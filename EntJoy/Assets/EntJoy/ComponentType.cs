@@ -6,6 +6,8 @@ namespace EntJoy
     {
         public int Id { get; }
 
+        public Type Type => ComponentTypeRegistry.GetType(this);
+
         public ComponentType(int id)
         {
             Id = id;
