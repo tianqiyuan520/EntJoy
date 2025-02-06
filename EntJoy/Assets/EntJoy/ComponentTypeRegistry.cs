@@ -5,19 +5,26 @@ namespace EntJoy
 {
     public class ComponentTypeRegistry
     {
-        private static Dictionary<Type, ComponentType> comTypeMap = new Dictionary<Type, ComponentType>();
+        private static Dictionary<Type, ComponentType> typeToComType = new();
+        private static Dictionary<int, Type> idToType = new();
         private static int idForAllocate;
         
         public static ComponentType Get(Type type)
         {
-            if (comTypeMap.TryGetValue(type, out var result))
+            if (typeToComType.TryGetValue(type, out var result))
             {
                 return result;
             }
 
             var newRes = new ComponentType(idForAllocate++);
-            comTypeMap.Add(type, newRes);
+            typeToComType.Add(type, newRes);
+            idToType.Add(idForAllocate, type);
             return newRes;
+        }
+
+        public static Type GetType(ComponentType componentType)
+        {
+            return idToType[componentType.Id];
         }
     }
 }
