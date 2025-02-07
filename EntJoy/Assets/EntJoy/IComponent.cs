@@ -1,4 +1,4 @@
 namespace EntJoy
 {
-    public interface IComponent<T> where T : struct { }
+    public interface IComponent { }
 }
