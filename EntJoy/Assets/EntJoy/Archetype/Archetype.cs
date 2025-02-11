@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace EntJoy
@@ -5,6 +6,7 @@ namespace EntJoy
     public class Archetype
     {
         private ComponentType[] types;
+        public ReadOnlySpan<ComponentType> Types => types;
         private StructArray[] structArrays;
         private StructArray<Entity> entities;
         private Dictionary<ComponentType, int> componentTypeToArrayIndices;
@@ -24,27 +26,40 @@ namespace EntJoy
             }
         }
 
+        public bool Has(Type type)
+        {
+            for (int i = 0; i < types.Length; i++)
+            {
+                if (types[i] == type)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// 添加实体
         /// </summary>
-        public void AddEntity(Entity entity)
+        public void AddEntity(Entity entity, out int slotInArchetype)
         {
             entities.Add(entity);
+            slotInArchetype = EntityCount;
             EntityCount++;
         }
         
         /// <summary>
         /// 删除实体和对应组件
         /// </summary>
-        public void Remove(int index, out RemovedEntityInfoInArchetype info)
+        public void Remove(int index, out int bePushEntityId, out int bePushEntityNewIndexInArchetype)
         {
-            info = new RemovedEntityInfoInArchetype();
             // 用最后一个有效实体去覆盖被移除的位置
             if (EntityCount >= 2)
             {
                 int desireBeMoveIndex = EntityCount - 1;
-                info.IsExecuteMove = true;
-                info.NewIndex = desireBeMoveIndex;
+                bePushEntityId = entities.GetRef(desireBeMoveIndex).Id;
+                bePushEntityNewIndexInArchetype = index;
                 entities.Move(desireBeMoveIndex, index);
                 for (int i = 0; i < ComponentCount; i++)
                 {
@@ -55,6 +70,8 @@ namespace EntJoy
             // 如果这是最后一个实体了, 那就只要设置为默认 
             else
             {
+                bePushEntityId = -1;
+                bePushEntityNewIndexInArchetype = -1;
                 entities.SetDefault(index);
                 for (int i = 0; i < ComponentCount; i++)
                 {
@@ -74,9 +91,27 @@ namespace EntJoy
             array.SetValue(index, value);
         }
 
-        public void MoveEntityToAnotherArchetypeByAdd<T>(int index)
+        public void CopyComponentsTo(int sourceIndex, Archetype target, int destinationIndex)
         {
-            
+            for (int i = 0; i < ComponentCount; i++)
+            {
+                // 当前要复制的组件类型
+                var array = structArrays[i];
+                var arrayType = array.GetType();
+
+                // 计算目标原型中,是否包含此组件类型
+                if (!target.Has(arrayType))
+                {
+                    continue;
+                }
+                
+                // 找到目标原型中, 该类型组件是第几行第几列
+                // 然后把组件的值复制过去
+                var targetCow = target.componentTypeToArrayIndices[arrayType];
+                var targetColumn = destinationIndex;
+                var targetArray = target.structArrays[targetCow];
+                array.CopyTo(sourceIndex, targetArray, targetColumn);
+            }
         }
     }
 }

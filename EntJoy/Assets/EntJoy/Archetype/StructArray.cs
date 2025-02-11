@@ -8,6 +8,7 @@ namespace EntJoy
         public abstract void EnsureCapacity(int newCapacity);
         public abstract void Move(int from, int to);
         public abstract void SetDefault(int index);
+        public abstract void CopyTo(int sourceIndex, StructArray target, int targetIndex);
     }
 
     public class StructArray<T> : StructArray
@@ -43,9 +44,9 @@ namespace EntJoy
             }
         }
 
-        public T Get(int index)
+        public ref T GetRef(int index)
         {
-            return Data[index];
+            return ref Data[index];
         }
         
         public void SetValue(int index, T value)
@@ -66,6 +67,12 @@ namespace EntJoy
         public override void SetDefault(int index)
         {
             Data[index] = default;
+        }
+
+        public override void CopyTo(int sourceIndex, StructArray target, int targetIndex)
+        {
+            var genericTarget = (StructArray<T>)target;
+            genericTarget.SetValue(targetIndex, Data[sourceIndex]);
         }
     }
 }

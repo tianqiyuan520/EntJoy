@@ -5,8 +5,7 @@ namespace EntJoy
 {
     public partial class World
     {
-        private Dictionary<int, Archetype> allArchetypes = new Dictionary<int, Archetype>();
-        private StructArray<int> entityIdToIndexInArchetype = new StructArray<int>(32);
+        private readonly Dictionary<int, Archetype> allArchetypes = new();
         
         private Archetype GetOrCreateArchetype(Span<ComponentType> types)
         {
