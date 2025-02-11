@@ -20,6 +20,10 @@ namespace EntJoy
             recycleEntities = new Queue<Entity>();
             entities = ArrayPool<EntityIndexInWorld>.Shared.Rent(32);
         }
+
+        public ref EntityIndexInWorld GetEntityInfoRef(int index) {
+            return ref entities[index];
+        }
         
         public Entity NewEntity(Span<ComponentType> types)
         {
@@ -35,7 +39,13 @@ namespace EntJoy
             }
             entityCount++;
             var targetArch = GetOrCreateArchetype(types);
-            targetArch.AddEntity(newEntity);
+            targetArch.AddEntity(newEntity, out var index);
+            entities[ent.Id] = new EntityIndexInWorld() {
+                Archetype = targetArch,
+                Entity = newEntity,
+                SlotInArchetype = index,
+            };
+            
             return newEntity;
         }
 

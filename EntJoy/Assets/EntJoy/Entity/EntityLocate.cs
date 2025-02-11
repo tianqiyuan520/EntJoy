@@ -4,5 +4,6 @@ namespace EntJoy
     {
         public Entity Entity;
         public Archetype Archetype;
+        public int SlotInArchetype;
     }
 }
