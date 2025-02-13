@@ -1,11 +1,16 @@
 # EntJoy
-一个由C#编写的轻量级ECS框架(基于Archetype)，不使用Unsafe，没有额外的性能优化，一切以简单为主
 
-因此，你可以用于：
+Entity Just For Fun!
+
+一个C#编写的轻量级ECS框架(基于Archetype)，不使用Unsafe，没有额外的性能优化，一切以简单为主
+
+目前项目正在完善中...
+
+EntJoy可以用于：
 
 1.了解ECS的一般构建方式（开发此ECS的最初目的）
 
-2.直接使用在你的项目中（我在UnityEngine中进行使用，但框架本身不依赖UnityAPI）
+2.【未来目标】直接使用在你的项目中（我在UnityEngine中进行使用，但框架本身不依赖UnityAPI）
 
 3.由于框架的API和核心部分都简单直白，你很容易基于框架进行自己的定制优化（例如同很多ECS框架一样，使用Unsafe等底层操作提升性能）
 
