@@ -3,7 +3,7 @@
 
 因此，你可以用于：
 
-1.了解ECS的一般构建方式
+1.了解ECS的一般构建方式（开发此ECS的最初目的）
 
 2.直接使用在你的项目中（我在UnityEngine中进行使用，但框架本身不依赖UnityAPI）
 
@@ -51,7 +51,7 @@ public class Project {
 ```
 
 ## 感谢
-在开发过程中,以下优秀的开源框架给了EntJoy很大的灵感和帮助,十分感谢这些巨人的肩膀:
+在开发过程中，以下优秀的开源框架给了EntJoy很大的灵感和帮助，十分感谢！如果可以，请您也多多支持:
 
 Arch: https://github.com/genaray/Arch
 
