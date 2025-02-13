@@ -10,6 +10,7 @@ namespace EntJoy
     {
         private static int idAllocator;
         private static readonly Dictionary<Type, ComponentType> hasRegistries = new();
+        public static readonly Dictionary<int, Type> idToTpyeMap = new();
 
         public static ComponentType GetComponentType(Type type)
         {
@@ -20,8 +21,14 @@ namespace EntJoy
 
             var newComponentType = new ComponentType(idAllocator);
             hasRegistries.Add(type, newComponentType);
+            idToTpyeMap.Add(idAllocator, type);
             idAllocator++;
             return newComponentType;
+        }
+
+        public static Type GetTypeByComponentType(int id)
+        {
+            return idToTpyeMap[id];
         }
     }
 }

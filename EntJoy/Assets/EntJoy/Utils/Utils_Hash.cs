@@ -2,7 +2,7 @@ using System;
 
 namespace EntJoy
 {
-    public partial class Utils
+    public static partial class Utils
     {
         /// <summary>
         /// 计算组件集合的哈希值

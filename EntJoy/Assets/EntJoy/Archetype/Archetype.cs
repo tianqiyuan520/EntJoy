@@ -23,7 +23,54 @@ namespace EntJoy
             for (int i = 0; i < ComponentCount; i++)
             {
                 componentTypeToArrayIndices.Add(types[i], i);
+                var genericType = typeof(StructArray<>).MakeGenericType(types[i].Type);
+                var instance = Activator.CreateInstance(genericType, new object[] { 8 });
+                var array = (StructArray)instance;
+                structArrays[i] = array;
             }
+        }
+
+        public bool HasAllOf(Span<ComponentType> spanTypes)
+        {
+            int len = spanTypes.Length;
+            for (int i = 0; i < len; i++)
+            {
+                if (!componentTypeToArrayIndices.ContainsKey(spanTypes[i]))
+                {
+                    return false;
+                }
+            }
+
+
+            return true;
+        }
+
+        public bool HasAnyOf(Span<ComponentType> spanTypes)
+        {
+            int len = spanTypes.Length;
+            for (int i = 0; i < len; i++)
+            {
+                if (componentTypeToArrayIndices.ContainsKey(spanTypes[i]))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool HasNoneOf(Span<ComponentType> spanTypes)
+        {
+            int len = spanTypes.Length;
+            for (int i = 0; i < len; i++)
+            {
+                if (componentTypeToArrayIndices.ContainsKey(spanTypes[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         public bool Has(Type type)
@@ -112,6 +159,18 @@ namespace EntJoy
                 var targetArray = target.structArrays[targetCow];
                 array.CopyTo(sourceIndex, targetArray, targetColumn);
             }
+        }
+
+        public Entity GetEntity(int index)
+        {
+            return entities.GetRef(index);
+        }
+        
+        public ArchetypeQuery<T> GetQuery<T>() where T : struct
+        {
+            var indexOfT = componentTypeToArrayIndices[typeof(T)];
+            var array = structArrays[indexOfT];
+            return new ArchetypeQuery<T>((StructArray<T>)array);
         }
     }
 }
