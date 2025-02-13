@@ -1,4 +1,4 @@
-namespace EntJoy.Query
+namespace EntJoy
 {
     public struct QueryBuilder
     {
@@ -6,19 +6,22 @@ namespace EntJoy.Query
         public ComponentType[] Any;
         public ComponentType[] None;
 
-        public void WithAll<T>() where T : struct
+        public QueryBuilder WithAll<T>() where T : struct
         {
             All = ComponentTypes<T>.Share;
+            return this;
         }
 
-        public void WithAny<T>() where T : struct
+        public QueryBuilder WithAny<T>() where T : struct
         {
             Any = ComponentTypes<T>.Share;
+            return this;
         }
 
-        public void WithNone<T>() where T : struct
+        public QueryBuilder WithNone<T>() where T : struct
         {
             None = ComponentTypes<T>.Share;
+            return this;
         }
     }
 }

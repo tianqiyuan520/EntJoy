@@ -14,15 +14,22 @@ namespace EntJoy
         private EntityIndexInWorld[] entities;
         private int entityCount;
 
-        public World(string worldName)
+        public World(string worldName = "Default")
         {
             Name = worldName;
             recycleEntities = new Queue<Entity>();
             entities = ArrayPool<EntityIndexInWorld>.Shared.Rent(32);
+            archetypeMap = new Dictionary<int, Archetype>();
+            allArchetypes = ArrayPool<Archetype>.Shared.Rent(8);
         }
 
         public ref EntityIndexInWorld GetEntityInfoRef(int index) {
             return ref entities[index];
+        }
+
+        public Entity NewEntity(params ComponentType[] types)
+        {
+            return NewEntity(types.AsSpan());
         }
         
         public Entity NewEntity(Span<ComponentType> types)

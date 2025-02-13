@@ -54,6 +54,12 @@ namespace EntJoy
             unchecked
             {
                 Data[index] = value;
+                
+                // TODO: 这里有没有可能直接跨索引赋值, 导致长度不对?
+                if (index >= Length)
+                {
+                    Length = index + 1;
+                }
             }
         }
 

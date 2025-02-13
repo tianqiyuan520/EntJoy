@@ -5,6 +5,8 @@ namespace EntJoy
     public struct ComponentType : IEquatable<ComponentType>
     {
         public readonly int Id;
+
+        public Type Type => ComponentTypeRegistry.GetTypeByComponentType(Id);
         
         public ComponentType(int id)
         {
