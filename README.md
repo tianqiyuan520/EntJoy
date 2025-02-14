@@ -2,7 +2,9 @@
 
 Entity Just For Fun!
 
-一个C#编写的轻量级ECS框架(基于Archetype)，不使用Unsafe，没有额外的性能优化，一切以简单为主
+一个C#编写的轻量级ECS框架(基于Archetype)
+
+不使用Unsafe，没有额外的性能优化，一切以简单为主，我们用最蠢的方式实现ECS，这样很好理解它的运作！
 
 目前项目正在完善中...
 
