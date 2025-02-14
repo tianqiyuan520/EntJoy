@@ -39,8 +39,14 @@ public class Project {
         // 创建一个实体
         Entity entity = myWorld.NewEntity(typeof(Position));
         
-        // 添加一个组件:名字组件
+        // 添加一个组件
         myWorld.AddComponent<Name>(entity);
+
+        // 覆盖组件
+        myWorld.Set<Name>(entity, new Name() { value = "Jack" });
+
+        // 移除一个组件
+        myWorld.RemoveComponent<Name>(entity);
 
         // 构建一个查询,我们通过它读取、修改组件字段值(通常,在ECS中查询是在System中运行的,你可以自定义这部分逻辑的位置)
         QueryBuilder builder = new QueryBuilder().WithAll<Position>();
