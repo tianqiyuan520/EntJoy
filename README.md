@@ -4,7 +4,7 @@ Entity Just For Fun!
 
 一个C#编写的轻量级ECS框架(基于Archetype)，没有额外的性能优化，一切以简单为主
 
-EntJoy可以用于：了解ECS的一般构建方式（开发此ECS的最初目的）
+它可以用于：了解ECS的一般构建方式（开发此ECS的最初目的）
 
 ## 安装
 通过Git Clone/直接下载zip，并复制到你的项目中即可使用
