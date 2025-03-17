@@ -69,4 +69,4 @@ Arch: https://github.com/genaray/Arch
 Friflo.Engine.ECS: https://github.com/friflo/Friflo.Engine.ECS
 
 ## 最后
-如果项目对您有帮助，请点击右上角的Star给予精神支持🙏
+如果项目对您有帮助，请给个Star吧！
