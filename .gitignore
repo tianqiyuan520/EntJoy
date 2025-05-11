@@ -1,0 +1,7 @@
+/.git
+*.uid
+
+# Only public documentation belongs to this repository.
+/docs/*
+!/docs/public/
+!/docs/public/**
