@@ -1,19 +1,17 @@
-[gd_scene load_steps=7 format=3 uid="uid://d3hkmpbtqvutp"]
+[gd_scene load_steps=6 format=3 uid="uid://d3hkmpbtqvutp"]
 
 [ext_resource type="Script" uid="uid://c3begxim16mqq" path="res://Scripts/EntJoy/Example/SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
 [ext_resource type="PackedScene" uid="uid://eren48bh2m26" path="res://Scripts/EntJoy/Debugger/DebuggerTrigger.tscn" id="2_roq2e"]
-[ext_resource type="Texture2D" uid="uid://bafbsflw5rv1" path="res://icon.svg" id="3_tq8fi"]
+[ext_resource type="Script" uid="uid://c75rmlbp6c863" path="res://Scripts/EntJoy/Example/SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
 [ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://Scripts/camera_move.cs" id="4_g3l2t"]
+[ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://Scripts/EntJoy/Example/SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
 
-[sub_resource type="QuadMesh" id="QuadMesh_hphxb"]
-size = Vector2(15, -15)
-
-[sub_resource type="MultiMesh" id="MultiMesh_1ig23"]
-mesh = SubResource("QuadMesh_hphxb")
-
-[node name="Node2D" type="Node2D" node_paths=PackedStringArray("multiMeshInstance")]
+[node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup", "multiMeshInstances")]
 script = ExtResource("1_rik7w")
-multiMeshInstance = NodePath("MultiMeshInstance2D")
+MultiMeshgroup = NodePath("MultiMeshGroup")
+packedScene = ExtResource("4_tq8fi")
+SpawnMultiMeshCount = 16
+multiMeshInstances = []
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
 
@@ -49,9 +47,13 @@ metadata/_edit_use_anchors_ = true
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="MultiMeshInstance2D" type="MultiMeshInstance2D" parent="."]
-multimesh = SubResource("MultiMesh_1ig23")
-texture = ExtResource("3_tq8fi")
+[node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
+script = ExtResource("3_roq2e")
+packedScene = ExtResource("4_tq8fi")
+MultiMeshgroup = NodePath("../MultiMeshGroup")
+refresh = true
+
+[node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
 position = Vector2(576, 322)
