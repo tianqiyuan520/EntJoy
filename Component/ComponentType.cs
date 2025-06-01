@@ -11,13 +11,13 @@ namespace EntJoy
 
         public Type Type => ComponentTypeManager.GetTypeByComponentType(Id);  // 通过查询获取组件类型
 
-        public ComponentType(int id) 
+        public ComponentType(int id)
         {
             Id = id;
         }
 
         // 将该类型转 组件类型
-        public static implicit operator ComponentType(Type type)  
+        public static implicit operator ComponentType(Type type)
         {
             return ComponentTypeManager.GetComponentType(type);  // 通过查询获取对应的组件类型
         }

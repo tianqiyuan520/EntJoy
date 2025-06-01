@@ -1,7 +1,7 @@
-using System;  
-using System.Collections.Generic;  
+using System;
+using System.Collections.Generic;
 
-namespace EntJoy  
+namespace EntJoy
 {
     /// <summary>
     /// 组件类型管理器
@@ -16,11 +16,11 @@ namespace EntJoy
         /// 获取该类型对应的组件 
         /// <br>查询该<paramref name="type"/>的对应组件类型，若查询无果则注册该类型</br>
         /// </summary>
-        public static ComponentType GetComponentType(Type type)  
+        public static ComponentType GetComponentType(Type type)
         {
             if (ComponentTypeRegistries.TryGetValue(type, out var componentType))  // 检查是否已注册
             {
-                return componentType; 
+                return componentType;
             }
             //若为注册过该类型
             var newComponentType = new ComponentType(idAllocator);  // 创建新组件类型
