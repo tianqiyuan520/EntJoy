@@ -1,64 +1,105 @@
 # EntJoy
 
-Entity Just For Fun!
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tianqiyuan520/EntJoy)![Godot Engine](https://img.shields.io/badge/GODOT-000000.svg?style=for-the-badge&logo=godot-engine)
 
-一个C#编写的轻量级ECS框架(基于Archetype)，没有额外的性能优化，一切以简单为主
+![Visual Studio](https://img.shields.io/badge/Visual%20Studio-5C2D91.svg?style=for-the-badge&logo=visual-studio&logoColor=white)![C#](https://img.shields.io/badge/c%23-%23239120.svg?style=for-the-badge&logo=csharp&logoColor=white)
 
-它可以用于：了解ECS的一般构建方式（开发此ECS的最初目的）
+Entity Just For Fun
+
+一个C#编写的轻量级ECS框架(基于Archetype)
+
+## 原项目
+
+coinsoundsbetter: <https://github.com/coinsoundsbetter/EntJoy>
 
 ## 安装
-通过Git Clone/直接下载zip，并复制到你的项目中即可使用
+
+通过Git Clone/直接下载zip，通过godot脚本运行即可
+
+详情可见: [精灵随机移动实例](Example\SpritesRandomMove\SpritesRandomMove.cs)
 
 ## 使用方式
 
 ```csharp
-
-public struct Position : ICom {
-    public Vector3 value;
+//位移组件
+public struct Position : IComponent
+{
+    public Vector2 pos;
+    //public Vector2 vel;
+    public override string ToString()
+    {
+        return $"({pos[0]:F2}, {pos[1]:F2})";
+    }
+}
+//速度组件
+public struct Vel : IComponent
+{
+    public Vector2 vel;
+    public override string ToString()
+    {
+        return $"({vel[0]:F2}, {vel[1]:F2})";
+    }
 }
 
-public struct Name : ICom {
-    public string value;
+public partial class SpritesRandomMove : Node2D
+{
+    public World myWorld;
+    public override void _Ready()
+    {
+        //新建世界
+        myWorld = new World();
+        World_Recorder.RecordWorld(myWorld);
+
+        //新建实体
+        var entity = myWorld.NewEntity(typeof(Position), typeof(Vel));
+        //添加组件
+        myWorld.AddComponent(entity, new Position()
+        {pos = new Vector2(0, 0)});
+        myWorld.AddComponent(entity, new Vel()
+        {
+            vel = new Vector2(10,0)
+        });
+    }
+
+    public override void _PhysicsProcess(double delta)
+    {
+        if (myWorld == null)
+        {
+            return;
+        }
+
+        //构造一个查询器
+        QueryBuilder queryBuilder = new QueryBuilder().WithAll<Position, Vel>();
+
+        moveSystem.dt = delta;  
+        myWorld.Query(queryBuilder, moveSystem);
+    }
 }
 
-public class Project {
-    private World myWorld;
+//运行系统
+public struct MoveSystem : ISystem<Position, Vel>
+{
+    public double dt;
+    public Vector2 viewportSize;
 
-    void Main() {
-        // 创建一个世界:你可以在构造函数中传入世界的标识符, 也可以不传入(默认为default)
-        myWorld = new World("GameWorld");
-
-        // 创建一个实体
-        Entity entity = myWorld.NewEntity(typeof(Position));
-        
-        // 添加一个组件
-        myWorld.AddComponent<Name>(entity);
-
-        // 覆盖组件
-        myWorld.Set<Name>(entity, new Name() { value = "Jack" });
-
-        // 移除一个组件
-        myWorld.RemoveComponent<Name>(entity);
-
-        // 构建一个查询,我们通过它读取、修改组件字段值(通常,在ECS中查询是在System中运行的,你可以自定义这部分逻辑的位置)
-        QueryBuilder builder = new QueryBuilder().WithAll<Position>();
-        myWorld.Query(builder, (Entity ent, ref Position pos) => {
-            // 写入:例如我们让位置不停变化
-            pos.value += Vector3.one;
-            // 读取:在控制台打印当前位置
-            Debug.Log(pos.value);   
-        })
+    public void Execute(ref Entity entity, ref Position pos, ref Vel vel)
+    {
+        pos.pos += vel.vel * (float)dt;
+        if (pos.pos.X < 0 || pos.pos.X > viewportSize.X) vel.vel.X *= -1;
+        if (pos.pos.Y < 0 || pos.pos.Y > viewportSize.Y) vel.vel.Y *= -1;
     }
 }
 
 ```
 
 ## 感谢
-在开发过程中，以下优秀的开源框架给了EntJoy很大的灵感和帮助，十分感谢！如果可以，请您也多多支持:
 
-Arch: https://github.com/genaray/Arch
+项目改自于：coinsoundsbetter 的 EntJoy
 
-Friflo.Engine.ECS: https://github.com/friflo/Friflo.Engine.ECS
+鸣谢 coinsoundsbetter
 
-## 最后
-如果项目对您有帮助，请给个Star吧！
+参考项目：
+
+Arch: <https://github.com/genaray/Arch>
+
+Friflo.Engine.ECS: <https://github.com/friflo/Friflo.Engine.ECS>
