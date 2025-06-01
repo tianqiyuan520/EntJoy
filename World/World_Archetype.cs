@@ -20,12 +20,25 @@ namespace EntJoy  // EntJoy命名空间
                 return archetype;  // 返回已有原型
             }
             // 不存在，则创建新原型
-            archetype = new Archetype(types.ToArray()); 
-            archetypeMap.Add(hash, archetype); 
+            archetype = new Archetype(types.ToArray());
+            archetypeMap.Add(hash, archetype);
+            //检查原型数组容量
+            if (archetypeCount >= allArchetypes.Length)
+            {
+                Array.Resize(ref allArchetypes, allArchetypes.Length * 2);
+            }
             // Todo: 如果有移除archetype的操作,空白的数组需要被填充
-            allArchetypes[archetypeCount] = archetype;  
+            allArchetypes[archetypeCount] = archetype;
             archetypeCount++;
-            return archetype; 
+            return archetype;
+        }
+
+        /// <summary>
+        /// 获取所有原型数组
+        /// </summary>
+        public Archetype[] GetAllArchetypes()
+        {
+            return allArchetypes;
         }
     }
 }

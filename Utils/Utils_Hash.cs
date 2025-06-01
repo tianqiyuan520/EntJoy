@@ -1,6 +1,6 @@
-using System; 
+using System;
 
-namespace EntJoy 
+namespace EntJoy
 {
     public static partial class Utils
     {
@@ -10,7 +10,7 @@ namespace EntJoy
         /// </summary>
         /// <param name="isNeedSort">判断是否需要对给定的 <paramref name="types"/> 排序</param>
         /// <returns></returns>
-        public static int CalculateHash(Span<ComponentType> types, bool isNeedSort = true) 
+        public static int CalculateHash(Span<ComponentType> types, bool isNeedSort = true)
         {
             if (isNeedSort)
             {
@@ -28,7 +28,7 @@ namespace EntJoy
         /// <summary>
         /// 插入排序 升序
         /// </summary>
-        public static void SortByInsert(Span<ComponentType> span) 
+        public static void SortByInsert(Span<ComponentType> span)
         {
             int length = span.Length;
             for (int i = 1; i < length; i++)

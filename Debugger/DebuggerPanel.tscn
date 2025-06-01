@@ -1,0 +1,77 @@
+[gd_scene load_steps=2 format=3 uid="uid://cgf2xqm4jwoxp"]
+
+[ext_resource type="Script" uid="uid://bqrh4m4gedojr" path="res://Scripts/EntJoy/Debugger/DebuggerPanel.cs" id="1_kvaey"]
+
+[node name="DebuggerPanel" type="Panel" node_paths=PackedStringArray("TreeControl", "RefreshButton")]
+anchors_preset = -1
+anchor_left = 0.0642361
+anchor_top = 0.16821
+anchor_right = 0.957465
+anchor_bottom = 0.891975
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_kvaey")
+TreeControl = NodePath("TabContainer/Info/VBoxContainer/Tree")
+RefreshButton = NodePath("Refresh")
+metadata/_edit_use_anchors_ = true
+metadata/_edit_group_ = true
+
+[node name="TabContainer" type="TabContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 0
+current_tab = 0
+metadata/_edit_use_anchors_ = true
+metadata/_edit_group_ = true
+
+[node name="Main" type="ScrollContainer" parent="TabContainer"]
+layout_mode = 2
+metadata/_tab_index = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="TabContainer/Main"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Label" type="Label" parent="TabContainer/Main/VBoxContainer"]
+layout_mode = 2
+text = "EntJoy"
+horizontal_alignment = 1
+
+[node name="Button" type="Button" parent="TabContainer/Main/VBoxContainer"]
+layout_mode = 2
+text = "123"
+
+[node name="Info" type="ScrollContainer" parent="TabContainer"]
+visible = false
+layout_mode = 2
+metadata/_tab_index = 1
+
+[node name="VBoxContainer" type="VBoxContainer" parent="TabContainer/Info"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Label" type="Label" parent="TabContainer/Info/VBoxContainer"]
+layout_mode = 2
+text = "EntJoy"
+horizontal_alignment = 1
+
+[node name="Tree" type="Tree" parent="TabContainer/Info/VBoxContainer"]
+layout_mode = 2
+size_flags_vertical = 3
+column_titles_visible = true
+
+[node name="Refresh" type="Button" parent="."]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.909091
+anchor_top = -0.0754257
+anchor_right = 0.998682
+text = "Refresh"
+metadata/_edit_use_anchors_ = true

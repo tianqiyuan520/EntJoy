@@ -7,19 +7,19 @@ namespace EntJoy
         /// </summary>
         public static bool IsMatch(this Archetype archetype, QueryBuilder queryBuilder)  // 原型匹配扩展方法
         {
-            
+
             if (queryBuilder.All != null && !archetype.HasAllOf(queryBuilder.All))
             {
                 return false;  // 不满足All条件
             }
 
-            
+
             if (queryBuilder.Any != null && !archetype.HasAnyOf(queryBuilder.Any))
             {
                 return false;  // 不满足Any条件
             }
 
-            
+
             if (queryBuilder.None != null && !archetype.HasNoneOf(queryBuilder.None))
             {
                 return false;  // 不满足None条件
