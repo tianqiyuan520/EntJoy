@@ -16,7 +16,7 @@ coinsoundsbetter: <https://github.com/coinsoundsbetter/EntJoy>
 
 通过Git Clone/直接下载zip，通过godot脚本运行即可
 
-详情可见: [精灵随机移动实例](Example\SpritesRandomMove\SpritesRandomMove.cs)
+详情可见: [精灵随机移动实例](Example/SpritesRandomMove/SpritesRandomMove.cs)
 
 ## 使用方式
 
@@ -76,7 +76,7 @@ public partial class SpritesRandomMove : Node2D
     }
 }
 
-//运行系统
+//运动系统
 public struct MoveSystem : ISystem<Position, Vel>
 {
     public double dt;
