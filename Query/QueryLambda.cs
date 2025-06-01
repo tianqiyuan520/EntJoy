@@ -24,6 +24,13 @@ namespace EntJoy
     {
         void Execute(ref Entity entity, ref T0 t0, ref T1 t1);
     }
+    public interface ISystem<T0, T1, T2>
+        where T0 : struct
+        where T1 : struct
+        where T2 : struct
+    {
+        void Execute(ref Entity entity, ref T0 t0, ref T1 t1, ref T2 t2);
+    }
 
     public interface IForeachWithSIMD<T0,T1> 
         where T0 : struct 

@@ -87,7 +87,6 @@ namespace EntJoy  // EntJoy命名空间
             {
                 for (int i = 0; i < archetypeCount; i++)
                 {
-                    //GD.Print(allArchetypes[i]?.GetComponentTypeString());
                     var arch = allArchetypes[i];
                     if (arch == null || !arch.IsMatch(builder))
                     {

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace EntJoy
 {
@@ -26,8 +28,9 @@ namespace EntJoy
         // 使用可变参数支持多组件
         public QueryBuilder WithAll(params Type[] types)
         {
-            All = new ComponentType[types.Length];
-            for (int i = 0; i < types.Length; i++)
+            int index = All.Length;
+            All = new ComponentType[All.Length + types.Length];
+            for (int i = index; i < types.Length; i++)
             {
                 All[i] = ComponentTypeManager.GetComponentType(types[i]);
             }
@@ -37,24 +40,42 @@ namespace EntJoy
 
         public QueryBuilder WithAll<T>() where T : struct
         {
-            All = ComponentTypes<T>.Share;  // 设置All条件
+            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
+            preCompTypes.AddRange(ComponentTypes<T>.Share);
+            All = preCompTypes.ToArray();
             return this;
         }
         public QueryBuilder WithAll<T, T2>() where T : struct
         {
-            All = ComponentTypes<T, T2>.Share;
+            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
+            preCompTypes.AddRange(ComponentTypes<T, T2>.Share);
+            All = preCompTypes.ToArray();
             return this;
         }
         public QueryBuilder WithAll<T, T2, T3>() where T : struct
         {
-            All = ComponentTypes<T, T2, T3>.Share;
+            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
+            preCompTypes.AddRange(ComponentTypes<T, T2, T3>.Share);
+            All = preCompTypes.ToArray();
             return this;
         }
         public QueryBuilder WithAll<T, T2, T3, T4>() where T : struct
         {
-            All = ComponentTypes<T, T2, T3, T4>.Share;
+            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
+            preCompTypes.AddRange(ComponentTypes<T, T2, T3, T4>.Share);
+            All = preCompTypes.ToArray();
             return this;
         }
+        public QueryBuilder WithAll<T, T2, T3, T4, T5>() where T : struct
+        {
+            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
+            preCompTypes.AddRange(ComponentTypes<T, T2, T3, T4, T5>.Share);
+            All = preCompTypes.ToArray();
+            return this;
+        }
+
+
+        //TODO
 
         public QueryBuilder WithAny<T>() where T : struct
         {
