@@ -3,14 +3,13 @@
 [ext_resource type="Script" uid="uid://c3begxim16mqq" path="res://Scripts/EntJoy/Example/SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
 [ext_resource type="PackedScene" uid="uid://eren48bh2m26" path="res://Scripts/EntJoy/Debugger/DebuggerTrigger.tscn" id="2_roq2e"]
 [ext_resource type="Script" uid="uid://c75rmlbp6c863" path="res://Scripts/EntJoy/Example/SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
-[ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://Scripts/camera_move.cs" id="4_g3l2t"]
+[ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://Scripts/CameraMove.cs" id="4_g3l2t"]
 [ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://Scripts/EntJoy/Example/SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
 
 [node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup", "multiMeshInstances")]
 script = ExtResource("1_rik7w")
 MultiMeshgroup = NodePath("MultiMeshGroup")
 packedScene = ExtResource("4_tq8fi")
-SpawnMultiMeshCount = 16
 multiMeshInstances = []
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]

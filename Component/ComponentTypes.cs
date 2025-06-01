@@ -45,4 +45,16 @@ namespace EntJoy
             typeof(T3),  // 组件类型3
         };
     }
+
+    internal sealed class ComponentTypes<T0, T1, T2, T3, T4>  // 四组件类型容器
+    {
+        public static ComponentType[] Share = new ComponentType[]  // 共享组件类型数组
+        {
+            typeof(T0),  
+            typeof(T1),  
+            typeof(T2),  
+            typeof(T3), 
+            typeof(T4),  
+        };
+    }
 }
