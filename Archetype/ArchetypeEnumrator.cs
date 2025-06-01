@@ -7,8 +7,8 @@ namespace EntJoy
 
         public ArchetypeEnumerator(StructArray<T> array)
         {
-            _array = array; 
-            _index = -1; 
+            _array = array;
+            _index = -1;
         }
 
         public bool MoveNext() => ++_index < _array.Length;  // 移动到下一个元素
@@ -24,7 +24,7 @@ namespace EntJoy
         {
             _array = array;
         }
-        
+
 
         public ArchetypeEnumerator<T> GetEnumerator() => new(_array);  // 获取枚举器
     }

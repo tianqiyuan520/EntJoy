@@ -1,8 +1,6 @@
-using Godot;
 using System;  // 系统命名空间
 using System.Buffers;  // 内存池命名空间
 using System.Collections.Generic;
-using System.Linq;  // 集合命名空间
 
 namespace EntJoy  // EntJoy命名空间
 {
@@ -51,14 +49,14 @@ namespace EntJoy  // EntJoy命名空间
         /// <param name="index"></param>
         /// <returns></returns>
         public ref EntityIndexInWorld GetEntityInfoRef(int index)
-        { 
+        {
             return ref entities[index];
         }
 
         /// <summary>
         /// 创建新实体（基于组件类型）
         /// </summary>
-        public Entity NewEntity(params Type[] componentTypes)  
+        public Entity NewEntity(params Type[] componentTypes)
         {
             var componentSpan = new ComponentType[componentTypes.Length];  // 创建组件类型数组
             for (int i = 0; i < componentTypes.Length; i++)  // 遍历输入的组件类型
@@ -98,18 +96,18 @@ namespace EntJoy  // EntJoy命名空间
                 }
             }
 
-            var targetArch = GetOrCreateArchetype(types); 
+            var targetArch = GetOrCreateArchetype(types);
             targetArch.AddEntity(newEntity, out var index);  // 在该实体对应的原型中添加实体
 
             // 更新该实体索引
             entities[newEntity.Id] = new EntityIndexInWorld()
-            {  
+            {
                 Archetype = targetArch,  // 设置原型
                 Entity = newEntity,  // 设置实体
                 SlotInArchetype = index,  // 设置槽位
             };
 
-            GD.Print("new Entity"," ", newEntity.Id," ", allArchetypes.Count()," ", allArchetypes[0]?.EntityCount," ", allArchetypes[1]?.EntityCount, allArchetypes[2]?.EntityCount);
+            //GD.Print("new Entity"," ", newEntity.Id," ", allArchetypes.Count()," ", allArchetypes[0]?.EntityCount," ", allArchetypes[1]?.EntityCount, allArchetypes[2]?.EntityCount);
 
             return newEntity;  // 返回新实体
         }

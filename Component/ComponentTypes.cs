@@ -1,4 +1,4 @@
-namespace EntJoy 
+namespace EntJoy
 {
     /// <summary>
     /// 组件类型容器（单组件）
