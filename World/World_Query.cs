@@ -1,6 +1,3 @@
-using Godot;
-using System;
-
 namespace EntJoy  // EntJoy命名空间
 {
     public partial class World  // World类部分定义

@@ -128,7 +128,7 @@ public partial class SpritesRandomMove : Node2D
 		RenderingInit();
 	}
 
-	public QueryBuilder queryBuilder = new QueryBuilder().WithAll<Position, Vel>();
+    public QueryBuilder queryBuilder = new QueryBuilder().WithAll<Position, Vel>();
 	public QueryBuilder queryBuilder2 = new QueryBuilder().WithAll<Position>();
 
 	public override void _Process(double delta)
