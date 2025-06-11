@@ -7,7 +7,7 @@ namespace EntJoy
     /// <summary>
     /// 查询构建器
     /// </summary>
-    public struct QueryBuilder
+    public partial struct QueryBuilder
     {
         public int LimitCount; //限制选择的数量
         public ComponentType[] All;
@@ -38,46 +38,28 @@ namespace EntJoy
         }
 
 
-        public QueryBuilder WithAll<T>() where T : struct
+        public QueryBuilder WithAll<T>()
+            where T : struct
         {
             var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
             preCompTypes.AddRange(ComponentTypes<T>.Share);
             All = preCompTypes.ToArray();
             return this;
         }
-        public QueryBuilder WithAll<T, T2>() where T : struct
+        public QueryBuilder WithAll<T, T2>()
+            where T : struct
+            where T2 : struct
         {
             var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
             preCompTypes.AddRange(ComponentTypes<T, T2>.Share);
             All = preCompTypes.ToArray();
             return this;
         }
-        public QueryBuilder WithAll<T, T2, T3>() where T : struct
-        {
-            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
-            preCompTypes.AddRange(ComponentTypes<T, T2, T3>.Share);
-            All = preCompTypes.ToArray();
-            return this;
-        }
-        public QueryBuilder WithAll<T, T2, T3, T4>() where T : struct
-        {
-            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
-            preCompTypes.AddRange(ComponentTypes<T, T2, T3, T4>.Share);
-            All = preCompTypes.ToArray();
-            return this;
-        }
-        public QueryBuilder WithAll<T, T2, T3, T4, T5>() where T : struct
-        {
-            var preCompTypes = All == null ? new List<ComponentType>() : All.ToList();
-            preCompTypes.AddRange(ComponentTypes<T, T2, T3, T4, T5>.Share);
-            All = preCompTypes.ToArray();
-            return this;
-        }
-
 
         //TODO
 
-        public QueryBuilder WithAny<T>() where T : struct
+        public QueryBuilder WithAny<T>() 
+            where T : struct
         {
             Any = ComponentTypes<T>.Share;
             return this;
