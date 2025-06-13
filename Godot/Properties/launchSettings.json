@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "EntJoy_godot": {
+      "commandName": "Executable",
+      "executablePath": "D:\\godot\\GODOT\\Godot_v4.4.1-stable_mono_win64\\Godot_v4.4.1-stable_mono_win64_console.exe",
+      "commandLineArgs": "--path . --verbose",
+      "workingDirectory": ".",
+      "nativeDebugging": true
+    }
+  }
+}

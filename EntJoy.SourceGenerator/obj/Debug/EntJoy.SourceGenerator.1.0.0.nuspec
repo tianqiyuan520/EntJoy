@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>EntJoy.SourceGenerator</id>
+    <version>1.0.0</version>
+    <authors>tianqiyuan520</authors>
+    <description>Package Description</description>
+    <repository type="git" />
+    <dependencies>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="Microsoft.CodeAnalysis.CSharp" version="3.8.0" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="E:\CSharp\EntJoy.SourceGenerator\EntJoy.SourceGenerator\bin\Debug\netstandard2.0\EntJoy.SourceGenerator.dll" target="lib\netstandard2.0\EntJoy.SourceGenerator.dll" />
+    <file src="E:\CSharp\EntJoy.SourceGenerator\EntJoy.SourceGenerator\bin\Debug\netstandard2.0\EntJoy.SourceGenerator.dll" target="analyzers\dotnet\cs\EntJoy.SourceGenerator.dll" />
+  </files>
+</package>
