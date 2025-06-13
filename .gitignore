@@ -1,2 +1,7 @@
 /.git
 *.uid
+/.vs
+EntJoy.SourceGenerator/.vs
+EntJoy/.vs
+Godot/.godot
+Godot/.vs
