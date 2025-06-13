@@ -1,5 +1,10 @@
 /.git
 *.uid
+/.vs
+EntJoy.SourceGenerator/.vs
+EntJoy/.vs
+Godot/.godot
+Godot/.vs
 
 # Only public documentation belongs to this repository.
 /docs/*

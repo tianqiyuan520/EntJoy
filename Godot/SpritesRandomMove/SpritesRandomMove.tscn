@@ -1,0 +1,54 @@
+[gd_scene load_steps=5 format=3 uid="uid://d3hkmpbtqvutp"]
+
+[ext_resource type="Script" uid="uid://c3begxim16mqq" path="res://SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
+[ext_resource type="Script" uid="uid://c75rmlbp6c863" path="res://SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
+[ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
+[ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://CameraMove.cs" id="4_x7x5y"]
+
+[node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup", "multiMeshInstances")]
+script = ExtResource("1_rik7w")
+MultiMeshgroup = NodePath("MultiMeshGroup")
+packedScene = ExtResource("4_tq8fi")
+multiMeshInstances = []
+
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+
+[node name="HBoxContainer" type="HBoxContainer" parent="CanvasLayer"]
+offset_right = 1151.0
+offset_bottom = 40.0
+
+[node name="CreateWorld" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Create World"
+metadata/_edit_use_anchors_ = true
+
+[node name="CreateEntity" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Create Entity"
+metadata/_edit_use_anchors_ = true
+
+[node name="PrintEntity" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Print Entity"
+metadata/_edit_use_anchors_ = true
+
+[node name="Report" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Report"
+metadata/_edit_use_anchors_ = true
+
+[node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
+script = ExtResource("3_roq2e")
+packedScene = ExtResource("4_tq8fi")
+MultiMeshgroup = NodePath("../MultiMeshGroup")
+refresh = true
+
+[node name="MultiMeshGroup" type="Node" parent="."]
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(576, 322)
+script = ExtResource("4_x7x5y")
