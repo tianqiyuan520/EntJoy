@@ -1,0 +1,11 @@
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\bin\Release\netstandard2.0\EntJoy.SourceGenerator.deps.json
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\bin\Release\netstandard2.0\EntJoy.SourceGenerator.dll
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\bin\Release\netstandard2.0\EntJoy.SourceGenerator.pdb
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.csproj.AssemblyReference.cache
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.GeneratedMSBuildEditorConfig.editorconfig
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.AssemblyInfoInputs.cache
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.AssemblyInfo.cs
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.csproj.CoreCompileInputs.cache
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.sourcelink.json
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.dll
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Release\netstandard2.0\EntJoy.SourceGenerator.pdb

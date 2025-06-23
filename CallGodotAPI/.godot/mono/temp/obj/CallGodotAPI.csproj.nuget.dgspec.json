@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {}
+    "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {}
   },
   "projects": {
-    "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {
+    "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj",
+        "projectUniqueName": "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj",
         "projectName": "CallGodotAPI",
-        "projectPath": "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj",
+        "projectPath": "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj",
         "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
-        "outputPath": "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\.godot\\mono\\temp\\obj\\",
+        "outputPath": "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\.godot\\mono\\temp\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "D:\\Microsoft Visual Studio\\2022\\Shared\\NuGetPackages"

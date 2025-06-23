@@ -1,0 +1,17 @@
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\bin\Release\CallGodotAPI.deps.json
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\bin\Release\CallGodotAPI.runtimeconfig.json
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\bin\Release\CallGodotAPI.dll
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\bin\Release\CallGodotAPI.pdb
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\bin\Release\GodotSharp.dll
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.csproj.AssemblyReference.cache
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.GeneratedMSBuildEditorConfig.editorconfig
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.AssemblyInfoInputs.cache
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.AssemblyInfo.cs
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.csproj.CoreCompileInputs.cache
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.sourcelink.json
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodo.DB75BF69.Up2Date
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.dll
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\refint\CallGodotAPI.dll
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.pdb
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\CallGodotAPI.genruntimeconfig.cache
+D:\godot\Project\EntJoy\CallGodotAPI\.godot\mono\temp\obj\Release\ref\CallGodotAPI.dll

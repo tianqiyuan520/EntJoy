@@ -1,8 +1,15 @@
 {
   "profiles": {
-    "EntJoy_godot": {
+    "EntJoy_godot_control": {
       "commandName": "Executable",
       "executablePath": "D:\\godot\\GODOT\\Godot_v4.4.1-stable_mono_win64\\Godot_v4.4.1-stable_mono_win64_console.exe",
+      "commandLineArgs": "--path . --verbose",
+      "workingDirectory": ".",
+      "nativeDebugging": true
+    },
+    "Debug": {
+      "commandName": "Executable",
+      "executablePath": "D:\\godot\\GODOT\\Godot_v4.4.1-stable_mono_win64\\Godot_v4.4.1-stable_mono_win64.exe",
       "commandLineArgs": "--path . --verbose",
       "workingDirectory": ".",
       "nativeDebugging": true

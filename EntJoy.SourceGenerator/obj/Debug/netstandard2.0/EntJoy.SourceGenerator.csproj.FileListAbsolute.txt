@@ -16,5 +16,6 @@ D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.S
 D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.AssemblyInfoInputs.cache
 D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.AssemblyInfo.cs
 D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.csproj.CoreCompileInputs.cache
+D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.sourcelink.json
 D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.dll
 D:\godot\Project\EntJoy\EntJoy.SourceGenerator\obj\Debug\netstandard2.0\EntJoy.SourceGenerator.pdb

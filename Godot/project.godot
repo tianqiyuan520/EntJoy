@@ -47,6 +47,7 @@ scroll_click={
 
 [physics]
 
+2d/run_on_separate_thread=true
 common/physics_interpolation=true
 
 [rendering]

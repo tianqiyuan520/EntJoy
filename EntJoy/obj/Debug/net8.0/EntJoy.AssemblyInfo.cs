@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("EntJoy")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2d610405972b7984199eec09957391ac31e9ce8f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f4c9a4b514fb9c2c5c4d25b13236e0cee6d2afee")]
 [assembly: System.Reflection.AssemblyProductAttribute("EntJoy")]
 [assembly: System.Reflection.AssemblyTitleAttribute("EntJoy")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
