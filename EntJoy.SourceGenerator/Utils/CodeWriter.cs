@@ -13,7 +13,7 @@ namespace EntJoy.SourceGenerator.Utils
 
         public int GetindentLevel { get => _indentLevel; set; }
 
-        public void AddLine(string value = "")
+        public void AppendLine(string value = "")
         {
             if (string.IsNullOrEmpty(value))
             {
@@ -21,32 +21,45 @@ namespace EntJoy.SourceGenerator.Utils
             }
             else
             {
-                _builder.AppendLine($"{new string(' ', _indentLevel * 4)}{value}");
+                if (value.Contains("\n"))
+                {
+                    foreach (var item in value.Split('\n'))
+                    {
+                        _builder.Append($"{new string(' ', _indentLevel * 4)}{item}\n");
+                    }
+                }
+                else
+                {
+                    _builder.AppendLine($"{new string(' ', _indentLevel * 4)}{value}");
+                }
+                
+                
             }
         }
+
 
         //增加缩进级别
         public void IncreaseIndent()
         {
-            _indentLevel++;
+            _indentLevel+=1;
         }
 
         //减少缩进级别
         public void DecreaseIndent()
         {
-             _indentLevel--;
+             _indentLevel-=1;
         }
         // 开始一个新的代码块
         public void BeginBlock()
         {
-            AddLine("{");
+            AppendLine("{");
             IncreaseIndent();
         }
         // 结束一个代码块,并可以选择是否加上分号
         public void EndBlock(bool withSemicolon = false)
         {
             DecreaseIndent();
-            AddLine(withSemicolon ? "};" : "}");
+            AppendLine(withSemicolon ? "};" : "}");
         }
 
         public void Clear()
@@ -75,6 +88,7 @@ namespace EntJoy.SourceGenerator.Utils
             }
         }
 
+        //缩进
         public IDisposable BeginIndentScope()
         {
             return new IndentScope(this);
@@ -91,7 +105,7 @@ namespace EntJoy.SourceGenerator.Utils
                 _writer = writer;
                 _withSemicolon = withSemicolon;
                 _startLine = startLine;
-                _writer.AddLine(_startLine);
+                _writer.AppendLine(_startLine);
                 _writer.BeginBlock();
             }
 

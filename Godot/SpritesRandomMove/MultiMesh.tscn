@@ -1,6 +1,6 @@
 [gd_scene load_steps=4 format=3 uid="uid://cod4dt0nabn3j"]
 
-[ext_resource type="Texture2D" uid="uid://bafbsflw5rv1" path="res://icon.svg" id="1_svha3"]
+[ext_resource type="Texture2D" uid="uid://b6cvfue0ixk5m" path="res://icon.svg" id="1_svha3"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_svha3"]
 resource_local_to_scene = true

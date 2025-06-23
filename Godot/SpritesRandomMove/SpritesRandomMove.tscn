@@ -5,11 +5,10 @@
 [ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
 [ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://CameraMove.cs" id="4_x7x5y"]
 
-[node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup", "multiMeshInstances")]
+[node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
 script = ExtResource("1_rik7w")
 MultiMeshgroup = NodePath("MultiMeshGroup")
 packedScene = ExtResource("4_tq8fi")
-multiMeshInstances = []
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
 

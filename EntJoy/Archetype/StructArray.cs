@@ -45,8 +45,8 @@ namespace EntJoy
             if (Capacity < newCapacity)
             {
                 //扩容
-                Array.Resize(ref Data, newCapacity * 2);
-                Capacity = newCapacity * 2;
+                Array.Resize(ref Data, newCapacity + 100);
+                Capacity = newCapacity + 100;
             }
         }
 

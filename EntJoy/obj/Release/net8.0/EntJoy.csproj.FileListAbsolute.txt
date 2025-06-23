@@ -1,0 +1,16 @@
+D:\godot\Project\EntJoy\EntJoy\bin\Release\net8.0\EntJoy.deps.json
+D:\godot\Project\EntJoy\EntJoy\bin\Release\net8.0\EntJoy.dll
+D:\godot\Project\EntJoy\EntJoy\bin\Release\net8.0\EntJoy.pdb
+D:\godot\Project\EntJoy\EntJoy\bin\Release\net8.0\CallGodotAPI.dll
+D:\godot\Project\EntJoy\EntJoy\bin\Release\net8.0\CallGodotAPI.pdb
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.csproj.AssemblyReference.cache
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.GeneratedMSBuildEditorConfig.editorconfig
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.AssemblyInfoInputs.cache
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.AssemblyInfo.cs
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.csproj.CoreCompileInputs.cache
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.sourcelink.json
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.csproj.Up2Date
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.dll
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\refint\EntJoy.dll
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\EntJoy.pdb
+D:\godot\Project\EntJoy\EntJoy\obj\Release\net8.0\ref\EntJoy.dll

@@ -3,6 +3,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+	  <PublishAot>false</PublishAot>
   </PropertyGroup>
   <ItemGroup>
 	  <ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
