@@ -9,6 +9,8 @@
 	  <LangVersion>preview</LangVersion>
 
 	  <Version>1.0.4</Version>
+
+	  <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>

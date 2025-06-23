@@ -112,11 +112,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\godot\\Project\\EntJoy\\EntJoy\\EntJoy.csproj",
+      "projectUniqueName": "d:\\godot\\Project\\EntJoy\\EntJoy\\EntJoy.csproj",
       "projectName": "EntJoy",
-      "projectPath": "D:\\godot\\Project\\EntJoy\\EntJoy\\EntJoy.csproj",
+      "projectPath": "d:\\godot\\Project\\EntJoy\\EntJoy\\EntJoy.csproj",
       "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
-      "outputPath": "D:\\godot\\Project\\EntJoy\\EntJoy\\obj\\",
+      "outputPath": "d:\\godot\\Project\\EntJoy\\EntJoy\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "D:\\Microsoft Visual Studio\\2022\\Shared\\NuGetPackages"
@@ -138,8 +138,8 @@
         "net8.0": {
           "targetAlias": "net8.0",
           "projectReferences": {
-            "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {
-              "projectPath": "D:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj"
+            "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj": {
+              "projectPath": "d:\\godot\\Project\\EntJoy\\CallGodotAPI\\CallGodotAPI.csproj"
             }
           }
         }

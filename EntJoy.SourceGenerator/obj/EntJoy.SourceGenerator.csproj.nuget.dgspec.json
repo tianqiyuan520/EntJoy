@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj": {}
+    "d:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj": {}
   },
   "projects": {
-    "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj": {
+    "d:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj": {
       "version": "1.0.4",
       "restore": {
-        "projectUniqueName": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
+        "projectUniqueName": "d:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
         "projectName": "EntJoy.SourceGenerator",
-        "projectPath": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
+        "projectPath": "d:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
         "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
-        "outputPath": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\obj\\",
+        "outputPath": "d:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "D:\\Microsoft Visual Studio\\2022\\Shared\\NuGetPackages"

@@ -1,11 +1,31 @@
 using EntJoy.Debugger;
 using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 namespace EntJoy
 {
     public sealed class Archetype
     {
+        // private const int BaseChunkSize = 16 * 1024; // 16KB基础块大小
+        // private readonly List<Chunk> _chunks = new();
         private ComponentType[] types;  // 该原型对应的组件类型数组
+        // private int _chunkCapacity; // 每个Chunk能容纳的实体数
+        // private void CalculateChunkCapacity()
+        // {
+        //     // 计算单个组件占用的空间
+        //     int componentSize = 0;
+        //     foreach (var type in types)
+        //     {
+        //         componentSize += Marshal.SizeOf(type.Type);
+        //     }
+
+        //     // 计算适合缓存行的实体数量
+        //     _chunkCapacity = Math.Max(16, BaseChunkSize / componentSize);
+
+        //     // 对齐到16的倍数
+        //     _chunkCapacity = (_chunkCapacity + 15) & ~15;
+        // }
         public ReadOnlySpan<ComponentType> Types => types;  // 该原型对应的组件类型数组[只读]
         private StructArray[] structArrays;  // 组件数据数组
         private StructArray<Entity> entities;  // 实体数组
@@ -25,7 +45,7 @@ namespace EntJoy
                 componentTypeRecorder.Add(types[i], i);  // 添加类型到索引映射
                 var genericType = typeof(StructArray<>).MakeGenericType(types[i].Type);  //创建泛型数组类型
                 var instance = Activator.CreateInstance(genericType, [8]);  // 实例化对应组件类型的数组默认值
-                var array = (StructArray)instance;  // 转换为基类
+                var array = (StructArray?)instance;  // 转换为基类
                 structArrays[i] = array;  // 存储数组
             }
         }
@@ -210,44 +230,25 @@ namespace EntJoy
             return (StructArray<T>)array;  // 创建并返回查询
         }
 
-        // 获取多个组件的查询序列
-        public object[] GetQueries(Type[] types)
-        {
-            object[] queries = new object[types.Length];
-            for (int i = 0; i < types.Length; i++)
-            {
-                // 使用反射获取查询序列
-                var method = GetType().GetMethod("GetQuery").MakeGenericMethod(types[i]);
-                queries[i] = method.Invoke(this, null);
-            }
-            return queries;
-        }
 
-        public String GetComponentTypeString()
-        {
-            String text = "";
-            for (int i = 0; i < ComponentCount; i++)  // 遍历所有组件
-            {
-                text += $" {structArrays[i].GetStructType()} ";
-            }
-            return text;
-        }
+        private IntPtr _cachedAddress;
 
-        //获取在该Archetype的所有实体
-        public StructArray<Entity> GetEntityStructArray()
-        {
-            return entities;
-        }
-        //获取当前ARchetype的所有组件
-        public StructArray[] GetComponentStructArray()
-        {
-            return structArrays;
-        }
-
-        // 获取原型自身地址
+        // 获取原型自身地址(缓存)
         public IntPtr GetAddress()
         {
-            return MemoryAddress.GetAddress(this);
+            if (_cachedAddress == IntPtr.Zero)
+            {
+                _cachedAddress = MemoryAddress.GetCachedAddress(this);
+            }
+            return _cachedAddress;
+        }
+
+        ~Archetype()
+        {
+            if (_cachedAddress != IntPtr.Zero)
+            {
+                MemoryAddress.ClearAddressCache(this);
+            }
         }
 
         // 获取实体数组地址
@@ -277,37 +278,47 @@ namespace EntJoy
         }
 
         // 获取内存布局信息
-        public string GetMemoryLayoutInfo()
+        public unsafe string GetMemoryLayoutInfo()
         {
             var sb = new StringBuilder();
             sb.AppendLine($"=== Archetype 内存布局 ===");
-            sb.AppendLine($"Archetype Address: {GetAddress().ToString("D")}");
+            sb.AppendLine($"Archetype Address: {GetAddress().ToInt64():D}");
             sb.AppendLine($"实体数: {EntityCount}, 组件数: {ComponentCount}");
 
             // 输出实体数组信息
-            IntPtr entityArrayAddr = GetEntityArrayAddress();
-            sb.AppendLine($"  Entity Array: {entityArrayAddr.ToString("D")}");
+            var entityArray = entities as StructArray<Entity>;
+            IntPtr entityArrayAddr = entityArray?.GetDataPointer() ?? IntPtr.Zero;
+            sb.AppendLine($"  Entity Array: {entityArrayAddr.ToInt64():D}");
 
             // 输出组件数组信息
             IntPtr prevAddress = IntPtr.Zero;
+            int preSize = 0;
             for (int i = 0; i < ComponentCount; i++)
             {
                 var array = structArrays[i];
-                IntPtr addr = array.GetAddress();
+                IntPtr addr = IntPtr.Zero;
                 int size = array.GetMemorySize();
 
+                // 使用反射调用GetDataPointer方法
+                var method = array.GetType().GetMethod("GetDataPointer");
+                if (method != null)
+                {
+                    addr = (IntPtr)method.Invoke(array, null);
+                }
+
                 sb.AppendLine($"  Component {i} ({types[i].Type.Name}):");
-                sb.AppendLine($"    Array Address: {addr.ToString("D")}");
+                sb.AppendLine($"    Array Address: {addr.ToInt64():D}");
                 sb.AppendLine($"    Memory Size: {size} bytes");
 
                 // 计算与前一个组件的地址差
-                if (prevAddress != IntPtr.Zero)
+                if (prevAddress != IntPtr.Zero && addr != IntPtr.Zero)
                 {
                     long gap = (long)addr - (long)prevAddress;
-                    sb.AppendLine($"  与前一个组件的地址差: {gap} bytes");
+                    sb.AppendLine($"  与前一个组件的地址差: {preSize}+{gap} bytes");
                 }
 
-                prevAddress = addr + size;
+                prevAddress = (addr != IntPtr.Zero) ? addr + size : IntPtr.Zero;
+                preSize = size;
             }
 
             return sb.ToString();

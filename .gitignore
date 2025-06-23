@@ -5,6 +5,7 @@ EntJoy.SourceGenerator/.vs
 EntJoy/.vs
 Godot/.godot
 Godot/.vs
+/.vscode
 
 # Only public documentation belongs to this repository.
 /docs/*

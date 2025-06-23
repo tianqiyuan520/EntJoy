@@ -2,53 +2,57 @@ using EntJoy;
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
-
-
 
 public struct Position : IComponent
 {
 	public Vector2 pos;
-	//public Vector2 vel;
-	public override string ToString()
-	{
-		return $"({pos[0]:F2}, {pos[1]:F2})";
-	}
 }
 
 public struct Vel : IComponent
 {
 	public Vector2 vel;
-	public override string ToString()
+}
+
+
+
+public partial struct MoveSystem : ISystem<Position, Vel>
+{
+	public static double dt;
+	public static Vector2 viewportSize;
+
+	public void Execute(ref Entity entity, ref Position pos, ref Vel vel)
 	{
-		return $"({vel[0]:F2}, {vel[1]:F2})";
+		pos.pos += vel.vel * (float)dt;
+		if (pos.pos.X < 0 || pos.pos.X > viewportSize.X) vel.vel.X *= -1;
+		if (pos.pos.Y < 0 || pos.pos.Y > viewportSize.Y) vel.vel.Y *= -1;
 	}
 }
 
 
-// [DebuggerDisplay("test,{myWorld}")]
+
 public partial class SpritesRandomMove : Node2D
 {
 	[Export]
 	Node MultiMeshgroup;
 	[Export]
 	PackedScene packedScene;
-	[Export]
-	int SpawnMultiMeshCount = 1;
+
+	int SpawnMultiMeshCount = 0;
 
 
 	public World myWorld;
 	public int count = 0;
-	[Export]
-	public MultiMeshInstance2D multiMeshInstance;
-	[Export]
+
 	public MultiMeshInstance2D[] multiMeshInstances;
 	private Rect2 viewportRect;
 	const int GODOT_FLOATS_PER_INSTANCE = 8;
 	// 每个MultiMesh的实体数量
 	public int ENTITIES_PER_MESH = 10000;
-	public int EntityCount = 10000;
+	public int EntityCount = 100000;
+
 	public MultiMeshInstance2D GenerateMultiMesh()
 	{
 		var multiMeshInstance2D = packedScene.Instantiate<MultiMeshInstance2D>();
@@ -71,15 +75,15 @@ public partial class SpritesRandomMove : Node2D
 		{
 			multiMeshInstances[i] = GenerateMultiMesh();
 		}
-		if(SpawnMultiMeshCount != 0) ENTITIES_PER_MESH = EntityCount / SpawnMultiMeshCount;
+		if (SpawnMultiMeshCount != 0) ENTITIES_PER_MESH = EntityCount / SpawnMultiMeshCount;
 		// 初始化所有MultiMesh实例
-		for (int i = 0; i < multiMeshInstances.Length; i++)
+		for (int i = 0; i < SpawnMultiMeshCount; i++)
 		{
 			multiMeshInstances[i].Multimesh.InstanceCount = ENTITIES_PER_MESH;
 		}
-		GD.Print(multiMeshInstances.Length, " ", ENTITIES_PER_MESH);
+		GD.Print(multiMeshInstances.Length, " ", "ENTITIES_PER_MESH:", ENTITIES_PER_MESH, " ", "EntityCount:", EntityCount);
 		viewportRect = GetViewportRect();
-		moveSystem.viewportSize = viewportRect.Size;
+		MoveSystem.viewportSize = viewportRect.Size;
 		moveSystemSIMD.viewportSize = viewportRect.Size;
 	}
 
@@ -107,7 +111,7 @@ public partial class SpritesRandomMove : Node2D
 			var entity = myWorld.NewEntity(typeof(Position), typeof(Vel));
 			myWorld.AddComponent(entity, new Position()
 			{
-				pos = new Vector2(11,11),
+				pos = new Vector2(11, 11),
 				//vel = new Vector2
 				//(
 				//	(float)GD.RandRange(-200.0, 200.0),
@@ -177,83 +181,46 @@ public partial class SpritesRandomMove : Node2D
 
 		//moveSystemSIMD.dt = delta;
 		//myWorld.QuerySIMD(
-		//    queryBuilder,
-		//    moveSystemSIMD
+		//queryBuilder,
+		//moveSystemSIMD
 		//);
 
-		moveSystem.dt = delta;
+		MoveSystem.dt = delta;
 		myWorld.Query(queryBuilder, moveSystem);
 
-		//myWorld.Query(queryBuilder, (ref Entity ent, ref Position pos, ref Vel vel) =>
-		//{
-		//    //pos.pos += vel.vel * dt;
-		//    pos.pos += vel.vel * (float)delta;
-		//    if (pos.pos.X < 0 || pos.pos.X > viewportSize.X) vel.vel.X *= -1;
-		//    if (pos.pos.Y < 0 || pos.pos.Y > viewportSize.Y) vel.vel.Y *= -1;
-		//    //UpdateInstancePosition(ref pos, ref vel, delta);
-		//});
 
-		//DisplaySprites();
-		//DisplaySpritesOptimized();
-
-		//DisplaySpritesOptimized3();
+		//DisplaySpritesOptimized2();
 	}
 
-
-	public struct MoveSystem : ISystem<Position, Vel>
+	public partial struct DisplayLimitedEntityPosSystem : ISystem<Position>
 	{
-		public double dt;
-		public Vector2 viewportSize;
-
-		public void Execute(ref Entity entity, ref Position pos, ref Vel vel)
+		public int EntityCount;
+		public int count;
+		public int limitCount;
+		public void Execute(ref Entity entity, ref Position pos)
 		{
-			pos.pos += vel.vel * (float)dt;
-			if (pos.pos.X < 0 || pos.pos.X > viewportSize.X) vel.vel.X *= -1;
-			if (pos.pos.Y < 0 || pos.pos.Y > viewportSize.Y) vel.vel.Y *= -1;
+			if (count >= limitCount) return;
+			GD.Print(count,"/", EntityCount, " ", pos.pos);
+			count++;
 		}
 	}
-
 
 	public void Display()
 	{
 		var queryBuilder = new QueryBuilder().WithAll<Position>().SetLimit(100);
 		GD.Print("Display:");
-		myWorld.Query(queryBuilder, (ref Entity ent, ref Position pos) =>
-		{
-			GD.Print(ent.Id, pos.pos);
-		});
+		DisplayLimitedEntityPosSystem displayLimitedEntityPosSystem = new() { EntityCount = EntityCount, count = 0, limitCount = 100 };
+		myWorld.Query(queryBuilder, displayLimitedEntityPosSystem);
 
 	}
 
 	public void Report()
 	{
-		//myWorld.ReportAllArchetypes();
+		myWorld.ReportAllArchetypes();
 	}
 
-	public void DisplaySprites()
-	{
-		multiMeshInstance = GetNode<MultiMeshInstance2D>("MultiMeshInstance2D");
-		if (multiMeshInstance?.Multimesh == null) return;
-		var multiMesh = multiMeshInstance.Multimesh;
 
-		//var buffer = RenderingServer.MultimeshGetBuffer(multiMesh.GetRid());
-		renderingSystem.index = 0;
-		renderingSystem._buffer = RenderingServer.MultimeshGetBuffer(multiMesh.GetRid());
-		myWorld.Query(queryBuilder2, renderingSystem);
-		try
-		{
-			RenderingServer.MultimeshSetBuffer(
-				multiMesh.GetRid(),
-				renderingSystem._buffer
-			);
-		}
-		catch (Exception e)
-		{
-			GD.PrintErr($"更新失败: {e.Message}");
-		}
-	}
-
-	public struct RenderingSystem : ISystem<Position>
+	public partial struct RenderingSystem : ISystem<Position>
 	{
 		public float[] _buffer;
 		public int index = 0;
@@ -399,63 +366,42 @@ public partial class SpritesRandomMove : Node2D
 
 
 
-	public unsafe struct RenderingSystemOptimized : ISystem<Position>
-	{
-		public float* BufferPtr;
-		public int InstanceCount;
+	// public unsafe partial struct RenderingSystemOptimized : ISystem<Position>
+	// {
+	// 	public float* BufferPtr;
+	// 	public int InstanceCount;
 
+	// 	public void Execute(ref Entity entity, ref Position pos)
+	// 	{
+	// 		// 预先计算好的偏移量
+	// 		const int xOffset = 3;
+	// 		const int yOffset = 7;
+	// 		const int stride = GODOT_FLOATS_PER_INSTANCE;
+
+	// 		int baseIndex = entity.Id * stride;
+	// 		BufferPtr[baseIndex + xOffset] = pos.pos.X;
+	// 		BufferPtr[baseIndex + yOffset] = pos.pos.Y;
+	// 	}
+	// }
+
+
+	public partial struct GetAllEntityPosSystem : ISystem<Position>
+	{
+		public List<Position> poses;
 		public void Execute(ref Entity entity, ref Position pos)
 		{
-			// 预先计算好的偏移量
-			const int xOffset = 3;
-			const int yOffset = 7;
-			const int stride = GODOT_FLOATS_PER_INSTANCE;
-
-			int baseIndex = entity.Id * stride;
-			BufferPtr[baseIndex + xOffset] = pos.pos.X;
-			BufferPtr[baseIndex + yOffset] = pos.pos.Y;
-		}
-	}
-
-	// 在DisplaySprites中使用
-	public unsafe void DisplaySpritesOptimized()
-	{
-		multiMeshInstance = GetNode<MultiMeshInstance2D>("MultiMeshInstance2D");
-		if (multiMeshInstance?.Multimesh == null) return;
-		var multiMesh = multiMeshInstance.Multimesh;
-
-		float[] bufferArray = RenderingServer.MultimeshGetBuffer(multiMesh.GetRid());
-		fixed (float* bufferPtr = bufferArray)
-		{
-			var renderingSystem = new RenderingSystemOptimized
-			{
-				BufferPtr = bufferPtr,
-				InstanceCount = bufferArray.Length / GODOT_FLOATS_PER_INSTANCE
-			};
-
-			myWorld.Query(queryBuilder2, renderingSystem);
-		}
-
-		try
-		{
-			RenderingServer.MultimeshSetBuffer(
-				multiMesh.GetRid(),
-				bufferArray
-			);
-		}
-		catch (Exception e)
-		{
-			GD.PrintErr($"更新失败: {e.Message}");
+			poses.Add(pos);
 		}
 	}
 
 	public void RenderingInit()
 	{
 		List<Position> poses = new();
-		myWorld.Query(queryBuilder, (ref Entity ent, ref Position pos) =>
-		{
-			poses.Add(pos);
-		});
+		GetAllEntityPosSystem getAllEntityPosSystem = new();
+		getAllEntityPosSystem.poses = poses;
+		myWorld.Query(queryBuilder, getAllEntityPosSystem);
+		poses = getAllEntityPosSystem.poses;
+
 
 		for (int meshIndex = 0; meshIndex < multiMeshInstances.Length; meshIndex++)
 		{
@@ -508,11 +454,13 @@ public partial class SpritesRandomMove : Node2D
 	public unsafe void DisplaySpritesOptimized2()
 	{
 		if (multiMeshInstances.Length == 0) return;
+
 		List<Position> poses = new();
-		myWorld.Query(queryBuilder, (ref Entity ent, ref Position pos) =>
-		{
-			poses.Add(pos);
-		});
+		GetAllEntityPosSystem getAllEntityPosSystem = new();
+		getAllEntityPosSystem.poses = poses;
+		myWorld.Query(queryBuilder, getAllEntityPosSystem);
+		poses = getAllEntityPosSystem.poses;
+
 		if (poses.Count == 0) return;
 		for (int meshIndex = 0; meshIndex < multiMeshInstances.Length; meshIndex++)
 		{
@@ -557,12 +505,13 @@ public partial class SpritesRandomMove : Node2D
 	public unsafe void DisplaySpritesOptimized3()
 	{
 		Position[] poses = new Position[EntityCount];
-		int index = 0;
-		myWorld.Query(queryBuilder, (ref Entity ent, ref Position pos) =>
-		{
-			poses[index] = pos;
-			index++;
-		});
+
+
+		GetAllEntityPosSystem getAllEntityPosSystem = new();
+		getAllEntityPosSystem.poses = poses.ToList();
+		myWorld.Query(queryBuilder, getAllEntityPosSystem);
+		poses = getAllEntityPosSystem.poses.ToArray();
+
 
 		for (int meshIndex = 0; meshIndex < multiMeshInstances.Length; meshIndex++)
 		{

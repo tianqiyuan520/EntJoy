@@ -28,6 +28,7 @@ namespace EntJoy.SourceGenerator.SystemArgs
 
         public void Execute(GeneratorExecutionContext context)
         {
+            context.AddSource("Test.cs", "//生成器已启动");
             var syntaxRecevier = context.SyntaxReceiver as SystemArgSyntaxReceiver;
             //if (syntaxRecevier.CandidatedArgs.Count == 0) return;
 
@@ -72,17 +73,19 @@ namespace EntJoy.SourceGenerator.SystemArgs
             }
         }
 
-        
+        //构造 ISystem
         private static string AppendISystemBody(in CodeWriter codeWriter, int argsCount)
         {
             StringBuilder generalArgs = new StringBuilder();
             StringBuilder generalArgsLimit = new StringBuilder();
             StringBuilder generalparams = new StringBuilder();
+            StringBuilder generalparamsArray = new StringBuilder();
             for (int i = 0; i < argsCount; i++)
             {
                 generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
                 generalArgsLimit.Append($"    where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
                 generalparams.Append($"ref T{i} t{i}{(i == argsCount - 1 ? "" : ", ")}");
+                generalparamsArray.Append($"ref T{i}* _t{i}{(i == argsCount - 1 ? "" : ", ")}");
             }
 
             var SourceText =
@@ -92,31 +95,31 @@ namespace EntJoy
     public interface ISystem<{generalArgs.ToString()}>
 {generalArgsLimit.ToString()}
     {{
+        unsafe void _execute(ref Entity* _entity, {generalparamsArray},int _Count);        
         void Execute(ref Entity entity, {generalparams});
+
     }}
 }}
 ";
-            codeWriter.AddLine(SourceText);
+            codeWriter.AppendLine(SourceText);
 
 
 
             return codeWriter.ToString();
         }
-
+        //构造 WorldQuery
         private static string AppendWorldQueryBody(in CodeWriter codeWriter, int argsCount)
         {
             StringBuilder generalArgs = new StringBuilder();
             StringBuilder generalArgsLimit = new StringBuilder();
             StringBuilder generalparams = new StringBuilder();
             StringBuilder generalExp = new StringBuilder();
-            StringBuilder generalExp2 = new StringBuilder();
             for (int i = 0; i < argsCount; i++)
             {
                 generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
                 generalArgsLimit.Append($"            where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
                 generalparams.Append($"ref archQuery{i}[j]{(i == argsCount - 1 ? "" : ", ")}");
-                generalExp.Append($"                    var archQuery{i} = arch.GetQueryStructArray<T{i}>().GetAllData();{(i == argsCount - 1 ? "" : "\n")}");
-                generalExp2.Append($"                            ref var t{i} = ref archQuery{i}[j];{(i == argsCount - 1 ? "" : "\n")}");
+                generalExp.Append($"                    T{i}* archQuery{i} = (T{i}*)arch.GetComponentArrayPointer<T{i}>().ToPointer();{(i == argsCount - 1 ? "" : "\n")}");
             }
 
             var SourceText =
@@ -125,7 +128,7 @@ namespace EntJoy
 {{
     public partial class World  // World类部分定义
     {{
-        public void Query<{generalArgs.ToString()}>(in QueryBuilder builder, in ISystem<{generalArgs.ToString()}> lambda)
+        public unsafe void Query<{generalArgs.ToString()}>(in QueryBuilder builder, in ISystem<{generalArgs.ToString()}> lambda)
 {generalArgsLimit.ToString()}
         {{
             unchecked
@@ -135,20 +138,11 @@ namespace EntJoy
                     var arch = allArchetypes[i];
                     if (arch == null || !arch.IsMatch(builder)) continue;
 
-                    var EntityQuery = arch.GetEntities();
+                    Entity* EntityQuery = (Entity*)arch.GetEntityArrayAddress().ToPointer();
 {generalExp.ToString()}
-                    int entityIndex = 0;  // 实体索引
                     int len = arch.EntityCount;
                     int limitCount = builder.LimitCount;
-                    for (int j = 0; j < len; j++)
-                    {{
-                        if (limitCount != -1 && entityIndex > limitCount) break;
-                        {{
-                            ref var ent = ref EntityQuery[j];
-                            lambda.Execute(ref ent, {generalparams});  // 执行回调
-                            entityIndex++;
-                        }}
-                    }}
+                    lambda._execute(ref EntityQuery, {generalparams},len);  // 执行回调
                 }}
             }}
 
@@ -156,13 +150,13 @@ namespace EntJoy
     }}
 }}
 ";
-            codeWriter.AddLine(SourceText);
+            codeWriter.AppendLine(SourceText);
 
 
 
             return codeWriter.ToString();
         }
-
+        //构造 QueryBuilder
         private static string AppendQueryBuilderBody(in CodeWriter codeWriter, int argsCount)
         {
             StringBuilder generalArgs = new StringBuilder();
@@ -209,13 +203,13 @@ namespace EntJoy
     }}
 }}
 ";
-            codeWriter.AddLine(SourceText);
+            codeWriter.AppendLine(SourceText);
 
 
 
             return codeWriter.ToString();
         }
-
+        //构造 ComponentType
         private static string AppendComponentTypesBody(in CodeWriter codeWriter, int argsCount)
         {
             StringBuilder generalArgs = new StringBuilder();
@@ -246,7 +240,7 @@ namespace EntJoy
     }}
 }}
 ";
-            codeWriter.AddLine(SourceText);
+            codeWriter.AppendLine(SourceText);
 
 
 
@@ -353,12 +347,6 @@ namespace EntJoy
             return false;
 
         }
-    }
-
-    //存储该系统的泛型参数
-    internal sealed class SystemArgs
-    {
-        public List<string> Args;
     }
 
 }
