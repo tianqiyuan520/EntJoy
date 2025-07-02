@@ -870,23 +870,23 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\Administrator\\.nuget\\packages\\": {},
-    "D:\\Microsoft Visual Studio\\2022\\Shared\\NuGetPackages": {}
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\": {},
+    "D:\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
-    "version": "1.0.4",
+    "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
+      "projectUniqueName": "D:\\Godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
       "projectName": "EntJoy.SourceGenerator",
-      "projectPath": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
-      "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
-      "outputPath": "D:\\godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\obj\\",
+      "projectPath": "D:\\Godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator.csproj",
+      "packagesPath": "C:\\Users\\tianqiyuan520\\.nuget\\packages\\",
+      "outputPath": "D:\\Godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
-        "D:\\Microsoft Visual Studio\\2022\\Shared\\NuGetPackages"
+        "D:\\Microsoft Visual Studio\\Shared\\NuGetPackages"
       ],
       "configFilePaths": [
-        "C:\\Users\\Administrator\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\NuGet\\NuGet.Config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
       ],
@@ -895,7 +895,8 @@
       ],
       "sources": {
         "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
-        "E:\\CSharp\\EntJoy.SourceGenerator\\EntJoy.SourceGenerator\\bin\\Debug": {},
+        "D:\\Godot\\Project\\EntJoy\\EntJoy.SourceGenerator\\bin\\Debug": {},
+        "D:\\Godot\\Project\\EntJoy\\EntJoy\\bin\\Debug": {},
         "https://api.nuget.org/v3/index.json": {}
       },
       "frameworks": {
@@ -942,7 +943,7 @@
         ],
         "assetTargetFallback": true,
         "warn": true,
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.300\\RuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.301\\RuntimeIdentifierGraph.json"
       }
     }
   }

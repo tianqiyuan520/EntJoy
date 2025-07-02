@@ -1,15 +1,14 @@
-[gd_scene load_steps=6 format=3 uid="uid://d3hkmpbtqvutp"]
+[gd_scene load_steps=5 format=3 uid="uid://7bhe7ecbrslq"]
 
-[ext_resource type="Script" uid="uid://bw05v0q8h0vtq" path="res://SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
-[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="3_qdxkg"]
-[ext_resource type="Script" uid="uid://bp6ea31m0b8oq" path="res://SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
-[ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
-[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_x7x5y"]
+[ext_resource type="Script" uid="uid://cix4ok868476m" path="res://QuadTree/QuadTree.cs" id="1_7byj6"]
+[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="1_ln0nn"]
+[ext_resource type="PackedScene" uid="uid://dfjqujsa3ydty" path="res://QuadTree/MultiMesh.tscn" id="2_md3tp"]
+[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_a61bo"]
 
-[node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
-script = ExtResource("1_rik7w")
+[node name="QuadTree" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
+script = ExtResource("1_7byj6")
 MultiMeshgroup = NodePath("MultiMeshGroup")
-packedScene = ExtResource("4_tq8fi")
+packedScene = ExtResource("2_md3tp")
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
 
@@ -19,7 +18,7 @@ offset_bottom = 40.0
 
 [node name="Label" type="Label" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
-text = "SpritesRandomMove"
+text = "QuadTree"
 
 [node name="CreateWorld" type="Button" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
@@ -51,17 +50,22 @@ size_flags_horizontal = 3
 text = "Pause"
 metadata/_edit_use_anchors_ = true
 
-[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("3_qdxkg")]
+[node name="UpdateTree" type="Button" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
+size_flags_horizontal = 3
+text = "UpdateTree"
+metadata/_edit_use_anchors_ = true
 
-[node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
-script = ExtResource("3_roq2e")
-packedScene = ExtResource("4_tq8fi")
-MultiMeshgroup = NodePath("../MultiMeshGroup")
-refresh = true
+[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("1_ln0nn")]
+layout_mode = 2
 
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
 position = Vector2(640, 360)
-script = ExtResource("4_x7x5y")
+script = ExtResource("4_a61bo")
+
+[node name="Timer" type="Timer" parent="."]
+wait_time = 0.1
+autostart = true
+ignore_time_scale = true

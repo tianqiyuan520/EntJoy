@@ -85,7 +85,7 @@ namespace EntJoy.SourceGenerator.SystemArgs
                 generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
                 generalArgsLimit.Append($"    where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
                 generalparams.Append($"ref T{i} t{i}{(i == argsCount - 1 ? "" : ", ")}");
-                generalparamsArray.Append($"ref T{i}* _t{i}{(i == argsCount - 1 ? "" : ", ")}");
+                generalparamsArray.Append($"T{i}* _t{i}{(i == argsCount - 1 ? "" : ", ")}");
             }
 
             var SourceText =
@@ -95,7 +95,7 @@ namespace EntJoy
     public interface ISystem<{generalArgs.ToString()}>
 {generalArgsLimit.ToString()}
     {{
-        unsafe void _execute(ref Entity* _entity, {generalparamsArray},int _Count);        
+        virtual unsafe void _execute(Entity* _entity, {generalparamsArray},int _Count) {{}}        
         void Execute(ref Entity entity, {generalparams});
 
     }}
@@ -113,36 +113,45 @@ namespace EntJoy
             StringBuilder generalArgs = new StringBuilder();
             StringBuilder generalArgsLimit = new StringBuilder();
             StringBuilder generalparams = new StringBuilder();
-            StringBuilder generalExp = new StringBuilder();
+            StringBuilder generalExp = new StringBuilder(); //表达式
+            StringBuilder GeneralExp2_Index = new StringBuilder();
+            generalExp.Append($"fixed (Entity* entities = &chunk.GetEntity(0))\n");
+
             for (int i = 0; i < argsCount; i++)
             {
+                GeneralExp2_Index.Append($"                    int t{i}Index = archetype.GetComponentTypeIndex<T{i}>();\n");
                 generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
                 generalArgsLimit.Append($"            where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
-                generalparams.Append($"ref archQuery{i}[j]{(i == argsCount - 1 ? "" : ", ")}");
-                generalExp.Append($"                    T{i}* archQuery{i} = (T{i}*)arch.GetComponentArrayPointer<T{i}>().ToPointer();{(i == argsCount - 1 ? "" : "\n")}");
+                generalparams.Append($"components{i}{(i == argsCount - 1 ? "" : ", ")}");
+                generalExp.Append($"                        fixed (T{i}* components{i} = &chunk.GetComponent<T{i}>(0, t{i}Index))\n");
             }
 
             var SourceText =
 $@"
+using System.Runtime.CompilerServices;
 namespace EntJoy
 {{
     public partial class World  // World类部分定义
     {{
-        public unsafe void Query<{generalArgs.ToString()}>(in QueryBuilder builder, in ISystem<{generalArgs.ToString()}> lambda)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void Query<{generalArgs.ToString()}>(in QueryBuilder builder, in ISystem<{generalArgs.ToString()}> system)
 {generalArgsLimit.ToString()}
         {{
             unchecked
             {{
-                for (int i = 0; i < archetypeCount; i++)  // 遍历所有原型
+                foreach (var archetype in GetMatchingArchetypes(builder))
                 {{
-                    var arch = allArchetypes[i];
-                    if (arch == null || !arch.IsMatch(builder)) continue;
+{GeneralExp2_Index.ToString()}
+                    foreach (var chunk in archetype.GetChunks())
+                    {{
+                        int count = chunk.EntityCount;
+                        if (count == 0) continue;
 
-                    Entity* EntityQuery = (Entity*)arch.GetEntityArrayAddress().ToPointer();
-{generalExp.ToString()}
-                    int len = arch.EntityCount;
-                    int limitCount = builder.LimitCount;
-                    lambda._execute(ref EntityQuery, {generalparams},len);  // 执行回调
+                        {generalExp.ToString()}
+                        {{
+                            system._execute(entities, {generalparams}, count);
+                        }}
+                    }}
                 }}
             }}
 
@@ -174,7 +183,7 @@ using System.Collections.Generic;
 using System.Linq;
 namespace EntJoy
 {{
-    public partial struct QueryBuilder
+    partial struct QueryBuilder
     {{
         public QueryBuilder WithAll<{generalArgs}>()
 {generalArgsLimit}

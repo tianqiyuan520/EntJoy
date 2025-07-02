@@ -1,0 +1,24 @@
+[gd_scene load_steps=2 format=3 uid="uid://d1yvwk4435q4p"]
+
+[ext_resource type="Script" uid="uid://yluod85bakh3" path="res://Debugger/MemoryGraphics.cs" id="1_lpqbw"]
+
+[node name="MemoryGraphics" type="Panel"]
+anchors_preset = -1
+anchor_left = 0.10625
+anchor_top = 0.141667
+anchor_right = 0.90625
+anchor_bottom = 0.883333
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_lpqbw")
+metadata/_edit_use_anchors_ = true
+
+[node name="GridContainer" type="GridContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+columns = 32
+metadata/_edit_use_anchors_ = true
