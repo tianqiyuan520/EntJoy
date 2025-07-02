@@ -7,7 +7,7 @@
   "targets": {
     ".NETStandard,Version=v2.0": {},
     ".NETStandard,Version=v2.0/": {
-      "EntJoy.SourceGenerator/1.0.4": {
+      "EntJoy.SourceGenerator/1.0.0": {
         "dependencies": {
           "Microsoft.CodeAnalysis.CSharp": "3.8.0",
           "NETStandard.Library": "2.0.3"
@@ -217,7 +217,7 @@
     }
   },
   "libraries": {
-    "EntJoy.SourceGenerator/1.0.4": {
+    "EntJoy.SourceGenerator/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

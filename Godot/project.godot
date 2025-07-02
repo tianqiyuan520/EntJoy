@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="EntJoy_godot"
-run/main_scene="uid://d3hkmpbtqvutp"
+run/main_scene="uid://7bhe7ecbrslq"
 config/features=PackedStringArray("4.4", "C#", "GL Compatibility")
 config/icon="res://icon.svg"
 
@@ -21,6 +21,8 @@ settings/stdout/print_fps=true
 
 [display]
 
+window/size/viewport_width=1280
+window/size/viewport_height=720
 window/vsync/vsync_mode=0
 
 [dotnet]
@@ -49,8 +51,3 @@ scroll_click={
 
 2d/run_on_separate_thread=true
 common/physics_interpolation=true
-
-[rendering]
-
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"

@@ -1,0 +1,19 @@
+[gd_scene load_steps=3 format=3 uid="uid://bcv83v7aecobm"]
+
+[ext_resource type="Script" uid="uid://ns1gif261d86" path="res://Debugger/DebuggerTrigger.cs" id="1_ggrpl"]
+[ext_resource type="PackedScene" uid="uid://cnahfjhhsfd3w" path="res://Debugger/DebuggerPanel.tscn" id="2_bx28l"]
+
+[node name="Debugger" type="Button" node_paths=PackedStringArray("Pos")]
+anchors_preset = -1
+anchor_right = 0.065625
+anchor_bottom = 0.0430556
+offset_right = -84.0
+offset_bottom = -31.0
+size_flags_horizontal = 3
+text = "Debugger"
+script = ExtResource("1_ggrpl")
+debuggerPanelPackedScene = ExtResource("2_bx28l")
+Pos = NodePath("Node")
+metadata/_edit_use_anchors_ = true
+
+[node name="Node" type="Node" parent="."]
