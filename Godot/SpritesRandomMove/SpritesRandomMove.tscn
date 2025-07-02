@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3 uid="uid://d3hkmpbtqvutp"]
+[gd_scene load_steps=6 format=3 uid="uid://d3hkmpbtqvutp"]
 
-[ext_resource type="Script" uid="uid://c3begxim16mqq" path="res://SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
-[ext_resource type="Script" uid="uid://c75rmlbp6c863" path="res://SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
+[ext_resource type="Script" uid="uid://bw05v0q8h0vtq" path="res://SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
+[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="3_qdxkg"]
+[ext_resource type="Script" uid="uid://bp6ea31m0b8oq" path="res://SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
 [ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
-[ext_resource type="Script" uid="uid://bigl2bhbsrbpt" path="res://CameraMove.cs" id="4_x7x5y"]
+[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_x7x5y"]
 
 [node name="Node2D" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
 script = ExtResource("1_rik7w")
@@ -15,6 +16,10 @@ packedScene = ExtResource("4_tq8fi")
 [node name="HBoxContainer" type="HBoxContainer" parent="CanvasLayer"]
 offset_right = 1151.0
 offset_bottom = 40.0
+
+[node name="Label" type="Label" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+text = "SpritesRandomMove"
 
 [node name="CreateWorld" type="Button" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
@@ -40,6 +45,15 @@ size_flags_horizontal = 3
 text = "Report"
 metadata/_edit_use_anchors_ = true
 
+[node name="Pause" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Pause"
+metadata/_edit_use_anchors_ = true
+
+[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("3_qdxkg")]
+layout_mode = 2
+
 [node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
 script = ExtResource("3_roq2e")
 packedScene = ExtResource("4_tq8fi")
@@ -49,5 +63,5 @@ refresh = true
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
-position = Vector2(576, 322)
+position = Vector2(640, 360)
 script = ExtResource("4_x7x5y")

@@ -60,8 +60,8 @@ public class EntitySystemGenerator : ISourceGenerator
 
         // 生成组件数组参数
         var arrayParams = componentParams
-            .Select(p => $"ref {p.Type}* _{p.Name}")
-            .Append("int _Count");
+            .Select(p => $"{p.Type}* _Generated_{p.Name}")
+            .Append("int _Generated_Count");
 
         bool HasUnsafeToken = false;
         //判断是否有unsafe 关键词
@@ -129,13 +129,13 @@ public class EntitySystemGenerator : ISourceGenerator
         {{
             {indexCopy}
             
-            for (int i = 0; i < _Count; i++)
+            for (int i = 0; i < _Generated_Count; i++)
             {{
                 // 获取组件引用 (使用原始参数名称)
 {string.Join("\n", componentParams.Select(p =>
                         {
-                            if (p.Type == "Entity") return "";
-                            return $"                ref var {p.Name} = ref _{p.Name}[i];";
+                            //if (p.Type == "Entity") return "";
+                            return $"                ref var {p.Name} = ref _Generated_{p.Name}[i];";
 
                         }))}
                 
