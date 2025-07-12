@@ -1,14 +1,14 @@
-[gd_scene load_steps=5 format=3 uid="uid://7bhe7ecbrslq"]
+[gd_scene load_steps=5 format=3 uid="uid://w5qawjdxbaar"]
 
-[ext_resource type="Script" uid="uid://cix4ok868476m" path="res://QuadTree/QuadTree.cs" id="1_7byj6"]
-[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="1_ln0nn"]
-[ext_resource type="PackedScene" uid="uid://dfjqujsa3ydty" path="res://QuadTree/MultiMesh.tscn" id="2_md3tp"]
-[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_a61bo"]
+[ext_resource type="Script" uid="uid://c7kiwxw2lef45" path="res://SteeringBehaviors/SteeringBehaviors.cs" id="1_3t1mt"]
+[ext_resource type="PackedScene" uid="uid://bjke0ujlcojf" path="res://SteeringBehaviors/MultiMesh.tscn" id="2_tywgd"]
+[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="3_kkd83"]
+[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_v5acm"]
 
-[node name="QuadTree" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
-script = ExtResource("1_7byj6")
+[node name="SteeringBehaviors" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
+script = ExtResource("1_3t1mt")
 MultiMeshgroup = NodePath("MultiMeshGroup")
-packedScene = ExtResource("2_md3tp")
+packedScene = ExtResource("2_tywgd")
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
 
@@ -18,7 +18,7 @@ offset_bottom = 40.0
 
 [node name="Label" type="Label" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
-text = "QuadTree"
+text = "SteeringBehaviors"
 
 [node name="CreateWorld" type="Button" parent="CanvasLayer/HBoxContainer"]
 layout_mode = 2
@@ -56,14 +56,16 @@ size_flags_horizontal = 3
 text = "UpdateTree"
 metadata/_edit_use_anchors_ = true
 
-[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("1_ln0nn")]
+[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("3_kkd83")]
 layout_mode = 2
 
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
-position = Vector2(640, 390)
-script = ExtResource("4_a61bo")
+position = Vector2(640, 360)
+script = ExtResource("4_v5acm")
 
 [node name="Timer" type="Timer" parent="."]
+wait_time = 0.1
+autostart = true
 ignore_time_scale = true

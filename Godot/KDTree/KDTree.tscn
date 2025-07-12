@@ -1,14 +1,9 @@
-[gd_scene load_steps=5 format=3 uid="uid://7bhe7ecbrslq"]
+[gd_scene load_steps=3 format=3 uid="uid://diglt4h7n5rij"]
 
-[ext_resource type="Script" uid="uid://cix4ok868476m" path="res://QuadTree/QuadTree.cs" id="1_7byj6"]
-[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="1_ln0nn"]
-[ext_resource type="PackedScene" uid="uid://dfjqujsa3ydty" path="res://QuadTree/MultiMesh.tscn" id="2_md3tp"]
-[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_a61bo"]
+[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="3_2afui"]
+[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_mbulx"]
 
-[node name="QuadTree" type="Node2D" node_paths=PackedStringArray("MultiMeshgroup")]
-script = ExtResource("1_7byj6")
-MultiMeshgroup = NodePath("MultiMeshGroup")
-packedScene = ExtResource("2_md3tp")
+[node name="KDTree" type="Node2D"]
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
 
@@ -56,14 +51,14 @@ size_flags_horizontal = 3
 text = "UpdateTree"
 metadata/_edit_use_anchors_ = true
 
-[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("1_ln0nn")]
+[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("3_2afui")]
 layout_mode = 2
 
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
 position = Vector2(640, 390)
-script = ExtResource("4_a61bo")
+script = ExtResource("4_mbulx")
 
 [node name="Timer" type="Timer" parent="."]
 ignore_time_scale = true

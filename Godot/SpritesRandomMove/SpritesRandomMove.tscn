@@ -63,5 +63,5 @@ refresh = true
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
-position = Vector2(640, 360)
+position = Vector2(640, 389)
 script = ExtResource("4_x7x5y")
