@@ -3,7 +3,6 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Text;
 
 namespace EntJoy.SourceGenerator.SystemArgs
@@ -49,8 +48,14 @@ namespace EntJoy.SourceGenerator.SystemArgs
                     // World_Query的扩展
                     sourceTextStr = AppendWorldQueryBody(codeWriter, argsCount);
                     sourceText1 = SourceText.From(sourceTextStr, Encoding.UTF8);
-                    //Debugger.Launch();
+
                     context.AddSource("World_Query" + $"args-{argsCount}.g.cs", sourceText1);
+                    codeWriter.Clear();
+
+                    // World_MultiQuery的扩展
+                    sourceTextStr = AppendWorldMultiQueryBody(codeWriter, argsCount);
+                    sourceText1 = SourceText.From(sourceTextStr, Encoding.UTF8);
+                    context.AddSource("World_MultiQuery" + $"args-{argsCount}.g.cs", sourceText1);
                     codeWriter.Clear();
                 }
             }
@@ -92,12 +97,12 @@ namespace EntJoy.SourceGenerator.SystemArgs
 $@"
 namespace EntJoy
 {{
-    public interface ISystem<{generalArgs.ToString()}>
+    public interface ISystem<{generalArgs.ToString()}> : GetArchetypeChunkID
 {generalArgsLimit.ToString()}
     {{
-        virtual unsafe void _execute(Entity* _entity, {generalparamsArray},int _Count) {{}}        
-        void Execute(ref Entity entity, {generalparams});
-
+        virtual unsafe void _execute(Entity* _entity, {generalparamsArray},int _Count, int LimitCount) {{}}        
+        virtual void Execute(ref Entity entity, {generalparams}) {{}}
+        virtual void Execute({generalparams}) {{}}
     }}
 }}
 ";
@@ -115,7 +120,7 @@ namespace EntJoy
             StringBuilder generalparams = new StringBuilder();
             StringBuilder generalExp = new StringBuilder(); //表达式
             StringBuilder GeneralExp2_Index = new StringBuilder();
-            generalExp.Append($"fixed (Entity* entities = &chunk.GetEntity(0))\n");
+            generalExp.Append($"Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();\n");
 
             for (int i = 0; i < argsCount; i++)
             {
@@ -123,7 +128,7 @@ namespace EntJoy
                 generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
                 generalArgsLimit.Append($"            where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
                 generalparams.Append($"components{i}{(i == argsCount - 1 ? "" : ", ")}");
-                generalExp.Append($"                        fixed (T{i}* components{i} = &chunk.GetComponent<T{i}>(0, t{i}Index))\n");
+                generalExp.Append($"                        T{i}* components{i} = (T{i}*)chunk.GetComponentArrayPointer(t{i}Index).ToPointer();\n");
             }
 
             var SourceText =
@@ -137,19 +142,30 @@ namespace EntJoy
         public unsafe void Query<{generalArgs.ToString()}>(in QueryBuilder builder, in ISystem<{generalArgs.ToString()}> system)
 {generalArgsLimit.ToString()}
         {{
+            int entityCounter = 0; // 记录查询到的实体数量
+            int limitCount = builder.LimitCount;
             unchecked
             {{
-                foreach (var archetype in GetMatchingArchetypes(builder))
+                for (int i = 0; i < archetypeCount; i++)
                 {{
-{GeneralExp2_Index.ToString()}
-                    foreach (var chunk in archetype.GetChunks())
+                    var archetype = allArchetypes[i];
+                    if (archetype != null && archetype.IsMatch(builder))
                     {{
-                        int count = chunk.EntityCount;
-                        if (count == 0) continue;
-
-                        {generalExp.ToString()}
+{GeneralExp2_Index.ToString()}
+                        var chunks = archetype.GetChunks();
+                        for (int j = 0; j < chunks.Count; j++)
                         {{
-                            system._execute(entities, {generalparams}, count);
+                            var chunk = chunks[j];
+                            int count = chunk.EntityCount;
+                            if (count == 0) continue;
+                            system.GetArchetypeID(i);
+                            system.GetChunkID(j);
+                            {generalExp.ToString()}
+                            {{
+                                system._execute(entities, {generalparams}, count, limitCount - entityCounter);
+                            }}
+                            entityCounter += count;
+                            if (limitCount != -1 && entityCounter >= limitCount) break;
                         }}
                     }}
                 }}
@@ -218,6 +234,105 @@ namespace EntJoy
 
             return codeWriter.ToString();
         }
+
+
+        //构造 World MultiQuery 多进程
+        private static string AppendWorldMultiQueryBody(in CodeWriter codeWriter, int argsCount)
+        {
+            StringBuilder generalArgs = new StringBuilder();
+            StringBuilder generalArgsLimit = new StringBuilder();
+            StringBuilder generalparams = new StringBuilder();
+            StringBuilder generalparams2 = new StringBuilder();
+            StringBuilder generalExp = new StringBuilder(); //表达式
+            StringBuilder GeneralExp2_Index = new StringBuilder();
+            StringBuilder GeneralExp2_Index2 = new StringBuilder();
+            generalExp.Append($"Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();\n");
+
+            for (int i = 0; i < argsCount; i++)
+            {
+                GeneralExp2_Index.Append($"                    int t{i}Index = archetype.GetComponentTypeIndex<T{i}>();\n");
+                GeneralExp2_Index2.Append($"int t{i}Index{(i == argsCount - 1 ? "" : ", ")}");
+                generalArgs.Append("T" + i + (i == argsCount - 1 ? "" : ","));
+                generalArgsLimit.Append($"            where T{i} : struct{(i == argsCount - 1 ? "" : "\n")}");
+                generalparams.Append($"components{i}{(i == argsCount - 1 ? "" : ", ")}");
+                generalparams2.Append($"t{i}Index{(i == argsCount - 1 ? "" : ", ")}");
+                generalExp.Append($"                        T{i}* components{i} = (T{i}*)chunk.GetComponentArrayPointer(t{i}Index).ToPointer();\n");
+            }
+
+            var SourceText =
+$@"
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
+namespace EntJoy
+{{
+    public partial class World  // World类部分定义
+    {{
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void MultiQuery<{generalArgs}>(QueryBuilder builder, ISystem<{generalArgs}> system)
+{generalArgsLimit}
+        {{
+            static void RunSystem(Chunk chunk, {GeneralExp2_Index2}, ISystem<{generalArgs}> system, int LimitCount, int ArchID, int ChunkID)
+            {{
+                int count = chunk.EntityCount;
+                system.GetArchetypeID(ArchID);
+                system.GetChunkID(ChunkID);
+                {generalExp}
+                    system._execute(entities, {generalparams}, count, LimitCount);
+            }}
+
+            unchecked
+            {{
+                int entityCounter = 0; 
+                int limitCount = builder.LimitCount;
+
+                for (int i = 0; i < archetypeCount; i++)
+                {{
+                    var archetype = allArchetypes[i];
+                    if (archetype != null && archetype.IsMatch(builder))
+                    {{
+            {GeneralExp2_Index}
+                    
+                        List<ValueTask> tasks = new();
+
+                        var chunks = archetype.GetChunks();
+                        for (int j = 0; j < chunks.Count; j++)
+                        {{
+                            var chunk = chunks[j];
+                            int count = chunk.EntityCount;
+                            if (count == 0) continue;
+                            int spareCount = limitCount - entityCounter;
+                            int archetypeID = i;
+                            int chunkID = j;
+                            Task task = Task.Run(() =>
+                            {{
+                                RunSystem(chunk, {generalparams2}, system, spareCount, archetypeID, chunkID);
+                            }}
+                            );
+                            tasks.Add(new ValueTask(task));
+                            entityCounter += count;
+                            if (limitCount != -1 && entityCounter >= limitCount) break;
+
+                        }}
+                        Task.WhenAll(tasks.Select(v => v.AsTask()));
+                    }}
+                }}
+            }}
+        }}
+    }}
+}}
+";
+            codeWriter.AppendLine(SourceText);
+
+
+
+            return codeWriter.ToString();
+        }
+
+
+
+
         //构造 ComponentType
         private static string AppendComponentTypesBody(in CodeWriter codeWriter, int argsCount)
         {
@@ -271,9 +386,9 @@ namespace EntJoy
         public void OnVisitSyntaxNode(SyntaxNode syntaxNode)
         {
 
-            if (TryGetWorkItem(syntaxNode, out var ArgsCount,out ExtendArgsType Type))
+            if (TryGetWorkItem(syntaxNode, out var ArgsCount, out ExtendArgsType Type))
             {
-                if(Type == ExtendArgsType.SystemOrQuery)
+                if (Type == ExtendArgsType.SystemOrQuery)
                 {
                     if (CandidatedArgs.Contains(ArgsCount))
                     {
@@ -297,7 +412,7 @@ namespace EntJoy
         }
 
         //语法节点接收器
-        private static bool TryGetWorkItem(SyntaxNode syntaxNode, out int ArgsCount,out ExtendArgsType Type)
+        private static bool TryGetWorkItem(SyntaxNode syntaxNode, out int ArgsCount, out ExtendArgsType Type)
         {
             Type = ExtendArgsType.None;
             if (syntaxNode is StructDeclarationSyntax structDeclarationSyntax && structDeclarationSyntax.BaseList != null)
@@ -330,7 +445,7 @@ namespace EntJoy
                     return true;
                 }
                 ArgsCount = 0;
-                
+
                 return false;
             }
 
@@ -341,7 +456,7 @@ namespace EntJoy
                     memberAccess.Name is GenericNameSyntax genericMethod &&
                     (genericMethod.Identifier.Text == "WithAll" || genericMethod.Identifier.Text == "WithAny" || genericMethod.Identifier.Text == "WithNone"))
                 {
-                    
+
                     Type = ExtendArgsType.QueryBuilder;
                     ArgsCount = genericMethod.TypeArgumentList.Arguments.Count;
                     if (ArgsCount >= SystemArgsGenerator.ArgsMinCount)

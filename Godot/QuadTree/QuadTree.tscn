@@ -62,10 +62,8 @@ layout_mode = 2
 [node name="MultiMeshGroup" type="Node" parent="."]
 
 [node name="Camera2D" type="Camera2D" parent="."]
-position = Vector2(640, 360)
+position = Vector2(640, 390)
 script = ExtResource("4_a61bo")
 
 [node name="Timer" type="Timer" parent="."]
-wait_time = 0.1
-autostart = true
 ignore_time_scale = true

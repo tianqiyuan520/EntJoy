@@ -19,6 +19,8 @@ public class EntitySystemGenerator : ISourceGenerator
 
     public void Execute(GeneratorExecutionContext context)
     {
+        GenerateAttribute(context);
+
         if (context.SyntaxReceiver is not SystemSyntaxReceiver receiver)
             return;
 
@@ -36,6 +38,22 @@ public class EntitySystemGenerator : ISourceGenerator
         }
     }
 
+    // 生成属性
+    private void GenerateAttribute(GeneratorExecutionContext context)
+    {
+//        string text = Def.Dom_Declarations +
+//$@"
+//using System;
+//namespace EntJoy
+//{{
+//    [AttributeUsage(AttributeTargets.Struct)]
+//    public sealed class System_GetArchetypeChunkID : Attribute
+//    {{}}
+//}}
+//        ";
+//        context.AddSource("Attribute.g.cs", SourceText.From(text, Encoding.UTF8));
+    }
+
     private bool IsSystemInterface(INamedTypeSymbol symbol)
     {
         return symbol.Interfaces.Any(i =>
@@ -45,6 +63,12 @@ public class EntitySystemGenerator : ISourceGenerator
 
     private string GenerateBatchSystem(SystemInfo systemInfo, INamedTypeSymbol symbol)
     {
+        //判断是否需要生成_execute方法
+        if (systemInfo.IsInitExecuteFunc)
+        {
+            return "";
+        }
+
         var structDecl = systemInfo.StructDeclaration;
         var executeMethod = systemInfo.ExecuteMethod;
         var componentParams = systemInfo.ComponentParameters;
@@ -61,7 +85,14 @@ public class EntitySystemGenerator : ISourceGenerator
         // 生成组件数组参数
         var arrayParams = componentParams
             .Select(p => $"{p.Type}* _Generated_{p.Name}")
-            .Append("int _Generated_Count");
+            .Append("int _Generated_Count")
+            .Append("int _Generated_LimitCount");
+
+        if (componentParams.FindIndex(p => p.Type == "Entity") == -1)
+        {
+            arrayParams = arrayParams.Prepend("Entity* _Generated_entity");
+        }
+
 
         bool HasUnsafeToken = false;
         //判断是否有unsafe 关键词
@@ -95,6 +126,7 @@ public class EntitySystemGenerator : ISourceGenerator
 
         codeWriter.AppendLine("using EntJoy;");
         codeWriter.AppendLine("using Godot;");
+        codeWriter.AppendLine("using System.Runtime.CompilerServices;");
 
         // 添加命名空间
         if (!string.IsNullOrEmpty(namespaceName))
@@ -123,6 +155,7 @@ public class EntitySystemGenerator : ISourceGenerator
 {typeName}
 {{
     {fieldsString}
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe void _execute({string.Join(", ", arrayParams)})
     {{
         unchecked
@@ -131,6 +164,7 @@ public class EntitySystemGenerator : ISourceGenerator
             
             for (int i = 0; i < _Generated_Count; i++)
             {{
+                if(_Generated_LimitCount > 0 && i >= _Generated_LimitCount) break;
                 // 获取组件引用 (使用原始参数名称)
 {string.Join("\n", componentParams.Select(p =>
                         {
@@ -144,6 +178,7 @@ public class EntitySystemGenerator : ISourceGenerator
             }}
         }}
     }}
+    
 }}
 ");
 
@@ -195,6 +230,28 @@ public class EntitySystemGenerator : ISourceGenerator
         return content;
     }
 }
+    // 生成获取chunkID和archetypeID的函数
+//    private string GenerateGetIDFunc(SystemInfo systemInfo)
+//    {
+//        StringBuilder result = new();
+//        if(systemInfo.IsGetArchetypeChunkID)
+//        result.AppendLine($@"
+//public int _chunkID;
+
+//public void GetChunkID(int id)
+//{{
+//    _chunkID = id;
+//}}
+
+//public int _ArchetypeID;
+//public void GetArchetypeID(int id)
+//{{
+//    _ArchetypeID = id;
+//}}
+//");
+//        return result.ToString();
+//    }
+//}
 
 // 用于识别候选结构体的语法接收器
 public class SystemSyntaxReceiver : ISyntaxReceiver
@@ -211,6 +268,8 @@ public class SystemSyntaxReceiver : ISyntaxReceiver
         public StructDeclarationSyntax StructDeclaration { get; set; }
         public MethodDeclarationSyntax ExecuteMethod { get; set; }
         public List<ComponentParamInfo> ComponentParameters { get; set; } = new();
+        public bool IsInitExecuteFunc;
+        public bool IsGetArchetypeChunkID;
     }
 
     public List<SystemInfo> CandidateSystems { get; } = new();
@@ -222,15 +281,18 @@ public class SystemSyntaxReceiver : ISyntaxReceiver
            (structDecl.Parent is ClassDeclarationSyntax || !(structDecl.Parent is ClassDeclarationSyntax)))
         {
             // 检查是否实现了ISystem接口
-            if (structDecl.BaseList?.Types.Any(t =>
-                t.Type is GenericNameSyntax gns &&
-                gns.Identifier.Text == "ISystem"
-                ) == true)
+            if (structDecl.BaseList?.Types.Any(t => t.Type is GenericNameSyntax gns && gns.Identifier.Text == "ISystem") == true)
             {
                 // 查找Execute方法
                 var executeMethod = structDecl.Members
                     .OfType<MethodDeclarationSyntax>()
                     .FirstOrDefault(m => m.Identifier.Text == "Execute");
+                // 查找是否定义了_execute方法
+                var executeMethod2 = structDecl.Members
+                    .OfType<MethodDeclarationSyntax>()
+                    .FirstOrDefault(m => m.Identifier.Text == "_execute");
+                bool IsInitExecuteFunc = false;
+                if (executeMethod2 != null) IsInitExecuteFunc = true;
 
                 if (executeMethod == null) return;
 
@@ -247,12 +309,32 @@ public class SystemSyntaxReceiver : ISyntaxReceiver
 
                 if (parameters.Count == 0) return;
 
-                CandidateSystems.Add(new SystemInfo
+                SystemInfo systemInfo = new SystemInfo
                 {
                     StructDeclaration = structDecl,
                     ExecuteMethod = executeMethod,
-                    ComponentParameters = parameters
-                });
+                    ComponentParameters = parameters,
+                    IsInitExecuteFunc = IsInitExecuteFunc,
+                };
+
+                CandidateSystems.Add(systemInfo);
+
+                var attributes = from attributeList in structDecl.AttributeLists
+                                 from attriute in attributeList.Attributes
+                                 select attriute;
+
+                //是否 匹配到合适 的属性
+                foreach (var attribute in attributes)
+                {
+                    var attribuiteName = attribute.Name.ToString();
+                    switch (attribuiteName)
+                    {
+                        case var name when
+                            name == "System_GetArchetypeChunkID":
+                            systemInfo.IsGetArchetypeChunkID = true;
+                            break;
+                    }
+                }
             }
         }
     }

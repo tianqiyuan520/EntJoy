@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("tianqiyuan520")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+50a07c66e29a568a0dfd16769bcbcfa9622ecb99")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+27dea744cfe11c2e795842b26f17f7e7ad25cb27")]
 [assembly: System.Reflection.AssemblyProductAttribute("EntJoy.SourceGenerator")]
 [assembly: System.Reflection.AssemblyTitleAttribute("EntJoy.SourceGenerator")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

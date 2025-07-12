@@ -100,27 +100,35 @@ namespace EntJoy
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ref T GetFirstComponentRef<T>(int componentIndex) where T : struct
+        {
+            return ref Unsafe.AsRef<T>((byte*)_memoryBlock + _componentOffsets[componentIndex]);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
-            if (entityIndex < 0 || entityIndex >= _entityCount)
-                throw new IndexOutOfRangeException();
             return ref Unsafe.AsRef<T>((byte*)_memoryBlock + _componentOffsets[componentIndex] + entityIndex * Marshal.SizeOf<T>());
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref Entity GetEntity(int entityIndex)
         {
-            if (entityIndex < 0 || entityIndex >= _entityCount)
-                throw new IndexOutOfRangeException();
-
             return ref ((Entity*)_memoryBlock)[entityIndex];
         }
-
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        // 获取实体的数组指针
+        public IntPtr GetEntityPointer()
+        {
+            return _memoryBlock;
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         // 获取特定组件的数组指针
         public IntPtr GetComponentArrayPointer(int componentIndex)
         {
             return _memoryBlock + _componentOffsets[componentIndex];
         }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         // 获取特定组件的偏移量
         public int GetComponentOffset(int componentIndex)
         {
@@ -131,10 +139,12 @@ namespace EntJoy
         {
             return Marshal.SizeOf<T>();
         }
+
         public int GetComponentSize(ComponentType componentType)
         {
             return Marshal.SizeOf(componentType.Type);
         }
+
         public int GetEntitySize()
         {
             return Marshal.SizeOf<Entity>();

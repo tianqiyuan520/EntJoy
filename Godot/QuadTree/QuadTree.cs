@@ -4,20 +4,23 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
-
-
-
-public unsafe partial struct MoveSystem2 : ISystem<Position, Vel, QTComp>
+public struct QTComp : IRect, IComponent
 {
-    public static Vector2 viewportSize;
-    public static float dt;
+    public int Id;
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Width { get; set; }
+    public float Height { get; set; }
+}
 
-    public void Execute(ref Entity entity, ref Position pos, ref Vel vel, ref QTComp qtcomp)
+
+public unsafe partial struct QuadTreeMoveSystem : ISystem<Position,QTComp>
+{
+    public Vector2 viewportSize;
+    public float dt;
+
+    public void Execute(ref Position pos, ref QTComp qtcomp)
     {
-        pos.pos.X += vel.vel.X * dt;
-        pos.pos.Y += vel.vel.Y * dt;
-        if (pos.pos.X < 0 || pos.pos.X > viewportSize.X) vel.vel.X *= -1;
-        if (pos.pos.Y < 0 || pos.pos.Y > viewportSize.Y) vel.vel.Y *= -1;
         qtcomp.X = (int)pos.pos.X;
         qtcomp.Y = (int)pos.pos.Y;
     }
@@ -25,17 +28,33 @@ public unsafe partial struct MoveSystem2 : ISystem<Position, Vel, QTComp>
 public partial struct DisplayLimitedEntityPosSystem2 : ISystem<Position, QTComp>
 {
     public int EntityCount;
-    public int Count;
-    public int limitCount;
 
     public void Execute(ref Entity entity, ref Position pos, ref QTComp qtcomp)
     {
-        if (Count > limitCount) return;
         GD.Print(entity.Id, "/", EntityCount, " ", pos.pos, " ", qtcomp.X, " ", qtcomp.Y, " ", qtcomp.Width, " ", qtcomp.Height);
-        Count++;
     }
 }
 
+
+public partial struct TreeUpdateSystem : ISystem<Position, QTComp>
+{
+    public QTree<QTComp> qTree;
+    public int ChunkId;
+    public void Execute(ref Entity entity, ref Position position, ref QTComp qTComp)
+    {
+        
+        lock (qTree)
+        {
+            qTree.Insert(qTComp);
+        }
+        
+    }
+    public void GetChunkID(int id)
+    {
+        ChunkId = id;
+        GD.Print("TreeUpdateSystem ", ChunkId);
+    }
+}
 public partial class QuadTree : Node2D
 {
 
@@ -46,11 +65,12 @@ public partial class QuadTree : Node2D
     public MultiMeshInstance2D[] multiMeshInstances;
     public int SpawnMultiMeshCount = 1; // MultiMesh 个数
                                         // 每个MultiMesh的实体数量
-    public int ENTITIES_PER_MESH = 10000;
-    public int EntityCount = 1000;
+    public const int ENTITIES_PER_MESH = 10_0000;
+    public int EntityCount = 1_0000;
     public World myWorld;
     public Rect2 viewportRect;
     public const int GODOT_FLOATS_PER_INSTANCE = 8;
+    public bool isPaused = false;
 
     public MultiMeshInstance2D GenerateMultiMesh()
     {
@@ -68,7 +88,7 @@ public partial class QuadTree : Node2D
         GD.Print($"创建世界成功; 当前世界总数:{World_Recorder.worldList.Count}");
     }
 
-    public QTree<QTComp> qTree = new QTree<QTComp>();
+
     public override void _Ready()
     {
         GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateWorld").Pressed += CreateWorld;
@@ -76,7 +96,7 @@ public partial class QuadTree : Node2D
         GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("PrintEntity").Pressed += Display;
         GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("Pause").Pressed += Pause;
         GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("UpdateTree").Pressed += UpdateTree;
-        GetNode<Timer>("Timer").Timeout += UpdateTree;
+        //GetNode<Timer>("Timer").Timeout += UpdateTree;
         //multiMeshInstance = GetNode<MultiMeshInstance2D>("MultiMeshInstance2D");
         //multiMeshInstance.Multimesh.InstanceCount = 30000;
 
@@ -86,7 +106,7 @@ public partial class QuadTree : Node2D
         {
             multiMeshInstances[i] = GenerateMultiMesh();
         }
-        if (SpawnMultiMeshCount != 0) ENTITIES_PER_MESH = EntityCount / SpawnMultiMeshCount;
+        //if (SpawnMultiMeshCount != 0) ENTITIES_PER_MESH = EntityCount / SpawnMultiMeshCount;
         // 初始化所有MultiMesh实例
         for (int i = 0; i < SpawnMultiMeshCount; i++)
         {
@@ -94,10 +114,10 @@ public partial class QuadTree : Node2D
         }
         GD.Print(multiMeshInstances.Length, " ", "ENTITIES_PER_MESH:", ENTITIES_PER_MESH, " ", "EntityCount:", EntityCount);
         viewportRect = GetViewportRect();
-        //moveSystemSIMD.viewportSize = viewportRect.Size;
 
-        MoveSystem2.viewportSize = viewportRect.Size;
+        
 
+        //QT初始化
         qTree.Init();
         qTree.CreateRoot();
         qTree.InitRect(viewportRect.Position.X + viewportRect.Size.X / 2,
@@ -124,6 +144,7 @@ public partial class QuadTree : Node2D
             });
             myWorld.AddComponent(entity, new QTComp()
             {
+                Id = entity.Id,
                 X = 0,
                 Y = 0,
                 Width = 1,
@@ -135,27 +156,9 @@ public partial class QuadTree : Node2D
         RenderingInit();
     }
 
-    public void Display()
-    {
-        var queryBuilder = new QueryBuilder().WithAll<Position, QTComp>();
-        GD.Print("Display:");
-        DisplayLimitedEntityPosSystem2 displayLimitedEntityPosSystem2 = new() { EntityCount = EntityCount, Count = 0, limitCount = 100 };
-        myWorld.Query(queryBuilder, displayLimitedEntityPosSystem2);
-
-    }
-
-    public QueryBuilder queryBuilder = new QueryBuilder().WithAll<Position, Vel, QTComp>();
-    public QueryBuilder queryBuilder2 = new QueryBuilder().WithAll<Position, QTComp>();
     public void RenderingInit()
     {
         if (multiMeshInstances.Length == 0) return;
-        List<Position> poses = new();
-        GetAllEntityPosSystem getAllEntityPosSystem = new();
-        getAllEntityPosSystem.poses = poses;
-        myWorld.Query(queryBuilder, getAllEntityPosSystem);
-        poses = getAllEntityPosSystem.poses;
-
-
         for (int meshIndex = 0; meshIndex < multiMeshInstances.Length; meshIndex++)
         {
             var multiMesh = multiMeshInstances[meshIndex].Multimesh;
@@ -168,22 +171,21 @@ public partial class QuadTree : Node2D
             int endIndex = startIndex + ENTITIES_PER_MESH;
 
             int bufferIndex = 0;
-            for (int entityIndex = startIndex; entityIndex < endIndex; entityIndex++)
+            for (int entityIndex = startIndex; entityIndex < endIndex - 1; entityIndex++)
             {
-                if (entityIndex >= poses.Count) break;
+                if (entityIndex >= ENTITIES_PER_MESH) break;
                 int baseIndex = bufferIndex * GODOT_FLOATS_PER_INSTANCE;
                 float rotation = 0.0f;
                 float cosX = Mathf.Cos(rotation);
                 float sinX = Mathf.Sin(rotation);
-                // 根据最新格式要求填充 (x.x, y.x, padding, origin.x, x.y, y.y, padding, origin.y)
                 buffer[baseIndex] = cosX;    // x.x
                 buffer[baseIndex + 1] = -sinX;   // y.x
                 buffer[baseIndex + 2] = 0.0f;    // padding
-                buffer[baseIndex + 3] = poses[entityIndex].pos[0]; // origin.x
+                buffer[baseIndex + 3] = 0; // origin.x
                 buffer[baseIndex + 4] = sinX;    // x.y
                 buffer[baseIndex + 5] = cosX;    // y.y
                 buffer[baseIndex + 6] = 0.0f;    // padding
-                buffer[baseIndex + 7] = poses[entityIndex].pos[1]; // origin.y
+                buffer[baseIndex + 7] = 0; // origin.y
                 bufferIndex++;
             }
 
@@ -201,6 +203,19 @@ public partial class QuadTree : Node2D
         }
     }
 
+
+    public void Display()
+    {
+        var queryBuilder = new QueryBuilder().WithAll<Position, QTComp>().SetLimit(100);
+        GD.Print("Display:");
+        DisplayLimitedEntityPosSystem2 displayLimitedEntityPosSystem2 = new() { EntityCount = EntityCount };
+        myWorld.Query(queryBuilder, displayLimitedEntityPosSystem2);
+
+    }
+
+    public QueryBuilder queryBuilder = new QueryBuilder().WithAll<Position, Vel, QTComp>();
+    public QueryBuilder queryBuilder2 = new QueryBuilder().WithAll<Position, QTComp>();
+
     public unsafe void DisplaySprites()
     {
         if (multiMeshInstances.Length == 0) return;
@@ -208,7 +223,7 @@ public partial class QuadTree : Node2D
         List<Position> poses = new();
         GetAllEntityPosSystem getAllEntityPosSystem = new();
         getAllEntityPosSystem.poses = poses;
-        myWorld.Query(queryBuilder, getAllEntityPosSystem);
+        myWorld.Query(new QueryBuilder().WithAll<Position>().SetLimit(ENTITIES_PER_MESH), getAllEntityPosSystem);
         poses = getAllEntityPosSystem.poses;
 
         if (poses.Count == 0) return;
@@ -259,11 +274,6 @@ public partial class QuadTree : Node2D
         {
             return;
         }
-
-        //if (Engine.GetProcessFrames() % 2 == 0)
-        //{
-        //	DisplaySpritesOptimized2();
-        //}
     }
     public override void _PhysicsProcess(double delta)
     {
@@ -275,13 +285,23 @@ public partial class QuadTree : Node2D
         if (!isPaused) TickLoop(delta);
         //UpdateTree();
     }
-    public MoveSystem2 moveSystem = new();
+    public QuadTreeMoveSystem quadTreeMoveSystem = new();
+    public MoveSystem moveSystem = new();
 
     public void TickLoop(double delta)
     {
         //var start = DateTime.Now;
-        MoveSystem2.dt = (float)delta;
-        myWorld.Query(queryBuilder, moveSystem);
+        var start = DateTime.Now;
+        //
+        moveSystem.viewportSize = viewportRect.Size;
+        moveSystem.dt = (float)delta;
+        myWorld.MultiQuery(new QueryBuilder().WithAll<Position, Vel>(), moveSystem);
+        //
+        quadTreeMoveSystem.viewportSize = viewportRect.Size;
+        quadTreeMoveSystem.dt = (float)delta;
+        myWorld.MultiQuery(queryBuilder, quadTreeMoveSystem);
+        var end = DateTime.Now;
+        //GD.Print($"QuadTreeMoveSystem:{(end - start).TotalMilliseconds}ms");
         DisplaySprites();
         //var end = DateTime.Now;
         //if (Engine.GetPhysicsFrames() % 15 == 0)
@@ -290,22 +310,16 @@ public partial class QuadTree : Node2D
         //}
     }
 
-    public bool isPaused = false;
+
     public void Pause()
     {
         isPaused = !isPaused;
     }
 
-
-    public partial struct TreeUpdateSystem : ISystem<Position, QTComp>
-    {
-        public static QTree<QTComp> qTree;
-        public void Execute(ref Entity entity, ref Position position, ref QTComp qTComp)
-        {
-            qTree.Insert(qTComp);
-        }
-    }
+    // Quad Tree
+    public QTree<QTComp> qTree = new QTree<QTComp>();
     public TreeUpdateSystem treeUpdateSystem = new();
+
     bool IsRuningTreeBuild = false;
     public async void UpdateTree()
     {
@@ -314,17 +328,20 @@ public partial class QuadTree : Node2D
             return;
         }
         if (isPaused || IsRuningTreeBuild) return;
-
+        var start = DateTime.Now;
         await Task.Run(() =>
         {
             IsRuningTreeBuild = true;
             qTree.Clear();
-            TreeUpdateSystem.qTree = qTree;
+            treeUpdateSystem.qTree = qTree;
             myWorld.Query(queryBuilder2, treeUpdateSystem);
-            qTree = TreeUpdateSystem.qTree;
-            IsRuningTreeBuild = false ;
+            qTree = treeUpdateSystem.qTree;
+            IsRuningTreeBuild = false;
         });
+        var end = DateTime.Now;
+        GD.Print($"四叉树构建耗时 :{(end - start).TotalMilliseconds}ms");
         DrawTree();
+
     }
 
 
@@ -353,7 +370,7 @@ public partial class QuadTree : Node2D
 
             for (int j = 0; j < point.Length; j++)
             {
-                DrawLine(point[j], point[(j + 1) % point.Length], new Color("#000000"), 1f);
+                DrawLine(point[j], point[(j + 1) % point.Length], new Color("#000000"), 3f);
             }
         }
     }

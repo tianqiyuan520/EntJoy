@@ -6,6 +6,7 @@ EntJoy/.vs
 Godot/.godot
 Godot/.vs
 /.vscode
+/Godot/BallCollision
 
 # Only public documentation belongs to this repository.
 /docs/*

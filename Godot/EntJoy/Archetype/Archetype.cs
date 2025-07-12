@@ -177,7 +177,7 @@ namespace EntJoy
         // 计算最佳Chunk容量
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            const int targetChunkSize = 16 * 1024; // 目标16KB大小
+            const int targetChunkSize = 64 * 1024; // 目标64KB大小
             int totalComponentSize = 0;
 
             foreach (var type in types)
@@ -188,23 +188,34 @@ namespace EntJoy
             // 加上实体ID的大小
             totalComponentSize += Marshal.SizeOf<Entity>();
 
-            // 计算实体数量，对齐到16的倍数
-            int capacity = Math.Max(16, targetChunkSize / totalComponentSize);
-            return (capacity + 15) & ~15; // 取16的整数倍 (最少16个实体) 并按16字节对齐
+            // 计算实体数量，对齐到64的倍数
+            int capacity = Math.Max(64, targetChunkSize / totalComponentSize);
+            return (capacity + 65) & ~65; // 取64的整数倍 (最少64个实体) 并按64字节对齐
         }
         // 增加实体
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
         {
             // 查找有空位的Chunk或创建新Chunk
             Chunk targetChunk = null;
-            foreach (var chunk in ChunkList)
+
+            //foreach (var chunk in ChunkList)
+            //{
+            //    if (chunk.EntityCount < chunk.Capacity)
+            //    {
+            //        targetChunk = chunk;
+            //        break;
+            //    }
+            //}
+            if(ChunkCount > 0)
             {
-                if (chunk.EntityCount < chunk.Capacity)
+                var chunk = ChunkList[^1];
+                if (chunk != null && chunk.EntityCount < chunk.Capacity)
                 {
                     targetChunk = chunk;
-                    break;
                 }
             }
+           
+
 
             if (targetChunk == null)
             {
@@ -256,7 +267,7 @@ namespace EntJoy
             var componentIndex = componentTypeRecorder[typeof(T)];
             return ref ChunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex);
         }
-
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Set<T>(int chunkIndex, int slotInChunk, T value) where T : struct
         {
             var componentIndex = componentTypeRecorder[typeof(T)];
