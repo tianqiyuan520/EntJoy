@@ -22,12 +22,17 @@ settings/stdout/print_fps=true
 [display]
 
 window/size/viewport_width=1280
-window/size/viewport_height=720
+window/size/viewport_height=780
+window/stretch/mode="canvas_items"
 window/vsync/vsync_mode=0
 
 [dotnet]
 
 project/assembly_name="EntJoy_godot"
+
+[editor]
+
+movie_writer/movie_file="D:/Godot/Project/EntJoy/Godot/BallCollision/movie/1.avi"
 
 [input]
 

@@ -39,15 +39,15 @@ public partial class CameraMove : Camera2D
 
 			if (m is InputEventMouseButton mb)        //  鼠标按键
 			{
-				var dif = 0.05f;
-				if (mb.IsActionPressed("scroll_up") && view_zoom + dif < 2) //放大
+				var dif = 0.02f;
+				if (mb.IsActionPressed("scroll_up") && view_zoom + dif < 2) //缩小
 				{
 					view_zoom = view_zoom + dif;
 					update_Zoom(view_zoom);
 				}
 
-				if (mb.IsActionPressed("scroll_down") && view_zoom - dif > 0.05) //缩小
-				{
+				if (mb.IsActionPressed("scroll_down") && view_zoom - dif > 0.04) //放大
+                {
 					view_zoom = view_zoom - dif;
 					update_Zoom(view_zoom);
 				}
