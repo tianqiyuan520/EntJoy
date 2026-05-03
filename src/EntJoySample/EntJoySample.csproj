@@ -1,0 +1,46 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<BaseOutputPath>..\..\bin</BaseOutputPath>
+		<OutputPath>..\..\bin</OutputPath>
+
+		<!-- 关键设置：取消自动追加 TargetFramework 子目录 -->
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Remove="NativeTranspiler_Generated\**" />
+		<EmbeddedResource Remove="NativeTranspiler_Generated\**" />
+		<None Remove="NativeTranspiler_Generated\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" />
+		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
+		<ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+		<!-- ★ 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
+		<ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" />
+	</ItemGroup>
+
+	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检查
+	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编译 -->
+	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
+
+	<Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
+		<Message Importance="high" Text="Starting native compilation for generated C++ code..." />
+		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
+	</Target>
+
+	<Target Name="CopyNativeDll" AfterTargets="Build" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiler_Generated.dll')">
+		<ItemGroup>
+			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\*.dll" />
+		</ItemGroup>
+		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+	</Target>
+
+</Project>

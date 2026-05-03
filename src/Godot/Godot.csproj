@@ -1,0 +1,51 @@
+<Project Sdk="Godot.NET.Sdk/4.4.1">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<EnableDynamicLoading>true</EnableDynamicLoading>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Optimize>true</Optimize>
+		<!-- 启用R2R -->
+		<PublishReadyToRun>false</PublishReadyToRun>
+		<!-- 启用AOT -->
+		<PublishAOT>true</PublishAOT>
+
+		<OptimizationPreference>Speed</OptimizationPreference>
+		<!-- 或 Size -->
+		<IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+		<BaseOutputPath>$(GodotProjectDir).godot\mono\temp\bin\</BaseOutputPath>
+	</PropertyGroup>
+	<!-- 源代码生成器引用 -->
+	<ItemGroup>
+		<!-- 避免裁剪程序集 -->
+		<TrimmerRootAssembly Include="GodotSharp" />
+		<TrimmerRootAssembly Include="$(TargetName)" />
+		<TrimmerRootAssembly Include="EntJoy" />
+		<!-- 通过描述文件保留特定类型 -->
+		<TrimmerRootDescriptor Include="TrimmerRoots.xml" />
+		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
+	</ItemGroup>
+
+	<!-- 查找 NativeDll.dll 位置（优先从 bin 目录，回退到项目源目录） -->
+	<PropertyGroup>
+		<_NativeDllSourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\bin\NativeDll.dll')">$(MSBuildThisFileDirectory)..\bin\NativeDll.dll</_NativeDllSourcePath>
+		<_NativeDllSourcePath Condition="'$(_NativeDllSourcePath)' == '' And Exists('$(MSBuildThisFileDirectory)bin\NativeDll.dll')">$(MSBuildThisFileDirectory)bin\NativeDll.dll</_NativeDllSourcePath>
+		<_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll')">$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll</_EntJoySourcePath>
+	</PropertyGroup>
+
+	<!-- 在构建后将 NativeDll.dll 和 EntJoy.dll 复制到所有 Godot 输出目录 -->
+	<Target Name="CopyDllsToGodot" AfterTargets="Build"
+		Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
+		Outputs="$(OutputPath)NativeDll.dll;$(OutputPath)EntJoy.dll">
+		<Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
+		<Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
+	</Target>
+
+	<!-- 在发布时也复制 DLL -->
+	<Target Name="CopyDllsToGodotPublish" AfterTargets="Publish"
+		Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
+		Outputs="$(PublishDir)NativeDll.dll;$(PublishDir)EntJoy.dll">
+		<Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
+		<Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
+	</Target>
+</Project>
