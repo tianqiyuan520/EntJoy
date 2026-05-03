@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "dgSpecHash": "Z4+20zXO/iQ=",
+  "success": true,
+  "projectFilePath": "D:\\Godot\\Project\\EntJoy\\src\\Godot\\Godot.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\godot.sourcegenerators\\4.4.1\\godot.sourcegenerators.4.4.1.nupkg.sha512",
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\godotsharp\\4.4.1\\godotsharp.4.4.1.nupkg.sha512",
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\microsoft.dotnet.ilcompiler\\8.0.19\\microsoft.dotnet.ilcompiler.8.0.19.nupkg.sha512",
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.19\\microsoft.net.illink.tasks.8.0.19.nupkg.sha512",
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\entjoy\\1.0.0\\entjoy.1.0.0.nupkg.sha512",
+    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\runtime.win-x64.microsoft.dotnet.ilcompiler\\8.0.19\\runtime.win-x64.microsoft.dotnet.ilcompiler.8.0.19.nupkg.sha512"
+  ],
+  "logs": []
+}

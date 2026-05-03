@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bwpa37oiqaqa8"]
+
+[ext_resource type="Script" uid="uid://e5c0e74pjsh0" path="res://NativeContainerTest/NativeContainerTest.cs" id="1_868yp"]
+
+[node name="NativeContainerTest" type="Node"]
+script = ExtResource("1_868yp")

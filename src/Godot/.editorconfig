@@ -1,0 +1,10 @@
+root = true
+
+[*]
+charset = utf-8
+
+# CS8500: 这会获取托管类型的地址、获取其大小或声明指向它的指针
+dotnet_diagnostic.CS8500.severity = none
+
+# CA2014: 不要循环使用 stackalloc
+dotnet_diagnostic.CA2014.severity = none

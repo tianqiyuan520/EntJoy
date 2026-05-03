@@ -1,0 +1,10 @@
+^D:\GODOT\PROJECT\ENTJOY\SRC\ENTJOYSAMPLE\NATIVETRANSPILER_GENERATED\BUILD\CMAKEFILES\7DD3E14F3FA1445C6B8811626BE0441A\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated -BD:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/NativeTranspiler_Generated.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

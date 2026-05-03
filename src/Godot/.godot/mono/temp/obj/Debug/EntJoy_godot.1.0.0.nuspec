@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>EntJoy_godot</id>
+    <version>1.0.0</version>
+    <authors>EntJoy_godot</authors>
+    <description>Package Description</description>
+    <repository type="git" commit="65d0b4c77f86c94d08112d50d58569cbb95141bb" />
+    <dependencies>
+      <group targetFramework="net8.0">
+        <dependency id="Godot.SourceGenerators" version="4.4.1" exclude="Build,Analyzers" />
+        <dependency id="GodotSharp" version="4.4.1" exclude="Build,Analyzers" />
+        <dependency id="GodotSharpEditor" version="4.4.1" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="D:\Godot\Project\EntJoy\Godot\.godot\mono\temp\bin\Debug\EntJoy_godot.runtimeconfig.json" target="lib\net8.0\EntJoy_godot.runtimeconfig.json" />
+    <file src="D:\Godot\Project\EntJoy\Godot\.godot\mono\temp\bin\Debug\EntJoy_godot.dll" target="lib\net8.0\EntJoy_godot.dll" />
+  </files>
+</package>

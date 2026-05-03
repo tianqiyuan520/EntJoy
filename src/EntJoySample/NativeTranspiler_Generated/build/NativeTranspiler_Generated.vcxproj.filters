@@ -1,0 +1,46 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_GridInitializationJobPointer_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_PrefixSumJobPointer_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_PlaceElementsJobPointer_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_FillCellStartEndJobPointer_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\NativeDll\tasksys.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{6C12E314-4652-3B48-882E-4D9280AAD036}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

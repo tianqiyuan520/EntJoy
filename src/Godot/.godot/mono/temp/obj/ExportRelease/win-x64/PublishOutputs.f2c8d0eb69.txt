@@ -1,0 +1,2 @@
+C:\Users\tianqiyuan520\AppData\Local\Temp\godot-publish-dotnet\29956-ExportRelease-win-x64\Godot.dll
+C:\Users\tianqiyuan520\AppData\Local\Temp\godot-publish-dotnet\29956-ExportRelease-win-x64\EntJoy.pdb

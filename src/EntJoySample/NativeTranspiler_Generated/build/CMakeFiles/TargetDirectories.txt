@@ -1,0 +1,3 @@
+D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/NativeTranspiler_Generated.dir
+D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/ALL_BUILD.dir
+D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/ZERO_CHECK.dir
