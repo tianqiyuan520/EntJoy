@@ -1,0 +1,17 @@
+[gd_scene load_steps=2 format=3 uid="uid://cxjnybra1xphv"]
+
+[ext_resource type="Script" uid="uid://0qb0kpx8j1rk" path="res://JobSystemTest/TestGridSearch.cs" id="1_ei57o"]
+
+[node name="GridSearch" type="Node"]
+script = ExtResource("1_ei57o")
+
+[node name="Label" type="Label" parent="."]
+anchors_preset = -1
+anchor_left = 0.303906
+anchor_top = 0.317949
+anchor_right = 0.666406
+anchor_bottom = 0.598718
+offset_top = -1.52588e-05
+offset_bottom = 3.05176e-05
+text = "test"
+metadata/_edit_use_anchors_ = true

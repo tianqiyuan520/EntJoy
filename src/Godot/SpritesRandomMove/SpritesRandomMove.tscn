@@ -1,0 +1,82 @@
+[gd_scene load_steps=8 format=3 uid="uid://d3hkmpbtqvutp"]
+
+[ext_resource type="Script" uid="uid://bw05v0q8h0vtq" path="res://SpritesRandomMove/SpritesRandomMove.cs" id="1_rik7w"]
+[ext_resource type="PackedScene" uid="uid://bcv83v7aecobm" path="res://Debugger/debuggerTrigger.tscn" id="3_qdxkg"]
+[ext_resource type="Script" uid="uid://bp6ea31m0b8oq" path="res://SpritesRandomMove/AutoSpawnMultiMesh.cs" id="3_roq2e"]
+[ext_resource type="PackedScene" uid="uid://cod4dt0nabn3j" path="res://SpritesRandomMove/MultiMesh.tscn" id="4_tq8fi"]
+[ext_resource type="Script" uid="uid://b1rgbu68cxabe" path="res://CameraMove.cs" id="4_x7x5y"]
+
+[sub_resource type="QuadMesh" id="QuadMesh_x7x5y"]
+resource_local_to_scene = true
+size = Vector2(15, -15)
+
+[sub_resource type="MultiMesh" id="MultiMesh_qdxkg"]
+resource_local_to_scene = true
+mesh = SubResource("QuadMesh_x7x5y")
+
+[node name="Node2D" type="Node2D"]
+script = ExtResource("1_rik7w")
+
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+
+[node name="HBoxContainer" type="HBoxContainer" parent="CanvasLayer"]
+offset_right = 1151.0
+offset_bottom = 40.0
+
+[node name="Label" type="Label" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+text = "SpritesRandomMove"
+
+[node name="CreateWorld" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Create World"
+metadata/_edit_use_anchors_ = true
+
+[node name="CreateEntity" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Create Entity"
+metadata/_edit_use_anchors_ = true
+
+[node name="PrintEntity" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Print Entity"
+metadata/_edit_use_anchors_ = true
+
+[node name="Report" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Report"
+metadata/_edit_use_anchors_ = true
+
+[node name="Pause" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Pause"
+metadata/_edit_use_anchors_ = true
+
+[node name="Debugger" parent="CanvasLayer/HBoxContainer" instance=ExtResource("3_qdxkg")]
+layout_mode = 2
+
+[node name="Benchmark" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Benchmark"
+metadata/_edit_use_anchors_ = true
+
+[node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
+script = ExtResource("3_roq2e")
+packedScene = ExtResource("4_tq8fi")
+MultiMeshgroup = NodePath("../MultiMeshGroup")
+refresh = true
+
+[node name="MultiMeshGroup" type="Node" parent="."]
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(640, 389)
+script = ExtResource("4_x7x5y")
+
+[node name="MultiMeshInstance2D" parent="." instance=ExtResource("4_tq8fi")]
+multimesh = SubResource("MultiMesh_qdxkg")
