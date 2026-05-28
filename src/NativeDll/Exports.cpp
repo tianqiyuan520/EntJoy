@@ -30,11 +30,6 @@ extern "C"
         JobSystem::Scheduler::Shutdown();
     }
 
-    void JobSystem_SetSpinDuration(int spinDurationUs)
-    {
-        JobSystem::Scheduler::SetSpinDuration(spinDurationUs);
-    }
-
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
     {
         JobSystem::JobHandle dep;

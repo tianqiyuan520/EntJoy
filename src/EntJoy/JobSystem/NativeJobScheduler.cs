@@ -74,7 +74,6 @@ public static unsafe partial class NativeJobScheduler
     // 函数指针（通过 GetProcAddress 获取）
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
-    private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetSpinDuration;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
@@ -194,8 +193,6 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
         _jobSystem_Shutdown = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
-        _jobSystem_SetSpinDuration = (delegate* unmanaged[Cdecl]<int, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_SetSpinDuration");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
         _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
@@ -226,7 +223,6 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 包装函数 ========================
     private static void JobSystem_Initialize(int numThreads) => _jobSystem_Initialize(numThreads);
     private static void JobSystem_Shutdown() => _jobSystem_Shutdown();
-    private static void JobSystem_SetSpinDuration(int spinDurationUs) => _jobSystem_SetSpinDuration(spinDurationUs);
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
         => _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
     private static IntPtr JobSystem_ScheduleParallelForBatch(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, int batchSize, IntPtr dependency)
@@ -267,15 +263,6 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 公共接口 ========================
     public static void Initialize(int numThreads = 0) => JobSystem_Initialize(numThreads);
     public static void Shutdown() => JobSystem_Shutdown();
-
-    /// <summary>
-    /// 设置 worker 线程空闲自旋超时时间（微秒）。
-    /// 在自旋超时内，worker 持续自旋以维持 CPU 频率和低延迟。
-    /// 超过超时后，worker 进入睡眠直到新任务提交。
-    /// 设置为 0 表示无限自旋（默认行为）。
-    /// 典型值：100000（100ms）适合帧循环，0 适合持续计算。
-    /// </summary>
-    public static void SetSpinDuration(int spinDurationUs) => JobSystem_SetSpinDuration(spinDurationUs);
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
