@@ -1,12 +1,11 @@
 {
   "version": 2,
-  "dgSpecHash": "L6ZMqxCt7Zo=",
+  "dgSpecHash": "gWsWa5EyzA0=",
   "success": true,
   "projectFilePath": "D:\\Godot\\Project\\EntJoy\\src\\Godot\\Godot.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\tianqiyuan520\\.nuget\\packages\\godot.sourcegenerators\\4.4.1\\godot.sourcegenerators.4.4.1.nupkg.sha512",
     "C:\\Users\\tianqiyuan520\\.nuget\\packages\\godotsharp\\4.4.1\\godotsharp.4.4.1.nupkg.sha512",
-    "C:\\Users\\tianqiyuan520\\.nuget\\packages\\godotsharpeditor\\4.4.1\\godotsharpeditor.4.4.1.nupkg.sha512",
     "C:\\Users\\tianqiyuan520\\.nuget\\packages\\entjoy\\1.0.0\\entjoy.1.0.0.nupkg.sha512"
   ],
   "logs": []

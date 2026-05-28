@@ -121,6 +121,26 @@ static struct float2 operator/(struct float2 v, float s) {
     struct float2 r; r.x = v.x / s; r.y = v.y / s; return r;
 }
 
+// ---------- float2 compound assignment operators ----------
+static inline struct float2 operator+=(struct float2 a, struct float2 b) {
+    a.x += b.x; a.y += b.y; return a;
+}
+static inline struct float2 operator-=(struct float2 a, struct float2 b) {
+    a.x -= b.x; a.y -= b.y; return a;
+}
+static inline struct float2 operator*=(struct float2 a, struct float2 b) {
+    a.x *= b.x; a.y *= b.y; return a;
+}
+static inline struct float2 operator/=(struct float2 a, struct float2 b) {
+    a.x /= b.x; a.y /= b.y; return a;
+}
+static inline struct float2 operator*=(struct float2 a, float s) {
+    a.x *= s; a.y *= s; return a;
+}
+static inline struct float2 operator/=(struct float2 a, float s) {
+    a.x /= s; a.y /= s; return a;
+}
+
 // ---------- int2 operators ----------
 static struct int2 operator+(struct int2 a, struct int2 b) {
     struct int2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
@@ -145,6 +165,29 @@ static struct int2 operator-(struct int2 a, int b) {
     struct int2 r; r.x = a.x - b; r.y = a.y - b; return r;
 }
 
+// ---------- int2 compound assignment operators ----------
+static inline struct int2 operator+=(struct int2 a, struct int2 b) {
+    a.x += b.x; a.y += b.y; return a;
+}
+static inline struct int2 operator-=(struct int2 a, struct int2 b) {
+    a.x -= b.x; a.y -= b.y; return a;
+}
+static inline struct int2 operator*=(struct int2 a, struct int2 b) {
+    a.x *= b.x; a.y *= b.y; return a;
+}
+static inline struct int2 operator/=(struct int2 a, struct int2 b) {
+    a.x /= b.x; a.y /= b.y; return a;
+}
+static inline struct int2 operator*=(struct int2 a, int s) {
+    a.x *= s; a.y *= s; return a;
+}
+static inline struct int2 operator+=(struct int2 a, int b) {
+    a.x += b; a.y += b; return a;
+}
+static inline struct int2 operator-=(struct int2 a, int b) {
+    a.x -= b; a.y -= b; return a;
+}
+
 // ---------- uint2 operators ----------
 static struct uint2 operator+(struct uint2 a, struct uint2 b) {
     struct uint2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
@@ -157,6 +200,20 @@ static struct uint2 operator*(struct uint2 a, struct uint2 b) {
 }
 static struct uint2 operator*(struct uint2 v, unsigned int s) {
     struct uint2 r; r.x = v.x * s; r.y = v.y * s; return r;
+}
+
+// ---------- uint2 compound assignment operators ----------
+static inline struct uint2 operator+=(struct uint2 a, struct uint2 b) {
+    a.x += b.x; a.y += b.y; return a;
+}
+static inline struct uint2 operator-=(struct uint2 a, struct uint2 b) {
+    a.x -= b.x; a.y -= b.y; return a;
+}
+static inline struct uint2 operator*=(struct uint2 a, struct uint2 b) {
+    a.x *= b.x; a.y *= b.y; return a;
+}
+static inline struct uint2 operator*=(struct uint2 a, unsigned int s) {
+    a.x *= s; a.y *= s; return a;
 }
 
 // ---------- math functions ----------
