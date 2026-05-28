@@ -793,13 +793,17 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
-        protected void AppendConstant(object? value)
+        protected virtual void AppendConstant(object? value)
         {
             if (value is string str) _builder.Append($"\"{str}\"");
             else if (value is bool b) _builder.Append(b ? "true" : "false");
             else if (value is float f)
             {
-                _builder.Append(f.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                string floatStr = f.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                // Ensure the float literal has a decimal point for valid C++ syntax (e.g., "1920" -> "1920.0f")
+                if (!floatStr.Contains('.') && !floatStr.Contains('e') && !floatStr.Contains('E'))
+                    floatStr += ".0";
+                _builder.Append(floatStr);
                 _builder.Append('f');
             }
             else if (value is double d) _builder.Append(d.ToString(System.Globalization.CultureInfo.InvariantCulture));

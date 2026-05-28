@@ -11,9 +11,7 @@
           "EntJoy": "1.0.0",
           "Godot.SourceGenerators": "4.4.1",
           "GodotSharp": "4.4.1",
-          "GodotSharpEditor": "4.4.1",
-          "Microsoft.DotNet.ILCompiler": "8.0.19",
-          "Microsoft.NET.ILLink.Tasks": "8.0.19"
+          "GodotSharpEditor": "4.4.1"
         },
         "runtime": {
           "Godot.dll": {}
@@ -39,8 +37,6 @@
           }
         }
       },
-      "Microsoft.DotNet.ILCompiler/8.0.19": {},
-      "Microsoft.NET.ILLink.Tasks/8.0.19": {},
       "EntJoy/1.0.0": {
         "runtime": {
           "EntJoy.dll": {
@@ -77,20 +73,6 @@
       "sha512": "sha512-cc3nA24r/sjW8KxrNqfSQk4CQMQYcg/kYk5935R88IhGBdRuTH4miaBXPlzR/td5GR8i1oGtCMWyW8axpQ0DxA==",
       "path": "godotsharpeditor/4.4.1",
       "hashPath": "godotsharpeditor.4.4.1.nupkg.sha512"
-    },
-    "Microsoft.DotNet.ILCompiler/8.0.19": {
-      "type": "package",
-      "serviceable": true,
-      "sha512": "sha512-NS8a5mXZzJDU+GvbZbdT75lgvB+s/IZ+7UPi9UOLKnpNqV4w3eDNlCRxa14/iQ6s/UjKAF0+wTrEG/mSbCuwGg==",
-      "path": "microsoft.dotnet.ilcompiler/8.0.19",
-      "hashPath": "microsoft.dotnet.ilcompiler.8.0.19.nupkg.sha512"
-    },
-    "Microsoft.NET.ILLink.Tasks/8.0.19": {
-      "type": "package",
-      "serviceable": true,
-      "sha512": "sha512-IhHf+zeZiaE5EXRyxILd4qM+Hj9cxV3sa8MpzZgeEhpvaG3a1VEGF6UCaPFLO44Kua3JkLKluE0SWVamS50PlA==",
-      "path": "microsoft.net.illink.tasks/8.0.19",
-      "hashPath": "microsoft.net.illink.tasks.8.0.19.nupkg.sha512"
     },
     "EntJoy/1.0.0": {
       "type": "project",

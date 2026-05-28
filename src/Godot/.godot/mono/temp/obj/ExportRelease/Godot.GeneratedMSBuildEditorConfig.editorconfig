@@ -1,8 +1,4 @@
 is_global = true
-build_property.EnableAotAnalyzer = true
-build_property.EnableSingleFileAnalyzer = true
-build_property.EnableTrimAnalyzer = true
-build_property.IncludeAllContentForSelfExtract = 
 build_property.GodotDisabledSourceGenerators = 
 build_property.GodotProjectDir = D:\Godot\Project\EntJoy\src\Godot\
 build_property.GodotProjectDirBase64 = 
@@ -19,6 +15,6 @@ build_property._SupportedPlatformList = Linux,macOS,Windows
 build_property.RootNamespace = Godot
 build_property.ProjectDir = D:\Godot\Project\EntJoy\src\Godot\
 build_property.EnableComHosting = 
-build_property.EnableGeneratedComInterfaceComImportInterop = false
+build_property.EnableGeneratedComInterfaceComImportInterop = 
 build_property.EffectiveAnalysisLevelStyle = 8.0
 build_property.EnableCodeStyleSeverity = 

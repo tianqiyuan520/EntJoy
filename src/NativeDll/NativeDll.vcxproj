@@ -162,6 +162,7 @@
   <ItemGroup>
     <ClInclude Include="ChunkJobData.h" />
     <ClInclude Include="Exports.h" />
+    <ClInclude Include="JobProfiler.h" />
     <ClInclude Include="JobSystem.h" />
     <ClInclude Include="Native.h" />
     <ClInclude Include="NativeContainers.h" />
@@ -169,6 +170,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Exports.cpp" />
+    <ClCompile Include="JobProfiler.cpp" />
     <ClCompile Include="JobSystem.cpp" />
     <ClCompile Include="Native.cpp" />
     <ClCompile Include="tasksys.cpp" />

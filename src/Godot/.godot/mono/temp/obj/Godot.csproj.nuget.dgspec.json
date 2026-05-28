@@ -135,17 +135,9 @@
               "target": "Package",
               "version": "[4.4.1, )"
             },
-            "Microsoft.DotNet.ILCompiler": {
-              "suppressParent": "All",
+            "GodotSharpEditor": {
               "target": "Package",
-              "version": "[8.0.19, )",
-              "autoReferenced": true
-            },
-            "Microsoft.NET.ILLink.Tasks": {
-              "suppressParent": "All",
-              "target": "Package",
-              "version": "[8.0.19, )",
-              "autoReferenced": true
+              "version": "[4.4.1, )"
             }
           },
           "imports": [
@@ -159,12 +151,6 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
-          "downloadDependencies": [
-            {
-              "name": "runtime.win-x64.Microsoft.DotNet.ILCompiler",
-              "version": "[8.0.19, 8.0.19]"
-            }
-          ],
           "frameworkReferences": {
             "Microsoft.NETCore.App": {
               "privateAssets": "all"

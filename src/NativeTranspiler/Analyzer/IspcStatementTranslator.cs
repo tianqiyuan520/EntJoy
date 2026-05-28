@@ -387,6 +387,19 @@ namespace NativeTranspiler.Analyzer
             _builder.Append(')');
         }
 
+        protected override void AppendConstant(object? value)
+        {
+            if (value is float f)
+            {
+                // ISPC accepts "1920f" format (no decimal point needed, unlike C++ which needs "1920.0f")
+                string floatStr = f.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _builder.Append(floatStr);
+                _builder.Append('f');
+                return;
+            }
+            base.AppendConstant(value);
+        }
+
         protected virtual void TranslateInterlockedCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
             var args = invocation.ArgumentList.Arguments;

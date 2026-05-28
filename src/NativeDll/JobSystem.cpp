@@ -1,5 +1,6 @@
 ﻿#include "JobSystem.h"
 #include "ChunkJobData.h"
+#include "JobProfiler.h"
 #include "../../external/cpp-taskflow/taskflow/taskflow.hpp"
 
 #include <algorithm>
@@ -10,6 +11,8 @@
 #include <utility>
 #include <atomic>
 #include <memory>
+#include <deque>
+#include <condition_variable>
 
 // ---------- 跨平台线程优先级 ----------
 #ifdef _WIN32
@@ -151,10 +154,14 @@ namespace JobSystem
         {
             g_numThreads = ResolveWorkerCount(0);
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
+            g_executor->spin_duration(std::chrono::milliseconds(100));
         }
         return g_executor;
     }
 
+    // 统一使用全部逻辑核心
+    // 所有进程实例都使用 hardware_concurrency() 个线程
+    // 由操作系统调度器负责在多个进程间分配 CPU 时间
     int ResolveWorkerCount(int numThreads)
     {
         if (numThreads > 0) return numThreads;
@@ -210,24 +217,6 @@ namespace JobSystem
             if (requestedChunk > 0) return requestedChunk;
             const int workerCount = std::max(1, CurrentWorkerCount());
             return std::max(64, length / (workerCount * 2));
-        }
-
-        int ResolveDispatchTaskCount(int workItemCount)
-        {
-            if (workItemCount <= 0) return 1;
-            return std::max(1, std::min(workItemCount, CurrentWorkerCount()));
-        }
-
-        bool ShouldUseDispatchLoop(int workItemCount)
-        {
-            const int workerCount = std::max(1, CurrentWorkerCount());
-            return workItemCount > workerCount * 8;
-        }
-
-        bool ShouldUseBatchDispatchLoop(int batchCount)
-        {
-            const int workerCount = std::max(1, CurrentWorkerCount());
-            return batchCount > workerCount * 4;
         }
 
         inline void RelaxCpu() noexcept
@@ -354,11 +343,21 @@ namespace JobSystem
         if (!_state) return;
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        for (int spin = 0; spin < kSpinBeforeWait; ++spin) {
-            RelaxCpu();
-            if (_state->completed.load(std::memory_order_acquire)) return;
+        // Unity 同款风格：指数退避自旋 + 最终让步
+        int spinCount = 0;
+        constexpr int kSpinThreshold = 256;
+
+        while (!_state->completed.load(std::memory_order_acquire)) {
+            if (spinCount < kSpinThreshold) {
+                int pauseCount = 1 + (spinCount / 64);
+                for (int i = 0; i < pauseCount; ++i) {
+                    RelaxCpu();
+                }
+                ++spinCount;
+            } else {
+                std::this_thread::yield();
+            }
         }
-        _state->completed.wait(false, std::memory_order_acquire);
     }
 
     bool JobHandle::IsCompleted() const noexcept {
@@ -402,25 +401,34 @@ namespace JobSystem
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
 
-            // 提交与线程数相等的任务，每个任务提升所在线程的优先级，保证所有工作线程都被覆盖
+            // 设置自旋超时：worker 空闲自旋 100ms 后进入睡眠
+            // 帧间隔 16ms 期间 worker 保持自旋以维持 CPU 频率
+            // 程序结束后 ~100ms 释放 CPU 资源
+            g_executor->spin_duration(std::chrono::milliseconds(100));
+
+            // 使用普通线程优先级
             for (int i = 0; i < g_numThreads; ++i)
             {
                 g_executor->silent_async([]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #else
-                    struct sched_param param;
-                    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-                    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0)
-                    {
-                        setpriority(PRIO_PROCESS, 0, -20);
-                    }
+                    setpriority(PRIO_PROCESS, 0, 0);
 #endif
                     });
             }
-            g_executor->wait_for_all();  // 等待所有优先级设置任务执行完毕
+            g_executor->wait_for_all();
         }
         if (oldExecutor) oldExecutor->wait_for_all();
+    }
+
+    void Scheduler::SetSpinDuration(int spinDurationUs)
+    {
+        std::lock_guard<std::mutex> lock(g_executorMutex);
+        if (g_executor)
+        {
+            g_executor->spin_duration(std::chrono::microseconds(spinDurationUs));
+        }
     }
 
     void Scheduler::Shutdown()
@@ -516,10 +524,9 @@ namespace JobSystem
 
         const int chunkSize = ResolveChunkSize(length, batchSize);
         const int chunkCount = (length + chunkSize - 1) / chunkSize;
-        const int dispatchTaskCount = ResolveDispatchTaskCount(chunkCount);
-        const bool useDispatchLoop = ShouldUseDispatchLoop(chunkCount);
+        const int workerCount = std::max(1, CurrentWorkerCount());
 
-        if (chunkCount == 1 || (useDispatchLoop && dispatchTaskCount == 1))
+        if (chunkCount == 1)
         {
             return ScheduleFastPathWithDependency(
                 [func, context, length]() { ExecuteForSync(func, context, length); },
@@ -528,32 +535,19 @@ namespace JobSystem
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
             SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                if (!useDispatchLoop)
+                // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 chunk
+                auto nextChunk = std::make_shared<std::atomic<int>>(0);
+                for (int w = 0; w < workerCount; ++w)
                 {
-                    for (int c = 0; c < chunkCount; ++c)
-                    {
-                        taskflow.emplace([=]() {
-                            int begin = c * chunkSize;
+                    taskflow.emplace([=]() {
+                        while (true) {
+                            int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
+                            if (chunkIdx >= chunkCount) break;
+                            int begin = chunkIdx * chunkSize;
                             int end = std::min(length, begin + chunkSize);
                             for (int i = begin; i < end; ++i) func(context, i);
-                            });
-                    }
-                }
-                else
-                {
-                    auto nextChunk = std::make_shared<std::atomic<int>>(0);
-                    for (int w = 0; w < dispatchTaskCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (true) {
-                                int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
-                                if (chunkIdx >= chunkCount) break;
-                                int begin = chunkIdx * chunkSize;
-                                int end = std::min(length, begin + chunkSize);
-                                for (int i = begin; i < end; ++i) func(context, i);
-                            }
-                            });
-                    }
+                        }
+                        });
                 }
                 }, state, context, cleanup);
             });
@@ -579,10 +573,9 @@ namespace JobSystem
 
         const int safeBatchSize = std::max(1, ResolveChunkSize(length, batchSize));
         const int batchCount = (length + safeBatchSize - 1) / safeBatchSize;
-        const int dispatchTaskCount = ResolveDispatchTaskCount(batchCount);
-        const bool useDispatchLoop = ShouldUseBatchDispatchLoop(batchCount);
+        const int workerCount = std::max(1, CurrentWorkerCount());
 
-        if (batchCount == 1 || (useDispatchLoop && dispatchTaskCount == 1))
+        if (batchCount == 1)
         {
             return ScheduleFastPathWithDependency(
                 [func, context, length]() { ExecuteBatchSync(func, context, length); },
@@ -591,32 +584,19 @@ namespace JobSystem
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
             SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                if (!useDispatchLoop)
+                // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 batch
+                auto nextBatch = std::make_shared<std::atomic<int>>(0);
+                for (int w = 0; w < workerCount; ++w)
                 {
-                    for (int b = 0; b < batchCount; ++b)
-                    {
-                        taskflow.emplace([=]() {
-                            int start = b * safeBatchSize;
+                    taskflow.emplace([=]() {
+                        while (true) {
+                            int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
+                            if (batchIdx >= batchCount) break;
+                            int start = batchIdx * safeBatchSize;
                             int count = std::min(safeBatchSize, length - start);
                             func(context, start, count);
-                            });
-                    }
-                }
-                else
-                {
-                    auto nextBatch = std::make_shared<std::atomic<int>>(0);
-                    for (int w = 0; w < dispatchTaskCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (true) {
-                                int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
-                                if (batchIdx >= batchCount) break;
-                                int start = batchIdx * safeBatchSize;
-                                int count = std::min(safeBatchSize, length - start);
-                                func(context, start, count);
-                            }
-                            });
-                    }
+                        }
+                        });
                 }
                 }, state, context, cleanup);
             });
@@ -640,21 +620,13 @@ namespace JobSystem
         auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
         auto executor = EnsureExecutor();
 
-        // chunks 是指针，按值捕获（指针本身很小，且访问的数据在 cleanup 之前一直有效）
         auto launch = [=]() {
             for (int i = 0; i < chunkCount; ++i)
             {
-                // 重要：计算 chunkPtr 为 &chunks[i] 的指针值，按值捕获
-                // 不要捕获局部引用（如 const auto& cd = chunks[i]; 并 capture &cd），
-                // 因为该引用在 i 迭代结束后失效，lambda 异步执行时引用悬挂。
                 const ChunkJobData* chunkPtr = &chunks[i];
                 AcquireState(state);
                 executor->silent_async([=]() {
-                    // 在 worker 线程中执行 C# 回调
-                    // chunkPtr 是按值捕获的指针，始终有效（非托管内存在 cleanup 之前不会被释放）
                     func(context, chunkPtr);
-
-                    // 递减计数，如果是最后一个完成的，执行 cleanup + 完成 signal
                     if (--*remaining == 0)
                     {
                         if (cleanup) cleanup(context);
@@ -665,7 +637,6 @@ namespace JobSystem
             }
         };
 
-        // 处理依赖
         if (dependency.State() && !dependency.IsCompleted())
         {
             AcquireState(state);
