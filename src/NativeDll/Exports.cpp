@@ -1,6 +1,7 @@
 ﻿#include "Exports.h"
 #include "JobSystem.h"
 #include "ChunkJobData.h"
+#include "JobProfiler.h"
 
 static JobSystem::HandleState* fromHandle(void* ptr)
 {
@@ -27,6 +28,11 @@ extern "C"
     void JobSystem_Shutdown()
     {
         JobSystem::Scheduler::Shutdown();
+    }
+
+    void JobSystem_SetSpinDuration(int spinDurationUs)
+    {
+        JobSystem::Scheduler::SetSpinDuration(spinDurationUs);
     }
 
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
@@ -123,6 +129,32 @@ extern "C"
             dep = JobSystem::JobHandle(fromHandle(dependency), true);
         auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep);
         return toHandle(handle);
+    }
+
+    // ======================== Profiler API ========================
+
+    void JobProfiler_SetEnabled(int enabled)
+    {
+        g_profilerEnabled.store(enabled != 0, std::memory_order_release);
+        if (!enabled) {
+            g_profilerBuffer.Clear();
+        }
+    }
+
+    int JobProfiler_IsEnabled()
+    {
+        return g_profilerEnabled.load(std::memory_order_acquire) ? 1 : 0;
+    }
+
+    int JobProfiler_ReadAll(struct ProfilerEntry* buffer, int maxCount)
+    {
+        if (!buffer || maxCount <= 0) return 0;
+        return static_cast<int>(g_profilerBuffer.ReadAll(static_cast<size_t>(maxCount), buffer));
+    }
+
+    void JobProfiler_Clear()
+    {
+        g_profilerBuffer.Clear();
     }
 
 } // extern "C"

@@ -10,8 +10,9 @@
 #define JOB_API __attribute__((visibility("default")))
 #endif
 
-// Forward declaration for ChunkJobData struct
+// Forward declarations
 struct ChunkJobData;
+struct ProfilerEntry;
 
 extern "C" {
 
@@ -24,6 +25,14 @@ extern "C" {
 
     JOB_API void JobSystem_Initialize(int numThreads);
     JOB_API void JobSystem_Shutdown();
+
+    /** 
+     * 设置 worker 线程空闲自旋超时时间（微秒）。
+     * 在自旋超时内，worker 持续自旋以维持 CPU 频率和低延迟。
+     * 超过超时后，worker 进入睡眠直到新任务提交。
+     * @param spinDurationUs 自旋时长（微秒），0 = 无限自旋
+     */
+    JOB_API void JobSystem_SetSpinDuration(int spinDurationUs);
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
@@ -53,5 +62,17 @@ extern "C" {
         const struct ChunkJobData* chunks,
         int chunkCount,
         void* dependency);
+
+    // ======================== Profiler API ========================
+    // 启用/禁用 Profiler
+    JOB_API void JobProfiler_SetEnabled(int enabled);
+    JOB_API int  JobProfiler_IsEnabled();
+
+    // 读取并清空所有 Profiler 记录
+    // returns: 实际读取的条目数
+    JOB_API int  JobProfiler_ReadAll(struct ProfilerEntry* buffer, int maxCount);
+
+    // 清空 Profiler 缓冲
+    JOB_API void JobProfiler_Clear();
 
 } // extern "C"

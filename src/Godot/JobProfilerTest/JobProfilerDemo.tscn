@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://ci1rr8nng0f7i"]
+
+[ext_resource type="Script" uid="uid://dwyb17ueoupqy" path="res://JobProfilerTest/JobProfilerDemo.cs" id="1_sisct"]
+
+[node name="JobProfilerDemo" type="Node"]
+script = ExtResource("1_sisct")

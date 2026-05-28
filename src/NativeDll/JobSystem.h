@@ -77,10 +77,16 @@ void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuat
 int ResolveWorkerCount(int numThreads);
 std::shared_ptr<tf::Executor> EnsureExecutor();
 
-class Scheduler {
+    class Scheduler {
     public:
         static void Initialize(int numThreads = 0);
         static void Shutdown();
+
+        /** 
+         * 设置 worker 线程空闲自旋超时时间（微秒）。
+         * 0 = 无限自旋（默认行为）。
+         */
+        static void SetSpinDuration(int spinDurationUs);
 
         static JobHandle Schedule(
             void (*func)(void*), void* context,
