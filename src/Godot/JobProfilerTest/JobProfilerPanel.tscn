@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3 uid="uid://bfld0rvvd1dh1"]
+
+[ext_resource type="Script" uid="uid://durc75psqafly" path="res://JobProfilerTest/JobProfilerPanel.cs" id="1_v7jxu"]
+
+[node name="JobProfilerPanel" type="Control"]
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("1_v7jxu")

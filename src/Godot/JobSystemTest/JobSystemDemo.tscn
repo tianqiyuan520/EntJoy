@@ -1,9 +1,6 @@
-[gd_scene load_steps=2 format=3 uid="uid://in8aux7pdbc2"]
-
-[ext_resource type="Script" uid="uid://cq136tae8m3pw" path="res://JobSystemTest/JobAdditionTest.cs" id="1_yssfw"]
+[gd_scene format=3 uid="uid://in8aux7pdbc2"]
 
 [node name="JobSystemDemo" type="Node"]
-script = ExtResource("1_yssfw")
 
 [node name="Label" type="Label" parent="."]
 anchors_preset = -1

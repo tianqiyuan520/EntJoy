@@ -66,6 +66,24 @@ size_flags_horizontal = 3
 text = "Benchmark"
 metadata/_edit_use_anchors_ = true
 
+[node name="ToggleMode" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "切换模式"
+metadata/_edit_use_anchors_ = true
+
+[node name="ToggleJobType" type="Button" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "切换Job类型"
+metadata/_edit_use_anchors_ = true
+
+[node name="ModeLabel" type="Label" parent="CanvasLayer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "[ECS]"
+metadata/_edit_use_anchors_ = true
+
 [node name="AutoSpawnMultiMesh" type="Node" parent="." node_paths=PackedStringArray("MultiMeshgroup")]
 script = ExtResource("3_roq2e")
 packedScene = ExtResource("4_tq8fi")

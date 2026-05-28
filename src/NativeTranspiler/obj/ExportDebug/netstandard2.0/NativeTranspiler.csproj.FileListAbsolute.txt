@@ -1,0 +1,8 @@
+D:\Godot\Project\EntJoy\src\NativeTranspiler\bin\ExportDebug\netstandard2.0\NativeTranspiler.deps.json
+D:\Godot\Project\EntJoy\src\NativeTranspiler\bin\ExportDebug\netstandard2.0\NativeTranspiler.dll
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.csproj.AssemblyReference.cache
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.GeneratedMSBuildEditorConfig.editorconfig
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.AssemblyInfoInputs.cache
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.AssemblyInfo.cs
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.csproj.CoreCompileInputs.cache
+D:\Godot\Project\EntJoy\src\NativeTranspiler\obj\ExportDebug\netstandard2.0\NativeTranspiler.dll

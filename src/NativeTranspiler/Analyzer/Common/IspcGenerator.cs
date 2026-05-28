@@ -819,7 +819,11 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 检测 Job 的 Execute 方法中是否有 NativeArray 被同时读写
         /// （即执行 read-modify-write 自修改操作）。
-        /// 对 foreach 的 SIMD scatter 不安全，必须使用 uniform for 循环。
+        /// 
+        /// 注意：简单的 read-modify-write 模式（如 pos = arr[i]; ... arr[i] = pos;）
+        /// 在 foreach 下是安全的，因为每个 SIMD lane 处理不同的 index。
+        /// 只有通过 UnsafeUtility.ArrayElementAsRef 获取 ref 并修改时，
+        /// 才需要 uniform for 保护（因为 ref 可能指向同一位置）。
         /// </summary>
         private static bool HasSelfModifyingNativeArray(
             INamedTypeSymbol jobStruct, SemanticModel semanticModel)
@@ -838,35 +842,10 @@ namespace NativeTranspiler.Analyzer
             }
             if (nativeArrayFields.Count == 0) return false;
 
-            // 收集所有被读取的 NativeArray 字段名
-            var readArrays = new HashSet<string>();
-            var writtenArrays = new HashSet<string>();
-
-            // 遍历表达式树：
-            // 元素访问 Position[index] 称为读
-            // 赋值左边 Position[index] = ... 称为写
+            // 检测方法调用中的 ref 参数传递（如 UnsafeUtility.ArrayElementAsRef）
+            // 这是唯一需要 uniform for 的情况，因为 ref 可能指向同一位置
             foreach (var node in methodSyntax.Body.DescendantNodes())
             {
-                // 检测元素访问：arr[i] → 读/写
-                if (node is ElementAccessExpressionSyntax elemAccess)
-                {
-                    if (elemAccess.Expression is IdentifierNameSyntax id)
-                    {
-                        string name = id.Identifier.Text;
-                        if (nativeArrayFields.Contains(name))
-                        {
-                            // 检查是否在赋值左边（如 Positions[index] = pos）
-                            bool isLeftOfAssign = elemAccess.Parent is AssignmentExpressionSyntax assign &&
-                                                  assign.Left == elemAccess;
-                            if (isLeftOfAssign)
-                                writtenArrays.Add(name);
-                            else
-                                readArrays.Add(name);   // 在赋值右边或任何其他位置 → 读
-                        }
-                    }
-                }
-
-                // 检测方法调用中的 ref 参数传递（如 UnsafeUtility.ArrayElementAsRef）
                 if (node is InvocationExpressionSyntax inv)
                 {
                     var sym = semanticModel.GetSymbolInfo(inv).Symbol as IMethodSymbol;
@@ -878,22 +857,13 @@ namespace NativeTranspiler.Analyzer
                         {
                             string name = arrId.Identifier.Text;
                             if (nativeArrayFields.Contains(name))
-                            {
-                                // ArrayElementAsRef 返回 ref，通常用于写入
-                                writtenArrays.Add(name);
-                                readArrays.Add(name);
-                            }
+                                return true; // ArrayElementAsRef 需要 uniform for
                         }
                     }
                 }
             }
 
-            // 检查交集：如果任一阵列既读又写 → read-modify-write
-            foreach (var name in nativeArrayFields)
-            {
-                if (readArrays.Contains(name) && writtenArrays.Contains(name))
-                    return true;
-            }
+            // 简单的 arr[i] = f(arr[i]) 模式在 foreach 下安全
             return false;
         }
 
@@ -1186,6 +1156,52 @@ namespace NativeTranspiler.Analyzer
                     else TranslateStatement(forStmt.Statement);
                     return;
                 }
+
+                // 检测标准 for (int i = 0; i < limit; i++) 模式，转换为 ISPC foreach
+                if (forStmt.Declaration != null &&
+                    forStmt.Declaration.Variables.Count == 1 &&
+                    forStmt.Condition is BinaryExpressionSyntax binExpr &&
+                    binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
+                    forStmt.Incrementors.Count == 1 &&
+                    forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
+                    postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))
+                {
+                    var varDecl = forStmt.Declaration.Variables[0];
+                    string indexName = varDecl.Identifier.Text;
+
+                    // 验证 increment 的变量名与声明一致
+                    if (postfix.Operand is IdentifierNameSyntax incId &&
+                        incId.Identifier.Text == indexName &&
+                        varDecl.Initializer?.Value is LiteralExpressionSyntax initLit &&
+                        initLit.Token.ValueText == "0")
+                    {
+                        // 验证条件左边也是同一个变量
+                        if (binExpr.Left is IdentifierNameSyntax condId &&
+                            condId.Identifier.Text == indexName)
+                        {
+                            // 成功匹配 for (int i = 0; i < limit; i++) 模式
+                            AppendIndent();
+                            _builder.Append("foreach (");
+                            _builder.Append(indexName);
+                            _builder.Append(" = 0 ... ");
+                            TranslateExpression(binExpr.Right);
+                            _builder.AppendLine(")");
+
+                            if (forStmt.Statement is BlockSyntax block)
+                                TranslateBlock(block, skipOuterBraces: false);
+                            else
+                            {
+                                _indentLevel++;
+                                AppendIndent();
+                                TranslateStatement(forStmt.Statement);
+                                _indentLevel--;
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                // 不匹配标准模式，回退到普通 for 循环
                 base.TranslateForStatement(forStmt);
             }
 

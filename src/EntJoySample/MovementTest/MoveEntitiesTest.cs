@@ -24,8 +24,8 @@ namespace EntJoy.MovementTest
     public class MoveEntitiesTest
     {
         private const int ENTITY_COUNT = 1_000_000;
-        private const float VIEWPORT_WIDTH = 1920f;
-        private const float VIEWPORT_HEIGHT = 1080f;
+        private const float VIEWPORT_WIDTH = 1920.0f;
+        private const float VIEWPORT_HEIGHT = 1080.0f;
         private const float DT = 0.016f;
 
         /// <summary>
@@ -230,6 +230,50 @@ namespace EntJoy.MovementTest
             };
             JobHandle handle = job.Schedule(count, 65536);
             handle.Complete();
+        }
+
+        /// <summary>
+        /// NativeTranspile C++ 单线程静态方法版本
+        /// </summary>
+        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+        public static void RunNativeCppStatic(NativeArray<float2> pos, NativeArray<float2> vel, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float2 p = pos[i];
+                float2 v = vel[i];
+
+                p.x += v.x * DT;
+                p.y += v.y * DT;
+
+                if (p.x < 0f || p.x > VIEWPORT_WIDTH) v.x = -v.x;
+                if (p.y < 0f || p.y > VIEWPORT_HEIGHT) v.y = -v.y;
+
+                pos[i] = p;
+                vel[i] = v;
+            }
+        }
+
+        /// <summary>
+        /// NativeTranspile ISPC 单线程静态方法版本
+        /// </summary>
+        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+        public static void RunNativeIspcStatic(NativeArray<float2> pos, NativeArray<float2> vel, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float2 p = pos[i];
+                float2 v = vel[i];
+
+                p.x += v.x * DT;
+                p.y += v.y * DT;
+
+                if (p.x < 0f || p.x > VIEWPORT_WIDTH) v.x = -v.x;
+                if (p.y < 0f || p.y > VIEWPORT_HEIGHT) v.y = -v.y;
+
+                pos[i] = p;
+                vel[i] = v;
+            }
         }
 
         public void RunAll()
