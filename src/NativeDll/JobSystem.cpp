@@ -406,14 +406,14 @@ namespace JobSystem
             // 程序结束后 ~100ms 释放 CPU 资源
             g_executor->spin_duration(std::chrono::milliseconds(100));
 
-            // 使用普通线程优先级
+            // 使用高于正常的线程优先级，减少被其他线程抢占导致的抖动
             for (int i = 0; i < g_numThreads; ++i)
             {
                 g_executor->silent_async([]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #else
-                    setpriority(PRIO_PROCESS, 0, 0);
+                    setpriority(PRIO_PROCESS, 0, -1);
 #endif
                     });
             }

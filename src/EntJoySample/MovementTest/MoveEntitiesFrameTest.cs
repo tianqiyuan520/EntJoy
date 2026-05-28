@@ -116,6 +116,10 @@ namespace EntJoy.MovementTest
             double[] times,
             bool preWakeWorkers = false)
         {
+            // 预热前先触发一次 GC，避免测试过程中 GC 抖动
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
             // 预热
             for (int i = 0; i < WARMUP_FRAMES; i++)
             {
@@ -126,6 +130,21 @@ namespace EntJoy.MovementTest
             // 正式测试 FRAMES 帧
             for (int frame = 0; frame < FRAMES; frame++)
             {
+                // 每帧前触发一次 GC，确保测试过程中无 GC 抖动
+                if (frame > 0 && frame % 10 == 0)
+                {
+                    GC.Collect(0, GCCollectionMode.Forced, blocking: false);
+                }
+
+                // 如果 preWakeWorkers 为 true，在计时前提交一个空 job 唤醒 worker 线程
+                if (preWakeWorkers)
+                {
+                    // 提交一个空 job 确保 worker 线程处于活跃状态
+                    var wakeJob = new WakeJob();
+                    var wakeHandle = wakeJob.Schedule();
+                    wakeHandle.Complete();
+                }
+
                 var sw = Stopwatch.StartNew();
                 runFn(positions, velocities, ENTITY_COUNT);
                 sw.Stop();
@@ -138,6 +157,17 @@ namespace EntJoy.MovementTest
                     Thread.Sleep(FRAME_INTERVAL_MS);
             }
             Console.WriteLine();
+        }
+
+        /// <summary>
+        /// 空 job，用于唤醒 worker 线程
+        /// </summary>
+        private struct WakeJob : IJob
+        {
+            public void Execute()
+            {
+                // 空操作，仅用于唤醒 worker 线程
+            }
         }
 
         private static (double avg, double min, double max, double med) AnalyzeTimes(double[] times)

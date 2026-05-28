@@ -18,6 +18,14 @@ endif()
 add_library(NativeTranspiler_Generated SHARED
     SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeCppStatic.cpp
     SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic_wrapper.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_GridInitializationJobPointer_Execute.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch_wrapper.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_PrefixSumJobPointer_Execute.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_PlaceElementsJobPointer_Execute.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_FillCellStartEndJobPointer_Execute.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch_wrapper.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch_wrapper.cpp
+    SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
     ${TASKSYS_SRC}
@@ -40,6 +48,9 @@ add_custom_command(TARGET NativeTranspiler_Generated PRE_BUILD
 
 set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"
 )
 target_link_libraries(NativeTranspiler_Generated PRIVATE ${ISPC_OBJECTS})

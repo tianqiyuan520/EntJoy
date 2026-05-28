@@ -249,6 +249,29 @@ namespace NativeTranspiler.Analyzer
             base.TranslateElementAccess(elementAccess);
         }
 
+        protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
+        {
+            // ISPC structs don't support compound assignment operators (+=, -=, *=, /=)
+            // Convert "pos += vel * Dt" to "pos = pos + vel * Dt"
+            string op = assignment.OperatorToken.Text;
+            if (op == "+=" || op == "-=" || op == "*=" || op == "/=")
+            {
+                // Check if the left side is a vector type
+                var leftType = _semanticModel.GetTypeInfo(assignment.Left).Type;
+                if (IsVectorType(leftType))
+                {
+                    // Convert to "left = left op right"
+                    TranslateExpression(assignment.Left);
+                    _builder.Append(" = ");
+                    TranslateExpression(assignment.Left);
+                    _builder.Append(' ').Append(op[0]).Append(' ');
+                    TranslateExpression(assignment.Right);
+                    return;
+                }
+            }
+            base.TranslateAssignment(assignment);
+        }
+
         protected override void TranslateBinaryExpression(BinaryExpressionSyntax binary)
         {
             if (binary.IsKind(SyntaxKind.SubtractExpression) &&
@@ -334,6 +357,19 @@ namespace NativeTranspiler.Analyzer
                         _builder.Append(clearFlag).Append(')');
                         return;
                     }
+                }
+
+                // 处理 NativeArray.GetUnsafePtr() — 翻译为 fieldName_ptr
+                if (methodSymbol.ContainingType?.Name == "NativeArray" &&
+                    NativeTranspiler.IsEntJoyNativeContainerType(methodSymbol.ContainingType) &&
+                    methodSymbol.Name == "GetUnsafePtr")
+                {
+                    var targetExpr = (invocation.Expression as MemberAccessExpressionSyntax)?.Expression;
+                    if (targetExpr is IdentifierNameSyntax id)
+                        _builder.Append(id.Identifier.Text + "_ptr");
+                    else
+                        base.TranslateInvocation(invocation);
+                    return;
                 }
 
                 if (fullTypeName == "EntJoy.Mathematics.math")

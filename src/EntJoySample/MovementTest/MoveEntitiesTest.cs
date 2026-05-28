@@ -426,77 +426,77 @@ namespace EntJoy.MovementTest
         public float ViewportHeight;
         public int Count;
 
-        public void Execute(int index)
-        {
-            float2 pos = Positions[index];
-            float2 vel = Velocities[index];
-
-            pos.x += vel.x * Dt;
-            pos.y += vel.y * Dt;
-
-            if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
-            if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
-
-            Positions[index] = pos;
-            Velocities[index] = vel;
-        }
-    }
-
-    /// <summary>
-    /// NativeTranspile C++ 原生编译版本
-    /// </summary>
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
-    public struct MoveEntitiesJob_NativeCpp : IJobParallelFor
+    public void Execute(int index)
     {
-        public NativeArray<float2> Positions;
-        public NativeArray<float2> Velocities;
-        public float Dt;
-        public float ViewportWidth;
-        public float ViewportHeight;
-        public int Count;
+        float2 pos = Positions[index];
+        float2 vel = Velocities[index];
 
-        public void Execute(int index)
-        {
-            float2 pos = Positions[index];
-            float2 vel = Velocities[index];
+        pos.x += vel.x * Dt;
+        pos.y += vel.y * Dt;
 
-            pos.x += vel.x * Dt;
-            pos.y += vel.y * Dt;
+        if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
+        if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
 
-            if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
-            if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
-
-            Positions[index] = pos;
-            Velocities[index] = vel;
-        }
+        Positions[index] = pos;
+        Velocities[index] = vel;
     }
+}
 
-    /// <summary>
-    /// NativeTranspile ISPC SIMD 编译版本
-    /// </summary>
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
-    public struct MoveEntitiesJob_NativeIspc : IJobParallelFor
+/// <summary>
+/// NativeTranspile C++ 原生编译版本
+/// </summary>
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+public struct MoveEntitiesJob_NativeCpp : IJobParallelFor
+{
+    public NativeArray<float2> Positions;
+    public NativeArray<float2> Velocities;
+    public float Dt;
+    public float ViewportWidth;
+    public float ViewportHeight;
+    public int Count;
+
+    public void Execute(int index)
     {
-        public NativeArray<float2> Positions;
-        public NativeArray<float2> Velocities;
-        public float Dt;
-        public float ViewportWidth;
-        public float ViewportHeight;
-        public int Count;
+        float2 pos = Positions[index];
+        float2 vel = Velocities[index];
 
-        public void Execute(int index)
-        {
-            float2 pos = Positions[index];
-            float2 vel = Velocities[index];
+        pos.x += vel.x * Dt;
+        pos.y += vel.y * Dt;
 
-            pos.x += vel.x * Dt;
-            pos.y += vel.y * Dt;
+        if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
+        if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
 
-            if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
-            if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
-
-            Positions[index] = pos;
-            Velocities[index] = vel;
-        }
+        Positions[index] = pos;
+        Velocities[index] = vel;
     }
+}
+
+/// <summary>
+/// NativeTranspile ISPC SIMD 编译版本
+/// </summary>
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+public struct MoveEntitiesJob_NativeIspc : IJobParallelFor
+{
+    public NativeArray<float2> Positions;
+    public NativeArray<float2> Velocities;
+    public float Dt;
+    public float ViewportWidth;
+    public float ViewportHeight;
+    public int Count;
+
+    public void Execute(int index)
+    {
+        float2 pos = Positions[index];
+        float2 vel = Velocities[index];
+
+        pos.x += vel.x * Dt;
+        pos.y += vel.y * Dt;
+
+        if (pos.x < 0f || pos.x > ViewportWidth) vel.x = -vel.x;
+        if (pos.y < 0f || pos.y > ViewportHeight) vel.y = -vel.y;
+
+        Positions[index] = pos;
+        Velocities[index] = vel;
+    }
+}
 }
