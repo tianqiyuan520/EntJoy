@@ -154,7 +154,6 @@ namespace JobSystem
         {
             g_numThreads = ResolveWorkerCount(0);
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
-            g_executor->spin_duration(std::chrono::milliseconds(100));
         }
         return g_executor;
     }
@@ -343,20 +342,20 @@ namespace JobSystem
         if (!_state) return;
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Unity 同款风格：指数退避自旋 + 最终让步
-        int spinCount = 0;
-        constexpr int kSpinThreshold = 256;
+        // 阶段 1: 短暂自旋 ~64 次（约 0.5μs），避免极短 job 的阻塞唤醒开销
+        for (int i = 0; i < 64; ++i) {
+            if (_state->completed.load(std::memory_order_acquire)) return;
+            RelaxCpu();
+        }
 
-        while (!_state->completed.load(std::memory_order_acquire)) {
-            if (spinCount < kSpinThreshold) {
-                int pauseCount = 1 + (spinCount / 64);
-                for (int i = 0; i < pauseCount; ++i) {
-                    RelaxCpu();
-                }
-                ++spinCount;
-            } else {
-                std::this_thread::yield();
-            }
+        // 阶段 2: 无限自旋直到 job 完成，保持 CPU 频率活跃
+        // 帧循环中 Complete() 只在 job 提交后立即调用，job 通常在 1-3ms 内完成
+        // 主线程持续自旋确保 CPU 在 job 执行期间保持最高频率
+        // job 完成后 CompleteState() 调用 notify_all() 立即唤醒主线程
+        // 帧间 16ms 间隔期间主线程不调用 Complete()，不会浪费 CPU
+        while (true) {
+            if (_state->completed.load(std::memory_order_acquire)) return;
+            RelaxCpu();
         }
     }
 
@@ -401,34 +400,20 @@ namespace JobSystem
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
 
-            // 设置自旋超时：worker 空闲自旋 100ms 后进入睡眠
-            // 帧间隔 16ms 期间 worker 保持自旋以维持 CPU 频率
-            // 程序结束后 ~100ms 释放 CPU 资源
-            g_executor->spin_duration(std::chrono::milliseconds(100));
-
-            // 使用高于正常的线程优先级，减少被其他线程抢占导致的抖动
+            // 使用高线程优先级，减少被其他线程抢占导致的抖动
             for (int i = 0; i < g_numThreads; ++i)
             {
                 g_executor->silent_async([]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #else
-                    setpriority(PRIO_PROCESS, 0, -1);
+                    setpriority(PRIO_PROCESS, 0, -10);
 #endif
                     });
             }
             g_executor->wait_for_all();
         }
         if (oldExecutor) oldExecutor->wait_for_all();
-    }
-
-    void Scheduler::SetSpinDuration(int spinDurationUs)
-    {
-        std::lock_guard<std::mutex> lock(g_executorMutex);
-        if (g_executor)
-        {
-            g_executor->spin_duration(std::chrono::microseconds(spinDurationUs));
-        }
     }
 
     void Scheduler::Shutdown()
@@ -534,22 +519,46 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 chunk
-                auto nextChunk = std::make_shared<std::atomic<int>>(0);
-                for (int w = 0; w < workerCount; ++w)
+            // 当 chunk 数较少时，使用 silent_async 直接提交每个 chunk
+            // 避免 taskflow 图构建开销（taskflow 的 emplace + run 对于少量 task 开销占比大）
+            if (chunkCount <= workerCount * 2)
+            {
+                auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
+                for (int i = 0; i < chunkCount; ++i)
                 {
-                    taskflow.emplace([=]() {
-                        while (true) {
-                            int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
-                            if (chunkIdx >= chunkCount) break;
-                            int begin = chunkIdx * chunkSize;
-                            int end = std::min(length, begin + chunkSize);
-                            for (int i = begin; i < end; ++i) func(context, i);
+                    int begin = i * chunkSize;
+                    int end = std::min(length, begin + chunkSize);
+                    AcquireState(state);
+                    executor->silent_async([=]() {
+                        for (int j = begin; j < end; ++j) func(context, j);
+                        if (--*remaining == 0)
+                        {
+                            if (cleanup) cleanup(context);
+                            CompleteState(state);
                         }
+                        ReleaseState(state);
                         });
                 }
-                }, state, context, cleanup);
+            }
+            else
+            {
+                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
+                    // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 chunk
+                    auto nextChunk = std::make_shared<std::atomic<int>>(0);
+                    for (int w = 0; w < workerCount; ++w)
+                    {
+                        taskflow.emplace([=]() {
+                            while (true) {
+                                int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
+                                if (chunkIdx >= chunkCount) break;
+                                int begin = chunkIdx * chunkSize;
+                                int end = std::min(length, begin + chunkSize);
+                                for (int i = begin; i < end; ++i) func(context, i);
+                            }
+                            });
+                    }
+                    }, state, context, cleanup);
+            }
             });
     }
 
@@ -583,22 +592,46 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 batch
-                auto nextBatch = std::make_shared<std::atomic<int>>(0);
-                for (int w = 0; w < workerCount; ++w)
+            // 当 batch 数较少时，使用 silent_async 直接提交每个 batch
+            // 避免 taskflow 图构建开销
+            if (batchCount <= workerCount * 2)
+            {
+                auto remaining = std::make_shared<std::atomic<int>>(batchCount);
+                for (int i = 0; i < batchCount; ++i)
                 {
-                    taskflow.emplace([=]() {
-                        while (true) {
-                            int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
-                            if (batchIdx >= batchCount) break;
-                            int start = batchIdx * safeBatchSize;
-                            int count = std::min(safeBatchSize, length - start);
-                            func(context, start, count);
+                    int start = i * safeBatchSize;
+                    int count = std::min(safeBatchSize, length - start);
+                    AcquireState(state);
+                    executor->silent_async([=]() {
+                        func(context, start, count);
+                        if (--*remaining == 0)
+                        {
+                            if (cleanup) cleanup(context);
+                            CompleteState(state);
                         }
+                        ReleaseState(state);
                         });
                 }
-                }, state, context, cleanup);
+            }
+            else
+            {
+                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
+                    // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 batch
+                    auto nextBatch = std::make_shared<std::atomic<int>>(0);
+                    for (int w = 0; w < workerCount; ++w)
+                    {
+                        taskflow.emplace([=]() {
+                            while (true) {
+                                int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
+                                if (batchIdx >= batchCount) break;
+                                int start = batchIdx * safeBatchSize;
+                                int count = std::min(safeBatchSize, length - start);
+                                func(context, start, count);
+                            }
+                            });
+                    }
+                    }, state, context, cleanup);
+            }
             });
     }
 
