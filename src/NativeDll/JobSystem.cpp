@@ -13,6 +13,7 @@
 #include <memory>
 #include <deque>
 #include <condition_variable>
+#include <cstdint>
 
 // ---------- 跨平台线程优先级 ----------
 #ifdef _WIN32
@@ -26,13 +27,37 @@
 
 namespace JobSystem
 {
+    struct DispatchRecord {
+        std::atomic<int> nextIndex{ 0 };
+        int chunkSize = 1;
+        int chunkCount = 0;
+        int length = 0;
+        void* context = nullptr;
+        void (*indexFunc)(void*, int) = nullptr;
+        void (*batchFunc)(void*, int, int) = nullptr;
+        void (*chunkFunc)(void*, const ChunkJobData*) = nullptr;
+        const ChunkJobData* chunks = nullptr;
+        uint8_t kind = 0; // 1=parallel_for, 2=parallel_batch, 3=chunks
+    };
+
+    struct DepsLaunchPayload {
+        std::shared_ptr<tf::Executor> executor;
+        void (*run)(HandleState*, const std::shared_ptr<tf::Executor>&, void*) = nullptr;
+        void* userPayload = nullptr;
+        void (*userPayloadCleanup)(void*) = nullptr;
+    };
+
     // ---------- 可调参数 ----------
     constexpr size_t kMaxPooledStates = 4096;
     constexpr size_t kMaxPooledTaskflows = 1024;
 
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
-    constexpr int kSpinBeforeWait = 256;
+    constexpr int kDefaultSpinBeforeWait = 256;
+    constexpr int kDefaultAssistAfterWaitLoops = 64;
+    constexpr int kDefaultAssistBurstMax = 1;
+    constexpr int kDefaultAssistCooldownWaitLoops = 16;
+    constexpr int kDefaultMinChunkSize = 256;
 
     // 全局资源
     std::mutex g_executorMutex;
@@ -44,6 +69,82 @@ namespace JobSystem
 
     std::mutex g_taskflowPoolMutex;
     std::vector<tf::Taskflow*> g_taskflowPool;
+    std::mutex g_dispatchPoolMutex;
+    std::vector<DispatchRecord*> g_dispatchPool;
+    constexpr size_t kMaxPooledDispatchRecords = 4096;
+
+    std::atomic<uint64_t> g_statCompleteWaitLoops{ 0 };
+    std::atomic<uint64_t> g_statAssistAttempts{ 0 };
+    std::atomic<uint64_t> g_statAssistExecuted{ 0 };
+
+    std::mutex g_tuningMutex;
+    JobSystemTuning g_tuning{};
+
+    namespace
+    {
+        DispatchRecord* AcquireDispatchRecord()
+        {
+            DispatchRecord* record = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_dispatchPoolMutex);
+                if (!g_dispatchPool.empty())
+                {
+                    record = g_dispatchPool.back();
+                    g_dispatchPool.pop_back();
+                }
+            }
+            if (!record) record = new DispatchRecord();
+            record->nextIndex.store(0, std::memory_order_relaxed);
+            record->chunkSize = 1;
+            record->chunkCount = 0;
+            record->length = 0;
+            record->context = nullptr;
+            record->indexFunc = nullptr;
+            record->batchFunc = nullptr;
+            record->chunkFunc = nullptr;
+            record->chunks = nullptr;
+            record->kind = 0;
+            return record;
+        }
+
+        void ReleaseDispatchRecord(DispatchRecord* record) noexcept
+        {
+            if (!record) return;
+            std::lock_guard<std::mutex> lock(g_dispatchPoolMutex);
+            if (g_dispatchPool.size() < kMaxPooledDispatchRecords) g_dispatchPool.push_back(record);
+            else delete record;
+        }
+
+        inline bool RunAssistToken(const AssistToken& token) noexcept
+        {
+            auto* record = token.record;
+            if (!record) return false;
+            const int idx = record->nextIndex.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= record->chunkCount) return false;
+
+            if (token.kind == 1 && record->indexFunc)
+            {
+                const int begin = idx * record->chunkSize;
+                const int end = std::min(record->length, begin + record->chunkSize);
+                for (int i = begin; i < end; ++i) record->indexFunc(record->context, i);
+                return true;
+            }
+            if (token.kind == 2 && record->batchFunc)
+            {
+                const int start = idx * record->chunkSize;
+                const int count = std::min(record->chunkSize, record->length - start);
+                if (count <= 0) return false;
+                record->batchFunc(record->context, start, count);
+                return true;
+            }
+            if (token.kind == 3 && record->chunkFunc && record->chunks)
+            {
+                record->chunkFunc(record->context, &record->chunks[idx]);
+                return true;
+            }
+            return false;
+        }
+    }
 
     // ---------- 内部函数实现（非匿名，供 Exports.cpp 等 TU 使用） ----------
 
@@ -55,12 +156,20 @@ namespace JobSystem
 #endif
         {
             std::lock_guard<std::mutex> lock(state->mtx);
-            state->assistStep = {};
+            state->assistToken = {};
         }
         state->inlineContinuation = {};
         state->continuations.clear();
+        if (state->onDepsResolvedPayloadCleanup && state->onDepsResolvedPayload)
+            state->onDepsResolvedPayloadCleanup(state->onDepsResolvedPayload);
+        state->onDepsResolved = nullptr;
+        state->onDepsResolvedPayload = nullptr;
+        state->onDepsResolvedPayloadCleanup = nullptr;
+        state->dependents.clear();
         state->waiterCount.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
+        state->unfinishedDeps.store(0, std::memory_order_relaxed);
+        state->depsResolvedFired.store(false, std::memory_order_relaxed);
         state->refCount.store(1, std::memory_order_relaxed);
 
         std::lock_guard<std::mutex> lock(g_statePoolMutex);
@@ -85,12 +194,18 @@ namespace JobSystem
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
         state->waiterCount.store(0, std::memory_order_relaxed);
+        state->unfinishedDeps.store(0, std::memory_order_relaxed);
+        state->depsResolvedFired.store(false, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(state->mtx);
-            state->assistStep = {};
+            state->assistToken = {};
         }
         state->inlineContinuation = {};
         state->continuations.clear();
+        state->onDepsResolved = nullptr;
+        state->onDepsResolvedPayload = nullptr;
+        state->onDepsResolvedPayloadCleanup = nullptr;
+        state->dependents.clear();
 #ifdef _DEBUG
         state->inPool.store(false, std::memory_order_relaxed);
         state->generation.fetch_add(1, std::memory_order_relaxed);
@@ -114,13 +229,15 @@ namespace JobSystem
         if (!state) return;
         std::function<void()> inlineContinuation;
         std::vector<std::function<void()>> continuations;
+        std::vector<HandleState*> dependents;
         {
             std::lock_guard<std::mutex> lock(state->mtx);
             if (state->completed.exchange(true, std::memory_order_acq_rel))
                 return;
-            state->assistStep = {};
+            state->assistToken = {};
             inlineContinuation = std::move(state->inlineContinuation);
             continuations.swap(state->continuations);
+            dependents.swap(state->dependents);
         }
 
         state->completed.notify_all();
@@ -133,6 +250,37 @@ namespace JobSystem
         for (auto& cont : continuations)
         {
             if (cont) { try { cont(); } catch (...) {} }
+        }
+
+        for (auto* dependent : dependents)
+        {
+            if (!dependent) continue;
+            const int prev = dependent->unfinishedDeps.fetch_sub(1, std::memory_order_acq_rel);
+            if (prev == 1)
+            {
+                OnDepsResolvedFn onDepsResolved = nullptr;
+                void* payload = nullptr;
+                OnDepsResolvedCleanupFn payloadCleanup = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(dependent->mtx);
+                    onDepsResolved = dependent->onDepsResolved;
+                    payload = dependent->onDepsResolvedPayload;
+                    payloadCleanup = dependent->onDepsResolvedPayloadCleanup;
+                    dependent->onDepsResolved = nullptr;
+                    dependent->onDepsResolvedPayload = nullptr;
+                    dependent->onDepsResolvedPayloadCleanup = nullptr;
+                }
+                if (onDepsResolved && !dependent->depsResolvedFired.exchange(true, std::memory_order_acq_rel))
+                {
+                    onDepsResolved(dependent, payload);
+                    if (payloadCleanup && payload) payloadCleanup(payload);
+                }
+                else
+                {
+                    CompleteState(dependent);
+                }
+            }
+            ReleaseState(dependent);
         }
     }
 
@@ -154,6 +302,78 @@ namespace JobSystem
                 state->continuations.emplace_back(std::move(continuation));
         }
         if (toRun) toRun();
+    }
+
+    static void AddDependencyLink(HandleState* dependency, HandleState* dependent)
+    {
+        if (!dependency || !dependent) return;
+        dependent->unfinishedDeps.fetch_add(1, std::memory_order_relaxed);
+        AcquireState(dependent);
+
+        bool alreadyCompleted = false;
+        {
+            std::lock_guard<std::mutex> lock(dependency->mtx);
+            alreadyCompleted = dependency->completed.load(std::memory_order_acquire);
+            if (!alreadyCompleted)
+            {
+                dependency->dependents.push_back(dependent);
+            }
+        }
+
+        if (alreadyCompleted)
+        {
+            const int prev = dependent->unfinishedDeps.fetch_sub(1, std::memory_order_acq_rel);
+            if (prev == 1)
+            {
+                OnDepsResolvedFn onDepsResolved = nullptr;
+                void* payload = nullptr;
+                OnDepsResolvedCleanupFn payloadCleanup = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(dependent->mtx);
+                    onDepsResolved = dependent->onDepsResolved;
+                    payload = dependent->onDepsResolvedPayload;
+                    payloadCleanup = dependent->onDepsResolvedPayloadCleanup;
+                    dependent->onDepsResolved = nullptr;
+                    dependent->onDepsResolvedPayload = nullptr;
+                    dependent->onDepsResolvedPayloadCleanup = nullptr;
+                }
+                if (onDepsResolved && !dependent->depsResolvedFired.exchange(true, std::memory_order_acq_rel))
+                {
+                    onDepsResolved(dependent, payload);
+                    if (payloadCleanup && payload) payloadCleanup(payload);
+                }
+                else
+                {
+                    CompleteState(dependent);
+                }
+            }
+            ReleaseState(dependent);
+        }
+    }
+
+    static void TryRunDepsResolved(HandleState* state)
+    {
+        if (!state) return;
+        if (state->unfinishedDeps.load(std::memory_order_acquire) != 0) return;
+        if (state->depsResolvedFired.exchange(true, std::memory_order_acq_rel)) return;
+
+        OnDepsResolvedFn onDepsResolved = nullptr;
+        void* payload = nullptr;
+        OnDepsResolvedCleanupFn payloadCleanup = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            onDepsResolved = state->onDepsResolved;
+            payload = state->onDepsResolvedPayload;
+            payloadCleanup = state->onDepsResolvedPayloadCleanup;
+            state->onDepsResolved = nullptr;
+            state->onDepsResolvedPayload = nullptr;
+            state->onDepsResolvedPayloadCleanup = nullptr;
+        }
+        if (onDepsResolved) {
+            onDepsResolved(state, payload);
+            if (payloadCleanup && payload) payloadCleanup(payload);
+        }
+        else CompleteState(state);
     }
 
     std::shared_ptr<tf::Executor> EnsureExecutor()
@@ -181,6 +401,23 @@ namespace JobSystem
             ? (hardwareThreads - kReservedThreads)
             : 1u;
         return static_cast<int>(std::max(1u, workerThreads));
+    }
+
+    void SetTuning(const JobSystemTuning& tuning)
+    {
+        std::lock_guard<std::mutex> lock(g_tuningMutex);
+        g_tuning.spinBeforeWait = std::max(0, tuning.spinBeforeWait);
+        g_tuning.assistAfterWaitLoops = std::max(1, tuning.assistAfterWaitLoops);
+        g_tuning.assistBurstMax = std::max(1, tuning.assistBurstMax);
+        g_tuning.assistCooldownWaitLoops = std::max(1, tuning.assistCooldownWaitLoops);
+        g_tuning.minChunkSize = std::max(1, tuning.minChunkSize);
+        g_tuning.workerPriorityMode = tuning.workerPriorityMode;
+    }
+
+    JobSystemTuning GetTuning()
+    {
+        std::lock_guard<std::mutex> lock(g_tuningMutex);
+        return g_tuning;
     }
 
     int CurrentWorkerCount()
@@ -230,7 +467,12 @@ namespace JobSystem
             if (length <= 0) return 1;
             if (requestedChunk > 0) return requestedChunk;
             const int workerCount = std::max(1, CurrentWorkerCount());
-            return std::max(64, length / (workerCount * 2));
+            int minChunkSize = kDefaultMinChunkSize;
+            {
+                std::lock_guard<std::mutex> lock(g_tuningMutex);
+                minChunkSize = std::max(1, g_tuning.minChunkSize);
+            }
+            return std::max(minChunkSize, length / (workerCount * 2));
         }
 
         inline void RelaxCpu() noexcept
@@ -250,22 +492,50 @@ namespace JobSystem
         template <typename WorkBuilder>
         JobHandle ScheduleWithDependency(const JobHandle& dependency, WorkBuilder&& builder)
         {
+            struct BuilderPayload {
+                WorkBuilder builder;
+                explicit BuilderPayload(WorkBuilder&& b) : builder(std::move(b)) {}
+            };
+            auto runBuilder = [](HandleState* state, const std::shared_ptr<tf::Executor>& executor, void* p) {
+                auto* payload = static_cast<BuilderPayload*>(p);
+                payload->builder(state, executor);
+            };
+            auto freeBuilderPayload = [](void* p) { delete static_cast<BuilderPayload*>(p); };
+            auto launchFromDeps = [](HandleState* state, void* p) {
+                auto* launch = static_cast<DepsLaunchPayload*>(p);
+                launch->run(state, launch->executor, launch->userPayload);
+            };
+            auto freeLaunchPayload = [](void* p) {
+                auto* launch = static_cast<DepsLaunchPayload*>(p);
+                if (launch->userPayloadCleanup && launch->userPayload)
+                    launch->userPayloadCleanup(launch->userPayload);
+                delete launch;
+            };
+
             auto* state = CreateState(false);
             auto executor = EnsureExecutor();
             auto* depState = dependency.State();
 
+            auto* builderPayload = new BuilderPayload(std::forward<WorkBuilder>(builder));
+            auto* launchPayload = new DepsLaunchPayload{
+                executor,
+                runBuilder,
+                static_cast<void*>(builderPayload),
+                freeBuilderPayload
+            };
+
+            state->onDepsResolved = launchFromDeps;
+            state->onDepsResolvedPayload = launchPayload;
+            state->onDepsResolvedPayloadCleanup = freeLaunchPayload;
+
             if (!depState || depState->completed.load(std::memory_order_acquire))
             {
-                builder(state, executor);
+                TryRunDepsResolved(state);
                 return JobHandle(state);
             }
 
-            AcquireState(state);
-            auto launch = [state, executor, builder = std::forward<WorkBuilder>(builder)]() mutable {
-                builder(state, executor);
-                ReleaseState(state);
-                };
-            AddContinuationOrRunNow(depState, std::move(launch));
+            AddDependencyLink(depState, state);
+            TryRunDepsResolved(state);
             return JobHandle(state);
         }
 
@@ -284,23 +554,9 @@ namespace JobSystem
         template <typename Work>
         JobHandle ScheduleFastPathWithDependency(Work&& work, void* context, void (*cleanup)(void*), const JobHandle& dependency)
         {
-            auto* state = CreateState(false);
-            auto executor = EnsureExecutor();
-            auto* depState = dependency.State();
-
-            if (!depState || depState->completed.load(std::memory_order_acquire))
-            {
+            return ScheduleWithDependency(dependency, [work = std::forward<Work>(work), context, cleanup](HandleState* state, const std::shared_ptr<tf::Executor>& executor) mutable {
                 ScheduleFastPath(std::forward<Work>(work), context, cleanup, state, executor);
-                return JobHandle(state);
-            }
-
-            AcquireState(state);
-            auto launch = [work = std::forward<Work>(work), context, cleanup, state, executor]() mutable {
-                ScheduleFastPath(std::forward<Work>(work), context, cleanup, state, executor);
-                ReleaseState(state);
-                };
-            AddContinuationOrRunNow(depState, std::move(launch));
-            return JobHandle(state);
+                });
         }
 
         template <typename TaskflowBuilder>
@@ -358,21 +614,46 @@ namespace JobSystem
         if (_state->completed.load(std::memory_order_acquire)) return;
 
         // 阶段 1: 有限自旋，覆盖极短任务，避免立刻进入内核等待路径
-        for (int i = 0; i < kSpinBeforeWait; ++i) {
+        int spinBeforeWait = kDefaultSpinBeforeWait;
+        int assistAfterWaitLoops = kDefaultAssistAfterWaitLoops;
+        int assistBurstMax = kDefaultAssistBurstMax;
+        int assistCooldownWaitLoops = kDefaultAssistCooldownWaitLoops;
+        {
+            std::lock_guard<std::mutex> lock(g_tuningMutex);
+            spinBeforeWait = std::max(0, g_tuning.spinBeforeWait);
+            assistAfterWaitLoops = std::max(1, g_tuning.assistAfterWaitLoops);
+            assistBurstMax = std::max(1, g_tuning.assistBurstMax);
+            assistCooldownWaitLoops = std::max(1, g_tuning.assistCooldownWaitLoops);
+        }
+
+        for (int i = 0; i < spinBeforeWait; ++i) {
             if (_state->completed.load(std::memory_order_acquire)) return;
             RelaxCpu();
         }
 
-        // 阶段 2: 主线程协作执行（Unity-style help execute）
-        // 阶段 3: 无可执行工作时再阻塞等待，降低复杂负载场景下的抢占与抖动
+        int waitLoops = 0;
+        int cooldown = 0;
         while (!_state->completed.load(std::memory_order_acquire)) {
-            std::function<bool()> assistStep;
-            {
-                std::lock_guard<std::mutex> lock(_state->mtx);
-                assistStep = _state->assistStep;
-            }
-            if (assistStep && assistStep()) {
-                continue;
+            ++waitLoops;
+            g_statCompleteWaitLoops.fetch_add(1, std::memory_order_relaxed);
+            if (cooldown > 0) --cooldown;
+
+            if (cooldown == 0 && waitLoops >= assistAfterWaitLoops) {
+                waitLoops = 0;
+                AssistToken assistToken{};
+                {
+                    std::lock_guard<std::mutex> lock(_state->mtx);
+                    assistToken = _state->assistToken;
+                }
+                g_statAssistAttempts.fetch_add(1, std::memory_order_relaxed);
+                if (assistToken.record) {
+                    for (int i = 0; i < assistBurstMax; ++i) {
+                        if (!RunAssistToken(assistToken)) break;
+                        g_statAssistExecuted.fetch_add(1, std::memory_order_relaxed);
+                        if (_state->completed.load(std::memory_order_acquire)) return;
+                    }
+                    cooldown = assistCooldownWaitLoops;
+                }
             }
             _state->completed.wait(false, std::memory_order_acquire);
         }
@@ -394,15 +675,12 @@ namespace JobSystem
         if (pendingStates.empty()) return MakeCompletedHandle();
 
         auto* combinedState = CreateState(false);
-        auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(pendingStates.size()));
-
         for (const auto& depState : pendingStates) {
-            AcquireState(combinedState);
-            AddContinuationOrRunNow(depState, [combinedState, remaining]() {
-                if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
-                    CompleteState(combinedState);
-                ReleaseState(combinedState);
-                });
+            AddDependencyLink(depState, combinedState);
+        }
+        if (combinedState->unfinishedDeps.load(std::memory_order_acquire) == 0)
+        {
+            CompleteState(combinedState);
         }
         return JobHandle(combinedState);
     }
@@ -419,12 +697,18 @@ namespace JobSystem
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
 
-            // 使用高线程优先级，减少被其他线程抢占导致的抖动
+            int priorityMode = 0;
+            {
+                std::lock_guard<std::mutex> tuningLock(g_tuningMutex);
+                priorityMode = g_tuning.workerPriorityMode;
+            }
+            // 默认 normal 优先级，复杂环境更稳（可通过 tuning 切到 above_normal）
             for (int i = 0; i < g_numThreads; ++i)
             {
-                g_executor->silent_async([]() {
+                g_executor->silent_async([priorityMode]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                    int winPriority = (priorityMode == 1) ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL;
+                    SetThreadPriority(GetCurrentThread(), winPriority);
 #else
                     setpriority(PRIO_PROCESS, 0, -5);
 #endif
@@ -538,51 +822,35 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            // 当 chunk 数较少时，使用 silent_async 直接提交每个 chunk
-            // 避免 taskflow 图构建开销（taskflow 的 emplace + run 对于少量 task 开销占比大）
-            if (chunkCount <= workerCount * 2)
+            DispatchRecord* record = AcquireDispatchRecord();
+            record->kind = 1;
+            record->indexFunc = func;
+            record->context = context;
+            record->length = length;
+            record->chunkSize = chunkSize;
+            record->chunkCount = chunkCount;
             {
-                auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
-                for (int i = 0; i < chunkCount; ++i)
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->assistToken = AssistToken{ record, 1 };
+            }
+            auto taskflow = AcquireTaskflow();
+            (*taskflow).clear();
+            [=](tf::Taskflow& taskflow) {
+                for (int w = 0; w < workerCount; ++w)
                 {
-                    int begin = i * chunkSize;
-                    int end = std::min(length, begin + chunkSize);
-                    AcquireState(state);
-                    executor->silent_async([=]() {
-                        for (int j = begin; j < end; ++j) func(context, j);
-                        if (--*remaining == 0)
-                        {
-                            if (cleanup) cleanup(context);
-                            CompleteState(state);
-                        }
-                        ReleaseState(state);
+                    taskflow.emplace([record]() {
+                        while (RunAssistToken(AssistToken{ record, 1 })) {}
                         });
                 }
-            }
-            else
-            {
-                auto nextChunk = std::make_shared<std::atomic<int>>(0);
-                auto runOneChunk = [=]() -> bool {
-                    const int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
-                    if (chunkIdx >= chunkCount) return false;
-                    const int begin = chunkIdx * chunkSize;
-                    const int end = std::min(length, begin + chunkSize);
-                    for (int i = begin; i < end; ++i) func(context, i);
-                    return true;
-                };
-                {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    state->assistStep = runOneChunk;
-                }
-                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    for (int w = 0; w < workerCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (runOneChunk()) {}
-                            });
-                    }
-                    }, state, context, cleanup);
-            }
+                }(*taskflow);
+
+            AcquireState(state);
+            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
+                ReleaseDispatchRecord(record);
+                if (cleanup) cleanup(context);
+                CompleteState(state);
+                ReleaseState(state);
+                });
             });
     }
 
@@ -616,51 +884,35 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            // 当 batch 数较少时，使用 silent_async 直接提交每个 batch
-            // 避免 taskflow 图构建开销
-            if (batchCount <= workerCount * 2)
+            DispatchRecord* record = AcquireDispatchRecord();
+            record->kind = 2;
+            record->batchFunc = func;
+            record->context = context;
+            record->length = length;
+            record->chunkSize = safeBatchSize;
+            record->chunkCount = batchCount;
             {
-                auto remaining = std::make_shared<std::atomic<int>>(batchCount);
-                for (int i = 0; i < batchCount; ++i)
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->assistToken = AssistToken{ record, 2 };
+            }
+            auto taskflow = AcquireTaskflow();
+            (*taskflow).clear();
+            [=](tf::Taskflow& taskflow) {
+                for (int w = 0; w < workerCount; ++w)
                 {
-                    int start = i * safeBatchSize;
-                    int count = std::min(safeBatchSize, length - start);
-                    AcquireState(state);
-                    executor->silent_async([=]() {
-                        func(context, start, count);
-                        if (--*remaining == 0)
-                        {
-                            if (cleanup) cleanup(context);
-                            CompleteState(state);
-                        }
-                        ReleaseState(state);
+                    taskflow.emplace([record]() {
+                        while (RunAssistToken(AssistToken{ record, 2 })) {}
                         });
                 }
-            }
-            else
-            {
-                auto nextBatch = std::make_shared<std::atomic<int>>(0);
-                auto runOneBatch = [=]() -> bool {
-                    const int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
-                    if (batchIdx >= batchCount) return false;
-                    const int start = batchIdx * safeBatchSize;
-                    const int count = std::min(safeBatchSize, length - start);
-                    func(context, start, count);
-                    return true;
-                };
-                {
-                    std::lock_guard<std::mutex> lock(state->mtx);
-                    state->assistStep = runOneBatch;
-                }
-                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    for (int w = 0; w < workerCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (runOneBatch()) {}
-                            });
-                    }
-                    }, state, context, cleanup);
-            }
+                }(*taskflow);
+
+            AcquireState(state);
+            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
+                ReleaseDispatchRecord(record);
+                if (cleanup) cleanup(context);
+                CompleteState(state);
+                ReleaseState(state);
+                });
             });
     }
 
@@ -678,41 +930,38 @@ namespace JobSystem
             return MakeCompletedHandle();
         }
 
-        auto* state = CreateState(false);
-        auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
-        auto executor = EnsureExecutor();
-
-        auto launch = [=]() {
-            for (int i = 0; i < chunkCount; ++i)
+        const int workerCount = std::max(1, CurrentWorkerCount());
+        return ScheduleWithDependency(dependency, [=](HandleState* state, const std::shared_ptr<tf::Executor>& executor) {
+            DispatchRecord* record = AcquireDispatchRecord();
+            record->kind = 3;
+            record->chunkFunc = func;
+            record->context = context;
+            record->chunks = chunks;
+            record->chunkCount = chunkCount;
+            record->chunkSize = 1;
+            record->length = chunkCount;
             {
-                const ChunkJobData* chunkPtr = &chunks[i];
-                AcquireState(state);
-                executor->silent_async([=]() {
-                    func(context, chunkPtr);
-                    if (--*remaining == 0)
-                    {
-                        if (cleanup) cleanup(context);
-                        CompleteState(state);
-                    }
-                    ReleaseState(state);
-                });
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->assistToken = AssistToken{ record, 3 };
             }
-        };
 
-        if (dependency.State() && !dependency.IsCompleted())
-        {
+            auto taskflow = AcquireTaskflow();
+            taskflow->clear();
+            for (int w = 0; w < workerCount; ++w)
+            {
+                taskflow->emplace([record]() {
+                    while (RunAssistToken(AssistToken{ record, 3 })) {}
+                    });
+            }
+
             AcquireState(state);
-            AddContinuationOrRunNow(dependency.State(), [=]() {
-                launch();
+            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
+                ReleaseDispatchRecord(record);
+                if (cleanup) cleanup(context);
+                CompleteState(state);
                 ReleaseState(state);
+                });
             });
-        }
-        else
-        {
-            launch();
-        }
-
-        return JobHandle(state);
     }
 
 } // namespace JobSystem

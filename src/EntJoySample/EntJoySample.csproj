@@ -31,7 +31,15 @@
 	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编译 -->
 	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
+	<Target Name="CleanStaleNativeTranspilerBindings" BeforeTargets="CoreCompile">
+		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler" ContinueOnError="true" />
+		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
+		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler" ContinueOnError="true" />
+		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
+	</Target>
+
 	<Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
+		<Delete Files="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\native_compile.hash" ContinueOnError="true" />
 		<Message Importance="high" Text="Starting native compilation for generated C++ code..." />
 		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
 	</Target>
