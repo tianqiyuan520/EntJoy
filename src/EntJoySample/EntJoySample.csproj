@@ -36,11 +36,15 @@
 		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
 	</Target>
 
-	<Target Name="CopyNativeDll" AfterTargets="Build" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiler_Generated.dll')">
+	<Target Name="CopyNativeDll" AfterTargets="Build" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll')">
 		<ItemGroup>
-			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\*.dll" />
+			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" />
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+	</Target>
+
+	<Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
+		<Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
 	</Target>
 
 </Project>
