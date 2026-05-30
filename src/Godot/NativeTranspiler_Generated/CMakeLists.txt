@@ -17,7 +17,9 @@ endif()
 
 add_library(NativeTranspiler_Generated SHARED
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
+    SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
+    SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Adapter.cpp
     ${TASKSYS_SRC}
 )
 

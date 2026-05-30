@@ -1,22 +1,22 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace NativeTranspiler.Analyzer
 {
     public class IspcStatementTranslator : CppPointerStatementTranslator
     {
-        private readonly string? _constBoolFieldName;
-        private readonly bool _constBoolValue;
+        private readonly Dictionary<string, bool> _constBoolFields = new();
         private readonly bool _useUniformVars;
 
         public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
             : base(semanticModel, jobStruct)
         {
-            _constBoolFieldName = constBoolFieldName;
-            _constBoolValue = constBoolValue;
+            if (constBoolFieldName != null)
+                _constBoolFields[constBoolFieldName] = constBoolValue;
             _useUniformVars = useUniformVars;
         }
 
@@ -24,8 +24,35 @@ namespace NativeTranspiler.Analyzer
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
             : base(semanticModel, method)
         {
-            _constBoolFieldName = constBoolFieldName;
-            _constBoolValue = constBoolValue;
+            if (constBoolFieldName != null)
+                _constBoolFields[constBoolFieldName] = constBoolValue;
+            _useUniformVars = useUniformVars;
+        }
+
+        /// <summary>
+        /// 支持多个 bool 条件字段的构造函数
+        /// </summary>
+        public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
+            List<IFieldSymbol>? constBoolFields, List<bool>? constBoolValues, bool useUniformVars = false)
+            : base(semanticModel, jobStruct)
+        {
+            if (constBoolFields != null && constBoolValues != null)
+            {
+                for (int i = 0; i < constBoolFields.Count; i++)
+                    _constBoolFields[constBoolFields[i].Name] = constBoolValues[i];
+            }
+            _useUniformVars = useUniformVars;
+        }
+
+        public IspcStatementTranslator(SemanticModel semanticModel, IMethodSymbol method,
+            List<IFieldSymbol>? constBoolFields, List<bool>? constBoolValues, bool useUniformVars = false)
+            : base(semanticModel, method)
+        {
+            if (constBoolFields != null && constBoolValues != null)
+            {
+                for (int i = 0; i < constBoolFields.Count; i++)
+                    _constBoolFields[constBoolFields[i].Name] = constBoolValues[i];
+            }
             _useUniformVars = useUniformVars;
         }
 
@@ -72,9 +99,9 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
         {
             string name = identifier.Identifier.Text;
-            if (name == _constBoolFieldName)
+            if (_constBoolFields.TryGetValue(name, out bool constValue))
             {
-                _builder.Append(_constBoolValue ? "true" : "false");
+                _builder.Append(constValue ? "true" : "false");
                 return;
             }
             if (_nativeListNames.Contains(name))

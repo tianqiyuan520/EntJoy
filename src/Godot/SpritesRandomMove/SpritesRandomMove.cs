@@ -201,10 +201,10 @@ public partial class SpritesRandomMove : Node2D
             // 检查几个关键的 DLL 路径
             string[] pathsToCheck = new string[]
             {
-                System.IO.Path.Combine(cwd, ".godot", "mono", "temp", "bin", "Debug", "NativeTranspiler_Generated.dll"),
-                System.IO.Path.Combine(cwd, "..", "..", "bin", "NativeTranspiler_Generated.dll"),
-                @"D:\Godot\Project\EntJoy\bin\NativeTranspiler_Generated.dll",
-                System.IO.Path.Combine(System.IO.Path.GetDirectoryName(asmLocation) ?? "", "NativeTranspiler_Generated.dll"),
+                System.IO.Path.Combine(cwd, ".godot", "mono", "temp", "bin", "Debug", "NativeDll.dll"),
+                System.IO.Path.Combine(cwd, "..", "..", "bin", "NativeDll.dll"),
+                @"D:\Godot\Project\EntJoy\bin\NativeDll.dll",
+                System.IO.Path.Combine(System.IO.Path.GetDirectoryName(asmLocation) ?? "", "NativeDll.dll"),
             };
 
             foreach (var p in pathsToCheck)

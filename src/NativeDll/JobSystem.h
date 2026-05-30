@@ -32,6 +32,8 @@ namespace JobSystem {
         // 延续任务相关（保留但极少使用）
         std::function<void()> inlineContinuation;
         std::vector<std::function<void()>> continuations;
+        // Complete() 可协作执行的辅助步骤（Unity-style main-thread assist）
+        std::function<bool()> assistStep;
         std::mutex mtx;  // 保护 continuations
 
 #ifdef _DEBUG

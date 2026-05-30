@@ -614,18 +614,28 @@ namespace NativeTranspiler.Analyzer
             {
                 // IJobParallelFor / IJobFor: 批处理模式，使用 foreach 或 for (uniform int)
                 var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
-                var boolField = conditionalFields.FirstOrDefault(f => f.Type.SpecialType == SpecialType.System_Boolean);
+                var boolFields = conditionalFields.Where(f => f.Type.SpecialType == SpecialType.System_Boolean).ToList();
                 string indexName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
-                if (boolField != null)
+                if (boolFields.Count > 0)
                 {
-                    GenerateIspcFunction(sb, baseName + "_true_impl", jobStruct, semanticModel, methodSyntax, indexName, boolField.Name, true);
-                    sb.AppendLine();
-                    GenerateIspcFunction(sb, baseName + "_false_impl", jobStruct, semanticModel, methodSyntax, indexName, boolField.Name, false);
+                    // 生成所有 2^n 个 bool 组合变体
+                    int totalVariants = 1 << boolFields.Count;
+                    for (int mask = 0; mask < totalVariants; mask++)
+                    {
+                        var values = new List<bool>();
+                        for (int i = 0; i < boolFields.Count; i++)
+                            values.Add((mask & (1 << i)) != 0);
+                        
+                        string suffix = "_" + string.Join("_", values.Select(v => v ? "true" : "false")) + "_impl";
+                        GenerateIspcFunction(sb, baseName + suffix, jobStruct, semanticModel, methodSyntax, indexName, boolFields, values);
+                        if (mask < totalVariants - 1)
+                            sb.AppendLine();
+                    }
                 }
                 else
                 {
-                    GenerateIspcFunction(sb, baseName + "_impl", jobStruct, semanticModel, methodSyntax, indexName, null, false);
+                    GenerateIspcFunction(sb, baseName + "_impl", jobStruct, semanticModel, methodSyntax, indexName, null, null);
                 }
             }
 
@@ -697,7 +707,7 @@ namespace NativeTranspiler.Analyzer
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
             var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
-            var boolField = conditionalFields.FirstOrDefault(f => f.Type.SpecialType == SpecialType.System_Boolean);
+            var boolFields = conditionalFields.Where(f => f.Type.SpecialType == SpecialType.System_Boolean).ToList();
 
             void GenWrapper(string suffix, string ispcImplSuffix)
             {
@@ -714,10 +724,20 @@ namespace NativeTranspiler.Analyzer
 
             if (hasBatch)
             {
-                if (boolField != null)
+                if (boolFields.Count > 0)
                 {
-                    GenWrapper("_true", "_true_impl");
-                    GenWrapper("_false", "_false_impl");
+                    // 生成所有 2^n 个 bool 组合变体
+                    int totalVariants = 1 << boolFields.Count;
+                    for (int mask = 0; mask < totalVariants; mask++)
+                    {
+                        var values = new List<bool>();
+                        for (int i = 0; i < boolFields.Count; i++)
+                            values.Add((mask & (1 << i)) != 0);
+                        
+                        string suffix = CppJobGenerator.BuildBoolVariantSuffix(boolFields, values);
+                        string ispcSuffix = "_" + string.Join("_", values.Select(v => v ? "true" : "false")) + "_impl";
+                        GenWrapper(suffix, ispcSuffix);
+                    }
                 }
                 else
                 {
@@ -870,7 +890,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateIspcFunction(StringBuilder sb, string functionName,
             INamedTypeSymbol jobStruct, SemanticModel semanticModel,
             MethodDeclarationSyntax methodSyntax, string indexParamName,
-            string? constBoolField, bool constBoolValue)
+            List<IFieldSymbol>? constBoolFields, List<bool>? constBoolValues)
         {
             var fields = GetFieldsFromJob(jobStruct);
             var paramsList = BuildIspcParamList(fields, true);
@@ -914,7 +934,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"{Indent}if (programIndex != 0) return;");
                 sb.AppendLine();
                 sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {endBound}; {indexParamName}++) {{");
-                var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolField, constBoolValue, useUniformVars: true);
+                var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues, useUniformVars: true);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
                 sb.AppendLine($"{Indent}}}");
@@ -936,7 +956,7 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
                 sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
-                var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolField, constBoolValue);
+                var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
                 sb.AppendLine($"{Indent}}}");
