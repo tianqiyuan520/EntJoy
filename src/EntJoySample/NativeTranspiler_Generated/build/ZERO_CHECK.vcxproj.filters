@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\build\CMakeFiles\7dd3e14f3fa1445c6b8811626be0441a\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{0068419B-2934-331A-B894-89496246DEE8}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
