@@ -32,7 +32,7 @@ namespace JobSystem
 
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
-    constexpr int kSpinBeforeWait = 16384;
+    constexpr int kSpinBeforeWait = 256;
 
     // 全局资源
     std::mutex g_executorMutex;
@@ -53,6 +53,10 @@ namespace JobSystem
 #ifdef _DEBUG
         state->inPool.store(true, std::memory_order_relaxed);
 #endif
+        {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            state->assistStep = {};
+        }
         state->inlineContinuation = {};
         state->continuations.clear();
         state->waiterCount.store(0, std::memory_order_relaxed);
@@ -81,6 +85,10 @@ namespace JobSystem
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
         state->waiterCount.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            state->assistStep = {};
+        }
         state->inlineContinuation = {};
         state->continuations.clear();
 #ifdef _DEBUG
@@ -110,6 +118,7 @@ namespace JobSystem
             std::lock_guard<std::mutex> lock(state->mtx);
             if (state->completed.exchange(true, std::memory_order_acq_rel))
                 return;
+            state->assistStep = {};
             inlineContinuation = std::move(state->inlineContinuation);
             continuations.swap(state->continuations);
         }
@@ -165,7 +174,13 @@ namespace JobSystem
     {
         if (numThreads > 0) return numThreads;
         const unsigned int hardwareThreads = std::thread::hardware_concurrency();
-        return static_cast<int>(std::max(1u, hardwareThreads));
+        // 默认预留 2 个逻辑核给系统/录屏/音频等后台任务，提升复杂环境下的帧稳定性
+        constexpr unsigned int kReservedThreads = 2;
+        if (hardwareThreads <= 2) return 1;
+        const unsigned int workerThreads = (hardwareThreads > kReservedThreads)
+            ? (hardwareThreads - kReservedThreads)
+            : 1u;
+        return static_cast<int>(std::max(1u, workerThreads));
     }
 
     int CurrentWorkerCount()
@@ -342,20 +357,24 @@ namespace JobSystem
         if (!_state) return;
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // 阶段 1: 短暂自旋 ~64 次（约 0.5μs），避免极短 job 的阻塞唤醒开销
-        for (int i = 0; i < 64; ++i) {
+        // 阶段 1: 有限自旋，覆盖极短任务，避免立刻进入内核等待路径
+        for (int i = 0; i < kSpinBeforeWait; ++i) {
             if (_state->completed.load(std::memory_order_acquire)) return;
             RelaxCpu();
         }
 
-        // 阶段 2: 无限自旋直到 job 完成，保持 CPU 频率活跃
-        // 帧循环中 Complete() 只在 job 提交后立即调用，job 通常在 1-3ms 内完成
-        // 主线程持续自旋确保 CPU 在 job 执行期间保持最高频率
-        // job 完成后 CompleteState() 调用 notify_all() 立即唤醒主线程
-        // 帧间 16ms 间隔期间主线程不调用 Complete()，不会浪费 CPU
-        while (true) {
-            if (_state->completed.load(std::memory_order_acquire)) return;
-            RelaxCpu();
+        // 阶段 2: 主线程协作执行（Unity-style help execute）
+        // 阶段 3: 无可执行工作时再阻塞等待，降低复杂负载场景下的抢占与抖动
+        while (!_state->completed.load(std::memory_order_acquire)) {
+            std::function<bool()> assistStep;
+            {
+                std::lock_guard<std::mutex> lock(_state->mtx);
+                assistStep = _state->assistStep;
+            }
+            if (assistStep && assistStep()) {
+                continue;
+            }
+            _state->completed.wait(false, std::memory_order_acquire);
         }
     }
 
@@ -405,9 +424,9 @@ namespace JobSystem
             {
                 g_executor->silent_async([]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #else
-                    setpriority(PRIO_PROCESS, 0, -10);
+                    setpriority(PRIO_PROCESS, 0, -5);
 #endif
                     });
             }
@@ -542,19 +561,24 @@ namespace JobSystem
             }
             else
             {
+                auto nextChunk = std::make_shared<std::atomic<int>>(0);
+                auto runOneChunk = [=]() -> bool {
+                    const int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
+                    if (chunkIdx >= chunkCount) return false;
+                    const int begin = chunkIdx * chunkSize;
+                    const int end = std::min(length, begin + chunkSize);
+                    for (int i = begin; i < end; ++i) func(context, i);
+                    return true;
+                };
+                {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    state->assistStep = runOneChunk;
+                }
                 SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 chunk
-                    auto nextChunk = std::make_shared<std::atomic<int>>(0);
                     for (int w = 0; w < workerCount; ++w)
                     {
                         taskflow.emplace([=]() {
-                            while (true) {
-                                int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
-                                if (chunkIdx >= chunkCount) break;
-                                int begin = chunkIdx * chunkSize;
-                                int end = std::min(length, begin + chunkSize);
-                                for (int i = begin; i < end; ++i) func(context, i);
-                            }
+                            while (runOneChunk()) {}
                             });
                     }
                     }, state, context, cleanup);
@@ -615,19 +639,24 @@ namespace JobSystem
             }
             else
             {
+                auto nextBatch = std::make_shared<std::atomic<int>>(0);
+                auto runOneBatch = [=]() -> bool {
+                    const int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
+                    if (batchIdx >= batchCount) return false;
+                    const int start = batchIdx * safeBatchSize;
+                    const int count = std::min(safeBatchSize, length - start);
+                    func(context, start, count);
+                    return true;
+                };
+                {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    state->assistStep = runOneBatch;
+                }
                 SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    // 使用工作窃取：每个 dispatch 任务从原子计数器获取下一个 batch
-                    auto nextBatch = std::make_shared<std::atomic<int>>(0);
                     for (int w = 0; w < workerCount; ++w)
                     {
                         taskflow.emplace([=]() {
-                            while (true) {
-                                int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
-                                if (batchIdx >= batchCount) break;
-                                int start = batchIdx * safeBatchSize;
-                                int count = std::min(safeBatchSize, length - start);
-                                func(context, start, count);
-                            }
+                            while (runOneBatch()) {}
                             });
                     }
                     }, state, context, cleanup);

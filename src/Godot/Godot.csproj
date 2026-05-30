@@ -1,73 +1,34 @@
 <Project Sdk="Godot.NET.Sdk/4.4.1">
-	<PropertyGroup>
-		<TargetFramework>net8.0</TargetFramework>
-		<EnableDynamicLoading>true</EnableDynamicLoading>
-		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<BaseOutputPath>$(GodotProjectDir).godot\mono\temp\bin\</BaseOutputPath>
-	</PropertyGroup>
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <BaseOutputPath>$(GodotProjectDir).godot\mono\temp\bin\</BaseOutputPath>
+  </PropertyGroup>
 
-	<!-- 源代码生成器引用（包括 NativeTranspiler） -->
-	<ItemGroup>
-		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
-		<ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" />
-	</ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\EntJoy\EntJoy.csproj" />
+    <ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
 
-	<!-- 查找 NativeDll.dll 位置（优先从 bin 目录，回退到项目源目录） -->
-	<PropertyGroup>
-		<_NativeDllSourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll')">$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll</_NativeDllSourcePath>
-		<_NativeDllSourcePath Condition="'$(_NativeDllSourcePath)' == '' And Exists('$(MSBuildThisFileDirectory)bin\NativeDll.dll')">$(MSBuildThisFileDirectory)bin\NativeDll.dll</_NativeDllSourcePath>
-		<_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll')">$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll</_EntJoySourcePath>
-	</PropertyGroup>
+  <PropertyGroup>
+    <_NativeDllSourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll')">$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll</_NativeDllSourcePath>
+    <_NativeDllSourcePath Condition="'$(_NativeDllSourcePath)' == '' And Exists('$(MSBuildThisFileDirectory)bin\NativeDll.dll')">$(MSBuildThisFileDirectory)bin\NativeDll.dll</_NativeDllSourcePath>
+    <_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll')">$(MSBuildThisFileDirectory)..\EntJoy\bin\Release\net8.0\EntJoy.dll</_EntJoySourcePath>
+  </PropertyGroup>
 
-	<!-- 在构建后将 NativeDll.dll 和 EntJoy.dll 复制到所有 Godot 输出目录 -->
-	<Target Name="CopyDllsToGodot" AfterTargets="Build"
-		Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
-		Outputs="$(OutputPath)NativeDll.dll;$(OutputPath)EntJoy.dll">
-		<Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
-		<Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
-	</Target>
+  <Target Name="CopyDllsToGodot" AfterTargets="Build"
+    Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
+    Outputs="$(OutputPath)NativeDll.dll;$(OutputPath)EntJoy.dll">
+    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
+    <Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
+  </Target>
 
-	<!-- 注册 NativeCompileTask 用于编译 NativeTranspiler 生成的 C++ 代码 -->
-	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
-
-	<Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
-		<Message Importance="high" Text="Starting native compilation for Godot generated C++ code..." />
-		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
-		<!-- 编译完成后立即将 DLL 从共享 bin/ 复制到 Godot 输出目录 -->
-		<Message Importance="high" Text="Copying NativeTranspiler_Generated.dll from bin/ to $(OutputPath)..." />
-		<Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll"
-			  DestinationFolder="$(OutputPath)"
-			  Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll')"
-			  SkipUnchangedFiles="true" />
-		<Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll"
-			  DestinationFolder="$(MSBuildThisFileDirectory).godot\mono\temp\bin\$(Configuration)\"
-			  Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll')"
-			  SkipUnchangedFiles="true" />
-		<!-- 同时复制到 Godot 数据目录可能的位置 -->
-		<Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll"
-			  DestinationFolder="$(MSBuildThisFileDirectory)bin\Debug\"
-			  Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll')"
-			  SkipUnchangedFiles="true" />
-	</Target>
-
-	<!-- 构建完成后也确保复制一次（兼容 Godot Editor 的构建流程） -->
-	<Target Name="CopyNativeDll" AfterTargets="Build" Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll')">
-		<Message Importance="high" Text="CopyNativeDll: copying NativeTranspiler_Generated.dll to $(OutputPath)..." />
-		<Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll"
-			  DestinationFolder="$(OutputPath)"
-			  SkipUnchangedFiles="true" />
-		<Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\bin\NativeTranspiler_Generated.dll"
-			  DestinationFolder="$(MSBuildThisFileDirectory).godot\mono\temp\bin\$(Configuration)\"
-			  SkipUnchangedFiles="true" />
-	</Target>
-
-	<!-- 在发布时也复制 DLL -->
-	<Target Name="CopyDllsToGodotPublish" AfterTargets="Publish"
-		Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
-		Outputs="$(PublishDir)NativeDll.dll;$(PublishDir)EntJoy.dll">
-		<Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
-		<Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
-	</Target>
+  <Target Name="CopyDllsToGodotPublish" AfterTargets="Publish"
+    Inputs="$(_NativeDllSourcePath);$(_EntJoySourcePath)"
+    Outputs="$(PublishDir)NativeDll.dll;$(PublishDir)EntJoy.dll">
+    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDllSourcePath)')" />
+    <Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
+  </Target>
 </Project>

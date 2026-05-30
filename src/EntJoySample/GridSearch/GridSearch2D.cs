@@ -146,7 +146,7 @@ public class GridSearch2D : IDisposable
             SquaredEpsilonSelf = epsilon * epsilon,
             Results = results
         };
-        var handle = job.Schedule(qPoints.Length, 0); // 批量大小 1024，减少调度开销
+        var handle = job.Schedule(qPoints.Length, 0);
         handle.Complete();
 
         int[] res = new int[results.Length];
@@ -209,7 +209,7 @@ public class GridSearch2D : IDisposable
             CellStartEnd = _cellStartEnd,
             Results = results
         };
-        var handle = job.Schedule(qPoints.Length, 64);
+        var handle = job.Schedule(qPoints.Length, 0);
         handle.Complete();
 
         int[] res = new int[results.Length];
@@ -240,7 +240,7 @@ public class GridSearch2D : IDisposable
             CellStartEnd = _cellStartEnd,
             Results = results
         };
-        var handle = job.Schedule(queryPoints.Length, 64);
+        var handle = job.Schedule(queryPoints.Length, 0);
         handle.Complete();
         return results;
     }
@@ -374,6 +374,7 @@ public class GridSearch2D : IDisposable
                                       _lastTimings.HashCounting +
                                       _lastTimings.PrefixAndFill +
                                       _lastTimings.ElementPlacement;
+
 
         counts.Dispose();
         sortedHashIndex.Dispose();
