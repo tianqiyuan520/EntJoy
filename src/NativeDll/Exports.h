@@ -13,6 +13,7 @@
 // Forward declarations
 struct ChunkJobData;
 struct ProfilerEntry;
+struct JobSystemTuningNative;
 
 extern "C" {
 
@@ -36,6 +37,18 @@ extern "C" {
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
+    
+    typedef struct JobSystemTuningNative {
+        int spinBeforeWait;
+        int assistAfterWaitLoops;
+        int assistBurstMax;
+        int assistCooldownWaitLoops;
+        int minChunkSize;
+        int workerPriorityMode; // 0=normal, 1=above_normal
+    } JobSystemTuningNative;
+
+    JOB_API void JobSystem_SetTuning(const JobSystemTuningNative* tuning);
+    JOB_API void JobSystem_GetTuning(JobSystemTuningNative* tuning);
 
     /** 
      * 调度多个 Chunk 任务，每个 Chunk 并行执行一次 func 回调。

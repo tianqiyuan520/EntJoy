@@ -69,6 +69,27 @@ internal unsafe struct HandleStateView
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JobSystemTuning
+    {
+        public int SpinBeforeWait;
+        public int AssistAfterWaitLoops;
+        public int AssistBurstMax;
+        public int AssistCooldownWaitLoops;
+        public int MinChunkSize;
+        public int WorkerPriorityMode; // 0=normal, 1=above_normal
+    }
+
+    private static readonly JobSystemTuning s_defaultTuning = new()
+    {
+        SpinBeforeWait = 256,
+        AssistAfterWaitLoops = 64,
+        AssistBurstMax = 1,
+        AssistCooldownWaitLoops = 16,
+        MinChunkSize = 256,
+        WorkerPriorityMode = 0
+    };
+
     // ======================== DLL 函数指针 ========================
     private static IntPtr _nativeDll = IntPtr.Zero;
 
@@ -82,6 +103,8 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
+    private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_SetTuning;
+    private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_GetTuning;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
     // Profiler 函数指针
     private static delegate* unmanaged[Cdecl]<int, void> _profiler_SetEnabled;
@@ -234,6 +257,10 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ReleaseHandle");
         _jobSystem_CombineDependencies = (delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_CombineDependencies");
+        _jobSystem_SetTuning = (delegate* unmanaged[Cdecl]<JobSystemTuning*, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_SetTuning");
+        _jobSystem_GetTuning = (delegate* unmanaged[Cdecl]<JobSystemTuning*, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_GetTuning");
         _jobSystem_ScheduleChunkJob = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJob");
 
@@ -245,6 +272,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobProfiler_ReadAll");
         _profiler_Clear = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobProfiler_Clear");
+
+        SetTuning(s_defaultTuning);
     }
 
     // ======================== 包装函数 ========================
@@ -262,6 +291,18 @@ public static unsafe partial class NativeJobScheduler
     private static IntPtr JobSystem_CombineDependencies(IntPtr[] handles, int count)
     {
         fixed (IntPtr* ptr = handles) return _jobSystem_CombineDependencies(ptr, count);
+    }
+    private static void JobSystem_SetTuning(JobSystemTuning tuning)
+    {
+        if (_jobSystem_SetTuning == null) return;
+        _jobSystem_SetTuning(&tuning);
+    }
+    private static JobSystemTuning JobSystem_GetTuning()
+    {
+        JobSystemTuning tuning = default;
+        if (_jobSystem_GetTuning == null) return tuning;
+        _jobSystem_GetTuning(&tuning);
+        return tuning;
     }
     private static IntPtr JobSystem_ScheduleChunkJob(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency)
         => _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
@@ -290,6 +331,8 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 公共接口 ========================
     public static void Initialize(int numThreads = 0) => JobSystem_Initialize(numThreads);
     public static void Shutdown() => JobSystem_Shutdown();
+    public static void SetTuning(JobSystemTuning tuning) => JobSystem_SetTuning(tuning);
+    public static JobSystemTuning GetTuning() => JobSystem_GetTuning();
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
@@ -364,8 +407,7 @@ public static unsafe partial class NativeJobScheduler
     public static bool IsCompleted(NativeJobHandle h)
     {
         if (h.Handle == IntPtr.Zero) return true;
-        var view = (HandleStateView*)(byte*)h.Handle;
-        return view->Completed;
+        return JobSystem_IsCompleted(h.Handle) != 0;
     }
 
     public static void Release(NativeJobHandle h)
