@@ -8,6 +8,8 @@ namespace NativeTranspiler.Analyzer
 {
     public static class BindingsGenerator
     {
+        private const string NativeLibraryName = "NativeDll";
+
         public static string GenerateBindingsClass(
             IEnumerable<IMethodSymbol> methods,
             IEnumerable<INamedTypeSymbol> jobStructs,
@@ -94,7 +96,7 @@ namespace NativeTranspiler.Analyzer
             var returnType = method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             var methodName = method.Name + "_Native";
             var parameters = BuildMethodDllImportParams(method);
-            sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{cppFunctionName}\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{cppFunctionName}\", CallingConvention = CallingConvention.Cdecl)]");
             sb.AppendLine($"        private static extern {returnType} {methodName}({string.Join(", ", parameters)});");
             sb.AppendLine();
         }
@@ -106,7 +108,7 @@ namespace NativeTranspiler.Analyzer
             var methodName = method.Name + "_mt_Native";
             var parameters = BuildMethodDllImportParams(method);
             parameters.Add("int numTasks");
-            sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{cppFunctionName}\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{cppFunctionName}\", CallingConvention = CallingConvention.Cdecl)]");
             sb.AppendLine($"        private static extern {returnType} {methodName}({string.Join(", ", parameters)});");
             sb.AppendLine();
         }
@@ -258,14 +260,14 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasMultiVersion)
                 {
-                    sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}_true\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_true\", CallingConvention = CallingConvention.Cdecl)]");
                     sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch_true({string.Join(", ", batchParams)});");
-                    sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}_false\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_false\", CallingConvention = CallingConvention.Cdecl)]");
                     sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch_false({string.Join(", ", batchParams)});");
                 }
                 else
                 {
-                    sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
                     sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch({string.Join(", ", batchParams)});");
                 }
 
@@ -273,14 +275,14 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (hasMultiVersion)
                     {
-                        sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}_true_mt\", CallingConvention = CallingConvention.Cdecl)]");
+                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_true_mt\", CallingConvention = CallingConvention.Cdecl)]");
                         sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_true_mt({string.Join(", ", batchParams)});");
-                        sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}_false_mt\", CallingConvention = CallingConvention.Cdecl)]");
+                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_false_mt\", CallingConvention = CallingConvention.Cdecl)]");
                         sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_false_mt({string.Join(", ", batchParams)});");
                     }
                     else
                     {
-                        sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{batchFuncName}_mt\", CallingConvention = CallingConvention.Cdecl)]");
+                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_mt\", CallingConvention = CallingConvention.Cdecl)]");
                         sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_mt({string.Join(", ", batchParams)});");
                     }
                 }
@@ -289,7 +291,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var singleFuncName = CppJobGenerator.GetCppJobFunctionName(jobStruct);
                 var singleParams = BuildJobDllImportParams(jobStruct);
-                sb.AppendLine($"        [DllImport(\"NativeTranspiler_Generated\", EntryPoint = \"{singleFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
+                sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{singleFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
                 sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute({string.Join(", ", singleParams)});");
             }
             sb.AppendLine();
