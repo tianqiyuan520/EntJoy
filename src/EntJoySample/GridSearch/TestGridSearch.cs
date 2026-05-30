@@ -105,6 +105,6 @@ public class TestGridSearch
         nativeQueries.Dispose();
 
         Console.WriteLine("\n测试完成。");
-        Console.Read();
+        //Console.Read();
     }
 }

@@ -257,6 +257,17 @@ namespace NativeTranspiler.Analyzer
                         }
                         cppFiles.Add(plainBase + ".cpp");
                     }
+
+                    // 为所有 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）
+                    var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
+                    string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
+                    bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                    bool adapterFileExists = File.Exists(adapterPath);
+                    if (!adapterDisabledAutoRefresh || !adapterFileExists)
+                    {
+                        WriteAllTextWithRetry(adapterPath, adapterCode);
+                    }
+                    cppFiles.Add($"{plainBase}_Adapter.cpp");
                 }
 
                 // 生成 run_ispc.bat
