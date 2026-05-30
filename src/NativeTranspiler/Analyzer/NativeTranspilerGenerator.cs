@@ -653,7 +653,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
         {
             var sb = new StringBuilder();
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
-            sb.AppendLine("project(NativeTranspiler_Generated LANGUAGES CXX)");
+            sb.AppendLine("project(NativeDll LANGUAGES CXX)");
             sb.AppendLine();
             sb.AppendLine("set(CMAKE_CXX_STANDARD 20)");
             sb.AppendLine("set(CMAKE_CXX_STANDARD_REQUIRED ON)");
@@ -672,7 +672,11 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            sb.AppendLine("add_library(NativeTranspiler_Generated SHARED");
+            sb.AppendLine("add_library(NativeDll SHARED");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Exports.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobProfiler.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobSystem.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Native.cpp").Replace("\\", "/")}\"");
             foreach (var file in cppFiles)
             {
                 sb.AppendLine($"    {file}");
@@ -693,7 +697,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("    set(ISPC_EXECUTABLE \"E:/Code/ispc-v1.30.0-windows/bin/ispc.exe\")");
                 sb.AppendLine("endif()");
                 sb.AppendLine();
-                sb.AppendLine("add_custom_command(TARGET NativeTranspiler_Generated PRE_BUILD");
+                sb.AppendLine("add_custom_command(TARGET NativeDll PRE_BUILD");
                 sb.AppendLine("    COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/run_ispc.bat\"");
                 sb.AppendLine("    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
                 sb.AppendLine("    COMMENT \"Running ISPC compiler for generated .ispc files\"");
@@ -706,22 +710,22 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     sb.AppendLine($"    \"${{CMAKE_CURRENT_BINARY_DIR}}/{baseName}.obj\"");
                 }
                 sb.AppendLine(")");
-                sb.AppendLine("target_link_libraries(NativeTranspiler_Generated PRIVATE ${ISPC_OBJECTS})");
+                sb.AppendLine("target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})");
                 sb.AppendLine();
             }
 
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeTranspiler_Generated PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)");
-            sb.AppendLine("    target_compile_definitions(NativeTranspiler_Generated PRIVATE NDEBUG NOMINMAX)");
-            sb.AppendLine("    set_target_properties(NativeTranspiler_Generated PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)");
             sb.AppendLine("else()");
-            sb.AppendLine("    target_compile_options(NativeTranspiler_Generated PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
-            sb.AppendLine("    target_compile_definitions(NativeTranspiler_Generated PRIVATE NDEBUG)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
             var binPath = outputBinDir.Replace("\\", "/");
-            sb.AppendLine($"set_target_properties(NativeTranspiler_Generated PROPERTIES");
+            sb.AppendLine($"set_target_properties(NativeDll PROPERTIES");
             sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"{binPath}\"");
             sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"{binPath}\"");
             sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"{binPath}\"");
@@ -729,7 +733,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine();
             sb.AppendLine($"foreach(OUTPUTCONFIG ${{CMAKE_CONFIGURATION_TYPES}})");
             sb.AppendLine($"    string(TOUPPER ${{OUTPUTCONFIG}} OUTPUTCONFIG)");
-            sb.AppendLine($"    set_target_properties(NativeTranspiler_Generated PROPERTIES");
+            sb.AppendLine($"    set_target_properties(NativeDll PROPERTIES");
             sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
             sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
             sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
@@ -737,7 +741,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine($"endforeach()");
             sb.AppendLine();
             sb.AppendLine("if(WIN32)");
-            sb.AppendLine("    set_target_properties(NativeTranspiler_Generated PROPERTIES SUFFIX \".dll\")");
+            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dll\")");
             sb.AppendLine("endif()");
             return sb.ToString();
         }

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -93,12 +94,21 @@ public static unsafe partial class NativeJobScheduler
     {
         const string dllName = "NativeDll.dll";
         string cwd = Environment.CurrentDirectory;
+        string baseDir = AppContext.BaseDirectory;
         string assemblyDir = Path.GetDirectoryName(typeof(NativeJobScheduler).Assembly.Location);
         string entryDir = Path.GetDirectoryName(Assembly.GetEntryAssembly()?.Location);
 
         var paths = new List<string>();
 
-        // 1. 从入口程序集（exe）所在目录查找
+        // 1. 首先从运行基目录查找（最接近当前进程实际加载目录）
+        if (!string.IsNullOrEmpty(baseDir))
+        {
+            paths.Add(Path.Combine(baseDir, dllName));
+            paths.Add(Path.Combine(baseDir, "Debug", dllName));
+            paths.Add(Path.Combine(baseDir, "Release", dllName));
+        }
+
+        // 2. 从入口程序集（exe）所在目录查找
         if (!string.IsNullOrEmpty(entryDir))
         {
             paths.Add(Path.Combine(entryDir, dllName));
@@ -107,7 +117,7 @@ public static unsafe partial class NativeJobScheduler
                 paths.Add(Path.Combine(parentOfEntry, "bin", dllName));
         }
 
-        // 2. 从程序集所在目录查找
+        // 3. 从程序集所在目录查找
         if (!string.IsNullOrEmpty(assemblyDir))
         {
             paths.Add(Path.Combine(assemblyDir, dllName));
@@ -117,7 +127,7 @@ public static unsafe partial class NativeJobScheduler
             paths.Add(Path.Combine(up2Bin, dllName));
         }
 
-        // 3. 从项目源路径推导
+        // 4. 从项目源路径推导
         {
             string probe = string.IsNullOrEmpty(assemblyDir) ? cwd : assemblyDir;
             while (probe != null && probe.Length >= 3)
@@ -139,7 +149,7 @@ public static unsafe partial class NativeJobScheduler
             }
         }
 
-        // 4. 从 CWD 查找
+        // 5. 从 CWD 查找
         {
             paths.Add(Path.Combine(cwd, ".godot", "mono", "temp", "bin", "Debug", dllName));
             paths.Add(Path.Combine(cwd, ".godot", "mono", "temp", "bin", "Release", dllName));
@@ -150,23 +160,36 @@ public static unsafe partial class NativeJobScheduler
             paths.Add(Path.Combine(cwd, "..", "..", "bin", dllName));
         }
 
-        var fullPaths = paths.ToArray();
+        // 去重并按“最后写入时间”降序，优先尝试最新构建产物，避免串到旧 DLL
+        var existingCandidates = paths
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(File.Exists)
+            .Select(p => new { Path = p, LastWriteUtc = File.GetLastWriteTimeUtc(p) })
+            .OrderByDescending(x => x.LastWriteUtc)
+            .ToArray();
+
+        var fullPaths = paths
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         IntPtr dllHandle = IntPtr.Zero;
-        foreach (string path in fullPaths)
+        string loadedPath = string.Empty;
+        foreach (var candidate in existingCandidates)
         {
-            string fullPath = Path.GetFullPath(path);
-            if (File.Exists(fullPath))
+            try
             {
-                try
+                dllHandle = NativeLibrary.Load(candidate.Path);
+                if (dllHandle != IntPtr.Zero)
                 {
-                    dllHandle = NativeLibrary.Load(fullPath);
-                    if (dllHandle != IntPtr.Zero) break;
+                    loadedPath = candidate.Path;
+                    break;
                 }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[NativeJobScheduler] Failed to load {fullPath}: {ex.Message}");
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[NativeJobScheduler] Failed to load {candidate.Path}: {ex.Message}");
             }
         }
 
@@ -188,6 +211,10 @@ public static unsafe partial class NativeJobScheduler
         }
 
         _nativeDll = dllHandle;
+        if (!string.IsNullOrEmpty(loadedPath))
+        {
+            Console.Error.WriteLine($"[NativeJobScheduler] Loaded NativeDll: {loadedPath} (UTC: {File.GetLastWriteTimeUtc(loadedPath):O})");
+        }
 
         _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
