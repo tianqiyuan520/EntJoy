@@ -69,6 +69,14 @@ internal unsafe struct HandleStateView
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ResolveBatchSize(int length, int batchSize)
+    {
+        if (length <= 0) return 1;
+        if (batchSize > 0) return Math.Min(length, batchSize);
+        return Math.Min(length, Math.Max(1, 32 * Environment.ProcessorCount));
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct JobSystemTuning
     {
@@ -76,19 +84,38 @@ public static unsafe partial class NativeJobScheduler
         public int AssistAfterWaitLoops;
         public int AssistBurstMax;
         public int AssistCooldownWaitLoops;
+        // Used by native auto chunk resolution when caller passes batchSize=0.
         public int MinChunkSize;
         public int WorkerPriorityMode; // 0=normal, 1=above_normal
     }
 
-    private static readonly JobSystemTuning s_defaultTuning = new()
+    public enum PerformanceProfile
+    {
+        FrameStable = 0
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JobSystemStats
+    {
+        public ulong CompleteWaitLoops;
+        public ulong AssistAttempts;
+        public ulong AssistExecuted;
+        public ulong FrameTasksSubmitted;
+        public ulong FrameTasksCompleted;
+        public int FrameQueueDepthPeak;
+    }
+
+    private static readonly JobSystemTuning s_frameStableTuning = new()
     {
         SpinBeforeWait = 256,
-        AssistAfterWaitLoops = 64,
+        AssistAfterWaitLoops = 768,
         AssistBurstMax = 1,
-        AssistCooldownWaitLoops = 16,
+        AssistCooldownWaitLoops = 192,
         MinChunkSize = 256,
         WorkerPriorityMode = 0
     };
+
+    private static readonly JobSystemTuning s_defaultTuning = s_frameStableTuning;
 
     // ======================== DLL 函数指针 ========================
     private static IntPtr _nativeDll = IntPtr.Zero;
@@ -96,6 +123,7 @@ public static unsafe partial class NativeJobScheduler
     // 函数指针（通过 GetProcAddress 获取）
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
+    private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
@@ -105,6 +133,8 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
     private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_SetTuning;
     private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_GetTuning;
+    private static delegate* unmanaged[Cdecl]<JobSystemStats*, void> _jobSystem_GetStats;
+    private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
     // Profiler 函数指针
     private static delegate* unmanaged[Cdecl]<int, void> _profiler_SetEnabled;
@@ -243,6 +273,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
         _jobSystem_Shutdown = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
+        _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
         _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
@@ -261,6 +293,10 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_SetTuning");
         _jobSystem_GetTuning = (delegate* unmanaged[Cdecl]<JobSystemTuning*, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_GetTuning");
+        _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<JobSystemStats*, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
+        _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
         _jobSystem_ScheduleChunkJob = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJob");
 
@@ -279,6 +315,7 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 包装函数 ========================
     private static void JobSystem_Initialize(int numThreads) => _jobSystem_Initialize(numThreads);
     private static void JobSystem_Shutdown() => _jobSystem_Shutdown();
+    private static void JobSystem_PrewakeWorkers() => _jobSystem_PrewakeWorkers();
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
         => _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
     private static IntPtr JobSystem_ScheduleParallelForBatch(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, int batchSize, IntPtr dependency)
@@ -303,6 +340,18 @@ public static unsafe partial class NativeJobScheduler
         if (_jobSystem_GetTuning == null) return tuning;
         _jobSystem_GetTuning(&tuning);
         return tuning;
+    }
+    private static JobSystemStats JobSystem_GetStats()
+    {
+        JobSystemStats stats = default;
+        if (_jobSystem_GetStats == null) return stats;
+        _jobSystem_GetStats(&stats);
+        return stats;
+    }
+    private static void JobSystem_ResetStats()
+    {
+        if (_jobSystem_ResetStats == null) return;
+        _jobSystem_ResetStats();
     }
     private static IntPtr JobSystem_ScheduleChunkJob(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency)
         => _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
@@ -333,6 +382,37 @@ public static unsafe partial class NativeJobScheduler
     public static void Shutdown() => JobSystem_Shutdown();
     public static void SetTuning(JobSystemTuning tuning) => JobSystem_SetTuning(tuning);
     public static JobSystemTuning GetTuning() => JobSystem_GetTuning();
+    public static void SetPerformanceProfile(PerformanceProfile profile)
+    {
+        switch (profile)
+        {
+            case PerformanceProfile.FrameStable:
+            default:
+                JobSystem_SetTuning(s_frameStableTuning);
+                break;
+        }
+    }
+    public static JobSystemStats GetStats() => JobSystem_GetStats();
+    public static void ResetStats() => JobSystem_ResetStats();
+
+    private static long s_lastParallelScheduleTicks;
+    // Frame-stable prewake cadence: avoid over-waking between close schedules.
+    // For 16ms frame-style workloads this keeps wakeups near "once per frame".
+    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 125; // 8ms
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AutoPrewakeIfNeeded(int length)
+    {
+        // Taskflow-first mode with lightweight prewake to reduce cold-start jitter.
+        if (length < 1024) return;
+        long now = Stopwatch.GetTimestamp();
+        long last = Interlocked.Read(ref s_lastParallelScheduleTicks);
+        if (now - last >= s_prewakeGapTicks)
+        {
+            JobSystem_PrewakeWorkers();
+        }
+        Interlocked.Exchange(ref s_lastParallelScheduleTicks, now);
+    }
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
@@ -351,6 +431,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobFor
     {
         if (length <= 0) return default;
+        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
@@ -365,12 +446,14 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelFor
     {
         if (length <= 0) return default;
+        int actualBatchSize = ResolveBatchSize(length, batchSize);
+        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
         }
         catch { Cleanup(ctx); throw; }
     }
@@ -379,12 +462,14 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelForBatch
     {
         if (length <= 0) return default;
+        int actualBatchSize = ResolveBatchSize(length, batchSize);
+        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForBatchCallback<T>());
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
         }
         catch { Cleanup(ctx); throw; }
     }
@@ -423,7 +508,11 @@ public static unsafe partial class NativeJobScheduler
         => new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependsOn?.Handle ?? IntPtr.Zero));
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
-        => new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+    {
+        int actualBatchSize = ResolveBatchSize(length, batchSize);
+        AutoPrewakeIfNeeded(length);
+        return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
+    }
 
 
     // ======================== Profiler 公共接口 ========================

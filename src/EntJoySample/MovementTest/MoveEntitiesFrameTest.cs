@@ -131,9 +131,9 @@ namespace EntJoy.MovementTest
                 if (preWakeWorkers)
                 {
                     //// 提交一个空 job 确保 worker 线程处于活跃状态
-                    var wakeJob = new WakeJob();
-                    var wakeHandle = wakeJob.Schedule();
-                    wakeHandle.Complete();
+                    //var wakeJob = new WakeJob();
+                    //var wakeHandle = wakeJob.Schedule();
+                    //wakeHandle.Complete();
                 }
 
                 var sw = Stopwatch.StartNew();

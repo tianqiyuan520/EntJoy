@@ -210,7 +210,7 @@ namespace EntJoy.MovementTest
                 ViewportHeight = VIEWPORT_HEIGHT,
                 Count = count
             };
-            JobHandle handle = job.Schedule(count, 65536);
+            JobHandle handle = job.Schedule(count, 0);
             handle.Complete();
         }
 
@@ -228,7 +228,7 @@ namespace EntJoy.MovementTest
                 ViewportHeight = VIEWPORT_HEIGHT,
                 Count = count
             };
-            JobHandle handle = job.Schedule(count, 65536);
+            JobHandle handle = job.Schedule(count, 0);
             handle.Complete();
         }
 
