@@ -69,63 +69,6 @@ internal unsafe struct HandleStateView
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct TranspiledContextPoolStats
-    {
-        public long Hit;
-        public long Miss;
-        public long Return;
-        public long OverflowFree;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ResolveBatchSize(int length, int batchSize)
-    {
-        if (length <= 0) return 1;
-        if (batchSize > 0) return Math.Min(length, batchSize);
-        return Math.Min(length, Math.Max(1, 32 * Environment.ProcessorCount));
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct JobSystemTuning
-    {
-        public int SpinBeforeWait;
-        public int AssistAfterWaitLoops;
-        public int AssistBurstMax;
-        public int AssistCooldownWaitLoops;
-        // Used by native auto chunk resolution when caller passes batchSize=0.
-        public int MinChunkSize;
-        public int WorkerPriorityMode; // 0=normal, 1=above_normal
-    }
-
-    public enum PerformanceProfile
-    {
-        FrameStable = 0
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct JobSystemStats
-    {
-        public ulong CompleteWaitLoops;
-        public ulong AssistAttempts;
-        public ulong AssistExecuted;
-        public ulong FrameTasksSubmitted;
-        public ulong FrameTasksCompleted;
-        public int FrameQueueDepthPeak;
-    }
-
-    private static readonly JobSystemTuning s_frameStableTuning = new()
-    {
-        SpinBeforeWait = 256,
-        AssistAfterWaitLoops = 768,
-        AssistBurstMax = 1,
-        AssistCooldownWaitLoops = 192,
-        MinChunkSize = 256,
-        WorkerPriorityMode = 0
-    };
-
-    private static readonly JobSystemTuning s_defaultTuning = s_frameStableTuning;
-
     // ======================== DLL 函数指针 ========================
     private static IntPtr _nativeDll = IntPtr.Zero;
 
@@ -140,10 +83,6 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
-    private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_SetTuning;
-    private static delegate* unmanaged[Cdecl]<JobSystemTuning*, void> _jobSystem_GetTuning;
-    private static delegate* unmanaged[Cdecl]<JobSystemStats*, void> _jobSystem_GetStats;
-    private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
     // Profiler 函数指针
     private static delegate* unmanaged[Cdecl]<int, void> _profiler_SetEnabled;
@@ -298,14 +237,6 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ReleaseHandle");
         _jobSystem_CombineDependencies = (delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_CombineDependencies");
-        _jobSystem_SetTuning = (delegate* unmanaged[Cdecl]<JobSystemTuning*, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_SetTuning");
-        _jobSystem_GetTuning = (delegate* unmanaged[Cdecl]<JobSystemTuning*, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_GetTuning");
-        _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<JobSystemStats*, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
-        _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
         _jobSystem_ScheduleChunkJob = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJob");
 
@@ -317,8 +248,6 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobProfiler_ReadAll");
         _profiler_Clear = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobProfiler_Clear");
-
-        SetTuning(s_defaultTuning);
     }
 
     // ======================== 包装函数 ========================
@@ -337,30 +266,6 @@ public static unsafe partial class NativeJobScheduler
     private static IntPtr JobSystem_CombineDependencies(IntPtr[] handles, int count)
     {
         fixed (IntPtr* ptr = handles) return _jobSystem_CombineDependencies(ptr, count);
-    }
-    private static void JobSystem_SetTuning(JobSystemTuning tuning)
-    {
-        if (_jobSystem_SetTuning == null) return;
-        _jobSystem_SetTuning(&tuning);
-    }
-    private static JobSystemTuning JobSystem_GetTuning()
-    {
-        JobSystemTuning tuning = default;
-        if (_jobSystem_GetTuning == null) return tuning;
-        _jobSystem_GetTuning(&tuning);
-        return tuning;
-    }
-    private static JobSystemStats JobSystem_GetStats()
-    {
-        JobSystemStats stats = default;
-        if (_jobSystem_GetStats == null) return stats;
-        _jobSystem_GetStats(&stats);
-        return stats;
-    }
-    private static void JobSystem_ResetStats()
-    {
-        if (_jobSystem_ResetStats == null) return;
-        _jobSystem_ResetStats();
     }
     private static IntPtr JobSystem_ScheduleChunkJob(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency)
         => _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
@@ -389,39 +294,7 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 公共接口 ========================
     public static void Initialize(int numThreads = 0) => JobSystem_Initialize(numThreads);
     public static void Shutdown() => JobSystem_Shutdown();
-    public static void SetTuning(JobSystemTuning tuning) => JobSystem_SetTuning(tuning);
-    public static JobSystemTuning GetTuning() => JobSystem_GetTuning();
-    public static void SetPerformanceProfile(PerformanceProfile profile)
-    {
-        switch (profile)
-        {
-            case PerformanceProfile.FrameStable:
-            default:
-                JobSystem_SetTuning(s_frameStableTuning);
-                break;
-        }
-    }
-    public static JobSystemStats GetStats() => JobSystem_GetStats();
-    public static void ResetStats() => JobSystem_ResetStats();
-
-    private static long s_lastParallelScheduleTicks;
-    // Frame-stable prewake cadence: avoid over-waking between close schedules.
-    // For 16ms frame-style workloads this keeps wakeups near "once per frame".
-    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 1000; // 1ms
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AutoPrewakeIfNeeded(int length)
-    {
-        // Taskflow-first mode with lightweight prewake to reduce cold-start jitter.
-        if (length < 1024) return;
-        long now = Stopwatch.GetTimestamp();
-        long last = Interlocked.Read(ref s_lastParallelScheduleTicks);
-        if (now - last >= s_prewakeGapTicks)
-        {
-            JobSystem_PrewakeWorkers();
-        }
-        Interlocked.Exchange(ref s_lastParallelScheduleTicks, now);
-    }
+    public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
@@ -440,7 +313,6 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobFor
     {
         if (length <= 0) return default;
-        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
@@ -455,14 +327,12 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelFor
     {
         if (length <= 0) return default;
-        int actualBatchSize = ResolveBatchSize(length, batchSize);
-        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
         }
         catch { Cleanup(ctx); throw; }
     }
@@ -471,14 +341,12 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelForBatch
     {
         if (length <= 0) return default;
-        int actualBatchSize = ResolveBatchSize(length, batchSize);
-        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForBatchCallback<T>());
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
         }
         catch { Cleanup(ctx); throw; }
     }
@@ -501,7 +369,8 @@ public static unsafe partial class NativeJobScheduler
     public static bool IsCompleted(NativeJobHandle h)
     {
         if (h.Handle == IntPtr.Zero) return true;
-        return JobSystem_IsCompleted(h.Handle) != 0;
+        var view = (HandleStateView*)(byte*)h.Handle;
+        return view->Completed;
     }
 
     public static void Release(NativeJobHandle h)
@@ -517,11 +386,7 @@ public static unsafe partial class NativeJobScheduler
         => new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependsOn?.Handle ?? IntPtr.Zero));
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
-    {
-        int actualBatchSize = ResolveBatchSize(length, batchSize);
-        AutoPrewakeIfNeeded(length);
-        return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, actualBatchSize, dependsOn?.Handle ?? IntPtr.Zero));
-    }
+        => new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
 
 
     // ======================== Profiler 公共接口 ========================
@@ -815,13 +680,7 @@ public static unsafe partial class NativeJobScheduler
     {
         private const int BucketShift = 6;
         private const int MaxBucket = 64;
-        private const int MaxPerBucket = 256;
         private static readonly ConcurrentStack<IntPtr>[] _buckets = new ConcurrentStack<IntPtr>[MaxBucket];
-        private static readonly int[] _bucketCounts = new int[MaxBucket];
-        private static long _hit;
-        private static long _miss;
-        private static long _return;
-        private static long _overflowFree;
 
         private static int GetBucketIndex(int size)
         {
@@ -832,70 +691,22 @@ public static unsafe partial class NativeJobScheduler
         public static IntPtr Rent(int size)
         {
             int idx = GetBucketIndex(size);
-            if (idx < 0)
-            {
-                Interlocked.Increment(ref _miss);
-                return Marshal.AllocHGlobal(size);
-            }
+            if (idx < 0) return Marshal.AllocHGlobal(size);
             var bucket = _buckets[idx];
-            if (bucket != null && bucket.TryPop(out var ptr))
-            {
-                Interlocked.Decrement(ref _bucketCounts[idx]);
-                Interlocked.Increment(ref _hit);
-                return ptr;
-            }
-            Interlocked.Increment(ref _miss);
+            if (bucket != null && bucket.TryPop(out var ptr)) return ptr;
             return Marshal.AllocHGlobal(1 << (BucketShift + idx));
         }
 
         public static void Return(IntPtr ptr, int size)
         {
             if (ptr == IntPtr.Zero) return;
-            Interlocked.Increment(ref _return);
             int idx = GetBucketIndex(size);
-            if (idx < 0)
-            {
-                Interlocked.Increment(ref _overflowFree);
-                Marshal.FreeHGlobal(ptr);
-                return;
-            }
+            if (idx < 0) { Marshal.FreeHGlobal(ptr); return; }
             var bucket = _buckets[idx];
             if (bucket == null) { bucket = new ConcurrentStack<IntPtr>(); _buckets[idx] = bucket; }
-            while (true)
-            {
-                int current = Volatile.Read(ref _bucketCounts[idx]);
-                if (current >= MaxPerBucket)
-                {
-                    Interlocked.Increment(ref _overflowFree);
-                    Marshal.FreeHGlobal(ptr);
-                    return;
-                }
-                if (Interlocked.CompareExchange(ref _bucketCounts[idx], current + 1, current) == current)
-                {
-                    bucket.Push(ptr);
-                    return;
-                }
-            }
-        }
-
-        public static TranspiledContextPoolStats GetStats()
-        {
-            return new TranspiledContextPoolStats
-            {
-                Hit = Interlocked.Read(ref _hit),
-                Miss = Interlocked.Read(ref _miss),
-                Return = Interlocked.Read(ref _return),
-                OverflowFree = Interlocked.Read(ref _overflowFree)
-            };
-        }
-
-        public static void ResetStats()
-        {
-            Interlocked.Exchange(ref _hit, 0);
-            Interlocked.Exchange(ref _miss, 0);
-            Interlocked.Exchange(ref _return, 0);
-            Interlocked.Exchange(ref _overflowFree, 0);
-            Array.Clear(_bucketCounts, 0, _bucketCounts.Length);
+            const int MaxPerBucket = 256;
+            if (bucket.Count < MaxPerBucket) bucket.Push(ptr);
+            else Marshal.FreeHGlobal(ptr);
         }
     }
 
@@ -928,18 +739,4 @@ public static unsafe partial class NativeJobScheduler
         int size = *(int*)((byte*)dataPtr - sizeof(int));
         ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
     }
-
-    // Transpiler-only context pool API. Reuses existing pool implementation
-    // without changing the existing C# job scheduling behavior.
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static IntPtr RentJobContext<T>(ref T job) where T : struct => AllocContext(ref job);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void ReturnJobContext(IntPtr ctx) => Cleanup(ctx);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static IntPtr GetReturnJobContextFuncPtr() => _cleanupPtr;
-
-    public static TranspiledContextPoolStats GetTranspiledContextPoolStats() => ContextPool.GetStats();
-    public static void ResetTranspiledContextPoolStats() => ContextPool.ResetStats();
 }

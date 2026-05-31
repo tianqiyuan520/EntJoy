@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <cstdint>
 #include <vector>
 
 // Forward declarations for taskflow
@@ -23,50 +22,18 @@ constexpr size_t hardware_destructive_interference_size = 64;
 #endif
 
 namespace JobSystem {
-    struct JobSystemStats {
-        uint64_t completeWaitLoops = 0;
-        uint64_t assistAttempts = 0;
-        uint64_t assistExecuted = 0;
-        uint64_t frameTasksSubmitted = 0;
-        uint64_t frameTasksCompleted = 0;
-        int frameQueueDepthPeak = 0;
-    };
-    struct DispatchRecord;
-
-    struct AssistToken {
-        DispatchRecord* record = nullptr;
-        uint8_t kind = 0; // 0=none, 1=parallel_for, 2=parallel_batch
-    };
-
-    struct JobSystemTuning {
-        int spinBeforeWait = 256;
-        int assistAfterWaitLoops = 768;
-        int assistBurstMax = 1;
-        int assistCooldownWaitLoops = 192;
-        int minChunkSize = 256;
-        int workerPriorityMode = 0; // 0=normal, 1=above_normal
-    };
 
     // 对齐到缓存行，避免伪共享
-    using OnDepsResolvedFn = void(*)(struct HandleState*, void*);
-    using OnDepsResolvedCleanupFn = void(*)(void*);
-
     struct alignas(hardware_destructive_interference_size) HandleState {
         std::atomic<uint32_t> refCount{ 1 };
         std::atomic<bool> completed{ false };
         std::atomic<int> waiterCount{ 0 };
-        std::atomic<int> unfinishedDeps{ 0 };
-        std::atomic<bool> depsResolvedFired{ false };
 
         // 延续任务相关（保留但极少使用）
         std::function<void()> inlineContinuation;
         std::vector<std::function<void()>> continuations;
-        OnDepsResolvedFn onDepsResolved = nullptr;
-        void* onDepsResolvedPayload = nullptr;
-        OnDepsResolvedCleanupFn onDepsResolvedPayloadCleanup = nullptr;
-        std::vector<HandleState*> dependents;
-        // Complete() 可协作执行的辅助 token（无 std::function 热路径）
-        AssistToken assistToken;
+        // Complete() 可协作执行的辅助步骤（Unity-style main-thread assist）
+        std::function<bool()> assistStep;
         std::mutex mtx;  // 保护 continuations
 
 #ifdef _DEBUG
@@ -111,10 +78,6 @@ void CompleteState(HandleState* state);
 void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
 int ResolveWorkerCount(int numThreads);
 std::shared_ptr<tf::Executor> EnsureExecutor();
-void SetTuning(const JobSystemTuning& tuning);
-JobSystemTuning GetTuning();
-JobSystemStats GetStats();
-void ResetStats();
 
     class Scheduler {
     public:
