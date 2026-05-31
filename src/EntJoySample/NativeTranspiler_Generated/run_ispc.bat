@@ -7,7 +7,7 @@ if not exist "%ISPC%" (
 cd /d "%~dp0"
 if not exist build mkdir build
 echo Compiling SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.ispc...
-"%ISPC%" "SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.ispc" -o "build\SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj" -h "SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+"%ISPC%" "SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.ispc" -o "build\SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj" -h "SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic_ispc.h" --target=avx2-i32x8 --math-lib=fast --opt=disable-fma
 if errorlevel 1 (
     echo Failed to compile SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.ispc
     exit /b 1

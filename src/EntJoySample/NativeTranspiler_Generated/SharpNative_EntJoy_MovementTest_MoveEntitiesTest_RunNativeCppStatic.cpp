@@ -12,10 +12,8 @@ for (int i = 0; i < count; i++)
     EntJoy::Mathematics::float2 v = vel_ptr[i];
     p.x += v.x * 0.016f;
     p.y += v.y * 0.016f;
-    if (p.x < 0.0f || p.x > 1920.0f)
-                v.x = -v.x;
-    if (p.y < 0.0f || p.y > 1080.0f)
-                v.y = -v.y;
+    v.x = p.x < 0.0f || p.x > 1920.0f ? -v.x : v.x;
+    v.y = p.y < 0.0f || p.y > 1080.0f ? -v.y : v.y;
     pos_ptr[i] = p;
     vel_ptr[i] = v;
 }
