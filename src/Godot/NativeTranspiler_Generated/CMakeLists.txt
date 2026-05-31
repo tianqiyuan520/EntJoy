@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(NativeTranspiler_Generated LANGUAGES CXX)
+project(NativeDll LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,7 +15,11 @@ else()
     message(WARNING "tasksys.cpp not found at D:/Godot/Project/EntJoy/src/NativeDll/tasksys.cpp")
 endif()
 
-add_library(NativeTranspiler_Generated SHARED
+add_library(NativeDll SHARED
+    "D:/Godot/Project/EntJoy/src/NativeDll/Exports.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/JobProfiler.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/JobSystem.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
@@ -32,7 +36,7 @@ if(NOT ISPC_EXECUTABLE)
     set(ISPC_EXECUTABLE "E:/Code/ispc-v1.30.0-windows/bin/ispc.exe")
 endif()
 
-add_custom_command(TARGET NativeTranspiler_Generated PRE_BUILD
+add_custom_command(TARGET NativeDll PRE_BUILD
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run_ispc.bat"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Running ISPC compiler for generated .ispc files"
@@ -41,18 +45,18 @@ add_custom_command(TARGET NativeTranspiler_Generated PRE_BUILD
 set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj"
 )
-target_link_libraries(NativeTranspiler_Generated PRIVATE ${ISPC_OBJECTS})
+target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
 
 if(MSVC)
-    target_compile_options(NativeTranspiler_Generated PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)
-    target_compile_definitions(NativeTranspiler_Generated PRIVATE NDEBUG NOMINMAX)
-    set_target_properties(NativeTranspiler_Generated PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)
+    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)
+    set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 else()
-    target_compile_options(NativeTranspiler_Generated PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)
-    target_compile_definitions(NativeTranspiler_Generated PRIVATE NDEBUG)
+    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)
+    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)
 endif()
 
-set_target_properties(NativeTranspiler_Generated PROPERTIES
+set_target_properties(NativeDll PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
     LIBRARY_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
     ARCHIVE_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
@@ -60,7 +64,7 @@ set_target_properties(NativeTranspiler_Generated PROPERTIES
 
 foreach(OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER ${OUTPUTCONFIG} OUTPUTCONFIG)
-    set_target_properties(NativeTranspiler_Generated PROPERTIES
+    set_target_properties(NativeDll PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
         LIBRARY_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
         ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
@@ -68,5 +72,5 @@ foreach(OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 
 if(WIN32)
-    set_target_properties(NativeTranspiler_Generated PROPERTIES SUFFIX ".dll")
+    set_target_properties(NativeDll PROPERTIES SUFFIX ".dll")
 endif()
