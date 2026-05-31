@@ -13,4 +13,40 @@ src/EntJoySample/bin
 src/EntJoySample/obj
 src/NativeDll/NativeDll
 src/NativeTranspiler.Tasks/bin
-src/ativeTranspiler.Tasks/obj
+src/NativeTranspiler.Tasks/obj
+
+# Generic build artifacts
+**/bin/
+**/obj/
+**/build/
+**/x64/
+**/.vs/
+**/.vscode/
+
+# Native/CMake/MSVC artifacts
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ipdb
+*.iobj
+*.ilk
+*.tlog
+*.idb
+*.log
+*.vcxproj.user
+*.sln.docstates
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Godot generated temp/cache outputs
+src/Godot/.godot/
+
+# Native transpiler generated build cache
+src/EntJoySample/NativeTranspiler_Generated/build/
+src/EntJoySample/NativeTranspiler_Generated/native_compile.hash
+src/EntJoySample/NativeTranspiler_Generated/
