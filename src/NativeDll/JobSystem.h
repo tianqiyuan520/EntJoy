@@ -83,6 +83,7 @@ std::shared_ptr<tf::Executor> EnsureExecutor();
     public:
         static void Initialize(int numThreads = 0);
         static void Shutdown();
+        static void PrewakeWorkers();
 
         static JobHandle Schedule(
             void (*func)(void*), void* context,

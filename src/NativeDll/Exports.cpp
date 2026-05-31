@@ -30,6 +30,11 @@ extern "C"
         JobSystem::Scheduler::Shutdown();
     }
 
+    void JobSystem_PrewakeWorkers()
+    {
+        JobSystem::Scheduler::PrewakeWorkers();
+    }
+
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
     {
         JobSystem::JobHandle dep;

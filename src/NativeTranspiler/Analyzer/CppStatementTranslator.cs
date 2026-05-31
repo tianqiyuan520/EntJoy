@@ -209,6 +209,9 @@ namespace NativeTranspiler.Analyzer
 
         protected virtual void TranslateIfStatement(IfStatementSyntax ifStmt)
         {
+            if (EnableBranchlessSimpleIfRewrite() && TryTranslateBranchlessSimpleIf(ifStmt))
+                return;
+
             AppendIndent();
             _builder.Append("if (");
             TranslateExpression(ifStmt.Condition);
@@ -238,6 +241,51 @@ namespace NativeTranspiler.Analyzer
                     _indentLevel--;
                 }
             }
+        }
+
+        protected virtual bool EnableBranchlessSimpleIfRewrite() => true;
+
+        private bool TryTranslateBranchlessSimpleIf(IfStatementSyntax ifStmt)
+        {
+            // Only rewrite:
+            // if (cond) x = y;
+            // => x = cond ? y : x;
+            if (ifStmt.Else != null)
+                return false;
+
+            if (ifStmt.Statement is not ExpressionStatementSyntax exprStmt)
+                return false;
+
+            if (exprStmt.Expression is not AssignmentExpressionSyntax assignment)
+                return false;
+
+            if (!assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
+                return false;
+
+            if (!IsSimpleLValue(assignment.Left))
+                return false;
+
+            AppendIndent();
+            TranslateExpression(assignment.Left);
+            _builder.Append(" = ");
+            TranslateExpression(ifStmt.Condition);
+            _builder.Append(" ? ");
+            TranslateExpression(assignment.Right);
+            _builder.Append(" : ");
+            TranslateExpression(assignment.Left);
+            _builder.AppendLine(";");
+            return true;
+        }
+
+        private static bool IsSimpleLValue(ExpressionSyntax expr)
+        {
+            return expr switch
+            {
+                IdentifierNameSyntax => true,
+                MemberAccessExpressionSyntax ma => IsSimpleLValue(ma.Expression),
+                ParenthesizedExpressionSyntax p => IsSimpleLValue(p.Expression),
+                _ => false
+            };
         }
 
         protected virtual void TranslateWhileStatement(WhileStatementSyntax whileStmt)
