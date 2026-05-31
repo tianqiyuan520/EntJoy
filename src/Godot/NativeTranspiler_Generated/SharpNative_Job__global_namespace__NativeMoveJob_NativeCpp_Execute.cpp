@@ -14,10 +14,8 @@ EntJoy::Mathematics::float2 pos = Positions_ptr[index];
 EntJoy::Mathematics::float2 vel = Velocities_ptr[index];
 pos.x += vel.x * Dt;
 pos.y += vel.y * Dt;
-if (pos.x < 0.0f || pos.x > ViewportWidth)
-        vel.x = -vel.x;
-if (pos.y < 0.0f || pos.y > ViewportHeight)
-        vel.y = -vel.y;
+vel.x = pos.x < 0.0f || pos.x > ViewportWidth ? -vel.x : vel.x;
+vel.y = pos.y < 0.0f || pos.y > ViewportHeight ? -vel.y : vel.y;
 Positions_ptr[index] = pos;
 Velocities_ptr[index] = vel;
     }

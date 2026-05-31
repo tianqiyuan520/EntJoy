@@ -287,14 +287,8 @@ namespace NativeTranspiler.Analyzer
                     {
                         string baseName = Path.GetFileNameWithoutExtension(ispc);
                         string mathLibStr = mathLib.ToString().ToLowerInvariant();
-                        // Static entrypoints are latency-sensitive and tend to be more stable on AVX2
-                        // (avoid AVX-512 frequency downclock spikes). Job/batch kernels keep AVX-512 throughput.
-                        bool isStaticKernel = baseName.IndexOf("RunNativeIspcStatic", StringComparison.Ordinal) >= 0;
-                        string targetArg = isStaticKernel ? "--target=avx2-i32x8" : "--target=avx512skx-i32x16";
-                        // Keep deterministic floating-point behavior aligned with C#/C++ baselines.
-                        string extraOpt = " --opt=disable-fma";
                         batContent.AppendLine($"echo Compiling {ispc}...");
-                        batContent.AppendLine($"\"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" {targetArg} --math-lib={mathLibStr}{extraOpt}");
+                        batContent.AppendLine($"\"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma");
                         batContent.AppendLine("if errorlevel 1 (");
                         batContent.AppendLine($"    echo Failed to compile {ispc}");
                         batContent.AppendLine("    exit /b 1");
