@@ -11,9 +11,9 @@
 #include <utility>
 #include <atomic>
 #include <memory>
-#include <deque>
-#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
+#include <chrono>
 
 // ---------- 跨平台线程优先级 ----------
 #ifdef _WIN32
@@ -53,11 +53,12 @@ namespace JobSystem
 
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
-    constexpr int kDefaultSpinBeforeWait = 256;
-    constexpr int kDefaultAssistAfterWaitLoops = 64;
-    constexpr int kDefaultAssistBurstMax = 1;
-    constexpr int kDefaultAssistCooldownWaitLoops = 16;
-    constexpr int kDefaultMinChunkSize = 256;
+	constexpr int kDefaultSpinBeforeWait = 256;
+	constexpr int kDefaultAssistAfterWaitLoops = 768;
+	constexpr int kDefaultAssistBurstMax = 1;
+	constexpr int kDefaultAssistCooldownWaitLoops = 192;
+	constexpr int kDefaultMinChunkSize = 256;
+    constexpr int kTaskflowSpinDurationMicros = 4000;
 
     // 全局资源
     std::mutex g_executorMutex;
@@ -76,12 +77,18 @@ namespace JobSystem
     std::atomic<uint64_t> g_statCompleteWaitLoops{ 0 };
     std::atomic<uint64_t> g_statAssistAttempts{ 0 };
     std::atomic<uint64_t> g_statAssistExecuted{ 0 };
-
+    std::atomic<uint64_t> g_statFrameTasksSubmitted{ 0 };
+    std::atomic<uint64_t> g_statFrameTasksCompleted{ 0 };
+    std::atomic<int> g_statFrameQueueDepthPeak{ 0 };
     std::mutex g_tuningMutex;
     JobSystemTuning g_tuning{};
+    std::atomic<bool> g_shutdownInProgress{ false };
+    std::once_flag g_shutdownHookOnce;
 
     namespace
     {
+        inline void RelaxCpu() noexcept;
+
         DispatchRecord* AcquireDispatchRecord()
         {
             DispatchRecord* record = nullptr;
@@ -143,6 +150,17 @@ namespace JobSystem
                 return true;
             }
             return false;
+        }
+
+        void EnsureFrameWorkers(int workerCount)
+        {
+            (void)workerCount;
+            return;
+        }
+
+        void StopFrameWorkers()
+        {
+            return;
         }
     }
 
@@ -383,6 +401,7 @@ namespace JobSystem
         {
             g_numThreads = ResolveWorkerCount(0);
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
+            g_executor->spin_duration(std::chrono::microseconds(kTaskflowSpinDurationMicros));
         }
         return g_executor;
     }
@@ -418,6 +437,28 @@ namespace JobSystem
     {
         std::lock_guard<std::mutex> lock(g_tuningMutex);
         return g_tuning;
+    }
+
+    JobSystemStats GetStats()
+    {
+        JobSystemStats stats{};
+        stats.completeWaitLoops = g_statCompleteWaitLoops.load(std::memory_order_relaxed);
+        stats.assistAttempts = g_statAssistAttempts.load(std::memory_order_relaxed);
+        stats.assistExecuted = g_statAssistExecuted.load(std::memory_order_relaxed);
+        stats.frameTasksSubmitted = g_statFrameTasksSubmitted.load(std::memory_order_relaxed);
+        stats.frameTasksCompleted = g_statFrameTasksCompleted.load(std::memory_order_relaxed);
+        stats.frameQueueDepthPeak = g_statFrameQueueDepthPeak.load(std::memory_order_relaxed);
+        return stats;
+    }
+
+    void ResetStats()
+    {
+        g_statCompleteWaitLoops.store(0, std::memory_order_relaxed);
+        g_statAssistAttempts.store(0, std::memory_order_relaxed);
+        g_statAssistExecuted.store(0, std::memory_order_relaxed);
+        g_statFrameTasksSubmitted.store(0, std::memory_order_relaxed);
+        g_statFrameTasksCompleted.store(0, std::memory_order_relaxed);
+        g_statFrameQueueDepthPeak.store(0, std::memory_order_relaxed);
     }
 
     int CurrentWorkerCount()
@@ -472,10 +513,11 @@ namespace JobSystem
                 std::lock_guard<std::mutex> lock(g_tuningMutex);
                 minChunkSize = std::max(1, g_tuning.minChunkSize);
             }
-            return std::max(minChunkSize, length / (workerCount * 2));
+            const int autoChunk = std::max(minChunkSize, length / (workerCount * 2));
+            return std::max(1, std::min(length, autoChunk));
         }
 
-        inline void RelaxCpu() noexcept
+		inline void RelaxCpu() noexcept
         {
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
             _mm_pause();
@@ -484,7 +526,25 @@ namespace JobSystem
 #else
             std::this_thread::yield();
 #endif
-        }
+		}
+
+#ifdef _WIN32
+		inline void PinCurrentThreadToWorkerCore(int workerSlot, int workerCount) noexcept
+		{
+			if (workerSlot < 0 || workerCount <= 0) return;
+			SYSTEM_INFO info{};
+			GetSystemInfo(&info);
+			const int totalCores = std::max(1, static_cast<int>(info.dwNumberOfProcessors));
+			// Keep first 2 logical cores unpinned for OS/foreground tasks.
+			const int reserve = std::min(2, std::max(0, totalCores - 1));
+			const int usable = std::max(1, totalCores - reserve);
+			const int coreIndex = reserve + (workerSlot % usable);
+
+			if (coreIndex >= 64) return; // simple mask path supports first 64 logical cores
+			const DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << coreIndex);
+			SetThreadAffinityMask(GetCurrentThread(), mask);
+		}
+#endif
 
         JobHandle MakeCompletedHandle() { return JobHandle(CreateState(true)); }
 
@@ -571,6 +631,36 @@ namespace JobSystem
                 CompleteState(state);
                 ReleaseState(state);
                 });
+        }
+
+        void SubmitDispatchWithTaskflow(
+            const std::shared_ptr<tf::Executor>& executor,
+            HandleState* state,
+            DispatchRecord* record,
+            uint8_t kind,
+            int workerCount,
+            void* context,
+            void (*cleanup)(void*))
+        {
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->assistToken = AssistToken{ record, kind };
+            }
+            auto taskflow = AcquireTaskflow();
+            taskflow->clear();
+            for (int w = 0; w < workerCount; ++w)
+            {
+                taskflow->emplace([record, kind]() {
+                    while (RunAssistToken(AssistToken{ record, kind })) {}
+                });
+            }
+            AcquireState(state);
+            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
+                ReleaseDispatchRecord(record);
+                if (cleanup) cleanup(context);
+                CompleteState(state);
+                ReleaseState(state);
+            });
         }
 
         // 同步执行包装
@@ -688,6 +778,12 @@ namespace JobSystem
     // ========== Scheduler 实现 ==========
     void Scheduler::Initialize(int numThreads)
     {
+        std::call_once(g_shutdownHookOnce, []() {
+            std::atexit([]() {
+                Scheduler::Shutdown();
+            });
+        });
+
         const int resolved = ResolveWorkerCount(numThreads);
         std::shared_ptr<tf::Executor> oldExecutor;
         {
@@ -696,21 +792,22 @@ namespace JobSystem
             oldExecutor = std::move(g_executor);
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
+            g_executor->spin_duration(std::chrono::microseconds(kTaskflowSpinDurationMicros));
 
-            int priorityMode = 0;
-            {
-                std::lock_guard<std::mutex> tuningLock(g_tuningMutex);
-                priorityMode = g_tuning.workerPriorityMode;
-            }
-            // 默认 normal 优先级，复杂环境更稳（可通过 tuning 切到 above_normal）
-            for (int i = 0; i < g_numThreads; ++i)
-            {
-                g_executor->silent_async([priorityMode]() {
+			int priorityMode = 0;
+			{
+				std::lock_guard<std::mutex> tuningLock(g_tuningMutex);
+				priorityMode = g_tuning.workerPriorityMode;
+			}
+			// 默认 normal 优先级，复杂环境更稳（可通过 tuning 切到 above_normal）
+			for (int i = 0; i < g_numThreads; ++i)
+			{
+				g_executor->silent_async([priorityMode]() {
 #ifdef _WIN32
-                    int winPriority = (priorityMode == 1) ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL;
-                    SetThreadPriority(GetCurrentThread(), winPriority);
+					int winPriority = (priorityMode == 1) ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL;
+					SetThreadPriority(GetCurrentThread(), winPriority);
 #else
-                    setpriority(PRIO_PROCESS, 0, -5);
+					setpriority(PRIO_PROCESS, 0, -5);
 #endif
                     });
             }
@@ -721,6 +818,7 @@ namespace JobSystem
 
     void Scheduler::Shutdown()
     {
+        if (g_shutdownInProgress.exchange(true, std::memory_order_acq_rel)) return;
         std::shared_ptr<tf::Executor> executor;
         {
             std::lock_guard<std::mutex> lock(g_executorMutex);
@@ -728,6 +826,7 @@ namespace JobSystem
             g_numThreads = 0;
         }
         if (executor) executor->wait_for_all();
+        StopFrameWorkers();
 
         {
             std::lock_guard<std::mutex> lock(g_statePoolMutex);
@@ -738,6 +837,27 @@ namespace JobSystem
             std::lock_guard<std::mutex> lock(g_taskflowPoolMutex);
             for (auto* tf : g_taskflowPool) delete tf;
             g_taskflowPool.clear();
+        }
+        g_shutdownInProgress.store(false, std::memory_order_release);
+    }
+
+    void Scheduler::PrewakeWorkers()
+    {
+        std::shared_ptr<tf::Executor> executor;
+        int workerCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_executorMutex);
+            executor = g_executor;
+            workerCount = g_numThreads;
+        }
+        if (!executor || workerCount <= 0) return;
+
+        // Taskflow-first path: push tiny no-op work to warm worker wakeups
+        // before the next frame's real jobs arrive.
+        const int wakeCount = std::min(workerCount, 4);
+        for (int i = 0; i < wakeCount; ++i)
+        {
+            executor->silent_async([] {});
         }
     }
 
@@ -786,10 +906,18 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state, auto executor) {
-            SubmitTaskflow(executor, [func, context, length](tf::Taskflow& taskflow) {
-                taskflow.emplace([func, context, length]() { ExecuteForSync(func, context, length); });
-                }, state, context, cleanup);
-            });
+            const int chunkSize = ResolveChunkSize(length, 0);
+            const int chunkCount = (length + chunkSize - 1) / chunkSize;
+            const int workerCount = std::max(1, CurrentWorkerCount());
+            DispatchRecord* record = AcquireDispatchRecord();
+            record->kind = 1;
+            record->indexFunc = func;
+            record->context = context;
+            record->length = length;
+            record->chunkSize = std::max(1, chunkSize);
+            record->chunkCount = std::max(1, chunkCount);
+            SubmitDispatchWithTaskflow(executor, state, record, 1, std::min(workerCount, record->chunkCount), context, cleanup);
+        });
     }
 
     JobHandle Scheduler::ScheduleParallelFor(
@@ -829,28 +957,7 @@ namespace JobSystem
             record->length = length;
             record->chunkSize = chunkSize;
             record->chunkCount = chunkCount;
-            {
-                std::lock_guard<std::mutex> lock(state->mtx);
-                state->assistToken = AssistToken{ record, 1 };
-            }
-            auto taskflow = AcquireTaskflow();
-            (*taskflow).clear();
-            [=](tf::Taskflow& taskflow) {
-                for (int w = 0; w < workerCount; ++w)
-                {
-                    taskflow.emplace([record]() {
-                        while (RunAssistToken(AssistToken{ record, 1 })) {}
-                        });
-                }
-                }(*taskflow);
-
-            AcquireState(state);
-            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
-                ReleaseDispatchRecord(record);
-                if (cleanup) cleanup(context);
-                CompleteState(state);
-                ReleaseState(state);
-                });
+            SubmitDispatchWithTaskflow(executor, state, record, 1, std::min(workerCount, chunkCount), context, cleanup);
             });
     }
 
@@ -891,28 +998,7 @@ namespace JobSystem
             record->length = length;
             record->chunkSize = safeBatchSize;
             record->chunkCount = batchCount;
-            {
-                std::lock_guard<std::mutex> lock(state->mtx);
-                state->assistToken = AssistToken{ record, 2 };
-            }
-            auto taskflow = AcquireTaskflow();
-            (*taskflow).clear();
-            [=](tf::Taskflow& taskflow) {
-                for (int w = 0; w < workerCount; ++w)
-                {
-                    taskflow.emplace([record]() {
-                        while (RunAssistToken(AssistToken{ record, 2 })) {}
-                        });
-                }
-                }(*taskflow);
-
-            AcquireState(state);
-            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
-                ReleaseDispatchRecord(record);
-                if (cleanup) cleanup(context);
-                CompleteState(state);
-                ReleaseState(state);
-                });
+            SubmitDispatchWithTaskflow(executor, state, record, 2, std::min(workerCount, batchCount), context, cleanup);
             });
     }
 
@@ -940,27 +1026,7 @@ namespace JobSystem
             record->chunkCount = chunkCount;
             record->chunkSize = 1;
             record->length = chunkCount;
-            {
-                std::lock_guard<std::mutex> lock(state->mtx);
-                state->assistToken = AssistToken{ record, 3 };
-            }
-
-            auto taskflow = AcquireTaskflow();
-            taskflow->clear();
-            for (int w = 0; w < workerCount; ++w)
-            {
-                taskflow->emplace([record]() {
-                    while (RunAssistToken(AssistToken{ record, 3 })) {}
-                    });
-            }
-
-            AcquireState(state);
-            executor->run(*taskflow, [taskflow, state, context, cleanup, record]() mutable {
-                ReleaseDispatchRecord(record);
-                if (cleanup) cleanup(context);
-                CompleteState(state);
-                ReleaseState(state);
-                });
+            SubmitDispatchWithTaskflow(executor, state, record, 3, std::min(workerCount, chunkCount), context, cleanup);
             });
     }
 

@@ -14,6 +14,7 @@
 struct ChunkJobData;
 struct ProfilerEntry;
 struct JobSystemTuningNative;
+struct JobSystemStatsNative;
 
 extern "C" {
 
@@ -26,6 +27,7 @@ extern "C" {
 
     JOB_API void JobSystem_Initialize(int numThreads);
     JOB_API void JobSystem_Shutdown();
+    JOB_API void JobSystem_PrewakeWorkers();
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
@@ -49,6 +51,18 @@ extern "C" {
 
     JOB_API void JobSystem_SetTuning(const JobSystemTuningNative* tuning);
     JOB_API void JobSystem_GetTuning(JobSystemTuningNative* tuning);
+
+    typedef struct JobSystemStatsNative {
+        unsigned long long completeWaitLoops;
+        unsigned long long assistAttempts;
+        unsigned long long assistExecuted;
+        unsigned long long frameTasksSubmitted;
+        unsigned long long frameTasksCompleted;
+        int frameQueueDepthPeak;
+    } JobSystemStatsNative;
+
+    JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
+    JOB_API void JobSystem_ResetStats();
 
     /** 
      * 调度多个 Chunk 任务，每个 Chunk 并行执行一次 func 回调。
