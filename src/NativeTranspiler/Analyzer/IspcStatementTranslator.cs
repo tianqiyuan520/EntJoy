@@ -112,6 +112,9 @@ namespace NativeTranspiler.Analyzer
             base.TranslateIdentifier(identifier);
         }
 
+        // Keep branch form in ISPC for better static-path stability on this workload.
+        protected override bool EnableBranchlessSimpleIfRewrite() => false;
+
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
             AppendIndent();

@@ -75,6 +75,7 @@ public static unsafe partial class NativeJobScheduler
     // 函数指针（通过 GetProcAddress 获取）
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
+    private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
@@ -220,6 +221,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
         _jobSystem_Shutdown = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
+        _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
         _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
@@ -250,6 +253,7 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 包装函数 ========================
     private static void JobSystem_Initialize(int numThreads) => _jobSystem_Initialize(numThreads);
     private static void JobSystem_Shutdown() => _jobSystem_Shutdown();
+    private static void JobSystem_PrewakeWorkers() => _jobSystem_PrewakeWorkers();
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
         => _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
     private static IntPtr JobSystem_ScheduleParallelForBatch(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, int batchSize, IntPtr dependency)
@@ -290,6 +294,7 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 公共接口 ========================
     public static void Initialize(int numThreads = 0) => JobSystem_Initialize(numThreads);
     public static void Shutdown() => JobSystem_Shutdown();
+    public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob

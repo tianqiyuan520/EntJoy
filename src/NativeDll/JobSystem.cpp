@@ -457,6 +457,24 @@ namespace JobSystem
         }
     }
 
+    void Scheduler::PrewakeWorkers()
+    {
+        std::shared_ptr<tf::Executor> executor;
+        int workerCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_executorMutex);
+            executor = g_executor;
+            workerCount = g_numThreads;
+        }
+        if (!executor || workerCount <= 0) return;
+
+        const int wakeCount = std::min(workerCount, 8);
+        for (int i = 0; i < wakeCount; ++i)
+        {
+            executor->silent_async([] {});
+        }
+    }
+
     JobHandle Scheduler::Schedule(
         void (*func)(void*), void* context,
         void (*cleanup)(void*),
