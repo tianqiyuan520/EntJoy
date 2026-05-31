@@ -115,48 +115,6 @@ extern "C"
         return toHandle(combined);
     }
 
-    void JobSystem_SetTuning(const JobSystemTuningNative* tuning)
-    {
-        if (!tuning) return;
-        JobSystem::JobSystemTuning nativeTuning{};
-        nativeTuning.spinBeforeWait = tuning->spinBeforeWait;
-        nativeTuning.assistAfterWaitLoops = tuning->assistAfterWaitLoops;
-        nativeTuning.assistBurstMax = tuning->assistBurstMax;
-        nativeTuning.assistCooldownWaitLoops = tuning->assistCooldownWaitLoops;
-        nativeTuning.minChunkSize = tuning->minChunkSize;
-        nativeTuning.workerPriorityMode = tuning->workerPriorityMode;
-        JobSystem::SetTuning(nativeTuning);
-    }
-
-    void JobSystem_GetTuning(JobSystemTuningNative* tuning)
-    {
-        if (!tuning) return;
-        const auto nativeTuning = JobSystem::GetTuning();
-        tuning->spinBeforeWait = nativeTuning.spinBeforeWait;
-        tuning->assistAfterWaitLoops = nativeTuning.assistAfterWaitLoops;
-        tuning->assistBurstMax = nativeTuning.assistBurstMax;
-        tuning->assistCooldownWaitLoops = nativeTuning.assistCooldownWaitLoops;
-        tuning->minChunkSize = nativeTuning.minChunkSize;
-        tuning->workerPriorityMode = nativeTuning.workerPriorityMode;
-    }
-
-    void JobSystem_GetStats(JobSystemStatsNative* stats)
-    {
-        if (!stats) return;
-        const auto nativeStats = JobSystem::GetStats();
-        stats->completeWaitLoops = nativeStats.completeWaitLoops;
-        stats->assistAttempts = nativeStats.assistAttempts;
-        stats->assistExecuted = nativeStats.assistExecuted;
-        stats->frameTasksSubmitted = nativeStats.frameTasksSubmitted;
-        stats->frameTasksCompleted = nativeStats.frameTasksCompleted;
-        stats->frameQueueDepthPeak = nativeStats.frameQueueDepthPeak;
-    }
-
-    void JobSystem_ResetStats()
-    {
-        JobSystem::ResetStats();
-    }
-
     void* JobSystem_ScheduleChunkJob(
         ChunkJobFunc func,
         void* context,
