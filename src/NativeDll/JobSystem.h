@@ -23,6 +23,14 @@ constexpr size_t hardware_destructive_interference_size = 64;
 #endif
 
 namespace JobSystem {
+    struct JobSystemStats {
+        uint64_t completeWaitLoops = 0;
+        uint64_t assistAttempts = 0;
+        uint64_t assistExecuted = 0;
+        uint64_t frameTasksSubmitted = 0;
+        uint64_t frameTasksCompleted = 0;
+        int frameQueueDepthPeak = 0;
+    };
     struct DispatchRecord;
 
     struct AssistToken {
@@ -32,10 +40,10 @@ namespace JobSystem {
 
     struct JobSystemTuning {
         int spinBeforeWait = 256;
-        int assistAfterWaitLoops = 8;
+        int assistAfterWaitLoops = 768;
         int assistBurstMax = 1;
-        int assistCooldownWaitLoops = 16;
-        int minChunkSize = 128;
+        int assistCooldownWaitLoops = 192;
+        int minChunkSize = 256;
         int workerPriorityMode = 0; // 0=normal, 1=above_normal
     };
 
@@ -105,11 +113,14 @@ int ResolveWorkerCount(int numThreads);
 std::shared_ptr<tf::Executor> EnsureExecutor();
 void SetTuning(const JobSystemTuning& tuning);
 JobSystemTuning GetTuning();
+JobSystemStats GetStats();
+void ResetStats();
 
     class Scheduler {
     public:
         static void Initialize(int numThreads = 0);
         static void Shutdown();
+        static void PrewakeWorkers();
 
         static JobHandle Schedule(
             void (*func)(void*), void* context,
