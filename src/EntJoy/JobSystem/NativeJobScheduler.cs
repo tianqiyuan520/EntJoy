@@ -69,6 +69,15 @@ internal unsafe struct HandleStateView
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TranspiledContextPoolStats
+    {
+        public long Hit;
+        public long Miss;
+        public long Return;
+        public long OverflowFree;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ResolveBatchSize(int length, int batchSize)
     {
@@ -398,7 +407,7 @@ public static unsafe partial class NativeJobScheduler
     private static long s_lastParallelScheduleTicks;
     // Frame-stable prewake cadence: avoid over-waking between close schedules.
     // For 16ms frame-style workloads this keeps wakeups near "once per frame".
-    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 125; // 8ms
+    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 1000; // 1ms
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AutoPrewakeIfNeeded(int length)
@@ -806,7 +815,13 @@ public static unsafe partial class NativeJobScheduler
     {
         private const int BucketShift = 6;
         private const int MaxBucket = 64;
+        private const int MaxPerBucket = 256;
         private static readonly ConcurrentStack<IntPtr>[] _buckets = new ConcurrentStack<IntPtr>[MaxBucket];
+        private static readonly int[] _bucketCounts = new int[MaxBucket];
+        private static long _hit;
+        private static long _miss;
+        private static long _return;
+        private static long _overflowFree;
 
         private static int GetBucketIndex(int size)
         {
@@ -817,22 +832,70 @@ public static unsafe partial class NativeJobScheduler
         public static IntPtr Rent(int size)
         {
             int idx = GetBucketIndex(size);
-            if (idx < 0) return Marshal.AllocHGlobal(size);
+            if (idx < 0)
+            {
+                Interlocked.Increment(ref _miss);
+                return Marshal.AllocHGlobal(size);
+            }
             var bucket = _buckets[idx];
-            if (bucket != null && bucket.TryPop(out var ptr)) return ptr;
+            if (bucket != null && bucket.TryPop(out var ptr))
+            {
+                Interlocked.Decrement(ref _bucketCounts[idx]);
+                Interlocked.Increment(ref _hit);
+                return ptr;
+            }
+            Interlocked.Increment(ref _miss);
             return Marshal.AllocHGlobal(1 << (BucketShift + idx));
         }
 
         public static void Return(IntPtr ptr, int size)
         {
             if (ptr == IntPtr.Zero) return;
+            Interlocked.Increment(ref _return);
             int idx = GetBucketIndex(size);
-            if (idx < 0) { Marshal.FreeHGlobal(ptr); return; }
+            if (idx < 0)
+            {
+                Interlocked.Increment(ref _overflowFree);
+                Marshal.FreeHGlobal(ptr);
+                return;
+            }
             var bucket = _buckets[idx];
             if (bucket == null) { bucket = new ConcurrentStack<IntPtr>(); _buckets[idx] = bucket; }
-            const int MaxPerBucket = 256;
-            if (bucket.Count < MaxPerBucket) bucket.Push(ptr);
-            else Marshal.FreeHGlobal(ptr);
+            while (true)
+            {
+                int current = Volatile.Read(ref _bucketCounts[idx]);
+                if (current >= MaxPerBucket)
+                {
+                    Interlocked.Increment(ref _overflowFree);
+                    Marshal.FreeHGlobal(ptr);
+                    return;
+                }
+                if (Interlocked.CompareExchange(ref _bucketCounts[idx], current + 1, current) == current)
+                {
+                    bucket.Push(ptr);
+                    return;
+                }
+            }
+        }
+
+        public static TranspiledContextPoolStats GetStats()
+        {
+            return new TranspiledContextPoolStats
+            {
+                Hit = Interlocked.Read(ref _hit),
+                Miss = Interlocked.Read(ref _miss),
+                Return = Interlocked.Read(ref _return),
+                OverflowFree = Interlocked.Read(ref _overflowFree)
+            };
+        }
+
+        public static void ResetStats()
+        {
+            Interlocked.Exchange(ref _hit, 0);
+            Interlocked.Exchange(ref _miss, 0);
+            Interlocked.Exchange(ref _return, 0);
+            Interlocked.Exchange(ref _overflowFree, 0);
+            Array.Clear(_bucketCounts, 0, _bucketCounts.Length);
         }
     }
 
@@ -865,4 +928,18 @@ public static unsafe partial class NativeJobScheduler
         int size = *(int*)((byte*)dataPtr - sizeof(int));
         ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
     }
+
+    // Transpiler-only context pool API. Reuses existing pool implementation
+    // without changing the existing C# job scheduling behavior.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IntPtr RentJobContext<T>(ref T job) where T : struct => AllocContext(ref job);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void ReturnJobContext(IntPtr ctx) => Cleanup(ctx);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IntPtr GetReturnJobContextFuncPtr() => _cleanupPtr;
+
+    public static TranspiledContextPoolStats GetTranspiledContextPoolStats() => ContextPool.GetStats();
+    public static void ResetTranspiledContextPoolStats() => ContextPool.ResetStats();
 }

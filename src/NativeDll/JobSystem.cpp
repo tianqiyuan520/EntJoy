@@ -854,7 +854,7 @@ namespace JobSystem
 
         // Taskflow-first path: push tiny no-op work to warm worker wakeups
         // before the next frame's real jobs arrive.
-        const int wakeCount = std::min(workerCount, 4);
+        const int wakeCount = std::min(workerCount, 8);
         for (int i = 0; i < wakeCount; ++i)
         {
             executor->silent_async([] {});
