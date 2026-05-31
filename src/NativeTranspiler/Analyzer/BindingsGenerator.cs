@@ -112,7 +112,6 @@ namespace NativeTranspiler.Analyzer
                 GenerateJobScheduleMethod(sb, jobStruct, compilation);
             }
 
-            sb.AppendLine(GenerateCleanupFactoryMethod());
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
@@ -205,7 +204,6 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"        private static readonly JobFuncDelegate s_{jobStruct.Name}_JobFunc;");
                 sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_JobFuncPtr;");
             }
-            sb.AppendLine($"        private static readonly CleanupFuncDelegate s_{jobStruct.Name}_CleanupFunc;");
             sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_CleanupFuncPtr;");
             sb.AppendLine();
         }
@@ -268,11 +266,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"            s_{jobStruct.Name}_JobFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_JobFunc);");
             }
 
-            sb.AppendLine($"            s_{jobStruct.Name}_CleanupFunc = (IntPtr context) =>");
-            sb.AppendLine("            {");
-            sb.AppendLine("                Marshal.FreeHGlobal(context);");
-            sb.AppendLine("            };");
-            sb.AppendLine($"            s_{jobStruct.Name}_CleanupFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_CleanupFunc);");
+            sb.AppendLine($"            s_{jobStruct.Name}_CleanupFuncPtr = NativeJobScheduler.GetReturnJobContextFuncPtr();");
             sb.AppendLine();
         }
 
@@ -361,10 +355,7 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine($"        public static JobHandle Schedule_{jobStruct.Name}({string.Join(", ", parameters)})");
             sb.AppendLine("        {");
-            sb.AppendLine($"            int size = sizeof({jobTypeName});");
-            sb.AppendLine($"            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
-            sb.AppendLine($"            void* originalPtr = Unsafe.AsPointer(ref job);");
-            sb.AppendLine($"            Unsafe.CopyBlockUnaligned((void*)nativePtr, originalPtr, (uint)size);");
+            sb.AppendLine($"            IntPtr nativePtr = NativeJobScheduler.RentJobContext(ref job);");
             sb.AppendLine();
 
             if (isParallelFor || isFor)
@@ -711,17 +702,5 @@ namespace NativeTranspiler.Analyzer
             };
         }
 
-        private static string GenerateCleanupFactoryMethod()
-        {
-            return @"
-        private static CleanupFuncDelegate CreateCleanup<T>(int size) where T : struct
-        {
-            return context =>
-            {
-                IntPtr native = (IntPtr)context;
-                Marshal.FreeHGlobal(native);
-            };
-        }";
-        }
     }
 }
