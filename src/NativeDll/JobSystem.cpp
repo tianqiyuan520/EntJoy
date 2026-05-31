@@ -701,50 +701,7 @@ namespace JobSystem
     void JobHandle::Complete() const
     {
         if (!_state) return;
-        if (_state->completed.load(std::memory_order_acquire)) return;
-
-        // 阶段 1: 有限自旋，覆盖极短任务，避免立刻进入内核等待路径
-        int spinBeforeWait = kDefaultSpinBeforeWait;
-        int assistAfterWaitLoops = kDefaultAssistAfterWaitLoops;
-        int assistBurstMax = kDefaultAssistBurstMax;
-        int assistCooldownWaitLoops = kDefaultAssistCooldownWaitLoops;
-        {
-            std::lock_guard<std::mutex> lock(g_tuningMutex);
-            spinBeforeWait = std::max(0, g_tuning.spinBeforeWait);
-            assistAfterWaitLoops = std::max(1, g_tuning.assistAfterWaitLoops);
-            assistBurstMax = std::max(1, g_tuning.assistBurstMax);
-            assistCooldownWaitLoops = std::max(1, g_tuning.assistCooldownWaitLoops);
-        }
-
-        for (int i = 0; i < spinBeforeWait; ++i) {
-            if (_state->completed.load(std::memory_order_acquire)) return;
-            RelaxCpu();
-        }
-
-        int waitLoops = 0;
-        int cooldown = 0;
         while (!_state->completed.load(std::memory_order_acquire)) {
-            ++waitLoops;
-            g_statCompleteWaitLoops.fetch_add(1, std::memory_order_relaxed);
-            if (cooldown > 0) --cooldown;
-
-            if (cooldown == 0 && waitLoops >= assistAfterWaitLoops) {
-                waitLoops = 0;
-                AssistToken assistToken{};
-                {
-                    std::lock_guard<std::mutex> lock(_state->mtx);
-                    assistToken = _state->assistToken;
-                }
-                g_statAssistAttempts.fetch_add(1, std::memory_order_relaxed);
-                if (assistToken.record) {
-                    for (int i = 0; i < assistBurstMax; ++i) {
-                        if (!RunAssistToken(assistToken)) break;
-                        g_statAssistExecuted.fetch_add(1, std::memory_order_relaxed);
-                        if (_state->completed.load(std::memory_order_acquire)) return;
-                    }
-                    cooldown = assistCooldownWaitLoops;
-                }
-            }
             _state->completed.wait(false, std::memory_order_acquire);
         }
     }

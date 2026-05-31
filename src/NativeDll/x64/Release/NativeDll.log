@@ -56,8 +56,8 @@ D:\Godot\Project\EntJoy\external\cpp-taskflow\taskflow\core\async.hpp(1,1): warn
   
     正在创建库 ..\..\bin\NativeDll.lib 和对象 ..\..\bin\NativeDll.exp
   正在生成代码
-  2 of 3888 functions (<0.1%) were compiled, the rest were copied from previous compilation.
+  7 of 3887 functions ( 0.2%) were compiled, the rest were copied from previous compilation.
     0 functions were new in current compilation
-    2 functions had inline decision re-evaluated but remain unchanged
+    49 functions had inline decision re-evaluated but remain unchanged
   已完成代码的生成
   NativeDll.vcxproj -> D:\Godot\Project\EntJoy\bin\NativeDll.dll
