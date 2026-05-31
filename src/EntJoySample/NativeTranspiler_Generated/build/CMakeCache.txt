@@ -183,22 +183,10 @@ NativeDll_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTrans
 NativeDll_IS_TOP_LEVEL:STATIC=ON
 
 //Dependencies for the target
-NativeDll_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj;
+NativeDll_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj;
 
 //Value Computed by CMake
 NativeDll_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated
-
-//Value Computed by CMake
-NativeTranspiler_Generated_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build
-
-//Value Computed by CMake
-NativeTranspiler_Generated_IS_TOP_LEVEL:STATIC=ON
-
-//Dependencies for the target
-NativeTranspiler_Generated_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj;general;D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj;
-
-//Value Computed by CMake
-NativeTranspiler_Generated_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated
 
 
 ########################
