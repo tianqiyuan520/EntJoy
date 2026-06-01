@@ -295,6 +295,21 @@ public static unsafe partial class NativeJobScheduler
     public static void Initialize(int numThreads = 0) => JobSystem_Initialize(numThreads);
     public static void Shutdown() => JobSystem_Shutdown();
     public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
+    private static long s_lastParallelScheduleTicks;
+    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 1000; // 1ms
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AutoPrewakeIfNeeded(int length)
+    {
+        if (length < 1024) return;
+        long now = Stopwatch.GetTimestamp();
+        long last = Interlocked.Read(ref s_lastParallelScheduleTicks);
+        if (now - last >= s_prewakeGapTicks)
+        {
+            JobSystem_PrewakeWorkers();
+        }
+        Interlocked.Exchange(ref s_lastParallelScheduleTicks, now);
+    }
 
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
@@ -327,6 +342,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelFor
     {
         if (length <= 0) return default;
+        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
@@ -341,6 +357,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelForBatch
     {
         if (length <= 0) return default;
+        AutoPrewakeIfNeeded(length);
         var ctx = AllocContext(ref job);
         try
         {
@@ -386,7 +403,10 @@ public static unsafe partial class NativeJobScheduler
         => new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependsOn?.Handle ?? IntPtr.Zero));
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
-        => new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+    {
+        if (length > 0) AutoPrewakeIfNeeded(length);
+        return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+    }
 
 
     // ======================== Profiler 公共接口 ========================
