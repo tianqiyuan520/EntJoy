@@ -40,6 +40,8 @@ internal unsafe struct ChunkContextHeader
     public int gcHandleStartIndex;       // GCHandle 列表起始索引
     public IntPtr chunksPtr;             // ChunkJobData 数组指针（用于 cleanup 回收）
     public int cleanupInProgress;        // 防止重复清理的标志
+    public IntPtr requiredComponentTypeIds; // NativeTranspiler IJobChunk 所需组件类型 ID 数组
+    public int requiredComponentTypeIdCount; // 所需组件类型 ID 数量
     // 紧接着是 job 的原始数据（变长）
 }
 
@@ -431,6 +433,14 @@ public static unsafe partial class NativeJobScheduler
     // ======================== IJobChunk 调度 ========================
     public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null)
         where T : struct, IJobChunk
+        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn);
+
+    public static NativeJobHandle ScheduleChunkRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+        where T : struct, IJobChunk
+        => ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn);
+
+    private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn)
+        where T : struct, IJobChunk
     {
         var chunkList = new List<Chunk>(128);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
@@ -471,7 +481,7 @@ public static unsafe partial class NativeJobScheduler
                 compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
                 compSizes[c] = arch.Types[c].Size;
                 bitmaps[c] = chunk.GetEnableBitMapPointer(c);
-                typeIndices[c] = c;
+                typeIndices[c] = arch.Types[c].Id;
             }
 
             chunksPtr[ci] = new ChunkJobData
@@ -487,12 +497,17 @@ public static unsafe partial class NativeJobScheduler
             };
         }
 
-        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex);
+        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
 
         try
         {
-            var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
-            return new NativeJobHandle(JobSystem_ScheduleChunkJob(cache.FuncPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero));
+            IntPtr callbackPtr = funcPtr;
+            if (callbackPtr == IntPtr.Zero)
+            {
+                var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
+                callbackPtr = cache.FuncPtr;
+            }
+            return new NativeJobHandle(JobSystem_ScheduleChunkJob(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -501,7 +516,7 @@ public static unsafe partial class NativeJobScheduler
     private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
     private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
 
-    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex) where T : struct
+    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, int[] requiredComponentTypeIds = null) where T : struct
     {
         int jobSize = Unsafe.SizeOf<T>();
         int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
@@ -513,7 +528,8 @@ public static unsafe partial class NativeJobScheduler
             for (int i = 0; i < allEnabledTypes.Length; i++) typeHashes[i] = allEnabledTypes[i].GetHashCode();
             typesDataSize = allEnabledTypes.Length * sizeof(int);
         }
-        int totalSize = headerSize + jobSize + typesDataSize;
+        int requiredTypesDataSize = requiredComponentTypeIds != null ? requiredComponentTypeIds.Length * sizeof(int) : 0;
+        int totalSize = headerSize + typesDataSize + requiredTypesDataSize + jobSize;
         var block = Marshal.AllocHGlobal(totalSize);
         Unsafe.InitBlockUnaligned((void*)block, 0, (uint)totalSize);
         var header = (ChunkContextHeader*)block;
@@ -530,7 +546,15 @@ public static unsafe partial class NativeJobScheduler
             header->queryAllEnabledTypes = (IntPtr)typeHashPtr;
         }
         else { header->allEnabledCount = 0; header->queryAllEnabledTypes = IntPtr.Zero; }
-        byte* jobPtr = (byte*)block + headerSize + typesDataSize;
+        if (requiredComponentTypeIds != null && requiredComponentTypeIds.Length > 0)
+        {
+            var requiredTypePtr = (int*)((byte*)block + headerSize + typesDataSize);
+            for (int i = 0; i < requiredComponentTypeIds.Length; i++) requiredTypePtr[i] = requiredComponentTypeIds[i];
+            header->requiredComponentTypeIdCount = requiredComponentTypeIds.Length;
+            header->requiredComponentTypeIds = (IntPtr)requiredTypePtr;
+        }
+        else { header->requiredComponentTypeIdCount = 0; header->requiredComponentTypeIds = IntPtr.Zero; }
+        byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
         Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)jobSize);
         return block;
     }
@@ -643,7 +667,8 @@ public static unsafe partial class NativeJobScheduler
             var header = (ChunkContextHeader*)ctx;
             int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
             int typesDataSize = header->allEnabledCount * sizeof(int);
-            byte* jobPtr = (byte*)ctx + headerSize + typesDataSize;
+            int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
+            byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
             ref var job = ref Unsafe.AsRef<T>(jobPtr);
 
             var chunkHandle = cd->chunkHandle;

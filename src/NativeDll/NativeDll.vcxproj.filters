@@ -33,6 +33,12 @@
     <ClInclude Include="ChunkJobData.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="JobProfiler.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ChunkNativeArray.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Native.cpp">
@@ -45,6 +51,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="tasksys.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JobProfiler.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
