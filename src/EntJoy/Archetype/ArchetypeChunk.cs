@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Runtime.CompilerServices;
+using EntJoy.Collections;
 
 namespace EntJoy
 {
@@ -11,12 +12,22 @@ namespace EntJoy
 
         public int Count => _chunk.EntityCount;
 
+        private static readonly AtomicSafetyHandle s_chunkViewSafety = SafetyHandleManager.Allocate();
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe Span<T> GetComponentDataSpan<T>() where T : struct
         {
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             T* ptr = (T*)((byte*)_chunk.MemoryBlock + _chunk.GetComponentOffset(idx));
             return new Span<T>(ptr, Count);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe NativeArray<T> GetComponentDataNativeArray<T>() where T : unmanaged
+        {
+            int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
+            void* ptr = (void*)_chunk.GetComponentArrayPointer(idx);
+            return NativeArray<T>.CreateView(ptr, Count, s_chunkViewSafety, Allocator.None);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

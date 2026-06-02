@@ -33,17 +33,17 @@ namespace NativeTranspiler.Analyzer
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
                 var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fullName == "EntJoy.Collections.NativeArray<T>")
+                if (fullName == "EntJoy.Collections.NativeArray<T>" || fullName == "global::EntJoy.Collections.NativeArray<T>")
                 {
                     var elem = named.TypeArguments[0];
                     return $"EntJoy::Collections::NativeArray<{MapCSharpTypeToCpp(elem)}>";
                 }
-                if (fullName == "EntJoy.Collections.NativeList<T>")
+                if (fullName == "EntJoy.Collections.NativeList<T>" || fullName == "global::EntJoy.Collections.NativeList<T>")
                 {
                     var elem = named.TypeArguments[0];
                     return $"EntJoy::Collections::UnsafeList<{MapCSharpTypeToCpp(elem)}>";
                 }
-                if (fullName == "EntJoy.Collections.UnsafeList<T>")
+                if (fullName == "EntJoy.Collections.UnsafeList<T>" || fullName == "global::EntJoy.Collections.UnsafeList<T>")
                 {
                     var elem = named.TypeArguments[0];
                     return $"EntJoy::Collections::UnsafeList<{MapCSharpTypeToCpp(elem)}>";
@@ -62,7 +62,7 @@ namespace NativeTranspiler.Analyzer
                 };
             }
 
-            return type.SpecialType switch
+            var mapped = type.SpecialType switch
             {
                 SpecialType.System_Int32 => "int",
                 SpecialType.System_UInt32 => "unsigned int",
@@ -72,8 +72,11 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Double => "double",
                 SpecialType.System_Boolean => "bool",
                 SpecialType.System_Void => "void",
-                _ => type.Name
+                _ => null
             };
+            if (mapped != null) return mapped;
+
+            return string.IsNullOrEmpty(ns) ? type.Name : $"{ns.Replace(".", "::")}::{type.Name}";
         }
 
         private static string GetNamespace(ITypeSymbol type)
@@ -179,7 +182,7 @@ namespace NativeTranspiler.Analyzer
             var ns = structSymbol.ContainingNamespace?.ToDisplayString() ?? "";
             bool hasNs = !string.IsNullOrEmpty(ns) && ns != "<global namespace>";
             if (hasNs)
-                sb.AppendLine($"namespace {ns} {{");
+                sb.AppendLine($"namespace {ns.Replace(".", "::")} {{");
             sb.AppendLine($"struct {structSymbol.Name} {{");
             foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>()
                 .Where(f => !f.IsStatic)

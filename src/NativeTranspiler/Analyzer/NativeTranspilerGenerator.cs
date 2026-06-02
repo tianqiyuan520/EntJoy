@@ -335,7 +335,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor") == true)
+                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk") == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -408,6 +408,9 @@ namespace NativeTranspiler.Analyzer
                             if (localType != null)
                                 CollectFromType(localType, structs);
                         }
+
+                        foreach (var chunkComponentType in CppJobGenerator.CollectChunkNativeArrayTypes(job, compilation))
+                            CollectFromType(chunkComponentType, structs);
                     }
                 }
             }
