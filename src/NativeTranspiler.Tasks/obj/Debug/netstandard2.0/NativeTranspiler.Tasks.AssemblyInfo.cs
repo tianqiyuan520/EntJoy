@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a2a56419d56521d773cb9f7a118b0514ae4f0b42")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+27979741a202939d1477f00aca6f434a2fa74968")]
 [assembly: System.Reflection.AssemblyProductAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
