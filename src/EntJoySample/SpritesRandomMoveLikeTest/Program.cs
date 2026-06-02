@@ -1,5 +1,4 @@
-using EntJoy.Collections;
-using EntJoySample.SpritesRandomMove;
+ï»¿using EntJoySample.SpritesRandomMove;
 
 namespace EntJoySample;
 
@@ -13,14 +12,14 @@ public static class Program
 
         while (true)
         {
-            Console.WriteLine("ÇëÑ¡Ôñ²âÊÔÈÎÎñ£º");
+            Console.WriteLine("è¯·é€‰æ‹©æµ‹è¯•ä»»åŠ¡ï¼š");
             Console.WriteLine("  1. ECS IJobChunk");
             Console.WriteLine("  2. C# Job");
             Console.WriteLine("  3. Native C++ Job");
             Console.WriteLine("  4. Native ISPC Job");
             Console.WriteLine("  5. Parity Suite");
             Console.WriteLine("  0. Exit");
-            Console.Write("ÊäÈëĞòºÅ: ");
+            Console.Write("è¾“å…¥åºå·: ");
 
             string? input = Console.ReadLine()?.Trim();
             Console.WriteLine();
@@ -45,7 +44,7 @@ public static class Program
                 case "0":
                     return;
                 default:
-                    Console.WriteLine("ÎŞĞ§ÊäÈë£¬ÇëÖØĞÂÊäÈë¡£\n");
+                    Console.WriteLine("æ— æ•ˆè¾“å…¥ï¼Œè¯·é‡æ–°è¾“å…¥ã€‚\\n");
                     break;
             }
         }
