@@ -12,6 +12,24 @@ if errorlevel 1 (
     echo Failed to compile SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.ispc
     exit /b 1
 )
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.ispc
+    exit /b 1
+)
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.ispc
+    exit /b 1
+)
+echo Compiling SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc...
+"%ISPC%" "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc" -o "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" -h "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc
+    exit /b 1
+)
 echo Compiling SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.ispc...
 "%ISPC%" "SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.ispc" -o "build\SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj" -h "SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
 if errorlevel 1 (
@@ -28,12 +46,6 @@ echo Compiling SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPo
 "%ISPC%" "SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.ispc" -o "build\SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj" -h "SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
 if errorlevel 1 (
     echo Failed to compile SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.ispc
-    exit /b 1
-)
-echo Compiling SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc...
-"%ISPC%" "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc" -o "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" -h "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
-if errorlevel 1 (
-    echo Failed to compile SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc
     exit /b 1
 )
 echo All ISPC files compiled successfully.
