@@ -22,6 +22,18 @@ add_library(NativeDll SHARED
     "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
     SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeCppStatic.cpp
     SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic_wrapper.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
+    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__GridSearch2D_GridInitializationJobPointer_Execute.cpp
     SharpNative_Job__global_namespace__GridSearch2D_GridInitializationJobPointer_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch_wrapper.cpp
@@ -38,14 +50,6 @@ add_library(NativeDll SHARED
     SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
-    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
     ${TASKSYS_SRC}
 )
 
@@ -66,10 +70,12 @@ add_custom_command(TARGET NativeDll PRE_BUILD
 
 set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj"
-    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"
 )
 target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
 

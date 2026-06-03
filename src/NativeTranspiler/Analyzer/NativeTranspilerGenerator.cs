@@ -258,16 +258,22 @@ namespace NativeTranspiler.Analyzer
                         cppFiles.Add(plainBase + ".cpp");
                     }
 
-                    // 为所有 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）
-                    var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
-                    string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
-                    bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
-                    bool adapterFileExists = File.Exists(adapterPath);
-                    if (!adapterDisabledAutoRefresh || !adapterFileExists)
+                    bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
+                                                             CppJobGenerator.IsChunkJob(job);
+                    if (!adapterProvidedByIspcChunkWrapper)
                     {
-                        WriteAllTextWithRetry(adapterPath, adapterCode);
+                        // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
+                        // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
+                        var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
+                        string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
+                        bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                        bool adapterFileExists = File.Exists(adapterPath);
+                        if (!adapterDisabledAutoRefresh || !adapterFileExists)
+                        {
+                            WriteAllTextWithRetry(adapterPath, adapterCode);
+                        }
+                        cppFiles.Add($"{plainBase}_Adapter.cpp");
                     }
-                    cppFiles.Add($"{plainBase}_Adapter.cpp");
                 }
 
                 // 生成 run_ispc.bat
