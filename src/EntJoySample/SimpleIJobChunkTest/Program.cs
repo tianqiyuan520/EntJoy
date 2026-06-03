@@ -4,7 +4,7 @@
 
 //public static class Program
 //{
-//    public static void RunSimpleIJobChunkTest()
+//    public static void Main()
 //    {
 //        NativeJobScheduler.Initialize();
 

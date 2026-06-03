@@ -10,7 +10,7 @@ public struct TestValue : IComponentData
     public int Value;
 }
 
-//[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
 public readonly struct AddOneJob : IJobChunk
 {
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
