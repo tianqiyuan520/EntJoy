@@ -433,6 +433,32 @@ public static unsafe partial class NativeJobScheduler
     }
 
     // ======================== IJobChunk 调度 ========================
+    private static readonly object _rawChunkScheduleCacheLock = new();
+    private static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
+
+    public static void ClearRawChunkScheduleCaches(EntityManager entityManager)
+    {
+        if (entityManager == null) return;
+
+        lock (_rawChunkScheduleCacheLock)
+        {
+            var keysToRemove = new List<RawChunkScheduleCacheKey>();
+            foreach (var pair in _rawChunkScheduleCaches)
+            {
+                if (pair.Key.Matches(entityManager))
+                {
+                    pair.Value.Dispose();
+                    keysToRemove.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; i < keysToRemove.Count; i++)
+            {
+                _rawChunkScheduleCaches.Remove(keysToRemove[i]);
+            }
+        }
+    }
+
     public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null)
         where T : struct, IJobChunk
         => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn);
@@ -444,6 +470,22 @@ public static unsafe partial class NativeJobScheduler
     private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn)
         where T : struct, IJobChunk
     {
+        var allEnabledTypes = query.AllEnabled;
+        bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
+        bool canUseRawCache = funcPtr != IntPtr.Zero &&
+                              !hasEnabledFilter;
+        if (canUseRawCache &&
+            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache) &&
+            rawCache.ChunkCount > 0)
+        {
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds);
+            try
+            {
+                return new NativeJobHandle(JobSystem_ScheduleChunkJob(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero));
+            }
+            catch { ChunkCleanup(rawContextBlock); throw; }
+        }
+
         var chunkList = new List<Chunk>(128);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
@@ -458,8 +500,6 @@ public static unsafe partial class NativeJobScheduler
         int chunkCount = chunkList.Count;
         if (chunkCount == 0) return default;
 
-        var allEnabledTypes = query.AllEnabled;
-        bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
 
         int gcHandleStartIndex;
@@ -539,6 +579,223 @@ public static unsafe partial class NativeJobScheduler
         catch { ChunkCleanup(contextBlock); throw; }
     }
 
+    private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache)
+    {
+        var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), GetRequiredComponentHash(requiredComponentTypeIds));
+        lock (_rawChunkScheduleCacheLock)
+        {
+            if (_rawChunkScheduleCaches.TryGetValue(key, out cache))
+            {
+                if (cache.StructuralVersion == entityManager.StructuralVersion)
+                {
+                    return true;
+                }
+
+                cache.Dispose();
+                _rawChunkScheduleCaches.Remove(key);
+            }
+
+            cache = BuildRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds);
+            _rawChunkScheduleCaches[key] = cache;
+            return true;
+        }
+    }
+
+    private static RawChunkScheduleCache BuildRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds)
+    {
+        var chunkList = new List<Chunk>(128);
+        for (int i = 0; i < entityManager.ArchetypeCount; i++)
+        {
+            var archetype = entityManager.Archetypes[i];
+            if (archetype != null && archetype.IsMatch(query))
+            {
+                foreach (var chunk in archetype.GetChunks())
+                {
+                    if (chunk.EntityCount > 0)
+                    {
+                        chunkList.Add(chunk);
+                    }
+                }
+            }
+        }
+
+        int chunkCount = chunkList.Count;
+        if (chunkCount == 0)
+        {
+            return new RawChunkScheduleCache(entityManager.StructuralVersion, null, 0);
+        }
+
+        var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
+        int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+
+        for (int ci = 0; ci < chunkCount; ci++)
+        {
+            var chunk = chunkList[ci];
+            var archetype = chunk.Archetype;
+            int componentCount = chunk.ComponentCount;
+            var componentArrays = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
+            var componentTypeIndices = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
+            void** requiredArrays = null;
+
+            if (requiredCount > 0)
+            {
+                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+            }
+
+            for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
+            {
+                componentArrays[componentIndex] = (void*)chunk.GetComponentArrayPointer(componentIndex);
+                componentTypeIndices[componentIndex] = archetype.Types[componentIndex].Id;
+            }
+
+            if (requiredArrays != null)
+            {
+                for (int r = 0; r < requiredCount; r++)
+                {
+                    int requiredTypeId = requiredComponentTypeIds[r];
+                    for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
+                    {
+                        if (componentTypeIndices[componentIndex] == requiredTypeId)
+                        {
+                            requiredArrays[r] = componentArrays[componentIndex];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            chunksPtr[ci] = new ChunkJobData
+            {
+                entityArray = (void*)chunk.GetEntityPointer(),
+                entityCount = chunk.EntityCount,
+                componentCount = componentCount,
+                componentArrays = componentArrays,
+                componentSizes = null,
+                enableBitMaps = null,
+                componentTypeIndices = componentTypeIndices,
+                chunkHandle = IntPtr.Zero,
+                requiredComponentArrays = requiredArrays,
+                requiredComponentCount = requiredCount
+            };
+        }
+
+        return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount);
+    }
+
+    private static int GetQueryHash(QueryBuilder query)
+    {
+        var hash = new HashCode();
+        AddComponentTypesHash(ref hash, query.All);
+        AddComponentTypesHash(ref hash, query.Any);
+        AddComponentTypesHash(ref hash, query.None);
+        AddComponentTypesHash(ref hash, query.AllEnabled);
+        hash.Add(query.LimitCount);
+        return hash.ToHashCode();
+    }
+
+    private static void AddComponentTypesHash(ref HashCode hash, ComponentType[] types)
+    {
+        if (types == null)
+        {
+            hash.Add(0);
+            return;
+        }
+
+        hash.Add(types.Length);
+        for (int i = 0; i < types.Length; i++)
+        {
+            hash.Add(types[i].Id);
+        }
+    }
+
+    private static int GetRequiredComponentHash(int[] requiredComponentTypeIds)
+    {
+        var hash = new HashCode();
+        if (requiredComponentTypeIds == null)
+        {
+            hash.Add(0);
+            return hash.ToHashCode();
+        }
+
+        hash.Add(requiredComponentTypeIds.Length);
+        for (int i = 0; i < requiredComponentTypeIds.Length; i++)
+        {
+            hash.Add(requiredComponentTypeIds[i]);
+        }
+
+        return hash.ToHashCode();
+    }
+
+    private readonly struct RawChunkScheduleCacheKey : IEquatable<RawChunkScheduleCacheKey>
+    {
+        private readonly EntityManager _entityManager;
+        private readonly int _managerHash;
+        private readonly int _queryHash;
+        private readonly int _requiredHash;
+
+        public RawChunkScheduleCacheKey(EntityManager entityManager, int queryHash, int requiredHash)
+        {
+            _entityManager = entityManager;
+            _managerHash = RuntimeHelpers.GetHashCode(entityManager);
+            _queryHash = queryHash;
+            _requiredHash = requiredHash;
+        }
+
+        public bool Equals(RawChunkScheduleCacheKey other)
+            => ReferenceEquals(_entityManager, other._entityManager) &&
+               _queryHash == other._queryHash &&
+               _requiredHash == other._requiredHash;
+
+        public bool Matches(EntityManager entityManager)
+            => ReferenceEquals(_entityManager, entityManager);
+
+        public override bool Equals(object obj)
+            => obj is RawChunkScheduleCacheKey other && Equals(other);
+
+        public override int GetHashCode()
+            => HashCode.Combine(_managerHash, _queryHash, _requiredHash);
+    }
+
+    private sealed class RawChunkScheduleCache : IDisposable
+    {
+        public readonly int StructuralVersion;
+        public readonly ChunkJobData* ChunksPtr;
+        public readonly int ChunkCount;
+
+        public RawChunkScheduleCache(int structuralVersion, ChunkJobData* chunksPtr, int chunkCount)
+        {
+            StructuralVersion = structuralVersion;
+            ChunksPtr = chunksPtr;
+            ChunkCount = chunkCount;
+        }
+
+        ~RawChunkScheduleCache()
+        {
+            Dispose();
+        }
+
+        public void Dispose()
+        {
+            if (ChunksPtr == null)
+            {
+                GC.SuppressFinalize(this);
+                return;
+            }
+
+            for (int i = 0; i < ChunkCount; i++)
+            {
+                var chunkData = ChunksPtr[i];
+                if (chunkData.componentArrays != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentArrays);
+                if (chunkData.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentTypeIndices);
+                if (chunkData.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)chunkData.requiredComponentArrays);
+            }
+
+            Marshal.FreeHGlobal((IntPtr)ChunksPtr);
+            GC.SuppressFinalize(this);
+        }
+    }
+
     // ======================== 内部实现 ========================
     private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
     private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
@@ -594,8 +851,9 @@ public static unsafe partial class NativeJobScheduler
         int chunkCount = header->chunkCount;
         int gcHandleStartIndex = header->gcHandleStartIndex;
         var chunksPtr = (ChunkJobData*)header->chunksPtr;
+        bool ownsChunkData = gcHandleStartIndex >= 0;
 
-        if (chunksPtr != null)
+        if (chunksPtr != null && ownsChunkData)
         {
             lock (_chunkGCHandlesLock)
             {
@@ -607,20 +865,23 @@ public static unsafe partial class NativeJobScheduler
             }
         }
 
-        for (int i = 0; i < chunkCount; i++)
+        if (ownsChunkData)
         {
-            if (chunksPtr != null)
+            for (int i = 0; i < chunkCount; i++)
             {
-                var cd = chunksPtr[i];
-                if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
-                if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
-                if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
-                if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
-                if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                if (chunksPtr != null)
+                {
+                    var cd = chunksPtr[i];
+                    if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
+                    if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
+                    if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
+                    if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
+                    if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                }
             }
         }
 
-        if (chunksPtr != null) Marshal.FreeHGlobal((IntPtr)chunksPtr);
+        if (chunksPtr != null && ownsChunkData) Marshal.FreeHGlobal((IntPtr)chunksPtr);
         Marshal.FreeHGlobal(contextBlock);
     }
 

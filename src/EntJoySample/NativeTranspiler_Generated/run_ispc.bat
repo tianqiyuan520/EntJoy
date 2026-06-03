@@ -48,4 +48,28 @@ if errorlevel 1 (
     echo Failed to compile SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.ispc
     exit /b 1
 )
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc
+    exit /b 1
+)
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc
+    exit /b 1
+)
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.ispc
+    exit /b 1
+)
+echo Compiling SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc...
+"%ISPC%" "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc" -o "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj" -h "SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+if errorlevel 1 (
+    echo Failed to compile SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.ispc
+    exit /b 1
+)
 echo All ISPC files compiled successfully.

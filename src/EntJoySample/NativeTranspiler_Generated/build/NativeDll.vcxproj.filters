@@ -103,6 +103,24 @@
     <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute_Adapter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute_Adapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute_Adapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\Godot\Project\EntJoy\src\NativeDll\tasksys.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

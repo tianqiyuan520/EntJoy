@@ -109,7 +109,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.@default)]
     public struct HeavyJobChunkCpp : IJobChunk
     {
         public float DeltaTime;

@@ -50,6 +50,18 @@ add_library(NativeDll SHARED
     SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_wrapper.cpp
     ${TASKSYS_SRC}
 )
 
@@ -76,13 +88,16 @@ set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_AssignAndCountJobPointer_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_CopyHashIndexJobPointer_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Batch.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj"
 )
 target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
 
 if(MSVC)
     target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)
     target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)
-    set_source_files_properties(SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCpp_Execute.cpp PROPERTIES COMPILE_FLAGS "/fp:fast")
     set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 else()
     target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)
