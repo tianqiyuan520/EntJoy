@@ -429,6 +429,8 @@ namespace NativeTranspiler.Analyzer
             // 过滤预定义的容器类型
             if (NativeTranspiler.IsEntJoyPredefinedType(type))
                 return;
+            if (type.Name == "Span" && type.ContainingNamespace?.ToDisplayString() == "System")
+                return;
 
             if (type.IsValueType && !NativeTranspiler.IsBuiltinUnmanaged(type))
             {
