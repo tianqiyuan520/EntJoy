@@ -15,7 +15,7 @@ foreach (index = 0 ... positions_length) {
     float vy = velocity.Value.y;
     float accX = px * 0.001f + vx * 0.01f;
     float accY = py * 0.001f + vy * 0.01f;
-    for (int iteration = 0; iteration < 32; iteration++)
+    for (int iteration = 0; iteration < 16; iteration++)
     {
         float phaseX = accX + iteration * 0.03125f;
         float phaseY = accY - iteration * 0.0625f;
