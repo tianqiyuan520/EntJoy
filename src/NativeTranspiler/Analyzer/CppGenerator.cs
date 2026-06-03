@@ -99,7 +99,9 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppPointerStatementTranslator(semanticModel, method);
+                var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+                bool useFastMath = AttributeHelper.HasFastCppMathLib(method, attrSymbol);
+                var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
             }
