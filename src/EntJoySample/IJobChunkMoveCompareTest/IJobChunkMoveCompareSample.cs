@@ -38,13 +38,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         public float DeltaTime;
 
-        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
-        {
-            NativeArray<MovePosition> positions = chunk.GetComponentDataNativeArray<MovePosition>();
-            NativeArray<MoveVelocity> velocities = chunk.GetComponentDataNativeArray<MoveVelocity>();
+    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+    {
+        Span<MovePosition> positions = chunk.GetComponentDataSpan<MovePosition>();
+        Span<MoveVelocity> velocities = chunk.GetComponentDataSpan<MoveVelocity>();
 
-            for (int index = 0; index < positions.Length; index++)
-            {
+        for (int index = 0; index < positions.Length; index++)
+        {
                 MovePosition position = positions[index];
                 position.Value += velocities[index].Value * DeltaTime;
                 positions[index] = position;
@@ -56,7 +56,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         private const int EntityCount = 1_000_000;
         private const int WarmupFrames = 5;
-        private const int MeasureFrames = 60;
+        private const int MeasureFrames = 500;
         private const float DeltaTime = 1.0f / 60.0f;
         private const float Epsilon = 0.001f;
 

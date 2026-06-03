@@ -85,6 +85,12 @@
     <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\Godot\Project\EntJoy\src\NativeDll\tasksys.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

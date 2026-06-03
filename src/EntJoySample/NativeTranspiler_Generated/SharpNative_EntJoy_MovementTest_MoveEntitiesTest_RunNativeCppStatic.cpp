@@ -1,6 +1,7 @@
 #include "SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeCppStatic.h"
 #include "EntJoySample_IJobChunkMoveCompareTest_MovePosition.h"
 #include "EntJoySample_IJobChunkMoveCompareTest_MoveVelocity.h"
+#include "EntJoySample_SimpleIJobChunkTest_TestValue.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

@@ -165,7 +165,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         case LocalDeclarationStatementSyntax localDecl:
                             var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-                            if (localType != null && !IsUnmanagedType(localType))
+                            if (localType != null && !IsUnmanagedType(localType) && !(isChunkJob && IsAllowedChunkSpanLocal(localDecl, semanticModel)))
                                 foreach (var v in localDecl.Declaration.Variables)
                                     diagnostics.Add(Diagnostic.Create(InvalidLocalVariableTypeError, v.GetLocation(), executeMethod.Name, v.Identifier.Text, localType.ToDisplayString()));
                             break;
@@ -258,7 +258,8 @@ namespace NativeTranspiler.Analyzer
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
-                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" && method.Name == "GetComponentDataNativeArray")
+                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                    (method.Name == "GetComponentDataNativeArray" || method.Name == "GetComponentDataSpan"))
                     return true;
                 return false;
             }
@@ -297,7 +298,26 @@ namespace NativeTranspiler.Analyzer
         {
             if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk")
                 return false;
-            return method.Name == "GetComponentDataSpan" || method.Name == "GetComponentDataPtr";
+            return method.Name == "GetComponentDataPtr";
+        }
+
+        private static bool IsAllowedChunkSpanLocal(LocalDeclarationStatementSyntax localDecl, SemanticModel semanticModel)
+        {
+            var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
+            if (localType?.Name != "Span" || localType.ContainingNamespace?.ToDisplayString() != "System")
+                return false;
+
+            foreach (var variable in localDecl.Declaration.Variables)
+            {
+                if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation)
+                    return false;
+                if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
+                    return false;
+                if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" || method.Name != "GetComponentDataSpan")
+                    return false;
+            }
+
+            return true;
         }
 
         public static List<IFieldSymbol> GetConditionalReadOnlyFields(INamedTypeSymbol jobStruct, SemanticModel semanticModel)

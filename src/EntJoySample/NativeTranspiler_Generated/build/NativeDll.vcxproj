@@ -489,6 +489,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp" />
     <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp" />
     <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp" />
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp" />
+    <ClCompile Include="D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp" />
     <ClCompile Include="D:\Godot\Project\EntJoy\src\NativeDll\tasksys.cpp">
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
