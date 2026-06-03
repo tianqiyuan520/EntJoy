@@ -52,6 +52,25 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
+    public struct MoveJobChunkCppFast : IJobChunk
+    {
+        public float DeltaTime;
+
+        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+        {
+            NativeArray<MovePosition> positions = chunk.GetComponentDataNativeArray<MovePosition>();
+            NativeArray<MoveVelocity> velocities = chunk.GetComponentDataNativeArray<MoveVelocity>();
+
+            for (int index = 0; index < positions.Length; index++)
+            {
+                MovePosition position = positions[index];
+                position.Value += velocities[index].Value * DeltaTime;
+                positions[index] = position;
+            }
+        }
+    }
+
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
     public struct MoveJobChunkIspc : IJobChunk
     {
@@ -148,6 +167,45 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
+    public struct HeavyJobChunkCppFast : IJobChunk
+    {
+        public float DeltaTime;
+
+        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+        {
+            NativeArray<MovePosition> positions = chunk.GetComponentDataNativeArray<MovePosition>();
+            NativeArray<MoveVelocity> velocities = chunk.GetComponentDataNativeArray<MoveVelocity>();
+
+            for (int index = 0; index < positions.Length; index++)
+            {
+                MovePosition position = positions[index];
+                MoveVelocity velocity = velocities[index];
+
+                float px = position.Value.x;
+                float py = position.Value.y;
+                float vx = velocity.Value.x;
+                float vy = velocity.Value.y;
+                float accX = px * 0.001f + vx * 0.01f;
+                float accY = py * 0.001f + vy * 0.01f;
+
+                for (int iteration = 0; iteration < 16; iteration++)
+                {
+                    float phaseX = accX + iteration * 0.03125f;
+                    float phaseY = accY - iteration * 0.0625f;
+                    float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                    float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                    accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                    accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+                }
+
+                position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+                position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+                positions[index] = position;
+            }
+        }
+    }
+
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
     public struct HeavyJobChunkIspc : IJobChunk
     {
@@ -200,6 +258,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private readonly QueryBuilder _query = new QueryBuilder().WithAll<MovePosition, MoveVelocity>();
         private readonly World _csharpWorld;
         private readonly World _cppWorld;
+        private readonly World _cppFastWorld;
         private readonly World _ispcWorld;
 
         public IJobChunkMoveCompareSample()
@@ -211,6 +270,9 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             _cppWorld = new World("IJobChunkMoveCompare_Cpp");
             CreateEntities(_cppWorld);
+
+            _cppFastWorld = new World("IJobChunkMoveCompare_CppFast");
+            CreateEntities(_cppFastWorld);
 
             _ispcWorld = new World("IJobChunkMoveCompare_Ispc");
             CreateEntities(_ispcWorld);
@@ -227,15 +289,18 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             double csharpAverage = RunCSharp();
             double cppAverage = RunCpp();
+            double cppFastAverage = RunCppFast();
             double ispcAverage = RunIspc();
             VerifyResults("Light Verify", Epsilon);
 
             Console.WriteLine();
-            Console.WriteLine($"C# IJobChunk : {csharpAverage:F3} ms/frame");
-            Console.WriteLine($"C++ IJobChunk: {cppAverage:F3} ms/frame");
-            Console.WriteLine($"ISPC IJobChunk: {ispcAverage:F3} ms/frame");
-            Console.WriteLine($"C++ Speedup  : {csharpAverage / cppAverage:F2}x");
-            Console.WriteLine($"ISPC Speedup : {csharpAverage / ispcAverage:F2}x");
+            Console.WriteLine($"C# IJobChunk       : {csharpAverage:F3} ms/frame");
+            Console.WriteLine($"C++ IJobChunk      : {cppAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Fast IJobChunk : {cppFastAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC IJobChunk     : {ispcAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Speedup        : {csharpAverage / cppAverage:F2}x");
+            Console.WriteLine($"C++ Fast Speedup   : {csharpAverage / cppFastAverage:F2}x");
+            Console.WriteLine($"ISPC Speedup       : {csharpAverage / ispcAverage:F2}x");
 
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Heavy 计算对比 ===");
@@ -244,15 +309,18 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             double csharpHeavyAverage = RunHeavyCSharp();
             double cppHeavyAverage = RunHeavyCpp();
+            double cppFastHeavyAverage = RunHeavyCppFast();
             double ispcHeavyAverage = RunHeavyIspc();
             VerifyResults("Heavy Verify", HeavyEpsilon);
 
             Console.WriteLine();
-            Console.WriteLine($"C# Heavy IJobChunk  : {csharpHeavyAverage:F3} ms/frame");
-            Console.WriteLine($"C++ Heavy IJobChunk : {cppHeavyAverage:F3} ms/frame");
-            Console.WriteLine($"ISPC Heavy IJobChunk: {ispcHeavyAverage:F3} ms/frame");
-            Console.WriteLine($"C++ Heavy Speedup   : {csharpHeavyAverage / cppHeavyAverage:F2}x");
-            Console.WriteLine($"ISPC Heavy Speedup  : {csharpHeavyAverage / ispcHeavyAverage:F2}x");
+            Console.WriteLine($"C# Heavy IJobChunk      : {csharpHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Heavy IJobChunk     : {cppHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Fast Heavy IJobChunk: {cppFastHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC Heavy IJobChunk    : {ispcHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Heavy Speedup       : {csharpHeavyAverage / cppHeavyAverage:F2}x");
+            Console.WriteLine($"C++ Fast Heavy Speedup  : {csharpHeavyAverage / cppFastHeavyAverage:F2}x");
+            Console.WriteLine($"ISPC Heavy Speedup      : {csharpHeavyAverage / ispcHeavyAverage:F2}x");
         }
 
         private double RunCSharp()
@@ -267,6 +335,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             World.DefaultWorld = _cppWorld;
             var job = new MoveJobChunkCpp { DeltaTime = DeltaTime };
             return RunBenchmark("C++ IJobChunk", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunCppFast()
+        {
+            World.DefaultWorld = _cppFastWorld;
+            var job = new MoveJobChunkCppFast { DeltaTime = DeltaTime };
+            return RunBenchmark("C++ Fast IJobChunk", () => job.Schedule(_query).Complete());
         }
 
         private double RunIspc()
@@ -288,6 +363,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             World.DefaultWorld = _cppWorld;
             var job = new HeavyJobChunkCpp { DeltaTime = DeltaTime };
             return RunBenchmark("C++ Heavy IJobChunk", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunHeavyCppFast()
+        {
+            World.DefaultWorld = _cppFastWorld;
+            var job = new HeavyJobChunkCppFast { DeltaTime = DeltaTime };
+            return RunBenchmark("C++ Fast Heavy IJobChunk", () => job.Schedule(_query).Complete());
         }
 
         private double RunHeavyIspc()
@@ -321,12 +403,15 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private void VerifyResults(string label, float epsilon)
         {
             float cppMaxDiff = 0;
+            float cppFastMaxDiff = 0;
             float ispcMaxDiff = 0;
             int cppMismatchCount = 0;
+            int cppFastMismatchCount = 0;
             int ispcMismatchCount = 0;
 
             var csharpChunks = GetPositionChunks(_csharpWorld);
             var cppChunks = GetPositionChunks(_cppWorld);
+            var cppFastChunks = GetPositionChunks(_cppFastWorld);
             var ispcChunks = GetPositionChunks(_ispcWorld);
             int entityOffset = 0;
 
@@ -334,16 +419,19 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             {
                 var csharpChunk = csharpChunks[chunkIndex];
                 var cppChunk = cppChunks[chunkIndex];
+                var cppFastChunk = cppFastChunks[chunkIndex];
                 var ispcChunk = ispcChunks[chunkIndex];
-                int count = Math.Min(csharpChunk.Count, Math.Min(cppChunk.Count, ispcChunk.Count));
+                int count = Math.Min(Math.Min(csharpChunk.Count, cppChunk.Count), Math.Min(cppFastChunk.Count, ispcChunk.Count));
 
                 for (int localIndex = 0; localIndex < count; localIndex++)
                 {
                     int entityIndex = entityOffset + localIndex;
                     float2 csharp = csharpChunk.Positions[localIndex].Value;
                     float2 cpp = cppChunk.Positions[localIndex].Value;
+                    float2 cppFast = cppFastChunk.Positions[localIndex].Value;
                     float2 ispc = ispcChunk.Positions[localIndex].Value;
                     float cppDiff = MathF.Max(MathF.Abs(csharp.x - cpp.x), MathF.Abs(csharp.y - cpp.y));
+                    float cppFastDiff = MathF.Max(MathF.Abs(csharp.x - cppFast.x), MathF.Abs(csharp.y - cppFast.y));
                     float ispcDiff = MathF.Max(MathF.Abs(csharp.x - ispc.x), MathF.Abs(csharp.y - ispc.y));
                     if (cppDiff > epsilon)
                     {
@@ -351,6 +439,15 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         if (cppMismatchCount <= 3)
                         {
                             Console.WriteLine($"C++ mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++=({cpp.x:F4},{cpp.y:F4}) diff={cppDiff:E4}");
+                        }
+                    }
+
+                    if (cppFastDiff > epsilon)
+                    {
+                        cppFastMismatchCount++;
+                        if (cppFastMismatchCount <= 3)
+                        {
+                            Console.WriteLine($"C++ Fast mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++Fast=({cppFast.x:F4},{cppFast.y:F4}) diff={cppFastDiff:E4}");
                         }
                     }
 
@@ -364,16 +461,17 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     }
 
                     if (cppDiff > cppMaxDiff) cppMaxDiff = cppDiff;
+                    if (cppFastDiff > cppFastMaxDiff) cppFastMaxDiff = cppFastDiff;
                     if (ispcDiff > ispcMaxDiff) ispcMaxDiff = ispcDiff;
                 }
 
                 entityOffset += count;
             }
 
-            bool passed = cppMismatchCount == 0 && ispcMismatchCount == 0;
+            bool passed = cppMismatchCount == 0 && cppFastMismatchCount == 0 && ispcMismatchCount == 0;
             Console.WriteLine(passed
-                ? $"{label,-13}: OK, cppMaxDiff={cppMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}"
-                : $"{label,-13}: ERROR, cppMismatch={cppMismatchCount:N0}, ispcMismatch={ispcMismatchCount:N0}, cppMaxDiff={cppMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}");
+                ? $"{label,-13}: OK, cppMaxDiff={cppMaxDiff:E4}, cppFastMaxDiff={cppFastMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}"
+                : $"{label,-13}: ERROR, cppMismatch={cppMismatchCount:N0}, cppFastMismatch={cppFastMismatchCount:N0}, ispcMismatch={ispcMismatchCount:N0}, cppMaxDiff={cppMaxDiff:E4}, cppFastMaxDiff={cppFastMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}");
         }
 
         private static void CreateEntities(World world)
@@ -443,6 +541,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         public void Dispose()
         {
             _ispcWorld.Dispose();
+            _cppFastWorld.Dispose();
             _cppWorld.Dispose();
             _csharpWorld.Dispose();
         }

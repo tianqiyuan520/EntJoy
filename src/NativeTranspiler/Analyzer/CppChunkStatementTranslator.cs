@@ -11,8 +11,8 @@ namespace NativeTranspiler.Analyzer
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly HashSet<string> _chunkArrayLocalNames = new();
 
-        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes)
-            : base(semanticModel, jobStruct)
+        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, bool useFastMath = false)
+            : base(semanticModel, jobStruct, useFastMath)
         {
             _requiredComponentTypes = requiredComponentTypes;
         }
