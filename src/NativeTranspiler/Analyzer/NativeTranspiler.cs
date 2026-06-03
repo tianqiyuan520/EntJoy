@@ -25,6 +25,15 @@ namespace NativeTranspiler.Analyzer
             @default
         }
 
+        /// <summary>
+        /// C++ 数学编译模式枚举。
+        /// </summary>
+        public enum CppMathLib
+        {
+            @default,
+            fast
+        }
+
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol pointerType)

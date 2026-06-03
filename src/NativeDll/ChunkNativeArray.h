@@ -20,6 +20,22 @@ namespace EntJoy
             return nullptr;
         }
 
+        inline void* GetRequiredChunkComponentArray(const ChunkJobData* chunkData, int requiredSlot, int componentTypeId)
+        {
+            if (chunkData->requiredComponentArrays != nullptr &&
+                requiredSlot >= 0 &&
+                requiredSlot < chunkData->requiredComponentCount)
+            {
+                void* ptr = chunkData->requiredComponentArrays[requiredSlot];
+                if (ptr != nullptr)
+                {
+                    return ptr;
+                }
+            }
+
+            return GetChunkComponentArray(chunkData, componentTypeId);
+        }
+
         template<typename T>
         inline EntJoy::Collections::NativeArray<T> GetChunkNativeArray(const ChunkJobData* chunkData, int componentTypeId)
         {

@@ -53,9 +53,9 @@ HEAD void CALLINGCONVENTION SharpNative_Job_EntJoySample_IJobChunkMoveCompareTes
     char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;
     const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;
 
-    auto* positions_ptr = reinterpret_cast<ispc::MovePosition*>(EntJoy::ChunkNativeArray::GetChunkComponentArray(__chunkData, __requiredComponentTypeIds[0]));
+    auto* positions_ptr = reinterpret_cast<ispc::MovePosition*>(EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, 0, __requiredComponentTypeIds[0]));
     int positions_length = __chunkData->entityCount;
-    auto* velocities_ptr = reinterpret_cast<ispc::MoveVelocity*>(EntJoy::ChunkNativeArray::GetChunkComponentArray(__chunkData, __requiredComponentTypeIds[1]));
+    auto* velocities_ptr = reinterpret_cast<ispc::MoveVelocity*>(EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, 1, __requiredComponentTypeIds[1]));
     int velocities_length = __chunkData->entityCount;
 
     auto* DeltaTime_ptr = (float*)(__jobContext + 0);

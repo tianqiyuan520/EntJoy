@@ -697,25 +697,53 @@ namespace JobSystem
         }
 
         auto* state = CreateState(false);
-        auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
         auto executor = EnsureExecutor();
 
         auto launch = [=]() {
-            for (int i = 0; i < chunkCount; ++i)
+            const int workerCount = std::max(1, CurrentWorkerCount());
+
+            if (chunkCount <= workerCount * 2)
             {
-                const ChunkJobData* chunkPtr = &chunks[i];
-                AcquireState(state);
-                executor->silent_async([=]() {
-                    func(context, chunkPtr);
-                    if (--*remaining == 0)
-                    {
-                        if (cleanup) cleanup(context);
-                        CompleteState(state);
-                    }
-                    ReleaseState(state);
-                });
+                auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
+                for (int i = 0; i < chunkCount; ++i)
+                {
+                    const ChunkJobData* chunkPtr = &chunks[i];
+                    AcquireState(state);
+                    executor->silent_async([=]() {
+                        func(context, chunkPtr);
+                        if (--*remaining == 0)
+                        {
+                            if (cleanup) cleanup(context);
+                            CompleteState(state);
+                        }
+                        ReleaseState(state);
+                    });
+                }
+                return;
             }
-        };
+
+            auto nextChunk = std::make_shared<std::atomic<int>>(0);
+            auto runOneChunk = [=]() -> bool {
+                const int chunkIndex = nextChunk->fetch_add(1, std::memory_order_relaxed);
+                if (chunkIndex >= chunkCount) return false;
+                func(context, &chunks[chunkIndex]);
+                return true;
+            };
+
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->assistStep = runOneChunk;
+            }
+
+            SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
+                for (int w = 0; w < workerCount; ++w)
+                {
+                    taskflow.emplace([=]() {
+                        while (runOneChunk()) {}
+                    });
+                }
+            }, state, context, cleanup);
+            };
 
         if (dependency.State() && !dependency.IsCompleted())
         {

@@ -92,7 +92,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 float accX = px * 0.001f + vx * 0.01f;
                 float accY = py * 0.001f + vy * 0.01f;
 
-                for (int iteration = 0; iteration < 32; iteration++)
+                for (int iteration = 0; iteration < 16; iteration++)
                 {
                     float phaseX = accX + iteration * 0.03125f;
                     float phaseY = accY - iteration * 0.0625f;
@@ -109,7 +109,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
     public struct HeavyJobChunkCpp : IJobChunk
     {
         public float DeltaTime;
@@ -131,7 +131,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 float accX = px * 0.001f + vx * 0.01f;
                 float accY = py * 0.001f + vy * 0.01f;
 
-                for (int iteration = 0; iteration < 32; iteration++)
+                for (int iteration = 0; iteration < 16; iteration++)
                 {
                     float phaseX = accX + iteration * 0.03125f;
                     float phaseY = accY - iteration * 0.0625f;
@@ -170,7 +170,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 float accX = px * 0.001f + vx * 0.01f;
                 float accY = py * 0.001f + vy * 0.01f;
 
-                for (int iteration = 0; iteration < 32; iteration++)
+                for (int iteration = 0; iteration < 16; iteration++)
                 {
                     float phaseX = accX + iteration * 0.03125f;
                     float phaseY = accY - iteration * 0.0625f;
@@ -191,11 +191,11 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         private const int EntityCount = 1_000_000;
         private const int WarmupFrames = 5;
-        private const int MeasureFrames = 100;
-        private const int HeavyIterations = 16;
+        private const int MeasureFrames = 300;
+        private const int HeavyIterations = 32;
         private const float DeltaTime = 1.0f / 60.0f;
         private const float Epsilon = 0.001f;
-        private const float HeavyEpsilon = 1.0f;
+        private const float HeavyEpsilon = 0.001f;
 
         private readonly QueryBuilder _query = new QueryBuilder().WithAll<MovePosition, MoveVelocity>();
         private readonly World _csharpWorld;
@@ -320,8 +320,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
         private void VerifyResults(string label, float epsilon)
         {
-            float maxDiff = 0;
-            int mismatchCount = 0;
+            float cppMaxDiff = 0;
+            float ispcMaxDiff = 0;
+            int cppMismatchCount = 0;
+            int ispcMismatchCount = 0;
 
             var csharpChunks = GetPositionChunks(_csharpWorld);
             var cppChunks = GetPositionChunks(_cppWorld);
@@ -343,28 +345,35 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     float2 ispc = ispcChunk.Positions[localIndex].Value;
                     float cppDiff = MathF.Max(MathF.Abs(csharp.x - cpp.x), MathF.Abs(csharp.y - cpp.y));
                     float ispcDiff = MathF.Max(MathF.Abs(csharp.x - ispc.x), MathF.Abs(csharp.y - ispc.y));
-                    float diff = MathF.Max(cppDiff, ispcDiff);
-                    if (diff > epsilon)
+                    if (cppDiff > epsilon)
                     {
-                        mismatchCount++;
-                        if (mismatchCount <= 3)
+                        cppMismatchCount++;
+                        if (cppMismatchCount <= 3)
                         {
-                            Console.WriteLine($"Mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++=({cpp.x:F4},{cpp.y:F4}) ISPC=({ispc.x:F4},{ispc.y:F4}) diff={diff:E4}");
+                            Console.WriteLine($"C++ mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++=({cpp.x:F4},{cpp.y:F4}) diff={cppDiff:E4}");
                         }
                     }
 
-                    if (diff > maxDiff)
+                    if (ispcDiff > epsilon)
                     {
-                        maxDiff = diff;
+                        ispcMismatchCount++;
+                        if (ispcMismatchCount <= 3)
+                        {
+                            Console.WriteLine($"ISPC mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) ISPC=({ispc.x:F4},{ispc.y:F4}) diff={ispcDiff:E4}");
+                        }
                     }
+
+                    if (cppDiff > cppMaxDiff) cppMaxDiff = cppDiff;
+                    if (ispcDiff > ispcMaxDiff) ispcMaxDiff = ispcDiff;
                 }
 
                 entityOffset += count;
             }
 
-            Console.WriteLine(mismatchCount == 0
-                ? $"{label,-13}: OK, maxDiff={maxDiff:E4}, epsilon={epsilon:E4}"
-                : $"{label,-13}: ERROR, mismatch={mismatchCount:N0}, maxDiff={maxDiff:E4}, epsilon={epsilon:E4}");
+            bool passed = cppMismatchCount == 0 && ispcMismatchCount == 0;
+            Console.WriteLine(passed
+                ? $"{label,-13}: OK, cppMaxDiff={cppMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}"
+                : $"{label,-13}: ERROR, cppMismatch={cppMismatchCount:N0}, ispcMismatch={ispcMismatchCount:N0}, cppMaxDiff={cppMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}");
         }
 
         private static void CreateEntities(World world)

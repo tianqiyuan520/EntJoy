@@ -71,6 +71,25 @@ namespace NativeTranspiler.Analyzer.Common
             return NativeTranspiler.IspcMathLib.fast;
         }
 
+        public static NativeTranspiler.CppMathLib GetCppMathLib(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+        {
+            if (attrSymbol == null) return NativeTranspiler.CppMathLib.@default;
+            var attrData = symbol.GetAttributes().FirstOrDefault(ad =>
+                SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol));
+            if (attrData == null) return NativeTranspiler.CppMathLib.@default;
+
+            foreach (var namedArg in attrData.NamedArguments)
+                if (namedArg.Key == "CppMathLib" && namedArg.Value.Value is int enumVal)
+                    return (NativeTranspiler.CppMathLib)enumVal;
+
+            return NativeTranspiler.CppMathLib.@default;
+        }
+
+        public static bool HasFastCppMathLib(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+        {
+            return GetCppMathLib(symbol, attrSymbol) == NativeTranspiler.CppMathLib.fast;
+        }
+
         /// <summary>
         /// 读取 DisabledAutoRefresh 参数：
         /// 为 true 时跳过已存在文件的重新生成（用于增量缓存）
