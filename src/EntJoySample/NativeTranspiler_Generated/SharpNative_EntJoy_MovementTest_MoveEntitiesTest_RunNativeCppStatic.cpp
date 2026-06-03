@@ -2,6 +2,7 @@
 #include "EntJoySample_IJobChunkMoveCompareTest_MovePosition.h"
 #include "EntJoySample_IJobChunkMoveCompareTest_MoveVelocity.h"
 #include "EntJoySample_SimpleIJobChunkTest_TestValue.h"
+#include "EntJoySample_IJobChunkScheduleOverheadTest_ScheduleValue.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

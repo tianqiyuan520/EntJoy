@@ -28,6 +28,8 @@ namespace EntJoy
         /// <summary>当前已创建的实体总数</summary>
         private int entityCount;  // 实体计数器
         public int EntityCount => entityCount;
+        private int structuralVersion;
+        public int StructuralVersion => structuralVersion;
 
         private bool _disposed;
 
@@ -89,6 +91,7 @@ namespace EntJoy
 
             archetypeMap.Clear();
             recycleEntities.Clear();
+            global::NativeJobScheduler.ClearRawChunkScheduleCaches(this);
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
@@ -172,6 +175,7 @@ namespace EntJoy
 
             var targetArch = GetOrCreateArchetype(types);
             targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);  // 在该实体对应的原型中添加实体
+            structuralVersion++;
 
             // 更新该实体索引
             UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
@@ -179,6 +183,35 @@ namespace EntJoy
             //GD.Print("new Entity"," ", newEntity.Id," ", allArchetypes.Count()," ", allArchetypes[0]?.entityCount," ", allArchetypes[1]?.entityCount, allArchetypes[2]?.entityCount);
 
             return newEntity;  // 返回新实体
+        }
+
+        public void DestroyEntity(Entity entity)
+        {
+            ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+            var archetype = entityInfoRef.Archetype;
+            if (archetype == null)
+            {
+                return;
+            }
+
+            int oldChunkIndex = entityInfoRef.ChunkIndex;
+            archetype.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityId, out var movedEntitySlotInChunk, out var compactedChunkIndex);
+
+            if (movedEntityId >= 0)
+            {
+                UpdateEntityLocation(movedEntityId, archetype, oldChunkIndex, movedEntitySlotInChunk);
+            }
+
+            if (compactedChunkIndex >= 0)
+            {
+                RefreshChunkEntityIndices(archetype, compactedChunkIndex);
+            }
+
+            entityInfoRef.Archetype = null;
+            entityInfoRef.ChunkIndex = -1;
+            entityInfoRef.SlotInChunk = -1;
+            recycleEntities.Enqueue(entity);
+            structuralVersion++;
         }
 
     }
@@ -449,6 +482,7 @@ namespace EntJoy
 
             // 设置新组件值
             targetArch.Set(chunkIndex, slotInChunk, t0);
+            structuralVersion++;
         }
 
 
@@ -492,6 +526,7 @@ namespace EntJoy
             }
             //刷新索引
             UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
+            structuralVersion++;
         }
 
         /// <summary>
