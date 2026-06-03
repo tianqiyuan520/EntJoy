@@ -412,7 +412,7 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 计算 C# struct 中字段的偏移量（基于 [StructLayout(LayoutKind.Sequential)]，64位 Windows）
         /// </summary>
-        private static int CalculateFieldOffset(IFieldSymbol field, ref int currentOffset)
+        internal static int CalculateFieldOffset(IFieldSymbol field, ref int currentOffset)
         {
             int size = GetCSharpFieldSize(field.Type);
             int alignment = GetCSharpFieldAlignment(field.Type);

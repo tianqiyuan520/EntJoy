@@ -19,7 +19,6 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, IJobFor, or IJobChunk.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobFieldError = new("NT009", "Invalid Job field", "[NativeTranspile] struct '{0}' field '{1}' type '{2}' must be unmanaged.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor UnsupportedIJobChunkBackendError = new("NT011", "Unsupported IJobChunk backend", "[NativeTranspile] IJobChunk struct '{0}' only supports BackendTarget.Cpp in v1.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
@@ -136,10 +135,6 @@ namespace NativeTranspiler.Analyzer
             bool implementsJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk");
             if (!implementsJob)
                 diagnostics.Add(Diagnostic.Create(MissingJobInterfaceError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
-
-            var attrSymbol = AttributeHelper.GetAttributeSymbol(compilation);
-            if (isChunkJob && AttributeHelper.GetBackendTarget(structSymbol, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
-                diagnostics.Add(Diagnostic.Create(UnsupportedIJobChunkBackendError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 
             foreach (var field in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {

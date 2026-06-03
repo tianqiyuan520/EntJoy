@@ -7,6 +7,19 @@ namespace EntJoy
 {
     namespace ChunkNativeArray
     {
+        inline void* GetChunkComponentArray(const ChunkJobData* chunkData, int componentTypeId)
+        {
+            for (int i = 0; i < chunkData->componentCount; ++i)
+            {
+                if (chunkData->componentTypeIndices[i] == componentTypeId)
+                {
+                    return chunkData->componentArrays[i];
+                }
+            }
+
+            return nullptr;
+        }
+
         template<typename T>
         inline EntJoy::Collections::NativeArray<T> GetChunkNativeArray(const ChunkJobData* chunkData, int componentTypeId)
         {
