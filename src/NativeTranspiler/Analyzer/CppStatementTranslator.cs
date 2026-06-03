@@ -694,7 +694,33 @@ namespace NativeTranspiler.Analyzer
         // ========== 以下方法改为 protected virtual，允许 ISPC 翻译器重写 ==========
         protected virtual void TranslateMathFunctionCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
-            string cppFunc = method.Name switch
+            bool isMathF = method.ContainingType?.ToDisplayString() == "System.MathF";
+            string cppFunc = isMathF ? method.Name switch
+            {
+                "Abs" => "::fabsf",
+                "Acos" => "::acosf",
+                "Asin" => "::asinf",
+                "Atan" => "::atanf",
+                "Atan2" => "::atan2f",
+                "Ceiling" => "::ceilf",
+                "Cos" => "::cosf",
+                "Cosh" => "::coshf",
+                "Exp" => "::expf",
+                "Floor" => "::floorf",
+                "Log" => "::logf",
+                "Log10" => "::log10f",
+                "Max" => "::fmaxf",
+                "Min" => "::fminf",
+                "Pow" => "::powf",
+                "Round" => "::roundf",
+                "Sin" => "::sinf",
+                "Sinh" => "::sinhf",
+                "Sqrt" => "::sqrtf",
+                "Tan" => "::tanf",
+                "Tanh" => "::tanhf",
+                "Truncate" => "::truncf",
+                _ => null
+            } : method.Name switch
             {
                 "Abs" => "std::abs",
                 "Acos" => "std::acos",

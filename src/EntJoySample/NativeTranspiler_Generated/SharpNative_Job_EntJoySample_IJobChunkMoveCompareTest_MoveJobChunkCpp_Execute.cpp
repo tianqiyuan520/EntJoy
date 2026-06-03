@@ -6,12 +6,14 @@
 HEAD void CALLINGCONVENTION SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute(const ChunkJobData* __chunkData, const int* __requiredComponentTypeIds, float* RESTRICT DeltaTime_ptr)
 {
     const float& DeltaTime = *DeltaTime_ptr;
-EntJoy::Collections::NativeArray<EntJoySample::IJobChunkMoveCompareTest::MovePosition> positions = EntJoy::ChunkNativeArray::GetChunkNativeArray<EntJoySample::IJobChunkMoveCompareTest::MovePosition>(__chunkData, __requiredComponentTypeIds[0]);
-EntJoy::Collections::NativeArray<EntJoySample::IJobChunkMoveCompareTest::MoveVelocity> velocities = EntJoy::ChunkNativeArray::GetChunkNativeArray<EntJoySample::IJobChunkMoveCompareTest::MoveVelocity>(__chunkData, __requiredComponentTypeIds[1]);
-for (int index = 0; index < positions.length(); index++)
+auto* RESTRICT positions_ptr = reinterpret_cast<EntJoySample::IJobChunkMoveCompareTest::MovePosition*>(EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, 0, __requiredComponentTypeIds[0]));
+int positions_length = __chunkData->entityCount;
+auto* RESTRICT velocities_ptr = reinterpret_cast<EntJoySample::IJobChunkMoveCompareTest::MoveVelocity*>(EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, 1, __requiredComponentTypeIds[1]));
+int velocities_length = __chunkData->entityCount;
+for (int index = 0; index < positions_length; index++)
 {
-    EntJoySample::IJobChunkMoveCompareTest::MovePosition position = positions[index];
-    position.Value += velocities[index].Value * DeltaTime;
-    positions[index] = position;
+    EntJoySample::IJobChunkMoveCompareTest::MovePosition position = positions_ptr[index];
+    position.Value += velocities_ptr[index].Value * DeltaTime;
+    positions_ptr[index] = position;
 }
 }

@@ -46,12 +46,18 @@ namespace NativeTranspiler.Analyzer
 
                 _chunkArrayLocalNames.Add(variable.Identifier.Text);
                 lines.Append(new string(' ', _indentLevel * 4));
-                lines.Append("EntJoy::Collections::NativeArray<");
-                lines.Append(cppType);
-                lines.Append("> ");
+                lines.Append("auto* RESTRICT ");
                 lines.Append(variable.Identifier.Text);
-                lines.Append(" = ");
+                lines.Append("_ptr = reinterpret_cast<");
+                lines.Append(cppType);
+                lines.Append("*>(");
                 lines.Append(expression);
+                lines.AppendLine(");");
+
+                lines.Append(new string(' ', _indentLevel * 4));
+                lines.Append("int ");
+                lines.Append(variable.Identifier.Text);
+                lines.Append("_length = __chunkData->entityCount");
                 lines.AppendLine(";");
             }
 
@@ -91,7 +97,7 @@ namespace NativeTranspiler.Analyzer
                 componentIndex = 0;
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
-            expression = $"EntJoy::ChunkNativeArray::GetChunkNativeArray<{cppType}>(__chunkData, __requiredComponentTypeIds[{componentIndex}])";
+            expression = $"EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, {componentIndex}, __requiredComponentTypeIds[{componentIndex}])";
             return true;
         }
 
@@ -101,7 +107,7 @@ namespace NativeTranspiler.Analyzer
                 _chunkArrayLocalNames.Contains(identifier.Identifier.Text) &&
                 memberAccess.Name.Identifier.Text == "Length")
             {
-                _builder.Append(identifier.Identifier.Text).Append(".length()");
+                _builder.Append(identifier.Identifier.Text).Append("_length");
                 return;
             }
 
@@ -113,7 +119,7 @@ namespace NativeTranspiler.Analyzer
             if (elementAccess.Expression is IdentifierNameSyntax identifier &&
                 _chunkArrayLocalNames.Contains(identifier.Identifier.Text))
             {
-                _builder.Append(identifier.Identifier.Text).Append('[');
+                _builder.Append(identifier.Identifier.Text).Append("_ptr[");
                 var args = elementAccess.ArgumentList.Arguments;
                 if (args.Count > 0)
                     TranslateExpression(args[0].Expression);

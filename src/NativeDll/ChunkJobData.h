@@ -13,4 +13,6 @@ struct ChunkJobData {
     void**  enableBitMaps;      // 每个 enableable 组件位图指针（可为 nullptr，长度为 componentCount）
     int*    componentTypeIndices;   // 组件类型索引数组（用于 C# 端按类型查找）
     void*   chunkHandle;        // GCHandle IntPtr，用于在 C# 回调中恢复 Chunk 对象
+    void**  requiredComponentArrays; // NativeTranspile IJobChunk required component arrays
+    int     requiredComponentCount;  // requiredComponentArrays length
 };

@@ -24,6 +24,8 @@ public unsafe struct ChunkJobData
     public void** enableBitMaps;        // 每个 enableable 组件位图指针（可为 null，长度为 componentCount）
     public int* componentTypeIndices;   // 组件类型索引数组
     public IntPtr chunkHandle;          // GCHandle IntPtr，用于在回调中恢复 Chunk 对象
+    public void** requiredComponentArrays; // NativeTranspile IJobChunk 所需组件数组指针
+    public int requiredComponentCount;     // requiredComponentArrays 数量
 }
 
 /// <summary>
@@ -475,6 +477,13 @@ public static unsafe partial class NativeJobScheduler
             var compSizes = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
             var bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
             var typeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+            void** requiredArrays = null;
+            int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+            if (requiredCount > 0)
+            {
+                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+            }
 
             for (int c = 0; c < compCount; c++)
             {
@@ -482,6 +491,22 @@ public static unsafe partial class NativeJobScheduler
                 compSizes[c] = arch.Types[c].Size;
                 bitmaps[c] = chunk.GetEnableBitMapPointer(c);
                 typeIndices[c] = arch.Types[c].Id;
+            }
+
+            if (requiredArrays != null)
+            {
+                for (int r = 0; r < requiredCount; r++)
+                {
+                    int requiredTypeId = requiredComponentTypeIds[r];
+                    for (int c = 0; c < compCount; c++)
+                    {
+                        if (typeIndices[c] == requiredTypeId)
+                        {
+                            requiredArrays[r] = compPtrs[c];
+                            break;
+                        }
+                    }
+                }
             }
 
             chunksPtr[ci] = new ChunkJobData
@@ -493,7 +518,9 @@ public static unsafe partial class NativeJobScheduler
                 componentSizes = compSizes,
                 enableBitMaps = bitmaps,
                 componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gch
+                chunkHandle = (IntPtr)gch,
+                requiredComponentArrays = requiredArrays,
+                requiredComponentCount = requiredCount
             };
         }
 
@@ -589,6 +616,7 @@ public static unsafe partial class NativeJobScheduler
                 if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
                 if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
                 if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
+                if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
             }
         }
 
