@@ -128,6 +128,8 @@ namespace NativeTranspiler.Analyzer
         {
             var sb = new StringBuilder();
             var baseFuncName = GetCppJobFunctionName(jobStruct);
+            var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+            bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
@@ -136,7 +138,7 @@ namespace NativeTranspiler.Analyzer
 
             if (IsChunkJob(jobStruct))
             {
-                GenerateChunkFunctionStandard(jobStruct, compilation, sb);
+                GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
@@ -160,17 +162,17 @@ namespace NativeTranspiler.Analyzer
                         var values = new List<bool>();
                         for (int i = 0; i < boolFields.Count; i++)
                             values.Add((mask & (1 << i)) != 0);
-                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb);
+                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath);
                     }
                 }
                 else
                 {
-                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb);
+                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath);
                 }
             }
             else
             {
-                GenerateSingleFunctionStandard(jobStruct, compilation, sb);
+                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
 
             return sb.ToString();
@@ -202,7 +204,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -212,7 +214,7 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName);
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
             var bodyCode = translator.Translate(methodSyntax.Body);
             sb.Append(bodyCode);
             sb.AppendLine("    }");
@@ -220,7 +222,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb)
+        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
         {
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
@@ -231,7 +233,7 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName);
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
             var bodyCode = translator.Translate(methodSyntax.Body);
             // 将所有 bool 条件字段替换为常量值
             for (int i = 0; i < boolFields.Count; i++)
@@ -246,7 +248,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb)
+        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var singleParams = BuildJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -258,7 +260,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppPointerStatementTranslator(semanticModel, jobStruct);
+                var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
             }
@@ -269,7 +271,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
         }
 
-        private static void GenerateChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb)
+        private static void GenerateChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -282,7 +284,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes);
+                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
             }

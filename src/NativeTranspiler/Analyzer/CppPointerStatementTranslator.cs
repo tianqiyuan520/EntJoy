@@ -12,8 +12,8 @@ namespace NativeTranspiler.Analyzer
         protected readonly HashSet<string> _nativeArrayListNames;
         protected readonly HashSet<string> _nativeListNames;
 
-        public CppPointerStatementTranslator(SemanticModel semanticModel, IMethodSymbol method)
-            : base(semanticModel)
+        public CppPointerStatementTranslator(SemanticModel semanticModel, IMethodSymbol method, bool useFastMath = false)
+            : base(semanticModel, useFastMath)
         {
             _valueParameterNames = new HashSet<string>();
             _pointerParameterNames = new HashSet<string>();
@@ -36,8 +36,8 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        public CppPointerStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct)
-            : base(semanticModel)
+        public CppPointerStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, bool useFastMath = false)
+            : base(semanticModel, useFastMath)
         {
             _valueParameterNames = new HashSet<string>();
             _pointerParameterNames = new HashSet<string>();

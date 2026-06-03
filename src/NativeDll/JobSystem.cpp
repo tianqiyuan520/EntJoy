@@ -580,26 +580,44 @@ namespace JobSystem
             else
             {
                 auto nextChunk = std::make_shared<std::atomic<int>>(0);
+                auto completedChunks = std::make_shared<std::atomic<int>>(0);
+                auto finalized = std::make_shared<std::atomic<bool>>(false);
+                auto finalizeParallelFor = [=]() {
+                    if (!finalized->exchange(true, std::memory_order_acq_rel))
+                    {
+                        if (cleanup) cleanup(context);
+                        CompleteState(state);
+                    }
+                };
                 auto runOneChunk = [=]() -> bool {
                     const int chunkIdx = nextChunk->fetch_add(1, std::memory_order_relaxed);
                     if (chunkIdx >= chunkCount) return false;
                     const int begin = chunkIdx * chunkSize;
                     const int end = std::min(length, begin + chunkSize);
                     for (int i = begin; i < end; ++i) func(context, i);
+                    if (completedChunks->fetch_add(1, std::memory_order_acq_rel) + 1 == chunkCount)
+                    {
+                        finalizeParallelFor();
+                    }
                     return true;
                 };
                 {
                     std::lock_guard<std::mutex> lock(state->mtx);
                     state->assistStep = runOneChunk;
                 }
-                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    for (int w = 0; w < workerCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (runOneChunk()) {}
-                            });
-                    }
-                    }, state, context, cleanup);
+
+                auto taskflow = AcquireTaskflow();
+                for (int w = 0; w < workerCount; ++w)
+                {
+                    taskflow->emplace([=]() {
+                        while (runOneChunk()) {}
+                    });
+                }
+
+                AcquireState(state);
+                executor->run(*taskflow, [taskflow, state]() mutable {
+                    ReleaseState(state);
+                });
             }
             });
     }
@@ -658,26 +676,44 @@ namespace JobSystem
             else
             {
                 auto nextBatch = std::make_shared<std::atomic<int>>(0);
+                auto completedBatches = std::make_shared<std::atomic<int>>(0);
+                auto finalized = std::make_shared<std::atomic<bool>>(false);
+                auto finalizeBatchJob = [=]() {
+                    if (!finalized->exchange(true, std::memory_order_acq_rel))
+                    {
+                        if (cleanup) cleanup(context);
+                        CompleteState(state);
+                    }
+                };
                 auto runOneBatch = [=]() -> bool {
                     const int batchIdx = nextBatch->fetch_add(1, std::memory_order_relaxed);
                     if (batchIdx >= batchCount) return false;
                     const int start = batchIdx * safeBatchSize;
                     const int count = std::min(safeBatchSize, length - start);
                     func(context, start, count);
+                    if (completedBatches->fetch_add(1, std::memory_order_acq_rel) + 1 == batchCount)
+                    {
+                        finalizeBatchJob();
+                    }
                     return true;
                 };
                 {
                     std::lock_guard<std::mutex> lock(state->mtx);
                     state->assistStep = runOneBatch;
                 }
-                SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                    for (int w = 0; w < workerCount; ++w)
-                    {
-                        taskflow.emplace([=]() {
-                            while (runOneBatch()) {}
-                            });
-                    }
-                    }, state, context, cleanup);
+
+                auto taskflow = AcquireTaskflow();
+                for (int w = 0; w < workerCount; ++w)
+                {
+                    taskflow->emplace([=]() {
+                        while (runOneBatch()) {}
+                    });
+                }
+
+                AcquireState(state);
+                executor->run(*taskflow, [taskflow, state]() mutable {
+                    ReleaseState(state);
+                });
             }
             });
     }
@@ -723,10 +759,23 @@ namespace JobSystem
             }
 
             auto nextChunk = std::make_shared<std::atomic<int>>(0);
+            auto completedChunks = std::make_shared<std::atomic<int>>(0);
+            auto finalized = std::make_shared<std::atomic<bool>>(false);
+            auto finalizeChunkJob = [=]() {
+                if (!finalized->exchange(true, std::memory_order_acq_rel))
+                {
+                    if (cleanup) cleanup(context);
+                    CompleteState(state);
+                }
+            };
             auto runOneChunk = [=]() -> bool {
                 const int chunkIndex = nextChunk->fetch_add(1, std::memory_order_relaxed);
                 if (chunkIndex >= chunkCount) return false;
                 func(context, &chunks[chunkIndex]);
+                if (completedChunks->fetch_add(1, std::memory_order_acq_rel) + 1 == chunkCount)
+                {
+                    finalizeChunkJob();
+                }
                 return true;
             };
 
@@ -735,14 +784,18 @@ namespace JobSystem
                 state->assistStep = runOneChunk;
             }
 
-            SubmitTaskflow(executor, [=](tf::Taskflow& taskflow) {
-                for (int w = 0; w < workerCount; ++w)
-                {
-                    taskflow.emplace([=]() {
-                        while (runOneChunk()) {}
-                    });
-                }
-            }, state, context, cleanup);
+            auto taskflow = AcquireTaskflow();
+            for (int w = 0; w < workerCount; ++w)
+            {
+                taskflow->emplace([=]() {
+                    while (runOneChunk()) {}
+                });
+            }
+
+            AcquireState(state);
+            executor->run(*taskflow, [taskflow, state]() mutable {
+                ReleaseState(state);
+            });
             };
 
         if (dependency.State() && !dependency.IsCompleted())
