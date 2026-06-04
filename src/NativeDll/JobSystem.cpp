@@ -631,16 +631,18 @@ namespace JobSystem
         if (!func) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
         if (length <= 0) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
 
+        const bool forceAsync = batchSize < 0;
+        const int requestedBatchSize = forceAsync ? -batchSize : batchSize;
         bool depCompleted = !dependency.State() || dependency.IsCompleted();
 
-        if (length <= kSyncExecutionLengthThreshold || (depCompleted && length <= kSyncWithCompletedDepThreshold))
+        if (!forceAsync && (length <= kSyncExecutionLengthThreshold || (depCompleted && length <= kSyncWithCompletedDepThreshold)))
         {
             ExecuteBatchSync(func, context, length);
             if (cleanup) cleanup(context);
             return MakeCompletedHandle();
         }
 
-        const int safeBatchSize = std::max(1, ResolveChunkSize(length, batchSize));
+        const int safeBatchSize = std::max(1, ResolveChunkSize(length, requestedBatchSize));
         const int batchCount = (length + safeBatchSize - 1) / safeBatchSize;
         const int workerCount = std::max(1, CurrentWorkerCount());
 
