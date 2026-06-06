@@ -1,4 +1,4 @@
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using EntJoy.Mathematics;
 using EntJoy.JobSystem;
 using System.Diagnostics;

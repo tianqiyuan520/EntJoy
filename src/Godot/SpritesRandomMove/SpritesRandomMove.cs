@@ -134,19 +134,19 @@ public partial class SpritesRandomMove : Node2D
                     _naMoveJob.Dt = (float)delta;
                     _naMoveJob.ViewportWidth = (float)viewportRect.Size.X;
                     _naMoveJob.ViewportHeight = (float)viewportRect.Size.Y;
-                    _naMoveJob.Schedule(EntityCount, 65536).Complete();
+                    _naMoveJob.Schedule(EntityCount, 0).Complete();
                     break;
                 case 1: // Native C++
                     _naMoveJobCpp.Dt = (float)delta;
                     _naMoveJobCpp.ViewportWidth = (float)viewportRect.Size.X;
                     _naMoveJobCpp.ViewportHeight = (float)viewportRect.Size.Y;
-                    _naMoveJobCpp.Schedule(EntityCount, 65536).Complete();
+                    _naMoveJobCpp.Schedule(EntityCount, 0).Complete();
                     break;
                 case 2: // Native ISPC
                     _naMoveJobIspc.Dt = (float)delta;
                     _naMoveJobIspc.ViewportWidth = (float)viewportRect.Size.X;
                     _naMoveJobIspc.ViewportHeight = (float)viewportRect.Size.Y;
-                    _naMoveJobIspc.Schedule(EntityCount, 65536).Complete();
+                    _naMoveJobIspc.Schedule(EntityCount, 0).Complete();
                     break;
             }
             _sw.Stop();

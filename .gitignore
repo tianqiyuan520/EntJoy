@@ -44,9 +44,9 @@ cmake_install.cmake
 compile_commands.json
 
 # Godot generated temp/cache outputs
-src/Godot/.godot/
+src/Godot/.godot/mono/
 
 # Native transpiler generated build cache
 src/EntJoySample/NativeTranspiler_Generated/build/
-src/EntJoySample/NativeTranspiler_Generated/native_compile.hash
-src/EntJoySample/NativeTranspiler_Generated/
+src/Godot/NativeTranspiler_Generated/build/
+

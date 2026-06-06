@@ -86,6 +86,7 @@ namespace NativeTranspiler.Analyzer
                 Directory.CreateDirectory(outputDir);
 
                 var cppFiles = new List<string>();
+                var fastMathCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
                 var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{AttributeNamespace}.{AttributeName}Attribute");
 
@@ -180,7 +181,10 @@ namespace NativeTranspiler.Analyzer
                             WriteAllTextWithRetry(hPath, header);
                             WriteAllTextWithRetry(cppPath, impl);
                         }
-                        cppFiles.Add(baseName + ".cpp");
+                        var cppFile = baseName + ".cpp";
+                        cppFiles.Add(cppFile);
+                        if (HasFastCppMathLib(method, attrSymbol))
+                            fastMathCppFiles.Add(cppFile);
                     }
                 }
 
@@ -255,19 +259,28 @@ namespace NativeTranspiler.Analyzer
                             WriteAllTextWithRetry(hPath, header);
                             WriteAllTextWithRetry(cppPath, impl);
                         }
-                        cppFiles.Add(plainBase + ".cpp");
+                        var cppFile = plainBase + ".cpp";
+                        cppFiles.Add(cppFile);
+                        if (HasFastCppMathLib(job, attrSymbol))
+                            fastMathCppFiles.Add(cppFile);
                     }
 
-                    // 为所有 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）
-                    var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
-                    string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
-                    bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
-                    bool adapterFileExists = File.Exists(adapterPath);
-                    if (!adapterDisabledAutoRefresh || !adapterFileExists)
+                    bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
+                                                             CppJobGenerator.IsChunkJob(job);
+                    if (!adapterProvidedByIspcChunkWrapper)
                     {
-                        WriteAllTextWithRetry(adapterPath, adapterCode);
+                        // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
+                        // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
+                        var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
+                        string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
+                        bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                        bool adapterFileExists = File.Exists(adapterPath);
+                        if (!adapterDisabledAutoRefresh || !adapterFileExists)
+                        {
+                            WriteAllTextWithRetry(adapterPath, adapterCode);
+                        }
+                        cppFiles.Add($"{plainBase}_Adapter.cpp");
                     }
-                    cppFiles.Add($"{plainBase}_Adapter.cpp");
                 }
 
                 // 生成 run_ispc.bat
@@ -303,7 +316,7 @@ namespace NativeTranspiler.Analyzer
                     string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
                     string nativeDllDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "NativeDll"));
                     var ispcFileNames = ispcFiles.Select(x => x.fileName).ToList();
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFileNames, outputDir, solutionBinDir, nativeDllDir);
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFileNames, fastMathCppFiles, outputDir, solutionBinDir, nativeDllDir);
                     WriteAllTextWithRetry(Path.Combine(outputDir, "CMakeLists.txt"), cmakeContent);
                 }
 
@@ -324,6 +337,9 @@ namespace NativeTranspiler.Analyzer
         private static NativeTranspiler.IspcMathLib GetMathLib(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.GetMathLib(symbol, attrSymbol);
 
+        private static bool HasFastCppMathLib(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+            => AttributeHelper.HasFastCppMathLib(symbol, attrSymbol);
+
         private static bool GetDisabledAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.GetDisabledAutoRefresh(symbol, attrSymbol);
 
@@ -335,7 +351,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor") == true)
+                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk") == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -408,6 +424,9 @@ namespace NativeTranspiler.Analyzer
                             if (localType != null)
                                 CollectFromType(localType, structs);
                         }
+
+                        foreach (var chunkComponentType in CppJobGenerator.CollectChunkNativeArrayTypes(job, compilation))
+                            CollectFromType(chunkComponentType, structs);
                     }
                 }
             }
@@ -425,6 +444,8 @@ namespace NativeTranspiler.Analyzer
 
             // 过滤预定义的容器类型
             if (NativeTranspiler.IsEntJoyPredefinedType(type))
+                return;
+            if (type.Name == "Span" && type.ContainingNamespace?.ToDisplayString() == "System")
                 return;
 
             if (type.IsValueType && !NativeTranspiler.IsBuiltinUnmanaged(type))
@@ -503,6 +524,12 @@ namespace {AttributeNamespace}
         @default
     }}
 
+    public enum CppMathLib
+    {{
+        @default,
+        fast
+    }}
+
     [AttributeUsage(AttributeTargets.Method | AttributeTargets.Struct)]
     public sealed class {AttributeName}Attribute : Attribute
     {{
@@ -510,6 +537,7 @@ namespace {AttributeNamespace}
         public bool DisabledAutoRefresh {{ get; set; }} = false;
         public bool UseISPC_MT {{ get; set; }} = false;
         public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
+        public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;
     }}
 }}
 ";
@@ -648,7 +676,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
 ";
         }
 
-        private static string GenerateCMakeLists(List<string> cppFiles, List<string> ispcFiles,
+        private static string GenerateCMakeLists(List<string> cppFiles, List<string> ispcFiles, HashSet<string> fastMathCppFiles,
                                   string outputDir, string outputBinDir, string nativeDllDir)
         {
             var sb = new StringBuilder();
@@ -717,6 +745,10 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("if(MSVC)");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            foreach (var file in fastMathCppFiles.OrderBy(x => x))
+            {
+                sb.AppendLine($"    set_source_files_properties({file} PROPERTIES COMPILE_FLAGS \"/fp:fast\")");
+            }
             sb.AppendLine("    set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
