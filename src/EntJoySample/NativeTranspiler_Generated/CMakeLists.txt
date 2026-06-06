@@ -38,8 +38,6 @@ add_library(NativeDll SHARED
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCppFast_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCppFast_Execute_Adapter.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute_wrapper.cpp
-    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
-    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
@@ -60,6 +58,8 @@ add_library(NativeDll SHARED
     SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute.cpp
     SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute_Adapter.cpp
+    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
+    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
     ${TASKSYS_SRC}
 )
 
