@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
+using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -15,9 +16,10 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ManagedObjectCreationError = new("NT005", "Managed object creation", "[NativeTranspile] method '{0}' cannot create managed object of type '{1}'", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ReferenceTypeUsageError = new("NT006", "Reference type usage", "[NativeTranspile] method '{0}' uses reference type '{1}' which is not allowed", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobTypeError = new("NT007", "Invalid Job type", "[NativeTranspile] can only be applied to structs. '{0}' is not a struct.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, or IJobFor.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, IJobFor, or IJobChunk.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobFieldError = new("NT009", "Invalid Job field", "[NativeTranspile] struct '{0}' field '{1}' type '{2}' must be unmanaged.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -129,7 +131,8 @@ namespace NativeTranspiler.Analyzer
             if (!structSymbol.IsValueType)
                 diagnostics.Add(Diagnostic.Create(InvalidJobTypeError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 
-            bool implementsJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor");
+            bool isChunkJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJobChunk");
+            bool implementsJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk");
             if (!implementsJob)
                 diagnostics.Add(Diagnostic.Create(MissingJobInterfaceError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 
@@ -157,7 +160,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         case LocalDeclarationStatementSyntax localDecl:
                             var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-                            if (localType != null && !IsUnmanagedType(localType))
+                            if (localType != null && !IsUnmanagedType(localType) && !(isChunkJob && IsAllowedChunkSpanLocal(localDecl, semanticModel)))
                                 foreach (var v in localDecl.Declaration.Variables)
                                     diagnostics.Add(Diagnostic.Create(InvalidLocalVariableTypeError, v.GetLocation(), executeMethod.Name, v.Identifier.Text, localType.ToDisplayString()));
                             break;
@@ -166,7 +169,9 @@ namespace NativeTranspiler.Analyzer
                             var symbolInfo = semanticModel.GetSymbolInfo(invocation);
                             if (symbolInfo.Symbol is IMethodSymbol calledMethod)
                             {
-                                if (!IsAllowedMethodCall(calledMethod, compilation))
+                                if (isChunkJob && IsDisallowedChunkDataAccess(calledMethod))
+                                    diagnostics.Add(Diagnostic.Create(DisallowedChunkDataAccessError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
+                                else if (!IsAllowedMethodCall(calledMethod, compilation, isChunkJob))
                                     diagnostics.Add(Diagnostic.Create(DisallowedMethodCallError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
                             }
                             break;
@@ -240,13 +245,16 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 检查方法调用是否被允许。
         /// </summary>
-        private static bool IsAllowedMethodCall(IMethodSymbol method, Compilation compilation)
+        private static bool IsAllowedMethodCall(IMethodSymbol method, Compilation compilation, bool allowChunkMethods = false)
         {
             // 1. 允许对容器类型的实例方法调用 (NativeList, NativeArray)
             if (!method.IsStatic)
             {
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
+                    return true;
+                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                    (method.Name == "GetComponentDataNativeArray" || method.Name == "GetComponentDataSpan"))
                     return true;
                 return false;
             }
@@ -279,6 +287,32 @@ namespace NativeTranspiler.Analyzer
             }
 
             return false;
+        }
+
+        private static bool IsDisallowedChunkDataAccess(IMethodSymbol method)
+        {
+            if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk")
+                return false;
+            return method.Name == "GetComponentDataPtr";
+        }
+
+        private static bool IsAllowedChunkSpanLocal(LocalDeclarationStatementSyntax localDecl, SemanticModel semanticModel)
+        {
+            var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
+            if (localType?.Name != "Span" || localType.ContainingNamespace?.ToDisplayString() != "System")
+                return false;
+
+            foreach (var variable in localDecl.Declaration.Variables)
+            {
+                if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation)
+                    return false;
+                if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
+                    return false;
+                if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" || method.Name != "GetComponentDataSpan")
+                    return false;
+            }
+
+            return true;
         }
 
         public static List<IFieldSymbol> GetConditionalReadOnlyFields(INamedTypeSymbol jobStruct, SemanticModel semanticModel)

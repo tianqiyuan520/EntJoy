@@ -20,6 +20,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("using System;");
             sb.AppendLine("using System.Runtime.InteropServices;");
             sb.AppendLine("using System.Runtime.CompilerServices;");
+            sb.AppendLine("using EntJoy;");
             sb.AppendLine("using EntJoy.Collections;");
             sb.AppendLine();
             sb.AppendLine("namespace NativeTranspiler.Bindings");
@@ -28,6 +29,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    {");
             sb.AppendLine("        public delegate void JobFuncDelegate(IntPtr context);");
             sb.AppendLine("        public delegate void BatchJobFuncDelegate(IntPtr context, int startIndex, int count);");
+            sb.AppendLine("        public delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);");
             sb.AppendLine("        public delegate void CleanupFuncDelegate(IntPtr context);");
             sb.AppendLine();
 
@@ -148,10 +150,15 @@ namespace NativeTranspiler.Analyzer
         // ---------- Job 委托字段 ----------
         private static void GenerateStaticDelegateFields(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
+            }
+            else if (isParallelFor || isFor)
             {
                 sb.AppendLine($"        private static readonly BatchJobFuncDelegate s_{jobStruct.Name}_BatchFunc;");
                 sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_BatchFuncPtr;");
@@ -171,6 +178,7 @@ namespace NativeTranspiler.Analyzer
             string jobTypeFullName = jobStruct.ToDisplayString();
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -192,7 +200,11 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
+            }
+            else if (isParallelFor || isFor)
             {
                 string mtSuffix = useMT ? "_mt" : "";
 
@@ -237,13 +249,20 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobDllImport(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
             bool useMT = HasUseISPC_MT(jobStruct, attrSymbol);
 
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+                sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
+                sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
+            }
+            else if (isParallelFor || isFor)
             {
                 var batchFuncName = CppJobGenerator.GetCppJobFunctionName(jobStruct, isBatch: true);
                 var batchParams = BuildBatchJobDllImportParams(jobStruct);
@@ -300,6 +319,7 @@ namespace NativeTranspiler.Analyzer
         // ---------- Job Schedule 方法 ----------
         private static void GenerateJobScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
@@ -310,7 +330,11 @@ namespace NativeTranspiler.Analyzer
             var parameters = new List<string>();
             // Use 'ref' for the internal Schedule_XXX method (caller already has a reference)
             parameters.Add($"ref {jobTypeName} job");
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                parameters.Add("QueryBuilder query");
+            }
+            else if (isParallelFor || isFor)
             {
                 parameters.Add("int arrayLength");
                 // IJobFor 也允许指定 innerBatchCount，保持接口统一
@@ -326,7 +350,17 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"            Unsafe.CopyBlockUnaligned((void*)nativePtr, originalPtr, (uint)size);");
             sb.AppendLine();
 
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
+                var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
+                string requiredIds = string.Join(", ", requiredTypes.Select(t => $"ComponentTypeManager.GetComponentType(typeof({t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})).Id"));
+                sb.AppendLine($"            int[] requiredComponentTypeIds = new int[] {{ {requiredIds} }};");
+                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleChunkRaw(");
+                sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, requiredComponentTypeIds, dependsOn._nativeHandle);");
+                sb.AppendLine($"            return new JobHandle(nativeHandle);");
+            }
+            else if (isParallelFor || isFor)
             {
                 // 自适应批次大小
                 if (useMT)
@@ -528,11 +562,20 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobExtensionMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
 
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                sb.AppendLine($"    public static JobHandle Schedule(this {jobTypeName} job, QueryBuilder query, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, query, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+            }
+            else if (isParallelFor || isFor)
             {
                 // ParallelFor/For: keep optional dependsOn (existing generic Schedule<T> has arrayLength params, no collision)
                 var parameters = new List<string>
@@ -566,6 +609,7 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobRunMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
+            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
@@ -573,14 +617,22 @@ namespace NativeTranspiler.Analyzer
             var parameters = new List<string>();
             // Must match existing JobExtensions signature (this T job) to take precedence in overload resolution
             parameters.Add($"this {jobTypeName} job");
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                parameters.Add("QueryBuilder query");
+            }
+            else if (isParallelFor || isFor)
             {
                 parameters.Add("int arrayLength");
             }
 
             sb.AppendLine($"    public static void Run({string.Join(", ", parameters)})");
             sb.AppendLine("    {");
-            if (isParallelFor || isFor)
+            if (isChunk)
+            {
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, query, default).Complete();");
+            }
+            else if (isParallelFor || isFor)
             {
                 sb.AppendLine($"        int startIndex = 0;");
                 sb.AppendLine($"        int count = arrayLength;");

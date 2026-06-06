@@ -11,11 +11,13 @@ namespace NativeTranspiler.Analyzer
     {
         protected readonly SemanticModel _semanticModel;
         protected readonly StringBuilder _builder = new();
+        protected readonly bool _useFastMath;
         protected int _indentLevel = 0;
 
-        public CppStatementTranslator(SemanticModel semanticModel)
+        public CppStatementTranslator(SemanticModel semanticModel, bool useFastMath = false)
         {
             _semanticModel = semanticModel;
+            _useFastMath = useFastMath;
         }
 
         public string Translate(BlockSyntax? block)
@@ -694,7 +696,56 @@ namespace NativeTranspiler.Analyzer
         // ========== 以下方法改为 protected virtual，允许 ISPC 翻译器重写 ==========
         protected virtual void TranslateMathFunctionCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
-            string cppFunc = method.Name switch
+            bool isMathF = method.ContainingType?.ToDisplayString() == "System.MathF";
+            if (_useFastMath && isMathF)
+            {
+                string fastFunc = method.Name switch
+                {
+                    "Sin" => "EntJoy::FastMath::Sin",
+                    "Cos" => "EntJoy::FastMath::Cos",
+                    "Sqrt" => "EntJoy::FastMath::Sqrt",
+                    _ => null
+                };
+                if (fastFunc != null)
+                {
+                    _builder.Append(fastFunc).Append('(');
+                    var fastArgs = invocation.ArgumentList.Arguments;
+                    for (int i = 0; i < fastArgs.Count; i++)
+                    {
+                        if (i > 0) _builder.Append(", ");
+                        TranslateExpression(fastArgs[i].Expression);
+                    }
+                    _builder.Append(')');
+                    return;
+                }
+            }
+
+            string cppFunc = isMathF ? method.Name switch
+            {
+                "Abs" => "::fabsf",
+                "Acos" => "::acosf",
+                "Asin" => "::asinf",
+                "Atan" => "::atanf",
+                "Atan2" => "::atan2f",
+                "Ceiling" => "::ceilf",
+                "Cos" => "::cosf",
+                "Cosh" => "::coshf",
+                "Exp" => "::expf",
+                "Floor" => "::floorf",
+                "Log" => "::logf",
+                "Log10" => "::log10f",
+                "Max" => "::fmaxf",
+                "Min" => "::fminf",
+                "Pow" => "::powf",
+                "Round" => "::roundf",
+                "Sin" => "::sinf",
+                "Sinh" => "::sinhf",
+                "Sqrt" => "::sqrtf",
+                "Tan" => "::tanf",
+                "Tanh" => "::tanhf",
+                "Truncate" => "::truncf",
+                _ => null
+            } : method.Name switch
             {
                 "Abs" => "std::abs",
                 "Acos" => "std::acos",

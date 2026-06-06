@@ -74,6 +74,7 @@ namespace NativeTranspiler.Analyzer
             "float" => "float",
             "int" => "int",
             "bool" => "bool",
+            _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
             _ => cppType
         };
 

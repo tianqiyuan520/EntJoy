@@ -4,6 +4,54 @@
 #include <cstdint>
 
 namespace EntJoy {
+	namespace FastMath {
+		inline int RoundToInt(float x) {
+			return static_cast<int>(x + (x >= 0.0f ? 0.5f : -0.5f));
+		}
+
+		inline float SinReduced(float x) {
+			const float x2 = x * x;
+			return x * (1.0f + x2 * (-0.1666666664f + x2 * (0.0083333315f + x2 * (-0.0001984090f + x2 * 0.0000027526f))));
+		}
+
+		inline float CosReduced(float x) {
+			const float x2 = x * x;
+			return 1.0f + x2 * (-0.5f + x2 * (0.0416666418f + x2 * (-0.0013888378f + x2 * 0.0000247609f)));
+		}
+
+		inline float Sin(float x) {
+			constexpr float twoOverPi = 0.63661977236758134f;
+			constexpr float piOverTwo = 1.57079632679489662f;
+			int quadrant = RoundToInt(x * twoOverPi);
+			float reduced = x - quadrant * piOverTwo;
+			switch (quadrant & 3)
+			{
+			case 0: return SinReduced(reduced);
+			case 1: return CosReduced(reduced);
+			case 2: return -SinReduced(reduced);
+			default: return -CosReduced(reduced);
+			}
+		}
+
+		inline float Cos(float x) {
+			constexpr float twoOverPi = 0.63661977236758134f;
+			constexpr float piOverTwo = 1.57079632679489662f;
+			int quadrant = RoundToInt(x * twoOverPi);
+			float reduced = x - quadrant * piOverTwo;
+			switch (quadrant & 3)
+			{
+			case 0: return CosReduced(reduced);
+			case 1: return -SinReduced(reduced);
+			case 2: return -CosReduced(reduced);
+			default: return SinReduced(reduced);
+			}
+		}
+
+		inline float Sqrt(float x) {
+			return std::sqrt(x);
+		}
+	} // namespace FastMath
+
 	namespace Mathematics {
 
 		// ---------- float2 ----------
