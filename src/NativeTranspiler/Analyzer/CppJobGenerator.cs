@@ -25,6 +25,8 @@ namespace NativeTranspiler.Analyzer
             jobStruct.AllInterfaces.Any(i => i.Name == "IJobParallelFor");
         public static bool IsForJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => i.Name == "IJobFor");
+        public static bool IsChunkJob(INamedTypeSymbol jobStruct) =>
+            jobStruct.AllInterfaces.Any(i => i.Name == "IJobChunk");
 
         /// <summary>
         /// 获取所有 bool 条件字段列表
@@ -87,13 +89,26 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
             sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
             sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
+            if (IsChunkJob(jobStruct))
+            {
+                sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
+                sb.AppendLine("#include \"../../NativeDll/ChunkNativeArray.h\"");
+            }
+            foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
+                sb.AppendLine($"#include \"{include}.h\"");
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateAtomicMacros());
             sb.AppendLine();
 
-            if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
+            if (IsChunkJob(jobStruct))
+            {
+                var chunkParams = BuildChunkJobParameters(jobStruct);
+                var singleFuncName = GetCppJobFunctionName(jobStruct);
+                sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
+            }
+            else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
                 var batchParams = BuildBatchJobParameters(jobStruct);
                 var baseFuncName = GetCppJobFunctionName(jobStruct, isBatch: true);
@@ -113,13 +128,19 @@ namespace NativeTranspiler.Analyzer
         {
             var sb = new StringBuilder();
             var baseFuncName = GetCppJobFunctionName(jobStruct);
+            var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+            bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
             sb.AppendLine();
 
-            if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
+            if (IsChunkJob(jobStruct))
+            {
+                GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
+            }
+            else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -141,17 +162,17 @@ namespace NativeTranspiler.Analyzer
                         var values = new List<bool>();
                         for (int i = 0; i < boolFields.Count; i++)
                             values.Add((mask & (1 << i)) != 0);
-                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb);
+                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath);
                     }
                 }
                 else
                 {
-                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb);
+                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath);
                 }
             }
             else
             {
-                GenerateSingleFunctionStandard(jobStruct, compilation, sb);
+                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
 
             return sb.ToString();
@@ -183,7 +204,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -193,7 +214,7 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName);
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
             var bodyCode = translator.Translate(methodSyntax.Body);
             sb.Append(bodyCode);
             sb.AppendLine("    }");
@@ -201,7 +222,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb)
+        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
         {
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
@@ -212,7 +233,7 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName);
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
             var bodyCode = translator.Translate(methodSyntax.Body);
             // 将所有 bool 条件字段替换为常量值
             for (int i = 0; i < boolFields.Count; i++)
@@ -227,7 +248,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb)
+        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var singleParams = BuildJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -239,7 +260,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppPointerStatementTranslator(semanticModel, jobStruct);
+                var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
             }
@@ -250,12 +271,43 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
         }
 
+        private static void GenerateChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        {
+            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var singleFuncName = GetCppJobFunctionName(jobStruct);
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine("{");
+            AppendLocalVariableDeclarations(jobStruct, sb);
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                var bodyCode = translator.Translate(methodSyntax.Body);
+                sb.Append(bodyCode);
+            }
+            else
+            {
+                sb.AppendLine("    // TODO: Translate IJobChunk Execute body");
+            }
+            sb.AppendLine("}");
+        }
+
         private static string BuildJobParameters(INamedTypeSymbol jobStruct)
         {
             var parameters = new List<string>();
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             if (executeMethod.Parameters.Length == 1 && executeMethod.Parameters[0].Type.SpecialType == SpecialType.System_Int32)
                 parameters.Add($"int {executeMethod.Parameters[0].Name}");
+            AppendFieldParameters(jobStruct, parameters);
+            return string.Join(", ", parameters);
+        }
+
+        private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct)
+        {
+            var parameters = new List<string> { "const ChunkJobData* __chunkData", "const int* __requiredComponentTypeIds" };
             AppendFieldParameters(jobStruct, parameters);
             return string.Join(", ", parameters);
         }
@@ -300,6 +352,61 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        public static List<INamedTypeSymbol> CollectChunkNativeArrayTypes(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var result = new List<INamedTypeSymbol>();
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+            var methodSyntax = executeMethod == null ? null : SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return result;
+
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+            foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
+                    continue;
+                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" ||
+                    (methodSymbol.Name != "GetComponentDataNativeArray" && methodSymbol.Name != "GetComponentDataSpan"))
+                    continue;
+                if (methodSymbol.TypeArguments.Length == 0 || methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)
+                    continue;
+                if (!result.Any(t => SymbolEqualityComparer.Default.Equals(t, componentType)))
+                    result.Add(componentType);
+            }
+            return result;
+        }
+
+        private static List<string> CollectJobStructIncludes(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var includes = new HashSet<string>();
+            void AddType(ITypeSymbol type)
+            {
+                if (type is IPointerTypeSymbol ptr)
+                {
+                    AddType(ptr.PointedAtType);
+                    return;
+                }
+                if (type is INamedTypeSymbol named && named.IsGenericType && NativeTranspiler.IsEntJoyNativeContainerType(type))
+                {
+                    AddType(named.TypeArguments[0]);
+                    return;
+                }
+                if (type is INamedTypeSymbol namedType &&
+                    type.TypeKind == TypeKind.Struct &&
+                    !NativeTranspiler.IsBuiltinUnmanaged(type) &&
+                    !NativeTranspiler.IsEntJoyPredefinedType(type))
+                {
+                    includes.Add(NativeTranspiler.GetStructHeaderFileName(namedType));
+                }
+            }
+
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                AddType(field.Type);
+            foreach (var type in CollectChunkNativeArrayTypes(jobStruct, compilation))
+                AddType(type);
+
+            return includes.OrderBy(x => x).ToList();
+        }
+
         // ===================================================================
         //              新增：适配函数生成（消除 C# 委托桥接）
         // ===================================================================
@@ -307,7 +414,7 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 计算 C# struct 中字段的偏移量（基于 [StructLayout(LayoutKind.Sequential)]，64位 Windows）
         /// </summary>
-        private static int CalculateFieldOffset(IFieldSymbol field, ref int currentOffset)
+        internal static int CalculateFieldOffset(IFieldSymbol field, ref int currentOffset)
         {
             int size = GetCSharpFieldSize(field.Type);
             int alignment = GetCSharpFieldAlignment(field.Type);
@@ -420,6 +527,12 @@ namespace NativeTranspiler.Analyzer
             
             sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
             sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
+            if (IsChunkJob(jobStruct))
+            {
+                sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
+                foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
+                    sb.AppendLine($"#include \"{include}.h\"");
+            }
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
 
@@ -446,9 +559,80 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine();
             }
 
+            bool isChunkJob = IsChunkJob(jobStruct);
             bool isParallelFor = IsParallelForJob(jobStruct) || IsForJob(jobStruct);
 
-            if (isParallelFor)
+            if (isChunkJob)
+            {
+                sb.AppendLine("struct __EntJoyChunkContextHeader");
+                sb.AppendLine("{");
+                sb.AppendLine("    int chunkCount;");
+                sb.AppendLine("    int hasEnabledFilter;");
+                sb.AppendLine("    void* queryAllEnabledTypes;");
+                sb.AppendLine("    int allEnabledCount;");
+                sb.AppendLine("    int gcHandleStartIndex;");
+                sb.AppendLine("    void* chunksPtr;");
+                sb.AppendLine("    int cleanupInProgress;");
+                sb.AppendLine("    void* requiredComponentTypeIds;");
+                sb.AppendLine("    int requiredComponentTypeIdCount;");
+                sb.AppendLine("};");
+                sb.AppendLine();
+
+                sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
+                sb.AppendLine("{");
+                sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
+                sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
+                sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
+                sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
+                sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
+                sb.AppendLine("    const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;");
+
+                var callArgs = new List<string> { "__chunkData", "__requiredComponentTypeIds" };
+                int currentOffset = 0;
+                foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                {
+                    int offset = CalculateFieldOffset(field, ref currentOffset);
+
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                    {
+                        if (field.Type.Name == "NativeList")
+                        {
+                            sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)(__jobContext + {offset});");
+                            callArgs.Add($"{field.Name}_listData");
+                        }
+                        else
+                        {
+                            var cppElemType = GetCppElementType(field.Type);
+                            sb.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)(__jobContext + {offset});");
+                            sb.AppendLine($"    int {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
+                            callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
+                        }
+                    }
+                    else if (field.Type is IPointerTypeSymbol)
+                    {
+                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                        sb.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)(__jobContext + {offset});");
+                        callArgs.Add($"{field.Name}_ptr");
+                    }
+                    else
+                    {
+                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                        sb.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)(__jobContext + {offset});");
+                        callArgs.Add($"{field.Name}_ptr");
+                    }
+                }
+
+                string chunkFuncName = GetCppJobFunctionName(jobStruct);
+                sb.AppendLine($"    {chunkFuncName}({string.Join(", ", callArgs)});");
+                sb.AppendLine("}");
+                sb.AppendLine();
+
+                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+                sb.AppendLine("{");
+                sb.AppendLine($"    return (void*){adapterFuncName};");
+                sb.AppendLine("}");
+            }
+            else if (isParallelFor)
             {
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 

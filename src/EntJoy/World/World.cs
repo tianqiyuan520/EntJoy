@@ -20,6 +20,11 @@ namespace EntJoy
             }
         }
 
+        public EntityQuery CreateEntityQuery(QueryBuilder builder)
+        {
+            return new EntityQuery(this, builder);
+        }
+
         public void Dispose()
         {
             _entityManager?.Dispose();

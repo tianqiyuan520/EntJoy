@@ -161,6 +161,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="ChunkJobData.h" />
+    <ClInclude Include="ChunkNativeArray.h" />
     <ClInclude Include="Exports.h" />
     <ClInclude Include="JobProfiler.h" />
     <ClInclude Include="JobSystem.h" />
