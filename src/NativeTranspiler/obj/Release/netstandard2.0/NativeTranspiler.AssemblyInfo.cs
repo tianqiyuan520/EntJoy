@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NativeTranspiler")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+83d1cec1992dce6b324eb80cc0fee78b003e37e1")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8e1f37134affd73a430ba48ac8be84f5ab5711b1")]
 [assembly: System.Reflection.AssemblyProductAttribute("NativeTranspiler")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NativeTranspiler")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

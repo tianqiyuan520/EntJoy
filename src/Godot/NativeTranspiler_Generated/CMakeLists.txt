@@ -20,6 +20,9 @@ add_library(NativeDll SHARED
     "D:/Godot/Project/EntJoy/src/NativeDll/JobProfiler.cpp"
     "D:/Godot/Project/EntJoy/src/NativeDll/JobSystem.cpp"
     "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
+    SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute_Adapter.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
@@ -43,6 +46,7 @@ add_custom_command(TARGET NativeDll PRE_BUILD
 )
 
 set(ISPC_OBJECTS
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj"
 )
 target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
