@@ -174,9 +174,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </ProjectReference>
-    <ProjectReference Include="D:\Godot\Project\EntJoy\src\Godot\NativeTranspiler_Generated\build\NativeTranspiler_Generated.vcxproj">
-      <Project>{A86C541A-2FFA-3083-8AF0-96BCC8F316AB}</Project>
-      <Name>NativeTranspiler_Generated</Name>
+    <ProjectReference Include="D:\Godot\Project\EntJoy\src\Godot\NativeTranspiler_Generated\build\NativeDll.vcxproj">
+      <Project>{0B419B35-4AB6-33CF-AD83-E05E03407570}</Project>
+      <Name>NativeDll</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

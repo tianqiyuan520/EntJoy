@@ -8,6 +8,7 @@ namespace NativeTranspiler.Analyzer
     public sealed class IspcChunkStatementTranslator : IspcStatementTranslator
     {
         private readonly HashSet<string> _chunkNativeArrayNames = new();
+        private readonly Dictionary<string, string> _chunkNativeArrayLengthAliases = new();
 
         public IspcChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct)
             : base(semanticModel, jobStruct, null, false)
@@ -24,6 +25,11 @@ namespace NativeTranspiler.Analyzer
                     _chunkNativeArrayNames.Add(variable.Identifier.Text);
                     _nativeArrayListNames.Add(variable.Identifier.Text);
                     continue;
+                }
+
+                if (TryGetChunkNativeArrayLengthAlias(variable.Initializer?.Value, out var arrayName))
+                {
+                    _chunkNativeArrayLengthAliases[variable.Identifier.Text] = arrayName;
                 }
 
                 if (!emittedAny)
@@ -100,9 +106,7 @@ namespace NativeTranspiler.Analyzer
                 forStmt.Condition is not BinaryExpressionSyntax condition ||
                 !condition.OperatorToken.IsKind(SyntaxKind.LessThanToken) ||
                 condition.Left is not IdentifierNameSyntax conditionIndex ||
-                condition.Right is not MemberAccessExpressionSyntax lengthAccess ||
-                lengthAccess.Expression is not IdentifierNameSyntax arrayId ||
-                !_chunkNativeArrayNames.Contains(arrayId.Identifier.Text))
+                !TryGetChunkNativeArrayLengthBound(condition.Right, out var arrayName))
             {
                 return false;
             }
@@ -114,7 +118,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             AppendIndent();
-            _builder.Append("foreach (").Append(indexName).Append(" = 0 ... ").Append(arrayId.Identifier.Text).Append("_length) ");
+            _builder.Append("foreach (").Append(indexName).Append(" = 0 ... ").Append(arrayName).Append("_length) ");
             if (forStmt.Statement is BlockSyntax block)
             {
                 _builder.AppendLine("{");
@@ -138,6 +142,38 @@ namespace NativeTranspiler.Analyzer
             }
 
             return true;
+        }
+
+        private bool TryGetChunkNativeArrayLengthAlias(ExpressionSyntax? expression, out string arrayName)
+        {
+            arrayName = string.Empty;
+            if (expression is MemberAccessExpressionSyntax memberAccess &&
+                memberAccess.Name.Identifier.Text == "Length" &&
+                memberAccess.Expression is IdentifierNameSyntax id &&
+                _chunkNativeArrayNames.Contains(id.Identifier.Text))
+            {
+                arrayName = id.Identifier.Text;
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryGetChunkNativeArrayLengthBound(ExpressionSyntax expression, out string arrayName)
+        {
+            if (TryGetChunkNativeArrayLengthAlias(expression, out arrayName))
+            {
+                return true;
+            }
+
+            if (expression is IdentifierNameSyntax id &&
+                _chunkNativeArrayLengthAliases.TryGetValue(id.Identifier.Text, out arrayName))
+            {
+                return true;
+            }
+
+            arrayName = string.Empty;
+            return false;
         }
 
         private bool IsChunkNativeArrayInitializer(ExpressionSyntax? expression)

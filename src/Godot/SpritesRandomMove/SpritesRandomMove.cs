@@ -2,16 +2,17 @@ using EntJoy;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using Godot;
+using System;
 using System.Diagnostics;
 
 public struct Position : IComponentData
 {
-    public Vector2 pos;
+    public float2 pos;
 }
 
 public struct Vel : IComponentData
 {
-    public Vector2 vel;
+    public float2 vel;
 }
 
 public partial class SpritesRandomMove : Node2D
@@ -31,13 +32,28 @@ public partial class SpritesRandomMove : Node2D
     private double _totalMs = 0;
     private int _frameCount = 0;
 
+    private const int EcsFrameBenchmarkWarmupFrames = 60;
+    private const int EcsFrameBenchmarkMeasureFrames = 300;
+    private bool _ecsFrameBenchmarkActive = false;
+    private int _ecsFrameBenchmarkJobType = 0;
+    private int _ecsFrameBenchmarkFrame = 0;
+    private readonly double[] _ecsFrameBenchmarkTotals = new double[EcsFrameBenchmarkMeasureFrames];
+    private readonly double[] _ecsFrameBenchmarkSchedules = new double[EcsFrameBenchmarkMeasureFrames];
+    private readonly double[] _ecsFrameBenchmarkCompletes = new double[EcsFrameBenchmarkMeasureFrames];
+
     // 模式切换
     private bool _useECS = true; // true=ECS模式, false=NativeArray模式
     private Label _modeLabel;
 
     // ECS 模式缓存
     private QueryBuilder _moveQuery = new QueryBuilder().WithAll<Position, Vel>();
-    private MoveSystemJob _moveJob;
+    private int _ecsJobType = 0;
+    private readonly string[] _ecsJobTypeNames =
+    {
+        "ECS C# IJobChunk",
+        "ECS C++ IJobChunk",
+        "ECS ISPC IJobChunk"
+    };
 
     // NativeArray 模式（百万级）
     private NativeArray<float2> _naPositions;
@@ -109,17 +125,21 @@ public partial class SpritesRandomMove : Node2D
         if (isPaused)
             return;
 
+        double elapsedMs;
+
         if (_useECS)
         {
             // ======= ECS 模式 =======
             if (myWorld == null || myWorld.EntityManager.EntityCount == 0)
                 return;
 
-            _moveJob.dt = (float)delta;
+            ScheduleAndCompleteEcsMoveJob((float)delta, _ecsFrameBenchmarkActive ? _ecsFrameBenchmarkJobType : _ecsJobType, out double scheduleMs, out double completeMs);
+            elapsedMs = scheduleMs + completeMs;
 
-            _sw.Restart();
-            _moveJob.Schedule(_moveQuery).Complete();
-            _sw.Stop();
+            if (_ecsFrameBenchmarkActive)
+            {
+                RecordEcsFrameBenchmarkSample(scheduleMs, completeMs);
+            }
         }
         else
         {
@@ -150,23 +170,169 @@ public partial class SpritesRandomMove : Node2D
                     break;
             }
             _sw.Stop();
+            elapsedMs = _sw.Elapsed.TotalMilliseconds;
         }
 
-        _totalMs += _sw.Elapsed.TotalMilliseconds;
+        if (!_ecsFrameBenchmarkActive)
+        {
+            _totalMs += elapsedMs;
         _frameCount++;
 
         if (_frameCount >= 60)
         {
             double avg = _totalMs / _frameCount;
-            string modeStr = _useECS ? "ECS" : _naJobTypeNames[_naJobType];
+            string modeStr = GetCurrentJobTypeName();
             GD.Print($"[{modeStr}] 每帧平均耗时(60帧): {avg:F4} ms");
             _totalMs = 0;
             _frameCount = 0;
         }
+        }
+    }
+
+    private void ScheduleEcsMoveJob(float dt)
+    {
+        ScheduleAndCompleteEcsMoveJob(dt, _ecsJobType, out _, out _);
+    }
+
+    private void ScheduleAndCompleteEcsMoveJob(float dt, int jobType, out double scheduleMs, out double completeMs)
+    {
+        JobHandle handle = default;
+
+        _sw.Restart();
+        switch (jobType)
+        {
+            case 0:
+                handle = new MoveSystemJobCSharp { dt = dt }.Schedule(_moveQuery);
+                break;
+            case 1:
+                handle = new MoveSystemJobCpp { dt = dt }.Schedule(_moveQuery);
+                break;
+            case 2:
+                handle = new MoveSystemJobIspc { dt = dt }.Schedule(_moveQuery);
+                break;
+        }
+        _sw.Stop();
+        scheduleMs = _sw.Elapsed.TotalMilliseconds;
+
+        _sw.Restart();
+        handle.Complete();
+        _sw.Stop();
+        completeMs = _sw.Elapsed.TotalMilliseconds;
+    }
+
+    private string GetCurrentJobTypeName()
+    {
+        return _useECS ? _ecsJobTypeNames[_ecsJobType] : _naJobTypeNames[_naJobType];
+    }
+
+    private void StartEcsFrameBenchmark()
+    {
+        if (myWorld == null || myWorld.EntityManager.EntityCount == 0)
+        {
+            GD.Print("请先创建世界和实体");
+            return;
+        }
+
+        _ecsFrameBenchmarkActive = true;
+        _ecsFrameBenchmarkJobType = _ecsJobType;
+        _ecsFrameBenchmarkFrame = 0;
+        _totalMs = 0;
+        _frameCount = 0;
+
+        string jobName = _ecsJobTypeNames[_ecsFrameBenchmarkJobType];
+        GD.Print($"[{jobName}] Frame-spaced benchmark started.");
+        GD.Print($"[{jobName}] one Schedule+Complete per _PhysicsProcess frame");
+        GD.Print($"[{jobName}] Warmup={EcsFrameBenchmarkWarmupFrames}, Measure={EcsFrameBenchmarkMeasureFrames}");
+    }
+
+    private void CancelEcsFrameBenchmark(string reason)
+    {
+        if (!_ecsFrameBenchmarkActive)
+            return;
+
+        string jobName = _ecsJobTypeNames[_ecsFrameBenchmarkJobType];
+        _ecsFrameBenchmarkActive = false;
+        _ecsFrameBenchmarkFrame = 0;
+        _totalMs = 0;
+        _frameCount = 0;
+        GD.Print($"[{jobName}] Frame-spaced benchmark cancelled: {reason}");
+    }
+
+    private void RecordEcsFrameBenchmarkSample(double scheduleMs, double completeMs)
+    {
+        int frame = _ecsFrameBenchmarkFrame++;
+        if (frame < EcsFrameBenchmarkWarmupFrames)
+            return;
+
+        int measureIndex = frame - EcsFrameBenchmarkWarmupFrames;
+        if (measureIndex == 0)
+        {
+            GD.Print($"[{_ecsJobTypeNames[_ecsFrameBenchmarkJobType]}] Warmup finished; measuring frame-spaced IJobChunk...");
+        }
+
+        if (measureIndex >= EcsFrameBenchmarkMeasureFrames)
+            return;
+
+        _ecsFrameBenchmarkSchedules[measureIndex] = scheduleMs;
+        _ecsFrameBenchmarkCompletes[measureIndex] = completeMs;
+        _ecsFrameBenchmarkTotals[measureIndex] = scheduleMs + completeMs;
+
+        if (measureIndex + 1 >= EcsFrameBenchmarkMeasureFrames)
+        {
+            FinishEcsFrameBenchmark();
+        }
+    }
+
+    private void FinishEcsFrameBenchmark()
+    {
+        string jobName = _ecsJobTypeNames[_ecsFrameBenchmarkJobType];
+        double avgTotal = Average(_ecsFrameBenchmarkTotals, EcsFrameBenchmarkMeasureFrames);
+        double avgSchedule = Average(_ecsFrameBenchmarkSchedules, EcsFrameBenchmarkMeasureFrames);
+        double avgComplete = Average(_ecsFrameBenchmarkCompletes, EcsFrameBenchmarkMeasureFrames);
+        double minTotal = Min(_ecsFrameBenchmarkTotals, EcsFrameBenchmarkMeasureFrames);
+        double maxTotal = Max(_ecsFrameBenchmarkTotals, EcsFrameBenchmarkMeasureFrames);
+        double p95Total = Percentile(_ecsFrameBenchmarkTotals, EcsFrameBenchmarkMeasureFrames, 0.95);
+
+        _ecsFrameBenchmarkActive = false;
+        _ecsFrameBenchmarkFrame = 0;
+
+        GD.Print($"Frame-spaced {jobName}: avgTotal={avgTotal:F4} ms avgSchedule={avgSchedule:F4} ms avgComplete={avgComplete:F4} ms min={minTotal:F4} ms max={maxTotal:F4} ms p95={p95Total:F4} ms");
+        GD.Print($"Frame-spaced {jobName}: one Schedule+Complete per _PhysicsProcess frame, samples={EcsFrameBenchmarkMeasureFrames}");
+    }
+
+    private static double Average(double[] values, int count)
+    {
+        double total = 0;
+        for (int i = 0; i < count; i++) total += values[i];
+        return total / count;
+    }
+
+    private static double Min(double[] values, int count)
+    {
+        double min = double.MaxValue;
+        for (int i = 0; i < count; i++) min = Math.Min(min, values[i]);
+        return min;
+    }
+
+    private static double Max(double[] values, int count)
+    {
+        double max = double.MinValue;
+        for (int i = 0; i < count; i++) max = Math.Max(max, values[i]);
+        return max;
+    }
+
+    private static double Percentile(double[] values, int count, double percentile)
+    {
+        double[] sorted = new double[count];
+        Array.Copy(values, sorted, count);
+        Array.Sort(sorted);
+        int index = Math.Clamp((int)Math.Ceiling(percentile * count) - 1, 0, count - 1);
+        return sorted[index];
     }
 
     public void ToggleMode()
     {
+        CancelEcsFrameBenchmark("mode switched");
         _useECS = !_useECS;
         UpdateModeLabel();
         GD.Print($"切换至 {(_useECS ? "ECS" : _naJobTypeNames[_naJobType])} 模式");
@@ -179,6 +345,20 @@ public partial class SpritesRandomMove : Node2D
     }
 
     public void ToggleNaJobType()
+    {
+        if (_useECS)
+        {
+            CancelEcsFrameBenchmark("job type switched");
+            _ecsJobType = (_ecsJobType + 1) % _ecsJobTypeNames.Length;
+            UpdateModeLabel();
+            GD.Print($"ECS IJobChunk 绫诲瀷鍒囨崲鑷? {_ecsJobTypeNames[_ecsJobType]}");
+            return;
+        }
+
+        ToggleNativeArrayJobType();
+    }
+
+    private void ToggleNativeArrayJobType()
     {
         if (_useECS) return; // ECS 模式下不切换
         _naJobType = (_naJobType + 1) % 3;
@@ -221,7 +401,7 @@ public partial class SpritesRandomMove : Node2D
     {
         if (_modeLabel != null)
         {
-            _modeLabel.Text = _useECS ? "[ECS]" : $"[{_naJobTypeNames[_naJobType]}]";
+            _modeLabel.Text = $"[{GetCurrentJobTypeName()}]";
         }
     }
 
@@ -252,10 +432,10 @@ public partial class SpritesRandomMove : Node2D
 
             for (int i = 0; i < len; i++)
             {
-                Vector2 p = positions[i].pos;
-                Vector2 v = velocities[i].vel;
-                _naPositions[idx] = new float2(p.X, p.Y);
-                _naVelocities[idx] = new float2(v.X, v.Y);
+                float2 p = positions[i].pos;
+                float2 v = velocities[i].vel;
+                _naPositions[idx] = new float2(p.x, p.y);
+                _naVelocities[idx] = new float2(v.x, v.y);
                 idx++;
             }
         }
@@ -304,34 +484,38 @@ public partial class SpritesRandomMove : Node2D
 
         if (_useECS)
         {
+            StartEcsFrameBenchmark();
+            return;
+        }
+
+        if (_useECS)
+        {
             if (myWorld == null || myWorld.EntityManager.EntityCount == 0)
             {
                 GD.Print("请先创建世界和实体");
                 return;
             }
 
-            var query = new QueryBuilder().WithAll<Position, Vel>();
+            string jobName = _ecsJobTypeNames[_ecsJobType];
 
-            GD.Print($"[ECS] 预热 {WARMUP} 次...");
+            GD.Print($"[{jobName}] 预热 {WARMUP} 次...");
             for (int i = 0; i < WARMUP; i++)
             {
-                var job = new MoveSystemJob { dt = 0.016f };
-                job.Schedule(query).Complete();
+                ScheduleEcsMoveJob(0.016f);
             }
 
-            GD.Print($"[ECS] 开始基准测试 {ITERATIONS} 次...");
+            GD.Print($"[{jobName}] 开始基准测试 {ITERATIONS} 次...");
             double total = 0;
             for (int i = 0; i < ITERATIONS; i++)
             {
-                var job = new MoveSystemJob { dt = 0.016f };
                 sw.Restart();
-                job.Schedule(query).Complete();
+                ScheduleEcsMoveJob(0.016f);
                 sw.Stop();
                 total += sw.Elapsed.TotalMilliseconds;
             }
 
             double avg = total / ITERATIONS;
-            GD.Print($"[ECS] Benchmark 完成: 平均 {avg:F3} ms (共 {ITERATIONS} 次)");
+            GD.Print($"[{jobName}] Benchmark 完成: 平均 {avg:F3} ms (共 {ITERATIONS} 次)");
         }
         else
         {
@@ -472,11 +656,11 @@ public partial class SpritesRandomMove : Node2D
                 var entity = myWorld.EntityManager.NewEntity(typeof(Position), typeof(Vel));
                 myWorld.EntityManager.AddComponent(entity, new Position()
                 {
-                    pos = new Vector2(100, 100),
+                    pos = new float2(100f, 100f),
                 });
                 myWorld.EntityManager.AddComponent(entity, new Vel()
                 {
-                    vel = new Vector2
+                    vel = new float2
                     (
                         (float)GD.RandRange(100.0, 200.0),
                         (float)GD.RandRange(-200.0, 200.0)
@@ -590,7 +774,8 @@ public partial class SpritesRandomMove : Node2D
 /// <summary>
 /// IJobChunk 实体位移 Job (ECS 模式)
 /// </summary>
-public unsafe struct MoveSystemJob : IJobChunk
+
+public unsafe struct MoveSystemJobCSharp : IJobChunk
 {
     public float dt;
 
@@ -598,12 +783,56 @@ public unsafe struct MoveSystemJob : IJobChunk
     {
         var positions = chunk.GetComponentDataSpan<Position>();
         var velocities = chunk.GetComponentDataSpan<Vel>();
-        int count = chunk.Count;
 
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < positions.Length; i++)
         {
-            positions[i].pos.X += velocities[i].vel.X * dt;
-            positions[i].pos.Y += velocities[i].vel.Y * dt;
+            Position position = positions[i];
+            Vel velocity = velocities[i];
+            position.pos.x += velocity.vel.x * dt;
+            position.pos.y += velocity.vel.y * dt;
+            positions[i] = position;
+        }
+    }
+}
+
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+public unsafe struct MoveSystemJobCpp : IJobChunk
+{
+    public float dt;
+
+    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+    {
+        var positions = chunk.GetComponentDataNativeArray<Position>();
+        var velocities = chunk.GetComponentDataNativeArray<Vel>();
+
+        for (int i = 0; i < positions.Length; i++)
+        {
+            Position position = positions[i];
+            Vel velocity = velocities[i];
+            position.pos.x += velocity.vel.x * dt;
+            position.pos.y += velocity.vel.y * dt;
+            positions[i] = position;
+        }
+    }
+}
+
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+public unsafe struct MoveSystemJobIspc : IJobChunk
+{
+    public float dt;
+
+    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+    {
+        var positions = chunk.GetComponentDataNativeArray<Position>();
+        var velocities = chunk.GetComponentDataNativeArray<Vel>();
+
+        for (int i = 0; i < positions.Length; i++)
+        {
+            Position position = positions[i];
+            Vel velocity = velocities[i];
+            position.pos.x += velocity.vel.x * dt;
+            position.pos.y += velocity.vel.y * dt;
+            positions[i] = position;
         }
     }
 }
