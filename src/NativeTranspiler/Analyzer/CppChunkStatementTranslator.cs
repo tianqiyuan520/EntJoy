@@ -8,8 +8,15 @@ namespace NativeTranspiler.Analyzer
 {
     public sealed class CppChunkStatementTranslator : CppPointerStatementTranslator
     {
+        private sealed class NativeArrayElementAlias
+        {
+            public string ArrayName { get; set; } = "";
+            public string IndexExpression { get; set; } = "";
+        }
+
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly HashSet<string> _chunkArrayLocalNames = new();
+        private readonly Dictionary<string, NativeArrayElementAlias> _nativeArrayElementAliases = new();
 
         public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, bool useFastMath = false)
             : base(semanticModel, jobStruct, useFastMath)
@@ -17,12 +24,46 @@ namespace NativeTranspiler.Analyzer
             _requiredComponentTypes = requiredComponentTypes;
         }
 
+        protected override void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
+        {
+            var previousAliases = new Dictionary<string, NativeArrayElementAlias>(_nativeArrayElementAliases);
+            RegisterNativeArrayElementAliases(block);
+
+            base.TranslateBlock(block, skipOuterBraces);
+
+            _nativeArrayElementAliases.Clear();
+            foreach (var pair in previousAliases)
+                _nativeArrayElementAliases[pair.Key] = pair.Value;
+        }
+
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
             if (TryTranslateChunkArrayLocal(localDecl))
                 return;
 
+            if (IsNativeArrayElementAliasLocal(localDecl))
+                return;
+
             base.TranslateLocalDeclaration(localDecl);
+        }
+
+        protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
+        {
+            if (exprStmt.Expression is AssignmentExpressionSyntax assignment && IsNativeArrayAliasWriteBack(assignment))
+                return;
+
+            base.TranslateExpressionStatement(exprStmt);
+        }
+
+        protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
+        {
+            if (_nativeArrayElementAliases.TryGetValue(identifier.Identifier.Text, out var alias))
+            {
+                _builder.Append(alias.ArrayName).Append("_ptr[").Append(alias.IndexExpression).Append(']');
+                return;
+            }
+
+            base.TranslateIdentifier(identifier);
         }
 
         private bool TryTranslateChunkArrayLocal(LocalDeclarationStatementSyntax localDecl)
@@ -129,5 +170,190 @@ namespace NativeTranspiler.Analyzer
 
             base.TranslateElementAccess(elementAccess);
         }
+
+        private void RegisterNativeArrayElementAliases(BlockSyntax block)
+        {
+            foreach (var statement in block.Statements)
+            {
+                if (statement is not LocalDeclarationStatementSyntax localDecl)
+                    continue;
+                if (!TryGetNativeArrayElementAliasLocal(localDecl, out var aliasName, out var alias))
+                    continue;
+                bool hasWriteBack = BlockContainsAliasWriteBack(block, aliasName, alias);
+                bool isReadOnlySource = !BlockWritesAlias(block, aliasName) && !BlockWritesChunkArray(block, alias.ArrayName);
+                if (!hasWriteBack && !isReadOnlySource)
+                    continue;
+
+                _nativeArrayElementAliases[aliasName] = alias;
+            }
+        }
+
+        private bool IsNativeArrayElementAliasLocal(LocalDeclarationStatementSyntax localDecl)
+            => TryGetNativeArrayElementAliasLocal(localDecl, out var aliasName, out _)
+               && _nativeArrayElementAliases.ContainsKey(aliasName);
+
+        private bool TryGetNativeArrayElementAliasLocal(
+            LocalDeclarationStatementSyntax localDecl,
+            out string aliasName,
+            out NativeArrayElementAlias alias)
+        {
+            aliasName = "";
+            alias = null!;
+
+            if (localDecl.Declaration.Variables.Count != 1)
+                return false;
+
+            var variable = localDecl.Declaration.Variables[0];
+            if (variable.Initializer?.Value is not ElementAccessExpressionSyntax elementAccess)
+                return false;
+            if (elementAccess.Expression is not IdentifierNameSyntax arrayIdentifier)
+                return false;
+            if (!_chunkArrayLocalNames.Contains(arrayIdentifier.Identifier.Text))
+                return false;
+
+            var args = elementAccess.ArgumentList.Arguments;
+            if (args.Count != 1)
+                return false;
+
+            aliasName = variable.Identifier.Text;
+            alias = new NativeArrayElementAlias
+            {
+                ArrayName = arrayIdentifier.Identifier.Text,
+                IndexExpression = NormalizeExpression(args[0].Expression)
+            };
+            return true;
+        }
+
+        private bool BlockContainsAliasWriteBack(BlockSyntax block, string aliasName, NativeArrayElementAlias alias)
+        {
+            foreach (var statement in block.Statements)
+            {
+                if (statement is not ExpressionStatementSyntax exprStmt)
+                    continue;
+                if (exprStmt.Expression is not AssignmentExpressionSyntax assignment)
+                    continue;
+                if (!assignment.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression))
+                    continue;
+                if (assignment.Right is not IdentifierNameSyntax right || right.Identifier.Text != aliasName)
+                    continue;
+                if (!TryGetChunkArrayElement(assignment.Left, out var arrayName, out var indexExpression))
+                    continue;
+                if (arrayName == alias.ArrayName && indexExpression == alias.IndexExpression)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool BlockWritesAlias(BlockSyntax block, string aliasName)
+        {
+            foreach (var statement in block.Statements)
+            {
+                if (statement is not ExpressionStatementSyntax exprStmt)
+                    continue;
+
+                if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
+                    ExpressionStartsWithIdentifier(assignment.Left, aliasName))
+                {
+                    return true;
+                }
+
+                if (exprStmt.Expression is PrefixUnaryExpressionSyntax prefix &&
+                    ExpressionStartsWithIdentifier(prefix.Operand, aliasName))
+                {
+                    return true;
+                }
+
+                if (exprStmt.Expression is PostfixUnaryExpressionSyntax postfix &&
+                    ExpressionStartsWithIdentifier(postfix.Operand, aliasName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool BlockWritesChunkArray(BlockSyntax block, string arrayName)
+        {
+            foreach (var statement in block.Statements)
+            {
+                if (statement is not ExpressionStatementSyntax exprStmt)
+                    continue;
+
+                if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
+                    TryGetChunkArrayElement(assignment.Left, out var writtenArray, out _) &&
+                    writtenArray == arrayName)
+                {
+                    return true;
+                }
+
+                if (exprStmt.Expression is PrefixUnaryExpressionSyntax prefix &&
+                    TryGetChunkArrayElement(prefix.Operand, out writtenArray, out _) &&
+                    writtenArray == arrayName)
+                {
+                    return true;
+                }
+
+                if (exprStmt.Expression is PostfixUnaryExpressionSyntax postfix &&
+                    TryGetChunkArrayElement(postfix.Operand, out writtenArray, out _) &&
+                    writtenArray == arrayName)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ExpressionStartsWithIdentifier(ExpressionSyntax expression, string identifier)
+        {
+            return expression switch
+            {
+                IdentifierNameSyntax id => id.Identifier.Text == identifier,
+                MemberAccessExpressionSyntax memberAccess => ExpressionStartsWithIdentifier(memberAccess.Expression, identifier),
+                ElementAccessExpressionSyntax elementAccess => ExpressionStartsWithIdentifier(elementAccess.Expression, identifier),
+                ParenthesizedExpressionSyntax parenthesized => ExpressionStartsWithIdentifier(parenthesized.Expression, identifier),
+                _ => false
+            };
+        }
+
+        private bool IsNativeArrayAliasWriteBack(AssignmentExpressionSyntax assignment)
+        {
+            if (!assignment.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression))
+                return false;
+            if (assignment.Right is not IdentifierNameSyntax right)
+                return false;
+            if (!_nativeArrayElementAliases.TryGetValue(right.Identifier.Text, out var alias))
+                return false;
+            if (!TryGetChunkArrayElement(assignment.Left, out var arrayName, out var indexExpression))
+                return false;
+
+            return arrayName == alias.ArrayName && indexExpression == alias.IndexExpression;
+        }
+
+        private bool TryGetChunkArrayElement(ExpressionSyntax expression, out string arrayName, out string indexExpression)
+        {
+            arrayName = "";
+            indexExpression = "";
+
+            if (expression is not ElementAccessExpressionSyntax elementAccess)
+                return false;
+            if (elementAccess.Expression is not IdentifierNameSyntax arrayIdentifier)
+                return false;
+            if (!_chunkArrayLocalNames.Contains(arrayIdentifier.Identifier.Text))
+                return false;
+
+            var args = elementAccess.ArgumentList.Arguments;
+            if (args.Count != 1)
+                return false;
+
+            arrayName = arrayIdentifier.Identifier.Text;
+            indexExpression = NormalizeExpression(args[0].Expression);
+            return true;
+        }
+
+        private static string NormalizeExpression(ExpressionSyntax expression)
+            => expression.NormalizeWhitespace().ToFullString();
     }
 }

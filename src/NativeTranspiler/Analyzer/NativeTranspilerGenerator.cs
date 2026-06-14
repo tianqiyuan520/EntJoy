@@ -351,7 +351,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk") == true)
+                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk" || i.Name == "IJobEntity") == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -756,19 +756,18 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            var binPath = outputBinDir.Replace("\\", "/");
             sb.AppendLine($"set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"{binPath}\"");
-            sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"{binPath}\"");
-            sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"{binPath}\"");
+            sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
+            sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
+            sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
             sb.AppendLine(")");
             sb.AppendLine();
             sb.AppendLine($"foreach(OUTPUTCONFIG ${{CMAKE_CONFIGURATION_TYPES}})");
             sb.AppendLine($"    string(TOUPPER ${{OUTPUTCONFIG}} OUTPUTCONFIG)");
             sb.AppendLine($"    set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
-            sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
-            sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
+            sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
+            sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
+            sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
             sb.AppendLine($"    )");
             sb.AppendLine($"endforeach()");
             sb.AppendLine();

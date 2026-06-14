@@ -23,6 +23,8 @@ add_library(NativeDll SHARED
     SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
@@ -61,17 +63,17 @@ else()
 endif()
 
 set_target_properties(NativeDll PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
-    LIBRARY_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
-    ARCHIVE_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
 foreach(OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER ${OUTPUTCONFIG} OUTPUTCONFIG)
     set_target_properties(NativeDll PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
-        LIBRARY_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
-        ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
+        RUNTIME_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
+        LIBRARY_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
+        ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
     )
 endforeach()
 

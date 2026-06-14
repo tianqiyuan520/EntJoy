@@ -16,12 +16,13 @@
     <ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\EntJoy\EntJoy.csproj" />
     <ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-    <ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
 
   <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
-  <Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask">
+  <Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
+          Condition="!Exists('$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll')">
     <MSBuild
       Projects="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
       Targets="Build"

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,15 @@ constexpr size_t hardware_destructive_interference_size = 64;
 
 namespace JobSystem {
 
+    using AssistStepCallback = bool (*)(void*) noexcept;
+
+    enum class ChunkScheduleMode : int {
+        PublishNoAssist = 0,
+        PublishAssist = 1,
+        DeferTinyOnly = 2,
+        ImmediateNative = 3,
+    };
+
     // 对齐到缓存行，避免伪共享
     struct alignas(hardware_destructive_interference_size) HandleState {
         std::atomic<uint32_t> refCount{ 1 };
@@ -32,7 +42,14 @@ namespace JobSystem {
         // 延续任务相关（保留但极少使用）
         std::function<void()> inlineContinuation;
         std::vector<std::function<void()>> continuations;
+        // Complete() 协作执行的轻量 raw callback。IJobChunk 热路径优先走这里，避免每 chunk std::function 拷贝/锁。
+        std::atomic<AssistStepCallback> assistCallback{ nullptr };
+        std::atomic<void*> assistContext{ nullptr };
+        // Unity-style deferred schedule: Complete() 可先尝试 claim pending work 并同步执行。
+        std::atomic<AssistStepCallback> pendingCallback{ nullptr };
+        std::atomic<void*> pendingContext{ nullptr };
         // Complete() 可协作执行的辅助步骤（Unity-style main-thread assist）
+        // 保留给 ParallelFor/ParallelForBatch 旧路径，后续可继续迁移。
         std::function<bool()> assistStep;
         std::mutex mtx;  // 保护 continuations
 
@@ -79,11 +96,38 @@ void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuat
 int ResolveWorkerCount(int numThreads);
 std::shared_ptr<tf::Executor> EnsureExecutor();
 
+struct JobSystemStatsSnapshot {
+    uint64_t completeWaitLoops;
+    uint64_t assistAttempts;
+    uint64_t assistExecuted;
+    uint64_t frameTasksSubmitted;
+    uint64_t frameTasksCompleted;
+    uint64_t workerExecutedRanges;
+    uint64_t mainExecutedRanges;
+    uint64_t stealCount;
+    uint64_t parkWakeCount;
+    uint64_t deferredRuns;
+    uint64_t publishedJobs;
+    uint64_t prewakeCount;
+    uint64_t hotSpinHits;
+    uint64_t waitFallbacks;
+    uint64_t notifiedWorkers;
+    uint64_t scheduleModePublishNoAssist;
+    uint64_t scheduleModePublishAssist;
+    uint64_t scheduleModeDeferTinyOnly;
+    uint64_t scheduleModeImmediateNative;
+    int frameQueueDepthPeak;
+};
+
+void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
+void ResetStatsSnapshot() noexcept;
+
     class Scheduler {
     public:
         static void Initialize(int numThreads = 0);
         static void Shutdown();
         static void PrewakeWorkers();
+        static void FlushScheduledJobs();
 
         static JobHandle Schedule(
             void (*func)(void*), void* context,
@@ -115,7 +159,10 @@ std::shared_ptr<tf::Executor> EnsureExecutor();
             void (*cleanup)(void*) = nullptr,
             const struct ChunkJobData* chunks = nullptr,
             int chunkCount = 0,
-            const JobHandle& dependency = {});
+            const JobHandle& dependency = {},
+            ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
+            int workerCap = 0,
+            int rangeSize = 0);
     };
 
 } // namespace JobSystem
