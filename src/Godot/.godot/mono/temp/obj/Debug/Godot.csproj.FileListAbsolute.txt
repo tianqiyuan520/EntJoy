@@ -3,7 +3,6 @@ D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\Godot.runtimeconfig
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\Godot.dll
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\Godot.pdb
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\GodotSharp.dll
-D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\GodotSharpEditor.dll
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\EntJoy.dll
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\EntJoy.pdb
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\obj\Debug\Godot.csproj.AssemblyReference.cache

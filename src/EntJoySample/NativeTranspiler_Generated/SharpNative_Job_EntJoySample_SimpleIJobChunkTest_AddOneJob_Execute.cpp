@@ -9,8 +9,6 @@ auto* RESTRICT values_ptr = reinterpret_cast<EntJoySample::SimpleIJobChunkTest::
 int values_length = __chunkData->entityCount;
 for (int index = 0; index < values_length; index++)
 {
-    EntJoySample::SimpleIJobChunkTest::TestValue value = values_ptr[index];
-    value.Value += 1;
-    values_ptr[index] = value;
+    values_ptr[index].Value += 1;
 }
 }

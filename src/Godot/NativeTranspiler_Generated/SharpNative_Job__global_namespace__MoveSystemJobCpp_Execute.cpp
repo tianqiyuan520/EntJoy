@@ -12,10 +12,7 @@ auto* RESTRICT velocities_ptr = reinterpret_cast<Vel*>(EntJoy::ChunkNativeArray:
 int velocities_length = __chunkData->entityCount;
 for (int i = 0; i < positions_length; i++)
 {
-    Position position = positions_ptr[i];
-    Vel velocity = velocities_ptr[i];
-    position.pos.x += velocity.vel.x * dt;
-    position.pos.y += velocity.vel.y * dt;
-    positions_ptr[i] = position;
+    positions_ptr[i].pos.x += velocities_ptr[i].vel.x * dt;
+    positions_ptr[i].pos.y += velocities_ptr[i].vel.y * dt;
 }
 }

@@ -206,6 +206,7 @@ namespace EntJoySample.IJobChunkScheduleOverheadTest
             double cppAddOne = RunInWorld(_cppWorld, "C++ AddOne IJobChunk", () => new AddOneChunkJobCpp().Schedule(_query).Complete());
             double ispcAddOne = RunInWorld(_ispcWorld, "ISPC AddOne IJobChunk", () => new AddOneChunkJobIspc().Schedule(_query).Complete());
             VerifyAddOne();
+            VerifyFlushScheduledJobs();
 
             Console.WriteLine();
             Console.WriteLine("=== Summary ===");
@@ -288,6 +289,20 @@ namespace EntJoySample.IJobChunkScheduleOverheadTest
             Console.WriteLine(csharpOk && cppOk && ispcOk
                 ? $"Verify AddOne        : OK, value={expected}"
                 : $"Verify AddOne        : ERROR, expected={expected}, C#={csharpActual}, C++={cppActual}, ISPC={ispcActual}");
+        }
+
+        private void VerifyFlushScheduledJobs()
+        {
+            World.DefaultWorld = _cppWorld;
+            var handle = new AddOneChunkJobCpp().Schedule(_query);
+            JobHandle.ScheduleBatchedJobs();
+            handle.Complete();
+
+            int expected = WarmupFrames + MeasureFrames + 1;
+            bool ok = VerifyWorld(_cppWorld, expected, out int actual);
+            Console.WriteLine(ok
+                ? $"Verify Flush         : OK, value={expected}"
+                : $"Verify Flush         : ERROR, expected={expected}, C++={actual}");
         }
 
         private bool VerifyWorld(World world, int expected, out int firstActual)

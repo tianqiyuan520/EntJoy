@@ -63,25 +63,25 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\Godot\Project\EntJoy\bin\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\build\DEBUG\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NativeDll.dir\Debug\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NativeDll</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.dll</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"></LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\Godot\Project\EntJoy\bin\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\build\RELEASE\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NativeDll.dir\Release\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NativeDll</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.dll</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'"></LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\Godot\Project\EntJoy\bin\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\build\MINSIZEREL\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">NativeDll.dir\MinSizeRel\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">NativeDll</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">.dll</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'"></LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\Godot\Project\EntJoy\bin\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\Godot\Project\EntJoy\src\EntJoySample\NativeTranspiler_Generated\build\RELWITHDEBINFO\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">NativeDll.dir\RelWithDebInfo\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">NativeDll</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">.dll</TargetExt>
@@ -157,9 +157,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
-      <ImportLibrary>D:/Godot/Project/EntJoy/bin/NativeDll.lib</ImportLibrary>
+      <ImportLibrary>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/DEBUG/NativeDll.lib</ImportLibrary>
       <LinkErrorReporting></LinkErrorReporting>
-      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/bin/NativeDll.pdb</ProgramDataBaseFile>
+      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/DEBUG/NativeDll.pdb</ProgramDataBaseFile>
       <RandomizedBaseAddress></RandomizedBaseAddress>
       <SubSystem>Console</SubSystem>
     </Link>
@@ -236,9 +236,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
-      <ImportLibrary>D:/Godot/Project/EntJoy/bin/NativeDll.lib</ImportLibrary>
+      <ImportLibrary>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/RELEASE/NativeDll.lib</ImportLibrary>
       <LinkErrorReporting></LinkErrorReporting>
-      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/bin/NativeDll.pdb</ProgramDataBaseFile>
+      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/RELEASE/NativeDll.pdb</ProgramDataBaseFile>
       <RandomizedBaseAddress></RandomizedBaseAddress>
       <SubSystem>Console</SubSystem>
     </Link>
@@ -315,9 +315,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
-      <ImportLibrary>D:/Godot/Project/EntJoy/bin/NativeDll.lib</ImportLibrary>
+      <ImportLibrary>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/MINSIZEREL/NativeDll.lib</ImportLibrary>
       <LinkErrorReporting></LinkErrorReporting>
-      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/bin/NativeDll.pdb</ProgramDataBaseFile>
+      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/MINSIZEREL/NativeDll.pdb</ProgramDataBaseFile>
       <RandomizedBaseAddress></RandomizedBaseAddress>
       <SubSystem>Console</SubSystem>
     </Link>
@@ -393,9 +393,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImageHasSafeExceptionHandlers></ImageHasSafeExceptionHandlers>
-      <ImportLibrary>D:/Godot/Project/EntJoy/bin/NativeDll.lib</ImportLibrary>
+      <ImportLibrary>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/RELWITHDEBINFO/NativeDll.lib</ImportLibrary>
       <LinkErrorReporting></LinkErrorReporting>
-      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/bin/NativeDll.pdb</ProgramDataBaseFile>
+      <ProgramDataBaseFile>D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/RELWITHDEBINFO/NativeDll.pdb</ProgramDataBaseFile>
       <RandomizedBaseAddress></RandomizedBaseAddress>
       <SubSystem>Console</SubSystem>
     </Link>

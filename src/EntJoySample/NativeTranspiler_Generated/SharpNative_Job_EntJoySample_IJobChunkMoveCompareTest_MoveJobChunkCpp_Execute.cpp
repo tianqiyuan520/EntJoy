@@ -12,8 +12,6 @@ auto* RESTRICT velocities_ptr = reinterpret_cast<EntJoySample::IJobChunkMoveComp
 int velocities_length = __chunkData->entityCount;
 for (int index = 0; index < positions_length; index++)
 {
-    EntJoySample::IJobChunkMoveCompareTest::MovePosition position = positions_ptr[index];
-    position.Value += velocities_ptr[index].Value * DeltaTime;
-    positions_ptr[index] = position;
+    positions_ptr[index].Value += velocities_ptr[index].Value * DeltaTime;
 }
 }

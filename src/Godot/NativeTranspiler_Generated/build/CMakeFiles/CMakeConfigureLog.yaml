@@ -35,7 +35,8 @@ events:
     found: "C:/Program Files/CMake/share/cmake-4.3/Modules/CMakeCXXCompilerId.cpp.in"
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -71,6 +72,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "message-v1"
     backtrace:
@@ -87,7 +89,7 @@ events:
       The output was:
       0
       閫傜敤浜?.NET Framework MSBuild 鐗堟湰 17.14.18+a338add32
-      鐢熸垚鍚姩鏃堕棿涓?2026/5/6 21:59:40銆?
+      鐢熸垚鍚姩鏃堕棿涓?2026/6/14 0:59:01銆?
       
       鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\4.3.0-rc3\\CompilerIdCXX\\CompilerIdCXX.vcxproj鈥?榛樿鐩爣)銆?
       PrepareForBuild:
@@ -116,7 +118,7 @@ events:
           0 涓鍛?
           0 涓敊璇?
       
-      宸茬敤鏃堕棿 00:00:00.68
+      宸茬敤鏃堕棿 00:00:00.85
       
       
       Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CompilerIdCXX.exe"
@@ -149,7 +151,8 @@ events:
       - "link"
     candidate_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/"
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -185,12 +188,14 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
     searched_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.com"
     found: "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.exe"
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -226,6 +231,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "find-v1"
     backtrace:
@@ -249,7 +255,8 @@ events:
       - "lld-link"
     candidate_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/"
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -285,13 +292,17 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
     searched_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lld-link.com"
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lld-link.exe"
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lld-link"
-      - "D:/Microsoft VS Code/lld-link.com"
-      - "D:/Microsoft VS Code/lld-link.exe"
-      - "D:/Microsoft VS Code/lld-link"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/lld-link.com"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/lld-link.exe"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/lld-link"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/lld-link.com"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/lld-link.exe"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/lld-link"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/lld-link.com"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/lld-link.exe"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/lld-link"
@@ -397,10 +408,14 @@ events:
       - "E:/Code/ispc-v1.30.0-windows/bin/lld-link.com"
       - "E:/Code/ispc-v1.30.0-windows/bin/lld-link.exe"
       - "E:/Code/ispc-v1.30.0-windows/bin/lld-link"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/lld-link.com"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/lld-link.exe"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/lld-link"
     found: false
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -436,6 +451,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "find-v1"
     backtrace:
@@ -457,7 +473,8 @@ events:
       - "link"
     candidate_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/"
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -493,12 +510,14 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
     searched_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.com"
     found: "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.exe"
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -534,6 +553,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "find-v1"
     backtrace:
@@ -555,7 +575,8 @@ events:
       - "mt"
     candidate_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/"
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -591,13 +612,17 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
     searched_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/mt.com"
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/mt.exe"
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/mt"
-      - "D:/Microsoft VS Code/mt.com"
-      - "D:/Microsoft VS Code/mt.exe"
-      - "D:/Microsoft VS Code/mt"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/mt.com"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/mt.exe"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/mt"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/mt.com"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/mt.exe"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/mt"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/mt.com"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/mt.exe"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/mt"
@@ -703,10 +728,14 @@ events:
       - "E:/Code/ispc-v1.30.0-windows/bin/mt.com"
       - "E:/Code/ispc-v1.30.0-windows/bin/mt.exe"
       - "E:/Code/ispc-v1.30.0-windows/bin/mt"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/mt.com"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/mt.exe"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/mt"
     found: false
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -742,6 +771,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "find-v1"
     backtrace:
@@ -763,7 +793,8 @@ events:
       - "lib"
     candidate_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/"
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -799,12 +830,14 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
     searched_directories:
       - "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.com"
     found: "D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe"
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -840,6 +873,7 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
   -
     kind: "find-v1"
     backtrace:
@@ -863,7 +897,8 @@ events:
     names:
       - "rc"
     candidate_directories:
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -899,6 +934,7 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
       - "C:/Program Files/bin/"
       - "C:/Program Files/sbin/"
       - "C:/Program Files/"
@@ -908,13 +944,16 @@ events:
       - "C:/Program Files/CMake/bin/"
       - "C:/Program Files/CMake/sbin/"
       - "C:/Program Files/CMake/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/bin/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/sbin/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/"
+      - "C:/Program Files (x86)/NativeDll/bin/"
+      - "C:/Program Files (x86)/NativeDll/sbin/"
+      - "C:/Program Files (x86)/NativeDll/"
     searched_directories:
-      - "D:/Microsoft VS Code/rc.com"
-      - "D:/Microsoft VS Code/rc.exe"
-      - "D:/Microsoft VS Code/rc"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/rc.com"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/rc.exe"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/rc"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/rc.com"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/rc.exe"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/rc"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/rc.com"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/rc.exe"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/rc"
@@ -1020,6 +1059,9 @@ events:
       - "E:/Code/ispc-v1.30.0-windows/bin/rc.com"
       - "E:/Code/ispc-v1.30.0-windows/bin/rc.exe"
       - "E:/Code/ispc-v1.30.0-windows/bin/rc"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/rc.com"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/rc.exe"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/rc"
       - "C:/Program Files/bin/rc.com"
       - "C:/Program Files/bin/rc.exe"
       - "C:/Program Files/bin/rc"
@@ -1047,19 +1089,20 @@ events:
       - "C:/Program Files/CMake/rc.com"
       - "C:/Program Files/CMake/rc.exe"
       - "C:/Program Files/CMake/rc"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/bin/rc.com"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/bin/rc.exe"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/bin/rc"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/sbin/rc.com"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/sbin/rc.exe"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/sbin/rc"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/rc.com"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/rc.exe"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/rc"
+      - "C:/Program Files (x86)/NativeDll/bin/rc.com"
+      - "C:/Program Files (x86)/NativeDll/bin/rc.exe"
+      - "C:/Program Files (x86)/NativeDll/bin/rc"
+      - "C:/Program Files (x86)/NativeDll/sbin/rc.com"
+      - "C:/Program Files (x86)/NativeDll/sbin/rc.exe"
+      - "C:/Program Files (x86)/NativeDll/sbin/rc"
+      - "C:/Program Files (x86)/NativeDll/rc.com"
+      - "C:/Program Files (x86)/NativeDll/rc.exe"
+      - "C:/Program Files (x86)/NativeDll/rc"
     found: false
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -1095,12 +1138,13 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
-      CMAKE_INSTALL_PREFIX: "C:/Program Files (x86)/NativeTranspiler_Generated"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
+      CMAKE_INSTALL_PREFIX: "C:/Program Files (x86)/NativeDll"
       CMAKE_SYSTEM_PREFIX_PATH:
         - "C:/Program Files"
         - "C:/Program Files (x86)"
         - "C:/Program Files/CMake"
-        - "C:/Program Files (x86)/NativeTranspiler_Generated"
+        - "C:/Program Files (x86)/NativeDll"
   -
     kind: "try_compile-v1"
     backtrace:
@@ -1110,8 +1154,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-ro5xp3"
-      binary: "D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-ro5xp3"
+      source: "D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-zhmffl"
+      binary: "D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-zhmffl"
     cmakeVariables:
       CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /W3 /GR /EHsc"
       CMAKE_CXX_FLAGS_DEBUG: "/MDd /Zi /Ob0 /Od /RTC1"
@@ -1122,39 +1166,39 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: true
       stdout: |
-        Change Dir: 'D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-ro5xp3'
+        Change Dir: 'D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-zhmffl'
         
-        Run Build Command(s): "D:/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_006dd.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
+        Run Build Command(s): "D:/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_82dce.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
         閫傜敤浜?.NET Framework MSBuild 鐗堟湰 17.14.18+a338add32
-        鐢熸垚鍚姩鏃堕棿涓?2026/5/6 21:59:41銆?
+        鐢熸垚鍚姩鏃堕棿涓?2026/6/14 0:59:02銆?
         
-        鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ro5xp3\\cmTC_006dd.vcxproj鈥?榛樿鐩爣)銆?
+        鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-zhmffl\\cmTC_82dce.vcxproj鈥?榛樿鐩爣)銆?
         PrepareForBuild:
           宸插惎鐢ㄧ粨鏋勫寲杈撳嚭銆傜紪璇戝櫒璇婃柇鐨勬牸寮忚缃皢鍙嶆槧閿欒灞傛缁撴瀯銆傛湁鍏宠缁嗕俊鎭紝璇峰弬闃?https://aka.ms/cpp/structured-output銆?
-          姝ｅ湪鍒涘缓鐩綍鈥淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ro5xp3\\Debug\\鈥濄€?
-          姝ｅ湪鍒涘缓鐩綍鈥渃mTC_006dd.dir\\Debug\\cmTC_006dd.tlog\\鈥濄€?
+          姝ｅ湪鍒涘缓鐩綍鈥淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-zhmffl\\Debug\\鈥濄€?
+          姝ｅ湪鍒涘缓鐩綍鈥渃mTC_82dce.dir\\Debug\\cmTC_82dce.tlog\\鈥濄€?
         InitializeBuildStatus:
-          姝ｅ湪鍒涘缓鈥渃mTC_006dd.dir\\Debug\\cmTC_006dd.tlog\\unsuccessfulbuild鈥濓紝鍥犱负宸叉寚瀹氣€淎lwaysCreate鈥濄€?
-          姝ｅ湪瀵光€渃mTC_006dd.dir\\Debug\\cmTC_006dd.tlog\\unsuccessfulbuild鈥濇墽琛?Touch 浠诲姟銆?
+          姝ｅ湪鍒涘缓鈥渃mTC_82dce.dir\\Debug\\cmTC_82dce.tlog\\unsuccessfulbuild鈥濓紝鍥犱负宸叉寚瀹氣€淎lwaysCreate鈥濄€?
+          姝ｅ湪瀵光€渃mTC_82dce.dir\\Debug\\cmTC_82dce.tlog\\unsuccessfulbuild鈥濇墽琛?Touch 浠诲姟銆?
         ClCompile:
-          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\CL.exe /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_006dd.dir\\Debug\\\\" /Fd"cmTC_006dd.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
+          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\CL.exe /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_82dce.dir\\Debug\\\\" /Fd"cmTC_82dce.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
           鐢ㄤ簬 x64 鐨?Microsoft (R) C/C++ 浼樺寲缂栬瘧鍣?19.44.35214 鐗?
           鐗堟潈鎵€鏈?C) Microsoft Corporation銆備繚鐣欐墍鏈夋潈鍒┿€?
-          cl /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_006dd.dir\\Debug\\\\" /Fd"cmTC_006dd.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
+          cl /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_82dce.dir\\Debug\\\\" /Fd"cmTC_82dce.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
           CMakeCXXCompilerABI.cpp
         Link:
-          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe /OUT:"D:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ro5xp3\\Debug\\cmTC_006dd.exe" /INCREMENTAL /ILK:"cmTC_006dd.dir\\Debug\\cmTC_006dd.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-ro5xp3/Debug/cmTC_006dd.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /IMPLIB:"D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-ro5xp3/Debug/cmTC_006dd.lib" /MACHINE:X64  /machine:x64 cmTC_006dd.dir\\Debug\\CMakeCXXCompilerABI.obj
-          cmTC_006dd.vcxproj -> D:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ro5xp3\\Debug\\cmTC_006dd.exe
+          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe /OUT:"D:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-zhmffl\\Debug\\cmTC_82dce.exe" /INCREMENTAL /ILK:"cmTC_82dce.dir\\Debug\\cmTC_82dce.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-zhmffl/Debug/cmTC_82dce.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /IMPLIB:"D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-zhmffl/Debug/cmTC_82dce.lib" /MACHINE:X64  /machine:x64 cmTC_82dce.dir\\Debug\\CMakeCXXCompilerABI.obj
+          cmTC_82dce.vcxproj -> D:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-zhmffl\\Debug\\cmTC_82dce.exe
         FinalizeBuildStatus:
-          姝ｅ湪鍒犻櫎鏂囦欢鈥渃mTC_006dd.dir\\Debug\\cmTC_006dd.tlog\\unsuccessfulbuild鈥濄€?
-          姝ｅ湪瀵光€渃mTC_006dd.dir\\Debug\\cmTC_006dd.tlog\\cmTC_006dd.lastbuildstate鈥濇墽琛?Touch 浠诲姟銆?
-        宸插畬鎴愮敓鎴愰」鐩€淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ro5xp3\\cmTC_006dd.vcxproj鈥?榛樿鐩爣)鐨勬搷浣溿€?
+          姝ｅ湪鍒犻櫎鏂囦欢鈥渃mTC_82dce.dir\\Debug\\cmTC_82dce.tlog\\unsuccessfulbuild鈥濄€?
+          姝ｅ湪瀵光€渃mTC_82dce.dir\\Debug\\cmTC_82dce.tlog\\cmTC_82dce.lastbuildstate鈥濇墽琛?Touch 浠诲姟銆?
+        宸插畬鎴愮敓鎴愰」鐩€淒:\\Godot\\Project\\EntJoy\\src\\Godot\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-zhmffl\\cmTC_82dce.vcxproj鈥?榛樿鐩爣)鐨勬搷浣溿€?
         
         宸叉垚鍔熺敓鎴愩€?
             0 涓鍛?
             0 涓敊璇?
         
-        宸茬敤鏃堕棿 00:00:00.71
+        宸茬敤鏃堕棿 00:00:00.94
         
       exitCode: 0
   -
@@ -1188,7 +1232,7 @@ events:
   -
     kind: "find-v1"
     backtrace:
-      - "CMakeLists.txt:28 (find_program)"
+      - "CMakeLists.txt:37 (find_program)"
     mode: "program"
     variable: "ISPC_EXECUTABLE"
     description: "Path to a program."
@@ -1203,7 +1247,8 @@ events:
     names:
       - "ispc"
     candidate_directories:
-      - "D:/Microsoft VS Code/"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/"
       - "D:/Program Files (x86)/VMware/VMware Workstation/bin/"
       - "C:/Program Files (x86)/Common Files/Intel/Shared Libraries/redist/intel64/compiler/"
@@ -1239,6 +1284,7 @@ events:
       - "C:/Users/tianqiyuan520/AppData/Roaming/npm/"
       - "D:/JetBrains/PyCharm 2026.1/bin/"
       - "E:/Code/ispc-v1.30.0-windows/bin/"
+      - "C:/Users/tianqiyuan520/.vscode/extensions/openai.chatgpt-26.609.30741-win32-x64/bin/windows-x86_64/"
       - "C:/Program Files/bin/"
       - "C:/Program Files/sbin/"
       - "C:/Program Files/"
@@ -1248,13 +1294,16 @@ events:
       - "C:/Program Files/CMake/bin/"
       - "C:/Program Files/CMake/sbin/"
       - "C:/Program Files/CMake/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/bin/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/sbin/"
-      - "C:/Program Files (x86)/NativeTranspiler_Generated/"
+      - "C:/Program Files (x86)/NativeDll/bin/"
+      - "C:/Program Files (x86)/NativeDll/sbin/"
+      - "C:/Program Files (x86)/NativeDll/"
     searched_directories:
-      - "D:/Microsoft VS Code/ispc.com"
-      - "D:/Microsoft VS Code/ispc.exe"
-      - "D:/Microsoft VS Code/ispc"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/ispc.com"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/ispc.exe"
+      - "C:/Users/tianqiyuan520/.codex/tmp/arg0/codex-arg0pfbt4u/ispc"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/ispc.com"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/ispc.exe"
+      - "C:/Program Files/Common Files/Oracle/Java/javapath/ispc"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/ispc.com"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/ispc.exe"
       - "C:/Program Files (x86)/Common Files/Oracle/Java/javapath/ispc"
@@ -1361,7 +1410,8 @@ events:
     found: "E:/Code/ispc-v1.30.0-windows/bin/ispc.exe"
     search_context:
       ENV{PATH}:
-        - "D:\\Microsoft VS Code"
+        - "C:\\Users\\tianqiyuan520\\.codex\\tmp\\arg0\\codex-arg0pfbt4u"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
         - "C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath"
         - "D:\\Program Files (x86)\\VMware\\VMware Workstation\\bin\\"
         - "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\redist\\intel64\\compiler"
@@ -1397,10 +1447,11 @@ events:
         - "C:\\Users\\tianqiyuan520\\AppData\\Roaming\\npm"
         - "D:\\JetBrains\\PyCharm 2026.1\\bin"
         - "E:\\Code\\ispc-v1.30.0-windows\\bin"
-      CMAKE_INSTALL_PREFIX: "C:/Program Files (x86)/NativeTranspiler_Generated"
+        - "c:\\Users\\tianqiyuan520\\.vscode\\extensions\\openai.chatgpt-26.609.30741-win32-x64\\bin\\windows-x86_64"
+      CMAKE_INSTALL_PREFIX: "C:/Program Files (x86)/NativeDll"
       CMAKE_SYSTEM_PREFIX_PATH:
         - "C:/Program Files"
         - "C:/Program Files (x86)"
         - "C:/Program Files/CMake"
-        - "C:/Program Files (x86)/NativeTranspiler_Generated"
+        - "C:/Program Files (x86)/NativeDll"
 ...

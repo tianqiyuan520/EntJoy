@@ -15,16 +15,7 @@
 ########################
 
 //Path to a program.
-ARMIE_COMMAND:FILEPATH=ARMIE_COMMAND-NOTFOUND
-
-//Path to a program.
-CLANG_EXE_PATH:FILEPATH=CLANG_EXE_PATH-NOTFOUND
-
-//Path to a program.
 CMAKE_AR:FILEPATH=D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe
-
-//Choose the type of build.
-CMAKE_BUILD_TYPE:STRING=Release
 
 //Semicolon separated list of supported configuration types, only
 // supports Debug, Release, MinSizeRel, and RelWithDebInfo, anything
@@ -49,24 +40,6 @@ CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=/MD /Zi /O2 /Ob1 /DNDEBUG
 //Libraries linked by default with all C++ applications.
 CMAKE_CXX_STANDARD_LIBRARIES:STRING=kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib
 
-//Flags used by the C compiler during all build types.
-CMAKE_C_FLAGS:STRING=/DWIN32 /D_WINDOWS
-
-//Flags used by the C compiler during DEBUG builds.
-CMAKE_C_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /RTC1
-
-//Flags used by the C compiler during MINSIZEREL builds.
-CMAKE_C_FLAGS_MINSIZEREL:STRING=/O1 /Ob1 /DNDEBUG
-
-//Flags used by the C compiler during RELEASE builds.
-CMAKE_C_FLAGS_RELEASE:STRING=/O2 /Ob2 /DNDEBUG
-
-//Flags used by the C compiler during RELWITHDEBINFO builds.
-CMAKE_C_FLAGS_RELWITHDEBINFO:STRING=/Zi /O2 /Ob1 /DNDEBUG
-
-//Libraries linked by default with all C applications.
-CMAKE_C_STANDARD_LIBRARIES:STRING=kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib
-
 //Flags used by the linker during all build types.
 CMAKE_EXE_LINKER_FLAGS:STRING=/machine:x64
 
@@ -85,56 +58,8 @@ CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=/debug /INCREMENTAL
 //Value Computed by CMake.
 CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/pkgRedirects
 
-//User executables (bin)
-CMAKE_INSTALL_BINDIR:PATH=bin
-
-//Read-only architecture-independent data (DATAROOTDIR)
-CMAKE_INSTALL_DATADIR:PATH=
-
-//Read-only architecture-independent data root (share)
-CMAKE_INSTALL_DATAROOTDIR:PATH=share
-
-//Documentation root (DATAROOTDIR/doc/PROJECT_NAME)
-CMAKE_INSTALL_DOCDIR:PATH=
-
-//C header files (include)
-CMAKE_INSTALL_INCLUDEDIR:PATH=include
-
-//Info documentation (DATAROOTDIR/info)
-CMAKE_INSTALL_INFODIR:PATH=
-
-//Object code libraries (lib)
-CMAKE_INSTALL_LIBDIR:PATH=lib
-
-//Program executables (libexec)
-CMAKE_INSTALL_LIBEXECDIR:PATH=libexec
-
-//Locale-dependent data (DATAROOTDIR/locale)
-CMAKE_INSTALL_LOCALEDIR:PATH=
-
-//Modifiable single-machine data (var)
-CMAKE_INSTALL_LOCALSTATEDIR:PATH=var
-
-//Man documentation (DATAROOTDIR/man)
-CMAKE_INSTALL_MANDIR:PATH=
-
-//C header files for non-gcc (/usr/include)
-CMAKE_INSTALL_OLDINCLUDEDIR:PATH=/usr/include
-
 //Install path prefix, prepended onto install directories.
 CMAKE_INSTALL_PREFIX:PATH=C:/Program Files (x86)/NativeDll
-
-//Run-time variable data (LOCALSTATEDIR/run)
-CMAKE_INSTALL_RUNSTATEDIR:PATH=
-
-//System admin executables (sbin)
-CMAKE_INSTALL_SBINDIR:PATH=sbin
-
-//Modifiable architecture-independent data (com)
-CMAKE_INSTALL_SHAREDSTATEDIR:PATH=com
-
-//Read-only single-machine data (etc)
-CMAKE_INSTALL_SYSCONFDIR:PATH=etc
 
 //Path to a program.
 CMAKE_LINKER:FILEPATH=D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.exe
@@ -176,21 +101,6 @@ CMAKE_PROJECT_NAME:STATIC=NativeDll
 
 //Value Computed by CMake
 CMAKE_PROJECT_SPDX_LICENSE:STATIC=
-
-//Value Computed by CMake
-CMAKE_PROJECT_VERSION:STATIC=3.9.0
-
-//Value Computed by CMake
-CMAKE_PROJECT_VERSION_MAJOR:STATIC=3
-
-//Value Computed by CMake
-CMAKE_PROJECT_VERSION_MINOR:STATIC=9
-
-//Value Computed by CMake
-CMAKE_PROJECT_VERSION_PATCH:STATIC=0
-
-//Value Computed by CMake
-CMAKE_PROJECT_VERSION_TWEAK:STATIC=
 
 //RC compiler
 CMAKE_RC_COMPILER:FILEPATH=rc
@@ -263,70 +173,8 @@ CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO:STRING=
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
-//Directory under which to collect all populated content
-FETCHCONTENT_BASE_DIR:PATH=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/_deps
-
-//Disables all attempts to download or update content and assumes
-// source dirs already exist
-FETCHCONTENT_FULLY_DISCONNECTED:BOOL=OFF
-
-//Enables QUIET option for all content population
-FETCHCONTENT_QUIET:BOOL=ON
-
-//When not empty, overrides where to find pre-populated content
-// for sleef
-FETCHCONTENT_SOURCE_DIR_SLEEF:PATH=
-
-//Enables UPDATE_DISCONNECTED behavior for all content population
-FETCHCONTENT_UPDATES_DISCONNECTED:BOOL=OFF
-
-//Enables UPDATE_DISCONNECTED behavior just for population of sleef
-FETCHCONTENT_UPDATES_DISCONNECTED_SLEEF:BOOL=OFF
-
-//Path to a program.
-FILECHECK_COMMAND:FILEPATH=FILECHECK_COMMAND-NOTFOUND
-
-//Git command line client
-GIT_EXECUTABLE:FILEPATH=D:/Git/cmd/git.exe
-
 //Path to a program.
 ISPC_EXECUTABLE:FILEPATH=E:/Code/ispc-v1.30.0-windows/bin/ispc.exe
-
-//Path to a library.
-LIBFFTW3:FILEPATH=LIBFFTW3-NOTFOUND
-
-//Path to a library.
-LIBFFTW3F:FILEPATH=LIBFFTW3F-NOTFOUND
-
-//Path to a library.
-LIBFFTW3F_OMP:FILEPATH=LIBFFTW3F_OMP-NOTFOUND
-
-//Path to a library.
-LIBFFTW3_OMP:FILEPATH=LIBFFTW3_OMP-NOTFOUND
-
-//Path to a library.
-LIBGMP:FILEPATH=LIBGMP-NOTFOUND
-
-//Path to a library.
-LIBM:FILEPATH=LIBM-NOTFOUND
-
-//Path to a library.
-LIBRT:FILEPATH=LIBRT-NOTFOUND
-
-//Path to a library.
-LIB_EAY_DEBUG:FILEPATH=LIB_EAY_DEBUG-NOTFOUND
-
-//Path to a library.
-LIB_EAY_LIBRARY_DEBUG:FILEPATH=LIB_EAY_LIBRARY_DEBUG-NOTFOUND
-
-//Path to a library.
-LIB_EAY_LIBRARY_RELEASE:FILEPATH=LIB_EAY_LIBRARY_RELEASE-NOTFOUND
-
-//Path to a library.
-LIB_EAY_RELEASE:FILEPATH=LIB_EAY_RELEASE-NOTFOUND
-
-//Path to a library.
-LIB_MPFR:FILEPATH=LIB_MPFR-NOTFOUND
 
 //Value Computed by CMake
 NativeDll_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build
@@ -340,264 +188,6 @@ NativeDll_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/EntJoySample/Na
 //Value Computed by CMake
 NativeDll_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated
 
-//Extra libraries for openssl
-OPENSSL_EXTRA_LIBRARIES:STRING=
-
-//Path to a file.
-OPENSSL_INCLUDE_DIR:PATH=OPENSSL_INCLUDE_DIR-NOTFOUND
-
-//CXX compiler flags for OpenMP parallelization
-OpenMP_CXX_FLAGS:STRING=-openmp
-
-//CXX compiler libraries for OpenMP parallelization
-OpenMP_CXX_LIB_NAMES:STRING=
-
-//C compiler flags for OpenMP parallelization
-OpenMP_C_FLAGS:STRING=-openmp
-
-//C compiler libraries for OpenMP parallelization
-OpenMP_C_LIB_NAMES:STRING=
-
-//Arguments to supply to pkg-config
-PKG_CONFIG_ARGN:STRING=
-
-//pkg-config executable
-PKG_CONFIG_EXECUTABLE:FILEPATH=C:/msys64/ucrt64/bin/pkg-config.exe
-
-//Path to a program.
-SDE_COMMAND:FILEPATH=SDE_COMMAND-NOTFOUND
-
-//Path to a program.
-SED_COMMAND:FILEPATH=SED_COMMAND-NOTFOUND
-
-//Streaming instructions are utilized in DFT.
-SLEEFDFT_ENABLE_STREAM:BOOL=OFF
-
-//List of SIMD architectures supported by libsleef.
-SLEEF_ALL_SUPPORTED_EXTENSIONS:STRING=AVX512FNOFMA;AVX512F;AVX2;AVX2128;FMA4;AVX;SSE4;SSE2;SVENOFMA;SVE;ADVSIMDNOFMA;ADVSIMD;NEON32;NEON32VFPV4;VSX;VSXNOFMA;VSX3;VSX3NOFMA;VXE;VXENOFMA;VXE2;VXE2NOFMA;RVVM1NOFMA;RVVM1;RVVM2NOFMA;RVVM2;PUREC_SCALAR;PURECFMA_SCALAR
-
-//Enable address sanitizing on all targets.
-SLEEF_ASAN:BOOL=OFF
-
-//Value Computed by CMake
-SLEEF_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/_deps/sleef-build
-
-//Bench will be built.
-SLEEF_BUILD_BENCH:BOOL=OFF
-
-//Benchmark script for reference (e.g. system libm) will be built.
-SLEEF_BUILD_BENCH_REF:BOOL=OFF
-
-//libsleefdft will be built.
-SLEEF_BUILD_DFT:BOOL=OFF
-
-//libsleefgnuabi will be built.
-SLEEF_BUILD_GNUABI_LIBS:BOOL=ON
-
-//Build header for inlining whole SLEEF functions
-SLEEF_BUILD_INLINE_HEADERS:BOOL=OFF
-
-//libsleef will be built.
-SLEEF_BUILD_LIBM:BOOL=ON
-
-//libsleefquad will be built.
-SLEEF_BUILD_QUAD:BOOL=OFF
-
-//libsleefscalar will be built.
-SLEEF_BUILD_SCALAR_LIB:BOOL=OFF
-
-SLEEF_BUILD_SHARED_LIBS:BOOL=OFF
-
-//Build statically linked test executables
-SLEEF_BUILD_STATIC_TEST_BINS:BOOL=OFF
-
-//Tests will be built.
-SLEEF_BUILD_TESTS:BOOL=OFF
-
-//build libsleef with libm, can turn off on Windows to solve mutiple
-// math functions issue.
-SLEEF_BUILD_WITH_LIBM:BOOL=ON
-
-//Disable AVX
-SLEEF_DISABLE_AVX:BOOL=OFF
-
-//Disable AVX2
-SLEEF_DISABLE_AVX2:BOOL=OFF
-
-//Disable AVX512F
-SLEEF_DISABLE_AVX512F:BOOL=OFF
-
-//Disable testing the DFT library with FFTW
-SLEEF_DISABLE_FFTW:BOOL=OFF
-
-//Disable float128
-SLEEF_DISABLE_FLOAT128:BOOL=OFF
-
-//Disable FMA4
-SLEEF_DISABLE_FMA4:BOOL=OFF
-
-//Disable long double
-SLEEF_DISABLE_LONG_DOUBLE:BOOL=OFF
-
-//Disable testing with the MPFR library
-SLEEF_DISABLE_MPFR:BOOL=OFF
-
-//Disable OPENMP
-SLEEF_DISABLE_OPENMP:BOOL=OFF
-
-//Disable RVVM1
-SLEEF_DISABLE_RVVM1:BOOL=OFF
-
-//Disable RVVM2
-SLEEF_DISABLE_RVVM2:BOOL=OFF
-
-//Disable SSE2
-SLEEF_DISABLE_SSE2:BOOL=OFF
-
-//Disable SSE4
-SLEEF_DISABLE_SSE4:BOOL=OFF
-
-//Disable testing with the SSL library
-SLEEF_DISABLE_SSL:BOOL=OFF
-
-//Disable SVE
-SLEEF_DISABLE_SVE:BOOL=OFF
-
-//Disable VSX
-SLEEF_DISABLE_VSX:BOOL=OFF
-
-//Disable VSX3
-SLEEF_DISABLE_VSX3:BOOL=OFF
-
-//Disable VXE
-SLEEF_DISABLE_VXE:BOOL=OFF
-
-//Disable VXE2
-SLEEF_DISABLE_VXE2:BOOL=OFF
-
-//Enable alternative division method (aarch64 only)
-SLEEF_ENABLE_ALTDIV:BOOL=OFF
-
-//Enable alternative sqrt method (aarch64 only)
-SLEEF_ENABLE_ALTSQRT:BOOL=OFF
-
-//Enable CUDA
-SLEEF_ENABLE_CUDA:BOOL=OFF
-
-//Enable LTO on GCC or ThinLTO on clang
-SLEEF_ENABLE_LTO:BOOL=OFF
-
-//Enable testing libm with tester
-SLEEF_ENABLE_TESTER:BOOL=OFF
-
-//Enable testing with tester4
-SLEEF_ENABLE_TESTER4:BOOL=ON
-
-//Enable use of TLFloat library
-SLEEF_ENABLE_TLFLOAT:BOOL=ON
-
-//Build fails if AVX is not supported by the compiler
-SLEEF_ENFORCE_AVX:BOOL=OFF
-
-//Build fails if AVX2 is not supported by the compiler
-SLEEF_ENFORCE_AVX2:BOOL=OFF
-
-//Build fails if AVX512F is not supported by the compiler
-SLEEF_ENFORCE_AVX512F:BOOL=OFF
-
-//Build fails if CUDA is not supported
-SLEEF_ENFORCE_CUDA:BOOL=OFF
-
-//Build fails if DFT is not built
-SLEEF_ENFORCE_DFT:BOOL=OFF
-
-//Build fails if float128 is not supported by the compiler
-SLEEF_ENFORCE_FLOAT128:BOOL=OFF
-
-//Build fails if FMA4 is not supported by the compiler
-SLEEF_ENFORCE_FMA4:BOOL=OFF
-
-//Build fails if long double is not supported by the compiler
-SLEEF_ENFORCE_LONG_DOUBLE:BOOL=OFF
-
-//Build fails if OPENMP is not supported by the compiler
-SLEEF_ENFORCE_OPENMP:BOOL=OFF
-
-//Build fails if RVVM1 is not supported by the compiler
-SLEEF_ENFORCE_RVVM1:BOOL=OFF
-
-//Build fails if RVVM2 is not supported by the compiler
-SLEEF_ENFORCE_RVVM2:BOOL=OFF
-
-//Build fails if SSE2 is not supported by the compiler
-SLEEF_ENFORCE_SSE2:BOOL=OFF
-
-//Build fails if SSE4 is not supported by the compiler
-SLEEF_ENFORCE_SSE4:BOOL=OFF
-
-//Build fails if SVE is not supported by the compiler
-SLEEF_ENFORCE_SVE:BOOL=OFF
-
-//Build fails if tester is not available
-SLEEF_ENFORCE_TESTER:BOOL=OFF
-
-//Build fails if tester3 is not built
-SLEEF_ENFORCE_TESTER3:BOOL=OFF
-
-//Build fails if tester4 is not available
-SLEEF_ENFORCE_TESTER4:BOOL=OFF
-
-//Build fails if VSX is not supported by the compiler
-SLEEF_ENFORCE_VSX:BOOL=OFF
-
-//Build fails if VSX3 is not supported by the compiler
-SLEEF_ENFORCE_VSX3:BOOL=OFF
-
-//Build fails if VXE is not supported by the compiler
-SLEEF_ENFORCE_VXE:BOOL=OFF
-
-//Build fails if VXE2 is not supported by the compiler
-SLEEF_ENFORCE_VXE2:BOOL=OFF
-
-//CMake package config location relative to the install prefix
-SLEEF_INSTALL_CMAKEDIR:STRING=lib/cmake/sleef
-
-//Value Computed by CMake
-SLEEF_IS_TOP_LEVEL:STATIC=OFF
-
-//Path for finding sleef specific cmake scripts
-SLEEF_SCRIPT_PATH:PATH=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/_deps/sleef-src/cmake/Scripts
-
-//Show SLEEF configuration status messages.
-SLEEF_SHOW_CONFIG:BOOL=ON
-
-//Show cmake error log.
-SLEEF_SHOW_ERROR_LOG:BOOL=OFF
-
-//Value Computed by CMake
-SLEEF_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/_deps/sleef-src
-
-//List of SIMD architectures supported by libsleef for GNU ABI.
-SLEEF_SUPPORTED_GNUABI_EXTENSIONS:STRING=SSE2;AVX;AVX2;AVX512F;ADVSIMD;SVE
-
-//List of SIMD architectures supported by libsleef.
-SLEEF_SUPPORTED_LIBM_EXTENSIONS:STRING=AVX512FNOFMA;AVX512F;AVX2;AVX2128;FMA4;AVX;SSE4;SSE2;SVENOFMA;SVE;ADVSIMDNOFMA;ADVSIMD;NEON32;NEON32VFPV4;VSX;VSXNOFMA;VSX3;VSX3NOFMA;VXE;VXENOFMA;VXE2;VXE2NOFMA;RVVM1NOFMA;RVVM1;RVVM2NOFMA;RVVM2;PUREC_SCALAR;PURECFMA_SCALAR
-
-//Perform tests on implementations with all vector extensions
-SLEEF_TEST_ALL_IUT:BOOL=OFF
-
-//Path to a library.
-SSL_EAY_DEBUG:FILEPATH=SSL_EAY_DEBUG-NOTFOUND
-
-//Path to a library.
-SSL_EAY_LIBRARY_DEBUG:FILEPATH=SSL_EAY_LIBRARY_DEBUG-NOTFOUND
-
-//Path to a library.
-SSL_EAY_LIBRARY_RELEASE:FILEPATH=SSL_EAY_LIBRARY_RELEASE-NOTFOUND
-
-//Path to a library.
-SSL_EAY_RELEASE:FILEPATH=SSL_EAY_RELEASE-NOTFOUND
-
 
 ########################
 # INTERNAL cache entries
@@ -605,8 +195,6 @@ SSL_EAY_RELEASE:FILEPATH=SSL_EAY_RELEASE-NOTFOUND
 
 //ADVANCED property for variable: CMAKE_AR
 CMAKE_AR-ADVANCED:INTERNAL=1
-//STRINGS property for variable: CMAKE_BUILD_TYPE
-CMAKE_BUILD_TYPE-STRINGS:INTERNAL=Debug;Release;RelWithDebInfo;MinSizeRel
 //This is the directory where this CMakeCache.txt was created
 CMAKE_CACHEFILE_DIR:INTERNAL=d:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build
 //Major version of cmake used to create the current loaded cache
@@ -633,18 +221,6 @@ CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL=1
 CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_CXX_STANDARD_LIBRARIES
 CMAKE_CXX_STANDARD_LIBRARIES-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS
-CMAKE_C_FLAGS-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_DEBUG
-CMAKE_C_FLAGS_DEBUG-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_MINSIZEREL
-CMAKE_C_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_RELEASE
-CMAKE_C_FLAGS_RELEASE-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_RELWITHDEBINFO
-CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_STANDARD_LIBRARIES
-CMAKE_C_STANDARD_LIBRARIES-ADVANCED:INTERNAL=1
 //Executable file format
 CMAKE_EXECUTABLE_FORMAT:INTERNAL=Unknown
 //ADVANCED property for variable: CMAKE_EXE_LINKER_FLAGS
@@ -670,38 +246,6 @@ CMAKE_GENERATOR_TOOLSET:INTERNAL=
 //Source directory with the top level CMakeLists.txt file for this
 // project
 CMAKE_HOME_DIRECTORY:INTERNAL=D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated
-//ADVANCED property for variable: CMAKE_INSTALL_BINDIR
-CMAKE_INSTALL_BINDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_DATADIR
-CMAKE_INSTALL_DATADIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_DATAROOTDIR
-CMAKE_INSTALL_DATAROOTDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_DOCDIR
-CMAKE_INSTALL_DOCDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_INCLUDEDIR
-CMAKE_INSTALL_INCLUDEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_INFODIR
-CMAKE_INSTALL_INFODIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_LIBDIR
-CMAKE_INSTALL_LIBDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_LIBEXECDIR
-CMAKE_INSTALL_LIBEXECDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_LOCALEDIR
-CMAKE_INSTALL_LOCALEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_LOCALSTATEDIR
-CMAKE_INSTALL_LOCALSTATEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_MANDIR
-CMAKE_INSTALL_MANDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_OLDINCLUDEDIR
-CMAKE_INSTALL_OLDINCLUDEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_RUNSTATEDIR
-CMAKE_INSTALL_RUNSTATEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_SBINDIR
-CMAKE_INSTALL_SBINDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_SHAREDSTATEDIR
-CMAKE_INSTALL_SHAREDSTATEDIR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_INSTALL_SYSCONFDIR
-CMAKE_INSTALL_SYSCONFDIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_LINKER
 CMAKE_LINKER-ADVANCED:INTERNAL=1
 //Name of CMakeLists files to read
@@ -765,118 +309,4 @@ CMAKE_STATIC_LINKER_FLAGS_RELEASE-ADVANCED:INTERNAL=1
 CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_VERBOSE_MAKEFILE
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
-//Test COMPILER_SUPPORTS_AVX
-COMPILER_SUPPORTS_AVX:INTERNAL=1
-//Test COMPILER_SUPPORTS_AVX2
-COMPILER_SUPPORTS_AVX2:INTERNAL=1
-//Test COMPILER_SUPPORTS_AVX512F
-COMPILER_SUPPORTS_AVX512F:INTERNAL=1
-//Test COMPILER_SUPPORTS_BUILTIN_MATH
-COMPILER_SUPPORTS_BUILTIN_MATH:INTERNAL=
-//Test COMPILER_SUPPORTS_FLOAT128
-COMPILER_SUPPORTS_FLOAT128:INTERNAL=
-//Test COMPILER_SUPPORTS_FMA4
-COMPILER_SUPPORTS_FMA4:INTERNAL=1
-//Test COMPILER_SUPPORTS_OMP_SIMD
-COMPILER_SUPPORTS_OMP_SIMD:INTERNAL=
-//Test COMPILER_SUPPORTS_OPENMP
-COMPILER_SUPPORTS_OPENMP:INTERNAL=1
-//Test COMPILER_SUPPORTS_SSE2
-COMPILER_SUPPORTS_SSE2:INTERNAL=1
-//Test COMPILER_SUPPORTS_SSE4
-COMPILER_SUPPORTS_SSE4:INTERNAL=1
-//Test COMPILER_SUPPORTS_SYS_GETRANDOM
-COMPILER_SUPPORTS_SYS_GETRANDOM:INTERNAL=
-//Test COMPILER_SUPPORTS_WEAK_ALIASES
-COMPILER_SUPPORTS_WEAK_ALIASES:INTERNAL=
-//Details about finding Git
-FIND_PACKAGE_MESSAGE_DETAILS_Git:INTERNAL=[D:/Git/cmd/git.exe][v2.50.1.windows.1()]
-//Details about finding OpenMP
-FIND_PACKAGE_MESSAGE_DETAILS_OpenMP:INTERNAL=[TRUE][TRUE][ ][v2.0()]
-//Details about finding OpenMP_C
-FIND_PACKAGE_MESSAGE_DETAILS_OpenMP_C:INTERNAL=[-openmp][v2.0()]
-//Details about finding OpenMP_CXX
-FIND_PACKAGE_MESSAGE_DETAILS_OpenMP_CXX:INTERNAL=[-openmp][v2.0()]
-//Details about finding PkgConfig
-FIND_PACKAGE_MESSAGE_DETAILS_PkgConfig:INTERNAL=[C:/msys64/ucrt64/bin/pkg-config.exe][v2.5.1()]
-//ADVANCED property for variable: GIT_EXECUTABLE
-GIT_EXECUTABLE-ADVANCED:INTERNAL=1
-//Result of TRY_COMPILE
-HAVE_LD_SIZE:INTERNAL=TRUE
-//Have include stddef.h
-HAVE_STDDEF_H:INTERNAL=1
-//Have include stdint.h
-HAVE_STDINT_H:INTERNAL=1
-//Have include sys/types.h
-HAVE_SYS_TYPES_H:INTERNAL=1
-//CHECK_TYPE_SIZE: sizeof(long double)
-LD_SIZE:INTERNAL=8
-//ADVANCED property for variable: LIB_EAY_LIBRARY_DEBUG
-LIB_EAY_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: LIB_EAY_LIBRARY_RELEASE
-LIB_EAY_LIBRARY_RELEASE-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: OPENSSL_INCLUDE_DIR
-OPENSSL_INCLUDE_DIR-ADVANCED:INTERNAL=1
-//Result of TRY_COMPILE
-OpenMP_COMPILE_RESULT_CXX_openmp:INTERNAL=TRUE
-//Result of TRY_COMPILE
-OpenMP_COMPILE_RESULT_C_openmp:INTERNAL=TRUE
-//ADVANCED property for variable: OpenMP_CXX_FLAGS
-OpenMP_CXX_FLAGS-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: OpenMP_CXX_LIB_NAMES
-OpenMP_CXX_LIB_NAMES-ADVANCED:INTERNAL=1
-//CXX compiler's OpenMP specification date
-OpenMP_CXX_SPEC_DATE:INTERNAL=200203
-//ADVANCED property for variable: OpenMP_C_FLAGS
-OpenMP_C_FLAGS-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: OpenMP_C_LIB_NAMES
-OpenMP_C_LIB_NAMES-ADVANCED:INTERNAL=1
-//C compiler's OpenMP specification date
-OpenMP_C_SPEC_DATE:INTERNAL=200203
-//Result of TRY_COMPILE
-OpenMP_SPECTEST_CXX_:INTERNAL=TRUE
-//Result of TRY_COMPILE
-OpenMP_SPECTEST_C_:INTERNAL=TRUE
-//ADVANCED property for variable: PKG_CONFIG_ARGN
-PKG_CONFIG_ARGN-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: PKG_CONFIG_EXECUTABLE
-PKG_CONFIG_EXECUTABLE-ADVANCED:INTERNAL=1
-//True for x86 architecture.
-SLEEF_ARCH_X86:INTERNAL=ON
-//ADVANCED property for variable: SLEEF_INSTALL_CMAKEDIR
-SLEEF_INSTALL_CMAKEDIR-ADVANCED:INTERNAL=1
-//Test SLEEF_LONGDOUBLE_IS_IEEEQP
-SLEEF_LONGDOUBLE_IS_IEEEQP:INTERNAL=
-//ADVANCED property for variable: SSL_EAY_LIBRARY_DEBUG
-SSL_EAY_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: SSL_EAY_LIBRARY_RELEASE
-SSL_EAY_LIBRARY_RELEASE-ADVANCED:INTERNAL=1
-TLFLOAT_CFLAGS:INTERNAL=
-TLFLOAT_CFLAGS_I:INTERNAL=
-TLFLOAT_CFLAGS_OTHER:INTERNAL=
-TLFLOAT_FOUND:INTERNAL=
-TLFLOAT_INCLUDEDIR:INTERNAL=
-TLFLOAT_LIBDIR:INTERNAL=
-TLFLOAT_LIBS:INTERNAL=
-TLFLOAT_LIBS_L:INTERNAL=
-TLFLOAT_LIBS_OTHER:INTERNAL=
-TLFLOAT_LIBS_PATHS:INTERNAL=
-TLFLOAT_MODULE_NAME:INTERNAL=
-TLFLOAT_PREFIX:INTERNAL=
-TLFLOAT_STATIC_CFLAGS:INTERNAL=
-TLFLOAT_STATIC_CFLAGS_I:INTERNAL=
-TLFLOAT_STATIC_CFLAGS_OTHER:INTERNAL=
-TLFLOAT_STATIC_LIBDIR:INTERNAL=
-TLFLOAT_STATIC_LIBS:INTERNAL=
-TLFLOAT_STATIC_LIBS_L:INTERNAL=
-TLFLOAT_STATIC_LIBS_OTHER:INTERNAL=
-TLFLOAT_STATIC_LIBS_PATHS:INTERNAL=
-TLFLOAT_VERSION:INTERNAL=
-TLFLOAT_tlfloat_INCLUDEDIR:INTERNAL=
-TLFLOAT_tlfloat_LIBDIR:INTERNAL=
-TLFLOAT_tlfloat_PREFIX:INTERNAL=
-TLFLOAT_tlfloat_VERSION:INTERNAL=
-//CMAKE_INSTALL_PREFIX during last run
-_GNUInstallDirs_LAST_CMAKE_INSTALL_PREFIX:INTERNAL=C:/Program Files (x86)/NativeDll
-__pkg_config_checked_TLFLOAT:INTERNAL=1
 

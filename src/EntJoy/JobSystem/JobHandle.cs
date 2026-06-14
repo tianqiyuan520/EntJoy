@@ -131,6 +131,14 @@ public struct JobHandle
         return new JobHandle(combineNode.Task);
     }
 
+    /// <summary>
+    /// 显式发布已延迟调度的原生 Job，语义接近 Unity JobHandle.ScheduleBatchedJobs。
+    /// </summary>
+    public static void ScheduleBatchedJobs()
+    {
+        NativeJobScheduler.FlushScheduledJobs();
+    }
+
     private class CombineNode
     {
         private int _remaining;

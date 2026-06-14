@@ -59,7 +59,7 @@ CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=/debug /INCREMENTAL
 CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/CMakeFiles/pkgRedirects
 
 //Install path prefix, prepended onto install directories.
-CMAKE_INSTALL_PREFIX:PATH=C:/Program Files (x86)/NativeTranspiler_Generated
+CMAKE_INSTALL_PREFIX:PATH=C:/Program Files (x86)/NativeDll
 
 //Path to a program.
 CMAKE_LINKER:FILEPATH=D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.exe
@@ -187,18 +187,6 @@ NativeDll_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/Godot/NativeTra
 
 //Value Computed by CMake
 NativeDll_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated
-
-//Value Computed by CMake
-NativeTranspiler_Generated_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build
-
-//Value Computed by CMake
-NativeTranspiler_Generated_IS_TOP_LEVEL:STATIC=ON
-
-//Dependencies for the target
-NativeTranspiler_Generated_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj;
-
-//Value Computed by CMake
-NativeTranspiler_Generated_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated
 
 
 ########################
