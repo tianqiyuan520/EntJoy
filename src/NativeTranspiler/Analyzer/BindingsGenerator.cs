@@ -38,7 +38,7 @@ namespace NativeTranspiler.Analyzer
             // 1. 为每个 Job 结构体生成静态缓存的委托字段和函数指针
             foreach (var jobStruct in jobStructs)
             {
-                GenerateStaticDelegateFields(sb, jobStruct);
+                GenerateStaticDelegateFields(sb, jobStruct, compilation);
             }
 
             // 2. 静态构造函数：初始化所有缓存的委托和函数指针
@@ -148,15 +148,18 @@ namespace NativeTranspiler.Analyzer
         }
 
         // ---------- Job 委托字段 ----------
-        private static void GenerateStaticDelegateFields(StringBuilder sb, INamedTypeSymbol jobStruct)
+        private static void GenerateStaticDelegateFields(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
             if (isChunk)
             {
                 sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
+                var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
+                string requiredIds = BuildRequiredComponentTypeIdsInitializer(requiredTypes);
+                sb.AppendLine($"        private static readonly int[] s_{jobStruct.Name}_RequiredComponentTypeIds = {requiredIds};");
             }
             else if (isParallelFor || isFor)
             {
@@ -178,7 +181,7 @@ namespace NativeTranspiler.Analyzer
             string jobTypeFullName = jobStruct.ToDisplayString();
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -249,7 +252,7 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobDllImport(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
@@ -319,7 +322,7 @@ namespace NativeTranspiler.Analyzer
         // ---------- Job Schedule 方法 ----------
         private static void GenerateJobScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
@@ -353,11 +356,10 @@ namespace NativeTranspiler.Analyzer
             if (isChunk)
             {
                 sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
-                string requiredIds = string.Join(", ", requiredTypes.Select(t => $"ComponentTypeManager.GetComponentType(typeof({t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})).Id"));
-                sb.AppendLine($"            int[] requiredComponentTypeIds = new int[] {{ {requiredIds} }};");
-                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleChunkRaw(");
-                sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, requiredComponentTypeIds, dependsOn._nativeHandle);");
+                string scheduleMethod = CppJobGenerator.IsEntityJob(jobStruct) ? "ScheduleEntityRawWithWorkerCapAndRangeSize" : "ScheduleChunkRaw";
+                string extraArgs = CppJobGenerator.IsEntityJob(jobStruct) ? ", 0, 0" : "";
+                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{scheduleMethod}(");
+                sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds{extraArgs}, dependsOn._nativeHandle);");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
             else if (isParallelFor || isFor)
@@ -385,6 +387,51 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("        }");
             sb.AppendLine();
+
+            if (isChunk)
+            {
+                sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
+                if (CppJobGenerator.IsEntityJob(jobStruct))
+                {
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleEntityRawWithWorkerCapAndRangeSize(");
+                    sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, 0, dependsOn._nativeHandle);");
+                }
+                else
+                {
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleChunkRawWithWorkerCap(");
+                    sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, dependsOn._nativeHandle);");
+                }
+                sb.AppendLine($"            return new JobHandle(nativeHandle);");
+                sb.AppendLine("        }");
+                sb.AppendLine();
+
+                sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
+                string capRangeMethod = CppJobGenerator.IsEntityJob(jobStruct) ? "ScheduleEntityRawWithWorkerCapAndRangeSize" : "ScheduleChunkRawWithWorkerCapAndRangeSize";
+                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{capRangeMethod}(");
+                sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, rangeSize, dependsOn._nativeHandle);");
+                sb.AppendLine($"            return new JobHandle(nativeHandle);");
+                sb.AppendLine("        }");
+                sb.AppendLine();
+
+                sb.AppendLine($"        public static void RunImmediate_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
+                string runImmediateMethod = CppJobGenerator.IsEntityJob(jobStruct) ? "RunEntityRawImmediate" : "RunChunkRawImmediate";
+                sb.AppendLine($"            NativeJobScheduler.{runImmediateMethod}(");
+                sb.AppendLine($"                ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                sb.AppendLine("        }");
+                sb.AppendLine();
+            }
+        }
+
+        private static string BuildRequiredComponentTypeIdsInitializer(IEnumerable<INamedTypeSymbol> requiredTypes)
+        {
+            var ids = string.Join(", ", requiredTypes.Select(t => $"ComponentTypeManager.GetComponentType(typeof({t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})).Id"));
+            return string.IsNullOrWhiteSpace(ids) ? "Array.Empty<int>()" : $"new int[] {{ {ids} }}";
         }
 
         // ---------- 辅助：构建参数列表 ----------
@@ -562,7 +609,7 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobExtensionMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
@@ -572,6 +619,21 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    public static JobHandle Schedule(this {jobTypeName} job, QueryBuilder query, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
                 sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, query, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCap_{jobStruct.Name}(ref job, query, workerCap, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCapAndRangeSize(this {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref job, query, workerCap, rangeSize, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static void RunImmediate(this {jobTypeName} job, QueryBuilder query)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.RunImmediate_{jobStruct.Name}(ref job, query);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
             }
@@ -609,7 +671,7 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateJobRunMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
-            bool isChunk = CppJobGenerator.IsChunkJob(jobStruct);
+            bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();

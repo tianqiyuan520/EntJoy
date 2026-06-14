@@ -28,6 +28,10 @@ add_library(NativeDll SHARED
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute_Adapter.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_wrapper.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
+    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute_Adapter.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCppFast_Execute.cpp
@@ -40,10 +44,6 @@ add_library(NativeDll SHARED
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
     SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp
     ${TASKSYS_SRC}
 )
 
@@ -66,9 +66,9 @@ set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute.obj"
-    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"
 )
 target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
 
@@ -84,17 +84,17 @@ else()
 endif()
 
 set_target_properties(NativeDll PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
-    LIBRARY_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
-    ARCHIVE_OUTPUT_DIRECTORY "D:/Godot/Project/EntJoy/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
 foreach(OUTPUTCONFIG ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER ${OUTPUTCONFIG} OUTPUTCONFIG)
     set_target_properties(NativeDll PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
-        LIBRARY_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
-        ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "D:/Godot/Project/EntJoy/bin"
+        RUNTIME_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
+        LIBRARY_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
+        ARCHIVE_OUTPUT_DIRECTORY_${OUTPUTCONFIG} "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUTCONFIG}"
     )
 endforeach()
 

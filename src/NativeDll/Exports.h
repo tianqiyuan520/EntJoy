@@ -28,6 +28,7 @@ extern "C" {
     JOB_API void JobSystem_Initialize(int numThreads);
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
+    JOB_API void JobSystem_FlushScheduledJobs();
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
@@ -58,6 +59,20 @@ extern "C" {
         unsigned long long assistExecuted;
         unsigned long long frameTasksSubmitted;
         unsigned long long frameTasksCompleted;
+        unsigned long long workerExecutedRanges;
+        unsigned long long mainExecutedRanges;
+        unsigned long long stealCount;
+        unsigned long long parkWakeCount;
+        unsigned long long deferredRuns;
+        unsigned long long publishedJobs;
+        unsigned long long prewakeCount;
+        unsigned long long hotSpinHits;
+        unsigned long long waitFallbacks;
+        unsigned long long notifiedWorkers;
+        unsigned long long scheduleModePublishNoAssist;
+        unsigned long long scheduleModePublishAssist;
+        unsigned long long scheduleModeDeferTinyOnly;
+        unsigned long long scheduleModeImmediateNative;
         int frameQueueDepthPeak;
     } JobSystemStatsNative;
 
@@ -81,6 +96,17 @@ extern "C" {
         const struct ChunkJobData* chunks,
         int chunkCount,
         void* dependency);
+
+    JOB_API void* JobSystem_ScheduleChunkJobEx(
+        ChunkJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const struct ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize);
 
     // ======================== Profiler API ========================
     // 启用/禁用 Profiler

@@ -26,3 +26,5 @@ D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\Nati
 D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\NativeTranspiler.Tasks.AssemblyInfo.cs
 D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\NativeTranspiler.Tasks.dll
 D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\NativeTranspiler.Tasks.pdb
+D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\NativeTranspiler.Tasks.csproj.CoreCompileInputs.cache
+D:\Godot\Project\EntJoy\src\NativeTranspiler.Tasks\obj\Debug\netstandard2.0\NativeTranspiler.Tasks.sourcelink.json

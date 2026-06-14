@@ -12,12 +12,10 @@ auto* RESTRICT velocities_ptr = reinterpret_cast<EntJoySample::IJobChunkMoveComp
 int velocities_length = __chunkData->entityCount;
 for (int index = 0; index < positions_length; index++)
 {
-    EntJoySample::IJobChunkMoveCompareTest::MovePosition position = positions_ptr[index];
-    EntJoySample::IJobChunkMoveCompareTest::MoveVelocity velocity = velocities_ptr[index];
-    float px = position.Value.x;
-    float py = position.Value.y;
-    float vx = velocity.Value.x;
-    float vy = velocity.Value.y;
+    float px = positions_ptr[index].Value.x;
+    float py = positions_ptr[index].Value.y;
+    float vx = velocities_ptr[index].Value.x;
+    float vy = velocities_ptr[index].Value.y;
     float accX = px * 0.001f + vx * 0.01f;
     float accY = py * 0.001f + vy * 0.01f;
     for (int iteration = 0; iteration < 16; iteration++)
@@ -29,8 +27,7 @@ for (int index = 0; index < positions_length; index++)
         accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
         accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
     }
-    position.Value.x = px + vx * DeltaTime + accX * 0.001f;
-    position.Value.y = py + vy * DeltaTime + accY * 0.001f;
-    positions_ptr[index] = position;
+    positions_ptr[index].Value.x = px + vx * DeltaTime + accX * 0.001f;
+    positions_ptr[index].Value.y = py + vy * DeltaTime + accY * 0.001f;
 }
 }
