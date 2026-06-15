@@ -2,6 +2,10 @@
 
 #include "../../NativeDll/NativeMath.h"
 #include "../../NativeDll/NativeContainers.h"
+#include "../../NativeDll/ChunkJobData.h"
+#include "../../NativeDll/ChunkNativeArray.h"
+#include "EntJoySample_IJobChunkMoveCompareTest_MovePosition.h"
+#include "EntJoySample_IJobChunkMoveCompareTest_MoveVelocity.h"
 
 
 #ifdef __cplusplus
@@ -54,4 +58,4 @@
 #endif
 
 
-HEAD void CALLINGCONVENTION SharpNative_Job__global_namespace__GridSearch2D_PrefixSumJobPointer_Execute(int* RESTRICT Counts_ptr, int Counts_length, int* RESTRICT Length_ptr);
+HEAD void CALLINGCONVENTION SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityCpp_Execute(float* RESTRICT DeltaTime_ptr);

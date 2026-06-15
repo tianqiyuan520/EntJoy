@@ -2,6 +2,7 @@
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
+using System.Threading;
 
 namespace EntJoySample.IJobChunkMoveCompareTest
 {
@@ -87,6 +88,49 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 position.Value += velocities[index].Value * DeltaTime;
                 positions[index] = position;
             }
+        }
+    }
+
+    public struct MoveJobEntityCSharp : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            position.Value += velocity.Value * DeltaTime;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
+    public struct MoveJobEntityCpp : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            position.Value += velocity.Value * DeltaTime;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct MoveJobEntityIspc : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            position.Value += velocity.Value * DeltaTime;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast, UseISPC_MT = true)]
+    public struct MoveJobEntityIspcMt : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            position.Value += velocity.Value * DeltaTime;
         }
     }
 
@@ -245,11 +289,129 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
+    public struct HeavyJobEntityCSharp : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            float px = position.Value.x;
+            float py = position.Value.y;
+            float vx = velocity.Value.x;
+            float vy = velocity.Value.y;
+            float accX = px * 0.001f + vx * 0.01f;
+            float accY = py * 0.001f + vy * 0.01f;
+
+            for (int iteration = 0; iteration < 16; iteration++)
+            {
+                float phaseX = accX + iteration * 0.03125f;
+                float phaseY = accY - iteration * 0.0625f;
+                float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+            }
+
+            position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+            position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.@default)]
+    public struct HeavyJobEntityCpp : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            float px = position.Value.x;
+            float py = position.Value.y;
+            float vx = velocity.Value.x;
+            float vy = velocity.Value.y;
+            float accX = px * 0.001f + vx * 0.01f;
+            float accY = py * 0.001f + vy * 0.01f;
+
+            for (int iteration = 0; iteration < 16; iteration++)
+            {
+                float phaseX = accX + iteration * 0.03125f;
+                float phaseY = accY - iteration * 0.0625f;
+                float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+            }
+
+            position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+            position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct HeavyJobEntityIspc : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            float px = position.Value.x;
+            float py = position.Value.y;
+            float vx = velocity.Value.x;
+            float vy = velocity.Value.y;
+            float accX = px * 0.001f + vx * 0.01f;
+            float accY = py * 0.001f + vy * 0.01f;
+
+            for (int iteration = 0; iteration < 16; iteration++)
+            {
+                float phaseX = accX + iteration * 0.03125f;
+                float phaseY = accY - iteration * 0.0625f;
+                float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+            }
+
+            position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+            position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast, UseISPC_MT = true)]
+    public struct HeavyJobEntityIspcMt : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            float px = position.Value.x;
+            float py = position.Value.y;
+            float vx = velocity.Value.x;
+            float vy = velocity.Value.y;
+            float accX = px * 0.001f + vx * 0.01f;
+            float accY = py * 0.001f + vy * 0.01f;
+
+            for (int iteration = 0; iteration < 16; iteration++)
+            {
+                float phaseX = accX + iteration * 0.03125f;
+                float phaseY = accY - iteration * 0.0625f;
+                float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+            }
+
+            position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+            position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+        }
+    }
+
     public sealed unsafe class IJobChunkMoveCompareSample : IDisposable
     {
         private const int EntityCount = 1_000_000;
         private const int WarmupFrames = 5;
-        private const int MeasureFrames = 300;
+        private const int MeasureFrames = 100;
+        private const int SleepWarmupFrames = 5;
+        private const int SleepMeasureFrames = 100;
+        private const int FrameSleepMilliseconds = 16;
         private const int HeavyIterations = 32;
         private const float DeltaTime = 1.0f / 60.0f;
         private const float Epsilon = 0.001f;
@@ -260,6 +422,16 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private readonly World _cppWorld;
         private readonly World _cppFastWorld;
         private readonly World _ispcWorld;
+        private readonly World _entityCsharpWorld;
+        private readonly World _entityCppWorld;
+        private readonly World _entityIspcWorld;
+        private readonly World _entityIspcMtWorld;
+        private readonly World _sleepChunkCsharpWorld;
+        private readonly World _sleepChunkCppWorld;
+        private readonly World _sleepChunkIspcWorld;
+        private readonly World _sleepEntityCsharpWorld;
+        private readonly World _sleepEntityCppWorld;
+        private readonly World _sleepEntityIspcWorld;
 
         public IJobChunkMoveCompareSample()
         {
@@ -276,6 +448,36 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             _ispcWorld = new World("IJobChunkMoveCompare_Ispc");
             CreateEntities(_ispcWorld);
+
+            _entityCsharpWorld = new World("IJobEntityMoveCompare_CSharp");
+            CreateEntities(_entityCsharpWorld);
+
+            _entityCppWorld = new World("IJobEntityMoveCompare_Cpp");
+            CreateEntities(_entityCppWorld);
+
+            _entityIspcWorld = new World("IJobEntityMoveCompare_Ispc");
+            CreateEntities(_entityIspcWorld);
+
+            _entityIspcMtWorld = new World("IJobEntityMoveCompare_IspcMt");
+            CreateEntities(_entityIspcMtWorld);
+
+            _sleepChunkCsharpWorld = new World("IJobChunkMoveCompare_Sleep_CSharp");
+            CreateEntities(_sleepChunkCsharpWorld);
+
+            _sleepChunkCppWorld = new World("IJobChunkMoveCompare_Sleep_Cpp");
+            CreateEntities(_sleepChunkCppWorld);
+
+            _sleepChunkIspcWorld = new World("IJobChunkMoveCompare_Sleep_Ispc");
+            CreateEntities(_sleepChunkIspcWorld);
+
+            _sleepEntityCsharpWorld = new World("IJobEntityMoveCompare_Sleep_CSharp");
+            CreateEntities(_sleepEntityCsharpWorld);
+
+            _sleepEntityCppWorld = new World("IJobEntityMoveCompare_Sleep_Cpp");
+            CreateEntities(_sleepEntityCppWorld);
+
+            _sleepEntityIspcWorld = new World("IJobEntityMoveCompare_Sleep_Ispc");
+            CreateEntities(_sleepEntityIspcWorld);
         }
 
         public void Run()
@@ -291,6 +493,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double cppAverage = RunCpp();
             double cppFastAverage = RunCppFast();
             double ispcAverage = RunIspc();
+            double entityCsharpAverage = RunEntityCSharp();
+            double entityCppAverage = RunEntityCpp();
+            double entityIspcAverage = RunEntityIspc();
+            double entityIspcMtAverage = RunEntityIspcMt();
             VerifyResults("Light Verify", Epsilon);
 
             Console.WriteLine();
@@ -298,9 +504,16 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"C++ IJobChunk      : {cppAverage:F3} ms/frame");
             Console.WriteLine($"C++ Fast IJobChunk : {cppFastAverage:F3} ms/frame");
             Console.WriteLine($"ISPC IJobChunk     : {ispcAverage:F3} ms/frame");
+            Console.WriteLine($"C# IJobEntity      : {entityCsharpAverage:F3} ms/frame");
+            Console.WriteLine($"C++ IJobEntity     : {entityCppAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC IJobEntity    : {entityIspcAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC MT IJobEntity : {entityIspcMtAverage:F3} ms/frame");
             Console.WriteLine($"C++ Speedup        : {csharpAverage / cppAverage:F2}x");
             Console.WriteLine($"C++ Fast Speedup   : {csharpAverage / cppFastAverage:F2}x");
             Console.WriteLine($"ISPC Speedup       : {csharpAverage / ispcAverage:F2}x");
+            Console.WriteLine($"C++ Entity Speedup : {csharpAverage / entityCppAverage:F2}x");
+            Console.WriteLine($"ISPC Entity Speedup: {csharpAverage / entityIspcAverage:F2}x");
+            Console.WriteLine($"ISPC MT Entity Spd : {csharpAverage / entityIspcMtAverage:F2}x");
 
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Heavy 计算对比 ===");
@@ -311,6 +524,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double cppHeavyAverage = RunHeavyCpp();
             double cppFastHeavyAverage = RunHeavyCppFast();
             double ispcHeavyAverage = RunHeavyIspc();
+            double entityCsharpHeavyAverage = RunHeavyEntityCSharp();
+            double entityCppHeavyAverage = RunHeavyEntityCpp();
+            double entityIspcHeavyAverage = RunHeavyEntityIspc();
+            double entityIspcMtHeavyAverage = RunHeavyEntityIspcMt();
             VerifyResults("Heavy Verify", HeavyEpsilon);
 
             Console.WriteLine();
@@ -318,9 +535,42 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"C++ Heavy IJobChunk     : {cppHeavyAverage:F3} ms/frame");
             Console.WriteLine($"C++ Fast Heavy IJobChunk: {cppFastHeavyAverage:F3} ms/frame");
             Console.WriteLine($"ISPC Heavy IJobChunk    : {ispcHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"C# Heavy IJobEntity     : {entityCsharpHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"C++ Heavy IJobEntity    : {entityCppHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC Heavy IJobEntity   : {entityIspcHeavyAverage:F3} ms/frame");
+            Console.WriteLine($"ISPC MT Heavy IJobEntity: {entityIspcMtHeavyAverage:F3} ms/frame");
             Console.WriteLine($"C++ Heavy Speedup       : {csharpHeavyAverage / cppHeavyAverage:F2}x");
             Console.WriteLine($"C++ Fast Heavy Speedup  : {csharpHeavyAverage / cppFastHeavyAverage:F2}x");
             Console.WriteLine($"ISPC Heavy Speedup      : {csharpHeavyAverage / ispcHeavyAverage:F2}x");
+            Console.WriteLine($"C++ Entity Heavy Speedup: {csharpHeavyAverage / entityCppHeavyAverage:F2}x");
+            Console.WriteLine($"ISPC Entity Heavy Spd   : {csharpHeavyAverage / entityIspcHeavyAverage:F2}x");
+            Console.WriteLine($"ISPC MT Entity Heavy Spd: {csharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
+
+            Console.WriteLine();
+            Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
+            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
+            Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
+            Console.WriteLine();
+
+            double sleepChunkCsharpAverage = RunSleepChunkCSharp();
+            double sleepChunkCppAverage = RunSleepChunkCpp();
+            double sleepChunkIspcAverage = RunSleepChunkIspc();
+            double sleepEntityCsharpAverage = RunSleepEntityCSharp();
+            double sleepEntityCppAverage = RunSleepEntityCpp();
+            double sleepEntityIspcAverage = RunSleepEntityIspc();
+            VerifySleepResults("Sleep Verify", Epsilon);
+
+            Console.WriteLine();
+            Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ IJobChunk  : {sleepChunkCppAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep ISPC IJobChunk : {sleepChunkIspcAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C# IJobEntity  : {sleepEntityCsharpAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ IJobEntity : {sleepEntityCppAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep ISPC IJobEntity: {sleepEntityIspcAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ Chunk Spd  : {sleepChunkCsharpAverage / sleepChunkCppAverage:F2}x");
+            Console.WriteLine($"Sleep ISPC Chunk Spd : {sleepChunkCsharpAverage / sleepChunkIspcAverage:F2}x");
+            Console.WriteLine($"Sleep C++ Entity Spd : {sleepChunkCsharpAverage / sleepEntityCppAverage:F2}x");
+            Console.WriteLine($"Sleep ISPC Entity Spd: {sleepChunkCsharpAverage / sleepEntityIspcAverage:F2}x");
         }
 
         private double RunCSharp()
@@ -351,6 +601,34 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             return RunBenchmark("ISPC IJobChunk", () => job.Schedule(_query).Complete());
         }
 
+        private double RunEntityCSharp()
+        {
+            World.DefaultWorld = _entityCsharpWorld;
+            var job = new MoveJobEntityCSharp { DeltaTime = DeltaTime };
+            return RunBenchmark("C# IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunEntityCpp()
+        {
+            World.DefaultWorld = _entityCppWorld;
+            var job = new MoveJobEntityCpp { DeltaTime = DeltaTime };
+            return RunBenchmark("C++ IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunEntityIspc()
+        {
+            World.DefaultWorld = _entityIspcWorld;
+            var job = new MoveJobEntityIspc { DeltaTime = DeltaTime };
+            return RunBenchmark("ISPC IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunEntityIspcMt()
+        {
+            World.DefaultWorld = _entityIspcMtWorld;
+            var job = new MoveJobEntityIspcMt { DeltaTime = DeltaTime };
+            return RunBenchmark("ISPC MT IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
         private double RunHeavyCSharp()
         {
             World.DefaultWorld = _csharpWorld;
@@ -379,6 +657,76 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             return RunBenchmark("ISPC Heavy IJobChunk", () => job.Schedule(_query).Complete());
         }
 
+        private double RunHeavyEntityCSharp()
+        {
+            World.DefaultWorld = _entityCsharpWorld;
+            var job = new HeavyJobEntityCSharp { DeltaTime = DeltaTime };
+            return RunBenchmark("C# Heavy IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunHeavyEntityCpp()
+        {
+            World.DefaultWorld = _entityCppWorld;
+            var job = new HeavyJobEntityCpp { DeltaTime = DeltaTime };
+            return RunBenchmark("C++ Heavy IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunHeavyEntityIspc()
+        {
+            World.DefaultWorld = _entityIspcWorld;
+            var job = new HeavyJobEntityIspc { DeltaTime = DeltaTime };
+            return RunBenchmark("ISPC Heavy IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunHeavyEntityIspcMt()
+        {
+            World.DefaultWorld = _entityIspcMtWorld;
+            var job = new HeavyJobEntityIspcMt { DeltaTime = DeltaTime };
+            return RunBenchmark("ISPC MT Heavy IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepChunkCSharp()
+        {
+            World.DefaultWorld = _sleepChunkCsharpWorld;
+            var job = new MoveJobChunkCSharp { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep C# IJobChunk", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepChunkCpp()
+        {
+            World.DefaultWorld = _sleepChunkCppWorld;
+            var job = new MoveJobChunkCpp { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep C++ IJobChunk", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepChunkIspc()
+        {
+            World.DefaultWorld = _sleepChunkIspcWorld;
+            var job = new MoveJobChunkIspc { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep ISPC IJobChunk", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepEntityCSharp()
+        {
+            World.DefaultWorld = _sleepEntityCsharpWorld;
+            var job = new MoveJobEntityCSharp { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep C# IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepEntityCpp()
+        {
+            World.DefaultWorld = _sleepEntityCppWorld;
+            var job = new MoveJobEntityCpp { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep C++ IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private double RunSleepEntityIspc()
+        {
+            World.DefaultWorld = _sleepEntityIspcWorld;
+            var job = new MoveJobEntityIspc { DeltaTime = DeltaTime };
+            return RunSleepBenchmark("Sleep ISPC IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
         private static double RunBenchmark(string label, Action scheduleAndComplete)
         {
             for (int frame = 0; frame < WarmupFrames; frame++)
@@ -400,78 +748,130 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             return average;
         }
 
+        private static double RunSleepBenchmark(string label, Action scheduleAndComplete)
+        {
+            for (int frame = 0; frame < SleepWarmupFrames; frame++)
+            {
+                scheduleAndComplete();
+                Thread.Sleep(FrameSleepMilliseconds);
+            }
+
+            double totalMilliseconds = 0;
+            for (int frame = 0; frame < SleepMeasureFrames; frame++)
+            {
+                long start = Stopwatch.GetTimestamp();
+                scheduleAndComplete();
+                long end = Stopwatch.GetTimestamp();
+                totalMilliseconds += (end - start) * 1000.0 / Stopwatch.Frequency;
+                Thread.Sleep(FrameSleepMilliseconds);
+            }
+
+            double average = totalMilliseconds / SleepMeasureFrames;
+            Console.WriteLine($"{label,-22}: avg={average:F3} ms");
+            return average;
+        }
+
         private void VerifyResults(string label, float epsilon)
         {
-            float cppMaxDiff = 0;
-            float cppFastMaxDiff = 0;
-            float ispcMaxDiff = 0;
-            int cppMismatchCount = 0;
-            int cppFastMismatchCount = 0;
-            int ispcMismatchCount = 0;
+            var targets = new[]
+            {
+                ("C++", _cppWorld),
+                ("C++ Fast", _cppFastWorld),
+                ("ISPC", _ispcWorld),
+                ("C# Entity", _entityCsharpWorld),
+                ("C++ Entity", _entityCppWorld),
+                ("ISPC Entity", _entityIspcWorld),
+                ("ISPC MT Entity", _entityIspcMtWorld),
+            };
 
-            var csharpChunks = GetPositionChunks(_csharpWorld);
-            var cppChunks = GetPositionChunks(_cppWorld);
-            var cppFastChunks = GetPositionChunks(_cppFastWorld);
-            var ispcChunks = GetPositionChunks(_ispcWorld);
-            int entityOffset = 0;
+            VerifyPositionWorlds(label, epsilon, _csharpWorld, targets);
+        }
+
+        private void VerifySleepResults(string label, float epsilon)
+        {
+            var targets = new[]
+            {
+                ("C++ Chunk", _sleepChunkCppWorld),
+                ("ISPC Chunk", _sleepChunkIspcWorld),
+                ("C# Entity", _sleepEntityCsharpWorld),
+                ("C++ Entity", _sleepEntityCppWorld),
+                ("ISPC Entity", _sleepEntityIspcWorld),
+            };
+
+            VerifyPositionWorlds(label, epsilon, _sleepChunkCsharpWorld, targets);
+        }
+
+        private void VerifyPositionWorlds(string label, float epsilon, World baselineWorld, (string Label, World World)[] targetWorlds)
+        {
+            var csharpChunks = GetPositionChunks(baselineWorld);
+            var targets = targetWorlds
+                .Select(target => (target.Label, Chunks: GetPositionChunks(target.World)))
+                .ToArray();
+
+            float[] maxDiffs = new float[targets.Length];
+            int[] mismatchCounts = new int[targets.Length];
 
             for (int chunkIndex = 0; chunkIndex < csharpChunks.Length; chunkIndex++)
             {
                 var csharpChunk = csharpChunks[chunkIndex];
-                var cppChunk = cppChunks[chunkIndex];
-                var cppFastChunk = cppFastChunks[chunkIndex];
-                var ispcChunk = ispcChunks[chunkIndex];
-                int count = Math.Min(Math.Min(csharpChunk.Count, cppChunk.Count), Math.Min(cppFastChunk.Count, ispcChunk.Count));
-
-                for (int localIndex = 0; localIndex < count; localIndex++)
+                int entityOffset = 0;
+                for (int previousChunk = 0; previousChunk < chunkIndex; previousChunk++)
                 {
-                    int entityIndex = entityOffset + localIndex;
-                    float2 csharp = csharpChunk.Positions[localIndex].Value;
-                    float2 cpp = cppChunk.Positions[localIndex].Value;
-                    float2 cppFast = cppFastChunk.Positions[localIndex].Value;
-                    float2 ispc = ispcChunk.Positions[localIndex].Value;
-                    float cppDiff = MathF.Max(MathF.Abs(csharp.x - cpp.x), MathF.Abs(csharp.y - cpp.y));
-                    float cppFastDiff = MathF.Max(MathF.Abs(csharp.x - cppFast.x), MathF.Abs(csharp.y - cppFast.y));
-                    float ispcDiff = MathF.Max(MathF.Abs(csharp.x - ispc.x), MathF.Abs(csharp.y - ispc.y));
-                    if (cppDiff > epsilon)
-                    {
-                        cppMismatchCount++;
-                        if (cppMismatchCount <= 3)
-                        {
-                            Console.WriteLine($"C++ mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++=({cpp.x:F4},{cpp.y:F4}) diff={cppDiff:E4}");
-                        }
-                    }
-
-                    if (cppFastDiff > epsilon)
-                    {
-                        cppFastMismatchCount++;
-                        if (cppFastMismatchCount <= 3)
-                        {
-                            Console.WriteLine($"C++ Fast mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) C++Fast=({cppFast.x:F4},{cppFast.y:F4}) diff={cppFastDiff:E4}");
-                        }
-                    }
-
-                    if (ispcDiff > epsilon)
-                    {
-                        ispcMismatchCount++;
-                        if (ispcMismatchCount <= 3)
-                        {
-                            Console.WriteLine($"ISPC mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) ISPC=({ispc.x:F4},{ispc.y:F4}) diff={ispcDiff:E4}");
-                        }
-                    }
-
-                    if (cppDiff > cppMaxDiff) cppMaxDiff = cppDiff;
-                    if (cppFastDiff > cppFastMaxDiff) cppFastMaxDiff = cppFastDiff;
-                    if (ispcDiff > ispcMaxDiff) ispcMaxDiff = ispcDiff;
+                    entityOffset += csharpChunks[previousChunk].Count;
                 }
 
-                entityOffset += count;
+                for (int targetIndex = 0; targetIndex < targets.Length; targetIndex++)
+                {
+                    var target = targets[targetIndex];
+                    if (chunkIndex >= target.Chunks.Length)
+                    {
+                        mismatchCounts[targetIndex] += csharpChunk.Count;
+                        continue;
+                    }
+
+                    var targetChunk = target.Chunks[chunkIndex];
+                    int count = Math.Min(csharpChunk.Count, targetChunk.Count);
+
+                    for (int localIndex = 0; localIndex < count; localIndex++)
+                    {
+                        int entityIndex = entityOffset + localIndex;
+                        float2 csharp = csharpChunk.Positions[localIndex].Value;
+                        float2 actual = targetChunk.Positions[localIndex].Value;
+                        float diff = MathF.Max(MathF.Abs(csharp.x - actual.x), MathF.Abs(csharp.y - actual.y));
+
+                        if (diff > epsilon)
+                        {
+                            mismatchCounts[targetIndex]++;
+                            if (mismatchCounts[targetIndex] <= 3)
+                            {
+                                Console.WriteLine($"{target.Item1} mismatch entity {entityIndex}: C#=({csharp.x:F4},{csharp.y:F4}) {target.Item1}=({actual.x:F4},{actual.y:F4}) diff={diff:E4}");
+                            }
+                        }
+
+                        if (diff > maxDiffs[targetIndex]) maxDiffs[targetIndex] = diff;
+                    }
+
+                    if (targetChunk.Count != csharpChunk.Count)
+                    {
+                        mismatchCounts[targetIndex] += Math.Abs(targetChunk.Count - csharpChunk.Count);
+                    }
+                }
             }
 
-            bool passed = cppMismatchCount == 0 && cppFastMismatchCount == 0 && ispcMismatchCount == 0;
+            bool passed = mismatchCounts.All(count => count == 0);
             Console.WriteLine(passed
-                ? $"{label,-13}: OK, cppMaxDiff={cppMaxDiff:E4}, cppFastMaxDiff={cppFastMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}"
-                : $"{label,-13}: ERROR, cppMismatch={cppMismatchCount:N0}, cppFastMismatch={cppFastMismatchCount:N0}, ispcMismatch={ispcMismatchCount:N0}, cppMaxDiff={cppMaxDiff:E4}, cppFastMaxDiff={cppFastMaxDiff:E4}, ispcMaxDiff={ispcMaxDiff:E4}, epsilon={epsilon:E4}");
+                ? $"{label,-13}: OK, {FormatVerifySummary(targets, maxDiffs)}, epsilon={epsilon:E4}"
+                : $"{label,-13}: ERROR, {FormatMismatchSummary(targets, mismatchCounts)}, {FormatVerifySummary(targets, maxDiffs)}, epsilon={epsilon:E4}");
+        }
+
+        private static string FormatVerifySummary((string Label, PositionChunkView[] Chunks)[] targets, float[] maxDiffs)
+        {
+            return string.Join(", ", targets.Select((target, index) => $"{target.Label}MaxDiff={maxDiffs[index]:E4}"));
+        }
+
+        private static string FormatMismatchSummary((string Label, PositionChunkView[] Chunks)[] targets, int[] mismatchCounts)
+        {
+            return string.Join(", ", targets.Select((target, index) => $"{target.Label}Mismatch={mismatchCounts[index]:N0}"));
         }
 
         private static void CreateEntities(World world)
@@ -540,6 +940,16 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
         public void Dispose()
         {
+            _sleepEntityIspcWorld.Dispose();
+            _sleepEntityCppWorld.Dispose();
+            _sleepEntityCsharpWorld.Dispose();
+            _sleepChunkIspcWorld.Dispose();
+            _sleepChunkCppWorld.Dispose();
+            _sleepChunkCsharpWorld.Dispose();
+            _entityIspcMtWorld.Dispose();
+            _entityIspcWorld.Dispose();
+            _entityCppWorld.Dispose();
+            _entityCsharpWorld.Dispose();
             _ispcWorld.Dispose();
             _cppFastWorld.Dispose();
             _cppWorld.Dispose();

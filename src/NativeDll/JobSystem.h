@@ -15,6 +15,7 @@ class Executor;
 
 // Forward declaration for ChunkJobData
 struct ChunkJobData;
+struct EntityBatchData;
 
 #ifdef __cpp_lib_hardware_interference_size
 using std::hardware_destructive_interference_size;
@@ -31,6 +32,8 @@ namespace JobSystem {
         PublishAssist = 1,
         DeferTinyOnly = 2,
         ImmediateNative = 3,
+        DeferredPublish = 4,
+        DeferredPublishNoAssist = 5,
     };
 
     // 对齐到缓存行，避免伪共享
@@ -159,6 +162,27 @@ void ResetStatsSnapshot() noexcept;
             void (*cleanup)(void*) = nullptr,
             const struct ChunkJobData* chunks = nullptr,
             int chunkCount = 0,
+            const JobHandle& dependency = {},
+            ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
+            int workerCap = 0,
+            int rangeSize = 0);
+
+        // 调度多个 Chunk range 任务；func 每次处理 [start, start + count) 的 chunk range。
+        static JobHandle ScheduleChunkRanges(
+            void (*func)(void*, const struct ChunkJobData*, int, int), void* context,
+            void (*cleanup)(void*) = nullptr,
+            const struct ChunkJobData* chunks = nullptr,
+            int chunkCount = 0,
+            const JobHandle& dependency = {},
+            ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
+            int workerCap = 0,
+            int rangeSize = 0);
+
+        static JobHandle ScheduleEntityBatches(
+            void (*func)(void*, const struct EntityBatchData*, int, int), void* context,
+            void (*cleanup)(void*) = nullptr,
+            const struct EntityBatchData* batches = nullptr,
+            int batchCount = 0,
             const JobHandle& dependency = {},
             ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
             int workerCap = 0,

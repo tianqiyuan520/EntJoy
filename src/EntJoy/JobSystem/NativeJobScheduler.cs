@@ -29,6 +29,13 @@ public unsafe struct ChunkJobData
     public int requiredComponentCount;     // requiredComponentArrays 数量
 }
 
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct EntityBatchData
+{
+    public void** componentArrays;
+    public int entityCount;
+}
+
 /// <summary>
 /// Chunk 上下文包的内存布局（非托管）
 /// 必须标记 Sequential 以确保内存布局与指针访问一致
@@ -109,7 +116,9 @@ internal enum ChunkScheduleMode
     PublishNoAssist = 0,
     PublishAssist = 1,
     DeferTinyOnly = 2,
-    ImmediateNative = 3
+    ImmediateNative = 3,
+    DeferredPublish = 4,
+    DeferredPublishNoAssist = 5
 }
 
 /// <summary>
@@ -141,6 +150,8 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkJobEx;
+    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
+    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
     private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     // Profiler 函数指针
@@ -329,6 +340,10 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJob");
         _jobSystem_ScheduleChunkJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJobEx");
+        _jobSystem_ScheduleChunkRangeJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkRangeJobEx");
+        _jobSystem_ScheduleEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleEntityBatchJobEx");
         _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
         _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
@@ -348,34 +363,115 @@ public static unsafe partial class NativeJobScheduler
     }
 
     // ======================== 包装函数 ========================
-    private static void JobSystem_Initialize(int numThreads) => _jobSystem_Initialize(numThreads);
-    private static void JobSystem_Shutdown() => _jobSystem_Shutdown();
-    private static void JobSystem_PrewakeWorkers() => _jobSystem_PrewakeWorkers();
-    private static void JobSystem_FlushScheduledJobs() => _jobSystem_FlushScheduledJobs();
+    private static bool IsNativeLoaded => _nativeDll != IntPtr.Zero && _jobSystem_Initialize != null;
+
+    private static void EnsureNativeLoaded()
+    {
+        if (!IsNativeLoaded)
+            throw new InvalidOperationException("NativeDll.dll is not loaded. Ensure NativeDll.dll is copied next to the executable or Godot output directory.");
+    }
+
+    private static void JobSystem_Initialize(int numThreads)
+    {
+        EnsureNativeLoaded();
+        _jobSystem_Initialize(numThreads);
+    }
+
+    private static void JobSystem_Shutdown()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_Shutdown == null) return;
+        _jobSystem_Shutdown();
+    }
+
+    private static void JobSystem_PrewakeWorkers()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_PrewakeWorkers == null) return;
+        _jobSystem_PrewakeWorkers();
+    }
+
+    private static void JobSystem_FlushScheduledJobs()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_FlushScheduledJobs == null) return;
+        _jobSystem_FlushScheduledJobs();
+    }
+
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
-        => _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
+    }
+
     private static IntPtr JobSystem_ScheduleParallelForBatch(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, int batchSize, IntPtr dependency)
-        => _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
+    }
+
     private static IntPtr JobSystem_ScheduleFor(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, IntPtr dependency)
-        => _jobSystem_ScheduleFor(funcPtr, context, cleanupPtr, length, dependency);
-    private static void JobSystem_CompleteAndRelease(IntPtr handle) => _jobSystem_CompleteAndRelease(handle);
-    private static int JobSystem_IsCompleted(IntPtr handle) => _jobSystem_IsCompleted(handle);
-    private static void JobSystem_ReleaseHandle(IntPtr handle) => _jobSystem_ReleaseHandle(handle);
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleFor(funcPtr, context, cleanupPtr, length, dependency);
+    }
+
+    private static void JobSystem_CompleteAndRelease(IntPtr handle)
+    {
+        EnsureNativeLoaded();
+        _jobSystem_CompleteAndRelease(handle);
+    }
+
+    private static int JobSystem_IsCompleted(IntPtr handle)
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_IsCompleted(handle);
+    }
+
+    private static void JobSystem_ReleaseHandle(IntPtr handle)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_ReleaseHandle == null) return;
+        _jobSystem_ReleaseHandle(handle);
+    }
+
     private static IntPtr JobSystem_CombineDependencies(IntPtr[] handles, int count)
     {
+        EnsureNativeLoaded();
         fixed (IntPtr* ptr = handles) return _jobSystem_CombineDependencies(ptr, count);
     }
     private static IntPtr JobSystem_ScheduleChunkJob(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency)
-        => _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
+    }
+
     private static IntPtr JobSystem_ScheduleChunkJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
-        => _jobSystem_ScheduleChunkJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleChunkJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
+    private static IntPtr JobSystem_ScheduleChunkRangeJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleChunkRangeJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
+    private static IntPtr JobSystem_ScheduleEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
     private static NativeJobSystemStats JobSystem_GetStats()
     {
+        EnsureNativeLoaded();
         NativeJobSystemStats stats = default;
         _jobSystem_GetStats(&stats);
         return stats;
     }
-    private static void JobSystem_ResetStats() => _jobSystem_ResetStats();
+    private static void JobSystem_ResetStats()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_ResetStats == null) return;
+        _jobSystem_ResetStats();
+    }
 
     // ======================== 委托类型 ========================
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -386,6 +482,8 @@ public static unsafe partial class NativeJobScheduler
     private delegate void BatchJobFunc(IntPtr context, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CleanupFunc(IntPtr context);
 
@@ -563,8 +661,10 @@ public static unsafe partial class NativeJobScheduler
 
     public static void Release(NativeJobHandle h)
     {
-        // C++ 自动管理 HandleState 生命周期；C# 仅释放引用
-        // 无需 P/Invoke
+        if (h.Handle != IntPtr.Zero)
+        {
+            _jobSystem_ReleaseHandle(h.Handle);
+        }
     }
 
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
@@ -605,6 +705,8 @@ public static unsafe partial class NativeJobScheduler
     private static readonly object _rawChunkScheduleCacheLock = new();
     private static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
     private static readonly Dictionary<RawChunkScheduleCacheKey, ManagedChunkScheduleCache> _managedChunkScheduleCaches = new();
+    private static readonly Dictionary<RawChunkScheduleCacheKey, EntityBatchScheduleCache> _entityBatchScheduleCaches = new();
+    private static readonly ConcurrentDictionary<IntPtr, GCHandle> _chunkContextLeases = new();
 
     public static void ClearRawChunkScheduleCaches(EntityManager entityManager)
     {
@@ -640,6 +742,21 @@ public static unsafe partial class NativeJobScheduler
             {
                 _managedChunkScheduleCaches.Remove(keysToRemove[i]);
             }
+
+            keysToRemove.Clear();
+            foreach (var pair in _entityBatchScheduleCaches)
+            {
+                if (pair.Key.Matches(entityManager))
+                {
+                    pair.Value.Dispose();
+                    keysToRemove.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; i < keysToRemove.Count; i++)
+            {
+                _entityBatchScheduleCaches.Remove(keysToRemove[i]);
+            }
         }
     }
 
@@ -663,6 +780,14 @@ public static unsafe partial class NativeJobScheduler
         where T : struct
         => ScheduleNativeChunkRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
 
+    public static NativeJobHandle ScheduleEntityRangeRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        where T : struct
+        => ScheduleNativeChunkRangeRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+
+    public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        where T : struct
+        => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+
     public static void RunChunkRawImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
         where T : struct, IJobChunk
     {
@@ -685,12 +810,11 @@ public static unsafe partial class NativeJobScheduler
         bool canUseRawCache = funcPtr != IntPtr.Zero &&
                               !hasEnabledFilter;
         if (canUseRawCache &&
-            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache) &&
+            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var mode = forcedMode ?? (rawCache.ChunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.PublishAssist);
-            if (mode == ChunkScheduleMode.PublishAssist) AutoPrewakeChunkIfNeeded(rawCache.ChunkCount);
-            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds);
+            var mode = forcedMode ?? (rawCache.ChunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish);
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
                 return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize));
@@ -702,10 +826,10 @@ public static unsafe partial class NativeJobScheduler
 
         if (funcPtr == IntPtr.Zero &&
             !jobHasManagedReferences &&
-            TryGetManagedChunkScheduleCache(entityManager, query, out var csharpRawCache) &&
+            TryGetManagedChunkScheduleCache(entityManager, query, out var csharpRawCache, out var csharpRawCacheLease) &&
             csharpRawCache.ChunkCount > 0)
         {
-            var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1);
+            var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, null, csharpRawCacheLease);
             try
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
@@ -823,9 +947,8 @@ public static unsafe partial class NativeJobScheduler
                 callbackPtr = cache.FuncPtr;
             }
             var mode = forcedMode ?? (funcPtr != IntPtr.Zero
-                ? (chunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.PublishAssist)
+                ? (chunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish)
                 : ChunkScheduleMode.PublishNoAssist);
-            if (mode == ChunkScheduleMode.PublishAssist) AutoPrewakeChunkIfNeeded(chunkCount);
             return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize));
         }
         catch { ChunkCleanup(contextBlock); throw; }
@@ -840,14 +963,13 @@ public static unsafe partial class NativeJobScheduler
         var allEnabledTypes = query.AllEnabled;
         bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
         if (!hasEnabledFilter &&
-            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache) &&
+            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds);
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                AutoPrewakeChunkIfNeeded(rawCache.ChunkCount);
-                return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.PublishAssist, workerCap, rangeSize));
+                return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -932,8 +1054,135 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
         try
         {
-            AutoPrewakeChunkIfNeeded(chunkCount);
-            return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.PublishAssist, workerCap, rangeSize));
+            return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+        }
+        catch { ChunkCleanup(contextBlock); throw; }
+    }
+
+    private static NativeJobHandle ScheduleNativeChunkRangeRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize)
+        where T : struct
+    {
+        if (funcPtr == IntPtr.Zero)
+            throw new ArgumentException("Native chunk range raw scheduling requires a function pointer.", nameof(funcPtr));
+
+        var allEnabledTypes = query.AllEnabled;
+        bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
+        if (!hasEnabledFilter &&
+            TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
+            rawCache.ChunkCount > 0)
+        {
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
+            try
+            {
+                return new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+            }
+            catch { ChunkCleanup(rawContextBlock); throw; }
+        }
+
+        var chunkList = new List<Chunk>(128);
+        for (int i = 0; i < entityManager.ArchetypeCount; i++)
+        {
+            var arch = entityManager.Archetypes[i];
+            if (arch != null && arch.IsMatch(query))
+            {
+                foreach (var c in arch.GetChunks())
+                    if (c.EntityCount > 0) chunkList.Add(c);
+            }
+        }
+
+        int chunkCount = chunkList.Count;
+        if (chunkCount == 0) return default;
+
+        var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
+        int gcHandleStartIndex;
+        lock (_chunkGCHandlesLock) { gcHandleStartIndex = _chunkGCHandles.Count; }
+
+        for (int ci = 0; ci < chunkCount; ci++)
+        {
+            var chunk = chunkList[ci];
+            var arch = chunk.Archetype;
+            var gch = GCHandle.Alloc(chunk, GCHandleType.WeakTrackResurrection);
+            lock (_chunkGCHandlesLock) { _chunkGCHandles.Add(gch); }
+
+            int compCount = chunk.ComponentCount;
+            var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
+            var compSizes = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+            var bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
+            var typeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+            void** requiredArrays = null;
+            int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+            if (requiredCount > 0)
+            {
+                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+            }
+
+            for (int c = 0; c < compCount; c++)
+            {
+                compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
+                compSizes[c] = arch.Types[c].Size;
+                bitmaps[c] = chunk.GetEnableBitMapPointer(c);
+                typeIndices[c] = arch.Types[c].Id;
+            }
+
+            if (requiredArrays != null)
+            {
+                for (int r = 0; r < requiredCount; r++)
+                {
+                    int requiredTypeId = requiredComponentTypeIds[r];
+                    for (int c = 0; c < compCount; c++)
+                    {
+                        if (typeIndices[c] == requiredTypeId)
+                        {
+                            requiredArrays[r] = compPtrs[c];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            chunksPtr[ci] = new ChunkJobData
+            {
+                entityArray = (void*)chunk.GetEntityPointer(),
+                entityCount = chunk.EntityCount,
+                componentCount = compCount,
+                componentArrays = compPtrs,
+                componentSizes = compSizes,
+                enableBitMaps = bitmaps,
+                componentTypeIndices = typeIndices,
+                chunkHandle = (IntPtr)gch,
+                requiredComponentArrays = requiredArrays,
+                requiredComponentCount = requiredCount
+            };
+        }
+
+        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
+        try
+        {
+            return new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+        }
+        catch { ChunkCleanup(contextBlock); throw; }
+    }
+
+    private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize)
+        where T : struct
+    {
+        if (funcPtr == IntPtr.Zero)
+            throw new ArgumentException("Native entity batch raw scheduling requires a function pointer.", nameof(funcPtr));
+
+        var allEnabledTypes = query.AllEnabled;
+        bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
+        if (hasEnabledFilter)
+            throw new NotSupportedException("Native IJobEntity DirectEntityBatch does not support AllEnabled filters yet.");
+
+        if (!TryGetEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds, out var cache, out var cacheLease) ||
+            cache.BatchCount == 0)
+            return default;
+
+        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
+        try
+        {
+            return new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -944,11 +1193,11 @@ public static unsafe partial class NativeJobScheduler
         if (funcPtr == IntPtr.Zero)
             throw new ArgumentException("Native chunk raw immediate requires a function pointer.", nameof(funcPtr));
 
-        if (!TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache) ||
+        if (!TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) ||
             rawCache.ChunkCount == 0)
             return default;
 
-        var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds);
+        var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
         try
         {
             return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative));
@@ -956,8 +1205,9 @@ public static unsafe partial class NativeJobScheduler
         catch { ChunkCleanup(rawContextBlock); throw; }
     }
 
-    private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache)
+    private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache, out IDisposable lease)
     {
+        lease = null;
         var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), GetRequiredComponentHash(requiredComponentTypeIds), 0);
         lock (_rawChunkScheduleCacheLock)
         {
@@ -965,6 +1215,11 @@ public static unsafe partial class NativeJobScheduler
             {
                 if (cache.StructuralVersion == entityManager.StructuralVersion)
                 {
+                    if (cache.ChunkCount > 0)
+                    {
+                        lease = cache.RetainLease();
+                    }
+
                     return true;
                 }
 
@@ -974,12 +1229,18 @@ public static unsafe partial class NativeJobScheduler
 
             cache = BuildRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds);
             _rawChunkScheduleCaches[key] = cache;
+            if (cache.ChunkCount > 0)
+            {
+                lease = cache.RetainLease();
+            }
+
             return true;
         }
     }
 
-    private static bool TryGetManagedChunkScheduleCache(EntityManager entityManager, QueryBuilder query, out RawChunkScheduleCache cache)
+    private static bool TryGetManagedChunkScheduleCache(EntityManager entityManager, QueryBuilder query, out RawChunkScheduleCache cache, out IDisposable lease)
     {
+        lease = null;
         var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), 0, 1);
         lock (_rawChunkScheduleCacheLock)
         {
@@ -987,6 +1248,11 @@ public static unsafe partial class NativeJobScheduler
             {
                 if (cache.StructuralVersion == entityManager.StructuralVersion)
                 {
+                    if (cache.ChunkCount > 0)
+                    {
+                        lease = cache.RetainLease();
+                    }
+
                     return true;
                 }
 
@@ -996,6 +1262,11 @@ public static unsafe partial class NativeJobScheduler
 
             cache = BuildManagedChunkScheduleCache(entityManager, query);
             _rawChunkScheduleCaches[key] = cache;
+            if (cache.ChunkCount > 0)
+            {
+                lease = cache.RetainLease();
+            }
+
             return true;
         }
     }
@@ -1019,6 +1290,95 @@ public static unsafe partial class NativeJobScheduler
             _managedChunkScheduleCaches[key] = cache;
             return true;
         }
+    }
+
+    private static bool TryGetEntityBatchScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out EntityBatchScheduleCache cache, out IDisposable lease)
+    {
+        lease = null;
+        var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), GetRequiredComponentHash(requiredComponentTypeIds), 3);
+        lock (_rawChunkScheduleCacheLock)
+        {
+            if (_entityBatchScheduleCaches.TryGetValue(key, out cache))
+            {
+                if (cache.StructuralVersion == entityManager.StructuralVersion)
+                {
+                    if (cache.BatchCount > 0)
+                    {
+                        lease = cache.RetainLease();
+                    }
+
+                    return true;
+                }
+
+                cache.Dispose();
+                _entityBatchScheduleCaches.Remove(key);
+            }
+
+            cache = BuildEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds);
+            _entityBatchScheduleCaches[key] = cache;
+            if (cache.BatchCount > 0)
+            {
+                lease = cache.RetainLease();
+            }
+
+            return true;
+        }
+    }
+
+    private static EntityBatchScheduleCache BuildEntityBatchScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds)
+    {
+        var chunkList = new List<Chunk>(128);
+        for (int i = 0; i < entityManager.ArchetypeCount; i++)
+        {
+            var archetype = entityManager.Archetypes[i];
+            if (archetype != null && archetype.IsMatch(query))
+            {
+                foreach (var chunk in archetype.GetChunks())
+                {
+                    if (chunk.EntityCount > 0)
+                    {
+                        chunkList.Add(chunk);
+                    }
+                }
+            }
+        }
+
+        int batchCount = chunkList.Count;
+        if (batchCount == 0)
+        {
+            return new EntityBatchScheduleCache(entityManager.StructuralVersion, null, 0);
+        }
+
+        int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+        var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(batchCount * sizeof(EntityBatchData));
+
+        for (int batchIndex = 0; batchIndex < batchCount; batchIndex++)
+        {
+            var chunk = chunkList[batchIndex];
+            var archetype = chunk.Archetype;
+            var requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+            for (int r = 0; r < requiredCount; r++)
+            {
+                requiredArrays[r] = null;
+                int requiredTypeId = requiredComponentTypeIds[r];
+                for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
+                {
+                    if (archetype.Types[componentIndex].Id == requiredTypeId)
+                    {
+                        requiredArrays[r] = (void*)chunk.GetComponentArrayPointer(componentIndex);
+                        break;
+                    }
+                }
+            }
+
+            batchesPtr[batchIndex] = new EntityBatchData
+            {
+                componentArrays = requiredArrays,
+                entityCount = chunk.EntityCount
+            };
+        }
+
+        return new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount);
     }
 
     private static ManagedChunkScheduleCache BuildManagedChunkArrayCache(EntityManager entityManager, QueryBuilder query)
@@ -1269,6 +1629,9 @@ public static unsafe partial class NativeJobScheduler
         public readonly ChunkJobData* ChunksPtr;
         public readonly int ChunkCount;
         public readonly bool OwnsChunkHandles;
+        private int _leaseCount;
+        private int _retired;
+        private int _disposed;
 
         public RawChunkScheduleCache(int structuralVersion, ChunkJobData* chunksPtr, int chunkCount, bool ownsChunkHandles = false)
         {
@@ -1283,11 +1646,50 @@ public static unsafe partial class NativeJobScheduler
             Dispose();
         }
 
+        public IDisposable RetainLease()
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(RawChunkScheduleCache));
+            }
+
+            Interlocked.Increment(ref _leaseCount);
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                ReleaseLease();
+                throw new ObjectDisposedException(nameof(RawChunkScheduleCache));
+            }
+
+            return new CacheLease(this);
+        }
+
         public void Dispose()
+        {
+            Interlocked.Exchange(ref _retired, 1);
+            GC.SuppressFinalize(this);
+            TryDisposeNow();
+        }
+
+        private void ReleaseLease()
+        {
+            if (Interlocked.Decrement(ref _leaseCount) == 0)
+            {
+                TryDisposeNow();
+            }
+        }
+
+        private void TryDisposeNow()
         {
             if (ChunksPtr == null)
             {
-                GC.SuppressFinalize(this);
+                Interlocked.Exchange(ref _disposed, 1);
+                return;
+            }
+
+            if (Volatile.Read(ref _retired) == 0 ||
+                Volatile.Read(ref _leaseCount) != 0 ||
+                Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
                 return;
             }
 
@@ -1307,7 +1709,22 @@ public static unsafe partial class NativeJobScheduler
             }
 
             Marshal.FreeHGlobal((IntPtr)ChunksPtr);
-            GC.SuppressFinalize(this);
+        }
+
+        private sealed class CacheLease : IDisposable
+        {
+            private RawChunkScheduleCache _owner;
+
+            public CacheLease(RawChunkScheduleCache owner)
+            {
+                _owner = owner;
+            }
+
+            public void Dispose()
+            {
+                var owner = Interlocked.Exchange(ref _owner, null);
+                owner?.ReleaseLease();
+            }
         }
     }
 
@@ -1323,13 +1740,110 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
+    private sealed class EntityBatchScheduleCache : IDisposable
+    {
+        public readonly int StructuralVersion;
+        public readonly EntityBatchData* BatchesPtr;
+        public readonly int BatchCount;
+        private int _leaseCount;
+        private int _retired;
+        private int _disposed;
+
+        public EntityBatchScheduleCache(int structuralVersion, EntityBatchData* batchesPtr, int batchCount)
+        {
+            StructuralVersion = structuralVersion;
+            BatchesPtr = batchesPtr;
+            BatchCount = batchCount;
+        }
+
+        ~EntityBatchScheduleCache()
+        {
+            Dispose();
+        }
+
+        public IDisposable RetainLease()
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(EntityBatchScheduleCache));
+            }
+
+            Interlocked.Increment(ref _leaseCount);
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                ReleaseLease();
+                throw new ObjectDisposedException(nameof(EntityBatchScheduleCache));
+            }
+
+            return new CacheLease(this);
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _retired, 1);
+            GC.SuppressFinalize(this);
+            TryDisposeNow();
+        }
+
+        private void ReleaseLease()
+        {
+            if (Interlocked.Decrement(ref _leaseCount) == 0)
+            {
+                TryDisposeNow();
+            }
+        }
+
+        private void TryDisposeNow()
+        {
+            if (BatchesPtr == null)
+            {
+                Interlocked.Exchange(ref _disposed, 1);
+                return;
+            }
+
+            if (Volatile.Read(ref _retired) == 0 ||
+                Volatile.Read(ref _leaseCount) != 0 ||
+                Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < BatchCount; i++)
+            {
+                var batch = BatchesPtr[i];
+                if (batch.componentArrays != null)
+                {
+                    Marshal.FreeHGlobal((IntPtr)batch.componentArrays);
+                }
+            }
+
+            Marshal.FreeHGlobal((IntPtr)BatchesPtr);
+        }
+
+        private sealed class CacheLease : IDisposable
+        {
+            private EntityBatchScheduleCache _owner;
+
+            public CacheLease(EntityBatchScheduleCache owner)
+            {
+                _owner = owner;
+            }
+
+            public void Dispose()
+            {
+                var owner = Interlocked.Exchange(ref _owner, null);
+                owner?.ReleaseLease();
+            }
+        }
+    }
+
     // ======================== 内部实现 ========================
     private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
     private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
     private static readonly CleanupFunc _managedChunkCleanup = ManagedChunkCleanup;
     private static readonly IntPtr _managedChunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_managedChunkCleanup);
 
-    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, int[] requiredComponentTypeIds = null) where T : struct
+    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
     {
         int jobSize = Unsafe.SizeOf<T>();
         int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
@@ -1372,6 +1886,11 @@ public static unsafe partial class NativeJobScheduler
         else { header->requiredComponentTypeIdCount = 0; header->requiredComponentTypeIds = IntPtr.Zero; }
         byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
         Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)jobSize);
+        if (cacheLease != null)
+        {
+            _chunkContextLeases[block] = GCHandle.Alloc(cacheLease, GCHandleType.Normal);
+        }
+
         return block;
     }
 
@@ -1451,6 +1970,16 @@ public static unsafe partial class NativeJobScheduler
         }
 
         if (chunksPtr != null && ownsChunkData) Marshal.FreeHGlobal((IntPtr)chunksPtr);
+        if (_chunkContextLeases.TryRemove(contextBlock, out var leaseHandle))
+        {
+            if (leaseHandle.Target is IDisposable lease)
+            {
+                lease.Dispose();
+            }
+
+            leaseHandle.Free();
+        }
+
         var pooledBlock = contextBlock - IntPtr.Size;
         int pooledSize = *(int*)pooledBlock;
         ContextPool.Return(pooledBlock, pooledSize);
