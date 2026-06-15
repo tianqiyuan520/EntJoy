@@ -248,6 +248,8 @@ extern "C"
         stats->scheduleModePublishAssist = snapshot.scheduleModePublishAssist;
         stats->scheduleModeDeferTinyOnly = snapshot.scheduleModeDeferTinyOnly;
         stats->scheduleModeImmediateNative = snapshot.scheduleModeImmediateNative;
+        stats->scheduleModeDeferredPublish = snapshot.scheduleModeDeferredPublish;
+        stats->scheduleModeDeferredPublishNoAssist = snapshot.scheduleModeDeferredPublishNoAssist;
         stats->frameQueueDepthPeak = snapshot.frameQueueDepthPeak;
     }
 

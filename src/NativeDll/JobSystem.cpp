@@ -71,7 +71,10 @@ namespace JobSystem
     std::atomic<uint64_t> g_scheduleModePublishAssist{ 0 };
     std::atomic<uint64_t> g_scheduleModeDeferTinyOnly{ 0 };
     std::atomic<uint64_t> g_scheduleModeImmediateNative{ 0 };
+    std::atomic<uint64_t> g_scheduleModeDeferredPublish{ 0 };
+    std::atomic<uint64_t> g_scheduleModeDeferredPublishNoAssist{ 0 };
     std::atomic<int> g_frameQueueDepthPeak{ 0 };
+    std::atomic<bool> g_shuttingDown{ false };
 
     void UpdateQueueDepthPeak(int value) noexcept
     {
@@ -104,6 +107,8 @@ namespace JobSystem
         stats->scheduleModePublishAssist = g_scheduleModePublishAssist.load(std::memory_order_relaxed);
         stats->scheduleModeDeferTinyOnly = g_scheduleModeDeferTinyOnly.load(std::memory_order_relaxed);
         stats->scheduleModeImmediateNative = g_scheduleModeImmediateNative.load(std::memory_order_relaxed);
+        stats->scheduleModeDeferredPublish = g_scheduleModeDeferredPublish.load(std::memory_order_relaxed);
+        stats->scheduleModeDeferredPublishNoAssist = g_scheduleModeDeferredPublishNoAssist.load(std::memory_order_relaxed);
         stats->frameQueueDepthPeak = g_frameQueueDepthPeak.load(std::memory_order_relaxed);
     }
 
@@ -128,6 +133,8 @@ namespace JobSystem
         g_scheduleModePublishAssist.store(0, std::memory_order_relaxed);
         g_scheduleModeDeferTinyOnly.store(0, std::memory_order_relaxed);
         g_scheduleModeImmediateNative.store(0, std::memory_order_relaxed);
+        g_scheduleModeDeferredPublish.store(0, std::memory_order_relaxed);
+        g_scheduleModeDeferredPublishNoAssist.store(0, std::memory_order_relaxed);
         g_frameQueueDepthPeak.store(0, std::memory_order_relaxed);
     }
 
@@ -417,6 +424,7 @@ namespace JobSystem
         }
 
         void FinalizeChunkBatch(ChunkBatchState* batch) noexcept;
+        void CancelChunkBatch(ChunkBatchState* batch) noexcept;
 
         bool RunOneChunkRange(void* rawBatch) noexcept
         {
@@ -428,20 +436,28 @@ namespace JobSystem
 
             const int begin = rangeIndex * batch->rangeSize;
             const int end = std::min(batch->chunkCount, begin + batch->rangeSize);
-            if (batch->entityRangeFunc)
+            try
             {
-                batch->entityRangeFunc(batch->context, batch->entityBatches, begin, end - begin);
-            }
-            else if (batch->rangeFunc)
-            {
-                batch->rangeFunc(batch->context, batch->chunks, begin, end - begin);
-            }
-            else
-            {
-                for (int chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+                if (batch->entityRangeFunc)
                 {
-                    batch->func(batch->context, &batch->chunks[chunkIndex]);
+                    batch->entityRangeFunc(batch->context, batch->entityBatches, begin, end - begin);
                 }
+                else if (batch->rangeFunc)
+                {
+                    batch->rangeFunc(batch->context, batch->chunks, begin, end - begin);
+                }
+                else
+                {
+                    for (int chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+                    {
+                        batch->func(batch->context, &batch->chunks[chunkIndex]);
+                    }
+                }
+            }
+            catch (...)
+            {
+                CancelChunkBatch(batch);
+                return false;
             }
 
             if (batch->completedRanges.fetch_add(1, std::memory_order_acq_rel) + 1 == batch->rangeCount)
@@ -488,6 +504,20 @@ namespace JobSystem
         }
 
         void FinalizeChunkBatch(ChunkBatchState* batch) noexcept
+        {
+            if (!batch) return;
+            if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
+            {
+                if (batch->cleanup) batch->cleanup(batch->context);
+                auto* state = batch->handleState;
+                batch->handleState = nullptr;
+                CompleteState(state);
+                ReleaseState(state);
+            }
+            TryReleaseChunkBatchState(batch);
+        }
+
+        void CancelChunkBatch(ChunkBatchState* batch) noexcept
         {
             if (!batch) return;
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
@@ -688,6 +718,13 @@ namespace JobSystem
             int expected = 0;
             if (!batch->scheduleState.compare_exchange_strong(expected, 2, std::memory_order_acq_rel))
                 return false;
+
+            if (g_shuttingDown.load(std::memory_order_acquire))
+            {
+                RemovePendingChunkBatch(batch);
+                CancelChunkBatch(batch);
+                return true;
+            }
 
             const int workerCount = std::max(1, CurrentWorkerCount());
             EnsureChunkWorkers(workerCount);
@@ -992,6 +1029,7 @@ namespace JobSystem
     // ========== Scheduler 实现 ==========
     void Scheduler::Initialize(int numThreads)
     {
+        g_shuttingDown.store(false, std::memory_order_release);
         const int resolved = ResolveWorkerCount(numThreads);
         std::shared_ptr<tf::Executor> oldExecutor;
         bool recreateChunkWorkers = false;
@@ -1023,6 +1061,7 @@ namespace JobSystem
 
     void Scheduler::Shutdown()
     {
+        g_shuttingDown.store(true, std::memory_order_release);
         FlushScheduledJobs();
         ShutdownChunkWorkers();
 
@@ -1092,6 +1131,11 @@ namespace JobSystem
         void (*cleanup)(void*),
         const JobHandle& dependency)
     {
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            if (cleanup) cleanup(context);
+            return MakeCompletedHandle();
+        }
         if (!func) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
 
         if (!dependency.State() || dependency.IsCompleted())
@@ -1112,6 +1156,11 @@ namespace JobSystem
         void (*cleanup)(void*),
         const JobHandle& dependency)
     {
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            if (cleanup) cleanup(context);
+            return MakeCompletedHandle();
+        }
         if (!func) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
         if (length <= 0) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
 
@@ -1144,6 +1193,11 @@ namespace JobSystem
         void (*cleanup)(void*),
         const JobHandle& dependency)
     {
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            if (cleanup) cleanup(context);
+            return MakeCompletedHandle();
+        }
         if (!func) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
         if (length <= 0) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
 
@@ -1240,6 +1294,11 @@ namespace JobSystem
         void (*cleanup)(void*),
         const JobHandle& dependency)
     {
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            if (cleanup) cleanup(context);
+            return MakeCompletedHandle();
+        }
         if (!func) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
         if (length <= 0) { if (cleanup) cleanup(context); return MakeCompletedHandle(); }
 
@@ -1345,6 +1404,12 @@ namespace JobSystem
         int workerCap,
         int rangeSize)
     {
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            if (cleanup) cleanup(context);
+            return MakeCompletedHandle();
+        }
+
         if ((!func && !rangeFunc && !entityRangeFunc) || chunkCount <= 0)
         {
             if (cleanup) cleanup(context);
@@ -1372,10 +1437,10 @@ namespace JobSystem
             g_scheduleModeImmediateNative.fetch_add(1, std::memory_order_relaxed);
             break;
         case ChunkScheduleMode::DeferredPublish:
-            g_scheduleModePublishAssist.fetch_add(1, std::memory_order_relaxed);
+            g_scheduleModeDeferredPublish.fetch_add(1, std::memory_order_relaxed);
             break;
         case ChunkScheduleMode::DeferredPublishNoAssist:
-            g_scheduleModePublishNoAssist.fetch_add(1, std::memory_order_relaxed);
+            g_scheduleModeDeferredPublishNoAssist.fetch_add(1, std::memory_order_relaxed);
             break;
         }
 

@@ -108,6 +108,8 @@ public struct NativeJobSystemStats
     public ulong ScheduleModePublishAssist;
     public ulong ScheduleModeDeferTinyOnly;
     public ulong ScheduleModeImmediateNative;
+    public ulong ScheduleModeDeferredPublish;
+    public ulong ScheduleModeDeferredPublishNoAssist;
     public int FrameQueueDepthPeak;
 }
 
@@ -131,6 +133,15 @@ public static unsafe partial class NativeJobScheduler
     private const int MaxRecordedJobExceptions = 16;
     private static readonly ConcurrentQueue<ExceptionDispatchInfo> _jobExceptions = new();
     private static int _recordedJobExceptionCount;
+    [ThreadStatic] private static int _jobExecutionDepth;
+
+    internal static bool IsExecutingJob => _jobExecutionDepth > 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EnterJobExecution() => _jobExecutionDepth++;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ExitJobExecution() => _jobExecutionDepth--;
 
     // ======================== DLL 函数指针 ========================
     private static IntPtr _nativeDll = IntPtr.Zero;
@@ -636,18 +647,12 @@ public static unsafe partial class NativeJobScheduler
     /// </summary>
     public static void Complete(ref NativeJobHandle h)
     {
-        if (h.Handle == IntPtr.Zero) return;
+        IntPtr handle = h.Detach();
+        if (handle == IntPtr.Zero) return;
 
         // 始终使用 P/Invoke 完成等待，确保同步正确性
         // C++ std::atomic::wait 在内部自旋后执行等待原语，效率接近忙等但更可靠
-        try
-        {
-            JobSystem_CompleteAndRelease(h.Handle);
-        }
-        finally
-        {
-            h.Handle = IntPtr.Zero;
-        }
+        JobSystem_CompleteAndRelease(handle);
 
         ThrowRecordedJobExceptions();
     }
@@ -661,10 +666,23 @@ public static unsafe partial class NativeJobScheduler
 
     public static void Release(NativeJobHandle h)
     {
-        if (h.Handle != IntPtr.Zero)
+        IntPtr handle = h.Detach();
+        if (handle != IntPtr.Zero)
         {
-            _jobSystem_ReleaseHandle(h.Handle);
+            JobSystem_ReleaseHandle(handle);
         }
+    }
+
+    internal static void ReleaseRawHandleForFinalizer(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return;
+        JobSystem_ReleaseHandle(handle);
+    }
+
+    private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle)
+    {
+        entityManager?.RegisterActiveJob(handle);
+        return handle;
     }
 
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
@@ -817,7 +835,7 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -833,7 +851,7 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
-                return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.PublishNoAssist));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.PublishNoAssist)));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -848,7 +866,7 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateChunkArrayBatchCallback<T>());
-                return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependsOn?.Handle ?? IntPtr.Zero));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependsOn?.Handle ?? IntPtr.Zero)));
             }
             catch
             {
@@ -949,7 +967,7 @@ public static unsafe partial class NativeJobScheduler
             var mode = forcedMode ?? (funcPtr != IntPtr.Zero
                 ? (chunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish)
                 : ChunkScheduleMode.PublishNoAssist);
-            return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -969,7 +987,7 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1054,7 +1072,7 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
         try
         {
-            return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1074,7 +1092,7 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1159,7 +1177,7 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
         try
         {
-            return new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1182,7 +1200,7 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
         try
         {
-            return new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1200,7 +1218,7 @@ public static unsafe partial class NativeJobScheduler
         var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
         try
         {
-            return new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative)));
         }
         catch { ChunkCleanup(rawContextBlock); throw; }
     }
@@ -2024,6 +2042,7 @@ public static unsafe partial class NativeJobScheduler
         bool managedContext = JobHasManagedReferences<T>();
         return (IntPtr ctx) =>
         {
+            EnterJobExecution();
             try
             {
                 long start = 0;
@@ -2036,6 +2055,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2047,6 +2070,7 @@ public static unsafe partial class NativeJobScheduler
         bool managedContext = JobHasManagedReferences<T>();
         return (IntPtr ctx, int i) =>
         {
+            EnterJobExecution();
             try
             {
                 long start = 0;
@@ -2059,6 +2083,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2070,6 +2098,7 @@ public static unsafe partial class NativeJobScheduler
         bool managedContext = JobHasManagedReferences<T>();
         return (IntPtr ctx, int start, int count) =>
         {
+            EnterJobExecution();
             try
             {
                 long startTicks = 0;
@@ -2083,6 +2112,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2094,6 +2127,7 @@ public static unsafe partial class NativeJobScheduler
         bool managedContext = JobHasManagedReferences<T>();
         return (IntPtr ctx, int start, int count) =>
         {
+            EnterJobExecution();
             try
             {
                 long startTicks = 0;
@@ -2106,6 +2140,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2113,6 +2151,7 @@ public static unsafe partial class NativeJobScheduler
     {
         return (IntPtr ctx, ChunkJobData* cd) =>
         {
+            EnterJobExecution();
             try
             {
                 var header = (ChunkContextHeader*)ctx;
@@ -2173,6 +2212,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2180,6 +2223,7 @@ public static unsafe partial class NativeJobScheduler
     {
         return (IntPtr ctx, ChunkJobData* cd) =>
         {
+            EnterJobExecution();
             try
             {
                 var header = (ManagedChunkContextHeader*)ctx;
@@ -2190,6 +2234,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2197,6 +2245,7 @@ public static unsafe partial class NativeJobScheduler
     {
         return (IntPtr ctx, int start, int count) =>
         {
+            EnterJobExecution();
             try
             {
                 var header = (ManagedChunkContextHeader*)ctx;
@@ -2212,6 +2261,10 @@ public static unsafe partial class NativeJobScheduler
             {
                 RecordJobException(exception);
             }
+            finally
+            {
+                ExitJobExecution();
+            }
         };
     }
 
@@ -2220,6 +2273,7 @@ public static unsafe partial class NativeJobScheduler
         bool managedContext = JobHasManagedReferences<T>();
         return (IntPtr ctx, int start, int count) =>
         {
+            EnterJobExecution();
             try
             {
                 ref var job = ref GetChunkBatchJob<T>(ctx, managedContext, out var chunks, out var allEnabledTypes);
@@ -2232,6 +2286,10 @@ public static unsafe partial class NativeJobScheduler
             catch (Exception exception)
             {
                 RecordJobException(exception);
+            }
+            finally
+            {
+                ExitJobExecution();
             }
         };
     }

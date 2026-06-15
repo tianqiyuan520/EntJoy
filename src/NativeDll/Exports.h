@@ -76,6 +76,8 @@ extern "C" {
         unsigned long long scheduleModePublishAssist;
         unsigned long long scheduleModeDeferTinyOnly;
         unsigned long long scheduleModeImmediateNative;
+        unsigned long long scheduleModeDeferredPublish;
+        unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
     } JobSystemStatsNative;
 
