@@ -119,6 +119,8 @@ struct JobSystemStatsSnapshot {
     uint64_t scheduleModePublishAssist;
     uint64_t scheduleModeDeferTinyOnly;
     uint64_t scheduleModeImmediateNative;
+    uint64_t scheduleModeDeferredPublish;
+    uint64_t scheduleModeDeferredPublishNoAssist;
     int frameQueueDepthPeak;
 };
 

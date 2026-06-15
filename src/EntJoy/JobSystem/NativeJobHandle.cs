@@ -10,12 +10,26 @@ using System.Threading;
 /// </summary>
 public struct NativeJobHandle : IEquatable<NativeJobHandle>
 {
-    public IntPtr Handle;
+    private NativeJobHandleBox _box;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public NativeJobHandle(IntPtr handle) => Handle = handle;
+    public NativeJobHandle(IntPtr handle) => _box = handle == IntPtr.Zero ? null : new NativeJobHandleBox(handle);
+
+    public readonly IntPtr Handle => _box?.Handle ?? IntPtr.Zero;
 
     public readonly bool IsValid => Handle != IntPtr.Zero;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly IntPtr Detach()
+    {
+        return _box?.Detach() ?? IntPtr.Zero;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly void Clear()
+    {
+        _box?.Clear();
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool Equals(NativeJobHandle other) => Handle == other.Handle;
@@ -27,4 +41,35 @@ public struct NativeJobHandle : IEquatable<NativeJobHandle>
     public static bool operator ==(NativeJobHandle left, NativeJobHandle right) => left.Handle == right.Handle;
 
     public static bool operator !=(NativeJobHandle left, NativeJobHandle right) => left.Handle != right.Handle;
+}
+
+internal sealed class NativeJobHandleBox
+{
+    private IntPtr _handle;
+
+    public NativeJobHandleBox(IntPtr handle)
+    {
+        _handle = handle;
+    }
+
+    public IntPtr Handle => Volatile.Read(ref _handle);
+
+    public IntPtr Detach()
+    {
+        return Interlocked.Exchange(ref _handle, IntPtr.Zero);
+    }
+
+    public void Clear()
+    {
+        Volatile.Write(ref _handle, IntPtr.Zero);
+    }
+
+    ~NativeJobHandleBox()
+    {
+        IntPtr handle = Detach();
+        if (handle != IntPtr.Zero)
+        {
+            NativeJobScheduler.ReleaseRawHandleForFinalizer(handle);
+        }
+    }
 }
