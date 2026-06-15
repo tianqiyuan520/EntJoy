@@ -20,7 +20,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor InvalidJobFieldError = new("NT009", "Invalid Job field", "[NativeTranspile] struct '{0}' field '{1}' type '{2}' must be unmanaged.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++ backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -154,7 +154,8 @@ namespace NativeTranspiler.Analyzer
             if (isEntityJob)
             {
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
-                if (AttributeHelper.GetBackendTarget(structSymbol, attrSymbol) != NativeTranspiler.BackendTarget.Cpp ||
+                var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
+                if ((target != NativeTranspiler.BackendTarget.Cpp && target != NativeTranspiler.BackendTarget.Ispc) ||
                     executeMethod.Parameters.Length == 0 ||
                     executeMethod.Parameters.Any(p => (p.RefKind != RefKind.Ref && p.RefKind != RefKind.In) || !IsUnmanagedType(p.Type)))
                 {

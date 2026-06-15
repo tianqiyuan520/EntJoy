@@ -46,6 +46,9 @@ namespace EntJoy.SourceGenerator
         {
             string jobFullName = jobType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             string adapterName = $"__EntJoy_IJobEntityAdapter_{Sanitize(jobType.ToDisplayString())}";
+            string namespaceName = jobType.ContainingNamespace?.IsGlobalNamespace == false
+                ? jobType.ContainingNamespace.ToDisplayString()
+                : string.Empty;
             string componentDecls = string.Join("\n", execute.Parameters.Select((p, i) =>
                 $"            var __c{i} = chunk.GetComponentDataSpan<{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>();"));
             string callArgs = string.Join(", ", execute.Parameters.Select((p, i) =>
@@ -56,6 +59,11 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine("using EntJoy;");
             sb.AppendLine("using System.Runtime.CompilerServices;");
             sb.AppendLine();
+            if (!string.IsNullOrEmpty(namespaceName))
+            {
+                sb.AppendLine($"namespace {namespaceName}");
+                sb.AppendLine("{");
+            }
             sb.AppendLine("public static partial class JobExtensions");
             sb.AppendLine("{");
             sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
@@ -84,6 +92,10 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
+            if (!string.IsNullOrEmpty(namespaceName))
+            {
+                sb.AppendLine("}");
+            }
             return sb.ToString();
         }
 

@@ -484,6 +484,72 @@ namespace NativeTranspiler.Analyzer
         //              新增：适配函数生成（消除 C# 委托桥接）
         // ===================================================================
 
+        private static void AppendEntityBatchAdapter(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        {
+            var adapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
+            sb.AppendLine("{");
+            sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
+            sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
+            sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
+            sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
+            sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
+
+            int currentOffset = 0;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                int offset = CalculateFieldOffset(field, ref currentOffset);
+                if (!NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    sb.AppendLine($"    auto {field.Name} = *({cppType}*)(__jobContext + {offset});");
+                }
+            }
+
+            sb.AppendLine("    const int __batch_end = __batch_start + __batch_count;");
+            sb.AppendLine("    for (int __batch_index = __batch_start; __batch_index < __batch_end; ++__batch_index)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batch_index];");
+            for (int i = 0; i < executeMethod.Parameters.Length; i++)
+            {
+                var param = executeMethod.Parameters[i];
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
+                string constPrefix = param.RefKind == RefKind.In ? "const " : "";
+                sb.AppendLine($"        {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__batchData->componentArrays[{i}]);");
+            }
+            sb.AppendLine("        int __entity_count = __batchData->entityCount;");
+            sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+            sb.AppendLine("        {");
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var translator = new CppStatementTranslator(semanticModel, useFastMath);
+                var bodyCode = translator.Translate(methodSyntax.Body);
+                foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
+                {
+                    string indexedParam = $"__entity_param_{param.i}_ptr[__entity_index]";
+                    bodyCode = Regex.Replace(bodyCode, $@"\b{Regex.Escape(param.p.Name)}\.", indexedParam + ".");
+                }
+
+                foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append("            ").AppendLine(line);
+                }
+            }
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+            sb.AppendLine("{");
+            sb.AppendLine($"    return (void*){adapterFuncName};");
+            sb.AppendLine("}");
+        }
+
         /// <summary>
         /// 计算 C# struct 中字段的偏移量（基于 [StructLayout(LayoutKind.Sequential)]，64位 Windows）
         /// </summary>
@@ -603,6 +669,8 @@ namespace NativeTranspiler.Analyzer
             if (IsChunkScheduledJob(jobStruct))
             {
                 sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
+                if (IsEntityJob(jobStruct))
+                    sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
                 foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
                     sb.AppendLine($"#include \"{include}.h\"");
             }
@@ -654,6 +722,12 @@ namespace NativeTranspiler.Analyzer
                 bool isEntityJob = IsEntityJob(jobStruct);
                 bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
 
+                if (isEntityJob)
+                {
+                    AppendEntityBatchAdapter(jobStruct, compilation, sb, useFastMath);
+                }
+                else
+                {
                 sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
                 sb.AppendLine("{");
                 sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
@@ -757,6 +831,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
+
+                }
             }
             else if (isParallelFor)
             {
@@ -958,12 +1034,32 @@ namespace NativeTranspiler.Analyzer
             return GetCppJobFunctionName(jobStruct) + "_Adapter";
         }
 
+        public static string GetRangeAdapterFunctionName(INamedTypeSymbol jobStruct)
+        {
+            return GetCppJobFunctionName(jobStruct) + "_RangeAdapter";
+        }
+
+        public static string GetEntityBatchAdapterFunctionName(INamedTypeSymbol jobStruct)
+        {
+            return GetCppJobFunctionName(jobStruct) + "_EntityBatchAdapter";
+        }
+
         /// <summary>
         /// 获取适配函数指针的获取函数名
         /// </summary>
         public static string GetAdapterPtrGetterName(INamedTypeSymbol jobStruct)
         {
             return "Get_" + GetAdapterFunctionName(jobStruct) + "Ptr";
+        }
+
+        public static string GetRangeAdapterPtrGetterName(INamedTypeSymbol jobStruct)
+        {
+            return "Get_" + GetRangeAdapterFunctionName(jobStruct) + "Ptr";
+        }
+
+        public static string GetEntityBatchAdapterPtrGetterName(INamedTypeSymbol jobStruct)
+        {
+            return "Get_" + GetEntityBatchAdapterFunctionName(jobStruct) + "Ptr";
         }
     }
 }

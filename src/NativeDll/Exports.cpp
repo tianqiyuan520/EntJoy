@@ -1,6 +1,7 @@
 ﻿#include "Exports.h"
 #include "JobSystem.h"
 #include "ChunkJobData.h"
+#include "EntityBatchData.h"
 #include "JobProfiler.h"
 
 static JobSystem::HandleState* fromHandle(void* ptr)
@@ -157,7 +158,69 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
         else if (scheduleMode == 3)
             mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
         auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleChunkRangeJobEx(
+        ChunkRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleEntityBatchJobEx(
+        EntityBatchRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const EntityBatchData* batches,
+        int batchCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
         return toHandle(handle);
     }
 

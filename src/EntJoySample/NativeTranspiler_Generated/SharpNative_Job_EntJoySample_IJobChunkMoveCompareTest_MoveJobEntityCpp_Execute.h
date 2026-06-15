@@ -2,6 +2,10 @@
 
 #include "../../NativeDll/NativeMath.h"
 #include "../../NativeDll/NativeContainers.h"
+#include "../../NativeDll/ChunkJobData.h"
+#include "../../NativeDll/ChunkNativeArray.h"
+#include "EntJoySample_IJobChunkMoveCompareTest_MovePosition.h"
+#include "EntJoySample_IJobChunkMoveCompareTest_MoveVelocity.h"
 
 
 #ifdef __cplusplus
@@ -54,4 +58,4 @@
 #endif
 
 
-HEAD void CALLINGCONVENTION SharpNative_Job__global_namespace__GridSearch2D_FindWithinJobPointer_Execute_Batch(int __startIndex, int __count, float* RESTRICT SquaredRadius_ptr, int* RESTRICT MaxNeighbor_ptr, int* RESTRICT CellsToLoop_ptr, EntJoy::Mathematics::float2* RESTRICT GridOrigin_ptr, float* RESTRICT GridResolutionInv_ptr, EntJoy::Mathematics::int2* RESTRICT GridDimensions_ptr, EntJoy::Mathematics::float2* RESTRICT QueryPositions_ptr, int QueryPositions_length, EntJoy::Mathematics::float2* RESTRICT SortedPositions_ptr, int SortedPositions_length, EntJoy::Mathematics::int2* RESTRICT HashIndex_ptr, int HashIndex_length, EntJoy::Collections::UnsafeList<EntJoy::Mathematics::int2>* RESTRICT CellStartEnd_listData, int* RESTRICT Results_ptr, int Results_length);
+HEAD void CALLINGCONVENTION SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobEntityCpp_Execute(float* RESTRICT DeltaTime_ptr);

@@ -145,7 +145,7 @@ namespace EntJoySample.IJobChunkScheduleOverheadTest
     {
         private const int EntityCount = 1_000_000;
         private const int WarmupFrames = 20;
-        private const int MeasureFrames = 1_000;
+        private const int MeasureFrames = 100;
         private const int BatchSize = 256;
 
         private readonly QueryBuilder _query = new QueryBuilder().WithAll<ScheduleValue>();
