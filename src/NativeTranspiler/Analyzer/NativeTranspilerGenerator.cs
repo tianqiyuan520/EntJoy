@@ -203,25 +203,35 @@ namespace NativeTranspiler.Analyzer
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
 
-                        var ispcSource = IspcGenerator.GenerateIspcSource(job, ctx.Compilation, userStructs);
-                        var cppWrapper = IspcGenerator.GenerateCppWrapper(job, ctx.Compilation);
-
-                        string ispcSrcPath = Path.Combine(outputDir, $"{ispcBase}.ispc");
-                        string wrapperCppPath = Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp");
-
                         bool disabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
-                        bool fileExists = File.Exists(ispcSrcPath) || File.Exists(wrapperCppPath);
+                        bool useIspcMt = HasUseISPC_MT(job, attrSymbol);
+                        bool mtProvidesScheduledAdapter = useIspcMt && CppJobGenerator.IsChunkScheduledJob(job);
 
-                        if (!disabledAutoRefresh || !fileExists)
+                        if (!mtProvidesScheduledAdapter)
                         {
-                            WriteAllTextWithRetry(ispcSrcPath, ispcSource);
-                            WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                            var ispcSource = IspcGenerator.GenerateIspcSource(job, ctx.Compilation, userStructs);
+                            var cppWrapper = IspcGenerator.GenerateCppWrapper(job, ctx.Compilation);
+
+                            string ispcSrcPath = Path.Combine(outputDir, $"{ispcBase}.ispc");
+                            string wrapperCppPath = Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp");
+                            bool fileExists = File.Exists(ispcSrcPath) || File.Exists(wrapperCppPath);
+
+                            if (!disabledAutoRefresh || !fileExists)
+                            {
+                                WriteAllTextWithRetry(ispcSrcPath, ispcSource);
+                                WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                            }
+
+                            ispcFiles.Add(($"{ispcBase}.ispc", mathLib));
+                            cppFiles.Add($"{ispcBase}_wrapper.cpp");
+                        }
+                        else
+                        {
+                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
+                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
                         }
 
-                        ispcFiles.Add(($"{ispcBase}.ispc", mathLib));
-                        cppFiles.Add($"{ispcBase}_wrapper.cpp");
-
-                        if (HasUseISPC_MT(job, attrSymbol))
+                        if (useIspcMt)
                         {
                             var mtIspcSource = IspcGenerator.GenerateIspcMTSource(job, ctx.Compilation, userStructs);
                             var mtCppWrapper = IspcGenerator.GenerateCppWrapperMT(job, ctx.Compilation);
@@ -266,7 +276,7 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
-                                                             CppJobGenerator.IsChunkJob(job);
+                                                             CppJobGenerator.IsChunkScheduledJob(job);
                     if (!adapterProvidedByIspcChunkWrapper)
                     {
                         // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。

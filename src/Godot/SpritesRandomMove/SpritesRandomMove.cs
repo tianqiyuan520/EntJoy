@@ -1,4 +1,4 @@
-﻿using EntJoy;
+using EntJoy;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using Godot;
@@ -63,9 +63,10 @@ public partial class SpritesRandomMove : Node2D
         "ECS C++ IJobChunk",
         "ECS ISPC IJobChunk",
         "ECS C# IJobEntity",
-        "ECS C++ IJobEntity"
+        "ECS C++ IJobEntity",
+        "ECS ISPC IJobEntity"
     };
-    private readonly int[] _ecsAutoBenchmarkJobTypes = { 0, 1, 2, 3, 4 };
+    private readonly int[] _ecsAutoBenchmarkJobTypes = { 0, 1, 2, 3, 4, 5 };
 
     private NativeArray<float2> _naPositions;
     private NativeArray<float2> _naVelocities;
@@ -234,14 +235,17 @@ public partial class SpritesRandomMove : Node2D
                 handle = new MoveSystemJobEntityCSharp { dt = dt }.Schedule(_moveQuery);
                 break;
             case 4:
-                handle = new MoveSystemJobEntityCpp { dt = dt }.ScheduleWithWorkerCapAndRangeSize(_moveQuery, 0, 64);
+                handle = new MoveSystemJobEntityCpp { dt = dt }.Schedule(_moveQuery);
+                break;
+            case 5:
+                handle = new MoveSystemJobEntityIspc { dt = dt }.Schedule(_moveQuery);
                 break;
         }
         _sw.Stop();
         scheduleMs = _sw.Elapsed.TotalMilliseconds;
 
         _sw.Restart();
-        if (jobType >= 0 && jobType <= 4)
+        if (jobType >= 0 && jobType <= 5)
         {
             handle.Complete();
         }
@@ -787,6 +791,18 @@ public struct MoveSystemJobEntityCSharp : IJobEntity
 
 [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
 public struct MoveSystemJobEntityCpp : IJobEntity
+{
+    public float dt;
+
+    public void Execute(ref Position position, in Vel velocity)
+    {
+        position.pos.x += velocity.vel.x * dt;
+        position.pos.y += velocity.vel.y * dt;
+    }
+}
+
+[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+public struct MoveSystemJobEntityIspc : IJobEntity
 {
     public float dt;
 

@@ -25,6 +25,7 @@ add_library(NativeDll SHARED
     SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute_Adapter.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
@@ -49,6 +50,7 @@ add_custom_command(TARGET NativeDll PRE_BUILD
 
 set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj"
+    "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj"
 )
 target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})

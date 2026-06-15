@@ -9,10 +9,19 @@ namespace NativeTranspiler.Analyzer
     {
         private readonly HashSet<string> _chunkNativeArrayNames = new();
         private readonly Dictionary<string, string> _chunkNativeArrayLengthAliases = new();
+        private readonly string? _foreachStartName;
+        private readonly string? _foreachEndName;
 
         public IspcChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct)
             : base(semanticModel, jobStruct, null, false)
         {
+        }
+
+        public IspcChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, string foreachStartName, string foreachEndName)
+            : base(semanticModel, jobStruct, null, false)
+        {
+            _foreachStartName = foreachStartName;
+            _foreachEndName = foreachEndName;
         }
 
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
@@ -118,7 +127,9 @@ namespace NativeTranspiler.Analyzer
             }
 
             AppendIndent();
-            _builder.Append("foreach (").Append(indexName).Append(" = 0 ... ").Append(arrayName).Append("_length) ");
+            string startName = _foreachStartName ?? "0";
+            string endName = _foreachEndName ?? $"{arrayName}_length";
+            _builder.Append("foreach (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
             if (forStmt.Statement is BlockSyntax block)
             {
                 _builder.AppendLine("{");

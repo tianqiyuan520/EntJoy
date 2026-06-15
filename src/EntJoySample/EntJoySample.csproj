@@ -20,7 +20,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" />
+		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
 		<ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<!-- ★ 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->

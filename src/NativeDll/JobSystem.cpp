@@ -1,5 +1,6 @@
 ﻿#include "JobSystem.h"
 #include "ChunkJobData.h"
+#include "EntityBatchData.h"
 #include "JobProfiler.h"
 #include "../../external/cpp-taskflow/taskflow/taskflow.hpp"
 
@@ -325,9 +326,12 @@ namespace JobSystem
         struct ChunkBatchState
         {
             void (*func)(void*, const ChunkJobData*) { nullptr };
+            void (*rangeFunc)(void*, const ChunkJobData*, int, int) { nullptr };
+            void (*entityRangeFunc)(void*, const EntityBatchData*, int, int) { nullptr };
             void* context{ nullptr };
             void (*cleanup)(void*) { nullptr };
             const ChunkJobData* chunks{ nullptr };
+            const EntityBatchData* entityBatches{ nullptr };
             int chunkCount{ 0 };
             int rangeSize{ 8 };
             int rangeCount{ 0 };
@@ -363,9 +367,12 @@ namespace JobSystem
             }
             if (!batch) batch = new ChunkBatchState();
             batch->func = nullptr;
+            batch->rangeFunc = nullptr;
+            batch->entityRangeFunc = nullptr;
             batch->context = nullptr;
             batch->cleanup = nullptr;
             batch->chunks = nullptr;
+            batch->entityBatches = nullptr;
             batch->chunkCount = 0;
             batch->rangeSize = 8;
             batch->rangeCount = 0;
@@ -414,16 +421,27 @@ namespace JobSystem
         bool RunOneChunkRange(void* rawBatch) noexcept
         {
             auto* batch = static_cast<ChunkBatchState*>(rawBatch);
-            if (!batch || !batch->func) return false;
+            if (!batch || (!batch->func && !batch->rangeFunc && !batch->entityRangeFunc)) return false;
 
             const int rangeIndex = batch->nextRange.fetch_add(1, std::memory_order_relaxed);
             if (rangeIndex >= batch->rangeCount) return false;
 
             const int begin = rangeIndex * batch->rangeSize;
             const int end = std::min(batch->chunkCount, begin + batch->rangeSize);
-            for (int chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+            if (batch->entityRangeFunc)
             {
-                batch->func(batch->context, &batch->chunks[chunkIndex]);
+                batch->entityRangeFunc(batch->context, batch->entityBatches, begin, end - begin);
+            }
+            else if (batch->rangeFunc)
+            {
+                batch->rangeFunc(batch->context, batch->chunks, begin, end - begin);
+            }
+            else
+            {
+                for (int chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+                {
+                    batch->func(batch->context, &batch->chunks[chunkIndex]);
+                }
             }
 
             if (batch->completedRanges.fetch_add(1, std::memory_order_acq_rel) + 1 == batch->rangeCount)
@@ -457,7 +475,13 @@ namespace JobSystem
         void FinishChunkQueueToken(ChunkBatchState* batch) noexcept
         {
             if (!batch) return;
-            if (batch->queueTokens.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            int previous = batch->queueTokens.fetch_sub(1, std::memory_order_acq_rel);
+            if (previous <= 0)
+            {
+                batch->queueTokens.store(0, std::memory_order_release);
+                return;
+            }
+            if (previous == 1)
             {
                 TryReleaseChunkBatchState(batch);
             }
@@ -469,7 +493,10 @@ namespace JobSystem
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
             {
                 if (batch->cleanup) batch->cleanup(batch->context);
-                CompleteState(batch->handleState);
+                auto* state = batch->handleState;
+                batch->handleState = nullptr;
+                CompleteState(state);
+                ReleaseState(state);
             }
             TryReleaseChunkBatchState(batch);
         }
@@ -594,7 +621,6 @@ namespace JobSystem
                 std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
                 g_chunkWorkersShutdown = true;
                 workers.swap(g_chunkWorkers);
-                g_chunkRunnableBatches.clear();
             }
             g_chunkWorkerCv.notify_all();
             for (auto& worker : workers)
@@ -607,6 +633,7 @@ namespace JobSystem
         {
             if (!batch || batch->rangeCount <= 0) return;
             const int tokenCount = std::max(1, std::min(workerCount, std::min(batch->workerTarget, batch->rangeCount)));
+            batch->queueTokens.store(tokenCount, std::memory_order_release);
 
             {
                 std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
@@ -633,7 +660,8 @@ namespace JobSystem
                 return std::max(1, std::min(std::min(workerCount, batch->rangeCount), batch->workerCap));
             }
 
-            if (batch->mode == ChunkScheduleMode::PublishNoAssist)
+            if (batch->mode == ChunkScheduleMode::PublishNoAssist ||
+                batch->mode == ChunkScheduleMode::DeferredPublishNoAssist)
             {
                 return std::max(1, std::min(workerCount, batch->rangeCount));
             }
@@ -706,7 +734,16 @@ namespace JobSystem
             return true;
         }
 
-        void AddPendingChunkBatch(ChunkBatchState* batch)
+        bool PublishPendingChunkBatch(void* rawBatch) noexcept
+        {
+            auto* batch = static_cast<ChunkBatchState*>(rawBatch);
+            if (!batch) return false;
+            RemovePendingChunkBatch(batch);
+            PublishChunkBatch(batch);
+            return false;
+        }
+
+        void AddPendingChunkBatch(ChunkBatchState* batch, AssistStepCallback pendingCallback)
         {
             if (!batch) return;
             {
@@ -716,7 +753,7 @@ namespace JobSystem
             if (batch->handleState)
             {
                 batch->handleState->pendingContext.store(batch, std::memory_order_release);
-                batch->handleState->pendingCallback.store(&CompletePendingChunkBatch, std::memory_order_release);
+                batch->handleState->pendingCallback.store(pendingCallback, std::memory_order_release);
             }
         }
 
@@ -861,6 +898,11 @@ namespace JobSystem
             return;
         }
 
+        // If this handle depends on another deferred job, completing this handle must
+        // publish the whole pending batch set. This mirrors Unity's Complete behavior:
+        // pending scheduled work is made runnable before the caller blocks.
+        Scheduler::FlushScheduledJobs();
+
         auto assistSome = [this](int burst) -> bool {
             auto assistCallback = _state->assistCallback.load(std::memory_order_acquire);
             void* assistContext = _state->assistContext.load(std::memory_order_acquire);
@@ -952,13 +994,14 @@ namespace JobSystem
     {
         const int resolved = ResolveWorkerCount(numThreads);
         std::shared_ptr<tf::Executor> oldExecutor;
+        bool recreateChunkWorkers = false;
         {
             std::lock_guard<std::mutex> lock(g_executorMutex);
             if (g_executor && g_numThreads == resolved) return;
+            recreateChunkWorkers = g_executor != nullptr;
             oldExecutor = std::move(g_executor);
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
-            EnsureChunkWorkers(g_numThreads);
 
             // 使用高线程优先级，减少被其他线程抢占导致的抖动
             for (int i = 0; i < g_numThreads; ++i)
@@ -973,11 +1016,14 @@ namespace JobSystem
             }
             g_executor->wait_for_all();
         }
+        if (recreateChunkWorkers) ShutdownChunkWorkers();
+        EnsureChunkWorkers(resolved);
         if (oldExecutor) oldExecutor->wait_for_all();
     }
 
     void Scheduler::Shutdown()
     {
+        FlushScheduledJobs();
         ShutdownChunkWorkers();
 
         std::shared_ptr<tf::Executor> executor;
@@ -1286,18 +1332,20 @@ namespace JobSystem
             });
     }
 
-    // ========== ScheduleChunks 实现 ==========
-    JobHandle Scheduler::ScheduleChunks(
+    static JobHandle ScheduleChunkBatchCore(
         void (*func)(void*, const struct ChunkJobData*), void* context,
+        void (*rangeFunc)(void*, const struct ChunkJobData*, int, int),
+        void (*entityRangeFunc)(void*, const struct EntityBatchData*, int, int),
         void (*cleanup)(void*),
         const struct ChunkJobData* chunks,
+        const struct EntityBatchData* entityBatches,
         int chunkCount,
         const JobHandle& dependency,
         ChunkScheduleMode mode,
         int workerCap,
         int rangeSize)
     {
-        if (!func || chunkCount <= 0)
+        if ((!func && !rangeFunc && !entityRangeFunc) || chunkCount <= 0)
         {
             if (cleanup) cleanup(context);
             return MakeCompletedHandle();
@@ -1306,7 +1354,8 @@ namespace JobSystem
         auto* state = CreateState(false);
         auto executor = EnsureExecutor();
         constexpr int kDeferredMaxRanges = 2;
-        const bool enableAssist = mode != ChunkScheduleMode::PublishNoAssist;
+        const bool enableAssist = mode != ChunkScheduleMode::PublishNoAssist &&
+            mode != ChunkScheduleMode::DeferredPublishNoAssist;
 
         switch (mode)
         {
@@ -1322,14 +1371,23 @@ namespace JobSystem
         case ChunkScheduleMode::ImmediateNative:
             g_scheduleModeImmediateNative.fetch_add(1, std::memory_order_relaxed);
             break;
+        case ChunkScheduleMode::DeferredPublish:
+            g_scheduleModePublishAssist.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case ChunkScheduleMode::DeferredPublishNoAssist:
+            g_scheduleModePublishNoAssist.fetch_add(1, std::memory_order_relaxed);
+            break;
         }
 
         auto createBatch = [=]() -> ChunkBatchState* {
             auto* batch = AcquireChunkBatchState();
             batch->func = func;
+            batch->rangeFunc = rangeFunc;
+            batch->entityRangeFunc = entityRangeFunc;
             batch->context = context;
             batch->cleanup = cleanup;
             batch->chunks = chunks;
+            batch->entityBatches = entityBatches;
             batch->chunkCount = chunkCount;
             batch->rangeSize = rangeSize > 0 ? rangeSize : (enableAssist ? 32 : 8);
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
@@ -1338,6 +1396,7 @@ namespace JobSystem
             batch->handleState = state;
             batch->workerCap = workerCap;
             batch->rangeSizeOverride = rangeSize;
+            AcquireState(state);
 
             return batch;
             };
@@ -1367,7 +1426,12 @@ namespace JobSystem
             }
             else if (mode == ChunkScheduleMode::DeferTinyOnly && batch->rangeCount <= kDeferredMaxRanges)
             {
-                AddPendingChunkBatch(batch);
+                AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
+            }
+            else if (mode == ChunkScheduleMode::DeferredPublish ||
+                mode == ChunkScheduleMode::DeferredPublishNoAssist)
+            {
+                AddPendingChunkBatch(batch, &PublishPendingChunkBatch);
             }
             else
             {
@@ -1376,6 +1440,46 @@ namespace JobSystem
         }
 
         return JobHandle(state);
+    }
+
+    // ========== ScheduleChunks 实现 ==========
+    JobHandle Scheduler::ScheduleChunks(
+        void (*func)(void*, const struct ChunkJobData*), void* context,
+        void (*cleanup)(void*),
+        const struct ChunkJobData* chunks,
+        int chunkCount,
+        const JobHandle& dependency,
+        ChunkScheduleMode mode,
+        int workerCap,
+        int rangeSize)
+    {
+        return ScheduleChunkBatchCore(func, context, nullptr, nullptr, cleanup, chunks, nullptr, chunkCount, dependency, mode, workerCap, rangeSize);
+    }
+
+    JobHandle Scheduler::ScheduleChunkRanges(
+        void (*func)(void*, const struct ChunkJobData*, int, int), void* context,
+        void (*cleanup)(void*),
+        const struct ChunkJobData* chunks,
+        int chunkCount,
+        const JobHandle& dependency,
+        ChunkScheduleMode mode,
+        int workerCap,
+        int rangeSize)
+    {
+        return ScheduleChunkBatchCore(nullptr, context, func, nullptr, cleanup, chunks, nullptr, chunkCount, dependency, mode, workerCap, rangeSize);
+    }
+
+    JobHandle Scheduler::ScheduleEntityBatches(
+        void (*func)(void*, const struct EntityBatchData*, int, int), void* context,
+        void (*cleanup)(void*),
+        const struct EntityBatchData* batches,
+        int batchCount,
+        const JobHandle& dependency,
+        ChunkScheduleMode mode,
+        int workerCap,
+        int rangeSize)
+    {
+        return ScheduleChunkBatchCore(nullptr, context, nullptr, func, cleanup, nullptr, batches, batchCount, dependency, mode, workerCap, rangeSize);
     }
 
 } // namespace JobSystem
