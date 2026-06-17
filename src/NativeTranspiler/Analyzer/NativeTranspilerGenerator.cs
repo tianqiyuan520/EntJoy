@@ -778,42 +778,44 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            // 生成 Unity/Jumbo 构建文件：将多个 generated .cpp 组合成少量编译单元
-            // 显著减少头文件重复解析开销，MSVC 增量编译更快
-            var generatedCppFiles = cppFiles.Where(f => !f.Contains("Exports") && !f.Contains("JobProfiler") && !f.Contains("JobSystem") && !f.Contains("Native")).OrderBy(f => f).ToList();
-            int unityBatchSize = 16; // 每个 unity 文件包含 16 个 .cpp
+            // NativeDll 核心源文件（固定路径，始终存在）
+            sb.AppendLine("add_library(NativeDll SHARED");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Exports.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobProfiler.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobSystem.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Native.cpp").Replace("\\", "/")}\"");
+
+            // Unity/Jumbo 构建：仅将纯 Job 实现 .cpp（不含 _wrapper / _Adapter）合并以减少头文件解析
+            // _wrapper.cpp / _Adapter.cpp 各自含有 struct 定义，不能合并进 unity
+            var unityBatchSize = 16;
+            var standaloneFiles = new List<string>();
+            var unityCandidates = new List<string>();
+            foreach (var f in cppFiles.OrderBy(x => x))
+            {
+                if (f.Contains("_Adapter") || f.Contains("_wrapper"))
+                    standaloneFiles.Add(f);
+                else
+                    unityCandidates.Add(f);
+            }
             var unityFiles = new List<string>();
-            for (int i = 0; i < generatedCppFiles.Count; i += unityBatchSize)
+            for (int i = 0; i < unityCandidates.Count; i += unityBatchSize)
             {
                 string unityName = $"generated_unity_{i / unityBatchSize}.cpp";
                 unityFiles.Add(unityName);
                 var unityContent = new StringBuilder();
                 unityContent.AppendLine("// Unity/Jumbo build file");
-                for (int j = i; j < generatedCppFiles.Count && j < i + unityBatchSize; j++)
+                for (int j = i; j < unityCandidates.Count && j < i + unityBatchSize; j++)
                 {
-                    unityContent.AppendLine($"#include \"{generatedCppFiles[j]}\"");
+                    unityContent.AppendLine($"#include \"{unityCandidates[j]}\"");
                 }
                 string unityPath = Path.Combine(outputDir, unityName);
                 WriteAllTextWithRetry(unityPath, unityContent.ToString());
             }
 
-            // 非 generated 的核心文件
-            var coreFiles = cppFiles.Where(f => f.Contains("Exports") || f.Contains("JobProfiler") || f.Contains("JobSystem") || f.Contains("Native")).OrderBy(f => f).ToList();
-
-            sb.AppendLine("add_library(NativeDll SHARED");
-            foreach (var core in coreFiles)
-            {
-                sb.AppendLine($"    {core}");
-            }
             foreach (var unity in unityFiles)
-            {
                 sb.AppendLine($"    {unity}");
-            }
-            // Adapter 文件独立编译（内容较小不必合入 unity）
-            foreach (var file in generatedCppFiles.Where(f => f.Contains("_Adapter")))
-            {
+            foreach (var file in standaloneFiles)
                 sb.AppendLine($"    {file}");
-            }
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
             sb.AppendLine();
