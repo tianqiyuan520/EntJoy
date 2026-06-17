@@ -20,11 +20,13 @@ add_library(NativeDll SHARED
     "D:/Godot/Project/EntJoy/src/NativeDll/JobProfiler.cpp"
     "D:/Godot/Project/EntJoy/src/NativeDll/JobSystem.cpp"
     "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
-    generated_unity_0.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute_Adapter.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
+    SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp

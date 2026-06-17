@@ -890,7 +890,7 @@ public static unsafe partial class NativeJobScheduler
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var mode = forcedMode ?? (rawCache.ChunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish);
+            var mode = forcedMode ?? (rawCache.ChunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.PublishAssist);
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
@@ -1026,9 +1026,9 @@ public static unsafe partial class NativeJobScheduler
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
                 callbackPtr = cache.FuncPtr;
             }
-            var mode = forcedMode ?? (funcPtr != IntPtr.Zero
-                ? (chunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish)
-                : ChunkScheduleMode.PublishNoAssist);
+                var mode = forcedMode ?? (funcPtr != IntPtr.Zero
+                    ? ChunkScheduleMode.DeferredPublish
+                    : ChunkScheduleMode.PublishNoAssist);
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
         }
@@ -1150,7 +1150,7 @@ public static unsafe partial class NativeJobScheduler
 
         var allEnabledTypes = query.AllEnabled;
         bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
-        if (!hasEnabledFilter &&
+            if (!hasEnabledFilter &&
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {

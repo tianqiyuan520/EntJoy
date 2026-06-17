@@ -1497,7 +1497,7 @@ namespace JobSystem
             batch->chunks = chunks;
             batch->entityBatches = entityBatches;
             batch->chunkCount = chunkCount;
-            batch->rangeSize = rangeSize > 0 ? rangeSize : (enableAssist ? 32 : 8);
+            batch->rangeSize = rangeSize > 0 ? rangeSize : 32;
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
             batch->enableAssist = enableAssist;
             batch->mode = mode;
@@ -1536,10 +1536,16 @@ namespace JobSystem
             {
                 AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
             }
+            // DeferredPublish:
+            //   entityRangeFunc (IJobEntity batch Heavy): publish to workers for parallel
+            //   func/rangeFunc (IJobChunk light): serial on main thread, bypasses worker park→wake
             else if (mode == ChunkScheduleMode::DeferredPublish ||
                 mode == ChunkScheduleMode::DeferredPublishNoAssist)
             {
-                AddPendingChunkBatch(batch, &PublishPendingChunkBatch);
+                if (batch->entityRangeFunc != nullptr)
+                    AddPendingChunkBatch(batch, &PublishPendingChunkBatch);
+                else
+                    AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
             }
             else
             {
