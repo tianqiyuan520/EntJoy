@@ -1536,16 +1536,11 @@ namespace JobSystem
             {
                 AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
             }
-            // DeferredPublish:
-            //   entityRangeFunc (IJobEntity batch Heavy): publish to workers for parallel
-            //   func/rangeFunc (IJobChunk light): serial on main thread, bypasses worker park→wake
+            // DeferredPublish: 所有 C++/ISPC Job 统一走 worker 并行执行
             else if (mode == ChunkScheduleMode::DeferredPublish ||
                 mode == ChunkScheduleMode::DeferredPublishNoAssist)
             {
-                if (batch->entityRangeFunc != nullptr)
-                    AddPendingChunkBatch(batch, &PublishPendingChunkBatch);
-                else
-                    AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
+                AddPendingChunkBatch(batch, &PublishPendingChunkBatch);
             }
             else
             {
