@@ -134,6 +134,10 @@
             "GodotSharp": {
               "target": "Package",
               "version": "[4.4.1, )"
+            },
+            "GodotSharpEditor": {
+              "target": "Package",
+              "version": "[4.4.1, )"
             }
           },
           "imports": [

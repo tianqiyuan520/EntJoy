@@ -890,7 +890,7 @@ public static unsafe partial class NativeJobScheduler
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var mode = forcedMode ?? (rawCache.ChunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.PublishAssist);
+            var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
@@ -1026,9 +1026,7 @@ public static unsafe partial class NativeJobScheduler
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
                 callbackPtr = cache.FuncPtr;
             }
-                var mode = forcedMode ?? (funcPtr != IntPtr.Zero
-                    ? ChunkScheduleMode.DeferredPublish
-                    : ChunkScheduleMode.PublishNoAssist);
+                var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
         }
@@ -1051,7 +1049,7 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1137,7 +1135,7 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1158,7 +1156,7 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1244,7 +1242,7 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1268,7 +1266,7 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }

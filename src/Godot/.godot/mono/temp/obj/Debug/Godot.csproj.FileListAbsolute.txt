@@ -17,3 +17,4 @@ D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\obj\Debug\refint\Godot.dll
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\obj\Debug\Godot.pdb
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\obj\Debug\Godot.genruntimeconfig.cache
 D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\obj\Debug\ref\Godot.dll
+D:\Godot\Project\EntJoy\src\Godot\.godot\mono\temp\bin\Debug\GodotSharpEditor.dll

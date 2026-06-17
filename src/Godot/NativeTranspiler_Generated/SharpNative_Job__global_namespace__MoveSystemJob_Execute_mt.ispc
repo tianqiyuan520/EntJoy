@@ -1,1 +1,0 @@
-// ISPC MT only supports IJobParallelFor / IJobFor.
