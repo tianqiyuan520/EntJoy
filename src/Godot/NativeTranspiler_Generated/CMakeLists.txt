@@ -16,20 +16,16 @@ else()
 endif()
 
 add_library(NativeDll SHARED
-    "D:/Godot/Project/EntJoy/src/NativeDll/Exports.cpp"
-    "D:/Godot/Project/EntJoy/src/NativeDll/JobProfiler.cpp"
-    "D:/Godot/Project/EntJoy/src/NativeDll/JobSystem.cpp"
-    "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
     SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobCpp_Execute_Adapter.cpp
-    SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityCpp_Execute_Adapter.cpp
     SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute_wrapper.cpp
+    SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_wrapper.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeCpp_Execute_Adapter.cpp
-    SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
     SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Adapter.cpp
+    SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_wrapper.cpp
     ${TASKSYS_SRC}
 )
 
@@ -42,18 +38,38 @@ if(NOT ISPC_EXECUTABLE)
     set(ISPC_EXECUTABLE "E:/Code/ispc-v1.30.0-windows/bin/ispc.exe")
 endif()
 
-add_custom_command(TARGET NativeDll PRE_BUILD
-    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run_ispc.bat"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    COMMENT "Running ISPC compiler for generated .ispc files"
-)
-
 set(ISPC_OBJECTS
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.obj"
     "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj"
 )
-target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})
+
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_ispc.h"
+    COMMAND "${ISPC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.ispc" -o "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj" -h "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.ispc"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Compiling ISPC SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.ispc"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.obj" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute_ispc.h"
+    COMMAND "${ISPC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.ispc" -o "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.obj" -h "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.ispc"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Compiling ISPC SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.ispc"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_ispc.h"
+    COMMAND "${ISPC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.ispc" -o "${CMAKE_CURRENT_BINARY_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj" -h "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.ispc"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Compiling ISPC SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.ispc"
+    VERBATIM
+)
+set_source_files_properties(${ISPC_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+target_sources(NativeDll PRIVATE ${ISPC_OBJECTS})
 
 if(MSVC)
     target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)

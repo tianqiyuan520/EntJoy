@@ -430,7 +430,8 @@
 //        }
 //    }
 
-//    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
+//    //[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
+//    [NativeTranspiler.NativeTranspile]
 //    public unsafe struct AssignAndCountJobPointer : IJobParallelFor
 //    {
 //        public NativeArray<float2> Positions;
@@ -529,6 +530,7 @@
 //    }
 
 //    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
+//    //[NativeTranspiler.NativeTranspile]
 //    public struct CopyHashIndexJobPointer : IJobParallelFor
 //    {
 //        public NativeArray<int2> Src;

@@ -182,9 +182,6 @@ NativeDll_BINARY_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_G
 //Value Computed by CMake
 NativeDll_IS_TOP_LEVEL:STATIC=ON
 
-//Dependencies for the target
-NativeDll_LIB_DEPENDS:STATIC=general;D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__MoveSystemJobIspc_Execute.obj;general;D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__MoveSystemJobEntityIspc_Execute.obj;general;D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated/build/SharpNative_Job__global_namespace__NativeMoveJob_NativeIspc_Execute_Batch.obj;
-
 //Value Computed by CMake
 NativeDll_SOURCE_DIR:STATIC=D:/Godot/Project/EntJoy/src/Godot/NativeTranspiler_Generated
 

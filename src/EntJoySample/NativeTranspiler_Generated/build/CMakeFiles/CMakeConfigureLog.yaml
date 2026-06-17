@@ -56,6 +56,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -87,7 +88,7 @@ events:
       The output was:
       0
       閫傜敤浜?.NET Framework MSBuild 鐗堟湰 17.14.18+a338add32
-      鐢熸垚鍚姩鏃堕棿涓?2026/6/15 21:05:18銆?
+      鐢熸垚鍚姩鏃堕棿涓?2026/6/17 0:59:51銆?
       
       鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\4.3.0-rc3\\CompilerIdCXX\\CompilerIdCXX.vcxproj鈥?榛樿鐩爣)銆?
       PrepareForBuild:
@@ -116,7 +117,7 @@ events:
           0 涓鍛?
           0 涓敊璇?
       
-      宸茬敤鏃堕棿 00:00:01.82
+      宸茬敤鏃堕棿 00:00:00.76
       
       
       Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CompilerIdCXX.exe"
@@ -170,6 +171,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -211,6 +213,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -270,6 +273,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -352,6 +356,9 @@ events:
       - "C:/Program Files/CMake/bin/lld-link.com"
       - "C:/Program Files/CMake/bin/lld-link.exe"
       - "C:/Program Files/CMake/bin/lld-link"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/lld-link.com"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/lld-link.exe"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/lld-link"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/lld-link.com"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/lld-link.exe"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/lld-link"
@@ -421,6 +428,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -478,6 +486,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -519,6 +528,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -576,6 +586,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -658,6 +669,9 @@ events:
       - "C:/Program Files/CMake/bin/mt.com"
       - "C:/Program Files/CMake/bin/mt.exe"
       - "C:/Program Files/CMake/bin/mt"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/mt.com"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/mt.exe"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/mt"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/mt.com"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/mt.exe"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/mt"
@@ -727,6 +741,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -784,6 +799,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -825,6 +841,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -884,6 +901,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -975,6 +993,9 @@ events:
       - "C:/Program Files/CMake/bin/rc.com"
       - "C:/Program Files/CMake/bin/rc.exe"
       - "C:/Program Files/CMake/bin/rc"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/rc.com"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/rc.exe"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/rc"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/rc.com"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/rc.exe"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/rc"
@@ -1080,6 +1101,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"
@@ -1110,8 +1132,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-fwynmw"
-      binary: "D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-fwynmw"
+      source: "D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-r0b1tr"
+      binary: "D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-r0b1tr"
     cmakeVariables:
       CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /W3 /GR /EHsc"
       CMAKE_CXX_FLAGS_DEBUG: "/MDd /Zi /Ob0 /Od /RTC1"
@@ -1122,39 +1144,39 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: true
       stdout: |
-        Change Dir: 'D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-fwynmw'
+        Change Dir: 'D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-r0b1tr'
         
-        Run Build Command(s): "D:/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_7867c.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
+        Run Build Command(s): "D:/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_70847.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
         閫傜敤浜?.NET Framework MSBuild 鐗堟湰 17.14.18+a338add32
-        鐢熸垚鍚姩鏃堕棿涓?2026/6/15 21:05:21銆?
+        鐢熸垚鍚姩鏃堕棿涓?2026/6/17 0:59:52銆?
         
-        鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-fwynmw\\cmTC_7867c.vcxproj鈥?榛樿鐩爣)銆?
+        鑺傜偣 1 涓婄殑椤圭洰鈥淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-r0b1tr\\cmTC_70847.vcxproj鈥?榛樿鐩爣)銆?
         PrepareForBuild:
           宸插惎鐢ㄧ粨鏋勫寲杈撳嚭銆傜紪璇戝櫒璇婃柇鐨勬牸寮忚缃皢鍙嶆槧閿欒灞傛缁撴瀯銆傛湁鍏宠缁嗕俊鎭紝璇峰弬闃?https://aka.ms/cpp/structured-output銆?
-          姝ｅ湪鍒涘缓鐩綍鈥淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-fwynmw\\Debug\\鈥濄€?
-          姝ｅ湪鍒涘缓鐩綍鈥渃mTC_7867c.dir\\Debug\\cmTC_7867c.tlog\\鈥濄€?
+          姝ｅ湪鍒涘缓鐩綍鈥淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-r0b1tr\\Debug\\鈥濄€?
+          姝ｅ湪鍒涘缓鐩綍鈥渃mTC_70847.dir\\Debug\\cmTC_70847.tlog\\鈥濄€?
         InitializeBuildStatus:
-          姝ｅ湪鍒涘缓鈥渃mTC_7867c.dir\\Debug\\cmTC_7867c.tlog\\unsuccessfulbuild鈥濓紝鍥犱负宸叉寚瀹氣€淎lwaysCreate鈥濄€?
-          姝ｅ湪瀵光€渃mTC_7867c.dir\\Debug\\cmTC_7867c.tlog\\unsuccessfulbuild鈥濇墽琛?Touch 浠诲姟銆?
+          姝ｅ湪鍒涘缓鈥渃mTC_70847.dir\\Debug\\cmTC_70847.tlog\\unsuccessfulbuild鈥濓紝鍥犱负宸叉寚瀹氣€淎lwaysCreate鈥濄€?
+          姝ｅ湪瀵光€渃mTC_70847.dir\\Debug\\cmTC_70847.tlog\\unsuccessfulbuild鈥濇墽琛?Touch 浠诲姟銆?
         ClCompile:
-          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\CL.exe /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_7867c.dir\\Debug\\\\" /Fd"cmTC_7867c.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
+          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\CL.exe /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_70847.dir\\Debug\\\\" /Fd"cmTC_70847.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
           鐢ㄤ簬 x64 鐨?Microsoft (R) C/C++ 浼樺寲缂栬瘧鍣?19.44.35214 鐗?
           鐗堟潈鎵€鏈?C) Microsoft Corporation銆備繚鐣欐墍鏈夋潈鍒┿€?
-          cl /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_7867c.dir\\Debug\\\\" /Fd"cmTC_7867c.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
+          cl /c /Zi /W3 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D _MBCS /D "CMAKE_INTDIR=\\"Debug\\"" /EHsc /RTC1 /MDd /GR /Fo"cmTC_70847.dir\\Debug\\\\" /Fd"cmTC_70847.dir\\Debug\\vc143.pdb" /external:W3 /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-4.3\\Modules\\CMakeCXXCompilerABI.cpp"
           CMakeCXXCompilerABI.cpp
         Link:
-          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe /OUT:"D:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-fwynmw\\Debug\\cmTC_7867c.exe" /INCREMENTAL /ILK:"cmTC_7867c.dir\\Debug\\cmTC_7867c.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-fwynmw/Debug/cmTC_7867c.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /IMPLIB:"D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-fwynmw/Debug/cmTC_7867c.lib" /MACHINE:X64  /machine:x64 cmTC_7867c.dir\\Debug\\CMakeCXXCompilerABI.obj
-          cmTC_7867c.vcxproj -> D:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-fwynmw\\Debug\\cmTC_7867c.exe
+          D:\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe /OUT:"D:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-r0b1tr\\Debug\\cmTC_70847.exe" /INCREMENTAL /ILK:"cmTC_70847.dir\\Debug\\cmTC_70847.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-r0b1tr/Debug/cmTC_70847.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /IMPLIB:"D:/Godot/Project/EntJoy/src/EntJoySample/NativeTranspiler_Generated/build/CMakeFiles/CMakeScratch/TryCompile-r0b1tr/Debug/cmTC_70847.lib" /MACHINE:X64  /machine:x64 cmTC_70847.dir\\Debug\\CMakeCXXCompilerABI.obj
+          cmTC_70847.vcxproj -> D:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-r0b1tr\\Debug\\cmTC_70847.exe
         FinalizeBuildStatus:
-          姝ｅ湪鍒犻櫎鏂囦欢鈥渃mTC_7867c.dir\\Debug\\cmTC_7867c.tlog\\unsuccessfulbuild鈥濄€?
-          姝ｅ湪瀵光€渃mTC_7867c.dir\\Debug\\cmTC_7867c.tlog\\cmTC_7867c.lastbuildstate鈥濇墽琛?Touch 浠诲姟銆?
-        宸插畬鎴愮敓鎴愰」鐩€淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-fwynmw\\cmTC_7867c.vcxproj鈥?榛樿鐩爣)鐨勬搷浣溿€?
+          姝ｅ湪鍒犻櫎鏂囦欢鈥渃mTC_70847.dir\\Debug\\cmTC_70847.tlog\\unsuccessfulbuild鈥濄€?
+          姝ｅ湪瀵光€渃mTC_70847.dir\\Debug\\cmTC_70847.tlog\\cmTC_70847.lastbuildstate鈥濇墽琛?Touch 浠诲姟銆?
+        宸插畬鎴愮敓鎴愰」鐩€淒:\\Godot\\Project\\EntJoy\\src\\EntJoySample\\NativeTranspiler_Generated\\build\\CMakeFiles\\CMakeScratch\\TryCompile-r0b1tr\\cmTC_70847.vcxproj鈥?榛樿鐩爣)鐨勬搷浣溿€?
         
         宸叉垚鍔熺敓鎴愩€?
             0 涓鍛?
             0 涓敊璇?
         
-        宸茬敤鏃堕棿 00:00:01.43
+        宸茬敤鏃堕棿 00:00:00.80
         
       exitCode: 0
   -
@@ -1188,7 +1210,7 @@ events:
   -
     kind: "find-v1"
     backtrace:
-      - "CMakeLists.txt:62 (find_program)"
+      - "CMakeLists.txt:58 (find_program)"
     mode: "program"
     variable: "ISPC_EXECUTABLE"
     description: "Path to a program."
@@ -1224,6 +1246,7 @@ events:
       - "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/"
       - "C:/Program Files/nodejs/"
       - "C:/Program Files/CMake/bin/"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Launcher/"
@@ -1315,6 +1338,9 @@ events:
       - "C:/Program Files/CMake/bin/ispc.com"
       - "C:/Program Files/CMake/bin/ispc.exe"
       - "C:/Program Files/CMake/bin/ispc"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/ispc.com"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/ispc.exe"
+      - "C:/Program Files (x86)/GtkSharp/2.12/bin/ispc"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/ispc.com"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/ispc.exe"
       - "C:/Users/tianqiyuan520/AppData/Local/Programs/Python/Python312/Scripts/ispc"
@@ -1382,6 +1408,7 @@ events:
         - "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\"
         - "C:\\Program Files\\nodejs\\"
         - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Program Files (x86)\\GtkSharp\\2.12\\bin"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Python312\\"
         - "C:\\Users\\tianqiyuan520\\AppData\\Local\\Programs\\Python\\Launcher\\"

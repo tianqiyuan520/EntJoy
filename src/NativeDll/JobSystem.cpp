@@ -508,7 +508,11 @@ namespace JobSystem
             if (!batch) return;
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
             {
-                if (batch->cleanup) batch->cleanup(batch->context);
+                if (batch->cleanup)
+                {
+                    try { batch->cleanup(batch->context); }
+                    catch (...) {}
+                }
                 auto* state = batch->handleState;
                 batch->handleState = nullptr;
                 CompleteState(state);
@@ -522,7 +526,11 @@ namespace JobSystem
             if (!batch) return;
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
             {
-                if (batch->cleanup) batch->cleanup(batch->context);
+                if (batch->cleanup)
+                {
+                    try { batch->cleanup(batch->context); }
+                    catch (...) {}
+                }
                 auto* state = batch->handleState;
                 batch->handleState = nullptr;
                 CompleteState(state);
@@ -843,8 +851,13 @@ namespace JobSystem
         {
             AcquireState(state);
             executor->silent_async([work = std::forward<Work>(work), state, context, cleanup]() {
-                work();
-                if (cleanup) cleanup(context);
+                try { work(); }
+                catch (...) {}
+                if (cleanup)
+                {
+                    try { cleanup(context); }
+                    catch (...) {}
+                }
                 CompleteState(state);
                 ReleaseState(state);
                 });
@@ -880,7 +893,11 @@ namespace JobSystem
             builder(*taskflow);
             AcquireState(state);
             executor->run(*taskflow, [taskflow, state, context, cleanup]() mutable {
-                if (cleanup) cleanup(context);
+                if (cleanup)
+                {
+                    try { cleanup(context); }
+                    catch (...) {}
+                }
                 CompleteState(state);
                 ReleaseState(state);
                 });
@@ -1233,10 +1250,18 @@ namespace JobSystem
                     int end = std::min(length, begin + chunkSize);
                     AcquireState(state);
                     executor->silent_async([=]() {
-                        for (int j = begin; j < end; ++j) func(context, j);
+                        try
+                        {
+                            for (int j = begin; j < end; ++j) func(context, j);
+                        }
+                        catch (...) {}
                         if (--*remaining == 0)
                         {
-                            if (cleanup) cleanup(context);
+                            if (cleanup)
+                            {
+                                try { cleanup(context); }
+                                catch (...) {}
+                            }
                             CompleteState(state);
                         }
                         ReleaseState(state);
@@ -1251,7 +1276,11 @@ namespace JobSystem
                 auto finalizeParallelFor = [=]() {
                     if (!finalized->exchange(true, std::memory_order_acq_rel))
                     {
-                        if (cleanup) cleanup(context);
+                        if (cleanup)
+                        {
+                            try { cleanup(context); }
+                            catch (...) {}
+                        }
                         CompleteState(state);
                     }
                 };
@@ -1260,7 +1289,11 @@ namespace JobSystem
                     if (chunkIdx >= chunkCount) return false;
                     const int begin = chunkIdx * chunkSize;
                     const int end = std::min(length, begin + chunkSize);
-                    for (int i = begin; i < end; ++i) func(context, i);
+                    try
+                    {
+                        for (int i = begin; i < end; ++i) func(context, i);
+                    }
+                    catch (...) {}
                     if (completedChunks->fetch_add(1, std::memory_order_acq_rel) + 1 == chunkCount)
                     {
                         finalizeParallelFor();
@@ -1336,10 +1369,15 @@ namespace JobSystem
                     int count = std::min(safeBatchSize, length - start);
                     AcquireState(state);
                     executor->silent_async([=]() {
-                        func(context, start, count);
+                        try { func(context, start, count); }
+                        catch (...) {}
                         if (--*remaining == 0)
                         {
-                            if (cleanup) cleanup(context);
+                            if (cleanup)
+                            {
+                                try { cleanup(context); }
+                                catch (...) {}
+                            }
                             CompleteState(state);
                         }
                         ReleaseState(state);
@@ -1354,7 +1392,11 @@ namespace JobSystem
                 auto finalizeBatchJob = [=]() {
                     if (!finalized->exchange(true, std::memory_order_acq_rel))
                     {
-                        if (cleanup) cleanup(context);
+                        if (cleanup)
+                        {
+                            try { cleanup(context); }
+                            catch (...) {}
+                        }
                         CompleteState(state);
                     }
                 };
@@ -1363,7 +1405,8 @@ namespace JobSystem
                     if (batchIdx >= batchCount) return false;
                     const int start = batchIdx * safeBatchSize;
                     const int count = std::min(safeBatchSize, length - start);
-                    func(context, start, count);
+                    try { func(context, start, count); }
+                    catch (...) {}
                     if (completedBatches->fetch_add(1, std::memory_order_acq_rel) + 1 == batchCount)
                     {
                         finalizeBatchJob();

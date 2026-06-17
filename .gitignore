@@ -46,7 +46,6 @@ compile_commands.json
 # Godot generated temp/cache outputs
 src/Godot/.godot/mono/
 
-# Native transpiler generated build cache
-src/EntJoySample/NativeTranspiler_Generated/build/
-src/Godot/NativeTranspiler_Generated/build/
+# Native transpiler generated sources/build cache
+**/NativeTranspiler_Generated/
 

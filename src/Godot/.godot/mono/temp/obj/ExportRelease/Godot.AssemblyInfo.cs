@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Godot")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("ExportRelease")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+398b2e6b2794f4568aa674f25c82329f508eee9e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c397a806e6e0e4b7f9e64dc81acf2283bbb1e6d0")]
 [assembly: System.Reflection.AssemblyProductAttribute("Godot")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Godot")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -40,6 +40,7 @@ extern "C" {
 
     JOB_API void JobSystem_Complete(void* handle);
     JOB_API void JobSystem_CompleteAndRelease(void* handle);
+    JOB_API void JobSystem_RetainHandle(void* handle);
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
