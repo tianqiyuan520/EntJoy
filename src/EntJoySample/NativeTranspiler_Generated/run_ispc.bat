@@ -26,19 +26,6 @@ start /b /min "ISPC_SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIs
 
 :skip_SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic
 
-:wait_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
-set RUNNING=0
-for /f %%p in ('tasklist /fi "imagename eq ispc.exe" 2^>nul ^| find /c "ispc.exe"') do set RUNNING=%%p
-if !RUNNING! GEQ !MAXCONCURRENT! (
-    >nul timeout /t 1 /nobreak
-    goto :wait_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
-)
-
-echo Compiling SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc... (fast)
-start /b /min "ISPC_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch" "%ISPC%" "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc" -o "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" -h "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma > "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.log" 2>&1
-
-:skip_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
-
 :wait_SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute
 set RUNNING=0
 for /f %%p in ('tasklist /fi "imagename eq ispc.exe" 2^>nul ^| find /c "ispc.exe"') do set RUNNING=%%p
@@ -143,6 +130,19 @@ start /b /min "ISPC_SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJ
 
 :skip_SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspcMt_Execute_mt
 
+:wait_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
+set RUNNING=0
+for /f %%p in ('tasklist /fi "imagename eq ispc.exe" 2^>nul ^| find /c "ispc.exe"') do set RUNNING=%%p
+if !RUNNING! GEQ !MAXCONCURRENT! (
+    >nul timeout /t 1 /nobreak
+    goto :wait_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
+)
+
+echo Compiling SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc... (fast)
+start /b /min "ISPC_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch" "%ISPC%" "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.ispc" -o "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" -h "SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_ispc.h" --target=avx512skx-i32x16 --math-lib=fast --opt=disable-fma > "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.log" 2>&1
+
+:skip_SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch
+
 :wait_all
 set RUNNING=0
 for /f %%p in ('tasklist /fi "imagename eq ispc.exe" 2^>nul ^| find /c "ispc.exe"') do set RUNNING=%%p
@@ -153,8 +153,6 @@ if !RUNNING! GTR 0 (
 
 if not exist "build\SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj" set FAILED=1
 if exist "build\SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj" if %%~z"build\SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic.obj"==0 set FAILED=1
-if not exist "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" set FAILED=1
-if exist "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" if %%~z"build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"==0 set FAILED=1
 if not exist "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj" set FAILED=1
 if exist "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj" if %%~z"build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute.obj"==0 set FAILED=1
 if not exist "build\SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute.obj" set FAILED=1
@@ -171,6 +169,8 @@ if not exist "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJ
 if exist "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspc_Execute.obj" if %%~z"build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspc_Execute.obj"==0 set FAILED=1
 if not exist "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspcMt_Execute_mt.obj" set FAILED=1
 if exist "build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspcMt_Execute_mt.obj" if %%~z"build\SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspcMt_Execute_mt.obj"==0 set FAILED=1
+if not exist "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" set FAILED=1
+if exist "build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj" if %%~z"build\SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch.obj"==0 set FAILED=1
 
 if "%FAILED%"=="1" (
     echo One or more ISPC files failed to compile. Check .log files for details.

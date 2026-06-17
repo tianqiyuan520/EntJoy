@@ -785,36 +785,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobSystem.cpp").Replace("\\", "/")}\"");
             sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Native.cpp").Replace("\\", "/")}\"");
 
-            // Unity/Jumbo 构建：仅将纯 Job 实现 .cpp（不含 _wrapper / _Adapter）合并以减少头文件解析
-            // _wrapper.cpp / _Adapter.cpp 各自含有 struct 定义，不能合并进 unity
-            var unityBatchSize = 16;
-            var standaloneFiles = new List<string>();
-            var unityCandidates = new List<string>();
-            foreach (var f in cppFiles.OrderBy(x => x))
-            {
-                if (f.Contains("_Adapter") || f.Contains("_wrapper"))
-                    standaloneFiles.Add(f);
-                else
-                    unityCandidates.Add(f);
-            }
-            var unityFiles = new List<string>();
-            for (int i = 0; i < unityCandidates.Count; i += unityBatchSize)
-            {
-                string unityName = $"generated_unity_{i / unityBatchSize}.cpp";
-                unityFiles.Add(unityName);
-                var unityContent = new StringBuilder();
-                unityContent.AppendLine("// Unity/Jumbo build file");
-                for (int j = i; j < unityCandidates.Count && j < i + unityBatchSize; j++)
-                {
-                    unityContent.AppendLine($"#include \"{unityCandidates[j]}\"");
-                }
-                string unityPath = Path.Combine(outputDir, unityName);
-                WriteAllTextWithRetry(unityPath, unityContent.ToString());
-            }
-
-            foreach (var unity in unityFiles)
-                sb.AppendLine($"    {unity}");
-            foreach (var file in standaloneFiles)
+            // 所有 generated .cpp 各自独立编译（按文件名排序）
+            foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
