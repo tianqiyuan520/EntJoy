@@ -114,18 +114,7 @@ namespace EntJoy.JobSystem
                     if (enabledIndices.Count > 0)
                     {
                         int ulongCount = (chunk.EntityCount + 63) / 64;
-                        const int maxStackAlloc = 256;
-                        ulong* combinedMask;
-
-                        if (ulongCount <= maxStackAlloc)
-                        {
-                            var u = stackalloc ulong[ulongCount];
-                            combinedMask = u;
-                        }
-                        else
-                        {
-                            combinedMask = TempBuffer.GetBuffer(ulongCount);  // 使用已修复的 TempBuffer
-                        }
+                        ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
 
                         int firstIdx = enabledIndices[0];
                         ulong* firstMask = chunk.GetEnableBitMapPointer(firstIdx);

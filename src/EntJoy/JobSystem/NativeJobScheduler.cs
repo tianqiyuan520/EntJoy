@@ -156,6 +156,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_CompleteAndRelease;
+    private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_RetainHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
@@ -341,6 +342,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleFor");
         _jobSystem_CompleteAndRelease = (delegate* unmanaged[Cdecl]<IntPtr, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
+        _jobSystem_RetainHandle = (delegate* unmanaged[Cdecl]<IntPtr, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_RetainHandle");
         _jobSystem_IsCompleted = (delegate* unmanaged[Cdecl]<IntPtr, int>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_IsCompleted");
         _jobSystem_ReleaseHandle = (delegate* unmanaged[Cdecl]<IntPtr, void>)
@@ -428,6 +431,12 @@ public static unsafe partial class NativeJobScheduler
     {
         EnsureNativeLoaded();
         _jobSystem_CompleteAndRelease(handle);
+    }
+
+    private static void JobSystem_RetainHandle(IntPtr handle)
+    {
+        EnsureNativeLoaded();
+        _jobSystem_RetainHandle(handle);
     }
 
     private static int JobSystem_IsCompleted(IntPtr handle)
@@ -567,8 +576,9 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             var cache = GetOrCreateDelegateCache<T, JobFunc>(() => CreateJobCallback<T>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return new NativeJobHandle(
-                JobSystem_Schedule(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_Schedule(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, dependencyLease.Handle));
         }
         catch
         {
@@ -587,8 +597,9 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             var cache = GetOrCreateDelegateCache<T, IndexJobFunc>(() => CreateForCallback<T>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return new NativeJobHandle(
-                JobSystem_ScheduleFor(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleFor(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, dependencyLease.Handle));
         }
         catch
         {
@@ -608,8 +619,9 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle));
         }
         catch
         {
@@ -629,8 +641,9 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForBatchCallback<T>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle));
         }
         catch
         {
@@ -659,9 +672,8 @@ public static unsafe partial class NativeJobScheduler
 
     public static bool IsCompleted(NativeJobHandle h)
     {
-        if (h.Handle == IntPtr.Zero) return true;
-        var view = (HandleStateView*)(byte*)h.Handle;
-        return view->Completed;
+        using var handleLease = new RetainedNativeDependency(h);
+        return handleLease.Handle == IntPtr.Zero || JobSystem_IsCompleted(handleLease.Handle) != 0;
     }
 
     public static void Release(NativeJobHandle h)
@@ -679,6 +691,33 @@ public static unsafe partial class NativeJobScheduler
         JobSystem_ReleaseHandle(handle);
     }
 
+    internal static void RetainRawHandleForUse(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return;
+        JobSystem_RetainHandle(handle);
+    }
+
+    private readonly struct RetainedNativeDependency : IDisposable
+    {
+        public readonly IntPtr Handle;
+
+        public RetainedNativeDependency(NativeJobHandle? dependency)
+        {
+            Handle = dependency.HasValue ? dependency.Value.RetainForUse() : IntPtr.Zero;
+        }
+
+        public RetainedNativeDependency(NativeJobHandle dependency)
+        {
+            Handle = dependency.RetainForUse();
+        }
+
+        public void Dispose()
+        {
+            if (Handle != IntPtr.Zero)
+                JobSystem_ReleaseHandle(Handle);
+        }
+    }
+
     private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle)
     {
         entityManager?.RegisterActiveJob(handle);
@@ -686,15 +725,22 @@ public static unsafe partial class NativeJobScheduler
     }
 
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
-        => new NativeJobHandle(JobSystem_Schedule(funcPtr, contextPtr, cleanupPtr, dependsOn?.Handle ?? IntPtr.Zero));
+    {
+        using var dependencyLease = new RetainedNativeDependency(dependsOn);
+        return new NativeJobHandle(JobSystem_Schedule(funcPtr, contextPtr, cleanupPtr, dependencyLease.Handle));
+    }
 
     public static NativeJobHandle ScheduleForRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, NativeJobHandle? dependsOn = null)
-        => new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependsOn?.Handle ?? IntPtr.Zero));
+    {
+        using var dependencyLease = new RetainedNativeDependency(dependsOn);
+        return new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependencyLease.Handle));
+    }
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
     {
         if (length > 0) AutoPrewakeIfNeeded(length);
-        return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn?.Handle ?? IntPtr.Zero));
+        using var dependencyLease = new RetainedNativeDependency(dependsOn);
+        return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
     }
 
     public static NativeJobSystemStats GetStats() => JobSystem_GetStats();
@@ -715,8 +761,21 @@ public static unsafe partial class NativeJobScheduler
     {
         if (handles == null || handles.Length == 0) return default;
         var ptrs = new IntPtr[handles.Length];
-        for (int i = 0; i < handles.Length; i++) ptrs[i] = handles[i].Handle;
-        return new NativeJobHandle(JobSystem_CombineDependencies(ptrs, handles.Length));
+        var leases = new RetainedNativeDependency[handles.Length];
+        try
+        {
+            for (int i = 0; i < handles.Length; i++)
+            {
+                leases[i] = new RetainedNativeDependency(handles[i]);
+                ptrs[i] = leases[i].Handle;
+            }
+            return new NativeJobHandle(JobSystem_CombineDependencies(ptrs, handles.Length));
+        }
+        finally
+        {
+            for (int i = 0; i < leases.Length; i++)
+                leases[i].Dispose();
+        }
     }
 
     // ======================== IJobChunk 调度 ========================
@@ -835,7 +894,8 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize)));
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -851,7 +911,8 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.PublishNoAssist)));
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishNoAssist)));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -866,7 +927,8 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateChunkArrayBatchCallback<T>());
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependsOn?.Handle ?? IntPtr.Zero)));
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle)));
             }
             catch
             {
@@ -967,7 +1029,8 @@ public static unsafe partial class NativeJobScheduler
             var mode = forcedMode ?? (funcPtr != IntPtr.Zero
                 ? (chunkCount <= 2 ? ChunkScheduleMode.DeferTinyOnly : ChunkScheduleMode.DeferredPublish)
                 : ChunkScheduleMode.PublishNoAssist);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, mode, workerCap, rangeSize)));
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -987,7 +1050,8 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1072,7 +1136,8 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
         try
         {
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1092,7 +1157,8 @@ public static unsafe partial class NativeJobScheduler
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1177,7 +1243,8 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
         try
         {
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1200,7 +1267,8 @@ public static unsafe partial class NativeJobScheduler
         var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
         try
         {
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependsOn?.Handle ?? IntPtr.Zero, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.DeferredPublish, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -2178,10 +2246,7 @@ public static unsafe partial class NativeJobScheduler
                 {
                     int* typeHashArray = (int*)header->queryAllEnabledTypes;
                     int ulongCount = (cd->entityCount + 63) / 64;
-                    ulong* combinedMask;
-                    const int maxStackAlloc = 256;
-                    if (ulongCount <= maxStackAlloc) { var u = stackalloc ulong[ulongCount]; combinedMask = u; }
-                    else { combinedMask = TempBuffer.GetBuffer(ulongCount); }
+                    ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
 
                     bool firstFound = false;
                     for (int j = 0; j < header->allEnabledCount; j++)
@@ -2301,10 +2366,7 @@ public static unsafe partial class NativeJobScheduler
         if (allEnabledTypes != null && allEnabledTypes.Length > 0)
         {
             int ulongCount = (chunk.EntityCount + 63) / 64;
-            ulong* combinedMask;
-            const int maxStackAlloc = 256;
-            if (ulongCount <= maxStackAlloc) { var u = stackalloc ulong[ulongCount]; combinedMask = u; }
-            else { combinedMask = TempBuffer.GetBuffer(ulongCount); }
+            ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
 
             bool firstFound = false;
             var archetype = chunk.Archetype;
@@ -2354,10 +2416,7 @@ public static unsafe partial class NativeJobScheduler
         {
             int* typeHashArray = (int*)header->queryAllEnabledTypes;
             int ulongCount = (cd->entityCount + 63) / 64;
-            ulong* combinedMask;
-            const int maxStackAlloc = 256;
-            if (ulongCount <= maxStackAlloc) { var u = stackalloc ulong[ulongCount]; combinedMask = u; }
-            else { combinedMask = TempBuffer.GetBuffer(ulongCount); }
+            ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
 
             bool firstFound = false;
             for (int j = 0; j < header->allEnabledCount; j++)

@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1633058332085924f9d0ef191487c1796bd21c62")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c397a806e6e0e4b7f9e64dc81acf2283bbb1e6d0")]
 [assembly: System.Reflection.AssemblyProductAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NativeTranspiler.Tasks")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

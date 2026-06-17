@@ -1,7 +1,6 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
 
 /// <summary>
 /// 表示一个由 C++ JobSystem 调度的原生作业句柄。
@@ -32,6 +31,12 @@ public struct NativeJobHandle : IEquatable<NativeJobHandle>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly IntPtr RetainForUse()
+    {
+        return _box?.RetainForUse() ?? IntPtr.Zero;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool Equals(NativeJobHandle other) => Handle == other.Handle;
 
     public override readonly bool Equals(object obj) => obj is NativeJobHandle other && Equals(other);
@@ -45,6 +50,7 @@ public struct NativeJobHandle : IEquatable<NativeJobHandle>
 
 internal sealed class NativeJobHandleBox
 {
+    private readonly object _gate = new();
     private IntPtr _handle;
 
     public NativeJobHandleBox(IntPtr handle)
@@ -52,16 +58,39 @@ internal sealed class NativeJobHandleBox
         _handle = handle;
     }
 
-    public IntPtr Handle => Volatile.Read(ref _handle);
+    public IntPtr Handle
+    {
+        get
+        {
+            lock (_gate)
+                return _handle;
+        }
+    }
+
+    public IntPtr RetainForUse()
+    {
+        lock (_gate)
+        {
+            if (_handle != IntPtr.Zero)
+                NativeJobScheduler.RetainRawHandleForUse(_handle);
+            return _handle;
+        }
+    }
 
     public IntPtr Detach()
     {
-        return Interlocked.Exchange(ref _handle, IntPtr.Zero);
+        lock (_gate)
+        {
+            IntPtr handle = _handle;
+            _handle = IntPtr.Zero;
+            return handle;
+        }
     }
 
     public void Clear()
     {
-        Volatile.Write(ref _handle, IntPtr.Zero);
+        lock (_gate)
+            _handle = IntPtr.Zero;
     }
 
     ~NativeJobHandleBox()

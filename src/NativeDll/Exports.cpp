@@ -97,6 +97,12 @@ extern "C"
         } // 析构时 Release(state)
     }
 
+    void JobSystem_RetainHandle(void* handle)
+    {
+        if (handle)
+            JobSystem::JobHandle::Acquire(fromHandle(handle));
+    }
+
     int JobSystem_IsCompleted(void* handle)
     {
         if (!handle) return 1;

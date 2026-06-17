@@ -22,7 +22,8 @@
   <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
   <Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
-          Condition="!Exists('$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll')">
+          Inputs="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeCompileTask .cs;$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
+          Outputs="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll">
     <MSBuild
       Projects="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
       Targets="Build"
@@ -37,7 +38,6 @@
   </Target>
 
   <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
-    <Delete Files="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\native_compile.hash" ContinueOnError="true" />
     <Message Importance="high" Text="Starting Godot native compilation for generated C++/ISPC code..." />
     <NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
   </Target>
