@@ -16,38 +16,32 @@ else()
 endif()
 
 add_library(NativeDll SHARED
-    SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeCppStatic.cpp
+    "D:/Godot/Project/EntJoy/src/NativeDll/Exports.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/JobProfiler.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/JobSystem.cpp"
+    "D:/Godot/Project/EntJoy/src/NativeDll/Native.cpp"
+    generated_unity_0.cpp
     SharpNative_EntJoy_MovementTest_MoveEntitiesTest_RunNativeIspcStatic_wrapper.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeCpp_Execute.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Adapter.cpp
     SharpNative_Job_EntJoy_MovementTest_MoveEntitiesJob_NativeIspc_Execute_Batch_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCppFast_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkCppFast_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobChunkIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_HeavyJobEntityIspcMt_Execute_mt_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCppFast_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkCppFast_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobChunkIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobEntityCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobEntityCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobEntityIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkMoveCompareTest_MoveJobEntityIspcMt_Execute_mt_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_AddOneChunkJobIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobCpp_Execute.cpp
     SharpNative_Job_EntJoySample_IJobChunkScheduleOverheadTest_EmptyChunkJobIspc_Execute_wrapper.cpp
     SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute_Adapter.cpp
-    SharpNative_Job_EntJoySample_SimpleIJobChunkTest_AddOneJob_Execute.cpp
     ${TASKSYS_SRC}
 )
 
