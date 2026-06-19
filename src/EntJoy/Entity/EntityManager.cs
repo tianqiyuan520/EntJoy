@@ -8,7 +8,7 @@ namespace EntJoy
 {
     public unsafe partial class EntityManager : IDisposable
     {
-        private readonly Dictionary<int, Archetype> archetypeMap;  // 原型映射表
+        private readonly Dictionary<int, List<Archetype>> archetypeMap;  // 原型映射表（哈希 -> Archetype 列表，防碰撞）
         private Archetype[] allArchetypes;  // 所有原型数组
 
         private int archetypeCount;
@@ -40,7 +40,7 @@ namespace EntJoy
         {
             recycleEntities = new Queue<Entity>();  // 初始化回收队列
             entities = ArrayPool<EntityIndexInWorld>.Shared.Rent(32);  // 从内存池租用数组
-            archetypeMap = new Dictionary<int, Archetype>();  // 初始化原型映射
+            archetypeMap = new Dictionary<int, List<Archetype>>();  // 初始化原型映射（哈希 -> Archetype 列表）
             allArchetypes = ArrayPool<Archetype>.Shared.Rent(8);  // 从内存池租用原型数组
         }
 
@@ -50,13 +50,23 @@ namespace EntJoy
         private Archetype GetOrCreateArchetype(Span<ComponentType> types)  // 获取或创建原型方法
         {
             var hash = Utils.CalculateHash(types);
-            if (archetypeMap.TryGetValue(hash, out Archetype archetype))  // 根据哈希值检查是否已存在
+            if (archetypeMap.TryGetValue(hash, out var archetypeList))  // 根据哈希值检查是否已存在
             {
-                return archetype;  // 返回已有原型
+                // 双重校验：用完整组件类型列表验证，防止哈希碰撞
+                for (int i = 0; i < archetypeList.Count; i++)
+                {
+                    if (archetypeList[i].Types.SequenceEqual(types))
+                        return archetypeList[i];
+                }
             }
-            // 不存在，则创建新原型
-            archetype = new Archetype(types.ToArray());
-            archetypeMap.Add(hash, archetype);
+            else
+            {
+                archetypeList = new List<Archetype>(1);
+                archetypeMap[hash] = archetypeList;
+            }
+            // 不存在具体匹配的 Archetype，创建新原型
+            var archetype = new Archetype(types.ToArray());
+            archetypeList.Add(archetype);
             //检查原型数组容量
             if (archetypeCount >= allArchetypes.Length)
             {
