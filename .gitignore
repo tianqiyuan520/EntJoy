@@ -1,29 +1,19 @@
 /.git
 /bin
 /.vs
-src/EntJoy.SourceGenerator/.vs
-src/EntJoy/.vs
-src/Godot/.vs
 /.vscode
-src/EntJoy.SourceGenerator/bin
-src/EntJoy.SourceGenerator/obj
-src/EntJoy/bin
-src/EntJoy/obj
-src/EntJoySample/bin
-src/EntJoySample/obj
-src/NativeDll/NativeDll
-src/NativeTranspiler.Tasks/bin
-src/NativeTranspiler.Tasks/obj
 
-# Generic build artifacts
-**/bin/
-**/obj/
-**/build/
-**/x64/
+# IDE
 **/.vs/
 **/.vscode/
 
+# .NET build artifacts
+**/bin/
+**/obj/
+
 # Native/CMake/MSVC artifacts
+**/build/
+**/x64/
 *.obj
 *.o
 *.a
@@ -43,9 +33,11 @@ CMakeCache.txt
 cmake_install.cmake
 compile_commands.json
 
-# Godot generated temp/cache outputs
-src/Godot/.godot/mono/
+# Godot generated temp/cache
+src/Godot/.godot/
 
-# Native transpiler generated sources/build cache
+# Native transpiler generated sources
 **/NativeTranspiler_Generated/
 
+# Roslyn analyzer generated
+*.g.cs

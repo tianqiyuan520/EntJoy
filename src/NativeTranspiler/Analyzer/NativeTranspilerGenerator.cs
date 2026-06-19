@@ -369,9 +369,11 @@ namespace NativeTranspiler.Analyzer
                 // 只在内容变化时写入 CMakeLists.txt，避免触发 CMake reconfigure
                 if (cppFiles.Count > 0 || ispcFiles.Count > 0)
                 {
-                    string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+            string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
                     string nativeDllDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "NativeDll"));
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, nativeDllDir);
+                    var relativeNativeDllDir = GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
+                    bool hasFastMath = fastMathCppFiles.Count > 0;
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
                     string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
@@ -754,8 +756,21 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
 ";
         }
 
+        /// <summary>计算相对路径（兼容 netstandard2.0，不支持 Path.GetRelativePath）</summary>
+        private static string GetRelativePath(string basePath, string targetPath)
+        {
+            if (!basePath.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                basePath += Path.DirectorySeparatorChar;
+
+            var baseUri = new Uri(basePath);
+            var targetUri = new Uri(targetPath);
+            var relativeUri = baseUri.MakeRelativeUri(targetUri);
+            var relativePath = Uri.UnescapeDataString(relativeUri.ToString());
+            return relativePath.Replace('/', Path.DirectorySeparatorChar);
+        }
+
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
-                                  string outputDir, string outputBinDir, string nativeDllDir)
+                                  string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath)
         {
             var sb = new StringBuilder();
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
@@ -765,27 +780,26 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("set(CMAKE_CXX_STANDARD_REQUIRED ON)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
-            sb.AppendLine($"include_directories(\"{nativeDllDir.Replace("\\", "/")}\")");
+            sb.AppendLine($"include_directories(\"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}\")");
             sb.AppendLine();
             sb.AppendLine("# No explicit task system defined; tasksys.cpp will pick the best one for the platform");
 
-            string tasksysPath = Path.Combine(nativeDllDir, "tasksys.cpp").Replace("\\", "/");
-            sb.AppendLine($"if(EXISTS \"{tasksysPath}\")");
-            sb.AppendLine($"    set(TASKSYS_SRC \"{tasksysPath}\")");
+            sb.AppendLine($"if(EXISTS \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
+            sb.AppendLine($"    set(TASKSYS_SRC \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("else()");
             sb.AppendLine("    set(TASKSYS_SRC \"\")");
-            sb.AppendLine("    message(WARNING \"tasksys.cpp not found at " + tasksysPath + "\")");
+            sb.AppendLine($"    message(WARNING \"tasksys.cpp not found at ${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
             // NativeDll 核心源文件（固定路径，始终存在）
             sb.AppendLine("add_library(NativeDll SHARED");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Exports.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobProfiler.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobSystem.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Native.cpp").Replace("\\", "/")}\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
 
-            // 所有 generated .cpp 各自独立编译（按文件名排序）
+            // 所有生成的 .cpp 各自独立编译（按文件名排序）
             foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
@@ -799,9 +813,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("endif()");
                 sb.AppendLine();
 
-                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc)");
+                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc REQUIRED)");
                 sb.AppendLine("if(NOT ISPC_EXECUTABLE)");
-                sb.AppendLine("    set(ISPC_EXECUTABLE \"E:/Code/ispc-v1.30.0-windows/bin/ispc.exe\")");
+                sb.AppendLine("    message(FATAL_ERROR \"ispc.exe not found. Install Intel ISPC and add it to PATH.\")");
                 sb.AppendLine("endif()");
                 sb.AppendLine();
                 sb.AppendLine("set(ISPC_OBJECTS");
@@ -834,13 +848,12 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             }
 
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /arch:AVX2 /Qpar /MP)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             foreach (var file in fastMathCppFiles.OrderBy(x => x))
             {
                 sb.AppendLine($"    set_source_files_properties({file} PROPERTIES COMPILE_FLAGS \"/fp:fast\")");
             }
-            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");

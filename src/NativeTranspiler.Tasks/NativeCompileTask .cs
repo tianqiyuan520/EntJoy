@@ -76,19 +76,13 @@ namespace NativeTranspiler.Tasks
             }
             else
             {
+                // 清理旧的 build 目录（无论 cache 是否存在），避免路径缓存冲突
                 if (Directory.Exists(buildDir))
                 {
-                    if (!cmakeCacheExists)
-                    {
-                        Log.LogMessage(MessageImportance.High, "CMake cache missing, cleaning build directory...");
-                        Directory.Delete(buildDir, true);
-                        Directory.CreateDirectory(buildDir);
-                    }
+                    Log.LogMessage(MessageImportance.High, "Cleaning build directory for fresh configure...");
+                    Directory.Delete(buildDir, true);
                 }
-                else
-                {
-                    Directory.CreateDirectory(buildDir);
-                }
+                Directory.CreateDirectory(buildDir);
 
                 // ---- CMake 配置 ----
                 var configureArgs = new List<string>
@@ -106,7 +100,7 @@ namespace NativeTranspiler.Tasks
             }
 
             // ---- CMake 构建 ----
-            var buildArgs = new[] { "--build", buildDir, "--config", "Release" };
+            var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel" };
             Log.LogMessage(MessageImportance.High, $"Running CMake build: cmake {string.Join(" ", buildArgs)}");
             var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
             if (buildResult.ExitCode != 0)
