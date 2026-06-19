@@ -65,12 +65,25 @@ public struct JobHandle
 
     internal Task GetTask()
     {
-        // 对于原生句柄包装返回已完成任务（用户应使用 Complete）
         if (_nativeHandle.IsValid)
-            return Task.CompletedTask;
+        {
+            var handle = this;
+            return Task.Run(() => handle.Complete());
+        }
         if (_task != null) return _task;
         if (_tasks != null) return Task.WhenAll(_tasks);
         return Task.CompletedTask;
+    }
+
+    internal NativeJobHandle? GetNativeDependencyOrCompleteManaged()
+    {
+        if (_nativeHandle.IsValid)
+            return _nativeHandle;
+
+        if (!IsCompleted)
+            Complete();
+
+        return null;
     }
 
     /// <summary>合并多个依赖句柄</summary>
@@ -92,7 +105,24 @@ public struct JobHandle
 
         if (hasNative)
         {
-            // 提取所有原生句柄
+            bool hasManagedTask = false;
+            for (int i = 0; i < handles.Length; i++)
+            {
+                if (!handles[i]._nativeHandle.IsValid && !handles[i].IsCompleted)
+                {
+                    hasManagedTask = true;
+                    break;
+                }
+            }
+
+            if (hasManagedTask)
+            {
+                var tasks = new Task[handles.Length];
+                for (int i = 0; i < handles.Length; i++)
+                    tasks[i] = handles[i].GetTask();
+                return new JobHandle(Task.WhenAll(tasks));
+            }
+
             var nativeHandles = new NativeJobHandle[handles.Length];
             for (int i = 0; i < handles.Length; i++)
                 nativeHandles[i] = handles[i]._nativeHandle;
@@ -129,6 +159,14 @@ public struct JobHandle
                 combineNode.Decrement();
         }
         return new JobHandle(combineNode.Task);
+    }
+
+    /// <summary>
+    /// 显式发布已延迟调度的原生 Job，语义接近 Unity JobHandle.ScheduleBatchedJobs。
+    /// </summary>
+    public static void ScheduleBatchedJobs()
+    {
+        NativeJobScheduler.FlushScheduledJobs();
     }
 
     private class CombineNode

@@ -203,25 +203,35 @@ namespace NativeTranspiler.Analyzer
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
 
-                        var ispcSource = IspcGenerator.GenerateIspcSource(job, ctx.Compilation, userStructs);
-                        var cppWrapper = IspcGenerator.GenerateCppWrapper(job, ctx.Compilation);
-
-                        string ispcSrcPath = Path.Combine(outputDir, $"{ispcBase}.ispc");
-                        string wrapperCppPath = Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp");
-
                         bool disabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
-                        bool fileExists = File.Exists(ispcSrcPath) || File.Exists(wrapperCppPath);
+                        bool useIspcMt = HasUseISPC_MT(job, attrSymbol);
+                        bool mtProvidesScheduledAdapter = useIspcMt && CppJobGenerator.IsChunkScheduledJob(job);
 
-                        if (!disabledAutoRefresh || !fileExists)
+                        if (!mtProvidesScheduledAdapter)
                         {
-                            WriteAllTextWithRetry(ispcSrcPath, ispcSource);
-                            WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                            var ispcSource = IspcGenerator.GenerateIspcSource(job, ctx.Compilation, userStructs);
+                            var cppWrapper = IspcGenerator.GenerateCppWrapper(job, ctx.Compilation);
+
+                            string ispcSrcPath = Path.Combine(outputDir, $"{ispcBase}.ispc");
+                            string wrapperCppPath = Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp");
+                            bool fileExists = File.Exists(ispcSrcPath) || File.Exists(wrapperCppPath);
+
+                            if (!disabledAutoRefresh || !fileExists)
+                            {
+                                WriteAllTextWithRetry(ispcSrcPath, ispcSource);
+                                WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                            }
+
+                            ispcFiles.Add(($"{ispcBase}.ispc", mathLib));
+                            cppFiles.Add($"{ispcBase}_wrapper.cpp");
+                        }
+                        else
+                        {
+                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
+                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
                         }
 
-                        ispcFiles.Add(($"{ispcBase}.ispc", mathLib));
-                        cppFiles.Add($"{ispcBase}_wrapper.cpp");
-
-                        if (HasUseISPC_MT(job, attrSymbol))
+                        if (useIspcMt)
                         {
                             var mtIspcSource = IspcGenerator.GenerateIspcMTSource(job, ctx.Compilation, userStructs);
                             var mtCppWrapper = IspcGenerator.GenerateCppWrapperMT(job, ctx.Compilation);
@@ -266,7 +276,7 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
-                                                             CppJobGenerator.IsChunkJob(job);
+                                                             CppJobGenerator.IsChunkScheduledJob(job);
                     if (!adapterProvidedByIspcChunkWrapper)
                     {
                         // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
@@ -283,41 +293,93 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
-                // 生成 run_ispc.bat
+                // 生成 run_ispc.bat：增量检测 + 并行编译
                 if (ispcFiles.Count > 0)
                 {
                     var batPath = Path.Combine(outputDir, "run_ispc.bat");
                     var batContent = new StringBuilder();
                     batContent.AppendLine("@echo off");
-                    batContent.AppendLine("set ISPC=E:/Code/ispc-v1.30.0-windows/bin/ispc.exe");
-                    batContent.AppendLine("if not exist \"%ISPC%\" (");
-                    batContent.AppendLine("    echo ISPC not found at %ISPC%");
-                    batContent.AppendLine("    exit /b 1");
-                    batContent.AppendLine(")");
                     batContent.AppendLine("cd /d \"%~dp0\"");
                     batContent.AppendLine("if not exist build mkdir build");
+                    batContent.AppendLine("setlocal enabledelayedexpansion");
+                    batContent.AppendLine("set ISPC=E:/Code/ispc-v1.30.0-windows/bin/ispc.exe");
+                    batContent.AppendLine("where ispc.exe >nul 2>nul");
+                    batContent.AppendLine("if not errorlevel 1 set ISPC=ispc.exe");
+                    batContent.AppendLine("if not exist \"%ISPC%\" (");
+                    batContent.AppendLine("    echo ISPC not found. Put ispc.exe in PATH or at E:/Code/ispc-v1.30.0-windows/bin/ispc.exe");
+                    batContent.AppendLine("    exit /b 1");
+                    batContent.AppendLine(")");
+                    batContent.AppendLine("set MAXCONCURRENT=%NUMBER_OF_PROCESSORS%");
+                    batContent.AppendLine("if \"%MAXCONCURRENT%\"==\"\" set MAXCONCURRENT=8");
+                    batContent.AppendLine("set FAILED=0");
+                    batContent.AppendLine();
+
+                    // 为每个 ispc 文件生成并行编译块
                     foreach (var (ispc, mathLib) in ispcFiles)
                     {
                         string baseName = Path.GetFileNameWithoutExtension(ispc);
                         string mathLibStr = mathLib.ToString().ToLowerInvariant();
-                        batContent.AppendLine($"echo Compiling {ispc}...");
-                        batContent.AppendLine($"\"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma");
-                        batContent.AppendLine("if errorlevel 1 (");
-                        batContent.AppendLine($"    echo Failed to compile {ispc}");
-                        batContent.AppendLine("    exit /b 1");
+
+                        // 增量检测
+                        // 等待有空闲槽位
+                        batContent.AppendLine($":wait_{baseName}");
+                        batContent.AppendLine("set RUNNING=0");
+                        batContent.AppendLine("for /f %%p in ('tasklist /fi \"imagename eq ispc.exe\" 2^>nul ^| find /c \"ispc.exe\"') do set RUNNING=%%p");
+                        batContent.AppendLine("if !RUNNING! GEQ !MAXCONCURRENT! (");
+                        batContent.AppendLine("    >nul timeout /t 1 /nobreak");
+                        batContent.AppendLine($"    goto :wait_{baseName}");
                         batContent.AppendLine(")");
+                        batContent.AppendLine();
+
+                        // 并行编译：后台启动 ispc，输出重定向到日志
+                        batContent.AppendLine($"echo Compiling {ispc}... ({mathLibStr})");
+                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma > \"build\\{baseName}.log\" 2>&1");
+                        batContent.AppendLine();
+                        batContent.AppendLine($":skip_{baseName}");
+                        batContent.AppendLine();
                     }
+
+                    // 等待所有 ISPC 编译完成
+                    batContent.AppendLine(":wait_all");
+                    batContent.AppendLine("set RUNNING=0");
+                    batContent.AppendLine("for /f %%p in ('tasklist /fi \"imagename eq ispc.exe\" 2^>nul ^| find /c \"ispc.exe\"') do set RUNNING=%%p");
+                    batContent.AppendLine("if !RUNNING! GTR 0 (");
+                    batContent.AppendLine("    >nul timeout /t 1 /nobreak");
+                    batContent.AppendLine("    goto :wait_all");
+                    batContent.AppendLine(")");
+                    batContent.AppendLine();
+
+                    // 检查所有文件是否编译成功（检查 .obj 存在且非空）
+                    foreach (var (ispc, mathLib) in ispcFiles)
+                    {
+                        string baseName = Path.GetFileNameWithoutExtension(ispc);
+                        batContent.AppendLine($"if not exist \"build\\{baseName}.obj\" set FAILED=1");
+                        batContent.AppendLine($"if exist \"build\\{baseName}.obj\" if %%~z\"build\\{baseName}.obj\"==0 set FAILED=1");
+                    }
+                    batContent.AppendLine();
+
+                    batContent.AppendLine("if \"%FAILED%\"==\"1\" (");
+                    batContent.AppendLine("    echo One or more ISPC files failed to compile. Check .log files for details.");
+                    batContent.AppendLine("    exit /b 1");
+                    batContent.AppendLine(")");
                     batContent.AppendLine("echo All ISPC files compiled successfully.");
                     WriteAllTextWithRetry(batPath, batContent.ToString());
                 }
 
+                // 只在内容变化时写入 CMakeLists.txt，避免触发 CMake reconfigure
                 if (cppFiles.Count > 0 || ispcFiles.Count > 0)
                 {
-                    string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+            string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
                     string nativeDllDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "NativeDll"));
-                    var ispcFileNames = ispcFiles.Select(x => x.fileName).ToList();
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFileNames, fastMathCppFiles, outputDir, solutionBinDir, nativeDllDir);
-                    WriteAllTextWithRetry(Path.Combine(outputDir, "CMakeLists.txt"), cmakeContent);
+                    var relativeNativeDllDir = GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
+                    bool hasFastMath = fastMathCppFiles.Count > 0;
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
+                    string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
+                    // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
+                    if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
+                    {
+                        WriteAllTextWithRetry(cmakePath, cmakeContent);
+                    }
                 }
 
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
@@ -351,7 +413,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk") == true)
+                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk" || i.Name == "IJobEntity") == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -463,6 +525,24 @@ namespace NativeTranspiler.Analyzer
 
         private static void WriteAllTextWithRetry(string path, string contents, int maxRetries = 5)
         {
+            // 内容级增量写入：只有内容变化时才写文件，避免因时间戳更新触发编译
+            if (File.Exists(path))
+            {
+                try
+                {
+                    string existing = File.ReadAllText(path);
+                    if (existing == contents)
+                        return;
+                }
+                catch { }
+            }
+            else
+            {
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+            }
+
             int retryCount = 0;
             while (true)
             {
@@ -676,8 +756,21 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
 ";
         }
 
-        private static string GenerateCMakeLists(List<string> cppFiles, List<string> ispcFiles, HashSet<string> fastMathCppFiles,
-                                  string outputDir, string outputBinDir, string nativeDllDir)
+        /// <summary>计算相对路径（兼容 netstandard2.0，不支持 Path.GetRelativePath）</summary>
+        private static string GetRelativePath(string basePath, string targetPath)
+        {
+            if (!basePath.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                basePath += Path.DirectorySeparatorChar;
+
+            var baseUri = new Uri(basePath);
+            var targetUri = new Uri(targetPath);
+            var relativeUri = baseUri.MakeRelativeUri(targetUri);
+            var relativePath = Uri.UnescapeDataString(relativeUri.ToString());
+            return relativePath.Replace('/', Path.DirectorySeparatorChar);
+        }
+
+        private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
+                                  string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath)
         {
             var sb = new StringBuilder();
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
@@ -687,28 +780,28 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("set(CMAKE_CXX_STANDARD_REQUIRED ON)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
-            sb.AppendLine($"include_directories(\"{nativeDllDir.Replace("\\", "/")}\")");
+            sb.AppendLine($"include_directories(\"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}\")");
             sb.AppendLine();
             sb.AppendLine("# No explicit task system defined; tasksys.cpp will pick the best one for the platform");
 
-            string tasksysPath = Path.Combine(nativeDllDir, "tasksys.cpp").Replace("\\", "/");
-            sb.AppendLine($"if(EXISTS \"{tasksysPath}\")");
-            sb.AppendLine($"    set(TASKSYS_SRC \"{tasksysPath}\")");
+            sb.AppendLine($"if(EXISTS \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
+            sb.AppendLine($"    set(TASKSYS_SRC \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("else()");
             sb.AppendLine("    set(TASKSYS_SRC \"\")");
-            sb.AppendLine("    message(WARNING \"tasksys.cpp not found at " + tasksysPath + "\")");
+            sb.AppendLine($"    message(WARNING \"tasksys.cpp not found at ${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
+            // NativeDll 核心源文件（固定路径，始终存在）
             sb.AppendLine("add_library(NativeDll SHARED");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Exports.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobProfiler.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "JobSystem.cpp").Replace("\\", "/")}\"");
-            sb.AppendLine($"    \"{Path.Combine(nativeDllDir, "Native.cpp").Replace("\\", "/")}\"");
-            foreach (var file in cppFiles)
-            {
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
+
+            // 所有生成的 .cpp 各自独立编译（按文件名排序）
+            foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
-            }
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
             sb.AppendLine();
@@ -720,55 +813,65 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("endif()");
                 sb.AppendLine();
 
-                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc)");
+                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc REQUIRED)");
                 sb.AppendLine("if(NOT ISPC_EXECUTABLE)");
-                sb.AppendLine("    set(ISPC_EXECUTABLE \"E:/Code/ispc-v1.30.0-windows/bin/ispc.exe\")");
+                sb.AppendLine("    message(FATAL_ERROR \"ispc.exe not found. Install Intel ISPC and add it to PATH.\")");
                 sb.AppendLine("endif()");
                 sb.AppendLine();
-                sb.AppendLine("add_custom_command(TARGET NativeDll PRE_BUILD");
-                sb.AppendLine("    COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/run_ispc.bat\"");
-                sb.AppendLine("    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
-                sb.AppendLine("    COMMENT \"Running ISPC compiler for generated .ispc files\"");
-                sb.AppendLine(")");
-                sb.AppendLine();
                 sb.AppendLine("set(ISPC_OBJECTS");
-                foreach (var ispc in ispcFiles)
+                foreach (var (ispc, _) in ispcFiles)
                 {
                     string baseName = Path.GetFileNameWithoutExtension(ispc);
                     sb.AppendLine($"    \"${{CMAKE_CURRENT_BINARY_DIR}}/{baseName}.obj\"");
                 }
                 sb.AppendLine(")");
-                sb.AppendLine("target_link_libraries(NativeDll PRIVATE ${ISPC_OBJECTS})");
+                sb.AppendLine();
+                foreach (var (ispc, mathLib) in ispcFiles)
+                {
+                    string baseName = Path.GetFileNameWithoutExtension(ispc);
+                    string sourcePath = "${CMAKE_CURRENT_SOURCE_DIR}/" + ispc.Replace("\\", "/");
+                    string objectPath = "${CMAKE_CURRENT_BINARY_DIR}/" + baseName + ".obj";
+                    string headerPath = "${CMAKE_CURRENT_SOURCE_DIR}/" + baseName + "_ispc.h";
+                    string mathLibStr = mathLib.ToString().ToLowerInvariant();
+                    sb.AppendLine("add_custom_command(");
+                    sb.AppendLine($"    OUTPUT \"{objectPath}\" \"{headerPath}\"");
+                    sb.AppendLine($"    COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma");
+                    sb.AppendLine($"    DEPENDS \"{sourcePath}\"");
+                    sb.AppendLine("    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
+                    sb.AppendLine($"    COMMENT \"Compiling ISPC {ispc}\"");
+                    sb.AppendLine("    VERBATIM");
+                    sb.AppendLine(")");
+                }
+                sb.AppendLine("set_source_files_properties(${ISPC_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)");
+                sb.AppendLine("target_sources(NativeDll PRIVATE ${ISPC_OBJECTS})");
                 sb.AppendLine();
             }
 
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /GL /arch:AVX2 /Qpar)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /arch:AVX2 /Qpar /MP)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             foreach (var file in fastMathCppFiles.OrderBy(x => x))
             {
                 sb.AppendLine($"    set_source_files_properties({file} PROPERTIES COMPILE_FLAGS \"/fp:fast\")");
             }
-            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            var binPath = outputBinDir.Replace("\\", "/");
             sb.AppendLine($"set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"{binPath}\"");
-            sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"{binPath}\"");
-            sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"{binPath}\"");
+            sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
+            sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
+            sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
             sb.AppendLine(")");
             sb.AppendLine();
             sb.AppendLine($"foreach(OUTPUTCONFIG ${{CMAKE_CONFIGURATION_TYPES}})");
             sb.AppendLine($"    string(TOUPPER ${{OUTPUTCONFIG}} OUTPUTCONFIG)");
             sb.AppendLine($"    set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
-            sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
-            sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"{binPath}\"");
+            sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
+            sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
+            sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
             sb.AppendLine($"    )");
             sb.AppendLine($"endforeach()");
             sb.AppendLine();

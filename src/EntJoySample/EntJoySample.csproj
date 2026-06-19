@@ -20,16 +20,25 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" />
+		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
 		<ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<!-- ★ 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
-		<ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" />
+		<ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
 	</ItemGroup>
 
 	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检查
 	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编译 -->
 	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
+
+	<Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
+	        Inputs="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeCompileTask .cs;$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
+	        Outputs="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll">
+		<MSBuild
+			Projects="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
+			Targets="Build"
+			Properties="Configuration=$(Configuration)" />
+	</Target>
 
 	<Target Name="CleanStaleNativeTranspilerBindings" BeforeTargets="CoreCompile">
 		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler" ContinueOnError="true" />
@@ -38,8 +47,7 @@
 		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
 	</Target>
 
-	<Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
-		<Delete Files="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\native_compile.hash" ContinueOnError="true" />
+  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
 		<Message Importance="high" Text="Starting native compilation for generated C++ code..." />
 		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
 	</Target>

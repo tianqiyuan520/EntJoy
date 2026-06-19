@@ -170,18 +170,7 @@ internal static class JobScheduler
                     counter?.RecordCurrentThread();
 
                     int ulongCount = (chunk.EntityCount + 63) / 64;
-                    const int maxStackAlloc = 256;
-                    ulong* combinedMask;
-
-                    if (ulongCount <= maxStackAlloc)
-                    {
-                        var u = stackalloc ulong[ulongCount];
-                        combinedMask = u;
-                    }
-                    else
-                    {
-                        combinedMask = TempBuffer.GetBuffer(ulongCount);
-                    }
+                    ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
 
                     int firstIdx = enabledIndices[0];
                     ulong* firstMask = chunk.GetEnableBitMapPointer(firstIdx);
