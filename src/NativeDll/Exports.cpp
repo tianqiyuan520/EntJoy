@@ -1,6 +1,7 @@
 ﻿#include "Exports.h"
 #include "JobSystem.h"
 #include "ChunkJobData.h"
+#include "EntityBatchData.h"
 #include "JobProfiler.h"
 
 static JobSystem::HandleState* fromHandle(void* ptr)
@@ -33,6 +34,11 @@ extern "C"
     void JobSystem_PrewakeWorkers()
     {
         JobSystem::Scheduler::PrewakeWorkers();
+    }
+
+    void JobSystem_FlushScheduledJobs()
+    {
+        JobSystem::Scheduler::FlushScheduledJobs();
     }
 
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
@@ -91,6 +97,12 @@ extern "C"
         } // 析构时 Release(state)
     }
 
+    void JobSystem_RetainHandle(void* handle)
+    {
+        if (handle)
+            JobSystem::JobHandle::Acquire(fromHandle(handle));
+    }
+
     int JobSystem_IsCompleted(void* handle)
     {
         if (!handle) return 1;
@@ -127,8 +139,129 @@ extern "C"
         JobSystem::JobHandle dep;
         if (dependency)
             dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep);
+        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, JobSystem::ChunkScheduleMode::PublishAssist, 0, 0);
         return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleChunkJobEx(
+        ChunkJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleChunkRangeJobEx(
+        ChunkRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleEntityBatchJobEx(
+        EntityBatchRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const EntityBatchData* batches,
+        int batchCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
+        return toHandle(handle);
+    }
+
+    void JobSystem_GetStats(JobSystemStatsNative* stats)
+    {
+        if (!stats) return;
+        JobSystem::JobSystemStatsSnapshot snapshot{};
+        JobSystem::GetStatsSnapshot(&snapshot);
+        stats->completeWaitLoops = snapshot.completeWaitLoops;
+        stats->assistAttempts = snapshot.assistAttempts;
+        stats->assistExecuted = snapshot.assistExecuted;
+        stats->frameTasksSubmitted = snapshot.frameTasksSubmitted;
+        stats->frameTasksCompleted = snapshot.frameTasksCompleted;
+        stats->workerExecutedRanges = snapshot.workerExecutedRanges;
+        stats->mainExecutedRanges = snapshot.mainExecutedRanges;
+        stats->stealCount = snapshot.stealCount;
+        stats->parkWakeCount = snapshot.parkWakeCount;
+        stats->deferredRuns = snapshot.deferredRuns;
+        stats->publishedJobs = snapshot.publishedJobs;
+        stats->prewakeCount = snapshot.prewakeCount;
+        stats->hotSpinHits = snapshot.hotSpinHits;
+        stats->waitFallbacks = snapshot.waitFallbacks;
+        stats->notifiedWorkers = snapshot.notifiedWorkers;
+        stats->scheduleModePublishNoAssist = snapshot.scheduleModePublishNoAssist;
+        stats->scheduleModePublishAssist = snapshot.scheduleModePublishAssist;
+        stats->scheduleModeDeferTinyOnly = snapshot.scheduleModeDeferTinyOnly;
+        stats->scheduleModeImmediateNative = snapshot.scheduleModeImmediateNative;
+        stats->scheduleModeDeferredPublish = snapshot.scheduleModeDeferredPublish;
+        stats->scheduleModeDeferredPublishNoAssist = snapshot.scheduleModeDeferredPublishNoAssist;
+        stats->frameQueueDepthPeak = snapshot.frameQueueDepthPeak;
+    }
+
+    void JobSystem_ResetStats()
+    {
+        JobSystem::ResetStatsSnapshot();
     }
 
     // ======================== Profiler API ========================

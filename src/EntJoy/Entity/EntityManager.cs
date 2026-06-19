@@ -32,6 +32,8 @@ namespace EntJoy
         public int StructuralVersion => structuralVersion;
 
         private bool _disposed;
+        private readonly object _activeJobLock = new();
+        private readonly List<JobHandle> _activeJobs = new();
 
 
         public EntityManager()
@@ -81,6 +83,7 @@ namespace EntJoy
                 return;
             }
 
+            CompleteActiveJobs();
             _disposed = true;
 
             for (int i = 0; i < archetypeCount; i++)
@@ -96,6 +99,48 @@ namespace EntJoy
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
             entityCount = 0;
+        }
+
+        internal void RegisterActiveJob(NativeJobHandle nativeHandle)
+        {
+            if (!nativeHandle.IsValid) return;
+            lock (_activeJobLock)
+            {
+                PruneCompletedJobsNoLock();
+                _activeJobs.Add(new JobHandle(nativeHandle));
+            }
+        }
+
+        internal void CompleteActiveJobs()
+        {
+            if (global::NativeJobScheduler.IsExecutingJob)
+            {
+                throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing. Complete the job before modifying entities or components.");
+            }
+
+            JobHandle[] jobs;
+            lock (_activeJobLock)
+            {
+                if (_activeJobs.Count == 0) return;
+                jobs = _activeJobs.ToArray();
+                _activeJobs.Clear();
+            }
+
+            for (int i = 0; i < jobs.Length; i++)
+            {
+                jobs[i].Complete();
+            }
+        }
+
+        private void PruneCompletedJobsNoLock()
+        {
+            for (int i = _activeJobs.Count - 1; i >= 0; i--)
+            {
+                if (_activeJobs[i].IsCompleted)
+                {
+                    _activeJobs.RemoveAt(i);
+                }
+            }
         }
 
     }
@@ -156,6 +201,7 @@ namespace EntJoy
         /// </summary>
         public unsafe Entity NewEntity(Span<ComponentType> types)  // 创建实体核心方法
         {
+            CompleteActiveJobs();
             var newEntity = new Entity();  // 创建新实体
             bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);  // 尝试从回收队列获取
 
@@ -187,6 +233,7 @@ namespace EntJoy
 
         public void DestroyEntity(Entity entity)
         {
+            CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             var archetype = entityInfoRef.Archetype;
             if (archetype == null)
@@ -445,6 +492,7 @@ namespace EntJoy
         /// </summary>
         public void AddComponent<T0>(Entity entity, T0 t0) where T0 : struct
         {
+            CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             var oldArch = entityInfoRef.Archetype;
             if (oldArch.Has(typeof(T0)))
@@ -488,6 +536,7 @@ namespace EntJoy
 
         public void RemoveComponent<T0>(Entity entity) where T0 : struct
         {
+            CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             var oldArch = entityInfoRef.Archetype;
             //若旧原型中无该类型，则直接返回
@@ -534,6 +583,7 @@ namespace EntJoy
         /// </summary>
         public void Set<T>(Entity entity, T t) where T : struct, IComponentData
         {
+            CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             var arch = entityInfoRef.Archetype;  // 获取对应的原型
             arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
@@ -554,6 +604,7 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetComponentEnabled<T>(Entity entity, bool enabled) where T : struct, IEnableableComponent
         {
+            CompleteActiveJobs();
             ref var info = ref GetEntityInfoRef(entity.Id);
             var archetype = info.Archetype;
 

@@ -1,7 +1,6 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
 
 /// <summary>
 /// 表示一个由 C++ JobSystem 调度的原生作业句柄。
@@ -10,12 +9,32 @@ using System.Threading;
 /// </summary>
 public struct NativeJobHandle : IEquatable<NativeJobHandle>
 {
-    public IntPtr Handle;
+    private NativeJobHandleBox _box;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public NativeJobHandle(IntPtr handle) => Handle = handle;
+    public NativeJobHandle(IntPtr handle) => _box = handle == IntPtr.Zero ? null : new NativeJobHandleBox(handle);
+
+    public readonly IntPtr Handle => _box?.Handle ?? IntPtr.Zero;
 
     public readonly bool IsValid => Handle != IntPtr.Zero;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly IntPtr Detach()
+    {
+        return _box?.Detach() ?? IntPtr.Zero;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly void Clear()
+    {
+        _box?.Clear();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly IntPtr RetainForUse()
+    {
+        return _box?.RetainForUse() ?? IntPtr.Zero;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool Equals(NativeJobHandle other) => Handle == other.Handle;
@@ -27,4 +46,59 @@ public struct NativeJobHandle : IEquatable<NativeJobHandle>
     public static bool operator ==(NativeJobHandle left, NativeJobHandle right) => left.Handle == right.Handle;
 
     public static bool operator !=(NativeJobHandle left, NativeJobHandle right) => left.Handle != right.Handle;
+}
+
+internal sealed class NativeJobHandleBox
+{
+    private readonly object _gate = new();
+    private IntPtr _handle;
+
+    public NativeJobHandleBox(IntPtr handle)
+    {
+        _handle = handle;
+    }
+
+    public IntPtr Handle
+    {
+        get
+        {
+            lock (_gate)
+                return _handle;
+        }
+    }
+
+    public IntPtr RetainForUse()
+    {
+        lock (_gate)
+        {
+            if (_handle != IntPtr.Zero)
+                NativeJobScheduler.RetainRawHandleForUse(_handle);
+            return _handle;
+        }
+    }
+
+    public IntPtr Detach()
+    {
+        lock (_gate)
+        {
+            IntPtr handle = _handle;
+            _handle = IntPtr.Zero;
+            return handle;
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_gate)
+            _handle = IntPtr.Zero;
+    }
+
+    ~NativeJobHandleBox()
+    {
+        IntPtr handle = Detach();
+        if (handle != IntPtr.Zero)
+        {
+            NativeJobScheduler.ReleaseRawHandleForFinalizer(handle);
+        }
+    }
 }
