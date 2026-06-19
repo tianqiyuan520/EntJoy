@@ -47,11 +47,7 @@
 		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
 	</Target>
 
-  <Target Name="ForceCppRebuildCheck" BeforeTargets="CompileCppWithCustomTask">
-    <Delete Files="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\native_compile.hash" ContinueOnError="true" />
-  </Target>
-
-  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks;ForceCppRebuildCheck" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
+  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
 		<Message Importance="high" Text="Starting native compilation for generated C++ code..." />
 		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
 	</Target>
