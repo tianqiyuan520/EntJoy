@@ -2498,6 +2498,15 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
+    /// <summary>
+    /// 抛出所有已记录的 Job 异常。
+    /// 公有接口，可在帧末通过 TempAllocator.Reset() 或自定义检查点调用。
+    /// </summary>
+    public static void FlushRecordedExceptions()
+    {
+        ThrowRecordedJobExceptions();
+    }
+
     private static void ThrowRecordedJobExceptions()
     {
         int count = Interlocked.Exchange(ref _recordedJobExceptionCount, 0);
