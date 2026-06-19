@@ -46,47 +46,61 @@ namespace NativeTranspiler.Tasks
                 return true;
             }
 
-            // ---- 基于内容哈希的增量检测（取代原来的时间戳比对） ----
+            // ---- 基于内容哈希的增量检测 ----
             var dependencies = CollectDependencies(NativeCodeGenDir);
-            var hashFile = Path.Combine(NativeCodeGenDir, "build", "native_compile.hash");
-            if (IsUpToDateByHash(dependencies, hashFile))
+            // 将 hash 文件存在项目根目录下，避免被 CMake 清理 build 目录时删除
+            var hashFile = Path.Combine(NativeCodeGenDir, "native_compile.hash");
+            var buildDir = Path.Combine(NativeCodeGenDir, "build");
+            var expectedNativeDll = Path.Combine(buildDir, "Release", "NativeDll.dll");
+            if (IsUpToDateByHash(dependencies, hashFile) && File.Exists(expectedNativeDll))
             {
                 Log.LogMessage(MessageImportance.High, "Native code is up-to-date (content hashes unchanged). Skipping CMake build.");
                 return true;
             }
-
-            var buildDir = Path.Combine(NativeCodeGenDir, "build");
-            if (Directory.Exists(buildDir))
+            if (!File.Exists(expectedNativeDll))
             {
-                var cacheFile = Path.Combine(buildDir, "CMakeCache.txt");
-                if (!File.Exists(cacheFile))
-                {
-                    Log.LogMessage(MessageImportance.High, "CMake cache missing, cleaning build directory...");
-                    Directory.Delete(buildDir, true);
-                    Directory.CreateDirectory(buildDir);
-                }
+                Log.LogMessage(MessageImportance.High, "Native output missing. CMake build required.");
+            }
+
+            // 分离 CMakeLists.txt 和其他依赖的检测：
+            // 如果只有 .cpp/.h/.ispc 改了，但 CMakeLists.txt 没变且 CMakeCache.txt 存在，则跳过 configure
+            var cmakeListsHash = ComputeFileHash(cmakeListsPath);
+            var savedCmakeListsHash = GetSavedFileHash(hashFile, cmakeListsPath);
+            bool cmakeListsUnchanged = (savedCmakeListsHash != null && savedCmakeListsHash == cmakeListsHash);
+
+            bool cmakeCacheExists = File.Exists(Path.Combine(buildDir, "CMakeCache.txt"));
+
+            if (cmakeCacheExists && cmakeListsUnchanged)
+            {
+                Log.LogMessage(MessageImportance.High, "CMakeLists.txt unchanged, cache valid. Skipping configure, running build only.");
             }
             else
             {
+                // 清理旧的 build 目录（无论 cache 是否存在），避免路径缓存冲突
+                if (Directory.Exists(buildDir))
+                {
+                    Log.LogMessage(MessageImportance.High, "Cleaning build directory for fresh configure...");
+                    Directory.Delete(buildDir, true);
+                }
                 Directory.CreateDirectory(buildDir);
-            }
 
-            // ---- CMake 配置 ----
-            var configureArgs = new List<string>
-            {
-                "-S", NativeCodeGenDir,
-                "-B", buildDir
-            };
-            Log.LogMessage(MessageImportance.High, $"Running CMake configure: cmake {string.Join(" ", configureArgs)}");
-            var configureResult = RunProcessWithTimeout("cmake", configureArgs.ToArray(), NativeCodeGenDir, 120000);
-            if (configureResult.ExitCode != 0)
-            {
-                Log.LogError($"CMake configuration failed.\nOutput: {configureResult.Output}\nError: {configureResult.Error}");
-                return false;
+                // ---- CMake 配置 ----
+                var configureArgs = new List<string>
+                {
+                    "-S", NativeCodeGenDir,
+                    "-B", buildDir
+                };
+                Log.LogMessage(MessageImportance.High, $"Running CMake configure: cmake {string.Join(" ", configureArgs)}");
+                var configureResult = RunProcessWithTimeout("cmake", configureArgs.ToArray(), NativeCodeGenDir, 120000);
+                if (configureResult.ExitCode != 0)
+                {
+                    Log.LogError($"CMake configuration failed.\nOutput: {configureResult.Output}\nError: {configureResult.Error}");
+                    return false;
+                }
             }
 
             // ---- CMake 构建 ----
-            var buildArgs = new[] { "--build", buildDir, "--config", "Release" };
+            var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel" };
             Log.LogMessage(MessageImportance.High, $"Running CMake build: cmake {string.Join(" ", buildArgs)}");
             var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
             if (buildResult.ExitCode != 0)
@@ -98,6 +112,21 @@ namespace NativeTranspiler.Tasks
             SaveHashManifest(dependencies, hashFile);
             Log.LogMessage(MessageImportance.High, "Native compilation succeeded.");
             return true;
+        }
+
+        /// <summary>从哈希清单中读取指定文件的已保存哈希</summary>
+        private static string GetSavedFileHash(string hashFile, string filePath)
+        {
+            if (!File.Exists(hashFile))
+                return null;
+
+            foreach (var line in File.ReadAllLines(hashFile))
+            {
+                var parts = line.Split(new char[] { ' ' }, 2);
+                if (parts.Length == 2 && string.Equals(parts[1], filePath, StringComparison.OrdinalIgnoreCase))
+                    return parts[0];
+            }
+            return null;
         }
 
         /// <summary>收集所有依赖文件的完整路径列表</summary>

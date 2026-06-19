@@ -12,6 +12,7 @@
 
 // Forward declarations
 struct ChunkJobData;
+struct EntityBatchData;
 struct ProfilerEntry;
 struct JobSystemTuningNative;
 struct JobSystemStatsNative;
@@ -24,10 +25,13 @@ extern "C" {
     typedef void (*ContextCleanupFunc)(void* context);
     // Chunk 任务回调：context 为 C# 传入的自定义数据，chunkData 为当前 Chunk 的描述块
     typedef void (*ChunkJobFunc)(void* context, const struct ChunkJobData* chunkData);
+    typedef void (*ChunkRangeJobFunc)(void* context, const struct ChunkJobData* chunks, int startIndex, int count);
+    typedef void (*EntityBatchRangeJobFunc)(void* context, const struct EntityBatchData* batches, int startIndex, int count);
 
     JOB_API void JobSystem_Initialize(int numThreads);
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
+    JOB_API void JobSystem_FlushScheduledJobs();
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
@@ -36,6 +40,7 @@ extern "C" {
 
     JOB_API void JobSystem_Complete(void* handle);
     JOB_API void JobSystem_CompleteAndRelease(void* handle);
+    JOB_API void JobSystem_RetainHandle(void* handle);
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
@@ -58,6 +63,22 @@ extern "C" {
         unsigned long long assistExecuted;
         unsigned long long frameTasksSubmitted;
         unsigned long long frameTasksCompleted;
+        unsigned long long workerExecutedRanges;
+        unsigned long long mainExecutedRanges;
+        unsigned long long stealCount;
+        unsigned long long parkWakeCount;
+        unsigned long long deferredRuns;
+        unsigned long long publishedJobs;
+        unsigned long long prewakeCount;
+        unsigned long long hotSpinHits;
+        unsigned long long waitFallbacks;
+        unsigned long long notifiedWorkers;
+        unsigned long long scheduleModePublishNoAssist;
+        unsigned long long scheduleModePublishAssist;
+        unsigned long long scheduleModeDeferTinyOnly;
+        unsigned long long scheduleModeImmediateNative;
+        unsigned long long scheduleModeDeferredPublish;
+        unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
     } JobSystemStatsNative;
 
@@ -81,6 +102,39 @@ extern "C" {
         const struct ChunkJobData* chunks,
         int chunkCount,
         void* dependency);
+
+    JOB_API void* JobSystem_ScheduleChunkJobEx(
+        ChunkJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const struct ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize);
+
+    JOB_API void* JobSystem_ScheduleChunkRangeJobEx(
+        ChunkRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const struct ChunkJobData* chunks,
+        int chunkCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize);
+
+    JOB_API void* JobSystem_ScheduleEntityBatchJobEx(
+        EntityBatchRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const struct EntityBatchData* batches,
+        int batchCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize);
 
     // ======================== Profiler API ========================
     // 启用/禁用 Profiler

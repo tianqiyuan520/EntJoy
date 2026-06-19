@@ -73,7 +73,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        protected void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
+        protected virtual void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
         {
             if (!skipOuterBraces)
             {

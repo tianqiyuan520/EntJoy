@@ -23,3 +23,7 @@ public interface IJobParallelForBatch
     [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
     void Execute(int startIndex, int count);
 }
+
+public interface IJobEntity
+{
+}
