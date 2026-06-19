@@ -784,8 +784,12 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    // IJobChunk: 解包字段指针，调用独立 Execute 函数
-                    var callArgs = new List<string> { "__chunkData", "__requiredComponentTypeIds" };
+                    // IJobChunk: 直接在 Adapter 内联 Execute 循环体，消除独立 Execute 函数调用，
+                    // 降低 IJobChunk 的函数调用+指针解包开销，使性能接近 IJobEntity。
+                    var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+                    var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+
+                    // 解包作业字段到局部变量
                     int currentOffset = 0;
                     foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
                     {
@@ -796,32 +800,61 @@ namespace NativeTranspiler.Analyzer
                             if (field.Type.Name == "NativeList")
                             {
                                 sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)(__jobContext + {offset});");
-                                callArgs.Add($"{field.Name}_listData");
                             }
                             else
                             {
                                 var cppElemType = GetCppElementType(field.Type);
                                 sb.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)(__jobContext + {offset});");
                                 sb.AppendLine($"    int {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
-                                callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
                             }
                         }
                         else if (field.Type is IPointerTypeSymbol)
                         {
                             var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                             sb.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)(__jobContext + {offset});");
-                            callArgs.Add($"{field.Name}_ptr");
                         }
                         else
                         {
                             var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                             sb.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)(__jobContext + {offset});");
-                            callArgs.Add($"{field.Name}_ptr");
                         }
                     }
 
-                    string chunkFuncName = GetCppJobFunctionName(jobStruct);
-                    sb.AppendLine($"    {chunkFuncName}({string.Join(", ", callArgs)});");
+                    // 将字段指针解引用为局部变量引用（原独立 Execute 函数中由 AppendLocalVariableDeclarations 完成）
+                    foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    {
+                        if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                        {
+                            if (field.Type.Name == "NativeList")
+                            {
+                                var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                                var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
+                                sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>& {field.Name} = *{field.Name}_listData;");
+                            }
+                            // NativeArray: nothing
+                        }
+                    }
+                    foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    {
+                        if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
+                        if (field.Type is IPointerTypeSymbol) continue;
+                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                        sb.AppendLine($"    const {cppType}& {field.Name} = *{field.Name}_ptr;");
+                    }
+
+                    // 内联 Execute 函数体（如同 IJobEntity 的做法）
+                    if (methodSyntax?.Body != null)
+                    {
+                        var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                        var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                        var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                        var bodyCode = translator.Translate(methodSyntax.Body);
+                        foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                        {
+                            if (line.Length == 0) continue;
+                            sb.Append("    ").AppendLine(line);
+                        }
+                    }
                 }
 
                 sb.AppendLine("}");

@@ -340,7 +340,7 @@ namespace JobSystem
             const ChunkJobData* chunks{ nullptr };
             const EntityBatchData* entityBatches{ nullptr };
             int chunkCount{ 0 };
-            int rangeSize{ 8 };
+            int rangeSize{ 1 };
             int rangeCount{ 0 };
             bool enableAssist{ false };
             ChunkScheduleMode mode{ ChunkScheduleMode::PublishAssist };
@@ -381,7 +381,7 @@ namespace JobSystem
             batch->chunks = nullptr;
             batch->entityBatches = nullptr;
             batch->chunkCount = 0;
-            batch->rangeSize = 8;
+            batch->rangeSize = 1;
             batch->rangeCount = 0;
             batch->enableAssist = false;
             batch->mode = ChunkScheduleMode::PublishAssist;
@@ -741,11 +741,6 @@ namespace JobSystem
             {
                 batch->handleState->pendingCallback.store(nullptr, std::memory_order_release);
                 batch->handleState->pendingContext.store(nullptr, std::memory_order_release);
-                if (batch->enableAssist)
-                {
-                    batch->handleState->assistContext.store(batch, std::memory_order_release);
-                    batch->handleState->assistCallback.store(&RunOneChunkRange, std::memory_order_release);
-                }
             }
             EnqueueChunkBatch(batch, workerCount);
             return true;
@@ -943,8 +938,6 @@ namespace JobSystem
         if (!_state) return;
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Unity-style deferred schedule: 如果 Schedule 后立刻 Complete，直接在当前线程执行 pending chunk batch，
-        // 避免唤醒 worker 和 condition_variable 往返。
         auto pendingCallback = _state->pendingCallback.load(std::memory_order_acquire);
         void* pendingContext = _state->pendingContext.load(std::memory_order_acquire);
         if (pendingCallback && pendingContext && pendingCallback(pendingContext))
@@ -952,66 +945,16 @@ namespace JobSystem
             return;
         }
 
-        // If this handle depends on another deferred job, completing this handle must
-        // publish the whole pending batch set. This mirrors Unity's Complete behavior:
-        // pending scheduled work is made runnable before the caller blocks.
         Scheduler::FlushScheduledJobs();
 
-        auto assistSome = [this](int burst) -> bool {
-            auto assistCallback = _state->assistCallback.load(std::memory_order_acquire);
-            void* assistContext = _state->assistContext.load(std::memory_order_acquire);
-            if (!assistCallback || !assistContext) return false;
-
-            bool assisted = false;
-            for (int i = 0; i < burst; ++i) {
-                if (_state->completed.load(std::memory_order_acquire)) return assisted;
-                g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
-                if (!assistCallback(assistContext)) break;
-                g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-                g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                assisted = true;
-            }
-            return assisted;
-        };
-
-        // 阶段 1: Complete 立即帮助执行少量 range，模拟 Unity 等待时主线程参与执行。
-        if (assistSome(kInitialAssistBurst) &&
-            _state->completed.load(std::memory_order_acquire))
-        {
-            return;
-        }
-
-        // 阶段 2: 有限自旋，并穿插 assist，覆盖 worker 已被预唤醒但尚未取到任务的窗口。
+        // 自旋等待 Worker 完成。非 Sleep 场景 Worker 热执行很快完成。
         for (int i = 0; i < kSpinBeforeWait; ++i) {
             if (_state->completed.load(std::memory_order_acquire)) return;
-            if ((i & 31) == 31 && assistSome(1) &&
-                _state->completed.load(std::memory_order_acquire))
-            {
-                return;
-            }
             RelaxCpu();
         }
 
-        // 阶段 3: 主线程协作执行；无可执行工作时再阻塞等待。
-        while (!_state->completed.load(std::memory_order_acquire)) {
-            if (assistSome(kAssistDrainBurst)) {
-                continue;
-            }
-
-            std::function<bool()> assistStep;
-            {
-                std::lock_guard<std::mutex> lock(_state->mtx);
-                assistStep = _state->assistStep;
-            }
-            if (assistStep && assistStep()) {
-                g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
-                g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
-            g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
-            _state->completed.wait(false, std::memory_order_acquire);
-        }
+        // 阻塞等待 Worker 通知
+        _state->completed.wait(false, std::memory_order_acquire);
     }
 
     bool JobHandle::IsCompleted() const noexcept {
@@ -1239,8 +1182,6 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            // 当 chunk 数较少时，使用 silent_async 直接提交每个 chunk
-            // 避免 taskflow 图构建开销（taskflow 的 emplace + run 对于少量 task 开销占比大）
             if (chunkCount <= workerCount * 2)
             {
                 auto remaining = std::make_shared<std::atomic<int>>(chunkCount);
@@ -1358,8 +1299,6 @@ namespace JobSystem
         }
 
         return ScheduleWithDependency(dependency, [=](HandleState* state, auto executor) {
-            // 当 batch 数较少时，使用 silent_async 直接提交每个 batch
-            // 避免 taskflow 图构建开销
             if (batchCount <= workerCount * 2)
             {
                 auto remaining = std::make_shared<std::atomic<int>>(batchCount);
@@ -1497,7 +1436,16 @@ namespace JobSystem
             batch->chunks = chunks;
             batch->entityBatches = entityBatches;
             batch->chunkCount = chunkCount;
-            batch->rangeSize = rangeSize > 0 ? rangeSize : 32;
+            // 默认 rangeSize = 1，保证 rangeCount = chunkCount >= Worker 数量
+            if (rangeSize > 0)
+            {
+                batch->rangeSize = rangeSize;
+            }
+            else
+            {
+                int workerCount = std::max(1, CurrentWorkerCount());
+                batch->rangeSize = std::max(1, chunkCount / (workerCount * 2 + 1));
+            }
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
             batch->enableAssist = enableAssist;
             batch->mode = mode;
@@ -1536,7 +1484,6 @@ namespace JobSystem
             {
                 AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
             }
-            // DeferredPublish: 所有 C++/ISPC Job 统一走 worker 并行执行
             else if (mode == ChunkScheduleMode::DeferredPublish ||
                 mode == ChunkScheduleMode::DeferredPublishNoAssist)
             {
