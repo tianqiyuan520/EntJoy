@@ -20,6 +20,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         public float DeltaTime;
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
         {
             Span<MovePosition> positions = chunk.GetComponentDataSpan<MovePosition>();
@@ -138,6 +139,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         public float DeltaTime;
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
         {
             Span<MovePosition> positions = chunk.GetComponentDataSpan<MovePosition>();
@@ -407,10 +409,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     public sealed unsafe class IJobChunkMoveCompareSample : IDisposable
     {
         private const int EntityCount = 1_000_000;
-        private const int WarmupFrames = 5;
-        private const int MeasureFrames = 100;
-        private const int SleepWarmupFrames = 5;
-        private const int SleepMeasureFrames = 100;
+        private static readonly int WarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
+        private static readonly int MeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
+        private static readonly int SleepWarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
+        private static readonly int SleepMeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
         private const int FrameSleepMilliseconds = 16;
         private const int HeavyIterations = 32;
         private const float DeltaTime = 1.0f / 60.0f;
@@ -432,6 +434,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private readonly World _sleepEntityCsharpWorld;
         private readonly World _sleepEntityCppWorld;
         private readonly World _sleepEntityIspcWorld;
+
+        private static int ReadPositiveEnvironmentInt(string name, int fallback)
+        {
+            return int.TryParse(Environment.GetEnvironmentVariable(name), out int value) && value > 0
+                ? value
+                : fallback;
+        }
 
         public IJobChunkMoveCompareSample()
         {
@@ -740,7 +749,8 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 long start = Stopwatch.GetTimestamp();
                 scheduleAndComplete();
                 long end = Stopwatch.GetTimestamp();
-                totalMilliseconds += (end - start) * 1000.0 / Stopwatch.Frequency;
+                double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
+                totalMilliseconds += elapsed;
             }
 
             double average = totalMilliseconds / MeasureFrames;
@@ -762,7 +772,8 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 long start = Stopwatch.GetTimestamp();
                 scheduleAndComplete();
                 long end = Stopwatch.GetTimestamp();
-                totalMilliseconds += (end - start) * 1000.0 / Stopwatch.Frequency;
+                double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
+                totalMilliseconds += elapsed;
                 Thread.Sleep(FrameSleepMilliseconds);
             }
 
