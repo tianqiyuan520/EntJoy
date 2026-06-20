@@ -138,7 +138,7 @@ namespace NativeTranspiler.Analyzer
                 componentIndex = 0;
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
-            expression = $"EntJoy::ChunkNativeArray::GetRequiredChunkComponentArray(__chunkData, {componentIndex}, __requiredComponentTypeIds[{componentIndex}])";
+            expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
             return true;
         }
 
