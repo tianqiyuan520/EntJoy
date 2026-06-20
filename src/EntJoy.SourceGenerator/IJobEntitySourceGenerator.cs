@@ -81,7 +81,7 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine($"    public {jobFullName} Job;");
             sb.AppendLine();
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]");
             sb.AppendLine("    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)");
             sb.AppendLine("    {");
             sb.AppendLine(componentDecls);

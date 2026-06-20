@@ -910,9 +910,9 @@ public static unsafe partial class NativeJobScheduler
             var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, null, csharpRawCacheLease);
             try
             {
-                var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
+                var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishNoAssist)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -2280,6 +2280,94 @@ public static unsafe partial class NativeJobScheduler
                 ExitJobExecution();
             }
         };
+    }
+
+    private unsafe static ChunkRangeJobFuncDelegate CreateChunkRangeCallback<T>() where T : struct, IJobChunk
+    {
+        return (IntPtr ctx, ChunkJobData* chunks, int startIndex, int count) =>
+        {
+            EnterJobExecution();
+            try
+            {
+                var header = (ChunkContextHeader*)ctx;
+                int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
+                int typesDataSize = header->allEnabledCount * sizeof(int);
+                int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
+                byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
+                ref var job = ref Unsafe.AsRef<T>(jobPtr);
+
+                int end = startIndex + count;
+                for (int index = startIndex; index < end; index++)
+                {
+                    ExecuteRawChunk(ref job, header, &chunks[index]);
+                }
+            }
+            catch (Exception exception)
+            {
+                RecordJobException(exception);
+            }
+            finally
+            {
+                ExitJobExecution();
+            }
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private unsafe static void ExecuteRawChunk<T>(ref T job, ChunkContextHeader* header, ChunkJobData* cd)
+        where T : struct, IJobChunk
+    {
+        var chunkHandle = cd->chunkHandle;
+        Chunk chunk = null;
+        if (chunkHandle != IntPtr.Zero)
+        {
+            try
+            {
+                var gch = GCHandle.FromIntPtr(chunkHandle);
+                if (gch.IsAllocated && gch.Target is Chunk c) chunk = c;
+            }
+            catch { }
+        }
+        if (chunk == null) return;
+
+        if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
+        {
+            int* typeHashArray = (int*)header->queryAllEnabledTypes;
+            int ulongCount = (cd->entityCount + 63) / 64;
+            ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
+
+            bool firstFound = false;
+            for (int j = 0; j < header->allEnabledCount; j++)
+            {
+                int typeHash = typeHashArray[j];
+                var arch = chunk.Archetype;
+                for (int k = 0; k < cd->componentCount; k++)
+                {
+                    if (arch.Types[k].GetHashCode() != typeHash) continue;
+                    ulong* bitmap = (ulong*)cd->enableBitMaps[k];
+                    if (bitmap != null)
+                    {
+                        if (!firstFound)
+                        {
+                            Buffer.MemoryCopy(bitmap, combinedMask, ulongCount * 8, ulongCount * 8);
+                            firstFound = true;
+                        }
+                        else
+                        {
+                            for (int b = 0; b < ulongCount; b++) combinedMask[b] &= bitmap[b];
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (firstFound) job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(combinedMask, cd->entityCount));
+            else job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
+        }
+        else
+        {
+            job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
+        }
     }
 
     private unsafe static ChunkJobFuncDelegate CreateManagedChunkCallback<T>() where T : struct, IJobChunk
