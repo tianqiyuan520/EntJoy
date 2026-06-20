@@ -507,6 +507,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double entityIspcAverage = RunEntityIspc();
             double entityIspcMtAverage = RunEntityIspcMt();
             VerifyResults("Light Verify", Epsilon);
+            VerifyExpectedPositions("Light Expected", _csharpWorld, WarmupFrames + MeasureFrames, Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"C# IJobChunk       : {csharpAverage:F3} ms/frame");
@@ -568,6 +569,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double sleepEntityCppAverage = RunSleepEntityCpp();
             double sleepEntityIspcAverage = RunSleepEntityIspc();
             VerifySleepResults("Sleep Verify", Epsilon);
+            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, SleepWarmupFrames + SleepMeasureFrames, Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
@@ -883,6 +885,33 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private static string FormatMismatchSummary((string Label, PositionChunkView[] Chunks)[] targets, int[] mismatchCounts)
         {
             return string.Join(", ", targets.Select((target, index) => $"{target.Label}Mismatch={mismatchCounts[index]:N0}"));
+        }
+
+        private void VerifyExpectedPositions(string label, World world, int frameCount, float epsilon)
+        {
+            float expectedEpsilon = MathF.Max(epsilon, 0.01f);
+            var chunks = GetPositionChunks(world);
+            int entityIndex = 0;
+            int mismatchCount = 0;
+            float maxDiff = 0;
+
+            foreach (var chunk in chunks)
+            {
+                for (int localIndex = 0; localIndex < chunk.Count; localIndex++, entityIndex++)
+                {
+                    float2 expected = CreateInitialPosition(entityIndex) +
+                        CreateInitialVelocity(entityIndex) * (DeltaTime * frameCount);
+                    float2 actual = chunk.Positions[localIndex].Value;
+                    float diff = MathF.Max(MathF.Abs(expected.x - actual.x), MathF.Abs(expected.y - actual.y));
+                    if (diff > maxDiff) maxDiff = diff;
+                    if (diff > expectedEpsilon) mismatchCount++;
+                }
+            }
+
+            bool passed = entityIndex == EntityCount && mismatchCount == 0;
+            Console.WriteLine(passed
+                ? $"{label,-13}: OK, entities={entityIndex:N0}, MaxDiff={maxDiff:E4}, epsilon={expectedEpsilon:E4}"
+                : $"{label,-13}: ERROR, entities={entityIndex:N0}, mismatches={mismatchCount:N0}, MaxDiff={maxDiff:E4}");
         }
 
         private static void CreateEntities(World world)
