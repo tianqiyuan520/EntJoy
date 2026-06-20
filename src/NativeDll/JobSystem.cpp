@@ -19,7 +19,9 @@
 
 // ---------- 跨平台线程优先级 ----------
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <pthread.h>
@@ -75,6 +77,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_scheduleModeDeferredPublishNoAssist{ 0 };
     std::atomic<int> g_frameQueueDepthPeak{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
+    std::atomic<bool> g_frameLowLatencyMode{ false };
 
     void UpdateQueueDepthPeak(int value) noexcept
     {
@@ -152,6 +155,7 @@ namespace JobSystem
         }
         state->assistCallback.store(nullptr, std::memory_order_release);
         state->assistContext.store(nullptr, std::memory_order_release);
+        state->assistReaders.store(0, std::memory_order_relaxed);
         state->pendingCallback.store(nullptr, std::memory_order_release);
         state->pendingContext.store(nullptr, std::memory_order_release);
         state->inlineContinuation = {};
@@ -188,6 +192,7 @@ namespace JobSystem
         }
         state->assistCallback.store(nullptr, std::memory_order_release);
         state->assistContext.store(nullptr, std::memory_order_release);
+        state->assistReaders.store(0, std::memory_order_relaxed);
         state->pendingCallback.store(nullptr, std::memory_order_release);
         state->pendingContext.store(nullptr, std::memory_order_release);
         state->inlineContinuation = {};
@@ -704,7 +709,6 @@ namespace JobSystem
                 return std::max(1, std::min(workerCount, batch->rangeCount));
             }
 
-            // NativeTranspile light IJobChunk benefits from fewer workers: less wake/sync traffic and less memory-bandwidth contention.
             constexpr int kNativeAssistWorkerCap = 12;
             return std::max(1, std::min(std::min(workerCount, batch->rangeCount), kNativeAssistWorkerCap));
         }
@@ -947,14 +951,46 @@ namespace JobSystem
 
         Scheduler::FlushScheduledJobs();
 
-        // 自旋等待 Worker 完成。非 Sleep 场景 Worker 热执行很快完成。
-        for (int i = 0; i < kSpinBeforeWait; ++i) {
+        auto runAssist = [state = _state]() noexcept {
+            state->assistReaders.fetch_add(1, std::memory_order_acq_rel);
+            auto callback = state->assistCallback.load(std::memory_order_acquire);
+            void* context = state->assistContext.load(std::memory_order_acquire);
+            bool executed = false;
+            if (callback && context && !state->completed.load(std::memory_order_acquire))
+            {
+                g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
+                executed = callback(context);
+                if (executed)
+                {
+                    g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+                    g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            const int previous = state->assistReaders.fetch_sub(1, std::memory_order_acq_rel);
+            if (previous == 1 && context)
+            {
+                TryReleaseChunkBatchState(static_cast<ChunkBatchState*>(context));
+            }
+            return executed;
+        };
+
+        for (int i = 0; i < kInitialAssistBurst; ++i)
+        {
+            if (_state->completed.load(std::memory_order_acquire)) return;
+            if (!runAssist()) break;
+        }
+
+        for (int i = 0; i < kSpinBeforeWait; ++i)
+        {
             if (_state->completed.load(std::memory_order_acquire)) return;
             RelaxCpu();
         }
 
-        // 阻塞等待 Worker 通知
-        _state->completed.wait(false, std::memory_order_acquire);
+        if (_state->completed.load(std::memory_order_acquire)) return;
+        g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
+        g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
+        while (!_state->completed.load(std::memory_order_acquire))
+            _state->completed.wait(false, std::memory_order_acquire);
     }
 
     bool JobHandle::IsCompleted() const noexcept {
@@ -1051,10 +1087,12 @@ namespace JobSystem
         EnsureChunkWorkers(workerCount);
         g_prewakeCount.fetch_add(1, std::memory_order_relaxed);
         g_chunkPrewakeGeneration.fetch_add(1, std::memory_order_release);
-        const auto hotUntil = std::chrono::steady_clock::now() + kChunkWorkerHotWait;
+        const auto now = std::chrono::steady_clock::now();
+        const auto hotUntil = now + kChunkWorkerHotWait;
         g_chunkHotUntilNs.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(hotUntil.time_since_epoch()).count(),
             std::memory_order_release);
+        g_chunkWorkerCv.notify_all();
 
         std::shared_ptr<tf::Executor> executor;
         int taskflowWorkerCount = 0;
@@ -1069,6 +1107,15 @@ namespace JobSystem
         for (int i = 0; i < taskflowWakeCount; ++i)
         {
             executor->silent_async([] {});
+        }
+    }
+
+    void Scheduler::SetFrameLowLatencyMode(bool enabled)
+    {
+        g_frameLowLatencyMode.store(enabled, std::memory_order_release);
+        if (!enabled)
+        {
+            g_chunkHotUntilNs.store(0, std::memory_order_release);
         }
     }
 
@@ -1436,7 +1483,6 @@ namespace JobSystem
             batch->chunks = chunks;
             batch->entityBatches = entityBatches;
             batch->chunkCount = chunkCount;
-            // 默认 rangeSize = 1，保证 rangeCount = chunkCount >= Worker 数量
             if (rangeSize > 0)
             {
                 batch->rangeSize = rangeSize;

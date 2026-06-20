@@ -48,6 +48,9 @@ namespace JobSystem {
         // Complete() 协作执行的轻量 raw callback。IJobChunk 热路径优先走这里，避免每 chunk std::function 拷贝/锁。
         std::atomic<AssistStepCallback> assistCallback{ nullptr };
         std::atomic<void*> assistContext{ nullptr };
+        // Readers pin the assist context while Complete() invokes its raw callback.
+        // Chunk batches are not recycled until this count returns to zero.
+        std::atomic<int> assistReaders{ 0 };
         // Unity-style deferred schedule: Complete() 可先尝试 claim pending work 并同步执行。
         std::atomic<AssistStepCallback> pendingCallback{ nullptr };
         std::atomic<void*> pendingContext{ nullptr };
@@ -132,6 +135,7 @@ void ResetStatsSnapshot() noexcept;
         static void Initialize(int numThreads = 0);
         static void Shutdown();
         static void PrewakeWorkers();
+        static void SetFrameLowLatencyMode(bool enabled);
         static void FlushScheduledJobs();
 
         static JobHandle Schedule(
