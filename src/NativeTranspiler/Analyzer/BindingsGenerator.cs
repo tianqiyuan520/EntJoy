@@ -159,7 +159,10 @@ namespace NativeTranspiler.Analyzer
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                     sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_EntityBatchFuncPtr;");
                 else
+                {
                     sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
+                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
+                }
                 var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
                 string requiredIds = BuildRequiredComponentTypeIdsInitializer(requiredTypes);
                 sb.AppendLine($"        private static readonly int[] s_{jobStruct.Name}_RequiredComponentTypeIds = {requiredIds};");
@@ -211,7 +214,10 @@ namespace NativeTranspiler.Analyzer
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                     sb.AppendLine($"            s_{jobStruct.Name}_EntityBatchFuncPtr = Get_{jobStruct.Name}_EntityBatchAdapterPtr();");
                 else
+                {
                     sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
+                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
+                }
             }
             else if (isParallelFor || isFor)
             {
@@ -276,8 +282,11 @@ namespace NativeTranspiler.Analyzer
                 else
                 {
                     var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+                    var rangeGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
                     sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
                     sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{rangeGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
                 }
             }
             else if (isParallelFor || isFor)

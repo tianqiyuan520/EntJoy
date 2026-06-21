@@ -118,6 +118,11 @@ struct JobSystemStatsSnapshot {
     uint64_t hotSpinHits;
     uint64_t waitFallbacks;
     uint64_t notifiedWorkers;
+    uint64_t workerClaimedTokens;
+    uint64_t mainClaimedTokens;
+    uint64_t coldBatches;
+    uint64_t activeWorkersPeak;
+    uint64_t wakeLatencyEwmaNs;
     uint64_t scheduleModePublishNoAssist;
     uint64_t scheduleModePublishAssist;
     uint64_t scheduleModeDeferTinyOnly;

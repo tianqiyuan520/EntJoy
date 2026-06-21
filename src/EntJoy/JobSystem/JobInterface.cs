@@ -27,3 +27,9 @@ public interface IJobParallelForBatch
 public interface IJobEntity
 {
 }
+
+public unsafe interface IJobEntityBatchExecutor<TJob>
+    where TJob : struct, IJobEntity
+{
+    static abstract void Execute(ref TJob job, EntityBatchData* batches, int startIndex, int count);
+}
