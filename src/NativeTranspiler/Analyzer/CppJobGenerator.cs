@@ -864,6 +864,22 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
+                sb.AppendLine();
+
+                var rangeAdapterFuncName = GetRangeAdapterFunctionName(jobStruct);
+                sb.AppendLine($"HEAD void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
+                sb.AppendLine("{");
+                sb.AppendLine("    const int __endIndex = __startIndex + __count;");
+                sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        {adapterFuncName}(context, &__chunks[__chunkIndex]);");
+                sb.AppendLine("    }");
+                sb.AppendLine("}");
+                sb.AppendLine();
+                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{rangeAdapterFuncName}Ptr()");
+                sb.AppendLine("{");
+                sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
+                sb.AppendLine("}");
 
                 }
             }

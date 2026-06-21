@@ -413,6 +413,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private static readonly int MeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
         private static readonly int SleepWarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
         private static readonly int SleepMeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
+        private static readonly int BenchmarkRounds = ReadPositiveEnvironmentInt("ENTJOY_BENCH_ROUNDS", 5);
         private const int FrameSleepMilliseconds = 16;
         private const int HeavyIterations = 32;
         private const float DeltaTime = 1.0f / 60.0f;
@@ -496,18 +497,25 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w 轻量移动对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {WarmupFrames}, Measure: {MeasureFrames}, dt={DeltaTime:F6}");
+            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine();
 
-            double csharpAverage = RunCSharp();
-            double cppAverage = RunCpp();
-            double cppFastAverage = RunCppFast();
-            double ispcAverage = RunIspc();
-            double entityCsharpAverage = RunEntityCSharp();
-            double entityCppAverage = RunEntityCpp();
-            double entityIspcAverage = RunEntityIspc();
-            double entityIspcMtAverage = RunEntityIspcMt();
+            var lightCases = new (string Label, Action Run)[]
+            {
+                ("C# IJobChunk", () => { World.DefaultWorld = _csharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ IJobChunk", () => { World.DefaultWorld = _cppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ Fast IJobChunk", () => { World.DefaultWorld = _cppFastWorld; new MoveJobChunkCppFast { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC IJobChunk", () => { World.DefaultWorld = _ispcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C# IJobEntity", () => { World.DefaultWorld = _entityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ IJobEntity", () => { World.DefaultWorld = _entityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC IJobEntity", () => { World.DefaultWorld = _entityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC MT IJobEntity", () => { World.DefaultWorld = _entityIspcMtWorld; new MoveJobEntityIspcMt { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+            };
+            double[] light = RunInterleavedBenchmark(lightCases, WarmupFrames, MeasureFrames, 0);
+            double csharpAverage = light[0], cppAverage = light[1], cppFastAverage = light[2], ispcAverage = light[3];
+            double entityCsharpAverage = light[4], entityCppAverage = light[5], entityIspcAverage = light[6], entityIspcMtAverage = light[7];
             VerifyResults("Light Verify", Epsilon);
-            VerifyExpectedPositions("Light Expected", _csharpWorld, WarmupFrames + MeasureFrames, Epsilon);
+            VerifyExpectedPositions("Light Expected", _csharpWorld, BenchmarkRounds * (WarmupFrames + MeasureFrames), Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"C# IJobChunk       : {csharpAverage:F3} ms/frame");
@@ -521,23 +529,30 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"C++ Speedup        : {csharpAverage / cppAverage:F2}x");
             Console.WriteLine($"C++ Fast Speedup   : {csharpAverage / cppFastAverage:F2}x");
             Console.WriteLine($"ISPC Speedup       : {csharpAverage / ispcAverage:F2}x");
-            Console.WriteLine($"C++ Entity Speedup : {csharpAverage / entityCppAverage:F2}x");
-            Console.WriteLine($"ISPC Entity Speedup: {csharpAverage / entityIspcAverage:F2}x");
-            Console.WriteLine($"ISPC MT Entity Spd : {csharpAverage / entityIspcMtAverage:F2}x");
+            Console.WriteLine($"C++ Entity Speedup : {entityCsharpAverage / entityCppAverage:F2}x");
+            Console.WriteLine($"ISPC Entity Speedup: {entityCsharpAverage / entityIspcAverage:F2}x");
+            Console.WriteLine($"ISPC MT Entity Spd : {entityCsharpAverage / entityIspcMtAverage:F2}x");
 
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Heavy 计算对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {WarmupFrames}, Measure: {MeasureFrames}, dt={DeltaTime:F6}, iterations={HeavyIterations}");
+            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine();
 
-            double csharpHeavyAverage = RunHeavyCSharp();
-            double cppHeavyAverage = RunHeavyCpp();
-            double cppFastHeavyAverage = RunHeavyCppFast();
-            double ispcHeavyAverage = RunHeavyIspc();
-            double entityCsharpHeavyAverage = RunHeavyEntityCSharp();
-            double entityCppHeavyAverage = RunHeavyEntityCpp();
-            double entityIspcHeavyAverage = RunHeavyEntityIspc();
-            double entityIspcMtHeavyAverage = RunHeavyEntityIspcMt();
+            var heavyCases = new (string Label, Action Run)[]
+            {
+                ("C# Heavy IJobChunk", () => { World.DefaultWorld = _csharpWorld; new HeavyJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ Heavy IJobChunk", () => { World.DefaultWorld = _cppWorld; new HeavyJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ Fast Heavy IJobChunk", () => { World.DefaultWorld = _cppFastWorld; new HeavyJobChunkCppFast { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC Heavy IJobChunk", () => { World.DefaultWorld = _ispcWorld; new HeavyJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C# Heavy IJobEntity", () => { World.DefaultWorld = _entityCsharpWorld; new HeavyJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("C++ Heavy IJobEntity", () => { World.DefaultWorld = _entityCppWorld; new HeavyJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC Heavy IJobEntity", () => { World.DefaultWorld = _entityIspcWorld; new HeavyJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("ISPC MT Heavy IJobEntity", () => { World.DefaultWorld = _entityIspcMtWorld; new HeavyJobEntityIspcMt { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+            };
+            double[] heavy = RunInterleavedBenchmark(heavyCases, WarmupFrames, MeasureFrames, 0);
+            double csharpHeavyAverage = heavy[0], cppHeavyAverage = heavy[1], cppFastHeavyAverage = heavy[2], ispcHeavyAverage = heavy[3];
+            double entityCsharpHeavyAverage = heavy[4], entityCppHeavyAverage = heavy[5], entityIspcHeavyAverage = heavy[6], entityIspcMtHeavyAverage = heavy[7];
             VerifyResults("Heavy Verify", HeavyEpsilon);
 
             Console.WriteLine();
@@ -552,24 +567,31 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"C++ Heavy Speedup       : {csharpHeavyAverage / cppHeavyAverage:F2}x");
             Console.WriteLine($"C++ Fast Heavy Speedup  : {csharpHeavyAverage / cppFastHeavyAverage:F2}x");
             Console.WriteLine($"ISPC Heavy Speedup      : {csharpHeavyAverage / ispcHeavyAverage:F2}x");
-            Console.WriteLine($"C++ Entity Heavy Speedup: {csharpHeavyAverage / entityCppHeavyAverage:F2}x");
-            Console.WriteLine($"ISPC Entity Heavy Spd   : {csharpHeavyAverage / entityIspcHeavyAverage:F2}x");
-            Console.WriteLine($"ISPC MT Entity Heavy Spd: {csharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
+            Console.WriteLine($"C++ Entity Heavy Speedup: {entityCsharpHeavyAverage / entityCppHeavyAverage:F2}x");
+            Console.WriteLine($"ISPC Entity Heavy Spd   : {entityCsharpHeavyAverage / entityIspcHeavyAverage:F2}x");
+            Console.WriteLine($"ISPC MT Entity Heavy Spd: {entityCsharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
 
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
+            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
             Console.WriteLine();
 
-            double sleepChunkCsharpAverage = RunSleepChunkCSharp();
-            double sleepChunkCppAverage = RunSleepChunkCpp();
-            double sleepChunkIspcAverage = RunSleepChunkIspc();
-            double sleepEntityCsharpAverage = RunSleepEntityCSharp();
-            double sleepEntityCppAverage = RunSleepEntityCpp();
-            double sleepEntityIspcAverage = RunSleepEntityIspc();
+            var sleepCases = new (string Label, Action Run)[]
+            {
+                ("Sleep C# IJobChunk", () => { World.DefaultWorld = _sleepChunkCsharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C++ IJobChunk", () => { World.DefaultWorld = _sleepChunkCppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep ISPC IJobChunk", () => { World.DefaultWorld = _sleepChunkIspcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C# IJobEntity", () => { World.DefaultWorld = _sleepEntityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C++ IJobEntity", () => { World.DefaultWorld = _sleepEntityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep ISPC IJobEntity", () => { World.DefaultWorld = _sleepEntityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+            };
+            double[] sleep = RunInterleavedBenchmark(sleepCases, SleepWarmupFrames, SleepMeasureFrames, FrameSleepMilliseconds);
+            double sleepChunkCsharpAverage = sleep[0], sleepChunkCppAverage = sleep[1], sleepChunkIspcAverage = sleep[2];
+            double sleepEntityCsharpAverage = sleep[3], sleepEntityCppAverage = sleep[4], sleepEntityIspcAverage = sleep[5];
             VerifySleepResults("Sleep Verify", Epsilon);
-            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, SleepWarmupFrames + SleepMeasureFrames, Epsilon);
+            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, BenchmarkRounds * (SleepWarmupFrames + SleepMeasureFrames), Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
@@ -580,8 +602,8 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"Sleep ISPC IJobEntity: {sleepEntityIspcAverage:F3} ms/frame");
             Console.WriteLine($"Sleep C++ Chunk Spd  : {sleepChunkCsharpAverage / sleepChunkCppAverage:F2}x");
             Console.WriteLine($"Sleep ISPC Chunk Spd : {sleepChunkCsharpAverage / sleepChunkIspcAverage:F2}x");
-            Console.WriteLine($"Sleep C++ Entity Spd : {sleepChunkCsharpAverage / sleepEntityCppAverage:F2}x");
-            Console.WriteLine($"Sleep ISPC Entity Spd: {sleepChunkCsharpAverage / sleepEntityIspcAverage:F2}x");
+            Console.WriteLine($"Sleep C++ Entity Spd : {sleepEntityCsharpAverage / sleepEntityCppAverage:F2}x");
+            Console.WriteLine($"Sleep ISPC Entity Spd: {sleepEntityCsharpAverage / sleepEntityIspcAverage:F2}x");
         }
 
         private double RunCSharp()
@@ -736,6 +758,83 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             World.DefaultWorld = _sleepEntityIspcWorld;
             var job = new MoveJobEntityIspc { DeltaTime = DeltaTime };
             return RunSleepBenchmark("Sleep ISPC IJobEntity", () => job.Schedule(_query).Complete());
+        }
+
+        private static double[] RunInterleavedBenchmark(
+            (string Label, Action Run)[] cases,
+            int warmupFrames,
+            int measureFrames,
+            int sleepMilliseconds)
+        {
+            var roundAverages = new double[BenchmarkRounds, cases.Length];
+            for (int round = 0; round < BenchmarkRounds; round++)
+            {
+                if (sleepMilliseconds == 0)
+                {
+                    int caseOffset = round % cases.Length;
+                    for (int step = 0; step < cases.Length; step++)
+                    {
+                        int index = (caseOffset + step) % cases.Length;
+                        for (int frame = 0; frame < warmupFrames; frame++) cases[index].Run();
+
+                        double total = 0;
+                        for (int frame = 0; frame < measureFrames; frame++)
+                        {
+                            long start = Stopwatch.GetTimestamp();
+                            cases[index].Run();
+                            long end = Stopwatch.GetTimestamp();
+                            total += (end - start) * 1000.0 / Stopwatch.Frequency;
+                        }
+                        roundAverages[round, index] = total / measureFrames;
+                    }
+                    continue;
+                }
+
+                for (int frame = 0; frame < warmupFrames; frame++)
+                {
+                    int offset = (round + frame) % cases.Length;
+                    for (int step = 0; step < cases.Length; step++)
+                    {
+                        cases[(offset + step) % cases.Length].Run();
+                        if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
+                    }
+                }
+
+                var totals = new double[cases.Length];
+                for (int frame = 0; frame < measureFrames; frame++)
+                {
+                    int offset = (round + warmupFrames + frame) % cases.Length;
+                    for (int step = 0; step < cases.Length; step++)
+                    {
+                        int index = (offset + step) % cases.Length;
+                        long start = Stopwatch.GetTimestamp();
+                        cases[index].Run();
+                        long end = Stopwatch.GetTimestamp();
+                        totals[index] += (end - start) * 1000.0 / Stopwatch.Frequency;
+                        if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
+                    }
+                }
+
+                for (int index = 0; index < cases.Length; index++)
+                {
+                    roundAverages[round, index] = totals[index] / measureFrames;
+                }
+            }
+
+            int firstAcceptedRound = BenchmarkRounds > 1 ? 1 : 0;
+            int acceptedRoundCount = BenchmarkRounds - firstAcceptedRound;
+            var averages = new double[cases.Length];
+            for (int index = 0; index < cases.Length; index++)
+            {
+                double total = 0;
+                for (int round = firstAcceptedRound; round < BenchmarkRounds; round++)
+                {
+                    total += roundAverages[round, index];
+                }
+                averages[index] = total / acceptedRoundCount;
+                Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
+            }
+            return averages;
         }
 
         private static double RunBenchmark(string label, Action scheduleAndComplete)
@@ -899,8 +998,9 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             {
                 for (int localIndex = 0; localIndex < chunk.Count; localIndex++, entityIndex++)
                 {
-                    float2 expected = CreateInitialPosition(entityIndex) +
-                        CreateInitialVelocity(entityIndex) * (DeltaTime * frameCount);
+                    float2 expected = CreateInitialPosition(entityIndex);
+                    float2 frameDelta = CreateInitialVelocity(entityIndex) * DeltaTime;
+                    for (int frame = 0; frame < frameCount; frame++) expected += frameDelta;
                     float2 actual = chunk.Positions[localIndex].Value;
                     float diff = MathF.Max(MathF.Abs(expected.x - actual.x), MathF.Abs(expected.y - actual.y));
                     if (diff > maxDiff) maxDiff = diff;
