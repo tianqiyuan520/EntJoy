@@ -104,6 +104,11 @@ public struct NativeJobSystemStats
     public ulong HotSpinHits;
     public ulong WaitFallbacks;
     public ulong NotifiedWorkers;
+    public ulong WorkerClaimedTokens;
+    public ulong MainClaimedTokens;
+    public ulong ColdBatches;
+    public ulong ActiveWorkersPeak;
+    public ulong WakeLatencyEwmaNs;
     public ulong ScheduleModePublishNoAssist;
     public ulong ScheduleModePublishAssist;
     public ulong ScheduleModeDeferTinyOnly;
@@ -504,6 +509,7 @@ public static unsafe partial class NativeJobScheduler
     private delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
+    private delegate void EntityBatchJobFuncDelegate(IntPtr context, EntityBatchData* batches, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CleanupFunc(IntPtr context);
 
@@ -864,6 +870,33 @@ public static unsafe partial class NativeJobScheduler
     public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+
+    public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+        where TJob : struct, IJobEntity
+        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
+    {
+        if (query.AllEnabled != null && query.AllEnabled.Length > 0)
+            throw new NotSupportedException("Direct managed IJobEntity batches do not support AllEnabled filters.");
+
+        if (!TryGetEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds, out var cache, out var cacheLease) ||
+            cache.BatchCount == 0)
+            return default;
+
+        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
+        try
+        {
+            var callback = GetOrCreateDelegateCache<TExecutor, EntityBatchJobFuncDelegate>(() => CreateManagedEntityBatchCallback<TJob, TExecutor>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(
+                callback.FuncPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount,
+                dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
+        }
+        catch
+        {
+            ChunkCleanup(contextBlock);
+            throw;
+        }
+    }
 
     public static void RunChunkRawImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
         where T : struct, IJobChunk
@@ -2301,6 +2334,34 @@ public static unsafe partial class NativeJobScheduler
                 {
                     ExecuteRawChunk(ref job, header, &chunks[index]);
                 }
+            }
+            catch (Exception exception)
+            {
+                RecordJobException(exception);
+            }
+            finally
+            {
+                ExitJobExecution();
+            }
+        };
+    }
+
+    private unsafe static EntityBatchJobFuncDelegate CreateManagedEntityBatchCallback<TJob, TExecutor>()
+        where TJob : struct, IJobEntity
+        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
+    {
+        return (IntPtr ctx, EntityBatchData* batches, int startIndex, int count) =>
+        {
+            EnterJobExecution();
+            try
+            {
+                var header = (ChunkContextHeader*)ctx;
+                int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
+                int typesDataSize = header->allEnabledCount * sizeof(int);
+                int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
+                byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
+                ref var job = ref Unsafe.AsRef<TJob>(jobPtr);
+                TExecutor.Execute(ref job, batches, startIndex, count);
             }
             catch (Exception exception)
             {

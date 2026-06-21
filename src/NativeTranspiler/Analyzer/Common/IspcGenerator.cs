@@ -1082,6 +1082,8 @@ namespace NativeTranspiler.Analyzer
             var ispcImplName = useMt ? ispcBase + "_mt_impl" : ispcBase + "_impl";
             var adapterFuncName = CppJobGenerator.GetAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+            var rangeAdapterFuncName = CppJobGenerator.GetRangeAdapterFunctionName(jobStruct);
+            var rangeAdapterGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
             var chunkArrays = CollectChunkNativeArrayLocals(jobStruct, compilation);
             var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();
 
@@ -1217,6 +1219,20 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"HEAD void* CALLINGCONVENTION {adapterGetterName}()");
             sb.AppendLine("{");
             sb.AppendLine($"    return (void*){adapterFuncName};");
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
+            sb.AppendLine("{");
+            sb.AppendLine("    const int __endIndex = __startIndex + __count;");
+            sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        {adapterFuncName}(context, &__chunks[__chunkIndex]);");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.AppendLine($"HEAD void* CALLINGCONVENTION {rangeAdapterGetterName}()");
+            sb.AppendLine("{");
+            sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
             sb.AppendLine("}");
             return sb.ToString();
         }
