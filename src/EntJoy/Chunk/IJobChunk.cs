@@ -4,7 +4,7 @@ namespace EntJoy
 {
     public interface IJobChunk
     {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask);
     }
 }

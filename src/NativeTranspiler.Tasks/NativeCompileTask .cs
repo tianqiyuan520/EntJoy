@@ -142,9 +142,13 @@ namespace NativeTranspiler.Tasks
                     files.Add(f);
             }
 
-            var nativeDllDir = Path.Combine(Directory.GetParent(rootDir)?.FullName ?? "", "..", "NativeDll");
+            // NativeCodeGenDir is <project>/NativeTranspiler_Generated. Resolve
+            // the shared runtime explicitly; Directory.GetParent behaves
+            // differently when the input retains a trailing separator.
+            var nativeDllDir = Path.GetFullPath(Path.Combine(rootDir, "..", "..", "NativeDll"));
             if (Directory.Exists(nativeDllDir))
             {
+                Log.LogMessage(MessageImportance.Low, $"  Including shared native sources: {nativeDllDir}");
                 foreach (var pattern in new[] { "*.h", "*.cpp", "*.hpp" })
                 {
                     foreach (var f in Directory.GetFiles(nativeDllDir, pattern))

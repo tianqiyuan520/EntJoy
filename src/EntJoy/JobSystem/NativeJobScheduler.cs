@@ -104,6 +104,11 @@ public struct NativeJobSystemStats
     public ulong HotSpinHits;
     public ulong WaitFallbacks;
     public ulong NotifiedWorkers;
+    public ulong WorkerClaimedTokens;
+    public ulong MainClaimedTokens;
+    public ulong ColdBatches;
+    public ulong ActiveWorkersPeak;
+    public ulong WakeLatencyEwmaNs;
     public ulong ScheduleModePublishNoAssist;
     public ulong ScheduleModePublishAssist;
     public ulong ScheduleModeDeferTinyOnly;
@@ -504,6 +509,7 @@ public static unsafe partial class NativeJobScheduler
     private delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
+    private delegate void EntityBatchJobFuncDelegate(IntPtr context, EntityBatchData* batches, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CleanupFunc(IntPtr context);
 
@@ -865,6 +871,33 @@ public static unsafe partial class NativeJobScheduler
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
 
+    public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+        where TJob : struct, IJobEntity
+        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
+    {
+        if (query.AllEnabled != null && query.AllEnabled.Length > 0)
+            throw new NotSupportedException("Direct managed IJobEntity batches do not support AllEnabled filters.");
+
+        if (!TryGetEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds, out var cache, out var cacheLease) ||
+            cache.BatchCount == 0)
+            return default;
+
+        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
+        try
+        {
+            var callback = GetOrCreateDelegateCache<TExecutor, EntityBatchJobFuncDelegate>(() => CreateManagedEntityBatchCallback<TJob, TExecutor>());
+            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(
+                callback.FuncPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount,
+                dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
+        }
+        catch
+        {
+            ChunkCleanup(contextBlock);
+            throw;
+        }
+    }
+
     public static void RunChunkRawImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
         where T : struct, IJobChunk
     {
@@ -910,9 +943,9 @@ public static unsafe partial class NativeJobScheduler
             var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, null, csharpRawCacheLease);
             try
             {
-                var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
+                var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishNoAssist)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -1156,7 +1189,7 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -2282,6 +2315,122 @@ public static unsafe partial class NativeJobScheduler
         };
     }
 
+    private unsafe static ChunkRangeJobFuncDelegate CreateChunkRangeCallback<T>() where T : struct, IJobChunk
+    {
+        return (IntPtr ctx, ChunkJobData* chunks, int startIndex, int count) =>
+        {
+            EnterJobExecution();
+            try
+            {
+                var header = (ChunkContextHeader*)ctx;
+                int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
+                int typesDataSize = header->allEnabledCount * sizeof(int);
+                int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
+                byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
+                ref var job = ref Unsafe.AsRef<T>(jobPtr);
+
+                int end = startIndex + count;
+                for (int index = startIndex; index < end; index++)
+                {
+                    ExecuteRawChunk(ref job, header, &chunks[index]);
+                }
+            }
+            catch (Exception exception)
+            {
+                RecordJobException(exception);
+            }
+            finally
+            {
+                ExitJobExecution();
+            }
+        };
+    }
+
+    private unsafe static EntityBatchJobFuncDelegate CreateManagedEntityBatchCallback<TJob, TExecutor>()
+        where TJob : struct, IJobEntity
+        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
+    {
+        return (IntPtr ctx, EntityBatchData* batches, int startIndex, int count) =>
+        {
+            EnterJobExecution();
+            try
+            {
+                var header = (ChunkContextHeader*)ctx;
+                int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
+                int typesDataSize = header->allEnabledCount * sizeof(int);
+                int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
+                byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
+                ref var job = ref Unsafe.AsRef<TJob>(jobPtr);
+                TExecutor.Execute(ref job, batches, startIndex, count);
+            }
+            catch (Exception exception)
+            {
+                RecordJobException(exception);
+            }
+            finally
+            {
+                ExitJobExecution();
+            }
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private unsafe static void ExecuteRawChunk<T>(ref T job, ChunkContextHeader* header, ChunkJobData* cd)
+        where T : struct, IJobChunk
+    {
+        var chunkHandle = cd->chunkHandle;
+        Chunk chunk = null;
+        if (chunkHandle != IntPtr.Zero)
+        {
+            try
+            {
+                var gch = GCHandle.FromIntPtr(chunkHandle);
+                if (gch.IsAllocated && gch.Target is Chunk c) chunk = c;
+            }
+            catch { }
+        }
+        if (chunk == null) return;
+
+        if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
+        {
+            int* typeHashArray = (int*)header->queryAllEnabledTypes;
+            int ulongCount = (cd->entityCount + 63) / 64;
+            ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
+
+            bool firstFound = false;
+            for (int j = 0; j < header->allEnabledCount; j++)
+            {
+                int typeHash = typeHashArray[j];
+                var arch = chunk.Archetype;
+                for (int k = 0; k < cd->componentCount; k++)
+                {
+                    if (arch.Types[k].GetHashCode() != typeHash) continue;
+                    ulong* bitmap = (ulong*)cd->enableBitMaps[k];
+                    if (bitmap != null)
+                    {
+                        if (!firstFound)
+                        {
+                            Buffer.MemoryCopy(bitmap, combinedMask, ulongCount * 8, ulongCount * 8);
+                            firstFound = true;
+                        }
+                        else
+                        {
+                            for (int b = 0; b < ulongCount; b++) combinedMask[b] &= bitmap[b];
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (firstFound) job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(combinedMask, cd->entityCount));
+            else job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
+        }
+        else
+        {
+            job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
+        }
+    }
+
     private unsafe static ChunkJobFuncDelegate CreateManagedChunkCallback<T>() where T : struct, IJobChunk
     {
         return (IntPtr ctx, ChunkJobData* cd) =>
@@ -2496,6 +2645,15 @@ public static unsafe partial class NativeJobScheduler
         {
             _jobExceptions.Enqueue(ExceptionDispatchInfo.Capture(exception));
         }
+    }
+
+    /// <summary>
+    /// 抛出所有已记录的 Job 异常。
+    /// 公有接口，可在帧末通过 TempAllocator.Reset() 或自定义检查点调用。
+    /// </summary>
+    public static void FlushRecordedExceptions()
+    {
+        ThrowRecordedJobExceptions();
     }
 
     private static void ThrowRecordedJobExceptions()
