@@ -413,7 +413,6 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private static readonly int MeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
         private static readonly int SleepWarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
         private static readonly int SleepMeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
-        private static readonly int BenchmarkRounds = ReadPositiveEnvironmentInt("ENTJOY_BENCH_ROUNDS", 5);
         private const int FrameSleepMilliseconds = 16;
         private const int HeavyIterations = 32;
         private const float DeltaTime = 1.0f / 60.0f;
@@ -497,7 +496,6 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w 轻量移动对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {WarmupFrames}, Measure: {MeasureFrames}, dt={DeltaTime:F6}");
-            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine();
 
             var lightCases = new (string Label, Action Run)[]
@@ -515,7 +513,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double csharpAverage = light[0], cppAverage = light[1], cppFastAverage = light[2], ispcAverage = light[3];
             double entityCsharpAverage = light[4], entityCppAverage = light[5], entityIspcAverage = light[6], entityIspcMtAverage = light[7];
             VerifyResults("Light Verify", Epsilon);
-            VerifyExpectedPositions("Light Expected", _csharpWorld, BenchmarkRounds * (WarmupFrames + MeasureFrames), Epsilon);
+            VerifyExpectedPositions("Light Expected", _csharpWorld, WarmupFrames + MeasureFrames, Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"C# IJobChunk       : {csharpAverage:F3} ms/frame");
@@ -536,7 +534,6 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Heavy 计算对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {WarmupFrames}, Measure: {MeasureFrames}, dt={DeltaTime:F6}, iterations={HeavyIterations}");
-            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine();
 
             var heavyCases = new (string Label, Action Run)[]
@@ -574,7 +571,6 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
-            Console.WriteLine($"轮次: {BenchmarkRounds}，汇总时忽略首轮");
             Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
             Console.WriteLine();
 
@@ -591,7 +587,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double sleepChunkCsharpAverage = sleep[0], sleepChunkCppAverage = sleep[1], sleepChunkIspcAverage = sleep[2];
             double sleepEntityCsharpAverage = sleep[3], sleepEntityCppAverage = sleep[4], sleepEntityIspcAverage = sleep[5];
             VerifySleepResults("Sleep Verify", Epsilon);
-            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, BenchmarkRounds * (SleepWarmupFrames + SleepMeasureFrames), Epsilon);
+            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, SleepWarmupFrames + SleepMeasureFrames, Epsilon);
 
             Console.WriteLine();
             Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
@@ -766,72 +762,27 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             int measureFrames,
             int sleepMilliseconds)
         {
-            var roundAverages = new double[BenchmarkRounds, cases.Length];
-            for (int round = 0; round < BenchmarkRounds; round++)
-            {
-                if (sleepMilliseconds == 0)
-                {
-                    int caseOffset = round % cases.Length;
-                    for (int step = 0; step < cases.Length; step++)
-                    {
-                        int index = (caseOffset + step) % cases.Length;
-                        for (int frame = 0; frame < warmupFrames; frame++) cases[index].Run();
-
-                        double total = 0;
-                        for (int frame = 0; frame < measureFrames; frame++)
-                        {
-                            long start = Stopwatch.GetTimestamp();
-                            cases[index].Run();
-                            long end = Stopwatch.GetTimestamp();
-                            total += (end - start) * 1000.0 / Stopwatch.Frequency;
-                        }
-                        roundAverages[round, index] = total / measureFrames;
-                    }
-                    continue;
-                }
-
-                for (int frame = 0; frame < warmupFrames; frame++)
-                {
-                    int offset = (round + frame) % cases.Length;
-                    for (int step = 0; step < cases.Length; step++)
-                    {
-                        cases[(offset + step) % cases.Length].Run();
-                        if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
-                    }
-                }
-
-                var totals = new double[cases.Length];
-                for (int frame = 0; frame < measureFrames; frame++)
-                {
-                    int offset = (round + warmupFrames + frame) % cases.Length;
-                    for (int step = 0; step < cases.Length; step++)
-                    {
-                        int index = (offset + step) % cases.Length;
-                        long start = Stopwatch.GetTimestamp();
-                        cases[index].Run();
-                        long end = Stopwatch.GetTimestamp();
-                        totals[index] += (end - start) * 1000.0 / Stopwatch.Frequency;
-                        if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
-                    }
-                }
-
-                for (int index = 0; index < cases.Length; index++)
-                {
-                    roundAverages[round, index] = totals[index] / measureFrames;
-                }
-            }
-
-            int firstAcceptedRound = BenchmarkRounds > 1 ? 1 : 0;
-            int acceptedRoundCount = BenchmarkRounds - firstAcceptedRound;
             var averages = new double[cases.Length];
+
             for (int index = 0; index < cases.Length; index++)
             {
-                double total = 0;
-                for (int round = firstAcceptedRound; round < BenchmarkRounds; round++)
+                for (int frame = 0; frame < warmupFrames; frame++)
                 {
-                    total += roundAverages[round, index];
+                    cases[index].Run();
+                    if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
-                averages[index] = total / acceptedRoundCount;
+
+                double measuredTotal = 0;
+                for (int frame = 0; frame < measureFrames; frame++)
+                {
+                    long start = Stopwatch.GetTimestamp();
+                    cases[index].Run();
+                    long end = Stopwatch.GetTimestamp();
+                    measuredTotal += (end - start) * 1000.0 / Stopwatch.Frequency;
+                    if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
+                }
+
+                averages[index] = measuredTotal / measureFrames;
                 Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
             }
             return averages;
