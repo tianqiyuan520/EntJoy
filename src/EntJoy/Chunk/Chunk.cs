@@ -9,6 +9,7 @@ namespace EntJoy
         public Archetype Archetype { get; internal set; }
 
         private nint _memoryBlock;
+        private nint _rawAllocation;  // 保存原始分配指针用于释放
         private readonly int _entityCapacity;
         // 组件数据在块内的偏移和大小，索引与 Archetype.Types 一一对应
         private readonly int[] _componentOffsets;
@@ -21,6 +22,9 @@ namespace EntJoy
         private readonly int[] _enableStrideBytes;
 
         private const int ENTITY_ARRAY_OFFSET = 0;     // Entity 数组始终在内存块起始处
+
+        // SIMD 对齐要求：AVX-512 需要 64 字节对齐地址
+        private const int SIMD_ALIGNMENT = 64;
 
         public int EntityCount => _entityCount;
         public int Capacity => _entityCapacity;
@@ -41,7 +45,15 @@ namespace EntJoy
                 _enableBitOffsets[i] = -1;
 
             _totalSize = CalculateMemoryLayout(componentTypes, entityCapacity);
-            _memoryBlock = Marshal.AllocHGlobal(_totalSize);
+
+            // 多分配 ALIGNMENT 字节，然后手动对齐到 SIMD_ALIGNMENT 边界
+            // 这样确保所有后续的组件数组指针（_memoryBlock + 已对齐的偏移量）也是 64 字节对齐
+            int allocSize = _totalSize + SIMD_ALIGNMENT;
+            _rawAllocation = Marshal.AllocHGlobal(allocSize);
+            long raw = _rawAllocation.ToInt64();
+            long aligned = (raw + SIMD_ALIGNMENT - 1) & ~(SIMD_ALIGNMENT - 1);
+            _memoryBlock = new IntPtr(aligned);
+
             Unsafe.InitBlock((byte*)_memoryBlock, 0, (uint)_totalSize);
         }
 
@@ -88,7 +100,7 @@ namespace EntJoy
             // 将实体写入 Entity 数组
             ((Entity*)((byte*)_memoryBlock + ENTITY_ARRAY_OFFSET))[_entityCount] = entity;
 
-            // 初始化所有 enableable 位为“启用”
+            // 初始化所有 enableable 位为"启用"
             for (int i = 0; i < _enableBitOffsets.Length; i++)
             {
                 if (_enableBitOffsets[i] != -1)
@@ -226,9 +238,10 @@ namespace EntJoy
 
         public void Dispose()
         {
-            if (_memoryBlock != nint.Zero)
+            if (_rawAllocation != nint.Zero)
             {
-                Marshal.FreeHGlobal(_memoryBlock);
+                Marshal.FreeHGlobal(_rawAllocation);
+                _rawAllocation = nint.Zero;
                 _memoryBlock = nint.Zero;
             }
         }

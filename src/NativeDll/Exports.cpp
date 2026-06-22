@@ -250,6 +250,11 @@ extern "C"
         stats->hotSpinHits = snapshot.hotSpinHits;
         stats->waitFallbacks = snapshot.waitFallbacks;
         stats->notifiedWorkers = snapshot.notifiedWorkers;
+        stats->workerClaimedTokens = snapshot.workerClaimedTokens;
+        stats->mainClaimedTokens = snapshot.mainClaimedTokens;
+        stats->coldBatches = snapshot.coldBatches;
+        stats->activeWorkersPeak = snapshot.activeWorkersPeak;
+        stats->wakeLatencyEwmaNs = snapshot.wakeLatencyEwmaNs;
         stats->scheduleModePublishNoAssist = snapshot.scheduleModePublishNoAssist;
         stats->scheduleModePublishAssist = snapshot.scheduleModePublishAssist;
         stats->scheduleModeDeferTinyOnly = snapshot.scheduleModeDeferTinyOnly;

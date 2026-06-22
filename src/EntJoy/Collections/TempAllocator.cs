@@ -29,6 +29,17 @@ namespace EntJoy.Collections
         /// <summary>在帧末调用，释放所有未被手动释放的 Temp 内存，并标记对应的安全句柄为已释放。</summary>
         public static void Reset()
         {
+            // ① 先检查并抛出 Job 异常，防止异常被静默吞噬
+            NativeJobScheduler.FlushRecordedExceptions();
+
+            // ② 完成所有活跃异步 Job，确保没有 C++ Worker 线程还在读写 Temp 内存
+            if (World.DefaultWorld != null)
+            {
+                var entityManager = World.DefaultWorld._entityManager;
+                entityManager.CompleteActiveJobs();
+            }
+
+            // ③ 再释放内存
             foreach (var kvp in _active)
             {
                 // 先标记安全句柄为已释放（使所有持有该句柄的容器访问时抛出异常）

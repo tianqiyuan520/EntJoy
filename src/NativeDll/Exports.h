@@ -73,6 +73,11 @@ extern "C" {
         unsigned long long hotSpinHits;
         unsigned long long waitFallbacks;
         unsigned long long notifiedWorkers;
+        unsigned long long workerClaimedTokens;
+        unsigned long long mainClaimedTokens;
+        unsigned long long coldBatches;
+        unsigned long long activeWorkersPeak;
+        unsigned long long wakeLatencyEwmaNs;
         unsigned long long scheduleModePublishNoAssist;
         unsigned long long scheduleModePublishAssist;
         unsigned long long scheduleModeDeferTinyOnly;
