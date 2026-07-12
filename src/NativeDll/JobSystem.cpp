@@ -81,6 +81,7 @@ namespace JobSystem
     std::atomic<int> g_frameQueueDepthPeak{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_frameLowLatencyMode{ false };
+    std::atomic<int64_t> g_lastTaskflowScheduleNs{ 0 };
 
     void UpdateQueueDepthPeak(int value) noexcept
     {
@@ -982,7 +983,8 @@ namespace JobSystem
             if (length <= 0) return 1;
             if (requestedChunk > 0) return requestedChunk;
             const int workerCount = std::max(1, CurrentWorkerCount());
-            return std::max(64, length / (workerCount * 2));
+            const int targetBatchCount = workerCount * 4;
+            return std::max(64, (length + targetBatchCount - 1) / targetBatchCount);
         }
 
         struct GeneralBatchState
@@ -1419,11 +1421,25 @@ namespace JobSystem
         }
     }
 
-    void Scheduler::PrewakeWorkers()
+    void PrewakeTaskflowWorkers()
+    {
+        std::shared_ptr<tf::Executor> executor;
+        int workerCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_executorMutex);
+            executor = g_executor;
+            workerCount = g_numThreads;
+        }
+        if (!executor || workerCount <= 0) return;
+        const int wakeCount = std::min(workerCount, 4);
+        for (int index = 0; index < wakeCount; ++index)
+            executor->silent_async([] {});
+    }
+
+    void PrewakeChunkWorkers()
     {
         const int workerCount = std::max(1, CurrentWorkerCount());
         EnsureChunkWorkers(workerCount);
-        g_prewakeCount.fetch_add(1, std::memory_order_relaxed);
         g_chunkPrewakeGeneration.fetch_add(1, std::memory_order_release);
         const auto now = std::chrono::steady_clock::now();
         const auto hotUntil = now + kChunkWorkerHotWait;
@@ -1431,21 +1447,23 @@ namespace JobSystem
             std::chrono::duration_cast<std::chrono::nanoseconds>(hotUntil.time_since_epoch()).count(),
             std::memory_order_release);
         g_chunkWorkerCv.notify_all();
+    }
 
-        std::shared_ptr<tf::Executor> executor;
-        int taskflowWorkerCount = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_executorMutex);
-            executor = g_executor;
-            taskflowWorkerCount = g_numThreads;
-        }
-        if (!executor || taskflowWorkerCount <= 0) return;
+    void AutoPrewakeTaskflowIfNeeded(int length)
+    {
+        if (length < 1024) return;
+        const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t previousNs = g_lastTaskflowScheduleNs.exchange(nowNs, std::memory_order_acq_rel);
+        if (previousNs == 0 || nowNs - previousNs >= 1'000'000)
+            PrewakeTaskflowWorkers();
+    }
 
-        const int taskflowWakeCount = std::min(taskflowWorkerCount, 4);
-        for (int i = 0; i < taskflowWakeCount; ++i)
-        {
-            executor->silent_async([] {});
-        }
+    void Scheduler::PrewakeWorkers()
+    {
+        g_prewakeCount.fetch_add(1, std::memory_order_relaxed);
+        PrewakeTaskflowWorkers();
+        PrewakeChunkWorkers();
     }
 
     void Scheduler::SetFrameLowLatencyMode(bool enabled)
@@ -1555,6 +1573,8 @@ namespace JobSystem
             return MakeCompletedHandle();
         }
 
+        AutoPrewakeTaskflowIfNeeded(length);
+
         const int chunkSize = ResolveChunkSize(length, batchSize);
         const int chunkCount = (length + chunkSize - 1) / chunkSize;
 
@@ -1592,6 +1612,8 @@ namespace JobSystem
             if (cleanup) cleanup(context);
             return MakeCompletedHandle();
         }
+
+        AutoPrewakeTaskflowIfNeeded(length);
 
         const int safeBatchSize = std::max(1, ResolveChunkSize(length, requestedBatchSize));
         const int batchCount = (length + safeBatchSize - 1) / safeBatchSize;

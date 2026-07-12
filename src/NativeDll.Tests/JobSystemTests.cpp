@@ -1,4 +1,5 @@
 #include "../NativeDll/JobSystem.h"
+#include "../NativeDll/ChunkJobData.h"
 
 #include <atomic>
 #include <chrono>
@@ -152,6 +153,59 @@ namespace
         Require(!childRanEarly.load(std::memory_order_acquire),
             "dependent parallel job ran before dependency");
     }
+
+    void TestAutomaticBatchDensity()
+    {
+        constexpr int length = 100'000;
+        std::atomic<int> callbackCount{ 0 };
+        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int, int)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+            }, &callbackCount, length, 0);
+        handle.Complete();
+        const int workers = JobSystem::ResolveWorkerCount(0);
+        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 3,
+            "automatic batching created too few work units for tail balancing");
+        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 4 + 1,
+            "automatic batching exceeded the four-per-worker target");
+    }
+
+    struct ChunkRangeContext
+    {
+        std::vector<std::atomic<int>>* hits;
+        std::atomic<int>* cleanupCount;
+    };
+
+    void ExecuteChunkRange(void* raw, const ChunkJobData*, int start, int count)
+    {
+        auto& context = *static_cast<ChunkRangeContext*>(raw);
+        for (int index = start; index < start + count; ++index)
+            (*context.hits)[static_cast<size_t>(index)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void CleanupChunkRange(void* raw)
+    {
+        static_cast<ChunkRangeContext*>(raw)->cleanupCount->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TestChunkRangeExactOnce()
+    {
+        constexpr int chunkCount = 1'024;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        std::vector<std::atomic<int>> hits(chunkCount);
+        std::atomic<int> cleanupCount{ 0 };
+        ChunkRangeContext context{ &hits, &cleanupCount };
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            &ExecuteChunkRange, &context, &CleanupChunkRange,
+            chunks.data(), chunkCount, {}, JobSystem::ChunkScheduleMode::PublishAssist);
+        handle.Complete();
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1,
+                "chunk range was missed or duplicated");
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "chunk cleanup must run exactly once");
+    }
 }
 
 int main()
@@ -167,6 +221,10 @@ int main()
         std::cout << "PASS ExplicitBatchSizes\n";
         TestDependencyOrdering();
         std::cout << "PASS DependencyOrdering\n";
+        TestChunkRangeExactOnce();
+        std::cout << "PASS ChunkRangeExactOnce\n";
+        TestAutomaticBatchDensity();
+        std::cout << "PASS AutomaticBatchDensity\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }
