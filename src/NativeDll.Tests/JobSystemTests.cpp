@@ -89,6 +89,69 @@ namespace
         Require(callerExecutions.load(std::memory_order_relaxed) > 0,
             "Complete caller did not execute any parallel batch");
     }
+
+    struct ExactOnceContext
+    {
+        std::vector<std::atomic<int>>* hits;
+        std::atomic<int>* cleanupCount;
+    };
+
+    void ExecuteExactRange(void* raw, int start, int count)
+    {
+        auto& context = *static_cast<ExactOnceContext*>(raw);
+        for (int index = start; index < start + count; ++index)
+            (*context.hits)[static_cast<size_t>(index)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void CleanupExactRange(void* raw)
+    {
+        static_cast<ExactOnceContext*>(raw)->cleanupCount->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TestExplicitBatchSize(int batchSize)
+    {
+        constexpr int length = 100'000;
+        std::vector<std::atomic<int>> hits(length);
+        std::atomic<int> cleanupCount{ 0 };
+        ExactOnceContext context{ &hits, &cleanupCount };
+        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteExactRange, &context, length, batchSize, &CleanupExactRange);
+        handle.Complete();
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1,
+                "explicit batch size missed or duplicated an index");
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "explicit batch cleanup must run exactly once");
+    }
+
+    void TestDependencyOrdering()
+    {
+        std::atomic<bool> dependencyFinished{ false };
+        std::atomic<bool> childRanEarly{ false };
+        auto dependency = JobSystem::Scheduler::Schedule(
+            [](void* raw)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                static_cast<std::atomic<bool>*>(raw)->store(true, std::memory_order_release);
+            }, &dependencyFinished);
+
+        struct DependentContext
+        {
+            std::atomic<bool>* dependencyFinished;
+            std::atomic<bool>* childRanEarly;
+        } context{ &dependencyFinished, &childRanEarly };
+
+        auto child = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int, int)
+            {
+                auto& dependent = *static_cast<DependentContext*>(raw);
+                if (!dependent.dependencyFinished->load(std::memory_order_acquire))
+                    dependent.childRanEarly->store(true, std::memory_order_release);
+            }, &context, 100'000, 257, nullptr, dependency);
+        child.Complete();
+        Require(!childRanEarly.load(std::memory_order_acquire),
+            "dependent parallel job ran before dependency");
+    }
 }
 
 int main()
@@ -98,6 +161,12 @@ int main()
     {
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
+        TestExplicitBatchSize(1);
+        TestExplicitBatchSize(257);
+        TestExplicitBatchSize(100'000);
+        std::cout << "PASS ExplicitBatchSizes\n";
+        TestDependencyOrdering();
+        std::cout << "PASS DependencyOrdering\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }
