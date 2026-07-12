@@ -2,6 +2,7 @@
 /bin
 /.vs
 /.vscode
+/.worktrees/
 
 # IDE
 **/.vs/
