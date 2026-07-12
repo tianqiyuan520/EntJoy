@@ -71,7 +71,8 @@ namespace
 
         std::jthread watchdog([&releaseWorkers]
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            for (int elapsed = 0; elapsed < 100 && !releaseWorkers.load(std::memory_order_acquire); ++elapsed)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             releaseWorkers.store(true, std::memory_order_release);
             releaseWorkers.notify_all();
         });
@@ -206,6 +207,52 @@ namespace
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "chunk cleanup must run exactly once");
     }
+
+    void TestCopiedHandleCleansUpOnce()
+    {
+        constexpr int length = 20'000;
+        std::vector<std::atomic<int>> hits(length);
+        std::atomic<int> cleanupCount{ 0 };
+        ExactOnceContext context{ &hits, &cleanupCount };
+        auto original = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteExactRange, &context, length, 257, &CleanupExactRange);
+        auto copied = original;
+        copied.Complete();
+        original.Complete();
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "copied handle caused duplicate cleanup");
+    }
+
+    void TestCombinedDependencies()
+    {
+        std::atomic<int> completed{ 0 };
+        auto callback = [](void* raw)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_release);
+        };
+        auto first = JobSystem::Scheduler::Schedule(callback, &completed);
+        auto second = JobSystem::Scheduler::Schedule(callback, &completed);
+        std::vector<JobSystem::JobHandle> dependencies{ first, second };
+        auto combined = JobSystem::JobHandle::CombineDependencies(dependencies);
+        combined.Complete();
+        Require(completed.load(std::memory_order_acquire) == 2,
+            "combined dependency completed before its inputs");
+    }
+
+    void TestShutdownWithOutstandingWork()
+    {
+        std::atomic<int> completedBatches{ 0 };
+        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int, int)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+            }, &completedBatches, 100'000, 257);
+        JobSystem::Scheduler::Shutdown();
+        Require(handle.IsCompleted(), "shutdown left parallel work incomplete");
+        JobSystem::Scheduler::Initialize();
+    }
 }
 
 int main()
@@ -225,6 +272,12 @@ int main()
         std::cout << "PASS ChunkRangeExactOnce\n";
         TestAutomaticBatchDensity();
         std::cout << "PASS AutomaticBatchDensity\n";
+        TestCopiedHandleCleansUpOnce();
+        std::cout << "PASS CopiedHandleCleansUpOnce\n";
+        TestCombinedDependencies();
+        std::cout << "PASS CombinedDependencies\n";
+        TestShutdownWithOutstandingWork();
+        std::cout << "PASS ShutdownWithOutstandingWork\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }
