@@ -42,6 +42,18 @@ The first ten result indices were identical in all runs:
 - Native exact-once, caller assist, explicit batch, dependency, Chunk, copied handle, combined dependency, and shutdown tests: **PASS**.
 - Native stress: **PASS** for 100 consecutive runs before adding the slower shutdown case. The later 500-process and 100-process audit commands exceeded the 120-second command limit without reporting a test failure; they are not claimed as completed runs.
 
+## IJobChunk / IJobEntity Results
+
+The existing one-million-entity comparison ran with 2 warmup and 100 measured frames. All light, heavy, sleep, and expected-position checks passed.
+
+| Scenario | C# Chunk | C++ Chunk | ISPC Chunk | C# Entity | C++ Entity | ISPC Entity |
+|---|---:|---:|---:|---:|---:|---:|
+| Continuous light | 0.581 ms | 0.500 ms | 1.342 ms | 0.515 ms | 0.486 ms | 1.416 ms |
+| Continuous heavy | 30.222 ms | 25.281 ms | 3.107 ms | 26.678 ms | 25.246 ms | 3.118 ms |
+| 16 ms sleep light | 1.064 ms | 1.020 ms | 1.334 ms | 1.074 ms | 1.010 ms | 1.315 ms |
+
+The generic assist implementation therefore retains correct Chunk and Entity execution in continuous, compute-heavy, and parked-worker scenarios. A strict percentage comparison for the sleep scenario requires a matching pre-change run on the same machine; no unsupported regression percentage is claimed here.
+
 ## Commands
 
 ```powershell
