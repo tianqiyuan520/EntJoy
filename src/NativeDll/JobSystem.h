@@ -26,6 +26,14 @@ constexpr size_t hardware_destructive_interference_size = 64;
 namespace JobSystem {
 
     using AssistStepCallback = bool (*)(void*) noexcept;
+    using AssistReleaseCallback = void (*)(void*) noexcept;
+
+    struct AssistState {
+        std::atomic<AssistStepCallback> callback{ nullptr };
+        std::atomic<void*> context{ nullptr };
+        std::atomic<AssistReleaseCallback> readersDrained{ nullptr };
+        std::atomic<int> readers{ 0 };
+    };
 
     enum class ChunkScheduleMode : int {
         PublishNoAssist = 0,
@@ -45,18 +53,11 @@ namespace JobSystem {
         // 延续任务相关（保留但极少使用）
         std::function<void()> inlineContinuation;
         std::vector<std::function<void()>> continuations;
-        // Complete() 协作执行的轻量 raw callback。IJobChunk 热路径优先走这里，避免每 chunk std::function 拷贝/锁。
-        std::atomic<AssistStepCallback> assistCallback{ nullptr };
-        std::atomic<void*> assistContext{ nullptr };
-        // Readers pin the assist context while Complete() invokes its raw callback.
-        // Chunk batches are not recycled until this count returns to zero.
-        std::atomic<int> assistReaders{ 0 };
+        // Complete() and workers share one raw, allocation-free work claimant.
+        AssistState assist;
         // Unity-style deferred schedule: Complete() 可先尝试 claim pending work 并同步执行。
         std::atomic<AssistStepCallback> pendingCallback{ nullptr };
         std::atomic<void*> pendingContext{ nullptr };
-        // Complete() 可协作执行的辅助步骤（Unity-style main-thread assist）
-        // 保留给 ParallelFor/ParallelForBatch 旧路径，后续可继续迁移。
-        std::function<bool()> assistStep;
         std::mutex mtx;  // 保护 continuations
 
 #ifdef _DEBUG
