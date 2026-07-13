@@ -544,36 +544,6 @@ public static unsafe partial class NativeJobScheduler
             return;
         JobSystem_Shutdown();
     }
-    private static long s_lastParallelScheduleTicks;
-    private static long s_lastChunkPrewakeTicks;
-    private static readonly long s_prewakeGapTicks = Stopwatch.Frequency / 1000; // 1ms
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AutoPrewakeIfNeeded(int length)
-    {
-        if (length < 1024) return;
-        long now = Stopwatch.GetTimestamp();
-        long last = Interlocked.Read(ref s_lastParallelScheduleTicks);
-        if (now - last >= s_prewakeGapTicks)
-        {
-            JobSystem_PrewakeWorkers();
-        }
-        Interlocked.Exchange(ref s_lastParallelScheduleTicks, now);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AutoPrewakeChunkIfNeeded(int chunkCount)
-    {
-        if (chunkCount <= 2) return;
-        long now = Stopwatch.GetTimestamp();
-        long last = Interlocked.Read(ref s_lastChunkPrewakeTicks);
-        if (now - last >= s_prewakeGapTicks)
-        {
-            JobSystem_PrewakeWorkers();
-        }
-        Interlocked.Exchange(ref s_lastChunkPrewakeTicks, now);
-    }
-
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
     {
@@ -619,7 +589,6 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelFor
     {
         if (length <= 0) return default;
-        AutoPrewakeIfNeeded(length);
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
         try
@@ -641,7 +610,6 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelForBatch
     {
         if (length <= 0) return default;
-        AutoPrewakeIfNeeded(length);
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
         try
@@ -744,7 +712,6 @@ public static unsafe partial class NativeJobScheduler
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
     {
-        if (length > 0) AutoPrewakeIfNeeded(length);
         using var dependencyLease = new RetainedNativeDependency(dependsOn);
         return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
     }
