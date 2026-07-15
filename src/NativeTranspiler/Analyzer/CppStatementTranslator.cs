@@ -898,6 +898,10 @@ namespace NativeTranspiler.Analyzer
             else if (value is bool b) _builder.Append(b ? "true" : "false");
             else if (value is float f)
             {
+                // 处理 NaN/Infinity 这些 C# 能表示但 C++ 字面量不支持的浮点值
+                if (float.IsNaN(f)) { _builder.Append("NAN"); return; }
+                if (float.IsPositiveInfinity(f)) { _builder.Append("INFINITY"); return; }
+                if (float.IsNegativeInfinity(f)) { _builder.Append("-INFINITY"); return; }
                 string floatStr = f.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 // Ensure the float literal has a decimal point for valid C++ syntax (e.g., "1920" -> "1920.0f")
                 if (!floatStr.Contains('.') && !floatStr.Contains('e') && !floatStr.Contains('E'))
@@ -905,7 +909,13 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(floatStr);
                 _builder.Append('f');
             }
-            else if (value is double d) _builder.Append(d.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            else if (value is double d)
+            {
+                if (double.IsNaN(d)) { _builder.Append("NAN"); return; }
+                if (double.IsPositiveInfinity(d)) { _builder.Append("INFINITY"); return; }
+                if (double.IsNegativeInfinity(d)) { _builder.Append("-INFINITY"); return; }
+                _builder.Append(d.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
             else _builder.Append(value?.ToString() ?? "nullptr");
         }
     }

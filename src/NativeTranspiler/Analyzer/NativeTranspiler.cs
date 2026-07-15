@@ -178,8 +178,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"struct {structSymbol.Name};");
             sb.AppendLine($"struct {structSymbol.Name} {{");
             foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>()
-                .Where(f => !f.IsStatic)
-                .OrderBy(f => f.MetadataToken))
+                .Where(f => !f.IsStatic))
             {
                 string ispcType = MapCSharpTypeToIspc(f.Type);
                 sb.AppendLine($"    {ispcType} {f.Name};");
@@ -202,8 +201,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"namespace {ns.Replace(".", "::")} {{");
             sb.AppendLine($"struct {structSymbol.Name} {{");
             foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>()
-                .Where(f => !f.IsStatic)
-                .OrderBy(f => f.MetadataToken))
+                .Where(f => !f.IsStatic))
             {
                 string cppType = MapCSharpTypeToCpp(f.Type);
                 sb.AppendLine($"    {cppType} {f.Name};");
