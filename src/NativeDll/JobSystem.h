@@ -141,6 +141,7 @@ void ResetStatsSnapshot() noexcept;
         static void Initialize(int numThreads = 0);
         static void Shutdown();
         static void PrewakeWorkers();
+        static void KeepWorkersWarm(int microseconds);
         static void SetFrameLowLatencyMode(bool enabled);
         static void FlushScheduledJobs();
 

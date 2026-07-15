@@ -31,6 +31,7 @@ extern "C" {
     JOB_API void JobSystem_Initialize(int numThreads);
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
+    JOB_API void JobSystem_KeepWorkersWarm(int microseconds);
     JOB_API void JobSystem_FlushScheduledJobs();
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
