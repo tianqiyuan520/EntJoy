@@ -2700,12 +2700,15 @@ public static unsafe partial class NativeJobScheduler
         return cache;
     }
 
+    private static readonly object _exceptionLock = new();
+    private static List<ExceptionDispatchInfo> _recordedJobExceptions = new();
+
     private static void RecordJobException(Exception exception)
     {
-        int count = Interlocked.Increment(ref _recordedJobExceptionCount);
-        if (count <= MaxRecordedJobExceptions)
+        lock (_exceptionLock)
         {
-            _jobExceptions.Enqueue(ExceptionDispatchInfo.Capture(exception));
+            if (_recordedJobExceptions.Count < MaxRecordedJobExceptions)
+                _recordedJobExceptions.Add(ExceptionDispatchInfo.Capture(exception));
         }
     }
 
@@ -2720,28 +2723,23 @@ public static unsafe partial class NativeJobScheduler
 
     private static void ThrowRecordedJobExceptions()
     {
-        int count = Interlocked.Exchange(ref _recordedJobExceptionCount, 0);
-        if (count == 0)
+        List<ExceptionDispatchInfo> captured;
+        lock (_exceptionLock)
         {
-            return;
+            captured = _recordedJobExceptions;
+            _recordedJobExceptions = new List<ExceptionDispatchInfo>();
         }
 
-        var exceptions = new List<Exception>(Math.Min(count, MaxRecordedJobExceptions));
-        while (_jobExceptions.TryDequeue(out var exceptionInfo))
+        if (captured.Count == 0) return;
+
+        if (captured.Count == 1)
         {
-            exceptions.Add(exceptionInfo.SourceException);
+            ExceptionDispatchInfo.Capture(captured[0].SourceException).Throw();
         }
 
-        if (exceptions.Count == 1)
-        {
-            ExceptionDispatchInfo.Capture(exceptions[0]).Throw();
-        }
-
-        if (count > exceptions.Count)
-        {
-            exceptions.Add(new InvalidOperationException($"Additional job exceptions were suppressed: {count - exceptions.Count}."));
-        }
-
+        var exceptions = new List<Exception>(captured.Count);
+        foreach (var ei in captured)
+            exceptions.Add(ei.SourceException);
         throw new AggregateException("One or more scheduled C# jobs failed.", exceptions);
     }
 
