@@ -15,7 +15,7 @@ namespace EntJoy.Collections
         private bool _isOwner;
 
 #if DEBUG
-        //private DisposeSentinel _sentinel;
+        private DisposeSentinel _sentinel;
 #endif
 
         public int Length => _length;
@@ -71,7 +71,7 @@ namespace EntJoy.Collections
 
             _isOwner = true;
 #if DEBUG
-            //_sentinel = new DisposeSentinel();
+            _sentinel = new DisposeSentinel();
 #endif
         }
 
@@ -109,8 +109,8 @@ namespace EntJoy.Collections
             _length = 0;
             _safety = default;
 #if DEBUG
-            //_sentinel?.Dispose();
-            //_sentinel = null;
+            _sentinel?.Dispose();
+            _sentinel = null;
 #endif
         }
 

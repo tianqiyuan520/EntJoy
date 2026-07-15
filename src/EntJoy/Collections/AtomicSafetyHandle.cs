@@ -65,7 +65,8 @@ namespace EntJoy.Collections
                 return;
 
             _freeIndices.Enqueue(index);
-            handle = default;
+            // 设置为无效索引(-1)，避免 default(0,false) 被回收后 use-after-free
+            handle = new AtomicSafetyHandle(-1, false);
         }
 
         /// <summary>强制标记指定索引的句柄为已释放（用于 TempAllocator 紧急清理）</summary>
@@ -83,6 +84,17 @@ namespace EntJoy.Collections
         {
             int index = handle.Index;
             if (index < 0 || index >= _states.Length)
+                throw new InvalidOperationException("Invalid handle index.");
+            if (Volatile.Read(ref _states[index]) == ReleasedFlag)
+                throw new ObjectDisposedException("NativeContainer has been disposed.");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        public static void CheckReadAndAllowInvalid(AtomicSafetyHandle handle)
+        {
+            int index = handle.Index;
+            if (index < 0) return; // 已释放的容器，允许不抛异常
+            if (index >= _states.Length)
                 throw new InvalidOperationException("Invalid handle index.");
             if (Volatile.Read(ref _states[index]) == ReleasedFlag)
                 throw new ObjectDisposedException("NativeContainer has been disposed.");
