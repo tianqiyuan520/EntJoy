@@ -150,14 +150,18 @@ internal static class JobScheduler
         var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
 
         // 在主线程预处理 enabledIndices（只在主线程做一次，不在并行任务里重复 new）
+        // 成分类型数量通常 ≤ 5，直接分配数组避免 ArrayPool 异步归还竞态
         int[] enabledIndices = null;
         if (query.AllEnabled != null && query.AllEnabled.Length > 0)
         {
-            enabledIndices = ArrayPool<int>.Shared.Rent(query.AllEnabled.Length);
+            enabledIndices = new int[query.AllEnabled.Length];
             var arch = chunks[0].Archetype;
             for (int i = 0; i < query.AllEnabled.Length; i++)
                 enabledIndices[i] = arch.GetComponentTypeIndex(query.AllEnabled[i]);
         }
+
+        // 拍快照：lambda 异步执行时 chunks 可能被 ThreadStatic 重用清空
+        var chunksSnapshot = chunks.ToArray();
 
         Action mainAction = () =>
         {
@@ -165,7 +169,7 @@ internal static class JobScheduler
             var hasEnabled = enabledIndices != null;
             if (hasEnabled)
             {
-                Parallel.ForEach(chunks, options, chunk =>
+                Parallel.ForEach(chunksSnapshot, options, chunk =>
                 {
                     counter?.RecordCurrentThread();
 
@@ -191,7 +195,7 @@ internal static class JobScheduler
             }
             else
             {
-                Parallel.ForEach(chunks, options, chunk =>
+                Parallel.ForEach(chunksSnapshot, options, chunk =>
                 {
                     counter?.RecordCurrentThread();
                     job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
@@ -204,9 +208,6 @@ internal static class JobScheduler
             mainTask = depTask.ContinueWith(_ => mainAction(), TaskContinuationOptions.ExecuteSynchronously);
         else
             mainTask = Task.Run(mainAction);
-
-        if (enabledIndices != null)
-            ArrayPool<int>.Shared.Return(enabledIndices);
 
         return new JobHandle(mainTask);
     }
