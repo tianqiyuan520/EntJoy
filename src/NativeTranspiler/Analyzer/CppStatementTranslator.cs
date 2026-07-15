@@ -826,22 +826,8 @@ namespace NativeTranspiler.Analyzer
             }
 
             _builder.Append(macroBase).Append(is64Bit ? "64" : "32").Append('(');
-
-            if (targetExpr is PrefixUnaryExpressionSyntax prefix
-                && prefix.OperatorToken.IsKind(SyntaxKind.AmpersandToken))
-            {
-                TranslateExpression(prefix.Operand);
-            }
-            else if (targetExpr is InvocationExpressionSyntax innerInvoke)
-            {
-                // ref T ArrayElementAsRef(...) — pass the address expression directly
-                TranslateExpression(targetExpr);
-            }
-            else
-            {
-                _builder.Append('&');
-                TranslateExpression(targetExpr);
-            }
+            _builder.Append('&');
+            TranslateExpression(targetExpr);
 
             if (method.Name == "Add" && args.Count >= 2)
             {
