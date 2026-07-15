@@ -119,13 +119,11 @@ namespace EntJoy
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            // 以物理 chunk 大小为靶向（128KB ~ 256KB），反向计算最优 entity 容量。
-            // 更大的 chunk = 更少的分发开销 + 更好的缓存局部性。
-            // 128KB 确保 ~184 chunks/1M 实体（每 worker ~23 chunks），
-            // 平衡调度开销与并行粒度。
+            // 以 96KB 物理 chunk 大小为靶向，兼顾调度开销与负载均衡。
+            // 每 worker 分配到 ~6 次 token 执行，每次 token 处理约 20000 实体。
+            // 1M 实体 → ~256 chunks → ~37 chunks/worker → 足以让所有 worker 满载。
             const int cacheLineSize = 64;
-            const int minChunkBytes = 128 * 1024;   // 128KB
-            const int maxChunkBytes = 256 * 1024;   // 256KB
+            const int targetChunkBytes = 96 * 1024;   // 96KB
 
             int entitySize = Marshal.SizeOf<Entity>();
             int totalComponentSize = entitySize;
@@ -136,27 +134,17 @@ namespace EntJoy
                 if (type.IsEnableable) enableableCount++;
             }
 
-            // 对齐填充：每个组件数组前需 cacheLineSize 对齐空隙
+            // 对齐填充、位图开销
             int alignmentOverhead = types.Length * cacheLineSize;
-
-            // 位图开销：每实体 (enableableCount * 8/64) 字节
-            const int bitmapBytesPer64Entities = 8; // ulong per component
+            const int bitmapBytesPer64Entities = 8;
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
-            // 从 target physical size 反推 capacity
             int stride = totalComponentSize + bitmapOverheadPerEntity;
-            int capacity = Math.Max(512, (minChunkBytes - alignmentOverhead) / stride);
+            int capacity = Math.Max(256, (targetChunkBytes - alignmentOverhead) / stride);
 
-            // 如果 stride 很小（容量已接近 maxChunkBytes），尝试更大
-            if (capacity * stride + alignmentOverhead < maxChunkBytes)
-            {
-                int cap2 = Math.Max(512, (maxChunkBytes - alignmentOverhead) / stride);
-                capacity = Math.Max(capacity, cap2);
-            }
-
-            // 64 对齐（与 Chunk 内存布局对齐一致）
+            // 64 对齐
             capacity = (capacity + (cacheLineSize - 1)) & ~(cacheLineSize - 1);
-            return Math.Clamp(capacity, 512, 65536);
+            return Math.Clamp(capacity, 256, 65536);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
