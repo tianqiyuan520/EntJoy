@@ -793,14 +793,23 @@ namespace NativeTranspiler.Analyzer
             _builder.Append(')');
         }
 
+        private static bool Is64BitType(ITypeSymbol? type)
+        {
+            return type != null && (type.SpecialType == SpecialType.System_Int64 ||
+                                    type.SpecialType == SpecialType.System_UInt64);
+        }
+
         protected virtual void TranslateInterlockedCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
             var args = invocation.ArgumentList.Arguments;
             if (args.Count == 0) return;
 
             var targetExpr = args[0].Expression;
+            var targetType = _semanticModel.GetTypeInfo(targetExpr).Type;
+            bool is64Bit = Is64BitType(targetType);
 
-            string macroName = method.Name switch
+            // 选择 32 或 64 位宏
+            string macroBase = method.Name switch
             {
                 "Increment" => "INTERLOCKED_INCREMENT_AND_FETCH",
                 "Decrement" => "INTERLOCKED_DECREMENT_AND_FETCH",
@@ -810,15 +819,29 @@ namespace NativeTranspiler.Analyzer
                 _ => null
             };
 
-            if (macroName == null)
+            if (macroBase == null)
             {
                 _builder.Append($"/* Unsupported Interlocked method: {method.Name} */");
                 return;
             }
 
-            _builder.Append(macroName).Append('(');
-            _builder.Append('&');
-            TranslateExpression(targetExpr);
+            _builder.Append(macroBase).Append(is64Bit ? "64" : "32").Append('(');
+
+            if (targetExpr is PrefixUnaryExpressionSyntax prefix
+                && prefix.OperatorToken.IsKind(SyntaxKind.AmpersandToken))
+            {
+                TranslateExpression(prefix.Operand);
+            }
+            else if (targetExpr is InvocationExpressionSyntax innerInvoke)
+            {
+                // ref T ArrayElementAsRef(...) — pass the address expression directly
+                TranslateExpression(targetExpr);
+            }
+            else
+            {
+                _builder.Append('&');
+                TranslateExpression(targetExpr);
+            }
 
             if (method.Name == "Add" && args.Count >= 2)
             {

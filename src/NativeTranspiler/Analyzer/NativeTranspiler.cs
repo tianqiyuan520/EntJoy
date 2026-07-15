@@ -1,5 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace NativeTranspiler.Analyzer
@@ -85,7 +86,7 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_SByte => "signed char",
                 SpecialType.System_Int16 => "short",
                 SpecialType.System_UInt16 => "unsigned short",
-                SpecialType.System_Char => "char",
+                SpecialType.System_Char => "unsigned short",  // C# char=16bit, C++ char=8bit
                 SpecialType.System_IntPtr => "intptr_t",
                 SpecialType.System_UIntPtr => "uintptr_t",
                 _ => null
@@ -194,7 +195,28 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
             sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
             sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
+            sb.AppendLine("#include <cstddef>");
             sb.AppendLine();
+
+            // 验证 [StructLayout(LayoutKind.Sequential)] — 没有该属性时 .NET 可重排字段
+            bool hasSequentialLayout = false;
+            foreach (var attr in structSymbol.GetAttributes())
+            {
+                if (attr.AttributeClass?.Name == "StructLayoutAttribute")
+                {
+                    if (attr.ConstructorArguments.Length > 0 &&
+                        attr.ConstructorArguments[0].Value is int layoutKind &&
+                        layoutKind == (int)LayoutKind.Sequential)
+                    {
+                        hasSequentialLayout = true;
+                    }
+                }
+            }
+            if (!hasSequentialLayout)
+            {
+                sb.AppendLine($"#error [StructLayout(LayoutKind.Sequential)] is REQUIRED on {structSymbol.Name} for C++ layout compatibility");
+            }
+
             var ns = structSymbol.ContainingNamespace?.ToDisplayString() ?? "";
             bool hasNs = !string.IsNullOrEmpty(ns) && ns != "<global namespace>";
             if (hasNs)
