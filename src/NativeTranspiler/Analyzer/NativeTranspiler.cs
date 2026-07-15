@@ -81,6 +81,13 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Double => "double",
                 SpecialType.System_Boolean => "bool",
                 SpecialType.System_Void => "void",
+                SpecialType.System_Byte => "unsigned char",
+                SpecialType.System_SByte => "signed char",
+                SpecialType.System_Int16 => "short",
+                SpecialType.System_UInt16 => "unsigned short",
+                SpecialType.System_Char => "char",
+                SpecialType.System_IntPtr => "intptr_t",
+                SpecialType.System_UIntPtr => "uintptr_t",
                 _ => null
             };
             if (mapped != null) return mapped;
@@ -135,7 +142,8 @@ namespace NativeTranspiler.Analyzer
         /// <summary>判断是否为内置非托管类型（基础类型或数学类型）</summary>
         public static bool IsBuiltinUnmanaged(ITypeSymbol type)
         {
-            return type.SpecialType != SpecialType.None ||
+            // 仅限值类型；string/object/array 等的 SpecialType != None 但非 unmanaged
+            return (type.IsValueType && type.SpecialType != SpecialType.None) ||
                    type.ToDisplayString().StartsWith("EntJoy.Mathematics.");
         }
 

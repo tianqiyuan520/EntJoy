@@ -1,3 +1,5 @@
+using System;
+
 namespace EntJoy
 {
     /// <summary>
@@ -6,8 +8,8 @@ namespace EntJoy
     internal sealed class ComponentTypes<T0>
         where T0 : struct
     {
-        /// <summary>共享的组件类型数组</summary>
-        public static ComponentType[] Share = new ComponentType[]
+        /// <summary>共享的组件类型数组（只读，防止外部修改）</summary>
+        public static readonly ComponentType[] Share = new ComponentType[]
         {
             typeof(T0)
         };
@@ -20,8 +22,8 @@ namespace EntJoy
         where T0 : struct
         where T1 : struct
     {
-        /// <summary>共享的组件类型数组</summary>
-        public static ComponentType[] Share = new ComponentType[]
+        /// <summary>共享的组件类型数组（只读，防止外部修改）</summary>
+        public static readonly ComponentType[] Share = new ComponentType[]
         {
             typeof(T0),
             typeof(T1)

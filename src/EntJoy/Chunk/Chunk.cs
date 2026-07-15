@@ -100,6 +100,14 @@ namespace EntJoy
             // 将实体写入 Entity 数组
             ((Entity*)((byte*)_memoryBlock + ENTITY_ARRAY_OFFSET))[_entityCount] = entity;
 
+            // 清零该实体的所有组件数据（防止 swap-pop 后读到脏数据）
+            for (int i = 0; i < _componentOffsets.Length; i++)
+            {
+                int compSize = _componentSizes[i];
+                byte* compPtr = (byte*)_memoryBlock + _componentOffsets[i] + _entityCount * compSize;
+                Unsafe.InitBlock(compPtr, 0, (uint)compSize);
+            }
+
             // 初始化所有 enableable 位为"启用"
             for (int i = 0; i < _enableBitOffsets.Length; i++)
             {
@@ -178,6 +186,10 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
+            if ((uint)entityIndex >= (uint)_entityCount)
+                throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
+            if ((uint)componentIndex >= (uint)_componentOffsets.Length)
+                throw new IndexOutOfRangeException($"Component index {componentIndex} out of range (count={_componentOffsets.Length}).");
             return ref Unsafe.AsRef<T>(
                 (byte*)_memoryBlock + _componentOffsets[componentIndex] + entityIndex * _componentSizes[componentIndex]);
         }
@@ -244,6 +256,7 @@ namespace EntJoy
                 _rawAllocation = nint.Zero;
                 _memoryBlock = nint.Zero;
             }
+            GC.SuppressFinalize(this);
         }
 
         ~Chunk()

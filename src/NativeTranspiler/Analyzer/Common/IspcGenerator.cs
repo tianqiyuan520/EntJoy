@@ -529,7 +529,9 @@ namespace NativeTranspiler.Analyzer
             else
             {
                 sb.AppendLine($"    {cppReturnType} __result_temp;");
-                sb.AppendLine($"    ispc::{baseName}_impl({ispcCallArgs});");
+                // ISPC _impl 函数签名中需要 __result_ptr 输出参数
+                string resultArg = string.IsNullOrEmpty(ispcCallArgs) ? "&__result_temp" : $", &__result_temp";
+                sb.AppendLine($"    ispc::{baseName}_impl({ispcCallArgs}{resultArg});");
                 sb.AppendLine("    return __result_temp;");
             }
 
