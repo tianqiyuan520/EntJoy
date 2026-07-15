@@ -524,6 +524,8 @@ namespace JobSystem
         bool g_chunkWorkersShutdown = false;
         std::atomic<uint64_t> g_chunkPrewakeGeneration{ 0 };
         std::atomic<int64_t> g_chunkHotUntilNs{ 0 };
+        std::atomic<int64_t> g_keepWarmUntilNs{ 0 };
+        constexpr int64_t kKeepWarmSpinYieldThreshold = 50;
         std::atomic<int64_t> g_lastChunkCompletionNs{ 0 };
 
         inline void RelaxCpu() noexcept;
@@ -651,23 +653,55 @@ namespace JobSystem
 
                 if (!token.batch)
                 {
-                    std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
-                    g_chunkWorkerCv.wait(lock, [&observedPrewake] {
-                        return g_chunkWorkersShutdown ||
-                            g_chunkRunnableCount.load(std::memory_order_acquire) > 0 ||
-                            g_chunkPrewakeGeneration.load(std::memory_order_relaxed) != observedPrewake;
-                    });
-                    if (g_chunkWorkersShutdown && g_chunkRunnableBatches.empty()) return;
-                    if (!g_chunkRunnableBatches.empty())
+                    // ——— 保温阶段 ———
+                    // g_keepWarmUntilNs > 0 时 spin-yield 代替 CV park，
+                    // 消除帧间 notify_one 唤醒延迟（~100 μs）。
+                    int64_t warmDeadline = g_keepWarmUntilNs.load(std::memory_order_acquire);
+                    if (warmDeadline > 0)
                     {
-                        token = g_chunkRunnableBatches.front();
-                        g_chunkRunnableBatches.pop_front();
-                        g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
+                        bool yielded = false;
+                        for (int w = 0; ; ++w)
+                        {
+                            auto now = std::chrono::steady_clock::now();
+                            if (now.time_since_epoch().count() >= warmDeadline) break;
+                            if (g_chunkRunnableCount.load(std::memory_order_acquire) > 0)
+                            {
+                                std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
+                                if (!g_chunkRunnableBatches.empty())
+                                {
+                                    token = g_chunkRunnableBatches.front();
+                                    g_chunkRunnableBatches.pop_front();
+                                    g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
+                                }
+                            }
+                            if (token.batch) break;
+                            if (w < kKeepWarmSpinYieldThreshold) { RelaxCpu(); }
+                            else if (!yielded) { yielded = true; std::this_thread::yield(); }
+                            else { RelaxCpu(); }
+                        }
+                        if (token.batch) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
                     }
-                    observedPrewake = g_chunkPrewakeGeneration.load(std::memory_order_relaxed);
-                    if (token.batch)
+
+                    if (!token.batch)
                     {
-                        g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                        std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
+                        g_chunkWorkerCv.wait(lock, [&observedPrewake] {
+                            return g_chunkWorkersShutdown ||
+                                g_chunkRunnableCount.load(std::memory_order_acquire) > 0 ||
+                                g_chunkPrewakeGeneration.load(std::memory_order_relaxed) != observedPrewake;
+                        });
+                        if (g_chunkWorkersShutdown && g_chunkRunnableBatches.empty()) return;
+                        if (!g_chunkRunnableBatches.empty())
+                        {
+                            token = g_chunkRunnableBatches.front();
+                            g_chunkRunnableBatches.pop_front();
+                            g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
+                        }
+                        observedPrewake = g_chunkPrewakeGeneration.load(std::memory_order_relaxed);
+                        if (token.batch)
+                        {
+                            g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
 
@@ -1465,6 +1499,16 @@ namespace JobSystem
         g_prewakeCount.fetch_add(1, std::memory_order_relaxed);
         PrewakeTaskflowWorkers();
         PrewakeChunkWorkers();
+    }
+
+    void Scheduler::KeepWorkersWarm(int microseconds)
+    {
+        const int64_t deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds)).time_since_epoch()
+        ).count();
+        g_keepWarmUntilNs.store(deadline, std::memory_order_release);
+        g_chunkHotUntilNs.store(deadline, std::memory_order_release);
+        g_chunkWorkerCv.notify_all();
     }
 
     void Scheduler::SetFrameLowLatencyMode(bool enabled)

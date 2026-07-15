@@ -156,6 +156,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
+    private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_KeepWorkersWarm;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_FlushScheduledJobs;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
@@ -337,6 +338,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
         _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
+        _jobSystem_KeepWorkersWarm = (delegate* unmanaged[Cdecl]<int, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_KeepWorkersWarm");
         _jobSystem_FlushScheduledJobs = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_FlushScheduledJobs");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
@@ -406,6 +409,12 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_PrewakeWorkers == null) return;
         _jobSystem_PrewakeWorkers();
+    }
+
+    private static void JobSystem_KeepWorkersWarm(int microseconds)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_KeepWorkersWarm == null) return;
+        _jobSystem_KeepWorkersWarm(microseconds);
     }
 
     private static void JobSystem_FlushScheduledJobs()
@@ -539,6 +548,7 @@ public static unsafe partial class NativeJobScheduler
     }
     public static void Shutdown() => SafeShutdown();
     public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
+    public static void KeepWorkersWarm(int microseconds) => JobSystem_KeepWorkersWarm(microseconds);
     public static void FlushScheduledJobs() => JobSystem_FlushScheduledJobs();
 
     private static void SafeShutdown()
