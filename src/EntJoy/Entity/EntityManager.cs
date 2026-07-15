@@ -105,6 +105,9 @@ namespace EntJoy
             archetypeMap.Clear();
             recycleEntities.Clear();
             global::NativeJobScheduler.ClearRawChunkScheduleCaches(this);
+            // 归还 ArrayPool 租用的数组
+            ArrayPool<EntityIndexInWorld>.Shared.Return(entities, clearArray: true);
+            ArrayPool<Archetype>.Shared.Return(allArchetypes, clearArray: true);
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
@@ -164,6 +167,8 @@ namespace EntJoy
         /// <returns></returns>
         public ref EntityIndexInWorld GetEntityInfoRef(int index)
         {
+            if ((uint)index >= (uint)entities.Length)
+                throw new IndexOutOfRangeException($"Entity index {index} is out of range (max {entities.Length - 1}).");
             return ref entities[index];
         }
 
@@ -174,6 +179,18 @@ namespace EntJoy
             entityInfoRef.Archetype = archetype;
             entityInfoRef.ChunkIndex = chunkIndex;
             entityInfoRef.SlotInChunk = slotInChunk;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ValidateEntity(Entity entity)
+        {
+            if ((uint)entity.Id >= (uint)entities.Length)
+                throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
+            ref var info = ref GetEntityInfoRef(entity.Id);
+            if (info.Archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (info.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
         }
 
         private void RefreshChunkEntityIndices(Archetype archetype, int chunkIndex)
@@ -235,6 +252,8 @@ namespace EntJoy
 
             // 更新该实体索引
             UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
+            // 存储实体版本号用于悬垂引用检测
+            GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
 
             //GD.Print("new Entity"," ", newEntity.Id," ", allArchetypes.Count()," ", allArchetypes[0]?.entityCount," ", allArchetypes[1]?.entityCount, allArchetypes[2]?.entityCount);
 
@@ -244,7 +263,12 @@ namespace EntJoy
         public void DestroyEntity(Entity entity)
         {
             CompleteActiveJobs();
+            if ((uint)entity.Id >= (uint)entities.Length)
+                throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+            // 版本不匹配：旧句柄指向已回收再生的实体
+            if (entityInfoRef.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             var archetype = entityInfoRef.Archetype;
             if (archetype == null)
             {
@@ -504,6 +528,10 @@ namespace EntJoy
         {
             CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+            if (entityInfoRef.Archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (entityInfoRef.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             var oldArch = entityInfoRef.Archetype;
             if (oldArch.Has(typeof(T0)))
             {
@@ -548,6 +576,10 @@ namespace EntJoy
         {
             CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+            if (entityInfoRef.Archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (entityInfoRef.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             var oldArch = entityInfoRef.Archetype;
             //若旧原型中无该类型，则直接返回
             if (!oldArch.Has(typeof(T0)))
@@ -595,6 +627,10 @@ namespace EntJoy
         {
             CompleteActiveJobs();
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+            if (entityInfoRef.Archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (entityInfoRef.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             var arch = entityInfoRef.Archetype;  // 获取对应的原型
             arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
         }
@@ -617,6 +653,11 @@ namespace EntJoy
             CompleteActiveJobs();
             ref var info = ref GetEntityInfoRef(entity.Id);
             var archetype = info.Archetype;
+
+            if (archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (info.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
 
             // 检查实体是否拥有该组件
             if (!archetype.Has(typeof(T)))
@@ -641,6 +682,11 @@ namespace EntJoy
         {
             ref var info = ref GetEntityInfoRef(entity.Id);
             var archetype = info.Archetype;
+
+            if (archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (info.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
 
             if (!archetype.Has(typeof(T)))
                 throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
