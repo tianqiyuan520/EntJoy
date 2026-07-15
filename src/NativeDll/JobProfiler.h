@@ -130,15 +130,21 @@ public:
         return nextIndex.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // 获取当前线程的索引
+    // 获取当前线程的索引（注意：Get/Set 共享同一个 thread_local）
     static int GetCurrentIndex() {
-        thread_local int tls_index = -1;
-        return tls_index;
+        return CurrentIndexRef();
     }
 
     // 设置当前线程的索引
     static void SetCurrentIndex(int index) {
-        thread_local int tls_index = -1;
-        tls_index = index;
+        CurrentIndexRef() = index;
     }
+
+private:
+    // 所有访问统一经过此函数返回的引用，确保跨函数共享同一个 thread_local
+    static int& CurrentIndexRef() {
+        thread_local int tls_index = -1;
+        return tls_index;
+    }
+public:
 };

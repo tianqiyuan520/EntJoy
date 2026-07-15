@@ -452,6 +452,10 @@ public static unsafe partial class NativeJobScheduler
 
     private static void JobSystem_ReleaseHandle(IntPtr handle)
     {
+        // 注意：与其它包装函数不同，此处不调用 EnsureNativeLoaded()
+        // 因为此路径在 finalizer 线程、DomainUnload 或 ProcessExit 期间
+        // 也可能被调用，此时 native DLL 可能已卸载。
+        // 非 finalizer 路径调用前应通过 RetainedNativeDependency 确保有效性。
         if (_nativeDll == IntPtr.Zero || _jobSystem_ReleaseHandle == null) return;
         _jobSystem_ReleaseHandle(handle);
     }
@@ -509,6 +513,7 @@ public static unsafe partial class NativeJobScheduler
     private delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void EntityBatchJobFuncDelegate(IntPtr context, EntityBatchData* batches, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CleanupFunc(IntPtr context);
@@ -549,17 +554,22 @@ public static unsafe partial class NativeJobScheduler
     {
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
+        bool cleanupByCpp = false;
         try
         {
             var cache = GetOrCreateDelegateCache<T, JobFunc>(() => CreateJobCallback<T>());
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(
-                JobSystem_Schedule(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, dependencyLease.Handle));
+            IntPtr handle = JobSystem_Schedule(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, dependencyLease.Handle);
+            cleanupByCpp = true; // C++ now owns ctx via cleanup callback
+            return new NativeJobHandle(handle);
         }
         catch
         {
-            if (managedContext) ManagedCleanup(ctx);
-            else Cleanup(ctx);
+            if (!cleanupByCpp)
+            {
+                if (managedContext) ManagedCleanup(ctx);
+                else Cleanup(ctx);
+            } // else: C++ will call cleanup when job completes
             throw;
         }
     }
@@ -570,17 +580,22 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
+        bool cleanupByCpp = false;
         try
         {
             var cache = GetOrCreateDelegateCache<T, IndexJobFunc>(() => CreateForCallback<T>());
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(
-                JobSystem_ScheduleFor(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, dependencyLease.Handle));
+            IntPtr handle = JobSystem_ScheduleFor(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, dependencyLease.Handle);
+            cleanupByCpp = true;
+            return new NativeJobHandle(handle);
         }
         catch
         {
-            if (managedContext) ManagedCleanup(ctx);
-            else Cleanup(ctx);
+            if (!cleanupByCpp)
+            {
+                if (managedContext) ManagedCleanup(ctx);
+                else Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -591,17 +606,22 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
+        bool cleanupByCpp = false;
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle));
+            IntPtr handle = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle);
+            cleanupByCpp = true;
+            return new NativeJobHandle(handle);
         }
         catch
         {
-            if (managedContext) ManagedCleanup(ctx);
-            else Cleanup(ctx);
+            if (!cleanupByCpp)
+            {
+                if (managedContext) ManagedCleanup(ctx);
+                else Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -612,17 +632,22 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = JobHasManagedReferences<T>();
         var ctx = managedContext ? AllocManagedContext(ref job) : AllocContext(ref job);
+        bool cleanupByCpp = false;
         try
         {
             var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForBatchCallback<T>());
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(
-                JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle));
+            IntPtr handle = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle);
+            cleanupByCpp = true;
+            return new NativeJobHandle(handle);
         }
         catch
         {
-            if (managedContext) ManagedCleanup(ctx);
-            else Cleanup(ctx);
+            if (!cleanupByCpp)
+            {
+                if (managedContext) ManagedCleanup(ctx);
+                else Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -954,83 +979,118 @@ public static unsafe partial class NativeJobScheduler
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
 
-        int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock) { gcHandleStartIndex = _chunkGCHandles.Count; }
-
+        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
+        var gcHandles = new GCHandle[chunkCount];
         for (int ci = 0; ci < chunkCount; ci++)
+            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
+
+        int gcHandleStartIndex;
+        lock (_chunkGCHandlesLock)
         {
-            var chunk = chunkList[ci];
-            var arch = chunk.Archetype;
-            var gch = GCHandle.Alloc(chunk, GCHandleType.WeakTrackResurrection);
-            lock (_chunkGCHandlesLock) { _chunkGCHandles.Add(gch); }
+            gcHandleStartIndex = _chunkGCHandles.Count;
+            for (int ci = 0; ci < chunkCount; ci++)
+                _chunkGCHandles.Add(gcHandles[ci]);
+        }
 
-            int compCount = chunk.ComponentCount;
-            var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-            var compSizes = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
-            var bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-            var typeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
-            void** requiredArrays = null;
-            int requiredCount = requiredComponentTypeIds?.Length ?? 0;
-            if (requiredCount > 0)
+        var contextBlock = IntPtr.Zero;
+        try
+        {
+            for (int ci = 0; ci < chunkCount; ci++)
             {
-                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
-            }
+                var chunk = chunkList[ci];
+                var arch = chunk.Archetype;
 
-            for (int c = 0; c < compCount; c++)
-            {
-                compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
-                compSizes[c] = arch.Types[c].Size;
-                bitmaps[c] = chunk.GetEnableBitMapPointer(c);
-                typeIndices[c] = arch.Types[c].Id;
-            }
-
-            if (requiredArrays != null)
-            {
-                for (int r = 0; r < requiredCount; r++)
+                int compCount = chunk.ComponentCount;
+                var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
+                var compSizes = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+                var bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
+                var typeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+                void** requiredArrays = null;
+                int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+                if (requiredCount > 0)
                 {
-                    int requiredTypeId = requiredComponentTypeIds[r];
-                    for (int c = 0; c < compCount; c++)
+                    requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                    for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+                }
+
+                for (int c = 0; c < compCount; c++)
+                {
+                    compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
+                    compSizes[c] = arch.Types[c].Size;
+                    bitmaps[c] = chunk.GetEnableBitMapPointer(c);
+                    typeIndices[c] = arch.Types[c].Id;
+                }
+
+                if (requiredArrays != null)
+                {
+                    for (int r = 0; r < requiredCount; r++)
                     {
-                        if (typeIndices[c] == requiredTypeId)
+                        int requiredTypeId = requiredComponentTypeIds[r];
+                        for (int c = 0; c < compCount; c++)
                         {
-                            requiredArrays[r] = compPtrs[c];
-                            break;
+                            if (typeIndices[c] == requiredTypeId)
+                            {
+                                requiredArrays[r] = compPtrs[c];
+                                break;
+                            }
                         }
                     }
                 }
+
+                chunksPtr[ci] = new ChunkJobData
+                {
+                    entityArray = (void*)chunk.GetEntityPointer(),
+                    entityCount = chunk.EntityCount,
+                    componentCount = compCount,
+                    componentArrays = compPtrs,
+                    componentSizes = compSizes,
+                    enableBitMaps = bitmaps,
+                    componentTypeIndices = typeIndices,
+                    chunkHandle = (IntPtr)gcHandles[ci],
+                    requiredComponentArrays = requiredArrays,
+                    requiredComponentCount = requiredCount
+                };
             }
 
-            chunksPtr[ci] = new ChunkJobData
-            {
-                entityArray = (void*)chunk.GetEntityPointer(),
-                entityCount = chunk.EntityCount,
-                componentCount = compCount,
-                componentArrays = compPtrs,
-                componentSizes = compSizes,
-                enableBitMaps = bitmaps,
-                componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gch,
-                requiredComponentArrays = requiredArrays,
-                requiredComponentCount = requiredCount
-            };
-        }
+            contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
 
-        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
-
-        try
-        {
             IntPtr callbackPtr = funcPtr;
             if (callbackPtr == IntPtr.Zero)
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
                 callbackPtr = cache.FuncPtr;
             }
-                var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
+            var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
         }
-        catch { ChunkCleanup(contextBlock); throw; }
+        catch
+        {
+            if (contextBlock != IntPtr.Zero)
+            {
+                ChunkCleanup(contextBlock);
+            }
+            else
+            {
+                // 分配循环未完成：部分清理 per-chunk 分配和 chunksPtr
+                if (chunksPtr != null)
+                {
+                    for (int ci = 0; ci < chunkCount; ci++)
+                    {
+                        var cd = chunksPtr[ci];
+                        if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
+                        if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
+                        if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
+                        if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
+                        if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                    }
+                    Marshal.FreeHGlobal((IntPtr)chunksPtr);
+                }
+                foreach (var gch in gcHandles)
+                    if (gch.IsAllocated) gch.Free();
+            }
+            throw;
+        }
     }
 
     private static NativeJobHandle ScheduleNativeChunkRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize)
@@ -1069,15 +1129,23 @@ public static unsafe partial class NativeJobScheduler
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
+        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
+        var gcHandles = new GCHandle[chunkCount];
+        for (int ci = 0; ci < chunkCount; ci++)
+            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
+
         int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock) { gcHandleStartIndex = _chunkGCHandles.Count; }
+        lock (_chunkGCHandlesLock)
+        {
+            gcHandleStartIndex = _chunkGCHandles.Count;
+            for (int ci = 0; ci < chunkCount; ci++)
+                _chunkGCHandles.Add(gcHandles[ci]);
+        }
 
         for (int ci = 0; ci < chunkCount; ci++)
         {
             var chunk = chunkList[ci];
             var arch = chunk.Archetype;
-            var gch = GCHandle.Alloc(chunk, GCHandleType.WeakTrackResurrection);
-            lock (_chunkGCHandlesLock) { _chunkGCHandles.Add(gch); }
 
             int compCount = chunk.ComponentCount;
             var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
@@ -1125,7 +1193,7 @@ public static unsafe partial class NativeJobScheduler
                 componentSizes = compSizes,
                 enableBitMaps = bitmaps,
                 componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gch,
+                chunkHandle = (IntPtr)gcHandles[ci],
                 requiredComponentArrays = requiredArrays,
                 requiredComponentCount = requiredCount
             };
@@ -1176,15 +1244,23 @@ public static unsafe partial class NativeJobScheduler
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
+        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
+        var gcHandles = new GCHandle[chunkCount];
+        for (int ci = 0; ci < chunkCount; ci++)
+            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
+
         int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock) { gcHandleStartIndex = _chunkGCHandles.Count; }
+        lock (_chunkGCHandlesLock)
+        {
+            gcHandleStartIndex = _chunkGCHandles.Count;
+            for (int ci = 0; ci < chunkCount; ci++)
+                _chunkGCHandles.Add(gcHandles[ci]);
+        }
 
         for (int ci = 0; ci < chunkCount; ci++)
         {
             var chunk = chunkList[ci];
             var arch = chunk.Archetype;
-            var gch = GCHandle.Alloc(chunk, GCHandleType.WeakTrackResurrection);
-            lock (_chunkGCHandlesLock) { _chunkGCHandles.Add(gch); }
 
             int compCount = chunk.ComponentCount;
             var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
@@ -1232,7 +1308,7 @@ public static unsafe partial class NativeJobScheduler
                 componentSizes = compSizes,
                 enableBitMaps = bitmaps,
                 componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gch,
+                chunkHandle = (IntPtr)gcHandles[ci],
                 requiredComponentArrays = requiredArrays,
                 requiredComponentCount = requiredCount
             };
@@ -2034,6 +2110,9 @@ public static unsafe partial class NativeJobScheduler
                     int index = gcHandleStartIndex + i;
                     if (_chunkGCHandles[index].IsAllocated) { _chunkGCHandles[index].Free(); _chunkGCHandles[index] = default; }
                 }
+                // 清理尾部连续的 default 条目，防止 _chunkGCHandles 无界增长
+                while (_chunkGCHandles.Count > 0 && !_chunkGCHandles[_chunkGCHandles.Count - 1].IsAllocated)
+                    _chunkGCHandles.RemoveAt(_chunkGCHandles.Count - 1);
             }
         }
 
@@ -2571,13 +2650,23 @@ public static unsafe partial class NativeJobScheduler
             return idx >= MaxBucket ? -1 : idx;
         }
 
+        /// <summary>安全计算桶大小，避免 1&lt;&lt;31 / 1&lt;&lt;32 溢出。</summary>
+        private static int GetBucketAllocSize(int idx)
+        {
+            // idx 范围 0..63, BucketShift=6 → 移位 6..69
+            // C# int 左移只用低 5 位，idx>=26 时会截断导致分配远小于预期。
+            // 改用 long 计算再 clamp。
+            long size = 1L << (BucketShift + idx);
+            return (int)Math.Min(size, int.MaxValue);
+        }
+
         public static IntPtr Rent(int size)
         {
             int idx = GetBucketIndex(size);
             if (idx < 0) return Marshal.AllocHGlobal(size);
             var bucket = _buckets[idx];
             if (bucket != null && bucket.TryPop(out var ptr)) return ptr;
-            return Marshal.AllocHGlobal(1 << (BucketShift + idx));
+            return Marshal.AllocHGlobal(GetBucketAllocSize(idx));
         }
 
         public static void Return(IntPtr ptr, int size)
@@ -2585,8 +2674,12 @@ public static unsafe partial class NativeJobScheduler
             if (ptr == IntPtr.Zero) return;
             int idx = GetBucketIndex(size);
             if (idx < 0) { Marshal.FreeHGlobal(ptr); return; }
-            var bucket = _buckets[idx];
-            if (bucket == null) { bucket = new ConcurrentStack<IntPtr>(); _buckets[idx] = bucket; }
+            var bucket = Volatile.Read(ref _buckets[idx]);
+            if (bucket == null)
+            {
+                bucket = new ConcurrentStack<IntPtr>();
+                bucket = Interlocked.CompareExchange(ref _buckets[idx], bucket, null) ?? bucket;
+            }
             const int MaxPerBucket = 256;
             if (bucket.Count < MaxPerBucket) bucket.Push(ptr);
             else Marshal.FreeHGlobal(ptr);
