@@ -91,10 +91,11 @@ namespace EntJoy.Collections
             Length--;
             if (index < Length)
             {
-                void* src = (byte*)Ptr + (index + 1) * sizeof(T);
-                void* dst = (byte*)Ptr + index * sizeof(T);
+                // 不能用 Buffer.MemoryCopy (MemCpy) — 源和目的区域重叠时行为未定义。
+                // 改用正向逐元素复制确保正确性。
                 int elementsToMove = Length - index;
-                UnsafeUtility.MemCpy(dst, src, elementsToMove * sizeof(T));
+                for (int i = 0; i < elementsToMove; i++)
+                    Ptr[index + i] = Ptr[index + i + 1];
             }
         }
 

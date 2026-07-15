@@ -75,8 +75,12 @@ namespace EntJoy.Collections
         {
             if (index < 0 || index >= _states.Length)
                 return;
-            Interlocked.Exchange(ref _states[index], ReleasedFlag);
-            // 注意：不加入空闲队列，因为该句柄可能仍被引用，但已标记释放后任何访问都会抛异常。
+            int old = Interlocked.Exchange(ref _states[index], ReleasedFlag);
+            if (old != ReleasedFlag)
+            {
+                // 归还索引到空闲队列，避免永久泄漏
+                _freeIndices.Enqueue(index);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]

@@ -107,7 +107,8 @@ namespace EntJoy.Collections
             }
             _buffer = null;
             _length = 0;
-            _safety = default;
+            // 注意：不设置 _safety = default — Release() 已将其设为 (-1, false)
+            // 避免索引 0 被回收后 use-after-free
 #if DEBUG
             _sentinel?.Dispose();
             _sentinel = null;
@@ -187,7 +188,11 @@ namespace EntJoy.Collections
         }
 
         // ========== Span 互操作 ==========
-        public Span<T> AsSpan() => new Span<T>(_buffer, _length);
+        public Span<T> AsSpan()
+        {
+            SafetyHandleManager.CheckReadAndThrow(_safety);
+            return new Span<T>(_buffer, _length);
+        }
         public static implicit operator Span<T>(NativeArray<T> arr) => arr.AsSpan();
         public static implicit operator ReadOnlySpan<T>(NativeArray<T> arr) => new ReadOnlySpan<T>(arr._buffer, arr._length);
 

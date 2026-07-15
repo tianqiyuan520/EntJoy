@@ -5,7 +5,12 @@ namespace EntJoy
     public partial class World : System.IDisposable
     {
         private static readonly object _defaultLock = new();
-        public static World DefaultWorld = null;
+        private static volatile World _defaultWorld;
+        public static World DefaultWorld
+        {
+            get => _defaultWorld;
+            set => _defaultWorld = value;
+        }
 
         public string Name { get; private set; }
         public EntityManager _entityManager;

@@ -82,11 +82,13 @@ namespace EntJoy
             {
                 return MoveNextArchetype();
             }
-            if (_chunkIndex < _currentArch.ChunkList.Count)
+            // 循环跳过空 chunk，而不是遇到空的就终止
+            while (_chunkIndex < _currentArch.ChunkList.Count)
             {
                 _currentChunk = _currentArch.ChunkList[_chunkIndex];
                 _chunkIndex++;
-                return _currentChunk.EntityCount > 0;
+                if (_currentChunk.EntityCount > 0)
+                    return true;
             }
             return MoveNextArchetype();
         }
