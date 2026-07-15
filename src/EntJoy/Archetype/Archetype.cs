@@ -256,10 +256,6 @@ namespace EntJoy
         ~Archetype()
         {
             Dispose();
-            if (_cachedAddress != IntPtr.Zero)
-            {
-                MemoryAddress.ClearAddressCache(this);
-            }
         }
     }
 
@@ -272,7 +268,7 @@ namespace EntJoy
         {
             if (_cachedAddress == IntPtr.Zero)
             {
-                _cachedAddress = MemoryAddress.GetCachedAddress(this);
+                _cachedAddress = MemoryAddress.GetAddress(this);
             }
             return _cachedAddress;
         }

@@ -1,86 +1,71 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace EntJoy.Debugger
 {
+    /// <summary>
+    /// 仅用于 DEBUG 输出。注意：返回的 IntPtr 仅在持有 GCHandle 期间有效。
+    /// 调用 GetAddress 后会保持对象的 pin 状态，请在不再需要时调用 ReleasePinned 释放。
+    /// </summary>
     public static class MemoryAddress
     {
-        private static Dictionary<object, GCHandle> _pinnedObjects = new Dictionary<object, GCHandle>();
-
-        private static Dictionary<object, IntPtr> _addressCache = new Dictionary<object, IntPtr>();
-
-        /// <summary>
-        /// 获取对象的缓存地址(可能变化)
-        /// </summary>
-        public static IntPtr GetCachedAddress(object obj)
-        {
-            if (obj == null) return IntPtr.Zero;
-
-            lock (_addressCache)
-            {
-                if (!_addressCache.TryGetValue(obj, out var address))
-                {
-                    // 使用Weak GCHandle获取当前地址
-                    var handle = GCHandle.Alloc(obj, GCHandleType.Weak);
-                    address = GCHandle.ToIntPtr(handle);
-                    handle.Free();
-
-                    _addressCache[obj] = address;
-                }
-                return address;
-            }
-        }
+        // 已 pin 的对象列表：保留 GCHandle 使返回的地址有效
+        private static readonly Dictionary<object, GCHandle> _pinned = new();
 
         /// <summary>
-        /// 清除地址缓存
-        /// </summary>
-        public static void ClearAddressCache(object obj)
-        {
-            if (obj == null) return;
-
-            lock (_addressCache)
-            {
-                _addressCache.Remove(obj);
-            }
-        }
-
-        /// <summary>
-        /// 获取对象的内存地址(临时)
+        /// 获取对象的内存地址（会 pin 住对象直到 ReleasePinned 调用）
         /// </summary>
         public static IntPtr GetAddress(object obj)
         {
             if (obj == null) return IntPtr.Zero;
 
-            GCHandle handle = GCHandle.Alloc(obj, GCHandleType.Pinned);
+            var handle = GCHandle.Alloc(obj, GCHandleType.Pinned);
             IntPtr address = handle.AddrOfPinnedObject();
-            handle.Free();
-            return address;
-        }
-
-        ///<summary>
-        ///获取值类型的内存地址
-        ///</summary>
-        public static IntPtr GetAddress<T>(ref T value) where T : struct
-        {
-            GCHandle handle = GCHandle.Alloc(value, GCHandleType.Pinned);
-            IntPtr address = handle.AddrOfPinnedObject();
-            handle.Free();
+            lock (_pinned) _pinned[obj] = handle;
             return address;
         }
 
         /// <summary>
-        /// 获取数组的首元素地址
+        /// 获取值类型引用在栈上的地址（不安全，地址仅在调用者的栈帧内有效）
+        /// </summary>
+        public unsafe static IntPtr GetAddress<T>(ref T value) where T : struct
+        {
+            return (IntPtr)Unsafe.AsPointer(ref value);
+        }
+
+        /// <summary>
+        /// 获取数组的首元素地址（会 pin 住数组直到 ReleasePinned 调用）
         /// </summary>
         public static IntPtr GetArrayAddress(Array array)
         {
             if (array == null || array.Length == 0)
                 return IntPtr.Zero;
 
-            GCHandle handle = GCHandle.Alloc(array, GCHandleType.Pinned);
+            var handle = GCHandle.Alloc(array, GCHandleType.Pinned);
             IntPtr address = handle.AddrOfPinnedObject();
-            handle.Free();
+            lock (_pinned) _pinned[array] = handle;
             return address;
         }
+
+        /// <summary>释放所有已 pin 的对象</summary>
+        public static void ReleaseAll()
+        {
+            lock (_pinned)
+            {
+                foreach (var kvp in _pinned)
+                    if (kvp.Value.IsAllocated) kvp.Value.Free();
+                _pinned.Clear();
+            }
+        }
+
+        // ---------- 已废弃：以下方法仅返回无效地址，保留仅为编译兼容 ----------
+
+        [Obsolete("Use GetAddress(object) instead — this method returned a dangling pointer.")]
+        public static IntPtr GetCachedAddress(object obj) => IntPtr.Zero;
+
+        [Obsolete("No longer needed.")]
+        public static void ClearAddressCache(object _) { }
     }
 }
