@@ -502,6 +502,7 @@ public partial class SpritesRandomMove : Node2D
 
 			for (int i = 0; i < len; i++)
 			{
+				if (idx >= _naPositions.Length) break; // 防止 EntityCount < 实际数量时越界写
 				float2 p = positions[i].pos;
 				float2 v = velocities[i].vel;
 				_naPositions[idx] = new float2(p.x, p.y);

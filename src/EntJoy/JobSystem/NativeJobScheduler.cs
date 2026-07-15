@@ -1088,6 +1088,8 @@ public static unsafe partial class NativeJobScheduler
                 }
                 foreach (var gch in gcHandles)
                     if (gch.IsAllocated) gch.Free();
+                // 注：GCHandle 已释放，但对应 slot 仍在 _chunkGCHandles 中。
+                // 异常路径罕见，孤立条目可接受；正常路径的尾压实可回收尾部段落。
             }
             throw;
         }

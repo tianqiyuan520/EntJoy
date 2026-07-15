@@ -99,32 +99,27 @@ namespace EntJoy
         public NativeArray<T> ToComponentDataArray<T>(Allocator allocator = Allocator.Persistent) where T : unmanaged
         {
             EnsureUpToDate();
+            // 使用 _chunks 列表而非 _matchingArchetypes[].GetChunks() 来确保
+            // 与 CalculateEntityCount() 计数一致，避免竞态引发的堆缓冲区溢出
             int total = CalculateEntityCount();
             var result = new NativeArray<T>(total, allocator);
             int dstIndex = 0;
             int elementSize = Unsafe.SizeOf<T>();
 
-            for (int archetypeIndex = 0; archetypeIndex < _matchingArchetypes.Count; archetypeIndex++)
+            for (int chunkIdx = 0; chunkIdx < _chunks.Count; chunkIdx++)
             {
-                var archetype = _matchingArchetypes[archetypeIndex];
-                if (!TryGetComponentTypeIndex<T>(archetype, out int componentIndex))
-                {
+                var chunk = _chunks[chunkIdx];
+                int count = chunk.EntityCount;
+                if (count == 0) continue;
+
+                var arch = chunk.Archetype;
+                if (!TryGetComponentTypeIndex<T>(arch, out int componentIndex))
                     continue;
-                }
 
-                foreach (var chunk in archetype.GetChunks())
-                {
-                    int count = chunk.EntityCount;
-                    if (count == 0)
-                    {
-                        continue;
-                    }
-
-                    var srcPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex);
-                    var dstPtr = (byte*)result.GetUnsafePtr() + dstIndex * elementSize;
-                    Unsafe.CopyBlock(dstPtr, srcPtr, (uint)(count * elementSize));
-                    dstIndex += count;
-                }
+                var srcPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex);
+                var dstPtr = (byte*)result.GetUnsafePtr() + dstIndex * elementSize;
+                Unsafe.CopyBlock(dstPtr, srcPtr, (uint)(count * elementSize));
+                dstIndex += count;
             }
 
             return result;
