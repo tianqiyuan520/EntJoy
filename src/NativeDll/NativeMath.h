@@ -56,10 +56,10 @@ namespace EntJoy {
 
 		// ---------- float2 ----------
 		struct float2 {
-			float x, y;
-			float2() : x(0), y(0) {}
-			float2(float v) : x(v), y(v) {}
-			float2(float x, float y) : x(x), y(y) {}
+			union { float data[2]; struct { float x, y; }; };
+			float2() : data{ 0, 0 } {}
+			float2(float v) : data{ v, v } {}
+			float2(float x_, float y_) : data{ x_, y_ } {}
 			float2(const float2&) = default;
 			float2& operator=(const float2&) = default;
 
@@ -84,8 +84,8 @@ namespace EntJoy {
 			bool operator==(const float2& rhs) const { return x == rhs.x && y == rhs.y; }
 			bool operator!=(const float2& rhs) const { return !(*this == rhs); }
 
-			float& operator[](int i) { return (&x)[i]; }
-			const float& operator[](int i) const { return (&x)[i]; }
+			float& operator[](int i) { return data[i]; }
+			const float& operator[](int i) const { return data[i]; }
 
 			// 从 int2 转换
 			float2(const struct int2& v);
@@ -100,10 +100,10 @@ namespace EntJoy {
 
 		// ---------- int2 ----------
 		struct int2 {
-			int x, y;
-			int2() : x(0), y(0) {}
-			int2(int v) : x(v), y(v) {}
-			int2(int x, int y) : x(x), y(y) {}
+			union { int data[2]; struct { int x, y; }; };
+			int2() : data{ 0, 0 } {}
+			int2(int v) : data{ v, v } {}
+			int2(int x_, int y_) : data{ x_, y_ } {}
 
 			int2 operator+(const int2& rhs) const { return int2(x + rhs.x, y + rhs.y); }
 			int2 operator-(const int2& rhs) const { return int2(x - rhs.x, y - rhs.y); }
@@ -119,8 +119,8 @@ namespace EntJoy {
 			bool operator==(const int2& rhs) const { return x == rhs.x && y == rhs.y; }
 			bool operator!=(const int2& rhs) const { return !(*this == rhs); }
 
-			int& operator[](int i) { return (&x)[i]; }
-			const int& operator[](int i) const { return (&x)[i]; }
+			int& operator[](int i) { return data[i]; }
+			const int& operator[](int i) const { return data[i]; }
 
 			// 从 float2 转换（截断小数）
 			int2(const float2& v) : x(static_cast<int>(v.x)), y(static_cast<int>(v.y)) {}
@@ -135,10 +135,10 @@ namespace EntJoy {
 
 		// ---------- uint2 ----------
 		struct uint2 {
-			uint32_t x, y;
-			uint2() : x(0), y(0) {}
-			uint2(uint32_t v) : x(v), y(v) {}
-			uint2(uint32_t x, uint32_t y) : x(x), y(y) {}
+			union { uint32_t data[2]; struct { uint32_t x, y; }; };
+			uint2() : data{ 0, 0 } {}
+			uint2(uint32_t v) : data{ v, v } {}
+			uint2(uint32_t x_, uint32_t y_) : data{ x_, y_ } {}
 
 			uint2 operator+(const uint2& rhs) const { return uint2(x + rhs.x, y + rhs.y); }
 			uint2 operator-(const uint2& rhs) const { return uint2(x - rhs.x, y - rhs.y); }
@@ -148,8 +148,8 @@ namespace EntJoy {
 			bool operator==(const uint2& rhs) const { return x == rhs.x && y == rhs.y; }
 			bool operator!=(const uint2& rhs) const { return !(*this == rhs); }
 
-			uint32_t& operator[](int i) { return (&x)[i]; }
-			const uint32_t& operator[](int i) const { return (&x)[i]; }
+			uint32_t& operator[](int i) { return data[i]; }
+			const uint32_t& operator[](int i) const { return data[i]; }
 
 			// 从 float2 转换
 			uint2(const float2& v) : x(static_cast<uint32_t>(v.x)), y(static_cast<uint32_t>(v.y)) {}

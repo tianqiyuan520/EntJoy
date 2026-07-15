@@ -9,6 +9,7 @@ namespace EntJoy
     {
         inline void* GetChunkComponentArray(const ChunkJobData* chunkData, int componentTypeId)
         {
+            if (!chunkData) return nullptr;
             for (int i = 0; i < chunkData->componentCount; ++i)
             {
                 if (chunkData->componentTypeIndices[i] == componentTypeId)
@@ -22,6 +23,7 @@ namespace EntJoy
 
         inline void* GetRequiredChunkComponentArray(const ChunkJobData* chunkData, int requiredSlot, int componentTypeId)
         {
+            if (!chunkData) return nullptr;
             if (chunkData->requiredComponentArrays != nullptr &&
                 requiredSlot >= 0 &&
                 requiredSlot < chunkData->requiredComponentCount)
@@ -39,6 +41,9 @@ namespace EntJoy
         template<typename T>
         inline EntJoy::Collections::NativeArray<T> GetChunkNativeArray(const ChunkJobData* chunkData, int componentTypeId)
         {
+            if (!chunkData)
+                return EntJoy::Collections::NativeArray<T>{ nullptr, 0, EntJoy::Collections::Allocator::None,
+                    EntJoy::Collections::AtomicSafetyHandle{0}, false };
             for (int i = 0; i < chunkData->componentCount; ++i)
             {
                 if (chunkData->componentTypeIndices[i] == componentTypeId)

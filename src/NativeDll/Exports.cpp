@@ -116,6 +116,8 @@ extern "C"
 
     void* JobSystem_CombineDependencies(void** handles, int count)
     {
+        if (count <= 0 || !handles)
+            return nullptr;
         std::vector<JobSystem::JobHandle> vec;
         vec.reserve(count);
         for (int i = 0; i < count; ++i)
