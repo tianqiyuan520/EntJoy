@@ -70,17 +70,15 @@ namespace EntJoy.Collections
         }
 
         /// <summary>强制标记指定索引的句柄为已释放（用于 TempAllocator 紧急清理）</summary>
+        /// 注意：不归还索引到空闲队列，因为旧句柄仍可能被访问；
+        /// 标记为 ReleasedFlag 后 CheckReadAndThrow 会捕获并抛出异常。
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         internal static void MarkReleased(int index)
         {
             if (index < 0 || index >= _states.Length)
                 return;
-            int old = Interlocked.Exchange(ref _states[index], ReleasedFlag);
-            if (old != ReleasedFlag)
-            {
-                // 归还索引到空闲队列，避免永久泄漏
-                _freeIndices.Enqueue(index);
-            }
+            Interlocked.Exchange(ref _states[index], ReleasedFlag);
+            // 不加入空闲队列 — 该句柄可能仍被引用，标记释放后任何访问都会抛异常
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]

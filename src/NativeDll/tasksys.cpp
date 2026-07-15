@@ -240,6 +240,9 @@ inline TaskGroupBase::~TaskGroupBase() {
     // the "mem" member!
     for (int i = 1; i < NUM_MEM_BUFFERS; ++i)
         delete[](memBuffers[i]);
+    // 释放所有 TaskInfo chunk，防止 ~256MB 永久泄漏
+    for (int i = 0; i < MAX_TASK_QUEUE_CHUNKS; ++i)
+        delete[](taskInfo[i]);
 }
 
 inline void TaskGroupBase::Reset() {

@@ -720,9 +720,10 @@ namespace JobSystem
         {
             if (workerCount <= 0) workerCount = 1;
             std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
+            // 无条件重置关闭标志，避免之前关闭后的残留 true 导致新 worker 立即退出
+            g_chunkWorkersShutdown = false;
             if (!g_chunkWorkers.empty()) return;
 
-            g_chunkWorkersShutdown = false;
             g_chunkWorkers.reserve(static_cast<size_t>(workerCount));
             for (int i = 0; i < workerCount; ++i)
             {
