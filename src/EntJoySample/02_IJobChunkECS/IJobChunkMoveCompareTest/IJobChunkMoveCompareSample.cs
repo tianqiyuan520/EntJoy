@@ -769,11 +769,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 for (int frame = 0; frame < warmupFrames; frame++)
                 {
                     cases[index].Run();
-                    if (sleepMilliseconds > 0)
-                    {
-                        NativeJobScheduler.KeepWorkersWarm((sleepMilliseconds + 2) * 1000);
-                        Thread.Sleep(sleepMilliseconds);
-                    }
+                    if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
                 double measuredTotal = 0;
@@ -783,11 +779,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     cases[index].Run();
                     long end = Stopwatch.GetTimestamp();
                     measuredTotal += (end - start) * 1000.0 / Stopwatch.Frequency;
-                    if (sleepMilliseconds > 0)
-                    {
-                        NativeJobScheduler.KeepWorkersWarm((sleepMilliseconds + 2) * 1000);
-                        Thread.Sleep(sleepMilliseconds);
-                    }
+                    if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
                 averages[index] = measuredTotal / measureFrames;
