@@ -2373,6 +2373,7 @@ public static unsafe partial class NativeJobScheduler
         };
     }
 
+    [SkipLocalsInit]
     private unsafe static ChunkRangeJobFuncDelegate CreateChunkRangeCallback<T>() where T : struct, IJobChunk
     {
         return (IntPtr ctx, ChunkJobData* chunks, int startIndex, int count) =>
@@ -2388,9 +2389,23 @@ public static unsafe partial class NativeJobScheduler
                 ref var job = ref Unsafe.AsRef<T>(jobPtr);
 
                 int end = startIndex + count;
-                for (int index = startIndex; index < end; index++)
+                // 快速路径：无 enabled filter，减少调用链
+                if (header->hasEnabledFilter == 0 || header->allEnabledCount == 0)
                 {
-                    ExecuteRawChunk(ref job, header, &chunks[index]);
+                    for (int index = startIndex; index < end; index++)
+                    {
+                        var cd = chunks + index;
+                        var chunk = ResolveChunk(cd->chunkHandle);
+                        if (chunk != null)
+                            job.Execute(new ArchetypeChunk(chunk), default);
+                    }
+                }
+                else
+                {
+                    for (int index = startIndex; index < end; index++)
+                    {
+                        ExecuteRawChunk(ref job, header, chunks + index);
+                    }
                 }
             }
             catch (Exception exception)
@@ -2402,6 +2417,19 @@ public static unsafe partial class NativeJobScheduler
                 ExitJobExecution();
             }
         };
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Chunk ResolveChunk(IntPtr chunkHandle)
+    {
+        if (chunkHandle == IntPtr.Zero) return null;
+        try
+        {
+            var gch = GCHandle.FromIntPtr(chunkHandle);
+            if (gch.IsAllocated && gch.Target is Chunk c) return c;
+        }
+        catch { }
+        return null;
     }
 
     private unsafe static EntityBatchJobFuncDelegate CreateManagedEntityBatchCallback<TJob, TExecutor>()
