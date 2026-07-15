@@ -296,18 +296,6 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                for (int __ri = 0; __ri < requiredTypes.Count; __ri++)
-                {
-                    sb.AppendLine($"    int __comp_idx_{__ri} = -1;");
-                    sb.AppendLine("    for (int __ci = 0; __ci < __chunkData->componentCount; __ci++)");
-                    sb.AppendLine("    {");
-                    sb.AppendLine($"        if (__chunkData->componentTypeIndices[__ci] == __requiredComponentTypeIds[{__ri}])");
-                    sb.AppendLine("        {");
-                    sb.AppendLine($"            __comp_idx_{__ri} = __ci;");
-                    sb.AppendLine("            break;");
-                    sb.AppendLine("        }");
-                    sb.AppendLine("    }");
-                }
                 var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
@@ -329,24 +317,11 @@ namespace NativeTranspiler.Analyzer
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            // 扫描 __requiredComponentTypeIds → componentArrays 索引，消除 requiredComponentArrays 分配
-            for (int __ri = 0; __ri < executeMethod.Parameters.Length; __ri++)
-            {
-                sb.AppendLine($"    int __comp_idx_{__ri} = -1;");
-                sb.AppendLine("    for (int __ci = 0; __ci < __chunkData->componentCount; __ci++)");
-                sb.AppendLine("    {");
-                sb.AppendLine($"        if (__chunkData->componentTypeIndices[__ci] == __requiredComponentTypeIds[{__ri}])");
-                sb.AppendLine("        {");
-                sb.AppendLine($"            __comp_idx_{__ri} = __ci;");
-                sb.AppendLine("            break;");
-                sb.AppendLine("        }");
-                sb.AppendLine("    }");
-            }
             for (int i = 0; i < executeMethod.Parameters.Length; i++)
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[__comp_idx_{i}]);");
+                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
             }
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
             sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
@@ -816,23 +791,11 @@ namespace NativeTranspiler.Analyzer
 
                     var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
                     var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-                    for (int __ri = 0; __ri < executeMethod.Parameters.Length; __ri++)
-                    {
-                        sb.AppendLine($"    int __comp_idx_{__ri} = -1;");
-                        sb.AppendLine("    for (int __ci = 0; __ci < __chunkData->componentCount; __ci++)");
-                        sb.AppendLine("    {");
-                        sb.AppendLine($"        if (__chunkData->componentTypeIndices[__ci] == __requiredComponentTypeIds[{__ri}])");
-                        sb.AppendLine("        {");
-                        sb.AppendLine($"            __comp_idx_{__ri} = __ci;");
-                        sb.AppendLine("            break;");
-                        sb.AppendLine("        }");
-                        sb.AppendLine("    }");
-                    }
                     for (int i = 0; i < executeMethod.Parameters.Length; i++)
                     {
                         var param = executeMethod.Parameters[i];
                         var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                        sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[__comp_idx_{i}]);");
+                        sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
                     }
                     sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
                     sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
@@ -922,18 +885,6 @@ namespace NativeTranspiler.Analyzer
                     {
                         var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                         var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                        for (int __ri = 0; __ri < requiredTypes.Count; __ri++)
-                        {
-                            sb.AppendLine($"    int __comp_idx_{__ri} = -1;");
-                            sb.AppendLine("    for (int __ci = 0; __ci < __chunkData->componentCount; __ci++)");
-                            sb.AppendLine("    {");
-                            sb.AppendLine($"        if (__chunkData->componentTypeIndices[__ci] == __requiredComponentTypeIds[{__ri}])");
-                            sb.AppendLine("        {");
-                            sb.AppendLine($"            __comp_idx_{__ri} = __ci;");
-                            sb.AppendLine("            break;");
-                            sb.AppendLine("        }");
-                            sb.AppendLine("    }");
-                        }
                         var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
                         var bodyCode = translator.Translate(methodSyntax.Body);
                         foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))

@@ -1124,23 +1124,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
 
             var callArgs = new List<string>();
-            for (int __ri = 0; __ri < chunkArrays.Count; __ri++)
-            {
-                sb.AppendLine($"    int __comp_idx_{__ri} = -1;");
-                sb.AppendLine("    for (int __ci = 0; __ci < __chunkData->componentCount; __ci++)");
-                sb.AppendLine("    {");
-                sb.AppendLine($"        if (__chunkData->componentTypeIndices[__ci] == __requiredComponentTypeIds[{__ri}])");
-                sb.AppendLine("        {");
-                sb.AppendLine($"            __comp_idx_{__ri} = __ci;");
-                sb.AppendLine("            break;");
-                sb.AppendLine("        }");
-                sb.AppendLine("    }");
-            }
             for (int i = 0; i < chunkArrays.Count; i++)
             {
                 var (type, name) = chunkArrays[i];
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
-                sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->componentArrays[__comp_idx_{i}]);");
+                sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    int {name}_length = __chunkData->entityCount;");
                 callArgs.Add($"{name}_ptr");
                 callArgs.Add($"{name}_length");

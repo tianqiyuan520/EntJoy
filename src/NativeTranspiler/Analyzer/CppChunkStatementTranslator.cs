@@ -146,7 +146,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
-            expression = $"__chunkData->componentArrays[__comp_idx_{componentIndex}]";
+            expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
             return true;
         }
 
