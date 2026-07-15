@@ -1,7 +1,10 @@
+using System.Threading;
+
 namespace EntJoy
 {
     public partial class World : System.IDisposable
     {
+        private static readonly object _defaultLock = new();
         public static World DefaultWorld = null;
 
         public string Name { get; private set; }
@@ -14,9 +17,13 @@ namespace EntJoy
             Name = worldName;
             _entityManager = new EntityManager();
 
-            if (DefaultWorld == null)
+            // 线程安全地设置 DefaultWorld：只有第一个 World 会成为默认
+            lock (_defaultLock)
             {
-                DefaultWorld = this;
+                if (DefaultWorld == null)
+                {
+                    DefaultWorld = this;
+                }
             }
         }
 
@@ -28,9 +35,12 @@ namespace EntJoy
         public void Dispose()
         {
             _entityManager?.Dispose();
-            if (ReferenceEquals(DefaultWorld, this))
+            lock (_defaultLock)
             {
-                DefaultWorld = null;
+                if (ReferenceEquals(DefaultWorld, this))
+                {
+                    DefaultWorld = null;
+                }
             }
         }
 
