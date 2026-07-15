@@ -48,11 +48,11 @@ public partial class CpuFullLoadTest : Node
 
         // ----- 单线程测试 -----
         Stopwatch sw = Stopwatch.StartNew();
-        //for (int i = 0; i < DATA_COUNT; i++)
-        //{
-        //    float x = data[i];
-        //    var res = Math.Sqrt(x) + Math.Sin(x) * Math.Cos(x) + Math.Log(x + 1);
-        //}
+        for (int i = 0; i < DATA_COUNT; i++)
+        {
+            float x = data[i];
+            var res = Math.Sqrt(x) + Math.Sin(x) * Math.Cos(x) + Math.Log(x + 1);
+        }
         sw.Stop();
         double singleMs = sw.Elapsed.TotalMilliseconds;
 

@@ -25,11 +25,13 @@ HEAD void CallingConvention Test1()
 
 EXTERNC void CallingConvention TestLog(char* log)
 {
+    if (!log) return;
     printf("%s", log);
 }
 
 HEAD void CallingConvention AddArrays(double* a, double* b, double* c, int length)
 {
+    if (!a || !b || !c || length <= 0) return;
     for (int i = 0; i < length; i++)
     {
         c[i] = a[i] + b[i];
@@ -38,6 +40,7 @@ HEAD void CallingConvention AddArrays(double* a, double* b, double* c, int lengt
 
 HEAD void CallingConvention AddArraysParallel(double* a, double* b, double* c, int length)
 {
+    if (!a || !b || !c || length <= 0) return;
     AddArraysParallelContext context{ a, b, c };
     auto handle = JobSystem::Scheduler::ScheduleParallelFor(
         AddArraysParallelWorker,
