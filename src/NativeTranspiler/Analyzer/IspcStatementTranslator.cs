@@ -450,7 +450,12 @@ namespace NativeTranspiler.Analyzer
                 _ => method.Name.ToLower()
             };
             _builder.Append(ispcFunc).Append('(');
-            TranslateExpression(invocation.ArgumentList.Arguments[0].Expression);
+            var args = invocation.ArgumentList.Arguments;
+            for (int i = 0; i < args.Count; i++)
+            {
+                if (i > 0) _builder.Append(", ");
+                TranslateExpression(args[i].Expression);
+            }
             _builder.Append(')');
         }
 

@@ -193,6 +193,7 @@ namespace NativeTranspiler.Analyzer
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             bool hasMultiVersion = false;
             string boolFieldName = null;
+            List<IFieldSymbol> boolFields = new List<IFieldSymbol>();
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
             bool useMT = HasUseISPC_MT(jobStruct, attrSymbol);
@@ -201,11 +202,11 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
-                var boolField = conditionalFields.FirstOrDefault(f => f.Type.SpecialType == SpecialType.System_Boolean);
-                if (boolField != null)
+                boolFields = conditionalFields.Where(f => f.Type.SpecialType == SpecialType.System_Boolean).ToList();
+                if (boolFields.Count > 0)
                 {
                     hasMultiVersion = true;
-                    boolFieldName = boolField.Name;
+                    boolFieldName = boolFields[0].Name;
                 }
             }
 
@@ -231,10 +232,36 @@ namespace NativeTranspiler.Analyzer
                 string batchArgsWithComma = string.IsNullOrEmpty(batchArgs) ? "" : ", " + batchArgs;
                 if (hasMultiVersion)
                 {
-                    sb.AppendLine($"                if (jobPtr->{boolFieldName})");
-                    sb.AppendLine($"                    {jobStruct.Name}_Execute_Batch_true{mtSuffix}(startIndex, count{batchArgsWithComma});");
-                    sb.AppendLine($"                else");
-                    sb.AppendLine($"                    {jobStruct.Name}_Execute_Batch_false{mtSuffix}(startIndex, count{batchArgsWithComma});");
+                    // 生成所有 2^n 个 bool 组合的 if-else 链，与 C++ 端命名一致
+                    int totalVariants = 1 << boolFields.Count;
+                    var boolVarNames = boolFields.Select(f => $"jobPtr->{f.Name}").ToList();
+
+                    for (int mask = 0; mask < totalVariants; mask++)
+                    {
+                        var values = new List<bool>();
+                        for (int i = 0; i < boolFields.Count; i++)
+                            values.Add((mask & (1 << i)) != 0);
+
+                        string suffix = "_" + string.Join("_", values.Select(v => v ? "true" : "false"));
+
+                        bool isLast = (mask == totalVariants - 1);
+                        if (mask == 0)
+                        {
+                            string condition = string.Join(" && ", boolFields.Select((f, i) => values[i] ? $"jobPtr->{f.Name}" : $"!jobPtr->{f.Name}"));
+                            sb.AppendLine($"                if ({condition})");
+                        }
+                        else if (!isLast)
+                        {
+                            string condition = string.Join(" && ", boolFields.Select((f, i) => values[i] ? $"jobPtr->{f.Name}" : $"!jobPtr->{f.Name}"));
+                            sb.AppendLine($"                else if ({condition})");
+                        }
+                        else
+                        {
+                            sb.AppendLine("                else");
+                        }
+
+                        sb.AppendLine($"                    {jobStruct.Name}_Execute_Batch{suffix}{mtSuffix}(startIndex, count{batchArgsWithComma});");
+                    }
                 }
                 else
                 {

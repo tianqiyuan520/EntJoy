@@ -1,5 +1,6 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -135,7 +136,13 @@ namespace NativeTranspiler.Analyzer
             var componentType = methodSymbol.TypeArguments[0];
             int componentIndex = _requiredComponentTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, componentType));
             if (componentIndex < 0)
-                componentIndex = 0;
+            {
+                // 编译期报错而非静默回退到 index 0，避免运行时读取错误组件数据
+                throw new InvalidOperationException(
+                    $"Component type {componentType.ToDisplayString()} used in chunk job body but " +
+                    "was not found in requiredComponentTypes. Fix CollectChunkNativeArrayTypes " +
+                    "to include this type, or mark the parameter with proper attributes.");
+            }
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
             expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
