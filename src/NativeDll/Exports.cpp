@@ -36,6 +36,11 @@ extern "C"
         JobSystem::Scheduler::PrewakeWorkers();
     }
 
+    void JobSystem_KeepWorkersWarm(int microseconds)
+    {
+        JobSystem::Scheduler::KeepWorkersWarm(microseconds);
+    }
+
     void JobSystem_FlushScheduledJobs()
     {
         JobSystem::Scheduler::FlushScheduledJobs();
