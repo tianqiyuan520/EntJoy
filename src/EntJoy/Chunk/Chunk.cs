@@ -184,8 +184,16 @@ namespace EntJoy
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ThrowIfDisposed()
+        {
+            if (_memoryBlock == nint.Zero)
+                throw new ObjectDisposedException(nameof(Chunk));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
+            ThrowIfDisposed();
             if ((uint)entityIndex >= (uint)_entityCount)
                 throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
             if ((uint)componentIndex >= (uint)_componentOffsets.Length)
@@ -197,18 +205,21 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref Entity GetEntity(int entityIndex)
         {
+            ThrowIfDisposed();
             return ref ((Entity*)((byte*)_memoryBlock + ENTITY_ARRAY_OFFSET))[entityIndex];
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public nint GetEntityPointer()
         {
+            ThrowIfDisposed();
             return _memoryBlock + ENTITY_ARRAY_OFFSET;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public nint GetComponentArrayPointer(int componentIndex)
         {
+            ThrowIfDisposed();
             return _memoryBlock + _componentOffsets[componentIndex];
         }
 

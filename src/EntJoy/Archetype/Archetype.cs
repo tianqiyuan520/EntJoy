@@ -229,7 +229,8 @@ namespace EntJoy
 
         public List<Chunk> GetChunks()
         {
-            return _chunkList;
+            // 返回副本，防止外部调用者绕过 Archetype 直接修改 _chunkList
+            return new List<Chunk>(_chunkList);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
