@@ -426,6 +426,13 @@ namespace NativeTranspiler.Analyzer
                     _builder.Append(NativeTranspiler.MapCSharpTypeToCpp(exprType)).Append("(0)");
                     return;
                 }
+                // C++ NativeMath.h 改用 data[2] + x()/y() 访问器，此处补 ()
+                if (memberName == "x" || memberName == "y")
+                {
+                    TranslateExpression(memberAccess.Expression);
+                    _builder.Append('.').Append(memberName).Append("()");
+                    return;
+                }
             }
 
             if (memberName == "MaxValue" || memberName == "MinValue")
