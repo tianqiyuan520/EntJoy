@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using NativeTranspiler.Analyzer.Common;
+using System;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -250,7 +251,7 @@ namespace NativeTranspiler.Analyzer
             for (int i = 0; i < boolFields.Count; i++)
             {
                 string constantLiteral = values[i] ? "true" : "false";
-                string pattern = $@"\b{boolFields[i].Name}\b";
+                string pattern = $@"\b{Regex.Escape(boolFields[i].Name)}\b";
                 bodyCode = Regex.Replace(bodyCode, pattern, constantLiteral);
             }
             sb.Append(bodyCode);
@@ -606,8 +607,30 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
-                _ => 4 // 默认
+                _ => type is INamedTypeSymbol namedType && namedType.IsValueType && namedType.TypeKind != TypeKind.Enum
+                    ? GetStructSizeRecursive(namedType) : 4 // 默认
             };
+        }
+
+        /// <summary>
+        /// 递归计算 struct 类型的大小（按 Sequential 布局）
+        /// </summary>
+        private static int GetStructSizeRecursive(INamedTypeSymbol structType)
+        {
+            int maxAlignment = 1;
+            int offset = 0;
+            foreach (var member in structType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                int fieldSize = GetCSharpFieldSize(member.Type);
+                int fieldAlignment = GetCSharpFieldAlignment(member.Type);
+                if (fieldAlignment > maxAlignment) maxAlignment = fieldAlignment;
+                // 对齐
+                offset = (offset + fieldAlignment - 1) / fieldAlignment * fieldAlignment;
+                offset += fieldSize;
+            }
+            // 最终对齐到结构体自身对齐要求
+            offset = (offset + maxAlignment - 1) / maxAlignment * maxAlignment;
+            return Math.Max(1, offset); // C# struct 最小为 1
         }
 
         /// <summary>
@@ -616,7 +639,7 @@ namespace NativeTranspiler.Analyzer
         private static int GetCSharpFieldAlignment(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol) return 8;
-            
+
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
                 var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
@@ -649,8 +672,23 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
-                _ => 4
+                _ => type is INamedTypeSymbol namedType && namedType.IsValueType
+                    ? GetStructAlignmentRecursive(namedType) : 4
             };
+        }
+
+        /// <summary>
+        /// 递归计算 struct 类型的对齐要求（字段对齐的 max）
+        /// </summary>
+        private static int GetStructAlignmentRecursive(INamedTypeSymbol structType)
+        {
+            int maxAlign = 1;
+            foreach (var member in structType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                int align = GetCSharpFieldAlignment(member.Type);
+                if (align > maxAlign) maxAlign = align;
+            }
+            return maxAlign;
         }
 
         /// <summary>
