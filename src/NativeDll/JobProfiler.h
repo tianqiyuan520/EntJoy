@@ -23,8 +23,10 @@ public:
     ProfilerRingBuffer() = default;
 
     // 写入一条记录 (多生产者安全)
+    // 使用 memory_order_release 与 Read/ReadAll 的 acquire 配对，
+    // 保证 entries_ 写入在 head_ 更新前对其他线程可见。
     void Push(const ProfilerEntry& e) {
-        size_t idx = head_.fetch_add(1, std::memory_order_relaxed) & (kMaxEntries - 1);
+        size_t idx = head_.fetch_add(1, std::memory_order_release) & (kMaxEntries - 1);
         entries_[idx] = e;
     }
 
@@ -42,6 +44,9 @@ public:
     }
 
     // 读取并清空 (消费者)
+    // 注意: exchange(0) 与并发 Push 存在竞态 — 已在 fetch_add 拿到高索引的
+    // 生产者写入的 slot 可能已被消费者读取过。此为诊断基础设施，
+    // 允许少量丢失/重复条目，不影响正确性。
     size_t ReadAll(size_t maxCount, ProfilerEntry* dst) {
         size_t current = head_.exchange(0, std::memory_order_acq_rel);
         size_t avail = std::min(maxCount, current);

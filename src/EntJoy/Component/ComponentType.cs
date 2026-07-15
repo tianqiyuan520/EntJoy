@@ -8,15 +8,16 @@ namespace EntJoy
     public struct ComponentType : IEquatable<ComponentType>
     {
         public readonly int Id;  // 记录该组件类型的ID
-        public int Size;
+        public readonly int Size;  // 组件大小（blittable size）
 
         public Type Type => ComponentTypeManager.GetTypeByComponentType(Id);  // 通过查询获取组件类型
         public bool IsEnableable => ComponentTypeManager.GetIsEnableable(Id);
 
 
-        public ComponentType(int id)
+        public ComponentType(int id, int size = 0)
         {
             Id = id;
+            Size = size;
         }
 
         // 将该类型转 组件类型
@@ -26,18 +27,21 @@ namespace EntJoy
         }
 
         /// <summary>
-        /// 获取哈希码
+        /// 获取哈希码（基于 Id，与 Equals 保持一致）
         /// </summary>
         public override int GetHashCode()
         {
-            return Id;  // 返回ID作为哈希码
+            return Id;
         }
 
 
 
         #region Equals
 
-        public bool Equals(ComponentType other) => Type == other.Type;
+        /// <summary>
+        /// 基于 Id 比较（Id 在 ComponentTypeManager 中全局唯一映射到 Type）
+        /// </summary>
+        public bool Equals(ComponentType other) => Id == other.Id;
 
         public override bool Equals(object obj) => obj is ComponentType ct && Equals(ct);
 

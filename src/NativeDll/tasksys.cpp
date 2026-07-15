@@ -130,6 +130,7 @@ using namespace Concurrency;
 #endif // ISPC_IS_LINUX
 
 #include <algorithm>
+#include <atomic>
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -257,7 +258,7 @@ inline TaskInfo* TaskGroupBase::GetTaskInfo(int index) {
     int chunk = (index >> LOG_TASK_QUEUE_CHUNK_SIZE);
     int offset = index & (TASK_QUEUE_CHUNK_SIZE - 1);
 
-    if (chunk == MAX_TASK_QUEUE_CHUNKS) {
+    if (chunk >= MAX_TASK_QUEUE_CHUNKS) {
         fprintf(stderr,
             "A total of %d tasks have been launched from the "
             "current function--the simple built-in task system can handle "
@@ -278,7 +279,7 @@ inline void* TaskGroupBase::AllocMemory(int64_t size, int32_t alignment) {
     intptr_t iptr = (intptr_t)(basePtr + curMemBufferOffset);
     iptr = (iptr + (alignment - 1)) & ~(alignment - 1);
 
-    int newOffset = int(iptr - (intptr_t)basePtr + size);
+    int newOffset = int((iptr - (intptr_t)basePtr) + size);
     if (newOffset < memBufferSize[curMemBuffer]) {
         curMemBufferOffset = newOffset;
         return (char*)iptr;
@@ -288,8 +289,12 @@ inline void* TaskGroupBase::AllocMemory(int64_t size, int32_t alignment) {
     curMemBufferOffset = 0;
     assert(curMemBuffer < NUM_MEM_BUFFERS);
 
-    int allocSize = 1 << (12 + curMemBuffer);
-    allocSize = std::max(int(size + alignment), allocSize);
+    // 使用 int64_t 计算分配大小，防止 size+alignment 截断
+    int64_t allocSize64 = 1LL << (12 + curMemBuffer);
+    int64_t needed64 = static_cast<int64_t>(size) + alignment;
+    if (needed64 > allocSize64) allocSize64 = needed64;
+    if (allocSize64 > INT32_MAX) allocSize64 = INT32_MAX;  // clamp
+    int allocSize = static_cast<int>(allocSize64);
     char* newBuf = new char[allocSize];
     memBufferSize[curMemBuffer] = allocSize;
     memBuffers[curMemBuffer] = newBuf;
@@ -643,10 +648,10 @@ static void InitTaskSystem() {
                     constexpr std::size_t FILENAME_MAX_LEN{ 1024UL };
                     char name[FILENAME_MAX_LEN];
                     bool success = false;
-                    srand(time(nullptr));
+                    // 在线程安全区内（锁保护）生成唯一名称
                     for (int i = 0; i < 10; i++) {
                         // Some platforms (e.g. FreeBSD) require the name to begin with a slash
-                        snprintf(name, FILENAME_MAX_LEN, "/ispc_task.%d.%d", static_cast<int>(getpid()), static_cast<int>(rand()));
+                        snprintf(name, FILENAME_MAX_LEN, "/ispc_task.%d.%d", static_cast<int>(getpid()), i);
                         workerSemaphore = sem_open(name, O_CREAT, S_IRUSR | S_IWUSR, 0);
                         if (workerSemaphore != SEM_FAILED) {
                             success = true;
@@ -667,7 +672,7 @@ static void InitTaskSystem() {
                     }
 
                     for (int i = 0; i < nThreads; ++i) {
-                        err = pthread_create(&threads[i], nullptr, &lTaskEntry, (void*)((long long)i));
+                        err = pthread_create(&threads[i], nullptr, &lTaskEntry, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
                         if (err != 0) {
                             fprintf(stderr, "Error creating pthread %d: %s\n", i, strerror(err));
                             exit(1);
@@ -974,7 +979,13 @@ static inline void FreeTaskGroup(TaskGroup* tg) {
 ///////////////////////////////////////////////////////////////////////////
 
 void ISPCLaunch(void** taskGroupPtr, void* func, void* data, int count0, int count1, int count2) {
-    const int count = count0 * count1 * count2;
+    // 使用 int64_t 防止 count0*count1*count2 乘积溢出（2000³=8B > INT32_MAX）
+    const int64_t count64 = static_cast<int64_t>(count0) * count1 * count2;
+    if (count64 > INT32_MAX) {
+        fprintf(stderr, "ISPCLaunch: task count %lld exceeds INT32_MAX. Clamping.\n",
+                static_cast<long long>(count64));
+    }
+    const int count = static_cast<int>(std::min(count64, static_cast<int64_t>(INT32_MAX)));
     TaskGroup* taskGroup;
     if (*taskGroupPtr == nullptr) {
         InitTaskSystem();
@@ -1029,32 +1040,35 @@ struct Task {
 public:
     TaskFuncType func;
     void* data;
-    volatile int32_t taskIndex;
+    std::atomic<int32_t> taskIndex{ 0 };
     int taskCount;
 
-    volatile int numDone;
+    std::atomic<int> numDone{ 0 };
     int liveIndex; // index in live task queue
 
-    inline int noMoreWork() { return taskIndex >= taskCount; }
+    inline int noMoreWork() {
+        // 用 acquire 保证读到最新的 taskIndex 和 taskCount
+        return taskIndex.load(std::memory_order_acquire) >= taskCount;
+    }
     /*! given thread is done working on this task --> decrease num locks */
     // inline void lock() { lAtomicAdd(&locks,1); }
     // inline void unlock() { lAtomicAdd(&locks,-1); }
-    inline int nextJob() { return lAtomicAdd(&taskIndex, 1); }
+    inline int nextJob() { return taskIndex.fetch_add(1, std::memory_order_acq_rel); }
     inline int numJobs() { return taskCount; }
     inline void schedule(int idx) {
-        taskIndex = 0;
-        numDone = 0;
+        taskIndex.store(0, std::memory_order_release);
+        numDone.store(0, std::memory_order_release);
         liveIndex = idx;
     }
     inline void run(int idx, int threadIdx);
-    inline void markOneDone() { lAtomicAdd(&numDone, 1); }
+    inline void markOneDone() { numDone.fetch_add(1, std::memory_order_acq_rel); }
     inline void wait() {
         while (!noMoreWork()) {
             int next = nextJob();
             if (next < numJobs())
                 run(next, 0);
         }
-        while (numDone != taskCount) {
+        while (numDone.load(std::memory_order_acquire) != taskCount) {
             usleep(1);
         }
     }
@@ -1064,21 +1078,20 @@ public:
 class TaskSys {
     static int numThreadsRunning;
     struct LiveTask {
-        volatile int locks;  /*!< num locks on this task. gets
+        std::atomic<int> locks{ -1 }; /*! num locks on this task. gets
                                   initialized to NUM_THREADS+1, then counted
                                   down by every thread that sees this. this
                                   value is only valid when 'active' is set
                                   to true */
-        volatile int active; /*! workers will spin on this until it
+        std::atomic<int> active{ 0 }; /*! workers will spin on this until it
                                  becomes active */
         Task* task;
 
-        inline void doneWithThis() { lAtomicAdd(&locks, -1); }
-        LiveTask() : active(0), locks(-1) {}
+        inline void doneWithThis() { locks.fetch_sub(1, std::memory_order_acq_rel); }
     };
 
 public:
-    volatile int nextScheduleIndex; /*! next index in the task queue
+    std::atomic<int> nextScheduleIndex{ 0 }; /*! next index in the task queue
                                         where we'll insert a live task */
 
                                         // inline int inc_begin() { int old = begin; begin = (begin+1)%MAX_TASKS; return old; }
@@ -1087,10 +1100,10 @@ public:
     LiveTask taskQueue[MAX_LIVE_TASKS];
     std::stack<Task*> taskMem;
 
-    static TaskSys* global;
+    static std::atomic<TaskSys*> global{ nullptr };
 
-    TaskSys() : nextScheduleIndex(0) {
-        TaskSys::global = this;
+    TaskSys() {
+        TaskSys::global.store(this, std::memory_order_release);
         Task* mem = new Task[MAX_LIVE_TASKS]; //< could actually be more than _live_ tasks
         for (int i = 0; i < MAX_LIVE_TASKS; i++) {
             taskMem.push(mem + i);
@@ -1112,11 +1125,11 @@ public:
     }
 
     static inline void init() {
-        if (global)
+        if (global.load(std::memory_order_acquire) != nullptr)
             return;
         pthread_mutex_lock(&mutex);
-        if (global == nullptr)
-            global = new TaskSys;
+        if (global.load(std::memory_order_relaxed) == nullptr)
+            global.store(new TaskSys, std::memory_order_release);
         pthread_mutex_unlock(&mutex);
     }
 
@@ -1128,30 +1141,31 @@ public:
 
     inline void schedule(Task* t) {
         pthread_mutex_lock(&mutex);
-        int liveIndex = nextScheduleIndex;
-        nextScheduleIndex = (nextScheduleIndex + 1) % MAX_LIVE_TASKS;
-        if (taskQueue[liveIndex].active) {
+        int liveIndex = nextScheduleIndex.load(std::memory_order_relaxed);
+        nextScheduleIndex.store((liveIndex + 1) % MAX_LIVE_TASKS, std::memory_order_relaxed);
+        if (taskQueue[liveIndex].active.load(std::memory_order_relaxed)) {
             fprintf(stderr, "Out of task queue resources.  "
                 "Change the value of MAX_LIVE_TASKS and recompile.\n");
             exit(1);
         }
         taskQueue[liveIndex].task = t;
         t->schedule(liveIndex);
-        taskQueue[liveIndex].locks = numThreadsRunning + 1; // num _worker_ threads plus creator
-        taskQueue[liveIndex].active = true;
+        taskQueue[liveIndex].locks.store(numThreadsRunning + 1, std::memory_order_release);
+        // release: 保证 task/taskIndex/numDone/locks 写入在 active 之前对其他线程可见
+        taskQueue[liveIndex].active.store(true, std::memory_order_release);
         pthread_mutex_unlock(&mutex);
     }
 
     void sync(Task* task) {
         task->wait();
         int liveIndex = task->liveIndex;
-        while (taskQueue[liveIndex].locks > 1) {
+        while (taskQueue[liveIndex].locks.load(std::memory_order_acquire) > 1) {
             usleep(1);
         }
         _mm_free(task->data);
         pthread_mutex_lock(&mutex);
         taskMem.push(task); // recycle task index
-        taskQueue[liveIndex].active = false;
+        taskQueue[liveIndex].active.store(false, std::memory_order_release);
         pthread_mutex_unlock(&mutex);
     }
 };
@@ -1159,10 +1173,12 @@ public:
 void TaskSys::threadFct() {
     int myIndex = 0; // lAtomicAdd(&threadIdx,1);
     while (1) {
-        while (!taskQueue[myIndex].active) {
+        while (!taskQueue[myIndex].active.load(std::memory_order_acquire)) {
             usleep(4);
             continue;
         }
+        // acquire barrier 保证看到 schedule() 中 active.store(true, release) 之前的所有写入
+        std::atomic_thread_fence(std::memory_order_acquire);
 
         Task* mine = taskQueue[myIndex].task;
         while (!mine->noMoreWork()) {

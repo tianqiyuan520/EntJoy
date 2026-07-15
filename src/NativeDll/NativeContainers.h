@@ -81,8 +81,12 @@ namespace EntJoy {
 			// 确保容量
 			void EnsureCapacity(int32_t minCapacity) {
 				if (Capacity >= minCapacity) return;
-				int32_t newCapacity = (Capacity == 0) ? 4 : Capacity * 2;
-				if (newCapacity < minCapacity) newCapacity = minCapacity;
+				// 使用 int64_t 计算容量，防止 Capacity * 2 在 >1G 时 int32 溢出 (UB)
+				int64_t newCapacity64 = (Capacity == 0) ? 4LL : static_cast<int64_t>(Capacity) * 2;
+				if (newCapacity64 > INT32_MAX)
+					newCapacity64 = INT32_MAX;  // 最大容量上限
+				if (newCapacity64 < minCapacity) newCapacity64 = minCapacity;
+				int32_t newCapacity = static_cast<int32_t>(newCapacity64);
 				T* newPtr = static_cast<T*>(malloc(newCapacity * sizeof(T)));
 				if (Ptr) {
 					for (int32_t i = 0; i < Length; ++i) {
@@ -96,6 +100,7 @@ namespace EntJoy {
 
 			// 添加元素（内部调用 EnsureCapacity）
 			void Add(const T& value) {
+				if (Length >= INT32_MAX) return;  // 防止 Length+1 溢出
 				EnsureCapacity(Length + 1);
 				Ptr[Length++] = value;
 			}
