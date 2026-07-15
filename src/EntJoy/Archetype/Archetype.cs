@@ -119,11 +119,17 @@ namespace EntJoy
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            // 以 96KB 物理 chunk 大小为靶向，兼顾调度开销与负载均衡。
-            // 每 worker 分配到 ~6 次 token 执行，每次 token 处理约 20000 实体。
-            // 1M 实体 → ~256 chunks → ~37 chunks/worker → 足以让所有 worker 满载。
+            // ——— 平衡 Chunk 容量 ———
+            // 512KB ~ 1MB 物理大小目标，兼顾调度开销、并行度和 DDR5 延迟。
+            // 环境变量 ENTJOY_CHUNK_KB 可覆盖。
             const int cacheLineSize = 64;
-            const int targetChunkBytes = 96 * 1024;   // 96KB
+            int targetChunkKB = 768;
+
+            string? env = Environment.GetEnvironmentVariable("ENTJOY_CHUNK_KB");
+            if (env != null && int.TryParse(env, out int parsed) && parsed >= 256)
+                targetChunkKB = parsed;
+
+            int targetChunkBytes = targetChunkKB * 1024;
 
             int entitySize = Marshal.SizeOf<Entity>();
             int totalComponentSize = entitySize;
@@ -134,17 +140,15 @@ namespace EntJoy
                 if (type.IsEnableable) enableableCount++;
             }
 
-            // 对齐填充、位图开销
             int alignmentOverhead = types.Length * cacheLineSize;
             const int bitmapBytesPer64Entities = 8;
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
             int stride = totalComponentSize + bitmapOverheadPerEntity;
-            int capacity = Math.Max(256, (targetChunkBytes - alignmentOverhead) / stride);
+            int capacity = Math.Max(2048, (targetChunkBytes - alignmentOverhead) / stride);
 
-            // 64 对齐
             capacity = (capacity + (cacheLineSize - 1)) & ~(cacheLineSize - 1);
-            return Math.Clamp(capacity, 256, 65536);
+            return Math.Clamp(capacity, 2048, 131072);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)

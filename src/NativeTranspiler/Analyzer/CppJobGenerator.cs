@@ -701,7 +701,7 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             var baseFuncName = GetCppJobFunctionName(jobStruct);
             var adapterFuncName = baseFuncName + "_Adapter";
-            
+
             sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
             sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
             if (IsChunkScheduledJob(jobStruct))
