@@ -1696,7 +1696,12 @@ namespace NativeTranspiler.Analyzer
                 if (field.Type is IPointerTypeSymbol) continue;
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                sb.AppendLine($"{Indent}{ToIspcType(cppType)} {field.Name} = *{field.Name}_ptr;");
+                // 标量字段（float/int/bool 等）和向量类型（float2/int2/uint2）声明为 uniform，
+                // 避免 ISPC 每 lane 一份冗余拷贝和 read-broadcast 开销。
+                bool isScalarOrVec = field.Type.SpecialType != SpecialType.None ||
+                    field.Type.ContainingNamespace?.ToDisplayString() == "EntJoy.Mathematics";
+                string uniform = isScalarOrVec || forceUniform ? "uniform " : "";
+                sb.AppendLine($"{Indent}{uniform}{ToIspcType(cppType)} {field.Name} = *{field.Name}_ptr;");
             }
         }
 
