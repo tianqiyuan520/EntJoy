@@ -255,6 +255,13 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(maker).Append("(0, 0)");
                 return;
             }
+            // ISPC float2/int2/uint2 使用成员字段（非方法），直接发射成员名
+            if (IsVectorType(exprType) && (memberName == "x" || memberName == "y"))
+            {
+                TranslateExpression(memberAccess.Expression);
+                _builder.Append('.').Append(memberName);
+                return;
+            }
             base.TranslateMemberAccess(memberAccess);
         }
 

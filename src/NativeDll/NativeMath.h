@@ -1,4 +1,4 @@
-﻿// NativeMath.h
+// NativeMath.h
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -8,215 +8,198 @@ namespace EntJoy {
 		inline int RoundToInt(float x) {
 			return static_cast<int>(x + (x >= 0.0f ? 0.5f : -0.5f));
 		}
-
 		inline float SinReduced(float x) {
 			const float x2 = x * x;
 			return x * (1.0f + x2 * (-0.1666666664f + x2 * (0.0083333315f + x2 * (-0.0001984090f + x2 * 0.0000027526f))));
 		}
-
 		inline float CosReduced(float x) {
 			const float x2 = x * x;
 			return 1.0f + x2 * (-0.5f + x2 * (0.0416666418f + x2 * (-0.0013888378f + x2 * 0.0000247609f)));
 		}
-
 		inline float Sin(float x) {
 			constexpr float twoOverPi = 0.63661977236758134f;
 			constexpr float piOverTwo = 1.57079632679489662f;
 			int quadrant = RoundToInt(x * twoOverPi);
 			float reduced = x - quadrant * piOverTwo;
-			switch (quadrant & 3)
-			{
+			switch (quadrant & 3) {
 			case 0: return SinReduced(reduced);
 			case 1: return CosReduced(reduced);
 			case 2: return -SinReduced(reduced);
 			default: return -CosReduced(reduced);
 			}
 		}
-
 		inline float Cos(float x) {
 			constexpr float twoOverPi = 0.63661977236758134f;
 			constexpr float piOverTwo = 1.57079632679489662f;
 			int quadrant = RoundToInt(x * twoOverPi);
 			float reduced = x - quadrant * piOverTwo;
-			switch (quadrant & 3)
-			{
+			switch (quadrant & 3) {
 			case 0: return CosReduced(reduced);
 			case 1: return -SinReduced(reduced);
 			case 2: return -CosReduced(reduced);
 			default: return SinReduced(reduced);
 			}
 		}
-
-		inline float Sqrt(float x) {
-			return std::sqrt(x);
-		}
+		inline float Sqrt(float x) { return std::sqrt(x); }
 	} // namespace FastMath
 
 	namespace Mathematics {
 
-		// ---------- float2 ----------
+		// ========== float2 ==========
+		// float data[2] 确保 MSVC HFA 检测通过；x()/y() 提供语义化命名访问器
 		struct float2 {
-			float x, y;
-			float2() : x(0), y(0) {}
-			float2(float v) : x(v), y(v) {}
-			float2(float x_, float y_) : x(x_), y(y_) {}
+			float data[2];
+
+			float2() { data[0] = 0; data[1] = 0; }
+			float2(float v) { data[0] = v; data[1] = v; }
+			float2(float x_, float y_) { data[0] = x_; data[1] = y_; }
 			float2(const float2&) = default;
 			float2& operator=(const float2&) = default;
 
-			float2 operator+(const float2& rhs) const { return float2(x + rhs.x, y + rhs.y); }
-			float2 operator-(const float2& rhs) const { return float2(x - rhs.x, y - rhs.y); }
-			float2 operator*(const float2& rhs) const { return float2(x * rhs.x, y * rhs.y); }
-			float2 operator/(const float2& rhs) const { return float2(x / rhs.x, y / rhs.y); }
-			float2 operator*(float s) const { return float2(x * s, y * s); }
-			friend float2 operator*(float s, const float2& v) { return v * s; }
-			float2 operator/(float s) const { return float2(x / s, y / s); }
+			float& x() { return data[0]; }
+			float& y() { return data[1]; }
+			const float& x() const { return data[0]; }
+			const float& y() const { return data[1]; }
 
-			float2 operator-() const { return float2(-x, -y); }
+			float2 operator+(const float2& rhs) const { return float2(x() + rhs.x(), y() + rhs.y()); }
+			float2 operator-(const float2& rhs) const { return float2(x() - rhs.x(), y() - rhs.y()); }
+			float2 operator*(const float2& rhs) const { return float2(x() * rhs.x(), y() * rhs.y()); }
+			float2 operator/(const float2& rhs) const { return float2(x() / rhs.x(), y() / rhs.y()); }
+			float2 operator*(float s) const { return float2(x() * s, y() * s); }
+			friend float2 operator*(float s, const float2& v) { return v * s; }
+			float2 operator/(float s) const { return float2(x() / s, y() / s); }
+			float2 operator-() const { return float2(-x(), -y()); }
 			float2 operator+() const { return *this; }
 
-			float2& operator+=(const float2& rhs) { x += rhs.x; y += rhs.y; return *this; }
-			float2& operator-=(const float2& rhs) { x -= rhs.x; y -= rhs.y; return *this; }
-			float2& operator*=(const float2& rhs) { x *= rhs.x; y *= rhs.y; return *this; }
-			float2& operator/=(const float2& rhs) { x /= rhs.x; y /= rhs.y; return *this; }
-			float2& operator*=(float s) { x *= s; y *= s; return *this; }
-			float2& operator/=(float s) { x /= s; y /= s; return *this; }
+			float2& operator+=(const float2& rhs) { x() += rhs.x(); y() += rhs.y(); return *this; }
+			float2& operator-=(const float2& rhs) { x() -= rhs.x(); y() -= rhs.y(); return *this; }
+			float2& operator*=(const float2& rhs) { x() *= rhs.x(); y() *= rhs.y(); return *this; }
+			float2& operator/=(const float2& rhs) { x() /= rhs.x(); y() /= rhs.y(); return *this; }
+			float2& operator*=(float s) { x() *= s; y() *= s; return *this; }
+			float2& operator/=(float s) { x() /= s; y() /= s; return *this; }
 
-			bool operator==(const float2& rhs) const { return x == rhs.x && y == rhs.y; }
+			bool operator==(const float2& rhs) const { return x() == rhs.x() && y() == rhs.y(); }
 			bool operator!=(const float2& rhs) const { return !(*this == rhs); }
+			float& operator[](int i) { return data[i]; }
+			const float& operator[](int i) const { return data[i]; }
 
-			float& operator[](int i) { return i == 0 ? x : y; }
-			const float& operator[](int i) const { return i == 0 ? x : y; }
-
-			// 从 int2 转换
 			float2(const struct int2& v);
-			// 从 uint2 转换
 			float2(const struct uint2& v);
 
-			float2 xx() const { return float2(x, x); }
-			float2 xy() const { return float2(x, y); }
-			float2 yx() const { return float2(y, x); }
-			float2 yy() const { return float2(y, y); }
+			float2 xx() const { return float2(x(), x()); }
+			float2 xy() const { return float2(x(), y()); }
+			float2 yx() const { return float2(y(), x()); }
+			float2 yy() const { return float2(y(), y()); }
 		};
 
-		// ---------- int2 ----------
+		// ========== int2 ==========
 		struct int2 {
-			int x, y;
-			int2() : x(0), y(0) {}
-			int2(int v) : x(v), y(v) {}
-			int2(int x_, int y_) : x(x_), y(y_) {}
+			int data[2];
 
-			int2 operator+(const int2& rhs) const { return int2(x + rhs.x, y + rhs.y); }
-			int2 operator-(const int2& rhs) const { return int2(x - rhs.x, y - rhs.y); }
-			int2 operator*(const int2& rhs) const { return int2(x * rhs.x, y * rhs.y); }
-			int2 operator/(const int2& rhs) const { return int2(x / rhs.x, y / rhs.y); }
-			int2 operator*(int s) const { return int2(x * s, y * s); }
+			int2() { data[0] = 0; data[1] = 0; }
+			int2(int v) { data[0] = v; data[1] = v; }
+			int2(int x_, int y_) { data[0] = x_; data[1] = y_; }
+
+			int& x() { return data[0]; }
+			int& y() { return data[1]; }
+			const int& x() const { return data[0]; }
+			const int& y() const { return data[1]; }
+
+			int2 operator+(const int2& rhs) const { return int2(x() + rhs.x(), y() + rhs.y()); }
+			int2 operator-(const int2& rhs) const { return int2(x() - rhs.x(), y() - rhs.y()); }
+			int2 operator*(const int2& rhs) const { return int2(x() * rhs.x(), y() * rhs.y()); }
+			int2 operator/(const int2& rhs) const { return int2(x() / rhs.x(), y() / rhs.y()); }
+			int2 operator*(int s) const { return int2(x() * s, y() * s); }
 			friend int2 operator*(int s, const int2& v) { return v * s; }
-			int2 operator-() const { return int2(-x, -y); }
+			int2 operator-() const { return int2(-x(), -y()); }
 
-			int2& operator+=(const int2& rhs) { x += rhs.x; y += rhs.y; return *this; }
-			int2& operator-=(const int2& rhs) { x -= rhs.x; y -= rhs.y; return *this; }
+			int2& operator+=(const int2& rhs) { x() += rhs.x(); y() += rhs.y(); return *this; }
+			int2& operator-=(const int2& rhs) { x() -= rhs.x(); y() -= rhs.y(); return *this; }
 
-			bool operator==(const int2& rhs) const { return x == rhs.x && y == rhs.y; }
+			bool operator==(const int2& rhs) const { return x() == rhs.x() && y() == rhs.y(); }
 			bool operator!=(const int2& rhs) const { return !(*this == rhs); }
+			int& operator[](int i) { return data[i]; }
+			const int& operator[](int i) const { return data[i]; }
 
-			int& operator[](int i) { return i == 0 ? x : y; }
-			const int& operator[](int i) const { return i == 0 ? x : y; }
-
-			// 从 float2 转换（截断小数）
-			int2(const float2& v) : x(static_cast<int>(v.x)), y(static_cast<int>(v.y)) {}
-			// 从 uint2 转换
+			int2(const float2& v) { data[0] = static_cast<int>(v.x()); data[1] = static_cast<int>(v.y()); }
 			int2(const struct uint2& v);
 
-			int2 xx() const { return int2(x, x); }
-			int2 xy() const { return int2(x, y); }
-			int2 yx() const { return int2(y, x); }
-			int2 yy() const { return int2(y, y); }
+			int2 xx() const { return int2(x(), x()); }
+			int2 xy() const { return int2(x(), y()); }
+			int2 yx() const { return int2(y(), x()); }
+			int2 yy() const { return int2(y(), y()); }
 		};
 
-		// ---------- uint2 ----------
+		// ========== uint2 ==========
 		struct uint2 {
-			uint32_t x, y;
-			uint2() : x(0), y(0) {}
-			uint2(uint32_t v) : x(v), y(v) {}
-			uint2(uint32_t x_, uint32_t y_) : x(x_), y(y_) {}
+			uint32_t data[2];
 
-			uint2 operator+(const uint2& rhs) const { return uint2(x + rhs.x, y + rhs.y); }
-			uint2 operator-(const uint2& rhs) const { return uint2(x - rhs.x, y - rhs.y); }
-			uint2 operator*(const uint2& rhs) const { return uint2(x * rhs.x, y * rhs.y); }
-			uint2 operator*(uint32_t s) const { return uint2(x * s, y * s); }
+			uint2() { data[0] = 0; data[1] = 0; }
+			uint2(uint32_t v) { data[0] = v; data[1] = v; }
+			uint2(uint32_t x_, uint32_t y_) { data[0] = x_; data[1] = y_; }
 
-			bool operator==(const uint2& rhs) const { return x == rhs.x && y == rhs.y; }
+			uint32_t& x() { return data[0]; }
+			uint32_t& y() { return data[1]; }
+			const uint32_t& x() const { return data[0]; }
+			const uint32_t& y() const { return data[1]; }
+
+			uint2 operator+(const uint2& rhs) const { return uint2(x() + rhs.x(), y() + rhs.y()); }
+			uint2 operator-(const uint2& rhs) const { return uint2(x() - rhs.x(), y() - rhs.y()); }
+			uint2 operator*(const uint2& rhs) const { return uint2(x() * rhs.x(), y() * rhs.y()); }
+			uint2 operator*(uint32_t s) const { return uint2(x() * s, y() * s); }
+
+			bool operator==(const uint2& rhs) const { return x() == rhs.x() && y() == rhs.y(); }
 			bool operator!=(const uint2& rhs) const { return !(*this == rhs); }
+			uint32_t& operator[](int i) { return data[i]; }
+			const uint32_t& operator[](int i) const { return data[i]; }
 
-			uint32_t& operator[](int i) { return i == 0 ? x : y; }
-			const uint32_t& operator[](int i) const { return i == 0 ? x : y; }
-
-			// 从 float2 转换
-			uint2(const float2& v) : x(static_cast<uint32_t>(v.x)), y(static_cast<uint32_t>(v.y)) {}
-			// 从 int2 转换
-			uint2(const int2& v) : x(static_cast<uint32_t>(v.x)), y(static_cast<uint32_t>(v.y)) {}
-
+			uint2(const float2& v) { data[0] = static_cast<uint32_t>(v.x()); data[1] = static_cast<uint32_t>(v.y()); }
+			uint2(const int2& v) { data[0] = static_cast<uint32_t>(v.x()); data[1] = static_cast<uint32_t>(v.y()); }
 		};
 
 		// ---------- 数学函数 ----------
-		inline float dot(const float2& a, const float2& b) { return a.x * b.x + a.y * b.y; }
+		inline float dot(const float2& a, const float2& b) { return a.x() * b.x() + a.y() * b.y(); }
 		inline float lengthsq(const float2& v) { return dot(v, v); }
 		inline float length(const float2& v) { return std::sqrt(lengthsq(v)); }
 		inline float2 normalize(const float2& v) {
 			float l = length(v);
 			return l > 0 ? v * (1.0f / l) : float2(0);
 		}
+		inline float2 abs(const float2& v) { return float2(std::abs(v.x()), std::abs(v.y())); }
+		inline int2 abs(const int2& v) { return int2(std::abs(v.x()), std::abs(v.y())); }
 
-		// 向量 abs
-		inline float2 abs(const float2& v) { return float2(std::abs(v.x), std::abs(v.y)); }
-		inline int2 abs(const int2& v) { return int2(std::abs(v.x), std::abs(v.y)); }
-
-		// 向量 min/max（自定义实现，不使用 std::min/max）
 		inline float2 min(const float2& a, const float2& b) {
-			return float2(a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y);
+			return float2(a.x() < b.x() ? a.x() : b.x(), a.y() < b.y() ? a.y() : b.y());
 		}
 		inline int2 min(const int2& a, const int2& b) {
-			return int2(a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y);
+			return int2(a.x() < b.x() ? a.x() : b.x(), a.y() < b.y() ? a.y() : b.y());
 		}
-
 		inline float2 max(const float2& a, const float2& b) {
-			return float2(a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y);
+			return float2(a.x() > b.x() ? a.x() : b.x(), a.y() > b.y() ? a.y() : b.y());
 		}
 		inline int2 max(const int2& a, const int2& b) {
-			return int2(a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y);
+			return int2(a.x() > b.x() ? a.x() : b.x(), a.y() > b.y() ? a.y() : b.y());
 		}
 
-		inline float2 clamp(const float2& v, const float2& minVal, const float2& maxVal) {
-			return min(max(v, minVal), maxVal);
-		}
-		inline int2 clamp(const int2& v, const int2& minVal, const int2& maxVal) {
-			return min(max(v, minVal), maxVal);
-		}
-
-		inline float2 floor(const float2& v) { return float2(std::floor(v.x), std::floor(v.y)); }
-		inline float2 ceil(const float2& v) { return float2(std::ceil(v.x), std::ceil(v.y)); }
-
+		inline float2 clamp(const float2& v, const float2& minVal, const float2& maxVal) { return min(max(v, minVal), maxVal); }
+		inline int2 clamp(const int2& v, const int2& minVal, const int2& maxVal) { return min(max(v, minVal), maxVal); }
+		inline float2 floor(const float2& v) { return float2(std::floor(v.x()), std::floor(v.y())); }
+		inline float2 ceil(const float2& v) { return float2(std::ceil(v.x()), std::ceil(v.y())); }
 		inline float distancesq(const float2& a, const float2& b) { return lengthsq(b - a); }
 
-		// 标量 min/max（同样自定义实现，避免包含 <algorithm>）
 		inline float min(float a, float b) { return a < b ? a : b; }
 		inline int min(int a, int b) { return a < b ? a : b; }
-
 		inline float max(float a, float b) { return a > b ? a : b; }
 		inline int max(int a, int b) { return a > b ? a : b; }
-
 		inline int clamp(int v, int minVal, int maxVal) { return min(max(v, minVal), maxVal); }
 		inline float clamp(float v, float minVal, float maxVal) { return min(max(v, minVal), maxVal); }
-
 		inline float floor(float x) { return std::floor(x); }
 		inline float ceil(float x) { return std::ceil(x); }
-
 		inline float lerp(float a, float b, float t) { return a + (b - a) * t; }
 		inline float2 lerp(const float2& a, const float2& b, float t) { return a + (b - a) * t; }
 
-		// 实现 float2 的构造函数（因为需要完整类型定义）
-		inline float2::float2(const int2& v) : x(static_cast<float>(v.x)), y(static_cast<float>(v.y)) {}
-		inline float2::float2(const uint2& v) : x(static_cast<float>(v.x)), y(static_cast<float>(v.y)) {}
-		inline int2::int2(const uint2& v) : x(static_cast<int>(v.x)), y(static_cast<int>(v.y)) {}
+		inline float2::float2(const int2& v) { data[0] = static_cast<float>(v.x()); data[1] = static_cast<float>(v.y()); }
+		inline float2::float2(const uint2& v) { data[0] = static_cast<float>(v.x()); data[1] = static_cast<float>(v.y()); }
+		inline int2::int2(const uint2& v) { data[0] = static_cast<int>(v.x()); data[1] = static_cast<int>(v.y()); }
 	} // namespace Mathematics
 } // namespace EntJoy
