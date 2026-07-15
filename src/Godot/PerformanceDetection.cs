@@ -29,6 +29,7 @@ public static class PerformanceDetection
 
     public static double GetAverage()
     {
+        if (RecordCount == 0) return 0.0;
         return RecordTime / RecordCount;
     }
 

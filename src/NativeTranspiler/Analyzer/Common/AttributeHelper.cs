@@ -35,12 +35,22 @@ namespace NativeTranspiler.Analyzer.Common
             if (attrData == null) return NativeTranspiler.BackendTarget.Cpp;
 
             var ctorArgs = attrData.ConstructorArguments;
-            if (ctorArgs.Length > 0 && ctorArgs[0].Value is int ctorInt)
-                return (NativeTranspiler.BackendTarget)ctorInt;
+            if (ctorArgs.Length > 0)
+            {
+                int? val = ConvertEnumArgToInt(ctorArgs[0].Value);
+                if (val.HasValue)
+                    return (NativeTranspiler.BackendTarget)val.Value;
+            }
 
             foreach (var namedArg in attrData.NamedArguments)
-                if (namedArg.Key == "Target" && namedArg.Value.Value is int enumVal)
-                    return (NativeTranspiler.BackendTarget)enumVal;
+            {
+                if (namedArg.Key == "Target")
+                {
+                    int? val = ConvertEnumArgToInt(namedArg.Value.Value);
+                    if (val.HasValue)
+                        return (NativeTranspiler.BackendTarget)val.Value;
+                }
+            }
 
             return NativeTranspiler.BackendTarget.Cpp;
         }
@@ -65,8 +75,11 @@ namespace NativeTranspiler.Analyzer.Common
             if (attrData == null) return NativeTranspiler.IspcMathLib.fast;
 
             foreach (var namedArg in attrData.NamedArguments)
-                if (namedArg.Key == "MathLib" && namedArg.Value.Value is int enumVal)
-                    return (NativeTranspiler.IspcMathLib)enumVal;
+                if (namedArg.Key == "MathLib")
+                {
+                    int? val = ConvertEnumArgToInt(namedArg.Value.Value);
+                    if (val.HasValue) return (NativeTranspiler.IspcMathLib)val.Value;
+                }
 
             return NativeTranspiler.IspcMathLib.fast;
         }
@@ -79,8 +92,11 @@ namespace NativeTranspiler.Analyzer.Common
             if (attrData == null) return NativeTranspiler.CppMathLib.@default;
 
             foreach (var namedArg in attrData.NamedArguments)
-                if (namedArg.Key == "CppMathLib" && namedArg.Value.Value is int enumVal)
-                    return (NativeTranspiler.CppMathLib)enumVal;
+                if (namedArg.Key == "CppMathLib")
+                {
+                    int? val = ConvertEnumArgToInt(namedArg.Value.Value);
+                    if (val.HasValue) return (NativeTranspiler.CppMathLib)val.Value;
+                }
 
             return NativeTranspiler.CppMathLib.@default;
         }
@@ -91,16 +107,34 @@ namespace NativeTranspiler.Analyzer.Common
         }
 
         /// <summary>
-        /// 读取 DisabledAutoRefresh 参数：
+        /// 读取 DisableAutoRefresh 参数：
         /// 为 true 时跳过已存在文件的重新生成（用于增量缓存）
         /// </summary>
-        public static bool GetDisabledAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+        public static bool GetDisableAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
         {
             if (attrSymbol == null) return false;
-            return TryGetNamedArgument(symbol, attrSymbol, "DisabledAutoRefresh", false);
+            return TryGetNamedArgument(symbol, attrSymbol, "DisableAutoRefresh", false);
         }
 
         // ---------- 辅助方法 ----------
+
+        /// <summary>
+        /// 将枚举构造参数的值转为 int，处理 byte/int/long 等不同底层类型。
+        /// </summary>
+        private static int? ConvertEnumArgToInt(object? value)
+        {
+            if (value == null) return null;
+            // enum 的底层类型可能是 int/byte/short/long，Roslyn box 为运行时对应类型
+            if (value is int i) return i;
+            if (value is byte b) return b;
+            if (value is sbyte sb) return sb;
+            if (value is short s) return s;
+            if (value is ushort us) return us;
+            if (value is uint ui) return (int)ui;
+            if (value is long l) return (int)l;
+            if (value is ulong ul) return (int)ul;
+            return null;
+        }
 
         private static T TryGetNamedArgument<T>(ISymbol symbol, INamedTypeSymbol attrSymbol, string name, T defaultValue)
         {
