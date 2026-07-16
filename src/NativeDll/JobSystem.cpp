@@ -409,6 +409,8 @@ namespace JobSystem
             std::atomic<int64_t> firstAssistShardNs{ 0 };
             std::atomic<int> assistReaders{ 0 };
             std::atomic<int> scheduleState{ 0 }; // 0=pending, 1=claimed by Complete, 2=published to workers
+            std::atomic<int> lifetimeRefs{ 1 };
+            std::atomic<bool> baseRefReleased{ false };
             std::atomic<bool> cleanupDone{ false };
             std::atomic<bool> returnedToPool{ false };
         };
@@ -458,6 +460,8 @@ namespace JobSystem
             batch->firstAssistShardNs.store(0, std::memory_order_relaxed);
             batch->assistReaders.store(0, std::memory_order_relaxed);
             batch->scheduleState.store(0, std::memory_order_relaxed);
+            batch->lifetimeRefs.store(1, std::memory_order_relaxed);
+            batch->baseRefReleased.store(false, std::memory_order_relaxed);
             batch->cleanupDone.store(false, std::memory_order_relaxed);
             batch->returnedToPool.store(false, std::memory_order_relaxed);
             return batch;
@@ -478,14 +482,10 @@ namespace JobSystem
                 delete batch;
         }
 
-        void TryReleaseChunkBatchState(ChunkBatchState* batch) noexcept
+        void ReleaseChunkBatchRef(ChunkBatchState* batch) noexcept
         {
             if (!batch) return;
-            if (!batch->cleanupDone.load(std::memory_order_acquire) ||
-                batch->queueTokens.load(std::memory_order_acquire) != 0 ||
-                batch->activeTickets.load(std::memory_order_acquire) != 0 ||
-                batch->assistReaders.load(std::memory_order_acquire) != 0 ||
-                (batch->handleState && batch->handleState->assist.readers.load(std::memory_order_acquire) != 0))
+            if (batch->lifetimeRefs.fetch_sub(1, std::memory_order_acq_rel) != 1)
             {
                 return;
             }
@@ -495,6 +495,8 @@ namespace JobSystem
                 ReleaseChunkBatchState(batch);
             }
         }
+
+        void TryReleaseChunkBatchState(ChunkBatchState* batch) noexcept;
 
         void OnChunkAssistReadersDrained(void* rawBatch) noexcept
         {
@@ -594,6 +596,19 @@ namespace JobSystem
             }
         }
 
+        void TryReleaseChunkBatchState(ChunkBatchState* batch) noexcept
+        {
+            if (!batch || !batch->cleanupDone.load(std::memory_order_acquire) ||
+                batch->assistReaders.load(std::memory_order_acquire) != 0 ||
+                (batch->handleState && batch->handleState->assist.readers.load(std::memory_order_acquire) != 0))
+            {
+                return;
+            }
+
+            if (!batch->baseRefReleased.exchange(true, std::memory_order_acq_rel))
+                ReleaseChunkBatchRef(batch);
+        }
+
         bool TryRunOneChunkRange(ChunkBatchState* batch, bool worker) noexcept
         {
             if (!batch || batch->cleanupDone.load(std::memory_order_acquire)) return false;
@@ -654,10 +669,7 @@ namespace JobSystem
                 batch->queueTokens.store(0, std::memory_order_release);
                 return;
             }
-            if (previous == 1)
-            {
-                TryReleaseChunkBatchState(batch);
-            }
+            ReleaseChunkBatchRef(batch);
         }
 
         void FinalizeChunkBatch(ChunkBatchState* batch) noexcept
@@ -865,6 +877,7 @@ namespace JobSystem
                 std::min(batch->workerTarget, batch->rangeCount)));
             const int tokenCount = requestedTokens;
             batch->tokenCount = tokenCount;
+            batch->lifetimeRefs.fetch_add(tokenCount, std::memory_order_relaxed);
             batch->queueTokens.store(tokenCount, std::memory_order_release);
             const int64_t publishNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -925,10 +938,10 @@ namespace JobSystem
             bool ranAny = false;
             while (TryRunOneChunkRange(batch, true)) ranAny = true;
             batch->activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
-            batch->activeTickets.fetch_sub(1, std::memory_order_acq_rel);
             if (!ranAny) g_exhaustedTickets.fetch_add(1, std::memory_order_relaxed);
-            FinishChunkQueueToken(batch);
+            batch->activeTickets.fetch_sub(1, std::memory_order_acq_rel);
             TryReleaseChunkBatchState(batch);
+            FinishChunkQueueToken(batch);
         }
 
         bool RunOneDirectChunkAssist(void* rawBatch) noexcept
@@ -1075,13 +1088,18 @@ namespace JobSystem
             std::atomic<bool> finalized{ false };
             std::atomic<bool> taskflowFinished{ false };
             std::atomic<bool> released{ false };
+            std::atomic<int> registryReaders{ 0 };
         };
+
+        std::mutex g_generalBatchRegistryMutex;
+        std::vector<GeneralBatchState*> g_generalBatchRegistry;
 
         void TryReleaseGeneralBatch(void* rawBatch) noexcept
         {
             auto* batch = static_cast<GeneralBatchState*>(rawBatch);
             if (!batch || !batch->finalized.load(std::memory_order_acquire) ||
                 !batch->taskflowFinished.load(std::memory_order_acquire) ||
+                batch->registryReaders.load(std::memory_order_acquire) != 0 ||
                 batch->handle->assist.readers.load(std::memory_order_acquire) != 0)
             {
                 return;
@@ -1128,6 +1146,24 @@ namespace JobSystem
             if (batch->completedBatches.fetch_add(1, std::memory_order_acq_rel) + 1 == batch->batchCount)
                 FinalizeGeneralBatch(batch);
             return true;
+        }
+
+        void DrainGeneralBatchesForShutdown() noexcept
+        {
+            std::vector<GeneralBatchState*> batches;
+            {
+                std::lock_guard<std::mutex> lock(g_generalBatchRegistryMutex);
+                batches = g_generalBatchRegistry;
+                for (auto* batch : batches)
+                    batch->registryReaders.fetch_add(1, std::memory_order_acq_rel);
+            }
+
+            for (auto* batch : batches)
+            {
+                while (TryExecuteGeneralBatch(batch)) {}
+                if (batch->registryReaders.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    TryReleaseGeneralBatch(batch);
+            }
         }
 
         inline void RelaxCpu() noexcept
@@ -1191,6 +1227,11 @@ namespace JobSystem
                 state->assist.readersDrained.store(&TryReleaseGeneralBatch, std::memory_order_release);
                 state->assist.callback.store(&TryExecuteGeneralBatch, std::memory_order_release);
 
+                {
+                    std::lock_guard<std::mutex> lock(g_generalBatchRegistryMutex);
+                    g_generalBatchRegistry.push_back(batch);
+                }
+
                 auto taskflow = AcquireTaskflow();
                 const int drainCount = std::min(std::max(1, CurrentWorkerCount()), batch->batchCount);
                 for (int worker = 0; worker < drainCount; ++worker)
@@ -1204,6 +1245,13 @@ namespace JobSystem
                 AcquireState(state);
                 executor->run(*taskflow, [taskflow, state, batch]() mutable
                 {
+                    {
+                        std::lock_guard<std::mutex> lock(g_generalBatchRegistryMutex);
+                        auto it = std::find(g_generalBatchRegistry.begin(),
+                            g_generalBatchRegistry.end(), batch);
+                        if (it != g_generalBatchRegistry.end())
+                            g_generalBatchRegistry.erase(it);
+                    }
                     batch->taskflowFinished.store(true, std::memory_order_release);
                     TryReleaseGeneralBatch(batch);
                     ReleaseState(state);
@@ -1473,6 +1521,7 @@ namespace JobSystem
         g_shuttingDown.store(true, std::memory_order_release);
         FlushScheduledJobs();
         ShutdownChunkWorkers();
+        DrainGeneralBatchesForShutdown();
 
         std::shared_ptr<tf::Executor> executor;
         {
