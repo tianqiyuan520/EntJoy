@@ -397,10 +397,12 @@ namespace JobSystem
             int rangeSizeOverride{ 0 };
             bool coldStart{ false };
             int tokenCount{ 0 };
+            int64_t scheduleNs{ 0 };
 
             std::atomic<int> completedRanges{ 0 };
+            std::atomic<int> nextRange{ 0 };
             std::atomic<int> queueTokens{ 0 };
-            std::atomic<int> unclaimedTokens{ 0 };
+            std::atomic<int> activeTickets{ 0 };
             std::atomic<int> activeWorkers{ 0 };
             std::atomic<int64_t> publishNs{ 0 };
             std::atomic<int64_t> firstWorkerStartNs{ 0 };
@@ -445,9 +447,11 @@ namespace JobSystem
             batch->rangeSizeOverride = 0;
             batch->coldStart = false;
             batch->tokenCount = 0;
+            batch->scheduleNs = 0;
             batch->completedRanges.store(0, std::memory_order_relaxed);
+            batch->nextRange.store(0, std::memory_order_relaxed);
             batch->queueTokens.store(0, std::memory_order_relaxed);
-            batch->unclaimedTokens.store(0, std::memory_order_relaxed);
+            batch->activeTickets.store(0, std::memory_order_relaxed);
             batch->activeWorkers.store(0, std::memory_order_relaxed);
             batch->publishNs.store(0, std::memory_order_relaxed);
             batch->firstWorkerStartNs.store(0, std::memory_order_relaxed);
@@ -479,6 +483,7 @@ namespace JobSystem
             if (!batch) return;
             if (!batch->cleanupDone.load(std::memory_order_acquire) ||
                 batch->queueTokens.load(std::memory_order_acquire) != 0 ||
+                batch->activeTickets.load(std::memory_order_acquire) != 0 ||
                 batch->assistReaders.load(std::memory_order_acquire) != 0 ||
                 (batch->handleState && batch->handleState->assist.readers.load(std::memory_order_acquire) != 0))
             {
@@ -543,16 +548,14 @@ namespace JobSystem
             return true;
         }
 
-        struct ChunkQueueToken
+        struct ChunkQueueTicket
         {
             ChunkBatchState* batch{ nullptr };
-            int firstRange{ 0 };
-            int lastRange{ 0 };
         };
 
         std::mutex g_chunkWorkerMutex;
         std::condition_variable g_chunkWorkerCv;
-        std::deque<ChunkQueueToken> g_chunkRunnableBatches;
+        std::deque<ChunkQueueTicket> g_chunkRunnableBatches;
         std::atomic<int> g_chunkRunnableCount{ 0 };
         std::mutex g_pendingChunkMutex;
         std::deque<ChunkBatchState*> g_pendingChunkBatches;
@@ -565,7 +568,7 @@ namespace JobSystem
         std::atomic<int64_t> g_lastChunkCompletionNs{ 0 };
 
         inline void RelaxCpu() noexcept;
-        void RunWorkerChunkToken(const ChunkQueueToken& token) noexcept;
+        void RunWorkerChunkTicket(const ChunkQueueTicket& ticket) noexcept;
 
         void UpdatePeak(std::atomic<uint64_t>& peak, uint64_t value) noexcept
         {
@@ -591,14 +594,46 @@ namespace JobSystem
             }
         }
 
-        void ClaimChunkToken(ChunkBatchState* batch, bool worker) noexcept
+        bool TryRunOneChunkRange(ChunkBatchState* batch, bool worker) noexcept
         {
-            if (!batch) return;
-            batch->unclaimedTokens.fetch_sub(1, std::memory_order_acq_rel);
+            if (!batch || batch->cleanupDone.load(std::memory_order_acquire)) return false;
+            const int rangeIndex = batch->nextRange.fetch_add(1, std::memory_order_relaxed);
+            if (rangeIndex >= batch->rangeCount) return false;
+
+            const int64_t claimNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            int64_t expected = 0;
             if (worker)
+            {
                 g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                g_stealCount.fetch_add(1, std::memory_order_relaxed);
+                if (batch->firstWorkerStartNs.compare_exchange_strong(
+                    expected, claimNs, std::memory_order_acq_rel))
+                {
+                    const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
+                    if (publishNs > 0)
+                    {
+                        const auto latency = static_cast<uint64_t>(claimNs - publishNs);
+                        UpdateUnsignedEwma(g_publishToFirstWorkerClaimEwmaNs, latency);
+                        if (batch->coldStart) UpdateWakeLatencyEwma(claimNs - publishNs);
+                    }
+                }
+            }
             else
+            {
                 g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+                if (batch->firstAssistShardNs.compare_exchange_strong(
+                    expected, claimNs, std::memory_order_acq_rel))
+                {
+                    const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
+                    if (publishNs > 0)
+                        UpdateUnsignedEwma(g_publishToFirstMainClaimEwmaNs,
+                            static_cast<uint64_t>(claimNs - publishNs));
+                }
+            }
+
+            return RunChunkRangeSpan(batch, rangeIndex, rangeIndex + 1);
         }
 
         void SetCurrentWorkerPriority() noexcept
@@ -637,9 +672,13 @@ namespace JobSystem
                 }
                 auto* state = batch->handleState;
                 const auto now = std::chrono::steady_clock::now();
-                g_lastChunkCompletionNs.store(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
-                    std::memory_order_relaxed);
+                const int64_t completionNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch()).count();
+                g_lastChunkCompletionNs.store(completionNs, std::memory_order_relaxed);
+                const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
+                if (publishNs > 0)
+                    UpdateUnsignedEwma(g_publishToCompletionEwmaNs,
+                        static_cast<uint64_t>(completionNs - publishNs));
                 CompleteState(state);
             }
             TryReleaseChunkBatchState(batch);
@@ -669,7 +708,7 @@ namespace JobSystem
 
             while (true)
             {
-                ChunkQueueToken token{};
+                ChunkQueueTicket ticket{};
 
                 for (int spin = 0; spin < kWorkerIdleSpin; ++spin)
                 {
@@ -678,7 +717,7 @@ namespace JobSystem
                         std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
                         if (!g_chunkRunnableBatches.empty())
                         {
-                            token = g_chunkRunnableBatches.front();
+                            ticket = g_chunkRunnableBatches.front();
                             g_chunkRunnableBatches.pop_front();
                             g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
                             break;
@@ -687,7 +726,7 @@ namespace JobSystem
                     RelaxCpu();
                 }
 
-                if (!token.batch)
+                if (!ticket.batch)
                 {
                     // ——— 保温阶段 ———
                     // g_keepWarmUntilNs > 0 时 spin-yield 代替 CV park，
@@ -705,20 +744,20 @@ namespace JobSystem
                                 std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
                                 if (!g_chunkRunnableBatches.empty())
                                 {
-                                    token = g_chunkRunnableBatches.front();
+                                    ticket = g_chunkRunnableBatches.front();
                                     g_chunkRunnableBatches.pop_front();
                                     g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
                                 }
                             }
-                            if (token.batch) break;
+                            if (ticket.batch) break;
                             if (w < kKeepWarmSpinYieldThreshold) { RelaxCpu(); }
                             else if (!yielded) { yielded = true; std::this_thread::yield(); }
                             else { RelaxCpu(); }
                         }
-                        if (token.batch) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                        if (ticket.batch) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
                     }
 
-                    if (!token.batch)
+                    if (!ticket.batch)
                     {
                         std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
                         g_chunkWorkerCv.wait(lock, [&observedPrewake] {
@@ -732,21 +771,21 @@ namespace JobSystem
                         if (g_chunkWorkersShutdown && g_chunkRunnableBatches.empty()) return;
                         if (!g_chunkRunnableBatches.empty())
                         {
-                            token = g_chunkRunnableBatches.front();
+                            ticket = g_chunkRunnableBatches.front();
                             g_chunkRunnableBatches.pop_front();
                             g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
                         }
                         observedPrewake = g_chunkPrewakeGeneration.load(std::memory_order_relaxed);
-                        if (token.batch)
+                        if (ticket.batch)
                         {
                             g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
                 }
 
-                if (token.batch)
+                if (ticket.batch)
                 {
-                    RunWorkerChunkToken(token);
+                    RunWorkerChunkTicket(ticket);
                 }
 
                 const auto hotUntilNs = g_chunkHotUntilNs.load(std::memory_order_relaxed);
@@ -767,7 +806,7 @@ namespace JobSystem
                         std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
                         if (!g_chunkRunnableBatches.empty())
                         {
-                            token = g_chunkRunnableBatches.front();
+                            ticket = g_chunkRunnableBatches.front();
                             g_chunkRunnableBatches.pop_front();
                             g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
                         }
@@ -776,15 +815,15 @@ namespace JobSystem
                             return;
                         }
                     }
-                    if (!token.batch)
+                    if (!ticket.batch)
                     {
                         RelaxCpu();
                         continue;
                     }
 
                     g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
-                    RunWorkerChunkToken(token);
-                    token = {};
+                    RunWorkerChunkTicket(ticket);
+                    ticket = {};
                 }
             }
         }
@@ -824,21 +863,26 @@ namespace JobSystem
             if (!batch || batch->rangeCount <= 0) return;
             const int requestedTokens = std::max(1, std::min(workerCount,
                 std::min(batch->workerTarget, batch->rangeCount)));
-            const int rangesPerToken = (batch->rangeCount + requestedTokens - 1) / requestedTokens;
-            const int tokenCount = (batch->rangeCount + rangesPerToken - 1) / rangesPerToken;
+            const int tokenCount = requestedTokens;
             batch->tokenCount = tokenCount;
             batch->queueTokens.store(tokenCount, std::memory_order_release);
-            batch->unclaimedTokens.store(tokenCount, std::memory_order_release);
-            batch->publishNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_release);
+            const int64_t publishNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            batch->publishNs.store(publishNs, std::memory_order_release);
+            if (batch->scheduleNs > 0)
+                UpdateUnsignedEwma(g_scheduleToPublishEwmaNs,
+                    static_cast<uint64_t>(publishNs - batch->scheduleNs));
 
             {
-                std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
+                const auto lockStart = std::chrono::steady_clock::now();
+                std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
+                const auto lockAcquired = std::chrono::steady_clock::now();
+                UpdateUnsignedEwma(g_queueLockWaitEwmaNs,
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        lockAcquired - lockStart).count()));
                 for (int i = 0; i < tokenCount; ++i)
                 {
-                    const int firstRange = i * rangesPerToken;
-                    const int lastRange = std::min(batch->rangeCount, firstRange + rangesPerToken);
-                    g_chunkRunnableBatches.push_back({ batch, firstRange, lastRange });
+                    g_chunkRunnableBatches.push_back({ batch });
                 }
                 g_chunkRunnableCount.fetch_add(tokenCount, std::memory_order_release);
                 UpdateQueueDepthPeak(static_cast<int>(g_chunkRunnableBatches.size()));
@@ -847,8 +891,8 @@ namespace JobSystem
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             g_notifiedWorkers.fetch_add(static_cast<uint64_t>(tokenCount), std::memory_order_relaxed);
             // 单次 notify_all 替代 tokenCount 次 notify_one：避免 7× 内核切换延迟（~80μs 节省）。
-            // token 是固定范围的，worker 通过原子 ClaimChunkToken 无竞争领取，
-            // 不会出现 thundering herd 导致的额外锁竞争。
+            // Tickets only grant participation. Every worker drains the batch's
+            // shared range cursor, so late workers can rebalance a heavy tail.
             g_chunkWorkerCv.notify_all();
         }
 
@@ -866,41 +910,25 @@ namespace JobSystem
                 return std::max(1, std::min(workerCount, batch->rangeCount));
             }
 
-            // Tokens own fixed ranges, so using all workers no longer adds
-            // contention on a shared allocation cursor.
+            // Cap assist-mode participation to avoid excessive cursor contention.
             constexpr int kAssistWorkerCap = 15;
             return std::max(1, std::min(std::min(workerCount, batch->rangeCount), kAssistWorkerCap));
         }
 
-        void RunWorkerChunkToken(const ChunkQueueToken& token) noexcept
+        void RunWorkerChunkTicket(const ChunkQueueTicket& ticket) noexcept
         {
-            auto* batch = token.batch;
+            auto* batch = ticket.batch;
             if (!batch) return;
-            ClaimChunkToken(batch, true);
-
-            const auto start = std::chrono::steady_clock::now();
-            const int64_t startNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                start.time_since_epoch()).count();
-            int64_t expected = 0;
-            if (batch->firstWorkerStartNs.compare_exchange_strong(
-                expected, startNs, std::memory_order_acq_rel))
-            {
-                if (batch->coldStart)
-                {
-                    UpdateWakeLatencyEwma(startNs - batch->publishNs.load(std::memory_order_relaxed));
-                }
-            }
-
+            batch->activeTickets.fetch_add(1, std::memory_order_acq_rel);
             const int active = batch->activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
             UpdatePeak(g_activeWorkersPeak, static_cast<uint64_t>(active));
-            const bool ranAny = RunChunkRangeSpan(batch, token.firstRange, token.lastRange);
+            bool ranAny = false;
+            while (TryRunOneChunkRange(batch, true)) ranAny = true;
             batch->activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
-            if (ranAny)
-            {
-                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                g_stealCount.fetch_add(1, std::memory_order_relaxed);
-            }
+            batch->activeTickets.fetch_sub(1, std::memory_order_acq_rel);
+            if (!ranAny) g_exhaustedTickets.fetch_add(1, std::memory_order_relaxed);
             FinishChunkQueueToken(batch);
+            TryReleaseChunkBatchState(batch);
         }
 
         bool RunOneQueuedChunkToken(void* rawBatch) noexcept
@@ -909,11 +937,11 @@ namespace JobSystem
             if (!requestedBatch) return false;
             requestedBatch->assistReaders.fetch_add(1, std::memory_order_acq_rel);
 
-            ChunkQueueToken token{};
+            ChunkQueueTicket ticket{};
             {
                 std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
                 auto it = std::find_if(g_chunkRunnableBatches.begin(), g_chunkRunnableBatches.end(),
-                    [requestedBatch](const ChunkQueueToken& candidate) {
+                    [requestedBatch](const ChunkQueueTicket& candidate) {
                         return candidate.batch == requestedBatch;
                     });
                 if (it == g_chunkRunnableBatches.end())
@@ -922,16 +950,16 @@ namespace JobSystem
                     if (previous == 1) TryReleaseChunkBatchState(requestedBatch);
                     return false;
                 }
-                token = *it;
+                ticket = *it;
                 g_chunkRunnableBatches.erase(it);
                 g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
             }
 
-            ClaimChunkToken(token.batch, false);
-            const bool executed = RunChunkRangeSpan(token.batch, token.firstRange, token.lastRange);
-            FinishChunkQueueToken(token.batch);
-            const int previous = token.batch->assistReaders.fetch_sub(1, std::memory_order_acq_rel);
-            if (previous == 1) TryReleaseChunkBatchState(token.batch);
+            bool executed = false;
+            while (TryRunOneChunkRange(requestedBatch, false)) executed = true;
+            FinishChunkQueueToken(requestedBatch);
+            const int previous = requestedBatch->assistReaders.fetch_sub(1, std::memory_order_acq_rel);
+            if (previous == 1) TryReleaseChunkBatchState(requestedBatch);
             return executed;
         }
 
@@ -1767,6 +1795,8 @@ namespace JobSystem
 
         auto createBatch = [=]() -> ChunkBatchState* {
             auto* batch = AcquireChunkBatchState();
+            batch->scheduleNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
             batch->func = func;
             batch->rangeFunc = rangeFunc;
             batch->entityRangeFunc = entityRangeFunc;
@@ -1787,6 +1817,7 @@ namespace JobSystem
                 batch->rangeSize = std::max(1, chunkCount / (workerCount * 6 + 1));
             }
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
+            batch->nextRange.store(0, std::memory_order_relaxed);
             batch->enableAssist = enableAssist;
             batch->mode = mode;
             batch->handleState = state;
