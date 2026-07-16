@@ -47,6 +47,24 @@ Values below are for the Sleep C# `IJobChunk` case. Latencies are EWMAs in micro
 
 Workers begin claiming in roughly 26-33 us and queue-lock wait is about 0.1 us, so parked-worker notification and publication locking are not the remaining dominant cost. The publish-to-completion tail is approximately 0.97-1.34 ms and 81-92 frames per process fall back to blocking wait. This points to cold-memory execution and tail distribution rather than a missed wake-up.
 
+## Evidence-Gated Tuning Investigation
+
+After the five-process acceptance run, three isolated parameter studies were run with 5 warmup and 30 measured frames per process. These short runs are diagnostic only; they do not replace the 100-frame acceptance data above. Each row reports the median of three independent processes.
+
+| Variable | Configuration | Continuous C# Chunk avg | Sleep C# Chunk avg | Sleep C# Chunk p95 | Heavy C# Chunk avg | Decision |
+|---|---|---:|---:|---:|---:|---|
+| Worker participation | cap 15 (production) | 0.191 ms | 1.036 ms | 1.181 ms | 26.088 ms | Retain |
+| Worker participation | cap 12 | 0.159 ms | 1.018 ms | 1.187 ms | 28.221 ms | Reject: Heavy +8.2% |
+| Worker participation | cap 8 | 0.432 ms | 1.074 ms | 1.304 ms | 37.552 ms | Reject: broad regression |
+| ECS Chunk capacity | 768 KiB (production) | 0.191 ms | 1.036 ms | 1.181 ms | 26.088 ms | Retain |
+| ECS Chunk capacity | 512 KiB | 0.718 ms | 1.060 ms | 1.281 ms | 24.510 ms | Reject: continuous regression |
+| ECS Chunk capacity | 256 KiB | 0.596 ms | 1.045 ms | 1.303 ms | 23.826 ms | Reject: continuous regression |
+| Complete wait policy | 256 pause iterations (production) | 0.191 ms | 1.036 ms | 1.181 ms | 26.088 ms | Retain |
+| Complete wait policy | spin for 200 us | 0.157 ms | 1.027 ms | 1.165 ms | 23.739 ms | Reject: target still missed; burns caller CPU |
+| Complete wait policy | spin for 500 us | 0.217 ms | 1.039 ms | 1.168 ms | 26.449 ms | Reject: no latency benefit; burns caller CPU |
+
+The 200 us policy reduced C# Sleep wait fallbacks from roughly 27/30 frames to 7-11/30, and the 500 us policy reduced them to zero, without materially improving average or p95 completion. This is direct evidence that blocking-wait entry is a symptom of the approximately 1 ms execution tail, not its cause. The final source therefore retains cap 15, the 768 KiB default Chunk capacity, and the bounded 256-pause wait before parking.
+
 ## Acceptance
 
 - Sleep average gate: **FAIL**, median 1.193 ms versus the required 0.950 ms.
@@ -59,4 +77,4 @@ Workers begin claiming in roughly 26-33 us and queue-lock wait is about 0.1 us, 
 
 Stopped at the evidence gate. The cooperative cursor, direct assist, range adapter, exact-once lifecycle, and shutdown drain are retained because they pass correctness and improve continuous/Heavy throughput, but this implementation is **not accepted as meeting the Unity-class Sleep target**.
 
-The next investigation must be a separate evidence-gated tuning change focused on cold-memory tail distribution, range sizing, and worker participation. It must not compensate with persistent frame-gap spinning, `KeepWorkersWarm`, a silent default worker-count change, or a Chunk-capacity change.
+The worker-count, Chunk-capacity, and wait-policy investigation is now complete and rejected all three as safe routes to the target. A further performance phase must optimize the movement data path or introduce an explicit fused synchronous execution API; it must not compensate with persistent frame-gap spinning, `KeepWorkersWarm`, a silent default worker-count change, or a Chunk-capacity change.
