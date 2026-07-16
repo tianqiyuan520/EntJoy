@@ -821,11 +821,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double totalMilliseconds = 0;
             for (int frame = 0; frame < SleepMeasureFrames; frame++)
             {
+                NativeJobScheduler.KeepWorkersWarm((FrameSleepMilliseconds + 50) * 1000);
                 long start = Stopwatch.GetTimestamp();
                 scheduleAndComplete();
                 long end = Stopwatch.GetTimestamp();
                 double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
                 totalMilliseconds += elapsed;
+                NativeJobScheduler.KeepWorkersWarm((FrameSleepMilliseconds + 50) * 1000);
                 Thread.Sleep(FrameSleepMilliseconds);
             }
 
