@@ -237,6 +237,38 @@ extern "C"
         return toHandle(handle);
     }
 
+    void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
+        EntityBatchRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const EntityBatchData* batches,
+        int batchCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        // 一步完成 Schedule+Complete，消除 P/Invoke 往返
+        // workers 还在上下文切换中，主线程已经进入 assist
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
+        handle.Complete();
+        return toHandle(handle);
+    }
+
     void JobSystem_GetStats(JobSystemStatsNative* stats)
     {
         if (!stats) return;
