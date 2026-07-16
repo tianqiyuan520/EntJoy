@@ -1502,11 +1502,12 @@ namespace JobSystem
 
     void Scheduler::KeepWorkersWarm(int microseconds)
     {
+        // 仅设 g_keepWarmUntilNs，不涉及 g_chunkHotUntilNs（hot-spin）。
+        // worker 在 CV park 前检查此标志并自旋等待，而非深度内核休眠。
         const int64_t deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(
             (std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds)).time_since_epoch()
         ).count();
         g_keepWarmUntilNs.store(deadline, std::memory_order_release);
-        g_chunkHotUntilNs.store(deadline, std::memory_order_release);
         g_chunkWorkerCv.notify_all();
     }
 
