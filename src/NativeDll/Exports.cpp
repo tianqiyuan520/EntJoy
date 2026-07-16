@@ -269,6 +269,13 @@ extern "C"
         stats->scheduleModeDeferredPublish = snapshot.scheduleModeDeferredPublish;
         stats->scheduleModeDeferredPublishNoAssist = snapshot.scheduleModeDeferredPublishNoAssist;
         stats->frameQueueDepthPeak = snapshot.frameQueueDepthPeak;
+        stats->directAssistClaims = snapshot.directAssistClaims;
+        stats->exhaustedTickets = snapshot.exhaustedTickets;
+        stats->scheduleToPublishEwmaNs = snapshot.scheduleToPublishEwmaNs;
+        stats->publishToFirstMainClaimEwmaNs = snapshot.publishToFirstMainClaimEwmaNs;
+        stats->publishToFirstWorkerClaimEwmaNs = snapshot.publishToFirstWorkerClaimEwmaNs;
+        stats->publishToCompletionEwmaNs = snapshot.publishToCompletionEwmaNs;
+        stats->queueLockWaitEwmaNs = snapshot.queueLockWaitEwmaNs;
     }
 
     void JobSystem_ResetStats()

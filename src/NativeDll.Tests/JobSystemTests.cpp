@@ -253,6 +253,20 @@ namespace
         Require(handle.IsCompleted(), "shutdown left parallel work incomplete");
         JobSystem::Scheduler::Initialize();
     }
+
+    void TestCooperativeStatsReset()
+    {
+        JobSystem::ResetStatsSnapshot();
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.directAssistClaims == 0, "direct assist stats did not reset");
+        Require(stats.exhaustedTickets == 0, "exhausted ticket stats did not reset");
+        Require(stats.scheduleToPublishEwmaNs == 0, "schedule-to-publish stats did not reset");
+        Require(stats.publishToFirstMainClaimEwmaNs == 0, "main-claim stats did not reset");
+        Require(stats.publishToFirstWorkerClaimEwmaNs == 0, "worker-claim stats did not reset");
+        Require(stats.publishToCompletionEwmaNs == 0, "completion stats did not reset");
+        Require(stats.queueLockWaitEwmaNs == 0, "queue-lock stats did not reset");
+    }
 }
 
 int main()
@@ -260,6 +274,8 @@ int main()
     JobSystem::Scheduler::Initialize();
     try
     {
+        TestCooperativeStatsReset();
+        std::cout << "PASS CooperativeStatsReset\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);
