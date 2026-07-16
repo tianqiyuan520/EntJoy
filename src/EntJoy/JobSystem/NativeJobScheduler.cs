@@ -33,7 +33,9 @@ public unsafe struct ChunkJobData
 public unsafe struct EntityBatchData
 {
     public void** componentArrays;
+    public void** enableBitMaps;
     public int entityCount;
+    public int enableBitmapCount;
 }
 
 /// <summary>
@@ -1556,10 +1558,35 @@ public static unsafe partial class NativeJobScheduler
                 }
             }
 
+            // 构建 enableBitMaps（有 enabled filter 时）
+            void** enableBitMaps = null;
+            int enableBitmapCount = 0;
+            var allEnabled = query.AllEnabled;
+            if (allEnabled != null && allEnabled.Length > 0)
+            {
+                enableBitmapCount = requiredCount;
+                enableBitMaps = (void**)Marshal.AllocHGlobal(enableBitmapCount * sizeof(void*));
+                for (int e = 0; e < enableBitmapCount; e++)
+                {
+                    enableBitMaps[e] = null;
+                    int requiredTypeId = requiredComponentTypeIds[e];
+                    for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
+                    {
+                        if (archetype.Types[componentIndex].Id == requiredTypeId)
+                        {
+                            enableBitMaps[e] = chunk.GetEnableBitMapPointer(componentIndex);
+                            break;
+                        }
+                    }
+                }
+            }
+
             batchesPtr[batchIndex] = new EntityBatchData
             {
                 componentArrays = requiredArrays,
-                entityCount = chunk.EntityCount
+                enableBitMaps = enableBitMaps,
+                entityCount = chunk.EntityCount,
+                enableBitmapCount = enableBitmapCount
             };
         }
 
@@ -1999,6 +2026,10 @@ public static unsafe partial class NativeJobScheduler
                 if (batch.componentArrays != null)
                 {
                     Marshal.FreeHGlobal((IntPtr)batch.componentArrays);
+                }
+                if (batch.enableBitMaps != null)
+                {
+                    Marshal.FreeHGlobal((IntPtr)batch.enableBitMaps);
                 }
             }
 

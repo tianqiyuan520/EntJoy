@@ -45,6 +45,12 @@ extern "C" {
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
+    // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
+    // 返回已完成的 handle
+    JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
+        EntityBatchRangeJobFunc func, void* context, ContextCleanupFunc cleanup,
+        const struct EntityBatchData* batches, int batchCount, void* dependency,
+        int scheduleMode, int workerCap, int rangeSize);
     
     typedef struct JobSystemTuningNative {
         int spinBeforeWait;

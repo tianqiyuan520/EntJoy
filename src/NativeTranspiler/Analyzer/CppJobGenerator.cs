@@ -707,8 +707,7 @@ namespace NativeTranspiler.Analyzer
             if (IsChunkScheduledJob(jobStruct))
             {
                 sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
-                if (IsEntityJob(jobStruct))
-                    sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
+                sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
                 foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
                     sb.AppendLine($"#include \"{include}.h\"");
             }
@@ -997,6 +996,83 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{rangeAdapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
+                sb.AppendLine("}");
+
+                // ★ Unity 风格 EntityBatch 适配器（替代 ChunkJobData 间接层）
+                // 接收 EntityBatchData* 而非 ChunkJobData*，消除 requiredComponentArrays 指针追访
+                // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
+                // 比 ChunkJobData（72 字节）更紧凑，cache 效率更高
+                var entityBatchAdapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
+                var entityBatchHeader = $@"HEAD void CALLINGCONVENTION {entityBatchAdapterFuncName}(void* context, const EntityBatchData* __batches, int __startIndex, int __count)
+{{
+    auto* __header = (__EntJoyChunkContextHeader*)context;
+    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);
+    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);
+    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);
+    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;";
+                sb.Append(entityBatchHeader);
+                sb.AppendLine();
+                // job field 指针（从 RangeAdapter 复制）
+                rOff = 0;
+                foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                {
+                    int off = CalculateFieldOffset(f, ref rOff);
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type))
+                    {
+                        if (f.Type.Name == "NativeList")
+                            sb.AppendLine($"    auto* {f.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(f.Type)}>**)(__jobContext + {off});");
+                        else
+                        {
+                            var e = GetCppElementType(f.Type);
+                            sb.AppendLine($"    auto* {f.Name}_ptr = *({e}**)(__jobContext + {off});");
+                            sb.AppendLine($"    int {f.Name}_length = *(int*)(__jobContext + {off + 8});");
+                        }
+                    }
+                    else if (f.Type is IPointerTypeSymbol)
+                    {
+                        var t = NativeTranspiler.MapCSharpTypeToCpp(f.Type);
+                        sb.AppendLine($"    auto* {f.Name}_ptr = *({t}*)(__jobContext + {off});");
+                    }
+                    else
+                    {
+                        var t = NativeTranspiler.MapCSharpTypeToCpp(f.Type);
+                        sb.AppendLine($"    auto* {f.Name}_ptr = ({t}*)(__jobContext + {off});");
+                    }
+                }
+                // field refs
+                foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type) && f.Type.Name == "NativeList")
+                    { var e = ((INamedTypeSymbol)f.Type).TypeArguments[0]; var c = NativeTranspiler.MapCSharpTypeToCpp(e); sb.AppendLine($"    EntJoy::Collections::UnsafeList<{c}>& {f.Name} = *{f.Name}_listData;"); }
+                foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                {
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type)) continue;
+                    if (f.Type is IPointerTypeSymbol) continue;
+                    sb.AppendLine($"    const {NativeTranspiler.MapCSharpTypeToCpp(f.Type)}& {f.Name} = *{f.Name}_ptr;");
+                }
+                sb.AppendLine("    const int __endIndex = __startIndex + __count;");
+                sb.AppendLine("    for (int __batchIndex = __startIndex; __batchIndex < __endIndex; ++__batchIndex)");
+                sb.AppendLine("    {");
+                sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batchIndex];");
+                // IJobChunk: 用 CppChunkStatementTranslator 翻译 Execute 体
+                if (methodSyntax?.Body != null)
+                {
+                    var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                    var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                    var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                    var bodyCode = tr.Translate(methodSyntax.Body);
+                    // 将 __chunkData 替换为 __batchData（CppChunkStatementTranslator 生成 __chunkData 引用）
+                    // 这比新增一个 EntityBatch 专用的 translator 更简洁
+                    bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
+                    bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
+                    foreach (var l in bodyCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                        if (l.Length > 0) sb.Append("        ").AppendLine(l);
+                }
+                sb.AppendLine("    }");
+                sb.AppendLine("}");
+                sb.AppendLine();
+                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{entityBatchAdapterFuncName}Ptr()");
+                sb.AppendLine("{");
+                sb.AppendLine($"    return (void*){entityBatchAdapterFuncName};");
                 sb.AppendLine("}");
 
                 }
