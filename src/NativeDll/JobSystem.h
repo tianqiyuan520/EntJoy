@@ -131,6 +131,13 @@ struct JobSystemStatsSnapshot {
     uint64_t scheduleModeDeferredPublish;
     uint64_t scheduleModeDeferredPublishNoAssist;
     int frameQueueDepthPeak;
+    uint64_t directAssistClaims;
+    uint64_t exhaustedTickets;
+    uint64_t scheduleToPublishEwmaNs;
+    uint64_t publishToFirstMainClaimEwmaNs;
+    uint64_t publishToFirstWorkerClaimEwmaNs;
+    uint64_t publishToCompletionEwmaNs;
+    uint64_t queueLockWaitEwmaNs;
 };
 
 void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;

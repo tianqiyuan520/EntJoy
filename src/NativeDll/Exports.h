@@ -86,6 +86,13 @@ extern "C" {
         unsigned long long scheduleModeDeferredPublish;
         unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
+        unsigned long long directAssistClaims;
+        unsigned long long exhaustedTickets;
+        unsigned long long scheduleToPublishEwmaNs;
+        unsigned long long publishToFirstMainClaimEwmaNs;
+        unsigned long long publishToFirstWorkerClaimEwmaNs;
+        unsigned long long publishToCompletionEwmaNs;
+        unsigned long long queueLockWaitEwmaNs;
     } JobSystemStatsNative;
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);

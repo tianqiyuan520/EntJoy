@@ -79,6 +79,13 @@ namespace JobSystem
     std::atomic<uint64_t> g_scheduleModeDeferredPublish{ 0 };
     std::atomic<uint64_t> g_scheduleModeDeferredPublishNoAssist{ 0 };
     std::atomic<int> g_frameQueueDepthPeak{ 0 };
+    std::atomic<uint64_t> g_directAssistClaims{ 0 };
+    std::atomic<uint64_t> g_exhaustedTickets{ 0 };
+    std::atomic<uint64_t> g_scheduleToPublishEwmaNs{ 0 };
+    std::atomic<uint64_t> g_publishToFirstMainClaimEwmaNs{ 0 };
+    std::atomic<uint64_t> g_publishToFirstWorkerClaimEwmaNs{ 0 };
+    std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
+    std::atomic<uint64_t> g_queueLockWaitEwmaNs{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_frameLowLatencyMode{ false };
     std::atomic<int64_t> g_lastTaskflowScheduleNs{ 0 };
@@ -89,6 +96,21 @@ namespace JobSystem
         while (value > observed &&
             !g_frameQueueDepthPeak.compare_exchange_weak(observed, value, std::memory_order_relaxed))
         {
+        }
+    }
+
+    void UpdateUnsignedEwma(std::atomic<uint64_t>& target, uint64_t sample) noexcept
+    {
+        if (sample == 0) return;
+        uint64_t current = target.load(std::memory_order_relaxed);
+        while (true)
+        {
+            const uint64_t next = current == 0
+                ? sample
+                : (sample >= current
+                    ? current + (sample - current) / 8
+                    : current - (current - sample) / 8);
+            if (target.compare_exchange_weak(current, next, std::memory_order_relaxed)) return;
         }
     }
 
@@ -122,6 +144,13 @@ namespace JobSystem
         stats->scheduleModeDeferredPublish = g_scheduleModeDeferredPublish.load(std::memory_order_relaxed);
         stats->scheduleModeDeferredPublishNoAssist = g_scheduleModeDeferredPublishNoAssist.load(std::memory_order_relaxed);
         stats->frameQueueDepthPeak = g_frameQueueDepthPeak.load(std::memory_order_relaxed);
+        stats->directAssistClaims = g_directAssistClaims.load(std::memory_order_relaxed);
+        stats->exhaustedTickets = g_exhaustedTickets.load(std::memory_order_relaxed);
+        stats->scheduleToPublishEwmaNs = g_scheduleToPublishEwmaNs.load(std::memory_order_relaxed);
+        stats->publishToFirstMainClaimEwmaNs = g_publishToFirstMainClaimEwmaNs.load(std::memory_order_relaxed);
+        stats->publishToFirstWorkerClaimEwmaNs = g_publishToFirstWorkerClaimEwmaNs.load(std::memory_order_relaxed);
+        stats->publishToCompletionEwmaNs = g_publishToCompletionEwmaNs.load(std::memory_order_relaxed);
+        stats->queueLockWaitEwmaNs = g_queueLockWaitEwmaNs.load(std::memory_order_relaxed);
     }
 
     void ResetStatsSnapshot() noexcept
@@ -152,6 +181,13 @@ namespace JobSystem
         g_scheduleModeDeferredPublish.store(0, std::memory_order_relaxed);
         g_scheduleModeDeferredPublishNoAssist.store(0, std::memory_order_relaxed);
         g_frameQueueDepthPeak.store(0, std::memory_order_relaxed);
+        g_directAssistClaims.store(0, std::memory_order_relaxed);
+        g_exhaustedTickets.store(0, std::memory_order_relaxed);
+        g_scheduleToPublishEwmaNs.store(0, std::memory_order_relaxed);
+        g_publishToFirstMainClaimEwmaNs.store(0, std::memory_order_relaxed);
+        g_publishToFirstWorkerClaimEwmaNs.store(0, std::memory_order_relaxed);
+        g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
+        g_queueLockWaitEwmaNs.store(0, std::memory_order_relaxed);
     }
 
     // ---------- 内部函数实现（非匿名，供 Exports.cpp 等 TU 使用） ----------

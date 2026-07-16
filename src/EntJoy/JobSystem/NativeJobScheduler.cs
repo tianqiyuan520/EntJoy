@@ -116,6 +116,13 @@ public struct NativeJobSystemStats
     public ulong ScheduleModeDeferredPublish;
     public ulong ScheduleModeDeferredPublishNoAssist;
     public int FrameQueueDepthPeak;
+    public ulong DirectAssistClaims;
+    public ulong ExhaustedTickets;
+    public ulong ScheduleToPublishEwmaNs;
+    public ulong PublishToFirstMainClaimEwmaNs;
+    public ulong PublishToFirstWorkerClaimEwmaNs;
+    public ulong PublishToCompletionEwmaNs;
+    public ulong QueueLockWaitEwmaNs;
 }
 
 internal enum ChunkScheduleMode
