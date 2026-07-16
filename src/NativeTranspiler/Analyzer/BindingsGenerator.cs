@@ -410,8 +410,8 @@ namespace NativeTranspiler.Analyzer
             if (isChunk)
             {
                 sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                string scheduleMethod = CppJobGenerator.IsEntityJob(jobStruct) ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize" : "ScheduleChunkRaw";
-                string funcPtrName = CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkFuncPtr";
+                string scheduleMethod = CppJobGenerator.IsEntityJob(jobStruct) ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize" : "ScheduleChunkRangeRaw";
+                string funcPtrName = CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
                 string extraArgs = CppJobGenerator.IsEntityJob(jobStruct) ? $", {(useMT ? 1 : 0)}, 0" : "";
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{scheduleMethod}(");
                 sb.AppendLine($"                ref job, world.EntityManager, query, {funcPtrName}, s_{jobStruct.Name}_RequiredComponentTypeIds{extraArgs}, dependsOn._nativeHandle);");
