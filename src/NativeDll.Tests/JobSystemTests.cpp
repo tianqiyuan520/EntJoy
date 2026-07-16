@@ -194,11 +194,24 @@ namespace
     {
         std::vector<std::atomic<int>>* hits;
         std::atomic<int>* cleanupCount;
+        std::atomic<bool>* releaseWorkers;
+        std::atomic<int>* callerExecutions;
     };
+
+    thread_local bool g_isCooperativeCompleteCaller = false;
 
     void ExecuteCooperativeChunkRange(void* raw, const ChunkJobData*, int start, int count)
     {
         auto& context = *static_cast<CooperativeChunkContext*>(raw);
+        if (g_isCooperativeCompleteCaller)
+        {
+            if (context.callerExecutions)
+                context.callerExecutions->fetch_add(1, std::memory_order_relaxed);
+        }
+        else if (context.releaseWorkers)
+        {
+            context.releaseWorkers->wait(false, std::memory_order_acquire);
+        }
         for (int index = start; index < start + count; ++index)
         {
             (*context.hits)[static_cast<size_t>(index)].fetch_add(1, std::memory_order_relaxed);
@@ -281,7 +294,11 @@ namespace
         std::vector<ChunkJobData> chunks(chunkCount);
         std::vector<std::atomic<int>> hits(chunkCount);
         std::atomic<int> cleanupCount{ 0 };
-        CooperativeChunkContext context{ &hits, &cleanupCount };
+        std::atomic<bool> releaseWorkers{ false };
+        std::atomic<int> callerExecutions{ 0 };
+        CooperativeChunkContext context{
+            &hits, &cleanupCount, &releaseWorkers, &callerExecutions
+        };
 
         JobSystem::ResetStatsSnapshot();
         auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
@@ -292,10 +309,18 @@ namespace
         auto second = handle;
         auto third = handle;
         auto fourth = handle;
-        std::jthread a([first]() mutable { first.Complete(); });
-        std::jthread b([second]() mutable { second.Complete(); });
-        std::jthread c([third]() mutable { third.Complete(); });
-        std::jthread d([fourth]() mutable { fourth.Complete(); });
+        auto completeAsCaller = [](JobSystem::JobHandle copied) mutable {
+            g_isCooperativeCompleteCaller = true;
+            copied.Complete();
+        };
+        std::jthread a(completeAsCaller, first);
+        std::jthread b(completeAsCaller, second);
+        std::jthread c(completeAsCaller, third);
+        std::jthread d(completeAsCaller, fourth);
+        while (callerExecutions.load(std::memory_order_acquire) < 2)
+            std::this_thread::yield();
+        releaseWorkers.store(true, std::memory_order_release);
+        releaseWorkers.notify_all();
         a.join();
         b.join();
         c.join();
@@ -307,6 +332,13 @@ namespace
                 "concurrent Complete missed or duplicated a Chunk range");
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "concurrent Complete duplicated Chunk cleanup");
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.directAssistClaims > 1,
+            "Complete callers did not claim target ranges directly");
+        Require(stats.mainClaimedTokens == stats.directAssistClaims,
+            "main claims used a path other than direct batch assist");
     }
 
     void TestExhaustedChunkTicketsDrain()
@@ -318,7 +350,7 @@ namespace
             std::vector<ChunkJobData> chunks(chunkCount);
             std::vector<std::atomic<int>> hits(chunkCount);
             std::atomic<int> cleanupCount{ 0 };
-            CooperativeChunkContext context{ &hits, &cleanupCount };
+            CooperativeChunkContext context{ &hits, &cleanupCount, nullptr, nullptr };
             auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
                 &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
                 chunks.data(), chunkCount, {},
