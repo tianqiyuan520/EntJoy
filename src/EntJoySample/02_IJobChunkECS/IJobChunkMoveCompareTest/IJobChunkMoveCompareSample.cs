@@ -772,20 +772,52 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
+                if (sleepMilliseconds > 0) NativeJobScheduler.ResetStats();
                 double measuredTotal = 0;
+                var samples = new double[measureFrames];
                 for (int frame = 0; frame < measureFrames; frame++)
                 {
                     long start = Stopwatch.GetTimestamp();
                     cases[index].Run();
                     long end = Stopwatch.GetTimestamp();
-                    measuredTotal += (end - start) * 1000.0 / Stopwatch.Frequency;
+                    double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
+                    samples[frame] = elapsed;
+                    measuredTotal += elapsed;
                     if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
                 averages[index] = measuredTotal / measureFrames;
-                Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
+                if (sleepMilliseconds > 0)
+                {
+                    double[] sorted = (double[])samples.Clone();
+                    Array.Sort(sorted);
+                    Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
+                    NativeJobSystemStats stats = NativeJobScheduler.GetStats();
+                    Console.WriteLine(
+                        $"  Scheduler: directAssist={stats.DirectAssistClaims}, exhaustedTickets={stats.ExhaustedTickets}, " +
+                        $"mainClaims={stats.MainClaimedTokens}, workerClaims={stats.WorkerClaimedTokens}, " +
+                        $"firstMainUs={stats.PublishToFirstMainClaimEwmaNs / 1000.0:F3}, " +
+                        $"firstWorkerUs={stats.PublishToFirstWorkerClaimEwmaNs / 1000.0:F3}, " +
+                        $"completionUs={stats.PublishToCompletionEwmaNs / 1000.0:F3}, " +
+                        $"queueLockUs={stats.QueueLockWaitEwmaNs / 1000.0:F3}, waitFallbacks={stats.WaitFallbacks}");
+                }
+                else
+                {
+                    Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
+                }
             }
             return averages;
+        }
+
+        private static double Percentile(double[] sorted, double percentile)
+        {
+            if (sorted.Length == 0) return 0;
+            double position = (sorted.Length - 1) * percentile;
+            int lower = (int)Math.Floor(position);
+            int upper = (int)Math.Ceiling(position);
+            if (lower == upper) return sorted[lower];
+            double weight = position - lower;
+            return sorted[lower] * (1.0 - weight) + sorted[upper] * weight;
         }
 
         private static double RunBenchmark(string label, Action scheduleAndComplete)
@@ -821,13 +853,11 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double totalMilliseconds = 0;
             for (int frame = 0; frame < SleepMeasureFrames; frame++)
             {
-                NativeJobScheduler.KeepWorkersWarm((FrameSleepMilliseconds + 50) * 1000);
                 long start = Stopwatch.GetTimestamp();
                 scheduleAndComplete();
                 long end = Stopwatch.GetTimestamp();
                 double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
                 totalMilliseconds += elapsed;
-                NativeJobScheduler.KeepWorkersWarm((FrameSleepMilliseconds + 50) * 1000);
                 Thread.Sleep(FrameSleepMilliseconds);
             }
 
