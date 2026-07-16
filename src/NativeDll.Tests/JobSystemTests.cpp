@@ -374,6 +374,79 @@ namespace
             "stale cooperative tickets did not drain through the exhausted path");
     }
 
+    void TestDependentChunkRangeCooperation()
+    {
+        constexpr int chunkCount = 1'024;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        std::vector<std::atomic<int>> hits(chunkCount);
+        std::atomic<int> cleanupCount{ 0 };
+        std::atomic<bool> releaseDependency{ false };
+
+        auto dependency = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int, int)
+            {
+                auto* release = static_cast<std::atomic<bool>*>(raw);
+                release->wait(false, std::memory_order_acquire);
+            }, &releaseDependency, 100'000, 100'000);
+
+        CooperativeChunkContext context{
+            &hits, &cleanupCount, nullptr, nullptr
+        };
+        auto original = JobSystem::Scheduler::ScheduleChunkRanges(
+            &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
+            chunks.data(), chunkCount, dependency,
+            JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+        auto first = original;
+        auto second = original;
+        std::jthread firstCaller([first]() mutable { first.Complete(); });
+        std::jthread secondCaller([second]() mutable { second.Complete(); });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 0,
+                "dependent Chunk range ran before its prerequisite");
+
+        releaseDependency.store(true, std::memory_order_release);
+        releaseDependency.notify_all();
+        firstCaller.join();
+        secondCaller.join();
+        original.Complete();
+
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1,
+                "dependent Chunk range was missed or duplicated");
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "dependent Chunk cleanup did not run exactly once");
+    }
+
+    void TestChunkShutdownRace()
+    {
+        for (int iteration = 0; iteration < 50; ++iteration)
+        {
+            constexpr int chunkCount = 1'024;
+            std::vector<ChunkJobData> chunks(chunkCount);
+            std::vector<std::atomic<int>> hits(chunkCount);
+            std::atomic<int> cleanupCount{ 0 };
+            CooperativeChunkContext context{
+                &hits, &cleanupCount, nullptr, nullptr
+            };
+
+            auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+                &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
+                chunks.data(), chunkCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            auto copied = handle;
+            std::jthread caller([copied]() mutable { copied.Complete(); });
+            JobSystem::Scheduler::Shutdown();
+            caller.join();
+
+            Require(handle.IsCompleted(), "shutdown left cooperative Chunk work incomplete");
+            Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+                "shutdown raced cooperative Chunk cleanup");
+            JobSystem::Scheduler::Initialize();
+        }
+    }
+
     void TestCooperativeStatsReset()
     {
         JobSystem::ResetStatsSnapshot();
@@ -391,6 +464,7 @@ namespace
 
 int main()
 {
+    std::cout << std::unitbuf;
     JobSystem::Scheduler::Initialize();
     try
     {
@@ -410,6 +484,10 @@ int main()
         std::cout << "PASS ConcurrentChunkComplete\n";
         TestExhaustedChunkTicketsDrain();
         std::cout << "PASS ExhaustedChunkTicketsDrain\n";
+        TestDependentChunkRangeCooperation();
+        std::cout << "PASS DependentChunkRangeCooperation\n";
+        TestChunkShutdownRace();
+        std::cout << "PASS ChunkShutdownRace\n";
         TestAutomaticBatchDensity();
         std::cout << "PASS AutomaticBatchDensity\n";
         TestCopiedHandleCleansUpOnce();
