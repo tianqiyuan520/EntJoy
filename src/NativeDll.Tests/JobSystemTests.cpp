@@ -190,6 +190,27 @@ namespace
         static_cast<ChunkRangeContext*>(raw)->cleanupCount->fetch_add(1, std::memory_order_relaxed);
     }
 
+    struct CooperativeChunkContext
+    {
+        std::vector<std::atomic<int>>* hits;
+        std::atomic<int>* cleanupCount;
+    };
+
+    void ExecuteCooperativeChunkRange(void* raw, const ChunkJobData*, int start, int count)
+    {
+        auto& context = *static_cast<CooperativeChunkContext*>(raw);
+        for (int index = start; index < start + count; ++index)
+        {
+            (*context.hits)[static_cast<size_t>(index)].fetch_add(1, std::memory_order_relaxed);
+            if ((index & 31) == 0) std::this_thread::yield();
+        }
+    }
+
+    void CleanupCooperativeChunkRange(void* raw)
+    {
+        static_cast<CooperativeChunkContext*>(raw)->cleanupCount->fetch_add(1, std::memory_order_relaxed);
+    }
+
     void TestChunkRangeExactOnce()
     {
         constexpr int chunkCount = 1'024;
@@ -254,6 +275,73 @@ namespace
         JobSystem::Scheduler::Initialize();
     }
 
+    void TestConcurrentChunkComplete()
+    {
+        constexpr int chunkCount = 4'096;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        std::vector<std::atomic<int>> hits(chunkCount);
+        std::atomic<int> cleanupCount{ 0 };
+        CooperativeChunkContext context{ &hits, &cleanupCount };
+
+        JobSystem::ResetStatsSnapshot();
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
+            chunks.data(), chunkCount, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+        auto first = handle;
+        auto second = handle;
+        auto third = handle;
+        auto fourth = handle;
+        std::jthread a([first]() mutable { first.Complete(); });
+        std::jthread b([second]() mutable { second.Complete(); });
+        std::jthread c([third]() mutable { third.Complete(); });
+        std::jthread d([fourth]() mutable { fourth.Complete(); });
+        a.join();
+        b.join();
+        c.join();
+        d.join();
+        handle.Complete();
+
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1,
+                "concurrent Complete missed or duplicated a Chunk range");
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "concurrent Complete duplicated Chunk cleanup");
+    }
+
+    void TestExhaustedChunkTicketsDrain()
+    {
+        constexpr int chunkCount = 2;
+        JobSystem::ResetStatsSnapshot();
+        for (int iteration = 0; iteration < 256; ++iteration)
+        {
+            std::vector<ChunkJobData> chunks(chunkCount);
+            std::vector<std::atomic<int>> hits(chunkCount);
+            std::atomic<int> cleanupCount{ 0 };
+            CooperativeChunkContext context{ &hits, &cleanupCount };
+            auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+                &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
+                chunks.data(), chunkCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "exhausted ticket test missed or duplicated a range");
+            Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+                "exhausted ticket test duplicated cleanup");
+        }
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        for (int retry = 0; retry < 100; ++retry)
+        {
+            JobSystem::GetStatsSnapshot(&stats);
+            if (stats.exhaustedTickets > 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        Require(stats.exhaustedTickets > 0,
+            "stale cooperative tickets did not drain through the exhausted path");
+    }
+
     void TestCooperativeStatsReset()
     {
         JobSystem::ResetStatsSnapshot();
@@ -286,6 +374,10 @@ int main()
         std::cout << "PASS DependencyOrdering\n";
         TestChunkRangeExactOnce();
         std::cout << "PASS ChunkRangeExactOnce\n";
+        TestConcurrentChunkComplete();
+        std::cout << "PASS ConcurrentChunkComplete\n";
+        TestExhaustedChunkTicketsDrain();
+        std::cout << "PASS ExhaustedChunkTicketsDrain\n";
         TestAutomaticBatchDensity();
         std::cout << "PASS AutomaticBatchDensity\n";
         TestCopiedHandleCleansUpOnce();
