@@ -931,41 +931,13 @@ namespace JobSystem
             TryReleaseChunkBatchState(batch);
         }
 
-        bool RunOneQueuedChunkToken(void* rawBatch) noexcept
+        bool RunOneDirectChunkAssist(void* rawBatch) noexcept
         {
-            auto* requestedBatch = static_cast<ChunkBatchState*>(rawBatch);
-            if (!requestedBatch) return false;
-            requestedBatch->assistReaders.fetch_add(1, std::memory_order_acq_rel);
-
-            ChunkQueueTicket ticket{};
-            {
-                std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
-                auto it = std::find_if(g_chunkRunnableBatches.begin(), g_chunkRunnableBatches.end(),
-                    [requestedBatch](const ChunkQueueTicket& candidate) {
-                        return candidate.batch == requestedBatch;
-                    });
-                if (it == g_chunkRunnableBatches.end())
-                {
-                    const int previous = requestedBatch->assistReaders.fetch_sub(1, std::memory_order_acq_rel);
-                    if (previous == 1) TryReleaseChunkBatchState(requestedBatch);
-                    return false;
-                }
-                ticket = *it;
-                g_chunkRunnableBatches.erase(it);
-                g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
-            }
-
-            bool executed = false;
-            while (TryRunOneChunkRange(requestedBatch, false)) executed = true;
-            FinishChunkQueueToken(requestedBatch);
-            const int previous = requestedBatch->assistReaders.fetch_sub(1, std::memory_order_acq_rel);
-            if (previous == 1) TryReleaseChunkBatchState(requestedBatch);
-            return executed;
-        }
-
-        bool RunOneQueuedColdChunkToken(void* rawBatch) noexcept
-        {
-            return RunOneQueuedChunkToken(rawBatch);
+            auto* batch = static_cast<ChunkBatchState*>(rawBatch);
+            if (!batch) return false;
+            const bool ran = TryRunOneChunkRange(batch, false);
+            if (ran) g_directAssistClaims.fetch_add(1, std::memory_order_relaxed);
+            return ran;
         }
 
         void RemovePendingChunkBatch(ChunkBatchState* batch)
@@ -1019,7 +991,7 @@ namespace JobSystem
                     batch->handleState->assist.readersDrained.store(
                         &OnChunkAssistReadersDrained, std::memory_order_release);
                     batch->handleState->assist.callback.store(
-                        batch->coldStart ? &RunOneQueuedColdChunkToken : &RunOneQueuedChunkToken,
+                        &RunOneDirectChunkAssist,
                         std::memory_order_release);
                 }
             }
