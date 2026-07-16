@@ -686,9 +686,12 @@ namespace JobSystem
                     {
                         std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
                         g_chunkWorkerCv.wait(lock, [&observedPrewake] {
-                            return g_chunkWorkersShutdown ||
-                                g_chunkRunnableCount.load(std::memory_order_acquire) > 0 ||
-                                g_chunkPrewakeGeneration.load(std::memory_order_relaxed) != observedPrewake;
+                            if (g_chunkWorkersShutdown) return true;
+                            if (g_chunkRunnableCount.load(std::memory_order_acquire) > 0) return true;
+                            if (g_chunkPrewakeGeneration.load(std::memory_order_relaxed) != observedPrewake) return true;
+                            // 保温：KeepWorkersWarm 设 g_keepWarmUntilNs → predicate true
+                            int64_t w = g_keepWarmUntilNs.load(std::memory_order_acquire);
+                            return w > 0 && std::chrono::steady_clock::now().time_since_epoch().count() < w;
                         });
                         if (g_chunkWorkersShutdown && g_chunkRunnableBatches.empty()) return;
                         if (!g_chunkRunnableBatches.empty())
