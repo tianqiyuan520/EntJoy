@@ -531,6 +531,42 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"ISPC Entity Speedup: {entityCsharpAverage / entityIspcAverage:F2}x");
             Console.WriteLine($"ISPC MT Entity Spd : {entityCsharpAverage / entityIspcMtAverage:F2}x");
 
+            NativeJobScheduler.ResetStats();
+
+            Console.WriteLine();
+            Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
+            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
+            Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
+            Console.WriteLine();
+
+            var sleepCases = new (string Label, Action Run)[]
+            {
+                ("Sleep C# IJobChunk", () => { World.DefaultWorld = _sleepChunkCsharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C++ IJobChunk", () => { World.DefaultWorld = _sleepChunkCppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep ISPC IJobChunk", () => { World.DefaultWorld = _sleepChunkIspcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C# IJobEntity", () => { World.DefaultWorld = _sleepEntityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C++ IJobEntity", () => { World.DefaultWorld = _sleepEntityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep ISPC IJobEntity", () => { World.DefaultWorld = _sleepEntityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+            };
+            double[] sleep = RunInterleavedBenchmark(sleepCases, SleepWarmupFrames, SleepMeasureFrames, FrameSleepMilliseconds);
+            double sleepChunkCsharpAverage = sleep[0], sleepChunkCppAverage = sleep[1], sleepChunkIspcAverage = sleep[2];
+            double sleepEntityCsharpAverage = sleep[3], sleepEntityCppAverage = sleep[4], sleepEntityIspcAverage = sleep[5];
+            VerifySleepResults("Sleep Verify", Epsilon);
+            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, SleepWarmupFrames + SleepMeasureFrames, Epsilon);
+
+            Console.WriteLine();
+            Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ IJobChunk  : {sleepChunkCppAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep ISPC IJobChunk : {sleepChunkIspcAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C# IJobEntity  : {sleepEntityCsharpAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ IJobEntity : {sleepEntityCppAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep ISPC IJobEntity: {sleepEntityIspcAverage:F3} ms/frame");
+            Console.WriteLine($"Sleep C++ Chunk Spd  : {sleepChunkCsharpAverage / sleepChunkCppAverage:F2}x");
+            Console.WriteLine($"Sleep ISPC Chunk Spd : {sleepChunkCsharpAverage / sleepChunkIspcAverage:F2}x");
+            Console.WriteLine($"Sleep C++ Entity Spd : {sleepEntityCsharpAverage / sleepEntityCppAverage:F2}x");
+            Console.WriteLine($"Sleep ISPC Entity Spd: {sleepEntityCsharpAverage / sleepEntityIspcAverage:F2}x");
+            NativeJobScheduler.ResetStats();
+
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Heavy 计算对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {WarmupFrames}, Measure: {MeasureFrames}, dt={DeltaTime:F6}, iterations={HeavyIterations}");
@@ -567,53 +603,6 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"C++ Entity Heavy Speedup: {entityCsharpHeavyAverage / entityCppHeavyAverage:F2}x");
             Console.WriteLine($"ISPC Entity Heavy Spd   : {entityCsharpHeavyAverage / entityIspcHeavyAverage:F2}x");
             Console.WriteLine($"ISPC MT Entity Heavy Spd: {entityCsharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
-
-            // Heavy → Sleep 间冷却：等 CPU 降温 + 重置调度器 EWMA 防止污染
-            Console.WriteLine();
-            Console.WriteLine("【冷却 5 秒中 — Heavy 后 CPU 降温，避免热态污染 Sleep 基准】");
-            NativeJobScheduler.ResetStats();
-            for (int cool = 5; cool > 0; cool--)
-            {
-                Console.Write($"\r{cool}...");
-                Thread.Sleep(1000);
-                // 帧循环间隔排水：保持 workers 不 park 但给缓存冷却时间
-                NativeJobScheduler.PrewakeWorkersOnce();
-            }
-            Console.WriteLine("\r【冷却完毕】");
-            NativeJobScheduler.ResetStats();
-
-            Console.WriteLine();
-            Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
-            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
-            Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
-            Console.WriteLine();
-
-            var sleepCases = new (string Label, Action Run)[]
-            {
-                ("Sleep C# IJobChunk", () => { World.DefaultWorld = _sleepChunkCsharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C++ IJobChunk", () => { World.DefaultWorld = _sleepChunkCppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep ISPC IJobChunk", () => { World.DefaultWorld = _sleepChunkIspcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C# IJobEntity", () => { World.DefaultWorld = _sleepEntityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C++ IJobEntity", () => { World.DefaultWorld = _sleepEntityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep ISPC IJobEntity", () => { World.DefaultWorld = _sleepEntityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-            };
-            double[] sleep = RunInterleavedBenchmark(sleepCases, SleepWarmupFrames, SleepMeasureFrames, FrameSleepMilliseconds);
-            double sleepChunkCsharpAverage = sleep[0], sleepChunkCppAverage = sleep[1], sleepChunkIspcAverage = sleep[2];
-            double sleepEntityCsharpAverage = sleep[3], sleepEntityCppAverage = sleep[4], sleepEntityIspcAverage = sleep[5];
-            VerifySleepResults("Sleep Verify", Epsilon);
-            VerifyExpectedPositions("Sleep Expected", _sleepChunkCsharpWorld, SleepWarmupFrames + SleepMeasureFrames, Epsilon);
-
-            Console.WriteLine();
-            Console.WriteLine($"Sleep C# IJobChunk   : {sleepChunkCsharpAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep C++ IJobChunk  : {sleepChunkCppAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep ISPC IJobChunk : {sleepChunkIspcAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep C# IJobEntity  : {sleepEntityCsharpAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep C++ IJobEntity : {sleepEntityCppAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep ISPC IJobEntity: {sleepEntityIspcAverage:F3} ms/frame");
-            Console.WriteLine($"Sleep C++ Chunk Spd  : {sleepChunkCsharpAverage / sleepChunkCppAverage:F2}x");
-            Console.WriteLine($"Sleep ISPC Chunk Spd : {sleepChunkCsharpAverage / sleepChunkIspcAverage:F2}x");
-            Console.WriteLine($"Sleep C++ Entity Spd : {sleepEntityCsharpAverage / sleepEntityCppAverage:F2}x");
-            Console.WriteLine($"Sleep ISPC Entity Spd: {sleepEntityCsharpAverage / sleepEntityIspcAverage:F2}x");
         }
 
         private double RunCSharp()
