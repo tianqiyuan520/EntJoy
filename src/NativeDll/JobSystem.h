@@ -138,6 +138,10 @@ struct JobSystemStatsSnapshot {
     uint64_t publishToFirstWorkerClaimEwmaNs;
     uint64_t publishToCompletionEwmaNs;
     uint64_t queueLockWaitEwmaNs;
+    // ——— 以下为调试诊断指标 ———
+    uint64_t perRangeExecEwmaNs;      // 每个 range 平均执行时间 (EWMA ns)
+    uint64_t assistExecPctEwma;       // assist 有效率 = assistExecuted/assistAttempts * 100 (EWMA)
+    uint64_t completionOverheadUs;    // completionUs - perRangeExecUs = 调度/等待开销 (EWMA μs)
 };
 
 void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
