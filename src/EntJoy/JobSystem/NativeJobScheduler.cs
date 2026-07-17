@@ -179,6 +179,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkJobEx;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
+    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
     private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     // Profiler 函数指针
@@ -375,6 +376,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkRangeJobEx");
         _jobSystem_ScheduleEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleEntityBatchJobEx");
+        _jobSystem_ScheduleAndCompleteEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleAndCompleteEntityBatchJobEx");
         _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
         _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
@@ -505,6 +508,12 @@ public static unsafe partial class NativeJobScheduler
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
+    private static IntPtr JobSystem_ScheduleAndCompleteEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode = ChunkScheduleMode.PublishAssist, int workerCap = 0, int rangeSize = 0)
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize);
     }
 
     private static NativeJobSystemStats JobSystem_GetStats()
@@ -887,6 +896,14 @@ public static unsafe partial class NativeJobScheduler
     public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+
+    /// <summary>
+    /// Schedule + Complete 一步完成，消除一次 P/Invoke 往返和 handle boxing 开销。
+    /// 适用于基准测试和一次性同步 job。
+    /// </summary>
+    public static NativeJobHandle ScheduleAndCompleteEntityBatchRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap = 0, int rangeSize = 0)
+        where T : struct
+        => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, null, workerCap, rangeSize, useScheduleAndComplete: true);
 
     public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
         where TJob : struct, IJobEntity
@@ -1350,7 +1367,7 @@ public static unsafe partial class NativeJobScheduler
         catch { ChunkCleanup(contextBlock); throw; }
     }
 
-    private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize)
+    private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, bool useScheduleAndComplete = false)
         where T : struct
     {
         if (funcPtr == IntPtr.Zero)
@@ -1369,7 +1386,10 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+            var handle = useScheduleAndComplete
+                ? JobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)
+                : JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
+            return TrackEntityJob(entityManager, new NativeJobHandle(handle));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }

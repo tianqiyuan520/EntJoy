@@ -38,7 +38,7 @@ namespace JobSystem
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
     constexpr int kSpinBeforeWait = 256;
-    constexpr int kWorkerIdleSpin = 128;
+    constexpr int kWorkerIdleSpin = 256;
     constexpr auto kChunkWorkerHotWait = std::chrono::microseconds(2000);
 
     // 全局资源
@@ -555,14 +555,26 @@ namespace JobSystem
             ChunkBatchState* batch{ nullptr };
         };
 
-        std::mutex g_chunkWorkerMutex;
-        std::condition_variable g_chunkWorkerCv;
-        std::deque<ChunkQueueTicket> g_chunkRunnableBatches;
-        std::atomic<int> g_chunkRunnableCount{ 0 };
+        // ——— 无锁环缓冲区（替代 std::mutex + std::deque） ———
+        static constexpr size_t kWorkRingSize = 512; // 2 的幂
+        static std::array<std::atomic<ChunkBatchState*>, kWorkRingSize> g_workRing{};
+        // 以下原子变量分散在不同缓存行上，避免多核 CAS/XADD 争用同一条缓存行
+        static alignas(64) std::atomic<uint32_t> g_workHead{ 0 };   // 生产者（主线程）写入
+        static alignas(64) std::atomic<uint32_t> g_workTail{ 0 };   // 消费者（workers）CAS
+        static alignas(64) std::atomic<int> g_workCount{ 0 };        // 可用 work 信号量
+
+        // ——— Worker park/wake（替代 condition_variable + mutex） ———
+        // 任何需要唤醒 worker 的事件递增此值并 notify_all
+        static alignas(64) std::atomic<uint64_t> g_workerGen{ 0 };
+
+        // ——— 线程生命周期管理（仅用于创建/销毁，不参与热路径） ———
+        static std::mutex g_chunkWorkerLifecycleMutex;
+        static std::vector<std::thread> g_chunkWorkers;
+        static std::atomic<bool> g_chunkWorkersShutdown{ false };
+
+        // ——— 保留现有机制 ———
         std::mutex g_pendingChunkMutex;
         std::deque<ChunkBatchState*> g_pendingChunkBatches;
-        std::vector<std::thread> g_chunkWorkers;
-        bool g_chunkWorkersShutdown = false;
         std::atomic<uint64_t> g_chunkPrewakeGeneration{ 0 };
         std::atomic<int64_t> g_chunkHotUntilNs{ 0 };
         std::atomic<int64_t> g_keepWarmUntilNs{ 0 };
@@ -570,6 +582,23 @@ namespace JobSystem
         std::atomic<int64_t> g_lastChunkCompletionNs{ 0 };
 
         inline void RelaxCpu() noexcept;
+
+        // ——— 无锁出队：从环缓冲区原子获取一个 batch ———
+        ChunkBatchState* TryDequeue() noexcept
+        {
+            uint32_t tail = g_workTail.load(std::memory_order_relaxed);
+            do {
+                uint32_t head = g_workHead.load(std::memory_order_acquire);
+                if (tail >= head) return nullptr;
+            } while (!g_workTail.compare_exchange_weak(tail, tail + 1,
+                std::memory_order_acq_rel));
+
+            ChunkBatchState* batch = g_workRing[tail & (kWorkRingSize - 1)]
+                .load(std::memory_order_acquire);
+            g_workCount.fetch_sub(1, std::memory_order_release);
+            return batch;
+        }
+
         void RunWorkerChunkTicket(const ChunkQueueTicket& ticket) noexcept;
 
         void UpdatePeak(std::atomic<uint64_t>& peak, uint64_t value) noexcept
@@ -716,33 +745,27 @@ namespace JobSystem
         {
             (void)workerIndex;
             SetCurrentWorkerPriority();
-            uint64_t observedPrewake = g_chunkPrewakeGeneration.load(std::memory_order_relaxed);
 
             while (true)
             {
-                ChunkQueueTicket ticket{};
+                ChunkBatchState* batch = nullptr;
 
+                // ——— Phase 1: 快速自旋 ———
                 for (int spin = 0; spin < kWorkerIdleSpin; ++spin)
                 {
-                    if (g_chunkRunnableCount.load(std::memory_order_acquire) > 0)
+                    if (g_workCount.load(std::memory_order_acquire) > 0)
                     {
-                        std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
-                        if (!g_chunkRunnableBatches.empty())
-                        {
-                            ticket = g_chunkRunnableBatches.front();
-                            g_chunkRunnableBatches.pop_front();
-                            g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
-                            break;
-                        }
+                        batch = TryDequeue();
+                        if (batch) break;
                     }
                     RelaxCpu();
                 }
 
-                if (!ticket.batch)
+                // ——— Phase 2: 保温自旋 ———
+                // g_keepWarmUntilNs > 0 时 spin-yield 代替深度 park，
+                // 消除帧间唤醒延迟。
+                if (!batch)
                 {
-                    // ——— 保温阶段 ———
-                    // g_keepWarmUntilNs > 0 时 spin-yield 代替 CV park，
-                    // 消除帧间 notify_one 唤醒延迟（~100 μs）。
                     int64_t warmDeadline = g_keepWarmUntilNs.load(std::memory_order_acquire);
                     if (warmDeadline > 0)
                     {
@@ -751,91 +774,103 @@ namespace JobSystem
                         {
                             auto now = std::chrono::steady_clock::now();
                             if (now.time_since_epoch().count() >= warmDeadline) break;
-                            if (g_chunkRunnableCount.load(std::memory_order_acquire) > 0)
+                            if (g_workCount.load(std::memory_order_acquire) > 0)
                             {
-                                std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
-                                if (!g_chunkRunnableBatches.empty())
-                                {
-                                    ticket = g_chunkRunnableBatches.front();
-                                    g_chunkRunnableBatches.pop_front();
-                                    g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
-                                }
+                                batch = TryDequeue();
+                                if (batch) break;
                             }
-                            if (ticket.batch) break;
                             if (w < kKeepWarmSpinYieldThreshold) { RelaxCpu(); }
                             else if (!yielded) { yielded = true; std::this_thread::yield(); }
                             else { RelaxCpu(); }
                         }
-                        if (ticket.batch) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
-                    }
-
-                    if (!ticket.batch)
-                    {
-                        std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
-                        g_chunkWorkerCv.wait(lock, [&observedPrewake] {
-                            if (g_chunkWorkersShutdown) return true;
-                            if (g_chunkRunnableCount.load(std::memory_order_acquire) > 0) return true;
-                            if (g_chunkPrewakeGeneration.load(std::memory_order_relaxed) != observedPrewake) return true;
-                            // 保温：KeepWorkersWarm 设 g_keepWarmUntilNs → predicate true
-                            int64_t w = g_keepWarmUntilNs.load(std::memory_order_acquire);
-                            return w > 0 && std::chrono::steady_clock::now().time_since_epoch().count() < w;
-                        });
-                        if (g_chunkWorkersShutdown && g_chunkRunnableBatches.empty()) return;
-                        if (!g_chunkRunnableBatches.empty())
-                        {
-                            ticket = g_chunkRunnableBatches.front();
-                            g_chunkRunnableBatches.pop_front();
-                            g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
-                        }
-                        observedPrewake = g_chunkPrewakeGeneration.load(std::memory_order_relaxed);
-                        if (ticket.batch)
-                        {
-                            g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
-                        }
+                        if (batch) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
 
-                if (ticket.batch)
+                // ——— Phase 3: 内核 park ———
+                // 使用 g_workerGen.wait() 替代 condition_variable + mutex。
+                // 任何需要唤醒 worker 的事件（新 work / prewake / shutdown）
+                // 都会递增 g_workerGen 并 notify_all。
+                if (!batch)
                 {
-                    RunWorkerChunkTicket(ticket);
+                    // 快速路径：先检查（避免在已有工作时不必要的 park）
+                    if (g_workCount.load(std::memory_order_acquire) > 0)
+                    {
+                        batch = TryDequeue();
+                    }
+
+                    if (!batch)
+                    {
+                        if (g_chunkWorkersShutdown.load(std::memory_order_acquire))
+                        {
+                            // 关闭中：最后一次 TryDequeue（处理可能还在队列中的剩余 ticket）
+                            batch = TryDequeue();
+                            if (!batch) return;
+                        }
+                        else
+                        {
+                            // 记录当前 generation 并 park
+                            uint64_t gen = g_workerGen.load(std::memory_order_relaxed);
+                            g_workerGen.wait(gen, std::memory_order_acquire);
+                            // WaitOnAddress/WakeByAddressAll 返回
+                            // 可能原因：新 work / prewake / shutdown / spurious
+
+                            if (g_chunkWorkersShutdown.load(std::memory_order_acquire))
+                            {
+                                // 关闭中：处理完剩余队列后退出
+                                while ((batch = TryDequeue()) != nullptr)
+                                {
+                                    RunWorkerChunkTicket({ batch });
+                                }
+                                return;
+                            }
+
+                            // 尝试获取 work
+                            if (g_workCount.load(std::memory_order_acquire) > 0)
+                            {
+                                batch = TryDequeue();
+                            }
+                            if (batch)
+                            {
+                                g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            // batch == null 表示 prewake 或 spurious → 进入 hot-spin 检查
+                        }
+                    }
                 }
 
+                // ——— 处理 ticket ———
+                if (batch)
+                {
+                    RunWorkerChunkTicket({ batch });
+                }
+
+                // ——— Phase 4: Hot-spin（Prewake 后活跃等待） ———
                 const auto hotUntilNs = g_chunkHotUntilNs.load(std::memory_order_relaxed);
-                if (hotUntilNs <= 0)
+                if (hotUntilNs > 0)
                 {
-                    continue;
-                }
-
-                const auto hotUntil = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(hotUntilNs));
-                while (std::chrono::steady_clock::now() < hotUntil)
-                {
-                    if (g_chunkRunnableCount.load(std::memory_order_acquire) <= 0)
+                    const auto hotUntil = std::chrono::steady_clock::time_point(
+                        std::chrono::nanoseconds(hotUntilNs));
+                    while (std::chrono::steady_clock::now() < hotUntil)
                     {
-                        RelaxCpu();
-                        continue;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
-                        if (!g_chunkRunnableBatches.empty())
+                        if (g_workCount.load(std::memory_order_acquire) > 0)
                         {
-                            ticket = g_chunkRunnableBatches.front();
-                            g_chunkRunnableBatches.pop_front();
-                            g_chunkRunnableCount.fetch_sub(1, std::memory_order_acq_rel);
+                            batch = TryDequeue();
+                            if (batch)
+                            {
+                                g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
+                                RunWorkerChunkTicket({ batch });
+                            }
                         }
-                        else if (g_chunkWorkersShutdown)
+                        else if (g_chunkWorkersShutdown.load(std::memory_order_acquire))
                         {
                             return;
                         }
+                        else
+                        {
+                            RelaxCpu();
+                        }
                     }
-                    if (!ticket.batch)
-                    {
-                        RelaxCpu();
-                        continue;
-                    }
-
-                    g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
-                    RunWorkerChunkTicket(ticket);
-                    ticket = {};
                 }
             }
         }
@@ -843,9 +878,9 @@ namespace JobSystem
         void EnsureChunkWorkers(int workerCount)
         {
             if (workerCount <= 0) workerCount = 1;
-            std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
+            std::lock_guard<std::mutex> lock(g_chunkWorkerLifecycleMutex);
             // 无条件重置关闭标志，避免之前关闭后的残留 true 导致新 worker 立即退出
-            g_chunkWorkersShutdown = false;
+            g_chunkWorkersShutdown.store(false, std::memory_order_release);
             if (!g_chunkWorkers.empty()) return;
 
             g_chunkWorkers.reserve(static_cast<size_t>(workerCount));
@@ -859,11 +894,13 @@ namespace JobSystem
         {
             std::vector<std::thread> workers;
             {
-                std::lock_guard<std::mutex> lock(g_chunkWorkerMutex);
-                g_chunkWorkersShutdown = true;
+                std::lock_guard<std::mutex> lock(g_chunkWorkerLifecycleMutex);
+                g_chunkWorkersShutdown.store(true, std::memory_order_release);
                 workers.swap(g_chunkWorkers);
             }
-            g_chunkWorkerCv.notify_all();
+            // 唤醒所有 park 的 worker 检查退出标志
+            g_workerGen.fetch_add(1, std::memory_order_release);
+            g_workerGen.notify_all();
             for (auto& worker : workers)
             {
                 if (worker.joinable()) worker.join();
@@ -886,27 +923,24 @@ namespace JobSystem
                 UpdateUnsignedEwma(g_scheduleToPublishEwmaNs,
                     static_cast<uint64_t>(publishNs - batch->scheduleNs));
 
+            // 无锁批量入队 — 每个 ticket = 一个 ring slot，无需 mutex
+            for (int i = 0; i < tokenCount; ++i)
             {
-                const auto lockStart = std::chrono::steady_clock::now();
-                std::unique_lock<std::mutex> lock(g_chunkWorkerMutex);
-                const auto lockAcquired = std::chrono::steady_clock::now();
-                UpdateUnsignedEwma(g_queueLockWaitEwmaNs,
-                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        lockAcquired - lockStart).count()));
-                for (int i = 0; i < tokenCount; ++i)
-                {
-                    g_chunkRunnableBatches.push_back({ batch });
-                }
-                g_chunkRunnableCount.fetch_add(tokenCount, std::memory_order_release);
-                UpdateQueueDepthPeak(static_cast<int>(g_chunkRunnableBatches.size()));
+                uint32_t slot = g_workHead.fetch_add(1, std::memory_order_acq_rel);
+                g_workRing[slot & (kWorkRingSize - 1)].store(batch, std::memory_order_release);
             }
+            g_workCount.fetch_add(tokenCount, std::memory_order_release);
+            UpdateQueueDepthPeak(static_cast<int>(
+                g_workHead.load(std::memory_order_relaxed) -
+                g_workTail.load(std::memory_order_relaxed)));
+
             g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(tokenCount), std::memory_order_relaxed);
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             g_notifiedWorkers.fetch_add(static_cast<uint64_t>(tokenCount), std::memory_order_relaxed);
-            // 单次 notify_all 替代 tokenCount 次 notify_one：避免 7× 内核切换延迟（~80μs 节省）。
-            // Tickets only grant participation. Every worker drains the batch's
-            // shared range cursor, so late workers can rebalance a heavy tail.
-            g_chunkWorkerCv.notify_all();
+            // 递增 workerGen 使 park 的 worker 唤醒（比 condition_variable 轻量，
+            // 无 mutex 参与，直接 WakeByAddressAll on Windows）。
+            g_workerGen.fetch_add(1, std::memory_order_release);
+            g_workerGen.notify_all();
         }
 
         int ResolveChunkWorkerTarget(const ChunkBatchState* batch, int workerCount) noexcept
@@ -1437,12 +1471,34 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 2: Short spin — 等待 worker 完成最后的工作
-        if (_state->completed.load(std::memory_order_acquire)) return;
+        // Phase 2: 自旋 — 等待 worker 完成最后的工作
         for (int i = 0; i < kSpinBeforeWait; ++i)
         {
             if (_state->completed.load(std::memory_order_acquire)) return;
             RelaxCpu();
+        }
+
+        if (_state->completed.load(std::memory_order_acquire)) return;
+
+        // Phase 2.5: 放弃自旋前再做一次 assist 尝试
+        // 无锁环缓冲区下 workers 抢 range 更快，主线程 assist 可能提前耗尽。
+        // 自旋一轮后某些 worker 已交付结果，再试一次 assist 可避免内核 wait。
+        {
+            auto assist = TryAcquireAssist(_state);
+            if (assist.callback && assist.context)
+            {
+                if (assist.callback(assist.context))
+                {
+                    g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+                    g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                    // 再给 512 次 PAUSE 等最后一个 worker 完成
+                    for (int i = 0; i < kSpinBeforeWait; ++i)
+                    {
+                        if (_state->completed.load(std::memory_order_acquire)) return;
+                        RelaxCpu();
+                    }
+                }
+            }
         }
 
         if (_state->completed.load(std::memory_order_acquire)) return;
@@ -1568,7 +1624,10 @@ namespace JobSystem
         g_chunkHotUntilNs.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(hotUntil.time_since_epoch()).count(),
             std::memory_order_release);
-        g_chunkWorkerCv.notify_all();
+        // 递增 workerGen 使 park 的 worker 从 g_workerGen.wait() 返回，
+        // 然后检查 g_chunkHotUntilNs 进入 hot-spin
+        g_workerGen.fetch_add(1, std::memory_order_release);
+        g_workerGen.notify_all();
     }
 
     void AutoPrewakeTaskflowIfNeeded(int length)
@@ -1591,12 +1650,13 @@ namespace JobSystem
     void Scheduler::KeepWorkersWarm(int microseconds)
     {
         // 仅设 g_keepWarmUntilNs，不涉及 g_chunkHotUntilNs（hot-spin）。
-        // worker 在 CV park 前检查此标志并自旋等待，而非深度内核休眠。
+        // worker 在 park 前检查此标志并自旋等待，而非深度内核休眠。
         const int64_t deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(
             (std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds)).time_since_epoch()
         ).count();
         g_keepWarmUntilNs.store(deadline, std::memory_order_release);
-        g_chunkWorkerCv.notify_all();
+        g_workerGen.fetch_add(1, std::memory_order_release);
+        g_workerGen.notify_all();
     }
 
     void Scheduler::SetFrameLowLatencyMode(bool enabled)
