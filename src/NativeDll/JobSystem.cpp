@@ -1471,39 +1471,21 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 2: 自旋 — 等待 worker 完成最后的工作
-        for (int i = 0; i < kSpinBeforeWait; ++i)
+        // Phase 2: 时间绑定自旋 — 覆盖 worker 尾部完成窗口
+        // 轻量 job 的 range 耗尽后 workers 仍需 ~50μs 完成数据搬运，
+        // 在此窗口内 PAUSE-spin 比 kernel wait 快约 5-10μs。
         {
-            if (_state->completed.load(std::memory_order_acquire)) return;
-            RelaxCpu();
-        }
-
-        if (_state->completed.load(std::memory_order_acquire)) return;
-
-        // Phase 2.5: 放弃自旋前再做一次 assist 尝试
-        // 无锁环缓冲区下 workers 抢 range 更快，主线程 assist 可能提前耗尽。
-        // 自旋一轮后某些 worker 已交付结果，再试一次 assist 可避免内核 wait。
-        {
-            auto assist = TryAcquireAssist(_state);
-            if (assist.callback && assist.context)
+            const auto spinDeadline = std::chrono::steady_clock::now() + std::chrono::microseconds(50);
+            while (std::chrono::steady_clock::now() < spinDeadline)
             {
-                if (assist.callback(assist.context))
-                {
-                    g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-                    g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                    // 再给 512 次 PAUSE 等最后一个 worker 完成
-                    for (int i = 0; i < kSpinBeforeWait; ++i)
-                    {
-                        if (_state->completed.load(std::memory_order_acquire)) return;
-                        RelaxCpu();
-                    }
-                }
+                if (_state->completed.load(std::memory_order_acquire)) return;
+                RelaxCpu();
             }
         }
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 3: 阻塞等待（极少发生）
+        // Phase 3: 阻塞等待 — 兜底（极少发生）
         g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
         g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
         while (!_state->completed.load(std::memory_order_acquire))
