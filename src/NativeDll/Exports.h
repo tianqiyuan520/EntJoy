@@ -99,6 +99,9 @@ extern "C" {
         unsigned long long publishToFirstWorkerClaimEwmaNs;
         unsigned long long publishToCompletionEwmaNs;
         unsigned long long queueLockWaitEwmaNs;
+        unsigned long long perRangeExecEwmaNs;
+        unsigned long long assistExecPctEwma;
+        unsigned long long completionOverheadUs;
     } JobSystemStatsNative;
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);

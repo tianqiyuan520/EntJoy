@@ -308,6 +308,9 @@ extern "C"
         stats->publishToFirstWorkerClaimEwmaNs = snapshot.publishToFirstWorkerClaimEwmaNs;
         stats->publishToCompletionEwmaNs = snapshot.publishToCompletionEwmaNs;
         stats->queueLockWaitEwmaNs = snapshot.queueLockWaitEwmaNs;
+        stats->perRangeExecEwmaNs = snapshot.perRangeExecEwmaNs;
+        stats->assistExecPctEwma = snapshot.assistExecPctEwma;
+        stats->completionOverheadUs = snapshot.completionOverheadUs;
     }
 
     void JobSystem_ResetStats()
