@@ -126,7 +126,7 @@ namespace EntJoy
             //
             // 环境变量 ENTJOY_CHUNK_KB 可覆盖。
             const int cacheLineSize = 64;
-            const int kTargetArrayKB = 8;  // 每个组件数组目标大小 (L1)
+            const int kTargetArrayKB = 16;  // 每个组件数组目标大小 (L1)
             int targetChunkKB = 64;
 
             string? env = Environment.GetEnvironmentVariable("ENTJOY_CHUNK_KB");
