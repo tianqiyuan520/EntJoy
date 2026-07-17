@@ -799,7 +799,11 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         $"firstMainUs={stats.PublishToFirstMainClaimEwmaNs / 1000.0:F3}, " +
                         $"firstWorkerUs={stats.PublishToFirstWorkerClaimEwmaNs / 1000.0:F3}, " +
                         $"completionUs={stats.PublishToCompletionEwmaNs / 1000.0:F3}, " +
-                        $"queueLockUs={stats.QueueLockWaitEwmaNs / 1000.0:F3}, waitFallbacks={stats.WaitFallbacks}");
+                        $"queueLockUs={stats.QueueLockWaitEwmaNs / 1000.0:F3}, " +
+                        $"overheadUs={stats.CompletionOverheadUs}, " +
+                        $"perRange={stats.PerRangeExecEwmaNs / 1000.0:F3}us, " +
+                        $"assistPct={stats.AssistExecPctEwma}%, " +
+                        $"waitFallbacks={stats.WaitFallbacks}");
                 }
                 else
                 {
