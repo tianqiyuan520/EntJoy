@@ -119,30 +119,24 @@ namespace EntJoy
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            // ——— 缓存友好的 Chunk 容量 ———
-            // 目标：每个组件数组 ≤ 16KB（L1 缓存覆盖），chunk 总大小 < 64KB，
-            // 整批 15 workers 数据 < 1MB，冷态下仍全在 L3 内。
-            // 同时确保 chunks 数不过多（< 1000），避免调度开销膨胀。
-            //
+            // ——— 平衡 Chunk 容量 ———
+            // 512KB ~ 1MB 物理大小目标，兼顾调度开销、并行度和 DDR5 延迟。
             // 环境变量 ENTJOY_CHUNK_KB 可覆盖。
             const int cacheLineSize = 64;
-            const int kTargetArrayKB = 16;  // 每个组件数组目标大小 (L1)
-            int targetChunkKB = 64;
+            int targetChunkKB = 768;
 
             string? env = Environment.GetEnvironmentVariable("ENTJOY_CHUNK_KB");
-            if (env != null && int.TryParse(env, out int parsed) && parsed >= 16)
+            if (env != null && int.TryParse(env, out int parsed) && parsed >= 256)
                 targetChunkKB = parsed;
 
             int targetChunkBytes = targetChunkKB * 1024;
 
             int entitySize = Marshal.SizeOf<Entity>();
             int totalComponentSize = entitySize;
-            int maxComponentSize = 1;
             int enableableCount = 0;
             foreach (var type in types)
             {
                 totalComponentSize += type.Size;
-                if (type.Size > maxComponentSize) maxComponentSize = type.Size;
                 if (type.IsEnableable) enableableCount++;
             }
 
@@ -151,14 +145,10 @@ namespace EntJoy
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
             int stride = totalComponentSize + bitmapOverheadPerEntity;
-            int capacityBySize = Math.Max(64, (targetChunkBytes - alignmentOverhead) / stride);
+            int capacity = Math.Max(2048, (targetChunkBytes - alignmentOverhead) / stride);
 
-            // 限制单个组件数组不超过 kTargetArrayKB
-            int capacityByArray = (kTargetArrayKB * 1024) / maxComponentSize;
-
-            int capacity = Math.Min(capacityBySize, capacityByArray);
             capacity = (capacity + (cacheLineSize - 1)) & ~(cacheLineSize - 1);
-            return Math.Clamp(capacity, 512, 16384);
+            return Math.Clamp(capacity, 2048, 131072);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
