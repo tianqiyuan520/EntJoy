@@ -1471,16 +1471,30 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 2: 时间绑定自旋 — 覆盖 worker 尾部完成窗口
-        // 轻量 job 的 range 耗尽后 workers 仍需 ~50μs 完成数据搬运，
-        // 在此窗口内 PAUSE-spin 比 kernel wait 快约 5-10μs。
+        // Phase 2: 时间绑定自旋 — 覆盖 worker 尾部完成窗口（50-100μs）
+        // 在自旋窗口内 workers 完成最后的数据搬运和 CompleteState()。
         {
-            const auto spinDeadline = std::chrono::steady_clock::now() + std::chrono::microseconds(50);
+            constexpr auto kPhase2SpinBudget = std::chrono::microseconds(100);
+            const auto spinDeadline = std::chrono::steady_clock::now() + kPhase2SpinBudget;
             while (std::chrono::steady_clock::now() < spinDeadline)
             {
                 if (_state->completed.load(std::memory_order_acquire)) return;
                 RelaxCpu();
             }
+        }
+
+        if (_state->completed.load(std::memory_order_acquire)) return;
+
+        // Phase 2.5: yield + 短自旋 — 给最后一个 worker 时间片完成 CompleteState()
+        // yield() 是用户态操作（~0.5μs），让出当前线程的时间片给 worker，
+        // 远快于内核 wait（~5-10μs 用户↔内核切换）。
+        std::this_thread::yield();
+        if (_state->completed.load(std::memory_order_acquire)) return;
+
+        for (int i = 0; i < 64; ++i)
+        {
+            if (_state->completed.load(std::memory_order_acquire)) return;
+            RelaxCpu();
         }
 
         if (_state->completed.load(std::memory_order_acquire)) return;
