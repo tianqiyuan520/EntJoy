@@ -125,6 +125,9 @@ public struct NativeJobSystemStats
     public ulong PublishToFirstWorkerClaimEwmaNs;
     public ulong PublishToCompletionEwmaNs;
     public ulong QueueLockWaitEwmaNs;
+    public ulong PerRangeExecEwmaNs;       // 每个 range 平均执行时间 (ns, EWMA)
+    public ulong AssistExecPctEwma;        // assist 有效率 (0~100)
+    public ulong CompletionOverheadUs;     // 调度/等待开销 = completionUs - perRangeExecUs
 }
 
 internal enum ChunkScheduleMode

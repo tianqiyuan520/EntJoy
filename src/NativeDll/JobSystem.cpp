@@ -86,6 +86,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_publishToFirstWorkerClaimEwmaNs{ 0 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_queueLockWaitEwmaNs{ 0 };
+    std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_frameLowLatencyMode{ false };
     std::atomic<int64_t> g_lastTaskflowScheduleNs{ 0 };
@@ -151,6 +152,15 @@ namespace JobSystem
         stats->publishToFirstWorkerClaimEwmaNs = g_publishToFirstWorkerClaimEwmaNs.load(std::memory_order_relaxed);
         stats->publishToCompletionEwmaNs = g_publishToCompletionEwmaNs.load(std::memory_order_relaxed);
         stats->queueLockWaitEwmaNs = g_queueLockWaitEwmaNs.load(std::memory_order_relaxed);
+        stats->perRangeExecEwmaNs = g_perRangeExecEwmaNs.load(std::memory_order_relaxed);
+        // assist 有效率 = assistExecuted/assistAttempts (0~100)
+        const uint64_t attempts = g_assistAttempts.load(std::memory_order_relaxed);
+        const uint64_t executed = g_assistExecuted.load(std::memory_order_relaxed);
+        stats->assistExecPctEwma = attempts > 0 ? (executed * 100 / attempts) : 100;
+        // overhead = completionUs - perRangeExecUs（调度/等待开销 EWMA μs）
+        const uint64_t compUs = stats->publishToCompletionEwmaNs / 1000;
+        const uint64_t perUs = stats->perRangeExecEwmaNs / 1000;
+        stats->completionOverheadUs = compUs > perUs ? compUs - perUs : 0;
     }
 
     void ResetStatsSnapshot() noexcept
@@ -188,6 +198,7 @@ namespace JobSystem
         g_publishToFirstWorkerClaimEwmaNs.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_queueLockWaitEwmaNs.store(0, std::memory_order_relaxed);
+        g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
 
     // ---------- 内部函数实现（非匿名，供 Exports.cpp 等 TU 使用） ----------
@@ -718,8 +729,13 @@ namespace JobSystem
                 g_lastChunkCompletionNs.store(completionNs, std::memory_order_relaxed);
                 const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
                 if (publishNs > 0)
-                    UpdateUnsignedEwma(g_publishToCompletionEwmaNs,
-                        static_cast<uint64_t>(completionNs - publishNs));
+                {
+                    const auto totalNs = static_cast<uint64_t>(completionNs - publishNs);
+                    UpdateUnsignedEwma(g_publishToCompletionEwmaNs, totalNs);
+                    // 每个 range 平均执行时间 = 总量 / range 数，分离内存带宽影响
+                    const auto perRangeNs = totalNs / std::max(1, batch->rangeCount);
+                    UpdateUnsignedEwma(g_perRangeExecEwmaNs, perRangeNs);
+                }
                 CompleteState(state);
             }
             TryReleaseChunkBatchState(batch);
