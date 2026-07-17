@@ -119,47 +119,46 @@ namespace EntJoy
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            // ——— Unity 兼容的 Chunk 容量 ———
-            // Unity DOTS 使用 16KB 固定 chunk 大小，每个组件数组 ~4KB（1 个 DDR 页）。
-            // 冷态下单次 TLB miss 覆盖整个数组，避免跨页访问，大幅降低 DRAM 温度敏感度。
+            // ——— 缓存友好的 Chunk 容量 ———
+            // 目标：每个组件数组 ≤ 16KB（L1 缓存覆盖），chunk 总大小 < 64KB，
+            // 整批 15 workers 数据 < 1MB，冷态下仍全在 L3 内。
+            // 同时确保 chunks 数不过多（< 1000），避免调度开销膨胀。
             //
-            // 环境变量 ENTJOY_CHUNK_KB 可覆盖（≥ 16KB）。
-            const int kChunkDataSize = 16 * 1024;  // 16KB = Unity 标准
-            const int kHeaderSize = 4 * 1024;      // ~4KB header
-            const int kAvailableBytes = kChunkDataSize - kHeaderSize;  // ~12KB
+            // 环境变量 ENTJOY_CHUNK_KB 可覆盖。
+            const int cacheLineSize = 64;
+            const int kTargetArrayKB = 16;  // 每个组件数组目标大小 (L1)
+            int targetChunkKB = 64;
 
-            int targetChunkKB = 16;
             string? env = Environment.GetEnvironmentVariable("ENTJOY_CHUNK_KB");
             if (env != null && int.TryParse(env, out int parsed) && parsed >= 16)
-            {
                 targetChunkKB = parsed;
-                int customBytes = targetChunkKB * 1024 - kHeaderSize;
-                int maxSize = 0;
-                foreach (var t in types)
-                {
-                    if (t.Size > maxSize) maxSize = t.Size;
-                    if (t.IsEnableable) { } // for completeness
-                }
-                int stride = Marshal.SizeOf<Entity>() + types.Length;
-                return Math.Clamp(customBytes / Math.Max(stride, 1), 64, 131072);
-            }
 
-            // 从可用空间倒推实体容量
-            int totalStride = Marshal.SizeOf<Entity>();
-            int maxCompSize = 1;
+            int targetChunkBytes = targetChunkKB * 1024;
+
+            int entitySize = Marshal.SizeOf<Entity>();
+            int totalComponentSize = entitySize;
+            int maxComponentSize = 1;
+            int enableableCount = 0;
             foreach (var type in types)
             {
-                totalStride += type.Size;
-                if (type.Size > maxCompSize) maxCompSize = type.Size;
+                totalComponentSize += type.Size;
+                if (type.Size > maxComponentSize) maxComponentSize = type.Size;
+                if (type.IsEnableable) enableableCount++;
             }
 
-            int capacity = kAvailableBytes / totalStride;
+            int alignmentOverhead = types.Length * cacheLineSize;
+            const int bitmapBytesPer64Entities = 8;
+            int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
-            // 确保每个组件数组 ≤ 4KB（1 DDR page）
-            int capByPage = 4 * 1024 / maxCompSize;
-            capacity = Math.Min(capacity, capByPage);
+            int stride = totalComponentSize + bitmapOverheadPerEntity;
+            int capacityBySize = Math.Max(64, (targetChunkBytes - alignmentOverhead) / stride);
 
-            return Math.Clamp(capacity, 64, 4096);
+            // 限制单个组件数组不超过 kTargetArrayKB
+            int capacityByArray = (kTargetArrayKB * 1024) / maxComponentSize;
+
+            int capacity = Math.Min(capacityBySize, capacityByArray);
+            capacity = (capacity + (cacheLineSize - 1)) & ~(cacheLineSize - 1);
+            return Math.Clamp(capacity, 512, 16384);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
