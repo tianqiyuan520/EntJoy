@@ -568,6 +568,20 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"ISPC Entity Heavy Spd   : {entityCsharpHeavyAverage / entityIspcHeavyAverage:F2}x");
             Console.WriteLine($"ISPC MT Entity Heavy Spd: {entityCsharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
 
+            // Heavy → Sleep 间冷却：等 CPU 降温 + 重置调度器 EWMA 防止污染
+            Console.WriteLine();
+            Console.WriteLine("【冷却 5 秒中 — Heavy 后 CPU 降温，避免热态污染 Sleep 基准】");
+            NativeJobScheduler.ResetStats();
+            for (int cool = 5; cool > 0; cool--)
+            {
+                Console.Write($"\r{cool}...");
+                Thread.Sleep(1000);
+                // 帧循环间隔排水：保持 workers 不 park 但给缓存冷却时间
+                NativeJobScheduler.PrewakeWorkersOnce();
+            }
+            Console.WriteLine("\r【冷却完毕】");
+            NativeJobScheduler.ResetStats();
+
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
             Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
