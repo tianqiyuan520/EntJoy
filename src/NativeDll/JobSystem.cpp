@@ -975,12 +975,7 @@ namespace JobSystem
         void EnqueueChunkBatch(ChunkBatchState* batch, int workerCount)
         {
             if (!batch || batch->rangeCount <= 0) return;
-            // 冷启动（帧间隔 > 5ms，缓存全冷）时减少活跃 worker 数，
-            // 减轻 DRAM 带宽争用。热缓存帧不受影响（coldStart=false）。
-            const int effectiveWorker = (batch->coldStart && batch->entityRangeFunc != nullptr)
-                ? std::max(4, workerCount * 2 / 3)
-                : workerCount;
-            const int requestedTokens = std::max(1, std::min(effectiveWorker,
+            const int requestedTokens = std::max(1, std::min(workerCount,
                 std::min(batch->workerTarget, batch->rangeCount)));
             const int tokenCount = requestedTokens;
             batch->tokenCount = tokenCount;
@@ -1097,6 +1092,14 @@ namespace JobSystem
             if (batch->coldStart)
             {
                 g_coldBatches.fetch_add(1, std::memory_order_relaxed);
+                // 冷缓存时禁用 range 批处理：DRAM 带宽是瓶颈，需要多核并行隐藏延迟
+                // 批处理反而串行化内存读取，增加 completion 时间
+                if (batch->batchSize > 1)
+                {
+                    batch->batchSize = 1;
+                    batch->batchCount = batch->rangeCount;
+                    batch->nextBatch.store(0, std::memory_order_relaxed);
+                }
             }
             if (batch->handleState)
             {
