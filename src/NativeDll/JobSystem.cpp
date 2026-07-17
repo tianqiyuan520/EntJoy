@@ -1015,17 +1015,6 @@ namespace JobSystem
             const int workerCount = std::max(1, CurrentWorkerCount());
             EnsureChunkWorkers(workerCount);
             batch->workerTarget = ResolveChunkWorkerTarget(batch, workerCount);
-            // 自适应 DRAM 带宽/热降频：如果上一帧 completion 时间 > 900μs，
-            // 减少 worker 数以降低带宽争用，让每核更快完成自己的 range。
-            // 热缓存帧（completion < 900μs）不受影响，保持满员。
-            {
-                const uint64_t completionEwma = g_publishToCompletionEwmaNs.load(std::memory_order_relaxed);
-                if (completionEwma > 900'000 && batch->entityRangeFunc != nullptr)
-                {
-                    const int adaptiveWorkers = std::max(4, workerCount * 2 / 3);
-                    batch->workerTarget = std::min(batch->workerTarget, adaptiveWorkers);
-                }
-            }
             const auto now = std::chrono::steady_clock::now();
             const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 now.time_since_epoch()).count();
