@@ -401,10 +401,6 @@ namespace JobSystem
 
             std::atomic<int> completedRanges{ 0 };
             std::atomic<int> nextRange{ 0 };
-            // batch 认领：一次 CAS 抢多个 range，本地循环处理
-            std::atomic<int> nextBatch{ 0 };
-            int batchSize{ 1 };
-            int batchCount{ 0 };
             std::atomic<int> queueTokens{ 0 };
             std::atomic<int> activeTickets{ 0 };
             std::atomic<int> activeWorkers{ 0 };
@@ -456,9 +452,6 @@ namespace JobSystem
             batch->scheduleNs = 0;
             batch->completedRanges.store(0, std::memory_order_relaxed);
             batch->nextRange.store(0, std::memory_order_relaxed);
-            batch->nextBatch.store(0, std::memory_order_relaxed);
-            batch->batchSize = 1;
-            batch->batchCount = 0;
             batch->queueTokens.store(0, std::memory_order_relaxed);
             batch->activeTickets.store(0, std::memory_order_relaxed);
             batch->activeWorkers.store(0, std::memory_order_relaxed);
@@ -685,64 +678,6 @@ namespace JobSystem
             }
 
             return RunChunkRangeSpan(batch, rangeIndex, rangeIndex + 1);
-        }
-
-        // ——— 批量认领：一次 CAS 获取一个 batch 的所有 range，本地循环处理 ———
-        // 对轻量 job 减少 ~85% 的 nextRange 原子争用（15 workers × 85 ranges 降至 ~30 batches）
-        bool TryRunOneChunkBatch(ChunkBatchState* batch, bool worker) noexcept
-        {
-            if (!batch || batch->cleanupDone.load(std::memory_order_acquire)) return false;
-            const int batchIndex = batch->nextBatch.fetch_add(1, std::memory_order_relaxed);
-            if (batchIndex >= batch->batchCount) return false;
-
-            // 统计跟踪（每个 batch 一次，而非每个 range 一次）
-            const int64_t claimNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            int64_t expected = 0;
-            if (worker)
-            {
-                g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
-                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                g_stealCount.fetch_add(1, std::memory_order_relaxed);
-                if (batch->firstWorkerStartNs.compare_exchange_strong(
-                    expected, claimNs, std::memory_order_acq_rel))
-                {
-                    const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
-                    if (publishNs > 0)
-                    {
-                        const auto latency = static_cast<uint64_t>(claimNs - publishNs);
-                        UpdateUnsignedEwma(g_publishToFirstWorkerClaimEwmaNs, latency);
-                        if (batch->coldStart) UpdateWakeLatencyEwma(claimNs - publishNs);
-                    }
-                }
-            }
-            else
-            {
-                g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
-                if (batch->firstAssistShardNs.compare_exchange_strong(
-                    expected, claimNs, std::memory_order_acq_rel))
-                {
-                    const int64_t publishNs = batch->publishNs.load(std::memory_order_acquire);
-                    if (publishNs > 0)
-                        UpdateUnsignedEwma(g_publishToFirstMainClaimEwmaNs,
-                            static_cast<uint64_t>(claimNs - publishNs));
-                }
-            }
-
-            // 本地循环处理 batch 内的所有 range
-            const int rangeStart = batchIndex * batch->batchSize;
-            const int rangeEnd = std::min(batch->rangeCount, rangeStart + batch->batchSize);
-            bool anySuccess = false;
-            for (int ri = rangeStart; ri < rangeEnd; ++ri)
-            {
-                if (!RunChunkRangeSpan(batch, ri, ri + 1))
-                {
-                    // RunChunkRangeSpan 失败时已调用 CancelChunkBatch
-                    return anySuccess;
-                }
-                anySuccess = true;
-            }
-            return anySuccess;
         }
 
         void SetCurrentWorkerPriority() noexcept
@@ -975,12 +910,7 @@ namespace JobSystem
         void EnqueueChunkBatch(ChunkBatchState* batch, int workerCount)
         {
             if (!batch || batch->rangeCount <= 0) return;
-            // 冷启动（帧间隔 > 5ms，缓存全冷）时减少活跃 worker 数，
-            // 减轻 DRAM 带宽争用。热缓存帧不受影响（coldStart=false）。
-            const int effectiveWorker = (batch->coldStart && batch->entityRangeFunc != nullptr)
-                ? std::max(4, workerCount * 2 / 3)
-                : workerCount;
-            const int requestedTokens = std::max(1, std::min(effectiveWorker,
+            const int requestedTokens = std::max(1, std::min(workerCount,
                 std::min(batch->workerTarget, batch->rangeCount)));
             const int tokenCount = requestedTokens;
             batch->tokenCount = tokenCount;
@@ -1040,7 +970,7 @@ namespace JobSystem
             const int active = batch->activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
             UpdatePeak(g_activeWorkersPeak, static_cast<uint64_t>(active));
             bool ranAny = false;
-            while (TryRunOneChunkBatch(batch, true)) ranAny = true;
+            while (TryRunOneChunkRange(batch, true)) ranAny = true;
             batch->activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
             if (!ranAny) g_exhaustedTickets.fetch_add(1, std::memory_order_relaxed);
             batch->activeTickets.fetch_sub(1, std::memory_order_acq_rel);
@@ -1052,7 +982,7 @@ namespace JobSystem
         {
             auto* batch = static_cast<ChunkBatchState*>(rawBatch);
             if (!batch) return false;
-            const bool ran = TryRunOneChunkBatch(batch, false);
+            const bool ran = TryRunOneChunkRange(batch, false);
             if (ran) g_directAssistClaims.fetch_add(1, std::memory_order_relaxed);
             return ran;
         }
@@ -1900,7 +1830,7 @@ namespace JobSystem
 
         auto* state = CreateState(false);
         auto executor = EnsureExecutor();
-        constexpr int kDeferredMaxRanges = 4;
+        constexpr int kDeferredMaxRanges = 2;
         const bool enableAssist = mode != ChunkScheduleMode::PublishNoAssist &&
             mode != ChunkScheduleMode::DeferredPublishNoAssist;
 
@@ -1951,19 +1881,6 @@ namespace JobSystem
             }
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
             batch->nextRange.store(0, std::memory_order_relaxed);
-            // 对轻量实体 job 启用 range 批处理：一次 CAS 抢多个 range
-            // 减少 ~85% 的 nextRange/fetch_add 原子争用
-            if (entityRangeFunc != nullptr && batch->rangeSize <= 4)
-            {
-                int workerCount = std::max(1, CurrentWorkerCount());
-                batch->batchSize = std::max(1, batch->rangeCount / (workerCount * 2 + 1));
-            }
-            else
-            {
-                batch->batchSize = 1;
-            }
-            batch->batchCount = (batch->rangeCount + batch->batchSize - 1) / batch->batchSize;
-            batch->nextBatch.store(0, std::memory_order_relaxed);
             batch->enableAssist = enableAssist;
             batch->mode = mode;
             batch->handleState = state;
@@ -1998,13 +1915,6 @@ namespace JobSystem
                 CompletePendingChunkBatch(batch);
             }
             else if (mode == ChunkScheduleMode::DeferTinyOnly && batch->rangeCount <= kDeferredMaxRanges)
-            {
-                AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
-            }
-            // 轻量实体 job 且 range 数少时自动同步执行（绕开 worker 唤醒 ~30-50μs 开销）
-            else if (batch->entityRangeFunc != nullptr && batch->rangeCount <= kDeferredMaxRanges &&
-                mode != ChunkScheduleMode::DeferredPublish &&
-                mode != ChunkScheduleMode::DeferredPublishNoAssist)
             {
                 AddPendingChunkBatch(batch, &CompletePendingChunkBatch);
             }
