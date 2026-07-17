@@ -1556,64 +1556,84 @@ public static unsafe partial class NativeJobScheduler
         int batchCount = chunkList.Count;
         if (batchCount == 0)
         {
-            return new EntityBatchScheduleCache(entityManager.StructuralVersion, null, 0);
+            return new EntityBatchScheduleCache(entityManager.StructuralVersion, null, 0, null, null);
         }
 
         int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+        bool hasEnableFilter = query.AllEnabled != null && query.AllEnabled.Length > 0;
+        int enableBitmapCount = hasEnableFilter ? requiredCount : 0;
+
+        // 三次分配替代 per-chunk × N 次分配：
+        // 1) EntityBatchData 数组
         var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(batchCount * sizeof(EntityBatchData));
+        // 2) 所有 componentArrays 指针（连续存储）
+        void* componentArraysBlock = null;
+        if (requiredCount > 0)
+            componentArraysBlock = (void*)Marshal.AllocHGlobal(batchCount * requiredCount * sizeof(void*));
+        // 3) 所有 enableBitMaps 指针（连续存储，可选）
+        void* enableBitMapsBlock = null;
+        if (enableBitmapCount > 0)
+            enableBitMapsBlock = (void*)Marshal.AllocHGlobal(batchCount * enableBitmapCount * sizeof(void*));
 
         for (int batchIndex = 0; batchIndex < batchCount; batchIndex++)
         {
             var chunk = chunkList[batchIndex];
             var archetype = chunk.Archetype;
-            var requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-            for (int r = 0; r < requiredCount; r++)
+
+            // 用偏移量填充连续块，而非每次分配
+            if (componentArraysBlock != null)
             {
-                requiredArrays[r] = null;
-                int requiredTypeId = requiredComponentTypeIds[r];
-                for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
+                void** arraysBase = (void**)componentArraysBlock + batchIndex * requiredCount;
+                for (int r = 0; r < requiredCount; r++)
                 {
-                    if (archetype.Types[componentIndex].Id == requiredTypeId)
+                    arraysBase[r] = null;
+                    int requiredTypeId = requiredComponentTypeIds[r];
+                    for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
                     {
-                        requiredArrays[r] = (void*)chunk.GetComponentArrayPointer(componentIndex);
-                        break;
+                        if (archetype.Types[componentIndex].Id == requiredTypeId)
+                        {
+                            arraysBase[r] = (void*)chunk.GetComponentArrayPointer(componentIndex);
+                            break;
+                        }
                     }
                 }
+
+                batchesPtr[batchIndex].componentArrays = arraysBase;
+            }
+            else
+            {
+                batchesPtr[batchIndex].componentArrays = null;
             }
 
-            // 构建 enableBitMaps（有 enabled filter 时）
-            void** enableBitMaps = null;
-            int enableBitmapCount = 0;
-            var allEnabled = query.AllEnabled;
-            if (allEnabled != null && allEnabled.Length > 0)
+            if (enableBitMapsBlock != null)
             {
-                enableBitmapCount = requiredCount;
-                enableBitMaps = (void**)Marshal.AllocHGlobal(enableBitmapCount * sizeof(void*));
+                void** bitmapsBase = (void**)enableBitMapsBlock + batchIndex * enableBitmapCount;
+                batchesPtr[batchIndex].enableBitMaps = bitmapsBase;
+                batchesPtr[batchIndex].enableBitmapCount = enableBitmapCount;
                 for (int e = 0; e < enableBitmapCount; e++)
                 {
-                    enableBitMaps[e] = null;
+                    bitmapsBase[e] = null;
                     int requiredTypeId = requiredComponentTypeIds[e];
                     for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
                     {
                         if (archetype.Types[componentIndex].Id == requiredTypeId)
                         {
-                            enableBitMaps[e] = chunk.GetEnableBitMapPointer(componentIndex);
+                            bitmapsBase[e] = chunk.GetEnableBitMapPointer(componentIndex);
                             break;
                         }
                     }
                 }
             }
-
-            batchesPtr[batchIndex] = new EntityBatchData
+            else
             {
-                componentArrays = requiredArrays,
-                enableBitMaps = enableBitMaps,
-                entityCount = chunk.EntityCount,
-                enableBitmapCount = enableBitmapCount
-            };
+                batchesPtr[batchIndex].enableBitMaps = null;
+                batchesPtr[batchIndex].enableBitmapCount = 0;
+            }
+
+            batchesPtr[batchIndex].entityCount = chunk.EntityCount;
         }
 
-        return new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount);
+        return new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount, componentArraysBlock, enableBitMapsBlock);
     }
 
     private static ManagedChunkScheduleCache BuildManagedChunkArrayCache(EntityManager entityManager, QueryBuilder query)
@@ -1980,15 +2000,19 @@ public static unsafe partial class NativeJobScheduler
         public readonly int StructuralVersion;
         public readonly EntityBatchData* BatchesPtr;
         public readonly int BatchCount;
+        private void* _componentArraysBlock;  // 批量分配的 componentArrays（可为 null）
+        private void* _enableBitMapsBlock;    // 批量分配的 enableBitMaps（可为 null）
         private int _leaseCount;
         private int _retired;
         private int _disposed;
 
-        public EntityBatchScheduleCache(int structuralVersion, EntityBatchData* batchesPtr, int batchCount)
+        public EntityBatchScheduleCache(int structuralVersion, EntityBatchData* batchesPtr, int batchCount, void* componentArraysBlock, void* enableBitMapsBlock)
         {
             StructuralVersion = structuralVersion;
             BatchesPtr = batchesPtr;
             BatchCount = batchCount;
+            _componentArraysBlock = componentArraysBlock;
+            _enableBitMapsBlock = enableBitMapsBlock;
         }
 
         ~EntityBatchScheduleCache()
@@ -2043,19 +2067,11 @@ public static unsafe partial class NativeJobScheduler
                 return;
             }
 
-            for (int i = 0; i < BatchCount; i++)
-            {
-                var batch = BatchesPtr[i];
-                if (batch.componentArrays != null)
-                {
-                    Marshal.FreeHGlobal((IntPtr)batch.componentArrays);
-                }
-                if (batch.enableBitMaps != null)
-                {
-                    Marshal.FreeHGlobal((IntPtr)batch.enableBitMaps);
-                }
-            }
-
+            // 释放批量分配的块（仅 2-3 次 Free，而非 per-chunk）
+            if (_componentArraysBlock != null)
+                Marshal.FreeHGlobal((IntPtr)_componentArraysBlock);
+            if (_enableBitMapsBlock != null)
+                Marshal.FreeHGlobal((IntPtr)_enableBitMapsBlock);
             Marshal.FreeHGlobal((IntPtr)BatchesPtr);
         }
 
