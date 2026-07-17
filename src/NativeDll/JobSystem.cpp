@@ -1907,7 +1907,12 @@ namespace JobSystem
                 int workerCount = std::max(1, CurrentWorkerCount());
                 // Keep enough ranges for late workers and Complete() to rebalance
                 // a heavy tail without making every chunk a separate queue item.
-                batch->rangeSize = std::max(1, chunkCount / (workerCount * 6 + 1));
+                // range 数目标：对轻量 job 约 2× workers，对重量 job 约 6× workers
+                // 小 chunk（1024 ent）时 chunks 数多，需要更大 rangeSize 减少原子开销
+                const int rangeDivisor = (entityRangeFunc != nullptr)
+                    ? (workerCount * 2 + 1)
+                    : (workerCount * 6 + 1);
+                batch->rangeSize = std::max(1, chunkCount / rangeDivisor);
             }
             batch->rangeCount = (chunkCount + batch->rangeSize - 1) / batch->rangeSize;
             batch->nextRange.store(0, std::memory_order_relaxed);
