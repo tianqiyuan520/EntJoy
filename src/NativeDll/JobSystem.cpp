@@ -1035,7 +1035,14 @@ namespace JobSystem
             const int active = batch->activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
             UpdatePeak(g_activeWorkersPeak, static_cast<uint64_t>(active));
             bool ranAny = false;
-            while (TryRunOneChunkBatch(batch, true)) ranAny = true;
+            if (batch->batchSize > 1)
+            {
+                while (TryRunOneChunkBatch(batch, true)) ranAny = true;
+            }
+            else
+            {
+                while (TryRunOneChunkRange(batch, true)) ranAny = true;
+            }
             batch->activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
             if (!ranAny) g_exhaustedTickets.fetch_add(1, std::memory_order_relaxed);
             batch->activeTickets.fetch_sub(1, std::memory_order_acq_rel);
@@ -1047,7 +1054,9 @@ namespace JobSystem
         {
             auto* batch = static_cast<ChunkBatchState*>(rawBatch);
             if (!batch) return false;
-            const bool ran = TryRunOneChunkBatch(batch, false);
+            const bool ran = (batch->batchSize > 1)
+                ? TryRunOneChunkBatch(batch, false)
+                : TryRunOneChunkRange(batch, false);
             if (ran) g_directAssistClaims.fetch_add(1, std::memory_order_relaxed);
             return ran;
         }
