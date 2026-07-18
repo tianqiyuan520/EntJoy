@@ -1,5 +1,6 @@
 #include "../NativeDll/JobSystem.h"
 #include "../NativeDll/ChunkJobData.h"
+#include "../NativeDll/JobProfiler.h"
 
 #include <atomic>
 #include <chrono>
@@ -7,6 +8,13 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace
 {
@@ -460,6 +468,196 @@ namespace
         Require(stats.publishToCompletionEwmaNs == 0, "completion stats did not reset");
         Require(stats.queueLockWaitEwmaNs == 0, "queue-lock stats did not reset");
     }
+
+#ifdef _WIN32
+    struct WorkerPriorityContext
+    {
+        std::atomic<int> observedPriority{ INT_MIN };
+    };
+
+    void RecordChunkWorkerPriority(void* raw, const ChunkJobData*, int, int)
+    {
+        auto& context = *static_cast<WorkerPriorityContext*>(raw);
+        context.observedPriority.store(
+            GetThreadPriority(GetCurrentThread()), std::memory_order_release);
+    }
+
+    void TestChunkWorkersDoNotPreemptCompletingThread()
+    {
+        ChunkJobData chunk{};
+        WorkerPriorityContext context;
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            &RecordChunkWorkerPriority,
+            &context,
+            nullptr,
+            &chunk,
+            1,
+            {},
+            JobSystem::ChunkScheduleMode::PublishNoAssist,
+            1,
+            1);
+        handle.Complete();
+
+        Require(context.observedPriority.load(std::memory_order_acquire) ==
+                THREAD_PRIORITY_NORMAL,
+            "Chunk worker priority can preempt the completing thread");
+    }
+
+    struct TaskflowWorkerPriorityContext
+    {
+        std::atomic<int> observedPriority{ INT_MIN };
+        std::thread::id caller;
+    };
+
+    void RecordTaskflowWorkerPriority(void* raw, int, int)
+    {
+        auto& context = *static_cast<TaskflowWorkerPriorityContext*>(raw);
+        if (std::this_thread::get_id() != context.caller)
+        {
+            int expected = INT_MIN;
+            context.observedPriority.compare_exchange_strong(
+                expected,
+                GetThreadPriority(GetCurrentThread()),
+                std::memory_order_release,
+                std::memory_order_relaxed);
+        }
+    }
+
+    void TestTaskflowWorkersDoNotPreemptCompletingThread()
+    {
+        TaskflowWorkerPriorityContext context;
+        context.caller = std::this_thread::get_id();
+        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &RecordTaskflowWorkerPriority, &context, 100'000, 1);
+
+        for (int retry = 0;
+            retry < 1'000 && context.observedPriority.load(std::memory_order_acquire) == INT_MIN;
+            ++retry)
+        {
+            std::this_thread::yield();
+        }
+        handle.Complete();
+
+        Require(context.observedPriority.load(std::memory_order_acquire) ==
+                THREAD_PRIORITY_NORMAL,
+            "Taskflow worker priority can preempt the completing thread");
+    }
+#endif
+
+    void TestTraceOverflow()
+    {
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
+
+        constexpr int overflow = 32;
+        for (int i = 0; i < JobSystem::kMaxTraceEventsPerThread + overflow; ++i)
+        {
+            JobSystem::PushTraceEvent(
+                JobSystem::TraceEventType::Claim,
+                7,
+                i,
+                i * 4,
+                4);
+        }
+
+        std::vector<JobSystem::TraceEvent> events(JobSystem::kMaxTraceEventsPerThread + overflow);
+        const int readCount = JobSystem::TraceReadAll(
+            events.data(), static_cast<int>(events.size()));
+        Require(readCount == JobSystem::kMaxTraceEventsPerThread,
+            "trace buffer did not remain bounded");
+        Require(JobSystem::TraceDroppedEvents() == overflow,
+            "trace overflow count mismatch");
+        for (int i = 1; i < readCount; ++i)
+        {
+            Require(events[i - 1].timestampNs <= events[i].timestampNs,
+                "trace timestamps are not monotonic");
+        }
+
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+    }
+
+    void TestTraceLifecycleOrder()
+    {
+        constexpr int rangeCount = 64;
+        std::vector<ChunkJobData> chunks(rangeCount);
+        std::vector<std::atomic<int>> hits(rangeCount);
+        std::atomic<int> cleanupCount{ 0 };
+        CooperativeChunkContext context{ &hits, &cleanupCount, nullptr, nullptr };
+
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            &ExecuteCooperativeChunkRange,
+            &context,
+            &CleanupCooperativeChunkRange,
+            chunks.data(),
+            rangeCount,
+            {},
+            JobSystem::ChunkScheduleMode::PublishAssist,
+            8,
+            1);
+        handle.Complete();
+        JobSystem::TraceSetEnabled(false);
+
+        std::vector<JobSystem::TraceEvent> events(8192);
+        const int readCount = JobSystem::TraceReadAll(events.data(), static_cast<int>(events.size()));
+        Require(JobSystem::TraceDroppedEvents() == 0, "lifecycle trace dropped events");
+
+        uint64_t batchId = 0;
+        uint64_t publishNs = 0;
+        uint64_t firstBeginNs = 0;
+        uint64_t lastEndNs = 0;
+        uint64_t finalizeNs = 0;
+        uint64_t completeNs = 0;
+        int claimCount = 0;
+        int beginCount = 0;
+        int endCount = 0;
+        for (int i = 0; i < readCount; ++i)
+        {
+            const auto& event = events[i];
+            if (static_cast<JobSystem::TraceEventType>(event.eventType) ==
+                    JobSystem::TraceEventType::Publish && event.batchId != 0)
+            {
+                batchId = event.batchId;
+                publishNs = event.timestampNs;
+                break;
+            }
+        }
+        for (int i = 0; i < readCount && batchId != 0; ++i)
+        {
+            const auto& event = events[i];
+            if (event.batchId != batchId) continue;
+            const auto type = static_cast<JobSystem::TraceEventType>(event.eventType);
+            if (type == JobSystem::TraceEventType::Claim) ++claimCount;
+            else if (type == JobSystem::TraceEventType::ExecuteBegin)
+            {
+                ++beginCount;
+                if (firstBeginNs == 0) firstBeginNs = event.timestampNs;
+            }
+            else if (type == JobSystem::TraceEventType::ExecuteEnd)
+            {
+                ++endCount;
+                lastEndNs = std::max(lastEndNs, event.timestampNs);
+            }
+            else if (type == JobSystem::TraceEventType::FinalizeBegin) finalizeNs = event.timestampNs;
+            else if (type == JobSystem::TraceEventType::HandleComplete) completeNs = event.timestampNs;
+        }
+
+        Require(publishNs > 0, "missing publish event");
+        Require(firstBeginNs >= publishNs, "execution began before publication");
+        Require(lastEndNs >= firstBeginNs, "execution end preceded begin");
+        Require(finalizeNs >= lastEndNs, "finalization preceded last range");
+        Require(completeNs >= finalizeNs, "handle completed before finalization");
+        Require(claimCount == rangeCount, "trace claim count mismatch");
+        Require(beginCount == rangeCount, "trace execute-begin count mismatch");
+        Require(endCount == rangeCount, "trace execute-end count mismatch");
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "traced batch cleanup did not run exactly once");
+        JobSystem::TraceClear();
+    }
 }
 
 int main()
@@ -470,6 +668,10 @@ int main()
     {
         TestCooperativeStatsReset();
         std::cout << "PASS CooperativeStatsReset\n";
+        TestTraceOverflow();
+        std::cout << "PASS TraceOverflow\n";
+        TestTraceLifecycleOrder();
+        std::cout << "PASS TraceLifecycleOrder\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);
@@ -480,6 +682,12 @@ int main()
         std::cout << "PASS DependencyOrdering\n";
         TestChunkRangeExactOnce();
         std::cout << "PASS ChunkRangeExactOnce\n";
+#ifdef _WIN32
+        TestChunkWorkersDoNotPreemptCompletingThread();
+        std::cout << "PASS ChunkWorkersDoNotPreemptCompletingThread\n";
+        TestTaskflowWorkersDoNotPreemptCompletingThread();
+        std::cout << "PASS TaskflowWorkersDoNotPreemptCompletingThread\n";
+#endif
         TestConcurrentChunkComplete();
         std::cout << "PASS ConcurrentChunkComplete\n";
         TestExhaustedChunkTicketsDrain();

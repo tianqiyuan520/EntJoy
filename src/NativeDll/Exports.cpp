@@ -344,4 +344,29 @@ extern "C"
         g_profilerBuffer.Clear();
     }
 
+    void Trace_SetEnabled(int enabled)
+    {
+        JobSystem::TraceSetEnabled(enabled != 0);
+    }
+
+    int Trace_IsEnabled()
+    {
+        return JobSystem::TraceIsEnabled() ? 1 : 0;
+    }
+
+    int Trace_ReadAll(JobSystem::TraceEvent* buffer, int maxCount)
+    {
+        return JobSystem::TraceReadAll(buffer, maxCount);
+    }
+
+    uint64_t Trace_DroppedEvents()
+    {
+        return JobSystem::TraceDroppedEvents();
+    }
+
+    void Trace_Clear()
+    {
+        JobSystem::TraceClear();
+    }
+
 } // extern "C"
