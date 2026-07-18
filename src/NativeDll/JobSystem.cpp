@@ -87,6 +87,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_queueLockWaitEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
+    std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_frameLowLatencyMode{ false };
     std::atomic<int64_t> g_lastTaskflowScheduleNs{ 0 };
@@ -218,6 +219,7 @@ namespace JobSystem
         state->inlineContinuation = {};
         state->continuations.clear();
         state->waiterCount.store(0, std::memory_order_relaxed);
+        state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
         state->refCount.store(1, std::memory_order_relaxed);
 
@@ -243,6 +245,7 @@ namespace JobSystem
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
         state->waiterCount.store(0, std::memory_order_relaxed);
+        state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->assist.callback.store(nullptr, std::memory_order_release);
         state->assist.context.store(nullptr, std::memory_order_release);
         state->assist.readersDrained.store(nullptr, std::memory_order_release);
@@ -276,6 +279,14 @@ namespace JobSystem
         std::vector<std::function<void()>> continuations;
         {
             std::lock_guard<std::mutex> lock(state->mtx);
+            if (state->completed.load(std::memory_order_acquire)) return;
+            const uint64_t diagnosticBatchId =
+                state->diagnosticBatchId.load(std::memory_order_relaxed);
+            if (diagnosticBatchId != 0)
+            {
+                PushTraceEvent(TraceEventType::HandleComplete,
+                    diagnosticBatchId, -1, 0, 0);
+            }
             if (state->completed.exchange(true, std::memory_order_acq_rel))
                 return;
             state->assist.callback.store(nullptr, std::memory_order_release);
@@ -390,6 +401,7 @@ namespace JobSystem
 
         struct ChunkBatchState
         {
+            uint64_t diagnosticId{ 0 };
             void (*func)(void*, const ChunkJobData*) { nullptr };
             void (*rangeFunc)(void*, const ChunkJobData*, int, int) { nullptr };
             void (*entityRangeFunc)(void*, const EntityBatchData*, int, int) { nullptr };
@@ -442,6 +454,7 @@ namespace JobSystem
                 }
             }
             if (!batch) batch = new ChunkBatchState();
+            batch->diagnosticId = 0;
             batch->func = nullptr;
             batch->rangeFunc = nullptr;
             batch->entityRangeFunc = nullptr;
@@ -528,6 +541,10 @@ namespace JobSystem
             {
                 const int begin = rangeIndex * batch->rangeSize;
                 const int end = std::min(batch->chunkCount, begin + batch->rangeSize);
+                PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
+                    rangeIndex, begin, end - begin);
+                PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
+                    rangeIndex, begin, end - begin);
                 try
                 {
                     if (batch->entityRangeFunc)
@@ -551,6 +568,8 @@ namespace JobSystem
                     CancelChunkBatch(batch);
                     return false;
                 }
+                PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
+                    rangeIndex, begin, end - begin);
                 ++completed;
             }
 
@@ -694,9 +713,9 @@ namespace JobSystem
         void SetCurrentWorkerPriority() noexcept
         {
 #ifdef _WIN32
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #else
-            setpriority(PRIO_PROCESS, 0, -5);
+            setpriority(PRIO_PROCESS, 0, 0);
 #endif
         }
 
@@ -717,6 +736,8 @@ namespace JobSystem
             if (!batch) return;
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
             {
+                PushTraceEvent(TraceEventType::FinalizeBegin,
+                    batch->diagnosticId, -1, 0, 0);
                 if (batch->cleanup)
                 {
                     try { batch->cleanup(batch->context); }
@@ -746,6 +767,8 @@ namespace JobSystem
             if (!batch) return;
             if (!batch->cleanupDone.exchange(true, std::memory_order_acq_rel))
             {
+                PushTraceEvent(TraceEventType::FinalizeBegin,
+                    batch->diagnosticId, -1, 0, 0);
                 if (batch->cleanup)
                 {
                     try { batch->cleanup(batch->context); }
@@ -759,7 +782,8 @@ namespace JobSystem
 
         void ChunkWorkerLoop(int workerIndex)
         {
-            (void)workerIndex;
+            WorkerIndexManager::SetCurrentIndex(workerIndex);
+            TracePrepareCurrentThread();
             SetCurrentWorkerPriority();
 
             while (true)
@@ -935,6 +959,8 @@ namespace JobSystem
             const int64_t publishNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             batch->publishNs.store(publishNs, std::memory_order_release);
+            PushTraceEvent(TraceEventType::Publish,
+                batch->diagnosticId, -1, 0, 0);
             if (batch->scheduleNs > 0)
                 UpdateUnsignedEwma(g_scheduleToPublishEwmaNs,
                     static_cast<uint64_t>(publishNs - batch->scheduleNs));
@@ -1455,6 +1481,13 @@ namespace JobSystem
     void JobHandle::Complete() const
     {
         if (!_state) return;
+        const uint64_t diagnosticBatchId =
+            _state->diagnosticBatchId.load(std::memory_order_relaxed);
+        if (diagnosticBatchId != 0)
+        {
+            PushTraceEvent(TraceEventType::CompleteEnter,
+                diagnosticBatchId, -1, 0, 0);
+        }
         if (_state->completed.load(std::memory_order_acquire)) return;
 
         // 先尝试 pendingCallback（延迟发布的 batch）
@@ -1566,14 +1599,14 @@ namespace JobSystem
             g_numThreads = resolved;
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
 
-            // 使用高线程优先级，减少被其他线程抢占导致的抖动
+            // Worker 与 Complete 调用线程保持同级，避免发布后反向抢占主线程。
             for (int i = 0; i < g_numThreads; ++i)
             {
                 g_executor->silent_async([]() {
 #ifdef _WIN32
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #else
-                    setpriority(PRIO_PROCESS, 0, -5);
+                    setpriority(PRIO_PROCESS, 0, 0);
 #endif
                     });
             }
@@ -1888,6 +1921,9 @@ namespace JobSystem
 
         auto createBatch = [=]() -> ChunkBatchState* {
             auto* batch = AcquireChunkBatchState();
+            batch->diagnosticId =
+                g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
+            state->diagnosticBatchId.store(batch->diagnosticId, std::memory_order_release);
             batch->scheduleNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             batch->func = func;

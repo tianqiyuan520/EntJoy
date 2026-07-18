@@ -130,6 +130,32 @@ public struct NativeJobSystemStats
     public ulong CompletionOverheadUs;     // 调度/等待开销 = completionUs - perRangeExecUs
 }
 
+public enum TraceEventType : ushort
+{
+    Publish,
+    CompleteEnter,
+    Claim,
+    ExecuteBegin,
+    ExecuteEnd,
+    FinalizeBegin,
+    HandleComplete,
+    Park,
+    Wake
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct NativeTraceEvent
+{
+    public ulong TimestampNs;
+    public ulong BatchId;
+    public int TileIndex;
+    public int EntityStart;
+    public int EntityCount;
+    public int ThreadId;
+    public short WorkerIndex;
+    public TraceEventType EventType;
+}
+
 internal enum ChunkScheduleMode
 {
     PublishNoAssist = 0,
@@ -190,6 +216,11 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<int> _profiler_IsEnabled;
     private static delegate* unmanaged[Cdecl]<ProfilerEntry*, int, int> _profiler_ReadAll;
     private static delegate* unmanaged[Cdecl]<void> _profiler_Clear;
+    private static delegate* unmanaged[Cdecl]<int, void> _trace_SetEnabled;
+    private static delegate* unmanaged[Cdecl]<int> _trace_IsEnabled;
+    private static delegate* unmanaged[Cdecl]<NativeTraceEvent*, int, int> _trace_ReadAll;
+    private static delegate* unmanaged[Cdecl]<ulong> _trace_DroppedEvents;
+    private static delegate* unmanaged[Cdecl]<void> _trace_Clear;
 
     [System.Runtime.CompilerServices.ModuleInitializer]
     internal static unsafe void LoadNativeDll()
@@ -394,6 +425,16 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobProfiler_ReadAll");
         _profiler_Clear = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobProfiler_Clear");
+        _trace_SetEnabled = (delegate* unmanaged[Cdecl]<int, void>)
+            NativeLibrary.GetExport(dllHandle, "Trace_SetEnabled");
+        _trace_IsEnabled = (delegate* unmanaged[Cdecl]<int>)
+            NativeLibrary.GetExport(dllHandle, "Trace_IsEnabled");
+        _trace_ReadAll = (delegate* unmanaged[Cdecl]<NativeTraceEvent*, int, int>)
+            NativeLibrary.GetExport(dllHandle, "Trace_ReadAll");
+        _trace_DroppedEvents = (delegate* unmanaged[Cdecl]<ulong>)
+            NativeLibrary.GetExport(dllHandle, "Trace_DroppedEvents");
+        _trace_Clear = (delegate* unmanaged[Cdecl]<void>)
+            NativeLibrary.GetExport(dllHandle, "Trace_Clear");
 
         AppDomain.CurrentDomain.ProcessExit += static (_, _) => SafeShutdown();
         AppDomain.CurrentDomain.DomainUnload += static (_, _) => SafeShutdown();
@@ -786,6 +827,18 @@ public static unsafe partial class NativeJobScheduler
     }
     internal static void Profiler_Clear() => _profiler_Clear();
 
+    public static void TraceSetEnabled(bool enabled) => _trace_SetEnabled(enabled ? 1 : 0);
+    public static bool TraceIsEnabled() => _trace_IsEnabled() != 0;
+    public static ulong TraceDroppedEvents() => _trace_DroppedEvents();
+    public static void TraceClear() => _trace_Clear();
+    public static int TraceReadAll(NativeTraceEvent[] buffer, int maxCount)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (buffer.Length == 0 || maxCount <= 0) return 0;
+        int count = Math.Min(maxCount, buffer.Length);
+        fixed (NativeTraceEvent* ptr = buffer) return _trace_ReadAll(ptr, count);
+    }
+
     public static NativeJobHandle CombineDependencies(params NativeJobHandle[] handles)
     {
         if (handles == null || handles.Length == 0) return default;
@@ -870,6 +923,10 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobChunk
         => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn);
 
+    public static NativeJobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null)
+        where T : struct, IJobChunk
+        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap);
+
     public static NativeJobHandle ScheduleChunkRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
         where T : struct, IJobChunk
         => ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn);
@@ -908,7 +965,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, null, workerCap, rangeSize, useScheduleAndComplete: true);
 
-    public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+    public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null, int workerCap = 0)
         where TJob : struct, IJobEntity
         where TExecutor : struct, IJobEntityBatchExecutor<TJob>
     {
@@ -926,7 +983,7 @@ public static unsafe partial class NativeJobScheduler
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(
                 callback.FuncPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount,
-                dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
+                dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap)));
         }
         catch
         {
@@ -982,7 +1039,7 @@ public static unsafe partial class NativeJobScheduler
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }

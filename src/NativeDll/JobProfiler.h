@@ -6,6 +6,49 @@
 #include <cstring>
 #include <algorithm>
 
+namespace JobSystem
+{
+    enum class TraceEventType : uint16_t
+    {
+        Publish,
+        CompleteEnter,
+        Claim,
+        ExecuteBegin,
+        ExecuteEnd,
+        FinalizeBegin,
+        HandleComplete,
+        Park,
+        Wake
+    };
+
+    struct TraceEvent
+    {
+        uint64_t timestampNs;
+        uint64_t batchId;
+        int32_t tileIndex;
+        int32_t entityStart;
+        int32_t entityCount;
+        int32_t threadId;
+        int16_t workerIndex;
+        uint16_t eventType;
+    };
+
+    inline constexpr int kMaxTraceEventsPerThread = 4096;
+
+    void TraceSetEnabled(bool enabled) noexcept;
+    void TracePrepareCurrentThread() noexcept;
+    bool TraceIsEnabled() noexcept;
+    int TraceReadAll(TraceEvent* buffer, int maxCount) noexcept;
+    uint64_t TraceDroppedEvents() noexcept;
+    void TraceClear() noexcept;
+    void PushTraceEvent(
+        TraceEventType type,
+        uint64_t batchId,
+        int tileIndex,
+        int entityStart,
+        int entityCount) noexcept;
+}
+
 // 单条 Profiler 记录 (轻量级，无锁)
 struct alignas(16) ProfilerEntry {
     uint64_t jobNameHash;   // Job 名称哈希 (用于聚合)

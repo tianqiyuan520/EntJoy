@@ -97,6 +97,23 @@ namespace EntJoy.SourceGenerator
             }
             sb.AppendLine("    }");
             sb.AppendLine();
+            sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+            sb.AppendLine("    {");
+            if (supportsDirectBatch)
+            {
+                sb.AppendLine("        if (query.AllEnabled != null && query.AllEnabled.Length > 0)");
+                sb.AppendLine($"            return new {adapterName} {{ Job = job }}.ScheduleWithWorkerCap(query, workerCap, dependsOn);");
+                sb.AppendLine("        var world = World.DefaultWorld ?? throw new global::System.InvalidOperationException(\"No active World found.\");");
+                sb.AppendLine($"        var handle = NativeJobScheduler.ScheduleManagedEntityBatch<{jobFullName}, {batchExecutorName}>(");
+                sb.AppendLine($"            ref job, world.EntityManager, query, {requiredTypesField}, dependsOn._nativeHandle, workerCap);");
+                sb.AppendLine("        return new JobHandle(handle);");
+            }
+            else
+            {
+                sb.AppendLine($"        return new {adapterName} {{ Job = job }}.ScheduleWithWorkerCap(query, workerCap, dependsOn);");
+            }
+            sb.AppendLine("    }");
+            sb.AppendLine();
             sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
             sb.AppendLine("    {");
             if (supportsDirectBatch)
