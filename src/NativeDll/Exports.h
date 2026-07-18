@@ -114,6 +114,19 @@ extern "C" {
         unsigned long long stealAttempts;
         unsigned long long stealSuccesses;
         unsigned long long permitsReleased;
+        unsigned long long victimScans;
+        unsigned long long stealEmptyExits;
+        unsigned long long batchStorageCreated;
+        unsigned long long batchStorageReused;
+        unsigned long long batchStorageReturned;
+        unsigned long long batchStorageDropped;
+        unsigned long long submitToFirstWorkerEwmaNs;
+        unsigned long long workerStartSpreadEwmaNs;
+        unsigned long long lastTileToTopologyDoneEwmaNs;
+        unsigned long long completeWakeToReturnEwmaNs;
+        unsigned long long taskflowBatches;
+        unsigned long long nativeBatches;
+        unsigned long long invalidBackendSelections;
     } JobSystemStatsNative;
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);

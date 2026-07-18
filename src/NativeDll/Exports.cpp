@@ -319,6 +319,19 @@ extern "C"
         stats->stealAttempts = snapshot.stealAttempts;
         stats->stealSuccesses = snapshot.stealSuccesses;
         stats->permitsReleased = snapshot.permitsReleased;
+        stats->victimScans = snapshot.victimScans;
+        stats->stealEmptyExits = snapshot.stealEmptyExits;
+        stats->batchStorageCreated = snapshot.batchStorageCreated;
+        stats->batchStorageReused = snapshot.batchStorageReused;
+        stats->batchStorageReturned = snapshot.batchStorageReturned;
+        stats->batchStorageDropped = snapshot.batchStorageDropped;
+        stats->submitToFirstWorkerEwmaNs = snapshot.submitToFirstWorkerEwmaNs;
+        stats->workerStartSpreadEwmaNs = snapshot.workerStartSpreadEwmaNs;
+        stats->lastTileToTopologyDoneEwmaNs = snapshot.lastTileToTopologyDoneEwmaNs;
+        stats->completeWakeToReturnEwmaNs = snapshot.completeWakeToReturnEwmaNs;
+        stats->taskflowBatches = snapshot.taskflowBatches;
+        stats->nativeBatches = snapshot.nativeBatches;
+        stats->invalidBackendSelections = snapshot.invalidBackendSelections;
     }
 
     void JobSystem_ResetStats()
