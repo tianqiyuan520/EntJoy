@@ -140,6 +140,10 @@ namespace JobSystem {
         uint64_t permitsReleased;
         uint64_t victimScans;
         uint64_t stealEmptyExits;
+        uint64_t batchStorageCreated;
+        uint64_t batchStorageReused;
+        uint64_t batchStorageReturned;
+        uint64_t batchStorageDropped;
     };
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;

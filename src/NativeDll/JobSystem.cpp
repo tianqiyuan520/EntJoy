@@ -26,6 +26,7 @@ namespace JobSystem
 {
     constexpr size_t kMaxPooledStates = 4096;
     constexpr size_t kMaxPooledTaskflows = 1024;
+    constexpr size_t kMaxPooledBatchStorage = 256;
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
 
@@ -65,6 +66,10 @@ namespace JobSystem
     std::atomic<uint64_t> g_stealSuccesses{ 0 };
     std::atomic<uint64_t> g_victimScans{ 0 };
     std::atomic<uint64_t> g_stealEmptyExits{ 0 };
+    std::atomic<uint64_t> g_batchStorageCreated{ 0 };
+    std::atomic<uint64_t> g_batchStorageReused{ 0 };
+    std::atomic<uint64_t> g_batchStorageReturned{ 0 };
+    std::atomic<uint64_t> g_batchStorageDropped{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
@@ -117,6 +122,10 @@ namespace JobSystem
         stats->permitsReleased = 0;
         stats->victimScans = g_victimScans.load(std::memory_order_relaxed);
         stats->stealEmptyExits = g_stealEmptyExits.load(std::memory_order_relaxed);
+        stats->batchStorageCreated = g_batchStorageCreated.load(std::memory_order_relaxed);
+        stats->batchStorageReused = g_batchStorageReused.load(std::memory_order_relaxed);
+        stats->batchStorageReturned = g_batchStorageReturned.load(std::memory_order_relaxed);
+        stats->batchStorageDropped = g_batchStorageDropped.load(std::memory_order_relaxed);
 
         const uint64_t workerTiles =
             g_workerExecutedRanges.load(std::memory_order_relaxed);
@@ -177,6 +186,10 @@ namespace JobSystem
         g_stealSuccesses.store(0, std::memory_order_relaxed);
         g_victimScans.store(0, std::memory_order_relaxed);
         g_stealEmptyExits.store(0, std::memory_order_relaxed);
+        g_batchStorageCreated.store(0, std::memory_order_relaxed);
+        g_batchStorageReused.store(0, std::memory_order_relaxed);
+        g_batchStorageReturned.store(0, std::memory_order_relaxed);
+        g_batchStorageDropped.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
@@ -405,6 +418,7 @@ namespace JobSystem
     // BatchState
     // ============================================================
     struct BatchState {
+        struct BatchStorage* storage{ nullptr };
         HandleState* handle{ nullptr };
         void* context{ nullptr };
         void (*cleanup)(void*){ nullptr };
@@ -431,6 +445,115 @@ namespace JobSystem
 
         uint64_t diagnosticId{ 0 };
     };
+
+    struct BatchStorage
+    {
+        BatchState batch;
+        ExecutionTile* tileBuffer{ nullptr };
+        uint32_t tileCapacity{ 0 };
+        LocalPartition* partitionBuffer{ nullptr };
+        uint32_t partitionCapacity{ 0 };
+
+        BatchStorage() noexcept { batch.storage = this; }
+        ~BatchStorage()
+        {
+            delete[] partitionBuffer;
+            delete[] tileBuffer;
+        }
+    };
+
+    std::mutex g_batchStoragePoolMutex;
+    std::vector<BatchStorage*> g_batchStoragePool;
+
+    static BatchStorage* AcquireBatchStorage(
+        uint32_t tileCapacity,
+        uint32_t partitionCapacity)
+    {
+        BatchStorage* storage = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+            auto best = g_batchStoragePool.end();
+            for (auto it = g_batchStoragePool.begin();
+                it != g_batchStoragePool.end(); ++it)
+            {
+                if ((*it)->tileCapacity < tileCapacity ||
+                    (*it)->partitionCapacity < partitionCapacity)
+                    continue;
+                if (best == g_batchStoragePool.end() ||
+                    (*it)->tileCapacity < (*best)->tileCapacity)
+                    best = it;
+            }
+            if (best != g_batchStoragePool.end())
+            {
+                storage = *best;
+                g_batchStoragePool.erase(best);
+            }
+        }
+
+        if (storage)
+            g_batchStorageReused.fetch_add(1, std::memory_order_relaxed);
+        else
+        {
+            storage = new BatchStorage();
+            g_batchStorageCreated.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        if (storage->tileCapacity < tileCapacity)
+        {
+            auto* replacement = new ExecutionTile[tileCapacity];
+            delete[] storage->tileBuffer;
+            storage->tileBuffer = replacement;
+            storage->tileCapacity = tileCapacity;
+        }
+        if (storage->partitionCapacity < partitionCapacity)
+        {
+            auto* replacement = new LocalPartition[partitionCapacity]();
+            delete[] storage->partitionBuffer;
+            storage->partitionBuffer = replacement;
+            storage->partitionCapacity = partitionCapacity;
+        }
+
+        storage->batch.storage = storage;
+        storage->batch.tiles = tileCapacity > 0 ? storage->tileBuffer : nullptr;
+        storage->batch.partitions = partitionCapacity > 0
+            ? storage->partitionBuffer
+            : nullptr;
+        return storage;
+    }
+
+    static void ReleaseBatchStorage(BatchStorage* storage) noexcept
+    {
+        if (!storage) return;
+        std::destroy_at(&storage->batch);
+        std::construct_at(&storage->batch);
+        storage->batch.storage = storage;
+        g_batchStorageReturned.fetch_add(1, std::memory_order_relaxed);
+
+        bool pooled = false;
+        {
+            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+            if (g_batchStoragePool.size() < kMaxPooledBatchStorage)
+            {
+                g_batchStoragePool.push_back(storage);
+                pooled = true;
+            }
+        }
+        if (!pooled)
+        {
+            g_batchStorageDropped.fetch_add(1, std::memory_order_relaxed);
+            delete storage;
+        }
+    }
+
+    static void ClearBatchStoragePool() noexcept
+    {
+        std::vector<BatchStorage*> idle;
+        {
+            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+            idle.swap(g_batchStoragePool);
+        }
+        for (auto* storage : idle) delete storage;
+    }
 
     struct VictimSnapshot
     {
@@ -625,9 +748,7 @@ namespace JobSystem
     static void ReleaseBatch(BatchState* batch) noexcept
     {
         if (!batch) return;
-        if (batch->partitions) { delete[] batch->partitions; batch->partitions = nullptr; }
-        if (batch->tiles)      { delete[] batch->tiles;      batch->tiles = nullptr; }
-        delete batch;
+        ReleaseBatchStorage(batch->storage);
     }
 
     static void TryFinalizeCompletedBatch(HandleState* state) noexcept
@@ -1033,6 +1154,7 @@ namespace JobSystem
         std::shared_ptr<tf::Executor> exec;
         { std::lock_guard<std::mutex> lock(g_executorMutex); exec = std::move(g_executor); g_numThreads = 0; }
         if (exec) exec->wait_for_all();
+        ClearBatchStoragePool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
         { std::lock_guard<std::mutex> lock(g_taskflowPoolMutex); for (auto* tf : g_taskflowPool) delete tf; g_taskflowPool.clear(); }
     }
@@ -1094,7 +1216,8 @@ namespace JobSystem
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup, length, cs };
-        auto* batch = new BatchState();
+        auto* storage = AcquireBatchStorage(0, 0);
+        auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
@@ -1125,7 +1248,8 @@ namespace JobSystem
         if (rc <= 1) { func(context, 0, length); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup, length, cs };
-        auto* batch = new BatchState(); auto* state = CreateState(false); batch->handle = state;
+        auto* storage = AcquireBatchStorage(0, 0);
+        auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
         batch->partitionCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
@@ -1170,7 +1294,12 @@ namespace JobSystem
         int execMode = func ? 0 : (rangeFunc ? 1 : 2);
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches, itemCount, rs, execMode };
-        auto* batch = new BatchState();
+        const uint32_t tileCount = static_cast<uint32_t>(func ? itemCount : rc);
+        const int targetWorkers = ResolveWorkerTarget(
+            workerCap, static_cast<int>(tileCount));
+        auto* storage = AcquireBatchStorage(
+            tileCount, static_cast<uint32_t>(targetWorkers));
+        auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
         batch->rangeCount = rc; batch->rangeSize = rs; batch->totalItems = itemCount;
@@ -1181,8 +1310,7 @@ namespace JobSystem
             const TileKind tileKind = func
                 ? TileKind::ChunkCallbacks
                 : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
-            const uint32_t tileCount = static_cast<uint32_t>(func ? itemCount : rc);
-            auto* tiles = new ExecutionTile[tileCount];
+            auto* tiles = storage->tileBuffer;
             for (uint32_t i = 0; i < tileCount; i++)
             {
                 const uint32_t first = func
@@ -1197,8 +1325,7 @@ namespace JobSystem
             }
 
             // Respect workerCap when choosing partition count
-            int targetWorkers = ResolveWorkerTarget(workerCap, static_cast<int>(tileCount));
-            auto* parts = new LocalPartition[static_cast<size_t>(targetWorkers)]();
+            auto* parts = storage->partitionBuffer;
             BuildPartitions(parts, targetWorkers, static_cast<int>(tileCount));
 
             batch->executeTile = &ChunkExecuteTile;
