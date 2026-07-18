@@ -42,3 +42,4 @@ src/Godot/.godot/
 
 # Roslyn analyzer generated
 *.g.cs
+nul

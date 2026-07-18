@@ -10,6 +10,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             using var sample = new IJobChunkMoveCompareSample();
             sample.Run();
+
         }
     }
 }

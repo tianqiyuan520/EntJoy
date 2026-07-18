@@ -55,6 +55,14 @@ namespace JobSystem
     std::atomic<uint64_t> g_workerClaimedTokens{ 0 };
     std::atomic<uint64_t> g_mainClaimedTokens{ 0 };
     std::atomic<uint64_t> g_activeWorkersPeak{ 0 };
+    std::atomic<uint64_t> g_activeWorkers{ 0 };
+    std::atomic<uint64_t> g_workerTargetTotal{ 0 };
+    std::atomic<uint64_t> g_totalTilesPublished{ 0 };
+    std::atomic<uint64_t> g_localTiles{ 0 };
+    std::atomic<uint64_t> g_stolenTiles{ 0 };
+    std::atomic<uint64_t> g_assistTiles{ 0 };
+    std::atomic<uint64_t> g_stealAttempts{ 0 };
+    std::atomic<uint64_t> g_stealSuccesses{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
@@ -97,10 +105,23 @@ namespace JobSystem
             g_wakeLatencyEwmaNs.load(std::memory_order_relaxed));
         stats->publishToCompletionEwmaNs = g_publishToCompletionEwmaNs.load(std::memory_order_relaxed);
         stats->perRangeExecEwmaNs = g_perRangeExecEwmaNs.load(std::memory_order_relaxed);
+        stats->workerTargetTotal = g_workerTargetTotal.load(std::memory_order_relaxed);
+        stats->totalTilesPublished = g_totalTilesPublished.load(std::memory_order_relaxed);
+        stats->localTiles = g_localTiles.load(std::memory_order_relaxed);
+        stats->stolenTiles = g_stolenTiles.load(std::memory_order_relaxed);
+        stats->assistTiles = g_assistTiles.load(std::memory_order_relaxed);
+        stats->stealAttempts = g_stealAttempts.load(std::memory_order_relaxed);
+        stats->stealSuccesses = g_stealSuccesses.load(std::memory_order_relaxed);
+        stats->permitsReleased = 0;
 
-        uint64_t attempts = g_assistAttempts.load(std::memory_order_relaxed);
-        uint64_t executed = g_assistExecuted.load(std::memory_order_relaxed);
-        stats->assistExecPctEwma = attempts > 0 ? (executed * 100 / attempts) : 0;
+        const uint64_t workerTiles =
+            g_workerExecutedRanges.load(std::memory_order_relaxed);
+        const uint64_t assistTiles =
+            g_mainExecutedRanges.load(std::memory_order_relaxed);
+        const uint64_t totalTiles = workerTiles + assistTiles;
+        stats->assistExecPctEwma = totalTiles > 0
+            ? (assistTiles * 100 / totalTiles)
+            : 0;
 
         uint64_t compUs = stats->publishToCompletionEwmaNs / 1000;
         uint64_t perUs = stats->perRangeExecEwmaNs / 1000;
@@ -142,6 +163,14 @@ namespace JobSystem
         g_workerClaimedTokens.store(0, std::memory_order_relaxed);
         g_mainClaimedTokens.store(0, std::memory_order_relaxed);
         g_activeWorkersPeak.store(0, std::memory_order_relaxed);
+        g_activeWorkers.store(0, std::memory_order_relaxed);
+        g_workerTargetTotal.store(0, std::memory_order_relaxed);
+        g_totalTilesPublished.store(0, std::memory_order_relaxed);
+        g_localTiles.store(0, std::memory_order_relaxed);
+        g_stolenTiles.store(0, std::memory_order_relaxed);
+        g_assistTiles.store(0, std::memory_order_relaxed);
+        g_stealAttempts.store(0, std::memory_order_relaxed);
+        g_stealSuccesses.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
@@ -286,25 +315,29 @@ namespace JobSystem
     }
     // A Tile is the load-balancing unit — one or more chunks (IJobChunk)
     // or a sub-range of entities (IJobEntity).
-    struct ExecutionTile {
-        uint32_t firstChunk;    // Index into ChunkJobData array
-        uint16_t chunkCount;    // Number of chunks in this tile (1 for IJobChunk)
-        uint16_t flags;         // See kTileIsEntitySubRange
-        uint32_t firstEntity;   // First entity index (for IJobEntity sub-tiles)
-        uint32_t entityCount;   // Number of entities
+    enum class TileKind : uint8_t
+    {
+        ChunkCallbacks,
+        ChunkRange,
+        EntityBatchRange
     };
-    constexpr uint16_t kTileIsEntitySubRange = 1;
+
+    struct ExecutionTile {
+        uint32_t firstItem;
+        uint32_t itemCount;
+        TileKind kind;
+    };
 
     // Local partition — stores tile range [front, back) for stealing-capable local execution.
-    struct LocalPartition {
+    struct alignas(hardware_destructive_interference_size) LocalPartition {
         std::atomic<uint32_t> front{ 0 };
         std::atomic<uint32_t> back{ 0 };
         uint32_t initialFront{ 0 };
         uint32_t initialBack{ 0 };
         uint32_t ownerSlot{ 0 };
-        uint32_t localTiles{ 0 };
-        uint32_t stolenTiles{ 0 };
     };
+    static_assert(alignof(LocalPartition) >= hardware_destructive_interference_size);
+    static_assert(sizeof(LocalPartition) % hardware_destructive_interference_size == 0);
 
     // Build partitions: continuous ranges (not round-robin).
     static void BuildPartitions(LocalPartition* parts, int count, int tileCount) noexcept
@@ -341,6 +374,7 @@ namespace JobSystem
     // Thief: steal half of remaining tiles from victim's back
     static bool TryStealHalf(LocalPartition& victim, uint32_t& stolenStart, uint32_t& stolenEnd) noexcept
     {
+        g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
         uint32_t b = victim.back.load(std::memory_order_acquire);
         while (true)
         {
@@ -352,6 +386,8 @@ namespace JobSystem
             if (victim.back.compare_exchange_weak(b, nb,
                 std::memory_order_acq_rel, std::memory_order_relaxed))
             {
+                g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
+                g_stealCount.fetch_add(1, std::memory_order_relaxed);
                 stolenStart = nb;
                 stolenEnd = b;
                 return true;
@@ -390,7 +426,7 @@ namespace JobSystem
         uint64_t diagnosticId{ 0 };
     };
 
-    static bool TryExecuteOneRange(BatchState* batch) noexcept
+    static bool TryExecuteOneRange(BatchState* batch, bool assist) noexcept
     {
         if (!batch) return false;
         const int index = batch->nextRange.fetch_add(1, std::memory_order_relaxed);
@@ -400,8 +436,16 @@ namespace JobSystem
             index, index * batch->rangeSize, batch->rangeSize);
         PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
             index, index * batch->rangeSize, batch->rangeSize);
-        g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
         batch->processRange(batch->context, index, 1);
+        if (assist)
+        {
+            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+        }
         PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
             index, index * batch->rangeSize, batch->rangeSize);
         batch->completedRanges.fetch_add(1, std::memory_order_acq_rel);
@@ -411,7 +455,7 @@ namespace JobSystem
     static bool AssistExecuteOneRange(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
-        return TryExecuteOneRange(batch);
+        return TryExecuteOneRange(batch, true);
     }
 
     // ============================================================
@@ -419,25 +463,48 @@ namespace JobSystem
     // ============================================================
     // Process one tile and update completion counter.
     // Returns true if the tile was processed (for assist comptability).
-    static bool TryExecuteOneTile(BatchState* batch, uint32_t tileIndex) noexcept
+    enum class TileExecutionSource : uint8_t
+    {
+        WorkerLocal,
+        WorkerStolen,
+        Assist
+    };
+
+    static bool TryExecuteOneTile(
+        BatchState* batch,
+        uint32_t tileIndex,
+        TileExecutionSource source) noexcept
     {
         if (!batch || tileIndex >= batch->tileCount) return false;
 
         const auto& tile = batch->tiles[tileIndex];
         PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
             static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstChunk),
-            static_cast<int>(tile.chunkCount));
+            static_cast<int>(tile.firstItem),
+            static_cast<int>(tile.itemCount));
         PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
             static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstChunk),
-            static_cast<int>(tile.chunkCount));
-        g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            static_cast<int>(tile.firstItem),
+            static_cast<int>(tile.itemCount));
         batch->executeTile(batch->context, batch->tiles[tileIndex]);
+        if (source == TileExecutionSource::Assist)
+        {
+            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            if (source == TileExecutionSource::WorkerLocal)
+                g_localTiles.fetch_add(1, std::memory_order_relaxed);
+            else
+                g_stolenTiles.fetch_add(1, std::memory_order_relaxed);
+        }
         PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
             static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstChunk),
-            static_cast<int>(tile.chunkCount));
+            static_cast<int>(tile.firstItem),
+            static_cast<int>(tile.itemCount));
         batch->completedTiles.fetch_add(1, std::memory_order_acq_rel);
         return true;
     }
@@ -449,14 +516,20 @@ namespace JobSystem
     {
         if (!batch || slot >= batch->partitionCount || batch->tileCount == 0) return;
 
+        const uint64_t active =
+            g_activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
+        uint64_t peak = g_activeWorkersPeak.load(std::memory_order_relaxed);
+        while (active > peak && !g_activeWorkersPeak.compare_exchange_weak(
+            peak, active, std::memory_order_relaxed)) {}
+        g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+
         LocalPartition& mine = batch->partitions[slot];
         uint32_t tileIdx;
 
         // Phase 1: Local tiles
         while (TryTakeLocal(mine, tileIdx))
         {
-            TryExecuteOneTile(batch, tileIdx);
-            mine.localTiles++;
+            TryExecuteOneTile(batch, tileIdx, TileExecutionSource::WorkerLocal);
         }
 
         // Phase 2: Half-steal from victims
@@ -470,11 +543,11 @@ namespace JobSystem
             {
                 for (uint32_t t = stealStart; t < stealEnd; t++)
                 {
-                    TryExecuteOneTile(batch, t);
-                    mine.stolenTiles++;
+                    TryExecuteOneTile(batch, t, TileExecutionSource::WorkerStolen);
                 }
             }
         }
+        g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     static bool AssistExecuteOneTile(void* ptr) noexcept
@@ -498,7 +571,7 @@ namespace JobSystem
         if (TryStealHalf(batch->partitions[bestVictim], ss, se))
         {
             for (uint32_t t = ss; t < se; t++)
-                TryExecuteOneTile(batch, t);
+                TryExecuteOneTile(batch, t, TileExecutionSource::Assist);
             return true;
         }
 
@@ -507,7 +580,7 @@ namespace JobSystem
         uint32_t tileIdx;
         if (TryTakeLocal(batch->partitions[bestVictim], tileIdx))
         {
-            TryExecuteOneTile(batch, tileIdx);
+            TryExecuteOneTile(batch, tileIdx, TileExecutionSource::Assist);
             return true;
         }
         return false;
@@ -579,7 +652,11 @@ namespace JobSystem
             // New path: partition-based — pass slot directly, no nextPartitionSlot
             for (int slot = 0; slot < participantCount; ++slot)
             {
-                taskflow->emplace([batch, slot]() { WorkerPartitionLoop(batch, static_cast<uint32_t>(slot)); });
+                taskflow->emplace([batch, slot]() {
+                    if (WorkerIndexManager::GetCurrentIndex() < 0)
+                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                    WorkerPartitionLoop(batch, static_cast<uint32_t>(slot));
+                });
             }
             assistFn = &AssistExecuteOneTile;
         }
@@ -589,7 +666,9 @@ namespace JobSystem
             for (int slot = 0; slot < participantCount; ++slot)
             {
                 taskflow->emplace([batch]() {
-                    while (TryExecuteOneRange(batch)) {}
+                    if (WorkerIndexManager::GetCurrentIndex() < 0)
+                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                    while (TryExecuteOneRange(batch, false)) {}
                 });
             }
             assistFn = &AssistExecuteOneRange;
@@ -597,7 +676,11 @@ namespace JobSystem
 
         g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-        g_notifiedWorkers.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
+        g_workerTargetTotal.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
+        g_totalTilesPublished.fetch_add(
+            batch->partitions ? static_cast<uint64_t>(batch->tileCount)
+                              : static_cast<uint64_t>(batch->rangeCount),
+            std::memory_order_relaxed);
 
         // Register assist callback + readersDrained for Complete()
         state->assistCallback.store(assistFn, std::memory_order_release);
@@ -666,12 +749,25 @@ namespace JobSystem
         return true;
     }
 
-    // Tile-based executor for chunk batches (partition path, execMode 0)
+    // Unified Tile executor for Chunk callbacks, Chunk ranges and Entity ranges.
     static bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
     {
         auto* bc = static_cast<ChunkBatchContext*>(ctx);
-        // Each tile maps to chunks[tile.firstChunk]
-        bc->func(bc->originalContext, &bc->chunks[tile.firstChunk]);
+        switch (tile.kind)
+        {
+        case TileKind::ChunkCallbacks:
+            for (uint32_t i = 0; i < tile.itemCount; ++i)
+                bc->func(bc->originalContext, &bc->chunks[tile.firstItem + i]);
+            break;
+        case TileKind::ChunkRange:
+            bc->rangeFunc(bc->originalContext, bc->chunks,
+                static_cast<int>(tile.firstItem), static_cast<int>(tile.itemCount));
+            break;
+        case TileKind::EntityBatchRange:
+            bc->entityRangeFunc(bc->originalContext, bc->entityBatches,
+                static_cast<int>(tile.firstItem), static_cast<int>(tile.itemCount));
+            break;
+        }
         return true;
     }
 
@@ -743,7 +839,14 @@ namespace JobSystem
 
     void JobHandle::Complete() const
     {
-        if (!_state || _state->completed.load(std::memory_order_acquire)) return;
+        if (!_state) return;
+
+        const uint64_t diagnosticId =
+            _state->diagnosticBatchId.load(std::memory_order_acquire);
+        if (diagnosticId != 0)
+            PushTraceEvent(TraceEventType::CompleteEnter, diagnosticId, -1, 0, 0);
+
+        if (_state->completed.load(std::memory_order_acquire)) return;
 
         // Phase 0: Assist — reader count on HandleState (safe, outlives batch)
         _state->assistReaders.fetch_add(1, std::memory_order_acq_rel);
@@ -755,8 +858,7 @@ namespace JobSystem
             while (!_state->completed.load(std::memory_order_acquire))
             {
                 if (!cb(ctx)) break;
-                g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-                g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
             }
         }
         if (_state->assistReaders.fetch_sub(1, std::memory_order_acq_rel) == 1)
@@ -1038,19 +1140,24 @@ namespace JobSystem
         batch->rangeCount = rc; batch->rangeSize = rs; batch->totalItems = itemCount;
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        // Phase 1 path: always use partitions + half-steal for IJobChunk
-        if (execMode == 0 && func)
+        // Every Chunk/Entity entry point uses the same Tile/partition protocol.
         {
-            // Build tiles: one tile per chunk
-            uint32_t tileCount = static_cast<uint32_t>(itemCount);
+            const TileKind tileKind = func
+                ? TileKind::ChunkCallbacks
+                : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
+            const uint32_t tileCount = static_cast<uint32_t>(func ? itemCount : rc);
             auto* tiles = new ExecutionTile[tileCount];
             for (uint32_t i = 0; i < tileCount; i++)
             {
-                tiles[i].firstChunk = i;
-                tiles[i].chunkCount = 1;
-                tiles[i].flags = 0;
-                tiles[i].firstEntity = 0;
-                tiles[i].entityCount = 0;
+                const uint32_t first = func
+                    ? i
+                    : i * static_cast<uint32_t>(rs);
+                tiles[i].firstItem = first;
+                tiles[i].itemCount = func
+                    ? 1u
+                    : std::min(static_cast<uint32_t>(rs),
+                        static_cast<uint32_t>(itemCount) - first);
+                tiles[i].kind = tileKind;
             }
 
             // Respect workerCap when choosing partition count
@@ -1064,12 +1171,6 @@ namespace JobSystem
             batch->partitions = parts;
             batch->partitionCount = static_cast<uint32_t>(targetWorkers);
             batch->completedTiles.store(0, std::memory_order_relaxed);
-        }
-        else
-        {
-            // Fallback for range/entity mode: global nextRange
-            batch->processRange = &ProcessChunkRange;
-            batch->partitionCount = static_cast<uint32_t>(ResolveWorkerTarget(workerCap, rc));
         }
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
