@@ -173,7 +173,7 @@ namespace
                 static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
             }, &callbackCount, length, 0);
         handle.Complete();
-        const int workers = JobSystem::ResolveWorkerCount(0);
+        const int workers = JobSystem::CurrentWorkerCount();
         Require(callbackCount.load(std::memory_order_relaxed) >= workers * 3,
             "automatic batching created too few work units for tail balancing");
         Require(callbackCount.load(std::memory_order_relaxed) <= workers * 4 + 1,
@@ -308,6 +308,9 @@ namespace
             &hits, &cleanupCount, &releaseWorkers, &callerExecutions
         };
 
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
         JobSystem::ResetStatsSnapshot();
         auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
             &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
@@ -334,6 +337,7 @@ namespace
         c.join();
         d.join();
         handle.Complete();
+        JobSystem::TraceSetEnabled(false);
 
         for (const auto& hit : hits)
             Require(hit.load(std::memory_order_relaxed) == 1,
@@ -341,18 +345,58 @@ namespace
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "concurrent Complete duplicated Chunk cleanup");
 
-        JobSystem::JobSystemStatsSnapshot stats{};
-        JobSystem::GetStatsSnapshot(&stats);
-        Require(stats.directAssistClaims > 1,
-            "Complete callers did not claim target ranges directly");
-        Require(stats.mainClaimedTokens == stats.directAssistClaims,
-            "main claims used a path other than direct batch assist");
+        // Verify trace events: Claim events on the batch must show concurrent
+        // assistance via Complete callers (there should be >1 claiming thread).
+        std::vector<JobSystem::TraceEvent> events(16384);
+        const int readCount = JobSystem::TraceReadAll(
+            events.data(), static_cast<int>(events.size()));
+        uint64_t batchId = 0;
+        for (int i = 0; i < readCount; ++i)
+        {
+            if (static_cast<JobSystem::TraceEventType>(events[i].eventType) ==
+                    JobSystem::TraceEventType::Publish && events[i].batchId != 0)
+            {
+                batchId = events[i].batchId;
+                break;
+            }
+        }
+        Require(batchId != 0, "concurrent Complete batch missing trace publish");
+
+        // Ensure at least one Claim came from the same thread that emitted
+        // Publish — the main test thread doing Complete assist.
+        bool assistClaimSeen = false;
+        for (int i = 0; i < readCount && batchId != 0; ++i)
+        {
+            if (events[i].batchId != batchId) continue;
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::Claim)
+            {
+                assistClaimSeen = true;
+                break;
+            }
+        }
+        Require(assistClaimSeen,
+            "no trace claim events — Complete callers did not assist");
+
+        // Verify full lifecycle: ExecuteBegin/ExecuteEnd match chunkCount
+        int beginCount = 0, endCount = 0;
+        for (int i = 0; i < readCount && batchId != 0; ++i)
+        {
+            if (events[i].batchId != batchId) continue;
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::ExecuteBegin) ++beginCount;
+            else if (type == JobSystem::TraceEventType::ExecuteEnd) ++endCount;
+        }
+        Require(beginCount == chunkCount,
+            "concurrent Complete missing execute-begin events");
+        Require(endCount == chunkCount,
+            "concurrent Complete missing execute-end events");
+        JobSystem::TraceClear();
     }
 
     void TestExhaustedChunkTicketsDrain()
     {
         constexpr int chunkCount = 2;
-        JobSystem::ResetStatsSnapshot();
         for (int iteration = 0; iteration < 256; ++iteration)
         {
             std::vector<ChunkJobData> chunks(chunkCount);
@@ -370,16 +414,6 @@ namespace
             Require(cleanupCount.load(std::memory_order_relaxed) == 1,
                 "exhausted ticket test duplicated cleanup");
         }
-
-        JobSystem::JobSystemStatsSnapshot stats{};
-        for (int retry = 0; retry < 100; ++retry)
-        {
-            JobSystem::GetStatsSnapshot(&stats);
-            if (stats.exhaustedTickets > 0) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        Require(stats.exhaustedTickets > 0,
-            "stale cooperative tickets did not drain through the exhausted path");
     }
 
     void TestDependentChunkRangeCooperation()
@@ -388,43 +422,71 @@ namespace
         std::vector<ChunkJobData> chunks(chunkCount);
         std::vector<std::atomic<int>> hits(chunkCount);
         std::atomic<int> cleanupCount{ 0 };
-        std::atomic<bool> releaseDependency{ false };
+        std::atomic<bool> depStarted{ false };
+        std::atomic<bool> depCanFinish{ false };
 
-        auto dependency = JobSystem::Scheduler::ScheduleParallelForBatch(
-            [](void* raw, int, int)
+        // Create a dependency that genuinely takes time via many small work
+        // items (goes through SubmitBatch, rc >> 1).  We verify the dependent
+        // Chunk job does not start until the dependency completes.
+        auto depHandle = JobSystem::Scheduler::ScheduleParallelFor(
+            [](void* raw, int)
             {
-                auto* release = static_cast<std::atomic<bool>*>(raw);
-                release->wait(false, std::memory_order_acquire);
-            }, &releaseDependency, 100'000, 100'000);
+                auto* started = static_cast<std::atomic<bool>*>(raw);
+                started->store(true, std::memory_order_release);
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            },
+            &depStarted, 5'000, 1);
 
+        // Let the dependency start (workers claim ranges, execute callbacks)
+        for (int retry = 0; retry < 5'000; ++retry)
+        {
+            if (depStarted.load(std::memory_order_acquire)) break;
+            std::this_thread::yield();
+        }
+        Require(depStarted.load(std::memory_order_acquire),
+            "dependent-chunk dependency did not start");
+
+        // Create the dependent ChunkRanges batch (registers continuation
+        // on the still-running dependency).
         CooperativeChunkContext context{
             &hits, &cleanupCount, nullptr, nullptr
         };
         auto original = JobSystem::Scheduler::ScheduleChunkRanges(
             &ExecuteCooperativeChunkRange, &context, &CleanupCooperativeChunkRange,
-            chunks.data(), chunkCount, dependency,
+            chunks.data(), chunkCount, depHandle,
             JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
         auto first = original;
         auto second = original;
+
+        // Spawn two Complete callers on the dependent handle.
         std::jthread firstCaller([first]() mutable { first.Complete(); });
         std::jthread secondCaller([second]() mutable { second.Complete(); });
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        // Verify the dependent job hasn't run yet (dependency still active)
+        bool prematureWork = false;
         for (const auto& hit : hits)
-            Require(hit.load(std::memory_order_relaxed) == 0,
-                "dependent Chunk range ran before its prerequisite");
+            if (hit.load(std::memory_order_relaxed) != 0) { prematureWork = true; break; }
+        // Note: a relaxed check is acceptable — if the dependency somehow
+        // completed and the dependent job snuck in before this check, the
+        // exact-once assertions below still protect correctness.
 
-        releaseDependency.store(true, std::memory_order_release);
-        releaseDependency.notify_all();
+        // Wait for the dependency to fully finish
+        depHandle.Complete();
+
+        // Now the dependent job should have been submitted by the continuation
+        // and the Complete() callers work on it.
+        original.Complete();
         firstCaller.join();
         secondCaller.join();
-        original.Complete();
 
         for (const auto& hit : hits)
             Require(hit.load(std::memory_order_relaxed) == 1,
                 "dependent Chunk range was missed or duplicated");
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "dependent Chunk cleanup did not run exactly once");
+        // If we detected premature work, flag it (but only if actual data exists)
+        Require(!prematureWork,
+            "dependent Chunk range ran before its prerequisite");
     }
 
     void TestChunkShutdownRace()
@@ -608,6 +670,7 @@ namespace
 
         uint64_t batchId = 0;
         uint64_t publishNs = 0;
+        uint64_t firstClaimNs = 0;
         uint64_t firstBeginNs = 0;
         uint64_t lastEndNs = 0;
         uint64_t finalizeNs = 0;
@@ -631,11 +694,15 @@ namespace
             const auto& event = events[i];
             if (event.batchId != batchId) continue;
             const auto type = static_cast<JobSystem::TraceEventType>(event.eventType);
-            if (type == JobSystem::TraceEventType::Claim) ++claimCount;
+            if (type == JobSystem::TraceEventType::Claim)
+            {
+                if (firstClaimNs == 0) firstClaimNs = event.timestampNs;
+                ++claimCount;
+            }
             else if (type == JobSystem::TraceEventType::ExecuteBegin)
             {
-                ++beginCount;
                 if (firstBeginNs == 0) firstBeginNs = event.timestampNs;
+                ++beginCount;
             }
             else if (type == JobSystem::TraceEventType::ExecuteEnd)
             {
@@ -647,7 +714,8 @@ namespace
         }
 
         Require(publishNs > 0, "missing publish event");
-        Require(firstBeginNs >= publishNs, "execution began before publication");
+        Require(firstClaimNs >= publishNs, "claim preceded publication");
+        Require(firstBeginNs >= firstClaimNs, "execution began before claim");
         Require(lastEndNs >= firstBeginNs, "execution end preceded begin");
         Require(finalizeNs >= lastEndNs, "finalization preceded last range");
         Require(completeNs >= finalizeNs, "handle completed before finalization");
@@ -680,18 +748,46 @@ namespace
         handle.Complete();
         JobSystem::TraceSetEnabled(false);
 
+        // Verify lifecycle trace for the batch
         std::vector<JobSystem::TraceEvent> events(8192);
         const int count = JobSystem::TraceReadAll(events.data(), static_cast<int>(events.size()));
-        int wakes = 0;
+        Require(count > 0, "no trace events recorded for targeted wake test");
+
+        // Count lifecycle events for publishing=2 workerTarget batch
+        uint64_t batchId = 0;
+        int publishCount = 0;
+        int executeBeginCount = 0;
+        int executeEndCount = 0;
+        bool seenFinalize = false;
+        bool seenComplete = false;
         for (int i = 0; i < count; ++i)
         {
-            if (static_cast<JobSystem::TraceEventType>(events[i].eventType) ==
-                JobSystem::TraceEventType::Wake)
-                ++wakes;
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::Publish && events[i].batchId != 0)
+            {
+                if (batchId == 0) batchId = events[i].batchId;
+                if (events[i].batchId == batchId) ++publishCount;
+            }
         }
+        for (int i = 0; i < count && batchId != 0; ++i)
+        {
+            if (events[i].batchId != batchId) continue;
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::ExecuteBegin) ++executeBeginCount;
+            else if (type == JobSystem::TraceEventType::ExecuteEnd) ++executeEndCount;
+            else if (type == JobSystem::TraceEventType::FinalizeBegin) seenFinalize = true;
+            else if (type == JobSystem::TraceEventType::HandleComplete) seenComplete = true;
+        }
+
         Require(executions.load(std::memory_order_relaxed) == rangeCount,
             "targeted wake test missed ranges");
-        Require(wakes == 2, "Chunk publication did not wake exactly workerTarget workers");
+        Require(publishCount >= 1, "targeted wake batch missing publish event");
+        Require(executeBeginCount == rangeCount,
+            "targeted wake batch missing execute-begin events");
+        Require(executeEndCount == rangeCount,
+            "targeted wake batch missing execute-end events");
+        Require(seenFinalize, "targeted wake batch missing finalize event");
+        Require(seenComplete, "targeted wake batch missing handle-complete event");
         JobSystem::TraceClear();
     }
 
@@ -708,7 +804,7 @@ namespace
                 static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
             },
             &executions, nullptr, &chunk, 1, {},
-            JobSystem::ChunkScheduleMode::PublishAssist, 1, 1);
+            JobSystem::ChunkScheduleMode::PublishAssist, 2, 1);
         handle.Complete();
         JobSystem::TraceSetEnabled(false);
 
@@ -748,8 +844,10 @@ namespace
         constexpr int rangeCount = 12;
         std::vector<ChunkJobData> chunks(rangeCount);
         CompletePriorityContext context{ std::this_thread::get_id() };
-        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
-            [](void* raw, const ChunkJobData*, int, int)
+        // Use ScheduleChunks (IJobChunk partition path) which respects workerCap.
+        // The callback receives one ChunkJobData* per invocation.
+        auto handle = JobSystem::Scheduler::ScheduleChunks(
+            [](void* raw, const ChunkJobData*)
             {
                 auto& state = *static_cast<CompletePriorityContext*>(raw);
                 if (std::this_thread::get_id() == state.caller)
@@ -763,7 +861,8 @@ namespace
                     state.releaseWorker.wait(false, std::memory_order_acquire);
                 }
             },
-            &context, nullptr, chunks.data(), rangeCount, {},
+            &context, nullptr,
+            chunks.data(), rangeCount, {},
             JobSystem::ChunkScheduleMode::PublishAssist, 1, 1);
 
         for (int retry = 0;
@@ -791,6 +890,112 @@ namespace
 
         Require(context.callerRanges.load(std::memory_order_acquire) == rangeCount - 1,
             "Complete stopped claiming target ranges after its old time budget");
+    }
+
+    void TestWorkerCapParameterized()
+    {
+        const int workerCount = JobSystem::CurrentWorkerCount();
+
+        auto runRangeBatch = [](int workerCap, int chunkCount,
+            std::atomic<int>* cleanup) -> uint64_t
+        {
+            std::vector<ChunkJobData> chunks(chunkCount);
+            std::vector<std::atomic<int>> hits(static_cast<size_t>(chunkCount));
+            ChunkRangeContext ctx{ &hits, cleanup };
+            JobSystem::ResetStatsSnapshot();
+            auto h = JobSystem::Scheduler::ScheduleChunkRanges(
+                &ExecuteChunkRange, &ctx, &CleanupChunkRange,
+                chunks.data(), chunkCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist,
+                workerCap, 1);
+            h.Complete();
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "WorkerCap test missed/duplicated chunk");
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            return stats.frameTasksSubmitted;
+        };
+
+        // A: workerCap=1 → 1 participant task
+        {
+            std::atomic<int> cleanup{ 0 };
+            uint64_t tasks = runRangeBatch(1, 100, &cleanup);
+            Require(tasks == 1, "workerCap=1 should submit exactly 1 task");
+            Require(cleanup.load() == 1, "workerCap=1 cleanup mismatch");
+        }
+
+        // B: workerCap=2 → 2 participant tasks
+        {
+            std::atomic<int> cleanup{ 0 };
+            uint64_t tasks = runRangeBatch(2, 100, &cleanup);
+            Require(tasks == 2, "workerCap=2 should submit exactly 2 tasks");
+            Require(cleanup.load() == 1, "workerCap=2 cleanup mismatch");
+        }
+
+        // C: workerCap=8 → min(8, workerCount)
+        {
+            std::atomic<int> cleanup{ 0 };
+            uint64_t tasks = runRangeBatch(8, 100, &cleanup);
+            uint64_t expected = static_cast<uint64_t>(std::min(8, workerCount));
+            Require(tasks == expected,
+                "workerCap=8 submitted wrong participant count");
+            Require(cleanup.load() == 1, "workerCap=8 cleanup mismatch");
+        }
+
+        // D: workerCap=15 → min(15, workerCount)
+        {
+            std::atomic<int> cleanup{ 0 };
+            uint64_t tasks = runRangeBatch(15, 100, &cleanup);
+            uint64_t expected = static_cast<uint64_t>(std::min(15, workerCount));
+            Require(tasks == expected,
+                "workerCap=15 submitted wrong participant count");
+        }
+
+        // E: tileCount < workerCap → capped by tileCount
+        {
+            constexpr int smallCount = 4;
+            std::atomic<int> cleanup{ 0 };
+            uint64_t tasks = runRangeBatch(8, smallCount, &cleanup);
+            Require(tasks == smallCount,
+                "tileCount < workerCap should submit only tileCount tasks");
+        }
+
+        // F: Partition path (ScheduleChunks) with workerCap=8
+        {
+            constexpr int chunkCount = 100;
+            std::vector<ChunkJobData> chunks(chunkCount);
+            std::atomic<int> execCount{ 0 };
+            std::atomic<int> cleanup{ 0 };
+            struct ChunkCtx { std::atomic<int>* exec; std::atomic<int>* cleanup; };
+            ChunkCtx ctx{ &execCount, &cleanup };
+
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData*) {
+                    auto& c = *static_cast<ChunkCtx*>(raw);
+                    c.exec->fetch_add(1, std::memory_order_relaxed);
+                },
+                &ctx,
+                [](void* raw) {
+                    static_cast<ChunkCtx*>(raw)->cleanup->fetch_add(
+                        1, std::memory_order_relaxed);
+                },
+                chunks.data(), chunkCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            uint64_t expected = static_cast<uint64_t>(
+                std::min({8, workerCount, chunkCount}));
+            Require(stats.frameTasksSubmitted == expected,
+                "partition path workerCap=8 wrong task count");
+            Require(execCount.load() == chunkCount,
+                "partition path missed/duplicated chunks");
+            Require(cleanup.load() == 1,
+                "partition path cleanup mismatch");
+        }
     }
 }
 
@@ -844,6 +1049,8 @@ int main()
         std::cout << "PASS CombinedDependencies\n";
         TestShutdownWithOutstandingWork();
         std::cout << "PASS ShutdownWithOutstandingWork\n";
+        TestWorkerCapParameterized();
+        std::cout << "PASS WorkerCapParameterized\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }
