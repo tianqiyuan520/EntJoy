@@ -24,6 +24,7 @@ namespace JobSystem
     struct TraceEvent
     {
         uint64_t timestampNs;
+        uint64_t sequence;
         uint64_t batchId;
         int32_t tileIndex;
         int32_t entityStart;

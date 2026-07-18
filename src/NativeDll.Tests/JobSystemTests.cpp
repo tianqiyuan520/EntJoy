@@ -1,5 +1,6 @@
 #include "../NativeDll/JobSystem.h"
 #include "../NativeDll/ChunkJobData.h"
+#include "../NativeDll/EntityBatchData.h"
 #include "../NativeDll/JobProfiler.h"
 
 #include <atomic>
@@ -529,6 +530,13 @@ namespace
         Require(stats.publishToFirstWorkerClaimEwmaNs == 0, "worker-claim stats did not reset");
         Require(stats.publishToCompletionEwmaNs == 0, "completion stats did not reset");
         Require(stats.queueLockWaitEwmaNs == 0, "queue-lock stats did not reset");
+        Require(stats.workerTargetTotal == 0, "worker-target stats did not reset");
+        Require(stats.totalTilesPublished == 0, "published-tile stats did not reset");
+        Require(stats.localTiles == 0, "local-tile stats did not reset");
+        Require(stats.stolenTiles == 0, "stolen-tile stats did not reset");
+        Require(stats.assistTiles == 0, "assist-tile stats did not reset");
+        Require(stats.stealAttempts == 0, "steal-attempt stats did not reset");
+        Require(stats.stealSuccesses == 0, "steal-success stats did not reset");
     }
 
 #ifdef _WIN32
@@ -670,14 +678,21 @@ namespace
 
         uint64_t batchId = 0;
         uint64_t publishNs = 0;
+        uint64_t publishSequence = 0;
+        uint64_t completeEnterNs = 0;
         uint64_t firstClaimNs = 0;
         uint64_t firstBeginNs = 0;
         uint64_t lastEndNs = 0;
         uint64_t finalizeNs = 0;
         uint64_t completeNs = 0;
+        uint64_t finalizeSequence = 0;
+        uint64_t completeSequence = 0;
         int claimCount = 0;
         int beginCount = 0;
         int endCount = 0;
+        std::vector<uint64_t> claimByTile(rangeCount);
+        std::vector<uint64_t> beginByTile(rangeCount);
+        std::vector<uint64_t> endByTile(rangeCount);
         for (int i = 0; i < readCount; ++i)
         {
             const auto& event = events[i];
@@ -686,6 +701,7 @@ namespace
             {
                 batchId = event.batchId;
                 publishNs = event.timestampNs;
+                publishSequence = event.sequence;
                 break;
             }
         }
@@ -697,33 +713,116 @@ namespace
             if (type == JobSystem::TraceEventType::Claim)
             {
                 if (firstClaimNs == 0) firstClaimNs = event.timestampNs;
+                if (event.tileIndex >= 0 && event.tileIndex < rangeCount)
+                    claimByTile[static_cast<size_t>(event.tileIndex)] = event.sequence;
                 ++claimCount;
             }
             else if (type == JobSystem::TraceEventType::ExecuteBegin)
             {
                 if (firstBeginNs == 0) firstBeginNs = event.timestampNs;
+                if (event.tileIndex >= 0 && event.tileIndex < rangeCount)
+                    beginByTile[static_cast<size_t>(event.tileIndex)] = event.sequence;
                 ++beginCount;
             }
             else if (type == JobSystem::TraceEventType::ExecuteEnd)
             {
                 ++endCount;
                 lastEndNs = std::max(lastEndNs, event.timestampNs);
+                if (event.tileIndex >= 0 && event.tileIndex < rangeCount)
+                    endByTile[static_cast<size_t>(event.tileIndex)] = event.sequence;
             }
-            else if (type == JobSystem::TraceEventType::FinalizeBegin) finalizeNs = event.timestampNs;
-            else if (type == JobSystem::TraceEventType::HandleComplete) completeNs = event.timestampNs;
+            else if (type == JobSystem::TraceEventType::CompleteEnter) completeEnterNs = event.timestampNs;
+            else if (type == JobSystem::TraceEventType::FinalizeBegin)
+            {
+                finalizeNs = event.timestampNs;
+                finalizeSequence = event.sequence;
+            }
+            else if (type == JobSystem::TraceEventType::HandleComplete)
+            {
+                completeNs = event.timestampNs;
+                completeSequence = event.sequence;
+            }
         }
 
         Require(publishNs > 0, "missing publish event");
+        Require(completeEnterNs > 0, "missing CompleteEnter event");
         Require(firstClaimNs >= publishNs, "claim preceded publication");
         Require(firstBeginNs >= firstClaimNs, "execution began before claim");
         Require(lastEndNs >= firstBeginNs, "execution end preceded begin");
         Require(finalizeNs >= lastEndNs, "finalization preceded last range");
         Require(completeNs >= finalizeNs, "handle completed before finalization");
+        Require(finalizeSequence > 0, "missing finalization sequence");
+        Require(completeSequence > finalizeSequence,
+            "handle completion did not follow finalization");
         Require(claimCount == rangeCount, "trace claim count mismatch");
         Require(beginCount == rangeCount, "trace execute-begin count mismatch");
         Require(endCount == rangeCount, "trace execute-end count mismatch");
+        for (int tile = 0; tile < rangeCount; ++tile)
+        {
+            Require(claimByTile[static_cast<size_t>(tile)] > publishSequence,
+                "tile claim did not follow publication");
+            Require(beginByTile[static_cast<size_t>(tile)] >
+                    claimByTile[static_cast<size_t>(tile)],
+                "tile execution did not follow its claim");
+            Require(endByTile[static_cast<size_t>(tile)] >
+                    beginByTile[static_cast<size_t>(tile)],
+                "tile execution end did not follow its begin");
+            Require(finalizeSequence > endByTile[static_cast<size_t>(tile)],
+                "finalization did not follow every tile execution");
+        }
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "traced batch cleanup did not run exactly once");
+        JobSystem::TraceClear();
+    }
+
+    void TestTraceIdentifiesCompleteCallerAndWorker()
+    {
+        constexpr int chunkCount = 64;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        std::atomic<int> executions{ 0 };
+
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
+        auto handle = JobSystem::Scheduler::ScheduleChunks(
+            [](void* raw, const ChunkJobData*)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(
+                    1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            },
+            &executions, nullptr, chunks.data(), chunkCount, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 2, 1);
+        handle.Complete();
+        JobSystem::TraceSetEnabled(false);
+
+        std::vector<JobSystem::TraceEvent> events(4096);
+        const int count = JobSystem::TraceReadAll(
+            events.data(), static_cast<int>(events.size()));
+        uint64_t batchId = 0;
+        bool sawCompleteEnter = false;
+        bool sawWorkerExecution = false;
+        for (int i = 0; i < count; ++i)
+        {
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::Publish && events[i].batchId != 0)
+                batchId = events[i].batchId;
+        }
+        for (int i = 0; i < count && batchId != 0; ++i)
+        {
+            if (events[i].batchId != batchId) continue;
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type == JobSystem::TraceEventType::CompleteEnter)
+                sawCompleteEnter = true;
+            if (type == JobSystem::TraceEventType::ExecuteBegin &&
+                events[i].workerIndex >= 0)
+                sawWorkerExecution = true;
+        }
+
+        Require(executions.load(std::memory_order_relaxed) == chunkCount,
+            "trace identity test missed chunk callbacks");
+        Require(sawCompleteEnter, "trace did not record CompleteEnter");
+        Require(sawWorkerExecution, "trace did not identify a Taskflow worker");
         JobSystem::TraceClear();
     }
 
@@ -892,6 +991,141 @@ namespace
             "Complete stopped claiming target ranges after its old time budget");
     }
 
+    void TestStatsClassifyWorkerAndAssistExactlyOnce()
+    {
+        constexpr int chunkCount = 12;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        CompletePriorityContext context{ std::this_thread::get_id() };
+
+        JobSystem::ResetStatsSnapshot();
+        auto handle = JobSystem::Scheduler::ScheduleChunks(
+            [](void* raw, const ChunkJobData*)
+            {
+                auto& state = *static_cast<CompletePriorityContext*>(raw);
+                if (std::this_thread::get_id() == state.caller)
+                {
+                    state.callerRanges.fetch_add(1, std::memory_order_release);
+                }
+                else
+                {
+                    state.workerEntered.store(true, std::memory_order_release);
+                    state.releaseWorker.wait(false, std::memory_order_acquire);
+                }
+            },
+            &context, nullptr, chunks.data(), chunkCount, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 1, 1);
+
+        while (!context.workerEntered.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        std::jthread watchdog([&context]
+        {
+            for (int retry = 0; retry < 100; ++retry)
+            {
+                if (context.callerRanges.load(std::memory_order_acquire) == chunkCount - 1)
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            context.releaseWorker.store(true, std::memory_order_release);
+            context.releaseWorker.notify_all();
+        });
+        handle.Complete();
+        watchdog.join();
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.workerExecutedRanges + stats.mainExecutedRanges == chunkCount,
+            "worker/main tile accounting did not reconcile");
+        Require(stats.mainExecutedRanges == chunkCount - 1,
+            "assist tile count did not match Complete caller work");
+        Require(stats.assistExecPctEwma <= 100,
+            "assist percentage exceeded 100 percent");
+    }
+
+    void RequireTileAccounting(
+        const JobSystem::JobSystemStatsSnapshot& stats,
+        uint64_t expectedTiles,
+        const char* message)
+    {
+        Require(stats.totalTilesPublished == expectedTiles, message);
+        Require(stats.localTiles + stats.stolenTiles + stats.assistTiles == expectedTiles,
+            message);
+        Require(stats.assistTiles == stats.mainExecutedRanges, message);
+        Require(stats.localTiles + stats.stolenTiles == stats.workerExecutedRanges,
+            message);
+        Require(stats.stealSuccesses <= stats.stealAttempts, message);
+        Require(stats.assistExecPctEwma <= 100, message);
+        Require(stats.activeWorkersPeak <= 8, message);
+    }
+
+    void TestUnifiedTileAccountingForAllChunkEntrypoints()
+    {
+        constexpr int itemCount = 31;
+        std::vector<ChunkJobData> chunks(itemCount);
+        std::vector<EntityBatchData> batches(itemCount);
+
+        {
+            std::atomic<int> callbacks{ 0 };
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData*)
+                {
+                    static_cast<std::atomic<int>*>(raw)->fetch_add(
+                        1, std::memory_order_relaxed);
+                },
+                &callbacks, nullptr, chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            Require(callbacks.load(std::memory_order_relaxed) == itemCount,
+                "ScheduleChunks missed or duplicated a callback");
+            RequireTileAccounting(stats, itemCount,
+                "ScheduleChunks tile accounting did not reconcile");
+        }
+
+        {
+            std::vector<std::atomic<int>> hits(itemCount);
+            ChunkRangeContext context{ &hits, nullptr };
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+                &ExecuteChunkRange, &context, nullptr,
+                chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "ScheduleChunkRanges missed or duplicated an item");
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            RequireTileAccounting(stats, itemCount,
+                "ScheduleChunkRanges tile accounting did not reconcile");
+        }
+
+        {
+            std::vector<std::atomic<int>> hits(itemCount);
+            struct EntityContext { std::vector<std::atomic<int>>* hits; } context{ &hits };
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleEntityBatches(
+                [](void* raw, const EntityBatchData*, int start, int count)
+                {
+                    auto& state = *static_cast<EntityContext*>(raw);
+                    for (int i = start; i < start + count; ++i)
+                        (*state.hits)[static_cast<size_t>(i)].fetch_add(
+                            1, std::memory_order_relaxed);
+                },
+                &context, nullptr, batches.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "ScheduleEntityBatches missed or duplicated an item");
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            RequireTileAccounting(stats, itemCount,
+                "ScheduleEntityBatches tile accounting did not reconcile");
+        }
+    }
+
     void TestWorkerCapParameterized()
     {
         const int workerCount = JobSystem::CurrentWorkerCount();
@@ -1011,12 +1245,18 @@ int main()
         std::cout << "PASS TraceOverflow\n";
         TestTraceLifecycleOrder();
         std::cout << "PASS TraceLifecycleOrder\n";
+        TestTraceIdentifiesCompleteCallerAndWorker();
+        std::cout << "PASS TraceIdentifiesCompleteCallerAndWorker\n";
         TestTraceRecordsProcessorForRangeEvents();
         std::cout << "PASS TraceRecordsProcessorForRangeEvents\n";
         TestChunkPublishWakesOnlyTargetWorkers();
         std::cout << "PASS ChunkPublishWakesOnlyTargetWorkers\n";
         TestCompleteDrainsTargetBeyondOldBudget();
         std::cout << "PASS CompleteDrainsTargetBeyondOldBudget\n";
+        TestStatsClassifyWorkerAndAssistExactlyOnce();
+        std::cout << "PASS StatsClassifyWorkerAndAssistExactlyOnce\n";
+        TestUnifiedTileAccountingForAllChunkEntrypoints();
+        std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);

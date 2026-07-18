@@ -28,6 +28,7 @@ namespace JobSystem
 
         std::atomic<bool> g_traceEnabled{ false };
         std::atomic<uint64_t> g_traceDroppedEvents{ 0 };
+        std::atomic<uint64_t> g_traceSequence{ 0 };
         std::mutex g_traceRegistryMutex;
         std::vector<std::unique_ptr<TraceThreadBuffer>> g_traceBuffers;
         thread_local TraceThreadBuffer* g_threadTraceBuffer = nullptr;
@@ -119,7 +120,7 @@ namespace JobSystem
                     threadBuffer->entries.begin() + count);
             }
             std::sort(snapshot.begin(), snapshot.end(), [](const TraceEvent& left, const TraceEvent& right) {
-                return left.timestampNs < right.timestampNs;
+                return left.sequence < right.sequence;
             });
             const int readCount = (std::min)(maxCount, static_cast<int>(snapshot.size()));
             std::copy_n(snapshot.begin(), readCount, buffer);
@@ -142,6 +143,7 @@ namespace JobSystem
         for (const auto& buffer : g_traceBuffers)
             buffer->publishedCount.store(0, std::memory_order_release);
         g_traceDroppedEvents.store(0, std::memory_order_release);
+        g_traceSequence.store(0, std::memory_order_release);
     }
 
     void PushTraceEvent(
@@ -162,6 +164,7 @@ namespace JobSystem
         }
         buffer->entries[index] = TraceEvent{
             TimestampNs(),
+            g_traceSequence.fetch_add(1, std::memory_order_relaxed) + 1,
             batchId,
             tileIndex,
             entityStart,
