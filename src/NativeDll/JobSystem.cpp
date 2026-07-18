@@ -2,6 +2,7 @@
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
+#include "NativeWorkerPool.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -10,10 +11,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -33,6 +37,8 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_executorMutex;
     std::shared_ptr<tf::Executor> g_executor;
+    std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
+    ExecutionBackend g_executionBackend{ ExecutionBackend::Taskflow };
     int g_numThreads = 0;
 
     std::mutex g_statePoolMutex;
@@ -74,6 +80,9 @@ namespace JobSystem
     std::atomic<uint64_t> g_workerStartSpreadEwmaNs{ 0 };
     std::atomic<uint64_t> g_lastTileToTopologyDoneEwmaNs{ 0 };
     std::atomic<uint64_t> g_completeWakeToReturnEwmaNs{ 0 };
+    std::atomic<uint64_t> g_taskflowBatches{ 0 };
+    std::atomic<uint64_t> g_nativeBatches{ 0 };
+    std::atomic<uint64_t> g_invalidBackendSelections{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
@@ -140,6 +149,9 @@ namespace JobSystem
         stats->workerStartSpreadEwmaNs = g_workerStartSpreadEwmaNs.load(std::memory_order_relaxed);
         stats->lastTileToTopologyDoneEwmaNs = g_lastTileToTopologyDoneEwmaNs.load(std::memory_order_relaxed);
         stats->completeWakeToReturnEwmaNs = g_completeWakeToReturnEwmaNs.load(std::memory_order_relaxed);
+        stats->taskflowBatches = g_taskflowBatches.load(std::memory_order_relaxed);
+        stats->nativeBatches = g_nativeBatches.load(std::memory_order_relaxed);
+        stats->invalidBackendSelections = g_invalidBackendSelections.load(std::memory_order_relaxed);
 
         const uint64_t workerTiles =
             g_workerExecutedRanges.load(std::memory_order_relaxed);
@@ -208,6 +220,9 @@ namespace JobSystem
         g_workerStartSpreadEwmaNs.store(0, std::memory_order_relaxed);
         g_lastTileToTopologyDoneEwmaNs.store(0, std::memory_order_relaxed);
         g_completeWakeToReturnEwmaNs.store(0, std::memory_order_relaxed);
+        g_taskflowBatches.store(0, std::memory_order_relaxed);
+        g_nativeBatches.store(0, std::memory_order_relaxed);
+        g_invalidBackendSelections.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
@@ -331,6 +346,44 @@ namespace JobSystem
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
         }
         return g_executor;
+    }
+
+    struct BackendAsyncContext
+    {
+        std::function<void()> work;
+    };
+
+    static void RunBackendAsync(void* raw, uint32_t) noexcept
+    {
+        auto* context = static_cast<BackendAsyncContext*>(raw);
+        try { context->work(); } catch (...) {}
+    }
+
+    static void CompleteBackendAsync(void* raw) noexcept
+    {
+        delete static_cast<BackendAsyncContext*>(raw);
+    }
+
+    static void SubmitBackendAsync(std::function<void()> work)
+    {
+        auto* context = new BackendAsyncContext{ std::move(work) };
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+        {
+            if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
+                context, 1, &RunBackendAsync, &CompleteBackendAsync))
+            {
+                RunBackendAsync(context, 0);
+                CompleteBackendAsync(context);
+            }
+            return;
+        }
+
+        auto executor = EnsureExecutor();
+        executor->silent_async([context]
+        {
+            RunBackendAsync(context, 0);
+            CompleteBackendAsync(context);
+        });
     }
 
     int ResolveChunkSize(int length, int requestedChunk)
@@ -858,8 +911,32 @@ namespace JobSystem
 
     // Acquire assist reader: returns false if batch is already finalized
     // Submit a BatchState via taskflow
-    static void SubmitBatch(BatchState* batch, const std::shared_ptr<tf::Executor>& executor,
-        int /*workerCap*/ = 0)
+    static void ExecuteBatchSlot(void* raw, uint32_t slot) noexcept
+    {
+        auto* batch = static_cast<BatchState*>(raw);
+        if (WorkerIndexManager::GetCurrentIndex() < 0)
+            WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+        if (batch->partitions)
+            WorkerPartitionLoop(batch, slot);
+        else
+        {
+            RecordWorkerEntry(batch);
+            while (TryExecuteOneRange(batch, false)) {}
+        }
+    }
+
+    static void CompleteBackendBatch(void* raw) noexcept
+    {
+        auto* batch = static_cast<BatchState*>(raw);
+        auto* state = batch->handle;
+        RecordTopologyCompletion(batch);
+        state->assistCallback.store(nullptr, std::memory_order_release);
+        batch->workersFinished.store(true, std::memory_order_release);
+        TryFinalizeCompletedBatch(state);
+        ReleaseState(state);
+    }
+
+    static void SubmitBatch(BatchState* batch, int /*workerCap*/ = 0)
     {
         auto* state = batch->handle;
         auto taskflow = AcquireTaskflow();
@@ -916,17 +993,27 @@ namespace JobSystem
 
         AcquireState(state);
         batch->publishedAt.store(MonotonicNowNs(), std::memory_order_release);
-        executor->run(*taskflow, [taskflow, state, batch]() mutable {
-            RecordTopologyCompletion(batch);
-            // Clear assist to prevent new readers from attaching.
-            state->assistCallback.store(nullptr, std::memory_order_release);
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+        {
+            g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
+            if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
+                batch,
+                static_cast<uint32_t>(participantCount),
+                &ExecuteBatchSlot,
+                &CompleteBackendBatch))
+            {
+                for (int slot = 0; slot < participantCount; ++slot)
+                    ExecuteBatchSlot(batch, static_cast<uint32_t>(slot));
+                CompleteBackendBatch(batch);
+            }
+            return;
+        }
 
-            // Cleanup and Batch release must also wait for any Complete()
-            // assist callback that is still executing outside Taskflow.
-            batch->workersFinished.store(true, std::memory_order_release);
-            TryFinalizeCompletedBatch(state);
-
-            ReleaseState(state);
+        g_taskflowBatches.fetch_add(1, std::memory_order_relaxed);
+        auto executor = EnsureExecutor();
+        executor->run(*taskflow, [taskflow, batch]() mutable
+        {
+            CompleteBackendBatch(batch);
         });
     }
 
@@ -1145,23 +1232,21 @@ namespace JobSystem
     JobHandle ScheduleWithDependency(const JobHandle& dep, WorkBuilder&& builder)
     {
         auto* state = CreateState(false);
-        auto exec = EnsureExecutor();
         auto* ds = dep.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { builder(state, exec); return JobHandle(state); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { builder(state); return JobHandle(state); }
         AcquireState(state);
-        AddContinuationOrRunNow(ds, [state, exec, b = std::forward<WorkBuilder>(builder)]() mutable {
-            b(state, exec);
+        AddContinuationOrRunNow(ds, [state, b = std::forward<WorkBuilder>(builder)]() mutable {
+            b(state);
             ReleaseState(state);
         });
         return JobHandle(state);
     }
 
     template <typename Work>
-    void FastPath(Work&& work, void* ctx, void (*cleanup)(void*), HandleState* state,
-        const std::shared_ptr<tf::Executor>& exec)
+    void FastPath(Work&& work, void* ctx, void (*cleanup)(void*), HandleState* state)
     {
         AcquireState(state);
-        exec->silent_async([work = std::forward<Work>(work), state, ctx, cleanup]() {
+        SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
             try { work(); } catch (...) {}
             if (cleanup) cleanup(ctx);
             CompleteState(state);
@@ -1173,13 +1258,12 @@ namespace JobSystem
     JobHandle ScheduleFastPath(Work&& work, void* ctx, void (*cleanup)(void*), const JobHandle& dep)
     {
         auto* state = CreateState(false);
-        auto exec = EnsureExecutor();
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
-        { FastPath(std::forward<Work>(work), ctx, cleanup, state, exec); return JobHandle(state); }
+        { FastPath(std::forward<Work>(work), ctx, cleanup, state); return JobHandle(state); }
         AcquireState(state);
-        AddContinuationOrRunNow(ds, [state, exec, work = std::forward<Work>(work), ctx, cleanup]() mutable {
-            FastPath(std::forward<Work>(work), ctx, cleanup, state, exec);
+        AddContinuationOrRunNow(ds, [state, work = std::forward<Work>(work), ctx, cleanup]() mutable {
+            FastPath(std::forward<Work>(work), ctx, cleanup, state);
             ReleaseState(state);
         });
         return JobHandle(state);
@@ -1188,17 +1272,37 @@ namespace JobSystem
     // ============================================================
     // Scheduler
     // ============================================================
+    static ExecutionBackend ResolveConfiguredBackend() noexcept
+    {
+        const char* raw = std::getenv("ENTJOY_JOB_BACKEND");
+        if (!raw || *raw == '\0') return ExecutionBackend::Taskflow;
+        std::string value(raw);
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (value == "taskflow") return ExecutionBackend::Taskflow;
+        if (value == "native") return ExecutionBackend::NativeWorkerPoolExperimental;
+        g_invalidBackendSelections.fetch_add(1, std::memory_order_relaxed);
+        return ExecutionBackend::Taskflow;
+    }
+
     void Scheduler::Initialize(int numThreads)
     {
         g_shuttingDown.store(false, std::memory_order_release);
-        std::shared_ptr<tf::Executor> oldExec;
         {
             std::lock_guard<std::mutex> lock(g_executorMutex);
             int resolved = numThreads > 0 ? numThreads :
                 (g_numThreads > 0 ? g_numThreads :
                     std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1));
-            if (g_executor && g_numThreads == resolved) return;
-            oldExec = std::move(g_executor); g_numThreads = resolved;
+            if (g_executor || (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning()))
+                return;
+            g_numThreads = resolved;
+            g_executionBackend = ResolveConfiguredBackend();
+            if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+            {
+                g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
+                g_nativeWorkerPool->Start(static_cast<uint32_t>(resolved));
+                return;
+            }
             g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(resolved));
 
 #if defined(_WIN32)
@@ -1217,15 +1321,21 @@ namespace JobSystem
             g_executor->wait_for_all();
 #endif
         }
-        if (oldExec) oldExec->wait_for_all();
     }
 
     void Scheduler::Shutdown()
     {
         g_shuttingDown.store(true, std::memory_order_release);
         std::shared_ptr<tf::Executor> exec;
-        { std::lock_guard<std::mutex> lock(g_executorMutex); exec = std::move(g_executor); g_numThreads = 0; }
+        std::unique_ptr<NativeWorkerPool> nativePool;
+        {
+            std::lock_guard<std::mutex> lock(g_executorMutex);
+            exec = std::move(g_executor);
+            nativePool = std::move(g_nativeWorkerPool);
+            g_numThreads = 0;
+        }
         if (exec) exec->wait_for_all();
+        if (nativePool) nativePool->Stop();
         ClearBatchStoragePool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
         { std::lock_guard<std::mutex> lock(g_taskflowPoolMutex); for (auto* tf : g_taskflowPool) delete tf; g_taskflowPool.clear(); }
@@ -1233,6 +1343,8 @@ namespace JobSystem
 
     void Scheduler::PrewakeWorkers()
     {
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+            return;
         auto exec = EnsureExecutor();
         // Submit NOP tasks to wake all workers
         auto taskflow = AcquireTaskflow();
@@ -1267,11 +1379,14 @@ namespace JobSystem
         if (length <= kSyncExecutionLengthThreshold || (depOk && length <= kSyncWithCompletedDepThreshold))
         { for (int i = 0; i < length; i++) func(context, i); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
-        return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state, auto exec) {
-            auto tf = AcquireTaskflow();
-            tf->emplace([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
+        return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             AcquireState(state);
-            exec->run(*tf, [tf, state, context, cleanup]() mutable { if (cleanup) cleanup(context); CompleteState(state); ReleaseState(state); });
+            SubmitBackendAsync([func, context, length, cleanup, state]() {
+                for (int i = 0; i < length; i++) func(context, i);
+                if (cleanup) cleanup(context);
+                CompleteState(state);
+                ReleaseState(state);
+            });
         });
     }
 
@@ -1298,10 +1413,9 @@ namespace JobSystem
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
-        auto exec = EnsureExecutor();
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, exec); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch, exec]() { SubmitBatch(batch, exec); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
+        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
 
@@ -1329,10 +1443,9 @@ namespace JobSystem
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
-        auto exec = EnsureExecutor();
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, exec); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch, exec]() { SubmitBatch(batch, exec); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
+        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
 
@@ -1410,10 +1523,9 @@ namespace JobSystem
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
-        auto exec = EnsureExecutor();
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, exec, workerCap); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch, exec, workerCap]() { SubmitBatch(batch, exec, workerCap); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, workerCap); }
+        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
         return JobHandle(state);
     }
 

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -1223,6 +1224,8 @@ namespace
             },
             &callbacks, nullptr, chunks.data(), itemCount, {},
             JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+        for (int retry = 0; retry < 100'000 && !handle.IsCompleted(); ++retry)
+            std::this_thread::yield();
         handle.Complete();
 
         JobSystem::JobSystemStatsSnapshot stats{};
@@ -1235,6 +1238,92 @@ namespace
             "last-tile-to-topology boundary was not measured");
         Require(stats.workerStartSpreadEwmaNs < 10'000'000'000ull,
             "worker-start-spread timing underflowed");
+    }
+
+    void SetBackendEnvironment(const char* value)
+    {
+#ifdef _WIN32
+        _putenv_s("ENTJOY_JOB_BACKEND", value ? value : "");
+#else
+        if (value) setenv("ENTJOY_JOB_BACKEND", value, 1);
+        else unsetenv("ENTJOY_JOB_BACKEND");
+#endif
+    }
+
+    void TestExecutionBackendSelection()
+    {
+        constexpr int itemCount = 31;
+        std::vector<ChunkJobData> chunks(itemCount);
+        std::atomic<int> callbacks{ 0 };
+        auto scheduleChunkBatch = [&]
+        {
+            auto handle = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData*)
+                {
+                    static_cast<std::atomic<int>*>(raw)->fetch_add(
+                        1, std::memory_order_relaxed);
+                },
+                &callbacks, nullptr, chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 4, 1);
+            handle.Complete();
+        };
+
+        JobSystem::ResetStatsSnapshot();
+        scheduleChunkBatch();
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.taskflowBatches == 1 && stats.nativeBatches == 0,
+            "default backend was not exclusively Taskflow");
+
+        JobSystem::Scheduler::Shutdown();
+        SetBackendEnvironment("native");
+        JobSystem::Scheduler::Initialize(4);
+        callbacks.store(0, std::memory_order_relaxed);
+        JobSystem::ResetStatsSnapshot();
+        scheduleChunkBatch();
+        std::atomic<int> parallelItems{ 0 };
+        auto parallel = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int, int count)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(
+                    count, std::memory_order_relaxed);
+            },
+            &parallelItems, 10'000, -100);
+        parallel.Complete();
+        std::atomic<int> forItems{ 0 };
+        auto forHandle = JobSystem::Scheduler::ScheduleFor(
+            [](void* raw, int)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(
+                    1, std::memory_order_relaxed);
+            },
+            &forItems, 10'000);
+        forHandle.Complete();
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(callbacks.load(std::memory_order_relaxed) == itemCount,
+            "native backend missed or duplicated chunks");
+        Require(parallelItems.load(std::memory_order_relaxed) == 10'000,
+            "native backend missed ParallelForBatch items");
+        Require(forItems.load(std::memory_order_relaxed) == 10'000,
+            "native backend missed ScheduleFor items");
+        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 2,
+            "native backend batch counters were not mutually exclusive");
+
+        JobSystem::Scheduler::Shutdown();
+        JobSystem::ResetStatsSnapshot();
+        SetBackendEnvironment("invalid-value");
+        JobSystem::Scheduler::Initialize(4);
+        callbacks.store(0, std::memory_order_relaxed);
+        scheduleChunkBatch();
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.invalidBackendSelections == 1,
+            "invalid backend selection was not diagnosed");
+        Require(stats.taskflowBatches == 1 && stats.nativeBatches == 0,
+            "invalid backend did not fall back exclusively to Taskflow");
+
+        JobSystem::Scheduler::Shutdown();
+        SetBackendEnvironment(nullptr);
+        JobSystem::Scheduler::Initialize();
     }
 
     void TestWorkerCapParameterized()
@@ -1408,6 +1497,8 @@ int main()
         std::cout << "PASS ShutdownWithOutstandingWork\n";
         TestWorkerCapParameterized();
         std::cout << "PASS WorkerCapParameterized\n";
+        TestExecutionBackendSelection();
+        std::cout << "PASS ExecutionBackendSelection\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }
