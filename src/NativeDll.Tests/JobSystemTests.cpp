@@ -537,6 +537,10 @@ namespace
         Require(stats.assistTiles == 0, "assist-tile stats did not reset");
         Require(stats.stealAttempts == 0, "steal-attempt stats did not reset");
         Require(stats.stealSuccesses == 0, "steal-success stats did not reset");
+        Require(stats.batchStorageCreated == 0, "batch-storage create stats did not reset");
+        Require(stats.batchStorageReused == 0, "batch-storage reuse stats did not reset");
+        Require(stats.batchStorageReturned == 0, "batch-storage return stats did not reset");
+        Require(stats.batchStorageDropped == 0, "batch-storage drop stats did not reset");
     }
 
 #ifdef _WIN32
@@ -1164,6 +1168,37 @@ namespace
         }
     }
 
+    void TestBatchStorageIsReturnedAndReused()
+    {
+        constexpr int itemCount = 31;
+        std::vector<ChunkJobData> chunks(itemCount);
+        std::atomic<int> callbacks{ 0 };
+
+        JobSystem::ResetStatsSnapshot();
+        for (int batchIndex = 0; batchIndex < 2; ++batchIndex)
+        {
+            auto handle = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData*)
+                {
+                    static_cast<std::atomic<int>*>(raw)->fetch_add(
+                        1, std::memory_order_relaxed);
+                },
+                &callbacks, nullptr, chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+        }
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(callbacks.load(std::memory_order_relaxed) == itemCount * 2,
+            "pooled batches missed or duplicated callbacks");
+        Require(stats.batchStorageReused >= 1,
+            "second sequential batch did not reuse storage");
+        Require(stats.batchStorageReturned ==
+            stats.batchStorageCreated + stats.batchStorageReused,
+            "batch storage acquire/return accounting did not reconcile");
+    }
+
     void TestWorkerCapParameterized()
     {
         const int workerCount = JobSystem::CurrentWorkerCount();
@@ -1297,6 +1332,8 @@ int main()
         std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
         TestBoundedHeaviestVictimStealing();
         std::cout << "PASS BoundedHeaviestVictimStealing\n";
+        TestBatchStorageIsReturnedAndReused();
+        std::cout << "PASS BatchStorageIsReturnedAndReused\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);
