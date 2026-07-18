@@ -16,6 +16,8 @@
 #include <condition_variable>
 #include <cstdint>
 #include <chrono>
+#include <climits>
+#include <semaphore>
 
 // ---------- 跨平台线程优先级 ----------
 #ifdef _WIN32
@@ -593,9 +595,10 @@ namespace JobSystem
         static alignas(64) std::atomic<uint32_t> g_workTail{ 0 };   // 消费者（workers）CAS
         static alignas(64) std::atomic<int> g_workCount{ 0 };        // 可用 work 信号量
 
-        // ——— Worker park/wake（替代 condition_variable + mutex） ———
-        // 任何需要唤醒 worker 的事件递增此值并 notify_all
-        static alignas(64) std::atomic<uint64_t> g_workerGen{ 0 };
+        // ——— Worker park/wake ———
+        // 每个发布的 queue ticket 对应一个 permit，因此普通发布只唤醒
+        // workerTarget 个 worker，不再把整个线程池从内核等待中唤醒。
+        static std::counting_semaphore<INT_MAX> g_workerWakeSemaphore{ 0 };
 
         // ——— 线程生命周期管理（仅用于创建/销毁，不参与热路径） ———
         static std::mutex g_chunkWorkerLifecycleMutex;
@@ -614,7 +617,7 @@ namespace JobSystem
         inline void RelaxCpu() noexcept;
 
         // ——— 无锁出队：从环缓冲区原子获取一个 batch ———
-        ChunkBatchState* TryDequeue() noexcept
+        ChunkBatchState* TryDequeueAfterWakePermit() noexcept
         {
             uint32_t tail = g_workTail.load(std::memory_order_relaxed);
             do {
@@ -627,6 +630,12 @@ namespace JobSystem
                 .load(std::memory_order_acquire);
             g_workCount.fetch_sub(1, std::memory_order_release);
             return batch;
+        }
+
+        ChunkBatchState* TryDequeue() noexcept
+        {
+            if (!g_workerWakeSemaphore.try_acquire()) return nullptr;
+            return TryDequeueAfterWakePermit();
         }
 
         void RunWorkerChunkTicket(const ChunkQueueTicket& ticket) noexcept;
@@ -828,9 +837,8 @@ namespace JobSystem
                 }
 
                 // ——— Phase 3: 内核 park ———
-                // 使用 g_workerGen.wait() 替代 condition_variable + mutex。
-                // 任何需要唤醒 worker 的事件（新 work / prewake / shutdown）
-                // 都会递增 g_workerGen 并 notify_all。
+                // 普通发布按 queue ticket 数 release permit；prewake / shutdown
+                // 才显式 release 整个 worker 池的 permit。
                 if (!batch)
                 {
                     // 快速路径：先检查（避免在已有工作时不必要的 park）
@@ -849,16 +857,13 @@ namespace JobSystem
                         }
                         else
                         {
-                            // 记录当前 generation 并 park
-                            uint64_t gen = g_workerGen.load(std::memory_order_relaxed);
-                            g_workerGen.wait(gen, std::memory_order_acquire);
-                            // WaitOnAddress/WakeByAddressAll 返回
-                            // 可能原因：新 work / prewake / shutdown / spurious
+                            g_workerWakeSemaphore.acquire();
 
                             if (g_chunkWorkersShutdown.load(std::memory_order_acquire))
                             {
                                 // 关闭中：处理完剩余队列后退出
-                                while ((batch = TryDequeue()) != nullptr)
+                                while (g_workCount.load(std::memory_order_acquire) > 0 &&
+                                    (batch = TryDequeue()) != nullptr)
                                 {
                                     RunWorkerChunkTicket({ batch });
                                 }
@@ -868,11 +873,13 @@ namespace JobSystem
                             // 尝试获取 work
                             if (g_workCount.load(std::memory_order_acquire) > 0)
                             {
-                                batch = TryDequeue();
+                                batch = TryDequeueAfterWakePermit();
                             }
                             if (batch)
                             {
                                 g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                                PushTraceEvent(TraceEventType::Wake,
+                                    batch->diagnosticId, -1, 0, 0);
                             }
                             // batch == null 表示 prewake 或 spurious → 进入 hot-spin 检查
                         }
@@ -938,9 +945,9 @@ namespace JobSystem
                 g_chunkWorkersShutdown.store(true, std::memory_order_release);
                 workers.swap(g_chunkWorkers);
             }
-            // 唤醒所有 park 的 worker 检查退出标志
-            g_workerGen.fetch_add(1, std::memory_order_release);
-            g_workerGen.notify_all();
+            // 唤醒所有 park 的 worker 检查退出标志。
+            if (!workers.empty())
+                g_workerWakeSemaphore.release(static_cast<std::ptrdiff_t>(workers.size()));
             for (auto& worker : workers)
             {
                 if (worker.joinable()) worker.join();
@@ -979,10 +986,7 @@ namespace JobSystem
             g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(tokenCount), std::memory_order_relaxed);
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             g_notifiedWorkers.fetch_add(static_cast<uint64_t>(tokenCount), std::memory_order_relaxed);
-            // 递增 workerGen 使 park 的 worker 唤醒（比 condition_variable 轻量，
-            // 无 mutex 参与，直接 WakeByAddressAll on Windows）。
-            g_workerGen.fetch_add(1, std::memory_order_release);
-            g_workerGen.notify_all();
+            g_workerWakeSemaphore.release(tokenCount);
         }
 
         int ResolveChunkWorkerTarget(const ChunkBatchState* batch, int workerCount) noexcept
@@ -1505,16 +1509,15 @@ namespace JobSystem
             auto assist = TryAcquireAssist(_state);
             if (assist.callback && assist.context)
             {
-                constexpr auto kThroughputAssistBudget = std::chrono::microseconds(1500);
-                const auto deadline = std::chrono::steady_clock::now() + kThroughputAssistBudget;
-                do
+                // Complete() 正在等待的是这个 handle：持续认领其尚未开始的
+                // range，直到游标耗尽。之后只需等待已在 worker 上运行的尾部。
+                while (!_state->completed.load(std::memory_order_acquire))
                 {
                     g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
                     if (!assist.callback(assist.context)) break;
                     g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
                     g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                } while (!_state->completed.load(std::memory_order_acquire) &&
-                    std::chrono::steady_clock::now() < deadline);
+                }
             }
         }
 
@@ -1669,10 +1672,8 @@ namespace JobSystem
         g_chunkHotUntilNs.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(hotUntil.time_since_epoch()).count(),
             std::memory_order_release);
-        // 递增 workerGen 使 park 的 worker 从 g_workerGen.wait() 返回，
-        // 然后检查 g_chunkHotUntilNs 进入 hot-spin
-        g_workerGen.fetch_add(1, std::memory_order_release);
-        g_workerGen.notify_all();
+        // Prewake 的语义是让整个池进入 hot-spin，因此这里显式唤醒全部。
+        g_workerWakeSemaphore.release(workerCount);
     }
 
     void AutoPrewakeTaskflowIfNeeded(int length)
@@ -1700,8 +1701,8 @@ namespace JobSystem
             (std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds)).time_since_epoch()
         ).count();
         g_keepWarmUntilNs.store(deadline, std::memory_order_release);
-        g_workerGen.fetch_add(1, std::memory_order_release);
-        g_workerGen.notify_all();
+        // 已 park 的线程需要醒来读取新的保温截止时间。
+        g_workerWakeSemaphore.release(std::max(1, CurrentWorkerCount()));
     }
 
     void Scheduler::SetFrameLowLatencyMode(bool enabled)

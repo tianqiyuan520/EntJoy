@@ -859,8 +859,9 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             int mainClaims = 0;
             var workerClaims = new Dictionary<int, int>();
             var workerFirstExecute = new Dictionary<int, ulong>();
+            var workerCores = new Dictionary<int, HashSet<int>>();
             var begins = new Dictionary<int, NativeTraceEvent>();
-            var durations = new List<(double Us, int Range, int Worker)>();
+            var durations = new List<(double Us, int Range, int Worker, int StartCore, int EndCore)>();
 
             for (int i = 0; i < count; ++i)
             {
@@ -890,6 +891,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         break;
                     case TraceEventType.ExecuteBegin:
                         begins[traceEvent.TileIndex] = traceEvent;
+                        if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? beginCores))
+                        {
+                            beginCores = new HashSet<int>();
+                            workerCores[traceEvent.WorkerIndex] = beginCores;
+                        }
+                        if (traceEvent.ProcessorIndex >= 0)
+                            beginCores.Add(traceEvent.ProcessorIndex);
                         firstExecuteNs = Math.Min(firstExecuteNs, traceEvent.TimestampNs);
                         if (traceEvent.WorkerIndex >= 0 &&
                             (!workerFirstExecute.TryGetValue(traceEvent.WorkerIndex, out ulong workerFirst) ||
@@ -900,11 +908,19 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         break;
                     case TraceEventType.ExecuteEnd:
                         lastExecuteNs = Math.Max(lastExecuteNs, traceEvent.TimestampNs);
+                        if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? endCores))
+                        {
+                            endCores = new HashSet<int>();
+                            workerCores[traceEvent.WorkerIndex] = endCores;
+                        }
+                        if (traceEvent.ProcessorIndex >= 0)
+                            endCores.Add(traceEvent.ProcessorIndex);
                         if (begins.TryGetValue(traceEvent.TileIndex, out NativeTraceEvent begin) &&
                             traceEvent.TimestampNs >= begin.TimestampNs)
                         {
                             durations.Add(((traceEvent.TimestampNs - begin.TimestampNs) / 1000.0,
-                                traceEvent.TileIndex, begin.WorkerIndex));
+                                traceEvent.TileIndex, begin.WorkerIndex,
+                                begin.ProcessorIndex, traceEvent.ProcessorIndex));
                         }
                         break;
                     case TraceEventType.FinalizeBegin:
@@ -924,6 +940,13 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             double rangeMaxUs = durations.Count > 0 ? durations[^1].Us : -1;
             int slowRange = durations.Count > 0 ? durations[^1].Range : -1;
             int slowWorker = durations.Count > 0 ? durations[^1].Worker : -1;
+            int slowStartCore = durations.Count > 0 ? durations[^1].StartCore : -1;
+            int slowEndCore = durations.Count > 0 ? durations[^1].EndCore : -1;
+            int coreMigrations = durations.Count(item =>
+                item.StartCore >= 0 && item.EndCore >= 0 && item.StartCore != item.EndCore);
+            string workerCoreMap = string.Join(';', workerCores
+                .OrderBy(item => item.Key)
+                .Select(item => $"{(item.Key < 0 ? "M" : item.Key)}:{string.Join("/", item.Value.OrderBy(core => core))}"));
             int workerMinClaims = workerClaims.Count > 0 ? workerClaims.Values.Min() : 0;
             int workerMaxClaims = workerClaims.Count > 0 ? workerClaims.Values.Max() : 0;
             double completeEnterUs = publishNs > 0 && completeEnterNs >= publishNs ?
@@ -948,7 +971,9 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 $"firstExecuteUs={firstExecuteUs:F3}|workerStartSpreadUs={workerStartSpreadUs:F3}|" +
                 $"executeSpanUs={executeSpanUs:F3}|rangeMinUs={rangeMinUs:F3}|rangeAvgUs={rangeAvgUs:F3}|" +
                 $"rangeP95Us={rangeP95Us:F3}|rangeMaxUs={rangeMaxUs:F3}|slowRange={slowRange}|" +
-                $"slowWorker={slowWorker}|finalizeGapUs={finalizeGapUs:F3}|completeGapUs={completeGapUs:F3}|" +
+                $"slowWorker={slowWorker}|slowStartCore={slowStartCore}|slowEndCore={slowEndCore}|" +
+                $"coreMigrations={coreMigrations}|workerCoreMap={workerCoreMap}|" +
+                $"finalizeGapUs={finalizeGapUs:F3}|completeGapUs={completeGapUs:F3}|" +
                 $"dropped={dropped}|result={(complete && dropped == 0 ? "OK" : "INCOMPLETE")}");
             NativeJobScheduler.TraceClear();
         }

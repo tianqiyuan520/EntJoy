@@ -658,6 +658,140 @@ namespace
             "traced batch cleanup did not run exactly once");
         JobSystem::TraceClear();
     }
+
+    void TestChunkPublishWakesOnlyTargetWorkers()
+    {
+        constexpr int rangeCount = 16;
+        std::vector<ChunkJobData> chunks(rangeCount);
+        std::atomic<int> executions{ 0 };
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            [](void* raw, const ChunkJobData*, int, int)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            },
+            &executions, nullptr, chunks.data(), rangeCount, {},
+            JobSystem::ChunkScheduleMode::PublishNoAssist, 2, 1);
+        handle.Complete();
+        JobSystem::TraceSetEnabled(false);
+
+        std::vector<JobSystem::TraceEvent> events(8192);
+        const int count = JobSystem::TraceReadAll(events.data(), static_cast<int>(events.size()));
+        int wakes = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            if (static_cast<JobSystem::TraceEventType>(events[i].eventType) ==
+                JobSystem::TraceEventType::Wake)
+                ++wakes;
+        }
+        Require(executions.load(std::memory_order_relaxed) == rangeCount,
+            "targeted wake test missed ranges");
+        Require(wakes == 2, "Chunk publication did not wake exactly workerTarget workers");
+        JobSystem::TraceClear();
+    }
+
+    void TestTraceRecordsProcessorForRangeEvents()
+    {
+        ChunkJobData chunk{};
+        std::atomic<int> executions{ 0 };
+        JobSystem::TraceSetEnabled(false);
+        JobSystem::TraceClear();
+        JobSystem::TraceSetEnabled(true);
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            [](void* raw, const ChunkJobData*, int, int)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+            },
+            &executions, nullptr, &chunk, 1, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 1, 1);
+        handle.Complete();
+        JobSystem::TraceSetEnabled(false);
+
+        std::vector<JobSystem::TraceEvent> events(256);
+        const int count = JobSystem::TraceReadAll(events.data(), static_cast<int>(events.size()));
+        int processorEvents = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            const auto type = static_cast<JobSystem::TraceEventType>(events[i].eventType);
+            if (type != JobSystem::TraceEventType::ExecuteBegin &&
+                type != JobSystem::TraceEventType::ExecuteEnd)
+            {
+                continue;
+            }
+
+            Require(events[i].processorIndex >= 0 && events[i].processorIndex < 32'768,
+                "range trace did not record a valid processor index");
+            ++processorEvents;
+        }
+        Require(executions.load(std::memory_order_relaxed) == 1,
+            "processor trace test did not execute its range");
+        Require(processorEvents == 2,
+            "processor trace test did not observe begin and end events");
+        JobSystem::TraceClear();
+    }
+
+    struct CompletePriorityContext
+    {
+        std::thread::id caller;
+        std::atomic<int> callerRanges{ 0 };
+        std::atomic<bool> workerEntered{ false };
+        std::atomic<bool> releaseWorker{ false };
+    };
+
+    void TestCompleteDrainsTargetBeyondOldBudget()
+    {
+        constexpr int rangeCount = 12;
+        std::vector<ChunkJobData> chunks(rangeCount);
+        CompletePriorityContext context{ std::this_thread::get_id() };
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            [](void* raw, const ChunkJobData*, int, int)
+            {
+                auto& state = *static_cast<CompletePriorityContext*>(raw);
+                if (std::this_thread::get_id() == state.caller)
+                {
+                    state.callerRanges.fetch_add(1, std::memory_order_release);
+                    std::this_thread::sleep_for(std::chrono::microseconds(300));
+                }
+                else
+                {
+                    state.workerEntered.store(true, std::memory_order_release);
+                    state.releaseWorker.wait(false, std::memory_order_acquire);
+                }
+            },
+            &context, nullptr, chunks.data(), rangeCount, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 1, 1);
+
+        for (int retry = 0;
+            retry < 10'000 && !context.workerEntered.load(std::memory_order_acquire);
+            ++retry)
+        {
+            std::this_thread::yield();
+        }
+        Require(context.workerEntered.load(std::memory_order_acquire),
+            "worker did not claim the range reserved by the test");
+
+        std::jthread watchdog([&context]
+        {
+            for (int retry = 0; retry < 20; ++retry)
+            {
+                if (context.callerRanges.load(std::memory_order_acquire) == rangeCount - 1)
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            context.releaseWorker.store(true, std::memory_order_release);
+            context.releaseWorker.notify_all();
+        });
+        handle.Complete();
+        watchdog.join();
+
+        Require(context.callerRanges.load(std::memory_order_acquire) == rangeCount - 1,
+            "Complete stopped claiming target ranges after its old time budget");
+    }
 }
 
 int main()
@@ -672,6 +806,12 @@ int main()
         std::cout << "PASS TraceOverflow\n";
         TestTraceLifecycleOrder();
         std::cout << "PASS TraceLifecycleOrder\n";
+        TestTraceRecordsProcessorForRangeEvents();
+        std::cout << "PASS TraceRecordsProcessorForRangeEvents\n";
+        TestChunkPublishWakesOnlyTargetWorkers();
+        std::cout << "PASS ChunkPublishWakesOnlyTargetWorkers\n";
+        TestCompleteDrainsTargetBeyondOldBudget();
+        std::cout << "PASS CompleteDrainsTargetBeyondOldBudget\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);

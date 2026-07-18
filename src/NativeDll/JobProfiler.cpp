@@ -8,6 +8,8 @@
 
 #ifdef _WIN32
 #include <Windows.h>
+#elif defined(__linux__)
+#include <sched.h>
 #endif
 
 // 全局 Profiler 实例定义
@@ -66,6 +68,20 @@ namespace JobSystem
             return static_cast<int32_t>(::GetCurrentThreadId());
 #else
             return static_cast<int32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+        }
+
+        int32_t CurrentProcessorIndex() noexcept
+        {
+#ifdef _WIN32
+            PROCESSOR_NUMBER processor{};
+            ::GetCurrentProcessorNumberEx(&processor);
+            return static_cast<int32_t>(processor.Group) * 64 +
+                static_cast<int32_t>(processor.Number);
+#elif defined(__linux__)
+            return static_cast<int32_t>(::sched_getcpu());
+#else
+            return -1;
 #endif
         }
     }
@@ -151,6 +167,7 @@ namespace JobSystem
             entityStart,
             entityCount,
             CurrentThreadId(),
+            CurrentProcessorIndex(),
             static_cast<int16_t>(WorkerIndexManager::GetCurrentIndex()),
             static_cast<uint16_t>(type) };
         buffer->publishedCount.store(index + 1, std::memory_order_release);
