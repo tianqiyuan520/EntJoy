@@ -137,6 +137,19 @@ public struct NativeJobSystemStats
     public ulong StealAttempts;
     public ulong StealSuccesses;
     public ulong PermitsReleased;
+    public ulong VictimScans;
+    public ulong StealEmptyExits;
+    public ulong BatchStorageCreated;
+    public ulong BatchStorageReused;
+    public ulong BatchStorageReturned;
+    public ulong BatchStorageDropped;
+    public ulong SubmitToFirstWorkerEwmaNs;
+    public ulong WorkerStartSpreadEwmaNs;
+    public ulong LastTileToTopologyDoneEwmaNs;
+    public ulong CompleteWakeToReturnEwmaNs;
+    public ulong TaskflowBatches;
+    public ulong NativeBatches;
+    public ulong InvalidBackendSelections;
 }
 
 public enum TraceEventType : ushort

@@ -797,6 +797,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/NativeWorkerPool.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
 
             // 所有生成的 .cpp 各自独立编译（按文件名排序）

@@ -814,23 +814,28 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     Array.Sort(sorted);
                     Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
                     NativeJobSystemStats stats = NativeJobScheduler.GetStats();
+                    string backend = stats.NativeBatches > 0 ? "Native" : "Taskflow";
                     Console.WriteLine(
-                        $"  SchedulerCore: batches={stats.PublishedJobs}, participantTasks={stats.FrameTasksSubmitted}, " +
+                        $"  SchedulerCore: backend={backend}, batches={stats.PublishedJobs}, participantTasks={stats.FrameTasksSubmitted}, " +
                         $"workerTarget={stats.WorkerTargetTotal}, workersPeak={stats.ActiveWorkersPeak}, " +
-                        $"uniqueWakes=N/A(Taskflow), permits=N/A(Taskflow), parkWakes=N/A(Taskflow)");
+                        $"taskflowBatches={stats.TaskflowBatches}, nativeBatches={stats.NativeBatches}, " +
+                        $"uniqueWakes=N/A({backend}), permits=N/A({backend}), parkWakes=N/A({backend})");
                     Console.WriteLine(
                         $"  SchedulerWork: tiles={stats.TotalTilesPublished}, local={stats.LocalTiles}, " +
                         $"stolen={stats.StolenTiles}, assist={stats.AssistTiles}, " +
                         $"accounted={stats.LocalTiles + stats.StolenTiles + stats.AssistTiles}, " +
                         $"stealAttempts={stats.StealAttempts}, stealSuccesses={stats.StealSuccesses}, " +
+                        $"victimScans={stats.VictimScans}, stealEmptyExits={stats.StealEmptyExits}, " +
                         $"workerClaims={stats.WorkerClaimedTokens}, assistClaims={stats.MainClaimedTokens}");
                     Console.WriteLine(
-                        $"  SchedulerTime: schedulePublishUs={stats.ScheduleToPublishEwmaNs / 1000.0:F3}, " +
-                        $"firstMainUs={stats.PublishToFirstMainClaimEwmaNs / 1000.0:F3}, " +
-                        $"firstWorkerUs={stats.PublishToFirstWorkerClaimEwmaNs / 1000.0:F3}, " +
-                        $"completionUs={stats.PublishToCompletionEwmaNs / 1000.0:F3}, " +
-                        $"queueLockUs={stats.QueueLockWaitEwmaNs / 1000.0:F3}, " +
-                        $"completionPerRangeUs={stats.PerRangeExecEwmaNs / 1000.0:F3}, " +
+                        $"  SchedulerStorage: created={stats.BatchStorageCreated}, reused={stats.BatchStorageReused}, " +
+                        $"returned={stats.BatchStorageReturned}, dropped={stats.BatchStorageDropped}");
+                    Console.WriteLine(
+                        $"  SchedulerTime: submitFirstWorkerUs={stats.SubmitToFirstWorkerEwmaNs / 1000.0:F3}, " +
+                        $"workerStartSpreadUs={stats.WorkerStartSpreadEwmaNs / 1000.0:F3}, " +
+                        $"lastTileTopologyUs={stats.LastTileToTopologyDoneEwmaNs / 1000.0:F3}, " +
+                        $"completeWakeReturnUs={stats.CompleteWakeToReturnEwmaNs / 1000.0:F3}, " +
+                        $"schedulePublish=N/A({backend}), firstMain=N/A({backend}), " +
                         $"assistTilePct={stats.AssistExecPctEwma}%, " +
                         $"waitFallbacks={stats.WaitFallbacks}");
                 }
