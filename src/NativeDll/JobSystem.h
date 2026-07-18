@@ -144,6 +144,10 @@ namespace JobSystem {
         uint64_t batchStorageReused;
         uint64_t batchStorageReturned;
         uint64_t batchStorageDropped;
+        uint64_t submitToFirstWorkerEwmaNs;
+        uint64_t workerStartSpreadEwmaNs;
+        uint64_t lastTileToTopologyDoneEwmaNs;
+        uint64_t completeWakeToReturnEwmaNs;
     };
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
