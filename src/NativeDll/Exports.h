@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <cstdint>
+
 #ifdef _WIN32
 #ifdef JOB_SYSTEM_EXPORT
 #define JOB_API __declspec(dllexport)
@@ -16,6 +18,7 @@ struct EntityBatchData;
 struct ProfilerEntry;
 struct JobSystemTuningNative;
 struct JobSystemStatsNative;
+namespace JobSystem { struct TraceEvent; }
 
 extern "C" {
 
@@ -169,5 +172,11 @@ extern "C" {
 
     // 清空 Profiler 缓冲
     JOB_API void JobProfiler_Clear();
+
+    JOB_API void Trace_SetEnabled(int enabled);
+    JOB_API int Trace_IsEnabled();
+    JOB_API int Trace_ReadAll(JobSystem::TraceEvent* buffer, int maxCount);
+    JOB_API uint64_t Trace_DroppedEvents();
+    JOB_API void Trace_Clear();
 
 } // extern "C"

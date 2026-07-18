@@ -49,6 +49,7 @@ namespace JobSystem {
         std::atomic<uint32_t> refCount{ 1 };
         std::atomic<bool> completed{ false };
         std::atomic<int> waiterCount{ 0 };
+        std::atomic<uint64_t> diagnosticBatchId{ 0 };
 
         // 延续任务相关（保留但极少使用）
         std::function<void()> inlineContinuation;

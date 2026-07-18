@@ -73,6 +73,19 @@ public static class JobExtensions
             NativeJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep));
     }
 
+    /// <summary>并行调度 IJobChunk，并限制参与该批次的 worker 数量。</summary>
+    public static JobHandle ScheduleWithWorkerCap<T>(this T job, QueryBuilder query,
+        int workerCap, JobHandle dependsOn = default) where T : struct, IJobChunk
+    {
+        var world = World.DefaultWorld;
+        if (world == null)
+            throw new InvalidOperationException("No active World found.");
+
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        return new JobHandle(NativeJobScheduler.ScheduleChunkWithWorkerCap(
+            ref job, world.EntityManager, query, workerCap, nativeDep));
+    }
+
     // ======================== ThreadCounter 重载 ========================
 
     /// <summary>调度 IJobParallelFor（带 ThreadCounter，调试用）</summary>
