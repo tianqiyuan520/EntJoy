@@ -541,6 +541,14 @@ namespace
         Require(stats.batchStorageReused == 0, "batch-storage reuse stats did not reset");
         Require(stats.batchStorageReturned == 0, "batch-storage return stats did not reset");
         Require(stats.batchStorageDropped == 0, "batch-storage drop stats did not reset");
+        Require(stats.submitToFirstWorkerEwmaNs == 0,
+            "submit-to-first-worker stats did not reset");
+        Require(stats.workerStartSpreadEwmaNs == 0,
+            "worker-start-spread stats did not reset");
+        Require(stats.lastTileToTopologyDoneEwmaNs == 0,
+            "last-tile-to-topology stats did not reset");
+        Require(stats.completeWakeToReturnEwmaNs == 0,
+            "complete-wake-to-return stats did not reset");
     }
 
 #ifdef _WIN32
@@ -1199,6 +1207,36 @@ namespace
             "batch storage acquire/return accounting did not reconcile");
     }
 
+    void TestBoundaryTimingDiagnostics()
+    {
+        constexpr int itemCount = 100;
+        std::vector<ChunkJobData> chunks(itemCount);
+        std::atomic<int> callbacks{ 0 };
+
+        JobSystem::ResetStatsSnapshot();
+        auto handle = JobSystem::Scheduler::ScheduleChunks(
+            [](void* raw, const ChunkJobData*)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(
+                    1, std::memory_order_relaxed);
+                std::this_thread::yield();
+            },
+            &callbacks, nullptr, chunks.data(), itemCount, {},
+            JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+        handle.Complete();
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        Require(callbacks.load(std::memory_order_relaxed) == itemCount,
+            "timed batch missed or duplicated callbacks");
+        Require(stats.submitToFirstWorkerEwmaNs > 0,
+            "submit-to-first-worker boundary was not measured");
+        Require(stats.lastTileToTopologyDoneEwmaNs > 0,
+            "last-tile-to-topology boundary was not measured");
+        Require(stats.workerStartSpreadEwmaNs < 10'000'000'000ull,
+            "worker-start-spread timing underflowed");
+    }
+
     void TestWorkerCapParameterized()
     {
         const int workerCount = JobSystem::CurrentWorkerCount();
@@ -1334,6 +1372,8 @@ int main()
         std::cout << "PASS BoundedHeaviestVictimStealing\n";
         TestBatchStorageIsReturnedAndReused();
         std::cout << "PASS BatchStorageIsReturnedAndReused\n";
+        TestBoundaryTimingDiagnostics();
+        std::cout << "PASS BoundaryTimingDiagnostics\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);

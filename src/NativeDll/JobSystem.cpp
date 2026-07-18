@@ -70,6 +70,10 @@ namespace JobSystem
     std::atomic<uint64_t> g_batchStorageReused{ 0 };
     std::atomic<uint64_t> g_batchStorageReturned{ 0 };
     std::atomic<uint64_t> g_batchStorageDropped{ 0 };
+    std::atomic<uint64_t> g_submitToFirstWorkerEwmaNs{ 0 };
+    std::atomic<uint64_t> g_workerStartSpreadEwmaNs{ 0 };
+    std::atomic<uint64_t> g_lastTileToTopologyDoneEwmaNs{ 0 };
+    std::atomic<uint64_t> g_completeWakeToReturnEwmaNs{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
@@ -89,6 +93,12 @@ namespace JobSystem
                     : current - (current - sample) / 8);
             if (target.compare_exchange_weak(current, next, std::memory_order_relaxed)) return;
         }
+    }
+
+    static uint64_t MonotonicNowNs() noexcept
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept
@@ -126,6 +136,10 @@ namespace JobSystem
         stats->batchStorageReused = g_batchStorageReused.load(std::memory_order_relaxed);
         stats->batchStorageReturned = g_batchStorageReturned.load(std::memory_order_relaxed);
         stats->batchStorageDropped = g_batchStorageDropped.load(std::memory_order_relaxed);
+        stats->submitToFirstWorkerEwmaNs = g_submitToFirstWorkerEwmaNs.load(std::memory_order_relaxed);
+        stats->workerStartSpreadEwmaNs = g_workerStartSpreadEwmaNs.load(std::memory_order_relaxed);
+        stats->lastTileToTopologyDoneEwmaNs = g_lastTileToTopologyDoneEwmaNs.load(std::memory_order_relaxed);
+        stats->completeWakeToReturnEwmaNs = g_completeWakeToReturnEwmaNs.load(std::memory_order_relaxed);
 
         const uint64_t workerTiles =
             g_workerExecutedRanges.load(std::memory_order_relaxed);
@@ -190,6 +204,10 @@ namespace JobSystem
         g_batchStorageReused.store(0, std::memory_order_relaxed);
         g_batchStorageReturned.store(0, std::memory_order_relaxed);
         g_batchStorageDropped.store(0, std::memory_order_relaxed);
+        g_submitToFirstWorkerEwmaNs.store(0, std::memory_order_relaxed);
+        g_workerStartSpreadEwmaNs.store(0, std::memory_order_relaxed);
+        g_lastTileToTopologyDoneEwmaNs.store(0, std::memory_order_relaxed);
+        g_completeWakeToReturnEwmaNs.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
@@ -438,6 +456,13 @@ namespace JobSystem
         LocalPartition* partitions{ nullptr };
         uint32_t partitionCount{ 0 };
         std::atomic<uint32_t> completedTiles{ 0 };
+        std::atomic<uint32_t> workerSlotsEntered{ 0 };
+
+        std::atomic<uint64_t> publishedAt{ 0 };
+        std::atomic<uint64_t> firstWorkerAt{ 0 };
+        std::atomic<uint64_t> lastWorkerAt{ 0 };
+        std::atomic<uint64_t> lastTileAt{ 0 };
+        std::atomic<uint64_t> topologyDoneAt{ 0 };
 
         std::atomic<int> completedRanges{ 0 };
         std::atomic<bool> finalized{ false };
@@ -608,7 +633,9 @@ namespace JobSystem
         }
         PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
             index, index * batch->rangeSize, batch->rangeSize);
-        batch->completedRanges.fetch_add(1, std::memory_order_acq_rel);
+        if (batch->completedRanges.fetch_add(1, std::memory_order_acq_rel) + 1 ==
+            batch->rangeCount)
+            batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
         return true;
     }
 
@@ -665,8 +692,21 @@ namespace JobSystem
             static_cast<int>(tileIndex),
             static_cast<int>(tile.firstItem),
             static_cast<int>(tile.itemCount));
-        batch->completedTiles.fetch_add(1, std::memory_order_acq_rel);
+        if (batch->completedTiles.fetch_add(1, std::memory_order_acq_rel) + 1 ==
+            batch->tileCount)
+            batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
         return true;
+    }
+
+    static void RecordWorkerEntry(BatchState* batch) noexcept
+    {
+        const uint64_t now = MonotonicNowNs();
+        uint64_t empty = 0;
+        batch->firstWorkerAt.compare_exchange_strong(
+            empty, now, std::memory_order_acq_rel, std::memory_order_relaxed);
+        if (batch->workerSlotsEntered.fetch_add(1, std::memory_order_acq_rel) + 1 ==
+            batch->partitionCount)
+            batch->lastWorkerAt.store(now, std::memory_order_release);
     }
 
     // Worker loop for partition mode:
@@ -675,6 +715,7 @@ namespace JobSystem
     static void WorkerPartitionLoop(BatchState* batch, uint32_t slot) noexcept
     {
         if (!batch || slot >= batch->partitionCount || batch->tileCount == 0) return;
+        RecordWorkerEntry(batch);
 
         const uint64_t active =
             g_activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -745,6 +786,25 @@ namespace JobSystem
         return false;
     }
 
+    static void RecordTopologyCompletion(BatchState* batch) noexcept
+    {
+        const uint64_t now = MonotonicNowNs();
+        batch->topologyDoneAt.store(now, std::memory_order_release);
+        const uint64_t published = batch->publishedAt.load(std::memory_order_acquire);
+        const uint64_t firstWorker = batch->firstWorkerAt.load(std::memory_order_acquire);
+        const uint64_t lastWorker = batch->lastWorkerAt.load(std::memory_order_acquire);
+        const uint64_t lastTile = batch->lastTileAt.load(std::memory_order_acquire);
+        if (published != 0 && firstWorker >= published)
+            UpdateUnsignedEwma(g_submitToFirstWorkerEwmaNs,
+                std::max<uint64_t>(1, firstWorker - published));
+        if (firstWorker != 0 && lastWorker >= firstWorker)
+            UpdateUnsignedEwma(g_workerStartSpreadEwmaNs,
+                std::max<uint64_t>(1, lastWorker - firstWorker));
+        if (lastTile != 0 && now >= lastTile)
+            UpdateUnsignedEwma(g_lastTileToTopologyDoneEwmaNs,
+                std::max<uint64_t>(1, now - lastTile));
+    }
+
     static void ReleaseBatch(BatchState* batch) noexcept
     {
         if (!batch) return;
@@ -781,9 +841,12 @@ namespace JobSystem
             // recorded before CompleteState's notify_all() wakes a waiter
             // that could race with TraceSetEnabled(false).
             PushTraceEvent(TraceEventType::HandleComplete, diagnosticId, -1, 0, 0);
+            // Completion is the public ownership boundary. Return scheduler
+            // metadata before publishing completed=true so a caller that
+            // leaves Complete() can immediately observe reconciled pool stats.
+            ReleaseBatch(batch);
             CompleteState(state);
         }
-        ReleaseBatch(batch);
     }
 
     // The last assist reader only requests finalization. Batch memory remains
@@ -825,6 +888,7 @@ namespace JobSystem
                 taskflow->emplace([batch]() {
                     if (WorkerIndexManager::GetCurrentIndex() < 0)
                         WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                    RecordWorkerEntry(batch);
                     while (TryExecuteOneRange(batch, false)) {}
                 });
             }
@@ -851,7 +915,9 @@ namespace JobSystem
         }
 
         AcquireState(state);
+        batch->publishedAt.store(MonotonicNowNs(), std::memory_order_release);
         executor->run(*taskflow, [taskflow, state, batch]() mutable {
+            RecordTopologyCompletion(batch);
             // Clear assist to prevent new readers from attaching.
             state->assistCallback.store(nullptr, std::memory_order_release);
 
@@ -1039,6 +1105,12 @@ namespace JobSystem
         g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
         while (!_state->completed.load(std::memory_order_acquire))
             _state->completed.wait(false, std::memory_order_acquire);
+        const uint64_t completeWakeAt = MonotonicNowNs();
+        const uint64_t completeReturnAt = MonotonicNowNs();
+        if (completeReturnAt >= completeWakeAt)
+            UpdateUnsignedEwma(
+                g_completeWakeToReturnEwmaNs,
+                std::max<uint64_t>(1, completeReturnAt - completeWakeAt));
     }
 
     bool JobHandle::IsCompleted() const noexcept {
