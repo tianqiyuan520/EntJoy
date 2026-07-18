@@ -63,6 +63,8 @@ namespace JobSystem
     std::atomic<uint64_t> g_assistTiles{ 0 };
     std::atomic<uint64_t> g_stealAttempts{ 0 };
     std::atomic<uint64_t> g_stealSuccesses{ 0 };
+    std::atomic<uint64_t> g_victimScans{ 0 };
+    std::atomic<uint64_t> g_stealEmptyExits{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
@@ -113,6 +115,8 @@ namespace JobSystem
         stats->stealAttempts = g_stealAttempts.load(std::memory_order_relaxed);
         stats->stealSuccesses = g_stealSuccesses.load(std::memory_order_relaxed);
         stats->permitsReleased = 0;
+        stats->victimScans = g_victimScans.load(std::memory_order_relaxed);
+        stats->stealEmptyExits = g_stealEmptyExits.load(std::memory_order_relaxed);
 
         const uint64_t workerTiles =
             g_workerExecutedRanges.load(std::memory_order_relaxed);
@@ -171,6 +175,8 @@ namespace JobSystem
         g_assistTiles.store(0, std::memory_order_relaxed);
         g_stealAttempts.store(0, std::memory_order_relaxed);
         g_stealSuccesses.store(0, std::memory_order_relaxed);
+        g_victimScans.store(0, std::memory_order_relaxed);
+        g_stealEmptyExits.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
     }
@@ -426,6 +432,37 @@ namespace JobSystem
         uint64_t diagnosticId{ 0 };
     };
 
+    struct VictimSnapshot
+    {
+        uint32_t index{ ~0u };
+        uint32_t remaining{ 0 };
+    };
+
+    static VictimSnapshot SelectHeaviestVictim(
+        BatchState* batch,
+        uint32_t excludedSlot,
+        uint32_t minimumRemaining) noexcept
+    {
+        VictimSnapshot best{};
+        if (!batch || !batch->partitions) return best;
+
+        for (uint32_t slot = 0; slot < batch->partitionCount; ++slot)
+        {
+            if (slot == excludedSlot) continue;
+            g_victimScans.fetch_add(1, std::memory_order_relaxed);
+            auto& part = batch->partitions[slot];
+            const uint32_t front = part.front.load(std::memory_order_acquire);
+            const uint32_t back = part.back.load(std::memory_order_acquire);
+            const uint32_t remaining = back > front ? back - front : 0;
+            if (remaining >= minimumRemaining && remaining > best.remaining)
+            {
+                best.index = slot;
+                best.remaining = remaining;
+            }
+        }
+        return best;
+    }
+
     static bool TryExecuteOneRange(BatchState* batch, bool assist) noexcept
     {
         if (!batch) return false;
@@ -532,20 +569,28 @@ namespace JobSystem
             TryExecuteOneTile(batch, tileIdx, TileExecutionSource::WorkerLocal);
         }
 
-        // Phase 2: Half-steal from victims
-        for (uint32_t v = 0; v < batch->partitionCount; v++)
+        // Phase 2: repeatedly target only the heaviest visible victim. A
+        // failed CAS gets one fresh selection instead of an all-victim loop.
+        uint32_t consecutiveFailures = 0;
+        while (consecutiveFailures < 2)
         {
-            uint32_t victimIdx = (slot + 1 + v) % batch->partitionCount;
-            if (victimIdx == slot) continue;
+            const VictimSnapshot victim = SelectHeaviestVictim(batch, slot, 2);
+            if (victim.index == ~0u)
+            {
+                g_stealEmptyExits.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
 
             uint32_t stealStart, stealEnd;
-            while (TryStealHalf(batch->partitions[victimIdx], stealStart, stealEnd))
+            if (!TryStealHalf(batch->partitions[victim.index], stealStart, stealEnd))
             {
-                for (uint32_t t = stealStart; t < stealEnd; t++)
-                {
-                    TryExecuteOneTile(batch, t, TileExecutionSource::WorkerStolen);
-                }
+                ++consecutiveFailures;
+                continue;
             }
+
+            consecutiveFailures = 0;
+            for (uint32_t t = stealStart; t < stealEnd; t++)
+                TryExecuteOneTile(batch, t, TileExecutionSource::WorkerStolen);
         }
         g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -553,22 +598,13 @@ namespace JobSystem
     static bool AssistExecuteOneTile(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
-        // In partition mode, assist by finding partition with most remaining
-        uint32_t bestVictim = ~0u;
-        uint32_t bestRemaining = 0;
-        for (uint32_t p = 0; p < batch->partitionCount; p++)
-        {
-            auto& part = batch->partitions[p];
-            uint32_t f = part.front.load(std::memory_order_acquire);
-            uint32_t b = part.back.load(std::memory_order_acquire);
-            uint32_t rem = b > f ? b - f : 0;
-            if (rem > bestRemaining) { bestRemaining = rem; bestVictim = p; }
-        }
-        if (bestVictim == ~0u || bestRemaining == 0) return false;
+        const VictimSnapshot victim = SelectHeaviestVictim(batch, ~0u, 1);
+        if (victim.index == ~0u) return false;
 
         // Try half-steal first (best for load balance)
         uint32_t ss, se;
-        if (TryStealHalf(batch->partitions[bestVictim], ss, se))
+        if (victim.remaining > 1 &&
+            TryStealHalf(batch->partitions[victim.index], ss, se))
         {
             for (uint32_t t = ss; t < se; t++)
                 TryExecuteOneTile(batch, t, TileExecutionSource::Assist);
@@ -578,7 +614,7 @@ namespace JobSystem
         // Fallback: single remaining tile — take it from front via TryTakeLocal.
         // This handles the case where TryStealHalf cannot split remaining=1.
         uint32_t tileIdx;
-        if (TryTakeLocal(batch->partitions[bestVictim], tileIdx))
+        if (TryTakeLocal(batch->partitions[victim.index], tileIdx))
         {
             TryExecuteOneTile(batch, tileIdx, TileExecutionSource::Assist);
             return true;

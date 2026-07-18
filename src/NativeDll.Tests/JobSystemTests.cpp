@@ -1126,6 +1126,44 @@ namespace
         }
     }
 
+    void TestBoundedHeaviestVictimStealing()
+    {
+        constexpr int itemCounts[] = { 1, 2, 7, 8, 31, 32, 100 };
+        for (const int itemCount : itemCounts)
+        {
+            std::vector<ChunkJobData> chunks(static_cast<size_t>(itemCount));
+            std::vector<std::atomic<int>> hits(static_cast<size_t>(itemCount));
+            struct Context
+            {
+                const ChunkJobData* base;
+                std::vector<std::atomic<int>>* hits;
+            } context{ chunks.data(), &hits };
+
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData* chunk)
+                {
+                    auto& state = *static_cast<Context*>(raw);
+                    const auto index = static_cast<size_t>(chunk - state.base);
+                    (*state.hits)[index].fetch_add(1, std::memory_order_relaxed);
+                },
+                &context, nullptr, chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
+            handle.Complete();
+
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "bounded stealing missed or duplicated a tile");
+
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            RequireTileAccounting(stats, static_cast<uint64_t>(itemCount),
+                "bounded stealing tile accounting did not reconcile");
+            Require(stats.victimScans >= stats.stealAttempts,
+                "victim scan count was lower than actual steal attempts");
+        }
+    }
+
     void TestWorkerCapParameterized()
     {
         const int workerCount = JobSystem::CurrentWorkerCount();
@@ -1257,6 +1295,8 @@ int main()
         std::cout << "PASS StatsClassifyWorkerAndAssistExactlyOnce\n";
         TestUnifiedTileAccountingForAllChunkEntrypoints();
         std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
+        TestBoundedHeaviestVictimStealing();
+        std::cout << "PASS BoundedHeaviestVictimStealing\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
         TestExplicitBatchSize(1);

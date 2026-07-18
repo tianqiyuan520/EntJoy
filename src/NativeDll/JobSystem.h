@@ -138,6 +138,8 @@ namespace JobSystem {
         uint64_t stealAttempts;
         uint64_t stealSuccesses;
         uint64_t permitsReleased;
+        uint64_t victimScans;
+        uint64_t stealEmptyExits;
     };
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
