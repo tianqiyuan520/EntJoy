@@ -20,6 +20,11 @@ constexpr size_t hardware_destructive_interference_size = 64;
 
 namespace JobSystem {
 
+    enum class ExecutionBackend : uint8_t {
+        Taskflow,
+        NativeWorkerPoolExperimental
+    };
+
     enum class ChunkScheduleMode : int {
         PublishNoAssist = 0,
         PublishAssist = 1,
@@ -148,6 +153,9 @@ namespace JobSystem {
         uint64_t workerStartSpreadEwmaNs;
         uint64_t lastTileToTopologyDoneEwmaNs;
         uint64_t completeWakeToReturnEwmaNs;
+        uint64_t taskflowBatches;
+        uint64_t nativeBatches;
+        uint64_t invalidBackendSelections;
     };
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
