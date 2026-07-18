@@ -42,6 +42,7 @@ src/Godot/.godot/
 
 # Roslyn analyzer generated
 *.g.cs
+nul
 
 # Only public documentation belongs to this repository.
 /docs/*

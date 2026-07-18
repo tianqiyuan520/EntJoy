@@ -311,6 +311,14 @@ extern "C"
         stats->perRangeExecEwmaNs = snapshot.perRangeExecEwmaNs;
         stats->assistExecPctEwma = snapshot.assistExecPctEwma;
         stats->completionOverheadUs = snapshot.completionOverheadUs;
+        stats->workerTargetTotal = snapshot.workerTargetTotal;
+        stats->totalTilesPublished = snapshot.totalTilesPublished;
+        stats->localTiles = snapshot.localTiles;
+        stats->stolenTiles = snapshot.stolenTiles;
+        stats->assistTiles = snapshot.assistTiles;
+        stats->stealAttempts = snapshot.stealAttempts;
+        stats->stealSuccesses = snapshot.stealSuccesses;
+        stats->permitsReleased = snapshot.permitsReleased;
     }
 
     void JobSystem_ResetStats()

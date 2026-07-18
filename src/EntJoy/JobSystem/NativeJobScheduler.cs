@@ -128,6 +128,15 @@ public struct NativeJobSystemStats
     public ulong PerRangeExecEwmaNs;       // 每个 range 平均执行时间 (ns, EWMA)
     public ulong AssistExecPctEwma;        // assist 有效率 (0~100)
     public ulong CompletionOverheadUs;     // 调度/等待开销 = completionUs - perRangeExecUs
+    // Appended Tile/partition fields; keep order in sync with Exports.h.
+    public ulong WorkerTargetTotal;
+    public ulong TotalTilesPublished;
+    public ulong LocalTiles;
+    public ulong StolenTiles;
+    public ulong AssistTiles;
+    public ulong StealAttempts;
+    public ulong StealSuccesses;
+    public ulong PermitsReleased;
 }
 
 public enum TraceEventType : ushort
@@ -147,6 +156,7 @@ public enum TraceEventType : ushort
 public struct NativeTraceEvent
 {
     public ulong TimestampNs;
+    public ulong Sequence;
     public ulong BatchId;
     public int TileIndex;
     public int EntityStart;

@@ -815,16 +815,15 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
                     NativeJobSystemStats stats = NativeJobScheduler.GetStats();
                     Console.WriteLine(
-                        $"  SchedulerCore: batches={stats.PublishedJobs}, ticketsSubmitted={stats.FrameTasksSubmitted}, " +
-                        $"notified={stats.NotifiedWorkers}, " +
-                        $"workersPeak={stats.ActiveWorkersPeak}, queuePeak={stats.FrameQueueDepthPeak}, " +
-                        $"parkWakes={stats.ParkWakeCount}, hotHits={stats.HotSpinHits}, coldBatches={stats.ColdBatches}");
+                        $"  SchedulerCore: batches={stats.PublishedJobs}, participantTasks={stats.FrameTasksSubmitted}, " +
+                        $"workerTarget={stats.WorkerTargetTotal}, workersPeak={stats.ActiveWorkersPeak}, " +
+                        $"uniqueWakes=N/A(Taskflow), permits=N/A(Taskflow), parkWakes=N/A(Taskflow)");
                     Console.WriteLine(
-                        $"  SchedulerWork: directAssist={stats.DirectAssistClaims}, assistAttempts={stats.AssistAttempts}, " +
-                        $"assistExecuted={stats.AssistExecuted}, exhaustedTickets={stats.ExhaustedTickets}, " +
-                        $"mainClaims={stats.MainClaimedTokens}, workerClaims={stats.WorkerClaimedTokens}, " +
-                        $"workerRanges={stats.WorkerExecutedRanges}, mainRanges={stats.MainExecutedRanges}, " +
-                        $"wakeEwmaUs={stats.WakeLatencyEwmaNs / 1000.0:F3}");
+                        $"  SchedulerWork: tiles={stats.TotalTilesPublished}, local={stats.LocalTiles}, " +
+                        $"stolen={stats.StolenTiles}, assist={stats.AssistTiles}, " +
+                        $"accounted={stats.LocalTiles + stats.StolenTiles + stats.AssistTiles}, " +
+                        $"stealAttempts={stats.StealAttempts}, stealSuccesses={stats.StealSuccesses}, " +
+                        $"workerClaims={stats.WorkerClaimedTokens}, assistClaims={stats.MainClaimedTokens}");
                     Console.WriteLine(
                         $"  SchedulerTime: schedulePublishUs={stats.ScheduleToPublishEwmaNs / 1000.0:F3}, " +
                         $"firstMainUs={stats.PublishToFirstMainClaimEwmaNs / 1000.0:F3}, " +
@@ -832,7 +831,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         $"completionUs={stats.PublishToCompletionEwmaNs / 1000.0:F3}, " +
                         $"queueLockUs={stats.QueueLockWaitEwmaNs / 1000.0:F3}, " +
                         $"completionPerRangeUs={stats.PerRangeExecEwmaNs / 1000.0:F3}, " +
-                        $"assistPct={stats.AssistExecPctEwma}%, " +
+                        $"assistTilePct={stats.AssistExecPctEwma}%, " +
                         $"waitFallbacks={stats.WaitFallbacks}");
                 }
                 else

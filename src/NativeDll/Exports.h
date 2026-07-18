@@ -105,6 +105,15 @@ extern "C" {
         unsigned long long perRangeExecEwmaNs;
         unsigned long long assistExecPctEwma;
         unsigned long long completionOverheadUs;
+        // Appended Tile/partition fields; keep order in sync with C#.
+        unsigned long long workerTargetTotal;
+        unsigned long long totalTilesPublished;
+        unsigned long long localTiles;
+        unsigned long long stolenTiles;
+        unsigned long long assistTiles;
+        unsigned long long stealAttempts;
+        unsigned long long stealSuccesses;
+        unsigned long long permitsReleased;
     } JobSystemStatsNative;
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
