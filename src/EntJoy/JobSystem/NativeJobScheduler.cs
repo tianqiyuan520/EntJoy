@@ -152,6 +152,7 @@ public struct NativeTraceEvent
     public int EntityStart;
     public int EntityCount;
     public int ThreadId;
+    public int ProcessorIndex;
     public short WorkerIndex;
     public TraceEventType EventType;
 }

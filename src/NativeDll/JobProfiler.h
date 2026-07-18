@@ -29,6 +29,7 @@ namespace JobSystem
         int32_t entityStart;
         int32_t entityCount;
         int32_t threadId;
+        int32_t processorIndex;
         int16_t workerIndex;
         uint16_t eventType;
     };
