@@ -332,11 +332,56 @@ extern "C"
         stats->taskflowBatches = snapshot.taskflowBatches;
         stats->nativeBatches = snapshot.nativeBatches;
         stats->invalidBackendSelections = snapshot.invalidBackendSelections;
+        stats->timingSampleCount = snapshot.timingSampleCount;
+        stats->timingSamplesDropped = snapshot.timingSamplesDropped;
+        stats->batchTotalP50Ns = snapshot.batchTotalP50Ns;
+        stats->batchTotalP95Ns = snapshot.batchTotalP95Ns;
+        stats->batchTotalP99Ns = snapshot.batchTotalP99Ns;
+        stats->batchTotalMaxNs = snapshot.batchTotalMaxNs;
+        stats->submitToFirstWorkerP50Ns = snapshot.submitToFirstWorkerP50Ns;
+        stats->submitToFirstWorkerP95Ns = snapshot.submitToFirstWorkerP95Ns;
+        stats->submitToFirstWorkerP99Ns = snapshot.submitToFirstWorkerP99Ns;
+        stats->submitToFirstWorkerMaxNs = snapshot.submitToFirstWorkerMaxNs;
+        stats->workerStartSpreadP50Ns = snapshot.workerStartSpreadP50Ns;
+        stats->workerStartSpreadP95Ns = snapshot.workerStartSpreadP95Ns;
+        stats->workerStartSpreadP99Ns = snapshot.workerStartSpreadP99Ns;
+        stats->workerStartSpreadMaxNs = snapshot.workerStartSpreadMaxNs;
+        stats->executionSpanP50Ns = snapshot.executionSpanP50Ns;
+        stats->executionSpanP95Ns = snapshot.executionSpanP95Ns;
+        stats->executionSpanP99Ns = snapshot.executionSpanP99Ns;
+        stats->executionSpanMaxNs = snapshot.executionSpanMaxNs;
+        stats->maxRangeP50Ns = snapshot.maxRangeP50Ns;
+        stats->maxRangeP95Ns = snapshot.maxRangeP95Ns;
+        stats->maxRangeP99Ns = snapshot.maxRangeP99Ns;
+        stats->maxRangeMaxNs = snapshot.maxRangeMaxNs;
+        stats->slowBatchId = snapshot.slowBatchId;
+        stats->slowBatchTotalNs = snapshot.slowBatchTotalNs;
+        stats->slowSubmitToFirstWorkerNs = snapshot.slowSubmitToFirstWorkerNs;
+        stats->slowWorkerStartSpreadNs = snapshot.slowWorkerStartSpreadNs;
+        stats->slowExecutionSpanNs = snapshot.slowExecutionSpanNs;
+        stats->slowMaxRangeNs = snapshot.slowMaxRangeNs;
+        stats->slowCoreMigrations = snapshot.slowCoreMigrations;
+        stats->slowAssistTiles = snapshot.slowAssistTiles;
+        stats->slowRangeThreadCpuNs = snapshot.slowRangeThreadCpuNs;
+        stats->slowRangeThreadCycles = snapshot.slowRangeThreadCycles;
+        stats->slowBatchMinRangeThreadCycles = snapshot.slowBatchMinRangeThreadCycles;
+        stats->slowBatchAverageRangeThreadCycles = snapshot.slowBatchAverageRangeThreadCycles;
+        stats->slowRangeIndex = snapshot.slowRangeIndex;
+        stats->slowRangeWorker = snapshot.slowRangeWorker;
+        stats->slowRangeStartLogicalCore = snapshot.slowRangeStartLogicalCore;
+        stats->slowRangeEndLogicalCore = snapshot.slowRangeEndLogicalCore;
+        stats->slowRangeStartPhysicalCore = snapshot.slowRangeStartPhysicalCore;
+        stats->slowRangeEndPhysicalCore = snapshot.slowRangeEndPhysicalCore;
     }
 
     void JobSystem_ResetStats()
     {
         JobSystem::ResetStatsSnapshot();
+    }
+
+    void JobSystem_SetTimingDiagnostics(int enabled)
+    {
+        JobSystem::SetTimingDiagnosticsEnabled(enabled != 0);
     }
 
     // ======================== Profiler API ========================

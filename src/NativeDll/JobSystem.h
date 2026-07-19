@@ -156,10 +156,54 @@ namespace JobSystem {
         uint64_t taskflowBatches;
         uint64_t nativeBatches;
         uint64_t invalidBackendSelections;
+
+        // Exact per-batch timing distribution, reset by ResetStatsSnapshot().
+        // Fields are appended to preserve the existing native/managed ABI prefix.
+        uint64_t timingSampleCount;
+        uint64_t timingSamplesDropped;
+        uint64_t batchTotalP50Ns;
+        uint64_t batchTotalP95Ns;
+        uint64_t batchTotalP99Ns;
+        uint64_t batchTotalMaxNs;
+        uint64_t submitToFirstWorkerP50Ns;
+        uint64_t submitToFirstWorkerP95Ns;
+        uint64_t submitToFirstWorkerP99Ns;
+        uint64_t submitToFirstWorkerMaxNs;
+        uint64_t workerStartSpreadP50Ns;
+        uint64_t workerStartSpreadP95Ns;
+        uint64_t workerStartSpreadP99Ns;
+        uint64_t workerStartSpreadMaxNs;
+        uint64_t executionSpanP50Ns;
+        uint64_t executionSpanP95Ns;
+        uint64_t executionSpanP99Ns;
+        uint64_t executionSpanMaxNs;
+        uint64_t maxRangeP50Ns;
+        uint64_t maxRangeP95Ns;
+        uint64_t maxRangeP99Ns;
+        uint64_t maxRangeMaxNs;
+        uint64_t slowBatchId;
+        uint64_t slowBatchTotalNs;
+        uint64_t slowSubmitToFirstWorkerNs;
+        uint64_t slowWorkerStartSpreadNs;
+        uint64_t slowExecutionSpanNs;
+        uint64_t slowMaxRangeNs;
+        uint64_t slowCoreMigrations;
+        uint64_t slowAssistTiles;
+        uint64_t slowRangeThreadCpuNs;
+        uint64_t slowRangeThreadCycles;
+        uint64_t slowBatchMinRangeThreadCycles;
+        uint64_t slowBatchAverageRangeThreadCycles;
+        int32_t slowRangeIndex;
+        int32_t slowRangeWorker;
+        int32_t slowRangeStartLogicalCore;
+        int32_t slowRangeEndLogicalCore;
+        int32_t slowRangeStartPhysicalCore;
+        int32_t slowRangeEndPhysicalCore;
     };
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
     void ResetStatsSnapshot() noexcept;
+    void SetTimingDiagnosticsEnabled(bool enabled) noexcept;
     void UpdateUnsignedEwma(std::atomic<uint64_t>& target, uint64_t sample) noexcept;
 
     class Scheduler {
