@@ -363,9 +363,12 @@ namespace JobSystem
 #endif
     }
 
+    static void WaitForBackendBatches() noexcept;
+
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept
     {
         if (!stats) return;
+        WaitForBackendBatches();
         stats->completeWaitLoops = g_completeWaitLoops.load(std::memory_order_relaxed);
         stats->assistAttempts = g_assistAttempts.load(std::memory_order_relaxed);
         stats->assistExecuted = g_assistExecuted.load(std::memory_order_relaxed);
@@ -440,8 +443,26 @@ namespace JobSystem
         stats->queueLockWaitEwmaNs = 0;
     }
 
+    static void ConsumeLongBatchBarriers() noexcept;
+    std::atomic<uint32_t> g_backendBatchesOutstanding{ 0 };
+
+    static void WaitForBackendBatches() noexcept
+    {
+        uint32_t outstanding =
+            g_backendBatchesOutstanding.load(std::memory_order_acquire);
+        while (outstanding != 0)
+        {
+            g_backendBatchesOutstanding.wait(
+                outstanding, std::memory_order_relaxed);
+            outstanding =
+                g_backendBatchesOutstanding.load(std::memory_order_acquire);
+        }
+    }
+
     void ResetStatsSnapshot() noexcept
     {
+        ConsumeLongBatchBarriers();
+        WaitForBackendBatches();
         g_completeWaitLoops.store(0, std::memory_order_relaxed);
         g_assistAttempts.store(0, std::memory_order_relaxed);
         g_assistExecuted.store(0, std::memory_order_relaxed);
@@ -506,6 +527,7 @@ namespace JobSystem
         state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
+        state->backendRetired.store(true, std::memory_order_relaxed);
         state->refCount.store(1, std::memory_order_relaxed);
         state->assistCallback.store(nullptr, std::memory_order_release);
         state->assistContext.store(nullptr, std::memory_order_release);
@@ -528,6 +550,7 @@ namespace JobSystem
         if (!state) state = new HandleState(completed);
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
+        state->backendRetired.store(true, std::memory_order_relaxed);
         state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->inlineContinuation = {};
@@ -544,6 +567,52 @@ namespace JobSystem
     {
         if (state && state->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
             RecycleState(state);
+    }
+
+    constexpr uint64_t kLongBatchBarrierNs = 800'000;
+    std::mutex g_longBatchBarrierMutex;
+    std::vector<HandleState*> g_longBatchBarriers;
+    thread_local HandleState* g_completingBatchState = nullptr;
+    std::atomic<bool> g_useFineRangesForNextEcsBatch{ false };
+
+    static void RegisterLongBatchBarrier(HandleState* state) noexcept
+    {
+        if (!state || state->backendRetired.load(std::memory_order_acquire))
+            return;
+        AcquireState(state);
+        std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
+        g_longBatchBarriers.push_back(state);
+    }
+
+    static void ConsumeLongBatchBarriers() noexcept
+    {
+        std::vector<HandleState*> barriers;
+        std::vector<HandleState*> deferred;
+        bool waitedForBarrier = false;
+        {
+            std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
+            barriers.swap(g_longBatchBarriers);
+        }
+        for (auto* state : barriers)
+        {
+            if (state == g_completingBatchState)
+            {
+                deferred.push_back(state);
+                continue;
+            }
+            while (!state->backendRetired.load(std::memory_order_acquire))
+                state->backendRetired.wait(false, std::memory_order_relaxed);
+            waitedForBarrier = true;
+            ReleaseState(state);
+        }
+        if (!deferred.empty())
+        {
+            std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
+            g_longBatchBarriers.insert(
+                g_longBatchBarriers.end(), deferred.begin(), deferred.end());
+        }
+        if (waitedForBarrier)
+            g_useFineRangesForNextEcsBatch.store(true, std::memory_order_release);
     }
 
     void CompleteState(HandleState* state)
@@ -1370,6 +1439,14 @@ namespace JobSystem
         state->assistCallback.store(nullptr, std::memory_order_release);
 
         RecordFinalizedBatchTiming(batch);
+        const uint64_t publishedAt =
+            batch->publishedAt.load(std::memory_order_acquire);
+        const uint64_t lastTileAt =
+            batch->lastTileAt.load(std::memory_order_acquire);
+        if (publishedAt != 0 && lastTileAt >= publishedAt + kLongBatchBarrierNs)
+            RegisterLongBatchBarrier(state);
+        auto* previousCompletingState = g_completingBatchState;
+        g_completingBatchState = state;
         PushTraceEvent(TraceEventType::FinalizeBegin,
             batch->diagnosticId, -1, 0, 0);
         if (batch->cleanup)
@@ -1380,6 +1457,7 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::HandleComplete,
             batch->diagnosticId, -1, 0, 0);
         CompleteState(state);
+        g_completingBatchState = previousCompletingState;
     }
 
     static void TryRetireCompletedBatch(HandleState* state) noexcept
@@ -1404,7 +1482,14 @@ namespace JobSystem
         }
 
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
+        {
             ReleaseBatch(batch);
+            state->backendRetired.store(true, std::memory_order_release);
+            state->backendRetired.notify_all();
+            g_backendBatchesOutstanding.fetch_sub(
+                1, std::memory_order_acq_rel);
+            g_backendBatchesOutstanding.notify_all();
+        }
     }
 
     // The last assist reader only requests finalization. Batch memory remains
@@ -1471,7 +1556,10 @@ namespace JobSystem
         }
 
         AcquireState(state);
-        batch->publishedAt.store(MonotonicNowNs(), std::memory_order_release);
+        state->backendRetired.store(false, std::memory_order_release);
+        g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
+        const uint64_t publishedAt = MonotonicNowNs();
+        batch->publishedAt.store(publishedAt, std::memory_order_release);
         if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
         {
             g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
@@ -1827,6 +1915,7 @@ namespace JobSystem
         }
         if (exec) exec->wait_for_all();
         if (nativePool) nativePool->Stop();
+        ConsumeLongBatchBarriers();
         ClearBatchStoragePool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
         { std::lock_guard<std::mutex> lock(g_taskflowPoolMutex); for (auto* tf : g_taskflowPool) delete tf; g_taskflowPool.clear(); }
@@ -1885,6 +1974,7 @@ namespace JobSystem
     JobHandle Scheduler::ScheduleParallelFor(void (*func)(void*, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        ConsumeLongBatchBarriers();
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         if (length <= kSyncExecutionLengthThreshold || (depOk && length <= kSyncWithCompletedDepThreshold))
@@ -1932,6 +2022,7 @@ namespace JobSystem
     (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        ConsumeLongBatchBarriers();
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         bool forceAsync = batchSize < 0; int reqBatch = forceAsync ? -batchSize : batchSize;
@@ -1981,9 +2072,13 @@ namespace JobSystem
         void* context, void (*cleanup)(void*),
         const ChunkJobData* chunks, const EntityBatchData* batches,
         int itemCount, const JobHandle& dependency,
-        ChunkScheduleMode, int workerCap, int rangeSize)
+        ChunkScheduleMode, int workerCap, int rangeSize, EcsJobKind jobKind)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        ConsumeLongBatchBarriers();
+        const bool useFineRanges =
+            g_useFineRangesForNextEcsBatch.exchange(
+                false, std::memory_order_acq_rel);
         if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
         // Choose the execution range from workload size and worker cohort.
@@ -1992,6 +2087,12 @@ namespace JobSystem
         int rs = rangeSize > 0
             ? rangeSize
             : ResolveEcsBatchRangeSize(itemCount, provisionalWorkers);
+        // Native IJobChunk and IJobEntity may both use EntityBatchData. The
+        // explicit kind is intentionally retained here for independent policy
+        // tuning; both currently benefit from one cold-frame subdivision.
+        if (useFineRanges && entityRangeFunc && rangeSize <= 0 &&
+            (jobKind == EcsJobKind::Chunk || jobKind == EcsJobKind::Entity))
+            rs = std::max(1, rs / 2);
         int rc = (itemCount + rs - 1) / rs;
 
         // Inline for trivial work
@@ -2050,14 +2151,14 @@ namespace JobSystem
 
     JobHandle Scheduler::ScheduleChunks(void (*f)(void*, const ChunkJobData*), void* ctx, void (*cl)(void*),
         const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs)
-    { return ScheduleChunkBatchCore(f, nullptr, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs); }
+    { return ScheduleChunkBatchCore(f, nullptr, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk); }
 
     JobHandle Scheduler::ScheduleChunkRanges(void (*f)(void*, const ChunkJobData*, int, int), void* ctx, void (*cl)(void*),
         const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs)
-    { return ScheduleChunkBatchCore(nullptr, f, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs); }
+    { return ScheduleChunkBatchCore(nullptr, f, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk); }
 
     JobHandle Scheduler::ScheduleEntityBatches(void (*f)(void*, const EntityBatchData*, int, int), void* ctx, void (*cl)(void*),
-        const EntityBatchData* batches, int bc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs)
-    { return ScheduleChunkBatchCore(nullptr, nullptr, f, ctx, cl, nullptr, batches, bc, dep, mode, wc, rs); }
+        const EntityBatchData* batches, int bc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs, EcsJobKind jobKind)
+    { return ScheduleChunkBatchCore(nullptr, nullptr, f, ctx, cl, nullptr, batches, bc, dep, mode, wc, rs, jobKind); }
 
 } // namespace JobSystem
