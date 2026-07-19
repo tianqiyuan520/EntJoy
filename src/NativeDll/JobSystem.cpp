@@ -46,6 +46,7 @@ namespace JobSystem
     std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
     ExecutionBackend g_executionBackend{ ExecutionBackend::Taskflow };
     int g_numThreads = 0;
+    int g_physicalCoreCount = 0;
 
     std::mutex g_statePoolMutex;
     std::vector<HandleState*> g_statePool;
@@ -590,6 +591,45 @@ namespace JobSystem
         return g_executor;
     }
 
+    static int DetectPhysicalCoreCount() noexcept
+    {
+#if defined(_WIN32)
+        DWORD bytes = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
+        if (bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+            return std::max(1, g_numThreads);
+        try
+        {
+            std::vector<unsigned char> storage(bytes);
+            auto* first = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                storage.data());
+            if (!GetLogicalProcessorInformationEx(
+                RelationProcessorCore, first, &bytes))
+                return std::max(1, g_numThreads);
+
+            int cores = 0;
+            DWORD offset = 0;
+            while (offset < bytes)
+            {
+                auto* info = reinterpret_cast<
+                    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                    storage.data() + offset);
+                if (info->Relationship == RelationProcessorCore)
+                    ++cores;
+                if (info->Size == 0) break;
+                offset += info->Size;
+            }
+            return std::max(1, std::min(cores, g_numThreads));
+        }
+        catch (...)
+        {
+            return std::max(1, g_numThreads);
+        }
+#else
+        return std::max(1, g_numThreads);
+#endif
+    }
+
     struct BackendAsyncContext
     {
         std::function<void()> work;
@@ -637,13 +677,37 @@ namespace JobSystem
     }
 
     // ============================================================
-    // Tile + LocalPartition + half-steal
+    // Unified execution tiles + dynamic atomic range claiming
     // ============================================================
     static int ResolveWorkerTarget(int workerCap, int targetCount) noexcept
     {
         if (targetCount <= 0) return 1;
-        const int cap = workerCap > 0 ? workerCap : g_numThreads;
+        // Memory-streaming ECS jobs normally saturate at one worker per physical
+        // core. Keep all persistent workers available, but use a topology-aware
+        // default cohort; explicit workerCap remains authoritative.
+        const int cap = workerCap > 0
+            ? workerCap
+            : (g_physicalCoreCount > 0 ? g_physicalCoreCount : g_numThreads);
         return std::max(1, std::min({ cap, g_numThreads, targetCount }));
+    }
+
+    static int ResolveEcsBatchRangeSize(
+        int itemCount,
+        int workerCount) noexcept
+    {
+        // Keep enough independently claimable ranges to absorb worker skew,
+        // without paying one atomic claim/callback for every physical chunk.
+        constexpr int kTargetTilesPerWorker = 8;
+        constexpr int kMinChunksPerTile = 4;
+        constexpr int kMaxChunksPerTile = 32;
+        const int targetTiles = std::max(
+            1, workerCount * kTargetTilesPerWorker);
+        const int chunksPerTile =
+            (itemCount + targetTiles - 1) / targetTiles;
+        return std::clamp(
+            chunksPerTile,
+            kMinChunksPerTile,
+            kMaxChunksPerTile);
     }
     // A Tile is the load-balancing unit — one or more chunks (IJobChunk)
     // or a sub-range of entities (IJobEntity).
@@ -659,73 +723,6 @@ namespace JobSystem
         uint32_t itemCount;
         TileKind kind;
     };
-
-    // Local partition — stores tile range [front, back) for stealing-capable local execution.
-    struct alignas(hardware_destructive_interference_size) LocalPartition {
-        std::atomic<uint32_t> front{ 0 };
-        std::atomic<uint32_t> back{ 0 };
-        uint32_t initialFront{ 0 };
-        uint32_t initialBack{ 0 };
-        uint32_t ownerSlot{ 0 };
-    };
-    static_assert(alignof(LocalPartition) >= hardware_destructive_interference_size);
-    static_assert(sizeof(LocalPartition) % hardware_destructive_interference_size == 0);
-
-    // Build partitions: continuous ranges (not round-robin).
-    static void BuildPartitions(LocalPartition* parts, int count, int tileCount) noexcept
-    {
-        for (int s = 0; s < count; s++)
-        {
-            uint32_t b = static_cast<uint32_t>(static_cast<uint64_t>(tileCount) * s / count);
-            uint32_t e = static_cast<uint32_t>(static_cast<uint64_t>(tileCount) * (s + 1) / count);
-            parts[s].front.store(b, std::memory_order_relaxed);
-            parts[s].back.store(e, std::memory_order_relaxed);
-            parts[s].initialFront = b;
-            parts[s].initialBack = e;
-            parts[s].ownerSlot = static_cast<uint32_t>(s);
-        }
-    }
-
-    // Worker: claim next tile from its own partition (front → back)
-    static bool TryTakeLocal(LocalPartition& part, uint32_t& tileIdx) noexcept
-    {
-        uint32_t f = part.front.load(std::memory_order_relaxed);
-        while (true)
-        {
-            uint32_t b = part.back.load(std::memory_order_acquire);
-            if (f >= b) return false;
-            if (part.front.compare_exchange_weak(f, f + 1,
-                std::memory_order_acq_rel, std::memory_order_relaxed))
-            {
-                tileIdx = f;
-                return true;
-            }
-        }
-    }
-
-    // Thief: steal half of remaining tiles from victim's back
-    static bool TryStealHalf(LocalPartition& victim, uint32_t& stolenStart, uint32_t& stolenEnd) noexcept
-    {
-        g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
-        uint32_t b = victim.back.load(std::memory_order_acquire);
-        while (true)
-        {
-            uint32_t f = victim.front.load(std::memory_order_acquire);
-            uint32_t remaining = b > f ? b - f : 0;
-            if (remaining <= 1) return false;
-            uint32_t half = remaining / 2;
-            uint32_t nb = b - half;
-            if (victim.back.compare_exchange_weak(b, nb,
-                std::memory_order_acq_rel, std::memory_order_relaxed))
-            {
-                g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
-                g_stealCount.fetch_add(1, std::memory_order_relaxed);
-                stolenStart = nb;
-                stolenEnd = b;
-                return true;
-            }
-        }
-    }
 
     // ============================================================
     // BatchState
@@ -745,11 +742,11 @@ namespace JobSystem
         int totalItems{ 0 };
         std::atomic<int> nextRange{ 0 };
 
-        // New path (partitions)
+        // Unified EntityRange/BatchRange path.
         ExecutionTile* tiles{ nullptr };
         uint32_t tileCount{ 0 };
-        LocalPartition* partitions{ nullptr };
-        uint32_t partitionCount{ 0 };
+        std::atomic<uint32_t> nextTile{ 0 };
+        uint32_t workerCount{ 0 };
         std::atomic<uint32_t> completedTiles{ 0 };
         std::atomic<uint32_t> workerSlotsEntered{ 0 };
 
@@ -829,13 +826,10 @@ namespace JobSystem
         BatchState batch;
         ExecutionTile* tileBuffer{ nullptr };
         uint32_t tileCapacity{ 0 };
-        LocalPartition* partitionBuffer{ nullptr };
-        uint32_t partitionCapacity{ 0 };
 
         BatchStorage() noexcept { batch.storage = this; }
         ~BatchStorage()
         {
-            delete[] partitionBuffer;
             delete[] tileBuffer;
         }
     };
@@ -843,9 +837,7 @@ namespace JobSystem
     std::mutex g_batchStoragePoolMutex;
     std::vector<BatchStorage*> g_batchStoragePool;
 
-    static BatchStorage* AcquireBatchStorage(
-        uint32_t tileCapacity,
-        uint32_t partitionCapacity)
+    static BatchStorage* AcquireBatchStorage(uint32_t tileCapacity)
     {
         BatchStorage* storage = nullptr;
         {
@@ -854,8 +846,7 @@ namespace JobSystem
             for (auto it = g_batchStoragePool.begin();
                 it != g_batchStoragePool.end(); ++it)
             {
-                if ((*it)->tileCapacity < tileCapacity ||
-                    (*it)->partitionCapacity < partitionCapacity)
+                if ((*it)->tileCapacity < tileCapacity)
                     continue;
                 if (best == g_batchStoragePool.end() ||
                     (*it)->tileCapacity < (*best)->tileCapacity)
@@ -883,19 +874,8 @@ namespace JobSystem
             storage->tileBuffer = replacement;
             storage->tileCapacity = tileCapacity;
         }
-        if (storage->partitionCapacity < partitionCapacity)
-        {
-            auto* replacement = new LocalPartition[partitionCapacity]();
-            delete[] storage->partitionBuffer;
-            storage->partitionBuffer = replacement;
-            storage->partitionCapacity = partitionCapacity;
-        }
-
         storage->batch.storage = storage;
         storage->batch.tiles = tileCapacity > 0 ? storage->tileBuffer : nullptr;
-        storage->batch.partitions = partitionCapacity > 0
-            ? storage->partitionBuffer
-            : nullptr;
         return storage;
     }
 
@@ -931,37 +911,6 @@ namespace JobSystem
             idle.swap(g_batchStoragePool);
         }
         for (auto* storage : idle) delete storage;
-    }
-
-    struct VictimSnapshot
-    {
-        uint32_t index{ ~0u };
-        uint32_t remaining{ 0 };
-    };
-
-    static VictimSnapshot SelectHeaviestVictim(
-        BatchState* batch,
-        uint32_t excludedSlot,
-        uint32_t minimumRemaining) noexcept
-    {
-        VictimSnapshot best{};
-        if (!batch || !batch->partitions) return best;
-
-        for (uint32_t slot = 0; slot < batch->partitionCount; ++slot)
-        {
-            if (slot == excludedSlot) continue;
-            g_victimScans.fetch_add(1, std::memory_order_relaxed);
-            auto& part = batch->partitions[slot];
-            const uint32_t front = part.front.load(std::memory_order_acquire);
-            const uint32_t back = part.back.load(std::memory_order_acquire);
-            const uint32_t remaining = back > front ? back - front : 0;
-            if (remaining >= minimumRemaining && remaining > best.remaining)
-            {
-                best.index = slot;
-                best.remaining = remaining;
-            }
-        }
-        return best;
     }
 
     static bool TryExecuteOneRange(BatchState* batch, bool assist) noexcept
@@ -1128,16 +1077,16 @@ namespace JobSystem
         batch->firstWorkerAt.compare_exchange_strong(
             empty, now, std::memory_order_acq_rel, std::memory_order_relaxed);
         if (batch->workerSlotsEntered.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-            batch->partitionCount)
+            batch->workerCount)
             batch->lastWorkerAt.store(now, std::memory_order_release);
     }
 
     // Worker loop for partition mode:
     // 1. Process local tiles from partition[slot] front
     // 2. Steal half from victims
-    static void WorkerPartitionLoop(BatchState* batch, uint32_t slot) noexcept
+    static void WorkerTileLoop(BatchState* batch, uint32_t slot) noexcept
     {
-        if (!batch || slot >= batch->partitionCount || batch->tileCount == 0) return;
+        if (!batch || slot >= batch->workerCount || batch->tileCount == 0) return;
         RecordWorkerEntry(batch);
 
         const uint64_t active =
@@ -1147,37 +1096,14 @@ namespace JobSystem
             peak, active, std::memory_order_relaxed)) {}
         g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
 
-        LocalPartition& mine = batch->partitions[slot];
-        uint32_t tileIdx;
-
-        // Phase 1: Local tiles
-        while (TryTakeLocal(mine, tileIdx))
+        // A physical Chunk is only a storage unit. Every worker dynamically
+        // claims the next independent BatchRange tile.
+        while (true)
         {
+            const uint32_t tileIdx = batch->nextTile.fetch_add(
+                1, std::memory_order_relaxed);
+            if (tileIdx >= batch->tileCount) break;
             TryExecuteOneTile(batch, tileIdx, TileExecutionSource::WorkerLocal);
-        }
-
-        // Phase 2: repeatedly target only the heaviest visible victim. A
-        // failed CAS gets one fresh selection instead of an all-victim loop.
-        uint32_t consecutiveFailures = 0;
-        while (consecutiveFailures < 2)
-        {
-            const VictimSnapshot victim = SelectHeaviestVictim(batch, slot, 2);
-            if (victim.index == ~0u)
-            {
-                g_stealEmptyExits.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-
-            uint32_t stealStart, stealEnd;
-            if (!TryStealHalf(batch->partitions[victim.index], stealStart, stealEnd))
-            {
-                ++consecutiveFailures;
-                continue;
-            }
-
-            consecutiveFailures = 0;
-            for (uint32_t t = stealStart; t < stealEnd; t++)
-                TryExecuteOneTile(batch, t, TileExecutionSource::WorkerStolen);
         }
         g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -1185,28 +1111,11 @@ namespace JobSystem
     static bool AssistExecuteOneTile(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
-        const VictimSnapshot victim = SelectHeaviestVictim(batch, ~0u, 1);
-        if (victim.index == ~0u) return false;
-
-        // Try half-steal first (best for load balance)
-        uint32_t ss, se;
-        if (victim.remaining > 1 &&
-            TryStealHalf(batch->partitions[victim.index], ss, se))
-        {
-            for (uint32_t t = ss; t < se; t++)
-                TryExecuteOneTile(batch, t, TileExecutionSource::Assist);
-            return true;
-        }
-
-        // Fallback: single remaining tile — take it from front via TryTakeLocal.
-        // This handles the case where TryStealHalf cannot split remaining=1.
-        uint32_t tileIdx;
-        if (TryTakeLocal(batch->partitions[victim.index], tileIdx))
-        {
+        if (!batch) return false;
+        const uint32_t tileIdx = batch->nextTile.fetch_add(
+            1, std::memory_order_relaxed);
+        return tileIdx < batch->tileCount &&
             TryExecuteOneTile(batch, tileIdx, TileExecutionSource::Assist);
-            return true;
-        }
-        return false;
     }
 
     static void RecordTopologyCompletion(BatchState* batch) noexcept
@@ -1231,8 +1140,8 @@ namespace JobSystem
 
     static void RecordFinalizedBatchTiming(BatchState* batch) noexcept
     {
-        if (!g_timingDiagnosticsEnabled.load(std::memory_order_relaxed)) return;
-
+        // Always retain cheap batch-boundary timing. Per-tile CPU/core/cycle
+        // diagnostics remain gated by g_timingDiagnosticsEnabled.
         const uint64_t now = MonotonicNowNs();
         const uint64_t published = batch->publishedAt.load(std::memory_order_acquire);
         const uint64_t firstWorker = batch->firstWorkerAt.load(std::memory_order_acquire);
@@ -1334,8 +1243,8 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-        if (batch->partitions)
-            WorkerPartitionLoop(batch, slot);
+        if (batch->tiles)
+            WorkerTileLoop(batch, slot);
         else
         {
             RecordWorkerEntry(batch);
@@ -1361,16 +1270,16 @@ namespace JobSystem
     static void SubmitBatch(BatchState* batch, int /*workerCap*/ = 0)
     {
         auto* state = batch->handle;
-        bool (*assistFn)(void*) noexcept = batch->partitions
+        bool (*assistFn)(void*) noexcept = batch->tiles
             ? &AssistExecuteOneTile
             : &AssistExecuteOneRange;
-        const int participantCount = std::max(1, static_cast<int>(batch->partitionCount));
+        const int participantCount = std::max(1, static_cast<int>(batch->workerCount));
 
         g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         g_workerTargetTotal.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_totalTilesPublished.fetch_add(
-            batch->partitions ? static_cast<uint64_t>(batch->tileCount)
+            batch->tiles ? static_cast<uint64_t>(batch->tileCount)
                               : static_cast<uint64_t>(batch->rangeCount),
             std::memory_order_relaxed);
 
@@ -1407,14 +1316,14 @@ namespace JobSystem
         // graph here also guarantees every acquired graph reaches its completion
         // callback and is returned to the graph pool.
         auto taskflow = AcquireTaskflow();
-        if (batch->partitions)
+        if (batch->tiles)
         {
             for (int slot = 0; slot < participantCount; ++slot)
             {
                 taskflow->emplace([batch, slot]() {
                     if (WorkerIndexManager::GetCurrentIndex() < 0)
                         WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                    WorkerPartitionLoop(batch, static_cast<uint32_t>(slot));
+                    WorkerTileLoop(batch, static_cast<uint32_t>(slot));
                 });
             }
         }
@@ -1732,6 +1641,7 @@ namespace JobSystem
             if (g_executor || (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning()))
                 return;
             g_numThreads = resolved;
+            g_physicalCoreCount = DetectPhysicalCoreCount();
             g_executionBackend = ResolveConfiguredBackend();
             if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
             {
@@ -1769,6 +1679,7 @@ namespace JobSystem
             exec = std::move(g_executor);
             nativePool = std::move(g_nativeWorkerPool);
             g_numThreads = 0;
+            g_physicalCoreCount = 0;
         }
         if (exec) exec->wait_for_all();
         if (nativePool) nativePool->Stop();
@@ -1839,12 +1750,12 @@ namespace JobSystem
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup, length, cs };
-        auto* storage = AcquireBatchStorage(0, 0);
+        auto* storage = AcquireBatchStorage(0);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
-        batch->partitionCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
+        batch->workerCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1870,11 +1781,11 @@ namespace JobSystem
         if (rc <= 1) { func(context, 0, length); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup, length, cs };
-        auto* storage = AcquireBatchStorage(0, 0);
+        auto* storage = AcquireBatchStorage(0);
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
-        batch->partitionCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
+        batch->workerCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1897,8 +1808,12 @@ namespace JobSystem
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
-        int wc = std::max(1, g_numThreads);
-        int rs = rangeSize > 0 ? rangeSize : std::max(1, itemCount / (wc * 4 + 1));
+        // Choose the execution range from workload size and worker cohort.
+        // Physical 16 KiB chunks remain storage units only.
+        const int provisionalWorkers = ResolveWorkerTarget(workerCap, itemCount);
+        int rs = rangeSize > 0
+            ? rangeSize
+            : ResolveEcsBatchRangeSize(itemCount, provisionalWorkers);
         int rc = (itemCount + rs - 1) / rs;
 
         // Inline for trivial work
@@ -1915,11 +1830,10 @@ namespace JobSystem
         int execMode = func ? 0 : (rangeFunc ? 1 : 2);
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches, itemCount, rs, execMode };
-        const uint32_t tileCount = static_cast<uint32_t>(func ? itemCount : rc);
+        const uint32_t tileCount = static_cast<uint32_t>(rc);
         const int targetWorkers = ResolveWorkerTarget(
             workerCap, static_cast<int>(tileCount));
-        auto* storage = AcquireBatchStorage(
-            tileCount, static_cast<uint32_t>(targetWorkers));
+        auto* storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
@@ -1934,26 +1848,18 @@ namespace JobSystem
             auto* tiles = storage->tileBuffer;
             for (uint32_t i = 0; i < tileCount; i++)
             {
-                const uint32_t first = func
-                    ? i
-                    : i * static_cast<uint32_t>(rs);
+                const uint32_t first = i * static_cast<uint32_t>(rs);
                 tiles[i].firstItem = first;
-                tiles[i].itemCount = func
-                    ? 1u
-                    : std::min(static_cast<uint32_t>(rs),
-                        static_cast<uint32_t>(itemCount) - first);
+                tiles[i].itemCount = std::min(static_cast<uint32_t>(rs),
+                    static_cast<uint32_t>(itemCount) - first);
                 tiles[i].kind = tileKind;
             }
-
-            // Respect workerCap when choosing partition count
-            auto* parts = storage->partitionBuffer;
-            BuildPartitions(parts, targetWorkers, static_cast<int>(tileCount));
 
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
-            batch->partitions = parts;
-            batch->partitionCount = static_cast<uint32_t>(targetWorkers);
+            batch->nextTile.store(0, std::memory_order_relaxed);
+            batch->workerCount = static_cast<uint32_t>(targetWorkers);
             batch->completedTiles.store(0, std::memory_order_relaxed);
         }
 

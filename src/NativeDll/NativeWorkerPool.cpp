@@ -1,10 +1,12 @@
 #include "NativeWorkerPool.h"
 
 #include <atomic>
+#include <climits>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -19,8 +21,9 @@ namespace JobSystem
             RunSlotFn runSlot{ nullptr };
             CompletionFn completion{ nullptr };
             uint32_t slotCount{ 0 };
-            std::atomic<uint32_t> nextSlot{ 0 };
+            uint32_t targetWorkerCount{ 0 };
             std::atomic<uint32_t> remaining{ 0 };
+            std::atomic<uint32_t> nextSlot{ 0 };
 
             // Workers increment readers before touching a published descriptor.
             // This lets the completion thread safely return it to the pool without
@@ -37,13 +40,22 @@ namespace JobSystem
                 runSlot = run;
                 completion = done;
                 slotCount = count;
-                nextSlot.store(0, std::memory_order_relaxed);
+                targetWorkerCount = 0;
                 remaining.store(count, std::memory_order_relaxed);
+                nextSlot.store(0, std::memory_order_relaxed);
             }
         };
 
+        struct WorkerState
+        {
+            // A fast worker may finish a batch before every released worker has
+            // consumed its wake. Counting preserves those releases safely while
+            // later batches are published.
+            std::counting_semaphore<INT_MAX> wake{ 0 };
+            std::thread thread;
+        };
+
         mutable std::mutex mutex;
-        std::condition_variable workAvailable;
         std::condition_variable idle;
 
         // Only Submit and batch completion touch these queues. Worker hot paths
@@ -52,12 +64,10 @@ namespace JobSystem
         std::vector<std::unique_ptr<BatchDescriptor>> descriptorStorage;
         std::vector<BatchDescriptor*> freeDescriptors;
         std::atomic<BatchDescriptor*> activeBatch{ nullptr };
-        std::atomic<uint64_t> generation{ 0 };
-
-        std::vector<std::thread> workers;
+        std::vector<std::unique_ptr<WorkerState>> workers;
         size_t outstandingBatches{ 0 };
         bool accepting{ false };
-        bool stopRequested{ false };
+        std::atomic<bool> stopRequested{ false };
 
         BatchDescriptor* AcquireDescriptorLocked()
         {
@@ -72,16 +82,24 @@ namespace JobSystem
             return descriptorStorage.back().get();
         }
 
-        bool PublishNextLocked() noexcept
+        BatchDescriptor* PublishNextLocked() noexcept
         {
             if (activeBatch.load(std::memory_order_relaxed) || pendingBatches.empty())
-                return false;
+                return nullptr;
 
             auto* next = pendingBatches.front();
             pendingBatches.pop_front();
+            next->targetWorkerCount = static_cast<uint32_t>((std::min)(
+                static_cast<size_t>(next->slotCount), workers.size()));
             activeBatch.store(next, std::memory_order_release);
-            generation.fetch_add(1, std::memory_order_release);
-            return true;
+            return next;
+        }
+
+        void WakeTargetWorkers(const BatchDescriptor* descriptor) noexcept
+        {
+            if (!descriptor) return;
+            for (uint32_t worker = 0; worker < descriptor->targetWorkerCount; ++worker)
+                workers[worker]->wake.release();
         }
 
         BatchDescriptor* AcquireActiveBatch() noexcept
@@ -106,16 +124,15 @@ namespace JobSystem
 
         void FinishBatch(BatchDescriptor* descriptor) noexcept
         {
-            bool wakeWorkers = false;
+            BatchDescriptor* nextBatch = nullptr;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (activeBatch.load(std::memory_order_relaxed) == descriptor)
                     activeBatch.store(nullptr, std::memory_order_release);
-                wakeWorkers = PublishNextLocked();
+                nextBatch = PublishNextLocked();
             }
 
-            if (wakeWorkers)
-                workAvailable.notify_all();
+            WakeTargetWorkers(nextBatch);
 
             // All valid slots have returned before remaining reaches zero, so the
             // user context can be completed even if a late worker is still dropping
@@ -134,19 +151,28 @@ namespace JobSystem
             }
         }
 
-        void ExecutePublishedBatch() noexcept
+        void ExecutePublishedBatch(uint32_t workerIndex) noexcept
         {
             auto* descriptor = AcquireActiveBatch();
             if (!descriptor) return;
 
+            const uint32_t targetWorkerCount = descriptor->targetWorkerCount;
+            if (workerIndex >= targetWorkerCount || targetWorkerCount == 0)
+            {
+                ReleaseActiveBatch(descriptor);
+                return;
+            }
+
             bool completedBatch = false;
+            // Completion depends on all partitions being executed, not on every
+            // notified OS thread waking up. Any ready worker can drain additional
+            // slots, matching a work-stealing executor and removing the slowest-
+            // worker acknowledgement barrier from the batch tail.
             while (true)
             {
                 const uint32_t slot = descriptor->nextSlot.fetch_add(
                     1, std::memory_order_relaxed);
-                if (slot >= descriptor->slotCount)
-                    break;
-
+                if (slot >= descriptor->slotCount) break;
                 descriptor->runSlot(descriptor->context, slot);
                 if (descriptor->remaining.fetch_sub(
                     1, std::memory_order_acq_rel) == 1)
@@ -161,32 +187,13 @@ namespace JobSystem
                 FinishBatch(descriptor);
         }
 
-        void WorkerLoop() noexcept
+        void WorkerLoop(uint32_t workerIndex, WorkerState* worker) noexcept
         {
-            uint64_t observedGeneration;
-            {
-                // Start() may return and Submit() may publish before this thread
-                // enters its loop. Treat an already-active generation as unseen so
-                // a late-starting worker cannot miss the first batch.
-                std::lock_guard<std::mutex> lock(mutex);
-                observedGeneration = generation.load(std::memory_order_acquire);
-                if (activeBatch.load(std::memory_order_acquire))
-                    --observedGeneration;
-            }
             while (true)
             {
-                {
-                    std::unique_lock<std::mutex> lock(mutex);
-                    workAvailable.wait(lock, [this, observedGeneration]
-                    {
-                        return stopRequested ||
-                            generation.load(std::memory_order_acquire) != observedGeneration;
-                    });
-                    if (stopRequested) return;
-                    observedGeneration = generation.load(std::memory_order_acquire);
-                }
-
-                ExecutePublishedBatch();
+                worker->wake.acquire();
+                if (stopRequested.load(std::memory_order_acquire)) return;
+                ExecutePublishedBatch(workerIndex);
             }
         }
     };
@@ -204,25 +211,34 @@ namespace JobSystem
     bool NativeWorkerPool::Start(uint32_t workerCount)
     {
         if (workerCount == 0) return false;
-        {
-            std::lock_guard<std::mutex> lock(_impl->mutex);
-            if (_impl->accepting) return _impl->workers.size() == workerCount;
-            if (!_impl->workers.empty()) return false;
-            _impl->stopRequested = false;
-            _impl->accepting = true;
-        }
+        std::unique_lock<std::mutex> lock(_impl->mutex);
+        if (_impl->accepting) return _impl->workers.size() == workerCount;
+        if (!_impl->workers.empty()) return false;
+        _impl->stopRequested.store(false, std::memory_order_relaxed);
 
         try
         {
+            // Keep the lifecycle mutex until the complete stable worker set is
+            // visible. Submit() must not publish against a partially built set.
             _impl->workers.reserve(workerCount);
             for (uint32_t i = 0; i < workerCount; ++i)
-                _impl->workers.emplace_back([this] { _impl->WorkerLoop(); });
+            {
+                auto worker = std::make_unique<Impl::WorkerState>();
+                auto* raw = worker.get();
+                worker->thread = std::thread([this, i, raw]
+                {
+                    _impl->WorkerLoop(i, raw);
+                });
+                _impl->workers.push_back(std::move(worker));
+            }
         }
         catch (...)
         {
+            lock.unlock();
             Stop();
             throw;
         }
+        _impl->accepting = true;
         return true;
     }
 
@@ -240,15 +256,16 @@ namespace JobSystem
             {
                 return _impl->outstandingBatches == 0;
             });
-            _impl->stopRequested = true;
+            _impl->stopRequested.store(true, std::memory_order_release);
         }
-        _impl->workAvailable.notify_all();
         for (auto& worker : _impl->workers)
-            if (worker.joinable()) worker.join();
+            worker->wake.release();
+        for (auto& worker : _impl->workers)
+            if (worker->thread.joinable()) worker->thread.join();
         _impl->workers.clear();
 
         std::lock_guard<std::mutex> lock(_impl->mutex);
-        _impl->stopRequested = false;
+        _impl->stopRequested.store(false, std::memory_order_relaxed);
     }
 
     bool NativeWorkerPool::Submit(
@@ -259,7 +276,7 @@ namespace JobSystem
     {
         if (slotCount == 0 || !runSlot || !completion) return false;
 
-        bool wakeWorkers = false;
+        Impl::BatchDescriptor* publishedBatch = nullptr;
         {
             std::lock_guard<std::mutex> lock(_impl->mutex);
             if (!_impl->accepting) return false;
@@ -268,11 +285,10 @@ namespace JobSystem
             descriptor->Reset(context, runSlot, completion, slotCount);
             _impl->pendingBatches.push_back(descriptor);
             ++_impl->outstandingBatches;
-            wakeWorkers = _impl->PublishNextLocked();
+            publishedBatch = _impl->PublishNextLocked();
         }
 
-        if (wakeWorkers)
-            _impl->workAvailable.notify_all();
+        _impl->WakeTargetWorkers(publishedBatch);
         return true;
     }
 

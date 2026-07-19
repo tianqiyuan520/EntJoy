@@ -119,17 +119,10 @@ namespace EntJoy
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            // ——— 平衡 Chunk 容量 ———
-            // 512KB ~ 1MB 物理大小目标，兼顾调度开销、并行度和 DDR5 延迟。
-            // 环境变量 ENTJOY_CHUNK_KB 可覆盖。
+            // Unity 风格的小物理 Chunk：Chunk 只负责存储和结构变化，
+            // Job 的执行粒度由调度器的 BatchRange 独立决定。
             const int cacheLineSize = 64;
-            int targetChunkKB = 768;
-
-            string? env = Environment.GetEnvironmentVariable("ENTJOY_CHUNK_KB");
-            if (env != null && int.TryParse(env, out int parsed) && parsed >= 256)
-                targetChunkKB = parsed;
-
-            int targetChunkBytes = targetChunkKB * 1024;
+            const int targetChunkBytes = 16 * 1024;
 
             int entitySize = Marshal.SizeOf<Entity>();
             int totalComponentSize = entitySize;
@@ -145,10 +138,13 @@ namespace EntJoy
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
             int stride = totalComponentSize + bitmapOverheadPerEntity;
-            int capacity = Math.Max(2048, (targetChunkBytes - alignmentOverhead) / stride);
+            int capacity = Math.Max(cacheLineSize,
+                (targetChunkBytes - alignmentOverhead) / Math.Max(1, stride));
 
-            capacity = (capacity + (cacheLineSize - 1)) & ~(cacheLineSize - 1);
-            return Math.Clamp(capacity, 2048, 131072);
+            // Bitmap 和 SIMD 遍历都以 64 个实体为自然边界。向下对齐，避免
+            // 因为容量取整反而突破 16 KiB 目标。
+            capacity &= ~(cacheLineSize - 1);
+            return Math.Clamp(capacity, cacheLineSize, 131072);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)

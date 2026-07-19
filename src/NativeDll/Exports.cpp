@@ -26,6 +26,11 @@ extern "C"
         JobSystem::Scheduler::Initialize(numThreads);
     }
 
+    int JobSystem_GetWorkerCount()
+    {
+        return JobSystem::CurrentWorkerCount();
+    }
+
     void JobSystem_Shutdown()
     {
         JobSystem::Scheduler::Shutdown();

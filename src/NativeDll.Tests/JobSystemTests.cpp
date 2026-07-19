@@ -1145,7 +1145,7 @@ namespace
         }
     }
 
-    void TestBoundedHeaviestVictimStealing()
+    void TestDynamicAtomicTileClaiming()
     {
         constexpr int itemCounts[] = { 1, 2, 7, 8, 31, 32, 100 };
         for (const int itemCount : itemCounts)
@@ -1172,15 +1172,43 @@ namespace
 
             for (const auto& hit : hits)
                 Require(hit.load(std::memory_order_relaxed) == 1,
-                    "bounded stealing missed or duplicated a tile");
+                    "dynamic tile claiming missed or duplicated an item");
 
             JobSystem::JobSystemStatsSnapshot stats{};
             JobSystem::GetStatsSnapshot(&stats);
             RequireTileAccounting(stats, static_cast<uint64_t>(itemCount),
-                "bounded stealing tile accounting did not reconcile");
-            Require(stats.victimScans >= stats.stealAttempts,
-                "victim scan count was lower than actual steal attempts");
+                "dynamic tile accounting did not reconcile");
+            Require(stats.stealAttempts == 0 && stats.victimScans == 0,
+                "dynamic tile path unexpectedly used legacy stealing");
         }
+    }
+
+    void TestDefaultTileIsDecoupledFromPhysicalChunks()
+    {
+        const auto runCase = [](int itemCount, uint64_t expectedTiles)
+        {
+            std::vector<ChunkJobData> chunks(static_cast<size_t>(itemCount));
+            std::vector<std::atomic<int>> hits(static_cast<size_t>(itemCount));
+            ChunkRangeContext context{ &hits, nullptr };
+
+            JobSystem::ResetStatsSnapshot();
+            auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+                &ExecuteChunkRange, &context, nullptr,
+                chunks.data(), itemCount, {},
+                JobSystem::ChunkScheduleMode::PublishAssist, 8, 0);
+            handle.Complete();
+
+            for (const auto& hit : hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "adaptive multi-chunk tile missed or duplicated an item");
+            JobSystem::JobSystemStatsSnapshot stats{};
+            JobSystem::GetStatsSnapshot(&stats);
+            RequireTileAccounting(stats, expectedTiles,
+                "adaptive BatchRange produced an unexpected tile count");
+        };
+
+        runCase(31, 8);    // 4 chunks/tile: minimum range size
+        runCase(1000, 63); // 16 chunks/tile: 8 tiles/worker target
     }
 
     void TestBatchStorageIsReturnedAndReused()
@@ -1491,8 +1519,10 @@ int main()
         std::cout << "PASS StatsClassifyWorkerAndAssistExactlyOnce\n";
         TestUnifiedTileAccountingForAllChunkEntrypoints();
         std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
-        TestBoundedHeaviestVictimStealing();
-        std::cout << "PASS BoundedHeaviestVictimStealing\n";
+        TestDynamicAtomicTileClaiming();
+        std::cout << "PASS DynamicAtomicTileClaiming\n";
+        TestDefaultTileIsDecoupledFromPhysicalChunks();
+        std::cout << "PASS DefaultTileIsDecoupledFromPhysicalChunks\n";
         TestBatchStorageIsReturnedAndReused();
         std::cout << "PASS BatchStorageIsReturnedAndReused\n";
         TestBoundaryTimingDiagnostics();

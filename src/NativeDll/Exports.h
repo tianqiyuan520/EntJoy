@@ -32,6 +32,9 @@ extern "C" {
     typedef void (*EntityBatchRangeJobFunc)(void* context, const struct EntityBatchData* batches, int startIndex, int count);
 
     JOB_API void JobSystem_Initialize(int numThreads);
+    // Unity JobsUtility.JobWorkerCount equivalent: the number of persistent
+    // job workers selected when the scheduler was initialized.
+    JOB_API int JobSystem_GetWorkerCount();
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
     JOB_API void JobSystem_KeepWorkersWarm(int microseconds);
