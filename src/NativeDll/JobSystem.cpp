@@ -700,6 +700,15 @@ namespace JobSystem
         EntityBatchRange
     };
 
+    enum class TileClaimMode : uint8_t
+    {
+        // Unity-style parallel-for ranges: one cache-hot atomic cursor and
+        // coarse callbacks. This avoids ECS partition scans for short jobs.
+        AtomicRange,
+        // ECS jobs keep stable local ownership and steal only at the tail.
+        LocalPartitions
+    };
+
     struct ExecutionTile {
         uint32_t firstItem;
         uint32_t itemCount;
@@ -741,9 +750,12 @@ namespace JobSystem
 
         bool (*executeTile)(void* ctx, const ExecutionTile& tile) noexcept{ nullptr };
 
-        // Unified EntityRange/BatchRange path.
+        // Unified lightweight BatchRange path. Physical ECS chunks remain
+        // storage boundaries; tiles are contiguous descriptor/index ranges.
         ExecutionTile* tiles{ nullptr };
         uint32_t tileCount{ 0 };
+        TileClaimMode claimMode{ TileClaimMode::LocalPartitions };
+        std::atomic<uint32_t> nextTile{ 0 };
         LocalPartition* partitions{ nullptr };
         uint32_t partitionCount{ 0 };
         std::atomic<uint32_t> assistPartitionCursor{ 0 };
@@ -1105,12 +1117,42 @@ namespace JobSystem
             batch->lastWorkerAt.store(now, std::memory_order_release);
     }
 
+    static void WorkerAtomicRangeLoop(BatchState* batch) noexcept
+    {
+        RecordWorkerEntry(batch);
+        const uint64_t active =
+            g_activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
+        uint64_t peak = g_activeWorkersPeak.load(std::memory_order_relaxed);
+        while (active > peak && !g_activeWorkersPeak.compare_exchange_weak(
+            peak, active, std::memory_order_relaxed)) {}
+        g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+
+        uint64_t executed = 0;
+        while (true)
+        {
+            const uint32_t tile = batch->nextTile.fetch_add(
+                1, std::memory_order_relaxed);
+            if (tile >= batch->tileCount) break;
+            TryExecuteOneTile(batch, tile);
+            ++executed;
+        }
+
+        g_workerExecutedRanges.fetch_add(executed, std::memory_order_relaxed);
+        g_localTiles.fetch_add(executed, std::memory_order_relaxed);
+        g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
     // Worker loop for partition mode:
     // 1. Process local tiles from partition[slot] front
     // 2. Steal half from victims
     static void WorkerTileLoop(BatchState* batch, uint32_t slot) noexcept
     {
         if (!batch || slot >= batch->workerCount || batch->tileCount == 0) return;
+        if (batch->claimMode == TileClaimMode::AtomicRange)
+        {
+            WorkerAtomicRangeLoop(batch);
+            return;
+        }
         RecordWorkerEntry(batch);
 
         const uint64_t active =
@@ -1213,7 +1255,20 @@ namespace JobSystem
     static bool AssistExecuteOneTile(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
-        if (!batch || batch->partitionCount == 0) return false;
+        if (!batch) return false;
+        if (batch->claimMode == TileClaimMode::AtomicRange)
+        {
+            const uint32_t tile = batch->nextTile.fetch_add(
+                1, std::memory_order_relaxed);
+            if (tile >= batch->tileCount) return false;
+            TryExecuteOneTile(batch, tile);
+            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
+            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        if (batch->partitionCount == 0) return false;
         const uint32_t start = batch->assistPartitionCursor.fetch_add(
             1, std::memory_order_relaxed) % batch->partitionCount;
         for (uint32_t offset = 0; offset < batch->partitionCount; ++offset)
@@ -1842,12 +1897,14 @@ namespace JobSystem
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(rc), targetWorkers);
+            static_cast<uint32_t>(rc), 0);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->tileCount = static_cast<uint32_t>(rc);
+        batch->claimMode = TileClaimMode::AtomicRange;
+        batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
         for (uint32_t i = 0; i < batch->tileCount; ++i)
         {
@@ -1860,7 +1917,6 @@ namespace JobSystem
         }
         batch->tiles = storage->tileBuffer;
         batch->workerCount = targetWorkers;
-        InitializeLocalPartitions(batch);
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1889,11 +1945,13 @@ namespace JobSystem
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(rc), targetWorkers);
+            static_cast<uint32_t>(rc), 0);
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->tileCount = static_cast<uint32_t>(rc);
+        batch->claimMode = TileClaimMode::AtomicRange;
+        batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
         for (uint32_t i = 0; i < batch->tileCount; ++i)
         {
@@ -1906,7 +1964,6 @@ namespace JobSystem
         }
         batch->tiles = storage->tileBuffer;
         batch->workerCount = targetWorkers;
-        InitializeLocalPartitions(batch);
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1953,8 +2010,7 @@ namespace JobSystem
         const uint32_t tileCount = static_cast<uint32_t>(rc);
         const int targetWorkers = ResolveWorkerTarget(
             workerCap, static_cast<int>(tileCount));
-        auto* storage = AcquireBatchStorage(
-            tileCount, static_cast<uint32_t>(targetWorkers));
+        auto* storage = AcquireBatchStorage(tileCount, 0);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
@@ -1978,9 +2034,10 @@ namespace JobSystem
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
+            batch->claimMode = TileClaimMode::AtomicRange;
+            batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(tileCount, std::memory_order_relaxed);
             batch->workerCount = static_cast<uint32_t>(targetWorkers);
-            InitializeLocalPartitions(batch);
         }
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
