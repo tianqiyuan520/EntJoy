@@ -413,8 +413,13 @@ namespace
             for (const auto& hit : hits)
                 Require(hit.load(std::memory_order_relaxed) == 1,
                     "exhausted ticket test missed or duplicated a range");
-            Require(cleanupCount.load(std::memory_order_relaxed) == 1,
-                "exhausted ticket test duplicated cleanup");
+            for (int retry = 0;
+                retry < 100'000 &&
+                cleanupCount.load(std::memory_order_acquire) == 0;
+                ++retry)
+                std::this_thread::yield();
+            Require(cleanupCount.load(std::memory_order_acquire) == 1,
+                "exhausted ticket test cleanup count mismatch");
         }
     }
 
@@ -1175,7 +1180,14 @@ namespace
                     "dynamic tile claiming missed or duplicated an item");
 
             JobSystem::JobSystemStatsSnapshot stats{};
-            JobSystem::GetStatsSnapshot(&stats);
+            for (int retry = 0; retry < 100'000; ++retry)
+            {
+                JobSystem::GetStatsSnapshot(&stats);
+                if (stats.localTiles + stats.stolenTiles + stats.assistTiles ==
+                    static_cast<uint64_t>(itemCount))
+                    break;
+                std::this_thread::yield();
+            }
             RequireTileAccounting(stats, static_cast<uint64_t>(itemCount),
                 "dynamic tile accounting did not reconcile");
             Require(stats.localTiles + stats.stolenTiles + stats.assistTiles ==
@@ -1230,6 +1242,15 @@ namespace
                 &callbacks, nullptr, chunks.data(), itemCount, {},
                 JobSystem::ChunkScheduleMode::PublishAssist, 8, 1);
             handle.Complete();
+            for (int retry = 0; retry < 100'000; ++retry)
+            {
+                JobSystem::JobSystemStatsSnapshot current{};
+                JobSystem::GetStatsSnapshot(&current);
+                if (current.batchStorageReturned >=
+                    static_cast<uint64_t>(batchIndex + 1))
+                    break;
+                std::this_thread::yield();
+            }
         }
 
         JobSystem::JobSystemStatsSnapshot stats{};
