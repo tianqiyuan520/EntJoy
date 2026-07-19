@@ -324,6 +324,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
             }
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+            sb.AppendLine("    #pragma loop(ivdep)");
             sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("    {");
             foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
@@ -522,6 +523,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"        {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__batchData->componentArrays[{i}]);");
             }
             sb.AppendLine("        int __entity_count = __batchData->entityCount;");
+            sb.AppendLine("        #pragma loop(ivdep)");
             sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("        {");
             if (methodSyntax?.Body != null)
@@ -798,6 +800,7 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
                     }
                     sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+                    sb.AppendLine("    #pragma loop(ivdep)");
                     sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
                     sb.AppendLine("    {");
                     foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
@@ -962,6 +965,7 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"        auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
                     }
                     sb.AppendLine("        int __entity_count = __chunkData->entityCount;");
+                    sb.AppendLine("        #pragma loop(ivdep)");
                     sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
                     sb.AppendLine("        {");
                     foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
