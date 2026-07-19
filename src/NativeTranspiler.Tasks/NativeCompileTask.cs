@@ -18,6 +18,48 @@ namespace NativeTranspiler.Tasks
 
         public override bool Execute()
         {
+            var normalizedDir = Path.GetFullPath(NativeCodeGenDir)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var isWindows = Path.DirectorySeparatorChar == '\\';
+            var lockIdentity = isWindows ? normalizedDir.ToUpperInvariant() : normalizedDir;
+            var mutexName = (isWindows ? @"Local\" : "") +
+                "EntJoy.NativeCompile." + ComputeTextHash(lockIdentity);
+
+            using (var compileMutex = new System.Threading.Mutex(false, mutexName))
+            {
+                var lockTaken = false;
+                try
+                {
+                    Log.LogMessage(MessageImportance.Low, $"Waiting for native compilation lock: {normalizedDir}");
+                    try
+                    {
+                        lockTaken = compileMutex.WaitOne(TimeSpan.FromMinutes(15));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        // The previous owner exited during compilation. The lock is
+                        // ours and the normal cache/build-system checks repair state.
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                    {
+                        Log.LogError($"Timed out waiting for another native compilation of '{normalizedDir}'.");
+                        return false;
+                    }
+
+                    return ExecuteLocked();
+                }
+                finally
+                {
+                    if (lockTaken)
+                        compileMutex.ReleaseMutex();
+                }
+            }
+        }
+
+        private bool ExecuteLocked()
+        {
             Log.LogMessage(MessageImportance.High, $"Checking native code directory: {NativeCodeGenDir}");
 
             if (!Directory.Exists(NativeCodeGenDir))
@@ -69,13 +111,17 @@ namespace NativeTranspiler.Tasks
             bool cmakeListsUnchanged = (savedCmakeListsHash != null && savedCmakeListsHash == cmakeListsHash);
 
             bool cmakeCacheExists = File.Exists(Path.Combine(buildDir, "CMakeCache.txt"));
+            bool cmakeBuildSystemExists = HasGeneratedBuildSystem(buildDir);
 
-            if (cmakeCacheExists && cmakeListsUnchanged)
+            if (cmakeCacheExists && cmakeBuildSystemExists && cmakeListsUnchanged)
             {
                 Log.LogMessage(MessageImportance.High, "CMakeLists.txt unchanged, cache valid. Skipping configure, running build only.");
             }
             else
             {
+                if (cmakeCacheExists && !cmakeBuildSystemExists)
+                    Log.LogMessage(MessageImportance.High, "CMake cache exists but generated build files are missing. Reconfiguring.");
+
                 // 清理旧的 build 目录（无论 cache 是否存在），避免路径缓存冲突
                 if (Directory.Exists(buildDir))
                 {
@@ -105,13 +151,59 @@ namespace NativeTranspiler.Tasks
             var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
             if (buildResult.ExitCode != 0)
             {
-                Log.LogError($"CMake build failed.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
-                return false;
+                // A cancelled/overlapping IDE build can leave CMakeCache.txt behind
+                // while deleting Visual Studio's generated project files. Repair the
+                // generated build system once before reporting a hard failure.
+                Log.LogWarning($"CMake build failed. Reconfiguring once before retry.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
+                var repairArgs = new[] { "-S", NativeCodeGenDir, "-B", buildDir };
+                var repairResult = RunProcessWithTimeout("cmake", repairArgs, NativeCodeGenDir, 120000);
+                if (repairResult.ExitCode != 0)
+                {
+                    Log.LogError($"CMake repair configuration failed.\nOutput: {repairResult.Output}\nError: {repairResult.Error}");
+                    return false;
+                }
+
+                buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
+                if (buildResult.ExitCode != 0)
+                {
+                    Log.LogError($"CMake build failed after repair.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
+                    return false;
+                }
             }
 
             SaveHashManifest(dependencies, hashFile);
             Log.LogMessage(MessageImportance.High, "Native compilation succeeded.");
             return true;
+        }
+
+        private static string ComputeTextHash(string value)
+        {
+            using (var md5 = MD5.Create())
+            {
+                var bytes = md5.ComputeHash(Encoding.UTF8.GetBytes(value));
+                var result = new StringBuilder(bytes.Length * 2);
+                foreach (var b in bytes)
+                    result.Append(b.ToString("x2"));
+                return result.ToString();
+            }
+        }
+
+        private static bool HasGeneratedBuildSystem(string buildDir)
+        {
+            if (!Directory.Exists(buildDir))
+                return false;
+
+            // Cover the common single- and multi-config CMake generators. A cache
+            // alone is insufficient: interrupted configuration may leave it behind.
+            if (File.Exists(Path.Combine(buildDir, "build.ninja")) ||
+                File.Exists(Path.Combine(buildDir, "Makefile")))
+                return true;
+
+            var visualStudioSolutions = Directory.GetFiles(buildDir, "*.sln", SearchOption.TopDirectoryOnly);
+            if (visualStudioSolutions.Length > 0)
+                return File.Exists(Path.Combine(buildDir, "ALL_BUILD.vcxproj"));
+
+            return false;
         }
 
         /// <summary>从哈希清单中读取指定文件的已保存哈希</summary>

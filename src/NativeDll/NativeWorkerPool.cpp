@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -12,68 +13,180 @@ namespace JobSystem
 {
     struct NativeWorkerPool::Impl
     {
-        struct Submission
+        struct BatchDescriptor
         {
-            void* context;
-            RunSlotFn runSlot;
-            CompletionFn completion;
-            std::atomic<uint32_t> remaining;
+            void* context{ nullptr };
+            RunSlotFn runSlot{ nullptr };
+            CompletionFn completion{ nullptr };
+            uint32_t slotCount{ 0 };
+            std::atomic<uint32_t> nextSlot{ 0 };
+            std::atomic<uint32_t> remaining{ 0 };
 
-            Submission(
+            // Workers increment readers before touching a published descriptor.
+            // This lets the completion thread safely return it to the pool without
+            // shared_ptr or per-slot queue nodes.
+            std::atomic<uint32_t> readers{ 0 };
+
+            void Reset(
                 void* value,
                 RunSlotFn run,
                 CompletionFn done,
                 uint32_t count) noexcept
-                : context(value), runSlot(run), completion(done), remaining(count)
             {
+                context = value;
+                runSlot = run;
+                completion = done;
+                slotCount = count;
+                nextSlot.store(0, std::memory_order_relaxed);
+                remaining.store(count, std::memory_order_relaxed);
             }
-        };
-
-        struct Token
-        {
-            std::shared_ptr<Submission> submission;
-            uint32_t slot;
         };
 
         mutable std::mutex mutex;
         std::condition_variable workAvailable;
         std::condition_variable idle;
-        std::deque<Token> queue;
+
+        // Only Submit and batch completion touch these queues. Worker hot paths
+        // load activeBatch and claim slots entirely through atomics.
+        std::deque<BatchDescriptor*> pendingBatches;
+        std::vector<std::unique_ptr<BatchDescriptor>> descriptorStorage;
+        std::vector<BatchDescriptor*> freeDescriptors;
+        std::atomic<BatchDescriptor*> activeBatch{ nullptr };
+        std::atomic<uint64_t> generation{ 0 };
+
         std::vector<std::thread> workers;
-        size_t activeTokens{ 0 };
+        size_t outstandingBatches{ 0 };
         bool accepting{ false };
         bool stopRequested{ false };
 
-        void WorkerLoop() noexcept
+        BatchDescriptor* AcquireDescriptorLocked()
+        {
+            if (!freeDescriptors.empty())
+            {
+                auto* descriptor = freeDescriptors.back();
+                freeDescriptors.pop_back();
+                return descriptor;
+            }
+
+            descriptorStorage.push_back(std::make_unique<BatchDescriptor>());
+            return descriptorStorage.back().get();
+        }
+
+        bool PublishNextLocked() noexcept
+        {
+            if (activeBatch.load(std::memory_order_relaxed) || pendingBatches.empty())
+                return false;
+
+            auto* next = pendingBatches.front();
+            pendingBatches.pop_front();
+            activeBatch.store(next, std::memory_order_release);
+            generation.fetch_add(1, std::memory_order_release);
+            return true;
+        }
+
+        BatchDescriptor* AcquireActiveBatch() noexcept
         {
             while (true)
             {
-                Token token;
-                {
-                    std::unique_lock<std::mutex> lock(mutex);
-                    workAvailable.wait(lock, [this]
-                    {
-                        return stopRequested || !queue.empty();
-                    });
-                    if (stopRequested && queue.empty()) return;
-                    token = std::move(queue.front());
-                    queue.pop_front();
-                    ++activeTokens;
-                }
+                auto* descriptor = activeBatch.load(std::memory_order_acquire);
+                if (!descriptor) return nullptr;
 
-                token.submission->runSlot(
-                    token.submission->context, token.slot);
-                if (token.submission->remaining.fetch_sub(
+                descriptor->readers.fetch_add(1, std::memory_order_acq_rel);
+                if (activeBatch.load(std::memory_order_acquire) == descriptor)
+                    return descriptor;
+
+                descriptor->readers.fetch_sub(1, std::memory_order_release);
+            }
+        }
+
+        void ReleaseActiveBatch(BatchDescriptor* descriptor) noexcept
+        {
+            descriptor->readers.fetch_sub(1, std::memory_order_release);
+        }
+
+        void FinishBatch(BatchDescriptor* descriptor) noexcept
+        {
+            bool wakeWorkers = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (activeBatch.load(std::memory_order_relaxed) == descriptor)
+                    activeBatch.store(nullptr, std::memory_order_release);
+                wakeWorkers = PublishNextLocked();
+            }
+
+            if (wakeWorkers)
+                workAvailable.notify_all();
+
+            // All valid slots have returned before remaining reaches zero, so the
+            // user context can be completed even if a late worker is still dropping
+            // a reader acquired for an already exhausted descriptor.
+            descriptor->completion(descriptor->context);
+
+            while (descriptor->readers.load(std::memory_order_acquire) != 0)
+                std::this_thread::yield();
+
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                freeDescriptors.push_back(descriptor);
+                --outstandingBatches;
+                if (outstandingBatches == 0)
+                    idle.notify_all();
+            }
+        }
+
+        void ExecutePublishedBatch() noexcept
+        {
+            auto* descriptor = AcquireActiveBatch();
+            if (!descriptor) return;
+
+            bool completedBatch = false;
+            while (true)
+            {
+                const uint32_t slot = descriptor->nextSlot.fetch_add(
+                    1, std::memory_order_relaxed);
+                if (slot >= descriptor->slotCount)
+                    break;
+
+                descriptor->runSlot(descriptor->context, slot);
+                if (descriptor->remaining.fetch_sub(
                     1, std::memory_order_acq_rel) == 1)
                 {
-                    token.submission->completion(token.submission->context);
+                    completedBatch = true;
+                    break;
+                }
+            }
+
+            ReleaseActiveBatch(descriptor);
+            if (completedBatch)
+                FinishBatch(descriptor);
+        }
+
+        void WorkerLoop() noexcept
+        {
+            uint64_t observedGeneration;
+            {
+                // Start() may return and Submit() may publish before this thread
+                // enters its loop. Treat an already-active generation as unseen so
+                // a late-starting worker cannot miss the first batch.
+                std::lock_guard<std::mutex> lock(mutex);
+                observedGeneration = generation.load(std::memory_order_acquire);
+                if (activeBatch.load(std::memory_order_acquire))
+                    --observedGeneration;
+            }
+            while (true)
+            {
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    workAvailable.wait(lock, [this, observedGeneration]
+                    {
+                        return stopRequested ||
+                            generation.load(std::memory_order_acquire) != observedGeneration;
+                    });
+                    if (stopRequested) return;
+                    observedGeneration = generation.load(std::memory_order_acquire);
                 }
 
-                {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    --activeTokens;
-                    if (queue.empty() && activeTokens == 0) idle.notify_all();
-                }
+                ExecutePublishedBatch();
             }
         }
     };
@@ -125,7 +238,7 @@ namespace JobSystem
             _impl->accepting = false;
             _impl->idle.wait(lock, [this]
             {
-                return _impl->queue.empty() && _impl->activeTokens == 0;
+                return _impl->outstandingBatches == 0;
             });
             _impl->stopRequested = true;
         }
@@ -145,15 +258,21 @@ namespace JobSystem
         CompletionFn completion)
     {
         if (slotCount == 0 || !runSlot || !completion) return false;
-        auto submission = std::make_shared<Impl::Submission>(
-            context, runSlot, completion, slotCount);
+
+        bool wakeWorkers = false;
         {
             std::lock_guard<std::mutex> lock(_impl->mutex);
             if (!_impl->accepting) return false;
-            for (uint32_t slot = 0; slot < slotCount; ++slot)
-                _impl->queue.push_back(Impl::Token{ submission, slot });
+
+            auto* descriptor = _impl->AcquireDescriptorLocked();
+            descriptor->Reset(context, runSlot, completion, slotCount);
+            _impl->pendingBatches.push_back(descriptor);
+            ++_impl->outstandingBatches;
+            wakeWorkers = _impl->PublishNextLocked();
         }
-        _impl->workAvailable.notify_all();
+
+        if (wakeWorkers)
+            _impl->workAvailable.notify_all();
         return true;
     }
 

@@ -550,6 +550,12 @@ namespace
             "last-tile-to-topology stats did not reset");
         Require(stats.completeWakeToReturnEwmaNs == 0,
             "complete-wake-to-return stats did not reset");
+        Require(stats.timingSampleCount == 0,
+            "batch timing samples did not reset");
+        Require(stats.timingSamplesDropped == 0,
+            "dropped batch timing samples did not reset");
+        Require(stats.slowBatchId == 0,
+            "slow batch correlation did not reset");
     }
 
 #ifdef _WIN32
@@ -1214,6 +1220,7 @@ namespace
         std::vector<ChunkJobData> chunks(itemCount);
         std::atomic<int> callbacks{ 0 };
 
+        JobSystem::SetTimingDiagnosticsEnabled(true);
         JobSystem::ResetStatsSnapshot();
         auto handle = JobSystem::Scheduler::ScheduleChunks(
             [](void* raw, const ChunkJobData*)
@@ -1230,6 +1237,7 @@ namespace
 
         JobSystem::JobSystemStatsSnapshot stats{};
         JobSystem::GetStatsSnapshot(&stats);
+        JobSystem::SetTimingDiagnosticsEnabled(false);
         Require(callbacks.load(std::memory_order_relaxed) == itemCount,
             "timed batch missed or duplicated callbacks");
         Require(stats.submitToFirstWorkerEwmaNs > 0,
@@ -1238,6 +1246,32 @@ namespace
             "last-tile-to-topology boundary was not measured");
         Require(stats.workerStartSpreadEwmaNs < 10'000'000'000ull,
             "worker-start-spread timing underflowed");
+        Require(stats.timingSampleCount == 1,
+            "completed batch did not produce exactly one timing sample");
+        Require(stats.timingSamplesDropped == 0,
+            "single timing sample was unexpectedly dropped");
+        Require(stats.batchTotalP50Ns > 0 &&
+            stats.batchTotalP50Ns <= stats.batchTotalP95Ns &&
+            stats.batchTotalP95Ns <= stats.batchTotalP99Ns &&
+            stats.batchTotalP99Ns <= stats.batchTotalMaxNs,
+            "batch-total timing percentiles are invalid");
+        Require(stats.maxRangeMaxNs > 0,
+            "maximum range execution time was not measured");
+        Require(stats.slowRangeIndex >= 0,
+            "slow range was not correlated with its tile index");
+#ifdef _WIN32
+        Require(stats.slowRangeThreadCycles > 0 &&
+            stats.slowBatchMinRangeThreadCycles > 0,
+            "Windows thread-cycle diagnostics were not measured");
+        Require(stats.slowRangeStartLogicalCore >= 0 &&
+            stats.slowRangeEndLogicalCore >= 0 &&
+            stats.slowRangeStartPhysicalCore >= 0 &&
+            stats.slowRangeEndPhysicalCore >= 0,
+            "Windows logical/physical core diagnostics were not measured");
+#endif
+        Require(stats.slowBatchId != 0 &&
+            stats.slowBatchTotalNs == stats.batchTotalMaxNs,
+            "slow batch was not correlated with the maximum batch sample");
     }
 
     void SetBackendEnvironment(const char* value)
