@@ -414,7 +414,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private static readonly int SleepWarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
         private static readonly int SleepMeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
         private const int FrameSleepMilliseconds = 16;
-        private const int SleepWorkerCap = 8;
+        // 0 means use the scheduler's global worker set. Unity's normal DOTS
+        // ScheduleParallel path is governed by JobsUtility.JobWorkerCount rather
+        // than imposing a different hard worker cap on each job.
+        private const int SleepWorkerCap = 0;
         private const int HeavyIterations = 16;
         private const float DeltaTime = 1.0f / 60.0f;
         private const float Epsilon = 0.001f;
@@ -573,7 +576,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
 
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
-            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms, WorkerCap={SleepWorkerCap}");
+            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms, WorkerCount={NativeJobScheduler.JobWorkerCount}, PerJobWorkerCap=default");
             Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
             Console.WriteLine();
 
@@ -768,17 +771,17 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         {
             var averages = new double[cases.Length];
             bool timingDiagnostics = sleepMilliseconds > 0;
-            if (timingDiagnostics)
-                NativeJobScheduler.SetTimingDiagnosticsEnabled(true);
 
             for (int index = 0; index < cases.Length; index++)
             {
+                NativeJobSystemStats diagnosticStats = default;
                 for (int frame = 0; frame < warmupFrames; frame++)
                 {
-                    bool traceFrame = sleepMilliseconds > 0 && frame == warmupFrames - 1;
-                    if (traceFrame)
+                    bool diagnosticFrame = timingDiagnostics && frame == warmupFrames - 1;
+                    if (diagnosticFrame)
                     {
-                        NativeJobScheduler.TraceSetEnabled(false);
+                        NativeJobScheduler.ResetStats();
+                        NativeJobScheduler.SetTimingDiagnosticsEnabled(true);
                         NativeJobScheduler.TraceClear();
                         NativeJobScheduler.TraceSetEnabled(true);
                     }
@@ -788,15 +791,29 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     }
                     finally
                     {
-                        if (traceFrame)
+                        if (diagnosticFrame)
+                        {
                             NativeJobScheduler.TraceSetEnabled(false);
+                            NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
+                        }
                     }
-                    if (traceFrame)
+                    if (diagnosticFrame)
+                    {
                         PrintTraceSummary(cases[index].Label);
+                        diagnosticStats = NativeJobScheduler.GetStats();
+                    }
                     if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
-                if (sleepMilliseconds > 0) NativeJobScheduler.ResetStats();
+                // Keep the benchmark path free from per-range cycle/core timing.
+                // Unity likewise keeps detailed profiler capture separate from the
+                // normal player timing being compared.
+                if (sleepMilliseconds > 0)
+                {
+                    NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
+                    NativeJobScheduler.TraceSetEnabled(false);
+                    NativeJobScheduler.ResetStats();
+                }
                 double measuredTotal = 0;
                 var samples = new double[measureFrames];
                 for (int frame = 0; frame < measureFrames; frame++)
@@ -816,7 +833,21 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     double[] sorted = (double[])samples.Clone();
                     Array.Sort(sorted);
                     Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
-                    NativeJobSystemStats stats = NativeJobScheduler.GetStats();
+
+                    NativeJobSystemStats cleanStats = NativeJobScheduler.GetStats();
+                    Console.WriteLine(
+                        $"  SchedulerClean: samples={cleanStats.TimingSampleCount}, " +
+                        $"batchUs[p50/p95/p99/max]={cleanStats.BatchTotalP50Ns / 1000.0:F3}/" +
+                        $"{cleanStats.BatchTotalP95Ns / 1000.0:F3}/{cleanStats.BatchTotalP99Ns / 1000.0:F3}/" +
+                        $"{cleanStats.BatchTotalMaxNs / 1000.0:F3}, " +
+                        $"submitFirstUs[p95/max]={cleanStats.SubmitToFirstWorkerP95Ns / 1000.0:F3}/" +
+                        $"{cleanStats.SubmitToFirstWorkerMaxNs / 1000.0:F3}, " +
+                        $"spreadUs[p95/max]={cleanStats.WorkerStartSpreadP95Ns / 1000.0:F3}/" +
+                        $"{cleanStats.WorkerStartSpreadMaxNs / 1000.0:F3}");
+
+                    // Detailed numbers come from the final warmup frame and are
+                    // intentionally separate from the clean measured samples.
+                    NativeJobSystemStats stats = diagnosticStats;
                     string backend = stats.NativeBatches > 0 ? "Native" : "Taskflow";
                     Console.WriteLine(
                         $"  SchedulerCore: backend={backend}, batches={stats.PublishedJobs}, participantTasks={stats.FrameTasksSubmitted}, " +
@@ -893,7 +924,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 }
             }
             if (timingDiagnostics)
+            {
+                NativeJobScheduler.TraceSetEnabled(false);
                 NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
+            }
             return averages;
         }
 

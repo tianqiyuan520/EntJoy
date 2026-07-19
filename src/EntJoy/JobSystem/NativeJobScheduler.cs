@@ -257,6 +257,7 @@ public static unsafe partial class NativeJobScheduler
 
     // 函数指针（通过 GetProcAddress 获取）
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
+    private static delegate* unmanaged[Cdecl]<int> _jobSystem_GetWorkerCount;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_KeepWorkersWarm;
@@ -444,6 +445,8 @@ public static unsafe partial class NativeJobScheduler
 
         _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
+        _jobSystem_GetWorkerCount = (delegate* unmanaged[Cdecl]<int>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_GetWorkerCount");
         _jobSystem_Shutdown = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
         _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
@@ -680,6 +683,18 @@ public static unsafe partial class NativeJobScheduler
     {
         Interlocked.Exchange(ref _shutdownRequested, 0);
         JobSystem_Initialize(numThreads);
+    }
+    /// <summary>
+    /// 当前持久 Job Worker 数。与 Unity JobsUtility.JobWorkerCount 的用途一致；
+    /// 默认值是逻辑处理器数减一，也可通过 Initialize(numThreads) 显式指定。
+    /// </summary>
+    public static int JobWorkerCount
+    {
+        get
+        {
+            EnsureNativeLoaded();
+            return _jobSystem_GetWorkerCount();
+        }
     }
     public static void Shutdown() => SafeShutdown();
     public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
