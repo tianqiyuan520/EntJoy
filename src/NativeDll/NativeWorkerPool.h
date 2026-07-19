@@ -17,7 +17,7 @@ namespace JobSystem
         NativeWorkerPool(const NativeWorkerPool&) = delete;
         NativeWorkerPool& operator=(const NativeWorkerPool&) = delete;
 
-        bool Start(uint32_t workerCount);
+        bool Start(uint32_t workerCount, bool bindWorkers = false);
         void Stop() noexcept;
         bool Submit(
             void* context,

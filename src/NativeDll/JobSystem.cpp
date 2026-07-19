@@ -3,6 +3,7 @@
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
 #include "NativeWorkerPool.h"
+#include "ThreadAffinity.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -34,6 +35,28 @@
 
 namespace JobSystem
 {
+    std::atomic<bool> g_workerAffinityEnabled{ false };
+
+    class AffinityWorkerInterface final : public tf::WorkerInterface
+    {
+    public:
+        void scheduler_prologue(tf::Worker& worker) override
+        {
+            if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
+                BindCurrentThreadToLogicalProcessor(
+                    static_cast<uint32_t>(worker.id()));
+#if defined(_WIN32)
+            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+#endif
+        }
+
+        void scheduler_epilogue(
+            tf::Worker&,
+            std::exception_ptr) override
+        {
+        }
+    };
+
     constexpr size_t kMaxPooledStates = 4096;
     constexpr size_t kMaxPooledTaskflows = 1024;
     constexpr size_t kMaxPooledBatchStorage = 256;
@@ -46,7 +69,6 @@ namespace JobSystem
     std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
     ExecutionBackend g_executionBackend{ ExecutionBackend::Taskflow };
     int g_numThreads = 0;
-    int g_physicalCoreCount = 0;
 
     std::mutex g_statePoolMutex;
     std::vector<HandleState*> g_statePool;
@@ -591,45 +613,6 @@ namespace JobSystem
         return g_executor;
     }
 
-    static int DetectPhysicalCoreCount() noexcept
-    {
-#if defined(_WIN32)
-        DWORD bytes = 0;
-        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
-        if (bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            return std::max(1, g_numThreads);
-        try
-        {
-            std::vector<unsigned char> storage(bytes);
-            auto* first = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
-                storage.data());
-            if (!GetLogicalProcessorInformationEx(
-                RelationProcessorCore, first, &bytes))
-                return std::max(1, g_numThreads);
-
-            int cores = 0;
-            DWORD offset = 0;
-            while (offset < bytes)
-            {
-                auto* info = reinterpret_cast<
-                    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
-                    storage.data() + offset);
-                if (info->Relationship == RelationProcessorCore)
-                    ++cores;
-                if (info->Size == 0) break;
-                offset += info->Size;
-            }
-            return std::max(1, std::min(cores, g_numThreads));
-        }
-        catch (...)
-        {
-            return std::max(1, g_numThreads);
-        }
-#else
-        return std::max(1, g_numThreads);
-#endif
-    }
-
     struct BackendAsyncContext
     {
         std::function<void()> work;
@@ -649,7 +632,7 @@ namespace JobSystem
     static void SubmitBackendAsync(std::function<void()> work)
     {
         auto* context = new BackendAsyncContext{ std::move(work) };
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
         {
             if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
                 context, 1, &RunBackendAsync, &CompleteBackendAsync))
@@ -682,12 +665,10 @@ namespace JobSystem
     static int ResolveWorkerTarget(int workerCap, int targetCount) noexcept
     {
         if (targetCount <= 0) return 1;
-        // Memory-streaming ECS jobs normally saturate at one worker per physical
-        // core. Keep all persistent workers available, but use a topology-aware
-        // default cohort; explicit workerCap remains authoritative.
-        const int cap = workerCap > 0
-            ? workerCap
-            : (g_physicalCoreCount > 0 ? g_physicalCoreCount : g_numThreads);
+        // Match Unity-style worker configuration: by default every job can use
+        // the full persistent worker cohort (logical CPU count minus one).
+        // An explicit per-job workerCap remains authoritative.
+        const int cap = workerCap > 0 ? workerCap : g_numThreads;
         return std::max(1, std::min({ cap, g_numThreads, targetCount }));
     }
 
@@ -697,7 +678,7 @@ namespace JobSystem
     {
         // Keep enough independently claimable ranges to absorb worker skew,
         // without paying one atomic claim/callback for every physical chunk.
-        constexpr int kTargetTilesPerWorker = 8;
+        constexpr int kTargetTilesPerWorker = 4;
         constexpr int kMinChunksPerTile = 4;
         constexpr int kMaxChunksPerTile = 32;
         const int targetTiles = std::max(
@@ -713,6 +694,7 @@ namespace JobSystem
     // or a sub-range of entities (IJobEntity).
     enum class TileKind : uint8_t
     {
+        GeneralRange,
         ChunkCallbacks,
         ChunkRange,
         EntityBatchRange
@@ -723,6 +705,30 @@ namespace JobSystem
         uint32_t itemCount;
         TileKind kind;
     };
+
+    // One cache line per participant. Both boundaries live in one atomic word,
+    // so owner-front claims and thief-back claims cannot overlap even when they
+    // race. This replaces the single cache-line-hot nextTile counter.
+    struct alignas(64) LocalPartition
+    {
+        std::atomic<uint64_t> bounds{ 0 };
+    };
+
+    static constexpr uint64_t PackBounds(uint32_t front, uint32_t back) noexcept
+    {
+        return static_cast<uint64_t>(front) |
+            (static_cast<uint64_t>(back) << 32);
+    }
+
+    static constexpr uint32_t BoundsFront(uint64_t bounds) noexcept
+    {
+        return static_cast<uint32_t>(bounds);
+    }
+
+    static constexpr uint32_t BoundsBack(uint64_t bounds) noexcept
+    {
+        return static_cast<uint32_t>(bounds >> 32);
+    }
 
     // ============================================================
     // BatchState
@@ -735,20 +741,19 @@ namespace JobSystem
 
         bool (*executeTile)(void* ctx, const ExecutionTile& tile) noexcept{ nullptr };
 
-        // Old path (nextRange)
-        bool (*processRange)(void* ctx, int start, int count) noexcept{ nullptr };
-        int rangeCount{ 0 };
-        int rangeSize{ 1 };
-        int totalItems{ 0 };
-        std::atomic<int> nextRange{ 0 };
-
         // Unified EntityRange/BatchRange path.
         ExecutionTile* tiles{ nullptr };
         uint32_t tileCount{ 0 };
-        std::atomic<uint32_t> nextTile{ 0 };
+        LocalPartition* partitions{ nullptr };
+        uint32_t partitionCount{ 0 };
+        std::atomic<uint32_t> assistPartitionCursor{ 0 };
         uint32_t workerCount{ 0 };
-        std::atomic<uint32_t> completedTiles{ 0 };
         std::atomic<uint32_t> workerSlotsEntered{ 0 };
+        // Logical completion is driven by finished tiles, not by participant
+        // task retirement.  Slow/late worker slots may still be unwinding the
+        // steal loop after the public JobHandle is already complete.
+        std::atomic<uint32_t> tilesRemaining{ 0 };
+        std::atomic<bool> logicalCompleted{ false };
 
         std::atomic<uint64_t> publishedAt{ 0 };
         std::atomic<uint64_t> firstWorkerAt{ 0 };
@@ -772,7 +777,9 @@ namespace JobSystem
         std::atomic<uint64_t> coreMigrations{ 0 };
         std::atomic<uint64_t> batchAssistTiles{ 0 };
 
-        std::atomic<int> completedRanges{ 0 };
+        // Physical retirement is deliberately separate from logical
+        // completion because worker slots and Complete() assist readers still
+        // reference the scheduler metadata after the last callback finishes.
         std::atomic<bool> finalized{ false };
         std::atomic<bool> workersFinished{ false };
 
@@ -826,18 +833,23 @@ namespace JobSystem
         BatchState batch;
         ExecutionTile* tileBuffer{ nullptr };
         uint32_t tileCapacity{ 0 };
+        LocalPartition* partitionBuffer{ nullptr };
+        uint32_t partitionCapacity{ 0 };
 
         BatchStorage() noexcept { batch.storage = this; }
         ~BatchStorage()
         {
             delete[] tileBuffer;
+            delete[] partitionBuffer;
         }
     };
 
     std::mutex g_batchStoragePoolMutex;
     std::vector<BatchStorage*> g_batchStoragePool;
 
-    static BatchStorage* AcquireBatchStorage(uint32_t tileCapacity)
+    static BatchStorage* AcquireBatchStorage(
+        uint32_t tileCapacity,
+        uint32_t partitionCapacity)
     {
         BatchStorage* storage = nullptr;
         {
@@ -846,7 +858,8 @@ namespace JobSystem
             for (auto it = g_batchStoragePool.begin();
                 it != g_batchStoragePool.end(); ++it)
             {
-                if ((*it)->tileCapacity < tileCapacity)
+                if ((*it)->tileCapacity < tileCapacity ||
+                    (*it)->partitionCapacity < partitionCapacity)
                     continue;
                 if (best == g_batchStoragePool.end() ||
                     (*it)->tileCapacity < (*best)->tileCapacity)
@@ -874,8 +887,17 @@ namespace JobSystem
             storage->tileBuffer = replacement;
             storage->tileCapacity = tileCapacity;
         }
+        if (storage->partitionCapacity < partitionCapacity)
+        {
+            auto* replacement = new LocalPartition[partitionCapacity];
+            delete[] storage->partitionBuffer;
+            storage->partitionBuffer = replacement;
+            storage->partitionCapacity = partitionCapacity;
+        }
         storage->batch.storage = storage;
         storage->batch.tiles = tileCapacity > 0 ? storage->tileBuffer : nullptr;
+        storage->batch.partitions = partitionCapacity > 0
+            ? storage->partitionBuffer : nullptr;
         return storage;
     }
 
@@ -913,91 +935,16 @@ namespace JobSystem
         for (auto* storage : idle) delete storage;
     }
 
-    static bool TryExecuteOneRange(BatchState* batch, bool assist) noexcept
-    {
-        if (!batch) return false;
-        const int index = batch->nextRange.fetch_add(1, std::memory_order_relaxed);
-        if (index >= batch->rangeCount) return false;
-
-        PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
-            index, index * batch->rangeSize, batch->rangeSize);
-        PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
-            index, index * batch->rangeSize, batch->rangeSize);
-        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
-        const uint64_t rangeStartedAt = timingEnabled ? MonotonicNowNs() : 0;
-        const uint64_t threadCpuStartedAt = timingEnabled
-            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
-        const uint64_t threadCyclesStartedAt = timingEnabled
-            ? CurrentThreadCyclesForDiagnostics() : 0;
-        const int rangeStartLogicalCore = timingEnabled
-            ? CurrentProcessorIndexForDiagnostics() : -1;
-        if (timingEnabled)
-        {
-            uint64_t empty = 0;
-            batch->firstTileAt.compare_exchange_strong(
-                empty, rangeStartedAt, std::memory_order_release, std::memory_order_relaxed);
-        }
-        batch->processRange(batch->context, index, 1);
-        const int rangeEndLogicalCore = timingEnabled
-            ? CurrentProcessorIndexForDiagnostics() : -1;
-        const uint64_t threadCyclesFinishedAt = timingEnabled
-            ? CurrentThreadCyclesForDiagnostics() : 0;
-        const uint64_t threadCpuFinishedAt = timingEnabled
-            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
-        const uint64_t rangeFinishedAt = timingEnabled ? MonotonicNowNs() : 0;
-        if (timingEnabled && rangeFinishedAt >= rangeStartedAt)
-        {
-            RecordRangeExecutionDiagnostics(
-                batch,
-                index,
-                rangeFinishedAt - rangeStartedAt,
-                threadCpuFinishedAt >= threadCpuStartedAt
-                    ? threadCpuFinishedAt - threadCpuStartedAt : 0,
-                threadCyclesFinishedAt >= threadCyclesStartedAt
-                    ? threadCyclesFinishedAt - threadCyclesStartedAt : 0,
-                rangeStartLogicalCore,
-                rangeEndLogicalCore);
-        }
-        if (assist)
-        {
-            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
-        }
-        else
-        {
-            g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-        }
-        PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
-            index, index * batch->rangeSize, batch->rangeSize);
-        if (batch->completedRanges.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-            batch->rangeCount)
-            batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
-        return true;
-    }
-
-    static bool AssistExecuteOneRange(void* ptr) noexcept
-    {
-        auto* batch = static_cast<BatchState*>(ptr);
-        return TryExecuteOneRange(batch, true);
-    }
-
     // ============================================================
     // Partition-based execution (Phase 1)
     // ============================================================
+    static void TryCompleteLogicalBatch(BatchState* batch) noexcept;
+
     // Process one tile and update completion counter.
     // Returns true if the tile was processed (for assist comptability).
-    enum class TileExecutionSource : uint8_t
-    {
-        WorkerLocal,
-        WorkerStolen,
-        Assist
-    };
-
     static bool TryExecuteOneTile(
         BatchState* batch,
-        uint32_t tileIndex,
-        TileExecutionSource source) noexcept
+        uint32_t tileIndex) noexcept
     {
         if (!batch || tileIndex >= batch->tileCount) return false;
 
@@ -1045,29 +992,106 @@ namespace JobSystem
                 rangeStartLogicalCore,
                 rangeEndLogicalCore);
         }
-        if (source == TileExecutionSource::Assist)
-        {
-            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
-            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
-        }
-        else
-        {
-            g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            if (source == TileExecutionSource::WorkerLocal)
-                g_localTiles.fetch_add(1, std::memory_order_relaxed);
-            else
-                g_stolenTiles.fetch_add(1, std::memory_order_relaxed);
-        }
         PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
             static_cast<int>(tileIndex),
             static_cast<int>(tile.firstItem),
             static_cast<int>(tile.itemCount));
-        if (batch->completedTiles.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-            batch->tileCount)
+
+        // Completion follows actual callback completion.  This is the hot-path
+        // atomic that replaces the much more expensive requirement that every
+        // published participant slot must first enter and retire.
+        if (batch->tilesRemaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
             batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
+            TryCompleteLogicalBatch(batch);
+        }
         return true;
+    }
+
+    static void AtomicMaxTimestamp(
+        std::atomic<uint64_t>& target,
+        uint64_t value) noexcept
+    {
+        uint64_t current = target.load(std::memory_order_relaxed);
+        while (value > current && !target.compare_exchange_weak(
+            current, value, std::memory_order_release,
+            std::memory_order_relaxed)) {}
+    }
+
+    static uint32_t PartitionRemaining(const LocalPartition& partition) noexcept
+    {
+        const uint64_t bounds = partition.bounds.load(std::memory_order_acquire);
+        const uint32_t front = BoundsFront(bounds);
+        const uint32_t back = BoundsBack(bounds);
+        return back > front ? back - front : 0;
+    }
+
+    static bool TryTakePartitionFrontSpan(
+        LocalPartition& partition,
+        uint32_t maxCount,
+        uint32_t& first,
+        uint32_t& end) noexcept
+    {
+        uint64_t bounds = partition.bounds.load(std::memory_order_relaxed);
+        while (true)
+        {
+            const uint32_t front = BoundsFront(bounds);
+            const uint32_t back = BoundsBack(bounds);
+            if (front >= back) return false;
+            const uint32_t count = std::min(maxCount, back - front);
+            const uint64_t next = PackBounds(front + count, back);
+            if (partition.bounds.compare_exchange_weak(
+                bounds, next, std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+            {
+                first = front;
+                end = front + count;
+                return true;
+            }
+        }
+    }
+
+    static bool TryStealPartitionHalf(
+        LocalPartition& partition,
+        uint32_t& first,
+        uint32_t& end) noexcept
+    {
+        uint64_t bounds = partition.bounds.load(std::memory_order_acquire);
+        while (true)
+        {
+            const uint32_t front = BoundsFront(bounds);
+            const uint32_t back = BoundsBack(bounds);
+            const uint32_t remaining = back > front ? back - front : 0;
+            if (remaining < 2) return false;
+            const uint32_t stealCount = remaining / 2;
+            const uint32_t newBack = back - stealCount;
+            const uint64_t next = PackBounds(front, newBack);
+            if (partition.bounds.compare_exchange_weak(
+                bounds, next, std::memory_order_acq_rel,
+                std::memory_order_acquire))
+            {
+                first = newBack;
+                end = back;
+                return true;
+            }
+        }
+    }
+
+    static void InitializeLocalPartitions(BatchState* batch) noexcept
+    {
+        batch->partitionCount = batch->workerCount;
+        batch->assistPartitionCursor.store(0, std::memory_order_relaxed);
+        for (uint32_t slot = 0; slot < batch->partitionCount; ++slot)
+        {
+            const uint32_t first = static_cast<uint32_t>(
+                (static_cast<uint64_t>(batch->tileCount) * slot) /
+                batch->partitionCount);
+            const uint32_t end = static_cast<uint32_t>(
+                (static_cast<uint64_t>(batch->tileCount) * (slot + 1)) /
+                batch->partitionCount);
+            batch->partitions[slot].bounds.store(
+                PackBounds(first, end), std::memory_order_relaxed);
+        }
     }
 
     static void RecordWorkerEntry(BatchState* batch) noexcept
@@ -1096,26 +1120,119 @@ namespace JobSystem
             peak, active, std::memory_order_relaxed)) {}
         g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
 
-        // A physical Chunk is only a storage unit. Every worker dynamically
-        // claims the next independent BatchRange tile.
+        uint64_t localCount = 0;
+        uint64_t stolenCount = 0;
+        uint64_t stealAttempts = 0;
+        uint64_t stealSuccesses = 0;
+        uint64_t victimScans = 0;
+        bool executedAny = false;
+        uint32_t stealRound = 0;
+
+        // Do not reserve a hidden multi-tile span here: Complete() must still be
+        // able to assist if a worker stalls inside its first callback.
+        constexpr uint32_t kLocalClaimSize = 1;
+        uint32_t first = 0;
+        uint32_t end = 0;
+        while (TryTakePartitionFrontSpan(
+            batch->partitions[slot], kLocalClaimSize, first, end))
+        {
+            for (uint32_t local = first; local < end; ++local)
+            {
+                TryExecuteOneTile(batch, local);
+                ++localCount;
+                executedAny = true;
+            }
+        }
+
+        // Only the tail-balancing path scans other partitions. Steal a span,
+        // not a single tile, so the successful CAS is amortized over half of a
+        // victim's remaining work.
         while (true)
         {
-            const uint32_t tileIdx = batch->nextTile.fetch_add(
-                1, std::memory_order_relaxed);
-            if (tileIdx >= batch->tileCount) break;
-            TryExecuteOneTile(batch, tileIdx, TileExecutionSource::WorkerLocal);
+            uint32_t victim = batch->partitionCount;
+            uint32_t largest = 0;
+            const uint32_t candidatesToScan = std::min<uint32_t>(
+                4, batch->partitionCount > 0 ? batch->partitionCount - 1 : 0);
+            for (uint32_t scan = 0; scan < candidatesToScan; ++scan)
+            {
+                uint32_t candidate =
+                    (slot + 1 + stealRound + scan) % batch->partitionCount;
+                if (candidate == slot)
+                    candidate = (candidate + 1) % batch->partitionCount;
+                const uint32_t remaining =
+                    PartitionRemaining(batch->partitions[candidate]);
+                ++victimScans;
+                if (remaining > largest)
+                {
+                    largest = remaining;
+                    victim = candidate;
+                }
+            }
+            stealRound += candidatesToScan;
+            if (victim == batch->partitionCount || largest == 0) break;
+
+            ++stealAttempts;
+            first = 0;
+            end = 0;
+            if (largest == 1)
+            {
+                if (!TryTakePartitionFrontSpan(
+                    batch->partitions[victim], 1, first, end))
+                    continue;
+            }
+            else if (!TryStealPartitionHalf(
+                batch->partitions[victim], first, end))
+            {
+                continue;
+            }
+
+            ++stealSuccesses;
+            for (uint32_t stolen = first; stolen < end; ++stolen)
+            {
+                TryExecuteOneTile(batch, stolen);
+                ++stolenCount;
+                executedAny = true;
+            }
         }
+
+        if (executedAny)
+            AtomicMaxTimestamp(batch->lastTileAt, MonotonicNowNs());
+        g_workerExecutedRanges.fetch_add(
+            localCount + stolenCount, std::memory_order_relaxed);
+        g_localTiles.fetch_add(localCount, std::memory_order_relaxed);
+        g_stolenTiles.fetch_add(stolenCount, std::memory_order_relaxed);
+        g_stealAttempts.fetch_add(stealAttempts, std::memory_order_relaxed);
+        g_stealSuccesses.fetch_add(stealSuccesses, std::memory_order_relaxed);
+        g_stealCount.fetch_add(stealSuccesses, std::memory_order_relaxed);
+        g_victimScans.fetch_add(victimScans, std::memory_order_relaxed);
+        if (stealAttempts != 0 && stealSuccesses == 0)
+            g_stealEmptyExits.fetch_add(1, std::memory_order_relaxed);
         g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     static bool AssistExecuteOneTile(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
-        if (!batch) return false;
-        const uint32_t tileIdx = batch->nextTile.fetch_add(
-            1, std::memory_order_relaxed);
-        return tileIdx < batch->tileCount &&
-            TryExecuteOneTile(batch, tileIdx, TileExecutionSource::Assist);
+        if (!batch || batch->partitionCount == 0) return false;
+        const uint32_t start = batch->assistPartitionCursor.fetch_add(
+            1, std::memory_order_relaxed) % batch->partitionCount;
+        for (uint32_t offset = 0; offset < batch->partitionCount; ++offset)
+        {
+            const uint32_t partition = (start + offset) % batch->partitionCount;
+            uint32_t first = 0;
+            uint32_t end = 0;
+            if (!TryTakePartitionFrontSpan(
+                batch->partitions[partition], 1, first, end))
+                continue;
+            TryExecuteOneTile(batch, first);
+            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
+            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
+            AtomicMaxTimestamp(batch->lastTileAt, MonotonicNowNs());
+            return true;
+        }
+        return false;
     }
 
     static void RecordTopologyCompletion(BatchState* batch) noexcept
@@ -1187,50 +1304,59 @@ namespace JobSystem
         ReleaseBatchStorage(batch->storage);
     }
 
-    static void TryFinalizeCompletedBatch(HandleState* state) noexcept
+    static void TryCompleteLogicalBatch(BatchState* batch) noexcept
+    {
+        if (!batch || batch->logicalCompleted.exchange(
+            true, std::memory_order_acq_rel)) return;
+
+        auto* state = batch->handle;
+        // Stop admitting new assist calls. Readers that already captured the
+        // callback can only observe empty partitions at this point.
+        state->assistCallback.store(nullptr, std::memory_order_release);
+
+        RecordFinalizedBatchTiming(batch);
+        PushTraceEvent(TraceEventType::FinalizeBegin,
+            batch->diagnosticId, -1, 0, 0);
+        if (batch->cleanup)
+        {
+            batch->cleanup(batch->context);
+            batch->context = nullptr;
+        }
+        PushTraceEvent(TraceEventType::HandleComplete,
+            batch->diagnosticId, -1, 0, 0);
+        CompleteState(state);
+    }
+
+    static void TryRetireCompletedBatch(HandleState* state) noexcept
     {
         if (!state) return;
 
         BatchState* batch = nullptr;
-        uint64_t diagnosticId = 0;
         {
             std::lock_guard<std::mutex> lock(state->mtx);
             batch = static_cast<BatchState*>(
                 state->assistContext.load(std::memory_order_acquire));
             if (!batch ||
+                !batch->logicalCompleted.load(std::memory_order_acquire) ||
                 !batch->workersFinished.load(std::memory_order_acquire) ||
                 state->assistReaders.load(std::memory_order_acquire) != 0)
             {
                 return;
             }
 
-            diagnosticId = batch->diagnosticId;
             state->assistContext.store(nullptr, std::memory_order_release);
             state->assistReadersDrained.store(nullptr, std::memory_order_release);
         }
 
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
-        {
-            RecordFinalizedBatchTiming(batch);
-            PushTraceEvent(TraceEventType::FinalizeBegin, diagnosticId, -1, 0, 0);
-            if (batch->cleanup) batch->cleanup(batch->context);
-            // Push HandleComplete before CompleteState so the event is
-            // recorded before CompleteState's notify_all() wakes a waiter
-            // that could race with TraceSetEnabled(false).
-            PushTraceEvent(TraceEventType::HandleComplete, diagnosticId, -1, 0, 0);
-            // Completion is the public ownership boundary. Return scheduler
-            // metadata before publishing completed=true so a caller that
-            // leaves Complete() can immediately observe reconciled pool stats.
             ReleaseBatch(batch);
-            CompleteState(state);
-        }
     }
 
     // The last assist reader only requests finalization. Batch memory remains
     // alive until Taskflow has also finished every worker task.
     static void OnAssistReadersDrained(void* handlePtr) noexcept
     {
-        TryFinalizeCompletedBatch(static_cast<HandleState*>(handlePtr));
+        TryRetireCompletedBatch(static_cast<HandleState*>(handlePtr));
     }
 
     // Acquire assist reader: returns false if batch is already finalized
@@ -1243,13 +1369,7 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-        if (batch->tiles)
-            WorkerTileLoop(batch, slot);
-        else
-        {
-            RecordWorkerEntry(batch);
-            while (TryExecuteOneRange(batch, false)) {}
-        }
+        WorkerTileLoop(batch, slot);
         const int endProcessor = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (startProcessor >= 0 && endProcessor >= 0 && startProcessor != endProcessor)
@@ -1263,24 +1383,25 @@ namespace JobSystem
         RecordTopologyCompletion(batch);
         state->assistCallback.store(nullptr, std::memory_order_release);
         batch->workersFinished.store(true, std::memory_order_release);
-        TryFinalizeCompletedBatch(state);
+        // Logical completion normally happened on the final tile. Keep this
+        // defensive fallback for custom/empty execution adapters.
+        if (batch->tilesRemaining.load(std::memory_order_acquire) == 0)
+            TryCompleteLogicalBatch(batch);
+        TryRetireCompletedBatch(state);
         ReleaseState(state);
     }
 
     static void SubmitBatch(BatchState* batch, int /*workerCap*/ = 0)
     {
         auto* state = batch->handle;
-        bool (*assistFn)(void*) noexcept = batch->tiles
-            ? &AssistExecuteOneTile
-            : &AssistExecuteOneRange;
+        bool (*assistFn)(void*) noexcept = &AssistExecuteOneTile;
         const int participantCount = std::max(1, static_cast<int>(batch->workerCount));
 
         g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         g_workerTargetTotal.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_totalTilesPublished.fetch_add(
-            batch->tiles ? static_cast<uint64_t>(batch->tileCount)
-                              : static_cast<uint64_t>(batch->rangeCount),
+            static_cast<uint64_t>(batch->tileCount),
             std::memory_order_relaxed);
 
         // Register assist callback + readersDrained for Complete()
@@ -1296,7 +1417,7 @@ namespace JobSystem
 
         AcquireState(state);
         batch->publishedAt.store(MonotonicNowNs(), std::memory_order_release);
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
         {
             g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
             if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
@@ -1316,28 +1437,13 @@ namespace JobSystem
         // graph here also guarantees every acquired graph reaches its completion
         // callback and is returned to the graph pool.
         auto taskflow = AcquireTaskflow();
-        if (batch->tiles)
+        for (int slot = 0; slot < participantCount; ++slot)
         {
-            for (int slot = 0; slot < participantCount; ++slot)
-            {
-                taskflow->emplace([batch, slot]() {
-                    if (WorkerIndexManager::GetCurrentIndex() < 0)
-                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                    WorkerTileLoop(batch, static_cast<uint32_t>(slot));
-                });
-            }
-        }
-        else
-        {
-            for (int slot = 0; slot < participantCount; ++slot)
-            {
-                taskflow->emplace([batch]() {
-                    if (WorkerIndexManager::GetCurrentIndex() < 0)
-                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                    RecordWorkerEntry(batch);
-                    while (TryExecuteOneRange(batch, false)) {}
-                });
-            }
+            taskflow->emplace([batch, slot]() {
+                if (WorkerIndexManager::GetCurrentIndex() < 0)
+                    WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                WorkerTileLoop(batch, static_cast<uint32_t>(slot));
+            });
         }
 
         g_taskflowBatches.fetch_add(1, std::memory_order_relaxed);
@@ -1357,38 +1463,7 @@ namespace JobSystem
         void (*originalCleanup)(void*);
         const ChunkJobData* chunks;
         const EntityBatchData* entityBatches;
-        int itemCount;
-        int rangeSize;
-        int execMode;
     };
-
-    static bool ProcessChunkRange(void* ctx, int start, int count) noexcept
-    {
-        auto* bc = static_cast<ChunkBatchContext*>(ctx);
-        switch (bc->execMode)
-        {
-        case 0: {
-            int firstChunk = start * bc->rangeSize;
-            int lastChunk = std::min(firstChunk + bc->rangeSize, bc->itemCount);
-            for (int i = firstChunk; i < lastChunk; i++)
-                bc->func(bc->originalContext, &bc->chunks[i]);
-            break;
-        }
-        case 1: {
-            int first = start * bc->rangeSize;
-            int cnt = std::min(bc->rangeSize, bc->itemCount - first);
-            bc->rangeFunc(bc->originalContext, bc->chunks, first, cnt);
-            break;
-        }
-        case 2: {
-            int first = start * bc->rangeSize;
-            int cnt = std::min(bc->rangeSize, bc->itemCount - first);
-            bc->entityRangeFunc(bc->originalContext, bc->entityBatches, first, cnt);
-            break;
-        }
-        }
-        return true;
-    }
 
     // Unified Tile executor for Chunk callbacks, Chunk ranges and Entity ranges.
     static bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
@@ -1396,6 +1471,8 @@ namespace JobSystem
         auto* bc = static_cast<ChunkBatchContext*>(ctx);
         switch (tile.kind)
         {
+        case TileKind::GeneralRange:
+            return false;
         case TileKind::ChunkCallbacks:
             for (uint32_t i = 0; i < tile.itemCount; ++i)
                 bc->func(bc->originalContext, &bc->chunks[tile.firstItem + i]);
@@ -1424,17 +1501,18 @@ namespace JobSystem
         void (*batchFunc)(void*, int, int);
         void* originalContext;
         void (*originalCleanup)(void*);
-        int length;
-        int batchSize;
     };
 
-    static bool ProcessGeneralRange(void* ctx, int start, int count) noexcept
+    static bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
     {
         auto* bc = static_cast<GeneralBatchContext*>(ctx);
-        int s = start * bc->batchSize;
-        int e = std::min(s + bc->batchSize * count, bc->length);
-        if (bc->batchFunc) bc->batchFunc(bc->originalContext, s, e - s);
-        else for (int i = s; i < e; i++) bc->indexFunc(bc->originalContext, i);
+        const int start = static_cast<int>(tile.firstItem);
+        const int count = static_cast<int>(tile.itemCount);
+        if (bc->batchFunc)
+            bc->batchFunc(bc->originalContext, start, count);
+        else
+            for (int i = start; i < start + count; ++i)
+                bc->indexFunc(bc->originalContext, i);
         return true;
     }
 
@@ -1621,13 +1699,35 @@ namespace JobSystem
         if (raw)
             value.assign(raw);
 #endif
-        if (value.empty()) return ExecutionBackend::Taskflow;
+        // The native persistent pool is now the production path. Taskflow stays
+        // available only as an explicit compatibility/A-B backend.
+        if (value.empty()) return ExecutionBackend::NativeWorkerPool;
         std::transform(value.begin(), value.end(), value.begin(),
             [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
         if (value == "taskflow") return ExecutionBackend::Taskflow;
-        if (value == "native") return ExecutionBackend::NativeWorkerPoolExperimental;
+        if (value == "native") return ExecutionBackend::NativeWorkerPool;
         g_invalidBackendSelections.fetch_add(1, std::memory_order_relaxed);
-        return ExecutionBackend::Taskflow;
+        return ExecutionBackend::NativeWorkerPool;
+    }
+
+    static bool ResolveWorkerAffinityEnabled() noexcept
+    {
+        std::string value;
+#if defined(_WIN32)
+        char* raw = nullptr;
+        std::size_t rawLength = 0;
+        if (_dupenv_s(&raw, &rawLength, "ENTJOY_WORKER_AFFINITY") == 0 && raw)
+        {
+            value.assign(raw);
+            std::free(raw);
+        }
+#else
+        if (const char* raw = std::getenv("ENTJOY_WORKER_AFFINITY"))
+            value.assign(raw);
+#endif
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return value == "1" || value == "true" || value == "on";
     }
 
     void Scheduler::Initialize(int numThreads)
@@ -1641,31 +1741,21 @@ namespace JobSystem
             if (g_executor || (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning()))
                 return;
             g_numThreads = resolved;
-            g_physicalCoreCount = DetectPhysicalCoreCount();
             g_executionBackend = ResolveConfiguredBackend();
-            if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+            g_workerAffinityEnabled.store(
+                ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
+            if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
             {
                 g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
-                g_nativeWorkerPool->Start(static_cast<uint32_t>(resolved));
+                g_nativeWorkerPool->Start(
+                    static_cast<uint32_t>(resolved),
+                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
                 return;
             }
-            g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(resolved));
-
-#if defined(_WIN32)
-            SYSTEM_INFO si; GetSystemInfo(&si);
-            DWORD_PTR allCores = static_cast<DWORD_PTR>(si.dwActiveProcessorMask);
-            for (int i = 0; i < resolved; i++)
-                g_executor->silent_async([i, resolved, allCores]() {
-                    if (allCores) {
-                        int ci = 0;
-                        for (int c = 0; c < (int)(sizeof(DWORD_PTR)*8) && ci <= i; c++)
-                            if (allCores & ((DWORD_PTR)1 << c))
-                                { if (ci++ == i) { SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << c); break; } }
-                    }
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
-                });
-            g_executor->wait_for_all();
-#endif
+            auto workerInterface =
+                tf::make_worker_interface<AffinityWorkerInterface>();
+            g_executor = std::make_shared<tf::Executor>(
+                static_cast<size_t>(resolved), workerInterface);
         }
     }
 
@@ -1679,7 +1769,6 @@ namespace JobSystem
             exec = std::move(g_executor);
             nativePool = std::move(g_nativeWorkerPool);
             g_numThreads = 0;
-            g_physicalCoreCount = 0;
         }
         if (exec) exec->wait_for_all();
         if (nativePool) nativePool->Stop();
@@ -1690,7 +1779,7 @@ namespace JobSystem
 
     void Scheduler::PrewakeWorkers()
     {
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPoolExperimental)
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
             return;
         auto exec = EnsureExecutor();
         // Submit NOP tasks to wake all workers
@@ -1749,13 +1838,29 @@ namespace JobSystem
         int rc = (length + cs - 1) / cs;
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
-        auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup, length, cs };
-        auto* storage = AcquireBatchStorage(0);
+        const uint32_t targetWorkers = static_cast<uint32_t>(
+            ResolveWorkerTarget(0, rc));
+        auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
+        auto* storage = AcquireBatchStorage(
+            static_cast<uint32_t>(rc), targetWorkers);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
-        batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
-        batch->workerCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
+        batch->executeTile = &GeneralExecuteTile;
+        batch->tileCount = static_cast<uint32_t>(rc);
+        batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < batch->tileCount; ++i)
+        {
+            const uint32_t first = i * static_cast<uint32_t>(cs);
+            storage->tileBuffer[i] = {
+                first,
+                std::min(static_cast<uint32_t>(cs),
+                    static_cast<uint32_t>(length) - first),
+                TileKind::GeneralRange };
+        }
+        batch->tiles = storage->tileBuffer;
+        batch->workerCount = targetWorkers;
+        InitializeLocalPartitions(batch);
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1780,12 +1885,28 @@ namespace JobSystem
         int rc = (length + cs - 1) / cs;
         if (rc <= 1) { func(context, 0, length); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
-        auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup, length, cs };
-        auto* storage = AcquireBatchStorage(0);
+        const uint32_t targetWorkers = static_cast<uint32_t>(
+            ResolveWorkerTarget(0, rc));
+        auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
+        auto* storage = AcquireBatchStorage(
+            static_cast<uint32_t>(rc), targetWorkers);
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
-        batch->processRange = &ProcessGeneralRange; batch->rangeCount = rc; batch->rangeSize = cs;
-        batch->workerCount = static_cast<uint32_t>(ResolveWorkerTarget(0, rc));
+        batch->executeTile = &GeneralExecuteTile;
+        batch->tileCount = static_cast<uint32_t>(rc);
+        batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < batch->tileCount; ++i)
+        {
+            const uint32_t first = i * static_cast<uint32_t>(cs);
+            storage->tileBuffer[i] = {
+                first,
+                std::min(static_cast<uint32_t>(cs),
+                    static_cast<uint32_t>(length) - first),
+                TileKind::GeneralRange };
+        }
+        batch->tiles = storage->tileBuffer;
+        batch->workerCount = targetWorkers;
+        InitializeLocalPartitions(batch);
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -1827,17 +1948,16 @@ namespace JobSystem
             return JobHandle(CreateState(true));
         }
 
-        int execMode = func ? 0 : (rangeFunc ? 1 : 2);
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
-            chunks, batches, itemCount, rs, execMode };
+            chunks, batches };
         const uint32_t tileCount = static_cast<uint32_t>(rc);
         const int targetWorkers = ResolveWorkerTarget(
             workerCap, static_cast<int>(tileCount));
-        auto* storage = AcquireBatchStorage(tileCount);
+        auto* storage = AcquireBatchStorage(
+            tileCount, static_cast<uint32_t>(targetWorkers));
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
-        batch->rangeCount = rc; batch->rangeSize = rs; batch->totalItems = itemCount;
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
         // Every Chunk/Entity entry point uses the same Tile/partition protocol.
@@ -1858,9 +1978,9 @@ namespace JobSystem
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
-            batch->nextTile.store(0, std::memory_order_relaxed);
+            batch->tilesRemaining.store(tileCount, std::memory_order_relaxed);
             batch->workerCount = static_cast<uint32_t>(targetWorkers);
-            batch->completedTiles.store(0, std::memory_order_relaxed);
+            InitializeLocalPartitions(batch);
         }
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
