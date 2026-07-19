@@ -10,16 +10,22 @@
 #include "../../external/cpp-taskflow/taskflow/taskflow.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <thread>
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 #include <immintrin.h>
@@ -88,6 +94,126 @@ namespace JobSystem
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
+    std::atomic<bool> g_timingDiagnosticsEnabled{ false };
+
+    constexpr size_t kBatchTimingSampleCapacity = 2048;
+    struct BatchTimingSample
+    {
+        uint64_t batchId{ 0 };
+        uint64_t batchTotalNs{ 0 };
+        uint64_t submitToFirstWorkerNs{ 0 };
+        uint64_t workerStartSpreadNs{ 0 };
+        uint64_t executionSpanNs{ 0 };
+        uint64_t maxRangeNs{ 0 };
+        uint64_t slowRangeThreadCpuNs{ 0 };
+        uint64_t slowRangeThreadCycles{ 0 };
+        uint64_t minRangeThreadCycles{ 0 };
+        uint64_t averageRangeThreadCycles{ 0 };
+        uint64_t coreMigrations{ 0 };
+        uint64_t assistTiles{ 0 };
+        int32_t slowRangeIndex{ -1 };
+        int32_t slowRangeWorker{ -1 };
+        int32_t slowRangeStartLogicalCore{ -1 };
+        int32_t slowRangeEndLogicalCore{ -1 };
+        int32_t slowRangeStartPhysicalCore{ -1 };
+        int32_t slowRangeEndPhysicalCore{ -1 };
+    };
+
+    std::mutex g_batchTimingMutex;
+    std::array<BatchTimingSample, kBatchTimingSampleCapacity> g_batchTimingSamples{};
+    size_t g_batchTimingSampleCount{ 0 };
+    uint64_t g_batchTimingSamplesDropped{ 0 };
+    BatchTimingSample g_slowestBatch{};
+
+    static void RecordBatchTiming(const BatchTimingSample& sample) noexcept
+    {
+        std::lock_guard<std::mutex> lock(g_batchTimingMutex);
+        if (g_batchTimingSampleCount < g_batchTimingSamples.size())
+            g_batchTimingSamples[g_batchTimingSampleCount++] = sample;
+        else
+            ++g_batchTimingSamplesDropped;
+
+        if (sample.batchTotalNs >= g_slowestBatch.batchTotalNs)
+            g_slowestBatch = sample;
+    }
+
+    template <typename Selector>
+    static void PopulateTimingPercentiles(
+        Selector selector,
+        uint64_t& p50,
+        uint64_t& p95,
+        uint64_t& p99,
+        uint64_t& maximum)
+    {
+        if (g_batchTimingSampleCount == 0) return;
+        std::vector<uint64_t> values;
+        values.reserve(g_batchTimingSampleCount);
+        for (size_t i = 0; i < g_batchTimingSampleCount; ++i)
+            values.push_back(selector(g_batchTimingSamples[i]));
+        std::sort(values.begin(), values.end());
+
+        const size_t last = values.size() - 1;
+        const auto percentileIndex = [last](size_t percentile) {
+            return (last * percentile + 99) / 100;
+        };
+        p50 = values[percentileIndex(50)];
+        p95 = values[percentileIndex(95)];
+        p99 = values[percentileIndex(99)];
+        maximum = values.back();
+    }
+
+    static void PopulateBatchTimingSnapshot(JobSystemStatsSnapshot* stats) noexcept
+    {
+        try
+        {
+            std::lock_guard<std::mutex> lock(g_batchTimingMutex);
+            stats->timingSampleCount = static_cast<uint64_t>(g_batchTimingSampleCount);
+            stats->timingSamplesDropped = g_batchTimingSamplesDropped;
+            PopulateTimingPercentiles(
+                [](const BatchTimingSample& sample) { return sample.batchTotalNs; },
+                stats->batchTotalP50Ns, stats->batchTotalP95Ns,
+                stats->batchTotalP99Ns, stats->batchTotalMaxNs);
+            PopulateTimingPercentiles(
+                [](const BatchTimingSample& sample) { return sample.submitToFirstWorkerNs; },
+                stats->submitToFirstWorkerP50Ns, stats->submitToFirstWorkerP95Ns,
+                stats->submitToFirstWorkerP99Ns, stats->submitToFirstWorkerMaxNs);
+            PopulateTimingPercentiles(
+                [](const BatchTimingSample& sample) { return sample.workerStartSpreadNs; },
+                stats->workerStartSpreadP50Ns, stats->workerStartSpreadP95Ns,
+                stats->workerStartSpreadP99Ns, stats->workerStartSpreadMaxNs);
+            PopulateTimingPercentiles(
+                [](const BatchTimingSample& sample) { return sample.executionSpanNs; },
+                stats->executionSpanP50Ns, stats->executionSpanP95Ns,
+                stats->executionSpanP99Ns, stats->executionSpanMaxNs);
+            PopulateTimingPercentiles(
+                [](const BatchTimingSample& sample) { return sample.maxRangeNs; },
+                stats->maxRangeP50Ns, stats->maxRangeP95Ns,
+                stats->maxRangeP99Ns, stats->maxRangeMaxNs);
+
+            stats->slowBatchId = g_slowestBatch.batchId;
+            stats->slowBatchTotalNs = g_slowestBatch.batchTotalNs;
+            stats->slowSubmitToFirstWorkerNs = g_slowestBatch.submitToFirstWorkerNs;
+            stats->slowWorkerStartSpreadNs = g_slowestBatch.workerStartSpreadNs;
+            stats->slowExecutionSpanNs = g_slowestBatch.executionSpanNs;
+            stats->slowMaxRangeNs = g_slowestBatch.maxRangeNs;
+            stats->slowRangeThreadCpuNs = g_slowestBatch.slowRangeThreadCpuNs;
+            stats->slowRangeThreadCycles = g_slowestBatch.slowRangeThreadCycles;
+            stats->slowBatchMinRangeThreadCycles = g_slowestBatch.minRangeThreadCycles;
+            stats->slowBatchAverageRangeThreadCycles = g_slowestBatch.averageRangeThreadCycles;
+            stats->slowCoreMigrations = g_slowestBatch.coreMigrations;
+            stats->slowAssistTiles = g_slowestBatch.assistTiles;
+            stats->slowRangeIndex = g_slowestBatch.slowRangeIndex;
+            stats->slowRangeWorker = g_slowestBatch.slowRangeWorker;
+            stats->slowRangeStartLogicalCore = g_slowestBatch.slowRangeStartLogicalCore;
+            stats->slowRangeEndLogicalCore = g_slowestBatch.slowRangeEndLogicalCore;
+            stats->slowRangeStartPhysicalCore = g_slowestBatch.slowRangeStartPhysicalCore;
+            stats->slowRangeEndPhysicalCore = g_slowestBatch.slowRangeEndPhysicalCore;
+        }
+        catch (...)
+        {
+            // Stats collection must never affect job completion.
+        }
+    }
 
     void UpdateUnsignedEwma(std::atomic<uint64_t>& target, uint64_t sample) noexcept
     {
@@ -108,6 +234,110 @@ namespace JobSystem
     {
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    static int CurrentProcessorIndexForDiagnostics() noexcept
+    {
+#if defined(_WIN32) && defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+        PROCESSOR_NUMBER processor{};
+        ::GetCurrentProcessorNumberEx(&processor);
+        return static_cast<int>(processor.Group) * 64 + static_cast<int>(processor.Number);
+#elif defined(__linux__)
+        return ::sched_getcpu();
+#else
+        return -1;
+#endif
+    }
+
+    static uint64_t CurrentThreadCpuTimeNsForDiagnostics() noexcept
+    {
+#if defined(_WIN32)
+        FILETIME creation{}, exit{}, kernel{}, user{};
+        if (!::GetThreadTimes(::GetCurrentThread(), &creation, &exit, &kernel, &user))
+            return 0;
+        ULARGE_INTEGER kernelTime{}, userTime{};
+        kernelTime.LowPart = kernel.dwLowDateTime;
+        kernelTime.HighPart = kernel.dwHighDateTime;
+        userTime.LowPart = user.dwLowDateTime;
+        userTime.HighPart = user.dwHighDateTime;
+        return (kernelTime.QuadPart + userTime.QuadPart) * 100ull;
+#elif defined(__linux__)
+        timespec value{};
+        if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+        return static_cast<uint64_t>(value.tv_sec) * 1'000'000'000ull +
+            static_cast<uint64_t>(value.tv_nsec);
+#else
+        return 0;
+#endif
+    }
+
+    static uint64_t CurrentThreadCyclesForDiagnostics() noexcept
+    {
+#if defined(_WIN32)
+        ULONG64 cycles = 0;
+        return ::QueryThreadCycleTime(::GetCurrentThread(), &cycles)
+            ? static_cast<uint64_t>(cycles) : 0;
+#else
+        return 0;
+#endif
+    }
+
+    static int PhysicalCoreIndexForDiagnostics(int logicalCore) noexcept
+    {
+#if defined(_WIN32)
+        constexpr size_t kLogicalCoreMapCapacity = 4096;
+        static const auto logicalToPhysical = []() noexcept {
+            std::array<int, kLogicalCoreMapCapacity> result{};
+            result.fill(-1);
+            DWORD bytes = 0;
+            (void)::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
+            if (bytes == 0) return result;
+            auto* buffer = static_cast<unsigned char*>(std::malloc(bytes));
+            if (!buffer) return result;
+            if (!::GetLogicalProcessorInformationEx(
+                RelationProcessorCore,
+                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer),
+                &bytes))
+            {
+                std::free(buffer);
+                return result;
+            }
+
+            DWORD offset = 0;
+            int physicalCore = 0;
+            while (offset < bytes)
+            {
+                auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                    buffer + offset);
+                if (info->Relationship == RelationProcessorCore)
+                {
+                    const auto& processor = info->Processor;
+                    for (WORD groupIndex = 0; groupIndex < processor.GroupCount; ++groupIndex)
+                    {
+                        const GROUP_AFFINITY& affinity = processor.GroupMask[groupIndex];
+                        for (int bit = 0; bit < 64; ++bit)
+                        {
+                            if ((affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) == 0)
+                                continue;
+                            const int index = static_cast<int>(affinity.Group) * 64 + bit;
+                            if (index >= 0 && static_cast<size_t>(index) < result.size())
+                                result[static_cast<size_t>(index)] = physicalCore;
+                        }
+                    }
+                    ++physicalCore;
+                }
+                if (info->Size == 0) break;
+                offset += info->Size;
+            }
+            std::free(buffer);
+            return result;
+        }();
+        return logicalCore >= 0 && static_cast<size_t>(logicalCore) < logicalToPhysical.size()
+            ? logicalToPhysical[static_cast<size_t>(logicalCore)] : -1;
+#else
+        (void)logicalCore;
+        return -1;
+#endif
     }
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept
@@ -152,6 +382,7 @@ namespace JobSystem
         stats->taskflowBatches = g_taskflowBatches.load(std::memory_order_relaxed);
         stats->nativeBatches = g_nativeBatches.load(std::memory_order_relaxed);
         stats->invalidBackendSelections = g_invalidBackendSelections.load(std::memory_order_relaxed);
+        PopulateBatchTimingSnapshot(stats);
 
         const uint64_t workerTiles =
             g_workerExecutedRanges.load(std::memory_order_relaxed);
@@ -225,6 +456,17 @@ namespace JobSystem
         g_invalidBackendSelections.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
         g_perRangeExecEwmaNs.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(g_batchTimingMutex);
+            g_batchTimingSampleCount = 0;
+            g_batchTimingSamplesDropped = 0;
+            g_slowestBatch = {};
+        }
+    }
+
+    void SetTimingDiagnosticsEnabled(bool enabled) noexcept
+    {
+        g_timingDiagnosticsEnabled.store(enabled, std::memory_order_release);
     }
 
     int CurrentWorkerCount()
@@ -514,8 +756,24 @@ namespace JobSystem
         std::atomic<uint64_t> publishedAt{ 0 };
         std::atomic<uint64_t> firstWorkerAt{ 0 };
         std::atomic<uint64_t> lastWorkerAt{ 0 };
+        std::atomic<uint64_t> firstTileAt{ 0 };
         std::atomic<uint64_t> lastTileAt{ 0 };
         std::atomic<uint64_t> topologyDoneAt{ 0 };
+        std::atomic<uint64_t> maxRangeDurationNs{ 0 };
+        std::atomic<uint64_t> minRangeThreadCycles{ (std::numeric_limits<uint64_t>::max)() };
+        std::atomic<uint64_t> totalRangeThreadCycles{ 0 };
+        std::atomic<uint64_t> measuredRangeThreadCycles{ 0 };
+        std::atomic_flag slowRangeLock = ATOMIC_FLAG_INIT;
+        uint64_t slowRangeThreadCpuNs{ 0 };
+        uint64_t slowRangeThreadCycles{ 0 };
+        int32_t slowRangeIndex{ -1 };
+        int32_t slowRangeWorker{ -1 };
+        int32_t slowRangeStartLogicalCore{ -1 };
+        int32_t slowRangeEndLogicalCore{ -1 };
+        int32_t slowRangeStartPhysicalCore{ -1 };
+        int32_t slowRangeEndPhysicalCore{ -1 };
+        std::atomic<uint64_t> coreMigrations{ 0 };
+        std::atomic<uint64_t> batchAssistTiles{ 0 };
 
         std::atomic<int> completedRanges{ 0 };
         std::atomic<bool> finalized{ false };
@@ -523,6 +781,48 @@ namespace JobSystem
 
         uint64_t diagnosticId{ 0 };
     };
+
+    static void AtomicMinNonZero(std::atomic<uint64_t>& target, uint64_t value) noexcept
+    {
+        if (value == 0) return;
+        uint64_t current = target.load(std::memory_order_relaxed);
+        while (value < current && !target.compare_exchange_weak(
+            current, value, std::memory_order_relaxed)) {}
+    }
+
+    static void RecordRangeExecutionDiagnostics(
+        BatchState* batch,
+        int rangeIndex,
+        uint64_t wallNs,
+        uint64_t threadCpuNs,
+        uint64_t threadCycles,
+        int startLogicalCore,
+        int endLogicalCore) noexcept
+    {
+        AtomicMinNonZero(batch->minRangeThreadCycles, threadCycles);
+        if (threadCycles != 0)
+        {
+            batch->totalRangeThreadCycles.fetch_add(threadCycles, std::memory_order_relaxed);
+            batch->measuredRangeThreadCycles.fetch_add(1, std::memory_order_relaxed);
+        }
+        while (batch->slowRangeLock.test_and_set(std::memory_order_acquire))
+            std::this_thread::yield();
+        if (wallNs > batch->maxRangeDurationNs.load(std::memory_order_relaxed))
+        {
+            batch->maxRangeDurationNs.store(wallNs, std::memory_order_relaxed);
+            batch->slowRangeThreadCpuNs = threadCpuNs;
+            batch->slowRangeThreadCycles = threadCycles;
+            batch->slowRangeIndex = rangeIndex;
+            batch->slowRangeWorker = WorkerIndexManager::GetCurrentIndex();
+            batch->slowRangeStartLogicalCore = startLogicalCore;
+            batch->slowRangeEndLogicalCore = endLogicalCore;
+            batch->slowRangeStartPhysicalCore =
+                PhysicalCoreIndexForDiagnostics(startLogicalCore);
+            batch->slowRangeEndPhysicalCore =
+                PhysicalCoreIndexForDiagnostics(endLogicalCore);
+        }
+        batch->slowRangeLock.clear(std::memory_order_release);
+    }
 
     struct BatchStorage
     {
@@ -674,11 +974,46 @@ namespace JobSystem
             index, index * batch->rangeSize, batch->rangeSize);
         PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
             index, index * batch->rangeSize, batch->rangeSize);
+        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+        const uint64_t rangeStartedAt = timingEnabled ? MonotonicNowNs() : 0;
+        const uint64_t threadCpuStartedAt = timingEnabled
+            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
+        const uint64_t threadCyclesStartedAt = timingEnabled
+            ? CurrentThreadCyclesForDiagnostics() : 0;
+        const int rangeStartLogicalCore = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
+        if (timingEnabled)
+        {
+            uint64_t empty = 0;
+            batch->firstTileAt.compare_exchange_strong(
+                empty, rangeStartedAt, std::memory_order_release, std::memory_order_relaxed);
+        }
         batch->processRange(batch->context, index, 1);
+        const int rangeEndLogicalCore = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
+        const uint64_t threadCyclesFinishedAt = timingEnabled
+            ? CurrentThreadCyclesForDiagnostics() : 0;
+        const uint64_t threadCpuFinishedAt = timingEnabled
+            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
+        const uint64_t rangeFinishedAt = timingEnabled ? MonotonicNowNs() : 0;
+        if (timingEnabled && rangeFinishedAt >= rangeStartedAt)
+        {
+            RecordRangeExecutionDiagnostics(
+                batch,
+                index,
+                rangeFinishedAt - rangeStartedAt,
+                threadCpuFinishedAt >= threadCpuStartedAt
+                    ? threadCpuFinishedAt - threadCpuStartedAt : 0,
+                threadCyclesFinishedAt >= threadCyclesStartedAt
+                    ? threadCyclesFinishedAt - threadCyclesStartedAt : 0,
+                rangeStartLogicalCore,
+                rangeEndLogicalCore);
+        }
         if (assist)
         {
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
@@ -726,12 +1061,47 @@ namespace JobSystem
             static_cast<int>(tileIndex),
             static_cast<int>(tile.firstItem),
             static_cast<int>(tile.itemCount));
+        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+        const uint64_t rangeStartedAt = timingEnabled ? MonotonicNowNs() : 0;
+        const uint64_t threadCpuStartedAt = timingEnabled
+            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
+        const uint64_t threadCyclesStartedAt = timingEnabled
+            ? CurrentThreadCyclesForDiagnostics() : 0;
+        const int rangeStartLogicalCore = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
+        if (timingEnabled)
+        {
+            uint64_t empty = 0;
+            batch->firstTileAt.compare_exchange_strong(
+                empty, rangeStartedAt, std::memory_order_release, std::memory_order_relaxed);
+        }
         batch->executeTile(batch->context, batch->tiles[tileIndex]);
+        const int rangeEndLogicalCore = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
+        const uint64_t threadCyclesFinishedAt = timingEnabled
+            ? CurrentThreadCyclesForDiagnostics() : 0;
+        const uint64_t threadCpuFinishedAt = timingEnabled
+            ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
+        const uint64_t rangeFinishedAt = timingEnabled ? MonotonicNowNs() : 0;
+        if (timingEnabled && rangeFinishedAt >= rangeStartedAt)
+        {
+            RecordRangeExecutionDiagnostics(
+                batch,
+                static_cast<int>(tileIndex),
+                rangeFinishedAt - rangeStartedAt,
+                threadCpuFinishedAt >= threadCpuStartedAt
+                    ? threadCpuFinishedAt - threadCpuStartedAt : 0,
+                threadCyclesFinishedAt >= threadCyclesStartedAt
+                    ? threadCyclesFinishedAt - threadCyclesStartedAt : 0,
+                rangeStartLogicalCore,
+                rangeEndLogicalCore);
+        }
         if (source == TileExecutionSource::Assist)
         {
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
             g_assistTiles.fetch_add(1, std::memory_order_relaxed);
+            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
@@ -856,6 +1226,50 @@ namespace JobSystem
         if (lastTile != 0 && now >= lastTile)
             UpdateUnsignedEwma(g_lastTileToTopologyDoneEwmaNs,
                 std::max<uint64_t>(1, now - lastTile));
+
+    }
+
+    static void RecordFinalizedBatchTiming(BatchState* batch) noexcept
+    {
+        if (!g_timingDiagnosticsEnabled.load(std::memory_order_relaxed)) return;
+
+        const uint64_t now = MonotonicNowNs();
+        const uint64_t published = batch->publishedAt.load(std::memory_order_acquire);
+        const uint64_t firstWorker = batch->firstWorkerAt.load(std::memory_order_acquire);
+        const uint64_t lastWorker = batch->lastWorkerAt.load(std::memory_order_acquire);
+        const uint64_t firstTile = batch->firstTileAt.load(std::memory_order_acquire);
+        const uint64_t lastTile = batch->lastTileAt.load(std::memory_order_acquire);
+
+        BatchTimingSample sample{};
+        sample.batchId = batch->diagnosticId;
+        sample.batchTotalNs = published != 0 && now >= published
+            ? now - published : 0;
+        sample.submitToFirstWorkerNs = published != 0 && firstWorker >= published
+            ? firstWorker - published : 0;
+        sample.workerStartSpreadNs = firstWorker != 0 && lastWorker >= firstWorker
+            ? lastWorker - firstWorker : 0;
+        sample.executionSpanNs = firstTile != 0 && lastTile >= firstTile
+            ? lastTile - firstTile : 0;
+        sample.maxRangeNs = batch->maxRangeDurationNs.load(std::memory_order_relaxed);
+        sample.slowRangeThreadCpuNs = batch->slowRangeThreadCpuNs;
+        sample.slowRangeThreadCycles = batch->slowRangeThreadCycles;
+        const uint64_t minCycles = batch->minRangeThreadCycles.load(std::memory_order_relaxed);
+        sample.minRangeThreadCycles = minCycles == (std::numeric_limits<uint64_t>::max)()
+            ? 0 : minCycles;
+        const uint64_t measuredCycles =
+            batch->measuredRangeThreadCycles.load(std::memory_order_relaxed);
+        sample.averageRangeThreadCycles = measuredCycles > 0
+            ? batch->totalRangeThreadCycles.load(std::memory_order_relaxed) / measuredCycles
+            : 0;
+        sample.coreMigrations = batch->coreMigrations.load(std::memory_order_relaxed);
+        sample.assistTiles = batch->batchAssistTiles.load(std::memory_order_relaxed);
+        sample.slowRangeIndex = batch->slowRangeIndex;
+        sample.slowRangeWorker = batch->slowRangeWorker;
+        sample.slowRangeStartLogicalCore = batch->slowRangeStartLogicalCore;
+        sample.slowRangeEndLogicalCore = batch->slowRangeEndLogicalCore;
+        sample.slowRangeStartPhysicalCore = batch->slowRangeStartPhysicalCore;
+        sample.slowRangeEndPhysicalCore = batch->slowRangeEndPhysicalCore;
+        RecordBatchTiming(sample);
     }
 
     static void ReleaseBatch(BatchState* batch) noexcept
@@ -888,6 +1302,7 @@ namespace JobSystem
 
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
+            RecordFinalizedBatchTiming(batch);
             PushTraceEvent(TraceEventType::FinalizeBegin, diagnosticId, -1, 0, 0);
             if (batch->cleanup) batch->cleanup(batch->context);
             // Push HandleComplete before CompleteState so the event is
@@ -914,6 +1329,9 @@ namespace JobSystem
     static void ExecuteBatchSlot(void* raw, uint32_t slot) noexcept
     {
         auto* batch = static_cast<BatchState*>(raw);
+        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+        const int startProcessor = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
         if (batch->partitions)
@@ -923,6 +1341,10 @@ namespace JobSystem
             RecordWorkerEntry(batch);
             while (TryExecuteOneRange(batch, false)) {}
         }
+        const int endProcessor = timingEnabled
+            ? CurrentProcessorIndexForDiagnostics() : -1;
+        if (startProcessor >= 0 && endProcessor >= 0 && startProcessor != endProcessor)
+            batch->coreMigrations.fetch_add(1, std::memory_order_relaxed);
     }
 
     static void CompleteBackendBatch(void* raw) noexcept
@@ -939,38 +1361,10 @@ namespace JobSystem
     static void SubmitBatch(BatchState* batch, int /*workerCap*/ = 0)
     {
         auto* state = batch->handle;
-        auto taskflow = AcquireTaskflow();
-
-        bool (*assistFn)(void*) noexcept = nullptr;
+        bool (*assistFn)(void*) noexcept = batch->partitions
+            ? &AssistExecuteOneTile
+            : &AssistExecuteOneRange;
         const int participantCount = std::max(1, static_cast<int>(batch->partitionCount));
-
-        if (batch->partitions)
-        {
-            // New path: partition-based — pass slot directly, no nextPartitionSlot
-            for (int slot = 0; slot < participantCount; ++slot)
-            {
-                taskflow->emplace([batch, slot]() {
-                    if (WorkerIndexManager::GetCurrentIndex() < 0)
-                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                    WorkerPartitionLoop(batch, static_cast<uint32_t>(slot));
-                });
-            }
-            assistFn = &AssistExecuteOneTile;
-        }
-        else
-        {
-            // Old path: global nextRange — still capped by participantCount
-            for (int slot = 0; slot < participantCount; ++slot)
-            {
-                taskflow->emplace([batch]() {
-                    if (WorkerIndexManager::GetCurrentIndex() < 0)
-                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                    RecordWorkerEntry(batch);
-                    while (TryExecuteOneRange(batch, false)) {}
-                });
-            }
-            assistFn = &AssistExecuteOneRange;
-        }
 
         g_frameTasksSubmitted.fetch_add(static_cast<uint64_t>(participantCount), std::memory_order_relaxed);
         g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
@@ -1007,6 +1401,34 @@ namespace JobSystem
                 CompleteBackendBatch(batch);
             }
             return;
+        }
+
+        // Native batches return above without touching Taskflow. Constructing the
+        // graph here also guarantees every acquired graph reaches its completion
+        // callback and is returned to the graph pool.
+        auto taskflow = AcquireTaskflow();
+        if (batch->partitions)
+        {
+            for (int slot = 0; slot < participantCount; ++slot)
+            {
+                taskflow->emplace([batch, slot]() {
+                    if (WorkerIndexManager::GetCurrentIndex() < 0)
+                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                    WorkerPartitionLoop(batch, static_cast<uint32_t>(slot));
+                });
+            }
+        }
+        else
+        {
+            for (int slot = 0; slot < participantCount; ++slot)
+            {
+                taskflow->emplace([batch]() {
+                    if (WorkerIndexManager::GetCurrentIndex() < 0)
+                        WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+                    RecordWorkerEntry(batch);
+                    while (TryExecuteOneRange(batch, false)) {}
+                });
+            }
         }
 
         g_taskflowBatches.fetch_add(1, std::memory_order_relaxed);
@@ -1274,9 +1696,23 @@ namespace JobSystem
     // ============================================================
     static ExecutionBackend ResolveConfiguredBackend() noexcept
     {
+        std::string value;
+#if defined(_WIN32)
+        char* raw = nullptr;
+        std::size_t rawLength = 0;
+        if (_dupenv_s(&raw, &rawLength, "ENTJOY_JOB_BACKEND") != 0)
+            raw = nullptr;
+        if (raw)
+        {
+            value.assign(raw);
+            std::free(raw);
+        }
+#else
         const char* raw = std::getenv("ENTJOY_JOB_BACKEND");
-        if (!raw || *raw == '\0') return ExecutionBackend::Taskflow;
-        std::string value(raw);
+        if (raw)
+            value.assign(raw);
+#endif
+        if (value.empty()) return ExecutionBackend::Taskflow;
         std::transform(value.begin(), value.end(), value.begin(),
             [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
         if (value == "taskflow") return ExecutionBackend::Taskflow;

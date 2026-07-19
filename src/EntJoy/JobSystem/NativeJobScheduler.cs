@@ -150,6 +150,47 @@ public struct NativeJobSystemStats
     public ulong TaskflowBatches;
     public ulong NativeBatches;
     public ulong InvalidBackendSelections;
+    // Exact per-batch timing distribution appended for ABI compatibility.
+    public ulong TimingSampleCount;
+    public ulong TimingSamplesDropped;
+    public ulong BatchTotalP50Ns;
+    public ulong BatchTotalP95Ns;
+    public ulong BatchTotalP99Ns;
+    public ulong BatchTotalMaxNs;
+    public ulong SubmitToFirstWorkerP50Ns;
+    public ulong SubmitToFirstWorkerP95Ns;
+    public ulong SubmitToFirstWorkerP99Ns;
+    public ulong SubmitToFirstWorkerMaxNs;
+    public ulong WorkerStartSpreadP50Ns;
+    public ulong WorkerStartSpreadP95Ns;
+    public ulong WorkerStartSpreadP99Ns;
+    public ulong WorkerStartSpreadMaxNs;
+    public ulong ExecutionSpanP50Ns;
+    public ulong ExecutionSpanP95Ns;
+    public ulong ExecutionSpanP99Ns;
+    public ulong ExecutionSpanMaxNs;
+    public ulong MaxRangeP50Ns;
+    public ulong MaxRangeP95Ns;
+    public ulong MaxRangeP99Ns;
+    public ulong MaxRangeMaxNs;
+    public ulong SlowBatchId;
+    public ulong SlowBatchTotalNs;
+    public ulong SlowSubmitToFirstWorkerNs;
+    public ulong SlowWorkerStartSpreadNs;
+    public ulong SlowExecutionSpanNs;
+    public ulong SlowMaxRangeNs;
+    public ulong SlowCoreMigrations;
+    public ulong SlowAssistTiles;
+    public ulong SlowRangeThreadCpuNs;
+    public ulong SlowRangeThreadCycles;
+    public ulong SlowBatchMinRangeThreadCycles;
+    public ulong SlowBatchAverageRangeThreadCycles;
+    public int SlowRangeIndex;
+    public int SlowRangeWorker;
+    public int SlowRangeStartLogicalCore;
+    public int SlowRangeEndLogicalCore;
+    public int SlowRangeStartPhysicalCore;
+    public int SlowRangeEndPhysicalCore;
 }
 
 public enum TraceEventType : ushort
@@ -235,6 +276,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
     private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
+    private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
     // Profiler 函数指针
     private static delegate* unmanaged[Cdecl]<int, void> _profiler_SetEnabled;
     private static delegate* unmanaged[Cdecl]<int> _profiler_IsEnabled;
@@ -440,6 +482,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
         _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
+        _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_SetTimingDiagnostics");
 
         _profiler_SetEnabled = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobProfiler_SetEnabled");
@@ -595,6 +639,11 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_ResetStats == null) return;
         _jobSystem_ResetStats();
+    }
+    private static void JobSystem_SetTimingDiagnostics(bool enabled)
+    {
+        EnsureNativeLoaded();
+        _jobSystem_SetTimingDiagnostics(enabled ? 1 : 0);
     }
 
     // ======================== 委托类型 ========================
@@ -839,6 +888,8 @@ public static unsafe partial class NativeJobScheduler
 
     public static NativeJobSystemStats GetStats() => JobSystem_GetStats();
     public static void ResetStats() => JobSystem_ResetStats();
+    public static void SetTimingDiagnosticsEnabled(bool enabled) =>
+        JobSystem_SetTimingDiagnostics(enabled);
 
     // ======================== Profiler 公共接口 ========================
     internal static void Profiler_SetEnabled(int enabled) => _profiler_SetEnabled(enabled);

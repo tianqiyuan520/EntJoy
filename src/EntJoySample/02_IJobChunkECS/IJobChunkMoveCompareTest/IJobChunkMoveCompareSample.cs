@@ -767,6 +767,9 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             int sleepMilliseconds)
         {
             var averages = new double[cases.Length];
+            bool timingDiagnostics = sleepMilliseconds > 0;
+            if (timingDiagnostics)
+                NativeJobScheduler.SetTimingDiagnosticsEnabled(true);
 
             for (int index = 0; index < cases.Length; index++)
             {
@@ -838,12 +841,59 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                         $"schedulePublish=N/A({backend}), firstMain=N/A({backend}), " +
                         $"assistTilePct={stats.AssistExecPctEwma}%, " +
                         $"waitFallbacks={stats.WaitFallbacks}");
+                    Console.WriteLine(
+                        $"  SchedulerDist: samples={stats.TimingSampleCount}, dropped={stats.TimingSamplesDropped}, " +
+                        $"batchTotalUs[p50/p95/p99/max]={stats.BatchTotalP50Ns / 1000.0:F3}/{stats.BatchTotalP95Ns / 1000.0:F3}/" +
+                        $"{stats.BatchTotalP99Ns / 1000.0:F3}/{stats.BatchTotalMaxNs / 1000.0:F3}, " +
+                        $"submitFirstUs[p50/p95/p99/max]={stats.SubmitToFirstWorkerP50Ns / 1000.0:F3}/" +
+                        $"{stats.SubmitToFirstWorkerP95Ns / 1000.0:F3}/{stats.SubmitToFirstWorkerP99Ns / 1000.0:F3}/" +
+                        $"{stats.SubmitToFirstWorkerMaxNs / 1000.0:F3}");
+                    Console.WriteLine(
+                        $"  SchedulerTail: spreadUs[p50/p95/p99/max]={stats.WorkerStartSpreadP50Ns / 1000.0:F3}/" +
+                        $"{stats.WorkerStartSpreadP95Ns / 1000.0:F3}/{stats.WorkerStartSpreadP99Ns / 1000.0:F3}/" +
+                        $"{stats.WorkerStartSpreadMaxNs / 1000.0:F3}, " +
+                        $"executeSpanUs[p50/p95/p99/max]={stats.ExecutionSpanP50Ns / 1000.0:F3}/" +
+                        $"{stats.ExecutionSpanP95Ns / 1000.0:F3}/{stats.ExecutionSpanP99Ns / 1000.0:F3}/" +
+                        $"{stats.ExecutionSpanMaxNs / 1000.0:F3}, " +
+                        $"maxRangeUs[p50/p95/p99/max]={stats.MaxRangeP50Ns / 1000.0:F3}/" +
+                        $"{stats.MaxRangeP95Ns / 1000.0:F3}/{stats.MaxRangeP99Ns / 1000.0:F3}/" +
+                        $"{stats.MaxRangeMaxNs / 1000.0:F3}");
+                    Console.WriteLine(
+                        $"  SchedulerSlow: batch={stats.SlowBatchId}, totalUs={stats.SlowBatchTotalNs / 1000.0:F3}, " +
+                        $"submitFirstUs={stats.SlowSubmitToFirstWorkerNs / 1000.0:F3}, " +
+                        $"spreadUs={stats.SlowWorkerStartSpreadNs / 1000.0:F3}, " +
+                        $"executeSpanUs={stats.SlowExecutionSpanNs / 1000.0:F3}, " +
+                        $"maxRangeUs={stats.SlowMaxRangeNs / 1000.0:F3}, " +
+                        $"coreMigrations={stats.SlowCoreMigrations}, assistTiles={stats.SlowAssistTiles}");
+                    bool threadCpuTimeValid = stats.SlowRangeThreadCpuNs > 0 &&
+                        stats.SlowRangeThreadCpuNs <= stats.SlowMaxRangeNs;
+                    string slowRangeCpuUs = threadCpuTimeValid
+                        ? $"{stats.SlowRangeThreadCpuNs / 1000.0:F3}" : "N/A(tick-granularity)";
+                    string slowRangeOffCpuUs = threadCpuTimeValid
+                        ? $"{(stats.SlowMaxRangeNs - stats.SlowRangeThreadCpuNs) / 1000.0:F3}"
+                        : "N/A";
+                    double slowRangeCycleRatio = stats.SlowBatchAverageRangeThreadCycles > 0
+                        ? (double)stats.SlowRangeThreadCycles / stats.SlowBatchAverageRangeThreadCycles
+                        : 0.0;
+                    double scheduledCyclesPerWallNs = stats.SlowMaxRangeNs > 0
+                        ? (double)stats.SlowRangeThreadCycles / stats.SlowMaxRangeNs
+                        : 0.0;
+                    Console.WriteLine(
+                        $"  SchedulerRange: tile={stats.SlowRangeIndex}, worker={stats.SlowRangeWorker}, " +
+                        $"wallUs={stats.SlowMaxRangeNs / 1000.0:F3}, threadCpuUs={slowRangeCpuUs}, " +
+                        $"offCpuUs={slowRangeOffCpuUs}, cycles={stats.SlowRangeThreadCycles}, " +
+                        $"avgCycles={stats.SlowBatchAverageRangeThreadCycles}, minCycles={stats.SlowBatchMinRangeThreadCycles}, " +
+                        $"cycleRatioVsAvg={slowRangeCycleRatio:F2}x, cyclesPerWallNs={scheduledCyclesPerWallNs:F2}, " +
+                        $"logicalCore={stats.SlowRangeStartLogicalCore}->{stats.SlowRangeEndLogicalCore}, " +
+                        $"physicalCore={stats.SlowRangeStartPhysicalCore}->{stats.SlowRangeEndPhysicalCore}");
                 }
                 else
                 {
                     Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
                 }
             }
+            if (timingDiagnostics)
+                NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
             return averages;
         }
 
