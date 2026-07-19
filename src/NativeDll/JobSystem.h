@@ -34,10 +34,19 @@ namespace JobSystem {
         DeferredPublishNoAssist = 5,
     };
 
+    // EntityBatchData is the shared execution ABI for both native IJobChunk
+    // and IJobEntity. Keep the semantic job kind explicit so scheduling
+    // policy does not have to guess it from the callback representation.
+    enum class EcsJobKind : int {
+        Chunk = 0,
+        Entity = 1,
+    };
+
     // 对齐到缓存行，避免伪共享
     struct alignas(hardware_destructive_interference_size) HandleState {
         std::atomic<uint32_t> refCount{ 1 };
         std::atomic<bool> completed{ false };
+        std::atomic<bool> backendRetired{ true };
         std::atomic<int> waiterCount{ 0 };
         std::atomic<uint64_t> diagnosticBatchId{ 0 };
 
@@ -267,7 +276,8 @@ namespace JobSystem {
             const JobHandle& dependency = {},
             ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
             int workerCap = 0,
-            int rangeSize = 0);
+            int rangeSize = 0,
+            EcsJobKind jobKind = EcsJobKind::Entity);
     };
 
 } // namespace JobSystem

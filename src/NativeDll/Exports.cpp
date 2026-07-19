@@ -222,7 +222,8 @@ extern "C"
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize)
+        int rangeSize,
+        int jobKind)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -238,7 +239,10 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublish;
         else if (scheduleMode == 5)
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
+        const auto kind = jobKind == 0
+            ? JobSystem::EcsJobKind::Chunk
+            : JobSystem::EcsJobKind::Entity;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
         return toHandle(handle);
     }
 
@@ -251,7 +255,8 @@ extern "C"
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize)
+        int rangeSize,
+        int jobKind)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -269,7 +274,10 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
         // 一步完成 Schedule+Complete，消除 P/Invoke 往返
         // workers 还在上下文切换中，主线程已经进入 assist
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
+        const auto kind = jobKind == 0
+            ? JobSystem::EcsJobKind::Chunk
+            : JobSystem::EcsJobKind::Entity;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
         handle.Complete();
         return toHandle(handle);
     }

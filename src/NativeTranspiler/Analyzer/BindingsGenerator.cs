@@ -451,7 +451,7 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        scheduleMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
+                        scheduleMethod = "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
                         funcPtrName = $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr";
                         extraArgs = $", 0, 0";
                     }
@@ -528,7 +528,9 @@ namespace NativeTranspiler.Analyzer
                 else
                 {
                     string capFuncPtr = CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr";
-                    string capMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
+                    string capMethod = CppJobGenerator.IsEntityJob(jobStruct)
+                        ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize"
+                        : "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
 
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
