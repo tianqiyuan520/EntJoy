@@ -1145,7 +1145,7 @@ namespace
         }
     }
 
-    void TestLocalPartitionTileClaiming()
+    void TestAtomicBatchRangeClaiming()
     {
         constexpr int itemCounts[] = { 1, 2, 7, 8, 31, 32, 100 };
         for (const int itemCount : itemCounts)
@@ -1180,7 +1180,7 @@ namespace
                 "dynamic tile accounting did not reconcile");
             Require(stats.localTiles + stats.stolenTiles + stats.assistTiles ==
                 static_cast<uint64_t>(itemCount),
-                "partition ownership did not account every tile exactly once");
+                "atomic BatchRange claiming did not account every tile exactly once");
         }
     }
 
@@ -1478,7 +1478,7 @@ namespace
                 "tileCount < workerCap should submit only tileCount tasks");
         }
 
-        // F: Partition path (ScheduleChunks) with workerCap=8
+        // F: ECS BatchRange path (ScheduleChunks) with workerCap=8
         {
             constexpr int chunkCount = 100;
             std::vector<ChunkJobData> chunks(chunkCount);
@@ -1507,11 +1507,11 @@ namespace
             uint64_t expected = static_cast<uint64_t>(
                 std::min({8, workerCount, chunkCount}));
             Require(stats.frameTasksSubmitted == expected,
-                "partition path workerCap=8 wrong task count");
+                "ECS BatchRange workerCap=8 wrong task count");
             Require(execCount.load() == chunkCount,
-                "partition path missed/duplicated chunks");
+                "ECS BatchRange missed/duplicated chunks");
             Require(cleanup.load() == 1,
-                "partition path cleanup mismatch");
+                "ECS BatchRange cleanup mismatch");
         }
     }
 }
@@ -1540,8 +1540,8 @@ int main()
         std::cout << "PASS StatsClassifyWorkerAndAssistExactlyOnce\n";
         TestUnifiedTileAccountingForAllChunkEntrypoints();
         std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
-        TestLocalPartitionTileClaiming();
-        std::cout << "PASS LocalPartitionTileClaiming\n";
+        TestAtomicBatchRangeClaiming();
+        std::cout << "PASS AtomicBatchRangeClaiming\n";
         TestDefaultTileIsDecoupledFromPhysicalChunks();
         std::cout << "PASS DefaultTileIsDecoupledFromPhysicalChunks\n";
         TestBatchStorageIsReturnedAndReused();
