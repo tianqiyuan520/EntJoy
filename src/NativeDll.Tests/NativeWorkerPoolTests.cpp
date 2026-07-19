@@ -2,10 +2,18 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -37,6 +45,32 @@ namespace
     {
         while (context.completions.load(std::memory_order_acquire) == 0)
             context.completions.wait(0, std::memory_order_acquire);
+    }
+
+    struct ConcurrentBatchContext
+    {
+        std::atomic<uint32_t>* entered;
+        std::atomic<bool>* release;
+        std::atomic<uint32_t> completions{ 0 };
+    };
+
+    void RunConcurrentBatch(void* raw, uint32_t) noexcept
+    {
+        auto& context = *static_cast<ConcurrentBatchContext*>(raw);
+        context.entered->fetch_add(1, std::memory_order_acq_rel);
+        context.entered->notify_all();
+        while (!context.release->load(std::memory_order_acquire))
+        {
+            const bool current = context.release->load(std::memory_order_relaxed);
+            context.release->wait(current, std::memory_order_relaxed);
+        }
+    }
+
+    void CompleteConcurrentBatch(void* raw) noexcept
+    {
+        auto& context = *static_cast<ConcurrentBatchContext*>(raw);
+        context.completions.store(1, std::memory_order_release);
+        context.completions.notify_all();
     }
 
     constexpr uint32_t StressBatchCount = 128;
@@ -80,6 +114,37 @@ namespace
                 "stress submission missed or duplicated a slot");
         }
     }
+
+#if defined(_WIN32)
+    struct AffinityContext
+    {
+        std::array<std::atomic<uint32_t>, 4> processors{};
+        std::atomic<uint32_t> entered{ 0 };
+        std::atomic<uint32_t> completions{ 0 };
+    };
+
+    void RunAffinitySlot(void* raw, uint32_t slot) noexcept
+    {
+        auto& context = *static_cast<AffinityContext*>(raw);
+        context.processors[slot].store(
+            ::GetCurrentProcessorNumber(), std::memory_order_relaxed);
+        context.entered.fetch_add(1, std::memory_order_acq_rel);
+        context.entered.notify_all();
+        while (context.entered.load(std::memory_order_acquire) < 4)
+        {
+            const uint32_t current =
+                context.entered.load(std::memory_order_relaxed);
+            context.entered.wait(current, std::memory_order_relaxed);
+        }
+    }
+
+    void CompleteAffinitySubmission(void* raw) noexcept
+    {
+        auto& context = *static_cast<AffinityContext*>(raw);
+        context.completions.store(1, std::memory_order_release);
+        context.completions.notify_all();
+    }
+#endif
 }
 
 int main()
@@ -88,9 +153,27 @@ int main()
     {
         JobSystem::NativeWorkerPool pool;
         Require(!pool.IsRunning(), "pool started threads in its constructor");
-        Require(pool.Start(4), "pool failed to start");
+        Require(pool.Start(4, true), "pool failed to start");
         Require(pool.IsRunning(), "pool did not report running");
         Require(pool.WorkerCount() == 4, "pool created the wrong worker count");
+
+#if defined(_WIN32)
+        AffinityContext affinity;
+        Require(pool.Submit(
+            &affinity, 4, &RunAffinitySlot, &CompleteAffinitySubmission),
+            "pool rejected affinity verification submission");
+        while (affinity.completions.load(std::memory_order_acquire) == 0)
+            affinity.completions.wait(0, std::memory_order_acquire);
+        uint32_t processorMask = 0;
+        for (const auto& processor : affinity.processors)
+        {
+            const uint32_t index = processor.load(std::memory_order_relaxed);
+            Require(index < 32, "worker affinity selected an unexpected processor");
+            processorMask |= uint32_t{ 1 } << index;
+        }
+        Require(processorMask == 0x0f,
+            "workers were not bound one-to-one to logical processors 0..3");
+#endif
 
         SubmissionContext first;
         Require(pool.Submit(&first, 8, &RunSlot, &CompleteSubmission),
@@ -107,6 +190,31 @@ int main()
         WaitForCompletion(second);
         Require(second.slots.load(std::memory_order_relaxed) == 0x7,
             "pool failed on a sequential submission");
+
+        // Distinct ready jobs must be able to execute concurrently. The old
+        // single-active-batch implementation could never pass this barrier.
+        std::atomic<uint32_t> concurrentEntered{ 0 };
+        std::atomic<bool> concurrentRelease{ false };
+        ConcurrentBatchContext concurrentA{ &concurrentEntered, &concurrentRelease };
+        ConcurrentBatchContext concurrentB{ &concurrentEntered, &concurrentRelease };
+        Require(pool.Submit(&concurrentA, 1, &RunConcurrentBatch,
+            &CompleteConcurrentBatch), "pool rejected concurrent batch A");
+        Require(pool.Submit(&concurrentB, 1, &RunConcurrentBatch,
+            &CompleteConcurrentBatch), "pool rejected concurrent batch B");
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(2);
+        while (concurrentEntered.load(std::memory_order_acquire) < 2 &&
+            std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        const bool overlapped =
+            concurrentEntered.load(std::memory_order_acquire) == 2;
+        concurrentRelease.store(true, std::memory_order_release);
+        concurrentRelease.notify_all();
+        while (concurrentA.completions.load(std::memory_order_acquire) == 0)
+            concurrentA.completions.wait(0, std::memory_order_acquire);
+        while (concurrentB.completions.load(std::memory_order_acquire) == 0)
+            concurrentB.completions.wait(0, std::memory_order_acquire);
+        Require(overlapped, "ready batches were serialized by the worker pool");
 
         // Queue many batches before waiting. This verifies that a descriptor is
         // published once per batch, every slot is claimed exactly once, and batch

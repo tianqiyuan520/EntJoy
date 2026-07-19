@@ -22,7 +22,7 @@ namespace JobSystem {
 
     enum class ExecutionBackend : uint8_t {
         Taskflow,
-        NativeWorkerPoolExperimental
+        NativeWorkerPool
     };
 
     enum class ChunkScheduleMode : int {

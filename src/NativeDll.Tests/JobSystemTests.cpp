@@ -1145,7 +1145,7 @@ namespace
         }
     }
 
-    void TestDynamicAtomicTileClaiming()
+    void TestLocalPartitionTileClaiming()
     {
         constexpr int itemCounts[] = { 1, 2, 7, 8, 31, 32, 100 };
         for (const int itemCount : itemCounts)
@@ -1178,8 +1178,9 @@ namespace
             JobSystem::GetStatsSnapshot(&stats);
             RequireTileAccounting(stats, static_cast<uint64_t>(itemCount),
                 "dynamic tile accounting did not reconcile");
-            Require(stats.stealAttempts == 0 && stats.victimScans == 0,
-                "dynamic tile path unexpectedly used legacy stealing");
+            Require(stats.localTiles + stats.stolenTiles + stats.assistTiles ==
+                static_cast<uint64_t>(itemCount),
+                "partition ownership did not account every tile exactly once");
         }
     }
 
@@ -1208,7 +1209,7 @@ namespace
         };
 
         runCase(31, 8);    // 4 chunks/tile: minimum range size
-        runCase(1000, 63); // 16 chunks/tile: 8 tiles/worker target
+        runCase(1000, 32); // 32 chunks/tile: 4 tiles/worker target
     }
 
     void TestBatchStorageIsReturnedAndReused()
@@ -1264,7 +1265,17 @@ namespace
         handle.Complete();
 
         JobSystem::JobSystemStatsSnapshot stats{};
-        JobSystem::GetStatsSnapshot(&stats);
+        // JobHandle completion is tile-driven and intentionally precedes the
+        // retirement of late participant slots. Topology diagnostics become
+        // available when those slots finish unwinding.
+        for (int retry = 0; retry < 100'000; ++retry)
+        {
+            JobSystem::GetStatsSnapshot(&stats);
+            if (stats.submitToFirstWorkerEwmaNs > 0 &&
+                stats.lastTileToTopologyDoneEwmaNs > 0)
+                break;
+            std::this_thread::yield();
+        }
         JobSystem::SetTimingDiagnosticsEnabled(false);
         Require(callbacks.load(std::memory_order_relaxed) == itemCount,
             "timed batch missed or duplicated callbacks");
@@ -1334,8 +1345,18 @@ namespace
         scheduleChunkBatch();
         JobSystem::JobSystemStatsSnapshot stats{};
         JobSystem::GetStatsSnapshot(&stats);
+        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 1,
+            "default backend was not exclusively the native worker pool");
+
+        JobSystem::Scheduler::Shutdown();
+        SetBackendEnvironment("taskflow");
+        JobSystem::Scheduler::Initialize(4);
+        callbacks.store(0, std::memory_order_relaxed);
+        JobSystem::ResetStatsSnapshot();
+        scheduleChunkBatch();
+        JobSystem::GetStatsSnapshot(&stats);
         Require(stats.taskflowBatches == 1 && stats.nativeBatches == 0,
-            "default backend was not exclusively Taskflow");
+            "explicit Taskflow compatibility backend was not selected");
 
         JobSystem::Scheduler::Shutdown();
         SetBackendEnvironment("native");
@@ -1380,8 +1401,8 @@ namespace
         JobSystem::GetStatsSnapshot(&stats);
         Require(stats.invalidBackendSelections == 1,
             "invalid backend selection was not diagnosed");
-        Require(stats.taskflowBatches == 1 && stats.nativeBatches == 0,
-            "invalid backend did not fall back exclusively to Taskflow");
+        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 1,
+            "invalid backend did not fall back to the native worker pool");
 
         JobSystem::Scheduler::Shutdown();
         SetBackendEnvironment(nullptr);
@@ -1519,8 +1540,8 @@ int main()
         std::cout << "PASS StatsClassifyWorkerAndAssistExactlyOnce\n";
         TestUnifiedTileAccountingForAllChunkEntrypoints();
         std::cout << "PASS UnifiedTileAccountingForAllChunkEntrypoints\n";
-        TestDynamicAtomicTileClaiming();
-        std::cout << "PASS DynamicAtomicTileClaiming\n";
+        TestLocalPartitionTileClaiming();
+        std::cout << "PASS LocalPartitionTileClaiming\n";
         TestDefaultTileIsDecoupledFromPhysicalChunks();
         std::cout << "PASS DefaultTileIsDecoupledFromPhysicalChunks\n";
         TestBatchStorageIsReturnedAndReused();
