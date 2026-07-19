@@ -856,15 +856,13 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body == null) return "// Error: no Execute body";
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
 
+            // ECS storage is physically chunked and component arrays are not
+            // contiguous across chunks. Pass the complete EntityBatchData table
+            // to one ISPC launch instead of launching a new ISPC task group for
+            // every physical batch. EntityBatchData is three 64-bit words on
+            // 64-bit targets: componentArrays, enableBitMaps, packed int counts.
             var pars = new StringBuilder();
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                if (pars.Length > 0) pars.Append(", ");
-                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                pars.Append($"uniform {ispcType} {parameter.Name}_ptr[]");
-            }
-            if (pars.Length > 0) pars.Append(", ");
-            pars.Append("uniform int __entity_count");
+            pars.Append("uniform uint64 __batch_words[], uniform int __batch_count");
             foreach (var (type, name) in fields)
             {
                 if (pars.Length > 0) pars.Append(", ");
@@ -874,15 +872,21 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine($"task void {baseName}_task({pars})");
             sb.AppendLine("{");
-            sb.AppendLine($"{Indent}uniform int n_per_task = max(1, __entity_count / taskCount);");
-            sb.AppendLine($"{Indent}uniform int __task_start = taskIndex * n_per_task;");
-            sb.AppendLine($"{Indent}uniform int __task_end = (taskIndex == taskCount - 1) ? __entity_count : min(__task_start + n_per_task, __entity_count);");
             AppendUniformVariableDeclarations(sb, jobStruct);
-            sb.AppendLine($"{Indent}foreach (__entity_index = __task_start ... __task_end) {{");
+            sb.AppendLine($"{Indent}for (uniform int __batch_index = taskIndex; __batch_index < __batch_count; __batch_index += taskCount) {{");
+            sb.AppendLine($"{Indent}{Indent}uniform uint64 * uniform __component_addresses = (uniform uint64 * uniform)__batch_words[__batch_index * 3];");
+            sb.AppendLine($"{Indent}{Indent}uniform int __entity_count = (uniform int)(__batch_words[__batch_index * 3 + 2] & 0xffffffff);");
             foreach (var parameter in executeMethod.Parameters)
             {
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                sb.AppendLine($"{Indent}{Indent}{ispcType} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
+                int parameterIndex = executeMethod.Parameters.IndexOf(parameter);
+                sb.AppendLine($"{Indent}{Indent}uniform {ispcType} * uniform {parameter.Name}_ptr = (uniform {ispcType} * uniform)__component_addresses[{parameterIndex}];");
+            }
+            sb.AppendLine($"{Indent}{Indent}foreach (__entity_index = 0 ... __entity_count) {{");
+            foreach (var parameter in executeMethod.Parameters)
+            {
+                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
+                sb.AppendLine($"{Indent}{Indent}{Indent}{ispcType} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
             }
 
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
@@ -890,21 +894,21 @@ namespace NativeTranspiler.Analyzer
             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
             {
                 if (line.Length == 0) continue;
-                sb.Append(Indent).Append(line).AppendLine();
+                sb.Append(Indent).Append(Indent).Append(line).AppendLine();
             }
             foreach (var parameter in executeMethod.Parameters)
             {
                 if (parameter.RefKind == RefKind.Ref)
-                    sb.AppendLine($"{Indent}{Indent}{parameter.Name}_ptr[__entity_index] = {parameter.Name};");
+                    sb.AppendLine($"{Indent}{Indent}{Indent}{parameter.Name}_ptr[__entity_index] = {parameter.Name};");
             }
+            sb.AppendLine($"{Indent}{Indent}}}");
             sb.AppendLine($"{Indent}}}");
             sb.AppendLine("}");
             sb.AppendLine();
 
             var mtCallArgs = new List<string>();
-            foreach (var parameter in executeMethod.Parameters)
-                mtCallArgs.Add($"{parameter.Name}_ptr");
-            mtCallArgs.Add("__entity_count");
+            mtCallArgs.Add("__batch_words");
+            mtCallArgs.Add("__batch_count");
             foreach (var (_, name) in fields)
                 mtCallArgs.Add($"{name}_ptr");
 
@@ -1006,7 +1010,10 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
             if (useMt)
+            {
                 sb.AppendLine("#include <thread>");
+                sb.AppendLine("#include <cstdint>");
+            }
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
             GenerateResizeCallbacks(sb, fields.Select(f => (f.Type, f.Name)));
@@ -1047,26 +1054,41 @@ namespace NativeTranspiler.Analyzer
                 fieldArgs.Add($"{field.Name}_ptr");
             }
 
-            sb.AppendLine("    const int __batch_end = __batch_start + __batch_count;");
-            sb.AppendLine("    for (int __batch_index = __batch_start; __batch_index < __batch_end; ++__batch_index)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batch_index];");
-
-            var callArgs = new List<string>();
-            for (int i = 0; i < executeMethod.Parameters.Length; i++)
-            {
-                var parameter = executeMethod.Parameters[i];
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(parameter.Type);
-                var ispcType = ToIspcType(cppType);
-                sb.AppendLine($"        auto* {parameter.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__batchData->componentArrays[{i}]);");
-                callArgs.Add($"{parameter.Name}_ptr");
-            }
-            callArgs.Add("__batchData->entityCount");
-            callArgs.AddRange(fieldArgs);
             if (useMt)
+            {
+                // Exactly one ISPC task group owns the whole query range. The
+                // generated ISPC tasks walk the EntityBatchData table directly,
+                // avoiding nested outer-worker x per-batch launch/sync storms.
+                var callArgs = new List<string>
+                {
+                    "reinterpret_cast<uint64_t*>(const_cast<EntityBatchData*>(__batches + __batch_start))",
+                    "__batch_count"
+                };
+                callArgs.AddRange(fieldArgs);
                 callArgs.Add("std::thread::hardware_concurrency()");
-            sb.AppendLine($"        ispc::{ispcImplName}({string.Join(", ", callArgs)});");
-            sb.AppendLine("    }");
+                sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
+            }
+            else
+            {
+                sb.AppendLine("    const int __batch_end = __batch_start + __batch_count;");
+                sb.AppendLine("    for (int __batch_index = __batch_start; __batch_index < __batch_end; ++__batch_index)");
+                sb.AppendLine("    {");
+                sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batch_index];");
+
+                var callArgs = new List<string>();
+                for (int i = 0; i < executeMethod.Parameters.Length; i++)
+                {
+                    var parameter = executeMethod.Parameters[i];
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(parameter.Type);
+                    var ispcType = ToIspcType(cppType);
+                    sb.AppendLine($"        auto* {parameter.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__batchData->componentArrays[{i}]);");
+                    callArgs.Add($"{parameter.Name}_ptr");
+                }
+                callArgs.Add("__batchData->entityCount");
+                callArgs.AddRange(fieldArgs);
+                sb.AppendLine($"        ispc::{ispcImplName}({string.Join(", ", callArgs)});");
+                sb.AppendLine("    }");
+            }
             sb.AppendLine("}");
             sb.AppendLine();
             sb.AppendLine($"HEAD void* CALLINGCONVENTION {adapterGetterName}()");

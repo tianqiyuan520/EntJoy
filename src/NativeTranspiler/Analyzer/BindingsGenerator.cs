@@ -435,7 +435,9 @@ namespace NativeTranspiler.Analyzer
                 {
                     scheduleMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
                     funcPtrName = $"s_{jobStruct.Name}_EntityBatchFuncPtr";
-                    extraArgs = $", {(useMT ? 1 : 0)}, 0";
+                    // ISPC MT owns the entire Query: one outer participant and
+                    // one range containing every physical ECS batch.
+                    extraArgs = useMT ? ", 1, int.MaxValue" : ", 0, 0";
                 }
                 else
                 {
@@ -500,7 +502,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    string workerCapArgs = isEntityJob ? $"workerCap, 0" : $"workerCap";
+                    string workerCapArgs = isEntityJob
+                        ? (useMT ? "1, int.MaxValue" : $"workerCap, 0")
+                        : (useMT ? "1" : $"workerCap");
                     sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{ispcScheduleMethod}(");
                     sb.AppendLine($"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {workerCapArgs}, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
@@ -513,7 +517,10 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
                     sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{ispcScheduleMethod2}(");
-                    sb.AppendLine($"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, rangeSize, dependsOn._nativeHandle);");
+                    string explicitCapArgs = useMT
+                        ? "1, int.MaxValue"
+                        : "workerCap, rangeSize";
+                    sb.AppendLine($"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {explicitCapArgs}, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
                     sb.AppendLine();
