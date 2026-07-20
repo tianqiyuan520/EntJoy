@@ -998,8 +998,14 @@ namespace NativeTranspiler.Analyzer
         {
             var sb = new StringBuilder();
             var ispcBase = GetIspcBaseName(jobStruct);
-            var ispcHeaderBase = ispcBase;  // Always _ispc.h
-            var ispcImplName = ispcBase + "_impl";  // Always _impl (no launch/sync)
+            var ispcHeaderBase = ispcBase;
+            var ispcImplBase = ispcBase;  // for MT, redirect to non-MT ISPC functions
+            if (useMt)
+            {
+                ispcHeaderBase = ispcBase.Replace("IspcMt", "Ispc");
+                ispcImplBase = ispcBase.Replace("IspcMt", "Ispc");
+            }
+            var ispcImplName = ispcImplBase + "_impl";
             var adapterFuncName = CppJobGenerator.GetEntityBatchAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct);
             var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();

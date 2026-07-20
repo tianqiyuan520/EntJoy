@@ -501,7 +501,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     // ISPC entity jobs use EntityBatch, ISPC chunk jobs use fallback
                     bool isEntityJob = CppJobGenerator.IsEntityJob(jobStruct);
-                    string ispcFuncPtr = isEntityJob ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkFuncPtr";
+                    string ispcFuncPtr = isEntityJob && useMT ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr" : (isEntityJob ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkFuncPtr");
                     string ispcScheduleMethod = isEntityJob ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize" : "ScheduleChunkRawWithWorkerCap";
 
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
@@ -532,7 +532,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    string capFuncPtr = CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr";
+                    string capFuncPtr = (CppJobGenerator.IsEntityJob(jobStruct) && useMT) ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr" : (CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr");
                     string capMethod = CppJobGenerator.IsEntityJob(jobStruct)
                         ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize"
                         : "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
