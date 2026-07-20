@@ -113,7 +113,7 @@ namespace NativeTranspiler.Analyzer
                 _chunkNativeArrayNames.Contains(id.Identifier.Text) &&
                 memberAccess.Name.Identifier.Text == "Length")
             {
-                _builder.Append(id.Identifier.Text).Append("_length");
+                _builder.Append("__entity_count");
                 return;
             }
 
@@ -199,8 +199,8 @@ namespace NativeTranspiler.Analyzer
 
             AppendIndent();
             string startName = _foreachStartName ?? "0";
-            string endName = _foreachEndName ?? $"{arrayName}_length";
-            _builder.Append("foreach (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
+            string endName = _foreachEndName ?? "__entity_count";
+            _builder.Append("foreach_tiled (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
             if (forStmt.Statement is BlockSyntax block)
             {
                 _builder.AppendLine("{");

@@ -813,7 +813,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"export void {functionName}({pars})");
             sb.AppendLine("{");
             AppendUniformVariableDeclarations(sb, jobStruct);
-            sb.AppendLine($"{Indent}foreach (__entity_index = 0 ... __entity_count) {{");
+            sb.AppendLine($"{Indent}foreach_tiled (__entity_index = 0 ... __entity_count) {{");
 
             // 不再生成 struct copy-in，而是让 translator 直接通过 ptr[index] 访问
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
@@ -876,7 +876,7 @@ namespace NativeTranspiler.Analyzer
                 int parameterIndex = executeMethod.Parameters.IndexOf(parameter);
                 sb.AppendLine($"{Indent}{Indent}uniform {ispcType} * uniform {parameter.Name}_ptr = (uniform {ispcType} * uniform)__component_addresses[{parameterIndex}];");
             }
-            sb.AppendLine($"{Indent}{Indent}foreach (__entity_index = 0 ... __entity_count) {{");
+            sb.AppendLine($"{Indent}{Indent}foreach_tiled (__entity_index = 0 ... __entity_count) {{");
 
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
             foreach (var parameter in executeMethod.Parameters)
@@ -928,10 +928,8 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body == null) return "// Error: no Execute body";
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
-            string entityCountExpr = chunkArrays.Count > 0 ? $"{chunkArrays[0].name}_length" : "__entity_count";
-            string taskParams = string.IsNullOrEmpty(paramsList)
-                ? "uniform int __entity_count"
-                : $"{paramsList}, uniform int __entity_count";
+            string entityCountExpr = "__entity_count";
+            string taskParams = paramsList;
 
             sb.AppendLine($"task void {baseName}_task({taskParams})");
             sb.AppendLine("{");
@@ -945,12 +943,10 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
             sb.AppendLine();
 
-            string mtParams = string.IsNullOrEmpty(paramsList)
-                ? "uniform int __entity_count, uniform int numTasks"
-                : $"{paramsList}, uniform int __entity_count, uniform int numTasks";
+            string mtParams = $"{paramsList}, uniform int numTasks";
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
-            string callArgs = string.IsNullOrEmpty(paramsList) ? "__entity_count" : $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
+            string callArgs = $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
             sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({callArgs});");
             sb.AppendLine($"{Indent}sync;");
             sb.AppendLine("}");
@@ -966,7 +962,6 @@ namespace NativeTranspiler.Analyzer
             foreach (var (_, name) in chunkArrays)
             {
                 args.Add($"{name}_ptr");
-                args.Add($"{name}_length");
             }
             foreach (var (type, name) in fields)
             {
@@ -1136,9 +1131,7 @@ namespace NativeTranspiler.Analyzer
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
                 sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t){name}_ptr % 64 == 0);");
-                sb.AppendLine($"    int {name}_length = __chunkData->entityCount;");
                 callArgs.Add($"{name}_ptr");
-                callArgs.Add($"{name}_length");
             }
 
             if (chunkArrays.Count > 0)
@@ -1201,9 +1194,9 @@ namespace NativeTranspiler.Analyzer
             }
 
             sb.AppendLine();
+            callArgs.Add("__chunkData->entityCount");
             if (useMt)
             {
-                callArgs.Add("__chunkData->entityCount");
                 callArgs.Add("std::thread::hardware_concurrency()");
             }
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
@@ -1414,7 +1407,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (pars.Length > 0) pars.Append(", ");
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
-                pars.Append($"uniform {ispcType} {name}_ptr[], uniform int {name}_length");
+                pars.Append($"uniform {ispcType} {name}_ptr[]");
             }
 
             foreach (var (type, name) in fields)
@@ -1446,6 +1439,10 @@ namespace NativeTranspiler.Analyzer
                     pars.Append($"uniform {ToIspcType(cppType)} * uniform {name}_ptr");
                 }
             }
+
+            if (pars.Length > 0)
+                pars.Append(", ");
+            pars.Append("uniform int __entity_count");
 
             return pars.ToString();
         }
