@@ -217,7 +217,11 @@ namespace NativeTranspiler.Analyzer
             if (isChunk)
             {
                 if (CppJobGenerator.IsEntityJob(jobStruct))
-                    sb.AppendLine($"            s_{jobStruct.Name}_EntityBatchFuncPtr = Get_{jobStruct.Name}_EntityBatchAdapterPtr();");
+                {
+                    // ISPC MT reuses the regular ISPC adapter; skip MT field.
+                    if (!useMT)
+                        sb.AppendLine($"            s_{jobStruct.Name}_EntityBatchFuncPtr = Get_{jobStruct.Name}_EntityBatchAdapterPtr();");
+                }
                 else
                 {
                     sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
@@ -434,11 +438,10 @@ namespace NativeTranspiler.Analyzer
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
                     scheduleMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
-                    funcPtrName = $"s_{jobStruct.Name}_EntityBatchFuncPtr";
-                    // ISPC MT uses the same scheduling as regular ISPC. The
-                    // only difference is the ISPC function pointer (_mt_impl
-                    // vs _impl).  _mt_impl uses launch[1] internally, so the
-                    // JobSystem orchestrates all tile-level parallelism.
+                    // ISPC MT reuses the regular ISPC EntityBatch adapter.
+                    funcPtrName = useMT
+                        ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr"
+                        : $"s_{jobStruct.Name}_EntityBatchFuncPtr";
                     extraArgs = ", 0, 0";
                 }
                 else
