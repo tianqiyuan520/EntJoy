@@ -1021,6 +1021,9 @@ namespace JobSystem
     // ============================================================
     static void TryCompleteLogicalBatch(BatchState* batch) noexcept;
 
+    // Forward declaration for tile prefetch (defined after ChunkBatchContext).
+    static void PrefetchNextTileData(void* context, const ExecutionTile& nextTile) noexcept;
+
     // Process one tile and update completion counter.
     // Returns true if the tile was processed (for assist comptability).
     static bool TryExecuteOneTile(
@@ -1052,6 +1055,12 @@ namespace JobSystem
             batch->firstTileAt.compare_exchange_strong(
                 empty, rangeStartedAt, std::memory_order_release, std::memory_order_relaxed);
         }
+
+        // Prefetch the next tile's data (delegated to a helper below that
+        // has access to the full ChunkBatchContext layout).
+        if (tileIndex + 1 < batch->tileCount)
+            PrefetchNextTileData(batch->context, batch->tiles[tileIndex + 1]);
+
         batch->executeTile(batch->context, batch->tiles[tileIndex]);
         const int rangeEndLogicalCore = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
@@ -1239,8 +1248,9 @@ namespace JobSystem
         bool executedAny = false;
         uint32_t stealRound = 0;
 
-        // Do not reserve a hidden multi-tile span here: Complete() must still be
-        // able to assist if a worker stalls inside its first callback.
+        // Keep partition-front claim granularity at one tile so that
+        // the main thread's assist path can still pick up remaining work
+        // when a worker is slow to wake (cold cache / Sleep scenario).
         constexpr uint32_t kLocalClaimSize = 1;
         uint32_t first = 0;
         uint32_t end = 0;
@@ -1608,6 +1618,33 @@ namespace JobSystem
         const EntityBatchData* entityBatches;
     };
 
+    // Prefetch data for the next tile. Called from TryExecuteOneTile before
+    // executing the current tile, so DRAM reads for the next batch overlap
+    // with computation of the current one.
+    static void PrefetchNextTileData(void* context, const ExecutionTile& nextTile) noexcept
+    {
+        auto* cc = static_cast<ChunkBatchContext*>(context);
+        if (nextTile.kind == TileKind::EntityBatchRange)
+        {
+            const auto* nextBatch = &cc->entityBatches[nextTile.firstItem];
+            if (nextBatch->componentArrays)
+            {
+                _mm_prefetch(
+                    reinterpret_cast<const char*>(nextBatch->componentArrays[0]),
+                    _MM_HINT_T0);
+            }
+        }
+        else if (nextTile.kind == TileKind::ChunkCallbacks ||
+                 nextTile.kind == TileKind::ChunkRange)
+        {
+            const auto& nextChunk = cc->chunks[nextTile.firstItem];
+            if (nextChunk.entityArray)
+                _mm_prefetch(
+                    reinterpret_cast<const char*>(nextChunk.entityArray),
+                    _MM_HINT_T0);
+        }
+    }
+
     // Unified Tile executor for Chunk callbacks, Chunk ranges and Entity ranges.
     static bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
     {
@@ -1730,9 +1767,20 @@ namespace JobSystem
         }
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 2: yield + spin
+        // Phase 2: dense spin first (never yield before we've given the job a
+        // chance to complete — yield triggers a full OS context switch).
+        for (int i = 0; i < 2048; i++)
+        {
+            if (_state->completed.load(std::memory_order_acquire)) return;
+            CpuPause();
+        }
+        if (_state->completed.load(std::memory_order_acquire)) return;
+
+        // Brief yield — let other threads run if the job is truly not done.
         std::this_thread::yield();
-        for (int i = 0; i < 64; i++)
+
+        // One more short spin after yielding.
+        for (int i = 0; i < 256; i++)
         {
             if (_state->completed.load(std::memory_order_acquire)) return;
             CpuPause();
@@ -2076,9 +2124,9 @@ namespace JobSystem
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
-        const bool useFineRanges =
-            g_useFineRangesForNextEcsBatch.exchange(
-                false, std::memory_order_acq_rel);
+        // Clear the fine-range flag (no longer used for scheduling decisions,
+        // but must consume the stored value to keep the barrier mechanism clean).
+        g_useFineRangesForNextEcsBatch.exchange(false, std::memory_order_acq_rel);
         if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
 
         // Choose the execution range from workload size and worker cohort.
@@ -2088,11 +2136,8 @@ namespace JobSystem
             ? rangeSize
             : ResolveEcsBatchRangeSize(itemCount, provisionalWorkers);
         // Native IJobChunk and IJobEntity may both use EntityBatchData. The
-        // explicit kind is intentionally retained here for independent policy
-        // tuning; both currently benefit from one cold-frame subdivision.
-        if (useFineRanges && entityRangeFunc && rangeSize <= 0 &&
-            (jobKind == EcsJobKind::Chunk || jobKind == EcsJobKind::Entity))
-            rs = std::max(1, rs / 2);
+        // explicit kind is intentionally retained here for independent policy.
+        // useFineRanges deliberately disabled: it doubled tile count without benefit.
         int rc = (itemCount + rs - 1) / rs;
 
         // Inline for trivial work
