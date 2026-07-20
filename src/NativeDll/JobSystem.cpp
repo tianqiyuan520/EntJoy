@@ -1932,7 +1932,7 @@ namespace JobSystem
 #if defined(_WIN32)
         // Raise this process above typical background load so worker threads
         // are deprioritized less when competing with the OS and other processes.
-        ::SetPriorityClass(::GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+        ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
         // Raise timer resolution from the default ~15.6 ms to 1 ms so that
         // semaphore wait/notify and condition-variable timeouts are more
         // responsive.  The OS-wide effect is negligible for a game process.
