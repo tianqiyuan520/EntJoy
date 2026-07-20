@@ -31,6 +31,8 @@
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 #include <immintrin.h>
 #include <windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
 #endif
 
 namespace JobSystem
@@ -1927,6 +1929,15 @@ namespace JobSystem
     void Scheduler::Initialize(int numThreads)
     {
         g_shuttingDown.store(false, std::memory_order_release);
+#if defined(_WIN32)
+        // Raise this process above typical background load so worker threads
+        // are deprioritized less when competing with the OS and other processes.
+        ::SetPriorityClass(::GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+        // Raise timer resolution from the default ~15.6 ms to 1 ms so that
+        // semaphore wait/notify and condition-variable timeouts are more
+        // responsive.  The OS-wide effect is negligible for a game process.
+        ::timeBeginPeriod(1);
+#endif
         {
             std::lock_guard<std::mutex> lock(g_executorMutex);
             int resolved = numThreads > 0 ? numThreads :
