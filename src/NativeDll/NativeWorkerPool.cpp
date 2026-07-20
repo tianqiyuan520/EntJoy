@@ -141,7 +141,7 @@ namespace JobSystem
         {
             if (bindWorkers) BindCurrentThreadToLogicalProcessor(workerIndex);
 #if defined(_WIN32)
-            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
             while (true)
             {
