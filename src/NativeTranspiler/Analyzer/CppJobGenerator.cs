@@ -1069,27 +1069,24 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    for (int __batchIndex = __startIndex; __batchIndex < __endIndex; ++__batchIndex)");
                 sb.AppendLine("    {");
                 sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batchIndex];");
-                // Local pointer extraction for alignment assumption.
-                // The CppChunkStatementTranslator inlines reinterpret_cast<T*>(__batchData->componentArrays[N])
-                // at every access site.  Without a local variable there is no __assume anchor.
                 if (methodSyntax?.Body != null)
                 {
                     var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                     var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                    for (int c = 0; c < rt.Count; c++)
-                    {
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(rt[c]);
-                        sb.AppendLine($"        auto* RESTRICT __batch_comp_{c}_ptr = reinterpret_cast<{cppType}*>(__batchData->componentArrays[{c}]);");
-                        sb.AppendLine($"        __assume((intptr_t)__batch_comp_{c}_ptr % 64 == 0);");
-                    }
                     var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
                     var bodyCode = tr.Translate(methodSyntax.Body);
                     bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                    for (int c = 0; c < rt.Count; c++)
-                        bodyCode = bodyCode.Replace($"__batchData->componentArrays[{c}]", $"__batch_comp_{c}_ptr");
-                    foreach (var l in bodyCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                    foreach (var l in bodyCode.Split(new[] { "\n" }, StringSplitOptions.None))
+                    {
                         if (l.Length > 0) sb.Append("        ").AppendLine(l);
+                        string trimmed = l.TrimStart();
+                        if (trimmed.StartsWith("auto*") && trimmed.Contains("reinterpret_cast<"))
+                        {
+                            string varName = trimmed.Split('=')[0].Trim().Split(' ').Last();
+                            sb.AppendLine($"        __assume((intptr_t){varName} % 64 == 0);");
+                        }
+                    }
                 }
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
