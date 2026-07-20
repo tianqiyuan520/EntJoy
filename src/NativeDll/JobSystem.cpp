@@ -1631,7 +1631,7 @@ namespace JobSystem
             {
                 _mm_prefetch(
                     reinterpret_cast<const char*>(nextBatch->componentArrays[0]),
-                    _MM_HINT_T0);
+                    _MM_HINT_NTA);
             }
         }
         else if (nextTile.kind == TileKind::ChunkCallbacks ||
@@ -1641,7 +1641,7 @@ namespace JobSystem
             if (nextChunk.entityArray)
                 _mm_prefetch(
                     reinterpret_cast<const char*>(nextChunk.entityArray),
-                    _MM_HINT_T0);
+                    _MM_HINT_NTA);
         }
     }
 
@@ -1754,8 +1754,13 @@ namespace JobSystem
         if (cb && ctx && !_state->completed.load(std::memory_order_acquire))
         {
             g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
-            while (!_state->completed.load(std::memory_order_acquire))
+            // Bounded assist: main thread claims up to 16 tiles, then falls
+            // through to spin. Prevents main thread monopolizing work
+            // in continuous scenarios (GridSearch) while still helping
+            // in cold-cache scenarios (Sleep).
+            for (int assistCount = 0; assistCount < 16; ++assistCount)
             {
+                if (_state->completed.load(std::memory_order_acquire)) break;
                 if (!cb(ctx)) break;
                 g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
             }
