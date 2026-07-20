@@ -1100,6 +1100,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
             sb.AppendLine("#include \"../../NativeDll/ChunkNativeArray.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
+            sb.AppendLine("#include <vector>");
             if (useMt)
                 sb.AppendLine("#include <thread>");
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
@@ -1230,13 +1231,111 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    return (void*){adapterFuncName};");
             sb.AppendLine("}");
             sb.AppendLine();
+            // RangeAdapter: collect chunk arrays and call ISPC batch function (single invocation per tile)
             sb.AppendLine($"HEAD void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
             sb.AppendLine("{");
-            sb.AppendLine("    const int __endIndex = __startIndex + __count;");
-            sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
+            sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
+            sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
+            sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
+            sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
+            sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
+            sb.AppendLine("    const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;");
+            sb.AppendLine();
+
+            // Generate batch collection code for each chunk array
+            foreach (var (type, name) in chunkArrays)
+            {
+                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
+                sb.AppendLine($"    std::vector<ispc::{ispcType}*> {name}_ptrs(__count);");
+                sb.AppendLine($"    std::vector<int> {name}_lens(__count);");
+            }
+            sb.AppendLine("    for (int __i = 0; __i < __count; __i++)");
             sb.AppendLine("    {");
-            sb.AppendLine($"        {adapterFuncName}(context, &__chunks[__chunkIndex]);");
+            sb.AppendLine("        const ChunkJobData* __cd = &__chunks[__startIndex + __i];");
+            for (int i = 0; i < chunkArrays.Count; i++)
+            {
+                var (type, name) = chunkArrays[i];
+                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
+                sb.AppendLine($"        {name}_ptrs[__i] = reinterpret_cast<ispc::{ispcType}*>(__cd->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"        {name}_lens[__i] = __cd->entityCount;");
+            }
             sb.AppendLine("    }");
+            sb.AppendLine();
+
+            // Collect field pointers from jobContext (same as _Adapter)
+            var batchCallArgs = new List<string>();
+            foreach (var (type, name) in chunkArrays)
+            {
+                batchCallArgs.Add($"{name}_ptrs.data()");
+                batchCallArgs.Add($"{name}_lens.data()");
+            }
+            batchCallArgs.Add("__count");
+
+            int batchCurrentOffset = 0;
+            foreach (var field in fields)
+            {
+                int offset = CppJobGenerator.CalculateFieldOffset(field, ref batchCurrentOffset);
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                {
+                    if (field.Type.Name == "NativeList")
+                    {
+                        var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
+                        var ispcElem = ToIspcType(cppElem);
+                        sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElem}>**)(__jobContext + {offset});");
+                        sb.AppendLine($"    ispc::UnsafeList_Context_{ispcElem} {field.Name}_ctx;");
+                        sb.AppendLine($"    {field.Name}_ctx._data = {field.Name}_listData->Ptr;");
+                        sb.AppendLine($"    {field.Name}_ctx._length = {field.Name}_listData->Length;");
+                        sb.AppendLine($"    {field.Name}_ctx._capacity = {field.Name}_listData->Capacity;");
+                        sb.AppendLine($"    {field.Name}_ctx._allocator = static_cast<int>({field.Name}_listData->Allocator);");
+                        sb.AppendLine($"    {field.Name}_ctx.ResizeFunc = UnsafeList_Resize_{ispcElem}_callback;");
+                        batchCallArgs.Add($"&{field.Name}_ctx");
+                    }
+                    else
+                    {
+                        var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
+                        var ispcElem = ToIspcType(cppElem);
+                        sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcElem}*>(*({cppElem}**)(__jobContext + {offset}));");
+                        sb.AppendLine($"    int {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
+                        batchCallArgs.Add($"{field.Name}_ptr");
+                        batchCallArgs.Add($"{field.Name}_length");
+                    }
+                }
+                else if (field.Type is IPointerTypeSymbol ptrType)
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(ptrType.PointedAtType);
+                    var ispcType = ToIspcType(cppType);
+                    sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(*({cppType}**)(__jobContext + {offset}));");
+                    batchCallArgs.Add($"{field.Name}_ptr");
+                }
+                else
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    var ispcType = ToIspcType(cppType);
+                    if (IsVectorType(cppType) || cppType.Contains("::"))
+                        sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*)(__jobContext + {offset}));");
+                    else
+                        sb.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)(__jobContext + {offset});");
+                    batchCallArgs.Add($"{field.Name}_ptr");
+                }
+            }
+
+            sb.AppendLine();
+            sb.AppendLine($"    ispc::{ispcImplName}_batch({string.Join(", ", batchCallArgs)});");
+
+            // Update NativeList contexts from ISPC batch call (same as _Adapter)
+            foreach (var field in fields)
+            {
+                if (!NativeTranspiler.IsEntJoyNativeContainerType(field.Type) || field.Type.Name != "NativeList") continue;
+                var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
+                sb.AppendLine($"    {field.Name}_listData->Length = {field.Name}_ctx._length;");
+                sb.AppendLine($"    {field.Name}_listData->Capacity = {field.Name}_ctx._capacity;");
+                sb.AppendLine($"    {field.Name}_listData->Ptr = static_cast<{cppElem}*>({field.Name}_ctx._data);");
+                sb.AppendLine($"    {field.Name}_listData->Allocator = static_cast<EntJoy::Collections::Allocator>({field.Name}_ctx._allocator);");
+            }
+
             sb.AppendLine("}");
             sb.AppendLine();
             sb.AppendLine($"HEAD void* CALLINGCONVENTION {rangeAdapterGetterName}()");
@@ -1395,6 +1494,7 @@ namespace NativeTranspiler.Analyzer
             var fields = GetFieldsFromJob(jobStruct);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
 
+            // Single-chunk function (used by per-chunk _Adapter callback)
             sb.AppendLine($"export void {functionName}({paramsList})");
             sb.AppendLine("{");
             AppendUniformVariableDeclarations(sb, jobStruct);
@@ -1402,6 +1502,95 @@ namespace NativeTranspiler.Analyzer
             var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
             var bodyCode = translator.Translate(methodSyntax.Body);
             sb.Append(bodyCode);
+            sb.AppendLine("}");
+
+            // Batch function: merges multiple chunks into one ISPC call, eliminating
+            // per-chunk function-call overhead. Instead of ~1000 calls for 1M entities,
+            // the batch variant processes all chunks in one call with a uniform for+foreach loop.
+            sb.AppendLine();
+            GenerateIspcChunkBatchFunction(sb, functionName + "_batch", jobStruct, chunkArrays, fields, semanticModel, methodSyntax);
+        }
+
+        private static void GenerateIspcChunkBatchFunction(StringBuilder sb, string batchFunctionName,
+            INamedTypeSymbol jobStruct,
+            List<(INamedTypeSymbol type, string name)> chunkArrays,
+            IEnumerable<(ITypeSymbol type, string name)> fields,
+            SemanticModel semanticModel,
+            MethodDeclarationSyntax methodSyntax)
+        {
+            // Build batch param list: uniform Type* uniform name_ptrs[], uniform int name_lens[], ...
+            var batchPars = new StringBuilder();
+            foreach (var (type, name) in chunkArrays)
+            {
+                if (batchPars.Length > 0) batchPars.Append(", ");
+                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
+                batchPars.Append($"uniform {ispcType} * uniform {name}_ptrs[], uniform int {name}_lens[]");
+            }
+            batchPars.Append(", uniform int __num_chunks");
+
+            foreach (var (type, name) in fields)
+            {
+                if (batchPars.Length > 0) batchPars.Append(", ");
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
+                if (NativeTranspiler.IsEntJoyNativeContainerType(type))
+                {
+                    if (type.Name == "NativeList")
+                    {
+                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var ispcElem = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elemType));
+                        batchPars.Append($"uniform UnsafeList_Context_{ispcElem}* uniform {name}");
+                    }
+                    else
+                    {
+                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var ispcElem = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elemType));
+                        batchPars.Append($"uniform {ispcElem} * uniform {name}_ptrs[], uniform int {name}_lens[]");
+                    }
+                }
+                else if (type is IPointerTypeSymbol ptrType)
+                {
+                    var baseCpp = NativeTranspiler.MapCSharpTypeToCpp(ptrType.PointedAtType);
+                    batchPars.Append($"uniform {ToIspcType(baseCpp)} * uniform {name}_ptr");
+                }
+                else
+                {
+                    batchPars.Append($"uniform {ToIspcType(cppType)} * uniform {name}_ptr");
+                }
+            }
+
+            sb.AppendLine($"export void {batchFunctionName}({batchPars})");
+            sb.AppendLine("{");
+            AppendUniformVariableDeclarations(sb, jobStruct);
+
+            sb.AppendLine($"{Indent}for (uniform int __ci = 0; __ci < __num_chunks; __ci++) {{");
+
+            foreach (var (type, name) in chunkArrays)
+            {
+                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
+                sb.AppendLine($"{Indent}{Indent}uniform {ispcType} * uniform {name}_ptr = {name}_ptrs[__ci];");
+                sb.AppendLine($"{Indent}{Indent}uniform int {name}_length = {name}_lens[__ci];");
+            }
+            foreach (var (type, name) in fields)
+            {
+                if (NativeTranspiler.IsEntJoyNativeContainerType(type) && type.Name == "NativeArray")
+                {
+                    var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                    var ispcElem = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elemType));
+                    sb.AppendLine($"{Indent}{Indent}uniform {ispcElem} * uniform {name}_ptr = {name}_ptrs[__ci];");
+                    sb.AppendLine($"{Indent}{Indent}uniform int {name}_length = {name}_lens[__ci];");
+                }
+            }
+
+            // Translated body uses the per-chunk locals (name_ptr / name_length)
+            var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
+            var bodyCode = translator.Translate(methodSyntax.Body);
+            foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+            {
+                if (line.Length == 0) continue;
+                sb.Append(Indent).Append(Indent).AppendLine(line);
+            }
+
+            sb.AppendLine($"{Indent}}}");
             sb.AppendLine("}");
         }
 
