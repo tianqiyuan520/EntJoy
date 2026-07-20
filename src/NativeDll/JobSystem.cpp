@@ -1949,6 +1949,12 @@ namespace JobSystem
             g_executionBackend = ResolveConfiguredBackend();
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
+
+            // Pin the calling thread (main thread) to logical core 0 so it
+            // is never preempted by a worker that shares its L1/L2 cache.
+            if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
+                BindCurrentThreadToLogicalProcessor(0);
+
             if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
             {
                 g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
