@@ -1065,6 +1065,7 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(parameter.Type);
                     var ispcType = ToIspcType(cppType);
                     sb.AppendLine($"        auto* {parameter.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__batchData->componentArrays[{i}]);");
+                    sb.AppendLine($"        __assume((intptr_t){parameter.Name}_ptr % 64 == 0);");
                     callArgs.Add($"{parameter.Name}_ptr");
                 }
                 callArgs.Add("__batchData->entityCount");
@@ -1134,6 +1135,7 @@ namespace NativeTranspiler.Analyzer
                 var (type, name) = chunkArrays[i];
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
                 sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    __assume((intptr_t){name}_ptr % 64 == 0);");
                 sb.AppendLine($"    int {name}_length = __chunkData->entityCount;");
                 callArgs.Add($"{name}_ptr");
                 callArgs.Add($"{name}_length");
