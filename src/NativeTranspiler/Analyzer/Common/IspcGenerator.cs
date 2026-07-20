@@ -1065,7 +1065,7 @@ namespace NativeTranspiler.Analyzer
                     "__batch_count"
                 };
                 callArgs.AddRange(fieldArgs);
-                callArgs.Add("std::thread::hardware_concurrency()");
+                callArgs.Add("1");  // numTasks=1 → launch[1] → serial inside ISPC
                 sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
             }
             else

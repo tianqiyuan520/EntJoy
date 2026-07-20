@@ -435,9 +435,11 @@ namespace NativeTranspiler.Analyzer
                 {
                     scheduleMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
                     funcPtrName = $"s_{jobStruct.Name}_EntityBatchFuncPtr";
-                    // ISPC MT owns the entire Query: one outer participant and
-                    // one range containing every physical ECS batch.
-                    extraArgs = useMT ? ", 1, int.MaxValue" : ", 0, 0";
+                    // ISPC MT uses the same scheduling as regular ISPC. The
+                    // only difference is the ISPC function pointer (_mt_impl
+                    // vs _impl).  _mt_impl uses launch[1] internally, so the
+                    // JobSystem orchestrates all tile-level parallelism.
+                    extraArgs = ", 0, 0";
                 }
                 else
                 {
