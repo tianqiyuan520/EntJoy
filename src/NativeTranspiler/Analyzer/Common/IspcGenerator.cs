@@ -815,24 +815,18 @@ namespace NativeTranspiler.Analyzer
             AppendUniformVariableDeclarations(sb, jobStruct);
             sb.AppendLine($"{Indent}foreach (__entity_index = 0 ... __entity_count) {{");
 
+            // 不再生成 struct copy-in，而是让 translator 直接通过 ptr[index] 访问
+            var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
             foreach (var parameter in executeMethod.Parameters)
             {
-                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                sb.AppendLine($"{Indent}{Indent}{ispcType} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
+                // Execute 方法的 ref/in 参数直接通过指针+索引访问
+                translator.AddEntityRefParam(parameter.Name);
             }
-
-            var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
             var bodyCode = translator.Translate(methodSyntax.Body);
             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
             {
                 if (line.Length == 0) continue;
                 sb.Append(Indent).Append(line).AppendLine();
-            }
-
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                if (parameter.RefKind == RefKind.Ref)
-                    sb.AppendLine($"{Indent}{Indent}{parameter.Name}_ptr[__entity_index] = {parameter.Name};");
             }
 
             sb.AppendLine($"{Indent}}}");
@@ -883,23 +877,17 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"{Indent}{Indent}uniform {ispcType} * uniform {parameter.Name}_ptr = (uniform {ispcType} * uniform)__component_addresses[{parameterIndex}];");
             }
             sb.AppendLine($"{Indent}{Indent}foreach (__entity_index = 0 ... __entity_count) {{");
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                sb.AppendLine($"{Indent}{Indent}{Indent}{ispcType} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
-            }
 
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
+            foreach (var parameter in executeMethod.Parameters)
+            {
+                translator.AddEntityRefParam(parameter.Name);
+            }
             var bodyCode = translator.Translate(methodSyntax.Body);
             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
             {
                 if (line.Length == 0) continue;
                 sb.Append(Indent).Append(Indent).Append(line).AppendLine();
-            }
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                if (parameter.RefKind == RefKind.Ref)
-                    sb.AppendLine($"{Indent}{Indent}{Indent}{parameter.Name}_ptr[__entity_index] = {parameter.Name};");
             }
             sb.AppendLine($"{Indent}{Indent}}}");
             sb.AppendLine($"{Indent}}}");
