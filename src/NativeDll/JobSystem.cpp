@@ -1754,13 +1754,11 @@ namespace JobSystem
         if (cb && ctx && !_state->completed.load(std::memory_order_acquire))
         {
             g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
-            // Bounded assist: main thread claims up to 16 tiles, then falls
-            // through to spin. Prevents main thread monopolizing work
-            // in continuous scenarios (GridSearch) while still helping
-            // in cold-cache scenarios (Sleep).
-            for (int assistCount = 0; assistCount < 16; ++assistCount)
+            // Unlimited assist: main thread claims tiles until no work
+            // remains. This eliminates P95 tail latency from OS worker
+            // scheduling, matching Unity's approach.
+            while (!_state->completed.load(std::memory_order_acquire))
             {
-                if (_state->completed.load(std::memory_order_acquire)) break;
                 if (!cb(ctx)) break;
                 g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
             }
