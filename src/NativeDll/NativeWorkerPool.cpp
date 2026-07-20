@@ -4,6 +4,7 @@
 #include <atomic>
 #include <climits>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -12,8 +13,19 @@
 #include <utility>
 #include <vector>
 
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#include <immintrin.h>
+#endif
+
 namespace JobSystem
 {
+    static inline void CpuPause() noexcept
+    {
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+        _mm_pause();
+#endif
+    }
+
     struct NativeWorkerPool::Impl
     {
         struct BatchDescriptor

@@ -322,6 +322,7 @@ namespace NativeTranspiler.Analyzer
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
             sb.AppendLine("    #pragma loop(ivdep)");
@@ -521,6 +522,7 @@ namespace NativeTranspiler.Analyzer
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 string constPrefix = param.RefKind == RefKind.In ? "const " : "";
                 sb.AppendLine($"        {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__batchData->componentArrays[{i}]);");
+                sb.AppendLine($"        __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
             sb.AppendLine("        int __entity_count = __batchData->entityCount;");
             sb.AppendLine("        #pragma loop(ivdep)");
@@ -798,6 +800,7 @@ namespace NativeTranspiler.Analyzer
                         var param = executeMethod.Parameters[i];
                         var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                         sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
                     }
                     sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
                     sb.AppendLine("    #pragma loop(ivdep)");
@@ -963,6 +966,7 @@ namespace NativeTranspiler.Analyzer
                         var param = executeMethod.Parameters[i];
                         var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                         sb.AppendLine($"        auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                        sb.AppendLine($"        __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
                     }
                     sb.AppendLine("        int __entity_count = __chunkData->entityCount;");
                     sb.AppendLine("        #pragma loop(ivdep)");
