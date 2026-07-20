@@ -14,6 +14,7 @@
 
 # Native/CMake/MSVC artifacts
 **/build/
+**/build-*/
 **/x64/
 *.obj
 *.o
