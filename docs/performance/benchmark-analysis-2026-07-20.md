@@ -94,6 +94,37 @@
 
 ---
 
+## Session 2: OS 调度友好优化 (commit 5ed2a80)
+
+### 改动
+
+| # | 改动 | 文件 | 说明 |
+|:-:|------|------|------|
+| 1 | **`SetPriorityClass(HIGH_PRIORITY_CLASS)`** | `JobSystem.cpp` | 进程优先级提升，减少被 OS 其他进程抢占 |
+| 2 | **`timeBeginPeriod(1)`** | `JobSystem.cpp` | 定时器精度从 ~15.6ms 提至 1ms，加速等待响应 |
+| 3 | **Staggered worker wake (4+4+N)** | `NativeWorkerPool.cpp` | Submit 中分 3 批唤醒 worker，间隔 10µs，避免调度风暴 |
+
+### 效果
+
+| 测试 | Session 1 | **Session 2** |
+|------|:---------:|:-------------:|
+| **C++ IJobEntity avg** | 1.10~1.37 ms | **0.94~1.01 ms** |
+| **C++ IJobEntity p50** | 0.96~1.10 ms | **0.96~0.97 ms** |
+| **C++ IJobEntity p95** | 1.8~2.5 ms | **1.26~1.41 ms** |
+| C# IJobChunk avg | 1.1~1.5 ms | **1.07~1.13 ms** |
+| C++ IJobChunk avg | 1.0~1.5 ms | **1.06~1.09 ms** |
+
+### 最终 commit 图
+
+```
+1a36850 unlimited assist
+8197bba  vector hint, NTA prefetch, ABOVE_NORMAL, assist bound
+db8fa74  useFineRanges, 2048 spin, 64KB slab, __assume
+5ed2a80  HIGH_PRIORITY_CLASS, timeBeginPeriod(1), staggered wake
+```
+
+---
+
 ## 瓶颈分析
 
 ### 开销拆解
