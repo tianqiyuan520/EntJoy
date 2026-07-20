@@ -835,67 +835,43 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
 
                     NativeJobSystemStats cleanStats = NativeJobScheduler.GetStats();
-                    Console.WriteLine(
-                        $"  SchedulerClean: samples={cleanStats.TimingSampleCount}, " +
-                        $"batchUs[p50/p95/p99/max]={cleanStats.BatchTotalP50Ns / 1000.0:F3}/" +
-                        $"{cleanStats.BatchTotalP95Ns / 1000.0:F3}/{cleanStats.BatchTotalP99Ns / 1000.0:F3}/" +
-                        $"{cleanStats.BatchTotalMaxNs / 1000.0:F3}, " +
-                        $"submitFirstUs[p95/max]={cleanStats.SubmitToFirstWorkerP95Ns / 1000.0:F3}/" +
-                        $"{cleanStats.SubmitToFirstWorkerMaxNs / 1000.0:F3}, " +
-                        $"spreadUs[p95/max]={cleanStats.WorkerStartSpreadP95Ns / 1000.0:F3}/" +
-                        $"{cleanStats.WorkerStartSpreadMaxNs / 1000.0:F3}");
+                    Console.WriteLine($"  ── Timing ──────────────────────────────");
+                    Console.WriteLine($"     samples={cleanStats.TimingSampleCount}  " +
+                        $"batch[P50/P95/P99/Max]={cleanStats.BatchTotalP50Ns / 1000.0:F3}/{cleanStats.BatchTotalP95Ns / 1000.0:F3}/{cleanStats.BatchTotalP99Ns / 1000.0:F3}/{cleanStats.BatchTotalMaxNs / 1000.0:F3} us");
 
                     // Detailed numbers come from the final warmup frame and are
                     // intentionally separate from the clean measured samples.
                     NativeJobSystemStats stats = diagnosticStats;
                     string backend = stats.NativeBatches > 0 ? "Native" : "Taskflow";
-                    Console.WriteLine(
-                        $"  SchedulerCore: backend={backend}, batches={stats.PublishedJobs}, participantTasks={stats.FrameTasksSubmitted}, " +
-                        $"workerTarget={stats.WorkerTargetTotal}, workersPeak={stats.ActiveWorkersPeak}, " +
-                        $"taskflowBatches={stats.TaskflowBatches}, nativeBatches={stats.NativeBatches}, " +
-                        $"uniqueWakes=N/A({backend}), permits=N/A({backend}), parkWakes=N/A({backend})");
-                    Console.WriteLine(
-                        $"  SchedulerWork: tiles={stats.TotalTilesPublished}, local={stats.LocalTiles}, " +
-                        $"stolen={stats.StolenTiles}, assist={stats.AssistTiles}, " +
-                        $"accounted={stats.LocalTiles + stats.StolenTiles + stats.AssistTiles}, " +
-                        $"stealAttempts={stats.StealAttempts}, stealSuccesses={stats.StealSuccesses}, " +
-                        $"victimScans={stats.VictimScans}, stealEmptyExits={stats.StealEmptyExits}, " +
-                        $"workerClaims={stats.WorkerClaimedTokens}, assistClaims={stats.MainClaimedTokens}");
-                    Console.WriteLine(
-                        $"  SchedulerStorage: created={stats.BatchStorageCreated}, reused={stats.BatchStorageReused}, " +
-                        $"returned={stats.BatchStorageReturned}, dropped={stats.BatchStorageDropped}");
-                    Console.WriteLine(
-                        $"  SchedulerTime: submitFirstWorkerUs={stats.SubmitToFirstWorkerEwmaNs / 1000.0:F3}, " +
-                        $"workerStartSpreadUs={stats.WorkerStartSpreadEwmaNs / 1000.0:F3}, " +
-                        $"lastTileTopologyUs={stats.LastTileToTopologyDoneEwmaNs / 1000.0:F3}, " +
-                        $"completeWakeReturnUs={stats.CompleteWakeToReturnEwmaNs / 1000.0:F3}, " +
-                        $"schedulePublish=N/A({backend}), firstMain=N/A({backend}), " +
-                        $"assistTilePct={stats.AssistExecPctEwma}%, " +
+                    Console.WriteLine($"  ── Config ──────────────────────────────");
+                    Console.WriteLine($"     backend={backend,-7} batches={stats.PublishedJobs}  " +
+                        $"participants={stats.FrameTasksSubmitted}/{stats.ActiveWorkersPeak}  " +
+                        $"workerTarget={stats.WorkerTargetTotal}  " +
+                        $"taskflowBatches={stats.TaskflowBatches}  native={stats.NativeBatches}");
+                    Console.WriteLine($"  ── Work ────────────────────────────────");
+                    Console.WriteLine($"     tiles={stats.TotalTilesPublished}  " +
+                        $"local={stats.LocalTiles}  stolen={stats.StolenTiles}  " +
+                        $"assist={stats.AssistTiles}  stealAttempts={stats.StealAttempts}  " +
+                        $"workerClaims={stats.WorkerClaimedTokens}  mainClaims={stats.MainClaimedTokens}");
+                    Console.WriteLine($"  ── Latency Breakdown ────────────────────");
+                    Console.WriteLine($"     submitFirstWorker  = {stats.SubmitToFirstWorkerEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     workerStartSpread  = {stats.WorkerStartSpreadEwmaNs / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.WorkerStartSpreadP50Ns / 1000.0:F3}/{stats.WorkerStartSpreadP95Ns / 1000.0:F3}/{stats.WorkerStartSpreadMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     executeSpan       = {stats.ExecutionSpanP50Ns / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.ExecutionSpanP50Ns / 1000.0:F3}/{stats.ExecutionSpanP95Ns / 1000.0:F3}/{stats.ExecutionSpanMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     maxRange          = {stats.MaxRangeP50Ns / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.MaxRangeP50Ns / 1000.0:F3}/{stats.MaxRangeP95Ns / 1000.0:F3}/{stats.MaxRangeMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     completeWakeReturn= {stats.CompleteWakeToReturnEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     lastTileTopology  = {stats.LastTileToTopologyDoneEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     assistTilePct    = {stats.AssistExecPctEwma}%  " +
                         $"waitFallbacks={stats.WaitFallbacks}");
-                    Console.WriteLine(
-                        $"  SchedulerDist: samples={stats.TimingSampleCount}, dropped={stats.TimingSamplesDropped}, " +
-                        $"batchTotalUs[p50/p95/p99/max]={stats.BatchTotalP50Ns / 1000.0:F3}/{stats.BatchTotalP95Ns / 1000.0:F3}/" +
-                        $"{stats.BatchTotalP99Ns / 1000.0:F3}/{stats.BatchTotalMaxNs / 1000.0:F3}, " +
-                        $"submitFirstUs[p50/p95/p99/max]={stats.SubmitToFirstWorkerP50Ns / 1000.0:F3}/" +
-                        $"{stats.SubmitToFirstWorkerP95Ns / 1000.0:F3}/{stats.SubmitToFirstWorkerP99Ns / 1000.0:F3}/" +
-                        $"{stats.SubmitToFirstWorkerMaxNs / 1000.0:F3}");
-                    Console.WriteLine(
-                        $"  SchedulerTail: spreadUs[p50/p95/p99/max]={stats.WorkerStartSpreadP50Ns / 1000.0:F3}/" +
-                        $"{stats.WorkerStartSpreadP95Ns / 1000.0:F3}/{stats.WorkerStartSpreadP99Ns / 1000.0:F3}/" +
-                        $"{stats.WorkerStartSpreadMaxNs / 1000.0:F3}, " +
-                        $"executeSpanUs[p50/p95/p99/max]={stats.ExecutionSpanP50Ns / 1000.0:F3}/" +
-                        $"{stats.ExecutionSpanP95Ns / 1000.0:F3}/{stats.ExecutionSpanP99Ns / 1000.0:F3}/" +
-                        $"{stats.ExecutionSpanMaxNs / 1000.0:F3}, " +
-                        $"maxRangeUs[p50/p95/p99/max]={stats.MaxRangeP50Ns / 1000.0:F3}/" +
-                        $"{stats.MaxRangeP95Ns / 1000.0:F3}/{stats.MaxRangeP99Ns / 1000.0:F3}/" +
-                        $"{stats.MaxRangeMaxNs / 1000.0:F3}");
-                    Console.WriteLine(
-                        $"  SchedulerSlow: batch={stats.SlowBatchId}, totalUs={stats.SlowBatchTotalNs / 1000.0:F3}, " +
-                        $"submitFirstUs={stats.SlowSubmitToFirstWorkerNs / 1000.0:F3}, " +
-                        $"spreadUs={stats.SlowWorkerStartSpreadNs / 1000.0:F3}, " +
-                        $"executeSpanUs={stats.SlowExecutionSpanNs / 1000.0:F3}, " +
-                        $"maxRangeUs={stats.SlowMaxRangeNs / 1000.0:F3}, " +
-                        $"coreMigrations={stats.SlowCoreMigrations}, assistTiles={stats.SlowAssistTiles}");
+                    Console.WriteLine($"  ── Slowest Range ────────────────────────");
+                    Console.WriteLine($"     batch#{stats.SlowBatchId}  " +
+                        $"total={stats.SlowBatchTotalNs / 1000.0:F3} us  " +
+                        $"submitFirst={stats.SlowSubmitToFirstWorkerNs / 1000.0:F3} us");
+                    Console.WriteLine($"     spread={stats.SlowWorkerStartSpreadNs / 1000.0:F3} us  " +
+                        $"executeSpan={stats.SlowExecutionSpanNs / 1000.0:F3} us  " +
+                        $"maxRange={stats.SlowMaxRangeNs / 1000.0:F3} us");
                     bool threadCpuTimeValid = stats.SlowRangeThreadCpuNs > 0 &&
                         stats.SlowRangeThreadCpuNs <= stats.SlowMaxRangeNs;
                     string slowRangeCpuUs = threadCpuTimeValid
@@ -909,14 +885,16 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     double scheduledCyclesPerWallNs = stats.SlowMaxRangeNs > 0
                         ? (double)stats.SlowRangeThreadCycles / stats.SlowMaxRangeNs
                         : 0.0;
-                    Console.WriteLine(
-                        $"  SchedulerRange: tile={stats.SlowRangeIndex}, worker={stats.SlowRangeWorker}, " +
-                        $"wallUs={stats.SlowMaxRangeNs / 1000.0:F3}, threadCpuUs={slowRangeCpuUs}, " +
-                        $"offCpuUs={slowRangeOffCpuUs}, cycles={stats.SlowRangeThreadCycles}, " +
-                        $"avgCycles={stats.SlowBatchAverageRangeThreadCycles}, minCycles={stats.SlowBatchMinRangeThreadCycles}, " +
-                        $"cycleRatioVsAvg={slowRangeCycleRatio:F2}x, cyclesPerWallNs={scheduledCyclesPerWallNs:F2}, " +
-                        $"logicalCore={stats.SlowRangeStartLogicalCore}->{stats.SlowRangeEndLogicalCore}, " +
-                        $"physicalCore={stats.SlowRangeStartPhysicalCore}->{stats.SlowRangeEndPhysicalCore}");
+                    Console.WriteLine($"     tile#{stats.SlowRangeIndex}  worker={stats.SlowRangeWorker}  " +
+                        $"wall={stats.SlowMaxRangeNs / 1000.0:F3} us  " +
+                        $"cpu={slowRangeCpuUs} us  offCpu={slowRangeOffCpuUs} us");
+                    Console.WriteLine($"     cycles={stats.SlowRangeThreadCycles}  " +
+                        $"avg={stats.SlowBatchAverageRangeThreadCycles}  " +
+                        $"min={stats.SlowBatchMinRangeThreadCycles}  " +
+                        $"ratioVsAvg={slowRangeCycleRatio:F2}x  cyclesPerNs={scheduledCyclesPerWallNs:F2}");
+                    Console.WriteLine($"     core={stats.SlowRangeStartLogicalCore}->{stats.SlowRangeEndLogicalCore}" +
+                        $"  phys={stats.SlowRangeStartPhysicalCore}->{stats.SlowRangeEndPhysicalCore}" +
+                        $"  coreMigrations={stats.SlowCoreMigrations}  assistTiles={stats.SlowAssistTiles}");
                 }
                 else
                 {
@@ -1053,16 +1031,23 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 claims > 0 && durations.Count == claims && finalizeNs > 0 && handleCompleteNs > 0;
 
             Console.WriteLine(
-                $"JOB_TRACE|case={label}|batch={batchId}|events={count}|claims={claims}|" +
-                $"workers={workerClaims.Count}|mainClaims={mainClaims}|workerMinClaims={workerMinClaims}|" +
-                $"workerMaxClaims={workerMaxClaims}|completeEnterUs={completeEnterUs:F3}|" +
-                $"firstExecuteUs={firstExecuteUs:F3}|workerStartSpreadUs={workerStartSpreadUs:F3}|" +
-                $"executeSpanUs={executeSpanUs:F3}|rangeMinUs={rangeMinUs:F3}|rangeAvgUs={rangeAvgUs:F3}|" +
-                $"rangeP95Us={rangeP95Us:F3}|rangeMaxUs={rangeMaxUs:F3}|slowRange={slowRange}|" +
-                $"slowWorker={slowWorker}|slowStartCore={slowStartCore}|slowEndCore={slowEndCore}|" +
-                $"coreMigrations={coreMigrations}|workerCoreMap={workerCoreMap}|" +
-                $"finalizeGapUs={finalizeGapUs:F3}|completeGapUs={completeGapUs:F3}|" +
-                $"dropped={dropped}|result={(complete && dropped == 0 ? "OK" : "INCOMPLETE")}");
+                $"  ── Trace ────────────────────────────────");
+            Console.WriteLine(
+                $"     case={label}  batch={batchId}  events={count}  claims={claims}  " +
+                $"workers={workerClaims.Count}  mainAssist={mainClaims}  " +
+                $"result={(complete && dropped == 0 ? "OK" : "INCOMPLETE")}");
+            Console.WriteLine(
+                $"     completeEnter={completeEnterUs:F3} us  firstExecute={firstExecuteUs:F3} us  " +
+                $"startSpread={workerStartSpreadUs:F3} us  executeSpan={executeSpanUs:F3} us");
+            Console.WriteLine(
+                $"     range[min/avg/P95/max]={rangeMinUs:F3}/{rangeAvgUs:F3}/{rangeP95Us:F3}/{rangeMaxUs:F3} us  " +
+                $"slowTile={slowRange}  slowWorker={slowWorker}");
+            Console.WriteLine(
+                $"     slowTileCore={slowStartCore}->{slowEndCore}  " +
+                $"coreMigrations={coreMigrations}  " +
+                $"finalizeGap={finalizeGapUs:F3} us  completeGap={completeGapUs:F3} us");
+            Console.WriteLine(
+                $"     workerCoreMap={workerCoreMap}");
             NativeJobScheduler.TraceClear();
         }
 
