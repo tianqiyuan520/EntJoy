@@ -140,7 +140,12 @@ namespace JobSystem
 
         void WorkerLoop(uint32_t workerIndex, WorkerState* worker) noexcept
         {
-            if (bindWorkers) BindCurrentThreadToLogicalProcessor(workerIndex);
+            if (bindWorkers)
+            {
+                // Workers use logical cores 1..N so they avoid competing with
+                // the main thread (pinned to core 0).
+                BindCurrentThreadToLogicalProcessor(1 + workerIndex);
+            }
 #if defined(_WIN32)
             ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
