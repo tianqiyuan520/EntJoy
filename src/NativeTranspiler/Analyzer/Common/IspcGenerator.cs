@@ -915,8 +915,13 @@ namespace NativeTranspiler.Analyzer
             string mtParams = pars.Length == 0 ? "uniform int numTasks" : $"{pars}, uniform int numTasks";
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
-            sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({string.Join(", ", mtCallArgs)});");
-            sb.AppendLine($"{Indent}sync;");
+            sb.AppendLine($"{Indent}if (numTasks <= 1)");
+            sb.AppendLine($"{Indent}{Indent}{baseName}_task({string.Join(", ", mtCallArgs)});");
+            sb.AppendLine($"{Indent}else");
+            sb.AppendLine($"{Indent}{{");
+            sb.AppendLine($"{Indent}{Indent}launch[numTasks] {baseName}_task({string.Join(", ", mtCallArgs)});");
+            sb.AppendLine($"{Indent}{Indent}sync;");
+            sb.AppendLine($"{Indent}}}");
             sb.AppendLine("}");
 
             return sb.ToString();
@@ -963,8 +968,13 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
             string callArgs = string.IsNullOrEmpty(paramsList) ? "__entity_count" : $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
-            sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({callArgs});");
-            sb.AppendLine($"{Indent}sync;");
+            sb.AppendLine($"{Indent}if (numTasks <= 1)");
+            sb.AppendLine($"{Indent}{Indent}{baseName}_task({callArgs});");
+            sb.AppendLine($"{Indent}else");
+            sb.AppendLine($"{Indent}{{");
+            sb.AppendLine($"{Indent}{Indent}launch[numTasks] {baseName}_task({callArgs});");
+            sb.AppendLine($"{Indent}{Indent}sync;");
+            sb.AppendLine($"{Indent}}}");
             sb.AppendLine("}");
 
             return sb.ToString();
@@ -998,8 +1008,8 @@ namespace NativeTranspiler.Analyzer
         {
             var sb = new StringBuilder();
             var ispcBase = GetIspcBaseName(jobStruct);
-            var ispcHeaderBase = useMt ? ispcBase + "_mt" : ispcBase;
-            var ispcImplName = useMt ? ispcBase + "_mt_impl" : ispcBase + "_impl";
+            var ispcHeaderBase = ispcBase;  // Always _ispc.h
+            var ispcImplName = ispcBase + "_impl";  // Always _impl (no launch/sync)
             var adapterFuncName = CppJobGenerator.GetEntityBatchAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct);
             var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();
@@ -1054,21 +1064,10 @@ namespace NativeTranspiler.Analyzer
                 fieldArgs.Add($"{field.Name}_ptr");
             }
 
-            if (useMt)
-            {
-                // Exactly one ISPC task group owns the whole query range. The
-                // generated ISPC tasks walk the EntityBatchData table directly,
-                // avoiding nested outer-worker x per-batch launch/sync storms.
-                var callArgs = new List<string>
-                {
-                    "reinterpret_cast<uint64_t*>(const_cast<EntityBatchData*>(__batches + __batch_start))",
-                    "__batch_count"
-                };
-                callArgs.AddRange(fieldArgs);
-                callArgs.Add("1");  // numTasks=1 → launch[1] → serial inside ISPC
-                sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
-            }
-            else
+            // Per-batch loop: read from EntityBatchData directly (single hop).
+            // Both MT and non-MT use this path.  ISPC MT is scheduled with
+            // workerCap=1, rangeSize=int.MaxValue (single-tile query range),
+            // so the parallelization is entirely in the tile scheduler.
             {
                 sb.AppendLine("    const int __batch_end = __batch_start + __batch_count;");
                 sb.AppendLine("    for (int __batch_index = __batch_start; __batch_index < __batch_end; ++__batch_index)");
