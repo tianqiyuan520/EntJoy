@@ -915,13 +915,8 @@ namespace NativeTranspiler.Analyzer
             string mtParams = pars.Length == 0 ? "uniform int numTasks" : $"{pars}, uniform int numTasks";
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
-            sb.AppendLine($"{Indent}if (numTasks <= 1)");
-            sb.AppendLine($"{Indent}{Indent}{baseName}_task({string.Join(", ", mtCallArgs)});");
-            sb.AppendLine($"{Indent}else");
-            sb.AppendLine($"{Indent}{{");
-            sb.AppendLine($"{Indent}{Indent}launch[numTasks] {baseName}_task({string.Join(", ", mtCallArgs)});");
-            sb.AppendLine($"{Indent}{Indent}sync;");
-            sb.AppendLine($"{Indent}}}");
+            sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({string.Join(", ", mtCallArgs)});");
+            sb.AppendLine($"{Indent}sync;");
             sb.AppendLine("}");
 
             return sb.ToString();
@@ -968,13 +963,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
             string callArgs = string.IsNullOrEmpty(paramsList) ? "__entity_count" : $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
-            sb.AppendLine($"{Indent}if (numTasks <= 1)");
-            sb.AppendLine($"{Indent}{Indent}{baseName}_task({callArgs});");
-            sb.AppendLine($"{Indent}else");
-            sb.AppendLine($"{Indent}{{");
-            sb.AppendLine($"{Indent}{Indent}launch[numTasks] {baseName}_task({callArgs});");
-            sb.AppendLine($"{Indent}{Indent}sync;");
-            sb.AppendLine($"{Indent}}}");
+            sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({callArgs});");
+            sb.AppendLine($"{Indent}sync;");
             sb.AppendLine("}");
 
             return sb.ToString();
