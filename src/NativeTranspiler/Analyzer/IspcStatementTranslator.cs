@@ -11,6 +11,13 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, bool> _constBoolFields = new();
         private readonly bool _useUniformVars;
 
+        /// <summary>
+        /// 在 IJobEntity ISPC 生成中，Execute 方法的 ref/in 参数不应复制为本地 struct，
+        /// 而应直接通过指针+索引访问（例如 position_ptr[__entity_index]）。
+        /// 此集合记录需要这种直接访问的参数名。
+        /// </summary>
+        protected readonly HashSet<string> _entityRefParamNames = new();
+
         public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
             : base(semanticModel, jobStruct)
@@ -110,8 +117,20 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(name);
                 return;
             }
+            // IJobEntity ref/in struct params: 直接通过指针+索引访问，消除 struct copy
+            if (_entityRefParamNames.Contains(name))
+            {
+                _builder.Append(name).Append("_ptr[__entity_index]");
+                return;
+            }
             base.TranslateIdentifier(identifier);
         }
+
+        /// <summary>
+        /// 添加需要在 ISPC body 中通过 <c>name_ptr[__entity_index]</c> 直接访问的参数名。
+        /// 用于 IJobEntity 的 execute 参数类型，消除 struct copy-in/copy-out 开销。
+        /// </summary>
+        public void AddEntityRefParam(string name) => _entityRefParamNames.Add(name);
 
         // Keep branch form in ISPC for better static-path stability on this workload.
         protected override bool EnableBranchlessSimpleIfRewrite() => false;
@@ -290,15 +309,18 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
         {
             // ISPC structs don't support compound assignment operators (+=, -=, *=, /=)
-            // Convert "pos += vel * Dt" to "pos = pos + vel * Dt"
+            // on struct types. Convert to "left = left op right" so that ISPC emits a
+            // single struct-level gather + scatter (optimal for AoS data layout):
+            //   position_ptr[idx].Value += vel_ptr[idx].Value * Dt
+            //     → position_ptr[idx].Value = position_ptr[idx].Value + vel_ptr[idx].Value * Dt
+            // Per-field decomposition (vec.x += val.x; vec.y += val.y) would double
+            // gather/scatter count and regress memory-bound (Light) workloads.
             string op = assignment.OperatorToken.Text;
             if (op == "+=" || op == "-=" || op == "*=" || op == "/=")
             {
-                // Check if the left side is a vector type
                 var leftType = _semanticModel.GetTypeInfo(assignment.Left).Type;
                 if (IsVectorType(leftType))
                 {
-                    // Convert to "left = left op right"
                     TranslateExpression(assignment.Left);
                     _builder.Append(" = ");
                     TranslateExpression(assignment.Left);
