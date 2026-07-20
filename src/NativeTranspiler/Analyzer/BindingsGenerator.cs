@@ -442,7 +442,7 @@ namespace NativeTranspiler.Analyzer
                     funcPtrName = useMT
                         ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr"
                         : $"s_{jobStruct.Name}_EntityBatchFuncPtr";
-                    extraArgs = ", 0, 0";
+                    extraArgs = useMT ? ", 1, int.MaxValue" : ", 0, 0";
                 }
                 else
                 {
