@@ -2,6 +2,7 @@
 #include "ThreadAffinity.h"
 
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <condition_variable>
 #include <cstdint>
@@ -239,8 +240,46 @@ namespace JobSystem
                 ++wakeCounts[workerIndex];
             }
         }
-        for (uint32_t i = 0; i < wakeCounts.size(); ++i)
-            if (wakeCounts[i] != 0) _impl->workers[i]->wake.release();
+        // Staggered wake: releasing all workers at once creates an OS
+        // scheduling storm that increases wake latency for the last worker
+        // from ~50µs to 500-1500µs. Release in batches with a short spin
+        // between batches so the scheduler has time to dispatch each cohort.
+        {
+            std::vector<uint32_t> toWake;
+            toWake.reserve(wakeCounts.size());
+            for (uint32_t i = 0; i < wakeCounts.size(); ++i)
+                if (wakeCounts[i] != 0) toWake.push_back(i);
+
+            constexpr uint32_t kFirstBatch = 4;
+            constexpr uint32_t kSecondBatch = 4;
+            constexpr auto kBatchInterval = std::chrono::microseconds(10);
+
+            size_t idx = 0;
+
+            // Batch 1 — immediate
+            uint32_t n1 = std::min(kFirstBatch, (uint32_t)toWake.size());
+            for (; idx < n1; ++idx)
+                _impl->workers[toWake[idx]]->wake.release();
+
+            // Batch 2 — after short spin
+            if (idx < toWake.size())
+            {
+                auto deadline = std::chrono::steady_clock::now() + kBatchInterval;
+                while (std::chrono::steady_clock::now() < deadline) { CpuPause(); }
+                uint32_t n2 = std::min(kSecondBatch, (uint32_t)(toWake.size() - idx));
+                for (uint32_t e = idx + n2; idx < e; ++idx)
+                    _impl->workers[toWake[idx]]->wake.release();
+            }
+
+            // Remaining — after another short spin
+            if (idx < toWake.size())
+            {
+                auto deadline = std::chrono::steady_clock::now() + kBatchInterval;
+                while (std::chrono::steady_clock::now() < deadline) { CpuPause(); }
+                for (; idx < toWake.size(); ++idx)
+                    _impl->workers[toWake[idx]]->wake.release();
+            }
+        }
         return true;
     }
 
