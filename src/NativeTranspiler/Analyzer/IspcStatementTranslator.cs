@@ -135,6 +135,52 @@ namespace NativeTranspiler.Analyzer
         // Keep branch form in ISPC for better static-path stability on this workload.
         protected override bool EnableBranchlessSimpleIfRewrite() => false;
 
+        protected override void TranslateIfStatement(IfStatementSyntax ifStmt)
+        {
+            var (innerCondition, hintKind) = ExtractHintFromCondition(ifStmt.Condition);
+
+            if (hintKind != HintKind.None)
+            {
+                // ISPC does not support __builtin_expect or [[likely]].
+                // Silently strip the Hint wrapper and emit a normal if-statement.
+                AppendIndent();
+                _builder.Append("if (");
+                TranslateExpression(innerCondition);
+                _builder.AppendLine(")");
+
+                // Translate true-branch body
+                if (ifStmt.Statement is BlockSyntax block)
+                    TranslateBlock(block, skipOuterBraces: false);
+                else
+                {
+                    _indentLevel++;
+                    AppendIndent();
+                    TranslateStatement(ifStmt.Statement);
+                    _indentLevel--;
+                }
+
+                // Translate else-branch if present
+                if (ifStmt.Else != null)
+                {
+                    AppendIndent();
+                    _builder.AppendLine("else");
+                    if (ifStmt.Else.Statement is BlockSyntax elseBlock)
+                        TranslateBlock(elseBlock, skipOuterBraces: false);
+                    else
+                    {
+                        _indentLevel++;
+                        AppendIndent();
+                        TranslateStatement(ifStmt.Else.Statement);
+                        _indentLevel--;
+                    }
+                }
+                return;
+            }
+
+            // No hint: use base implementation (which also handles branchless rewrite etc.)
+            base.TranslateIfStatement(ifStmt);
+        }
+
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
             AppendIndent();
@@ -445,6 +491,14 @@ namespace NativeTranspiler.Analyzer
                 if (fullTypeName == "System.Threading.Interlocked")
                 {
                     TranslateInterlockedCall(methodSymbol, invocation);
+                    return;
+                }
+                if (fullTypeName == "EntJoy.Hint")
+                {
+                    // ISPC does not support __builtin_expect or [[likely]].
+                    // Silently strip the Hint wrapper and translate the inner condition.
+                    if (invocation.ArgumentList.Arguments.Count > 0)
+                        TranslateExpression(invocation.ArgumentList.Arguments[0].Expression);
                     return;
                 }
             }

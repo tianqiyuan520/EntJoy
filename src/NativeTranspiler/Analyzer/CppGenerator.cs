@@ -12,7 +12,8 @@ namespace NativeTranspiler.Analyzer
         private static readonly HashSet<string> SkipIncludeTypeNames = new()
         {
             "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility"
+            "EntJoy.Collections.UnsafeUtility",
+            "EntJoy.Hint"
         };
 
         public static string GetCppFunctionName(IMethodSymbol method)
