@@ -8,6 +8,9 @@
 **/.vs/
 **/.vscode/
 
+# Claude Code config/cache
+**/.claude/
+
 # .NET build artifacts
 **/bin/
 **/obj/
