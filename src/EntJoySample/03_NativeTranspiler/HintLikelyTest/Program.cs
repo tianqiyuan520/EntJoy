@@ -1,4 +1,4 @@
-using EntJoySample.HintLikelyTest;
+﻿using EntJoySample.HintLikelyTest;
 
 namespace EntJoySample.HintLikelyTest
 {
@@ -7,8 +7,8 @@ namespace EntJoySample.HintLikelyTest
         public static void Main()
         {
             HintLikely.Run();
-            HintLikelyBenchmark.Run();
-            HintLikelyUopCacheTest.Run();
+            //HintLikelyBenchmark.Run();
+            //HintLikelyUopCacheTest.Run();
         }
     }
 }
