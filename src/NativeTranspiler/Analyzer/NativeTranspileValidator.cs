@@ -66,6 +66,8 @@ namespace NativeTranspiler.Analyzer
             "EntJoy.Mathematics.math.ceil",
             "EntJoy.Mathematics.math.distancesq",
             "EntJoy.Collections.UnsafeUtility.ArrayElementAsRef",
+            "EntJoy.Hint.Likely",
+            "EntJoy.Hint.Unlikely",
         };
 
         public static bool ValidateMethod(IMethodSymbol method, Compilation compilation, out List<Diagnostic> diagnostics)

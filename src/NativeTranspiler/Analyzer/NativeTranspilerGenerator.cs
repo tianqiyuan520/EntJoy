@@ -20,7 +20,8 @@ namespace NativeTranspiler.Analyzer
         private static readonly HashSet<string> SkipTranspileTypeNames = new()
         {
             "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility"
+            "EntJoy.Collections.UnsafeUtility",
+            "EntJoy.Hint"
         };
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
