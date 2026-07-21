@@ -211,13 +211,24 @@ namespace NativeTranspiler.Analyzer
 
         protected virtual void TranslateIfStatement(IfStatementSyntax ifStmt)
         {
-            if (EnableBranchlessSimpleIfRewrite() && TryTranslateBranchlessSimpleIf(ifStmt))
+            var (innerCondition, hintKind) = ExtractHintFromCondition(ifStmt.Condition);
+
+            // 如果有显式的分支预测 hint，跳过 branchless rewrite 以保留分支形式
+            if (hintKind == HintKind.None && EnableBranchlessSimpleIfRewrite() && TryTranslateBranchlessSimpleIf(ifStmt))
                 return;
 
             AppendIndent();
             _builder.Append("if (");
-            TranslateExpression(ifStmt.Condition);
-            _builder.AppendLine(")");
+            TranslateExpression(innerCondition);
+
+            // Hint.Likely → `if (cond) [[likely]]` ; Hint.Unlikely → `if (cond) [[unlikely]]`
+            // [[likely]] / [[unlikely]] 是 C++20 statement attribute，置于 true-branch 前
+            if (hintKind == HintKind.Likely)
+                _builder.AppendLine(") [[likely]]");
+            else if (hintKind == HintKind.Unlikely)
+                _builder.AppendLine(") [[unlikely]]");
+            else
+                _builder.AppendLine(")");
 
             if (ifStmt.Statement is BlockSyntax block)
                 TranslateBlock(block, skipOuterBraces: false);
@@ -243,6 +254,29 @@ namespace NativeTranspiler.Analyzer
                     _indentLevel--;
                 }
             }
+        }
+
+        /// <summary>
+        /// Detects whether an if-statement condition is wrapped in <c>Hint.Likely(…)</c>
+        /// or <c>Hint.Unlikely(…)</c>, and if so returns the inner condition and which
+        /// hint was used.
+        /// </summary>
+        protected enum HintKind { None, Likely, Unlikely }
+
+        protected (ExpressionSyntax inner, HintKind kind) ExtractHintFromCondition(ExpressionSyntax condition)
+        {
+            if (condition is InvocationExpressionSyntax inv)
+            {
+                var sym = _semanticModel.GetSymbolInfo(inv);
+                if (sym.Symbol is IMethodSymbol m && m.ContainingType?.ToDisplayString() == "EntJoy.Hint")
+                {
+                    if (m.Name == "Likely" && inv.ArgumentList.Arguments.Count > 0)
+                        return (inv.ArgumentList.Arguments[0].Expression, HintKind.Likely);
+                    if (m.Name == "Unlikely" && inv.ArgumentList.Arguments.Count > 0)
+                        return (inv.ArgumentList.Arguments[0].Expression, HintKind.Unlikely);
+                }
+            }
+            return (condition, HintKind.None);
         }
 
         protected virtual bool EnableBranchlessSimpleIfRewrite() => true;
@@ -317,7 +351,14 @@ namespace NativeTranspiler.Analyzer
                     if (token.Kind() == SyntaxKind.NumericLiteralToken)
                     {
                         var text = token.Text;
-                        if (text.EndsWith("f", StringComparison.OrdinalIgnoreCase))
+                        // Hex integer literals (0x...) must be emitted as-is.
+                        // They are always integer and never have a float suffix in C#.
+                        if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
+                            text.StartsWith("0X", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _builder.Append(text);
+                        }
+                        else if (text.EndsWith("f", StringComparison.OrdinalIgnoreCase))
                         {
                             string numberPart = text.Substring(0, text.Length - 1);
                             if (!numberPart.Contains('.') && !numberPart.Contains('e') && !numberPart.Contains('E'))
@@ -527,6 +568,17 @@ namespace NativeTranspiler.Analyzer
                     if (fullTypeName == "EntJoy.Mathematics.math")
                     {
                         TranslateEntJoyMathCall(methodSymbol, invocation);
+                        return;
+                    }
+                    if (fullTypeName == "EntJoy.Hint")
+                    {
+                        // Strip Hint wrapper: just translate the inner condition expression.
+                        // The [[likely]] / [[unlikely]] attribute is emitted by TranslateIfStatement
+                        // which checks the condition before calling TranslateInvocation.
+                        if (invocation.ArgumentList.Arguments.Count > 0)
+                            TranslateExpression(invocation.ArgumentList.Arguments[0].Expression);
+                        else
+                            _builder.Append("true");
                         return;
                     }
 
