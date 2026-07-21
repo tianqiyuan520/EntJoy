@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 /// <summary>
 /// 表示一个由 C++ JobSystem 调度的原生作业句柄。
@@ -95,7 +96,8 @@ internal sealed class NativeJobHandleBox
 
     ~NativeJobHandleBox()
     {
-        IntPtr handle = Detach();
+        // 避免在 finalizer 中持锁（危险反模式），使用 Interlocked 无锁摘除
+        IntPtr handle = Interlocked.Exchange(ref _handle, IntPtr.Zero);
         if (handle != IntPtr.Zero)
         {
             NativeJobScheduler.ReleaseRawHandleForFinalizer(handle);

@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <cstdint>
+
 #ifdef _WIN32
 #ifdef JOB_SYSTEM_EXPORT
 #define JOB_API __declspec(dllexport)
@@ -16,6 +18,7 @@ struct EntityBatchData;
 struct ProfilerEntry;
 struct JobSystemTuningNative;
 struct JobSystemStatsNative;
+namespace JobSystem { struct TraceEvent; }
 
 extern "C" {
 
@@ -29,8 +32,12 @@ extern "C" {
     typedef void (*EntityBatchRangeJobFunc)(void* context, const struct EntityBatchData* batches, int startIndex, int count);
 
     JOB_API void JobSystem_Initialize(int numThreads);
+    // Unity JobsUtility.JobWorkerCount equivalent: the number of persistent
+    // job workers selected when the scheduler was initialized.
+    JOB_API int JobSystem_GetWorkerCount();
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
+    JOB_API void JobSystem_KeepWorkersWarm(int microseconds);
     JOB_API void JobSystem_FlushScheduledJobs();
 
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
@@ -44,6 +51,12 @@ extern "C" {
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
+    // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
+    // 返回已完成的 handle
+    JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
+        EntityBatchRangeJobFunc func, void* context, ContextCleanupFunc cleanup,
+        const struct EntityBatchData* batches, int batchCount, void* dependency,
+        int scheduleMode, int workerCap, int rangeSize, int jobKind);
     
     typedef struct JobSystemTuningNative {
         int spinBeforeWait;
@@ -85,10 +98,84 @@ extern "C" {
         unsigned long long scheduleModeDeferredPublish;
         unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
+        unsigned long long directAssistClaims;
+        unsigned long long exhaustedTickets;
+        unsigned long long scheduleToPublishEwmaNs;
+        unsigned long long publishToFirstMainClaimEwmaNs;
+        unsigned long long publishToFirstWorkerClaimEwmaNs;
+        unsigned long long publishToCompletionEwmaNs;
+        unsigned long long queueLockWaitEwmaNs;
+        unsigned long long perRangeExecEwmaNs;
+        unsigned long long assistExecPctEwma;
+        unsigned long long completionOverheadUs;
+        // Appended Tile/partition fields; keep order in sync with C#.
+        unsigned long long workerTargetTotal;
+        unsigned long long totalTilesPublished;
+        unsigned long long localTiles;
+        unsigned long long stolenTiles;
+        unsigned long long assistTiles;
+        unsigned long long stealAttempts;
+        unsigned long long stealSuccesses;
+        unsigned long long permitsReleased;
+        unsigned long long victimScans;
+        unsigned long long stealEmptyExits;
+        unsigned long long batchStorageCreated;
+        unsigned long long batchStorageReused;
+        unsigned long long batchStorageReturned;
+        unsigned long long batchStorageDropped;
+        unsigned long long submitToFirstWorkerEwmaNs;
+        unsigned long long workerStartSpreadEwmaNs;
+        unsigned long long lastTileToTopologyDoneEwmaNs;
+        unsigned long long completeWakeToReturnEwmaNs;
+        unsigned long long taskflowBatches;
+        unsigned long long nativeBatches;
+        unsigned long long invalidBackendSelections;
+        // Appended exact per-batch timing distribution; keep order in sync with C#.
+        unsigned long long timingSampleCount;
+        unsigned long long timingSamplesDropped;
+        unsigned long long batchTotalP50Ns;
+        unsigned long long batchTotalP95Ns;
+        unsigned long long batchTotalP99Ns;
+        unsigned long long batchTotalMaxNs;
+        unsigned long long submitToFirstWorkerP50Ns;
+        unsigned long long submitToFirstWorkerP95Ns;
+        unsigned long long submitToFirstWorkerP99Ns;
+        unsigned long long submitToFirstWorkerMaxNs;
+        unsigned long long workerStartSpreadP50Ns;
+        unsigned long long workerStartSpreadP95Ns;
+        unsigned long long workerStartSpreadP99Ns;
+        unsigned long long workerStartSpreadMaxNs;
+        unsigned long long executionSpanP50Ns;
+        unsigned long long executionSpanP95Ns;
+        unsigned long long executionSpanP99Ns;
+        unsigned long long executionSpanMaxNs;
+        unsigned long long maxRangeP50Ns;
+        unsigned long long maxRangeP95Ns;
+        unsigned long long maxRangeP99Ns;
+        unsigned long long maxRangeMaxNs;
+        unsigned long long slowBatchId;
+        unsigned long long slowBatchTotalNs;
+        unsigned long long slowSubmitToFirstWorkerNs;
+        unsigned long long slowWorkerStartSpreadNs;
+        unsigned long long slowExecutionSpanNs;
+        unsigned long long slowMaxRangeNs;
+        unsigned long long slowCoreMigrations;
+        unsigned long long slowAssistTiles;
+        unsigned long long slowRangeThreadCpuNs;
+        unsigned long long slowRangeThreadCycles;
+        unsigned long long slowBatchMinRangeThreadCycles;
+        unsigned long long slowBatchAverageRangeThreadCycles;
+        int slowRangeIndex;
+        int slowRangeWorker;
+        int slowRangeStartLogicalCore;
+        int slowRangeEndLogicalCore;
+        int slowRangeStartPhysicalCore;
+        int slowRangeEndPhysicalCore;
     } JobSystemStatsNative;
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
     JOB_API void JobSystem_ResetStats();
+    JOB_API void JobSystem_SetTimingDiagnostics(int enabled);
 
     /** 
      * 调度多个 Chunk 任务，每个 Chunk 并行执行一次 func 回调。
@@ -139,7 +226,8 @@ extern "C" {
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize);
+        int rangeSize,
+        int jobKind);
 
     // ======================== Profiler API ========================
     // 启用/禁用 Profiler
@@ -152,5 +240,11 @@ extern "C" {
 
     // 清空 Profiler 缓冲
     JOB_API void JobProfiler_Clear();
+
+    JOB_API void Trace_SetEnabled(int enabled);
+    JOB_API int Trace_IsEnabled();
+    JOB_API int Trace_ReadAll(JobSystem::TraceEvent* buffer, int maxCount);
+    JOB_API uint64_t Trace_DroppedEvents();
+    JOB_API void Trace_Clear();
 
 } // extern "C"

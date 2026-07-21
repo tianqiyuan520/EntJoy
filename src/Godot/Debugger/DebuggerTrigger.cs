@@ -18,7 +18,8 @@ public partial class DebuggerTrigger : Button
             debuggerPanel = debuggerPanelPackedScene.Instantiate<DebuggerPanel>();
             Pos?.AddChild(debuggerPanel);
         }
-        debuggerPanel.Visible = false;
+        if (debuggerPanel != null)
+            debuggerPanel.Visible = false;
     }
 
     public void Press()
@@ -26,18 +27,19 @@ public partial class DebuggerTrigger : Button
         IsOpen = !IsOpen;
         if (IsOpen) Open();
         else Close();
-
     }
-
 
     public void Open()
     {
+        if (debuggerPanel == null) return;
         debuggerPanel.Visible = true;
     }
 
     public void Close()
     {
+        if (debuggerPanel == null) return;
         debuggerPanel.Visible = false;
-        debuggerPanel.memoryGraphics.Visible = false;
+        if (debuggerPanel.memoryGraphics != null)
+            debuggerPanel.memoryGraphics.Visible = false;
     }
 }

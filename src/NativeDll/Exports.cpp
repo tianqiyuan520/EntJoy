@@ -26,6 +26,11 @@ extern "C"
         JobSystem::Scheduler::Initialize(numThreads);
     }
 
+    int JobSystem_GetWorkerCount()
+    {
+        return JobSystem::CurrentWorkerCount();
+    }
+
     void JobSystem_Shutdown()
     {
         JobSystem::Scheduler::Shutdown();
@@ -34,6 +39,11 @@ extern "C"
     void JobSystem_PrewakeWorkers()
     {
         JobSystem::Scheduler::PrewakeWorkers();
+    }
+
+    void JobSystem_KeepWorkersWarm(int microseconds)
+    {
+        JobSystem::Scheduler::KeepWorkersWarm(microseconds);
     }
 
     void JobSystem_FlushScheduledJobs()
@@ -116,6 +126,8 @@ extern "C"
 
     void* JobSystem_CombineDependencies(void** handles, int count)
     {
+        if (count <= 0 || !handles)
+            return nullptr;
         std::vector<JobSystem::JobHandle> vec;
         vec.reserve(count);
         for (int i = 0; i < count; ++i)
@@ -210,7 +222,8 @@ extern "C"
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize)
+        int rangeSize,
+        int jobKind)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -226,7 +239,46 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublish;
         else if (scheduleMode == 5)
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize);
+        const auto kind = jobKind == 0
+            ? JobSystem::EcsJobKind::Chunk
+            : JobSystem::EcsJobKind::Entity;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
+        return toHandle(handle);
+    }
+
+    void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
+        EntityBatchRangeJobFunc func,
+        void* context,
+        ContextCleanupFunc cleanup,
+        const EntityBatchData* batches,
+        int batchCount,
+        void* dependency,
+        int scheduleMode,
+        int workerCap,
+        int rangeSize,
+        int jobKind)
+    {
+        JobSystem::JobHandle dep;
+        if (dependency)
+            dep = JobSystem::JobHandle(fromHandle(dependency), true);
+        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+        if (scheduleMode == 0)
+            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+        else if (scheduleMode == 2)
+            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        else if (scheduleMode == 3)
+            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+        else if (scheduleMode == 4)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+        else if (scheduleMode == 5)
+            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        // 一步完成 Schedule+Complete，消除 P/Invoke 往返
+        // workers 还在上下文切换中，主线程已经进入 assist
+        const auto kind = jobKind == 0
+            ? JobSystem::EcsJobKind::Chunk
+            : JobSystem::EcsJobKind::Entity;
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
+        handle.Complete();
         return toHandle(handle);
     }
 
@@ -262,11 +314,87 @@ extern "C"
         stats->scheduleModeDeferredPublish = snapshot.scheduleModeDeferredPublish;
         stats->scheduleModeDeferredPublishNoAssist = snapshot.scheduleModeDeferredPublishNoAssist;
         stats->frameQueueDepthPeak = snapshot.frameQueueDepthPeak;
+        stats->directAssistClaims = snapshot.directAssistClaims;
+        stats->exhaustedTickets = snapshot.exhaustedTickets;
+        stats->scheduleToPublishEwmaNs = snapshot.scheduleToPublishEwmaNs;
+        stats->publishToFirstMainClaimEwmaNs = snapshot.publishToFirstMainClaimEwmaNs;
+        stats->publishToFirstWorkerClaimEwmaNs = snapshot.publishToFirstWorkerClaimEwmaNs;
+        stats->publishToCompletionEwmaNs = snapshot.publishToCompletionEwmaNs;
+        stats->queueLockWaitEwmaNs = snapshot.queueLockWaitEwmaNs;
+        stats->perRangeExecEwmaNs = snapshot.perRangeExecEwmaNs;
+        stats->assistExecPctEwma = snapshot.assistExecPctEwma;
+        stats->completionOverheadUs = snapshot.completionOverheadUs;
+        stats->workerTargetTotal = snapshot.workerTargetTotal;
+        stats->totalTilesPublished = snapshot.totalTilesPublished;
+        stats->localTiles = snapshot.localTiles;
+        stats->stolenTiles = snapshot.stolenTiles;
+        stats->assistTiles = snapshot.assistTiles;
+        stats->stealAttempts = snapshot.stealAttempts;
+        stats->stealSuccesses = snapshot.stealSuccesses;
+        stats->permitsReleased = snapshot.permitsReleased;
+        stats->victimScans = snapshot.victimScans;
+        stats->stealEmptyExits = snapshot.stealEmptyExits;
+        stats->batchStorageCreated = snapshot.batchStorageCreated;
+        stats->batchStorageReused = snapshot.batchStorageReused;
+        stats->batchStorageReturned = snapshot.batchStorageReturned;
+        stats->batchStorageDropped = snapshot.batchStorageDropped;
+        stats->submitToFirstWorkerEwmaNs = snapshot.submitToFirstWorkerEwmaNs;
+        stats->workerStartSpreadEwmaNs = snapshot.workerStartSpreadEwmaNs;
+        stats->lastTileToTopologyDoneEwmaNs = snapshot.lastTileToTopologyDoneEwmaNs;
+        stats->completeWakeToReturnEwmaNs = snapshot.completeWakeToReturnEwmaNs;
+        stats->taskflowBatches = snapshot.taskflowBatches;
+        stats->nativeBatches = snapshot.nativeBatches;
+        stats->invalidBackendSelections = snapshot.invalidBackendSelections;
+        stats->timingSampleCount = snapshot.timingSampleCount;
+        stats->timingSamplesDropped = snapshot.timingSamplesDropped;
+        stats->batchTotalP50Ns = snapshot.batchTotalP50Ns;
+        stats->batchTotalP95Ns = snapshot.batchTotalP95Ns;
+        stats->batchTotalP99Ns = snapshot.batchTotalP99Ns;
+        stats->batchTotalMaxNs = snapshot.batchTotalMaxNs;
+        stats->submitToFirstWorkerP50Ns = snapshot.submitToFirstWorkerP50Ns;
+        stats->submitToFirstWorkerP95Ns = snapshot.submitToFirstWorkerP95Ns;
+        stats->submitToFirstWorkerP99Ns = snapshot.submitToFirstWorkerP99Ns;
+        stats->submitToFirstWorkerMaxNs = snapshot.submitToFirstWorkerMaxNs;
+        stats->workerStartSpreadP50Ns = snapshot.workerStartSpreadP50Ns;
+        stats->workerStartSpreadP95Ns = snapshot.workerStartSpreadP95Ns;
+        stats->workerStartSpreadP99Ns = snapshot.workerStartSpreadP99Ns;
+        stats->workerStartSpreadMaxNs = snapshot.workerStartSpreadMaxNs;
+        stats->executionSpanP50Ns = snapshot.executionSpanP50Ns;
+        stats->executionSpanP95Ns = snapshot.executionSpanP95Ns;
+        stats->executionSpanP99Ns = snapshot.executionSpanP99Ns;
+        stats->executionSpanMaxNs = snapshot.executionSpanMaxNs;
+        stats->maxRangeP50Ns = snapshot.maxRangeP50Ns;
+        stats->maxRangeP95Ns = snapshot.maxRangeP95Ns;
+        stats->maxRangeP99Ns = snapshot.maxRangeP99Ns;
+        stats->maxRangeMaxNs = snapshot.maxRangeMaxNs;
+        stats->slowBatchId = snapshot.slowBatchId;
+        stats->slowBatchTotalNs = snapshot.slowBatchTotalNs;
+        stats->slowSubmitToFirstWorkerNs = snapshot.slowSubmitToFirstWorkerNs;
+        stats->slowWorkerStartSpreadNs = snapshot.slowWorkerStartSpreadNs;
+        stats->slowExecutionSpanNs = snapshot.slowExecutionSpanNs;
+        stats->slowMaxRangeNs = snapshot.slowMaxRangeNs;
+        stats->slowCoreMigrations = snapshot.slowCoreMigrations;
+        stats->slowAssistTiles = snapshot.slowAssistTiles;
+        stats->slowRangeThreadCpuNs = snapshot.slowRangeThreadCpuNs;
+        stats->slowRangeThreadCycles = snapshot.slowRangeThreadCycles;
+        stats->slowBatchMinRangeThreadCycles = snapshot.slowBatchMinRangeThreadCycles;
+        stats->slowBatchAverageRangeThreadCycles = snapshot.slowBatchAverageRangeThreadCycles;
+        stats->slowRangeIndex = snapshot.slowRangeIndex;
+        stats->slowRangeWorker = snapshot.slowRangeWorker;
+        stats->slowRangeStartLogicalCore = snapshot.slowRangeStartLogicalCore;
+        stats->slowRangeEndLogicalCore = snapshot.slowRangeEndLogicalCore;
+        stats->slowRangeStartPhysicalCore = snapshot.slowRangeStartPhysicalCore;
+        stats->slowRangeEndPhysicalCore = snapshot.slowRangeEndPhysicalCore;
     }
 
     void JobSystem_ResetStats()
     {
         JobSystem::ResetStatsSnapshot();
+    }
+
+    void JobSystem_SetTimingDiagnostics(int enabled)
+    {
+        JobSystem::SetTimingDiagnosticsEnabled(enabled != 0);
     }
 
     // ======================== Profiler API ========================
@@ -293,6 +421,31 @@ extern "C"
     void JobProfiler_Clear()
     {
         g_profilerBuffer.Clear();
+    }
+
+    void Trace_SetEnabled(int enabled)
+    {
+        JobSystem::TraceSetEnabled(enabled != 0);
+    }
+
+    int Trace_IsEnabled()
+    {
+        return JobSystem::TraceIsEnabled() ? 1 : 0;
+    }
+
+    int Trace_ReadAll(JobSystem::TraceEvent* buffer, int maxCount)
+    {
+        return JobSystem::TraceReadAll(buffer, maxCount);
+    }
+
+    uint64_t Trace_DroppedEvents()
+    {
+        return JobSystem::TraceDroppedEvents();
+    }
+
+    void Trace_Clear()
+    {
+        JobSystem::TraceClear();
     }
 
 } // extern "C"

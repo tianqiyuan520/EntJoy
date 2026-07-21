@@ -11,6 +11,13 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, bool> _constBoolFields = new();
         private readonly bool _useUniformVars;
 
+        /// <summary>
+        /// 在 IJobEntity ISPC 生成中，Execute 方法的 ref/in 参数不应复制为本地 struct，
+        /// 而应直接通过指针+索引访问（例如 position_ptr[__entity_index]）。
+        /// 此集合记录需要这种直接访问的参数名。
+        /// </summary>
+        protected readonly HashSet<string> _entityRefParamNames = new();
+
         public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
             : base(semanticModel, jobStruct)
@@ -110,11 +117,69 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(name);
                 return;
             }
+            // IJobEntity ref/in struct params: 直接通过指针+索引访问，消除 struct copy
+            if (_entityRefParamNames.Contains(name))
+            {
+                _builder.Append(name).Append("_ptr[__entity_index]");
+                return;
+            }
             base.TranslateIdentifier(identifier);
         }
 
+        /// <summary>
+        /// 添加需要在 ISPC body 中通过 <c>name_ptr[__entity_index]</c> 直接访问的参数名。
+        /// 用于 IJobEntity 的 execute 参数类型，消除 struct copy-in/copy-out 开销。
+        /// </summary>
+        public void AddEntityRefParam(string name) => _entityRefParamNames.Add(name);
+
         // Keep branch form in ISPC for better static-path stability on this workload.
         protected override bool EnableBranchlessSimpleIfRewrite() => false;
+
+        protected override void TranslateIfStatement(IfStatementSyntax ifStmt)
+        {
+            var (innerCondition, hintKind) = ExtractHintFromCondition(ifStmt.Condition);
+
+            if (hintKind != HintKind.None)
+            {
+                // ISPC does not support __builtin_expect or [[likely]].
+                // Silently strip the Hint wrapper and emit a normal if-statement.
+                AppendIndent();
+                _builder.Append("if (");
+                TranslateExpression(innerCondition);
+                _builder.AppendLine(")");
+
+                // Translate true-branch body
+                if (ifStmt.Statement is BlockSyntax block)
+                    TranslateBlock(block, skipOuterBraces: false);
+                else
+                {
+                    _indentLevel++;
+                    AppendIndent();
+                    TranslateStatement(ifStmt.Statement);
+                    _indentLevel--;
+                }
+
+                // Translate else-branch if present
+                if (ifStmt.Else != null)
+                {
+                    AppendIndent();
+                    _builder.AppendLine("else");
+                    if (ifStmt.Else.Statement is BlockSyntax elseBlock)
+                        TranslateBlock(elseBlock, skipOuterBraces: false);
+                    else
+                    {
+                        _indentLevel++;
+                        AppendIndent();
+                        TranslateStatement(ifStmt.Else.Statement);
+                        _indentLevel--;
+                    }
+                }
+                return;
+            }
+
+            // No hint: use base implementation (which also handles branchless rewrite etc.)
+            base.TranslateIfStatement(ifStmt);
+        }
 
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
@@ -255,6 +320,13 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(maker).Append("(0, 0)");
                 return;
             }
+            // ISPC float2/int2/uint2 使用成员字段（非方法），直接发射成员名
+            if (IsVectorType(exprType) && (memberName == "x" || memberName == "y"))
+            {
+                TranslateExpression(memberAccess.Expression);
+                _builder.Append('.').Append(memberName);
+                return;
+            }
             base.TranslateMemberAccess(memberAccess);
         }
 
@@ -283,15 +355,18 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
         {
             // ISPC structs don't support compound assignment operators (+=, -=, *=, /=)
-            // Convert "pos += vel * Dt" to "pos = pos + vel * Dt"
+            // on struct types. Convert to "left = left op right" so that ISPC emits a
+            // single struct-level gather + scatter (optimal for AoS data layout):
+            //   position_ptr[idx].Value += vel_ptr[idx].Value * Dt
+            //     → position_ptr[idx].Value = position_ptr[idx].Value + vel_ptr[idx].Value * Dt
+            // Per-field decomposition (vec.x += val.x; vec.y += val.y) would double
+            // gather/scatter count and regress memory-bound (Light) workloads.
             string op = assignment.OperatorToken.Text;
             if (op == "+=" || op == "-=" || op == "*=" || op == "/=")
             {
-                // Check if the left side is a vector type
                 var leftType = _semanticModel.GetTypeInfo(assignment.Left).Type;
                 if (IsVectorType(leftType))
                 {
-                    // Convert to "left = left op right"
                     TranslateExpression(assignment.Left);
                     _builder.Append(" = ");
                     TranslateExpression(assignment.Left);
@@ -418,6 +493,14 @@ namespace NativeTranspiler.Analyzer
                     TranslateInterlockedCall(methodSymbol, invocation);
                     return;
                 }
+                if (fullTypeName == "EntJoy.Hint")
+                {
+                    // ISPC does not support __builtin_expect or [[likely]].
+                    // Silently strip the Hint wrapper and translate the inner condition.
+                    if (invocation.ArgumentList.Arguments.Count > 0)
+                        TranslateExpression(invocation.ArgumentList.Arguments[0].Expression);
+                    return;
+                }
             }
             base.TranslateInvocation(invocation);
         }
@@ -450,7 +533,12 @@ namespace NativeTranspiler.Analyzer
                 _ => method.Name.ToLower()
             };
             _builder.Append(ispcFunc).Append('(');
-            TranslateExpression(invocation.ArgumentList.Arguments[0].Expression);
+            var args = invocation.ArgumentList.Arguments;
+            for (int i = 0; i < args.Count; i++)
+            {
+                if (i > 0) _builder.Append(", ");
+                TranslateExpression(args[i].Expression);
+            }
             _builder.Append(')');
         }
 

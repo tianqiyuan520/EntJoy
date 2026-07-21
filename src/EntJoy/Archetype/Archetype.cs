@@ -114,20 +114,46 @@ namespace EntJoy
         private readonly int _chunkCapacity;
         private const int _chunkHeaderSize = 64;
 
+        // Contiguous memory slab: 64 KB per slab. Multiple chunks are carved
+        // from each slab so their component arrays are physically adjacent.
+        private const int SLAB_SIZE = 64 * 1024;
+        private const int SLAB_ALIGNMENT = 64 * 1024;
+        private List<nint> _slabs = new();
+        private nint _currentSlab;
+        private int _currentSlabOffset;
+        private int _chunkStride;
+
         public int ChunkCount => _chunkList.Count;
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
-            const int targetChunkSize = _chunkHeaderSize * 1024;
-            int totalComponentSize = 0;
+            // Unity 风格的小物理 Chunk：Chunk 只负责存储和结构变化，
+            // Job 的执行粒度由调度器的 BatchRange 独立决定。
+            const int cacheLineSize = 64;
+            const int targetChunkBytes = 16 * 1024;
+
+            int entitySize = Marshal.SizeOf<Entity>();
+            int totalComponentSize = entitySize;
+            int enableableCount = 0;
             foreach (var type in types)
             {
                 totalComponentSize += type.Size;
+                if (type.IsEnableable) enableableCount++;
             }
-            totalComponentSize += Marshal.SizeOf<Entity>();
-            int capacity = Math.Max(_chunkHeaderSize, targetChunkSize / totalComponentSize);
-            return (capacity + (_chunkHeaderSize - 1)) & ~(_chunkHeaderSize - 1);
+
+            int alignmentOverhead = types.Length * cacheLineSize;
+            const int bitmapBytesPer64Entities = 8;
+            int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
+
+            int stride = totalComponentSize + bitmapOverheadPerEntity;
+            int capacity = Math.Max(cacheLineSize,
+                (targetChunkBytes - alignmentOverhead) / Math.Max(1, stride));
+
+            // Bitmap 和 SIMD 遍历都以 64 个实体为自然边界。向下对齐，避免
+            // 因为容量取整反而突破 16 KiB 目标。
+            capacity &= ~(cacheLineSize - 1);
+            return Math.Clamp(capacity, cacheLineSize, 131072);
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
@@ -144,7 +170,8 @@ namespace EntJoy
 
             if (targetChunk == null)
             {
-                targetChunk = new Chunk(_chunkCapacity, types, this);
+                nint chunkMem = AllocateFromSlab();
+                targetChunk = new Chunk(_chunkCapacity, types, this, chunkMem);
                 _chunkList.Add(targetChunk);
             }
 
@@ -152,6 +179,47 @@ namespace EntJoy
             targetChunk.AddEntity(entity);
             chunkIndex = _chunkList.IndexOf(targetChunk);
             EntityCount++;
+        }
+
+        private int ComputeChunkStride()
+        {
+            int entitySize = Marshal.SizeOf<Entity>();
+            int offset = _chunkCapacity * entitySize;
+            const int cacheLineSize = 64;
+
+            for (int i = 0; i < types.Length; i++)
+            {
+                offset = (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
+                offset += _chunkCapacity * types[i].Size;
+                if (types[i].IsEnableable)
+                {
+                    int bitmapBytes = ((_chunkCapacity + 63) / 64) * 8;
+                    offset += bitmapBytes;
+                }
+            }
+            // Align the stride to 64 bytes for clean slab slicing
+            return (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
+        }
+
+        private nint AllocateFromSlab()
+        {
+            if (_chunkStride == 0) _chunkStride = ComputeChunkStride();
+
+            // Ensure slab allocation
+            if (_currentSlab == nint.Zero || _currentSlabOffset + _chunkStride > SLAB_SIZE)
+            {
+                int slabAllocSize = SLAB_SIZE + SLAB_ALIGNMENT;
+                nint raw = Marshal.AllocHGlobal(slabAllocSize);
+                long addr = raw.ToInt64();
+                long aligned = (addr + SLAB_ALIGNMENT - 1) & ~(SLAB_ALIGNMENT - 1);
+                _currentSlab = new nint(aligned);
+                _currentSlabOffset = 0;
+                _slabs.Add(raw); // store raw pointer for freeing
+            }
+
+            nint chunkMem = _currentSlab + _currentSlabOffset;
+            _currentSlabOffset += _chunkStride;
+            return chunkMem;
         }
 
         public void Remove(int chunkIndex, int slotInChunk, out int movedEntityId, out int movedEntitySlot, out int compactedChunkIndex)
@@ -229,7 +297,8 @@ namespace EntJoy
 
         public List<Chunk> GetChunks()
         {
-            return _chunkList;
+            // 返回副本，防止外部调用者绕过 Archetype 直接修改 _chunkList
+            return new List<Chunk>(_chunkList);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -246,20 +315,15 @@ namespace EntJoy
 
         public void Dispose()
         {
-            foreach (var chunk in _chunkList)
-            {
-                chunk.Dispose();
-            }
+            foreach (var raw in _slabs)
+                Marshal.FreeHGlobal(raw);
+            _slabs.Clear();
             _chunkList.Clear();
         }
 
         ~Archetype()
         {
             Dispose();
-            if (_cachedAddress != IntPtr.Zero)
-            {
-                MemoryAddress.ClearAddressCache(this);
-            }
         }
     }
 
@@ -272,7 +336,7 @@ namespace EntJoy
         {
             if (_cachedAddress == IntPtr.Zero)
             {
-                _cachedAddress = MemoryAddress.GetCachedAddress(this);
+                _cachedAddress = MemoryAddress.GetAddress(this);
             }
             return _cachedAddress;
         }

@@ -122,9 +122,12 @@ namespace EntJoy.Collections
         public void TrimExcess()
         {
             SafetyHandleManager.CheckWriteAndThrow(_safety);
+            if (_listData == null) return;
             if (_listData->Length == 0)
             {
-                Dispose();
+                // 不调用 Dispose() — 那会销毁整个列表
+                // 只把容量缩减到 0
+                _listData->Resize(0);
                 return;
             }
 

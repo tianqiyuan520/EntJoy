@@ -20,7 +20,8 @@ namespace NativeTranspiler.Analyzer
         private static readonly HashSet<string> SkipTranspileTypeNames = new()
         {
             "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility"
+            "EntJoy.Collections.UnsafeUtility",
+            "EntJoy.Hint"
         };
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
@@ -137,7 +138,7 @@ namespace NativeTranspiler.Analyzer
                         string ispcSrcPath = Path.Combine(outputDir, $"{baseName}.ispc");
                         string wrapperCppPath = Path.Combine(outputDir, $"{baseName}_wrapper.cpp");
 
-                        bool disabledAutoRefresh = GetDisabledAutoRefresh(method, attrSymbol);
+                        bool disabledAutoRefresh = GetDisableAutoRefresh(method, attrSymbol);
                         bool fileExists = File.Exists(ispcSrcPath) || File.Exists(wrapperCppPath);
 
                         if (!disabledAutoRefresh || !fileExists)
@@ -173,7 +174,7 @@ namespace NativeTranspiler.Analyzer
                         string hPath = Path.Combine(outputDir, $"{baseName}.h");
                         string cppPath = Path.Combine(outputDir, $"{baseName}.cpp");
 
-                        bool disabledAutoRefresh = GetDisabledAutoRefresh(method, attrSymbol);
+                        bool disabledAutoRefresh = GetDisableAutoRefresh(method, attrSymbol);
                         bool fileExists = File.Exists(hPath) || File.Exists(cppPath);
 
                         if (!disabledAutoRefresh || !fileExists)
@@ -203,7 +204,7 @@ namespace NativeTranspiler.Analyzer
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
                         DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
 
-                        bool disabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                        bool disabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
                         bool useIspcMt = HasUseISPC_MT(job, attrSymbol);
                         bool mtProvidesScheduledAdapter = useIspcMt && CppJobGenerator.IsChunkScheduledJob(job);
 
@@ -261,7 +262,7 @@ namespace NativeTranspiler.Analyzer
                         string hPath = Path.Combine(outputDir, $"{plainBase}.h");
                         string cppPath = Path.Combine(outputDir, $"{plainBase}.cpp");
 
-                        bool disabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                        bool disabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
                         bool fileExists = File.Exists(hPath) || File.Exists(cppPath);
 
                         if (!disabledAutoRefresh || !fileExists)
@@ -283,7 +284,7 @@ namespace NativeTranspiler.Analyzer
                         // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
                         var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
                         string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
-                        bool adapterDisabledAutoRefresh = GetDisabledAutoRefresh(job, attrSymbol);
+                        bool adapterDisabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
                         bool adapterFileExists = File.Exists(adapterPath);
                         if (!adapterDisabledAutoRefresh || !adapterFileExists)
                         {
@@ -332,8 +333,9 @@ namespace NativeTranspiler.Analyzer
                         batContent.AppendLine();
 
                         // 并行编译：后台启动 ispc，输出重定向到日志
+                        string ispcExtraOpts = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                         batContent.AppendLine($"echo Compiling {ispc}... ({mathLibStr})");
-                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma > \"build\\{baseName}.log\" 2>&1");
+                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{ispcExtraOpts} > \"build\\{baseName}.log\" 2>&1");
                         batContent.AppendLine();
                         batContent.AppendLine($":skip_{baseName}");
                         batContent.AppendLine();
@@ -402,8 +404,8 @@ namespace NativeTranspiler.Analyzer
         private static bool HasFastCppMathLib(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.HasFastCppMathLib(symbol, attrSymbol);
 
-        private static bool GetDisabledAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
-            => AttributeHelper.GetDisabledAutoRefresh(symbol, attrSymbol);
+        private static bool GetDisableAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+            => AttributeHelper.GetDisableAutoRefresh(symbol, attrSymbol);
 
         private static void CollectMethodDependencies(
             IMethodSymbol method, Compilation compilation,
@@ -797,6 +799,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
+            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/NativeWorkerPool.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
 
             // 所有生成的 .cpp 各自独立编译（按文件名排序）
@@ -833,9 +836,11 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     string objectPath = "${CMAKE_CURRENT_BINARY_DIR}/" + baseName + ".obj";
                     string headerPath = "${CMAKE_CURRENT_SOURCE_DIR}/" + baseName + "_ispc.h";
                     string mathLibStr = mathLib.ToString().ToLowerInvariant();
+                    // fast math: enable FMA for maximum throughput; system/precise: keep deterministic
+                    string fmaOpt = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                     sb.AppendLine("add_custom_command(");
                     sb.AppendLine($"    OUTPUT \"{objectPath}\" \"{headerPath}\"");
-                    sb.AppendLine($"    COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr} --opt=disable-fma");
+                    sb.AppendLine($"    COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{fmaOpt}");
                     sb.AppendLine($"    DEPENDS \"{sourcePath}\"");
                     sb.AppendLine("    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
                     sb.AppendLine($"    COMMENT \"Compiling ISPC {ispc}\"");

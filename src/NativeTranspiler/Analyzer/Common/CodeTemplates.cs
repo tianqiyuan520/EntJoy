@@ -45,30 +45,48 @@ namespace NativeTranspiler.Analyzer.Common
 
         /// <summary>
         /// 跨编译器原子操作宏：
-        ///   MSVC → _InterlockedExchangeAdd / _InterlockedIncrement 等
+        ///   MSVC → _InterlockedExchangeAdd / _InterlockedExchangeAdd64 等
         ///   GCC  → __sync_fetch_and_add / __sync_add_and_fetch 等
+        /// 注意：MSVC x64 上 long 是 32 位，long long / __int64 是 64 位，
+        /// 因此提供两组宏（32/64）由转译器根据具体类型宽度选择。
         /// </summary>
         public static string GenerateAtomicMacros() => @"
 // Cross-compiler atomic macros (stateless, no std::atomic_ref)
 #ifdef _MSC_VER
 #include <intrin.h>
-#define INTERLOCKED_FETCH_ADD(ptr, val) _InterlockedExchangeAdd((long*)(ptr), (val))
-#define INTERLOCKED_FETCH_SUB(ptr, val) _InterlockedExchangeAdd((long*)(ptr), -(val))
-#define INTERLOCKED_EXCHANGE(ptr, val)   _InterlockedExchange((long*)(ptr), (val))
-#define INTERLOCKED_ADD_AND_FETCH(ptr, val)   (_InterlockedExchangeAdd((long*)(ptr), (val)) + (val))
-#define INTERLOCKED_INCREMENT_AND_FETCH(ptr)  _InterlockedIncrement((long*)(ptr))
-#define INTERLOCKED_DECREMENT_AND_FETCH(ptr)  _InterlockedDecrement((long*)(ptr))
-#define INTERLOCKED_SUB_AND_FETCH(ptr, val)   (_InterlockedExchangeAdd((long*)(ptr), -(val)) - (val))
-#define INTERLOCKED_COMPARE_EXCHANGE(ptr, oldVal, newVal) _InterlockedCompareExchange((long*)(ptr), (newVal), (oldVal))
+// --- 32-bit operations ---
+#define INTERLOCKED_FETCH_ADD32(ptr, val)       _InterlockedExchangeAdd((volatile long*)(ptr), (long)(val))
+#define INTERLOCKED_FETCH_SUB32(ptr, val)       _InterlockedExchangeAdd((volatile long*)(ptr), -(long)(val))
+#define INTERLOCKED_EXCHANGE32(ptr, val)        _InterlockedExchange((volatile long*)(ptr), (long)(val))
+#define INTERLOCKED_ADD_AND_FETCH32(ptr, val)   (_InterlockedExchangeAdd((volatile long*)(ptr), (long)(val)) + (long)(val))
+#define INTERLOCKED_INCREMENT_AND_FETCH32(ptr)  _InterlockedIncrement((volatile long*)(ptr))
+#define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  _InterlockedDecrement((volatile long*)(ptr))
+#define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) _InterlockedCompareExchange((volatile long*)(ptr), (long)(newVal), (long)(oldVal))
+// --- 64-bit operations ---
+#define INTERLOCKED_FETCH_ADD64(ptr, val)       _InterlockedExchangeAdd64((volatile __int64*)(ptr), (__int64)(val))
+#define INTERLOCKED_FETCH_SUB64(ptr, val)       _InterlockedExchangeAdd64((volatile __int64*)(ptr), -(__int64)(val))
+#define INTERLOCKED_EXCHANGE64(ptr, val)        _InterlockedExchange64((volatile __int64*)(ptr), (__int64)(val))
+#define INTERLOCKED_ADD_AND_FETCH64(ptr, val)   (_InterlockedExchangeAdd64((volatile __int64*)(ptr), (__int64)(val)) + (__int64)(val))
+#define INTERLOCKED_INCREMENT_AND_FETCH64(ptr)  _InterlockedIncrement64((volatile __int64*)(ptr))
+#define INTERLOCKED_DECREMENT_AND_FETCH64(ptr)  _InterlockedDecrement64((volatile __int64*)(ptr))
+#define INTERLOCKED_COMPARE_EXCHANGE64(ptr, oldVal, newVal) _InterlockedCompareExchange64((volatile __int64*)(ptr), (__int64)(newVal), (__int64)(oldVal))
 #else
-#define INTERLOCKED_FETCH_ADD(ptr, val) __sync_fetch_and_add((ptr), (val))
-#define INTERLOCKED_FETCH_SUB(ptr, val) __sync_fetch_and_sub((ptr), (val))
-#define INTERLOCKED_EXCHANGE(ptr, val)   __sync_lock_test_and_set((ptr), (val))
-#define INTERLOCKED_ADD_AND_FETCH(ptr, val)   __sync_add_and_fetch((ptr), (val))
-#define INTERLOCKED_INCREMENT_AND_FETCH(ptr)  __sync_add_and_fetch((ptr), 1)
-#define INTERLOCKED_DECREMENT_AND_FETCH(ptr)  __sync_sub_and_fetch((ptr), 1)
-#define INTERLOCKED_SUB_AND_FETCH(ptr, val)   __sync_sub_and_fetch((ptr), (val))
-#define INTERLOCKED_COMPARE_EXCHANGE(ptr, oldVal, newVal) __sync_val_compare_and_swap((ptr), (oldVal), (newVal))
+// GCC __sync_* builtins are type-generic and work correctly for all widths
+#define INTERLOCKED_FETCH_ADD32(ptr, val) __sync_fetch_and_add((ptr), (val))
+#define INTERLOCKED_FETCH_SUB32(ptr, val) __sync_fetch_and_sub((ptr), (val))
+#define INTERLOCKED_EXCHANGE32(ptr, val)   __sync_lock_test_and_set((ptr), (val))
+#define INTERLOCKED_ADD_AND_FETCH32(ptr, val)   __sync_add_and_fetch((ptr), (val))
+#define INTERLOCKED_INCREMENT_AND_FETCH32(ptr)  __sync_add_and_fetch((ptr), 1)
+#define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  __sync_sub_and_fetch((ptr), 1)
+#define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) __sync_val_compare_and_swap((ptr), (oldVal), (newVal))
+// 64-bit (same generic builtins)
+#define INTERLOCKED_FETCH_ADD64(ptr, val) __sync_fetch_and_add((ptr), (val))
+#define INTERLOCKED_FETCH_SUB64(ptr, val) __sync_fetch_and_sub((ptr), (val))
+#define INTERLOCKED_EXCHANGE64(ptr, val)   __sync_lock_test_and_set((ptr), (val))
+#define INTERLOCKED_ADD_AND_FETCH64(ptr, val)   __sync_add_and_fetch((ptr), (val))
+#define INTERLOCKED_INCREMENT_AND_FETCH64(ptr)  __sync_add_and_fetch((ptr), 1)
+#define INTERLOCKED_DECREMENT_AND_FETCH64(ptr)  __sync_sub_and_fetch((ptr), 1)
+#define INTERLOCKED_COMPARE_EXCHANGE64(ptr, oldVal, newVal) __sync_val_compare_and_swap((ptr), (oldVal), (newVal))
 #endif
 ";
 

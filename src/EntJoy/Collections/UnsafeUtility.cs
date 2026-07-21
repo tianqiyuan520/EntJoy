@@ -47,8 +47,17 @@ namespace EntJoy.Collections
             Buffer.MemoryCopy(src, dest, size, size);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        public static void MemSet(void* dest, byte value, long size) =>
-            Unsafe.InitBlockUnaligned(dest, value, (uint)size);
+        public static void MemSet(void* dest, byte value, long size)
+        {
+            // 分块处理，避免 (uint)size 截断
+            while (size > 0)
+            {
+                uint chunk = size >= uint.MaxValue ? uint.MaxValue : (uint)size;
+                Unsafe.InitBlockUnaligned(dest, value, chunk);
+                dest = (byte*)dest + chunk;
+                size -= chunk;
+            }
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void MemClear(void* dest, long size) => MemSet(dest, 0, size);

@@ -72,10 +72,11 @@ namespace EntJoy.Collections
             if (index < Length)
             {
                 // 将 index 开始的元素向后移动一位
-                void* src = (byte*)Ptr + index * sizeof(T);
-                void* dst = (byte*)src + sizeof(T);
+                // 注意：不能用 Buffer.MemoryCopy (MemCpy) — 源和目的区域重叠时行为未定义。
+                // 改用反向逐元素复制确保正确性。
                 int elementsToMove = Length - index;
-                UnsafeUtility.MemCpy(dst, src, elementsToMove * sizeof(T));
+                for (int i = elementsToMove - 1; i >= 0; i--)
+                    Ptr[index + i + 1] = Ptr[index + i];
             }
             Ptr[index] = value;
             Length++;
@@ -90,10 +91,11 @@ namespace EntJoy.Collections
             Length--;
             if (index < Length)
             {
-                void* src = (byte*)Ptr + (index + 1) * sizeof(T);
-                void* dst = (byte*)Ptr + index * sizeof(T);
+                // 不能用 Buffer.MemoryCopy (MemCpy) — 源和目的区域重叠时行为未定义。
+                // 改用正向逐元素复制确保正确性。
                 int elementsToMove = Length - index;
-                UnsafeUtility.MemCpy(dst, src, elementsToMove * sizeof(T));
+                for (int i = 0; i < elementsToMove; i++)
+                    Ptr[index + i] = Ptr[index + i + 1];
             }
         }
 

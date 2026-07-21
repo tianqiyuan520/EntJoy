@@ -9,7 +9,6 @@ namespace EntJoy
         public Archetype Archetype { get; internal set; }
 
         private nint _memoryBlock;
-        private nint _rawAllocation;  // 保存原始分配指针用于释放
         private readonly int _entityCapacity;
         // 组件数据在块内的偏移和大小，索引与 Archetype.Types 一一对应
         private readonly int[] _componentOffsets;
@@ -32,10 +31,15 @@ namespace EntJoy
         public int ComponentCount => _componentOffsets.Length;
         public nint MemoryBlock => _memoryBlock;
 
-        public Chunk(int entityCapacity, ComponentType[] componentTypes, Archetype archetype)
+        /// <summary>
+        /// Construct a chunk using a pre-allocated slab pointer. The memory is
+        /// owned by Archetype (contiguous slab), not by this Chunk.
+        /// </summary>
+        public Chunk(int entityCapacity, ComponentType[] componentTypes, Archetype archetype, nint memoryBlock)
         {
             Archetype = archetype;
             _entityCapacity = entityCapacity;
+            _memoryBlock = memoryBlock;
             _componentOffsets = new int[componentTypes.Length];
             _componentSizes = new int[componentTypes.Length];
             _enableBitOffsets = new int[componentTypes.Length];
@@ -45,15 +49,6 @@ namespace EntJoy
                 _enableBitOffsets[i] = -1;
 
             _totalSize = CalculateMemoryLayout(componentTypes, entityCapacity);
-
-            // 多分配 ALIGNMENT 字节，然后手动对齐到 SIMD_ALIGNMENT 边界
-            // 这样确保所有后续的组件数组指针（_memoryBlock + 已对齐的偏移量）也是 64 字节对齐
-            int allocSize = _totalSize + SIMD_ALIGNMENT;
-            _rawAllocation = Marshal.AllocHGlobal(allocSize);
-            long raw = _rawAllocation.ToInt64();
-            long aligned = (raw + SIMD_ALIGNMENT - 1) & ~(SIMD_ALIGNMENT - 1);
-            _memoryBlock = new IntPtr(aligned);
-
             Unsafe.InitBlock((byte*)_memoryBlock, 0, (uint)_totalSize);
         }
 
@@ -99,6 +94,14 @@ namespace EntJoy
 
             // 将实体写入 Entity 数组
             ((Entity*)((byte*)_memoryBlock + ENTITY_ARRAY_OFFSET))[_entityCount] = entity;
+
+            // 清零该实体的所有组件数据（防止 swap-pop 后读到脏数据）
+            for (int i = 0; i < _componentOffsets.Length; i++)
+            {
+                int compSize = _componentSizes[i];
+                byte* compPtr = (byte*)_memoryBlock + _componentOffsets[i] + _entityCount * compSize;
+                Unsafe.InitBlock(compPtr, 0, (uint)compSize);
+            }
 
             // 初始化所有 enableable 位为"启用"
             for (int i = 0; i < _enableBitOffsets.Length; i++)
@@ -176,8 +179,20 @@ namespace EntJoy
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ThrowIfDisposed()
+        {
+            if (_memoryBlock == nint.Zero)
+                throw new ObjectDisposedException(nameof(Chunk));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
+            ThrowIfDisposed();
+            if ((uint)entityIndex >= (uint)_entityCount)
+                throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
+            if ((uint)componentIndex >= (uint)_componentOffsets.Length)
+                throw new IndexOutOfRangeException($"Component index {componentIndex} out of range (count={_componentOffsets.Length}).");
             return ref Unsafe.AsRef<T>(
                 (byte*)_memoryBlock + _componentOffsets[componentIndex] + entityIndex * _componentSizes[componentIndex]);
         }
@@ -185,18 +200,21 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref Entity GetEntity(int entityIndex)
         {
+            ThrowIfDisposed();
             return ref ((Entity*)((byte*)_memoryBlock + ENTITY_ARRAY_OFFSET))[entityIndex];
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public nint GetEntityPointer()
         {
+            ThrowIfDisposed();
             return _memoryBlock + ENTITY_ARRAY_OFFSET;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public nint GetComponentArrayPointer(int componentIndex)
         {
+            ThrowIfDisposed();
             return _memoryBlock + _componentOffsets[componentIndex];
         }
 
@@ -238,12 +256,9 @@ namespace EntJoy
 
         public void Dispose()
         {
-            if (_rawAllocation != nint.Zero)
-            {
-                Marshal.FreeHGlobal(_rawAllocation);
-                _rawAllocation = nint.Zero;
-                _memoryBlock = nint.Zero;
-            }
+            // Memory is owned by Archetype's contiguous slab, not by Chunk.
+            _memoryBlock = nint.Zero;
+            GC.SuppressFinalize(this);
         }
 
         ~Chunk()

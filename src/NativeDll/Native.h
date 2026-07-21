@@ -6,7 +6,7 @@
 #define EXTERNC
 #endif 
 
-#define CallingConvention _cdecl
+#define CallingConvention __cdecl
 
 #ifdef DLL_IMPORT
 #define HEAD EXTERNC __declspec(dllimport)

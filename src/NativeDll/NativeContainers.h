@@ -70,7 +70,7 @@ namespace EntJoy {
 				if (newSize > Capacity) {
 					EnsureCapacity(newSize);
 				}
-				if (newSize > Length && options == NativeArrayOptions::ClearMemory) {
+				if (newSize > Length && options == NativeArrayOptions::ClearMemory && Ptr) {
 					size_t clearBytes = static_cast<size_t>(newSize - Length) * sizeof(T);
 					uint8_t* start = reinterpret_cast<uint8_t*>(Ptr + Length);
 					for (size_t i = 0; i < clearBytes; ++i) start[i] = 0;
@@ -80,10 +80,15 @@ namespace EntJoy {
 
 			// 确保容量
 			void EnsureCapacity(int32_t minCapacity) {
-				if (Capacity >= minCapacity) return;
-				int32_t newCapacity = (Capacity == 0) ? 4 : Capacity * 2;
-				if (newCapacity < minCapacity) newCapacity = minCapacity;
-				T* newPtr = static_cast<T*>(malloc(newCapacity * sizeof(T)));
+				if (minCapacity < 0 || Capacity >= minCapacity) return;
+				// 使用 int64_t 计算容量，防止 Capacity * 2 在 >1G 时 int32 溢出 (UB)
+				int64_t newCapacity64 = (Capacity <= 0) ? 4LL : static_cast<int64_t>(Capacity) * 2;
+				if (newCapacity64 > INT32_MAX)
+					newCapacity64 = INT32_MAX;  // 最大容量上限
+				if (newCapacity64 < minCapacity) newCapacity64 = minCapacity;
+				int32_t newCapacity = static_cast<int32_t>(newCapacity64);
+				T* newPtr = static_cast<T*>(malloc(static_cast<size_t>(newCapacity) * sizeof(T)));
+				if (!newPtr) return;  // malloc 失败时保持原状
 				if (Ptr) {
 					for (int32_t i = 0; i < Length; ++i) {
 						newPtr[i] = Ptr[i];
@@ -96,6 +101,7 @@ namespace EntJoy {
 
 			// 添加元素（内部调用 EnsureCapacity）
 			void Add(const T& value) {
+				if (Length >= INT32_MAX) return;  // 防止 Length+1 溢出
 				EnsureCapacity(Length + 1);
 				Ptr[Length++] = value;
 			}

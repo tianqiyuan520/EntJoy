@@ -414,7 +414,11 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         private static readonly int SleepWarmupFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", 5);
         private static readonly int SleepMeasureFrames = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", 100);
         private const int FrameSleepMilliseconds = 16;
-        private const int HeavyIterations = 32;
+        // 0 means use the scheduler's global worker set. Unity's normal DOTS
+        // ScheduleParallel path is governed by JobsUtility.JobWorkerCount rather
+        // than imposing a different hard worker cap on each job.
+        private const int SleepWorkerCap = 0;
+        private const int HeavyIterations = 16;
         private const float DeltaTime = 1.0f / 60.0f;
         private const float Epsilon = 0.001f;
         private const float HeavyEpsilon = 0.001f;
@@ -568,20 +572,22 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"ISPC Entity Heavy Spd   : {entityCsharpHeavyAverage / entityIspcHeavyAverage:F2}x");
             Console.WriteLine($"ISPC MT Entity Heavy Spd: {entityCsharpHeavyAverage / entityIspcMtHeavyAverage:F2}x");
 
+            NativeJobScheduler.ResetStats();
+
             Console.WriteLine();
             Console.WriteLine("=== IJobChunk 100w Sleep 帧间隔移动对比 ===");
-            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms");
+            Console.WriteLine($"实体数: {EntityCount:N0}, Warmup: {SleepWarmupFrames}, Measure: {SleepMeasureFrames}, dt={DeltaTime:F6}, Sleep={FrameSleepMilliseconds}ms, WorkerCount={NativeJobScheduler.JobWorkerCount}, PerJobWorkerCap=default");
             Console.WriteLine("说明: 每次 Schedule().Complete() 后 Thread.Sleep(16ms)，只统计 Job 耗时，不统计 Sleep。");
             Console.WriteLine();
 
             var sleepCases = new (string Label, Action Run)[]
             {
-                ("Sleep C# IJobChunk", () => { World.DefaultWorld = _sleepChunkCsharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C++ IJobChunk", () => { World.DefaultWorld = _sleepChunkCppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep ISPC IJobChunk", () => { World.DefaultWorld = _sleepChunkIspcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C# IJobEntity", () => { World.DefaultWorld = _sleepEntityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep C++ IJobEntity", () => { World.DefaultWorld = _sleepEntityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
-                ("Sleep ISPC IJobEntity", () => { World.DefaultWorld = _sleepEntityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.Schedule(_query).Complete(); }),
+                ("Sleep C# IJobChunk", () => { World.DefaultWorld = _sleepChunkCsharpWorld; new MoveJobChunkCSharp { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
+                ("Sleep C++ IJobChunk", () => { World.DefaultWorld = _sleepChunkCppWorld; new MoveJobChunkCpp { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
+                ("Sleep ISPC IJobChunk", () => { World.DefaultWorld = _sleepChunkIspcWorld; new MoveJobChunkIspc { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
+                ("Sleep C# IJobEntity", () => { World.DefaultWorld = _sleepEntityCsharpWorld; new MoveJobEntityCSharp { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
+                ("Sleep C++ IJobEntity", () => { World.DefaultWorld = _sleepEntityCppWorld; new MoveJobEntityCpp { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
+                ("Sleep ISPC IJobEntity", () => { World.DefaultWorld = _sleepEntityIspcWorld; new MoveJobEntityIspc { DeltaTime = DeltaTime }.ScheduleWithWorkerCap(_query, SleepWorkerCap).Complete(); }),
             };
             double[] sleep = RunInterleavedBenchmark(sleepCases, SleepWarmupFrames, SleepMeasureFrames, FrameSleepMilliseconds);
             double sleepChunkCsharpAverage = sleep[0], sleepChunkCppAverage = sleep[1], sleepChunkIspcAverage = sleep[2];
@@ -600,6 +606,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             Console.WriteLine($"Sleep ISPC Chunk Spd : {sleepChunkCsharpAverage / sleepChunkIspcAverage:F2}x");
             Console.WriteLine($"Sleep C++ Entity Spd : {sleepEntityCsharpAverage / sleepEntityCppAverage:F2}x");
             Console.WriteLine($"Sleep ISPC Entity Spd: {sleepEntityCsharpAverage / sleepEntityIspcAverage:F2}x");
+            NativeJobScheduler.ResetStats();
         }
 
         private double RunCSharp()
@@ -763,29 +770,296 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             int sleepMilliseconds)
         {
             var averages = new double[cases.Length];
+            bool timingDiagnostics = sleepMilliseconds > 0;
 
             for (int index = 0; index < cases.Length; index++)
             {
+                NativeJobSystemStats diagnosticStats = default;
                 for (int frame = 0; frame < warmupFrames; frame++)
                 {
-                    cases[index].Run();
+                    bool diagnosticFrame = timingDiagnostics && frame == warmupFrames - 1;
+                    if (diagnosticFrame)
+                    {
+                        NativeJobScheduler.ResetStats();
+                        NativeJobScheduler.SetTimingDiagnosticsEnabled(true);
+                        NativeJobScheduler.TraceClear();
+                        NativeJobScheduler.TraceSetEnabled(true);
+                    }
+                    try
+                    {
+                        cases[index].Run();
+                    }
+                    finally
+                    {
+                        if (diagnosticFrame)
+                        {
+                            NativeJobScheduler.TraceSetEnabled(false);
+                            NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
+                        }
+                    }
+                    if (diagnosticFrame)
+                    {
+                        PrintTraceSummary(cases[index].Label);
+                        diagnosticStats = NativeJobScheduler.GetStats();
+                    }
                     if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
+                // Keep the benchmark path free from per-range cycle/core timing.
+                // Unity likewise keeps detailed profiler capture separate from the
+                // normal player timing being compared.
+                if (sleepMilliseconds > 0)
+                {
+                    NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
+                    NativeJobScheduler.TraceSetEnabled(false);
+                    NativeJobScheduler.ResetStats();
+                }
                 double measuredTotal = 0;
+                var samples = new double[measureFrames];
                 for (int frame = 0; frame < measureFrames; frame++)
                 {
                     long start = Stopwatch.GetTimestamp();
                     cases[index].Run();
                     long end = Stopwatch.GetTimestamp();
-                    measuredTotal += (end - start) * 1000.0 / Stopwatch.Frequency;
+                    double elapsed = (end - start) * 1000.0 / Stopwatch.Frequency;
+                    samples[frame] = elapsed;
+                    measuredTotal += elapsed;
                     if (sleepMilliseconds > 0) Thread.Sleep(sleepMilliseconds);
                 }
 
                 averages[index] = measuredTotal / measureFrames;
-                Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
+                if (sleepMilliseconds > 0)
+                {
+                    double[] sorted = (double[])samples.Clone();
+                    Array.Sort(sorted);
+                    Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms, p50={Percentile(sorted, 0.50):F3} ms, p95={Percentile(sorted, 0.95):F3} ms");
+
+                    NativeJobSystemStats cleanStats = NativeJobScheduler.GetStats();
+                    Console.WriteLine($"  ── Timing ──────────────────────────────");
+                    Console.WriteLine($"     samples={cleanStats.TimingSampleCount}  " +
+                        $"batch[P50/P95/P99/Max]={cleanStats.BatchTotalP50Ns / 1000.0:F3}/{cleanStats.BatchTotalP95Ns / 1000.0:F3}/{cleanStats.BatchTotalP99Ns / 1000.0:F3}/{cleanStats.BatchTotalMaxNs / 1000.0:F3} us");
+
+                    // Detailed numbers come from the final warmup frame and are
+                    // intentionally separate from the clean measured samples.
+                    NativeJobSystemStats stats = diagnosticStats;
+                    string backend = stats.NativeBatches > 0 ? "Native" : "Taskflow";
+                    Console.WriteLine($"  ── Config ──────────────────────────────");
+                    Console.WriteLine($"     backend={backend,-7} batches={stats.PublishedJobs}  " +
+                        $"participants={stats.FrameTasksSubmitted}/{stats.ActiveWorkersPeak}  " +
+                        $"workerTarget={stats.WorkerTargetTotal}  " +
+                        $"taskflowBatches={stats.TaskflowBatches}  native={stats.NativeBatches}");
+                    Console.WriteLine($"  ── Work ────────────────────────────────");
+                    Console.WriteLine($"     tiles={stats.TotalTilesPublished}  " +
+                        $"local={stats.LocalTiles}  stolen={stats.StolenTiles}  " +
+                        $"assist={stats.AssistTiles}  stealAttempts={stats.StealAttempts}  " +
+                        $"workerClaims={stats.WorkerClaimedTokens}  mainClaims={stats.MainClaimedTokens}");
+                    Console.WriteLine($"  ── Latency Breakdown ────────────────────");
+                    Console.WriteLine($"     submitFirstWorker  = {stats.SubmitToFirstWorkerEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     workerStartSpread  = {stats.WorkerStartSpreadEwmaNs / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.WorkerStartSpreadP50Ns / 1000.0:F3}/{stats.WorkerStartSpreadP95Ns / 1000.0:F3}/{stats.WorkerStartSpreadMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     executeSpan       = {stats.ExecutionSpanP50Ns / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.ExecutionSpanP50Ns / 1000.0:F3}/{stats.ExecutionSpanP95Ns / 1000.0:F3}/{stats.ExecutionSpanMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     maxRange          = {stats.MaxRangeP50Ns / 1000.0:F3} us" +
+                        $"  (P50/P95/Max={stats.MaxRangeP50Ns / 1000.0:F3}/{stats.MaxRangeP95Ns / 1000.0:F3}/{stats.MaxRangeMaxNs / 1000.0:F3})");
+                    Console.WriteLine($"     completeWakeReturn= {stats.CompleteWakeToReturnEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     lastTileTopology  = {stats.LastTileToTopologyDoneEwmaNs / 1000.0:F3} us");
+                    Console.WriteLine($"     assistTilePct    = {stats.AssistExecPctEwma}%  " +
+                        $"waitFallbacks={stats.WaitFallbacks}");
+                    Console.WriteLine($"  ── Slowest Range ────────────────────────");
+                    Console.WriteLine($"     batch#{stats.SlowBatchId}  " +
+                        $"total={stats.SlowBatchTotalNs / 1000.0:F3} us  " +
+                        $"submitFirst={stats.SlowSubmitToFirstWorkerNs / 1000.0:F3} us");
+                    Console.WriteLine($"     spread={stats.SlowWorkerStartSpreadNs / 1000.0:F3} us  " +
+                        $"executeSpan={stats.SlowExecutionSpanNs / 1000.0:F3} us  " +
+                        $"maxRange={stats.SlowMaxRangeNs / 1000.0:F3} us");
+                    bool threadCpuTimeValid = stats.SlowRangeThreadCpuNs > 0 &&
+                        stats.SlowRangeThreadCpuNs <= stats.SlowMaxRangeNs;
+                    string slowRangeCpuUs = threadCpuTimeValid
+                        ? $"{stats.SlowRangeThreadCpuNs / 1000.0:F3}" : "N/A(tick-granularity)";
+                    string slowRangeOffCpuUs = threadCpuTimeValid
+                        ? $"{(stats.SlowMaxRangeNs - stats.SlowRangeThreadCpuNs) / 1000.0:F3}"
+                        : "N/A";
+                    double slowRangeCycleRatio = stats.SlowBatchAverageRangeThreadCycles > 0
+                        ? (double)stats.SlowRangeThreadCycles / stats.SlowBatchAverageRangeThreadCycles
+                        : 0.0;
+                    double scheduledCyclesPerWallNs = stats.SlowMaxRangeNs > 0
+                        ? (double)stats.SlowRangeThreadCycles / stats.SlowMaxRangeNs
+                        : 0.0;
+                    Console.WriteLine($"     tile#{stats.SlowRangeIndex}  worker={stats.SlowRangeWorker}  " +
+                        $"wall={stats.SlowMaxRangeNs / 1000.0:F3} us  " +
+                        $"cpu={slowRangeCpuUs} us  offCpu={slowRangeOffCpuUs} us");
+                    Console.WriteLine($"     cycles={stats.SlowRangeThreadCycles}  " +
+                        $"avg={stats.SlowBatchAverageRangeThreadCycles}  " +
+                        $"min={stats.SlowBatchMinRangeThreadCycles}  " +
+                        $"ratioVsAvg={slowRangeCycleRatio:F2}x  cyclesPerNs={scheduledCyclesPerWallNs:F2}");
+                    Console.WriteLine($"     core={stats.SlowRangeStartLogicalCore}->{stats.SlowRangeEndLogicalCore}" +
+                        $"  phys={stats.SlowRangeStartPhysicalCore}->{stats.SlowRangeEndPhysicalCore}" +
+                        $"  coreMigrations={stats.SlowCoreMigrations}  assistTiles={stats.SlowAssistTiles}");
+                }
+                else
+                {
+                    Console.WriteLine($"{cases[index].Label,-26}: avg={averages[index]:F3} ms");
+                }
+            }
+            if (timingDiagnostics)
+            {
+                NativeJobScheduler.TraceSetEnabled(false);
+                NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
             }
             return averages;
+        }
+
+        private static void PrintTraceSummary(string label)
+        {
+            var events = new NativeTraceEvent[65_536];
+            int count = NativeJobScheduler.TraceReadAll(events, events.Length);
+            ulong dropped = NativeJobScheduler.TraceDroppedEvents();
+            ulong batchId = 0;
+            ulong publishNs = 0;
+            ulong completeEnterNs = 0;
+            ulong firstExecuteNs = ulong.MaxValue;
+            ulong lastExecuteNs = 0;
+            ulong finalizeNs = 0;
+            ulong handleCompleteNs = 0;
+            int claims = 0;
+            int mainClaims = 0;
+            var workerClaims = new Dictionary<int, int>();
+            var workerFirstExecute = new Dictionary<int, ulong>();
+            var workerCores = new Dictionary<int, HashSet<int>>();
+            var begins = new Dictionary<int, NativeTraceEvent>();
+            var durations = new List<(double Us, int Range, int Worker, int StartCore, int EndCore)>();
+
+            for (int i = 0; i < count; ++i)
+            {
+                ref readonly NativeTraceEvent traceEvent = ref events[i];
+                if (traceEvent.EventType == TraceEventType.Publish && traceEvent.BatchId != 0)
+                {
+                    batchId = traceEvent.BatchId;
+                    publishNs = traceEvent.TimestampNs;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < count && batchId != 0; ++i)
+            {
+                NativeTraceEvent traceEvent = events[i];
+                if (traceEvent.BatchId != batchId) continue;
+                switch (traceEvent.EventType)
+                {
+                    case TraceEventType.CompleteEnter:
+                        completeEnterNs = traceEvent.TimestampNs;
+                        break;
+                    case TraceEventType.Claim:
+                        ++claims;
+                        if (traceEvent.WorkerIndex < 0) ++mainClaims;
+                        else workerClaims[traceEvent.WorkerIndex] =
+                            workerClaims.GetValueOrDefault(traceEvent.WorkerIndex) + 1;
+                        break;
+                    case TraceEventType.ExecuteBegin:
+                        begins[traceEvent.TileIndex] = traceEvent;
+                        if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? beginCores))
+                        {
+                            beginCores = new HashSet<int>();
+                            workerCores[traceEvent.WorkerIndex] = beginCores;
+                        }
+                        if (traceEvent.ProcessorIndex >= 0)
+                            beginCores.Add(traceEvent.ProcessorIndex);
+                        firstExecuteNs = Math.Min(firstExecuteNs, traceEvent.TimestampNs);
+                        if (traceEvent.WorkerIndex >= 0 &&
+                            (!workerFirstExecute.TryGetValue(traceEvent.WorkerIndex, out ulong workerFirst) ||
+                                traceEvent.TimestampNs < workerFirst))
+                        {
+                            workerFirstExecute[traceEvent.WorkerIndex] = traceEvent.TimestampNs;
+                        }
+                        break;
+                    case TraceEventType.ExecuteEnd:
+                        lastExecuteNs = Math.Max(lastExecuteNs, traceEvent.TimestampNs);
+                        if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? endCores))
+                        {
+                            endCores = new HashSet<int>();
+                            workerCores[traceEvent.WorkerIndex] = endCores;
+                        }
+                        if (traceEvent.ProcessorIndex >= 0)
+                            endCores.Add(traceEvent.ProcessorIndex);
+                        if (begins.TryGetValue(traceEvent.TileIndex, out NativeTraceEvent begin) &&
+                            traceEvent.TimestampNs >= begin.TimestampNs)
+                        {
+                            durations.Add(((traceEvent.TimestampNs - begin.TimestampNs) / 1000.0,
+                                traceEvent.TileIndex, begin.WorkerIndex,
+                                begin.ProcessorIndex, traceEvent.ProcessorIndex));
+                        }
+                        break;
+                    case TraceEventType.FinalizeBegin:
+                        finalizeNs = traceEvent.TimestampNs;
+                        break;
+                    case TraceEventType.HandleComplete:
+                        handleCompleteNs = traceEvent.TimestampNs;
+                        break;
+                }
+            }
+
+            durations.Sort(static (left, right) => left.Us.CompareTo(right.Us));
+            double rangeMinUs = durations.Count > 0 ? durations[0].Us : -1;
+            double rangeAvgUs = durations.Count > 0 ? durations.Sum(item => item.Us) / durations.Count : -1;
+            double rangeP95Us = durations.Count > 0 ?
+                durations[(int)Math.Ceiling((durations.Count - 1) * 0.95)].Us : -1;
+            double rangeMaxUs = durations.Count > 0 ? durations[^1].Us : -1;
+            int slowRange = durations.Count > 0 ? durations[^1].Range : -1;
+            int slowWorker = durations.Count > 0 ? durations[^1].Worker : -1;
+            int slowStartCore = durations.Count > 0 ? durations[^1].StartCore : -1;
+            int slowEndCore = durations.Count > 0 ? durations[^1].EndCore : -1;
+            int coreMigrations = durations.Count(item =>
+                item.StartCore >= 0 && item.EndCore >= 0 && item.StartCore != item.EndCore);
+            string workerCoreMap = string.Join(';', workerCores
+                .OrderBy(item => item.Key)
+                .Select(item => $"{(item.Key < 0 ? "M" : item.Key)}:{string.Join("/", item.Value.OrderBy(core => core))}"));
+            int workerMinClaims = workerClaims.Count > 0 ? workerClaims.Values.Min() : 0;
+            int workerMaxClaims = workerClaims.Count > 0 ? workerClaims.Values.Max() : 0;
+            double completeEnterUs = publishNs > 0 && completeEnterNs >= publishNs ?
+                (completeEnterNs - publishNs) / 1000.0 : -1;
+            double firstExecuteUs = publishNs > 0 && firstExecuteNs != ulong.MaxValue && firstExecuteNs >= publishNs ?
+                (firstExecuteNs - publishNs) / 1000.0 : -1;
+            double workerStartSpreadUs = workerFirstExecute.Count > 1 ?
+                (workerFirstExecute.Values.Max() - workerFirstExecute.Values.Min()) / 1000.0 : 0;
+            double executeSpanUs = firstExecuteNs != ulong.MaxValue && lastExecuteNs >= firstExecuteNs ?
+                (lastExecuteNs - firstExecuteNs) / 1000.0 : -1;
+            double finalizeGapUs = lastExecuteNs > 0 && finalizeNs >= lastExecuteNs ?
+                (finalizeNs - lastExecuteNs) / 1000.0 : -1;
+            double completeGapUs = finalizeNs > 0 && handleCompleteNs >= finalizeNs ?
+                (handleCompleteNs - finalizeNs) / 1000.0 : -1;
+            bool complete = batchId != 0 && publishNs > 0 && completeEnterNs > 0 &&
+                claims > 0 && durations.Count == claims && finalizeNs > 0 && handleCompleteNs > 0;
+
+            Console.WriteLine(
+                $"  ── Trace ────────────────────────────────");
+            Console.WriteLine(
+                $"     case={label}  batch={batchId}  events={count}  claims={claims}  " +
+                $"workers={workerClaims.Count}  mainAssist={mainClaims}  " +
+                $"result={(complete && dropped == 0 ? "OK" : "INCOMPLETE")}");
+            Console.WriteLine(
+                $"     completeEnter={completeEnterUs:F3} us  firstExecute={firstExecuteUs:F3} us  " +
+                $"startSpread={workerStartSpreadUs:F3} us  executeSpan={executeSpanUs:F3} us");
+            Console.WriteLine(
+                $"     range[min/avg/P95/max]={rangeMinUs:F3}/{rangeAvgUs:F3}/{rangeP95Us:F3}/{rangeMaxUs:F3} us  " +
+                $"slowTile={slowRange}  slowWorker={slowWorker}");
+            Console.WriteLine(
+                $"     slowTileCore={slowStartCore}->{slowEndCore}  " +
+                $"coreMigrations={coreMigrations}  " +
+                $"finalizeGap={finalizeGapUs:F3} us  completeGap={completeGapUs:F3} us");
+            Console.WriteLine(
+                $"     workerCoreMap={workerCoreMap}");
+            NativeJobScheduler.TraceClear();
+        }
+
+        private static double Percentile(double[] sorted, double percentile)
+        {
+            if (sorted.Length == 0) return 0;
+            double position = (sorted.Length - 1) * percentile;
+            int lower = (int)Math.Floor(position);
+            int upper = (int)Math.Ceiling(position);
+            if (lower == upper) return sorted[lower];
+            double weight = position - lower;
+            return sorted[lower] * (1.0 - weight) + sorted[upper] * weight;
         }
 
         private static double RunBenchmark(string label, Action scheduleAndComplete)

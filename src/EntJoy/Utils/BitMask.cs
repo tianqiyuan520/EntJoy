@@ -21,6 +21,7 @@ namespace EntJoy
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
+                if (_bits == null) throw new InvalidOperationException("BitMask is not initialized.");
                 if ((uint)index >= (uint)_length) throw new IndexOutOfRangeException();
                 int ulongIndex = index >> 6;
                 int bitOffset = index & 63;
@@ -29,6 +30,7 @@ namespace EntJoy
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
+                if (_bits == null) throw new InvalidOperationException("BitMask is not initialized.");
                 if ((uint)index >= (uint)_length) throw new IndexOutOfRangeException();
                 int ulongIndex = index >> 6;
                 int bitOffset = index & 63;

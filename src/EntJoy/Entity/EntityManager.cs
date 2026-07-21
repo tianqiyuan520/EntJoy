@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -34,14 +33,15 @@ namespace EntJoy
         private bool _disposed;
         private readonly object _activeJobLock = new();
         private readonly List<JobHandle> _activeJobs = new();
+        private readonly object _structuralLock = new();  // 结构性操作（NewEntity/DestroyEntity/AddComponent/RemoveComponent）的锁
 
 
         public EntityManager()
         {
             recycleEntities = new Queue<Entity>();  // 初始化回收队列
-            entities = ArrayPool<EntityIndexInWorld>.Shared.Rent(32);  // 从内存池租用数组
+            entities = new EntityIndexInWorld[32];  // 初始实体数组
             archetypeMap = new Dictionary<int, List<Archetype>>();  // 初始化原型映射（哈希 -> Archetype 列表）
-            allArchetypes = ArrayPool<Archetype>.Shared.Rent(8);  // 从内存池租用原型数组
+            allArchetypes = new Archetype[8];  // 初始原型数组
         }
 
         /// <summary>
@@ -105,10 +105,17 @@ namespace EntJoy
             archetypeMap.Clear();
             recycleEntities.Clear();
             global::NativeJobScheduler.ClearRawChunkScheduleCaches(this);
+            // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
             entityCount = 0;
+        }
+
+        private void CheckDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(EntityManager));
         }
 
         internal void RegisterActiveJob(NativeJobHandle nativeHandle)
@@ -164,6 +171,8 @@ namespace EntJoy
         /// <returns></returns>
         public ref EntityIndexInWorld GetEntityInfoRef(int index)
         {
+            if ((uint)index >= (uint)entities.Length)
+                throw new IndexOutOfRangeException($"Entity index {index} is out of range (max {entities.Length - 1}).");
             return ref entities[index];
         }
 
@@ -174,6 +183,18 @@ namespace EntJoy
             entityInfoRef.Archetype = archetype;
             entityInfoRef.ChunkIndex = chunkIndex;
             entityInfoRef.SlotInChunk = slotInChunk;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ValidateEntity(Entity entity)
+        {
+            if ((uint)entity.Id >= (uint)entities.Length)
+                throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
+            ref var info = ref GetEntityInfoRef(entity.Id);
+            if (info.Archetype == null)
+                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+            if (info.Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
         }
 
         private void RefreshChunkEntityIndices(Archetype archetype, int chunkIndex)
@@ -211,64 +232,77 @@ namespace EntJoy
         /// </summary>
         public unsafe Entity NewEntity(Span<ComponentType> types)  // 创建实体核心方法
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            var newEntity = new Entity();  // 创建新实体
-            bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);  // 尝试从回收队列获取
+            lock (_structuralLock)
+            {
+                var newEntity = new Entity();  // 创建新实体
+                bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);  // 尝试从回收队列获取
 
-            if (isRecycled)  // 使用回收的实体
-            {
-                newEntity.Id = recycledEnt.Id;  // 复用ID
-                newEntity.Version = recycledEnt.Version + 1;  // 版本号递增
-            }
-            else  // 无可复用的实体，则创建新实体
-            {
-                newEntity.Id = entityCount++;  // 分配新ID
-                if (newEntity.Id >= entities.Length)  // 检查数组容量
+                if (isRecycled)  // 使用回收的实体
                 {
-                    Array.Resize(ref entities, entities.Length * 2);  // 扩容数组
+                    newEntity.Id = recycledEnt.Id;  // 复用ID
+                    newEntity.Version = recycledEnt.Version + 1;  // 版本号递增
                 }
+                else  // 无可复用的实体，则创建新实体
+                {
+                    newEntity.Id = entityCount++;  // 分配新ID
+                    if (newEntity.Id >= entities.Length)  // 检查数组容量
+                    {
+                        Array.Resize(ref entities, entities.Length * 2);  // 扩容数组
+                    }
+                }
+
+                var targetArch = GetOrCreateArchetype(types);
+                targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);  // 在该实体对应的原型中添加实体
+                structuralVersion++;
+
+                // 更新该实体索引
+                UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
+                // 存储实体版本号用于悬垂引用检测
+                GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+
+                return newEntity;  // 返回新实体
             }
-
-            var targetArch = GetOrCreateArchetype(types);
-            targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);  // 在该实体对应的原型中添加实体
-            structuralVersion++;
-
-            // 更新该实体索引
-            UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
-
-            //GD.Print("new Entity"," ", newEntity.Id," ", allArchetypes.Count()," ", allArchetypes[0]?.entityCount," ", allArchetypes[1]?.entityCount, allArchetypes[2]?.entityCount);
-
-            return newEntity;  // 返回新实体
         }
 
         public void DestroyEntity(Entity entity)
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-            var archetype = entityInfoRef.Archetype;
-            if (archetype == null)
+            lock (_structuralLock)
             {
-                return;
+                if ((uint)entity.Id >= (uint)entities.Length)
+                    throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
+                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+                // 版本不匹配：旧句柄指向已回收再生的实体
+                if (entityInfoRef.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
+                var archetype = entityInfoRef.Archetype;
+                if (archetype == null)
+                {
+                    return;
+                }
+
+                int oldChunkIndex = entityInfoRef.ChunkIndex;
+                archetype.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityId, out var movedEntitySlotInChunk, out var compactedChunkIndex);
+
+                if (movedEntityId >= 0)
+                {
+                    UpdateEntityLocation(movedEntityId, archetype, oldChunkIndex, movedEntitySlotInChunk);
+                }
+
+                if (compactedChunkIndex >= 0)
+                {
+                    RefreshChunkEntityIndices(archetype, compactedChunkIndex);
+                }
+
+                entityInfoRef.Archetype = null;
+                entityInfoRef.ChunkIndex = -1;
+                entityInfoRef.SlotInChunk = -1;
+                recycleEntities.Enqueue(entity);
+                structuralVersion++;
             }
-
-            int oldChunkIndex = entityInfoRef.ChunkIndex;
-            archetype.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityId, out var movedEntitySlotInChunk, out var compactedChunkIndex);
-
-            if (movedEntityId >= 0)
-            {
-                UpdateEntityLocation(movedEntityId, archetype, oldChunkIndex, movedEntitySlotInChunk);
-            }
-
-            if (compactedChunkIndex >= 0)
-            {
-                RefreshChunkEntityIndices(archetype, compactedChunkIndex);
-            }
-
-            entityInfoRef.Archetype = null;
-            entityInfoRef.ChunkIndex = -1;
-            entityInfoRef.SlotInChunk = -1;
-            recycleEntities.Enqueue(entity);
-            structuralVersion++;
         }
 
     }
@@ -502,90 +536,106 @@ namespace EntJoy
         /// </summary>
         public void AddComponent<T0>(Entity entity, T0 t0) where T0 : struct
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-            var oldArch = entityInfoRef.Archetype;
-            if (oldArch.Has(typeof(T0)))
+            lock (_structuralLock)
             {
-                oldArch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t0);
-                return;
+                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+                if (entityInfoRef.Archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (entityInfoRef.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
+                var oldArch = entityInfoRef.Archetype;
+                if (oldArch.Has(typeof(T0)))
+                {
+                    oldArch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t0);
+                    return;
+                }
+
+                // 创建新组件类型数组
+                Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
+                oldArch.Types.CopyTo(targetComponents);
+                targetComponents[^1] = ComponentTypeManager.GetComponentType(typeof(T0));
+
+                var targetArch = GetOrCreateArchetype(targetComponents);
+                targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
+
+                // 复制组件数据
+                oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
+
+                // 从旧原型移除
+                oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);
+
+                if (movedEntityID >= 0)
+                {
+                    UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
+                }
+
+                if (compactedChunkIndex >= 0)
+                {
+                    RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
+                }
+
+                // 刷新索引（关键修复）
+                UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
+
+                // 设置新组件值
+                targetArch.Set(chunkIndex, slotInChunk, t0);
+                structuralVersion++;
             }
-
-            // 创建新组件类型数组
-            Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
-            oldArch.Types.CopyTo(targetComponents);
-            targetComponents[^1] = ComponentTypeManager.GetComponentType(typeof(T0));
-
-            var targetArch = GetOrCreateArchetype(targetComponents);
-            targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
-
-            // 复制组件数据
-            oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
-
-            // 从旧原型移除
-            oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);
-
-            if (movedEntityID >= 0)
-            {
-                UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
-            }
-
-            if (compactedChunkIndex >= 0)
-            {
-                RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
-            }
-
-            // 刷新索引（关键修复）
-            UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
-
-            // 设置新组件值
-            targetArch.Set(chunkIndex, slotInChunk, t0);
-            structuralVersion++;
         }
 
 
         public void RemoveComponent<T0>(Entity entity) where T0 : struct
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-            var oldArch = entityInfoRef.Archetype;
-            //若旧原型中无该类型，则直接返回
-            if (!oldArch.Has(typeof(T0)))
+            lock (_structuralLock)
             {
-                return;
-            }
-
-            //生成 目标"组件类型"
-            Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];  // 创建新组件数组
-            int spanIndex = 0;
-            for (int i = 0; i < oldArch.Types.Length; i++)  // 遍历组件类型
-            {
-                var comType = oldArch.Types[i];  // 获取组件类型
-                if (comType.Type == typeof(T0))  // 跳过要移除的组件
+                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+                if (entityInfoRef.Archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (entityInfoRef.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
+                var oldArch = entityInfoRef.Archetype;
+                //若旧原型中无该类型，则直接返回
+                if (!oldArch.Has(typeof(T0)))
                 {
-                    continue;
+                    return;
                 }
 
-                targetComponents[spanIndex++] = comType;  // 添加保留的组件
-            }
-            // 获取或创建新原型
-            var targetArch = GetOrCreateArchetype(targetComponents);
-            targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);  // 添加实体到新原型
+                //生成 目标"组件类型"
+                Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];  // 创建新组件数组
+                int spanIndex = 0;
+                for (int i = 0; i < oldArch.Types.Length; i++)  // 遍历组件类型
+                {
+                    var comType = oldArch.Types[i];  // 获取组件类型
+                    if (comType.Type == typeof(T0))  // 跳过要移除的组件
+                    {
+                        continue;
+                    }
 
-            oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);  //复制组件数据
-            oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);  // 从旧原型移除
-            if (movedEntityID >= 0)  // 处理被移动的实体
-            {
-                UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
-            }
+                    targetComponents[spanIndex++] = comType;  // 添加保留的组件
+                }
+                // 获取或创建新原型
+                var targetArch = GetOrCreateArchetype(targetComponents);
+                targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);  // 添加实体到新原型
 
-            if (compactedChunkIndex >= 0)
-            {
-                RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
+                oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);  //复制组件数据
+                oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);  // 从旧原型移除
+                if (movedEntityID >= 0)  // 处理被移动的实体
+                {
+                    UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
+                }
+
+                if (compactedChunkIndex >= 0)
+                {
+                    RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
+                }
+                //刷新索引
+                UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
+                structuralVersion++;
             }
-            //刷新索引
-            UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
-            structuralVersion++;
         }
 
         /// <summary>
@@ -593,10 +643,18 @@ namespace EntJoy
         /// </summary>
         public void Set<T>(Entity entity, T t) where T : struct, IComponentData
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-            var arch = entityInfoRef.Archetype;  // 获取对应的原型
-            arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
+            lock (_structuralLock)
+            {
+                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+                if (entityInfoRef.Archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (entityInfoRef.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
+                var arch = entityInfoRef.Archetype;  // 获取对应的原型
+                arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
+            }
         }
     }
 
@@ -611,22 +669,32 @@ namespace EntJoy
         /// <param name="entity">目标实体</param>
         /// <param name="enabled">true 为启用，false 为禁用</param>
         /// <exception cref="InvalidOperationException">如果实体不包含该组件，或组件不可 enable</exception>
+#pragma warning disable CS0618 // 保留旧接口兼容
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetComponentEnabled<T>(Entity entity, bool enabled) where T : struct, IEnableableComponent
         {
+            CheckDisposed();
             CompleteActiveJobs();
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            var archetype = info.Archetype;
+            lock (_structuralLock)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                var archetype = info.Archetype;
 
-            // 检查实体是否拥有该组件
-            if (!archetype.Has(typeof(T)))
-                throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
+                if (archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (info.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
 
-            int compIdx = archetype.GetComponentTypeIndex<T>();
-            var chunks = archetype.GetChunks();
-            var chunk = chunks[info.ChunkIndex];
+                // 检查实体是否拥有该组件
+                if (!archetype.Has(typeof(T)))
+                    throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
 
-            chunk.SetComponentEnabled(compIdx, info.SlotInChunk, enabled);
+                int compIdx = archetype.GetComponentTypeIndex<T>();
+                var chunks = archetype.GetChunks();
+                var chunk = chunks[info.ChunkIndex];
+
+                chunk.SetComponentEnabled(compIdx, info.SlotInChunk, enabled);
+            }
         }
 
         /// <summary>
@@ -639,17 +707,26 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool IsComponentEnabled<T>(Entity entity) where T : struct, IEnableableComponent
         {
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            var archetype = info.Archetype;
+            CheckDisposed();
+            lock (_structuralLock)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                var archetype = info.Archetype;
 
-            if (!archetype.Has(typeof(T)))
-                throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
+                if (archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (info.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
 
-            int compIdx = archetype.GetComponentTypeIndex<T>();
-            var chunks = archetype.GetChunks();
-            var chunk = chunks[info.ChunkIndex];
+                if (!archetype.Has(typeof(T)))
+                    throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
 
-            return chunk.GetComponentEnabled(compIdx, info.SlotInChunk);
+                int compIdx = archetype.GetComponentTypeIndex<T>();
+                var chunks = archetype.GetChunks();
+                var chunk = chunks[info.ChunkIndex];
+
+                return chunk.GetComponentEnabled(compIdx, info.SlotInChunk);
+            }
         }
 
         #endregion

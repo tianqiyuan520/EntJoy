@@ -1,7 +1,9 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace NativeTranspiler.Analyzer
@@ -135,7 +137,12 @@ namespace NativeTranspiler.Analyzer
             var componentType = methodSymbol.TypeArguments[0];
             int componentIndex = _requiredComponentTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, componentType));
             if (componentIndex < 0)
-                componentIndex = 0;
+            {
+                throw new InvalidOperationException(
+                    $"Component type {componentType.ToDisplayString()} used in chunk job body but " +
+                    "was not found in requiredComponentTypes. Fix CollectChunkNativeArrayTypes " +
+                    "to include this type, or mark the parameter with proper attributes.");
+            }
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
             expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
@@ -317,6 +324,21 @@ namespace NativeTranspiler.Analyzer
                 _ => false
             };
         }
+
+        // ——— 向量化提示 ———
+        // #pragma loop(ivdep) 强制 MSVC 消除指针别名保守性生成 SIMD。
+        protected override void TranslateForStatement(ForStatementSyntax forStmt)
+        {
+            AppendIndent();
+            _builder.AppendLine("#pragma loop(ivdep)");
+            base.TranslateForStatement(forStmt);
+        }
+
+        // ——— 向量类型运算 ———
+        // 不做 x()/y() 分量拆解，交由基类 CppStatementTranslator 直接生成
+        // 完整的 Value += 调用。现代 MSVC 能完全消除 float2 临时对象，
+        // 生成单条 addps/mulps/paddd 指令。分量拆解反而阻止了这种
+        // SIMD 自动向量化。
 
         private bool IsNativeArrayAliasWriteBack(AssignmentExpressionSyntax assignment)
         {

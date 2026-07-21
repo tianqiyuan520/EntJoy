@@ -12,6 +12,13 @@ namespace NativeTranspiler.Analyzer
         private readonly string? _foreachStartName;
         private readonly string? _foreachEndName;
 
+        /// <summary>
+        /// 跟踪从 ChunkNativeArray 元素初始化的局部 struct 变量。
+        /// T var = positions[index] 模式的 var 会被映射到 positions_ptr[index] 的直接访问。
+        /// Key: 局部变量名，Value: 完整的 ISPC 替换文本（如 "positions_ptr[index]"）
+        /// </summary>
+        private readonly Dictionary<string, string> _chunkProxyLocalVars = new();
+
         public IspcChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct)
             : base(semanticModel, jobStruct, null, false)
         {
@@ -39,6 +46,16 @@ namespace NativeTranspiler.Analyzer
                 if (TryGetChunkNativeArrayLengthAlias(variable.Initializer?.Value, out var arrayName))
                 {
                     _chunkNativeArrayLengthAliases[variable.Identifier.Text] = arrayName;
+                }
+
+                // 检测 T var = positions[index] 模式，将 var 标记为数组代理
+                // 后续 var.field 的访问将被翻译为 positions_ptr[index].field
+                // 从而消除 struct copy-in/copy-out 开销
+                if (IsChunkNativeArrayElementAccess(variable.Initializer?.Value, out var proxyArrayName, out var proxyIndexExpr))
+                {
+                    string indexText = CaptureExpressionText(proxyIndexExpr);
+                    _chunkProxyLocalVars[variable.Identifier.Text] = $"{proxyArrayName}_ptr[{indexText}]";
+                    continue; // 跳过此局部变量的声明和拷贝
                 }
 
                 if (!emittedAny)
@@ -78,13 +95,25 @@ namespace NativeTranspiler.Analyzer
             base.TranslateForStatement(forStmt);
         }
 
+        protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
+        {
+            string name = identifier.Identifier.Text;
+            // 结构体代理变量：直接替换为 array_ptr[index] 消除 struct copy
+            if (_chunkProxyLocalVars.TryGetValue(name, out string proxyReplacement))
+            {
+                _builder.Append(proxyReplacement);
+                return;
+            }
+            base.TranslateIdentifier(identifier);
+        }
+
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             if (memberAccess.Expression is IdentifierNameSyntax id &&
                 _chunkNativeArrayNames.Contains(id.Identifier.Text) &&
                 memberAccess.Name.Identifier.Text == "Length")
             {
-                _builder.Append(id.Identifier.Text).Append("_length");
+                _builder.Append("__entity_count");
                 return;
             }
 
@@ -108,6 +137,48 @@ namespace NativeTranspiler.Analyzer
             base.TranslateElementAccess(elementAccess);
         }
 
+        protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
+        {
+            // 检测并跳过冗余的 struct writeback 语句: positions[index] = position;
+            if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
+                assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                assignment.Right is IdentifierNameSyntax rightId &&
+                _chunkProxyLocalVars.ContainsKey(rightId.Identifier.Text) &&
+                assignment.Left is ElementAccessExpressionSyntax leftElem &&
+                leftElem.Expression is IdentifierNameSyntax leftArrayId &&
+                _chunkNativeArrayNames.Contains(leftArrayId.Identifier.Text))
+            {
+                if (_chunkProxyLocalVars.TryGetValue(rightId.Identifier.Text, out string proxyReplacement) &&
+                    proxyReplacement.StartsWith(leftArrayId.Identifier.Text + "_ptr["))
+                {
+                    return; // 跳过整个语句（不 emit 分号）
+                }
+            }
+            base.TranslateExpressionStatement(exprStmt);
+        }
+
+        protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
+        {
+            // 检测并消除 struct writeback 模式: nativeArray[index] = proxyVar
+            // 因为 proxyVar 的所有 per-field 写入已经通过 TranslateIdentifier 重定向直接写入了数组，
+            // 这里的整 struct 回写是冗余拷贝，可以安全跳过。
+            if (assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                assignment.Right is IdentifierNameSyntax rightId &&
+                _chunkProxyLocalVars.ContainsKey(rightId.Identifier.Text) &&
+                assignment.Left is ElementAccessExpressionSyntax leftElem &&
+                leftElem.Expression is IdentifierNameSyntax leftArrayId &&
+                _chunkNativeArrayNames.Contains(leftArrayId.Identifier.Text))
+            {
+                // 确认代理变量对应的数组与 LHS 数组匹配（避免误跳过 cross-array 赋值）
+                if (_chunkProxyLocalVars.TryGetValue(rightId.Identifier.Text, out string proxyReplacement) &&
+                    proxyReplacement.StartsWith(leftArrayId.Identifier.Text + "_ptr["))
+                {
+                    return; // 跳过冗余的 struct writeback
+                }
+            }
+            base.TranslateAssignment(assignment);
+        }
+
         private bool TryTranslateChunkArrayForEach(ForStatementSyntax forStmt)
         {
             if (forStmt.Declaration == null ||
@@ -128,8 +199,8 @@ namespace NativeTranspiler.Analyzer
 
             AppendIndent();
             string startName = _foreachStartName ?? "0";
-            string endName = _foreachEndName ?? $"{arrayName}_length";
-            _builder.Append("foreach (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
+            string endName = _foreachEndName ?? "__entity_count";
+            _builder.Append("foreach_tiled (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
             if (forStmt.Statement is BlockSyntax block)
             {
                 _builder.AppendLine("{");
@@ -184,6 +255,38 @@ namespace NativeTranspiler.Analyzer
             }
 
             arrayName = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// 将表达式翻译为 ISPC 文本并返回，不影响 _builder 的当前状态。
+        /// </summary>
+        private string CaptureExpressionText(ExpressionSyntax expr)
+        {
+            int savedLen = _builder.Length;
+            TranslateExpression(expr);
+            string text = _builder.ToString(savedLen, _builder.Length - savedLen);
+            _builder.Length = savedLen;
+            return text;
+        }
+
+        /// <summary>
+        /// 检测表达式是否为 ChunkNativeArray 的元素访问（如 positions[index]）。
+        /// 用于 struct proxy 模式的检测。
+        /// </summary>
+        private bool IsChunkNativeArrayElementAccess(ExpressionSyntax? expression, out string arrayName, out ExpressionSyntax indexExpr)
+        {
+            arrayName = string.Empty;
+            indexExpr = null!;
+            if (expression is ElementAccessExpressionSyntax elemAccess &&
+                elemAccess.Expression is IdentifierNameSyntax id &&
+                _chunkNativeArrayNames.Contains(id.Identifier.Text) &&
+                elemAccess.ArgumentList.Arguments.Count >= 1)
+            {
+                arrayName = id.Identifier.Text;
+                indexExpr = elemAccess.ArgumentList.Arguments[0].Expression;
+                return true;
+            }
             return false;
         }
 

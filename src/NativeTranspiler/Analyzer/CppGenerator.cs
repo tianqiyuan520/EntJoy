@@ -12,7 +12,8 @@ namespace NativeTranspiler.Analyzer
         private static readonly HashSet<string> SkipIncludeTypeNames = new()
         {
             "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility"
+            "EntJoy.Collections.UnsafeUtility",
+            "EntJoy.Hint"
         };
 
         public static string GetCppFunctionName(IMethodSymbol method)
@@ -117,8 +118,10 @@ namespace NativeTranspiler.Analyzer
         private static string GenerateCppFunctionSignature(IMethodSymbol method, bool fullyQualified)
         {
             var returnType = NativeTranspiler.MapCSharpTypeToCpp(method.ReturnType);
-            if (method.ReturnType is IPointerTypeSymbol) returnType += "*";
-            else if (method.ReturnType.SpecialType != SpecialType.System_Void && !method.ReturnType.IsValueType) returnType += "*";
+            // MapCSharpTypeToCpp 已处理指针类型（追加 *），此处只需处理引用类型返回指针
+            if (!(method.ReturnType is IPointerTypeSymbol) &&
+                method.ReturnType.SpecialType != SpecialType.System_Void &&
+                !method.ReturnType.IsValueType) returnType += "*";
 
             var funcName = fullyQualified ? GetCppFunctionName(method) : method.Name;
             var parameters = new List<string>();

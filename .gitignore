@@ -14,6 +14,7 @@
 
 # Native/CMake/MSVC artifacts
 **/build/
+**/build-*/
 **/x64/
 *.obj
 *.o
@@ -42,3 +43,9 @@ src/Godot/.godot/
 
 # Roslyn analyzer generated
 *.g.cs
+nul
+
+# Native test builds (build artifacts only)
+src/NativeDll.Tests/build*
+src/NativeDll.Tests/*.vcxproj
+src/NativeDll.Tests/*.sln
