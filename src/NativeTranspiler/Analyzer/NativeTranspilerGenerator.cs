@@ -612,6 +612,12 @@ namespace {AttributeNamespace}
         fast
     }}
 
+    public enum AutoSIMD
+    {{
+        Enabled,
+        Disabled
+    }}
+
     [AttributeUsage(AttributeTargets.Method | AttributeTargets.Struct)]
     public sealed class {AttributeName}Attribute : Attribute
     {{
@@ -620,6 +626,7 @@ namespace {AttributeNamespace}
         public bool UseISPC_MT {{ get; set; }} = false;
         public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
         public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;
+        public AutoSIMD AutoSIMD {{ get; set; }} = AutoSIMD.Enabled;
     }}
 }}
 ";

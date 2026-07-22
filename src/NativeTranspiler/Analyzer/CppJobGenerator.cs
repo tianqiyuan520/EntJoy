@@ -140,6 +140,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
+            sb.AppendLine("#include \"../../NativeDll/NativeSIMD.h\"");
             sb.AppendLine();
 
             // IJobChunk: 生成独立 Execute 函数
@@ -164,6 +165,7 @@ namespace NativeTranspiler.Analyzer
 
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
+                var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
 
                 if (boolFields.Count > 0)
                 {
@@ -179,7 +181,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath);
+                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath, autoSIMD);
                 }
             }
             else
@@ -216,7 +218,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Enabled)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -224,14 +226,35 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+
+            // 先用标量翻译器翻译 body（余量循环需要标量体）
+            var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
+            var scalarBody = scalarTranslator.Translate(methodSyntax.Body);
+
+            if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+            {
+                // 分析循环体是否可向量化
+                var analyzer = new LoopPatternAnalyzer(semanticModel);
+                var pattern = analyzer.Analyze(methodSyntax, indexParamName);
+
+                if (pattern.IsVectorizable)
+                {
+                    var simdGen = new SimdCodeGenerator(pattern);
+                    var simdCode = simdGen.Generate(scalarBody);
+                    sb.Append(simdCode);
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+                    return;
+                }
+            }
+
+            // 回退标量路径
             sb.AppendLine($"    #pragma loop(ivdep)");
             sb.AppendLine($"    #pragma loop(vector)");
             sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
-            var bodyCode = translator.Translate(methodSyntax.Body);
-            sb.Append(bodyCode);
+            sb.Append(scalarBody);
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
