@@ -125,11 +125,9 @@ namespace NativeTranspiler.Analyzer
 
                 if (IsFloat2Type(info.CppType))
                 {
-                    // Decompose float2/int2 into x/y components
-                    string elemType = info.CppType.Contains("float2") ? "simd_value<float>" : "simd_value<int>";
-                    string initVal = info.InitSIMDExpr ?? (elemType + "::broadcast(0)");
-                    AppendLine($"{elemType} v_{name}_x = {GetComponentInit(name, info, ".x()", initVal)};");
-                    AppendLine($"{elemType} v_{name}_y = {GetComponentInit(name, info, ".y()", initVal)};");
+                    // Use whole type (simd_value<float2>/simd_value<int2>) instead of decomposition
+                    string initVal = info.InitSIMDExpr ?? $"{varType}::broadcast(0)";
+                    AppendLine($"{varType} v_{name} = {initVal};");
                 }
                 else
                 {
@@ -137,14 +135,6 @@ namespace NativeTranspiler.Analyzer
                     AppendLine($"{varType} v_{name} = {initVal};");
                 }
             }
-        }
-
-        private string GetComponentInit(string varName, SimdVariableInfo info, string member, string fallback)
-        {
-            // For varying float2 QueryPositions[index] gather, generate:
-            // simd_value<float> v_q_x = simd_value<float>::gathf(QueryPositions_ptr, v_i);
-            // But that's done in expression translation, not here.
-            return fallback;
         }
 
         // ================================================================
@@ -365,21 +355,30 @@ namespace NativeTranspiler.Analyzer
             string continueLabel = $"__loop_continue_{_labelCounter++}";
 
             AppendLine($"// SIMD count-loop: for (int {ivName} = {startExpr}; {ivName} < ...; {ivName}++)");
-            AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({startExpr});");
-            AppendLine($"simd_value<int> v_{ivName} = simd_{ivName};");
-            AppendLine($"simd_value<int> simd_end_{ivName} = simd_value<int>::broadcast({endExpr});");
+            bool startIsVarying = decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying;
+            bool endIsVarying = stmt.Condition is BinaryExpressionSyntax ec && _varAnalyzer.ClassifyExpression(ec.Right) >= VarKind.Varying;
+            string simdStartVal = startIsVarying ? startExpr : $"simd_value<int>::broadcast({startExpr})";
+            string simdEndVal = endIsVarying ? endExpr : $"simd_value<int>::broadcast({endExpr})";
+            AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} < {simdEndVal}; {ivName}++)");
+            AppendLine($"simd_value<int> simd_{ivName} = {simdStartVal};");
+            AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
-            AppendLine($"int simd_max_iter_{ivName} = hmax(simd_end_{ivName} - simd_{ivName});");
-            AppendLine($"for (int __iter_{ivName} = 0; __iter_{ivName} < simd_max_iter_{ivName}; __iter_{ivName}++)");
+
+            string preLoopMask = _currentMask;  // Save pre-loop expr (restore after loop exit)
+            AppendLine("while (true)");
             AppendLine("{");
             _indent++;
 
             AppendLine($"simd_mask {iterActive} = simd_mask{{ n_cmp_lt_epi32(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
             string savedMask = $"__mask_{_maskCounter++}";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
-            // Check if any lanes still active (savedMask & iterActive)
-            AppendLine($"if (!({savedMask} & {iterActive}).any_true()) {{ {_currentMask} = {savedMask}; goto {exitLabel}; }}");
-            _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {iterActive}.m) }}";
+            // Update currentMask to the saved variable name (in-scope inside while)
+            _currentMask = savedMask;
+            // Check if any lanes still active
+            AppendLine($"if (!({savedMask} & {iterActive}).any_true()) {{ break; }}");
+            // Narrow mask to active lanes for the loop body
+            string narrowedMask = $"simd_mask{{ n_and_mask({savedMask}.m, {iterActive}.m) }}";
+            _currentMask = narrowedMask;
 
             // Push loop frame
             _loopStack.Push(new LoopFrame
@@ -396,12 +395,13 @@ namespace NativeTranspiler.Analyzer
             // Pop loop frame
             _loopStack.Pop();
 
-            // Continue label + restore + increment
+            // Continue label + restore mask + increment
             AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             AppendLine("}");
             _indent--;
+            _currentMask = preLoopMask;  // Restore pre-loop expr (outside while scope)
             AppendLine($"{exitLabel}: ;");
         }
 
@@ -545,8 +545,7 @@ namespace NativeTranspiler.Analyzer
                         if (variable.Initializer != null)
                         {
                             string initExpr = TranslateExpression(variable.Initializer.Value);
-                            AppendLine("v_" + name + "_x = " + GetSIMDComponent(initExpr, "x") + ";");
-                            AppendLine("v_" + name + "_y = " + GetSIMDComponent(initExpr, "y") + ";");
+                            AppendLine("v_" + name + " = " + initExpr + ";");
                         }
                     }
                     else
@@ -653,18 +652,20 @@ namespace NativeTranspiler.Analyzer
         {
             if (expr is IdentifierNameSyntax id)
             {
-                // bool variable → broadcast to mask
                 string name = id.Identifier.Text;
+                // Uniform bool: broadcast to all lanes then compare !=0 to produce proper n_mask
                 if (_variables.TryGetValue(name, out var info) && info.Kind == VarKind.Uniform)
-                {
-                    // Uniform bool scalar: broadcast to mask
-                    return $"simd_mask{{ n_and_mask(simd_mask{{ simd_value<int>::broadcast({name} ? -1 : 0).v }}.m, simd_mask::all_true().m) }}";
-                }
-                // Varying bool → already a mask?
-                return $"simd_mask{{ n_cmp_ne_epi32(v_{name}.v, n_set1_epi32(0)) }}";
+                    return $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({name} ? -1 : 0).v, n_set1_epi32(0)) }}";
+                // Varying int/bool: compare register against zero
+                if (_variables.TryGetValue(name, out var info2) && info2.Kind >= VarKind.Varying)
+                    return $"simd_mask{{ n_cmp_ne_epi32(v_{name}.v, n_set1_epi32(0)) }}";
             }
 
-            return TranslateExpression(expr);
+            string result = TranslateExpression(expr);
+            // If result is a scalar bool, wrap it as simd_mask via broadcast+compare
+            if (!result.Contains("simd_mask") && !result.Contains("n_cmp_"))
+                return $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({result} ? -1 : 0).v, n_set1_epi32(0)) }}";
+            return result;
         }
 
         // ================================================================
@@ -688,6 +689,10 @@ namespace NativeTranspiler.Analyzer
             if (name == _indexParamName)
                 return _simdIndexVar;
 
+            // For-loop induction variables → use simd_ prefix (no conflict risk)
+            if (_forLoopVars.Contains(name))
+                return $"simd_{name}";
+
             // Known variable
             if (_variables.TryGetValue(name, out var info))
             {
@@ -697,10 +702,7 @@ namespace NativeTranspiler.Analyzer
                 // Varying or Reduction
                 if (IsFloat2Type(info.CppType))
                 {
-                    // Return the whole float2 — x/y are decomposed as v_name_x, v_name_y
-                    // The caller must use .x or .y member to access components
-                    // For now, note that translating float2 as a whole is complex
-                    return $"v_{name}_x"; // partial — caller should use member access
+                    return $"v_{name}"; // float2 — use member access for components
                 }
                 return $"v_{name}";
             }
@@ -750,16 +752,21 @@ namespace NativeTranspiler.Analyzer
                 return $"{objExpr}_length";
             }
 
-            // .x or .y on float2
+            // .x or .y on float2 — use .x/.y member on simd_value<float2>
             if ((memberName == "x" || memberName == "y") && isVaryingFloat2)
             {
-                return $"v_{objName}_{memberName}";
+                return $"{objExpr}.{memberName}";
             }
 
             // Default: obj.member
             // EntJoy Mathematics types use method syntax: .x() not .x
+            // BUT: SIMD expressions (containing ::) use .x/.y as member access, not function call
             if ((memberName == "x" || memberName == "y") && !isVaryingFloat2)
+            {
+                if (objExpr.Contains("::") || objExpr.StartsWith("simd_"))
+                    return $"{objExpr}.{memberName}";
                 return $"{objExpr}.{memberName}()";
+            }
             return $"{objExpr}.{memberName}";
         }
 
@@ -795,11 +802,37 @@ namespace NativeTranspiler.Analyzer
                 indexKind = _varAnalyzer.ClassifyExpression(argExpr);
             }
 
+            // Handle NativeList: use Ptr->data access
+            if (!isNativeArray && _jobStruct != null && elementAccess.Expression is IdentifierNameSyntax id2)
+            {
+                var members2 = _jobStruct.GetMembers(id2.Identifier.Text);
+                if (members2.Length > 0 && members2[0] is IFieldSymbol f2
+                    && NativeTranspiler.IsEntJoyNativeContainerType(f2.Type)
+                    && f2.Type.Name == "NativeList")
+                {
+                    isNativeArray = true;
+                    var typeArg = ((INamedTypeSymbol)f2.Type).TypeArguments.FirstOrDefault();
+                    if (typeArg != null)
+                        elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
+                    if (indexKind >= VarKind.Varying)
+                    {
+                        if (elemCppType.Contains("float2"))
+                            return $"simd_value<float2>::gather(({elemCppType}*){baseExpr}.Ptr, {indexExpr})";
+                        if (elemCppType.Contains("int2"))
+                            return $"simd_value<EntJoy::Mathematics::int2>::gather(({elemCppType}*){baseExpr}.Ptr, {indexExpr})";
+                        return $"simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {indexExpr}.v)";
+                    }
+                    return $"(({elemCppType}*){baseExpr}.Ptr)[{indexExpr}]";
+                }
+            }
+
             if (isNativeArray && indexKind >= VarKind.Varying)
             {
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
                     return $"simd_value<{elemCppType}>::gather({baseExpr}_ptr, {indexExpr})";
+                if (elemCppType.Contains("int2"))
+                    return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}_ptr, {indexExpr})";
                 if (elemCppType == "float")
                     return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
                 if (elemCppType == "int")
@@ -901,7 +934,19 @@ namespace NativeTranspiler.Analyzer
                         string hi = TranslateExpression(args[2].Expression);
                         VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
                         if (kv >= VarKind.Varying)
-                            return $"simd_max(simd_min({v}, {hi}), {lo})";
+                        {
+                            // For float2/int2: decompose to component-wise clamp
+                            if (args[0].Expression is IdentifierNameSyntax clampId
+                                && _float2VaryingVars.Contains(clampId.Identifier.Text)
+                                && _variables.TryGetValue(clampId.Identifier.Text, out var clampInfo))
+                            {
+                                string simdType = GetSIMDTypeString(clampInfo.CppType);
+                                // simdType is "simd_value<EntJoy::Mathematics::int2>" — use directly, NOT wrapping in simd_value<>
+                                return $"{simdType}(max(min({v}.x, {hi}.x()), {lo}.x()), max(min({v}.y, {hi}.y()), {lo}.y()))";
+                            }
+                            // Default: use friend functions max/min (works for all SIMD types)
+                            return $"max(min({v}, {hi}), {lo})";
+                        }
                         return $"EntJoy::Mathematics::clamp({v}, {lo}, {hi})";
                     }
                     break;
@@ -948,24 +993,9 @@ namespace NativeTranspiler.Analyzer
                         VarKind k1 = _varAnalyzer.ClassifyExpression(args[1].Expression);
                         if (k0 >= VarKind.Varying || k1 >= VarKind.Varying)
                         {
-                            // Expand as SIMD: (ax-bx)*(ax-bx) + (ay-by)*(ay-by)
-                            // Assumes float2 with _x and _y components
-                            string ax = $"{a}.x";
-                            string ay = $"{a}.y";
-                            string bx = $"{b}.x";
-                            string by = $"{b}.y";
-
-                            // For varying float2: use v_a_x, v_a_y components
-                            if (args[0].Expression is IdentifierNameSyntax id0 && _float2VaryingVars.Contains(id0.Identifier.Text))
-                            {
-                                ax = $"{a}_x";
-                                ay = $"{a}_y";
-                            }
-                            if (args[1].Expression is IdentifierNameSyntax id1 && _float2VaryingVars.Contains(id1.Identifier.Text))
-                            {
-                                bx = $"{b}_x";
-                                by = $"{b}_y";
-                            }
+                            // Expand as SIMD using .x/.y member access on whole-type simd_value<float2>
+                            string ax = $"{a}.x", ay = $"{a}.y";
+                            string bx = $"{b}.x", by = $"{b}.y";
 
                             return $"({ax} - {bx}) * ({ax} - {bx}) + ({ay} - {by}) * ({ay} - {by})";
                         }
@@ -983,8 +1013,9 @@ namespace NativeTranspiler.Analyzer
                         VarKind k0 = _varAnalyzer.ClassifyExpression(args[0].Expression);
                         if (k0 >= VarKind.Varying)
                         {
-                            string ax = $"{a}_x", ay = $"{a}_y";
-                            string bx = $"{b}_x", by = $"{b}_y";
+                            // Use member access on whole-type: v_a.x * v_b.x + v_a.y * v_b.y
+                            string ax = $"{a}.x", ay = $"{a}.y";
+                            string bx = $"{b}.x", by = $"{b}.y";
                             return $"{ax} * {bx} + {ay} * {by}";
                         }
                         return $"EntJoy::Mathematics::dot({a}, {b})";
@@ -1099,62 +1130,61 @@ namespace NativeTranspiler.Analyzer
                     return $"({left} {cppOp} {right})";
                 }
 
-                // Varying comparison → SIMD compare
-                // Ensure both sides have .v for SIMD registers
-                string leftV = leftKind >= VarKind.Varying ? $"{left}.v" : $"{left}";
-                string rightV = rightKind >= VarKind.Varying ? $"{right}.v" : $"{right}";
-                if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
-                    leftV = $"n_set1_ps({left})";
-                else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying)
-                    rightV = $"n_set1_ps({right})";
+                // Varying comparison → SIMD compare (detect int vs float)
+                // Wrap complex expressions in parens so .v binds to the whole expression, not just the last term
+                string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : $"{left}";
+                string rightV = rightKind >= VarKind.Varying ? $"({right}).v" : $"{right}";
 
-                string cmpFunc = op switch
-                {
-                    "<" => "n_cmp_lt_ps",
-                    ">" => "n_cmp_gt_ps",
-                    "<=" => "n_cmp_le_ps",
-                    ">=" => "n_cmp_ge_ps",
-                    "==" => "n_cmp_eq_ps",
-                    "!=" => "n_cmp_ne_ps",
-                    _ => "n_cmp_eq_ps"
-                };
+                bool cmpIsInt = false;
+                foreach (var side in new ExpressionSyntax[] { binary.Left, binary.Right }) {
+                    if (side is IdentifierNameSyntax cid && _variables.TryGetValue(cid.Identifier.Text, out var civ) && civ.CppType == "int") cmpIsInt = true;
+                    if (side is CastExpressionSyntax cce && cce.Expression is IdentifierNameSyntax ccid && _variables.TryGetValue(ccid.Identifier.Text, out var cciv) && cciv.CppType == "int") cmpIsInt = true;
+                }
+                string bc = cmpIsInt ? "n_set1_epi32" : "n_set1_ps";
+                if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying) leftV = $"{bc}({left})";
+                else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying) rightV = $"{bc}({right})";
 
-                // For int comparisons, use epi32 variants
-                bool isIntCmp = leftKind >= VarKind.Varying
-                    && binary.Left is IdentifierNameSyntax cmpLeftId
-                    && _variables.TryGetValue(cmpLeftId.Identifier.Text, out var cmpLeftVar)
-                    && cmpLeftVar.CppType == "int";
-                if (isIntCmp)
-                {
-                    // Check if the expression involves ints
-                    string intCmp = op switch
-                    {
-                        "<" => "n_cmp_lt_epi32",
-                        ">" => "n_cmp_gt_epi32",
-                        "<=" => "n_cmp_le_epi32",
-                        ">=" => "n_cmp_ge_epi32",
-                        "==" => "n_cmp_eq_epi32",
-                        "!=" => "n_cmp_ne_epi32",
+                if (cmpIsInt) {
+                    string ic = op switch {
+                        "<" => "n_cmp_lt_epi32", ">" => "n_cmp_gt_epi32", "<=" => "n_cmp_le_epi32",
+                        ">=" => "n_cmp_ge_epi32", "==" => "n_cmp_eq_epi32", "!=" => "n_cmp_ne_epi32",
                         _ => "n_cmp_eq_epi32"
                     };
-                    return $"simd_mask{{ {intCmp}({leftV}, {rightV}) }}";
+                    return $"simd_mask{{ {ic}({leftV}, {rightV}) }}";
                 }
-
-                return $"simd_mask{{ {cmpFunc}({leftV}, {rightV}) }}";
+                string fc = op switch {
+                    "<" => "n_cmp_lt_ps", ">" => "n_cmp_gt_ps", "<=" => "n_cmp_le_ps",
+                    ">=" => "n_cmp_ge_ps", "==" => "n_cmp_eq_ps", "!=" => "n_cmp_ne_ps",
+                    _ => "n_cmp_eq_ps"
+                };
+                return $"simd_mask{{ {fc}({leftV}, {rightV}) }}";
             }
 
             // Logical operators
             if (binary.IsKind(SyntaxKind.LogicalAndExpression))
             {
-                return anyVarying
-                    ? $"simd_mask{{ n_and_mask({left}.m, {right}.m) }}"
-                    : $"({left} && {right})";
+                if (anyVarying)
+                {
+                    // Wrap scalar bools in simd_mask before accessing .m
+                    if (!left.Contains("simd_mask") && !left.Contains("n_cmp_"))
+                        left = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({left} ? -1 : 0).v, n_set1_epi32(0)) }}";
+                    if (!right.Contains("simd_mask") && !right.Contains("n_cmp_"))
+                        right = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({right} ? -1 : 0).v, n_set1_epi32(0)) }}";
+                    return $"simd_mask{{ n_and_mask({left}.m, {right}.m) }}";
+                }
+                return $"({left} && {right})";
             }
             if (binary.IsKind(SyntaxKind.LogicalOrExpression))
             {
-                return anyVarying
-                    ? $"simd_mask{{ n_or_mask({left}.m, {right}.m) }}"
-                    : $"({left} || {right})";
+                if (anyVarying)
+                {
+                    if (!left.Contains("simd_mask") && !left.Contains("n_cmp_"))
+                        left = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({left} ? -1 : 0).v, n_set1_epi32(0)) }}";
+                    if (!right.Contains("simd_mask") && !right.Contains("n_cmp_"))
+                        right = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({right} ? -1 : 0).v, n_set1_epi32(0)) }}";
+                    return $"simd_mask{{ n_or_mask({left}.m, {right}.m) }}";
+                }
+                return $"({left} || {right})";
             }
 
             // Arithmetic operators
@@ -1182,16 +1212,26 @@ namespace NativeTranspiler.Analyzer
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
             string targetTypeStr = cast.Type.ToString();
 
-            // For varying int -> unsigned int: just use .v (comparison functions handle bit pattern)
+            // For varying int -> unsigned int: keep {inner} as-is (n_cmp_*_epi32 works on raw n_int)
             if (innerKind >= VarKind.Varying && (targetTypeStr == "uint" || targetTypeStr == "unsigned int"))
-                return $"{inner}.v";
+                return $"{inner}";
 
-            // (int)floatExpr → convert
+            // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
+            if (innerKind >= VarKind.Varying)
+            {
+                if (targetTypeStr.Contains("int2"))
+                    return $"simd_value<EntJoy::Mathematics::int2>::convert({inner})";
+                if (targetTypeStr == "int" || targetTypeStr == "System.Int32")
+                    return $"simd_value<int>::convert({inner})";
+                // (float2)simd_value<float2> → just the inner value (identity conversion)
+                if (targetTypeStr.Contains("float2"))
+                    return inner;
+            }
+
+            // (int)floatExpr → scalar convert (uniform path)
             try
             {
                 var targetType = _semanticModel.GetTypeInfo(cast.Type).Type;
-                if (targetType?.SpecialType == SpecialType.System_Int32 && innerKind >= VarKind.Varying)
-                    return $"simd_value<int>::convert({inner})";
                 if (targetType != null)
                     return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType)}){inner}";
             }
@@ -1274,45 +1314,21 @@ namespace NativeTranspiler.Analyzer
         /// 提取 SIMD 值中的 x/y 分量。
         /// 用于 float2 SIMD gather → 组件赋值
         /// </summary>
-        private string GetSIMDComponent(string simdExpr, string component)
-        {
-            // Transform simd_value<Type>::gather(base, idx) -> simd_value<float>::gathf/gathfy(base, idx.v)
-            if (simdExpr.Contains("::gather"))
-            {
-                int gPos = simdExpr.IndexOf("::gather", System.StringComparison.Ordinal);
-                if (gPos > 0)
-                {
-                    string suffix = simdExpr.Substring(gPos + 8);
-                    // Add .v to the last parameter (SIMD int index -> raw n_int for gathf)
-                    int lastComma = suffix.LastIndexOf(',');
-                    if (lastComma >= 0)
-                    {
-                        int closeParen = suffix.LastIndexOf(')');
-                        string afterComma = closeParen >= 0
-                            ? suffix.Substring(lastComma + 1, closeParen - lastComma - 1)
-                            : suffix.Substring(lastComma + 1);
-                        string trimmed = afterComma.Trim();
-                        if (!trimmed.EndsWith(".v"))
-                            suffix = suffix.Substring(0, lastComma + 1) + trimmed + ".v)";
-                    }
-                    if (component == "x") return "simd_value<float>::gathf" + suffix;
-                    if (component == "y") return "simd_value<float>::gathfy" + suffix;
-                }
-            }
-            return simdExpr;
-        }
-
         /// <summary>
         /// 获取 C# 类型对应的 SIMD C++ 类型字符串
         /// </summary>
         private static string? GetSIMDTypeString(string cppType)
         {
-            if (cppType == "float" || cppType.Contains("float2"))
+            if (cppType.Contains("float2"))
+                return "simd_value<EntJoy::Mathematics::float2>";
+            if (cppType.Contains("int2"))
+                return "simd_value<EntJoy::Mathematics::int2>";
+            if (cppType == "float")
                 return "simd_value<float>";
-            if (cppType == "int" || cppType.Contains("int2"))
+            if (cppType == "int")
                 return "simd_value<int>";
             if (cppType == "bool")
-                return "simd_value<int>"; // bool stored as 0/-1 in int reg
+                return "simd_value<int>";
             return null;
         }
 

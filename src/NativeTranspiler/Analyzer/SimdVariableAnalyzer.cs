@@ -166,11 +166,13 @@ namespace NativeTranspiler.Analyzer
                     string name = variable.Identifier.Text;
                     if (_variables.ContainsKey(name)) continue;
 
-                    var typeInfo = _semanticModel.GetTypeInfo(localDecl.Declaration.Type);
-                    if (typeInfo.Type == null) continue;
-
-                    string cppType = GetCppTypeString(typeInfo.Type);
-                    // 先标记为 uniform，后续传播会修正
+                    // Text-based type detection (safe without semantic model)
+                    string typeText = localDecl.Declaration.Type.ToString();
+                    string cppType = "int";
+                    if (typeText.Contains("float2")) cppType = "EntJoy::Mathematics::float2";
+                    else if (typeText.Contains("int2")) cppType = "EntJoy::Mathematics::int2";
+                    else if (typeText == "float") cppType = "float";
+                    else if (typeText == "bool") cppType = "bool";
                     AddVariable(name, cppType, VarKind.Uniform, null);
                 }
             }
@@ -184,38 +186,31 @@ namespace NativeTranspiler.Analyzer
                     {
                         string name = v.Identifier.Text;
                         if (!_variables.ContainsKey(name))
-                        {
                             AddVariable(name, "int", VarKind.Varying, null);
-                        }
-                        else
-                        {
-                            // for 循环变量覆盖之前的分类
-                            _variables[name].Kind = VarKind.Varying;
-                            _variables[name].CppType = "int";
-                        }
+                        else { _variables[name].Kind = VarKind.Varying; _variables[name].CppType = "int"; }
                     }
                 }
             }
         }
 
         /// <summary>
-        /// 遍历所有赋值语句，传播 classification
+        /// 遍历所有赋值和局部初始化，按文档顺序传播 classification。
+        /// 关键：必须按文档顺序处理，使 `float distSq = init; if(...) best = distSq;`
+        /// 中 distSq 在赋给 best 之前已被正确分类为 Varying。
         /// </summary>
         private void PropagateAssignments(SyntaxNode node)
         {
-            foreach (var assignment in node.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+            foreach (var child in node.DescendantNodes())
             {
-                ProcessAssignment(assignment);
-            }
-            // Also handle local variable declarations with initializers
-            foreach (var localDecl in node.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
-            {
-                foreach (var variable in localDecl.Declaration.Variables)
+                if (child is AssignmentExpressionSyntax assignment)
                 {
-                    if (variable.Initializer != null)
-                    {
-                        ProcessLocalInitializer(variable.Identifier.Text, variable.Initializer.Value);
-                    }
+                    ProcessAssignment(assignment);
+                }
+                else if (child is VariableDeclaratorSyntax varDecl && varDecl.Initializer != null)
+                {
+                    string name = varDecl.Identifier.Text;
+                    if (_variables.ContainsKey(name))
+                        ProcessLocalInitializer(name, varDecl.Initializer.Value);
                 }
             }
         }
@@ -372,34 +367,25 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        
         private VarKind ClassifyIdentifier(IdentifierNameSyntax identifier)
         {
             string name = identifier.Identifier.Text;
-
-            // 检查是否是已知变量
-            if (_variables.TryGetValue(name, out var info))
-                return info.Kind;
-
-            // 检查是否是 Job struct 字段
-            var symbol = _semanticModel.GetSymbolInfo(identifier).Symbol;
-            if (symbol is IFieldSymbol field && !field.IsStatic)
+            if (_variables.TryGetValue(name, out var info)) return info.Kind;
+            if (_jobStruct != null)
             {
-                if (field.ContainingType.Equals(_jobStruct, SymbolEqualityComparer.Default))
+                try
                 {
-                    // 容器类型字段不直接分类；容器名本身是 uniform
-                    if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                        return VarKind.Uniform;
-
-                    // 标量字段 → uniform
-                    return VarKind.Uniform;
+                    var members = _jobStruct.GetMembers(name);
+                    if (members.Length > 0 && members[0] is IFieldSymbol field && !field.IsStatic)
+                        return NativeTranspiler.IsEntJoyNativeContainerType(field.Type) ? VarKind.Uniform : VarKind.Uniform;
                 }
+                catch { }
             }
-
-            // 未知标识符 → uniform
             return VarKind.Uniform;
         }
 
-        private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
+private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             // 处理 float2.x / float2.y
             string memberName = memberAccess.Name.Identifier.Text;
@@ -460,48 +446,35 @@ namespace NativeTranspiler.Analyzer
             return Max(leftKind, rightKind);
         }
 
+        
         private VarKind ClassifyInvocation(InvocationExpressionSyntax invocation, HashSet<string> visiting)
         {
-            var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-            if (symbol == null) return VarKind.Uniform;
-
-            string containingType = symbol.ContainingType?.ToDisplayString() ?? "";
-
-            // math.min/max/clamp/abs/floor/distancesq/dot — 结果分类 = parameters 的 max
-            if (containingType == "EntJoy.Mathematics.math"
-                || containingType == "System.MathF")
+            try
             {
-                VarKind maxKind = VarKind.Uniform;
-                foreach (var arg in invocation.ArgumentList.Arguments)
+                var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+                if (symbol == null) return VarKind.Uniform;
+                string ct = symbol.ContainingType?.ToDisplayString() ?? "";
+                if (ct == "EntJoy.Mathematics.math" || ct == "System.MathF")
                 {
-                    var argKind = ClassifyExpressionInternal(arg.Expression, visiting);
-                    if (argKind > maxKind) maxKind = argKind;
+                    VarKind mk = VarKind.Uniform;
+                    foreach (var arg in invocation.ArgumentList.Arguments)
+                    {
+                        var ak = ClassifyExpressionInternal(arg.Expression, visiting);
+                        if (ak > mk) mk = ak;
+                    }
+                    return mk;
                 }
-                return maxKind;
             }
-
-            // 其他函数调用 → 保守返回 uniform
+            catch { }
             return VarKind.Uniform;
         }
 
-        /// <summary>从表达式左侧提取变量名</summary>
+
         private static string? GetLHSVariableName(ExpressionSyntax expr)
         {
-            switch (expr)
-            {
-                case IdentifierNameSyntax id:
-                    return id.Identifier.Text;
-                case MemberAccessExpressionSyntax member:
-                    // float2.x = y — 取左侧对象名
-                    if (member.Expression is IdentifierNameSyntax obj)
-                        return obj.Identifier.Text;
-                    return null;
-                default:
-                    return null;
-            }
+            return expr is IdentifierNameSyntax id ? id.Identifier.Text : null;
         }
 
-        /// <summary>从表达式提取变量名（如果是简单标识符）</summary>
         private static string? GetExprVariableName(ExpressionSyntax expr)
         {
             return expr is IdentifierNameSyntax id ? id.Identifier.Text : null;
