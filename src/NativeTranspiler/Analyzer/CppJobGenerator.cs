@@ -141,6 +141,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
             sb.AppendLine("#include \"../../NativeDll/NativeSIMD.h\"");
+            sb.AppendLine("#include \"../../NativeDll/SimdValue.h\"");
             sb.AppendLine();
 
             // IJobChunk: 生成独立 Execute 函数
@@ -228,18 +229,16 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // 先用标量翻译器翻译 body（余量循环需要标量体）
-            var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, autoSIMD == NativeTranspiler.AutoSIMD.Enabled);
+            var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, /* scalar body, no SIMD */ false);
             var scalarBody = scalarTranslator.Translate(methodSyntax.Body);
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                // 分析循环体是否可向量化
-                var analyzer = new LoopPatternAnalyzer(semanticModel);
-                var pattern = analyzer.Analyze(methodSyntax, indexParamName);
-
-                if (pattern.IsVectorizable)
+                // 分析 Execute 体是否适合外层 SIMD
+                var analyzer = new SimdEligibilityAnalyzer(semanticModel);
+                if (analyzer.Analyze(methodSyntax))
                 {
-                    var simdGen = new SimdCodeGenerator(pattern);
+                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName);
                     var simdCode = simdGen.Generate(scalarBody);
                     sb.Append(simdCode);
                     sb.AppendLine("}");
@@ -274,8 +273,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            bool enableSIMD = autoSIMD == NativeTranspiler.AutoSIMD.Enabled;
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, enableSIMD);
+            bool scalar_noSIMD = false;
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, scalar_noSIMD);
             var bodyCode = translator.Translate(methodSyntax.Body);
             // 将所有 bool 条件字段替换为常量值
             for (int i = 0; i < boolFields.Count; i++)
