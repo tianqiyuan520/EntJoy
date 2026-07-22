@@ -24,13 +24,14 @@ struct simd_value<float> {
     void store(float* p) const { n_store_ps(p, v); }
 
     template<typename Tarr>
-    static simd_value gathf(const Tarr* base, n_int idx) {
+    static inline simd_value gathf(const Tarr* base, n_int idx) {
         return simd_value{ n_gather_ps<sizeof(Tarr)>((const float*)base, idx) };
     }
     template<typename Tarr>
-    static simd_value gathfy(const Tarr* base, n_int idx) {
+    static inline simd_value gathfy(const Tarr* base, n_int idx) {
         return simd_value{ n_gather_ps<sizeof(Tarr)>(((const float*)base) + 1, idx) };
     }
+
 
     friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ n_add_ps(a.v, b.v) }; }
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ n_sub_ps(a.v, b.v) }; }
@@ -92,7 +93,7 @@ struct simd_value<int> {
     static simd_value load(const int* p) { return simd_value{ n_load_epi32(p) }; }
     void store(int* p) const { n_store_epi32(p, v); }
 
-    static simd_value gather(const int* base, simd_value idx) {
+    static inline simd_value gather(const int* base, simd_value idx) {
         return simd_value{ n_gather_epi32(base, idx.v) };
     }
 
@@ -214,19 +215,19 @@ struct simd_value<EntJoy::Mathematics::int2> {
 // ============================================================
 // Global SIMD operations
 // ============================================================
-static simd_value<float> blend(simd_value<float> f, simd_value<float> t, simd_mask m) {
+static inline simd_value<float> blend(simd_value<float> f, simd_value<float> t, simd_mask m) {
     return simd_value<float>{ n_blend_ps(f.v, t.v, m.m) };
 }
-static simd_value<int> blend(simd_value<int> f, simd_value<int> t, simd_mask m) {
+static inline simd_value<int> blend(simd_value<int> f, simd_value<int> t, simd_mask m) {
     return simd_value<int>{ n_blend_epi32(f.v, t.v, m.m) };
 }
-static float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
-static float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
-static float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }
-static int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
-static int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
-static int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
+static inline float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
+static inline float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
+static inline float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }
+static inline int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
+static inline int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
+static inline int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
 
 // SIMD int element-wise min/max (named to avoid Windows min/max macro conflict)
-static simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }
-static simd_value<int> simd_min(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_min_epi32(a.v, b.v) }; }
+static inline simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }
+static inline simd_value<int> simd_min(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_min_epi32(a.v, b.v) }; }

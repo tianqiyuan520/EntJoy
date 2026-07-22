@@ -556,6 +556,72 @@ static inline n_int n_gather_epi32(const int* base, n_int indices) {
 }
 
 // ============================================================
+// Masked gather (ISPC-style: hardware skips inactive lanes)
+// ============================================================
+template<int stride>
+static inline n_float n_gather_masked_ps(const float* base, n_int indices, n_mask mask) {
+#if defined(NSIMD_AVX2)
+    // AVX2: _mm256_mask_i32gather_ps takes __m256 mask (n_mask = __m256), pass directly
+    n_float src = _mm256_setzero_ps();
+    return _mm256_mask_i32gather_ps(src, base, indices, mask, stride);
+#elif defined(NSIMD_NEON)
+    // NEON: mask is uint32x4_t, store as uint32 to check per lane
+    int w = NSIMD_WIDTH;
+    int idx[8];
+    float val[8];
+    uint32_t maskBits[8];
+    n_store_epi32(idx, indices);
+    vst1q_u32(maskBits, mask);
+    const char* cb = (const char*)base;
+    for (int i = 0; i < w; i++)
+        val[i] = maskBits[i] ? *(const float*)(cb + idx[i] * stride) : 0.0f;
+    return n_load_ps(val);
+#else
+    // SSE4/scalar fallback: mask is float type, store as float bits
+    int w = NSIMD_WIDTH;
+    int idx[8];
+    float val[8];
+    float maskBits[8];
+    n_store_epi32(idx, indices);
+    n_store_ps(maskBits, mask);
+    const char* cb = (const char*)base;
+    for (int i = 0; i < w; i++)
+        val[i] = (*(uint32_t*)&maskBits[i] != 0) ? *(const float*)(cb + idx[i] * stride) : 0.0f;
+    return n_load_ps(val);
+#endif
+}
+
+template<int stride = 8>
+static inline n_int n_gather_masked_epi32(const int* base, n_int indices, n_mask mask) {
+#if defined(NSIMD_AVX2)
+    n_int src = _mm256_setzero_si256();
+    return _mm256_mask_i32gather_epi32(src, base, indices, _mm256_castps_si256(mask), stride);
+#elif defined(NSIMD_NEON)
+    int w = NSIMD_WIDTH;
+    int idx[8];
+    int val[8];
+    uint32_t maskBits[8];
+    n_store_epi32(idx, indices);
+    vst1q_u32(maskBits, mask);
+    const char* cb = (const char*)base;
+    for (int i = 0; i < w; i++)
+        val[i] = maskBits[i] ? *(const int*)(cb + idx[i] * stride) : 0;
+    return n_load_epi32(val);
+#else
+    int w = NSIMD_WIDTH;
+    int idx[8];
+    int val[8];
+    float maskBits[8];
+    n_store_epi32(idx, indices);
+    n_store_ps(maskBits, mask);
+    const char* cb = (const char*)base;
+    for (int i = 0; i < w; i++)
+        val[i] = (*(uint32_t*)&maskBits[i] != 0) ? *(const int*)(cb + idx[i] * stride) : 0;
+    return n_load_epi32(val);
+#endif
+}
+
+// ============================================================
 // Lane extraction (SIMD register -> scalar)
 // ============================================================
 static inline float n_extract_lane_f32(n_float v, int lane) {
