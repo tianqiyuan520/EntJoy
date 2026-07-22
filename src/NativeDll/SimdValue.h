@@ -178,12 +178,25 @@ struct simd_value<EntJoy::Mathematics::int2> {
     static simd_value gather(const EntJoy::Mathematics::int2* base, simd_value<int> idx) {
         // Use float gather (proven correct for float2) then cast to int via bitcast
         simd_value v;
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX2)
         v.x.v = _mm256_castps_si256(_mm256_i32gather_ps((const float*)base, idx.v, 8));
         v.y.v = _mm256_castps_si256(_mm256_i32gather_ps(((const float*)base) + 1, idx.v, 8));
 #else
-        v.x = simd_value<int>::gather((const int*)base, idx);
-        v.y = simd_value<int>::gather(((const int*)base) + 1, idx);
+        // H2+H3: SSE4/NEON/scalar fallback with explicit stride=8
+        // int2 is 8 bytes, so stride must be 8, not the default 4
+        const int* baseInt = (const int*)base;
+        const int* baseIntY = (const int*)base + 1;
+        int w = NSIMD_WIDTH;
+        int idxArr[8];
+        int xArr[8];
+        int yArr[8];
+        n_store_epi32(idxArr, idx.v);
+        for (int i = 0; i < w; i++) {
+            xArr[i] = *(const int*)((const char*)baseInt + idxArr[i] * 8);
+            yArr[i] = *(const int*)((const char*)baseIntY + idxArr[i] * 8);
+        }
+        v.x.v = n_load_epi32(xArr);
+        v.y.v = n_load_epi32(yArr);
 #endif
         return v;
     }

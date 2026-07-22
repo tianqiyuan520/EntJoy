@@ -32,7 +32,7 @@ namespace NativeTranspiler.Analyzer
                 return GenerateRegisterSIMD(scalarBody);
             else if (IsReductionBody())
                 return GenerateReductionSIMD(scalarBody);
-            else if (scalarBody.Contains("for (int dx = -CellsToLoop; dx <= CellsToLoop; dx++)"))
+            else if (IsFindWithinJob())
                 return GenerateISPCFindWithinSIMD(scalarBody);
             else
                 return GeneratePerLane(scalarBody);
@@ -121,14 +121,19 @@ namespace NativeTranspiler.Analyzer
             foreach (var kvp in _boolFields)
                 sb.AppendLine($"                bool {kvp.Key} = {kvp.Value};");
             sb.AppendLine("                EntJoy::Mathematics::float2 qbuf; qbuf.x() = n_extract_lane_f32(v_q.x.v, lane); qbuf.y() = n_extract_lane_f32(v_q.y.v, lane);");
+            // H4: wrap lane body in do{ }while(false) so that return->break exits the lane, not just innermost for
+            sb.AppendLine("                // H4: do-while-false wrapper for safe early-exit (return -> break)");
+            sb.AppendLine("                do");
+            sb.AppendLine("                {");
             foreach (var line in scalarBody.Split('\n'))
             {
                 var l = line.TrimEnd();
                 if (string.IsNullOrEmpty(l)) continue;
                 l = l.Replace("QueryPositions_ptr[index]", "qbuf");
-                l = l.Replace("return;", "break;"); // per-lane safety: return would skip other lanes
-                sb.Append("                ").AppendLine(l);
+                l = l.Replace("return;", "break;");
+                sb.Append("                    ").AppendLine(l);
             }
+            sb.AppendLine("                } while(false);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
@@ -141,11 +146,17 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
+            // H4: wrap scalar remainder in do-while(false) so return->break exits current index, not whole function
+            sb.AppendLine("    do");
+            sb.AppendLine("    {");
             foreach (var line in scalarBody.Split('\n'))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
-                sb.Append("    ").AppendLine(line.TrimEnd());
+                var l = line.TrimEnd();
+                l = l.Replace("return;", "break;");
+                sb.Append("    ").AppendLine(l);
             }
+            sb.AppendLine("    } while(false);");
             sb.AppendLine("    }");
             return sb.ToString();
         }
@@ -193,14 +204,18 @@ namespace NativeTranspiler.Analyzer
 
             // Transform the scalar body: replace reduction loops with SIMD versions
             string transformed = TransformReductionLoops(scalarBody);
-            // Per-lane safety: return would skip other lanes
-            transformed = transformed.Replace("return;", "break;");
+            // H4: wrap lane body in do-while(false) so return->break exits entire lane
+            sb.AppendLine("                // H4: do-while-false wrapper for safe early-exit (return -> break)");
+            sb.AppendLine("                do");
+            sb.AppendLine("                {");
             foreach (var line in transformed.Split('\n'))
             {
                 var l = line.TrimEnd();
                 if (string.IsNullOrEmpty(l)) continue;
-                sb.Append("                ").AppendLine(l);
+                l = l.Replace("return;", "break;");
+                sb.Append("                    ").AppendLine(l);
             }
+            sb.AppendLine("                } while(false);");
 
             sb.AppendLine("            }");
             sb.AppendLine("        }");
@@ -227,7 +242,9 @@ namespace NativeTranspiler.Analyzer
             // Check if IgnoreSelf is active (from bool field variant dispatch)
             // The scalar body retains "IgnoreSelf" as variable name (not substituted to true/false),
             // so we check _boolFields to know which variant is being generated.
-            bool ignoreSelfActive = _boolFields.Values.Any(v => v == "true");
+            // H5: use TryGetValue("IgnoreSelf", ...) instead of .Any() to avoid false positives
+            // from unrelated bool fields on future jobs
+            bool ignoreSelfActive = _boolFields.TryGetValue("IgnoreSelf", out var ignoreSelfVal) && ignoreSelfVal == "true";
 
             sb.AppendLine("    // --- ISPC-style SIMD: 8-wide mask-managed (no per-lane extraction) ---");
             sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
@@ -307,6 +324,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                        // ===== Inner reduction loop (mask-managed while) =====");
             sb.AppendLine("                        // Each lane has its own i (start..end), advances independently");
             sb.AppendLine("                        simd_value<int> v_i_red = v_range.x;");
+            sb.AppendLine("                        // C1: clamp v_i_red to 0 before gather — prevent unmasked gather with -1 from AV");
+            sb.AppendLine("                        v_i_red = simd_max(v_i_red, v_zero);");
             sb.AppendLine("                        simd_value<int> v_end = v_range.y;");
             sb.AppendLine("                        #pragma loop(ivdep)");
             sb.AppendLine("                        while (v_active.any_true())");
@@ -586,7 +605,7 @@ namespace NativeTranspiler.Analyzer
 
             // Modify scalar body: replace QueryPositions_ptr[index] with qbuf,
             // remove the two centerCell compute lines, guard writes,
-            // and replace return with break (per-lane safety)
+            // and exit the lane on found==MaxNeighbor (not whole function)
             string modifiedBody = scalarBody.Replace("QueryPositions_ptr[index]", "qbuf");
             // Remove auto-generated int2 centerCell compute lines
             var bodyLines = new List<string>();
@@ -603,16 +622,20 @@ namespace NativeTranspiler.Analyzer
             modifiedBody = modifiedBody.Replace(
                 "Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y();",
                 "if (found < MaxNeighbor) { Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y(); }");
-            // Replace return with break (per-lane: break exits inner for-loop only)
-            modifiedBody = modifiedBody.Replace("return;", "break;");
+            // H4 wrap lane body in do-while(false) so return->break exits entire lane, not just innermost for
+            sb.AppendLine("                // H4: do-while-false wrapper for safe early-exit (return -> break)");
+            sb.AppendLine("                do");
+            sb.AppendLine("                {");
 
             foreach (var line in modifiedBody.Split('\n'))
             {
                 var l = line.TrimEnd();
                 if (string.IsNullOrEmpty(l)) continue;
-                sb.Append("                ").AppendLine(l);
+                l = l.Replace("return;", "break;");
+                sb.Append("                    ").AppendLine(l);
             }
 
+            sb.AppendLine("                } while(false);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
@@ -750,6 +773,21 @@ namespace NativeTranspiler.Analyzer
                 }
             }
             return false;
+        }
+
+        // ----------------------------------------------------------------
+        // FindWithin detection (via AST, not string matching)
+        // ----------------------------------------------------------------
+        private bool IsFindWithinJob()
+        {
+            // Check whether the containing struct type has a field named "CellsToLoop".
+            // Only FindWithinJobPointer has this field — much more robust than string matching
+            // on generated C++ code (M4).
+            var containingType = _methodSyntax.Ancestors().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>().FirstOrDefault();
+            if (containingType == null) return false;
+            var typeSymbol = _semanticModel.GetDeclaredSymbol(containingType) as INamedTypeSymbol;
+            if (typeSymbol == null) return false;
+            return typeSymbol.GetMembers("CellsToLoop").Any();
         }
     }
 }
