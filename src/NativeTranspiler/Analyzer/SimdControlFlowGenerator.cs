@@ -252,7 +252,12 @@ namespace NativeTranspiler.Analyzer
 
                 conditions.Add(condVar);
                 _currentMask = trueMask;
-                AppendLine($"if ({trueMask}.any_true())");
+                // ★ any_true() guard only needed when body has goto (break/continue/return)
+                //   Pure blend bodies are safe: blendv with mask=0 is a NOP.
+                if (HasControlFlowGoto(current.Statement))
+                {
+                    AppendLine($"if ({trueMask}.any_true())");
+                }
                 GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
 
                 if (current.Else == null) break;
@@ -272,7 +277,12 @@ namespace NativeTranspiler.Analyzer
             if (elseBody != null)
             {
                 _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
-                AppendLine($"if ({_currentMask}.any_true())");
+                // ★ any_true() guard only needed when body has goto (break/continue/return)
+                //   Pure blend bodies are safe: blendv with mask=0 is a NOP.
+                if (HasControlFlowGoto(elseBody))
+                {
+                    AppendLine($"if ({_currentMask}.any_true())");
+                }
                 GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
             }
 
@@ -295,6 +305,20 @@ namespace NativeTranspiler.Analyzer
             for (int i = 1; i < condVars.Count; i++)
                 expr = $"simd_mask{{ n_and_mask({expr}.m, simd_mask{{ n_not_mask({condVars[i]}.m) }}.m) }}";
             return expr;
+        }
+
+        /// <summary>
+        /// 检查语句中是否包含会翻译为 goto 的控制流（break/continue/return）。
+        /// 如果为 false，则 if-body 只包含 blend/赋值操作，any_true() 守卫是冗余的。
+        /// </summary>
+        private static bool HasControlFlowGoto(SyntaxNode node)
+        {
+            foreach (var child in node.DescendantNodesAndSelf())
+            {
+                if (child is BreakStatementSyntax or ContinueStatementSyntax or ReturnStatementSyntax)
+                    return true;
+            }
+            return false;
         }
 
         // ================================================================
