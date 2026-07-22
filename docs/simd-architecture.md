@@ -182,15 +182,19 @@ struct simd_mask {
 
 分析 `Execute` 方法体，判断是否适合外层 SIMD。
 
-**准入条件**：
+**准入条件**（外层严格检查 `CheckStatement`）：
 - 无 return / break / continue
+- 无 while / do 循环（for 循环允许）
 - 无函数调用（`EntJoy.Mathematics.math` 和 `System.MathF` 除外）
 - 无间接索引（`arr[hash[i]]`）
 
 **允许的（安全）**：
 - for 循环（每通道独立跑自己的，互不干扰）
 - if-else（blend 处理）
-- for 体内的 break/continue（每通道独立控制流）
+
+**for 体内宽松检查 `CheckStatementLoose`**：
+- 允许 break/continue（仅影响当前通道，不影响其他 SIMD lane）
+- 递归检查嵌套 for / if-else
 
 ### OuterSimdGenerator
 
@@ -367,24 +371,35 @@ src/
     └── Analyzer/
         ├── SimdEligibilityAnalyzer.cs  ← Execute 体 SIMD 安全性分析
         ├── OuterSimdGenerator.cs       ← 外层 SIMD 代码生成
-        └── CppJobGenerator.cs          ← 调度标量/SIMD 路径
+        └── CppJobGenerator.cs          ← 调度标量/SIMD + 适配函数生成
+            ├─ GenerateJobHeader        ─ .h 头文件
+            ├─ GenerateJobImplementation─ .cpp 实现（IJob / IJobChunk / IJobEntity / ParallelFor）
+            │   ├─ 标量（MSVC ivdep）
+            │   └─ AutoSIMD=Enabled
+            │       ├─ Register SIMD（简单 SoA）
+            │       └─ Per-lane（复杂 body，寄存器提取）
+            ├─ GenerateJobAdapter       ─ 适配函数（消除 C# 委托桥接）
+            │   ├─ _Adapter（ParallelFor）
+            │   ├─ _RangeAdapter（IJobChunk 范围调度）
+            │   └─ _EntityBatchAdapter（IJobEntity 批量调度）
+            └─ 辅助函数集               ─ CalculateFieldOffset / GetCppElementType / …（~500 行）
 ```
 
 ## 关键文件说明
 
 | 文件 | 职责 | 行数 |
 |---|---|---|
-| `NativeSIMD.h` | 平台检测、所有 n_* 函数、水平规约、gather | ~420 |
+| `NativeSIMD.h` | 平台检测、所有 n_* 函数、水平规约、gather、lane 提取 | ~520 |
 | `SimdValue.h` | simd_value<float>/<int>/<float2>/<int2>、blend、hmin/hmax/hsum | ~130 |
-| `SimdEligibilityAnalyzer.cs` | 分析 Execute 体是否安全外层 SIMD | ~170 |
-| `OuterSimdGenerator.cs` | 寄存器 SIMD 或 per-lane 代码生成 | ~200 |
-| `CppJobGenerator.cs` | AutoSIMD 分派、Standard + Variant 双路径 | ~300 |
+| `SimdEligibilityAnalyzer.cs` | 分析 Execute 体是否安全外层 SIMD（两层校验：外层严格，for 体内宽松） | ~270 |
+| `OuterSimdGenerator.cs` | 寄存器 SIMD 或 per-lane（寄存器提取）代码生成 | ~200 |
+| `CppJobGenerator.cs` | AutoSIMD 分派、Standard/Variant/Bool 变体、适配函数生成（Adapter/RangeAdapter/EntityBatchAdapter） | ~1380 |
 
 ---
 
 ## 后续优化方向
 
-1. **per-lane 寄存器提取**：实现 `n_extract_lane_f32` 消除 buffer，保留 MLP 收益
+1. ~~**per-lane 寄存器提取**：已实现 `n_extract_lane_f32`/`n_extract_lane_epi32`，OuterSimdGenerator 已使用寄存器代替 buffer，保留 gather MLP 收益~~ ✅
 2. **for_masked 内层循环**：对包含内循环的 body 在 SIMD 层面处理
 3. **IJobEntity 适配**：ECS 组件系统天然 SoA，寄存器 SIMD 路径收益最大
 4. **IJobChunk 适配**：chunk 内组件连续数组，与 IJobEntity 同理

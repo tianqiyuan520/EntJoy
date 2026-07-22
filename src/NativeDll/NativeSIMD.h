@@ -360,6 +360,48 @@ static inline n_int n_gather_epi32(const int* base, n_int indices) {
 #endif
 
 // ============================================================
+// Lane extraction (SIMD register -> scalar)
+// ============================================================
+static inline float n_extract_lane_f32(n_float v, int lane) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    // AVX2/AVX: lane 0-3 -> low 128, lane 4-7 -> high 128
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 sel = lane < 4 ? lo : hi;
+    int idx = lane & 3;
+    return _mm_cvtss_f32(_mm_shuffle_ps(sel, sel, _MM_SHUFFLE(idx, idx, idx, idx)));
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(lane, lane, lane, lane)));
+#elif defined(NSIMD_NEON)
+    return vgetq_lane_f32(v, lane);
+#else
+    (void)lane;
+    return v;
+#endif
+}
+
+static inline int n_extract_lane_epi32(n_int v, int lane) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128i lo = _mm256_castsi256_si128(v);
+    __m128i hi = _mm256_extractf128_si256(v, 1);
+    __m128i sel = lane < 4 ? lo : hi;
+    int idx = lane & 3;
+    alignas(16) int buf[4];
+    _mm_store_si128((__m128i*)buf, sel);
+    return buf[idx];
+#elif defined(NSIMD_SSE4)
+    alignas(16) int buf[4];
+    _mm_store_si128((__m128i*)buf, v);
+    return buf[lane];
+#elif defined(NSIMD_NEON)
+    return vgetq_lane_s32(v, lane);
+#else
+    (void)lane;
+    return v;
+#endif
+}
+
+// ============================================================
 // All-zero test
 // ============================================================
 static inline int n_all_zero(n_mask mask) {

@@ -12,6 +12,8 @@ struct SimdInfo {
         std::fprintf(stderr, "[SIMD] AVX2 8-wide\n");
 #elif defined(__AVX__)
         std::fprintf(stderr, "[SIMD] AVX 8-wide\n");
+#elif defined(__SSE4_2__) || defined(__SSE4_1__) || defined(__SSE__) || defined(_M_X64)
+        std::fprintf(stderr, "[SIMD] SSE4 4-wide\n");
 #elif defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
         std::fprintf(stderr, "[SIMD] NEON 4-wide\n");
 #else
