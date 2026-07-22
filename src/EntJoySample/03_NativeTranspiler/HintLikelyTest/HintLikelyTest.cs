@@ -1,5 +1,27 @@
-﻿namespace EntJoySample.HintLikelyTest
+﻿using System;
+using System.Runtime.InteropServices;
+
+namespace EntJoySample.HintLikelyTest
 {
+    /// <summary>
+    /// 直接在测试文件中定义 DllImport 绑定，避免依赖 SourceGenerator 生成的 NativeTranspiler.Bindings。
+    /// </summary>
+    internal static class HintNativeExports
+    {
+        const string NATIVE_DLL = "NativeDll";
+
+        [DllImport(NATIVE_DLL, EntryPoint = "SharpNative_Static__global_namespace__EntJoySample_HintLikelyTest_HintLikely_TestLikelyCpp")]
+        public static extern int TestLikelyCpp(int x);
+
+        [DllImport(NATIVE_DLL, EntryPoint = "SharpNative_Static__global_namespace__EntJoySample_HintLikelyTest_HintLikely_TestUnlikelyCpp")]
+        public static extern int TestUnlikelyCpp(int x);
+
+        [DllImport(NATIVE_DLL, EntryPoint = "SharpNative_Static__global_namespace__EntJoySample_HintLikelyTest_HintLikely_TestLikelyIspc")]
+        public static extern int TestLikelyIspc(int x);
+
+        [DllImport(NATIVE_DLL, EntryPoint = "SharpNative_Static__global_namespace__EntJoySample_HintLikelyTest_HintLikely_TestUnlikelyIspc")]
+        public static extern int TestUnlikelyIspc(int x);
+    }
     /// <summary>
     /// 验证 Hint.Likely / Hint.Unlikely 在 NativeTranspiler 中的正确性：
     /// - C++ 后端应生成 `[[likely]]` / `[[unlikely]]`
@@ -89,10 +111,10 @@
             Console.WriteLine("\n--- Native (via generated bindings) ---");
             try
             {
-                int r1 = NativeTranspiler.Bindings.NativeExports.TestLikelyCpp(5);
-                int r2 = NativeTranspiler.Bindings.NativeExports.TestLikelyCpp(-1);
-                int r3 = NativeTranspiler.Bindings.NativeExports.TestUnlikelyCpp(-1);
-                int r4 = NativeTranspiler.Bindings.NativeExports.TestUnlikelyCpp(5);
+                int r1 = HintNativeExports.TestLikelyCpp(5);
+                int r2 = HintNativeExports.TestLikelyCpp(-1);
+                int r3 = HintNativeExports.TestUnlikelyCpp(-1);
+                int r4 = HintNativeExports.TestUnlikelyCpp(5);
 
                 RunCase("TestLikelyCpp(5)",    r1 == 10);
                 RunCase("TestLikelyCpp(-1)",   r2 == 1);
@@ -101,10 +123,10 @@
 
 #if true
                 // ISPC 绑定测试（需要 ISPC SDK 编译环境就绪）
-                int r5 = NativeTranspiler.Bindings.NativeExports.TestLikelyIspc(5);
-                int r6 = NativeTranspiler.Bindings.NativeExports.TestLikelyIspc(-1);
-                int r7 = NativeTranspiler.Bindings.NativeExports.TestUnlikelyIspc(-1);
-                int r8 = NativeTranspiler.Bindings.NativeExports.TestUnlikelyIspc(5);
+                int r5 = HintNativeExports.TestLikelyIspc(5);
+                int r6 = HintNativeExports.TestLikelyIspc(-1);
+                int r7 = HintNativeExports.TestUnlikelyIspc(-1);
+                int r8 = HintNativeExports.TestUnlikelyIspc(5);
 
                 RunCase("TestLikelyIspc(5)",    r5 == 10);
                 RunCase("TestLikelyIspc(-1)",   r6 == 1);
