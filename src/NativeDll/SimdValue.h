@@ -42,6 +42,15 @@ struct simd_value<float> {
     friend simd_value operator+(float a, simd_value b) { return simd_value{ n_add_ps(n_set1_ps(a), b.v) }; }
     friend simd_value operator-(float a, simd_value b) { return simd_value{ n_sub_ps(n_set1_ps(a), b.v) }; }
     friend simd_value operator*(float a, simd_value b) { return simd_value{ n_mul_ps(n_set1_ps(a), b.v) }; }
+
+    // SIMD float comparisons (return simd_mask)
+    simd_mask operator<(simd_value a) const { return simd_mask{ n_cmp_lt_ps(v, a.v) }; }
+    simd_mask operator<=(simd_value a) const { return simd_mask{ n_cmp_le_ps(v, a.v) }; }
+    simd_mask operator>(simd_value a) const { return simd_mask{ n_cmp_gt_ps(v, a.v) }; }
+    simd_mask operator>=(simd_value a) const { return simd_mask{ n_cmp_ge_ps(v, a.v) }; }
+    simd_mask operator==(simd_value a) const { return simd_mask{ n_cmp_eq_ps(v, a.v) }; }
+    simd_mask operator!=(simd_value a) const { return simd_mask{ n_cmp_ne_ps(v, a.v) }; }
+
     friend simd_value min(simd_value a, simd_value b) { return simd_value{ n_min_ps(a.v, b.v) }; }
     friend simd_value max(simd_value a, simd_value b) { return simd_value{ n_max_ps(a.v, b.v) }; }
 
@@ -73,8 +82,12 @@ struct simd_mask {
     bool any_true() const { return n_any_true(m) != 0; }
 
     friend simd_mask operator&(simd_mask a, simd_mask b) { return simd_mask{ n_and_mask(a.m, b.m) }; }
+    friend simd_mask operator|(simd_mask a, simd_mask b) { return simd_mask{ n_or_mask(a.m, b.m) }; }
+    friend simd_mask operator^(simd_mask a, simd_mask b) { return simd_mask{ n_xor_mask(a.m, b.m) }; }
     simd_mask operator~() const { return simd_mask{ n_not_mask(m) }; }
     simd_mask& operator&=(simd_mask other) { m = n_and_mask(m, other.m); return *this; }
+    simd_mask& operator|=(simd_mask other) { m = n_or_mask(m, other.m); return *this; }
+    simd_mask& operator^=(simd_mask other) { m = n_xor_mask(m, other.m); return *this; }
 };
 
 // ============================================================
