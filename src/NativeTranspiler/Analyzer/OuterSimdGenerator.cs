@@ -298,14 +298,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                n_store_epi32(&Results_ptr[si], n_set1_epi32(-1));");
             sb.AppendLine();
             sb.AppendLine("                // ---- dx loop (SIMD mask-managed) ----");
-            sb.AppendLine("                for (int ispc_dx = -1; ispc_dx <= 1; ispc_dx++)");
+            sb.AppendLine("                for (int dx = -1; dx <= 1; dx++)");
             sb.AppendLine("                {");
-            sb.AppendLine("                    simd_value<int> v_nx = v_cell_x + ispc_dx;");
+            sb.AppendLine("                    simd_value<int> v_nx = v_cell_x + dx;");
             sb.AppendLine("                    simd_mask v_nx_active{ n_cmp_ult_epi32(v_nx.v, v_grid_dims_x.v) };");
             sb.AppendLine("                    if (!v_nx_active.any_true()) continue;");
-            sb.AppendLine("                    for (int ispc_dy = -1; ispc_dy <= 1; ispc_dy++)");
+            sb.AppendLine("                    for (int dy = -1; dy <= 1; dy++)");
             sb.AppendLine("                    {");
-            sb.AppendLine("                        simd_value<int> v_ny = v_cell_y + ispc_dy;");
+            sb.AppendLine("                        simd_value<int> v_ny = v_cell_y + dy;");
             sb.AppendLine("                        simd_mask v_cell_active = v_nx_active & simd_mask{ n_cmp_ult_epi32(v_ny.v, v_grid_dims_y.v) };");
             sb.AppendLine("                        if (!v_cell_active.any_true()) continue;");
             sb.AppendLine();
@@ -324,7 +324,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                        // ===== Inner reduction loop (mask-managed while) =====");
             sb.AppendLine("                        // Each lane has its own i (start..end), advances independently");
             sb.AppendLine("                        simd_value<int> v_i_red = v_range.x;");
-            sb.AppendLine("                        // C1: clamp v_i_red to 0 before gather — prevent unmasked gather with -1 from AV");
+            sb.AppendLine("                        // clamp v_i_red to 0 before gather -- prevent unmasked gather from -1 (AV)");
             sb.AppendLine("                        v_i_red = simd_max(v_i_red, v_zero);");
             sb.AppendLine("                        simd_value<int> v_end = v_range.y;");
             sb.AppendLine("                        #pragma loop(ivdep)");
