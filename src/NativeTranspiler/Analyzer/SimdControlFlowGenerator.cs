@@ -816,11 +816,14 @@ namespace NativeTranspiler.Analyzer
                         elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
                     if (indexKind >= VarKind.Varying)
                     {
+                        string safeIdx = _currentMask != "simd_mask::all_true()"
+                            ? $"max({indexExpr}, simd_value<int>(0))"
+                            : indexExpr;
                         if (elemCppType.Contains("float2"))
-                            return $"simd_value<float2>::gather(({elemCppType}*){baseExpr}.Ptr, {indexExpr})";
+                            return $"simd_value<float2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
                         if (elemCppType.Contains("int2"))
-                            return $"simd_value<EntJoy::Mathematics::int2>::gather(({elemCppType}*){baseExpr}.Ptr, {indexExpr})";
-                        return $"simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {indexExpr}.v)";
+                            return $"simd_value<EntJoy::Mathematics::int2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
+                        return $"simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v)";
                     }
                     return $"(({elemCppType}*){baseExpr}.Ptr)[{indexExpr}]";
                 }
@@ -828,16 +831,24 @@ namespace NativeTranspiler.Analyzer
 
             if (isNativeArray && indexKind >= VarKind.Varying)
             {
+                // ★ When inside a mask context (if/else), the gather index may be -1 for
+                //   masked-out lanes (e.g., v_bestIdx). Clamp to 0 so the SIMD gather
+                //   doesn't read OOB. The per-lane store guard in TranslateAssignment
+                //   prevents writing garbage for masked-out lanes.
+                string safeIdx = _currentMask != "simd_mask::all_true()"
+                    ? $"max({indexExpr}, simd_value<int>(0))"
+                    : indexExpr;
+
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
-                    return $"simd_value<{elemCppType}>::gather({baseExpr}_ptr, {indexExpr})";
+                    return $"simd_value<{elemCppType}>::gather({baseExpr}_ptr, {safeIdx})";
                 if (elemCppType.Contains("int2"))
-                    return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}_ptr, {indexExpr})";
+                    return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}_ptr, {safeIdx})";
                 if (elemCppType == "float")
-                    return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
+                    return $"simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v)";
                 if (elemCppType == "int")
-                    return $"simd_value<int>::gather({baseExpr}_ptr, {indexExpr}.v)";
-                return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
+                    return $"simd_value<int>::gather({baseExpr}_ptr, {safeIdx}.v)";
+                return $"simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v)";
             }
 
             // Scalar access
@@ -1264,7 +1275,20 @@ namespace NativeTranspiler.Analyzer
                         return $"n_store_epi32(&{baseName}_ptr[si], n_set1_epi32({rhsExpr}))";
 
                     if (idxKind >= VarKind.Varying)
+                    {
+                        // ★ Mask-guarded per-lane scatter:
+                        //   When _currentMask is narrowed (if/else context), the per-lane extract
+                        //   loop must NOT write to lanes excluded by the mask. Otherwise lanes
+                        //   where the condition was false get garbage Results.
+                        //   From ISPC LLVM IR (closestpoint_ispc.ll line 130-135):
+                        //   "notequal_bestIdx_load_ = icmp ne <8 x i32> %bestIdx.1, splat (-1)"
+                        //   → per-lane guard on the write.
+                        if (_currentMask != "simd_mask::all_true()")
+                        {
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]=n_extract_lane_epi32({rhsExpr}.v,__l);}}}}}}";
+                        }
                         return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]=n_extract_lane_epi32({rhsExpr}.v,__l);}}}}";
+                    }
 
                     return $"{baseName}_ptr[{idxExpr}] = {rhsExpr}";
                 }
