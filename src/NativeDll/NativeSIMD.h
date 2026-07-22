@@ -45,7 +45,8 @@
 #elif defined(NSIMD_NEON)
     typedef float32x4_t n_float;
     typedef int32x4_t   n_int;
-    typedef uint32x4_t  n_mask;
+    // M3: n_mask must be float type (same as x86) so simd_mask(n_float) constructor accepts it
+    typedef float32x4_t n_mask;
 #else
     typedef float  n_float;
     typedef int    n_int;
@@ -484,7 +485,8 @@ static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
 #elif defined(NSIMD_SSE4)
     return _mm_andnot_ps(a, b);
 #elif defined(NSIMD_NEON)
-    return vbicq_u32(a, b);
+    // H2: vbicq_u32(a,b) = a & ~b, but andnotps(a,b) = ~a & b. Swap operands.
+    return vbicq_u32(b, a);
 #else
     return !a && b;
 #endif
