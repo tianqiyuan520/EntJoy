@@ -21,10 +21,12 @@ struct simd_mask {
     simd_mask() = default;
     explicit simd_mask(n_float val) : m(val) {}
     static simd_mask all_true() {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
         return simd_mask{ _mm256_castsi256_ps(_mm256_set1_epi32(-1)) };
 #elif defined(NSIMD_SSE4)
         return simd_mask{ _mm_castsi128_ps(_mm_set1_epi32(-1)) };
+#elif defined(NSIMD_NEON)
+        return simd_mask{ vreinterpretq_f32_u32(vdupq_n_u32(0xFFFFFFFF)) };
 #else
         return simd_mask{ n_set1_ps(-1.0f) };
 #endif
