@@ -32,11 +32,12 @@ namespace NativeTranspiler.Analyzer
                 return GenerateRegisterSIMD(scalarBody);
             else if (IsReductionBody())
                 return GenerateReductionSIMD(scalarBody);
+            else if (scalarBody.Contains("for (int dx = -CellsToLoop; dx <= CellsToLoop; dx++)"))
+                return GenerateISPCFindWithinSIMD(scalarBody);
             else
                 return GeneratePerLane(scalarBody);
         }
 
-        // ----------------------------------------------------------------
         // Path 1: Register SIMD (for simple SoA jobs: pos += vel * dt)
         // ----------------------------------------------------------------
         private string GenerateRegisterSIMD(string scalarBody)
@@ -125,6 +126,7 @@ namespace NativeTranspiler.Analyzer
                 var l = line.TrimEnd();
                 if (string.IsNullOrEmpty(l)) continue;
                 l = l.Replace("QueryPositions_ptr[index]", "qbuf");
+                l = l.Replace("return;", "break;"); // per-lane safety: return would skip other lanes
                 sb.Append("                ").AppendLine(l);
             }
             sb.AppendLine("            }");
@@ -150,14 +152,29 @@ namespace NativeTranspiler.Analyzer
 
         // ----------------------------------------------------------------
         // Path 3: Reduction inner SIMD (complex bodies like ClosestPoint)
-        // Wraps query gather in SIMD, extracts each lane, then replaces
-        // inner reduction loops (for i = start..end over array[i]) with
-        // SIMD batch: gather 8 array elements → SIMD arithmetic → blend reduction
+        // ISPC-style: keeps 8 queries in SIMD registers throughout,
+        // uses mask-managed while loop for inner reduction (no >=8 guard).
+        // For non-ClosestPoint reduction bodies, falls back to per-lane.
         // ----------------------------------------------------------------
         private string GenerateReductionSIMD(string scalarBody)
         {
+            // ISPC-style SIMD for ClosestPoint pattern (dx/dy neighbor loops)
+            if (scalarBody.Contains("for (int dx = -1; dx <= 1; dx++)"))
+                return GenerateISPCClosestPointSIMD(scalarBody);
+
+            // Fallback: per-lane extraction + inner reduction SIMD batch
+            return GenerateReductionSIMDPerLane(scalarBody);
+        }
+
+        /// <summary>
+        /// Original per-lane reduction path (renamed for fallback use).
+        /// Wraps query gather in SIMD, extracts each lane, then replaces
+        /// inner reduction loops with SIMD batch (if >= 8 elements).
+        /// </summary>
+        private string GenerateReductionSIMDPerLane(string scalarBody)
+        {
             var sb = new StringBuilder();
-            sb.AppendLine("    // --- Outer SIMD: reduction inner (SIMD inner loops) ---");
+            sb.AppendLine("    // --- Outer SIMD: reduction per-lane + inner SIMD batch ---");
             sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
             sb.AppendLine("    if (simd_end_ > __startIndex)");
             sb.AppendLine("    {");
@@ -176,6 +193,8 @@ namespace NativeTranspiler.Analyzer
 
             // Transform the scalar body: replace reduction loops with SIMD versions
             string transformed = TransformReductionLoops(scalarBody);
+            // Per-lane safety: return would skip other lanes
+            transformed = transformed.Replace("return;", "break;");
             foreach (var line in transformed.Split('\n'))
             {
                 var l = line.TrimEnd();
@@ -183,6 +202,189 @@ namespace NativeTranspiler.Analyzer
                 sb.Append("                ").AppendLine(l);
             }
 
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+            sb.Append(RemainderLoop(scalarBody));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ISPC-style SIMD for ClosestPoint pattern.
+        /// Keeps 8 queries in SIMD registers for the entire function body,
+        /// using mask-managed while loops instead of per-lane extraction.
+        /// This matches ISPC's foreach model where each SIMD lane runs one query independently.
+        ///
+        /// Inner reduction loop uses while(active.any_true()) with per-lane i,
+        /// avoiding the per-lane extraction + if(>=8) guard anti-pattern.
+        /// Global fallback uses scalar load + broadcast (not gather) since all
+        /// active lanes share the same i in that path.
+        /// </summary>
+        private string GenerateISPCClosestPointSIMD(string scalarBody)
+        {
+            var sb = new StringBuilder();
+
+            // Check if IgnoreSelf is active (from bool field variant dispatch)
+            // The scalar body retains "IgnoreSelf" as variable name (not substituted to true/false),
+            // so we check _boolFields to know which variant is being generated.
+            bool ignoreSelfActive = _boolFields.Values.Any(v => v == "true");
+
+            sb.AppendLine("    // --- ISPC-style SIMD: 8-wide mask-managed (no per-lane extraction) ---");
+            sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    if (simd_end_ > __startIndex)");
+            sb.AppendLine("    {");
+            // Hoist loop-invariant broadcasts outside the per-si loop
+            sb.AppendLine("        // Hoisted loop-invariant broadcasts");
+            sb.AppendLine("        simd_value<float> v_GridOrigin_x = simd_value<float>::broadcast(GridOrigin.x());");
+            sb.AppendLine("        simd_value<float> v_GridOrigin_y = simd_value<float>::broadcast(GridOrigin.y());");
+            if (ignoreSelfActive)
+            {
+                sb.AppendLine("        simd_value<float> v_sqEpsilon = simd_value<float>::broadcast(SquaredEpsilonSelf);");
+            }
+            sb.AppendLine();
+            sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+            sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            // Gather 8 query positions (SIMD)");
+            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+            sb.AppendLine("            simd_value<EntJoy::Mathematics::float2> v_q =");
+            sb.AppendLine("                simd_value<EntJoy::Mathematics::float2>::gather(QueryPositions_ptr, v_i);");
+            sb.AppendLine();
+            sb.AppendLine("            // ===== ISPC-style body (all SIMD, no per-lane extraction) =====");
+            sb.AppendLine("            {");
+            sb.AppendLine("                // Broadcast grid constants");
+            sb.AppendLine("                simd_value<int> v_grid_dims_x = simd_value<int>::broadcast(GridDimensions.x());");
+            sb.AppendLine("                simd_value<int> v_grid_dims_y = simd_value<int>::broadcast(GridDimensions.y());");
+            sb.AppendLine("                simd_value<int> v_zero = simd_value<int>::broadcast(0);");
+            sb.AppendLine("                simd_value<int> v_maxCellHash = v_grid_dims_x * v_grid_dims_y - 1;");
+            sb.AppendLine();
+            sb.AppendLine("                // Compute cell positions (SIMD: floor, convert, clamp)");
+            sb.AppendLine("                simd_value<float> v_cell_fx = (v_q.x - v_GridOrigin_x) * GridResolutionInv;");
+            sb.AppendLine("                v_cell_fx = v_cell_fx.floor();");
+            sb.AppendLine("                simd_value<float> v_cell_fy = (v_q.y - v_GridOrigin_y) * GridResolutionInv;");
+            sb.AppendLine("                v_cell_fy = v_cell_fy.floor();");
+            sb.AppendLine("                simd_value<int> v_cell_x = simd_value<int>::convert(v_cell_fx);");
+            sb.AppendLine("                simd_value<int> v_cell_y = simd_value<int>::convert(v_cell_fy);");
+            sb.AppendLine("                v_cell_x = simd_max(v_cell_x, v_zero);");
+            sb.AppendLine("                v_cell_y = simd_max(v_cell_y, v_zero);");
+            sb.AppendLine("                v_cell_x = simd_min(v_cell_x, v_grid_dims_x - 1);");
+            sb.AppendLine("                v_cell_y = simd_min(v_cell_y, v_grid_dims_y - 1);");
+            sb.AppendLine();
+            // Use std::numeric_limits<float>::max() matching the generated C++ style
+            string fltMax = "std::numeric_limits<float>::max()";
+
+            sb.AppendLine("                // Initialize best values (per-lane in SIMD regs)");
+            sb.AppendLine("                simd_value<float> v_bestDistSq = simd_value<float>::broadcast(" + fltMax + ");");
+            sb.AppendLine("                simd_value<int> v_bestIdx = simd_value<int>::broadcast(-1);");
+            sb.AppendLine();
+            sb.AppendLine("                // Results initialization: all -1");
+            sb.AppendLine("                n_store_epi32(&Results_ptr[si], n_set1_epi32(-1));");
+            sb.AppendLine();
+            sb.AppendLine("                // ---- dx loop (SIMD mask-managed) ----");
+            sb.AppendLine("                for (int ispc_dx = -1; ispc_dx <= 1; ispc_dx++)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    simd_value<int> v_nx = v_cell_x + ispc_dx;");
+            sb.AppendLine("                    simd_mask v_nx_active{ n_cmp_ult_epi32(v_nx.v, v_grid_dims_x.v) };");
+            sb.AppendLine("                    if (!v_nx_active.any_true()) continue;");
+            sb.AppendLine("                    for (int ispc_dy = -1; ispc_dy <= 1; ispc_dy++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        simd_value<int> v_ny = v_cell_y + ispc_dy;");
+            sb.AppendLine("                        simd_mask v_cell_active = v_nx_active & simd_mask{ n_cmp_ult_epi32(v_ny.v, v_grid_dims_y.v) };");
+            sb.AppendLine("                        if (!v_cell_active.any_true()) continue;");
+            sb.AppendLine();
+            sb.AppendLine("                        // Cell hash (clamped for gather safety)");
+            sb.AppendLine("                        simd_value<int> v_cellHash = v_ny * v_grid_dims_x + v_nx;");
+            sb.AppendLine("                        v_cellHash = simd_max(v_cellHash, v_zero);");
+            sb.AppendLine("                        v_cellHash = simd_min(v_cellHash, v_maxCellHash);");
+            sb.AppendLine();
+            sb.AppendLine("                        // Gather CellStartEnd range (int2 per cell)");
+            sb.AppendLine("                        simd_value<EntJoy::Mathematics::int2> v_range =");
+            sb.AppendLine("                            simd_value<EntJoy::Mathematics::int2>::gather(CellStartEnd.Ptr, v_cellHash);");
+            sb.AppendLine("                        simd_mask v_start_valid{ n_cmp_ge_epi32(v_range.x.v, v_zero.v) };");
+            sb.AppendLine("                        simd_mask v_active = v_cell_active & v_start_valid;");
+            sb.AppendLine("                        if (!v_active.any_true()) continue;");
+            sb.AppendLine();
+            sb.AppendLine("                        // ===== Inner reduction loop (mask-managed while) =====");
+            sb.AppendLine("                        // Each lane has its own i (start..end), advances independently");
+            sb.AppendLine("                        simd_value<int> v_i_red = v_range.x;");
+            sb.AppendLine("                        simd_value<int> v_end = v_range.y;");
+            sb.AppendLine("                        #pragma loop(ivdep)");
+            sb.AppendLine("                        while (v_active.any_true())");
+            sb.AppendLine("                        {");
+            sb.AppendLine("                            // Gather 8 different SortedPositions (per-lane indices)");
+            sb.AppendLine("                            simd_value<float> v_px = simd_value<float>::gathf(SortedPositions_ptr, v_i_red.v);");
+            sb.AppendLine("                            simd_value<float> v_py = simd_value<float>::gathfy(SortedPositions_ptr, v_i_red.v);");
+            sb.AppendLine();
+            sb.AppendLine("                            // 8-wide distance squared: (qx-px)^2 + (qy-py)^2");
+            sb.AppendLine("                            simd_value<float> v_dx = v_q.x - v_px;");
+            sb.AppendLine("                            simd_value<float> v_dy = v_q.y - v_py;");
+            sb.AppendLine("                            simd_value<float> v_distSq = v_dx * v_dx + v_dy * v_dy;");
+            sb.AppendLine();
+            sb.AppendLine("                            // Masked blend: update if distSq < bestDistSq AND lane active");
+            sb.AppendLine("                            simd_mask v_improve{ n_cmp_lt_ps(v_distSq.v, v_bestDistSq.v) };");
+            sb.AppendLine("                            v_improve = v_improve & v_active;");
+
+            if (ignoreSelfActive)
+            {
+                sb.AppendLine("                            // Self-point exclusion (IgnoreSelf=true)");
+                sb.AppendLine("                            simd_mask v_not_self{ n_not_mask(n_cmp_lt_ps(v_distSq.v, v_sqEpsilon.v)) };");
+                sb.AppendLine("                            v_improve = v_improve & v_not_self;");
+            }
+
+            sb.AppendLine("                            v_bestDistSq = blend(v_bestDistSq, v_distSq, v_improve);");
+            sb.AppendLine("                            v_bestIdx = blend(v_bestIdx, v_i_red, v_improve);");
+            sb.AppendLine();
+            sb.AppendLine("                            // Advance i, mask out lanes that reached end");
+            sb.AppendLine("                            v_i_red = v_i_red + 1;");
+            sb.AppendLine("                            v_active = v_active & simd_mask{ n_cmp_lt_epi32(v_i_red.v, v_end.v) };");
+            sb.AppendLine("                        }");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                }");
+            sb.AppendLine();
+            sb.AppendLine("                // ---- Global fallback (lanes where bestIdx is still -1) ----");
+            sb.AppendLine("                simd_mask v_need_fallback{ n_cmp_eq_epi32(v_bestIdx.v, n_set1_epi32(-1)) };");
+            sb.AppendLine("                if (v_need_fallback.any_true())");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    // Scalar load + broadcast (all active lanes share same index i_fb)");
+            sb.AppendLine("                    simd_value<float> v_fb_bestDistSq = v_bestDistSq;");
+            sb.AppendLine("                    simd_value<int> v_fb_bestIdx = v_bestIdx;");
+            sb.AppendLine("                    simd_mask v_fb_active = v_need_fallback;");
+            sb.AppendLine("                    int sortedLen = SortedLength;");
+            sb.AppendLine("                    for (int i_fb = 0; i_fb < sortedLen; i_fb++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (!v_fb_active.any_true()) break;");
+            sb.AppendLine("                        // Scalar load once, broadcast to all lanes");
+            sb.AppendLine("                        EntJoy::Mathematics::float2 fb_pos = SortedPositions_ptr[i_fb];");
+            sb.AppendLine("                        simd_value<float> v_fb_px = simd_value<float>::broadcast(fb_pos.x());");
+            sb.AppendLine("                        simd_value<float> v_fb_py = simd_value<float>::broadcast(fb_pos.y());");
+            sb.AppendLine("                        simd_value<float> v_fb_dx = v_q.x - v_fb_px;");
+            sb.AppendLine("                        simd_value<float> v_fb_dy = v_q.y - v_fb_py;");
+            sb.AppendLine("                        simd_value<float> v_fb_distSq = v_fb_dx * v_fb_dx + v_fb_dy * v_fb_dy;");
+            sb.AppendLine("                        simd_mask v_fb_improve{ n_cmp_lt_ps(v_fb_distSq.v, v_fb_bestDistSq.v) };");
+            sb.AppendLine("                        v_fb_improve = v_fb_improve & v_fb_active;");
+
+            if (ignoreSelfActive)
+            {
+                sb.AppendLine("                        simd_mask v_fb_not_self{ n_not_mask(n_cmp_lt_ps(v_fb_distSq.v, v_sqEpsilon.v)) };");
+                sb.AppendLine("                        v_fb_improve = v_fb_improve & v_fb_not_self;");
+            }
+
+            sb.AppendLine("                        v_fb_bestDistSq = blend(v_fb_bestDistSq, v_fb_distSq, v_fb_improve);");
+            sb.AppendLine("                        v_fb_bestIdx = blend(v_fb_bestIdx, simd_value<int>::broadcast(i_fb), v_fb_improve);");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    // Merge fallback results into main SIMD registers");
+            sb.AppendLine("                    v_bestDistSq = blend(v_bestDistSq, v_fb_bestDistSq, v_need_fallback);");
+            sb.AppendLine("                    v_bestIdx = blend(v_bestIdx, v_fb_bestIdx, v_need_fallback);");
+            sb.AppendLine("                }");
+            sb.AppendLine();
+            sb.AppendLine("                // ---- Write results: HashIndex_ptr[bestIdx].y for found lanes ----");
+            sb.AppendLine("                // Per-lane scalar write (safe: unmasked gather with -1 indices would AV)");
+            sb.AppendLine("                for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    int bestIdx_lane = n_extract_lane_epi32(v_bestIdx.v, lane);");
+            sb.AppendLine("                    if (bestIdx_lane != -1)");
+            sb.AppendLine("                        Results_ptr[si + lane] = HashIndex_ptr[bestIdx_lane].y();");
+            sb.AppendLine("                }");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
@@ -326,6 +528,95 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"        {origLine}");
             sb.AppendLine("    }");
             sb.AppendLine("    }");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ISPC-style SIMD for FindWithin pattern.
+        /// SIMD cell compute (8-wide floor/convert/clamp), then per-lane scalar inner scan.
+        /// The write pattern (list construction) doesn't SIMDize well, so per-lane extraction
+        /// is used for the inner loops. Main benefit: SIMD cell compute + broadcast reuse.
+        /// </summary>
+        private string GenerateISPCFindWithinSIMD(string scalarBody)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("    // --- ISPC-style SIMD: FindWithin (SIMD cell compute + per-lane scan) ---");
+            sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    if (simd_end_ > __startIndex)");
+            sb.AppendLine("    {");
+            // Hoisted loop-invariant broadcasts
+            sb.AppendLine("        // Hoisted loop-invariant broadcasts");
+            sb.AppendLine("        simd_value<float> v_GridOrigin_x = simd_value<float>::broadcast(GridOrigin.x());");
+            sb.AppendLine("        simd_value<float> v_GridOrigin_y = simd_value<float>::broadcast(GridOrigin.y());");
+            sb.AppendLine();
+            sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+            sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            // Gather 8 query positions (SIMD)");
+            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+            sb.AppendLine("            simd_value<EntJoy::Mathematics::float2> v_q =");
+            sb.AppendLine("                simd_value<EntJoy::Mathematics::float2>::gather(QueryPositions_ptr, v_i);");
+            sb.AppendLine();
+            sb.AppendLine("            // SIMD cell compute (floor, convert, clamp)");
+            sb.AppendLine("            simd_value<int> v_grid_dims_x = simd_value<int>::broadcast(GridDimensions.x());");
+            sb.AppendLine("            simd_value<int> v_grid_dims_y = simd_value<int>::broadcast(GridDimensions.y());");
+            sb.AppendLine("            simd_value<int> v_zero = simd_value<int>::broadcast(0);");
+            sb.AppendLine("            simd_value<float> v_cell_fx = (v_q.x - v_GridOrigin_x) * GridResolutionInv;");
+            sb.AppendLine("            v_cell_fx = v_cell_fx.floor();");
+            sb.AppendLine("            simd_value<float> v_cell_fy = (v_q.y - v_GridOrigin_y) * GridResolutionInv;");
+            sb.AppendLine("            v_cell_fy = v_cell_fy.floor();");
+            sb.AppendLine("            simd_value<int> v_cell_x = simd_value<int>::convert(v_cell_fx);");
+            sb.AppendLine("            simd_value<int> v_cell_y = simd_value<int>::convert(v_cell_fy);");
+            sb.AppendLine("            v_cell_x = simd_max(v_cell_x, v_zero);");
+            sb.AppendLine("            v_cell_y = simd_max(v_cell_y, v_zero);");
+            sb.AppendLine("            v_cell_x = simd_min(v_cell_x, v_grid_dims_x - 1);");
+            sb.AppendLine("            v_cell_y = simd_min(v_cell_y, v_grid_dims_y - 1);");
+            sb.AppendLine();
+            sb.AppendLine("            // Per-lane: extract cell + q, then scalar inner scan");
+            sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                int index = si + lane;");
+            sb.AppendLine("                int cell_x = n_extract_lane_epi32(v_cell_x.v, lane);");
+            sb.AppendLine("                int cell_y = n_extract_lane_epi32(v_cell_y.v, lane);");
+            sb.AppendLine("                EntJoy::Mathematics::float2 qbuf;");
+            sb.AppendLine("                qbuf.x() = n_extract_lane_f32(v_q.x.v, lane);");
+            sb.AppendLine("                qbuf.y() = n_extract_lane_f32(v_q.y.v, lane);");
+            sb.AppendLine("                // Inject SIMD-computed cell (avoids redundant floor/convert/clamp per lane)");
+            sb.AppendLine("                EntJoy::Mathematics::int2 centerCell = EntJoy::Mathematics::int2(cell_x, cell_y);");
+
+            // Modify scalar body: replace QueryPositions_ptr[index] with qbuf,
+            // remove the two centerCell compute lines, guard writes,
+            // and replace return with break (per-lane safety)
+            string modifiedBody = scalarBody.Replace("QueryPositions_ptr[index]", "qbuf");
+            // Remove auto-generated int2 centerCell compute lines
+            var bodyLines = new List<string>();
+            foreach (var line in modifiedBody.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.Contains("int2 centerCell = ((EntJoy::Mathematics::int2)") ||
+                    trimmed.StartsWith("centerCell = EntJoy::Mathematics::clamp"))
+                    continue;
+                bodyLines.Add(line);
+            }
+            modifiedBody = string.Join("\n", bodyLines);
+            // Guard result writes against out-of-bounds after MaxNeighbor reached
+            modifiedBody = modifiedBody.Replace(
+                "Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y();",
+                "if (found < MaxNeighbor) { Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y(); }");
+            // Replace return with break (per-lane: break exits inner for-loop only)
+            modifiedBody = modifiedBody.Replace("return;", "break;");
+
+            foreach (var line in modifiedBody.Split('\n'))
+            {
+                var l = line.TrimEnd();
+                if (string.IsNullOrEmpty(l)) continue;
+                sb.Append("                ").AppendLine(l);
+            }
+
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+            sb.Append(RemainderLoop(scalarBody));
             return sb.ToString();
         }
 
