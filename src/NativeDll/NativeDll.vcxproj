@@ -162,9 +162,11 @@
     <ClInclude Include="Native.h" />
     <ClInclude Include="NativeContainers.h" />
     <ClInclude Include="NativeMath.h" />
+    <ClInclude Include="NativeSIMD.h" />
     <ClInclude Include="NativeWorkerPool.h" />
     <ClInclude Include="ContinuationQueue.h" />
     <ClInclude Include="EntityBatchData.h" />
+    <ClInclude Include="SimdValue.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Exports.cpp" />

@@ -705,21 +705,16 @@ namespace NativeTranspiler.Analyzer
                 return $"v_{name}";
             }
 
-            // Job struct field
-            var symbol = _semanticModel.GetSymbolInfo(identifier).Symbol;
-            if (symbol is IFieldSymbol field && !field.IsStatic
-                && field.ContainingType.Equals(_jobStruct, SymbolEqualityComparer.Default))
+            // Job struct field (resolve via _jobStruct symbol, not semantic model)
+            if (_jobStruct != null)
             {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                var members = _jobStruct.GetMembers(name);
+                if (members.Length > 0 && members[0] is IFieldSymbol field && !field.IsStatic)
                 {
-                    // NativeArray → _ptr suffix
-                    if (_variables.TryGetValue(name, out var finfo) && finfo.Kind == VarKind.Uniform)
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
                         return name;
-                    return name; // The container itself is uniform
+                    return name;
                 }
-
-                // Scalar field → use name directly (it's a const ref)
-                return name;
             }
 
             // Fallback: use name as-is
@@ -753,7 +748,22 @@ namespace NativeTranspiler.Analyzer
 
         private string TranslateElementAccess(ElementAccessExpressionSyntax elementAccess)
         {
-            var exprType = _semanticModel.GetTypeInfo(elementAccess.Expression).Type;
+                        // Resolve NativeArray type via _jobStruct symbol (avoid semantic model in source gen context)
+            bool isNativeArray = false;
+            string elemCppType = "float";
+            if (_jobStruct != null && elementAccess.Expression is IdentifierNameSyntax id)
+            {
+                var members = _jobStruct.GetMembers(id.Identifier.Text);
+                if (members.Length > 0 && members[0] is IFieldSymbol field && !field.IsStatic
+                    && NativeTranspiler.IsEntJoyNativeContainerType(field.Type)
+                    && field.Type.Name == "NativeArray")
+                {
+                    isNativeArray = true;
+                    var typeArg = ((INamedTypeSymbol)field.Type).TypeArguments.FirstOrDefault();
+                    if (typeArg != null)
+                        elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
+                }
+            }
             string baseExpr = TranslateExpression(elementAccess.Expression);
 
             string indexExpr = "0";
@@ -768,30 +778,15 @@ namespace NativeTranspiler.Analyzer
                 indexKind = _varAnalyzer.ClassifyExpression(argExpr);
             }
 
-            bool isNativeArray = exprType != null
-                && NativeTranspiler.IsEntJoyNativeContainerType(exprType)
-                && exprType.Name == "NativeArray";
-
             if (isNativeArray && indexKind >= VarKind.Varying)
             {
-                // SIMD gather: base_ptr[index]
-                // baseExpr is the field name; we need base_ptr, and the element type
-                string elemType = "";
-                if (exprType is INamedTypeSymbol named)
-                {
-                    var typeArg = named.TypeArguments.FirstOrDefault();
-                    if (typeArg != null)
-                    {
-                        string cppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
-                        if (cppType.Contains("float2"))
-                            return $"simd_value<{cppType}>::gather({baseExpr}_ptr, {indexExpr})";
-                        if (cppType == "float")
-                            return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
-                        if (cppType == "int")
-                            return $"simd_value<int>::gather({baseExpr}_ptr, {indexExpr}.v)";
-                    }
-                }
-                // Fallback gather
+                // SIMD gather
+                if (elemCppType.Contains("float2"))
+                    return $"simd_value<{elemCppType}>::gather({baseExpr}_ptr, {indexExpr})";
+                if (elemCppType == "float")
+                    return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
+                if (elemCppType == "int")
+                    return $"simd_value<int>::gather({baseExpr}_ptr, {indexExpr}.v)";
                 return $"simd_value<float>::gathf({baseExpr}_ptr, {indexExpr}.v)";
             }
 

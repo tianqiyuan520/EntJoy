@@ -82,35 +82,38 @@ namespace NativeTranspiler.Analyzer
             if (method.Body == null)
                 return _variables;
 
-            // === Step 1: 种子分类 ===
-            // 1a: Execute 参数
-            foreach (var param in method.ParameterList.Parameters)
+            try
             {
-                string name = param.Identifier.Text;
-                var typeInfo = _semanticModel.GetDeclaredSymbol(param);
-                if (typeInfo is IParameterSymbol paramSym)
+                // === Step 1: 种子分类 ===
+                // 1a: Execute 参数（保守：直接用参数名判断，避免 GetDeclaredSymbol 在 source gen 上下文中抛异常）
+                foreach (var param in method.ParameterList.Parameters)
                 {
-                    bool isIndex = paramSym.Type.SpecialType == SpecialType.System_Int32 && name == _indexParamName;
-                    AddVariable(name, GetCppTypeString(paramSym.Type),
-                        isIndex ? VarKind.Varying : VarKind.Uniform, null);
+                    string name = param.Identifier.Text;
+                    bool isIndex = name == _indexParamName;
+                    AddVariable(name, "int", isIndex ? VarKind.Varying : VarKind.Uniform, null);
                 }
+
+                // 1b：Job struct 字段预分类（在 OuterSimdGenerator 或 CppJobGenerator 层级处理）
+                //      标量字段 → uniform；容器字段不参与变量分析
+                // 1c：方法体内变量声明
+                CollectDeclarations(method.Body);
+
+                // === Step 2: 表达式传播 ===
+                // 遍历所有赋值，传播 classification
+                PropagateAssignments(method.Body);
+
+                // === Step 3: Reduction 模式检测 ===
+                // 检测 if (val &lt; best) { best = val; } 规约模式
+                DetectReductionPatterns(method.Body);
+
+                // 应用 reduction 标记
+                ApplyReductionMarkers();
             }
-
-            // 1b：Job struct 字段预分类（在 OuterSimdGenerator 或 CppJobGenerator 层级处理）
-            //      标量字段 → uniform；容器字段不参与变量分析
-            // 1c：方法体内变量声明
-            CollectDeclarations(method.Body);
-
-            // === Step 2: 表达式传播 ===
-            // 遍历所有赋值，传播 classification
-            PropagateAssignments(method.Body);
-
-            // === Step 3: Reduction 模式检测 ===
-            // 检测 if (val &lt; best) { best = val; } 规约模式
-            DetectReductionPatterns(method.Body);
-
-            // 应用 reduction 标记
-            ApplyReductionMarkers();
+            catch
+            {
+                // Any error in variable analysis → return empty (fallback to per-lane)
+                _variables.Clear();
+            }
 
             return _variables;
         }
@@ -126,7 +129,14 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         public VarKind ClassifyExpression(ExpressionSyntax expr)
         {
-            return ClassifyExpressionInternal(expr, new HashSet<string>());
+            try
+            {
+                return ClassifyExpressionInternal(expr, new HashSet<string>());
+            }
+            catch
+            {
+                return VarKind.Uniform;
+            }
         }
 
         // ================================================================
@@ -197,6 +207,26 @@ namespace NativeTranspiler.Analyzer
             {
                 ProcessAssignment(assignment);
             }
+            // Also handle local variable declarations with initializers
+            foreach (var localDecl in node.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+            {
+                foreach (var variable in localDecl.Declaration.Variables)
+                {
+                    if (variable.Initializer != null)
+                    {
+                        ProcessLocalInitializer(variable.Identifier.Text, variable.Initializer.Value);
+                    }
+                }
+            }
+        }
+
+        private void ProcessLocalInitializer(string varName, ExpressionSyntax initValue)
+        {
+            if (!_variables.TryGetValue(varName, out var lhsInfo))
+                return;
+            VarKind rhsKind = ClassifyExpressionInternal(initValue, new HashSet<string>());
+            if (rhsKind > lhsInfo.Kind)
+                lhsInfo.Kind = rhsKind;
         }
 
         private void ProcessAssignment(AssignmentExpressionSyntax assignment)

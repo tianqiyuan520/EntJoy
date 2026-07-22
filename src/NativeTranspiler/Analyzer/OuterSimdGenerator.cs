@@ -14,21 +14,32 @@ namespace NativeTranspiler.Analyzer
         private readonly SemanticModel _semanticModel;
         private readonly string _idx;
         private readonly Dictionary<string, string> _boolFields;
+        private readonly INamedTypeSymbol? _jobStruct;
 
         public OuterSimdGenerator(MethodDeclarationSyntax methodSyntax, SemanticModel semanticModel, string indexVarName,
-            Dictionary<string, string>? boolFieldValues = null)
+            Dictionary<string, string>? boolFieldValues = null,
+            INamedTypeSymbol? jobStruct = null)
         {
             _methodSyntax = methodSyntax;
             _semanticModel = semanticModel;
             _idx = indexVarName;
             _boolFields = boolFieldValues ?? new Dictionary<string, string>();
+            _jobStruct = jobStruct;
         }
 
         public string Generate(string scalarBody)
         {
-            // Universal full-SIMD from AST (ISPC-style, no special-case paths)
-            if (IsFullSIMDEligible())
-                return GenerateFullSIMDFromAST(scalarBody);
+            try
+            {
+                // Universal full-SIMD from AST (ISPC-style)
+                string simdResult = GenerateFullSIMDFromAST(scalarBody);
+                if (!string.IsNullOrEmpty(simdResult))
+                    return simdResult;
+            }
+            catch
+            {
+                // Universal path failed → fall through to per-lane
+            }
 
             // FALLBACK: per-lane scalar (when AST analysis fails)
             return GeneratePerLane(scalarBody);
@@ -122,27 +133,11 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private bool IsFullSIMDEligible()
         {
-            if (_methodSyntax.Body == null) return false;
+            if (_methodSyntax.Body == null || _jobStruct == null) return false;
 
-            // 只拒绝完全 AST 不支持的模式
-            if (HasUnsupportedStatement(_methodSyntax.Body))
-                return false;
-
-            // SimdVariableAnalyzer 检查（新）
-            var jobStruct = GetJobStruct();
-            if (jobStruct == null) return false;
-
-            try
-            {
-                var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, jobStruct, _idx);
-                var variables = varAnalyzer.Analyze(_methodSyntax);
-                // 必须至少成功分类 index 参数
-                return variables.ContainsKey(_idx) && variables.Count > 0;
-            }
-            catch
-            {
-                return false;
-            }
+            var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, _jobStruct, _idx);
+            var variables = varAnalyzer.Analyze(_methodSyntax);
+            return variables.ContainsKey(_idx) && variables.Count > 0;
         }
 
         /// <summary>
@@ -184,26 +179,33 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private bool HasUnsupportedCall(InvocationExpressionSyntax invocation)
         {
-            var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-            if (symbol == null) return true;
+            try
+            {
+                var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+                if (symbol == null) return true;
 
-            string containingType = symbol.ContainingType?.ToDisplayString() ?? "";
-            if (containingType == "EntJoy.Mathematics.math") return false;
-            if (containingType == "System.MathF") return false;
-            if (containingType == "System.Math") return false;
+                string containingType = symbol.ContainingType?.ToDisplayString() ?? "";
+                if (containingType == "EntJoy.Mathematics.math") return false;
+                if (containingType == "System.MathF") return false;
+                if (containingType == "System.Math") return false;
 
-            // 允许已知的数学函数名
-            if (symbol.Name is "min" or "max" or "clamp" or "floor" or "ceil" or "abs"
-                or "dot" or "distancesq" or "lengthsq" or "length" or "normalize"
-                or "Min" or "Max" or "Abs" or "Sqrt" or "Floor" or "Ceiling")
-                return false;
+                // 允许已知的数学函数名
+                if (symbol.Name is "min" or "max" or "clamp" or "floor" or "ceil" or "abs"
+                    or "dot" or "distancesq" or "lengthsq" or "length" or "normalize"
+                    or "Min" or "Max" or "Abs" or "Sqrt" or "Floor" or "Ceiling")
+                    return false;
 
-            // NativeArray.GetUnsafePtr 允许
-            if (symbol.ContainingType?.Name == "NativeArray" && symbol.Name == "GetUnsafePtr")
-                return false;
+                // NativeArray.GetUnsafePtr 允许
+                if (symbol.ContainingType?.Name == "NativeArray" && symbol.Name == "GetUnsafePtr")
+                    return false;
 
-            // 其他函数调用暂时不允许
-            return true;
+                // 其他函数调用暂时不允许
+                return true;
+            }
+            catch
+            {
+                return true; // 不确定则保守拒绝
+            }
         }
 
         /// <summary>
@@ -221,30 +223,17 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 获取 Execute 方法所在的 Job struct 类型符号。
-        /// </summary>
-        private INamedTypeSymbol? GetJobStruct()
-        {
-            var containingType = _methodSyntax.Ancestors()
-                .OfType<TypeDeclarationSyntax>()
-                .FirstOrDefault();
-            if (containingType == null) return null;
-            return _semanticModel.GetDeclaredSymbol(containingType) as INamedTypeSymbol;
-        }
-
-        /// <summary>
         /// 生成通用全 SIMD 代码。
         /// 使用 SimdVariableAnalyzer + SimdControlFlowGenerator 从 AST 直接生成。
         /// </summary>
         private string GenerateFullSIMDFromAST(string scalarBody)
         {
             var sb = new StringBuilder();
-            var jobStruct = GetJobStruct();
-            if (jobStruct == null || _methodSyntax.Body == null)
+            if (_jobStruct == null || _methodSyntax.Body == null)
                 return "";
 
             // 1. 变量分析
-            var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, jobStruct, _idx);
+            var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, _jobStruct, _idx);
             var variables = varAnalyzer.Analyze(_methodSyntax);
 
             // 2. 外层 SIMD 循环框架
@@ -266,7 +255,7 @@ namespace NativeTranspiler.Analyzer
 
             // 4. 生成 SIMD body
             var cfGenerator = new SimdControlFlowGenerator(
-                _semanticModel, jobStruct, variables, varAnalyzer,
+                _semanticModel, _jobStruct, variables, varAnalyzer,
                 indexParamName: _idx, simdIndexVar: "v_i");
             string simdBody = cfGenerator.Generate(_methodSyntax.Body);
 
