@@ -133,6 +133,7 @@ namespace NativeTranspiler.Analyzer
                 l = l.Replace("return;", "break;");
                 sb.Append("                    ").AppendLine(l);
             }
+            sb.AppendLine("                    // _simd_exit (unused)");
             sb.AppendLine("                } while(false);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
@@ -146,7 +147,6 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
-            // H4: wrap scalar remainder in do-while(false) so return->break exits current index, not whole function
             sb.AppendLine("    do");
             sb.AppendLine("    {");
             foreach (var line in scalarBody.Split('\n'))
@@ -156,6 +156,7 @@ namespace NativeTranspiler.Analyzer
                 l = l.Replace("return;", "break;");
                 sb.Append("    ").AppendLine(l);
             }
+            sb.AppendLine("    // _simd_exit (unused)");
             sb.AppendLine("    } while(false);");
             sb.AppendLine("    }");
             return sb.ToString();
@@ -215,6 +216,7 @@ namespace NativeTranspiler.Analyzer
                 l = l.Replace("return;", "break;");
                 sb.Append("                    ").AppendLine(l);
             }
+            sb.AppendLine("                    // _simd_exit (unused)");
             sb.AppendLine("                } while(false);");
 
             sb.AppendLine("            }");
@@ -641,11 +643,16 @@ namespace NativeTranspiler.Analyzer
                 sb.Append("                    ").AppendLine(l);
             }
 
+            sb.AppendLine("                    // _simd_exit (unused)");
             sb.AppendLine("                } while(false);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
-            sb.Append(RemainderLoop(scalarBody));
+            // For remainder loop, apply only the write guard, not the qbuf replacement
+            string remainderBody = scalarBody.Replace(
+                "Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y();",
+                "if (found < MaxNeighbor) { Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y(); }");
+            sb.Append(RemainderLoop(remainderBody));
             return sb.ToString();
         }
 
