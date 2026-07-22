@@ -121,10 +121,10 @@ namespace NativeTranspiler.Analyzer.Common
         /// </summary>
         public static NativeTranspiler.AutoSIMD GetAutoSIMD(ISymbol symbol, INamedTypeSymbol? attrSymbol)
         {
-            if (attrSymbol == null) return NativeTranspiler.AutoSIMD.Enabled;
+            if (attrSymbol == null) return NativeTranspiler.AutoSIMD.Disabled;
             var attrData = symbol.GetAttributes().FirstOrDefault(ad =>
                 SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol));
-            if (attrData == null) return NativeTranspiler.AutoSIMD.Enabled;
+            if (attrData == null) return NativeTranspiler.AutoSIMD.Disabled;
 
             foreach (var namedArg in attrData.NamedArguments)
                 if (namedArg.Key == "AutoSIMD")
@@ -133,7 +133,7 @@ namespace NativeTranspiler.Analyzer.Common
                     if (val.HasValue) return (NativeTranspiler.AutoSIMD)val.Value;
                 }
 
-            return NativeTranspiler.AutoSIMD.Enabled;
+            return NativeTranspiler.AutoSIMD.Disabled;
         }
 
         // ---------- 辅助方法 ----------

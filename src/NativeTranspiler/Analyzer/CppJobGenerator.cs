@@ -176,7 +176,7 @@ namespace NativeTranspiler.Analyzer
                         var values = new List<bool>();
                         for (int i = 0; i < boolFields.Count; i++)
                             values.Add((mask & (1 << i)) != 0);
-                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath);
+                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath, autoSIMD);
                     }
                 }
                 else
@@ -218,7 +218,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Enabled)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -228,7 +228,7 @@ namespace NativeTranspiler.Analyzer
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // 先用标量翻译器翻译 body（余量循环需要标量体）
-            var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
+            var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, autoSIMD == NativeTranspiler.AutoSIMD.Enabled);
             var scalarBody = scalarTranslator.Translate(methodSyntax.Body);
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
@@ -260,7 +260,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath)
+        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
         {
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
@@ -274,7 +274,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
+            bool enableSIMD = autoSIMD == NativeTranspiler.AutoSIMD.Enabled;
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, enableSIMD);
             var bodyCode = translator.Translate(methodSyntax.Body);
             // 将所有 bool 条件字段替换为常量值
             for (int i = 0; i < boolFields.Count; i++)

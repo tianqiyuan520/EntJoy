@@ -9,8 +9,8 @@ namespace NativeTranspiler.Analyzer
         private readonly string _newIndexName;
 
         public CppBatchStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
-            string originalIndexName, string newIndexName, bool useFastMath = false)
-            : base(semanticModel, jobStruct, useFastMath)
+            string originalIndexName, string newIndexName, bool useFastMath = false, bool enableAutoSIMD = false)
+            : base(semanticModel, jobStruct, useFastMath, enableAutoSIMD)
         {
             _originalIndexName = originalIndexName;
             _newIndexName = newIndexName;
