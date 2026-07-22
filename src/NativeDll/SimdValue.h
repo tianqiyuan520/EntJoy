@@ -179,6 +179,17 @@ struct simd_value<EntJoy::Mathematics::float2> {
         return v;
     }
 
+    // Component-wise arithmetic
+    friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ a.x + b.x, a.y + b.y }; }
+    friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ a.x - b.x, a.y - b.y }; }
+    friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ a.x * b.x, a.y * b.y }; }
+    friend simd_value operator+(simd_value a, float b) { return simd_value{ a.x + b, a.y + b }; }
+    friend simd_value operator-(simd_value a, float b) { return simd_value{ a.x - b, a.y - b }; }
+    friend simd_value operator*(simd_value a, float b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator+(float a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
+    friend simd_value operator-(float a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
+    friend simd_value operator*(float a, simd_value b) { return simd_value{ a * b.x, a * b.y }; }
+
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
     }
@@ -225,6 +236,15 @@ struct simd_value<EntJoy::Mathematics::int2> {
 #endif
         return v;
     }
+
+    // Component-wise arithmetic
+    friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ a.x + b.x, a.y + b.y }; }
+    friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ a.x - b.x, a.y - b.y }; }
+    friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ a.x * b.x, a.y * b.y }; }
+    friend simd_value operator+(simd_value a, int b) { return simd_value{ a.x + b, a.y + b }; }
+    friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
+    friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
+    friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };

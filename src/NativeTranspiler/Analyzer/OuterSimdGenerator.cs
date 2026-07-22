@@ -26,12 +26,7 @@ namespace NativeTranspiler.Analyzer
 
         public string Generate(string scalarBody)
         {
-            // NEW: try universal full-SIMD from AST first
-            if (IsFullSIMDEligible())
-                return GenerateFullSIMDFromAST(scalarBody);
-
-            // EXISTING: fallback paths (keep for compatibility)
-            // Check if the body is simple SoA (continuous read + arithmetic + write)
+            // EXISTING: proven paths first (register SIMD, ISPC ClosestPoint, ISPC FindWithin)
             bool isSimpleSoa = IsSimpleSoaBody();
             if (isSimpleSoa)
                 return GenerateRegisterSIMD(scalarBody);
@@ -39,8 +34,13 @@ namespace NativeTranspiler.Analyzer
                 return GenerateReductionSIMD(scalarBody);
             else if (IsFindWithinJob())
                 return GenerateISPCFindWithinSIMD(scalarBody);
-            else
-                return GeneratePerLane(scalarBody);
+
+            // NEW: universal full-SIMD from AST (catches jobs that previously fell to per-lane)
+            if (IsFullSIMDEligible())
+                return GenerateFullSIMDFromAST(scalarBody);
+
+            // FALLBACK: per-lane scalar
+            return GeneratePerLane(scalarBody);
         }
 
         // Path 1: Register SIMD (for simple SoA jobs: pos += vel * dt)
@@ -824,15 +824,16 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 检查 Execute 体是否适合通用全 SIMD 生成。
-        /// 同时通过 SimdEligibilityAnalyzer 和 SimdVariableAnalyzer 检测。
+        /// 使用宽松检查——SimdControlFlowGenerator 支持所有控制流：
+        /// if/else/for/while/do/break/continue/return。
+        /// 只拒绝真正不支持的模式（间接索引、switch、foreach）。
         /// </summary>
         private bool IsFullSIMDEligible()
         {
             if (_methodSyntax.Body == null) return false;
 
-            // SimdEligibilityAnalyzer 检查（现有逻辑）
-            var eligibilityAnalyzer = new SimdEligibilityAnalyzer(_semanticModel);
-            if (!eligibilityAnalyzer.Analyze(_methodSyntax))
+            // 只拒绝完全 AST 不支持的模式
+            if (HasUnsupportedStatement(_methodSyntax.Body))
                 return false;
 
             // SimdVariableAnalyzer 检查（新）
@@ -850,6 +851,81 @@ namespace NativeTranspiler.Analyzer
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 宽松检查：只拒绝 SimdControlFlowGenerator 完全不支持的语句。
+        /// 间接索引 arr[hash[i]]、switch、foreach、fixed 等被拒绝。
+        /// if/for/while/do/break/continue/return 全部支持。
+        /// </summary>
+        private bool HasUnsupportedStatement(SyntaxNode node)
+        {
+            foreach (var stmt in node.DescendantNodesAndSelf())
+            {
+                switch (stmt)
+                {
+                    case SwitchStatementSyntax _:
+                    case CommonForEachStatementSyntax _:
+                    case FixedStatementSyntax _:
+                    case UsingStatementSyntax _:
+                    case CheckedStatementSyntax _:
+                    case UnsafeStatementSyntax _:
+                        return true;
+
+                    case InvocationExpressionSyntax invocation:
+                        if (HasUnsupportedCall(invocation))
+                            return true;
+                        break;
+
+                    case ElementAccessExpressionSyntax elementAccess:
+                        // 间接索引 arr[hash[i]] 仍不支持
+                        if (HasIndirectIndex(elementAccess))
+                            return true;
+                        break;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 检查函数调用是否不被支持（只允许 math 函数和已知模式）。
+        /// </summary>
+        private bool HasUnsupportedCall(InvocationExpressionSyntax invocation)
+        {
+            var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+            if (symbol == null) return true;
+
+            string containingType = symbol.ContainingType?.ToDisplayString() ?? "";
+            if (containingType == "EntJoy.Mathematics.math") return false;
+            if (containingType == "System.MathF") return false;
+            if (containingType == "System.Math") return false;
+
+            // 允许已知的数学函数名
+            if (symbol.Name is "min" or "max" or "clamp" or "floor" or "ceil" or "abs"
+                or "dot" or "distancesq" or "lengthsq" or "length" or "normalize"
+                or "Min" or "Max" or "Abs" or "Sqrt" or "Floor" or "Ceiling")
+                return false;
+
+            // NativeArray.GetUnsafePtr 允许
+            if (symbol.ContainingType?.Name == "NativeArray" && symbol.Name == "GetUnsafePtr")
+                return false;
+
+            // 其他函数调用暂时不允许
+            return true;
+        }
+
+        /// <summary>
+        /// 检测间接索引 arr[hash[i]]。
+        /// </summary>
+        private static bool HasIndirectIndex(ElementAccessExpressionSyntax elementAccess)
+        {
+            foreach (var arg in elementAccess.ArgumentList.Arguments)
+            {
+                if (arg.Expression.DescendantNodesAndSelf()
+                    .OfType<ElementAccessExpressionSyntax>().Any())
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
