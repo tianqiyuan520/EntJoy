@@ -3,6 +3,22 @@
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
+#include <cstdio>
+
+// 运行时输出当前 SIMD 配置（DLL 加载时执行）
+struct SimdInfo {
+    SimdInfo() {
+#if defined(__AVX2__)
+        std::fprintf(stderr, "[SIMD] AVX2 8-wide\n");
+#elif defined(__AVX__)
+        std::fprintf(stderr, "[SIMD] AVX 8-wide\n");
+#elif defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
+        std::fprintf(stderr, "[SIMD] NEON 4-wide\n");
+#else
+        std::fprintf(stderr, "[SIMD] SCALAR 1-wide\n");
+#endif
+    }
+} g_simdInfo;
 
 static JobSystem::HandleState* fromHandle(void* ptr)
 {
