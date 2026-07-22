@@ -116,6 +116,26 @@ namespace NativeTranspiler.Analyzer.Common
             return TryGetNamedArgument(symbol, attrSymbol, "DisableAutoRefresh", false);
         }
 
+        /// <summary>
+        /// 读取 AutoSIMD 参数：是否启用自动 SIMD 向量化
+        /// </summary>
+        public static NativeTranspiler.AutoSIMD GetAutoSIMD(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+        {
+            if (attrSymbol == null) return NativeTranspiler.AutoSIMD.Enabled;
+            var attrData = symbol.GetAttributes().FirstOrDefault(ad =>
+                SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol));
+            if (attrData == null) return NativeTranspiler.AutoSIMD.Enabled;
+
+            foreach (var namedArg in attrData.NamedArguments)
+                if (namedArg.Key == "AutoSIMD")
+                {
+                    int? val = ConvertEnumArgToInt(namedArg.Value.Value);
+                    if (val.HasValue) return (NativeTranspiler.AutoSIMD)val.Value;
+                }
+
+            return NativeTranspiler.AutoSIMD.Enabled;
+        }
+
         // ---------- 辅助方法 ----------
 
         /// <summary>

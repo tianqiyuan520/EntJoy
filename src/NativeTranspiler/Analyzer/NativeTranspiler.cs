@@ -35,6 +35,15 @@ namespace NativeTranspiler.Analyzer
             fast
         }
 
+        /// <summary>
+        /// 自动 SIMD 向量化开关。
+        /// </summary>
+        public enum AutoSIMD
+        {
+            Enabled,
+            Disabled
+        }
+
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol pointerType)
