@@ -364,14 +364,19 @@ static inline n_int n_gather_epi32(const int* base, n_int indices) {
 // ============================================================
 static inline float n_extract_lane_f32(n_float v, int lane) {
 #if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
-    // AVX2/AVX: lane 0-3 -> low 128, lane 4-7 -> high 128
+    // AVX2/AVX: extract the right 128-bit half then store+index
+    // (store approach avoids _MM_SHUFFLE's compile-time constant requirement)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 sel = lane < 4 ? lo : hi;
     int idx = lane & 3;
-    return _mm_cvtss_f32(_mm_shuffle_ps(sel, sel, _MM_SHUFFLE(idx, idx, idx, idx)));
+    alignas(16) float buf[4];
+    _mm_store_ps(buf, sel);
+    return buf[idx];
 #elif defined(NSIMD_SSE4)
-    return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(lane, lane, lane, lane)));
+    alignas(16) float buf[4];
+    _mm_store_ps(buf, v);
+    return buf[lane];
 #elif defined(NSIMD_NEON)
     return vgetq_lane_f32(v, lane);
 #else
