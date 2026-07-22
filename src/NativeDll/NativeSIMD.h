@@ -1,4 +1,4 @@
-// NativeSIMD.h — 跨平台 SIMD 抽象层
+﻿// NativeSIMD.h — 跨平台 SIMD 抽象层
 // 提供 AVX2 / SSE4 / NEON / 标量回退的统一接口
 // 所有加载使用非对齐访问（loadu），不需额外对齐保证
 #pragma once
