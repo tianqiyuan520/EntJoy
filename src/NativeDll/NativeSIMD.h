@@ -45,8 +45,8 @@
 #elif defined(NSIMD_NEON)
     typedef float32x4_t n_float;
     typedef int32x4_t   n_int;
-    // M3: n_mask must be float type (same as x86) so simd_mask(n_float) constructor accepts it
-    typedef float32x4_t n_mask;
+    // n_mask is uint32x4_t on NEON (comparison/bitwise ops return this type)
+    typedef uint32x4_t  n_mask;
 #else
     typedef float  n_float;
     typedef int    n_int;
@@ -310,7 +310,7 @@ static inline n_mask n_not_mask(n_mask m) {
 #elif defined(NSIMD_SSE4)
     return _mm_xor_ps(m, _mm_castsi128_ps(_mm_set1_epi32(-1)));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_f32_u32(vmvnq_u32(vreinterpretq_u32_f32(m)));
+    return vmvnq_u32(m);
 #else
     return !m;
 #endif
@@ -327,7 +327,7 @@ static inline n_mask n_cmp_lt_epi32(n_int a, n_int b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpgt_epi32(b, a));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_f32_u32(vcltq_s32(a, b));
+    return vcltq_s32(a, b);
 #else
     return a < b;
 #endif
@@ -340,7 +340,7 @@ static inline n_mask n_cmp_gt_epi32(n_int a, n_int b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpgt_epi32(a, b));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_f32_u32(vcgtq_s32(a, b));
+    return vcgtq_s32(a, b);
 #else
     return a > b;
 #endif
@@ -349,14 +349,13 @@ static inline n_mask n_cmp_gt_epi32(n_int a, n_int b) {
 // Unsigned int a < b
 static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
-    // XOR with sign bit trick: flip sign, then signed compare
     n_int sign = _mm256_set1_epi32(0x80000000);
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_xor_si256(b, sign), _mm256_xor_si256(a, sign)));
 #elif defined(NSIMD_SSE4)
     n_int sign = _mm_set1_epi32(0x80000000);
     return _mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(b, sign), _mm_xor_si128(a, sign)));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_f32_u32(vcltq_u32(a, b));
+    return vcltq_u32(a, b);
 #else
     return (unsigned int)a < (unsigned int)b;
 #endif
@@ -369,7 +368,7 @@ static inline n_mask n_cmp_eq_epi32(n_int a, n_int b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpeq_epi32(a, b));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_f32_u32(vceqq_s32(a, b));
+    return vceqq_s32(a, b);
 #else
     return a == b;
 #endif
