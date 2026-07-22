@@ -77,10 +77,10 @@ struct simd_i {
 
 // 需要在 simd_i 定义完成后实现 gather
 inline simd_f simd_f::gathf(const float* base, simd_i idx) {
-    return simd_f{ n_gather_ps<sizeof(float)>(base, idx.v) };
+    return simd_f{ n_gather_ps<sizeof(EntJoy::Mathematics::float2)>(base, idx.v) };
 }
 inline simd_f simd_f::gathfy(const float* base, simd_i idx) {
-    return simd_f{ n_gather_ps<sizeof(float)>(base + 1, idx.v) };
+    return simd_f{ n_gather_ps<sizeof(EntJoy::Mathematics::float2)>(base + 1, idx.v) };
 }
 
 static simd_f blend(simd_f f, simd_f t, simd_mask m) { return simd_f{ n_blend_ps(f.v, t.v, m.m) }; }
