@@ -56,20 +56,15 @@ namespace NativeTranspiler.Analyzer
             switch (stmt)
             {
                 case ForStatementSyntax forStmt:
-                    // for 如果是常量展开（如 for dx=-1;dx<=1;dx++），没问题
-                    // 如果是数据循环（for i=s;i<e;i++），不可 SIMD
-                    if (IsConstantBoundForLoop(forStmt))
+                    // for 循环对外层 SIMD 是安全的——每个 SIMD 通道
+                    // 独立跑自己的内层循环，互不干扰（for_masked 处理）。
+                    // 递归检查 for 体中的语句
+                    if (forStmt.Statement is BlockSyntax forBlock)
                     {
-                        // 递归检查 for 体中的语句
-                        if (forStmt.Statement is BlockSyntax block)
-                        {
-                            foreach (var s in block.Statements)
-                                if (!CheckStatement(s)) return false;
-                        }
-                        return true;
+                        foreach (var s in forBlock.Statements)
+                            if (!CheckStatement(s)) return false;
                     }
-                    MarkNotEligible("Contains data-for loop");
-                    return false;
+                    return true;
 
                 case WhileStatementSyntax _:
                 case DoStatementSyntax _:
