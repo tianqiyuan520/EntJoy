@@ -26,6 +26,11 @@ namespace NativeTranspiler.Analyzer
 
         public string Generate(string scalarBody)
         {
+            // NEW: try universal full-SIMD from AST first
+            if (IsFullSIMDEligible())
+                return GenerateFullSIMDFromAST(scalarBody);
+
+            // EXISTING: fallback paths (keep for compatibility)
             // Check if the body is simple SoA (continuous read + arithmetic + write)
             bool isSimpleSoa = IsSimpleSoaBody();
             if (isSimpleSoa)
@@ -811,6 +816,119 @@ namespace NativeTranspiler.Analyzer
             var typeSymbol = _semanticModel.GetDeclaredSymbol(containingType) as INamedTypeSymbol;
             if (typeSymbol == null) return false;
             return typeSymbol.GetMembers("CellsToLoop").Any();
+        }
+
+        // ================================================================
+        // NEW: Universal Full-SIMD Path (ISPC-style from AST)
+        // ================================================================
+
+        /// <summary>
+        /// 检查 Execute 体是否适合通用全 SIMD 生成。
+        /// 同时通过 SimdEligibilityAnalyzer 和 SimdVariableAnalyzer 检测。
+        /// </summary>
+        private bool IsFullSIMDEligible()
+        {
+            if (_methodSyntax.Body == null) return false;
+
+            // SimdEligibilityAnalyzer 检查（现有逻辑）
+            var eligibilityAnalyzer = new SimdEligibilityAnalyzer(_semanticModel);
+            if (!eligibilityAnalyzer.Analyze(_methodSyntax))
+                return false;
+
+            // SimdVariableAnalyzer 检查（新）
+            var jobStruct = GetJobStruct();
+            if (jobStruct == null) return false;
+
+            try
+            {
+                var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, jobStruct, _idx);
+                var variables = varAnalyzer.Analyze(_methodSyntax);
+                // 必须至少成功分类 index 参数
+                return variables.ContainsKey(_idx) && variables.Count > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 获取 Execute 方法所在的 Job struct 类型符号。
+        /// </summary>
+        private INamedTypeSymbol? GetJobStruct()
+        {
+            var containingType = _methodSyntax.Ancestors()
+                .OfType<TypeDeclarationSyntax>()
+                .FirstOrDefault();
+            if (containingType == null) return null;
+            return _semanticModel.GetDeclaredSymbol(containingType) as INamedTypeSymbol;
+        }
+
+        /// <summary>
+        /// 生成通用全 SIMD 代码。
+        /// 使用 SimdVariableAnalyzer + SimdControlFlowGenerator 从 AST 直接生成。
+        /// </summary>
+        private string GenerateFullSIMDFromAST(string scalarBody)
+        {
+            var sb = new StringBuilder();
+            var jobStruct = GetJobStruct();
+            if (jobStruct == null || _methodSyntax.Body == null)
+                return "";
+
+            // 1. 变量分析
+            var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, jobStruct, _idx);
+            var variables = varAnalyzer.Analyze(_methodSyntax);
+
+            // 2. 外层 SIMD 循环框架
+            sb.AppendLine("    // --- Universal Full-SIMD (ISPC-style) ---");
+            sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    if (simd_end_ > __startIndex)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        // Hoisted loop-invariant broadcasts");
+            sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+            sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+
+            // 3. 布尔字段常量注入
+            foreach (var kvp in _boolFields)
+            {
+                sb.AppendLine($"            bool {kvp.Key} = {kvp.Value};");
+            }
+
+            // 4. 生成 SIMD body
+            var cfGenerator = new SimdControlFlowGenerator(
+                _semanticModel, jobStruct, variables, varAnalyzer,
+                indexParamName: _idx, simdIndexVar: "v_i");
+            string simdBody = cfGenerator.Generate(_methodSyntax.Body);
+
+            // 缩进并追加
+            foreach (var line in simdBody.Split('\n'))
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                    sb.Append("            ").AppendLine(line);
+            }
+
+            sb.AppendLine("        __simd_exit: ;");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+
+            // 5. 标量余量循环（使用传入的 scalarBody）
+            if (!string.IsNullOrEmpty(scalarBody))
+                sb.Append(RemainderLoop(scalarBody));
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 获取标量 body 用于余量循环。
+        /// 临时方法——后续可改为缓存 pre-translated scalar body。
+        /// </summary>
+        private string GetScalarBody()
+        {
+            // 使用现有的 _boolFields 构建简化标量体
+            // 这里返回空字符串，让调用方处理
+            return "";
         }
     }
 }
