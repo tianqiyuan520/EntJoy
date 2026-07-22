@@ -144,20 +144,33 @@ namespace NativeTranspiler.Analyzer
 
         private string RemainderLoop(string scalarBody)
         {
+            // Substitute bool field names with literal values so MSVC eliminates dead branches
+            string substituted = scalarBody;
+            foreach (var kvp in _boolFields)
+                substituted = System.Text.RegularExpressions.Regex.Replace(
+                    substituted, $@"\b{kvp.Key}\b", kvp.Value);
+
             var sb = new StringBuilder();
             sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
-            sb.AppendLine("    do");
-            sb.AppendLine("    {");
-            foreach (var line in scalarBody.Split('\n'))
+            // Only wrap in do-while(false) when the body has return (e.g. FindWithin)
+            bool bodyHasReturn = substituted.Contains("return;");
+            if (bodyHasReturn)
+            {
+                sb.AppendLine("    do");
+                sb.AppendLine("    {");
+            }
+            foreach (var line in substituted.Split('\n'))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var l = line.TrimEnd();
                 l = l.Replace("return;", "break;");
                 sb.Append("    ").AppendLine(l);
             }
-            sb.AppendLine("    // _simd_exit (unused)");
-            sb.AppendLine("    } while(false);");
+            if (bodyHasReturn)
+            {
+                sb.AppendLine("    } while(false);");
+            }
             sb.AppendLine("    }");
             return sb.ToString();
         }
