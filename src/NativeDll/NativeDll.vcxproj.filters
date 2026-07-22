@@ -48,6 +48,12 @@
     <ClInclude Include="NativeWorkerPool.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="NativeSIMD.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SimdValue.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Native.cpp">

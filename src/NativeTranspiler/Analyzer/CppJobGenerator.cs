@@ -238,7 +238,7 @@ namespace NativeTranspiler.Analyzer
                 var analyzer = new SimdEligibilityAnalyzer(semanticModel);
                 if (analyzer.Analyze(methodSyntax))
                 {
-                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName);
+                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, jobStruct: jobStruct);
                     var simdCode = simdGen.Generate(scalarBody);
                     sb.Append(simdCode);
                     sb.AppendLine("}");
@@ -288,7 +288,7 @@ namespace NativeTranspiler.Analyzer
                     var boolFieldValues = new System.Collections.Generic.Dictionary<string, string>();
                     for (int i_ = 0; i_ < boolFields.Count; i_++)
                         boolFieldValues[boolFields[i_].Name] = values[i_] ? "true" : "false";
-                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues);
+                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues, jobStruct);
                     var simdCode = simdGen.Generate(bodyCode);
                     sb.Append(simdCode);
                     sb.AppendLine("}");
