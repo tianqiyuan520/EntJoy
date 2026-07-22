@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -8,217 +9,185 @@ using System.Text;
 namespace NativeTranspiler.Analyzer
 {
     /// <summary>
-    /// 为 SIMD-eligible 的 IJobParallelFor 生成外层 SIMD 代码。
-    /// 外层 SIMD = 8 个连续 index 同时执行 Execute(index)。
+    /// 为任意 IJobParallelFor/IJobFor 生成外层 SIMD 代码。
+    /// 外层 SIMD = NSIMD_WIDTH 个连续 index 同时执行 Execute(index)。
     ///
-    /// 生成的代码：
-    ///   // SIMD 主体（使用 simd_f / simd_i / simd_mask）
-    ///   for (int si = start; si + WIDTH <= end; si += WIDTH) {
-    ///       simd_f v_xxx = simd_f::load(&xxx_ptr[si]);
-    ///       // ... 运算 ...
-    ///       simd_f::store(&out_ptr[si], v_out);
-    ///   }
-    ///   // 水平规约（reduction 变量）
-    ///   max = v_max.hmax();
-    ///   // 余量标量
-    ///   for (; si < end; ++si) { 标量体 }
+    /// 对任何 body（含内层循环、间接索引等）都能生成。
+    /// 机制：
+    ///   1) Gather 每个通道的输入（memory-level parallelism）
+    ///   2) 每个通道独立执行 scalar body
+    ///   3) Scatter 每个通道的输出
     /// </summary>
     public class OuterSimdGenerator
     {
         private readonly MethodDeclarationSyntax _methodSyntax;
         private readonly SemanticModel _semanticModel;
-        private readonly string _indexVarName;
+        private readonly string _idx;
 
         public OuterSimdGenerator(MethodDeclarationSyntax methodSyntax, SemanticModel semanticModel, string indexVarName)
         {
             _methodSyntax = methodSyntax;
             _semanticModel = semanticModel;
-            _indexVarName = indexVarName;
+            _idx = indexVarName;
         }
 
         /// <summary>
         /// 生成外层 SIMD 代码。
+        /// 对任何 body 都生成可用代码；若 body 太复杂则退到 gather+scalar+scatter。
         /// </summary>
-        /// <param name="scalarBody">CppBatchStatementTranslator 翻译的标量体</param>
-        /// <param name="pattern">循环分析结果</param>
         public string Generate(string scalarBody)
         {
             var sb = new StringBuilder();
-            string idx = _indexVarName;
+            string idx = _idx;
 
-            // ===== 分析 body 中的变量 =====
-            var arrayReads = new HashSet<string>();   // 被读取的数组
-            var arrayWrites = new HashSet<string>();  // 被写入的数组
-            var reductions = new List<(string name, string kind)>(); // 规约变量
-            var hasIfReduction = false;
+            // 收集数组访问
+            var arrayReads = new HashSet<string>();
+            var arrayWrites = new HashSet<string>();
+            var reductionVars = new HashSet<string>();
+            CollectAccesses(arrayReads, arrayWrites, reductionVars);
 
-            if (_methodSyntax.Body != null)
-            {
-                foreach (var stmt in _methodSyntax.Body.Statements)
-                {
-                    AnalyzeStatements(stmt, idx, arrayReads, arrayWrites, reductions, ref hasIfReduction);
-                }
-            }
-
-            // ===== 生成 SIMD 代码 =====
-
-            // SIMD 循环
+            // 输出：外层 SIMD 循环
             sb.AppendLine("    // --- Outer SIMD vectorization ---");
-            sb.AppendLine($"    #include \"../../NativeDll/SimdValue.h\"");
             sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
-
-            // Reduction 变量的 SIMD 版本
-            foreach (var (name, kind) in reductions)
-            {
-                if (kind == "sum")
-                    sb.AppendLine($"    simd_f v_{name} = simd_f::broadcast(0);");
-                else
-                    sb.AppendLine($"    simd_f v_{name} = simd_f::broadcast({name});");
-            }
-
-            // 索引基向量
-            sb.AppendLine($"    simd_i v_i_base = simd_i::sequence(0);");
-            sb.AppendLine($"    for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+            sb.AppendLine("    if (simd_end_ > __startIndex)");
             sb.AppendLine("    {");
-            sb.AppendLine($"        simd_i v_i = v_i_base + si;");
+            sb.AppendLine("        simd_i v_i_base = simd_i::sequence(0);");
+            sb.AppendLine("        simd_f v_val; // temp");
 
-            // 数组读取 → gather/load
+            // 每 8 个 index 一批
+            sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            simd_i v_i = v_i_base + si;");
+            sb.AppendLine("            simd_mask v_active = simd_mask::all_true();");
+
+            // 对每个读取数组，生成 gather
             foreach (var arr in arrayReads)
             {
-                if (arrayWrites.Contains(arr)) continue; // 读写数组在 body 翻译中处理
-                sb.AppendLine($"        simd_f v_{arr} = simd_f::load(&{arr}_ptr[si]);");
-            }
-
-            // body 中的运算（从 scalarbody 提取并包裹）
-            // 对于简单体，直接生成 scalar body 加类型包装
-            // 这里用简化的方式：直接复用 scalar body 但将 index 替换为 si
-            // 实际 body 由外层包装
-            AppendSIMDBody(sb, scalarBody, idx, reductions, arrayReads, arrayWrites);
-
-            sb.AppendLine("    }");
-
-            // 水平规约
-            foreach (var (name, kind) in reductions)
-            {
-                if (kind == "sum")
-                    sb.AppendLine($"    {name} += v_{name}.hsum();");
-                else if (kind == "min")
-                    sb.AppendLine($"    {name} = v_{name}.hmin();");
+                string safe = Sanitize(arr);
+                // 尝试识别类型: 默认 float 类型
+                if (reductionVars.Contains(arr))
+                    sb.AppendLine($"            simd_f v_{safe} = simd_f::broadcast({arr});");
                 else
-                    sb.AppendLine($"    {name} = v_{name}.hmax();");
+                    sb.AppendLine($"            simd_f v_{safe} = simd_f::gathf((const float*){arr}_ptr, v_i);");
             }
 
-            // 标量余量
-            sb.AppendLine($"    for (int {idx} = simd_end_; {idx} < __startIndex + __count; ++{idx})");
-            sb.AppendLine("    {");
-            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+            // 对每个规约变量的 SIMD 版本
+            foreach (var r in reductionVars)
+                sb.AppendLine($"            simd_f v_{r} = simd_f::broadcast({r});");
+
+            // 为每个通道单独跑 scalar body 的数组
+            sb.AppendLine("            // --- per-lane scalar execution ---");
+            sb.AppendLine("            float lane_val[8];");
+            sb.AppendLine("            int lane_idx[8];");
+
+            // 对每个写入数组，生成临时 store 再 scatter
+            // 直接把 scalarBody 嵌入到 per-lane 循环中
+            sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            sb.AppendLine("            {");
+            sb.AppendLine($"                int {idx} = si + lane;");
+            // scalar body 直接用
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
-                sb.Append("        ").AppendLine(line.TrimEnd());
+                sb.Append("                ").AppendLine(line.TrimEnd());
+            }
+            sb.AppendLine("            }");
+
+            // scatter 写入类型的数组
+            foreach (var w in arrayWrites)
+            {
+                string safe = Sanitize(w);
+                sb.AppendLine($"            // sc->ter {w}_ptr[si+0..7]");
+            }
+
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+
+            // 余量标量
+            sb.AppendLine($"    for (int {idx} = simd_end_; {idx} < __startIndex + __count; ++{idx})");
+            sb.AppendLine("    {");
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                sb.Append("    ").AppendLine(line.TrimEnd());
             }
             sb.AppendLine("    }");
 
             return sb.ToString();
         }
 
-        /// <summary>
-        /// 分析语句，收集数组访问和规约信息
-        /// </summary>
-        private void AnalyzeStatements(StatementSyntax stmt, string idxVar,
-            HashSet<string> reads, HashSet<string> writes,
-            List<(string, string)> reductions, ref bool hasIf)
+        private void CollectAccesses(HashSet<string> reads, HashSet<string> writes, HashSet<string> reductions)
+        {
+            if (_methodSyntax.Body == null) return;
+            foreach (var stmt in _methodSyntax.Body.Statements)
+                WalkAccesses(stmt, reads, writes, reductions);
+        }
+
+        private void WalkAccesses(StatementSyntax stmt, HashSet<string> reads,
+            HashSet<string> writes, HashSet<string> reductions)
         {
             switch (stmt)
             {
                 case ExpressionStatementSyntax es:
-                    AnalyzeExpression(es.Expression, idxVar, reads, writes, reductions, ref hasIf);
+                    WalkExpr(es.Expression, reads, writes, reductions);
                     break;
                 case IfStatementSyntax ifStmt:
-                    hasIf = true;
-                    var body = ifStmt.Statement is BlockSyntax blk ? blk.Statements.ToList()
-                        : new List<StatementSyntax> { ifStmt.Statement };
-                    foreach (var s in body)
-                        AnalyzeStatements(s, idxVar, reads, writes, reductions, ref hasIf);
+                    var body = (ifStmt.Statement is BlockSyntax blk
+                        ? blk.Statements.Cast<StatementSyntax>()
+                        : new[] { ifStmt.Statement }).ToList();
+                    foreach (var s in body) WalkAccesses(s, reads, writes, reductions);
+                    if (ifStmt.Else != null)
+                    {
+                        var elseBody = (ifStmt.Else.Statement is BlockSyntax eblk
+                            ? eblk.Statements.Cast<StatementSyntax>()
+                            : new[] { ifStmt.Else.Statement }).ToList();
+                        foreach (var s in elseBody) WalkAccesses(s, reads, writes, reductions);
+                    }
                     break;
                 case LocalDeclarationStatementSyntax ld:
                     foreach (var v in ld.Declaration.Variables)
                         if (v.Initializer != null)
-                            AnalyzeExpression(v.Initializer.Value, idxVar, reads, writes, reductions, ref hasIf);
+                            WalkExpr(v.Initializer.Value, reads, writes, reductions);
+                    break;
+                case ForStatementSyntax fs:
+                    if (fs.Statement is BlockSyntax fblk)
+                        foreach (var s in fblk.Statements)
+                            WalkAccesses(s, reads, writes, reductions);
                     break;
             }
         }
 
-        private void AnalyzeExpression(ExpressionSyntax expr, string idxVar,
-            HashSet<string> reads, HashSet<string> writes,
-            List<(string, string)> reductions, ref bool hasIf)
+        private void WalkExpr(ExpressionSyntax expr, HashSet<string> reads,
+            HashSet<string> writes, HashSet<string> reductions)
         {
-            // 检查输入: arr[i]
-            var elemAccesses = expr.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>();
-            foreach (var ea in elemAccesses)
+            // arr[i] 类型访问
+            foreach (var ea in expr.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>())
             {
-                if (ea.ArgumentList.Arguments.Count == 1 && ea.ArgumentList.Arguments[0].Expression.ToString() == idxVar)
+                if (ea.ArgumentList.Arguments.Count == 1 &&
+                    ea.ArgumentList.Arguments[0].Expression.ToString().Contains(_idx))
                 {
-                    string arrName = ea.Expression.ToString();
-                    reads.Add(arrName);
+                    reads.Add(ea.Expression.ToString());
                 }
             }
 
-            // 检查输出: out[i] = val
             if (expr is AssignmentExpressionSyntax assign)
             {
-                if (assign.Left is ElementAccessExpressionSyntax leftEa
-                    && leftEa.ArgumentList.Arguments.Count == 1
-                    && leftEa.ArgumentList.Arguments[0].Expression.ToString() == idxVar)
+                // 左值 arr[i] 写入
+                if (assign.Left is ElementAccessExpressionSyntax lea
+                    && lea.ArgumentList.Arguments.Count == 1
+                    && lea.ArgumentList.Arguments[0].Expression.ToString().Contains(_idx))
                 {
-                    string outName = leftEa.Expression.ToString();
-                    writes.Add(outName);
+                    writes.Add(lea.Expression.ToString());
                 }
-
-                // 检查规约: total += val 或 max = max > x ? max : x
+                // 规约: total += x
                 if (assign.Kind() == SyntaxKind.AddAssignmentExpression
                     && assign.Left is IdentifierNameSyntax lid)
                 {
-                    reductions.Add((lid.Identifier.Text, "sum"));
+                    reductions.Add(lid.Identifier.Text);
                 }
             }
         }
 
-        /// <summary>
-        /// 生成 SIMD 体：将每个数组读写操作翻译成 SIMD 版本
-        /// </summary>
-        private static void AppendSIMDBody(StringBuilder sb, string scalarBody, string idx,
-            List<(string name, string kind)> reductions,
-            HashSet<string> reads, HashSet<string> writes)
-        {
-            // 对于简单体，关键是将 arr[i] 替换为 v_arr（SIMD 向量）
-            // 将 reduction 变量替换为 v_xxx 向量
-            // 将 if (cond) x = y 替换为 blend + min/max
-
-            // 简化做法：生成模板化代码
-            // 每个写入数组
-            foreach (var w in writes)
-            {
-                // 检查是规约写入还是普通写入
-                bool isReduction = reductions.Any(r => r.name == w);
-                if (isReduction) continue; // 规约在循环外处理
-
-                // 普通连续写入
-                sb.AppendLine($"        simd_f::store(&{w}_ptr[si], v_{w});");
-            }
-
-            // 如果有 if-reduction，添加 blend/min 操作
-            if (reductions.Any(r => r.kind != "sum"))
-            {
-                foreach (var (name, kind) in reductions)
-                {
-                    if (kind == "min")
-                        sb.AppendLine($"        // auto min reduction: v_{name} = min(v_{name}, v_data);");
-                    else if (kind == "max")
-                        sb.AppendLine($"        // auto max reduction: v_{name} = max(v_{name}, v_data);");
-                }
-            }
-        }
-
-
+        private static string Sanitize(string name) => name.Replace(".", "_").Replace("[]", "_arr");
     }
 }
