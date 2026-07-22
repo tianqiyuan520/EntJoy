@@ -777,6 +777,27 @@ static inline int n_all_zero(n_mask mask) {
 static inline int n_any_true(n_mask mask) { return !n_all_zero(mask); }
 
 // ============================================================
+// Mask → integer bitmask (converts SIMD mask to per-lane bits)
+// Used for per-lane scatter guards: each bit = 1 means lane is active
+// ============================================================
+static inline int n_mask_to_bitmask(n_mask mask) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_movemask_ps(mask);
+#elif defined(NSIMD_SSE4)
+    return _mm_movemask_ps(mask);
+#elif defined(NSIMD_NEON)
+    // NEON: extract each lane's sign bit (MSB of float32)
+    uint32x4_t u = vreinterpretq_u32_f32(mask);
+    uint32_t tmp[4];
+    vst1q_u32(tmp, u);
+    return (int)((tmp[0] >> 31)) | ((int)(tmp[1] >> 31) << 1)
+         | ((int)(tmp[2] >> 31) << 2) | ((int)(tmp[3] >> 31) << 3);
+#else
+    return mask ? 1 : 0;
+#endif
+}
+
+// ============================================================
 // Horizontal reduction
 // ============================================================
 
