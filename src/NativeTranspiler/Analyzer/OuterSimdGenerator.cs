@@ -321,18 +321,25 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                        simd_mask v_active = v_cell_active & v_start_valid;");
             sb.AppendLine("                        if (!v_active.any_true()) continue;");
             sb.AppendLine();
-            sb.AppendLine("                        // ===== Inner reduction loop (mask-managed while) =====");
+            sb.AppendLine("                        // ===== Inner reduction loop (ISPC-style count for) =====");
             sb.AppendLine("                        // Each lane has its own i (start..end), advances independently");
+            sb.AppendLine("                        // Pre-compute max iterations = hmax(end-start) so all lanes march together");
+            sb.AppendLine("                        // Finished lanes do wasted work, result masked out by blend (ISPC semantics)");
             sb.AppendLine("                        simd_value<int> v_i_red = v_range.x;");
-            sb.AppendLine("                        // clamp v_i_red to 0 before gather -- prevent unmasked gather from -1 (AV)");
             sb.AppendLine("                        v_i_red = simd_max(v_i_red, v_zero);");
             sb.AppendLine("                        simd_value<int> v_end = v_range.y;");
+            sb.AppendLine("                        simd_value<int> v_maxIter = v_end - v_i_red;");
+            sb.AppendLine("                        int maxIter = hmax(v_maxIter);");
+            sb.AppendLine("                        simd_value<int> v_sortedLast = simd_value<int>::broadcast(SortedLength - 1);");
             sb.AppendLine("                        #pragma loop(ivdep)");
-            sb.AppendLine("                        while (v_active.any_true())");
+            sb.AppendLine("                        for (int iter = 0; iter < maxIter; iter++)");
             sb.AppendLine("                        {");
-            sb.AppendLine("                            // Gather 8 different SortedPositions (per-lane indices)");
-            sb.AppendLine("                            simd_value<float> v_px = simd_value<float>::gathf(SortedPositions_ptr, v_i_red.v);");
-            sb.AppendLine("                            simd_value<float> v_py = simd_value<float>::gathfy(SortedPositions_ptr, v_i_red.v);");
+            sb.AppendLine("                            // Per-iteration mask: lanes with i < end stay active");
+            sb.AppendLine("                            simd_mask v_mask{ n_cmp_lt_epi32(v_i_red.v, v_end.v) };");
+            sb.AppendLine("                            // Clamp i to safe bounds for gather (finished lanes read 0, blend discards)");
+            sb.AppendLine("                            simd_value<int> v_safe_i = simd_min(v_i_red, v_sortedLast);");
+            sb.AppendLine("                            simd_value<float> v_px = simd_value<float>::gathf(SortedPositions_ptr, v_safe_i.v);");
+            sb.AppendLine("                            simd_value<float> v_py = simd_value<float>::gathfy(SortedPositions_ptr, v_safe_i.v);");
             sb.AppendLine();
             sb.AppendLine("                            // 8-wide distance squared: (qx-px)^2 + (qy-py)^2");
             sb.AppendLine("                            simd_value<float> v_dx = v_q.x - v_px;");
@@ -341,7 +348,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
             sb.AppendLine("                            // Masked blend: update if distSq < bestDistSq AND lane active");
             sb.AppendLine("                            simd_mask v_improve{ n_cmp_lt_ps(v_distSq.v, v_bestDistSq.v) };");
-            sb.AppendLine("                            v_improve = v_improve & v_active;");
+            sb.AppendLine("                            v_improve = v_improve & v_mask;");
 
             if (ignoreSelfActive)
             {
@@ -353,9 +360,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                            v_bestDistSq = blend(v_bestDistSq, v_distSq, v_improve);");
             sb.AppendLine("                            v_bestIdx = blend(v_bestIdx, v_i_red, v_improve);");
             sb.AppendLine();
-            sb.AppendLine("                            // Advance i, mask out lanes that reached end");
+            sb.AppendLine("                            // Advance i (finished lanes keep going, blend discards)");
             sb.AppendLine("                            v_i_red = v_i_red + 1;");
-            sb.AppendLine("                            v_active = v_active & simd_mask{ n_cmp_lt_epi32(v_i_red.v, v_end.v) };");
             sb.AppendLine("                        }");
             sb.AppendLine("                    }");
             sb.AppendLine("                }");
