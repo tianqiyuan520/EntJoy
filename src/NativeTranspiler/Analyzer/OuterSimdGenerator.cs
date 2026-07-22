@@ -29,19 +29,11 @@ namespace NativeTranspiler.Analyzer
 
         public string Generate(string scalarBody)
         {
-            try
-            {
-                // Universal full-SIMD from AST (ISPC-style)
-                string simdResult = GenerateFullSIMDFromAST(scalarBody);
-                if (!string.IsNullOrEmpty(simdResult))
-                    return simdResult;
-            }
-            catch
-            {
-                // Universal path failed → fall through to per-lane
-            }
-
-            // FALLBACK: per-lane scalar (when AST analysis fails)
+            // Try universal SIMD from AST
+            string simdResult = GenerateFullSIMDFromAST(scalarBody);
+            if (!string.IsNullOrEmpty(simdResult))
+                return simdResult;
+            // FALLBACK: per-lane scalar
             return GeneratePerLane(scalarBody);
         }
 
@@ -226,27 +218,8 @@ namespace NativeTranspiler.Analyzer
         /// 生成通用全 SIMD 代码。
         /// 使用 SimdVariableAnalyzer + SimdControlFlowGenerator 从 AST 直接生成。
         /// </summary>
-        /// <summary>
-        /// Check if the method body has float2/int2 casts or complex math operations
-        /// that the universal SIMD generator can't yet handle. If so, fall back.
-        /// </summary>
-        private bool HasComplexFloat2Ops()
-        {
-            if (_methodSyntax.Body == null) return false;
-            foreach (var cast in _methodSyntax.Body.DescendantNodes().OfType<CastExpressionSyntax>())
-            {
-                string typeName = cast.Type.ToString();
-                if (typeName.Contains("int2") || typeName.Contains("float2"))
-                    return true;
-            }
-            return false;
-        }
-
         private string GenerateFullSIMDFromAST(string scalarBody)
         {
-            // Skip complex float2 arithmetic jobs (use proven per-lane for now)
-            if (HasComplexFloat2Ops())
-                return "";
 
             var sb = new StringBuilder();
             if (_jobStruct == null || _methodSyntax.Body == null)

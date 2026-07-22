@@ -20,6 +20,9 @@ struct simd_value<float> {
     simd_value() = default;
     explicit simd_value(n_float val) : v(val) {}
     simd_value& operator=(float s) { v = n_set1_ps(s); return *this; }
+    // Non-explicit scalar broadcast constructor enables implicit float→simd_value<float> conversion
+    // (needed for min(v, scalar) and operator arguments where the scalar side needs to match SIMD width)
+    simd_value(float s) : v(n_set1_ps(s)) {}
 
     static simd_value broadcast(float s) { return simd_value{ n_set1_ps(s) }; }
     static simd_value load(const float* p) { return simd_value{ n_load_ps(p) }; }
@@ -109,6 +112,8 @@ struct simd_value<int> {
     simd_value() = default;
     explicit simd_value(n_int val) : v(val) {}
     simd_value& operator=(int s) { v = n_set1_epi32(s); return *this; }
+    // Non-explicit scalar broadcast constructor enables implicit int→simd_value<int> conversion
+    simd_value(int s) : v(n_set1_epi32(s)) {}
 
     static simd_value broadcast(int s) { return simd_value{ n_set1_epi32(s) }; }
     static simd_value sequence(int base) {
@@ -138,7 +143,7 @@ struct simd_value<int> {
     // Full-Width SIMD: float->int truncation conversion
     static simd_value convert(simd_value<float> f) { return simd_value{ n_cvttps_epi32(f.v) }; }
 
-    // Full-Width SIMD: per-lane comparisons with scalar return simd_mask
+    // Per-lane comparisons with scalar return simd_mask
     simd_mask operator<(int s) const { return simd_mask{ n_cmp_lt_epi32(v, n_set1_epi32(s)) }; }
     simd_mask operator<=(int s) const { return simd_mask{ n_cmp_le_epi32(v, n_set1_epi32(s)) }; }
     simd_mask operator>(int s) const { return simd_mask{ n_cmp_gt_epi32(v, n_set1_epi32(s)) }; }
@@ -171,8 +176,12 @@ struct simd_value<EntJoy::Mathematics::float2> {
 
     simd_value() = default;
     simd_value(simd_value<float> x_, simd_value<float> y_) : x(x_), y(y_) {}
+    static simd_value broadcast(EntJoy::Mathematics::float2 s) {
+        return simd_value{ simd_value<float>::broadcast(s.x()), simd_value<float>::broadcast(s.y()) };
+    }
     // Broadcast constructor: scalar float2 → all lanes = s
     simd_value(EntJoy::Mathematics::float2 s) : x(simd_value<float>::broadcast(s.x())), y(simd_value<float>::broadcast(s.y())) {}
+    simd_value floor() const { return simd_value{ x.floor(), y.floor() }; }
 
     static simd_value gather(const EntJoy::Mathematics::float2* base, simd_value<int> idx) {
         simd_value v;
@@ -194,6 +203,7 @@ struct simd_value<EntJoy::Mathematics::float2> {
     // scalar float2 broadcast → component-wise (for decomposed varying + uniform)
     friend simd_value<float> operator-(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a - b.x(); }
     friend simd_value<float> operator+(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a + b.x(); }
+    friend simd_value<float> operator*(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a * b.x(); }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
@@ -213,6 +223,9 @@ struct simd_value<EntJoy::Mathematics::int2> {
 
     simd_value() = default;
     simd_value(simd_value<int> x_, simd_value<int> y_) : x(x_), y(y_) {}
+    static simd_value broadcast(EntJoy::Mathematics::int2 s) {
+        return simd_value{ simd_value<int>::broadcast(s.x()), simd_value<int>::broadcast(s.y()) };
+    }
     // Broadcast constructor: scalar int2 → all lanes = s
     simd_value(EntJoy::Mathematics::int2 s) : x(simd_value<int>::broadcast(s.x())), y(simd_value<int>::broadcast(s.y())) {}
 
@@ -252,12 +265,18 @@ struct simd_value<EntJoy::Mathematics::int2> {
     friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
     friend simd_value<int> operator-(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a - b.x(); }
     friend simd_value<int> operator+(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a + b.x(); }
+    friend simd_value<int> operator*(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a * b.x(); }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
     }
     friend simd_value max(simd_value a, simd_value b) {
         return simd_value{ max(a.x, b.x), max(a.y, b.y) };
+    }
+
+    // Full-Width SIMD: float2→int2 truncation conversion (via component-wise cvttps)
+    static simd_value convert(simd_value<EntJoy::Mathematics::float2> f) {
+        return simd_value{ simd_value<int>::convert(f.x), simd_value<int>::convert(f.y) };
     }
 };
 
