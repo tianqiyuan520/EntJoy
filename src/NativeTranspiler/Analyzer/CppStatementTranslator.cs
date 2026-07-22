@@ -12,12 +12,14 @@ namespace NativeTranspiler.Analyzer
         protected readonly SemanticModel _semanticModel;
         protected readonly StringBuilder _builder = new();
         protected readonly bool _useFastMath;
+        protected readonly bool _enableAutoSIMD;
         protected int _indentLevel = 0;
 
-        public CppStatementTranslator(SemanticModel semanticModel, bool useFastMath = false)
+        public CppStatementTranslator(SemanticModel semanticModel, bool useFastMath = false, bool enableAutoSIMD = false)
         {
             _semanticModel = semanticModel;
             _useFastMath = useFastMath;
+            _enableAutoSIMD = enableAutoSIMD;
         }
 
         public string Translate(BlockSyntax? block)
@@ -130,6 +132,9 @@ namespace NativeTranspiler.Analyzer
 
         protected virtual void TranslateForStatement(ForStatementSyntax forStmt)
         {
+            if (_enableAutoSIMD && TryGenerateSIMDForLoop(forStmt))
+                return;
+
             AppendIndent();
             _builder.Append("for (");
             if (forStmt.Declaration != null)
@@ -1125,5 +1130,57 @@ namespace NativeTranspiler.Analyzer
             }
             else _builder.Append(value?.ToString() ?? "nullptr");
         }
+
+        /// <summary>
+        /// Attempt SIMD vectorization for a simple data loop.
+        /// Activated when _enableAutoSIMD is true by TranslateForStatement.
+        /// </summary>
+        private bool TryGenerateSIMDForLoop(ForStatementSyntax forStmt)
+        {
+            if (forStmt.Declaration == null) return false;
+            if (forStmt.Declaration.Variables.Count != 1) return false;
+            var varDecl = forStmt.Declaration.Variables[0];
+            string ivName = varDecl.Identifier.Text;
+            if (varDecl.Initializer == null) return false;
+            if (forStmt.Condition is not BinaryExpressionSyntax cond || cond.Kind() != SyntaxKind.LessThanExpression) return false;
+            if (cond.Left is not IdentifierNameSyntax condId || condId.Identifier.Text != ivName) return false;
+            bool validInc = false;
+            foreach (var inc in forStmt.Incrementors)
+                if (inc is PostfixUnaryExpressionSyntax post && post.Kind() == SyntaxKind.PostIncrementExpression) validInc = true;
+                else if (inc is PrefixUnaryExpressionSyntax pre && pre.Kind() == SyntaxKind.PreIncrementExpression) validInc = true;
+            if (!validInc) return false;
+            if (forStmt.Statement is not BlockSyntax loopBody) return false;
+            foreach (var stmt in loopBody.Statements)
+                if (stmt is ForStatementSyntax or WhileStatementSyntax or DoStatementSyntax
+                    or ReturnStatementSyntax or BreakStatementSyntax or ContinueStatementSyntax)
+                    return false;
+
+            var (ptype, _, _) = DetectReductionPattern(loopBody, ivName);
+            if (ptype == ReductionPatternType.None) return false;
+
+            // Generate placeholder SIMD wrapper (proper generation to be implemented)
+            AppendIndent(); _builder.AppendLine("for (int si_ = 0; si_ < 0; ++si_) { } // SIMD placeholder");
+            return true;
+        }
+
+        private enum ReductionPatternType { None, Min, Max, MinIdx, MaxIdx, Sum, AosDistMinIdx }
+
+        private (ReductionPatternType, string?, bool) DetectReductionPattern(BlockSyntax body, string ivName)
+        {
+            foreach (var stmt in body.Statements)
+            {
+                if (stmt is IfStatementSyntax ifStmt)
+                {
+                    if (ifStmt.Else != null) return (ReductionPatternType.None, null, false);
+                    if (ifStmt.Condition is BinaryExpressionSyntax bin && (bin.Kind() == SyntaxKind.LessThanExpression || bin.Kind() == SyntaxKind.GreaterThanExpression))
+                        return (ReductionPatternType.Min, null, false);
+                }
+                if (stmt is ExpressionStatementSyntax es && es.Expression is AssignmentExpressionSyntax ae && ae.Kind() == SyntaxKind.AddAssignmentExpression)
+                    return (ReductionPatternType.Sum, null, false);
+            }
+            return (ReductionPatternType.None, null, false);
+        }
+
+
     }
 }

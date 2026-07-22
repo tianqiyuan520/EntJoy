@@ -626,7 +626,7 @@ namespace {AttributeNamespace}
         public bool UseISPC_MT {{ get; set; }} = false;
         public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
         public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;
-        public AutoSIMD AutoSIMD {{ get; set; }} = AutoSIMD.Enabled;
+        public AutoSIMD AutoSIMD {{ get; set; }} = AutoSIMD.Disabled;
     }}
 }}
 ";
