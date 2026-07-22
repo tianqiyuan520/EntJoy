@@ -14,7 +14,13 @@
     #define NSIMD_AVX2 1
     #define NSIMD_WIDTH 8
     #include <immintrin.h>
-#elif defined(__SSE4_2__) || defined(__SSE4_1__) || defined(__SSE__)
+#elif defined(__AVX__)
+    // /arch:AVX (without AVX2)
+    #define NSIMD_AVX 1
+    #define NSIMD_WIDTH 8
+    #include <immintrin.h>
+#elif defined(__SSE4_2__) || defined(__SSE4_1__) || defined(__SSE__) || defined(_M_IX86_FP) || defined(_M_X64)
+    // Generic x86/x64 fallback: all modern x64 CPUs support at least SSE4
     #define NSIMD_SSE4 1
     #define NSIMD_WIDTH 4
     #include <smmintrin.h>
