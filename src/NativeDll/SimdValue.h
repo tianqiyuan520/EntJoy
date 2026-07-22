@@ -1,21 +1,110 @@
-// SimdValue.h — 外层 SIMD 值类型
-// 基于 NativeSIMD.h 的 n_* 函数提供 simd_f / simd_i / simd_mask 类型
+// SimdValue.h — SIMD types aligned with EntJoy.Mathematics
+// simd_value<float>  = WIDTH-wide float
+// simd_value<int>    = WIDTH-wide int
+// simd_value<float2> = pair of simd_value<float> (x,y)
+// simd_value<int2>   = pair of simd_value<int> (x,y)
 #pragma once
 #include "NativeSIMD.h"
 #include "NativeMath.h"
 
-// 标量回退
-#if NSIMD_WIDTH == 1
-typedef float simd_f;
-typedef int simd_i;
-typedef bool simd_mask;
-static inline float hsum(float v) { return v; }
-static inline float hmin(float v) { return v; }
-static inline float hmax(float v) { return v; }
-#else
+// Forward declaration
+template<typename T> struct simd_value;
 
-struct simd_i; // 前向声明
+// ============================================================
+// simd_value<float>
+// ============================================================
+template<>
+struct simd_value<float> {
+    n_float v;
+    simd_value() = default;
+    explicit simd_value(n_float val) : v(val) {}
 
+    static simd_value broadcast(float s) { return simd_value{ n_set1_ps(s) }; }
+    static simd_value load(const float* p) { return simd_value{ n_load_ps(p) }; }
+    void store(float* p) const { n_store_ps(p, v); }
+
+    template<typename Tarr>
+    static simd_value gathf(const Tarr* base, n_int idx) {
+        return simd_value{ n_gather_ps<sizeof(Tarr)>((const float*)base, idx) };
+    }
+    template<typename Tarr>
+    static simd_value gathfy(const Tarr* base, n_int idx) {
+        return simd_value{ n_gather_ps<sizeof(Tarr)>(((const float*)base) + 1, idx) };
+    }
+
+    friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ n_add_ps(a.v, b.v) }; }
+    friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ n_sub_ps(a.v, b.v) }; }
+    friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ n_mul_ps(a.v, b.v) }; }
+    friend simd_value operator+(simd_value a, float b) { return simd_value{ n_add_ps(a.v, n_set1_ps(b)) }; }
+    friend simd_value operator-(simd_value a, float b) { return simd_value{ n_sub_ps(a.v, n_set1_ps(b)) }; }
+    friend simd_value operator*(simd_value a, float b) { return simd_value{ n_mul_ps(a.v, n_set1_ps(b)) }; }
+    friend simd_value operator+(float a, simd_value b) { return simd_value{ n_add_ps(n_set1_ps(a), b.v) }; }
+    friend simd_value operator-(float a, simd_value b) { return simd_value{ n_sub_ps(n_set1_ps(a), b.v) }; }
+    friend simd_value operator*(float a, simd_value b) { return simd_value{ n_mul_ps(n_set1_ps(a), b.v) }; }
+    friend simd_value min(simd_value a, simd_value b) { return simd_value{ n_min_ps(a.v, b.v) }; }
+    friend simd_value max(simd_value a, simd_value b) { return simd_value{ n_max_ps(a.v, b.v) }; }
+};
+
+// ============================================================
+// simd_value<int>
+// ============================================================
+template<>
+struct simd_value<int> {
+    n_int v;
+    simd_value() = default;
+    explicit simd_value(n_int val) : v(val) {}
+
+    static simd_value broadcast(int s) { return simd_value{ n_set1_epi32(s) }; }
+    static simd_value sequence(int base) {
+        return simd_value{ n_set_epi32(base+7, base+6, base+5, base+4, base+3, base+2, base+1, base) };
+    }
+    static simd_value load(const int* p) { return simd_value{ n_load_epi32(p) }; }
+    void store(int* p) const { n_store_epi32(p, v); }
+
+    static simd_value gather(const int* base, simd_value idx) {
+        return simd_value{ n_gather_epi32(base, idx.v) };
+    }
+
+    friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ n_add_epi32(a.v, b.v) }; }
+    friend simd_value operator+(simd_value a, int b) { return simd_value{ n_add_epi32(a.v, n_set1_epi32(b)) }; }
+    friend simd_value operator+(int a, simd_value b) { return simd_value{ n_add_epi32(n_set1_epi32(a), b.v) }; }
+};
+
+// ============================================================
+// simd_value<EntJoy::Mathematics::float2>
+// ============================================================
+template<>
+struct simd_value<EntJoy::Mathematics::float2> {
+    simd_value<float> x;
+    simd_value<float> y;
+
+    static simd_value gather(const EntJoy::Mathematics::float2* base, simd_value<int> idx) {
+        simd_value v;
+        v.x = simd_value<float>::gathf(base, idx.v);
+        v.y = simd_value<float>::gathfy(base, idx.v);
+        return v;
+    }
+};
+
+// ============================================================
+// simd_value<EntJoy::Mathematics::int2>
+// ============================================================
+template<>
+struct simd_value<EntJoy::Mathematics::int2> {
+    simd_value<int> x;
+    simd_value<int> y;
+
+    static simd_value gather(const EntJoy::Mathematics::int2* base, simd_value<int> idx) {
+        simd_value v;
+        v.x = simd_value<int>::gather((const int*)base, idx);
+        v.y = simd_value<int>::gather(((const int*)base) + 1, idx);
+        return v;
+    }
+};
+
+// ============================================================
+// simd_mask
+// ============================================================
 struct simd_mask {
     n_float m;
     simd_mask() = default;
@@ -34,59 +123,16 @@ struct simd_mask {
     bool all_false() const { return n_all_zero(m) != 0; }
 };
 
-struct simd_f {
-    n_float v;
-    simd_f() = default;
-    explicit simd_f(n_float val) : v(val) {}
-
-    static simd_f broadcast(float s) { return simd_f{ n_set1_ps(s) }; }
-    static simd_f load(const float* p) { return simd_f{ n_load_ps(p) }; }
-    void store(float* p) const { n_store_ps(p, v); }
-
-    static simd_f gathf(const float* base, simd_i idx);
-    static simd_f gathfy(const float* base, simd_i idx);
-
-    friend simd_f operator+(simd_f a, simd_f b) { return simd_f{ n_add_ps(a.v, b.v) }; }
-    friend simd_f operator-(simd_f a, simd_f b) { return simd_f{ n_sub_ps(a.v, b.v) }; }
-    friend simd_f operator*(simd_f a, simd_f b) { return simd_f{ n_mul_ps(a.v, b.v) }; }
-    friend simd_f operator+(simd_f a, float b) { return simd_f{ n_add_ps(a.v, n_set1_ps(b)) }; }
-    friend simd_f operator-(simd_f a, float b) { return simd_f{ n_sub_ps(a.v, n_set1_ps(b)) }; }
-    friend simd_f operator*(simd_f a, float b) { return simd_f{ n_mul_ps(a.v, n_set1_ps(b)) }; }
-    friend simd_f operator+(float a, simd_f b) { return simd_f{ n_add_ps(n_set1_ps(a), b.v) }; }
-    friend simd_f operator-(float a, simd_f b) { return simd_f{ n_sub_ps(n_set1_ps(a), b.v) }; }
-    friend simd_f operator*(float a, simd_f b) { return simd_f{ n_mul_ps(n_set1_ps(a), b.v) }; }
-    friend simd_f min(simd_f a, simd_f b) { return simd_f{ n_min_ps(a.v, b.v) }; }
-    friend simd_f max(simd_f a, simd_f b) { return simd_f{ n_max_ps(a.v, b.v) }; }
-};
-
-struct simd_i {
-    n_int v;
-    simd_i() = default;
-    explicit simd_i(n_int val) : v(val) {}
-    static simd_i broadcast(int s) { return simd_i{ n_set1_epi32(s) }; }
-    static simd_i sequence(int base) {
-        return simd_i{ n_set_epi32(base+7, base+6, base+5, base+4, base+3, base+2, base+1, base) };
-    }
-    static simd_i load(const int* p) { return simd_i{ n_load_epi32(p) }; }
-    void store(int* p) const { n_store_epi32(p, v); }
-
-    friend simd_i operator+(simd_i a, simd_i b) { return simd_i{ n_add_epi32(a.v, b.v) }; }
-    friend simd_i operator+(simd_i a, int b) { return simd_i{ n_add_epi32(a.v, n_set1_epi32(b)) }; }
-    friend simd_i operator+(int a, simd_i b) { return simd_i{ n_add_epi32(n_set1_epi32(a), b.v) }; }
-};
-
-// 需要在 simd_i 定义完成后实现 gather
-inline simd_f simd_f::gathf(const float* base, simd_i idx) {
-    return simd_f{ n_gather_ps<sizeof(EntJoy::Mathematics::float2)>(base, idx.v) };
+// ============================================================
+// Global SIMD operations
+// ============================================================
+static simd_value<float> blend(simd_value<float> f, simd_value<float> t, simd_mask m) {
+    return simd_value<float>{ n_blend_ps(f.v, t.v, m.m) };
 }
-inline simd_f simd_f::gathfy(const float* base, simd_i idx) {
-    return simd_f{ n_gather_ps<sizeof(EntJoy::Mathematics::float2)>(base + 1, idx.v) };
+static simd_value<int> blend(simd_value<int> f, simd_value<int> t, simd_mask m) {
+    return simd_value<int>{ n_blend_epi32(f.v, t.v, m.m) };
 }
-
-static simd_f blend(simd_f f, simd_f t, simd_mask m) { return simd_f{ n_blend_ps(f.v, t.v, m.m) }; }
-static simd_i blend(simd_i f, simd_i t, simd_mask m) { return simd_i{ n_blend_epi32(f.v, t.v, m.m) }; }
-static float hmin(simd_f v) { return n_hmin_ps(v.v); }
-static float hmax(simd_f v) { return n_hmax_ps(v.v); }
-static float hsum(simd_f v) { return n_hsum_ps(v.v); }
-
-#endif
+static float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
+static float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
+static float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }
+static int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
