@@ -133,7 +133,6 @@ namespace NativeTranspiler.Analyzer
                 l = l.Replace("return;", "break;");
                 sb.Append("                    ").AppendLine(l);
             }
-            sb.AppendLine("                    // _simd_exit (unused)");
             sb.AppendLine("                } while(false);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
@@ -229,7 +228,6 @@ namespace NativeTranspiler.Analyzer
                 l = l.Replace("return;", "break;");
                 sb.Append("                    ").AppendLine(l);
             }
-            sb.AppendLine("                    // _simd_exit (unused)");
             sb.AppendLine("                } while(false);");
 
             sb.AppendLine("            }");
@@ -643,22 +641,21 @@ namespace NativeTranspiler.Analyzer
             modifiedBody = modifiedBody.Replace(
                 "Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y();",
                 "if (found < MaxNeighbor) { Results_ptr[baseIdx + found] = HashIndex_ptr[iCell].y(); }");
-            // H4 wrap lane body in do-while(false) so return->break exits entire lane, not just innermost for
-            sb.AppendLine("                // H4: do-while-false wrapper for safe early-exit (return -> break)");
-            sb.AppendLine("                do");
+            // goto _simd_exit replaces return to exit nested loops directly (standard C++ pattern)
+            sb.AppendLine("                // goto-exit from nested loops (C++ standard pattern)");
             sb.AppendLine("                {");
 
             foreach (var line in modifiedBody.Split('\n'))
             {
                 var l = line.TrimEnd();
                 if (string.IsNullOrEmpty(l)) continue;
-                l = l.Replace("return;", "break;");
+                l = l.Replace("return;", "goto _simd_exit;");
                 sb.Append("                    ").AppendLine(l);
             }
 
-            sb.AppendLine("                    // _simd_exit (unused)");
-            sb.AppendLine("                } while(false);");
+            sb.AppendLine("                }");
             sb.AppendLine("            }");
+            sb.AppendLine("            _simd_exit: ;");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             // For remainder loop, apply only the write guard, not the qbuf replacement
