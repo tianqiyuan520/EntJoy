@@ -36,6 +36,8 @@ namespace NativeTranspiler.Analyzer
         private string _currentMask = "simd_mask::all_true()";
         private int _maskCounter;
         private int _labelCounter;
+        // For-loop induction variables (skip in GenerateVariableDeclarations)
+        private readonly HashSet<string> _forLoopVars = new();
 
         // Loop tracking (for break/continue)
         private struct LoopFrame
@@ -89,6 +91,11 @@ namespace NativeTranspiler.Analyzer
         public string Generate(BlockSyntax body)
         {
             _builder.Clear();
+            _forLoopVars.Clear();
+            foreach (var fs in body.DescendantNodes().OfType<ForStatementSyntax>())
+                if (fs.Declaration != null)
+                    foreach (var v in fs.Declaration.Variables)
+                        _forLoopVars.Add(v.Identifier.Text);
             GenerateVariableDeclarations();
             GenerateBlock(body, skipBraces: true);
             return _builder.ToString();
@@ -107,6 +114,7 @@ namespace NativeTranspiler.Analyzer
 
                 // Skip index parameter (it maps to v_i from outer loop)
                 if (name == _indexParamName) continue;
+                if (_forLoopVars.Contains(name)) continue;
 
                 // Skip uniform variables (handled as scalar by outer scope)
                 if (info.Kind == VarKind.Uniform) continue;
@@ -357,8 +365,9 @@ namespace NativeTranspiler.Analyzer
             string continueLabel = $"__loop_continue_{_labelCounter++}";
 
             AppendLine($"// SIMD count-loop: for (int {ivName} = {startExpr}; {ivName} < ...; {ivName}++)");
-            AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
-            AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
+            AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({startExpr});");
+            AppendLine($"simd_value<int> v_{ivName} = simd_{ivName};");
+            AppendLine($"simd_value<int> simd_end_{ivName} = simd_value<int>::broadcast({endExpr});");
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
             AppendLine($"int simd_max_iter_{ivName} = hmax(simd_end_{ivName} - simd_{ivName});");
             AppendLine($"for (int __iter_{ivName} = 0; __iter_{ivName} < simd_max_iter_{ivName}; __iter_{ivName}++)");
@@ -368,8 +377,9 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"simd_mask {iterActive} = simd_mask{{ n_cmp_lt_epi32(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
             string savedMask = $"__mask_{_maskCounter++}";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
-            _currentMask = $"{_currentMask} & {iterActive}";
-            AppendLine($"if (!{_currentMask}.any_true()) {{ {_currentMask} = {savedMask}; goto {exitLabel}; }}");
+            // Check if any lanes still active (savedMask & iterActive)
+            AppendLine($"if (!({savedMask} & {iterActive}).any_true()) {{ {_currentMask} = {savedMask}; goto {exitLabel}; }}");
+            _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {iterActive}.m) }}";
 
             // Push loop frame
             _loopStack.Push(new LoopFrame
@@ -532,17 +542,11 @@ namespace NativeTranspiler.Analyzer
 
                     if (IsFloat2Type(info.CppType))
                     {
-                        string elemType = info.CppType.Contains("float2") ? "simd_value<float>" : "simd_value<int>";
                         if (variable.Initializer != null)
                         {
                             string initExpr = TranslateExpression(variable.Initializer.Value);
-                            AppendLine($"{elemType} v_{name}_x = {GetSIMDComponent(initExpr, "x")};");
-                            AppendLine($"{elemType} v_{name}_y = {GetSIMDComponent(initExpr, "y")};");
-                        }
-                        else
-                        {
-                            AppendLine($"{elemType} v_{name}_x = {elemType}::broadcast(0);");
-                            AppendLine($"{elemType} v_{name}_y = {elemType}::broadcast(0);");
+                            AppendLine("v_" + name + "_x = " + GetSIMDComponent(initExpr, "x") + ";");
+                            AppendLine("v_" + name + "_y = " + GetSIMDComponent(initExpr, "y") + ";");
                         }
                     }
                     else
@@ -550,11 +554,7 @@ namespace NativeTranspiler.Analyzer
                         if (variable.Initializer != null)
                         {
                             string initExpr = TranslateExpression(variable.Initializer.Value);
-                            AppendLine($"{varType} v_{name} = {initExpr};");
-                        }
-                        else
-                        {
-                            AppendLine($"{varType} v_{name} = {varType}::broadcast(0);");
+                            AppendLine("v_" + name + " = " + initExpr + ";");
                         }
                     }
                 }
@@ -730,6 +730,20 @@ namespace NativeTranspiler.Analyzer
             string objName = memberAccess.Expression is IdentifierNameSyntax id ? id.Identifier.Text : null;
             bool isVaryingFloat2 = objName != null && _float2VaryingVars.Contains(objName);
 
+            // .MaxValue / .MinValue on float → numeric_limits
+            if (memberName == "MaxValue" || memberName == "MinValue")
+            {
+                string sign = memberName == "MaxValue" ? "max" : "lowest";
+                return $"std::numeric_limits<float>::{sign}()";
+            }
+
+            // .zero on int2/float2 → constructor
+            if (memberName == "zero" && (objExpr.Contains("int2") || objExpr.Contains("float2")))
+            {
+                string prefix = objExpr.Contains("int2") ? "EntJoy::Mathematics::int2" : "EntJoy::Mathematics::float2";
+                return $"{prefix}(0, 0)";
+            }
+
             // .Length on NativeArray → _length suffix
             if (memberName == "Length")
             {
@@ -743,6 +757,9 @@ namespace NativeTranspiler.Analyzer
             }
 
             // Default: obj.member
+            // EntJoy Mathematics types use method syntax: .x() not .x
+            if ((memberName == "x" || memberName == "y") && !isVaryingFloat2)
+                return $"{objExpr}.{memberName}()";
             return $"{objExpr}.{memberName}";
         }
 
@@ -915,6 +932,11 @@ namespace NativeTranspiler.Analyzer
                     }
                     break;
                 }
+
+                case "MaxValue":
+                    return "std::numeric_limits<float>::max()";
+                case "MinValue":
+                    return "std::numeric_limits<float>::lowest()";
 
                 case "distancesq":
                 {
@@ -1098,7 +1120,11 @@ namespace NativeTranspiler.Analyzer
                 };
 
                 // For int comparisons, use epi32 variants
-                if (leftKind >= VarKind.Varying && _variables.Values.Any(v => v.CppType == "int"))
+                bool isIntCmp = leftKind >= VarKind.Varying
+                    && binary.Left is IdentifierNameSyntax cmpLeftId
+                    && _variables.TryGetValue(cmpLeftId.Identifier.Text, out var cmpLeftVar)
+                    && cmpLeftVar.CppType == "int";
+                if (isIntCmp)
                 {
                     // Check if the expression involves ints
                     string intCmp = op switch
@@ -1152,28 +1178,63 @@ namespace NativeTranspiler.Analyzer
 
         private string TranslateCast(CastExpressionSyntax cast)
         {
-            // (int)floatExpr → convert
             string inner = TranslateExpression(cast.Expression);
-            var targetType = _semanticModel.GetTypeInfo(cast.Type).Type;
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
+            string targetTypeStr = cast.Type.ToString();
 
-            if (targetType?.SpecialType == SpecialType.System_Int32 && innerKind >= VarKind.Varying)
+            // For varying int -> unsigned int: just use .v (comparison functions handle bit pattern)
+            if (innerKind >= VarKind.Varying && (targetTypeStr == "uint" || targetTypeStr == "unsigned int"))
+                return $"{inner}.v";
+
+            // (int)floatExpr → convert
+            try
             {
-                return $"simd_value<int>::convert({inner})";
+                var targetType = _semanticModel.GetTypeInfo(cast.Type).Type;
+                if (targetType?.SpecialType == SpecialType.System_Int32 && innerKind >= VarKind.Varying)
+                    return $"simd_value<int>::convert({inner})";
+                if (targetType != null)
+                    return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType)}){inner}";
             }
+            catch { }
 
-            return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType!)}){inner}";
+            return $"({targetTypeStr.Replace(".", "::")}){inner}";
         }
 
         private string TranslateAssignment(AssignmentExpressionSyntax assign)
         {
+            // NativeArray writes: detect element-access LHS
+            if (assign.Left is ElementAccessExpressionSyntax elemAccess
+                && elemAccess.Expression is IdentifierNameSyntax id
+                && _jobStruct != null)
+            {
+                var members = _jobStruct.GetMembers(id.Identifier.Text);
+                if (members.Length > 0 && members[0] is IFieldSymbol f
+                    && NativeTranspiler.IsEntJoyNativeContainerType(f.Type)
+                    && f.Type.Name == "NativeArray")
+                {
+                    string baseName = id.Identifier.Text;
+                    string idxExpr = TranslateExpression(
+                        elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
+                    string rhsExpr = TranslateExpression(assign.Right);
+                    VarKind idxKind = _varAnalyzer.ClassifyExpression(
+                        elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
+                    VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
+
+                    if (idxKind >= VarKind.Varying && rhsKind < VarKind.Varying)
+                        return $"n_store_epi32(&{baseName}_ptr[si], n_set1_epi32({rhsExpr}))";
+
+                    if (idxKind >= VarKind.Varying)
+                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]=n_extract_lane_epi32({rhsExpr}.v,__l);}}}}";
+
+                    return $"{baseName}_ptr[{idxExpr}] = {rhsExpr}";
+                }
+            }
+
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
-
             return $"{lhs} {op} {rhs}";
         }
-
         private string TranslateTernary(ConditionalExpressionSyntax ternary)
         {
             string condition = TranslateCondition(ternary.Condition);
@@ -1215,13 +1276,28 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private string GetSIMDComponent(string simdExpr, string component)
         {
-            // If simdExpr is already a gather call, extract component
+            // Transform simd_value<Type>::gather(base, idx) -> simd_value<float>::gathf/gathfy(base, idx.v)
             if (simdExpr.Contains("::gather"))
             {
-                if (component == "x")
-                    return simdExpr.Replace("::gather(", "::gathf(");
-                if (component == "y")
-                    return simdExpr.Replace("::gather(", "::gathfy(");
+                int gPos = simdExpr.IndexOf("::gather", System.StringComparison.Ordinal);
+                if (gPos > 0)
+                {
+                    string suffix = simdExpr.Substring(gPos + 8);
+                    // Add .v to the last parameter (SIMD int index -> raw n_int for gathf)
+                    int lastComma = suffix.LastIndexOf(',');
+                    if (lastComma >= 0)
+                    {
+                        int closeParen = suffix.LastIndexOf(')');
+                        string afterComma = closeParen >= 0
+                            ? suffix.Substring(lastComma + 1, closeParen - lastComma - 1)
+                            : suffix.Substring(lastComma + 1);
+                        string trimmed = afterComma.Trim();
+                        if (!trimmed.EndsWith(".v"))
+                            suffix = suffix.Substring(0, lastComma + 1) + trimmed + ".v)";
+                    }
+                    if (component == "x") return "simd_value<float>::gathf" + suffix;
+                    if (component == "y") return "simd_value<float>::gathfy" + suffix;
+                }
             }
             return simdExpr;
         }

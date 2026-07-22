@@ -19,6 +19,7 @@ struct simd_value<float> {
     n_float v;
     simd_value() = default;
     explicit simd_value(n_float val) : v(val) {}
+    simd_value& operator=(float s) { v = n_set1_ps(s); return *this; }
 
     static simd_value broadcast(float s) { return simd_value{ n_set1_ps(s) }; }
     static simd_value load(const float* p) { return simd_value{ n_load_ps(p) }; }
@@ -107,6 +108,7 @@ struct simd_value<int> {
     n_int v;
     simd_value() = default;
     explicit simd_value(n_int val) : v(val) {}
+    simd_value& operator=(int s) { v = n_set1_epi32(s); return *this; }
 
     static simd_value broadcast(int s) { return simd_value{ n_set1_epi32(s) }; }
     static simd_value sequence(int base) {
@@ -189,6 +191,9 @@ struct simd_value<EntJoy::Mathematics::float2> {
     friend simd_value operator+(float a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(float a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
     friend simd_value operator*(float a, simd_value b) { return simd_value{ a * b.x, a * b.y }; }
+    // scalar float2 broadcast → component-wise (for decomposed varying + uniform)
+    friend simd_value<float> operator-(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a - b.x(); }
+    friend simd_value<float> operator+(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a + b.x(); }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
@@ -245,6 +250,8 @@ struct simd_value<EntJoy::Mathematics::int2> {
     friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
     friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
+    friend simd_value<int> operator-(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a - b.x(); }
+    friend simd_value<int> operator+(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a + b.x(); }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
