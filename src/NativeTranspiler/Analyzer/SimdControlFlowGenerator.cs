@@ -1273,6 +1273,20 @@ namespace NativeTranspiler.Analyzer
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
+
+            // ★ CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
+            //   variable must use blend() to preserve inactive lanes.
+            //   Without this, ALL lanes overwrite = lanes where condition is false lose their data.
+            //   Affects reduction patterns: if(distSq < bestDistSq) { bestDistSq = distSq; bestIdx = i; }
+            if (op == "=" && _currentMask != "simd_mask::all_true()")
+            {
+                string? lhsVar = assign.Left is IdentifierNameSyntax lhsId ? lhsId.Identifier.Text : null;
+                if (lhsVar != null && _variables.TryGetValue(lhsVar, out var blInfo) && blInfo.Kind >= VarKind.Varying)
+                {
+                    return $"{lhs} = blend({lhs}, {rhs}, {_currentMask})";
+                }
+            }
+
             return $"{lhs} {op} {rhs}";
         }
         private string TranslateTernary(ConditionalExpressionSyntax ternary)
