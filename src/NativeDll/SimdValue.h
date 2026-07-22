@@ -7,8 +7,9 @@
 #include "NativeSIMD.h"
 #include "NativeMath.h"
 
-// Forward declaration
+// Forward declarations
 template<typename T> struct simd_value;
+struct simd_mask;
 
 // ============================================================
 // simd_value<float>
