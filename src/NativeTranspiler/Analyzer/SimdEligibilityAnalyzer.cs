@@ -180,7 +180,8 @@ namespace NativeTranspiler.Analyzer
             {
                 case BreakStatementSyntax _:
                 case ContinueStatementSyntax _:
-                    return true; // allowed inside for loops
+                case ReturnStatementSyntax _:
+                    return true; // allowed inside for loops (generator replaces return with break)
                 case ForStatementSyntax forStmt:
                     if (forStmt.Statement is BlockSyntax fb)
                         foreach (var s in fb.Statements)

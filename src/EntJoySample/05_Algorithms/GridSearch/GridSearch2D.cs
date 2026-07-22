@@ -543,8 +543,8 @@ public class GridSearch2D : IDisposable
     }
 
     // ---- 优化的最近点查询 Job (AoS, ISPC, 无全局回退) ----
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
-    //[NativeTranspiler.NativeTranspile(AutoSIMD= NativeTranspiler.AutoSIMD.Enabled)]
+    //[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD= NativeTranspiler.AutoSIMD.Enabled)]
     public struct ClosestPointJobPointer : IJobParallelFor
     {
         public float2 GridOrigin;
@@ -623,7 +623,7 @@ public class GridSearch2D : IDisposable
 
 
 
-    [NativeTranspiler.NativeTranspile]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
     public struct FindWithinJobPointer : IJobParallelFor
     {
         public float SquaredRadius;
