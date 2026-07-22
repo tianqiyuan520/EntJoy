@@ -29,8 +29,9 @@ namespace EntJoy.SourceGenerator
                 if (!jobType.AllInterfaces.Any(i => i.Name == "IJobEntity"))
                     continue;
 
-                if (jobType.GetAttributes().Any(a => a.AttributeClass?.Name == "NativeTranspileAttribute"))
-                    continue;
+                // 注意：NativeTranspile 类型的 IJobEntity 也需要 Schedule 扩展方法，
+                // 适配器内部会分派到 transpiled C++/ISPC 后端
+                // 因此在这里不做过滤，所有 IJobEntity 都生成 Schedule
 
                 var execute = jobType.GetMembers().OfType<IMethodSymbol>()
                     .FirstOrDefault(m => m.Name == "Execute" && m.Parameters.Length > 0 && m.ReturnsVoid);
