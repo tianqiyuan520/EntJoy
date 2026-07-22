@@ -62,7 +62,7 @@ namespace NativeTranspiler.Analyzer
                     if (forStmt.Statement is BlockSyntax forBlock)
                     {
                         foreach (var s in forBlock.Statements)
-                            if (!CheckStatement(s)) return false;
+                            if (!CheckStatementLoose(s)) return false;
                     }
                     return true;
 
@@ -167,6 +167,59 @@ namespace NativeTranspiler.Analyzer
                 // 保守判断：含字母的表达式不算常量
             }
             return false;
+        }
+
+        /// <summary>
+        /// Loose check for for-loop bodies: allows break/continue.
+        /// For outer SIMD, each channel runs its own for loop,
+        /// so break/continue only affects that channel, not others.
+        /// </summary>
+        private bool CheckStatementLoose(StatementSyntax stmt)
+        {
+            switch (stmt)
+            {
+                case BreakStatementSyntax _:
+                case ContinueStatementSyntax _:
+                    return true; // allowed inside for loops
+                case ForStatementSyntax forStmt:
+                    if (forStmt.Statement is BlockSyntax fb)
+                        foreach (var s in fb.Statements)
+                            if (!CheckStatementLoose(s)) return false;
+                    return true;
+                case IfStatementSyntax ifStmt:
+                    var body = ifStmt.Statement is BlockSyntax blk ? blk.Statements.ToList()
+                        : new List<StatementSyntax> { ifStmt.Statement };
+                    foreach (var s in body)
+                        if (!CheckStatementLoose(s)) return false;
+                    if (ifStmt.Else != null)
+                    {
+                        var elseBody = ifStmt.Else.Statement is BlockSyntax eblk ? eblk.Statements.ToList()
+                            : new List<StatementSyntax> { ifStmt.Else.Statement };
+                        foreach (var s in elseBody)
+                            if (!CheckStatementLoose(s)) return false;
+                    }
+                    return true;
+                case ExpressionStatementSyntax es:
+                    if (HasUnsupportedCall(es.Expression)) return false;
+                    if (HasIndirectIndex(es.Expression)) return false;
+                    return true;
+                case LocalDeclarationStatementSyntax ld:
+                    foreach (var v in ld.Declaration.Variables)
+                    {
+                        if (v.Initializer != null && HasUnsupportedCall(v.Initializer.Value)) return false;
+                        if (v.Initializer != null && HasIndirectIndex(v.Initializer.Value)) return false;
+                    }
+                    return true;
+                case EmptyStatementSyntax _:
+                    return true;
+                case BlockSyntax block:
+                    foreach (var s in block.Statements)
+                        if (!CheckStatementLoose(s)) return false;
+                    return true;
+                default:
+                    MarkNotEligible($"Unsupported in for body: {stmt.Kind()}");
+                    return false;
+            }
         }
 
         private bool HasUnsupportedCall(ExpressionSyntax expr)

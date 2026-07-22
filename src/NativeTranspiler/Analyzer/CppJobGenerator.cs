@@ -268,24 +268,42 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+
+            // 先用标量翻译器翻译 body + 替换 bool 常量
+            bool scalar_noSIMD = false;
+            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, scalar_noSIMD);
+            var bodyCode = translator.Translate(methodSyntax.Body);
+            for (int i = 0; i < boolFields.Count; i++)
+            {
+                string constantLiteral = values[i] ? "true" : "false";
+                string pattern = $@"{Regex.Escape(boolFields[i].Name)}";
+                bodyCode = Regex.Replace(bodyCode, pattern, constantLiteral);
+            }
+
+            if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+            {
+                var analyzer = new SimdEligibilityAnalyzer(semanticModel);
+                if (analyzer.Analyze(methodSyntax))
+                {
+                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName);
+                    var simdCode = simdGen.Generate(bodyCode);
+                    sb.Append(simdCode);
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+                    return;
+                }
+            }
+
+            // 标量回退
             sb.AppendLine($"    #pragma loop(ivdep)");
             sb.AppendLine($"    #pragma loop(vector)");
             sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
-            bool scalar_noSIMD = false;
-            var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, scalar_noSIMD);
-            var bodyCode = translator.Translate(methodSyntax.Body);
-            // 将所有 bool 条件字段替换为常量值
-            for (int i = 0; i < boolFields.Count; i++)
-            {
-                string constantLiteral = values[i] ? "true" : "false";
-                string pattern = $@"\b{Regex.Escape(boolFields[i].Name)}\b";
-                bodyCode = Regex.Replace(bodyCode, pattern, constantLiteral);
-            }
             sb.Append(bodyCode);
             sb.AppendLine("    }");
             sb.AppendLine("}");
+            sb.AppendLine();
             sb.AppendLine();
         }
 
