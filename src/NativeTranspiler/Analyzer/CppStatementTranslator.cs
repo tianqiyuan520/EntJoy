@@ -213,8 +213,12 @@ namespace NativeTranspiler.Analyzer
         {
             var (innerCondition, hintKind) = ExtractHintFromCondition(ifStmt.Condition);
 
-            // 如果有显式的分支预测 hint，跳过 branchless rewrite 以保留分支形式
-            if (hintKind == HintKind.None && EnableBranchlessSimpleIfRewrite() && TryTranslateBranchlessSimpleIf(ifStmt))
+            // 禁用 branchless rewrite（三元展开）：
+            //   原写法 if (x < best) best = x; → best = x < best ? x : best;
+            //   会导致左值右值引用同一变量，形成 MSVC 无法矢量化的循环携带依赖。
+            //   保留原生 if 形式更有利于 MSVC 自动矢量化器识别规约模式。
+            // 若用户显式使用了 Hint.Likely/Unlikely，继续保留分支形式即可。
+            if (false && EnableBranchlessSimpleIfRewrite() && TryTranslateBranchlessSimpleIf(ifStmt))
                 return;
 
             AppendIndent();
@@ -903,46 +907,181 @@ namespace NativeTranspiler.Analyzer
 
         protected virtual void TranslateEntJoyMathCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
-            string cppFunc = method.Name switch
-            {
-                "dot" => "EntJoy::Mathematics::dot",
-                "lengthsq" => "EntJoy::Mathematics::lengthsq",
-                "length" => "EntJoy::Mathematics::length",
-                "normalize" => "EntJoy::Mathematics::normalize",
-                "abs" => "EntJoy::Mathematics::abs",
-                "min" => "EntJoy::Mathematics::min",
-                "max" => "EntJoy::Mathematics::max",
-                "clamp" => "EntJoy::Mathematics::clamp",
-                "lerp" => "EntJoy::Mathematics::lerp",
-                "floor" => "EntJoy::Mathematics::floor",
-                "ceil" => "EntJoy::Mathematics::ceil",
-                "distancesq" => "EntJoy::Mathematics::distancesq",
-                _ => null
-            };
+            var args = invocation.ArgumentList.Arguments;
+            bool isVectorArg = args.Count > 0 && IsVectorType(method.Parameters[0].Type);
 
-            if (cppFunc == null)
+            // 本地函数：发射函数调用形式（用于向量类型或未展开的函数）
+            void EmitCall(string funcName)
             {
-                TranslateExpression(invocation.Expression);
-                _builder.Append('(');
-                var args = invocation.ArgumentList.Arguments;
+                _builder.Append(funcName).Append('(');
                 for (int i = 0; i < args.Count; i++)
                 {
                     if (i > 0) _builder.Append(", ");
                     TranslateExpression(args[i].Expression);
                 }
                 _builder.Append(')');
-                return;
             }
 
-            _builder.Append(cppFunc).Append('(');
-            var argsList = invocation.ArgumentList.Arguments;
-            for (int i = 0; i < argsList.Count; i++)
+            switch (method.Name)
             {
-                if (i > 0) _builder.Append(", ");
-                TranslateExpression(argsList[i].Expression);
+                case "dot":
+                    // a.x()*b.x() + a.y()*b.y()
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x()*");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".x() + ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()*");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".y()");
+                    return;
+
+                case "lengthsq":
+                    // v.x()*v.x() + v.y()*v.y()
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x()*");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x() + ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()*");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()");
+                    return;
+
+                case "distancesq":
+                    // (a.x()-b.x())*(a.x()-b.x()) + (a.y()-b.y())*(a.y()-b.y())
+                    _builder.Append('(');
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x()-");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".x())*(");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x()-");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".x()) + (");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()-");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".y())*(");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()-");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(".y())");
+                    return;
+
+                case "length":
+                    // ::sqrtf(v.x()*v.x() + v.y()*v.y())
+                    _builder.Append("::sqrtf(");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x()*");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".x() + ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y()*");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(".y())");
+                    return;
+
+                case "min":
+                    if (isVectorArg)
+                    {
+                        // float2/int2: 无 operator<，保留函数调用
+                        EmitCall("EntJoy::Mathematics::min");
+                        return;
+                    }
+                    // scalar: a < b ? a : b
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" < ");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(" ? ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" : ");
+                    TranslateExpression(args[1].Expression);
+                    return;
+
+                case "max":
+                    if (isVectorArg)
+                    {
+                        EmitCall("EntJoy::Mathematics::max");
+                        return;
+                    }
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" > ");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(" ? ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" : ");
+                    TranslateExpression(args[1].Expression);
+                    return;
+
+                case "abs":
+                    if (isVectorArg)
+                    {
+                        EmitCall("EntJoy::Mathematics::abs");
+                        return;
+                    }
+                    _builder.Append('(');
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" < 0 ? -");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" : ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(')');
+                    return;
+
+                case "clamp":
+                    if (isVectorArg)
+                    {
+                        EmitCall("EntJoy::Mathematics::clamp");
+                        return;
+                    }
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" < ");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(" ? ");
+                    TranslateExpression(args[1].Expression);
+                    _builder.Append(" : (");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(" > ");
+                    TranslateExpression(args[2].Expression);
+                    _builder.Append(" ? ");
+                    TranslateExpression(args[2].Expression);
+                    _builder.Append(" : ");
+                    TranslateExpression(args[0].Expression);
+                    _builder.Append(")");
+                    return;
+
+                default:
+                    // 对于未展开的函数（normalize, lerp, floor, ceil 等），保留原有函数调用形式
+                    string cppFunc = method.Name switch
+                    {
+                        "normalize" => "EntJoy::Mathematics::normalize",
+                        "lerp" => "EntJoy::Mathematics::lerp",
+                        "floor" => "EntJoy::Mathematics::floor",
+                        "ceil" => "EntJoy::Mathematics::ceil",
+                        _ => null
+                    };
+
+                    if (cppFunc != null)
+                    {
+                        EmitCall(cppFunc);
+                        return;
+                    }
+
+                    TranslateExpression(invocation.Expression);
+                    _builder.Append('(');
+                    for (int i = 0; i < args.Count; i++)
+                    {
+                        if (i > 0) _builder.Append(", ");
+                        TranslateExpression(args[i].Expression);
+                    }
+                    _builder.Append(')');
+                    return;
             }
-            _builder.Append(')');
         }
+
+        private static bool IsVectorType(ITypeSymbol? type)
+            => type?.Name is "float2" or "int2" or "uint2";
 
         protected bool TryInlineConstant(IdentifierNameSyntax identifier)
         {

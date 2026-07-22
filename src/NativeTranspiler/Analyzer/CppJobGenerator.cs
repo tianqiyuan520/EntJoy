@@ -224,6 +224,9 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+            sb.AppendLine($"    #pragma loop(ivdep)");
+            sb.AppendLine($"    #pragma loop(vector)");
+            sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
             var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
@@ -243,6 +246,9 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+            sb.AppendLine($"    #pragma loop(ivdep)");
+            sb.AppendLine($"    #pragma loop(vector)");
+            sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
             var translator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath);
