@@ -252,6 +252,7 @@ namespace NativeTranspiler.Analyzer
 
                 conditions.Add(condVar);
                 _currentMask = trueMask;
+                AppendLine($"if ({trueMask}.any_true())");
                 GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
 
                 if (current.Else == null) break;
@@ -271,6 +272,7 @@ namespace NativeTranspiler.Analyzer
             if (elseBody != null)
             {
                 _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
+                AppendLine($"if ({_currentMask}.any_true())");
                 GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
             }
 
