@@ -356,12 +356,18 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__loop_exit_{_labelCounter++}";
             string continueLabel = $"__loop_continue_{_labelCounter++}";
 
-            AppendLine($"// SIMD count-loop: for (int {ivName} = {startExpr}; {ivName} < ...; {ivName}++)");
+            // Detect C# <= vs < to use correct SIMD comparison (CRITICAL for correctness)
+            bool isLessOrEqual = stmt.Condition is BinaryExpressionSyntax condBinary
+                && condBinary.IsKind(SyntaxKind.LessThanOrEqualExpression);
+            string simdCmpFunc = isLessOrEqual ? "n_cmp_le_epi32" : "n_cmp_lt_epi32";
+            string csOpStr = isLessOrEqual ? "<=" : "<";
+
+            AppendLine($"// SIMD count-loop: for (int {ivName} = {startExpr}; {ivName} {csOpStr} ...; {ivName}++)");
             bool startIsVarying = decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying;
             bool endIsVarying = stmt.Condition is BinaryExpressionSyntax ec && _varAnalyzer.ClassifyExpression(ec.Right) >= VarKind.Varying;
             string simdStartVal = startIsVarying ? startExpr : $"simd_value<int>::broadcast({startExpr})";
             string simdEndVal = endIsVarying ? endExpr : $"simd_value<int>::broadcast({endExpr})";
-            AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} < {simdEndVal}; {ivName}++)");
+            AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} {csOpStr} {simdEndVal}; {ivName}++)");
             AppendLine($"simd_value<int> simd_{ivName} = {simdStartVal};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
@@ -371,7 +377,7 @@ namespace NativeTranspiler.Analyzer
             AppendLine("{");
             _indent++;
 
-            AppendLine($"simd_mask {iterActive} = simd_mask{{ n_cmp_lt_epi32(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
+            AppendLine($"simd_mask {iterActive} = simd_mask{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
             string savedMask = $"__mask_{_maskCounter++}";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
             // Update currentMask to the saved variable name (in-scope inside while)
