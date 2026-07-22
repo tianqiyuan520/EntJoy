@@ -301,6 +301,59 @@ static inline n_mask n_cmp_gt_ps(n_float a, n_float b) {
 #endif
 }
 
+// Float a == b
+static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_EQ_OS);
+#elif defined(NSIMD_SSE4)
+    return _mm_cmpeq_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return vceqq_f32(a, b);
+#else
+    return a == b;
+#endif
+}
+
+// Float a != b
+static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_NEQ_OS);
+#elif defined(NSIMD_SSE4)
+    return _mm_cmpneq_ps(a, b);
+#elif defined(NSIMD_NEON)
+    // NEON vcneq requires aarch64; use ~vceqq for aarch32 compatibility
+    return vmvnq_u32(vceqq_f32(a, b));
+#else
+    return a != b;
+#endif
+}
+
+// Float a >= b
+static inline n_mask n_cmp_ge_ps(n_float a, n_float b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_GE_OS);
+#elif defined(NSIMD_SSE4)
+    return _mm_cmpge_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return vcgeq_f32(a, b);
+#else
+    return a >= b;
+#endif
+}
+
+// Float a <= b
+static inline n_mask n_cmp_le_ps(n_float a, n_float b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_LE_OS);
+#elif defined(NSIMD_SSE4)
+    return _mm_cmple_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return vcleq_f32(a, b);
+#else
+    return a <= b;
+#endif
+}
+
 // ============================================================
 // Mask inversion + logic
 // ============================================================
@@ -372,6 +425,11 @@ static inline n_mask n_cmp_eq_epi32(n_int a, n_int b) {
 #else
     return a == b;
 #endif
+}
+
+// Signed int a != b
+static inline n_mask n_cmp_ne_epi32(n_int a, n_int b) {
+    return n_not_mask(n_cmp_eq_epi32(a, b));
 }
 
 // Signed int a >= b
@@ -488,6 +546,32 @@ static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
     return vbicq_u32(b, a);
 #else
     return !a && b;
+#endif
+}
+
+// Mask OR
+static inline n_mask n_or_mask(n_mask a, n_mask b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_or_ps(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_or_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return vorrq_u32(a, b);
+#else
+    return a || b;
+#endif
+}
+
+// Mask XOR
+static inline n_mask n_xor_mask(n_mask a, n_mask b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_xor_ps(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_xor_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return veorq_u32(a, b);
+#else
+    return a != b;
 #endif
 }
 
