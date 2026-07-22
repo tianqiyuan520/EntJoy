@@ -162,6 +162,16 @@ static inline n_float n_fmadd_ps(n_float a, n_float b, n_float c) {
 #endif
 }
 
+static inline n_int n_add_epi32(n_int a, n_int b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_add_epi32(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_add_epi32(a, b);
+#else
+    return a + b;
+#endif
+}
+
 // ============================================================
 // Min / Max
 // ============================================================

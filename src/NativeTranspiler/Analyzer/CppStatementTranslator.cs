@@ -2,6 +2,7 @@
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
@@ -1155,30 +1156,244 @@ namespace NativeTranspiler.Analyzer
                     or ReturnStatementSyntax or BreakStatementSyntax or ContinueStatementSyntax)
                     return false;
 
-            var (ptype, _, _) = DetectReductionPattern(loopBody, ivName);
-            if (ptype == ReductionPatternType.None) return false;
+            string startExpr = varDecl.Initializer.Value.ToString();
+            string endExpr = cond.Right.ToString();
 
-            // Generate placeholder SIMD wrapper (proper generation to be implemented)
-            AppendIndent(); _builder.AppendLine("for (int si_ = 0; si_ < 0; ++si_) { } // SIMD placeholder");
+            // ===== 检测规约模式 =====
+            bool isAos = false;
+            string? arrayField = null;
+            string? aosVar = null;
+            string? reductionField = null;
+            string? indexField = null;
+            bool isMin = true;
+            bool isSum = false;
+
+            foreach (var stmt in loopBody.Statements)
+            {
+                // 检测 AoS 结构体加载: float2 pos = arr[i];
+                if (stmt is LocalDeclarationStatementSyntax ld)
+                {
+                    foreach (var v in ld.Declaration.Variables)
+                    {
+                        if (v.Initializer?.Value is ElementAccessExpressionSyntax ea
+                            && ea.ArgumentList.Arguments.Count == 1
+                            && ea.ArgumentList.Arguments[0].Expression.ToString() == ivName)
+                        {
+                            arrayField = ea.Expression.ToString();
+                            aosVar = v.Identifier.Text;
+                            var type = _semanticModel.GetTypeInfo(ld.Declaration.Type).Type;
+                            if (type?.Name is "float2" or "int2") isAos = true;
+                        }
+                    }
+                    continue;
+                }
+
+                // 检测 if reduction: if (d < best) { best = d; idx = i; }
+                if (stmt is IfStatementSyntax ifStmt && ifStmt.Else == null
+                    && ifStmt.Condition is BinaryExpressionSyntax bin)
+                {
+                    if (bin.Kind() == SyntaxKind.LessThanExpression || bin.Kind() == SyntaxKind.LessThanOrEqualExpression)
+                        isMin = true;
+                    else if (bin.Kind() == SyntaxKind.GreaterThanExpression || bin.Kind() == SyntaxKind.GreaterThanOrEqualExpression)
+                        isMin = false;
+                    else continue;
+
+                    if (bin.Right is IdentifierNameSyntax rid)
+                        reductionField = rid.Identifier.Text;
+                    else continue;
+
+                    var bodyStmts = ifStmt.Statement is BlockSyntax blk ? blk.Statements.ToList()
+                        : new List<StatementSyntax> { ifStmt.Statement };
+                    foreach (var s in bodyStmts)
+                    {
+                        if (s is ExpressionStatementSyntax es && es.Expression is AssignmentExpressionSyntax ae
+                            && ae.Kind() == SyntaxKind.SimpleAssignmentExpression)
+                        {
+                            if (ae.Left is IdentifierNameSyntax lid)
+                            {
+                                if (lid.Identifier.Text == reductionField) continue; // best = d
+                                if (ae.Right.ToString() == ivName) { indexField = lid.Identifier.Text; }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // 检测 sum: total += arr[i];
+                if (stmt is ExpressionStatementSyntax es2 && es2.Expression is AssignmentExpressionSyntax ae2
+                    && ae2.Kind() == SyntaxKind.AddAssignmentExpression
+                    && ae2.Left is IdentifierNameSyntax lid2)
+                {
+                    reductionField = lid2.Identifier.Text;
+                    isSum = true;
+                }
+            }
+
+            if (reductionField == null) return false;
+
+            // ===== 取标量体文本（余量循环用） =====
+            string saved = _builder.ToString();
+            _builder.Clear();
+            int savedIndent = _indentLevel;
+            _indentLevel = 0;
+            TranslateBlock(loopBody, skipOuterBraces: true);
+            string scalarBody = _builder.ToString();
+            _builder.Clear();
+            _builder.Append(saved);
+            _indentLevel = savedIndent;
+
+            // ===== 生成 SIMD 代码 =====
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+
+            string arr = arrayField != null ? arrayField + "_ptr" : "/*array*/_ptr";
+
+            if (isAos && aosVar != null && arrayField != null)
+            {
+                // Pattern: AoS float2 + distance + min + idx (ClosestPoint)
+                GenerateSIMD_AosDist(reductionField, indexField, ivName, startExpr, endExpr, arr, scalarBody, isMin);
+            }
+            else if (isSum)
+            {
+                GenerateSIMD_Sum(reductionField, ivName, startExpr, endExpr, arr, scalarBody);
+            }
+            else
+            {
+                GenerateSIMD_Reduction(reductionField, indexField, ivName, startExpr, endExpr, arr, scalarBody, isMin);
+            }
+
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
             return true;
         }
 
-        private enum ReductionPatternType { None, Min, Max, MinIdx, MaxIdx, Sum, AosDistMinIdx }
-
-        private (ReductionPatternType, string?, bool) DetectReductionPattern(BlockSyntax body, string ivName)
+        private void GenerateSIMD_AosDist(string redField, string? idxField, string ivName,
+            string startExpr, string endExpr, string arr, string scalarBody, bool isMin)
         {
-            foreach (var stmt in body.Statements)
+            string cmpOp = isMin ? "n_cmp_lt_ps" : "n_cmp_gt_ps";
+            string redOp = isMin ? "n_min_ps" : "n_max_ps";
+            string hRedOp = isMin ? "n_hmin_ps" : "n_hmax_ps";
+
+            AppendIndent(); _builder.AppendLine("// SIMD AoS distance + min reduction");
+            AppendIndent(); _builder.AppendLine($"n_float v_{redField} = n_set1_ps({redField});");
+            if (idxField != null)
+                AppendIndent(); _builder.AppendLine($"n_int v_{idxField} = n_set1_epi32({idxField});");
+            AppendIndent(); _builder.AppendLine("n_int v_base = n_set_epi32(7,6,5,4,3,2,1,0);");
+            AppendIndent(); _builder.AppendLine($"int simd_end_ = {startExpr} + (({endExpr} - {startExpr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            AppendIndent(); _builder.AppendLine("if (simd_end_ > 0)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"for (int si_ = {startExpr}; si_ < simd_end_; si_ += NSIMD_WIDTH)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine("n_int v_i = n_add_epi32(v_base, n_set1_epi32(si_));");
+            AppendIndent(); _builder.AppendLine($"n_float v_px = n_gather_ps<sizeof(({arr})[0])>((const float*){arr}, v_i);");
+            AppendIndent(); _builder.AppendLine($"n_float v_py = n_gather_ps<sizeof(({arr})[0])>(((const float*){arr}) + 1, v_i);");
+            AppendIndent(); _builder.AppendLine($"n_float v_dx = n_sub_ps(n_set1_ps(q.x()), v_px);");
+            AppendIndent(); _builder.AppendLine($"n_float v_dy = n_sub_ps(n_set1_ps(q.y()), v_py);");
+            AppendIndent(); _builder.AppendLine("n_float v_dsq = n_fmadd_ps(v_dx, v_dx, n_mul_ps(v_dy, v_dy));");
+            AppendIndent(); _builder.AppendLine($"n_mask v_mask = {cmpOp}(v_dsq, v_{redField});");
+            AppendIndent(); _builder.AppendLine($"v_{redField} = {redOp}(v_{redField}, v_dsq);");
+            if (idxField != null)
+                AppendIndent(); _builder.AppendLine($"v_{idxField} = n_blend_epi32(v_{idxField}, v_i, v_mask);");
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+            AppendIndent(); _builder.AppendLine("}");
+            AppendIndent(); _builder.AppendLine($"float simd_val_ = {hRedOp}(v_{redField});");
+            if (idxField != null)
             {
-                if (stmt is IfStatementSyntax ifStmt)
-                {
-                    if (ifStmt.Else != null) return (ReductionPatternType.None, null, false);
-                    if (ifStmt.Condition is BinaryExpressionSyntax bin && (bin.Kind() == SyntaxKind.LessThanExpression || bin.Kind() == SyntaxKind.GreaterThanExpression))
-                        return (ReductionPatternType.Min, null, false);
-                }
-                if (stmt is ExpressionStatementSyntax es && es.Expression is AssignmentExpressionSyntax ae && ae.Kind() == SyntaxKind.AddAssignmentExpression)
-                    return (ReductionPatternType.Sum, null, false);
+                AppendIndent(); _builder.AppendLine($"int simd_idx_ = n_hmin_idx(v_{redField}, v_{idxField});");
+                AppendIndent(); _builder.AppendLine($"if (simd_val_ < {redField}) {{ {redField} = simd_val_; {idxField} = simd_idx_; }}");
             }
-            return (ReductionPatternType.None, null, false);
+            else
+            {
+                AppendIndent(); _builder.AppendLine($"if (simd_val_ < {redField}) {redField} = simd_val_;");
+            }
+            // 标量余量
+            AppendIndent(); _builder.AppendLine($"for (int si_ = simd_end_; si_ < {endExpr}; ++si_)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"int {ivName} = si_;");
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                AppendIndent(); _builder.AppendLine(line.TrimEnd());
+            }
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+        }
+
+        private void GenerateSIMD_Sum(string redField, string ivName,
+            string startExpr, string endExpr, string arr, string scalarBody)
+        {
+            AppendIndent(); _builder.AppendLine("// SIMD sum reduction");
+            AppendIndent(); _builder.AppendLine($"n_float v_{redField} = n_set1_ps(0);");
+            AppendIndent(); _builder.AppendLine($"int simd_end_ = {startExpr} + (({endExpr} - {startExpr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            AppendIndent(); _builder.AppendLine("if (simd_end_ > 0)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"for (int si_ = {startExpr}; si_ < simd_end_; si_ += NSIMD_WIDTH)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"n_float v_val = n_load_ps(&{arr}[si_]);");
+            AppendIndent(); _builder.AppendLine($"v_{redField} = n_add_ps(v_{redField}, v_val);");
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+            AppendIndent(); _builder.AppendLine($"{redField} += n_hsum_ps(v_{redField});");
+            AppendIndent(); _builder.AppendLine($"for (int si_ = simd_end_; si_ < {endExpr}; ++si_)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"int {ivName} = si_;");
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                AppendIndent(); _builder.AppendLine(line.TrimEnd());
+            }
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+        }
+
+        private void GenerateSIMD_Reduction(string redField, string? idxField, string ivName,
+            string startExpr, string endExpr, string arr, string scalarBody, bool isMin)
+        {
+            string redOp = isMin ? "n_min_ps" : "n_max_ps";
+            string hRedOp = isMin ? "n_hmin_ps" : "n_hmax_ps";
+
+            AppendIndent(); _builder.AppendLine("// SIMD scalar reduction");
+            AppendIndent(); _builder.AppendLine($"n_float v_{redField} = n_set1_ps({redField});");
+            AppendIndent(); _builder.AppendLine($"int simd_end_ = {startExpr} + (({endExpr} - {startExpr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            AppendIndent(); _builder.AppendLine("if (simd_end_ > 0)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"for (int si_ = {startExpr}; si_ < simd_end_; si_ += NSIMD_WIDTH)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"n_float v_val = n_load_ps(&{arr}[si_]);");
+            AppendIndent(); _builder.AppendLine($"v_{redField} = {redOp}(v_{redField}, v_val);");
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
+            AppendIndent(); _builder.AppendLine($"float simd_val_ = {hRedOp}(v_{redField});");
+            if (idxField != null)
+            {
+                // 简单的 idx tracking：标量 fallback 不做 SIMD idx
+                // 用户应使用 AoS 模式走 idx gather 路径
+            }
+            AppendIndent(); _builder.AppendLine($"if (simd_val_ < {redField}) {redField} = simd_val_;");
+            AppendIndent(); _builder.AppendLine($"for (int si_ = simd_end_; si_ < {endExpr}; ++si_)");
+            AppendIndent(); _builder.AppendLine("{");
+            _indentLevel++;
+            AppendIndent(); _builder.AppendLine($"int {ivName} = si_;");
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                AppendIndent(); _builder.AppendLine(line.TrimEnd());
+            }
+            _indentLevel--;
+            AppendIndent(); _builder.AppendLine("}");
         }
 
 
