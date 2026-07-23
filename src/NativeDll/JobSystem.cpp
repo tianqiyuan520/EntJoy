@@ -48,7 +48,7 @@ namespace JobSystem
                 BindCurrentThreadToLogicalProcessor(
                     static_cast<uint32_t>(worker.id()));
 #if defined(_WIN32)
-            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
         }
 
