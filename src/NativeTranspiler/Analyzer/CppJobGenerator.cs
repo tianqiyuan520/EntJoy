@@ -234,17 +234,13 @@ namespace NativeTranspiler.Analyzer
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                // 分析 Execute 体是否适合外层 SIMD
-                var analyzer = new SimdEligibilityAnalyzer(semanticModel);
-                if (analyzer.Analyze(methodSyntax))
-                {
-                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, jobStruct: jobStruct);
-                    var simdCode = simdGen.Generate(scalarBody);
-                    sb.Append(simdCode);
-                    sb.AppendLine("}");
-                    sb.AppendLine();
-                    return;
-                }
+                // Per-lane SIMD: gather queries once, extract to scalar for each lane
+                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, jobStruct: jobStruct);
+                var simdCode = simdGen.Generate(scalarBody);
+                sb.Append(simdCode);
+                sb.AppendLine("}");
+                sb.AppendLine();
+                return;
             }
 
             // 回退标量路径
@@ -282,19 +278,17 @@ namespace NativeTranspiler.Analyzer
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                var analyzer = new SimdEligibilityAnalyzer(semanticModel);
-                if (analyzer.Analyze(methodSyntax))
-                {
-                    var boolFieldValues = new System.Collections.Generic.Dictionary<string, string>();
-                    for (int i_ = 0; i_ < boolFields.Count; i_++)
-                        boolFieldValues[boolFields[i_].Name] = values[i_] ? "true" : "false";
-                    var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues, jobStruct);
-                    var simdCode = simdGen.Generate(bodyCode);
-                    sb.Append(simdCode);
-                    sb.AppendLine("}");
-                    sb.AppendLine();
-                    return;
-                }
+                // Per-lane SIMD: gather queries once, extract to scalar for each lane
+                // Works for any Job body — no eligibility check needed.
+                var boolFieldValues = new System.Collections.Generic.Dictionary<string, string>();
+                for (int i_ = 0; i_ < boolFields.Count; i_++)
+                    boolFieldValues[boolFields[i_].Name] = values[i_] ? "true" : "false";
+                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues, jobStruct);
+                var simdCode = simdGen.Generate(bodyCode);
+                sb.Append(simdCode);
+                sb.AppendLine("}");
+                sb.AppendLine();
+                return;
             }
 
             // 标量回退
