@@ -68,6 +68,11 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, string> _uniformHoistMap = new();
         // Pending broadcasts: "varName" → "simd_value<T> varName = ...";
         private readonly Dictionary<string, string> _uniformHoistPending = new();
+        // Batch offset variable ("si" for OuterSimdGenerator batch, "0" for standalone IJob/static)
+        private readonly string _batchOffsetVar;
+        // Early-exit sentinel for reduction loops (from scalar body write pattern, e.g. "bestIdx"/"-1")
+        internal string _sentinelVar = "";
+        internal string _sentinelVal = "";
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -77,7 +82,8 @@ namespace NativeTranspiler.Analyzer
             string indexParamName = "index",
             string simdIndexVar = "v_i",
             bool useFastMath = false,
-            Dictionary<string, string>? boolFields = null)
+            Dictionary<string, string>? boolFields = null,
+            string batchOffsetVar = "si")
         {
             _semanticModel = semanticModel;
             _jobStruct = jobStruct;
@@ -87,6 +93,7 @@ namespace NativeTranspiler.Analyzer
             _simdIndexVar = simdIndexVar;
             _useFastMath = useFastMath;
             _boolFields = boolFields ?? new Dictionary<string, string>();
+            _batchOffsetVar = batchOffsetVar;
 
             // Pre-identify float2/int2 variables that are varying
             foreach (var kvp in _variables)
@@ -823,8 +830,9 @@ namespace NativeTranspiler.Analyzer
                 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
             GenerateBlock(bodyBlock, skipBraces: false);
 
-            // ★ Early-exit: when all lanes in the fallback scope have found results, break
-            AppendLine($"if (!({savedMask} & simd_mask{{ n_cmp_eq_epi32(v_bestIdx.v, n_set1_epi32(-1)) }}).any_true()) {{ break; }}");
+            // Exit early when all lanes resolved (sentinel from scalar write pattern)
+            if (!string.IsNullOrEmpty(_sentinelVar))
+                AppendLine($"if (!({savedMask} & simd_mask{{ n_cmp_eq_epi32(v_{_sentinelVar}.v, n_set1_epi32({_sentinelVal})) }}).any_true()) {{ break; }}");
 
             _loopStack.Pop();
 
@@ -1659,7 +1667,7 @@ namespace NativeTranspiler.Analyzer
                 if (elemCppType == "float")
                     return $"simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v)";
                 if (elemCppType == "int")
-                    return $"simd_value<int>::gather({baseExpr}_ptr, {safeIdx}.v)";
+                    return $"simd_value<int>::gather({baseExpr}_ptr, {safeIdx})";
                 return $"simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v)";
             }
 
@@ -1913,8 +1921,13 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // Default
-            string call = $"std::{methodName}(";
+            // Default: lowercase mapping (MathF.Sin → sin for SIMD ADL, std::sin for scalar)
+            bool anyVarying = false;
+            for (int i = 0; i < args.Count; i++)
+                if (_varAnalyzer.ClassifyExpression(args[i].Expression) >= VarKind.Varying)
+                    { anyVarying = true; break; }
+            string funcPrefix = anyVarying ? "" : "std::";
+            string call = $"{funcPrefix}{methodName.ToLowerInvariant()}(";
             for (int i = 0; i < args.Count; i++)
             {
                 if (i > 0) call += ", ";
@@ -2114,9 +2127,15 @@ namespace NativeTranspiler.Analyzer
                     VarKind idxKind = _varAnalyzer.ClassifyExpression(
                         elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
                     VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
+                    string elemType = NativeTranspiler.MapCSharpTypeToCpp(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                    string extractFn = elemType == "float" ? "n_extract_lane_f32" : "n_extract_lane_epi32";
+                    string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                    string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
 
                     if (idxKind >= VarKind.Varying && rhsKind < VarKind.Varying)
-                        return $"n_store_epi32(&{baseName}_ptr[si], n_set1_epi32({rhsExpr}))";
+                    {
+                        return $"{storeFnScalar}(&{baseName}_ptr[{_batchOffsetVar}], {setFnScalar}({rhsExpr}))";
+                    }
 
                     if (idxKind >= VarKind.Varying)
                     {
@@ -2129,9 +2148,15 @@ namespace NativeTranspiler.Analyzer
                         //   → per-lane guard on the write.
                         if (_currentMask != "simd_mask::all_true()")
                         {
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]=n_extract_lane_epi32({rhsExpr}.v,__l);}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}}}";
                         }
-                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]=n_extract_lane_epi32({rhsExpr}.v,__l);}}}}";
+                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}";
+                    }
+
+                    // uniform idx + varying rhs -> extract lane 0
+                    if (rhsKind >= VarKind.Varying)
+                    {
+                        return $"{baseName}_ptr[{idxExpr}] = {extractFn}({rhsExpr}.v, 0)";
                     }
 
                     return $"{baseName}_ptr[{idxExpr}] = {rhsExpr}";

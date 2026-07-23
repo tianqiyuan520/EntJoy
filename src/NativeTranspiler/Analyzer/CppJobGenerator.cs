@@ -136,6 +136,7 @@ namespace NativeTranspiler.Analyzer
             var baseFuncName = GetCppJobFunctionName(jobStruct);
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
             bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
+            var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
@@ -166,7 +167,6 @@ namespace NativeTranspiler.Analyzer
 
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
-                var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
 
                 if (boolFields.Count > 0)
                 {
@@ -187,7 +187,7 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath);
+                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath, autoSIMD);
             }
 
             return sb.ToString();
@@ -304,7 +304,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath,
+            NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
         {
             var singleParams = BuildJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -316,9 +317,27 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
-                var bodyCode = translator.Translate(methodSyntax.Body);
-                sb.Append(bodyCode);
+
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                {
+                    // IJob/static: no OuterSimdGenerator batch wrapper, use SimdControlFlowGenerator directly
+                    // Inner for-loops, if-else, gather-blend all become SIMD via mask management.
+                    // Output writes with varying index → per-lane scatter; uniform index → extract lane 0.
+                    var varAnalyzer = new SimdVariableAnalyzer(semanticModel, jobStruct, "");
+                    var variables = varAnalyzer.Analyze(methodSyntax);
+                    var simdGen = new SimdControlFlowGenerator(
+                        semanticModel, jobStruct, variables, varAnalyzer,
+                        indexParamName: "", simdIndexVar: "v_i",
+                        batchOffsetVar: "0");
+                    var simdBody = simdGen.Generate(methodSyntax.Body);
+                    sb.Append(simdBody);
+                }
+                else
+                {
+                    var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
+                    var bodyCode = translator.Translate(methodSyntax.Body);
+                    sb.Append(bodyCode);
+                }
             }
             else
             {

@@ -191,9 +191,13 @@ namespace NativeTranspiler.Analyzer
             {
                 var variable = localDecl.Declaration.Variables[i];
                 if (i > 0) _builder.Append(", ");
-                if (_useUniformVars)
-                    _builder.Append("uniform ");
-                _builder.Append(ispcType).Append(' ').Append(variable.Identifier.Text);
+                if (i == 0)
+                {
+                    if (_useUniformVars)
+                        _builder.Append("uniform ");
+                    _builder.Append(ispcType);
+                }
+                _builder.Append(' ').Append(variable.Identifier.Text);
                 if (variable.Initializer != null)
                 {
                     _builder.Append(" = ");
