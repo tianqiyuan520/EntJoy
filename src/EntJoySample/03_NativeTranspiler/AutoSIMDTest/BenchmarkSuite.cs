@@ -82,30 +82,28 @@ namespace EntJoySample.AutoSIMDTest
         public static void PrintHeader()
         {
             Console.WriteLine();
-            Console.WriteLine("=".PadRight(70, '='));
-            Console.WriteLine("  Auto-SIMD Benchmark Suite");
+            Console.WriteLine("=".PadRight(58, '='));
+            Console.WriteLine("  Auto-SIMD Benchmark Suite (C# 线下对比)");
             Console.WriteLine($"  数据量: {DataSize:N0}, 预热: {Warmup}, 迭代: {Iterations}");
-            Console.WriteLine("=".PadRight(70, '='));
+            Console.WriteLine("  3 列均为 C# 直接执行（需 NativeCompileTask 构建链跑 C++/ISPC）");
+            Console.WriteLine("=".PadRight(58, '='));
             Console.WriteLine();
-            Console.WriteLine($"{"Case",-22} {"C#(μs)",-10} {"C++(μs)",-10} {"SIMD(μs)",-10} {"IJob(μs)",-10} {"ISPC(μs)",-10}");
-            Console.WriteLine("-".PadRight(70, '-'));
+            Console.WriteLine($"{"Case",-22} {"C# IJobPF(ms)",-14} {"IJobFor(ms)",-12} {"IJob(ms)",-10}");
+            Console.WriteLine("-".PadRight(58, '-'));
         }
 
         public static void PrintRow(CaseResult r)
         {
-            string csharp  = r.ValidCSharp  ? $"{r.CSharp_MS * 1000,7:F2}" : "  N/A";
-            string cpp     = r.ValidCpp     ? $"{r.Cpp_MS * 1000,7:F2}" : "  N/A";
-            string simd    = r.ValidSIMD    ? $"{r.SIMD_MS * 1000,7:F2}" : "  N/A";
-            string simdIJob = r.ValidSIMDIJob ? $"{r.SIMD_IJob_MS * 1000,7:F2}" : "  N/A";
-            string ispc    = r.ValidISPC    ? $"{r.ISPC_MS * 1000,7:F2}" : "  N/A";
-            Console.WriteLine($"{r.Name,-22} {csharp,-10} {cpp,-10} {simd,-10} {simdIJob,-10} {ispc,-10}");
+            string csharp  = r.ValidCSharp  ? $"{r.CSharp_MS,7:F3}" : "    N/A";
+            string simd    = r.ValidSIMD    ? $"{r.SIMD_MS,7:F3}" : "    N/A";
+            string simdIJob = r.ValidSIMDIJob ? $"{r.SIMD_IJob_MS,7:F3}" : "    N/A";
+            Console.WriteLine($"{r.Name,-22} {csharp,-14} {simd,-12} {simdIJob,-10}");
         }
 
         public static void PrintFooter()
         {
-            Console.WriteLine("-".PadRight(70, '-'));
-            Console.WriteLine("  μs = 微秒 (越小越好)");
-            Console.WriteLine("  N/A = 该后端未实现/暂不可用");
+            Console.WriteLine("-".PadRight(58, '-'));
+            Console.WriteLine("  ms = 毫秒 (越小越好)");
             Console.WriteLine();
         }
     }
