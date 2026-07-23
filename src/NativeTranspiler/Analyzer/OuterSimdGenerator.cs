@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -8,10 +9,6 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace NativeTranspiler.Analyzer
 {
-    /// <summary>
-    /// Per-lane scalar Outer SIMD generator.
-    /// Strip-mines query range into NSIMD_WIDTH chunks, pure scalar body per lane.
-    /// </summary>
     public class OuterSimdGenerator
     {
         private readonly MethodDeclarationSyntax _methodSyntax;
@@ -32,6 +29,60 @@ namespace NativeTranspiler.Analyzer
         }
 
         public string Generate(string scalarBody)
+        {
+            // Try full SIMD from AST first
+            string simdResult = GenerateFullSIMDFromAST(scalarBody);
+            if (!string.IsNullOrEmpty(simdResult))
+                return simdResult;
+            // Fallback: per-lane scalar
+            return GeneratePerLane(scalarBody);
+        }
+
+        private string GenerateFullSIMDFromAST(string scalarBody)
+        {
+            if (_jobStruct == null || _methodSyntax.Body == null) return "";
+            try
+            {
+                var varAnalyzer = new SimdVariableAnalyzer(_semanticModel, _jobStruct, _idx);
+                var variables = varAnalyzer.Analyze(_methodSyntax);
+                if (!variables.ContainsKey(_idx) || variables.Count == 0) return "";
+
+                var sb = new StringBuilder();
+                sb.AppendLine("    // --- Universal Full-SIMD (ISPC-style) ---");
+                sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                sb.AppendLine("    if (simd_end_ > __startIndex)");
+                sb.AppendLine("    {");
+                sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+                sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+                foreach (var kvp in _boolFields)
+                    sb.AppendLine($"            bool {kvp.Key} = {kvp.Value};");
+
+                var cfGenerator = new SimdControlFlowGenerator(
+                    _semanticModel, _jobStruct, variables, varAnalyzer,
+                    indexParamName: _idx, simdIndexVar: "v_i",
+                    boolFields: _boolFields);
+                string simdBody = cfGenerator.Generate(_methodSyntax.Body);
+
+                foreach (var line in simdBody.Split('\n'))
+                    if (!string.IsNullOrWhiteSpace(line))
+                        sb.Append("            ").AppendLine(line);
+
+                sb.AppendLine("        __simd_exit: ;");
+                sb.AppendLine("        }");
+                sb.AppendLine("    }");
+                if (!string.IsNullOrEmpty(scalarBody))
+                    sb.Append(RemainderLoop(scalarBody));
+                return sb.ToString();
+            }
+            catch (Exception)
+            {
+                return "";
+            }
+        }
+
+        private string GeneratePerLane(string scalarBody)
         {
             string body = scalarBody;
             foreach (var kvp in _boolFields)
@@ -68,6 +119,28 @@ namespace NativeTranspiler.Analyzer
                 sb.Append("    ").AppendLine(x);
             }
             if (hr) sb.AppendLine("    }while(false);");
+            sb.AppendLine("    }");
+            return sb.ToString();
+        }
+
+        private string RemainderLoop(string scalarBody)
+        {
+            string substituted = scalarBody;
+            foreach (var kvp in _boolFields)
+                substituted = Regex.Replace(substituted, $@"\b{kvp.Key}\b", kvp.Value);
+            var sb = new StringBuilder();
+            sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
+            sb.AppendLine("    {");
+            bool hr = substituted.Contains("return;");
+            if (hr) { sb.AppendLine("    do {"); }
+            foreach (var line in substituted.Split('\n'))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var l = line.TrimEnd();
+                l = l.Replace("return;", "break;");
+                sb.Append("    ").AppendLine(l);
+            }
+            if (hr) sb.AppendLine("    } while(false);");
             sb.AppendLine("    }");
             return sb.ToString();
         }
