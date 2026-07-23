@@ -52,6 +52,10 @@ namespace NativeTranspiler.Analyzer
         // Variable naming tracking for float2 component decomposition
         private readonly HashSet<string> _float2VaryingVars = new();
 
+        // Variable tracking for per-lane region transitions (save/merge)
+        private readonly HashSet<string> _simdVaryingVarNames = new();
+        private readonly Dictionary<string, string> _simdVaryingCppType = new();
+
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
             INamedTypeSymbol jobStruct,
@@ -134,6 +138,9 @@ namespace NativeTranspiler.Analyzer
                     string initVal = info.InitSIMDExpr ?? $"{varType}::broadcast(0)";
                     AppendLine($"{varType} v_{name} = {initVal};");
                 }
+                // Track for per-lane save/merge
+                _simdVaryingVarNames.Add(name);
+                _simdVaryingCppType[name] = info.CppType;
             }
         }
 
@@ -394,9 +401,20 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} {csOpStr} {simdEndVal}; {ivName}++)");
             AppendLine($"simd_value<int> simd_{ivName} = {simdStartVal};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
+
+            // ★ Varying bounds → per-lane region (gather vs sequential read trade-off)
+            //   When each lane has a different start/end range, SIMD gather is expensive
+            //   and per-lane sequential access is cache-friendly.
+            string preLoopMask = _currentMask;
+            if (startIsVarying || endIsVarying)
+            {
+                GeneratePerLaneForLoop(stmt, ivName);
+                _currentMask = preLoopMask;
+                return;
+            }
+
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
 
-            string preLoopMask = _currentMask;  // Save pre-loop expr (restore after loop exit)
             AppendLine("while (true)");
             AppendLine("{");
             _indent++;
@@ -435,6 +453,181 @@ namespace NativeTranspiler.Analyzer
             _indent--;
             _currentMask = preLoopMask;  // Restore pre-loop expr (outside while scope)
             AppendLine($"{exitLabel}: ;");
+        }
+
+        // ================================================================
+        // Per-lane for-loop (varying bounds — gather vs sequential trade-off)
+        // ================================================================
+
+        /// <summary>
+        /// 生成 per-lane scalar 版本的 for 循环，用于边界 varying 的场景。
+        /// 原理：SIMD 全宽度 gather 在循环范围 per-lane 各不相同时 cache 不友好，
+        /// 改为提取到标量 → 顺序读 → 合并回 SIMD。
+        /// </summary>
+        private void GeneratePerLaneForLoop(ForStatementSyntax stmt, string ivName)
+        {
+            // --- 1. 收集被 per-lane 体引用的 SIMD 变量（排除局部声明和 induction var）---
+            var referencedVars = new HashSet<string>();
+            var locallyDeclared = new HashSet<string>();
+            foreach (var id in stmt.Statement.DescendantNodes().OfType<IdentifierNameSyntax>())
+            {
+                string name = id.Identifier.Text;
+                if (_simdVaryingVarNames.Contains(name))
+                    referencedVars.Add(name);
+            }
+            foreach (var localDecl in stmt.Statement.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in localDecl.Declaration.Variables)
+                    locallyDeclared.Add(v.Identifier.Text);
+            referencedVars.ExceptWith(locallyDeclared);
+            referencedVars.Remove(ivName);
+
+            // --- 2. 区分只读和读写变量 ---
+            var writtenVars = new HashSet<string>();
+            foreach (var assign in stmt.Statement.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+            {
+                string? lhs = assign.Left is IdentifierNameSyntax lhsId ? lhsId.Identifier.Text : null;
+                if (lhs != null && referencedVars.Contains(lhs))
+                    writtenVars.Add(lhs);
+            }
+            var readOnlyVars = new HashSet<string>(referencedVars);
+            readOnlyVars.ExceptWith(writtenVars);
+
+            string sid = $"{_maskCounter++}";
+
+            // --- 3. Save phase: SIMD 寄存器 → 缓冲区 ---
+            AppendLine("// --- Per-lane region (varying bounds) ---");
+            AppendLine("{");
+            _indent++;
+            AppendLine($"int __mask_{sid} = n_mask_to_bitmask(({_currentMask}).m);");
+
+            foreach (var name in referencedVars)
+            {
+                string ct = _simdVaryingCppType[name];
+                if (ct.Contains("float2"))
+                {
+                    AppendLine($"float __{name}_x_{sid}[NSIMD_WIDTH]; n_store_ps(__{name}_x_{sid}, v_{name}.x.v);");
+                    AppendLine($"float __{name}_y_{sid}[NSIMD_WIDTH]; n_store_ps(__{name}_y_{sid}, v_{name}.y.v);");
+                }
+                else if (ct.Contains("int2"))
+                {
+                    AppendLine($"int __{name}_x_{sid}[NSIMD_WIDTH]; n_store_epi32(__{name}_x_{sid}, v_{name}.x.v);");
+                    AppendLine($"int __{name}_y_{sid}[NSIMD_WIDTH]; n_store_epi32(__{name}_y_{sid}, v_{name}.y.v);");
+                }
+                else
+                {
+                    string store = ct == "float" ? "n_store_ps" : "n_store_epi32";
+                    AppendLine($"{ct} __{name}_{sid}[NSIMD_WIDTH]; {store}(__{name}_{sid}, v_{name}.v);");
+                }
+            }
+            AppendLine($"int __start_{sid}[NSIMD_WIDTH]; n_store_epi32(__start_{sid}, simd_{ivName}.v);");
+            AppendLine($"int __end_{sid}[NSIMD_WIDTH]; n_store_epi32(__end_{sid}, simd_end_{ivName}.v);");
+
+            // --- 4. Per-lane scalar loop ---
+            AppendLine("for (int __lane = 0; __lane < NSIMD_WIDTH; __lane++)");
+            AppendLine("{");
+            _indent++;
+            AppendLine($"if (!(__mask_{sid} & (1 << __lane))) continue;");
+
+            // C++ references for written vars (auto-modify buffer)
+            foreach (var name in writtenVars)
+            {
+                string ct = _simdVaryingCppType[name];
+                if (ct.Contains("float2"))
+                {
+                    AppendLine($"float& __{name}_x = __{name}_x_{sid}[__lane];");
+                    AppendLine($"float& __{name}_y = __{name}_y_{sid}[__lane];");
+                }
+                else if (ct.Contains("int2"))
+                {
+                    AppendLine($"int& __{name}_x = __{name}_x_{sid}[__lane];");
+                    AppendLine($"int& __{name}_y = __{name}_y_{sid}[__lane];");
+                }
+                else
+                    AppendLine($"{ct}& {name} = __{name}_{sid}[__lane];");
+            }
+
+            // Extract read-only SIMD vars to per-lane scalars
+            foreach (var name in readOnlyVars)
+            {
+                string ct = _simdVaryingCppType[name];
+                if (ct.Contains("float2"))
+                {
+                    AppendLine($"EntJoy::Mathematics::float2 {name};");
+                    AppendLine($"{name}.x() = n_extract_lane_f32(v_{name}.x.v, __lane);");
+                    AppendLine($"{name}.y() = n_extract_lane_f32(v_{name}.y.v, __lane);");
+                }
+                else if (ct.Contains("int2"))
+                {
+                    AppendLine($"EntJoy::Mathematics::int2 {name};");
+                    AppendLine($"{name}.x() = n_extract_lane_epi32(v_{name}.x.v, __lane);");
+                    AppendLine($"{name}.y() = n_extract_lane_epi32(v_{name}.y.v, __lane);");
+                }
+                else if (ct == "float")
+                    AppendLine($"float {name} = n_extract_lane_f32(v_{name}.v, __lane);");
+                else
+                    AppendLine($"int {name} = n_extract_lane_epi32(v_{name}.v, __lane);");
+            }
+
+            // Scalar for-loop with induction variable
+            AppendLine($"int {ivName} = __start_{sid}[__lane];");
+            AppendLine($"int {ivName}_end = __end_{sid}[__lane];");
+            AppendLine($"for (; {ivName} < {ivName}_end; {ivName}++)");
+            AppendLine("{");
+            _indent++;
+
+            // --- 5. Scalar body via CppBatchStatementTranslator ---
+            var stmtBody = stmt.Statement is BlockSyntax bs
+                ? bs
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+            var scalarTranslator = new CppBatchStatementTranslator(
+                _semanticModel, _jobStruct, "", "", _useFastMath, false);
+            string scalarBody = scalarTranslator.Translate(stmtBody);
+
+            // Replace float2/int2 component access for written vars: name.x() → __name_x
+            foreach (var name in writtenVars)
+            {
+                string ct = _simdVaryingCppType[name];
+                if (ct.Contains("float2") || ct.Contains("int2"))
+                {
+                    scalarBody = System.Text.RegularExpressions.Regex.Replace(
+                        scalarBody, $@"\b{name}\.x\(\)", $"__{name}_x");
+                    scalarBody = System.Text.RegularExpressions.Regex.Replace(
+                        scalarBody, $@"\b{name}\.y\(\)", $"__{name}_y");
+                }
+            }
+
+            foreach (var line in scalarBody.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    AppendLine(line.TrimEnd());
+
+            _indent--;
+            AppendLine("}"); // end for(ivName)
+            _indent--;
+            AppendLine("}"); // end for(__lane)
+
+            // --- 6. Merge phase: reload buffers → SIMD registers ---
+            foreach (var name in referencedVars)
+            {
+                string ct = _simdVaryingCppType[name];
+                if (ct.Contains("float2"))
+                {
+                    AppendLine($"v_{name}.x = simd_value<float>::load(__{name}_x_{sid});");
+                    AppendLine($"v_{name}.y = simd_value<float>::load(__{name}_y_{sid});");
+                }
+                else if (ct.Contains("int2"))
+                {
+                    AppendLine($"v_{name}.x = simd_value<int>::load(__{name}_x_{sid});");
+                    AppendLine($"v_{name}.y = simd_value<int>::load(__{name}_y_{sid});");
+                }
+                else
+                {
+                    string load = ct == "float" ? "simd_value<float>::load" : "simd_value<int>::load";
+                    AppendLine($"v_{name} = {load}(__{name}_{sid});");
+                }
+            }
+
+            _indent--;
+            AppendLine("}"); // end per-lane scope
         }
 
         // ================================================================
