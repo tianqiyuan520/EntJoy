@@ -75,6 +75,8 @@ namespace NativeTranspiler.Analyzer
         // Early-exit sentinel for reduction loops (from scalar body write pattern, e.g. "bestIdx"/"-1")
         internal string _sentinelVar = "";
         internal string _sentinelVal = "";
+        // Track goto targets for dead label elimination (suppress labels in hot paths)
+        private readonly HashSet<string> _gotoTargets = new();
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -801,10 +803,12 @@ namespace NativeTranspiler.Analyzer
                 GenerateBlock(bodyB, skipBraces: false);
                 _loopStack.Pop();
                 _isUniformScalarLoop = false;
+                if (_gotoTargets.Contains(contL))
                 AppendLine($"{contL}: ;");
                 _indent--;
                 AppendLine("}");
                 _currentMask = preLoopMask2;
+                if (_gotoTargets.Contains(exitL))
                 AppendLine($"{exitL}: ;");
             }
             else
@@ -862,12 +866,14 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Pop();
 
-            AppendLine($"{continueLabel}: ;");
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
             _indent--;
             AppendLine("}");
             // ★ Restore mask after loop: use the saved variable (still in scope)
             _currentMask = savedMask;
-            AppendLine($"{exitLabel}: ;");
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
         }
 
         // ================================================================
@@ -932,7 +938,8 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Pop();
 
-            AppendLine($"{continueLabel}: ;");
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             _indent--;
@@ -942,7 +949,8 @@ namespace NativeTranspiler.Analyzer
             _inVaryingReductionLoop = false;
             _hoistedSafeMaxVar = null;
             _hoistedSafeMaxExpr = null;
-            AppendLine($"{exitLabel}: ;");
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
         }
 
         // ================================================================
@@ -1000,13 +1008,15 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Pop();
 
-            AppendLine($"{continueLabel}: ;");
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             AppendLine("}");
             _indent--;
             _currentMask = preLoopMask;
-            AppendLine($"{exitLabel}: ;");
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
         }
 
         // ================================================================
@@ -1221,11 +1231,13 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Pop();
 
-            AppendLine($"{continueLabel}: ;");
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
             AppendLine("}");
             _indent--;
-            AppendLine($"{exitLabel}: ;");
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
         }
 
         // ================================================================
@@ -1259,14 +1271,16 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Pop();
 
-            AppendLine($"{continueLabel}: ;");
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
 
             string condExpr = TranslateCondition(stmt.Condition);
             string condVar = $"__dcond_{_maskCounter++}";
             AppendLine($"simd_mask {condVar} = {condExpr};");
             AppendLine($"}} while(({_currentMask} & {condVar} & {tracker}).any_true());");
-            AppendLine($"{exitLabel}: ;");
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
             _indent--;
         }
 
@@ -1282,6 +1296,7 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
             var frame = _loopStack.Peek();
+            _gotoTargets.Add(frame.ExitLabel);
             AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & ~{frame.IterActiveVar};");
             AppendLine($"goto {frame.ExitLabel};");
         }
@@ -1294,6 +1309,7 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
             var frame = _loopStack.Peek();
+            _gotoTargets.Add(frame.ContinueLabel);
             // ★ Docs-style scalar for loop: mask already narrowed by if-body's early exit.
             //   The `if(!active.any_true()) continue;` is emitted inline by GenerateIfStatement.
             //   We just emit the goto for the loop frame (used by tracker-based while-true loops).
