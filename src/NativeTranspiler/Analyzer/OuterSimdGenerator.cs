@@ -71,14 +71,16 @@ namespace NativeTranspiler.Analyzer
                         sb.Append("            ").AppendLine(line);
 
                 // Unified write for ALL lanes (replaces the two per-lane one-liner writes)
-                // Only for reduction bodies that use bestIdx (ClosestPoint, not FindWithin)
-                if (scalarBody.Contains("int bestIdx"))
+                // Extract the RHS expression from scalar body's own write pattern, e.g.:
+                //   Results[index] = HashIndex[bestIdx].y  →  HashIndex_ptr[bestIdx_lane].y()
+                string? writeRHS = ExtractResultWriteRHS(scalarBody);
+                if (writeRHS != null)
                 {
                     sb.AppendLine("            // Unified write from v_bestIdx");
                     sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++) {");
                     sb.AppendLine("                int bestIdx_lane = n_extract_lane_epi32(v_bestIdx.v, lane);");
                     sb.AppendLine("                if (bestIdx_lane != -1)");
-                    sb.AppendLine("                    Results_ptr[si + lane] = HashIndex_ptr[bestIdx_lane].y();");
+                    sb.AppendLine($"                    Results_ptr[si + lane] = {writeRHS};");
                     sb.AppendLine("            }");
                 }
                 sb.AppendLine("        __simd_exit: ;");
@@ -92,6 +94,18 @@ namespace NativeTranspiler.Analyzer
             {
                 return "";
             }
+        }
+
+        /// <summary>Extract RHS from last Results_ptr[index] = EXPR; → EXPR with bestIdx→bestIdx_lane</summary>
+        private static string? ExtractResultWriteRHS(string scalarBody)
+        {
+            int idx = scalarBody.LastIndexOf("Results_ptr[index]");
+            if (idx < 0) return null;
+            int eq = scalarBody.IndexOf('=', idx);
+            int semi = scalarBody.IndexOf(';', eq);
+            if (eq < 0 || semi < 0) return null;
+            string rhs = scalarBody.Substring(eq + 1, semi - eq - 1).Trim();
+            return rhs == "-1" ? null : rhs.Replace("[bestIdx]", "[bestIdx_lane]");
         }
 
         /// <summary>Remove all per-lane result write one-liners from SIMD body</summary>
