@@ -38,6 +38,8 @@ namespace NativeTranspiler.Analyzer
         private int _labelCounter;
         // For-loop induction variables (skip in GenerateVariableDeclarations)
         private readonly HashSet<string> _forLoopVars = new();
+        // Induction variables from uniform-bound reduction loops (for broadcast optimization)
+        private readonly HashSet<string> _uniformLoopVars = new();
 
         // Loop tracking (for break/continue)
         private struct LoopFrame
@@ -95,6 +97,8 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 从 Execute 方法体生成 SIMD C++ 代码。
+        /// varying-bound 循环 → per-lane full body（已验证正确）
+        /// uniform 循环 → 全 SIMD mask 模式
         /// </summary>
         public string Generate(BlockSyntax body)
         {
@@ -105,8 +109,9 @@ namespace NativeTranspiler.Analyzer
                     foreach (var v in fs.Declaration.Variables)
                         _forLoopVars.Add(v.Identifier.Text);
 
-            // ★ Detect if body has varying-bounds loops → per-lane whole-body
-            //   ISPC uses foreach + per-lane for these, achieving 0.6ms vs our 2.8ms.
+            // ★ Full SIMD has a fundamental bug: per-lane `continue` uses `any_true()` + `goto`
+            //   which skips ALL lanes when only SOME lanes need to continue.
+            //   Until this is fixed, always use per-lane for varying-bound bodies.
             if (HasVaryingBoundsLoop(body))
                 GeneratePerLaneFullBody(body);
             else {
@@ -133,6 +138,62 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (_varAnalyzer.ClassifyExpression(cond.Right) >= VarKind.Varying)
                         return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 检查方法体中是否有 varying-bound 且非 reduction 的 for 循环。
+        /// reduction 循环可用 count-loop / broadcast 优化。
+        /// </summary>
+        private bool HasVaryingNonReductionLoop(SyntaxNode node)
+        {
+            foreach (var fs in node.DescendantNodes().OfType<ForStatementSyntax>())
+            {
+                if (fs.Declaration == null || fs.Declaration.Variables.Count != 1) continue;
+                var decl = fs.Declaration.Variables[0];
+                bool hasVaryingBounds = false;
+                if (decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying)
+                    hasVaryingBounds = true;
+                if (fs.Condition is BinaryExpressionSyntax cond)
+                {
+                    if (_varAnalyzer.ClassifyExpression(cond.Right) >= VarKind.Varying)
+                        hasVaryingBounds = true;
+                }
+                if (hasVaryingBounds && !IsReductionLoop(fs))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 检测 for 循环体是否 DIRECT 包含 reduction 模式（if(val &lt; best) { best = val; ... }）。
+        /// 只考虑直接体中的 if，排除嵌套循环体内的 if。
+        /// </summary>
+        private bool IsReductionLoop(ForStatementSyntax stmt)
+        {
+            var body = stmt.Statement;
+            foreach (var ifStmt in body.DescendantNodes().OfType<IfStatementSyntax>())
+            {
+                var closestFor = ifStmt.Ancestors().OfType<ForStatementSyntax>().FirstOrDefault();
+                if (closestFor != stmt) continue;
+                if (ifStmt.Condition is BinaryExpressionSyntax bin &&
+                    (bin.IsKind(SyntaxKind.LessThanExpression) ||
+                     bin.IsKind(SyntaxKind.GreaterThanExpression) ||
+                     bin.IsKind(SyntaxKind.LessThanOrEqualExpression)))
+                {
+                    var trueBlock = ifStmt.Statement is BlockSyntax tb
+                        ? tb.Statements.AsEnumerable()
+                        : (IEnumerable<StatementSyntax>)new[] { ifStmt.Statement };
+                    if (trueBlock.Any(s => s is ExpressionStatementSyntax es
+                        && es.Expression is AssignmentExpressionSyntax))
+                    {
+                        bool accessesArray = body.DescendantNodes()
+                            .OfType<ElementAccessExpressionSyntax>()
+                            .Any(ea => ea.ArgumentList?.Arguments.Count > 0);
+                        if (accessesArray) return true;
+                    }
                 }
             }
             return false;
@@ -437,8 +498,6 @@ namespace NativeTranspiler.Analyzer
             string endExpr = "simd_value<int>::broadcast(0)";
             if (stmt.Condition is BinaryExpressionSyntax cond)
             {
-                // Typically: for (i = start; i < end; i++)
-                // end is cond.Right (assuming cond.Left is the induction variable)
                 endExpr = TranslateExpression(cond.Right);
             }
 
@@ -450,43 +509,184 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
 
-            // Count-loop pattern
+            // Classify bounds + reduction
+            bool isUniformBounds = true;
+            if (decl.Initializer != null)
+                isUniformBounds = isUniformBounds && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) < VarKind.Varying;
+            if (stmt.Condition is BinaryExpressionSyntax condBounds)
+                isUniformBounds = isUniformBounds && _varAnalyzer.ClassifyExpression(condBounds.Right) < VarKind.Varying;
+
+            bool isReduction = IsReductionLoop(stmt);
+
+            // Dispatch: uniform reduction → broadcast, varying reduction → count-loop,
+            //   other → standard while-true mask loop
+            if (isUniformBounds && isReduction)
+                GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
+            else if (!isUniformBounds && isReduction)
+                GenerateVaryingReductionLoop(ivName, startExpr, endExpr, stmt);
+            else
+                GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, isUniformBounds);
+        }
+
+        // ================================================================
+        // Strategy 1: Uniform-bound reduction → scalar for + SIMD broadcast
+        //   scalar load + broadcast → 8-wide SIMD op + blend
+        //   Mask scope fix: save _currentMask as named var BEFORE the for
+        // ================================================================
+        private void GenerateUniformReductionLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt)
+        {
+            _uniformLoopVars.Add(ivName);
+
+            string endSuffix = $"_{_maskCounter++}";
+            string exitLabel = $"__uni_exit_{_labelCounter++}";
+            string continueLabel = $"__uni_cont_{_labelCounter++}";
+
+            // ★ Mask scope fix: save current mask as a named variable OUTSIDE the for scope
+            string savedMask = $"__saved_{_maskCounter++}";
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+
+            string csOpStr = stmt.Condition is BinaryExpressionSyntax condCmp
+                && condCmp.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
+
+            AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
+            AppendLine($"int {ivName}_end{endSuffix} = {endExpr};");
+            AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
+            AppendLine("{");
+            _indent++;
+            // simd_i for blend targets (bestIdx = simd_i)
+            AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({ivName});");
+
+            // Within the loop body, use savedMask (it's in scope)
+            string outerMask = _currentMask;
+            _currentMask = savedMask;
+
+            _loopStack.Push(new LoopFrame
+            {
+                TrackerVar = "",
+                IterActiveVar = "",
+                ExitLabel = exitLabel,
+                ContinueLabel = continueLabel
+            });
+
+            var bodyBlock = stmt.Statement is BlockSyntax bs
+                ? bs
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+            GenerateBlock(bodyBlock, skipBraces: false);
+
+            _loopStack.Pop();
+
+            AppendLine($"{continueLabel}: ;");
+            _indent--;
+            AppendLine("}");
+            // ★ Restore mask after loop: use the saved variable (still in scope)
+            _currentMask = savedMask;
+            AppendLine($"{exitLabel}: ;");
+        }
+
+        // ================================================================
+        // Strategy 2: Varying-bound reduction → count-loop + hmax + ivdep
+        //   hmax(end-start) + for(iter) + clamp + SIMD gather + blend
+        //   Mask scope fix: save _currentMask as named var BEFORE the for
+        // ================================================================
+        private void GenerateVaryingReductionLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt)
+        {
+            string sid = $"_{_maskCounter++}";
+            string exitLabel = $"__vr_exit_{_labelCounter++}";
+            string continueLabel = $"__vr_cont_{_labelCounter++}";
+
+            bool isLessOrEqual = stmt.Condition is BinaryExpressionSyntax condBinary
+                && condBinary.IsKind(SyntaxKind.LessThanOrEqualExpression);
+            string simdCmpFunc = isLessOrEqual ? "n_cmp_le_epi32" : "n_cmp_lt_epi32";
+
+            // ★ Mask scope fix: save current mask as a named variable OUTSIDE the for scope
+            string savedMask = $"__saved_{_maskCounter++}";
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+
+            AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
+            AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
+            AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
+            AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
+            AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
+            // Safety clamp for gather is now in TranslateElementAccess (generic clamp)
+            AppendLine($"#pragma loop(ivdep)");
+            AppendLine($"for (int iter{sid} = 0; iter{sid} < maxIter{sid}; iter{sid}++)");
+            AppendLine("{");
+            _indent++;
+
+            AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
+
+            // Use savedMask (in scope, declared before the for)
+            string innerSaved = $"__mask_{_maskCounter++}";
+            AppendLine($"simd_mask {innerSaved} = {savedMask};");
+            _currentMask = $"simd_mask{{ n_and_mask({innerSaved}.m, v_active{sid}.m) }}";
+
+            _loopStack.Push(new LoopFrame
+            {
+                TrackerVar = "",
+                IterActiveVar = "",
+                ExitLabel = exitLabel,
+                ContinueLabel = continueLabel
+            });
+
+            var bodyBlock = stmt.Statement is BlockSyntax bsb
+                ? bsb
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+            GenerateBlock(bodyBlock, skipBraces: false);
+
+            _loopStack.Pop();
+
+            AppendLine($"{continueLabel}: ;");
+            _currentMask = innerSaved;
+            AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
+            _indent--;
+            AppendLine("}");
+            // ★ Restore mask after loop: use the saved variable (still in scope)
+            _currentMask = savedMask;
+            AppendLine($"{exitLabel}: ;");
+        }
+
+        // ================================================================
+        // Strategy 3: Standard SIMD loop (while-true + mask) — original pattern
+        // ================================================================
+        private void GenerateStandardSIMDLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt, bool isUniformBounds)
+        {
             string tracker = $"__tracker_{_maskCounter++}";
             string iterActive = $"__iter_active_{_maskCounter++}";
             string exitLabel = $"__loop_exit_{_labelCounter++}";
             string continueLabel = $"__loop_continue_{_labelCounter++}";
 
-            // Detect C# <= vs < to use correct SIMD comparison (CRITICAL for correctness)
             bool isLessOrEqual = stmt.Condition is BinaryExpressionSyntax condBinary
                 && condBinary.IsKind(SyntaxKind.LessThanOrEqualExpression);
             string simdCmpFunc = isLessOrEqual ? "n_cmp_le_epi32" : "n_cmp_lt_epi32";
             string csOpStr = isLessOrEqual ? "<=" : "<";
 
-            // ★ Uniform-bounds only: always broadcast (varying bounds handled at whole-body level)
-            string simdStartVal = $"simd_value<int>::broadcast({startExpr})";
-            string simdEndVal = $"simd_value<int>::broadcast({endExpr})";
-            AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} {csOpStr} {simdEndVal}; {ivName}++)");
+            string simdStartVal = isUniformBounds
+                ? $"simd_value<int>::broadcast({startExpr})"
+                : startExpr;
+            string simdEndVal = isUniformBounds
+                ? $"simd_value<int>::broadcast({endExpr})"
+                : endExpr;
+
+            AppendLine($"// SIMD mask-loop: for (int {ivName} = {startExpr}; {ivName} {csOpStr} {endExpr}; {ivName}++)");
             AppendLine($"simd_value<int> simd_{ivName} = {simdStartVal};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
 
-            string preLoopMask = _currentMask;
+            // ★ Scope-safe mask save: declare a named copy at current scope level
+            string preLoopMask = $"__pre_{_maskCounter++}";
+            AppendLine($"simd_mask {preLoopMask} = {_currentMask};");
             AppendLine("while (true)");
             AppendLine("{");
             _indent++;
 
             AppendLine($"simd_mask {iterActive} = simd_mask{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
             string savedMask = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {savedMask} = {_currentMask};");
-            // Update currentMask to the saved variable name (in-scope inside while)
+            AppendLine($"simd_mask {savedMask} = {preLoopMask};");
             _currentMask = savedMask;
-            // Check if any lanes still active
             AppendLine($"if (!({savedMask} & {iterActive}).any_true()) {{ break; }}");
-            // Narrow mask to active lanes for the loop body
             string narrowedMask = $"simd_mask{{ n_and_mask({savedMask}.m, {iterActive}.m) }}";
             _currentMask = narrowedMask;
 
-            // Push loop frame
             _loopStack.Push(new LoopFrame
             {
                 TrackerVar = tracker,
@@ -495,19 +695,19 @@ namespace NativeTranspiler.Analyzer
                 ContinueLabel = continueLabel
             });
 
-            // Generate loop body
-            GenerateBlock(stmt.Statement is BlockSyntax fb ? fb : SyntaxFactory.Block(stmt.Statement), skipBraces: false);
+            var bodyBlock = stmt.Statement is BlockSyntax fb
+                ? fb
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+            GenerateBlock(bodyBlock, skipBraces: false);
 
-            // Pop loop frame
             _loopStack.Pop();
 
-            // Continue label + restore mask + increment
             AppendLine($"{continueLabel}: ;");
             _currentMask = savedMask;
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             AppendLine("}");
             _indent--;
-            _currentMask = preLoopMask;  // Restore pre-loop expr (outside while scope)
+            _currentMask = preLoopMask;
             AppendLine($"{exitLabel}: ;");
         }
 
@@ -1112,12 +1312,32 @@ namespace NativeTranspiler.Analyzer
 
             if (isNativeArray && indexKind >= VarKind.Varying)
             {
-                // ★ When inside a mask context (if/else), the gather index may be -1 for
-                //   masked-out lanes (e.g., v_bestIdx). Clamp to 0 so the SIMD gather
-                //   doesn't read OOB. The per-lane store guard in TranslateAssignment
-                //   prevents writing garbage for masked-out lanes.
+                // ★ Check if index is from a uniform-bound reduction loop induction variable
+                //   → emit broadcast of scalar load instead of gather.
+                //   This is the key optimization for fallback loops like for(i=0; i<N; i++):
+                //   one scalar load + broadcast to all 8 lanes.
+                if (elementAccess.ArgumentList?.Arguments.Count > 0)
+                {
+                    var rawArg = elementAccess.ArgumentList.Arguments[0].Expression;
+                    if (rawArg is IdentifierNameSyntax rawId && _uniformLoopVars.Contains(rawId.Identifier.Text))
+                    {
+                        string scalarIdx = rawId.Identifier.Text;
+                        if (elemCppType.Contains("float2"))
+                            return $"simd_value<{elemCppType}>::broadcast({baseExpr}_ptr[{scalarIdx}])";
+                        if (elemCppType.Contains("int2"))
+                            return $"simd_value<EntJoy::Mathematics::int2>::broadcast({baseExpr}_ptr[{scalarIdx}])";
+                        if (elemCppType == "float")
+                            return $"simd_value<float>::broadcast({baseExpr}_ptr[{scalarIdx}])";
+                        if (elemCppType == "int")
+                            return $"simd_value<int>::broadcast({baseExpr}_ptr[{scalarIdx}])";
+                        return $"simd_value<float>::broadcast({baseExpr}_ptr[{scalarIdx}])";
+                    }
+                }
+
+                // ★ Safety clamp for gather: when in mask context, clamp indices to
+                //   [0, arr_length-1] to prevent AVX2 unmasked gather OOB.
                 string safeIdx = _currentMask != "simd_mask::all_true()"
-                    ? $"max({indexExpr}, simd_value<int>(0))"
+                    ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}_length - 1))"
                     : indexExpr;
 
                 // SIMD gather

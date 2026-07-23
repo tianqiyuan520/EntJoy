@@ -289,6 +289,14 @@ static inline simd_value<float> blend(simd_value<float> f, simd_value<float> t, 
 static inline simd_value<int> blend(simd_value<int> f, simd_value<int> t, simd_mask m) {
     return simd_value<int>{ n_blend_epi32(f.v, t.v, m.m) };
 }
+static inline simd_value<EntJoy::Mathematics::float2> blend(
+    simd_value<EntJoy::Mathematics::float2> f, simd_value<EntJoy::Mathematics::float2> t, simd_mask m) {
+    return simd_value<EntJoy::Mathematics::float2>{ blend(f.x, t.x, m), blend(f.y, t.y, m) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> blend(
+    simd_value<EntJoy::Mathematics::int2> f, simd_value<EntJoy::Mathematics::int2> t, simd_mask m) {
+    return simd_value<EntJoy::Mathematics::int2>{ blend(f.x, t.x, m), blend(f.y, t.y, m) };
+}
 static inline float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
 static inline float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
 static inline float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }
