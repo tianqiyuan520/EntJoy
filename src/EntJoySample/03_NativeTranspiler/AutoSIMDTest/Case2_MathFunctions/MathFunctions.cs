@@ -25,4 +25,23 @@ namespace EntJoySample.AutoSIMDTest
         public NativeArray<float> A, Result;
         public void Execute(int i) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
     }
+    // --- C++ Auto-SIMD (IJobFor) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct MathFuncs_SIMD_For : IJobFor
+    {
+        public NativeArray<float> A, Result;
+        public void Execute(int i) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
+    }
+
+    // --- C++ Auto-SIMD (IJob) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct MathFuncs_SIMD_IJob : IJob
+    {
+        public NativeArray<float> A, Result;
+        public int Count;
+        public void Execute()
+        {
+            for (int i = 0; i < Count; i++) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
+        }
+    }
 }
