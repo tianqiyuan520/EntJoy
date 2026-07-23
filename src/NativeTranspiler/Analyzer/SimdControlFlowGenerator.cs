@@ -31,6 +31,7 @@ namespace NativeTranspiler.Analyzer
         private readonly string _indexParamName;
         private readonly string _simdIndexVar; // "v_i" — the SIMD index variable from outer loop
         private readonly bool _useFastMath;
+        private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
         // Mask management
         private string _currentMask = "simd_mask::all_true()";
@@ -87,7 +88,8 @@ namespace NativeTranspiler.Analyzer
             string simdIndexVar = "v_i",
             bool useFastMath = false,
             Dictionary<string, string>? boolFields = null,
-            string batchOffsetVar = "si")
+            string batchOffsetVar = "si",
+            NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
         {
             _semanticModel = semanticModel;
             _jobStruct = jobStruct;
@@ -96,6 +98,7 @@ namespace NativeTranspiler.Analyzer
             _indexParamName = indexParamName;
             _simdIndexVar = simdIndexVar;
             _useFastMath = useFastMath;
+            _simdMathPrecision = simdMathPrecision;
             _boolFields = boolFields ?? new Dictionary<string, string>();
             _batchOffsetVar = batchOffsetVar;
 
@@ -1934,7 +1937,7 @@ namespace NativeTranspiler.Analyzer
                         VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
                         if (kv >= VarKind.Varying)
                         {
-                            // SIMD sqrt not always available; fallback to per-lane
+                            // SIMD sqrt via native instruction
                             return $"simd_value<float>{{ n_sqrt_ps({v}.v) }}";
                         }
                         return $"std::sqrt({v})";
@@ -1954,9 +1957,95 @@ namespace NativeTranspiler.Analyzer
                     }
                     break;
                 }
+
+                // Lightweight native SIMD (no SLEEF needed)
+                case "Ceiling":
+                {
+                    if (args.Count >= 1)
+                    {
+                        string v = TranslateExpression(args[0].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_ceil_ps({v}.v) }}";
+                        return $"std::ceil({v})";
+                    }
+                    break;
+                }
+                case "Round":
+                {
+                    if (args.Count >= 1)
+                    {
+                        string v = TranslateExpression(args[0].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_round_ps({v}.v) }}";
+                        return $"std::round({v})";
+                    }
+                    break;
+                }
+                case "Truncate":
+                {
+                    if (args.Count >= 1)
+                    {
+                        string v = TranslateExpression(args[0].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_trunc_ps({v}.v) }}";
+                        return $"std::trunc({v})";
+                    }
+                    break;
+                }
+
+                // SLEEF transcendental functions (single-argument)
+                case "Sin":  case "Cos":  case "Tan":
+                case "Asin": case "Acos": case "Atan":
+                case "Sinh": case "Cosh": case "Tanh":
+                case "Exp":  case "Log":  case "Log10":
+                {
+                    if (args.Count >= 1)
+                    {
+                        string v = TranslateExpression(args[0].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                        {
+                            string sleefFn = $"n_{methodName.ToLowerInvariant()}_ps";
+                            return $"simd_value<float>{{ {sleefFn}({v}.v) }}";
+                        }
+                        return $"std::{methodName.ToLowerInvariant()}({v})";
+                    }
+                    break;
+                }
+
+                // SLEEF two-argument functions
+                case "Atan2":
+                {
+                    if (args.Count >= 2)
+                    {
+                        string a = TranslateExpression(args[0].Expression);
+                        string b = TranslateExpression(args[1].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_atan2_ps({a}.v, {b}.v) }}";
+                        return $"std::atan2({a}, {b})";
+                    }
+                    break;
+                }
+                case "Pow":
+                {
+                    if (args.Count >= 2)
+                    {
+                        string a = TranslateExpression(args[0].Expression);
+                        string b = TranslateExpression(args[1].Expression);
+                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
+                        if (kv >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_pow_ps({a}.v, {b}.v) }}";
+                        return $"std::pow({a}, {b})";
+                    }
+                    break;
+                }
             }
 
-            // Default: lowercase mapping (MathF.Sin → sin for SIMD ADL, std::sin for scalar)
+            // Fallback: lowercase mapping (MathF.Sin → sin for SIMD ADL, std::sin for scalar)
             bool anyVarying = false;
             for (int i = 0; i < args.Count; i++)
                 if (_varAnalyzer.ClassifyExpression(args[i].Expression) >= VarKind.Varying)

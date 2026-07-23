@@ -36,6 +36,17 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
+        /// SIMD 数学函数精度等级（用于 SLEEF 向量数学库）。
+        /// Fastest = ~3.5 ULP, High = ~1.0 ULP, IEEE = 标量精确。
+        /// </summary>
+        public enum SimdMathPrecision
+        {
+            Fastest,
+            High,
+            IEEE
+        }
+
+        /// <summary>
         /// 自动 SIMD 向量化开关。
         /// </summary>
         public enum AutoSIMD

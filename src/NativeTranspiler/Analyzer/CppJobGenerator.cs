@@ -137,6 +137,7 @@ namespace NativeTranspiler.Analyzer
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
             bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
             var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
+            var simdMathPrecision = AttributeHelper.GetMathPrecision(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
@@ -177,17 +178,17 @@ namespace NativeTranspiler.Analyzer
                         var values = new List<bool>();
                         for (int i = 0; i < boolFields.Count; i++)
                             values.Add((mask & (1 << i)) != 0);
-                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath, autoSIMD);
+                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision);
                     }
                 }
                 else
                 {
-                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath, autoSIMD);
+                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision);
                 }
             }
             else
             {
-                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath, autoSIMD);
+                GenerateSingleFunctionStandard(jobStruct, compilation, sb, useFastMath, autoSIMD, simdMathPrecision);
             }
 
             return sb.ToString();
@@ -219,7 +220,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -235,7 +236,7 @@ namespace NativeTranspiler.Analyzer
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
                 // Per-lane SIMD: gather queries once, extract to scalar for each lane
-                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, jobStruct: jobStruct);
+                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, jobStruct: jobStruct, simdMathPrecision: simdMathPrecision);
                 var simdCode = simdGen.Generate(scalarBody);
                 sb.Append(simdCode);
                 sb.AppendLine("}");
@@ -255,7 +256,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
+        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
         {
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
@@ -283,7 +284,7 @@ namespace NativeTranspiler.Analyzer
                 var boolFieldValues = new System.Collections.Generic.Dictionary<string, string>();
                 for (int i_ = 0; i_ < boolFields.Count; i_++)
                     boolFieldValues[boolFields[i_].Name] = values[i_] ? "true" : "false";
-                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues, jobStruct);
+                var simdGen = new OuterSimdGenerator(methodSyntax, semanticModel, indexParamName, boolFieldValues, jobStruct, simdMathPrecision);
                 var simdCode = simdGen.Generate(bodyCode);
                 sb.Append(simdCode);
                 sb.AppendLine("}");
@@ -305,7 +306,8 @@ namespace NativeTranspiler.Analyzer
         }
 
         private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath,
-            NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
+            NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled,
+            NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
         {
             var singleParams = BuildJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -328,7 +330,8 @@ namespace NativeTranspiler.Analyzer
                     var simdGen = new SimdControlFlowGenerator(
                         semanticModel, jobStruct, variables, varAnalyzer,
                         indexParamName: "", simdIndexVar: "v_i",
-                        batchOffsetVar: "0");
+                        batchOffsetVar: "0",
+                        simdMathPrecision: simdMathPrecision);
                     var simdBody = simdGen.Generate(methodSyntax.Body);
                     sb.Append(simdBody);
                 }
