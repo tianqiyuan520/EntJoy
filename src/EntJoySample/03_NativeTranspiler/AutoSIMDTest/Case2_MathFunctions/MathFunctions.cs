@@ -7,33 +7,18 @@ namespace EntJoySample.AutoSIMDTest
         public NativeArray<float> A, Result;
         public void Execute(int i) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
     }
-
     [NativeTranspiler.NativeTranspile]
     public struct MathFuncs_Cpp : IJobParallelFor
     {
         public NativeArray<float> A, Result;
         public void Execute(int i) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
     }
-
     [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
-    public struct MathFuncs_SIMD : IJobFor
+    public struct MathFuncs_SIMD_PF : IJobParallelFor
     {
         public NativeArray<float> A, Result;
         public void Execute(int i) { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
     }
-
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
-    public struct MathFuncs_SIMD_IJob : IJob
-    {
-        public NativeArray<float> A, Result;
-        public int Count;
-        public void Execute()
-        {
-            for (int i = 0; i < Count; i++)
-            { float x = A[i]; Result[i] = MathF.Sqrt(x) + MathF.Sin(x) * MathF.Cos(x) + MathF.Log(x + 1); }
-        }
-    }
-
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
     public struct MathFuncs_ISPC : IJobParallelFor
     {
