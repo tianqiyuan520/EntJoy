@@ -674,10 +674,8 @@ namespace NativeTranspiler.Analyzer
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
 
-            // Use savedMask (in scope, declared before the for)
-            string innerSaved = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {innerSaved} = {savedMask};");
-            _currentMask = $"simd_mask{{ n_and_mask({innerSaved}.m, v_active{sid}.m) }}";
+            // ★ Use savedMask directly — no __mask_N = savedMask copy (saves 1 move per inner iter)
+            _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, v_active{sid}.m) }}";
 
             _loopStack.Push(new LoopFrame
             {
@@ -695,7 +693,7 @@ namespace NativeTranspiler.Analyzer
             _loopStack.Pop();
 
             AppendLine($"{continueLabel}: ;");
-            _currentMask = innerSaved;
+            _currentMask = savedMask;
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             _indent--;
             AppendLine("}");
