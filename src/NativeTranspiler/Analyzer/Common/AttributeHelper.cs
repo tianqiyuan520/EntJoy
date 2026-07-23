@@ -136,6 +136,26 @@ namespace NativeTranspiler.Analyzer.Common
             return NativeTranspiler.AutoSIMD.Disabled;
         }
 
+        /// <summary>
+        /// 读取 MathPrecision 参数：SIMD 数学函数精度等级
+        /// </summary>
+        public static NativeTranspiler.SimdMathPrecision GetMathPrecision(ISymbol symbol, INamedTypeSymbol? attrSymbol)
+        {
+            if (attrSymbol == null) return NativeTranspiler.SimdMathPrecision.Fastest;
+            var attrData = symbol.GetAttributes().FirstOrDefault(ad =>
+                SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol));
+            if (attrData == null) return NativeTranspiler.SimdMathPrecision.Fastest;
+
+            foreach (var namedArg in attrData.NamedArguments)
+                if (namedArg.Key == "MathPrecision")
+                {
+                    int? val = ConvertEnumArgToInt(namedArg.Value.Value);
+                    if (val.HasValue) return (NativeTranspiler.SimdMathPrecision)val.Value;
+                }
+
+            return NativeTranspiler.SimdMathPrecision.Fastest;
+        }
+
         // ---------- 辅助方法 ----------
 
         /// <summary>

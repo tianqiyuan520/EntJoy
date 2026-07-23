@@ -626,6 +626,49 @@ static inline n_float n_sqrt_ps(n_float a) {
 }
 
 // ============================================================
+// Float ceil / round / trunc (lightweight, native instructions)
+// ============================================================
+
+static inline n_float n_ceil_ps(n_float a) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_ceil_ps(a);
+#elif defined(NSIMD_SSE4)
+    return _mm_ceil_ps(a);
+#elif defined(NSIMD_NEON)
+    // vrndpq_f32 = round toward +inf (ceil), available on AArch32/AArch64
+    return vrndpq_f32(a);
+#else
+    return ceilf(a);
+#endif
+}
+
+static inline n_float n_round_ps(n_float a) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_round_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_SSE4)
+    return _mm_round_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_NEON)
+    // vrndaq_f32 = round to nearest (ties to even)
+    return vrndaq_f32(a);
+#else
+    return roundf(a);
+#endif
+}
+
+static inline n_float n_trunc_ps(n_float a) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_SSE4)
+    return _mm_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_NEON)
+    // vrndq_f32 = round toward zero (trunc)
+    return vrndq_f32(a);
+#else
+    return truncf(a);
+#endif
+}
+
+// ============================================================
 // Float -> int truncation (toward zero)
 // ============================================================
 static inline n_int n_cvttps_epi32(n_float a) {

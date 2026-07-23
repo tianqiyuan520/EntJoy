@@ -5,6 +5,7 @@
 // simd_value<int2>   = pair of simd_value<int> (x,y)
 #pragma once
 #include "NativeSIMD.h"
+#include "NativeSIMD_math.h"
 #include "NativeMath.h"
 
 // Forward declarations
@@ -59,8 +60,32 @@ struct simd_value<float> {
     friend simd_value min(simd_value a, simd_value b) { return simd_value{ n_min_ps(a.v, b.v) }; }
     friend simd_value max(simd_value a, simd_value b) { return simd_value{ n_max_ps(a.v, b.v) }; }
 
-    // Full-Width SIMD: floor() - vectorized
+    // Full-Width SIMD: floor/ceil/round/trunc - vectorized via native instructions
     simd_value floor() const { return simd_value{ n_floor_ps(v) }; }
+    simd_value ceil()  const { return simd_value{ n_ceil_ps(v) }; }
+    simd_value round() const { return simd_value{ n_round_ps(v) }; }
+    simd_value trunc() const { return simd_value{ n_trunc_ps(v) }; }
+
+    // Full-Width SIMD: transcendental functions via SLEEF
+    simd_value sin()    const { return simd_value{ n_sin_ps(v) }; }
+    simd_value cos()    const { return simd_value{ n_cos_ps(v) }; }
+    simd_value tan()    const { return simd_value{ n_tan_ps(v) }; }
+    simd_value asin()   const { return simd_value{ n_asin_ps(v) }; }
+    simd_value acos()   const { return simd_value{ n_acos_ps(v) }; }
+    simd_value atan()   const { return simd_value{ n_atan_ps(v) }; }
+    simd_value sinh()   const { return simd_value{ n_sinh_ps(v) }; }
+    simd_value cosh()   const { return simd_value{ n_cosh_ps(v) }; }
+    simd_value tanh()   const { return simd_value{ n_tanh_ps(v) }; }
+    simd_value exp()    const { return simd_value{ n_exp_ps(v) }; }
+    simd_value log()    const { return simd_value{ n_log_ps(v) }; }
+    simd_value log10()  const { return simd_value{ n_log10_ps(v) }; }
+
+    // Two-argument forms
+    friend simd_value atan2(simd_value a, simd_value b) { return simd_value{ n_atan2_ps(a.v, b.v) }; }
+    friend simd_value pow(simd_value a, simd_value b)   { return simd_value{ n_pow_ps(a.v, b.v) }; }
+
+    // Simultaneous sin+cos (faster than separate calls)
+    void sincos(simd_value* s, simd_value* c) const { n_sincos_ps(v, &s->v, &c->v); }
 };
 
 // ============================================================
@@ -304,18 +329,21 @@ static inline int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
 static inline int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
 static inline int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
 
-// Per-element math for simd_value<float> (per-lane fallback for sin/cos/log etc)
+// Vector math via SLEEF (ADL targets for auto-SIMD generated code)
+// sin/cos/log/exp/... dispatch to n_sin_ps from NativeSIMD_math.h
 #include <cmath>
-static inline simd_value<float> n_apply_ps(float(*fn)(float), simd_value<float> v) {
-    alignas(32) float buf[8];
-    alignas(32) float out[8];
-    n_store_ps(buf, v.v);
-    for (int i = 0; i < NSIMD_WIDTH; i++) out[i] = fn(buf[i]);
-    return simd_value<float>{ n_load_ps(out) };
-}
-static inline simd_value<float> sin(simd_value<float> v) { return n_apply_ps(::sinf, v); }
-static inline simd_value<float> cos(simd_value<float> v) { return n_apply_ps(::cosf, v); }
-static inline simd_value<float> log(simd_value<float> v) { return n_apply_ps(::logf, v); }
+static inline simd_value<float> sin(simd_value<float> v)   { return simd_value<float>{ n_sin_ps(v.v) }; }
+static inline simd_value<float> cos(simd_value<float> v)   { return simd_value<float>{ n_cos_ps(v.v) }; }
+static inline simd_value<float> tan(simd_value<float> v)   { return simd_value<float>{ n_tan_ps(v.v) }; }
+static inline simd_value<float> asin(simd_value<float> v)  { return simd_value<float>{ n_asin_ps(v.v) }; }
+static inline simd_value<float> acos(simd_value<float> v)  { return simd_value<float>{ n_acos_ps(v.v) }; }
+static inline simd_value<float> atan(simd_value<float> v)  { return simd_value<float>{ n_atan_ps(v.v) }; }
+static inline simd_value<float> sinh(simd_value<float> v)  { return simd_value<float>{ n_sinh_ps(v.v) }; }
+static inline simd_value<float> cosh(simd_value<float> v)  { return simd_value<float>{ n_cosh_ps(v.v) }; }
+static inline simd_value<float> tanh(simd_value<float> v)  { return simd_value<float>{ n_tanh_ps(v.v) }; }
+static inline simd_value<float> exp(simd_value<float> v)   { return simd_value<float>{ n_exp_ps(v.v) }; }
+static inline simd_value<float> log(simd_value<float> v)   { return simd_value<float>{ n_log_ps(v.v) }; }
+static inline simd_value<float> log10(simd_value<float> v) { return simd_value<float>{ n_log10_ps(v.v) }; }
 
 // SIMD int element-wise min/max (named to avoid Windows min/max macro conflict)
 static inline simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }

@@ -16,16 +16,19 @@ namespace NativeTranspiler.Analyzer
         private readonly string _idx;
         private readonly Dictionary<string, string> _boolFields;
         private readonly INamedTypeSymbol? _jobStruct;
+        private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
         public OuterSimdGenerator(MethodDeclarationSyntax methodSyntax, SemanticModel semanticModel, string indexVarName,
             Dictionary<string, string>? boolFieldValues = null,
-            INamedTypeSymbol? jobStruct = null)
+            INamedTypeSymbol? jobStruct = null,
+            NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
         {
             _methodSyntax = methodSyntax;
             _semanticModel = semanticModel;
             _idx = indexVarName;
             _boolFields = boolFieldValues ?? new Dictionary<string, string>();
             _jobStruct = jobStruct;
+            _simdMathPrecision = simdMathPrecision;
         }
 
         public string Generate(string scalarBody)
@@ -58,7 +61,8 @@ namespace NativeTranspiler.Analyzer
                 var cfGenerator = new SimdControlFlowGenerator(
                     _semanticModel, _jobStruct, variables, varAnalyzer,
                     indexParamName: _idx, simdIndexVar: "v_i",
-                    boolFields: _boolFields);
+                    boolFields: _boolFields,
+                    simdMathPrecision: _simdMathPrecision);
 
                 var writePattern = ExtractResultWritePattern(scalarBody);
                 if (writePattern != null)

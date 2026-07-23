@@ -618,6 +618,13 @@ namespace {AttributeNamespace}
         Disabled
     }}
 
+    public enum SimdMathPrecision
+    {{
+        Fastest,
+        High,
+        IEEE
+    }}
+
     [AttributeUsage(AttributeTargets.Method | AttributeTargets.Struct)]
     public sealed class {AttributeName}Attribute : Attribute
     {{
@@ -627,6 +634,7 @@ namespace {AttributeNamespace}
         public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
         public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;
         public AutoSIMD AutoSIMD {{ get; set; }} = AutoSIMD.Disabled;
+        public SimdMathPrecision MathPrecision {{ get; set; }} = SimdMathPrecision.Fastest;
     }}
 }}
 ";
@@ -783,6 +791,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
         {
             var sb = new StringBuilder();
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
+            sb.AppendLine("# Set CMAKE_INSTALL_PREFIX before project() so SLEEF submodule can detect it");
+            sb.AppendLine("set(CMAKE_INSTALL_PREFIX \"${CMAKE_CURRENT_BINARY_DIR}/sleef_install\" CACHE PATH \"Install prefix\" FORCE)");
             sb.AppendLine("project(NativeDll LANGUAGES CXX)");
             sb.AppendLine();
             sb.AppendLine("set(CMAKE_CXX_STANDARD 20)");
@@ -877,6 +887,43 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_SCALAR NSIMD_WIDTH=1)");
             sb.AppendLine("endif()");
+            sb.AppendLine();
+
+            // SLEEF: vector math library (git submodule)
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# SLEEF: cross-platform SIMD math (sin/cos/log/exp/...)");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine($"if(EXISTS \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/sleef/CMakeLists.txt\")");
+            sb.AppendLine("    # Disable SLEEF features we don't need");
+            sb.AppendLine("    set(SLEEF_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_BUILD_DFT OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_BUILD_QUAD OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_BUILD_INLINE_HEADERS OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_ENABLE_TLFLOAT OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_ENABLE_OPENMP OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine("    set(SLEEF_ENABLE_LTO OFF CACHE BOOL \"\" FORCE)");
+            sb.AppendLine($"    add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/sleef ${{CMAKE_CURRENT_BINARY_DIR}}/sleef)");
+            sb.AppendLine("    # sleef.h is a generated file; point to build output");
+            sb.AppendLine("    # SLEEF unconditionally depends on ext_tlfloat target even when TLFLOAT is OFF");
+            sb.AppendLine("    if(NOT TARGET ext_tlfloat)");
+            sb.AppendLine("        add_custom_target(ext_tlfloat)");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("    # Create dummy tlfloat header to satisfy SLEEF's unconditional include");
+            sb.AppendLine("    file(WRITE \"${CMAKE_CURRENT_BINARY_DIR}/sleef/include/tlfloat/tlfloat.h\" \"// dummy\")");
+            sb.AppendLine("    include_directories(BEFORE \"${CMAKE_CURRENT_BINARY_DIR}/sleef/include\")");
+            sb.AppendLine("    target_link_libraries(NativeDll PRIVATE sleef)");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE HAS_SLEEF=1)");
+            sb.AppendLine($"    target_sources(NativeDll PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/sleef_wrapper.cpp)");
+            sb.AppendLine("    message(STATUS \"NativeDll: SLEEF vector math enabled\")");
+            sb.AppendLine("else()");
+            sb.AppendLine("    message(STATUS \"NativeDll: SLEEF not found (git submodule?), using scalar math fallback\")");
+            sb.AppendLine("endif()");
+            sb.AppendLine();
+            sb.AppendLine("# SIMD math precision: 1=Fastest(~3.5ULP) 2=High(~1.0ULP) 3=IEEE(exact)");
+            sb.AppendLine("if(NOT DEFINED NATIVE_SIMD_MATH_PRECISION)");
+            sb.AppendLine("    set(NATIVE_SIMD_MATH_PRECISION \"1\" CACHE STRING \"SIMD math precision level: 1=Fastest 2=High 3=IEEE\")");
+            sb.AppendLine("endif()");
+            sb.AppendLine("target_compile_definitions(NativeDll PRIVATE SIMD_MATH_PRECISION=${NATIVE_SIMD_MATH_PRECISION})");
             sb.AppendLine();
 
             // ISPC: x86 only, optional
