@@ -54,8 +54,6 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            simd_value<int> v_i = v_base + si;");
-                foreach (var kvp in _boolFields)
-                    sb.AppendLine($"            bool {kvp.Key} = {kvp.Value};");
 
                 var cfGenerator = new SimdControlFlowGenerator(
                     _semanticModel, _jobStruct, variables, varAnalyzer,
@@ -108,11 +106,31 @@ namespace NativeTranspiler.Analyzer
             return rhs == "-1" ? null : rhs.Replace("[bestIdx]", "[bestIdx_lane]");
         }
 
-        /// <summary>Remove all per-lane result write one-liners from SIMD body</summary>
+        /// <summary>Remove all per-lane result write constructs from SIMD body</summary>
         private static string RemovePerLaneWrites(string simdBody)
         {
-            var writeRx = new Regex(@"\n\s*\{\s*int\s+__sg\s*=\s*n_mask_to_bitmask[^\n]*Results_ptr[^\n]+\}\}\};", RegexOptions.Singleline);
-            return writeRx.Replace(simdBody, "");
+            // Pattern: {int __sg=n_mask_to_bitmask(...) ... }}
+            string marker = "n_mask_to_bitmask";
+            int idx = simdBody.IndexOf(marker);
+            while (idx >= 0)
+            {
+                int openBrace = simdBody.LastIndexOf('{', idx);
+                if (openBrace < 0) break;
+                int depth = 0, end = -1;
+                for (int i = openBrace; i < simdBody.Length; i++)
+                {
+                    if (simdBody[i] == '{') depth++;
+                    else if (simdBody[i] == '}')
+                    {
+                        depth--;
+                        if (depth == 0) { end = i; break; }
+                    }
+                }
+                if (end < 0) break;
+                simdBody = simdBody.Remove(openBrace, end + 1 - openBrace);
+                idx = simdBody.IndexOf(marker);
+            }
+            return simdBody;
         }
 
         private string GeneratePerLane(string scalarBody)

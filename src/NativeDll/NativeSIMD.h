@@ -38,6 +38,10 @@
     typedef __m256  n_float;
     typedef __m256i n_int;
     typedef __m256  n_mask;
+#elif defined(NSIMD_AVX)
+    typedef __m256  n_float;
+    typedef __m256i n_int;
+    typedef __m256  n_mask;
 #elif defined(NSIMD_SSE4)
     typedef __m128  n_float;
     typedef __m128i n_int;
@@ -59,6 +63,8 @@
 static inline n_float n_load_ps(const float* p) {
 #if defined(NSIMD_AVX2)
     return _mm256_loadu_ps(p);
+#elif defined(NSIMD_AVX)
+return _mm256_loadu_ps(p);
 #elif defined(NSIMD_SSE4)
     return _mm_loadu_ps(p);
 #elif defined(NSIMD_NEON)
@@ -71,6 +77,8 @@ static inline n_float n_load_ps(const float* p) {
 static inline void n_store_ps(float* p, n_float v) {
 #if defined(NSIMD_AVX2)
     _mm256_storeu_ps(p, v);
+#elif defined(NSIMD_AVX)
+_mm256_storeu_ps(p, v);
 #elif defined(NSIMD_SSE4)
     _mm_storeu_ps(p, v);
 #elif defined(NSIMD_NEON)
@@ -83,6 +91,8 @@ static inline void n_store_ps(float* p, n_float v) {
 static inline n_int n_load_epi32(const int* p) {
 #if defined(NSIMD_AVX2)
     return _mm256_loadu_si256((const __m256i*)p);
+#elif defined(NSIMD_AVX)
+    return _mm256_loadu_si256((const __m256i*)p);
 #elif defined(NSIMD_SSE4)
     return _mm_loadu_si128((const __m128i*)p);
 #elif defined(NSIMD_NEON)
@@ -94,6 +104,8 @@ static inline n_int n_load_epi32(const int* p) {
 
 static inline void n_store_epi32(int* p, n_int v) {
 #if defined(NSIMD_AVX2)
+    _mm256_storeu_si256((__m256i*)p, v);
+#elif defined(NSIMD_AVX)
     _mm256_storeu_si256((__m256i*)p, v);
 #elif defined(NSIMD_SSE4)
     _mm_storeu_si128((__m128i*)p, v);
@@ -110,6 +122,8 @@ static inline void n_store_epi32(int* p, n_int v) {
 static inline n_float n_set1_ps(float s) {
 #if defined(NSIMD_AVX2)
     return _mm256_set1_ps(s);
+#elif defined(NSIMD_AVX)
+    return _mm256_set1_ps(s);
 #elif defined(NSIMD_SSE4)
     return _mm_set1_ps(s);
 #elif defined(NSIMD_NEON)
@@ -122,6 +136,9 @@ static inline n_float n_set1_ps(float s) {
 static inline n_int n_set1_epi32(int s) {
 #if defined(NSIMD_AVX2)
     return _mm256_set1_epi32(s);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_set1_epi32(s);
+    return _mm256_set_m128i(lo, lo);
 #elif defined(NSIMD_SSE4)
     return _mm_set1_epi32(s);
 #elif defined(NSIMD_NEON)
@@ -135,6 +152,10 @@ static inline n_int n_set_epi32(int i7, int i6, int i5, int i4,
                                 int i3, int i2, int i1, int i0) {
 #if defined(NSIMD_AVX2)
     return _mm256_set_epi32(i7, i6, i5, i4, i3, i2, i1, i0);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_set_epi32(i3, i2, i1, i0);
+    __m128i hi = _mm_set_epi32(i7, i6, i5, i4);
+    return _mm256_set_m128i(hi, lo);
 #elif defined(NSIMD_SSE4) || defined(NSIMD_NEON)
     (void)i7; (void)i6; (void)i5; (void)i4;
 #if defined(NSIMD_SSE4)
@@ -156,6 +177,8 @@ static inline n_int n_set_epi32(int i7, int i6, int i5, int i4,
 static inline n_float n_add_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_add_ps(a, b);
+#elif defined(NSIMD_AVX)
+return _mm256_add_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_add_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -168,6 +191,8 @@ static inline n_float n_add_ps(n_float a, n_float b) {
 static inline n_float n_sub_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_sub_ps(a, b);
+#elif defined(NSIMD_AVX)
+return _mm256_sub_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_sub_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -180,6 +205,8 @@ static inline n_float n_sub_ps(n_float a, n_float b) {
 static inline n_float n_mul_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_mul_ps(a, b);
+#elif defined(NSIMD_AVX)
+return _mm256_mul_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_mul_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -196,16 +223,26 @@ static inline n_float n_fmadd_ps(n_float a, n_float b, n_float c) {
     return _mm256_fmadd_ps(a, b, c);
 #elif defined(NSIMD_SSE4) && defined(__FMA__)
     return _mm_fmadd_ps(a, b, c);
+#elif defined(NSIMD_SSE4)
+    return _mm_add_ps(_mm_mul_ps(a, b), c);
 #elif defined(NSIMD_NEON)
     return vfmaq_f32(c, a, b);
 #else
-    return a * b + c;
+    return n_add_ps(n_mul_ps(a, b), c);
 #endif
 }
 
 static inline n_int n_add_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_add_epi32(a, b);
+#elif defined(NSIMD_AVX)
+    __m128i lo_a = _mm256_castsi256_si128(a);
+    __m128i lo_b = _mm256_castsi256_si128(b);
+    __m128i hi_a = _mm256_extractf128_si256(a, 1);
+    __m128i hi_b = _mm256_extractf128_si256(b, 1);
+    __m128i lo = _mm_add_epi32(lo_a, lo_b);
+    __m128i hi = _mm_add_epi32(hi_a, hi_b);
+    return _mm256_set_m128i(hi, lo);
 #elif defined(NSIMD_SSE4)
     return _mm_add_epi32(a, b);
 #elif defined(NSIMD_NEON)
@@ -218,6 +255,14 @@ static inline n_int n_add_epi32(n_int a, n_int b) {
 static inline n_int n_sub_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_sub_epi32(a, b);
+#elif defined(NSIMD_AVX)
+    __m128i lo_a = _mm256_castsi256_si128(a);
+    __m128i lo_b = _mm256_castsi256_si128(b);
+    __m128i hi_a = _mm256_extractf128_si256(a, 1);
+    __m128i hi_b = _mm256_extractf128_si256(b, 1);
+    __m128i lo = _mm_sub_epi32(lo_a, lo_b);
+    __m128i hi = _mm_sub_epi32(hi_a, hi_b);
+    return _mm256_set_m128i(hi, lo);
 #elif defined(NSIMD_SSE4)
     return _mm_sub_epi32(a, b);
 #elif defined(NSIMD_NEON)
@@ -253,6 +298,8 @@ static inline n_int n_mullo_epi32(n_int a, n_int b) {
 static inline n_float n_min_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_min_ps(a, b);
+#elif defined(NSIMD_AVX)
+return _mm256_min_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_min_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -265,6 +312,8 @@ static inline n_float n_min_ps(n_float a, n_float b) {
 static inline n_float n_max_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_max_ps(a, b);
+#elif defined(NSIMD_AVX)
+return _mm256_max_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_max_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -280,6 +329,8 @@ static inline n_float n_max_ps(n_float a, n_float b) {
 static inline n_mask n_cmp_lt_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_LT_OS);
+#elif defined(NSIMD_AVX)
+    return _mm256_cmp_ps(a, b, _CMP_LT_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmplt_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -291,6 +342,8 @@ static inline n_mask n_cmp_lt_ps(n_float a, n_float b) {
 
 static inline n_mask n_cmp_gt_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_GT_OS);
+#elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_GT_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmpgt_ps(a, b);
@@ -305,6 +358,8 @@ static inline n_mask n_cmp_gt_ps(n_float a, n_float b) {
 static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_EQ_OS);
+#elif defined(NSIMD_AVX)
+    return _mm256_cmp_ps(a, b, _CMP_EQ_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmpeq_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -317,6 +372,8 @@ static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
 // Float a != b
 static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_NEQ_OS);
+#elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_NEQ_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmpneq_ps(a, b);
@@ -332,6 +389,8 @@ static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
 static inline n_mask n_cmp_ge_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_GE_OS);
+#elif defined(NSIMD_AVX)
+    return _mm256_cmp_ps(a, b, _CMP_GE_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmpge_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -344,6 +403,8 @@ static inline n_mask n_cmp_ge_ps(n_float a, n_float b) {
 // Float a <= b
 static inline n_mask n_cmp_le_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
+    return _mm256_cmp_ps(a, b, _CMP_LE_OS);
+#elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_LE_OS);
 #elif defined(NSIMD_SSE4)
     return _mm_cmple_ps(a, b);
@@ -360,6 +421,9 @@ static inline n_mask n_cmp_le_ps(n_float a, n_float b) {
 static inline n_mask n_not_mask(n_mask m) {
 #if defined(NSIMD_AVX2)
     return _mm256_xor_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(-1)));
+#elif defined(NSIMD_AVX)
+    __m128i all_ones = _mm_set1_epi32(-1);
+    return _mm256_xor_ps(m, _mm256_castsi256_ps(_mm256_set_m128i(all_ones, all_ones)));
 #elif defined(NSIMD_SSE4)
     return _mm_xor_ps(m, _mm_castsi128_ps(_mm_set1_epi32(-1)));
 #elif defined(NSIMD_NEON)
@@ -390,6 +454,14 @@ static inline n_mask n_cmp_lt_epi32(n_int a, n_int b) {
 static inline n_mask n_cmp_gt_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(a, b));
+#elif defined(NSIMD_AVX)
+    __m128i lo_a = _mm256_castsi256_si128(a);
+    __m128i lo_b = _mm256_castsi256_si128(b);
+    __m128i hi_a = _mm256_extractf128_si256(a, 1);
+    __m128i hi_b = _mm256_extractf128_si256(b, 1);
+    __m128i lo = _mm_castps_si128(_mm_cmpgt_ps(_mm_castsi128_ps(lo_a), _mm_castsi128_ps(lo_b)));
+    __m128i hi = _mm_castps_si128(_mm_cmpgt_ps(_mm_castsi128_ps(hi_a), _mm_castsi128_ps(hi_b)));
+    return _mm256_castsi256_ps(_mm256_set_m128i(hi, lo));
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpgt_epi32(a, b));
 #elif defined(NSIMD_NEON)
@@ -418,6 +490,14 @@ static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
 static inline n_mask n_cmp_eq_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpeq_epi32(a, b));
+#elif defined(NSIMD_AVX)
+    __m128i lo_a = _mm256_castsi256_si128(a);
+    __m128i lo_b = _mm256_castsi256_si128(b);
+    __m128i hi_a = _mm256_extractf128_si256(a, 1);
+    __m128i hi_b = _mm256_extractf128_si256(b, 1);
+    __m128i lo = _mm_cmpeq_epi32(lo_a, lo_b);
+    __m128i hi = _mm_cmpeq_epi32(hi_a, hi_b);
+    return _mm256_castsi256_ps(_mm256_set_m128i(hi, lo));
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpeq_epi32(a, b));
 #elif defined(NSIMD_NEON)
@@ -491,6 +571,8 @@ static inline n_int n_max_epi32(n_int a, n_int b) {
 static inline n_float n_floor_ps(n_float a) {
 #if defined(NSIMD_AVX2)
     return _mm256_floor_ps(a);
+#elif defined(NSIMD_AVX)
+    return _mm256_floor_ps(a);
 #elif defined(NSIMD_SSE4)
     return _mm_floor_ps(a);
 #elif defined(NSIMD_NEON)
@@ -512,6 +594,8 @@ static inline n_float n_floor_ps(n_float a) {
 static inline n_int n_cvttps_epi32(n_float a) {
 #if defined(NSIMD_AVX2)
     return _mm256_cvttps_epi32(a);
+#elif defined(NSIMD_AVX)
+    return _mm256_cvttps_epi32(a);
 #elif defined(NSIMD_SSE4)
     return _mm_cvttps_epi32(a);
 #elif defined(NSIMD_NEON)
@@ -527,6 +611,8 @@ static inline n_int n_cvttps_epi32(n_float a) {
 static inline n_mask n_and_mask(n_mask a, n_mask b) {
 #if defined(NSIMD_AVX2)
     return _mm256_and_ps(a, b);
+#elif defined(NSIMD_AVX)
+    return _mm256_and_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_and_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -538,6 +624,8 @@ static inline n_mask n_and_mask(n_mask a, n_mask b) {
 
 static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
 #if defined(NSIMD_AVX2)
+    return _mm256_andnot_ps(a, b);
+#elif defined(NSIMD_AVX)
     return _mm256_andnot_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_andnot_ps(a, b);
@@ -553,6 +641,8 @@ static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
 static inline n_mask n_or_mask(n_mask a, n_mask b) {
 #if defined(NSIMD_AVX2)
     return _mm256_or_ps(a, b);
+#elif defined(NSIMD_AVX)
+    return _mm256_or_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_or_ps(a, b);
 #elif defined(NSIMD_NEON)
@@ -565,6 +655,8 @@ static inline n_mask n_or_mask(n_mask a, n_mask b) {
 // Mask XOR
 static inline n_mask n_xor_mask(n_mask a, n_mask b) {
 #if defined(NSIMD_AVX2)
+    return _mm256_xor_ps(a, b);
+#elif defined(NSIMD_AVX)
     return _mm256_xor_ps(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_xor_ps(a, b);
@@ -581,6 +673,8 @@ static inline n_mask n_xor_mask(n_mask a, n_mask b) {
 static inline n_float n_blend_ps(n_float v_false, n_float v_true, n_mask mask) {
 #if defined(NSIMD_AVX2)
     return _mm256_blendv_ps(v_false, v_true, mask);
+#elif defined(NSIMD_AVX)
+    return _mm256_blendv_ps(v_false, v_true, mask);
 #elif defined(NSIMD_SSE4)
     return _mm_blendv_ps(v_false, v_true, mask);
 #elif defined(NSIMD_NEON)
@@ -592,6 +686,9 @@ static inline n_float n_blend_ps(n_float v_false, n_float v_true, n_mask mask) {
 
 static inline n_int n_blend_epi32(n_int v_false, n_int v_true, n_mask mask) {
 #if defined(NSIMD_AVX2)
+    return _mm256_castps_si256(
+        _mm256_blendv_ps(_mm256_castsi256_ps(v_false), _mm256_castsi256_ps(v_true), mask));
+#elif defined(NSIMD_AVX)
     return _mm256_castps_si256(
         _mm256_blendv_ps(_mm256_castsi256_ps(v_false), _mm256_castsi256_ps(v_true), mask));
 #elif defined(NSIMD_SSE4)
