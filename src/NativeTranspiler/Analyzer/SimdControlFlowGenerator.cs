@@ -683,11 +683,13 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
             AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
-            // ★ Blend-zero masked-lane start/end so garbage doesn't inflate hmax
-            AppendLine($"simd_{ivName} = blend(simd_value<int>(0), simd_{ivName}, {savedMask});");
-            AppendLine($"simd_end_{ivName} = blend(simd_value<int>(0), simd_end_{ivName}, {savedMask});");
+            // ★ Zero masked-lane start/end so garbage doesn't inflate hmax
+            AppendLine($"simd_{ivName} = simd_max(simd_{ivName}, simd_value<int>(0));");
+            AppendLine($"simd_end_{ivName} = simd_max(simd_end_{ivName}, simd_value<int>(0));");
             AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
             AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
+            // ivdep: ignore loop-carried dependencies so MSVC can auto-vectorize/reduction-fold
+            AppendLine($"#pragma loop(ivdep)");
             AppendLine($"for (int iter{sid} = 0; iter{sid} < maxIter{sid}; iter{sid}++)");
             AppendLine("{");
             _indent++;
