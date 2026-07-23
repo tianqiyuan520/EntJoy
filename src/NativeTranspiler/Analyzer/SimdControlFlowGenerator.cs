@@ -36,6 +36,7 @@ namespace NativeTranspiler.Analyzer
         private string _currentMask = "simd_mask::all_true()";
         private int _maskCounter;
         private int _labelCounter;
+        private bool _isUniformScalarLoop;
         // For-loop induction variables (skip in GenerateVariableDeclarations)
         private readonly HashSet<string> _forLoopVars = new();
         // Induction variables from uniform-bound reduction loops (for broadcast optimization)
@@ -109,8 +110,8 @@ namespace NativeTranspiler.Analyzer
                     foreach (var v in fs.Declaration.Variables)
                         _forLoopVars.Add(v.Identifier.Text);
 
-            // ★ Varying bounds → per-lane (full SIMD has pre-existing bugs)
-            if (HasVaryingBoundsLoop(body))
+            // ★ Enhanced: reduction loops use count-loop, only non-reduction varying → per-lane
+            if (HasVaryingNonReductionLoop(body))
                 GeneratePerLaneFullBody(body);
             else {
                 GenerateVariableDeclarations();
@@ -386,14 +387,32 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 conditions.Add(condVar);
-                _currentMask = trueMask;
-                // ★ any_true() guard only needed when body has goto (break/continue/return)
-                //   Pure blend bodies are safe: blendv with mask=0 is a NOP.
-                if (HasControlFlowGoto(current.Statement))
+
+                // ★ Docs-style uniform scalar: invert bad condition, narrow mask, continue when all dead
+                if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
-                    AppendLine($"if ({trueMask}.any_true())");
+                    string goodExpr = condExpr
+                        .Replace("n_cmp_lt_", "##TMP##")
+                        .Replace("n_cmp_ge_", "n_cmp_lt_")
+                        .Replace("n_cmp_gt_", "n_cmp_le_")
+                        .Replace("n_cmp_le_", "n_cmp_gt_")
+                        .Replace("n_cmp_eq_", "n_cmp_ne_")
+                        .Replace("n_cmp_ne_", "n_cmp_eq_")
+                        .Replace("##TMP##", "n_cmp_ge_");
+                    string goodName = $"__good_{_labelCounter++}";
+                    AppendLine($"simd_mask {goodName} = {goodExpr};");
+                    _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {goodName}.m) }}";
+                    AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
+                    // Narrow savedMask so subsequent ops exclude dead lanes
+                    AppendLine($"{savedMask} = {_currentMask};");
                 }
-                GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                else
+                {
+                    _currentMask = trueMask;
+                    if (HasControlFlowGoto(current.Statement))
+                        AppendLine($"if ({trueMask}.any_true())");
+                    GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                }
 
                 if (current.Else == null) break;
 
@@ -412,12 +431,8 @@ namespace NativeTranspiler.Analyzer
             if (elseBody != null)
             {
                 _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
-                // ★ any_true() guard only needed when body has goto (break/continue/return)
-                //   Pure blend bodies are safe: blendv with mask=0 is a NOP.
                 if (HasControlFlowGoto(elseBody))
-                {
                     AppendLine($"if ({_currentMask}.any_true())");
-                }
                 GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
             }
 
@@ -440,6 +455,15 @@ namespace NativeTranspiler.Analyzer
             for (int i = 1; i < condVars.Count; i++)
                 expr = $"simd_mask{{ n_and_mask({expr}.m, simd_mask{{ n_not_mask({condVars[i]}.m) }}.m) }}";
             return expr;
+        }
+
+        /// <summary>检查 if 语句体是否是单条的 continue;</summary>
+        private static bool IsSingleContinue(StatementSyntax stmt)
+        {
+            if (stmt is ContinueStatementSyntax) return true;
+            if (stmt is BlockSyntax blk && blk.Statements.Count == 1
+                && blk.Statements[0] is ContinueStatementSyntax) return true;
+            return false;
         }
 
         /// <summary>
@@ -516,8 +540,47 @@ namespace NativeTranspiler.Analyzer
 
             bool isReduction = IsReductionLoop(stmt);
 
-            // Standard while-true mask loop (the only fully verified path)
-            GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, isUniformBounds);
+            // Dispatch: uniform → scalar for, varying reduction → count-loop, other → while-true
+            if (isUniformBounds && isReduction)
+                GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
+            else if (!isUniformBounds && isReduction)
+                GenerateVaryingReductionLoop(ivName, startExpr, endExpr, stmt);
+            else if (isUniformBounds && !isReduction)
+            {
+                // Docs-style: scalar for() with mask-narrowed body (dx/dy loops)
+                //   for(int dx) {
+                //     v_active = cmp_ult(v_nx, dims);
+                //     if(!v_active.any_true()) continue;
+                //     // body uses v_active as mask
+                //   }
+                // continue emits real C++ continue; (skip iteration when ALL lanes done)
+                string csOpStr2 = stmt.Condition is BinaryExpressionSyntax cbin2
+                    && cbin2.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
+                AppendLine($"// Docs-style scalar for: for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
+                AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({startExpr});");
+                AppendLine($"simd_value<int> simd_end_{ivName} = simd_value<int>::broadcast({endExpr});");
+                string preLoopMask2 = _currentMask;
+                AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
+                AppendLine("{");
+                _indent++;
+                AppendLine($"simd_{ivName} = simd_value<int>::broadcast({ivName});");
+                // Loop frame for continue (real C++ continue;)
+                string exitL = $"__uni_exit_{_labelCounter++}";
+                string contL = $"__uni_cont_{_labelCounter++}";
+                _isUniformScalarLoop = true;
+                _loopStack.Push(new LoopFrame { TrackerVar = "", IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
+                var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+                GenerateBlock(bodyB, skipBraces: false);
+                _loopStack.Pop();
+                _isUniformScalarLoop = false;
+                AppendLine($"{contL}: ;");
+                _indent--;
+                AppendLine("}");
+                _currentMask = preLoopMask2;
+                AppendLine($"{exitL}: ;");
+            }
+            else
+                GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
         }
 
         // ================================================================
@@ -597,6 +660,9 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
             AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
+            // ★ Zero masked-lane start/end so garbage doesn't inflate hmax
+            AppendLine($"simd_{ivName} = blend(simd_value<int>(0), simd_{ivName}, {savedMask});");
+            AppendLine($"simd_end_{ivName} = blend(simd_value<int>(0), simd_end_{ivName}, {savedMask});");
             AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
             AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
             // Safety clamp for gather is now in TranslateElementAccess (generic clamp)
@@ -986,7 +1052,21 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
             var frame = _loopStack.Peek();
-            AppendLine($"goto {frame.ContinueLabel};");
+            // ★ Docs-style scalar for loop: mask already narrowed by if-body's early exit.
+            //   The `if(!active.any_true()) continue;` is emitted inline by GenerateIfStatement.
+            //   We just emit the goto for the loop frame (used by tracker-based while-true loops).
+            if (string.IsNullOrEmpty(frame.TrackerVar))
+            {
+                // No tracker → scalar for loop → goto is actually a real C++ continue target
+                // The goto is inside an `any_true()` guard, so it's fine
+                AppendLine($"goto {frame.ContinueLabel};");
+            }
+            else
+            {
+                // While-true mask loop: kill current lanes from tracker before goto
+                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                AppendLine($"goto {frame.ContinueLabel};");
+            }
         }
 
         private void GenerateReturnStatement(ReturnStatementSyntax stmt)
@@ -1287,8 +1367,9 @@ namespace NativeTranspiler.Analyzer
                         elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
                     if (indexKind >= VarKind.Varying)
                     {
+                        // ★ Safety clamp: mask ctx → clamp to [0, Length-1] for unmasked gather
                         string safeIdx = _currentMask != "simd_mask::all_true()"
-                            ? $"max({indexExpr}, simd_value<int>(0))"
+                            ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}.Length - 1))"
                             : indexExpr;
                         if (elemCppType.Contains("float2"))
                             return $"simd_value<float2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
