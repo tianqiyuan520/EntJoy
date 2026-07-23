@@ -52,6 +52,8 @@ namespace NativeTranspiler.Analyzer
         // Variable naming tracking for float2 component decomposition
         private readonly HashSet<string> _float2VaryingVars = new();
 
+        // Bool field name→literal mapping for dead-branch elimination
+        private readonly Dictionary<string, string> _boolFields;
         // Variable tracking for per-lane region transitions (save/merge)
         private readonly HashSet<string> _simdVaryingVarNames = new();
         private readonly Dictionary<string, string> _simdVaryingCppType = new();
@@ -63,7 +65,8 @@ namespace NativeTranspiler.Analyzer
             SimdVariableAnalyzer varAnalyzer,
             string indexParamName = "index",
             string simdIndexVar = "v_i",
-            bool useFastMath = false)
+            bool useFastMath = false,
+            Dictionary<string, string>? boolFields = null)
         {
             _semanticModel = semanticModel;
             _jobStruct = jobStruct;
@@ -72,6 +75,7 @@ namespace NativeTranspiler.Analyzer
             _indexParamName = indexParamName;
             _simdIndexVar = simdIndexVar;
             _useFastMath = useFastMath;
+            _boolFields = boolFields ?? new Dictionary<string, string>();
 
             // Pre-identify float2/int2 variables that are varying
             foreach (var kvp in _variables)
@@ -157,6 +161,12 @@ namespace NativeTranspiler.Analyzer
                 _semanticModel, _jobStruct, _indexParamName, _indexParamName,
                 _useFastMath, false);
             string scalarBody = scalarTranslator.Translate(body);
+
+            // Bool field constant substitution → enables MSVC dead-branch elimination
+            // Without this, IgnoreSelf remains ptr load, MSVC can't fold 'if (false &&)'
+            foreach (var kvp in _boolFields)
+                scalarBody = System.Text.RegularExpressions.Regex.Replace(
+                    scalarBody, $@"\b{System.Text.RegularExpressions.Regex.Escape(kvp.Key)}\b", kvp.Value);
 
             foreach (var line in scalarBody.Split('\n'))
                 if (!string.IsNullOrWhiteSpace(line))

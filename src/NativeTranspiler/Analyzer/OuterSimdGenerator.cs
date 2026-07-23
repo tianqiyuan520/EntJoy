@@ -249,7 +249,8 @@ namespace NativeTranspiler.Analyzer
             // 4. 生成 SIMD body
             var cfGenerator = new SimdControlFlowGenerator(
                 _semanticModel, _jobStruct, variables, varAnalyzer,
-                indexParamName: _idx, simdIndexVar: "v_i");
+                indexParamName: _idx, simdIndexVar: "v_i",
+                boolFields: _boolFields);
             string simdBody = cfGenerator.Generate(_methodSyntax.Body);
 
             // 缩进并追加
