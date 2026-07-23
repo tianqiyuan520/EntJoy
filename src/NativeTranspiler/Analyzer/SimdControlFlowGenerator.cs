@@ -256,17 +256,13 @@ namespace NativeTranspiler.Analyzer
                 string varType = GetSIMDTypeString(info.CppType);
                 if (varType == null) continue;
 
-                if (IsFloat2Type(info.CppType))
-                {
-                    // Use whole type (simd_value<float2>/simd_value<int2>) instead of decomposition
-                    string initVal = info.InitSIMDExpr ?? $"{varType}::broadcast(0)";
-                    AppendLine($"{varType} v_{name} = {initVal};");
-                }
+                // Default construct: all variables are immediately overwritten
+                // (v_q=gather, v_cell=convert, v_bestDistSq=max, etc.)
+                // broadcast(0) was wasted instructions & register pressure.
+                if (info.InitSIMDExpr != null)
+                    AppendLine($"{varType} v_{name} = {info.InitSIMDExpr};");
                 else
-                {
-                    string initVal = info.InitSIMDExpr ?? $"{varType}::broadcast(0)";
-                    AppendLine($"{varType} v_{name} = {initVal};");
-                }
+                    AppendLine($"{varType} v_{name};");
                 // Track for per-lane save/merge
                 _simdVaryingVarNames.Add(name);
                 _simdVaryingCppType[name] = info.CppType;
