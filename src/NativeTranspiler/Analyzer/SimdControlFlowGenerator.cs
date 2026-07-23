@@ -358,37 +358,18 @@ namespace NativeTranspiler.Analyzer
 
         private void GenerateIfStatement(IfStatementSyntax stmt)
         {
-            string savedMask = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {savedMask} = {_currentMask};");
-
             // Collect all conditions and bodies (if / else-if chain)
             var conditions = new List<string>();
             var current = stmt;
             StatementSyntax? elseBody = null;
+            string savedMask = "";
 
             while (true)
             {
-                string condVar = $"__cond_{_maskCounter++}";
                 string condExpr = TranslateCondition(current.Condition);
-                AppendLine($"simd_mask {condVar} = {condExpr};");
 
-                // True branch mask: saved & cond (with all previous not-conditions ANDed in for else-if)
-                string trueMask;
-                if (conditions.Count == 0)
-                {
-                    trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
-                }
-                else
-                {
-                    // For else-if: saved & ~prev_cond & cond
-                    string notPrev = BuildNotChain(conditions);
-                    trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
-                    trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
-                }
-
-                conditions.Add(condVar);
-
-                // ★ Docs-style uniform scalar: invert bad condition, narrow mask, continue when all dead
+                // ★ Docs-style uniform scalar: invert bad condition, narrow mask, continue when all dead.
+                //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
                     string goodExpr = condExpr
@@ -401,13 +382,35 @@ namespace NativeTranspiler.Analyzer
                         .Replace("##TMP##", "n_cmp_ge_");
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
-                    _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {goodName}.m) }}";
+                    // Direct assignment — no all_true() wrapper
+                    _currentMask = goodName;
+                    // Docs-style: if(!goodMask.any_true()) continue;
                     AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
-                    // Narrow savedMask so subsequent ops exclude dead lanes
-                    AppendLine($"{savedMask} = {_currentMask};");
+                    savedMask = goodName;  // track narrowed name (no C++ statement emitted)
                 }
                 else
                 {
+                    // Only emit savedMask on first non-continue branch in this if-chain
+                    if (string.IsNullOrEmpty(savedMask))
+                    {
+                        savedMask = $"__mask_{_maskCounter++}";
+                        AppendLine($"simd_mask {savedMask} = {_currentMask};");
+                    }
+
+                    string condVar = $"__cond_{_maskCounter++}";
+                    AppendLine($"simd_mask {condVar} = {condExpr};");
+
+                    string trueMask;
+                    if (conditions.Count == 0)
+                        trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                    else
+                    {
+                        string notPrev = BuildNotChain(conditions);
+                        trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
+                        trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
+                    }
+
+                    conditions.Add(condVar);
                     _currentMask = trueMask;
                     if (HasControlFlowGoto(current.Statement))
                         AppendLine($"if ({trueMask}.any_true())");
@@ -557,8 +560,8 @@ namespace NativeTranspiler.Analyzer
                 string csOpStr2 = stmt.Condition is BinaryExpressionSyntax cbin2
                     && cbin2.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
                 AppendLine($"// Docs-style scalar for: for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
-                AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({startExpr});");
-                AppendLine($"simd_value<int> simd_end_{ivName} = simd_value<int>::broadcast({endExpr});");
+                AppendLine($"simd_value<int> simd_{ivName};");
+                // simd_end_{ivName} not needed — uniform loops never compare against end in SIMD
                 string preLoopMask2 = _currentMask;
                 AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
                 AppendLine("{");
@@ -660,13 +663,11 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
             AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
-            // ★ Zero masked-lane start/end so garbage doesn't inflate hmax
+            // ★ Blend-zero masked-lane start/end so garbage doesn't inflate hmax
             AppendLine($"simd_{ivName} = blend(simd_value<int>(0), simd_{ivName}, {savedMask});");
             AppendLine($"simd_end_{ivName} = blend(simd_value<int>(0), simd_end_{ivName}, {savedMask});");
             AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
             AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
-            // Safety clamp for gather is now in TranslateElementAccess (generic clamp)
-            AppendLine($"#pragma loop(ivdep)");
             AppendLine($"for (int iter{sid} = 0; iter{sid} < maxIter{sid}; iter{sid}++)");
             AppendLine("{");
             _indent++;
