@@ -791,8 +791,38 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
             sb.AppendLine($"include_directories(\"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}\")");
             sb.AppendLine();
-            sb.AppendLine("# No explicit task system defined; tasksys.cpp will pick the best one for the platform");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# CPU architecture detection");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("if(CMAKE_SYSTEM_PROCESSOR MATCHES \"^(x86_64|amd64|AMD64|x64)$\")");
+            sb.AppendLine("    set(NATIVE_ARCH \"x86_64\")");
+            sb.AppendLine("elseif(CMAKE_SYSTEM_PROCESSOR MATCHES \"^(aarch64|arm64|ARM64|AARCH64)$\")");
+            sb.AppendLine("    set(NATIVE_ARCH \"arm64\")");
+            sb.AppendLine("elseif(CMAKE_SYSTEM_PROCESSOR MATCHES \"^(armv[7-9]|arm|ARM)$\")");
+            sb.AppendLine("    set(NATIVE_ARCH \"arm\")");
+            sb.AppendLine("else()");
+            sb.AppendLine("    set(NATIVE_ARCH \"unknown\")");
+            sb.AppendLine("endif()");
+            sb.AppendLine();
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# SIMD level: AUTO or user override (-DNATIVE_SIMD_LEVEL=AVX2|SSE4|NEON|SCALAR)");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("if(NOT DEFINED NATIVE_SIMD_LEVEL)");
+            sb.AppendLine("    set(NATIVE_SIMD_LEVEL \"AUTO\" CACHE STRING \"SIMD: AUTO/AVX2/AVX/SSE4/NEON/SCALAR\")");
+            sb.AppendLine("endif()");
+            sb.AppendLine("if(NATIVE_SIMD_LEVEL STREQUAL \"AUTO\")");
+            sb.AppendLine("    if(NATIVE_ARCH MATCHES \"x86_64|x86\")");
+            sb.AppendLine("        set(NATIVE_SIMD_LEVEL \"AVX2\")");
+            sb.AppendLine("    elseif(NATIVE_ARCH MATCHES \"arm64|arm\")");
+            sb.AppendLine("        set(NATIVE_SIMD_LEVEL \"NEON\")");
+            sb.AppendLine("    else()");
+            sb.AppendLine("        set(NATIVE_SIMD_LEVEL \"SCALAR\")");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("endif()");
+            sb.AppendLine("message(STATUS \"NativeDll: arch=${NATIVE_ARCH}, SIMD=${NATIVE_SIMD_LEVEL}\")");
+            sb.AppendLine();
 
+            sb.AppendLine("# No explicit task system defined; tasksys.cpp will pick the best one for the platform");
             sb.AppendLine($"if(EXISTS \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine($"    set(TASKSYS_SRC \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("else()");
@@ -816,25 +846,62 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine(")");
             sb.AppendLine();
 
+            // SIMD arch flags + defines (after add_library)
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# SIMD arch flags + defines");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("if(NATIVE_SIMD_LEVEL STREQUAL \"AVX2\")");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8)");
+            sb.AppendLine("    if(MSVC)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /arch:AVX2)");
+            sb.AppendLine("    else()");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -mavx2 -mbmi2 -mfma)");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"AVX\")");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_AVX NSIMD_WIDTH=8)");
+            sb.AppendLine("    if(MSVC)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /arch:AVX)");
+            sb.AppendLine("    else()");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -mavx)");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"SSE4\")");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_SSE4 NSIMD_WIDTH=4)");
+            sb.AppendLine("    if(NOT MSVC)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -msse4.2)");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"NEON\")");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_NEON NSIMD_WIDTH=4)");
+            sb.AppendLine("    if(NOT MSVC)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -march=armv8-a+simd)");
+            sb.AppendLine("    endif()");
+            sb.AppendLine("else()");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_SCALAR NSIMD_WIDTH=1)");
+            sb.AppendLine("endif()");
+            sb.AppendLine();
+
+            // ISPC: x86 only, optional
             if (ispcFiles.Count > 0)
             {
-                sb.AppendLine("if(TASKSYS_SRC)");
-                sb.AppendLine("    set_source_files_properties(${TASKSYS_SRC} PROPERTIES COMPILE_FLAGS \"/arch:AVX\")");
+                sb.AppendLine("# ============================================================");
+                sb.AppendLine("# ISPC: x86 only, optional");
+                sb.AppendLine("# ============================================================");
+                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc)");
+                sb.AppendLine("if(ISPC_EXECUTABLE AND NATIVE_ARCH MATCHES \"x86_64|x86\")");
+                sb.AppendLine("    set(HAS_ISPC TRUE)");
+                sb.AppendLine("    message(STATUS \"NativeDll: ISPC found\")");
+                sb.AppendLine("else()");
+                sb.AppendLine("    set(HAS_ISPC FALSE)");
                 sb.AppendLine("endif()");
                 sb.AppendLine();
 
-                sb.AppendLine("find_program(ISPC_EXECUTABLE ispc REQUIRED)");
-                sb.AppendLine("if(NOT ISPC_EXECUTABLE)");
-                sb.AppendLine("    message(FATAL_ERROR \"ispc.exe not found. Install Intel ISPC and add it to PATH.\")");
-                sb.AppendLine("endif()");
-                sb.AppendLine();
-                sb.AppendLine("set(ISPC_OBJECTS");
+                sb.AppendLine("if(HAS_ISPC)");
+                sb.AppendLine("    set(ISPC_OBJECTS");
                 foreach (var (ispc, _) in ispcFiles)
                 {
                     string baseName = Path.GetFileNameWithoutExtension(ispc);
-                    sb.AppendLine($"    \"${{CMAKE_CURRENT_BINARY_DIR}}/{baseName}.obj\"");
+                    sb.AppendLine($"        \"${{CMAKE_CURRENT_BINARY_DIR}}/{baseName}.obj\"");
                 }
-                sb.AppendLine(")");
+                sb.AppendLine("    )");
                 sb.AppendLine();
                 foreach (var (ispc, mathLib) in ispcFiles)
                 {
@@ -843,24 +910,31 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     string objectPath = "${CMAKE_CURRENT_BINARY_DIR}/" + baseName + ".obj";
                     string headerPath = "${CMAKE_CURRENT_SOURCE_DIR}/" + baseName + "_ispc.h";
                     string mathLibStr = mathLib.ToString().ToLowerInvariant();
-                    // fast math: enable FMA for maximum throughput; system/precise: keep deterministic
                     string fmaOpt = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
-                    sb.AppendLine("add_custom_command(");
-                    sb.AppendLine($"    OUTPUT \"{objectPath}\" \"{headerPath}\"");
-                    sb.AppendLine($"    COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{fmaOpt}");
-                    sb.AppendLine($"    DEPENDS \"{sourcePath}\"");
-                    sb.AppendLine("    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
-                    sb.AppendLine($"    COMMENT \"Compiling ISPC {ispc}\"");
-                    sb.AppendLine("    VERBATIM");
-                    sb.AppendLine(")");
+                    sb.AppendLine("    add_custom_command(");
+                    sb.AppendLine($"        OUTPUT \"{objectPath}\" \"{headerPath}\"");
+                    sb.AppendLine($"        COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{fmaOpt}");
+                    sb.AppendLine($"        DEPENDS \"{sourcePath}\"");
+                    sb.AppendLine("        WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
+                    sb.AppendLine($"        COMMENT \"Compiling ISPC {ispc}\"");
+                    sb.AppendLine("        VERBATIM");
+                    sb.AppendLine("    )");
                 }
-                sb.AppendLine("set_source_files_properties(${ISPC_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)");
-                sb.AppendLine("target_sources(NativeDll PRIVATE ${ISPC_OBJECTS})");
+                sb.AppendLine("    set_source_files_properties(${ISPC_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)");
+                sb.AppendLine("    target_sources(NativeDll PRIVATE ${ISPC_OBJECTS})");
+                sb.AppendLine();
+                sb.AppendLine("    if(TASKSYS_SRC)");
+                sb.AppendLine("        set_source_files_properties(${TASKSYS_SRC} PROPERTIES COMPILE_FLAGS \"/arch:AVX\")");
+                sb.AppendLine("    endif()");
+                sb.AppendLine("endif()");
                 sb.AppendLine();
             }
 
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# Global compiler flags");
+            sb.AppendLine("# ============================================================");
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /arch:AVX2 /Qpar /MP)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             foreach (var file in fastMathCppFiles.OrderBy(x => x))
             {
@@ -872,24 +946,22 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            sb.AppendLine($"set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"    RUNTIME_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
-            sb.AppendLine($"    LIBRARY_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
-            sb.AppendLine($"    ARCHIVE_OUTPUT_DIRECTORY \"${{CMAKE_CURRENT_BINARY_DIR}}\"");
-            sb.AppendLine(")");
-            sb.AppendLine();
-            sb.AppendLine($"foreach(OUTPUTCONFIG ${{CMAKE_CONFIGURATION_TYPES}})");
-            sb.AppendLine($"    string(TOUPPER ${{OUTPUTCONFIG}} OUTPUTCONFIG)");
-            sb.AppendLine($"    set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine($"        RUNTIME_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
-            sb.AppendLine($"        LIBRARY_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
-            sb.AppendLine($"        ARCHIVE_OUTPUT_DIRECTORY_${{OUTPUTCONFIG}} \"${{CMAKE_CURRENT_BINARY_DIR}}/${{OUTPUTCONFIG}}\"");
-            sb.AppendLine($"    )");
-            sb.AppendLine($"endforeach()");
-            sb.AppendLine();
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# Platform-specific output suffix");
+            sb.AppendLine("# ============================================================");
             sb.AppendLine("if(WIN32)");
             sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dll\")");
+            sb.AppendLine("elseif(APPLE)");
+            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dylib\")");
+            sb.AppendLine("else()");
+            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".so\")");
             sb.AppendLine("endif()");
+            sb.AppendLine();
+            sb.AppendLine("set_target_properties(NativeDll PROPERTIES");
+            sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine(")");
             return sb.ToString();
         }
     }
