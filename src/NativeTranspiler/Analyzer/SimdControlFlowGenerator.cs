@@ -57,9 +57,17 @@ namespace NativeTranspiler.Analyzer
 
         // Bool field name→literal mapping for dead-branch elimination
         private readonly Dictionary<string, string> _boolFields;
+        // Varying reduction loop context for inner-loop gather optimization
+        private bool _inVaryingReductionLoop;
+        private string? _hoistedSafeMaxVar;
+        private string? _hoistedSafeMaxExpr;
         // Variable tracking for per-lane region transitions (save/merge)
         private readonly HashSet<string> _simdVaryingVarNames = new();
         private readonly Dictionary<string, string> _simdVaryingCppType = new();
+        // Hoisted uniform broadcasts: "fieldName.comp" → "varName"
+        private readonly Dictionary<string, string> _uniformHoistMap = new();
+        // Pending broadcasts: "varName" → "simd_value<T> varName = ...";
+        private readonly Dictionary<string, string> _uniformHoistPending = new();
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -115,6 +123,9 @@ namespace NativeTranspiler.Analyzer
                 GeneratePerLaneFullBody(body);
             else {
                 GenerateVariableDeclarations();
+                // ★ Pre-scan and emit hoisted uniform broadcasts (GridDimensions.x/y etc.)
+                PreScanUniformHoists(body);
+                EmitUniformHoistPrologue();
                 GenerateBlock(body, skipBraces: true);
             }
 
@@ -270,6 +281,68 @@ namespace NativeTranspiler.Analyzer
         }
 
         // ================================================================
+        // Uniform Broadcast Hoisting (generic, no hardcoded field names)
+        // ================================================================
+
+        /// <summary>
+        /// Pre-scan body for .x/.y access on uniform int2/float2 job struct fields.
+        /// These should be pre-broadcast once and reused, instead of re-broadcast at each use.
+        /// Fully generic: applies to ANY job with ANY uniform int2/float2 fields.
+        /// </summary>
+        private void PreScanUniformHoists(SyntaxNode body)
+        {
+            _uniformHoistMap.Clear();
+            _uniformHoistPending.Clear();
+
+            foreach (var ma in body.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+            {
+                string memberName = ma.Name.Identifier.Text;
+                if (memberName != "x" && memberName != "y") continue;
+                if (!(ma.Expression is IdentifierNameSyntax id)) continue;
+
+                string fieldName = id.Identifier.Text;
+                if (_jobStruct == null) continue;
+
+                try
+                {
+                    var members = _jobStruct.GetMembers(fieldName);
+                    if (members.Length == 0) continue;
+                    if (!(members[0] is IFieldSymbol field) || field.IsStatic) continue;
+
+                    string typeName = field.Type.Name;
+                    string simdType, key;
+                    if (typeName == "int2")
+                    {
+                        simdType = "simd_value<int>";
+                        key = $"{fieldName}.{memberName}";
+                    }
+                    else if (typeName == "float2")
+                    {
+                        simdType = "simd_value<float>";
+                        key = $"{fieldName}.{memberName}";
+                    }
+                    else continue;
+
+                    if (_uniformHoistMap.ContainsKey(key)) continue;
+
+                    string varName = $"__uni_{fieldName}_{memberName}";
+                    _uniformHoistMap[key] = varName;
+                    _uniformHoistPending[varName] = $"{simdType} {varName} = {simdType}::broadcast({fieldName}.{memberName}());";
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Emit all hoisted uniform broadcasts in the prologue</summary>
+        private void EmitUniformHoistPrologue()
+        {
+            if (_uniformHoistPending.Count == 0) return;
+            AppendLine("// Hoisted uniform broadcasts");
+            foreach (var kvp in _uniformHoistPending)
+                AppendLine(kvp.Value);
+        }
+
+        // ================================================================
         // Statement Generators
         // ================================================================
 
@@ -365,56 +438,115 @@ namespace NativeTranspiler.Analyzer
             {
                 string condExpr = TranslateCondition(current.Condition);
 
+                // ★ Dead condition detection (通用, 适用所有上下文)
+                bool isDeadFalse = condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))");
+                bool isDeadTrue = condExpr == "simd_mask::all_true()";
+
+                if (isDeadFalse)
+                {
+                    // 条件永远假 → 跳过整个 if-body
+                    if (current.Else != null)
+                    {
+                        if (current.Else.Statement is IfStatementSyntax elseif)
+                        {
+                            current = elseif;
+                            continue;
+                        }
+                        elseBody = current.Else.Statement;
+                    }
+                    break;
+                }
+
+                if (isDeadTrue)
+                {
+                    // 条件永远真 → 执行 if-body, 跳过所有 else
+                    GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                    break;
+                }
+
+                // ★ 空 if-true + else (非 else-if) → 反转条件, 直接走 else
+                if (IsEmptyBlock(current.Statement) && current.Else != null
+                    && !(current.Else.Statement is IfStatementSyntax))
+                {
+                    string negCond;
+                    if (condExpr.Contains("n_cmp_ne_epi32"))
+                        negCond = condExpr.Replace("n_cmp_ne_epi32", "n_cmp_eq_epi32");
+                    else if (condExpr.Contains("n_cmp_eq_epi32"))
+                        negCond = condExpr.Replace("n_cmp_eq_epi32", "n_cmp_ne_epi32");
+                    else
+                        negCond = $"simd_mask{{ n_not_mask({condExpr}.m) }}";
+
+                    string cm = $"__cm_{_maskCounter++}";
+                    if (_currentMask != "simd_mask::all_true()")
+                        AppendLine($"simd_mask {cm} = simd_mask{{ n_and_mask({_currentMask}.m, {negCond}.m) }};");
+                    else
+                        AppendLine($"simd_mask {cm} = {negCond};");
+                    string entryMask = _currentMask;
+                    _currentMask = cm;
+                    GenerateBlock(EnsureBlock(current.Else.Statement), skipBraces: false);
+                    _currentMask = entryMask;
+                    return;
+                }
+
                 // ★ Docs-style uniform scalar: invert bad condition, narrow mask, continue when all dead.
                 //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
-                    // Handle short-circuited constants (from TranslateBinary)
-                    bool isDeadFalse = condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))")
-                        || condExpr == "simd_mask::all_true()";
-                    bool isDeadTrue = condExpr == "simd_mask::all_true()";
-                    // (Dead-true here means: if(true) continue → always continue → can't optimize further)
-                    if (!isDeadFalse)
+                    // Dead conditions already handled above — condition is always non-trivial here
+                    string goodExpr = condExpr
+                        .Replace("n_cmp_lt_", "##TMP##")
+                        .Replace("n_cmp_ge_", "n_cmp_lt_")
+                        .Replace("n_cmp_gt_", "n_cmp_le_")
+                        .Replace("n_cmp_le_", "n_cmp_gt_")
+                        .Replace("n_cmp_eq_", "n_cmp_ne_")
+                        .Replace("n_cmp_ne_", "n_cmp_eq_")
+                        .Replace("##TMP##", "n_cmp_ge_");
+                    string goodName = $"__good_{_labelCounter++}";
+                    AppendLine($"simd_mask {goodName} = {goodExpr};");
+                    // ★ Combine with previous mask to narrow unfound lanes
+                    string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
+                    if (prev != "simd_mask::all_true()")
                     {
-                        string goodExpr = condExpr
-                            .Replace("n_cmp_lt_", "##TMP##")
-                            .Replace("n_cmp_ge_", "n_cmp_lt_")
-                            .Replace("n_cmp_gt_", "n_cmp_le_")
-                            .Replace("n_cmp_le_", "n_cmp_gt_")
-                            .Replace("n_cmp_eq_", "n_cmp_ne_")
-                            .Replace("n_cmp_ne_", "n_cmp_eq_")
-                            .Replace("##TMP##", "n_cmp_ge_");
-                        string goodName = $"__good_{_labelCounter++}";
-                        AppendLine($"simd_mask {goodName} = {goodExpr};");
-                        // ★ Combine with previous mask to narrow unfound lanes
-                        string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
-                        if (prev != "simd_mask::all_true()")
-                        {
-                            string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
-                            AppendLine($"{goodName} = {combined};");
-                        }
-                        _currentMask = goodName;
-                        AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
-                        savedMask = goodName;
+                        string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
+                        AppendLine($"{goodName} = {combined};");
                     }
-                    // else dead false: skip entirely — leave _currentMask unchanged, no emission
+                    _currentMask = goodName;
+                    AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
+                    savedMask = goodName;
                 }
                 else
                 {
-                    // Emit savedMask if not yet emitted
-                    if (!savedMaskEmitted)
+                    bool isAllTrue = _currentMask == "simd_mask::all_true()";
+
+                    // ★ When all_true: skip emitting savedMask, but register it for restore
+                    if (!isAllTrue)
                     {
-                        savedMask = $"__mask_{_maskCounter++}";
-                        AppendLine($"simd_mask {savedMask} = {_currentMask};");
-                        savedMaskEmitted = true;
+                        if (!savedMaskEmitted)
+                        {
+                            savedMask = $"__mask_{_maskCounter++}";
+                            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+                            savedMaskEmitted = true;
+                        }
+                    }
+                    else
+                    {
+                        // Sentinel: no emit needed, but restore will set _currentMask=all_true()
+                        savedMask = "simd_mask::all_true()";
                     }
 
                     string condVar = $"__cond_{_maskCounter++}";
                     AppendLine($"simd_mask {condVar} = {condExpr};");
 
                     string trueMask;
-                    if (conditions.Count == 0)
+                    if (isAllTrue)
+                    {
+                        // all_true AND X → just X (eliminate redundant and_mask)
+                        trueMask = condVar;
+                    }
+                    else if (conditions.Count == 0)
+                    {
                         trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                    }
                     else
                     {
                         string notPrev = BuildNotChain(conditions);
@@ -431,9 +563,11 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"simd_mask {cm} = {trueMask};");
                         _currentMask = cm;
                     }
-                    if (HasControlFlowGoto(current.Statement))
+                    bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
+                    if (!bodyEmpty && HasControlFlowGoto(current.Statement))
                         AppendLine($"if ({trueMask}.any_true())");
-                    GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                    if (!bodyEmpty)
+                        GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
                 }
 
                 if (current.Else == null) break;
@@ -452,10 +586,17 @@ namespace NativeTranspiler.Analyzer
             // Final else: saved & ~all_conds
             if (elseBody != null)
             {
-                _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
-                if (HasControlFlowGoto(elseBody))
-                    AppendLine($"if ({_currentMask}.any_true())");
-                GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
+                if (savedMaskEmitted)
+                    _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
+                else if (savedMask == "simd_mask::all_true()")
+                    _currentMask = BuildNotChain(conditions); // all_true AND X → just X
+                // else: dead-false — _currentMask unchanged, use directly
+                string elseMask = _currentMask;
+                bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
+                if (!elseBodyEmpty && HasControlFlowGoto(elseBody))
+                    AppendLine($"if ({elseMask}.any_true())");
+                if (!elseBodyEmpty)
+                    GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
@@ -487,6 +628,37 @@ namespace NativeTranspiler.Analyzer
             if (stmt is BlockSyntax blk && blk.Statements.Count == 1
                 && blk.Statements[0] is ContinueStatementSyntax) return true;
             return false;
+        }
+
+        /// <summary>检查 if 语句体是否为空</summary>
+        private static bool IsEmptyBlock(StatementSyntax stmt)
+        {
+            if (stmt is BlockSyntax blk && blk.Statements.Count == 0) return true;
+            if (stmt is EmptyStatementSyntax) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 查找 varying reduction 循环中的主 gather 数组，用于 broadcast len-1 提升
+        /// </summary>
+        private string? FindSortedLengthVar(ForStatementSyntax stmt)
+        {
+            foreach (var elem in stmt.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (elem.Expression is IdentifierNameSyntax arrId &&
+                    elem.ArgumentList?.Arguments.Count > 0)
+                {
+                    string arrName = arrId.Identifier.Text;
+                    var idxExpr = elem.ArgumentList.Arguments[0].Expression;
+                    VarKind idxKind = _varAnalyzer.ClassifyExpression(idxExpr);
+                    if (idxKind >= VarKind.Varying)
+                    {
+                        _hoistedSafeMaxExpr = arrName;
+                        return arrName + "_length";
+                    }
+                }
+            }
+            return null;
         }
 
         /// <summary>
@@ -651,6 +823,9 @@ namespace NativeTranspiler.Analyzer
                 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
             GenerateBlock(bodyBlock, skipBraces: false);
 
+            // ★ Early-exit: when all lanes in the fallback scope have found results, break
+            AppendLine($"if (!({savedMask} & simd_mask{{ n_cmp_eq_epi32(v_bestIdx.v, n_set1_epi32(-1)) }}).any_true()) {{ break; }}");
+
             _loopStack.Pop();
 
             AppendLine($"{continueLabel}: ;");
@@ -668,6 +843,8 @@ namespace NativeTranspiler.Analyzer
         // ================================================================
         private void GenerateVaryingReductionLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt)
         {
+            _inVaryingReductionLoop = true;
+
             string sid = $"_{_maskCounter++}";
             string exitLabel = $"__vr_exit_{_labelCounter++}";
             string continueLabel = $"__vr_cont_{_labelCounter++}";
@@ -683,9 +860,15 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
             AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
-            // ★ Zero masked-lane start/end so garbage doesn't inflate hmax
+            // ★ Zero masked-lane start so garbage doesn't inflate hmax
             AppendLine($"simd_{ivName} = simd_max(simd_{ivName}, simd_value<int>(0));");
-            AppendLine($"simd_end_{ivName} = simd_max(simd_end_{ivName}, simd_value<int>(0));");
+            // ★ Hoist SortedPositions_length-1 broadcast for safe gather inside loop
+            string sortedLenVar = FindSortedLengthVar(stmt);
+            if (sortedLenVar != null)
+            {
+                _hoistedSafeMaxVar = "v_sortedLast";
+                AppendLine($"simd_value<int> v_sortedLast = simd_value<int>::broadcast({sortedLenVar} - 1);");
+            }
             AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
             AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
             // ivdep: ignore loop-carried dependencies so MSVC can auto-vectorize/reduction-fold
@@ -722,6 +905,9 @@ namespace NativeTranspiler.Analyzer
             AppendLine("}");
             // ★ Restore mask after loop: use the saved variable (still in scope)
             _currentMask = savedMask;
+            _inVaryingReductionLoop = false;
+            _hoistedSafeMaxVar = null;
+            _hoistedSafeMaxExpr = null;
             AppendLine($"{exitLabel}: ;");
         }
 
@@ -1338,11 +1524,17 @@ namespace NativeTranspiler.Analyzer
                 return $"{objExpr}.{memberName}";
             }
 
-            // Default: obj.member
-            // EntJoy Mathematics types use method syntax: .x() not .x
-            // BUT: SIMD expressions (containing ::) use .x/.y as member access, not function call
+            // ★ Check for hoisted uniform broadcast (pre-broadcast once, reuse in SIMD)
             if ((memberName == "x" || memberName == "y") && !isVaryingFloat2)
             {
+                if (memberAccess.Expression is IdentifierNameSyntax hoistId)
+                {
+                    string key = $"{hoistId.Identifier.Text}.{memberName}";
+                    if (_uniformHoistMap.TryGetValue(key, out var hoistVar))
+                        return hoistVar;
+                }
+                // EntJoy Mathematics types use method syntax: .x() not .x
+                // BUT: SIMD expressions (containing ::) use .x/.y as member access, not function call
                 if (objExpr.Contains("::") || objExpr.StartsWith("simd_"))
                     return $"{objExpr}.{memberName}";
                 return $"{objExpr}.{memberName}()";
@@ -1436,9 +1628,20 @@ namespace NativeTranspiler.Analyzer
 
                 // ★ Safety clamp for gather: when in mask context, clamp indices to
                 //   [0, arr_length-1] to prevent AVX2 unmasked gather OOB.
-                string safeIdx = _currentMask != "simd_mask::all_true()"
-                    ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}_length - 1))"
-                    : indexExpr;
+                string safeIdx;
+                if (_inVaryingReductionLoop && _hoistedSafeMaxVar != null && baseExpr == _hoistedSafeMaxExpr)
+                {
+                    // Varying reduction loop: index pre-clamped to >=0, use hoisted broadcast
+                    safeIdx = $"simd_min({indexExpr}, {_hoistedSafeMaxVar})";
+                }
+                else if (_currentMask != "simd_mask::all_true()")
+                {
+                    safeIdx = $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}_length - 1))";
+                }
+                else
+                {
+                    safeIdx = indexExpr;
+                }
 
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
@@ -1614,6 +1817,7 @@ namespace NativeTranspiler.Analyzer
                         if (k0 >= VarKind.Varying || k1 >= VarKind.Varying)
                         {
                             // Expand as SIMD using .x/.y member access on whole-type simd_value<float2>
+                            // Keep inline: explicit temps increase register pressure, MSVC CSE is sufficient
                             string ax = $"{a}.x", ay = $"{a}.y";
                             string bx = $"{b}.x", by = $"{b}.y";
 
@@ -1761,8 +1965,26 @@ namespace NativeTranspiler.Analyzer
                     if (side is CastExpressionSyntax cce && cce.Expression is IdentifierNameSyntax ccid && _variables.TryGetValue(ccid.Identifier.Text, out var cciv) && cciv.CppType == "int") cmpIsInt = true;
                 }
                 string bc = cmpIsInt ? "n_set1_epi32" : "n_set1_ps";
-                if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying) leftV = $"{bc}({left})";
-                else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying) rightV = $"{bc}({right})";
+                // ★ Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
+                bool rightIsHoisted = right.StartsWith("__uni_");
+                bool leftIsHoisted = left.StartsWith("__uni_");
+                if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
+                {
+                    if (leftIsHoisted)
+                        rightV = $"({right}).v";
+                    else
+                        leftV = $"{bc}({left})";
+                }
+                else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying)
+                {
+                    if (rightIsHoisted)
+                        rightV = $"({right}).v";
+                    else
+                        rightV = $"{bc}({right})";
+                }
+                // If hoisted broadcast ended up on wrong side, correct
+                if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"({right}).v";
+                if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"({left}).v";
 
                 if (cmpIsInt) {
                     string ic = op switch {
@@ -1840,6 +2062,10 @@ namespace NativeTranspiler.Analyzer
             string inner = TranslateExpression(cast.Expression);
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
             string targetTypeStr = cast.Type.ToString();
+
+            // ★ Hoisted broadcasts are already the correct SIMD type — skip cast entirely
+            if (inner.StartsWith("__uni_"))
+                return inner;
 
             // For varying int -> unsigned int: keep {inner} as-is (n_cmp_*_epi32 works on raw n_int)
             if (innerKind >= VarKind.Varying && (targetTypeStr == "uint" || targetTypeStr == "unsigned int"))
