@@ -441,6 +441,14 @@ static inline n_mask n_not_mask(n_mask m) {
 static inline n_mask n_cmp_lt_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(b, a));  // a < b  →  b > a
+#elif defined(NSIMD_AVX)
+    __m128i lo_a = _mm256_castsi256_si128(a);
+    __m128i lo_b = _mm256_castsi256_si128(b);
+    __m128i hi_a = _mm256_extractf128_si256(a, 1);
+    __m128i hi_b = _mm256_extractf128_si256(b, 1);
+    __m128i lo = _mm_castps_si128(_mm_cmplt_ps(_mm_castsi128_ps(lo_a), _mm_castsi128_ps(lo_b)));
+    __m128i hi = _mm_castps_si128(_mm_cmplt_ps(_mm_castsi128_ps(hi_a), _mm_castsi128_ps(hi_b)));
+    return _mm256_castsi256_ps(_mm256_set_m128i(hi, lo));
 #elif defined(NSIMD_SSE4)
     return _mm_castsi128_ps(_mm_cmpgt_epi32(b, a));
 #elif defined(NSIMD_NEON)
@@ -476,6 +484,18 @@ static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     n_int sign = _mm256_set1_epi32(0x80000000);
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_xor_si256(b, sign), _mm256_xor_si256(a, sign)));
+#elif defined(NSIMD_AVX)
+    n_int sign = _mm256_set1_epi32(0x80000000);
+    // Use _mm256_xor_ps (AVX) instead of _mm256_xor_si256 (AVX2)
+    n_int bx = _mm256_castps_si256(_mm256_xor_ps(_mm256_castsi256_ps(b), _mm256_castsi256_ps(sign)));
+    n_int ax = _mm256_castps_si256(_mm256_xor_ps(_mm256_castsi256_ps(a), _mm256_castsi256_ps(sign)));
+    __m128i lo_b = _mm256_castsi256_si128(bx);
+    __m128i lo_a = _mm256_castsi256_si128(ax);
+    __m128i hi_b = _mm256_extractf128_si256(bx, 1);
+    __m128i hi_a = _mm256_extractf128_si256(ax, 1);
+    __m128i lo = _mm_castps_si128(_mm_cmpgt_ps(_mm_castsi128_ps(lo_b), _mm_castsi128_ps(lo_a)));
+    __m128i hi = _mm_castps_si128(_mm_cmpgt_ps(_mm_castsi128_ps(hi_b), _mm_castsi128_ps(hi_a)));
+    return _mm256_castsi256_ps(_mm256_set_m128i(hi, lo));
 #elif defined(NSIMD_SSE4)
     n_int sign = _mm_set1_epi32(0x80000000);
     return _mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(b, sign), _mm_xor_si128(a, sign)));
@@ -808,7 +828,7 @@ static inline n_int n_gather_masked_epi32(const int* base, n_int indices, n_mask
 static inline float n_extract_lane_f32(n_float v, int lane) {
     // M2: clamp lane to valid range to prevent buffer overrun
     lane = lane & (NSIMD_WIDTH - 1);
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     // AVX2: extract the right 128-bit half then store+index
     // (store approach avoids _MM_SHUFFLE's compile-time constant requirement)
     __m128 lo = _mm256_castps256_ps128(v);
@@ -841,6 +861,10 @@ static inline int n_extract_lane_epi32(n_int v, int lane) {
     alignas(16) int buf[4];
     _mm_store_si128((__m128i*)buf, sel);
     return buf[idx];
+#elif defined(NSIMD_AVX)
+    alignas(32) int buf[8];
+    _mm256_storeu_si256((__m256i*)buf, v);
+    return buf[lane];
 #elif defined(NSIMD_SSE4)
     alignas(16) int buf[4];
     _mm_store_si128((__m128i*)buf, v);
@@ -857,7 +881,7 @@ static inline int n_extract_lane_epi32(n_int v, int lane) {
 // All-zero test
 // ============================================================
 static inline int n_all_zero(n_mask mask) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_testz_ps(mask, mask);
 #elif defined(NSIMD_SSE4)
     return _mm_testz_ps(mask, mask);
@@ -899,7 +923,7 @@ static inline int n_mask_to_bitmask(n_mask mask) {
 // ============================================================
 
 static inline float n_hmin_ps(n_float v) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 m = _mm_min_ps(lo, hi);
@@ -923,7 +947,7 @@ static inline float n_hmin_ps(n_float v) {
 }
 
 static inline float n_hmax_ps(n_float v) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 m = _mm_max_ps(lo, hi);
@@ -947,7 +971,7 @@ static inline float n_hmax_ps(n_float v) {
 }
 
 static inline float n_hsum_ps(n_float v) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 s = _mm_add_ps(lo, hi);
