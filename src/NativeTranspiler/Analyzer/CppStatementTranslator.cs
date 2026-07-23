@@ -105,8 +105,11 @@ namespace NativeTranspiler.Analyzer
             {
                 var variable = localDecl.Declaration.Variables[i];
                 if (i > 0) _builder.Append(", ");
-                _builder.Append(cppType);
-                _builder.Append(' ');
+                if (i == 0)
+                {
+                    _builder.Append(cppType);
+                    _builder.Append(' ');
+                }
                 _builder.Append(variable.Identifier.Text);
                 if (variable.Initializer != null)
                 {

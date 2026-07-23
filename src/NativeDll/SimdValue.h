@@ -304,6 +304,19 @@ static inline int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
 static inline int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
 static inline int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
 
+// Per-element math for simd_value<float> (per-lane fallback for sin/cos/log etc)
+#include <cmath>
+static inline simd_value<float> n_apply_ps(float(*fn)(float), simd_value<float> v) {
+    alignas(32) float buf[8];
+    alignas(32) float out[8];
+    n_store_ps(buf, v.v);
+    for (int i = 0; i < NSIMD_WIDTH; i++) out[i] = fn(buf[i]);
+    return simd_value<float>{ n_load_ps(out) };
+}
+static inline simd_value<float> sin(simd_value<float> v) { return n_apply_ps(::sinf, v); }
+static inline simd_value<float> cos(simd_value<float> v) { return n_apply_ps(::cosf, v); }
+static inline simd_value<float> log(simd_value<float> v) { return n_apply_ps(::logf, v); }
+
 // SIMD int element-wise min/max (named to avoid Windows min/max macro conflict)
 static inline simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }
 static inline simd_value<int> simd_min(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_min_epi32(a.v, b.v) }; }
