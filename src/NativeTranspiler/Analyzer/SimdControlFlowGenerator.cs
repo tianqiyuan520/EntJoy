@@ -142,99 +142,33 @@ namespace NativeTranspiler.Analyzer
         /// 生成 per-lane 全 body 版本 (ISPC foreach 风格)。
         /// 当 mask=all_true 时生成简约代码匹配参考 73549457 的 0.6ms。
         /// </summary>
+        /// <summary>
+        /// For varying-bound loops: pure scalar code matching remainder loop perf (~0.75ms).
+        /// No SIMD gather — just for(lane) + direct NativeArray reads.
+        /// </summary>
         private void GeneratePerLaneFullBody(BlockSyntax body)
         {
-            string sid = $"{_maskCounter++}";
-            string maskVar = $"__perlane_{sid}";
-
-            // --- 1. Scalar body from CppBatchStatementTranslator ---
             var scalarTranslator = new CppBatchStatementTranslator(
                 _semanticModel, _jobStruct, _indexParamName, _indexParamName,
                 _useFastMath, false);
             string scalarBody = scalarTranslator.Translate(body);
 
-            // Bool field constant substitution
             foreach (var kvp in _boolFields)
                 scalarBody = System.Text.RegularExpressions.Regex.Replace(
                     scalarBody, $@"\b{System.Text.RegularExpressions.Regex.Escape(kvp.Key)}\b", kvp.Value);
 
-            // --- 2. Detect NativeArray fields read with index --> SIMD gather ---
-            //     Match reference 73549457: v_q gather + qbuf extract
             bool hasReturn = scalarBody.Contains("return;");
-            string gatherDecl = "";
-            string extractCode = "";
-            string extractVar = "";
-            if (_jobStruct != null)
-            {
-                foreach (var field in _jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-                {
-                    if (!NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
-                    if (field.Type.Name != "NativeArray") continue;
-                    string ptrName = $"{field.Name}_ptr";
-                    if (!scalarBody.Contains($"{ptrName}[{_indexParamName}]")) continue;
-                    if (field.Name.Contains("Result")) continue;
-
-                    var typeArg = ((INamedTypeSymbol)field.Type).TypeArguments.FirstOrDefault();
-                    if (typeArg == null) continue;
-                    string elemType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
-
-                    if (elemType.Contains("float2"))
-                    {
-                        gatherDecl = $"simd_value<EntJoy::Mathematics::float2> v_q = simd_value<EntJoy::Mathematics::float2>::gather({ptrName}, {_simdIndexVar});\n";
-                        extractVar = "qbuf";
-                        extractCode = $"EntJoy::Mathematics::float2 {extractVar}; {extractVar}.x() = n_extract_lane_f32(v_q.x.v, lane); {extractVar}.y() = n_extract_lane_f32(v_q.y.v, lane);";
-                        scalarBody = scalarBody.Replace($"{ptrName}[{_indexParamName}]", extractVar);
-                    }
-                }
-            }
-
-            // --- 3. Emit -- all_true path matches ref 73549457 exactly ---
-            if (!string.IsNullOrEmpty(gatherDecl))
-                _builder.Append(gatherDecl);
-
-            // Only emit mask bitmask + check when not all_true (reference never has it)
-            if (_currentMask != "simd_mask::all_true()")
-                AppendLine($"int {maskVar} = n_mask_to_bitmask(({_currentMask}).m);");
+            if (hasReturn)
+                scalarBody = scalarBody.Replace("return;", "break;");
 
             AppendLine("for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
             AppendLine("{");
             _indent++;
-            if (_currentMask != "simd_mask::all_true()")
-                AppendLine($"if (!({maskVar} & (1 << lane))) continue;");
             AppendLine($"int {_indexParamName} = si + lane;");
-
-            // Bool fields already substituted into scalar body by Regex above
-            // No need to emit separate declarations — MSVC sees "if (false && ...)" directly
-
-            // Extract gathered fields directly to variable (no qbuf temp, no copy)
-            if (!string.IsNullOrEmpty(extractCode))
-            {
-                // Remove the redundant copy line: "float2/float q = qbuf;" after replacement
-                string copyLine = $"EntJoy::Mathematics::float2 {extractVar} = {extractVar};";
-                scalarBody = scalarBody.Replace(copyLine, "");
-                copyLine = $"{extractVar} = {extractVar};";
-                scalarBody = scalarBody.Replace(copyLine, "");
-                AppendLine(extractCode);
-            }
-
-            // do-while(false) wrapper for return->break safety (matches ref H4 pattern)
-            if (hasReturn)
-            {
-                scalarBody = scalarBody.Replace("return;", "break;");
-                AppendLine("do");
-                AppendLine("{");
-                _indent++;
-            }
 
             foreach (var line in scalarBody.Split('\n'))
                 if (!string.IsNullOrWhiteSpace(line))
                     AppendLine(line.TrimEnd());
-
-            if (hasReturn)
-            {
-                _indent--;
-                AppendLine("} while(false);");
-            }
 
             _indent--;
             AppendLine("}");
