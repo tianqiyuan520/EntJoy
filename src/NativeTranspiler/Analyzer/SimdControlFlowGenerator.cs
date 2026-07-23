@@ -64,6 +64,8 @@ namespace NativeTranspiler.Analyzer
         // Variable tracking for per-lane region transitions (save/merge)
         private readonly HashSet<string> _simdVaryingVarNames = new();
         private readonly Dictionary<string, string> _simdVaryingCppType = new();
+        // Track which varying locals have had their type declaration emitted (for scope narrowing)
+        private readonly HashSet<string> _varDeclEmitted = new();
         // Hoisted uniform broadcasts: "fieldName.comp" → "varName"
         private readonly Dictionary<string, string> _uniformHoistMap = new();
         // Pending broadcasts: "varName" → "simd_value<T> varName = ...";
@@ -278,9 +280,15 @@ namespace NativeTranspiler.Analyzer
                 // (v_q=gather, v_cell=convert, v_bestDistSq=max, etc.)
                 // broadcast(0) was wasted instructions & register pressure.
                 if (info.InitSIMDExpr != null)
+                {
                     AppendLine($"{varType} v_{name} = {info.InitSIMDExpr};");
+                    _varDeclEmitted.Add(name);
+                }
                 else
-                    AppendLine($"{varType} v_{name};");
+                {
+                    // Scope narrowing: defer declaration to first assignment site
+                    // (reduces live-range overlap -> less register pressure -> better stability)
+                }
                 // Track for per-lane save/merge
                 _simdVaryingVarNames.Add(name);
                 _simdVaryingCppType[name] = info.CppType;
@@ -530,8 +538,15 @@ namespace NativeTranspiler.Analyzer
                     {
                         if (!savedMaskEmitted)
                         {
-                            savedMask = $"__mask_{_maskCounter++}";
-                            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+                            if (_currentMask.StartsWith("v_") || _currentMask.StartsWith("__"))
+                            {
+                                savedMask = _currentMask;
+                            }
+                            else
+                            {
+                                savedMask = $"__mask_{_maskCounter++}";
+                                AppendLine($"simd_mask {savedMask} = {_currentMask};");
+                            }
                             savedMaskEmitted = true;
                         }
                     }
@@ -541,34 +556,45 @@ namespace NativeTranspiler.Analyzer
                         savedMask = "simd_mask::all_true()";
                     }
 
-                    string condVar = $"__cond_{_maskCounter++}";
-                    AppendLine($"simd_mask {condVar} = {condExpr};");
+                    bool simpleCmp = condExpr.Contains("n_cmp_") && !condExpr.Contains("n_and_mask(") && !condExpr.Contains("n_not_mask(");
 
                     string trueMask;
                     if (isAllTrue)
                     {
-                        // all_true AND X → just X (eliminate redundant and_mask)
-                        trueMask = condVar;
+                        trueMask = "simd_mask::all_true()";
                     }
-                    else if (conditions.Count == 0)
+                    else if (conditions.Count == 0 && simpleCmp && savedMask.Contains("v_act"))
                     {
-                        trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                        // Inline simple condition into __cm_N, skip __cond_N
+                        string cm = $"__cm_{_maskCounter++}";
+                        AppendLine($"simd_mask {cm} = simd_mask{{ n_and_mask({savedMask}.m, {condExpr}.m) }};");
+                        trueMask = cm;
+                        _currentMask = cm;
                     }
                     else
                     {
-                        string notPrev = BuildNotChain(conditions);
-                        trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
-                        trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
-                    }
+                        string condVar = $"__cond_{_maskCounter++}";
+                        AppendLine($"simd_mask {condVar} = {condExpr};");
 
-                    conditions.Add(condVar);
-                    _currentMask = trueMask;
-                    // ★ Pre-compute compound mask as temp var (avoids recomputing in multiple blends)
-                    if (trueMask.Contains("n_and_mask("))
-                    {
-                        string cm = $"__cm_{_maskCounter++}";
-                        AppendLine($"simd_mask {cm} = {trueMask};");
-                        _currentMask = cm;
+                        if (isAllTrue)
+                            trueMask = condVar;
+                        else if (conditions.Count == 0)
+                            trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                        else
+                        {
+                            string notPrev = BuildNotChain(conditions);
+                            trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
+                            trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
+                        }
+
+                        conditions.Add(condVar);
+                        _currentMask = trueMask;
+                        if (trueMask.Contains("n_and_mask("))
+                        {
+                            string cm = $"__cm_{_maskCounter++}";
+                            AppendLine($"simd_mask {cm} = {trueMask};");
+                            _currentMask = cm;
+                        }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
                     if (!bodyEmpty && HasControlFlowGoto(current.Statement))
@@ -1301,26 +1327,19 @@ namespace NativeTranspiler.Analyzer
             {
                 string name = variable.Identifier.Text;
 
-                // If already classified by SimdVariableAnalyzer, use that
                 if (_variables.TryGetValue(name, out var info) && info.Kind >= VarKind.Varying)
                 {
                     string varType = GetSIMDTypeString(info.CppType);
                     if (varType == null) continue;
 
-                    if (IsFloat2Type(info.CppType))
+                    if (variable.Initializer != null)
                     {
-                        if (variable.Initializer != null)
+                        string initExpr = TranslateExpression(variable.Initializer.Value);
                         {
-                            string initExpr = TranslateExpression(variable.Initializer.Value);
-                            AppendLine("v_" + name + " = " + initExpr + ";");
-                        }
-                    }
-                    else
-                    {
-                        if (variable.Initializer != null)
-                        {
-                            string initExpr = TranslateExpression(variable.Initializer.Value);
-                            AppendLine("v_" + name + " = " + initExpr + ";");
+                            _varDeclEmitted.Add(name);
+                            _simdVaryingVarNames.Add(name);
+                            _simdVaryingCppType[name] = info.CppType;
+                            AppendLine($"{varType} v_{name} = {initExpr};");
                         }
                     }
                 }
@@ -2166,6 +2185,20 @@ namespace NativeTranspiler.Analyzer
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
+
+            // Scope narrowing: declare at first assignment
+            string? declLhs = assign.Left is IdentifierNameSyntax declId ? declId.Identifier.Text : null;
+            if (op == "=" && declLhs != null && _variables.TryGetValue(declLhs, out var lhsInfo) && lhsInfo.Kind >= VarKind.Varying && !_varDeclEmitted.Contains(declLhs))
+            {
+                string declType = GetSIMDTypeString(lhsInfo.CppType);
+                if (declType != null)
+                {
+                    _varDeclEmitted.Add(declLhs);
+                    _simdVaryingVarNames.Add(declLhs);
+                    _simdVaryingCppType[declLhs] = lhsInfo.CppType;
+                    return $"{declType} {lhs} = {rhs}";
+                }
+            }
 
             // ★ CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
             //   variable must use blend() to preserve inactive lanes.
