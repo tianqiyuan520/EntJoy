@@ -9,21 +9,6 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace NativeTranspiler.Analyzer
 {
-    /// <summary>
-    /// 通用 Outer SIMD 生成器。
-    /// 为 IJobParallelFor/IJobFor 添加外层 batch 循环 + SIMD index gather。
-    ///
-    /// 职责：
-    ///   1. batch loop: for(si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)
-    ///   2. SIMD index: v_i = v_base + si
-    ///   3. 内层 body 由 SimdControlFlowGenerator 生成（mask-managed SIMD）
-    ///   4. 移除 SIMD body 中的多重 per-lane 写回（保留一份统一写回）
-    ///   5. 标量尾循环处理剩余元素
-    ///
-    /// 无硬编码字段名。所有变量名从 AST 自动推导。
-    /// 统一写回：从 scalar body 的最后一条写入提取表达式和变量名，
-    /// 生成 per-lane 循环，sentinel 值从标量代码的条件推断。
-    /// </summary>
     public class OuterSimdGenerator
     {
         private readonly MethodDeclarationSyntax _methodSyntax;
@@ -43,7 +28,6 @@ namespace NativeTranspiler.Analyzer
             _jobStruct = jobStruct;
         }
 
-        /// <summary>生成完整的 SIMD C++ 代码。先尝试全 SIMD，失败后退避到 per-lane。</summary>
         public string Generate(string scalarBody)
         {
             string simdResult = GenerateFullSIMDFromAST(scalarBody);
@@ -52,13 +36,6 @@ namespace NativeTranspiler.Analyzer
             return GeneratePerLane(scalarBody);
         }
 
-        /// <summary>
-        /// 全 SIMD 路径：batch loop + SimdControlFlowGenerator。
-        /// 写回策略：
-        ///   1. SimdControlFlowGenerator 生成每处写入（包括 if/else 分支中的）
-        ///   2. OuterSimdGenerator 移除所有 per-lane scatter 循环
-        ///   3. 从 scalar body 的最后一条写入推导统一写回表达式
-        /// </summary>
         private string GenerateFullSIMDFromAST(string scalarBody)
         {
             if (_jobStruct == null || _methodSyntax.Body == null) return "";
@@ -83,7 +60,6 @@ namespace NativeTranspiler.Analyzer
                     indexParamName: _idx, simdIndexVar: "v_i",
                     boolFields: _boolFields);
 
-                // Pass sentinel info for uniform reduction loop early-exit (generic, no hardcoded names)
                 var writePattern = ExtractResultWritePattern(scalarBody);
                 if (writePattern != null)
                 {
@@ -92,26 +68,20 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);
-
-                // 移除多重 per-lane scatter 循环（n_mask_to_bitmask 模式）
-                // 这些是 SimdControlFlowGenerator 在 if/else 分支内生成的写入，
-                // 统一写回会代替它们，避免多次写回。
                 simdBody = RemovePerLaneWrites(simdBody);
+                simdBody = CleanupDeadIfBodies(simdBody);
 
                 foreach (var line in simdBody.Split('\n'))
                     if (!string.IsNullOrWhiteSpace(line))
                         sb.Append("            ").AppendLine(line);
 
-                // 统一写回：从 scalar body 最后一条写入分析索引变量名
-                // 推导出 SIMD 寄存器名（v_ 前缀），生成 per-lane 提取+写入
-                var writeInfo = ExtractResultWritePattern(scalarBody);
-                if (writeInfo != null)
+                if (writePattern != null)
                 {
                     sb.AppendLine("            // Unified write");
                     sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++) {");
-                    sb.AppendLine($"                int {writeInfo.IndexVar}_lane = n_extract_lane_epi32(v_{writeInfo.IndexVar}.v, lane);");
-                    sb.AppendLine($"                if ({writeInfo.IndexVar}_lane != {writeInfo.Sentinel})");
-                    sb.AppendLine($"                    {writeInfo.WriteExpr};");
+                    sb.AppendLine($"                int {writePattern.IndexVar}_lane = n_extract_lane_epi32(v_{writePattern.IndexVar}.v, lane);");
+                    sb.AppendLine($"                if ({writePattern.IndexVar}_lane != {writePattern.Sentinel})");
+                    sb.AppendLine($"                    {writePattern.WriteExpr};");
                     sb.AppendLine("            }");
                 }
 
@@ -128,65 +98,51 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        /// <summary>从标量 body 分析最后一条写入的模式</summary>
-        private class WritePattern
+        /// <summary>清理 RemovePerLaneWrites 留下的死 __cond_N/__cm_N + { ; } 块</summary>
+        private static string CleanupDeadIfBodies(string simdBody)
         {
-            public string WriteExpr;   // 写入表达式（如 "Results_ptr[si + lane] = HashIndex_ptr[bestIdx_lane].y()"）
-            public string IndexVar;    // 结果索引变量名（如 "bestIdx"）
-            public string Sentinel;    // 哨兵值（如 "-1"）
+            // 模式: __cond_N = expr; \n __cm_N = expr; \n { \n ; \n } → 全部移除
+            simdBody = Regex.Replace(simdBody,
+                @"simd_mask\s+__cond_\d+\s*=\s*[^;]+;\s*\n\s*simd_mask\s+__cm_\d+\s*=\s*[^;]+;\s*\n\s*\{\s*\n\s*;\s*\n\s*\}[^\n]*",
+                "", RegexOptions.Multiline);
+            return simdBody;
         }
 
-        /// <summary>
-        /// 分析 scalar body 的最后一条 _ptr 写入，提取结果索引变量名和哨兵值。
-        /// 例如：Results_ptr[index] = HashIndex_ptr[bestIdx].y();
-        ///   → IndexVar = "bestIdx", Sentinel = "-1"
-        /// 完全基于标量代码的文本模式推导，无硬编码。
-        /// </summary>
+        private class WritePattern
+        {
+            public string WriteExpr;
+            public string IndexVar;
+            public string Sentinel;
+        }
+
         private static WritePattern? ExtractResultWritePattern(string scalarBody)
         {
-            // 查找最后一条形如  XXX_ptr[index] = ... 的写入
             int idx = scalarBody.LastIndexOf("_ptr[index]");
             if (idx < 0) return null;
 
-            // 向左找最近的变量名作为输出数组前缀
             int eq = scalarBody.IndexOf('=', idx);
             int semi = scalarBody.IndexOf(';', eq);
             if (eq < 0 || semi < 0) return null;
 
-            // 提取 RHS：从 = 到 ; 之间
             string rhs = scalarBody.Substring(eq + 1, semi - eq - 1).Trim();
-
-            // 如果 RHS 是 -1，说明是初始化为空结果，不是实际写入
             if (rhs == "-1") return null;
 
-            // 在 RHS 中寻找 [变量名] 模式（如 HashIndex_ptr[bestIdx].y()）
             var bracketMatch = Regex.Match(rhs, @"\[(\w+)\]");
             if (!bracketMatch.Success) return null;
 
             string indexVar = bracketMatch.Groups[1].Value;
-
-            // 查找标量 body 中形如 "indexVar != -1" 或 "indexVar == -1" 的模式
             var sentinelMatch = Regex.Match(scalarBody, $@"\b{Regex.Escape(indexVar)}\s*!=\s*(-?\d+)");
             string sentinel = sentinelMatch.Success ? sentinelMatch.Groups[1].Value : "-1";
 
-            // 构建写入表达式：将 RHS 中的 [indexVar] 替换为 [indexVar_lane]
             string writeRHS = rhs.Replace($"[{indexVar}]", $"[{indexVar}_lane]");
-            // 提取 LHS 数组名：从 "_ptr[index]" 左边找标识符
             int ptrIdx = scalarBody.LastIndexOf("_ptr[index]", idx);
             int lhsStart = scalarBody.LastIndexOfAny(" \n\r;{".ToCharArray(), ptrIdx) + 1;
             string lhsArray = scalarBody.Substring(lhsStart, ptrIdx - lhsStart);
-
             string writeExpr = $"{lhsArray}_ptr[si + lane] = {writeRHS}";
 
-            return new WritePattern
-            {
-                WriteExpr = writeExpr,
-                IndexVar = indexVar,
-                Sentinel = sentinel
-            };
+            return new WritePattern { WriteExpr = writeExpr, IndexVar = indexVar, Sentinel = sentinel };
         }
 
-        /// <summary>按 n_mask_to_bitmask 模式移除 per-lane scatter 块</summary>
         private static string RemovePerLaneWrites(string simdBody)
         {
             string marker = "n_mask_to_bitmask";
