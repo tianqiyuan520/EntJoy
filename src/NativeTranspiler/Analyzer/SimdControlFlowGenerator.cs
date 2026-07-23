@@ -100,9 +100,70 @@ namespace NativeTranspiler.Analyzer
                 if (fs.Declaration != null)
                     foreach (var v in fs.Declaration.Variables)
                         _forLoopVars.Add(v.Identifier.Text);
-            GenerateVariableDeclarations();
-            GenerateBlock(body, skipBraces: true);
+
+            // ★ Detect if body has varying-bounds loops → per-lane whole-body
+            //   ISPC uses foreach + per-lane for these, achieving 0.6ms vs our 2.8ms.
+            if (HasVaryingBoundsLoop(body))
+                GeneratePerLaneFullBody(body);
+            else {
+                GenerateVariableDeclarations();
+                GenerateBlock(body, skipBraces: true);
+            }
+
             return _builder.ToString();
+        }
+
+        /// <summary>
+        /// 检查方法体中是否有边界 varying 的 for 循环。
+        /// 如果有，整个 body 走 per-lane 避免 SIMD mask/gather 的开销。
+        /// </summary>
+        private bool HasVaryingBoundsLoop(SyntaxNode node)
+        {
+            foreach (var fs in node.DescendantNodes().OfType<ForStatementSyntax>())
+            {
+                if (fs.Declaration == null || fs.Declaration.Variables.Count != 1) continue;
+                var decl = fs.Declaration.Variables[0];
+                if (decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying)
+                    return true;
+                if (fs.Condition is BinaryExpressionSyntax cond)
+                {
+                    if (_varAnalyzer.ClassifyExpression(cond.Right) >= VarKind.Varying)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 生成 per-lane 全 body 版本 (ISPC foreach 风格)：
+        /// 捕获 mask → for(lane) → 标量 body → 无需 merge（结果直接写回）。
+        /// 比混合引擎更快：save/merge 只做 0 次，dx/dy 原生标量。
+        /// </summary>
+        private void GeneratePerLaneFullBody(BlockSyntax body)
+        {
+            string sid = $"{_maskCounter++}";
+            string maskVar = $"__perlane_{sid}";
+
+            AppendLine($"int {maskVar} = n_mask_to_bitmask(({_currentMask}).m);");
+            AppendLine("for (int __lane = 0; __lane < NSIMD_WIDTH; __lane++)");
+            AppendLine("{");
+            _indent++;
+            AppendLine($"if (!({maskVar} & (1 << __lane))) continue;");
+            AppendLine($"int {_indexParamName} = si + __lane;");
+
+            // Generate full scalar body via CppBatchStatementTranslator
+            // All expressions become native C++ (pointer derefs, scalar math, native if/for)
+            var scalarTranslator = new CppBatchStatementTranslator(
+                _semanticModel, _jobStruct, _indexParamName, _indexParamName,
+                _useFastMath, false);
+            string scalarBody = scalarTranslator.Translate(body);
+
+            foreach (var line in scalarBody.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    AppendLine(line.TrimEnd());
+
+            _indent--;
+            AppendLine("}");
         }
 
         // ================================================================
@@ -393,28 +454,15 @@ namespace NativeTranspiler.Analyzer
             string simdCmpFunc = isLessOrEqual ? "n_cmp_le_epi32" : "n_cmp_lt_epi32";
             string csOpStr = isLessOrEqual ? "<=" : "<";
 
-            AppendLine($"// SIMD count-loop: for (int {ivName} = {startExpr}; {ivName} {csOpStr} ...; {ivName}++)");
-            bool startIsVarying = decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying;
-            bool endIsVarying = stmt.Condition is BinaryExpressionSyntax ec && _varAnalyzer.ClassifyExpression(ec.Right) >= VarKind.Varying;
-            string simdStartVal = startIsVarying ? startExpr : $"simd_value<int>::broadcast({startExpr})";
-            string simdEndVal = endIsVarying ? endExpr : $"simd_value<int>::broadcast({endExpr})";
+            // ★ Uniform-bounds only: always broadcast (varying bounds handled at whole-body level)
+            string simdStartVal = $"simd_value<int>::broadcast({startExpr})";
+            string simdEndVal = $"simd_value<int>::broadcast({endExpr})";
             AppendLine($"// SIMD count-loop: for (int {ivName} = {simdStartVal}; {ivName} {csOpStr} {simdEndVal}; {ivName}++)");
             AppendLine($"simd_value<int> simd_{ivName} = {simdStartVal};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
-
-            // ★ Varying bounds → per-lane region (gather vs sequential read trade-off)
-            //   When each lane has a different start/end range, SIMD gather is expensive
-            //   and per-lane sequential access is cache-friendly.
-            string preLoopMask = _currentMask;
-            if (startIsVarying || endIsVarying)
-            {
-                GeneratePerLaneForLoop(stmt, ivName);
-                _currentMask = preLoopMask;
-                return;
-            }
-
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
 
+            string preLoopMask = _currentMask;
             AppendLine("while (true)");
             AppendLine("{");
             _indent++;
