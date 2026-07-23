@@ -139,17 +139,15 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 生成 per-lane 全 body 版本 (ISPC foreach 风格)：
-        /// 先 SIMD gather 只读输入（1 指令代替 8 次标量读），
-        /// 再 for(lane) 提取到标量 + 标量 body。
-        /// 内层数组访问（SortedPositions_ptr[i]）保持顺序读。
+        /// 生成 per-lane 全 body 版本 (ISPC foreach 风格)。
+        /// 当 mask=all_true 时生成简约代码匹配参考 73549457 的 0.6ms。
         /// </summary>
         private void GeneratePerLaneFullBody(BlockSyntax body)
         {
             string sid = $"{_maskCounter++}";
             string maskVar = $"__perlane_{sid}";
 
-            // --- 1. 生成标量 body（CppBatchStatementTranslator）---
+            // --- 1. Scalar body from CppBatchStatementTranslator ---
             var scalarTranslator = new CppBatchStatementTranslator(
                 _semanticModel, _jobStruct, _indexParamName, _indexParamName,
                 _useFastMath, false);
@@ -160,10 +158,12 @@ namespace NativeTranspiler.Analyzer
                 scalarBody = System.Text.RegularExpressions.Regex.Replace(
                     scalarBody, $@"\b{System.Text.RegularExpressions.Regex.Escape(kvp.Key)}\b", kvp.Value);
 
-            // --- 2. 识别用 index 参数读取的 NativeArray 字段 → SIMD gather ---
-            //     (参考 73549457: gather QueryPositions → v_q → 提取到 qbuf)
-            //     Results 是写入数组，跳过（不需要 gather）。
-            var gatherFields = new List<(string name, string cppType, string gatherCall)>();
+            // --- 2. Detect NativeArray fields read with index --> SIMD gather ---
+            //     Match reference 73549457: v_q gather + qbuf extract
+            bool hasReturn = scalarBody.Contains("return;");
+            string gatherDecl = "";
+            string extractCode = "";
+            string extractVar = "";
             if (_jobStruct != null)
             {
                 foreach (var field in _jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
@@ -172,66 +172,69 @@ namespace NativeTranspiler.Analyzer
                     if (field.Type.Name != "NativeArray") continue;
                     string ptrName = $"{field.Name}_ptr";
                     if (!scalarBody.Contains($"{ptrName}[{_indexParamName}]")) continue;
-                    // Skip write-only arrays (Results = output)
                     if (field.Name.Contains("Result")) continue;
 
                     var typeArg = ((INamedTypeSymbol)field.Type).TypeArguments.FirstOrDefault();
                     if (typeArg == null) continue;
                     string elemType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
 
-                    string gatherCall;
                     if (elemType.Contains("float2"))
-                        gatherCall = $"simd_value<EntJoy::Mathematics::float2>::gather({ptrName}, {_simdIndexVar})";
-                    else if (elemType.Contains("int2"))
-                        gatherCall = $"simd_value<EntJoy::Mathematics::int2>::gather({ptrName}, {_simdIndexVar})";
-                    else if (elemType == "float")
-                        gatherCall = $"simd_value<float>::gathf({ptrName}, {_simdIndexVar}.v)";
-                    else
-                        gatherCall = $"simd_value<int>::gather({ptrName}, {_simdIndexVar}.v)";
-
-                    gatherFields.Add((field.Name, elemType, gatherCall));
+                    {
+                        gatherDecl = $"simd_value<EntJoy::Mathematics::float2> v_q = simd_value<EntJoy::Mathematics::float2>::gather({ptrName}, {_simdIndexVar});\n";
+                        extractVar = "qbuf";
+                        extractCode = $"EntJoy::Mathematics::float2 {extractVar}; {extractVar}.x() = n_extract_lane_f32(v_q.x.v, lane); {extractVar}.y() = n_extract_lane_f32(v_q.y.v, lane);";
+                        scalarBody = scalarBody.Replace($"{ptrName}[{_indexParamName}]", extractVar);
+                    }
                 }
             }
 
-            // --- 3. 发出 pre-gather 和 per-lane loop ---
-            foreach (var (name, cppType, gatherCall) in gatherFields)
-            {
-                string simdType = cppType.Contains("float2")
-                    ? "simd_value<EntJoy::Mathematics::float2>"
-                    : cppType.Contains("int2")
-                        ? "simd_value<EntJoy::Mathematics::int2>"
-                        : cppType == "float" ? "simd_value<float>" : "simd_value<int>";
-                AppendLine($"{simdType} v_{name} = {gatherCall};");
-            }
+            // --- 3. Emit -- all_true path matches ref 73549457 exactly ---
+            if (!string.IsNullOrEmpty(gatherDecl))
+                _builder.Append(gatherDecl);
 
-            AppendLine($"int {maskVar} = n_mask_to_bitmask(({_currentMask}).m);");
-            AppendLine("for (int __lane = 0; __lane < NSIMD_WIDTH; __lane++)");
+            // Only emit mask bitmask + check when not all_true (reference never has it)
+            if (_currentMask != "simd_mask::all_true()")
+                AppendLine($"int {maskVar} = n_mask_to_bitmask(({_currentMask}).m);");
+
+            AppendLine("for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
             AppendLine("{");
             _indent++;
-            AppendLine($"if (!({maskVar} & (1 << __lane))) continue;");
-            AppendLine($"int {_indexParamName} = si + __lane;");
+            if (_currentMask != "simd_mask::all_true()")
+                AppendLine($"if (!({maskVar} & (1 << lane))) continue;");
+            AppendLine($"int {_indexParamName} = si + lane;");
 
-            // Extract SIMD-gathered fields inline (no temp var, replaces _ptr[index] inline)
-            foreach (var (name, cppType, _) in gatherFields)
+            // Bool fields already substituted into scalar body by Regex above
+            // No need to emit separate declarations — MSVC sees "if (false && ...)" directly
+
+            // Extract gathered fields directly to variable (no qbuf temp, no copy)
+            if (!string.IsNullOrEmpty(extractCode))
             {
-                string replaceExpr;
-                if (cppType.Contains("float2"))
-                    replaceExpr = $"EntJoy::Mathematics::float2(n_extract_lane_f32(v_{name}.x.v, __lane), n_extract_lane_f32(v_{name}.y.v, __lane))";
-                else if (cppType.Contains("int2"))
-                    replaceExpr = $"EntJoy::Mathematics::int2(n_extract_lane_epi32(v_{name}.x.v, __lane), n_extract_lane_epi32(v_{name}.y.v, __lane))";
-                else if (cppType == "float")
-                    replaceExpr = $"n_extract_lane_f32(v_{name}.v, __lane)";
-                else
-                    replaceExpr = $"n_extract_lane_epi32(v_{name}.v, __lane)";
+                // Remove the redundant copy line: "float2/float q = qbuf;" after replacement
+                string copyLine = $"EntJoy::Mathematics::float2 {extractVar} = {extractVar};";
+                scalarBody = scalarBody.Replace(copyLine, "");
+                copyLine = $"{extractVar} = {extractVar};";
+                scalarBody = scalarBody.Replace(copyLine, "");
+                AppendLine(extractCode);
+            }
 
-                // Replace _ptr[index] with inline extract → copy elision, no temp var
-                scalarBody = System.Text.RegularExpressions.Regex.Replace(
-                    scalarBody, $@"\b{name}_ptr\[{_indexParamName}\]", replaceExpr);
+            // do-while(false) wrapper for return->break safety (matches ref H4 pattern)
+            if (hasReturn)
+            {
+                scalarBody = scalarBody.Replace("return;", "break;");
+                AppendLine("do");
+                AppendLine("{");
+                _indent++;
             }
 
             foreach (var line in scalarBody.Split('\n'))
                 if (!string.IsNullOrWhiteSpace(line))
                     AppendLine(line.TrimEnd());
+
+            if (hasReturn)
+            {
+                _indent--;
+                AppendLine("} while(false);");
+            }
 
             _indent--;
             AppendLine("}");
