@@ -1764,10 +1764,10 @@ namespace NativeTranspiler.Analyzer
             {
                 if (anyVarying)
                 {
-                    // ★ Short-circuit known bool constants (MSVC eliminates dead code)
-                    if (left == "false") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    // ★ Compile-time constant folding: false && expr → false, true && expr → expr
+                    if (left == "false" || left == "0") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
                     if (left == "true") return right;
-                    if (right == "false") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    if (right == "false" || right == "0") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
                     if (right == "true") return left;
                     // Wrap scalar bools in simd_mask before accessing .m
                     if (!left.Contains("simd_mask") && !left.Contains("n_cmp_"))
