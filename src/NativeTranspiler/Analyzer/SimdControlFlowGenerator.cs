@@ -696,8 +696,9 @@ namespace NativeTranspiler.Analyzer
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
 
-            // ★ Use savedMask directly — no __mask_N = savedMask copy (saves 1 move per inner iter)
-            _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, v_active{sid}.m) }}";
+            // ★ Use v_active directly — no and with savedMask (redundant: dead lanes have v_active=false)
+            //   simd_i/simd_end_i were clamped to ≥0 above, so dead-cell lanes have v_active=false.
+            _currentMask = $"v_active{sid}";
 
             _loopStack.Push(new LoopFrame
             {
