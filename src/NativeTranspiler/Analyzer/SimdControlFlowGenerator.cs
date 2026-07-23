@@ -109,9 +109,7 @@ namespace NativeTranspiler.Analyzer
                     foreach (var v in fs.Declaration.Variables)
                         _forLoopVars.Add(v.Identifier.Text);
 
-            // ★ Full SIMD has a fundamental bug: per-lane `continue` uses `any_true()` + `goto`
-            //   which skips ALL lanes when only SOME lanes need to continue.
-            //   Until this is fixed, always use per-lane for varying-bound bodies.
+            // ★ Varying bounds → per-lane (full SIMD has pre-existing bugs)
             if (HasVaryingBoundsLoop(body))
                 GeneratePerLaneFullBody(body);
             else {
@@ -518,14 +516,8 @@ namespace NativeTranspiler.Analyzer
 
             bool isReduction = IsReductionLoop(stmt);
 
-            // Dispatch: uniform reduction → broadcast, varying reduction → count-loop,
-            //   other → standard while-true mask loop
-            if (isUniformBounds && isReduction)
-                GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
-            else if (!isUniformBounds && isReduction)
-                GenerateVaryingReductionLoop(ivName, startExpr, endExpr, stmt);
-            else
-                GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, isUniformBounds);
+            // Standard while-true mask loop (the only fully verified path)
+            GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, isUniformBounds);
         }
 
         // ================================================================
@@ -672,16 +664,14 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"simd_value<int> simd_end_{ivName} = {simdEndVal};");
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
 
-            // ★ Scope-safe mask save: declare a named copy at current scope level
-            string preLoopMask = $"__pre_{_maskCounter++}";
-            AppendLine($"simd_mask {preLoopMask} = {_currentMask};");
+            string preLoopMask = _currentMask;
             AppendLine("while (true)");
             AppendLine("{");
             _indent++;
 
             AppendLine($"simd_mask {iterActive} = simd_mask{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }} & {tracker};");
             string savedMask = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {savedMask} = {preLoopMask};");
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
             _currentMask = savedMask;
             AppendLine($"if (!({savedMask} & {iterActive}).any_true()) {{ break; }}");
             string narrowedMask = $"simd_mask{{ n_and_mask({savedMask}.m, {iterActive}.m) }}";
