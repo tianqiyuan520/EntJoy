@@ -30,11 +30,9 @@ namespace NativeTranspiler.Analyzer
 
         public string Generate(string scalarBody)
         {
-            // Try full SIMD from AST first
             string simdResult = GenerateFullSIMDFromAST(scalarBody);
             if (!string.IsNullOrEmpty(simdResult))
                 return simdResult;
-            // Fallback: per-lane scalar
             return GeneratePerLane(scalarBody);
         }
 

@@ -363,6 +363,7 @@ namespace NativeTranspiler.Analyzer
             var current = stmt;
             StatementSyntax? elseBody = null;
             string savedMask = "";
+            bool savedMaskEmitted = false;
 
             while (true)
             {
@@ -373,35 +374,36 @@ namespace NativeTranspiler.Analyzer
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
                     // Handle short-circuited constants (from TranslateBinary)
-                    string goodExpr;
-                    if (condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))"))
-                        goodExpr = "simd_mask::all_true()";  // known false → never continue
-                    else if (condExpr == "simd_mask::all_true()")
-                        goodExpr = "simd_mask::all_true()";  // all_true → all_true (always good)
-                    else
-                        goodExpr = condExpr
-                        .Replace("n_cmp_lt_", "##TMP##")
-                        .Replace("n_cmp_ge_", "n_cmp_lt_")
-                        .Replace("n_cmp_gt_", "n_cmp_le_")
-                        .Replace("n_cmp_le_", "n_cmp_gt_")
-                        .Replace("n_cmp_eq_", "n_cmp_ne_")
-                        .Replace("n_cmp_ne_", "n_cmp_eq_")
-                        .Replace("##TMP##", "n_cmp_ge_");
-                    string goodName = $"__good_{_labelCounter++}";
-                    AppendLine($"simd_mask {goodName} = {goodExpr};");
-                    // Direct assignment — no all_true() wrapper
-                    _currentMask = goodName;
-                    // Docs-style: if(!goodMask.any_true()) continue;
-                    AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
-                    savedMask = goodName;  // track narrowed name (no C++ statement emitted)
+                    bool isDeadFalse = condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))")
+                        || condExpr == "simd_mask::all_true()";
+                    bool isDeadTrue = condExpr == "simd_mask::all_true()";
+                    // (Dead-true here means: if(true) continue → always continue → can't optimize further)
+                    if (!isDeadFalse)
+                    {
+                        string goodExpr = condExpr
+                            .Replace("n_cmp_lt_", "##TMP##")
+                            .Replace("n_cmp_ge_", "n_cmp_lt_")
+                            .Replace("n_cmp_gt_", "n_cmp_le_")
+                            .Replace("n_cmp_le_", "n_cmp_gt_")
+                            .Replace("n_cmp_eq_", "n_cmp_ne_")
+                            .Replace("n_cmp_ne_", "n_cmp_eq_")
+                            .Replace("##TMP##", "n_cmp_ge_");
+                        string goodName = $"__good_{_labelCounter++}";
+                        AppendLine($"simd_mask {goodName} = {goodExpr};");
+                        _currentMask = goodName;
+                        AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
+                        savedMask = goodName;
+                    }
+                    // else dead false: skip entirely — leave _currentMask unchanged, no emission
                 }
                 else
                 {
-                    // Only emit savedMask on first non-continue branch in this if-chain
-                    if (string.IsNullOrEmpty(savedMask))
+                    // Emit savedMask if not yet emitted
+                    if (!savedMaskEmitted)
                     {
                         savedMask = $"__mask_{_maskCounter++}";
                         AppendLine($"simd_mask {savedMask} = {_currentMask};");
+                        savedMaskEmitted = true;
                     }
 
                     string condVar = $"__cond_{_maskCounter++}";
@@ -446,8 +448,9 @@ namespace NativeTranspiler.Analyzer
                 GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
             }
 
-            // Restore
-            _currentMask = savedMask;
+            // Restore (skip if mask was never saved — e.g., dead-false continue)
+            if (savedMaskEmitted || !string.IsNullOrEmpty(savedMask))
+                _currentMask = savedMask;
         }
 
         /// <summary>
