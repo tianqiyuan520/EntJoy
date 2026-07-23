@@ -372,7 +372,14 @@ namespace NativeTranspiler.Analyzer
                 //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
-                    string goodExpr = condExpr
+                    // Handle short-circuited constants (from TranslateBinary)
+                    string goodExpr;
+                    if (condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))"))
+                        goodExpr = "simd_mask::all_true()";  // known false → never continue
+                    else if (condExpr == "simd_mask::all_true()")
+                        goodExpr = "simd_mask::all_true()";  // all_true → all_true (always good)
+                    else
+                        goodExpr = condExpr
                         .Replace("n_cmp_lt_", "##TMP##")
                         .Replace("n_cmp_ge_", "n_cmp_lt_")
                         .Replace("n_cmp_gt_", "n_cmp_le_")
@@ -1203,6 +1210,9 @@ namespace NativeTranspiler.Analyzer
             if (expr is IdentifierNameSyntax id)
             {
                 string name = id.Identifier.Text;
+                // ★ Bool field with known constant → skip computation, MSVC handles DCE
+                if (_boolFields.TryGetValue(name, out var bv))
+                    return bv == "true" ? "simd_mask::all_true()" : "simd_mask::all_false()";
                 // Uniform bool: broadcast to all lanes then compare !=0 to produce proper n_mask
                 if (_variables.TryGetValue(name, out var info) && info.Kind == VarKind.Uniform)
                     return $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({name} ? -1 : 0).v, n_set1_epi32(0)) }}";
@@ -1243,7 +1253,11 @@ namespace NativeTranspiler.Analyzer
             if (_forLoopVars.Contains(name))
                 return $"simd_{name}";
 
-            // Known variable
+            // ★ Bool field with known constant → return literal (MSVC DCE handles the rest)
+            if (_boolFields.TryGetValue(name, out var bv))
+                return bv;  // "true" or "false"
+
+            // Known variable (from SimdVariableAnalyzer)
             if (_variables.TryGetValue(name, out var info))
             {
                 if (info.Kind == VarKind.Uniform)
@@ -1747,6 +1761,11 @@ namespace NativeTranspiler.Analyzer
             {
                 if (anyVarying)
                 {
+                    // ★ Short-circuit known bool constants (MSVC eliminates dead code)
+                    if (left == "false") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    if (left == "true") return right;
+                    if (right == "false") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    if (right == "true") return left;
                     // Wrap scalar bools in simd_mask before accessing .m
                     if (!left.Contains("simd_mask") && !left.Contains("n_cmp_"))
                         left = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({left} ? -1 : 0).v, n_set1_epi32(0)) }}";
@@ -1760,6 +1779,10 @@ namespace NativeTranspiler.Analyzer
             {
                 if (anyVarying)
                 {
+                    if (left == "true") return "simd_mask::all_true()";
+                    if (left == "false") return right;
+                    if (right == "true") return "simd_mask::all_true()";
+                    if (right == "false") return left;
                     if (!left.Contains("simd_mask") && !left.Contains("n_cmp_"))
                         left = $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({left} ? -1 : 0).v, n_set1_epi32(0)) }}";
                     if (!right.Contains("simd_mask") && !right.Contains("n_cmp_"))
