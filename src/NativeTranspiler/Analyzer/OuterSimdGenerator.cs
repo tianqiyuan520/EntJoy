@@ -63,10 +63,24 @@ namespace NativeTranspiler.Analyzer
                     boolFields: _boolFields);
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);
 
+                // ★ Merge double write → single write: remove all per-lane extract write lines
+                simdBody = RemovePerLaneWrites(simdBody);
+
                 foreach (var line in simdBody.Split('\n'))
                     if (!string.IsNullOrWhiteSpace(line))
                         sb.Append("            ").AppendLine(line);
 
+                // Unified write for ALL lanes (replaces the two per-lane one-liner writes)
+                // Only for reduction bodies that use bestIdx (ClosestPoint, not FindWithin)
+                if (scalarBody.Contains("int bestIdx"))
+                {
+                    sb.AppendLine("            // Unified write from v_bestIdx");
+                    sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++) {");
+                    sb.AppendLine("                int bestIdx_lane = n_extract_lane_epi32(v_bestIdx.v, lane);");
+                    sb.AppendLine("                if (bestIdx_lane != -1)");
+                    sb.AppendLine("                    Results_ptr[si + lane] = HashIndex_ptr[bestIdx_lane].y();");
+                    sb.AppendLine("            }");
+                }
                 sb.AppendLine("        __simd_exit: ;");
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
@@ -78,6 +92,13 @@ namespace NativeTranspiler.Analyzer
             {
                 return "";
             }
+        }
+
+        /// <summary>Remove all per-lane result write one-liners from SIMD body</summary>
+        private static string RemovePerLaneWrites(string simdBody)
+        {
+            var writeRx = new Regex(@"\n\s*\{\s*int\s+__sg\s*=\s*n_mask_to_bitmask[^\n]*Results_ptr[^\n]+\}\}\};", RegexOptions.Singleline);
+            return writeRx.Replace(simdBody, "");
         }
 
         private string GeneratePerLane(string scalarBody)
