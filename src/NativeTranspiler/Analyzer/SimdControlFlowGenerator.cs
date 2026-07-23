@@ -424,6 +424,13 @@ namespace NativeTranspiler.Analyzer
 
                     conditions.Add(condVar);
                     _currentMask = trueMask;
+                    // ★ Pre-compute compound mask as temp var (avoids recomputing in multiple blends)
+                    if (trueMask.Contains("n_and_mask("))
+                    {
+                        string cm = $"__cm_{_maskCounter++}";
+                        AppendLine($"simd_mask {cm} = {trueMask};");
+                        _currentMask = cm;
+                    }
                     if (HasControlFlowGoto(current.Statement))
                         AppendLine($"if ({trueMask}.any_true())");
                     GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
@@ -1432,7 +1439,15 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
+                {
+                    if (safeIdx != indexExpr)
+                    {
+                        string tidx = $"__ci_{_labelCounter++}";
+                        AppendLine($"simd_value<int> {tidx} = {safeIdx};");
+                        return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf({baseExpr}_ptr, {tidx}.v), simd_value<float>::gathfy({baseExpr}_ptr, {tidx}.v) }}";
+                    }
                     return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v), simd_value<float>::gathfy({baseExpr}_ptr, {safeIdx}.v) }}";
+                }
                 if (elemCppType.Contains("int2"))
                     return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}_ptr, {safeIdx})";
                 if (elemCppType == "float")
