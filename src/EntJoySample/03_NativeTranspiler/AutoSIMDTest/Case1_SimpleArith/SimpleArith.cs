@@ -29,4 +29,23 @@ namespace EntJoySample.AutoSIMDTest
         public NativeArray<float> A, B, C, Result;
         public void Execute(int i) { Result[i] = A[i] * B[i] + C[i]; }
     }
+    // --- C++ Auto-SIMD (IJobFor) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct SimpleArith_SIMD_For : IJobFor
+    {
+        public NativeArray<float> A, B, C, Result;
+        public void Execute(int i) { Result[i] = A[i] * B[i] + C[i]; }
+    }
+
+    // --- C++ Auto-SIMD (IJob) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct SimpleArith_SIMD_IJob : IJob
+    {
+        public NativeArray<float> A, B, C, Result;
+        public int Count;
+        public void Execute()
+        {
+            for (int i = 0; i < Count; i++) { Result[i] = A[i] * B[i] + C[i]; }
+        }
+    }
 }

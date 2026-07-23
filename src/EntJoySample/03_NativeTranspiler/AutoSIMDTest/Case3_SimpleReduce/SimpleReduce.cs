@@ -25,4 +25,29 @@ namespace EntJoySample.AutoSIMDTest
         public NativeArray<float> A, Result;
         public void Execute(int i) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = A[i * 100 + j]; if (v < best) best = v; } Result[i] = best; }
     }
+    // --- C++ Auto-SIMD (IJobFor) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct SimpleReduce_SIMD_For : IJobFor
+    {
+        public NativeArray<float> A, Result;
+        public void Execute(int i) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = A[i * 100 + j]; if (v < best) best = v; } Result[i] = best; }
+    }
+
+    // --- C++ Auto-SIMD (IJob) ---
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct SimpleReduce_SIMD_IJob : IJob
+    {
+        public NativeArray<float> A, Result;
+        public int Count;
+        public void Execute()
+        {
+            for (int i = 0; i < Count; i++)
+            {
+                float best = float.MaxValue;
+                for (int j = 0; j < 100; j++)
+                { float v = A[i * 100 + j]; if (v < best) best = v; }
+                Result[i] = best;
+            }
+        }
+    }
 }
