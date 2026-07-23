@@ -1,4 +1,4 @@
-// Auto-SIMD Benchmark — 7 后端 / 4 Job 类型全面对比
+// Auto-SIMD — C# | C++ | SIMD | ISPC x Job | For | PF = 10+ variants
 using EntJoy;
 using EntJoy.Collections;
 using EntJoySample.AutoSIMDTest;
@@ -8,107 +8,119 @@ namespace EntJoySample.AutoSIMDTest
 {
     public static class Program
     {
-        // 每个 Case 的数据：名称、C# struct、C++ struct、SIMD-PF、SIMD-For、SIMD-IJob、ISPC struct
-        // 静态函数组独立处理
         public static void Main()
         {
             NativeJobScheduler.Initialize();
-            int N = 100000, W = 3, I = 100;
+            int N = 100000, W = 3, I = 100, H = 10;
             var rnd = new Random(42);
-            var rd = GenFloats(N * 100, rnd);
+            var rd = GF(N * 100, rnd);
             using var nR = new NativeArray<float>(rd, Allocator.Persistent);
-            var a = GenFloats(N, rnd); var b = GenFloats(N, rnd); var c = GenFloats(N, rnd);
-            var qx = GenFloats(N, rnd); var qy = GenFloats(N, rnd);
-            var dx = GenFloats(N * 2, rnd); var dy = GenFloats(N * 2, rnd);
+            var a = GF(N, rnd); var b = GF(N, rnd); var c = GF(N, rnd);
+            var qx = GF(N, rnd); var qy = GF(N, rnd);
+            var dx = GF(N * 2, rnd); var dy = GF(N * 2, rnd);
             var ix = new int[N * 50]; for (int t = 0; t < N * 50; t++) ix[t] = rnd.Next(N * 2);
-            using var nA = new NativeArray<float>(a, Allocator.Persistent);
-            using var nB = new NativeArray<float>(b, Allocator.Persistent);
-            using var nC = new NativeArray<float>(c, Allocator.Persistent);
-            using var nQx = new NativeArray<float>(qx, Allocator.Persistent);
-            using var nQy = new NativeArray<float>(qy, Allocator.Persistent);
-            using var nDx = new NativeArray<float>(dx, Allocator.Persistent);
-            using var nDy = new NativeArray<float>(dy, Allocator.Persistent);
-            using var nIx = new NativeArray<int>(ix, Allocator.Persistent);
-            var rp = new NativeArray<float>[6];
-            for (int i = 0; i < 6; i++) rp[i] = new NativeArray<float>(N, Allocator.Persistent);
+            using var nA = NA(a); using var nB = NA(b); using var nC = NA(c);
+            using var nQx = NA(qx); using var nQy = NA(qy);
+            using var nDx = NA(dx); using var nDy = NA(dy); using var nIx = NI(ix);
+            using var p0 = NA(N); using var p1 = NA(N); using var p2 = NA(N);
+            using var p3 = NA(N); using var p4 = NA(N); using var p5 = NA(N);
 
-            Console.WriteLine("=".PadRight(90, '='));
-            Console.WriteLine("  Auto-SIMD — C# / C++ / SIMD-PF / SIMD-For / SIMD-IJob / ISPC");
-            Console.WriteLine("  N=100k | 预热=3 | 迭代=100(R/G=10) | 批=64");
-            Console.WriteLine("=".PadRight(90, '='));
-            Console.WriteLine($"{"Case",-20} {"C#",-9} {"C++",-9} {"SIMDPF",-9} {"SIMDFor",-9} {"IJob",-9} {"ISPC",-9}");
-            Console.WriteLine("-".PadRight(90, '-'));
+            Console.WriteLine("=".PadRight(105, '='));
+            Console.WriteLine("  Auto-SIMD: C# | C++ | SIMD | ISPC  x  Job | IJobFor | IJobPF");
+            Console.WriteLine("=".PadRight(105, '='));
+            Console.WriteLine($"{"Case",-14} {"C#Job",-9}{"C#For",-9}{"C#PF",-9} {"CppJob",-9}{"CppFor",-9}{"CppPF",-9} {"SMDJob",-9}{"SMDFor",-9}{"SMDPF",-9} {"ISPF",-9}");
+            Console.WriteLine("-".PadRight(105, '-'));
 
-            int heavyIter = 10; // Reduce/Gather
-            int normalIter = I;
+            // (CJ=C#Job, CF=C#For, CP=C#PF, NJ=CppJob, NF=CppFor, NP=CppPF, SJ=SIMDJob, SF=SIMDFor, SP=SIMDPF, IP=ISPC)
+            void T(string name, int it,
+                System.Func<double> CJ, System.Func<double> CF, System.Func<double> CP,
+                System.Func<double> NJ, System.Func<double> NF, System.Func<double> NP,
+                System.Func<double> SJ, System.Func<double> SF, System.Func<double> SP,
+                System.Func<double> IP)
+            { Console.WriteLine($"  {name,-12}{CJ(),8:F3}{CF(),8:F3}{CP(),8:F3}{NJ(),8:F3}{NF(),8:F3}{NP(),8:F3}{SJ(),8:F3}{SF(),8:F3}{SP(),8:F3}{IP(),8:F3}"); }
 
-            // Case 1
-            double i1 = CCSharp(new SimpleArith_CSharp{A=nA,B=nB,C=nC,Result=rp[0]}, N, W, normalIter);
-            double i2 = CSched<SimpleArith_Cpp>(new SimpleArith_Cpp{A=nA,B=nB,C=nC,Result=rp[1]}, N, W, normalIter);
-            double i3 = CSched<SimpleArith_SIMD_PF>(new SimpleArith_SIMD_PF{A=nA,B=nB,C=nC,Result=rp[2]}, N, W, normalIter);
-            double i4 = CSchedFor<SimpleArith_SIMD_For>(new SimpleArith_SIMD_For{A=nA,B=nB,C=nC,Result=rp[3]}, N, W, normalIter);
-            double i5 = CIJob(new SimpleArith_SIMD_IJob{A=nA,B=nB,C=nC,Result=rp[4],Count=N}, W, normalIter);
-            double i6 = CSched<SimpleArith_ISPC>(new SimpleArith_ISPC{A=nA,B=nB,C=nC,Result=rp[5]}, N, W, normalIter);
-            PrintRow("1_SimpleArith", i1, i2, i3, i4, i5, i6);
+            // 1
+            T("SimpleArith", I,
+                ()=>Ij(new SimpleArith_CSharp_Job{A=nA,B=nB,C=nC,Result=p0,Count=N},W,I),
+                ()=>Fo(new SimpleArith_CSharp_For{A=nA,B=nB,C=nC,Result=p1},N,W,I),
+                ()=>Pf(new SimpleArith_CSharp_PF{A=nA,B=nB,C=nC,Result=p2},N,W,I),
+                ()=>Ij(new SimpleArith_Cpp_Job{A=nA,B=nB,C=nC,Result=p0,Count=N},W,I),
+                ()=>Fo(new SimpleArith_Cpp_For{A=nA,B=nB,C=nC,Result=p1},N,W,I),
+                ()=>Pf(new SimpleArith_Cpp_PF{A=nA,B=nB,C=nC,Result=p2},N,W,I),
+                ()=>Ij(new SimpleArith_SIMD_Job{A=nA,B=nB,C=nC,Result=p3,Count=N},W,I),
+                ()=>Fo(new SimpleArith_SIMD_For{A=nA,B=nB,C=nC,Result=p4},N,W,I),
+                ()=>Pf(new SimpleArith_SIMD_PF{A=nA,B=nB,C=nC,Result=p5},N,W,I),
+                ()=>Pf(new SimpleArith_ISPC_PF{A=nA,B=nB,C=nC,Result=p0},N,W,I));
 
-            // Case 2
-            double j1 = CCSharp(new MathFuncs_CSharp{A=nA,Result=rp[0]}, N, W, normalIter);
-            double j2 = CSched<MathFuncs_Cpp>(new MathFuncs_Cpp{A=nA,Result=rp[1]}, N, W, normalIter);
-            double j3 = CSched<MathFuncs_SIMD_PF>(new MathFuncs_SIMD_PF{A=nA,Result=rp[2]}, N, W, normalIter);
-            double j4 = CSchedFor<MathFuncs_SIMD_For>(new MathFuncs_SIMD_For{A=nA,Result=rp[3]}, N, W, normalIter);
-            double j5 = CIJob(new MathFuncs_SIMD_IJob{A=nA,Result=rp[4],Count=N}, W, normalIter);
-            double j6 = CSched<MathFuncs_ISPC>(new MathFuncs_ISPC{A=nA,Result=rp[5]}, N, W, normalIter);
-            PrintRow("2_MathFunctions", j1, j2, j3, j4, j5, j6);
+            // 2
+            T("MathFuncs", I,
+                ()=>Ij(new MathFuncs_CSharp_Job{A=nA,Result=p0,Count=N},W,I),
+                ()=>Fo(new MathFuncs_CSharp_For{A=nA,Result=p1},N,W,I),
+                ()=>Pf(new MathFuncs_CSharp_PF{A=nA,Result=p2},N,W,I),
+                ()=>Ij(new MathFuncs_Cpp_Job{A=nA,Result=p0,Count=N},W,I),
+                ()=>Fo(new MathFuncs_Cpp_For{A=nA,Result=p1},N,W,I),
+                ()=>Pf(new MathFuncs_Cpp_PF{A=nA,Result=p2},N,W,I),
+                ()=>Ij(new MathFuncs_SIMD_Job{A=nA,Result=p3,Count=N},W,I),
+                ()=>Fo(new MathFuncs_SIMD_For{A=nA,Result=p4},N,W,I),
+                ()=>Pf(new MathFuncs_SIMD_PF{A=nA,Result=p5},N,W,I),
+                ()=>Pf(new MathFuncs_ISPC_PF{A=nA,Result=p0},N,W,I));
 
-            // Case 3
-            double k1 = CCSharp(new SimpleReduce_CSharp{A=nR,Result=rp[0]}, N, W, heavyIter);
-            double k2 = CSched<SimpleReduce_Cpp>(new SimpleReduce_Cpp{A=nR,Result=rp[1]}, N, W, heavyIter);
-            double k3 = CSched<SimpleReduce_SIMD_PF>(new SimpleReduce_SIMD_PF{A=nR,Result=rp[2]}, N, W, heavyIter);
-            double k4 = CSchedFor<SimpleReduce_SIMD_For>(new SimpleReduce_SIMD_For{A=nR,Result=rp[3]}, N, W, heavyIter);
-            double k5 = CIJob(new SimpleReduce_SIMD_IJob{A=nR,Result=rp[4],Count=N}, W, heavyIter);
-            double k6 = CSched<SimpleReduce_ISPC>(new SimpleReduce_ISPC{A=nR,Result=rp[5]}, N, W, heavyIter);
-            PrintRow("3_SimpleReduce", k1, k2, k3, k4, k5, k6);
+            // 3
+            T("Reduce", H,
+                ()=>Ij(new SimpleReduce_CSharp_Job{A=nR,Result=p0,Count=N},W,H),
+                ()=>Fo(new SimpleReduce_CSharp_For{A=nR,Result=p1},N,W,H),
+                ()=>Pf(new SimpleReduce_CSharp_PF{A=nR,Result=p2},N,W,H),
+                ()=>Ij(new SimpleReduce_Cpp_Job{A=nR,Result=p0,Count=N},W,H),
+                ()=>Fo(new SimpleReduce_Cpp_For{A=nR,Result=p1},N,W,H),
+                ()=>Pf(new SimpleReduce_Cpp_PF{A=nR,Result=p2},N,W,H),
+                ()=>Ij(new SimpleReduce_SIMD_Job{A=nR,Result=p3,Count=N},W,H),
+                ()=>Fo(new SimpleReduce_SIMD_For{A=nR,Result=p4},N,W,H),
+                ()=>Pf(new SimpleReduce_SIMD_PF{A=nR,Result=p5},N,W,H),
+                ()=>Pf(new SimpleReduce_ISPC_PF{A=nR,Result=p0},N,W,H));
 
-            // Case 4
-            double l1 = CCSharp(new ComplexFlow_CSharp{A=nA,B=nB,Result=rp[0],Threshold=50}, N, W, normalIter);
-            double l2 = CSched<ComplexFlow_Cpp>(new ComplexFlow_Cpp{A=nA,B=nB,Result=rp[1],Threshold=50}, N, W, normalIter);
-            double l3 = CSched<ComplexFlow_SIMD_PF>(new ComplexFlow_SIMD_PF{A=nA,B=nB,Result=rp[2],Threshold=50}, N, W, normalIter);
-            double l4 = CSchedFor<ComplexFlow_SIMD_For>(new ComplexFlow_SIMD_For{A=nA,B=nB,Result=rp[3],Threshold=50}, N, W, normalIter);
-            double l5 = CIJob(new ComplexFlow_SIMD_IJob{A=nA,B=nB,Result=rp[4],Threshold=50,Count=N}, W, normalIter);
-            double l6 = CSched<ComplexFlow_ISPC>(new ComplexFlow_ISPC{A=nA,B=nB,Result=rp[5],Threshold=50}, N, W, normalIter);
-            PrintRow("4_ComplexFlow", l1, l2, l3, l4, l5, l6);
+            // 4
+            T("ComplexFlow", I,
+                ()=>Ij(new ComplexFlow_CSharp_Job{A=nA,B=nB,Result=p0,Threshold=50,Count=N},W,I),
+                ()=>Fo(new ComplexFlow_CSharp_For{A=nA,B=nB,Result=p1,Threshold=50},N,W,I),
+                ()=>Pf(new ComplexFlow_CSharp_PF{A=nA,B=nB,Result=p2,Threshold=50},N,W,I),
+                ()=>Ij(new ComplexFlow_Cpp_Job{A=nA,B=nB,Result=p0,Threshold=50,Count=N},W,I),
+                ()=>Fo(new ComplexFlow_Cpp_For{A=nA,B=nB,Result=p1,Threshold=50},N,W,I),
+                ()=>Pf(new ComplexFlow_Cpp_PF{A=nA,B=nB,Result=p2,Threshold=50},N,W,I),
+                ()=>Ij(new ComplexFlow_SIMD_Job{A=nA,B=nB,Result=p3,Threshold=50,Count=N},W,I),
+                ()=>Fo(new ComplexFlow_SIMD_For{A=nA,B=nB,Result=p4,Threshold=50},N,W,I),
+                ()=>Pf(new ComplexFlow_SIMD_PF{A=nA,B=nB,Result=p5,Threshold=50},N,W,I),
+                ()=>Pf(new ComplexFlow_ISPC_PF{A=nA,B=nB,Result=p0,Threshold=50},N,W,I));
 
-            // Case 5
-            double m1 = CCSharp(new GatherReduce_CSharp{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[0]}, N, W, heavyIter);
-            double m2 = CSched<GatherReduce_Cpp>(new GatherReduce_Cpp{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[1]}, N, W, heavyIter);
-            double m3 = CSched<GatherReduce_SIMD_PF>(new GatherReduce_SIMD_PF{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[2]}, N, W, heavyIter);
-            double m4 = CSchedFor<GatherReduce_SIMD_For>(new GatherReduce_SIMD_For{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[3]}, N, W, heavyIter);
-            double m5 = CIJob(new GatherReduce_SIMD_IJob{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[4],Count=N}, W, heavyIter);
-            double m6 = CSched<GatherReduce_ISPC>(new GatherReduce_ISPC{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=rp[5]}, N, W, heavyIter);
-            PrintRow("5_GatherReduce", m1, m2, m3, m4, m5, m6);
+            // 5
+            T("GatherReduce", H,
+                ()=>Ij(new GatherReduce_CSharp_Job{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p0,Count=N},W,H),
+                ()=>Fo(new GatherReduce_CSharp_For{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p1},N,W,H),
+                ()=>Pf(new GatherReduce_CSharp_PF{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p2},N,W,H),
+                ()=>Ij(new GatherReduce_Cpp_Job{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p0,Count=N},W,H),
+                ()=>Fo(new GatherReduce_Cpp_For{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p1},N,W,H),
+                ()=>Pf(new GatherReduce_Cpp_PF{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p2},N,W,H),
+                ()=>Ij(new GatherReduce_SIMD_Job{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p3,Count=N},W,H),
+                ()=>Fo(new GatherReduce_SIMD_For{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p4},N,W,H),
+                ()=>Pf(new GatherReduce_SIMD_PF{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p5},N,W,H),
+                ()=>Pf(new GatherReduce_ISPC_PF{QueryX=nQx,QueryY=nQy,DataX=nDx,DataY=nDy,Index=nIx,Result=p0},N,W,H));
 
-            Console.WriteLine("-".PadRight(90, '-'));
-            Console.WriteLine("  C#=CSharp Execute | C++=IJobPF Schedule | SIMDPF=IJobPF Schedule");
-            Console.WriteLine("  SIMDFor=IJobFor Schedule | IJob=Execute | ISPC=IJobPF Schedule");
+            Console.WriteLine("-".PadRight(105, '-'));
+            Console.WriteLine("  Job=Execute | For=Schedule | PF=Schedule(64) | ISPC only PF");
             Console.WriteLine();
-            for (int i = 0; i < 6; i++) rp[i].Dispose();
         }
 
-        static void PrintRow(string name, params double[] v)
-        { Console.WriteLine($"  {name,-20} {v[0],8:F3}{v[1],8:F3}{v[2],8:F3}{v[3],8:F3}{v[4],8:F3}{v[5],8:F3}"); }
+        static NativeArray<float> NA(float[] d) => new NativeArray<float>(d, Allocator.Persistent);
+        static NativeArray<float> NA(int n) => new NativeArray<float>(n, Allocator.Persistent);
+        static NativeArray<int> NI(int[] d) => new NativeArray<int>(d, Allocator.Persistent);
+        static float[] GF(int n, Random r) { var d = new float[n]; for (int i=0;i<n;i++) d[i]=(float)(r.NextDouble()*200-100); return d; }
 
-        static float[] GenFloats(int n, Random r) { var d = new float[n]; for (int i=0;i<n;i++) d[i]=(float)(r.NextDouble()*200-100); return d; }
+        static double Pf<T>(T j, int n, int w, int t) where T : struct, IJobParallelFor
+        { for (int i=0;i<w;i++) j.Schedule(n,64).Complete(); var s=Stopwatch.StartNew(); for (int i=0;i<t;i++){j.Schedule(n,64).Complete();} s.Stop(); return s.Elapsed.TotalMilliseconds/t; }
 
-        static double CCSharp<T>(T job, int n, int w, int it) where T : struct, IJobParallelFor
-        { for (int i=0;i<w;i++) for (int j=0;j<n;j++) job.Execute(j); var s=Stopwatch.StartNew(); for (int t=0;t<it;t++) for (int i=0;i<n;i++) job.Execute(i); s.Stop(); return s.Elapsed.TotalMilliseconds/it; }
+        static double Fo<T>(T j, int n, int w, int t) where T : struct, IJobFor
+        { for (int i=0;i<w;i++) j.Schedule(n).Complete(); var s=Stopwatch.StartNew(); for (int i=0;i<t;i++){j.Schedule(n).Complete();} s.Stop(); return s.Elapsed.TotalMilliseconds/t; }
 
-        static double CSched<T>(T job, int n, int w, int it) where T : struct, IJobParallelFor
-        { for (int i=0;i<w;i++) job.Schedule(n,64).Complete(); var s=Stopwatch.StartNew(); for (int t=0;t<it;t++){job.Schedule(n,64).Complete();} s.Stop(); return s.Elapsed.TotalMilliseconds/it; }
-
-        static double CSchedFor<T>(T job, int n, int w, int it) where T : struct, IJobFor
-        { for (int i=0;i<w;i++) job.Schedule(n).Complete(); var s=Stopwatch.StartNew(); for (int t=0;t<it;t++){job.Schedule(n).Complete();} s.Stop(); return s.Elapsed.TotalMilliseconds/it; }
-
-        static double CIJob<T>(T job, int w, int it) where T : struct, IJob
-        { for (int i=0;i<w;i++) job.Execute(); var s=Stopwatch.StartNew(); for (int t=0;t<it;t++) job.Execute(); s.Stop(); return s.Elapsed.TotalMilliseconds/it; }
+        static double Ij<T>(T j, int w, int t) where T : struct, IJob
+        { for (int i=0;i<w;i++) j.Execute(); var s=Stopwatch.StartNew(); for (int i=0;i<t;i++) j.Execute(); s.Stop(); return s.Elapsed.TotalMilliseconds/t; }
     }
 }
