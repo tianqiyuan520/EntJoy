@@ -386,6 +386,13 @@ namespace NativeTranspiler.Analyzer
                             .Replace("##TMP##", "n_cmp_ge_");
                         string goodName = $"__good_{_labelCounter++}";
                         AppendLine($"simd_mask {goodName} = {goodExpr};");
+                        // ★ Combine with previous mask to narrow unfound lanes
+                        string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
+                        if (prev != "simd_mask::all_true()")
+                        {
+                            string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
+                            AppendLine($"{goodName} = {combined};");
+                        }
                         _currentMask = goodName;
                         AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
                         savedMask = goodName;
@@ -1384,7 +1391,7 @@ namespace NativeTranspiler.Analyzer
                             ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}.Length - 1))"
                             : indexExpr;
                         if (elemCppType.Contains("float2"))
-                            return $"simd_value<float2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
+                            return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v), simd_value<float>::gathfy(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v) }}";
                         if (elemCppType.Contains("int2"))
                             return $"simd_value<EntJoy::Mathematics::int2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
                         return $"simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v)";
@@ -1425,7 +1432,7 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
-                    return $"simd_value<{elemCppType}>::gather({baseExpr}_ptr, {safeIdx})";
+                    return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf({baseExpr}_ptr, {safeIdx}.v), simd_value<float>::gathfy({baseExpr}_ptr, {safeIdx}.v) }}";
                 if (elemCppType.Contains("int2"))
                     return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}_ptr, {safeIdx})";
                 if (elemCppType == "float")
