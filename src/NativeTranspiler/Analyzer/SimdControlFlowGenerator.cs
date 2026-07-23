@@ -500,7 +500,7 @@ namespace NativeTranspiler.Analyzer
             _indent++;
             AppendLine($"int __mask_{sid} = n_mask_to_bitmask(({_currentMask}).m);");
 
-            foreach (var name in referencedVars)
+            foreach (var name in writtenVars)
             {
                 string ct = _simdVaryingCppType[name];
                 if (ct.Contains("float2"))
@@ -605,8 +605,8 @@ namespace NativeTranspiler.Analyzer
             _indent--;
             AppendLine("}"); // end for(__lane)
 
-            // --- 6. Merge phase: reload buffers → SIMD registers ---
-            foreach (var name in referencedVars)
+            // --- 6. Merge phase: reload buffers→ SIMD registers ---
+            foreach (var name in writtenVars)
             {
                 string ct = _simdVaryingCppType[name];
                 if (ct.Contains("float2"))
