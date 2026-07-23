@@ -187,24 +187,23 @@ namespace NativeTranspiler.Analyzer
             var type = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
             var ispcType = ToIspcType(cppType);
+            // ISPC 不支持在逗号声明中引用同列表的兄弟变量（如 float dx=x, dy=y, d=dx*dx; 中 d 看不到 dx/dy）
+            // 每个变量独立声明，以分号结束
             for (int i = 0; i < localDecl.Declaration.Variables.Count; i++)
             {
                 var variable = localDecl.Declaration.Variables[i];
-                if (i > 0) _builder.Append(", ");
-                if (i == 0)
-                {
-                    if (_useUniformVars)
-                        _builder.Append("uniform ");
-                    _builder.Append(ispcType);
-                }
-                _builder.Append(' ').Append(variable.Identifier.Text);
+                if (i > 0) { _builder.AppendLine(); AppendIndent(); }
+                if (_useUniformVars)
+                    _builder.Append("uniform ");
+                _builder.Append(ispcType).Append(' ').Append(variable.Identifier.Text);
                 if (variable.Initializer != null)
                 {
                     _builder.Append(" = ");
                     TranslateExpression(variable.Initializer.Value);
                 }
+                _builder.Append(';');
             }
-            _builder.AppendLine(";");
+            _builder.AppendLine();
         }
 
         protected override void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)
