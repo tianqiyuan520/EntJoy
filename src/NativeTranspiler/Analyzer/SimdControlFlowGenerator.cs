@@ -82,6 +82,10 @@ namespace NativeTranspiler.Analyzer
         internal string _sentinelVal = "";
         // Track goto targets for dead label elimination (suppress labels in hot paths)
         private readonly HashSet<string> _gotoTargets = new();
+        // Reduction folding: when set, TranslateAssignment uses n_min_ps/n_max_ps instead of blend
+        private string _foldReduceFn = null;
+        // Variables whose last value came from a clamped gather — skip redundant clamp
+        private readonly HashSet<string> _clampedVars = new();
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -139,6 +143,17 @@ namespace NativeTranspiler.Analyzer
                 if (fs.Declaration != null)
                     foreach (var v in fs.Declaration.Variables)
                         _forLoopVars.Add(v.Identifier.Text);
+
+            // ★ Prescan: find variables assigned from gather/gathf with clamp (skip redundant clamp)
+            _clampedVars.Clear();
+            foreach (var assign in body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                if (assign.Left is IdentifierNameSyntax lhs && assign.Right is InvocationExpressionSyntax inv)
+                    if (IsGatherCall(inv))
+                        _clampedVars.Add(lhs.Identifier.Text);
+            foreach (var decl in body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in decl.Declaration.Variables)
+                    if (v.Initializer?.Value is InvocationExpressionSyntax inv2 && IsGatherCall(inv2))
+                        _clampedVars.Add(v.Identifier.Text);
 
             // ★ Enhanced: reduction loops use count-loop, only non-reduction varying → per-lane
             if (HasVaryingNonReductionLoop(body))
@@ -586,6 +601,17 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
+                        // ★ Folding: if (d < best) best = d → n_min_ps / n_max_ps
+                        if ((isAllTrue || savedMaskEmitted)
+                            && TryFoldReduction(condExpr, current.Statement, out var foldFn))
+                        {
+                            _foldReduceFn = foldFn;
+                            GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                            _foldReduceFn = null;
+                            current = null;
+                            break; // skip mask push/pop
+                        }
+
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
 
@@ -682,6 +708,27 @@ namespace NativeTranspiler.Analyzer
             if (stmt is BlockSyntax blk && blk.Statements.Count == 0) return true;
             if (stmt is EmptyStatementSyntax) return true;
             return false;
+        }
+
+        /// <summary>
+        /// Detect if this if-statement is a simple reduction pattern like if(d<best) best=d
+        /// that can be folded to n_min_ps/n_max_ps instead of mask+blend.
+        /// </summary>
+        private static bool TryFoldReduction(string condExpr, StatementSyntax body, out string foldFn)
+        {
+            foldFn = null;
+            // Condition must be simple comparison: simd_mask{ n_cmp_lt_ps(lhs.v, rhs.v) }
+            bool isLt = condExpr.Contains("n_cmp_lt_ps(");
+            bool isGt = condExpr.Contains("n_cmp_gt_ps(");
+            if (!isLt && !isGt) return false;
+            foldFn = isLt ? "n_min_ps" : "n_max_ps";
+
+            // Body must be a block with single statement that is an assignment
+            var stmts = body is BlockSyntax blk ? blk.Statements : new SyntaxList<StatementSyntax>(body);
+            if (stmts.Count != 1) return false;
+            if (!(stmts[0] is ExpressionStatementSyntax ess) || !(ess.Expression is AssignmentExpressionSyntax))
+                return false;
+            return true;
         }
 
         /// <summary>
@@ -1689,8 +1736,15 @@ namespace NativeTranspiler.Analyzer
 
                 // ★ Safety clamp for gather: when in mask context, clamp indices to
                 //   [0, arr_length-1] to prevent AVX2 unmasked gather OOB.
+                //   Skip if index variable was already clamped by a prior gather.
                 string safeIdx;
-                if (_inVaryingReductionLoop && _hoistedSafeMaxVar != null && baseExpr == _hoistedSafeMaxExpr)
+                if (elementAccess.ArgumentList?.Arguments.Count > 0
+                    && elementAccess.ArgumentList.Arguments[0].Expression is IdentifierNameSyntax idxId
+                    && _clampedVars.Contains(idxId.Identifier.Text))
+                {
+                    safeIdx = indexExpr; // already clamped by prior gather
+                }
+                else if (_inVaryingReductionLoop && _hoistedSafeMaxVar != null && baseExpr == _hoistedSafeMaxExpr)
                 {
                     // Varying reduction loop: index pre-clamped to >=0, use hoisted broadcast
                     safeIdx = $"simd_min({indexExpr}, {_hoistedSafeMaxVar})";
@@ -2384,6 +2438,15 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            // ★ Reduction folding: return n_min_ps/n_max_ps instead of blend
+            if (op == "=" && _foldReduceFn != null)
+            {
+                string fn = _foldReduceFn;
+                _foldReduceFn = null;
+                // Both operands are simd_value<T>, unwrap .v for raw n_float/n_int
+                return $"{lhs} = simd_value<float>{{ {fn}({lhs}.v, {rhs}.v) }}";
+            }
+
             // ★ CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
             //   variable must use blend() to preserve inactive lanes.
             //   Without this, ALL lanes overwrite = lanes where condition is false lose their data.
@@ -2454,6 +2517,16 @@ namespace NativeTranspiler.Analyzer
             if (cppType == "bool")
                 return "simd_value<int>";
             return null;
+        }
+
+        /// <summary>Check if an invocation is a gather/gathf call (produces clamped indices).</summary>
+        private static bool IsGatherCall(InvocationExpressionSyntax inv)
+        {
+            if (inv.Expression is IdentifierNameSyntax id)
+                return id.Identifier.Text == "gather" || id.Identifier.Text == "gathf";
+            if (inv.Expression is MemberAccessExpressionSyntax ma)
+                return ma.Name.Identifier.Text == "gather" || ma.Name.Identifier.Text == "gathf";
+            return false;
         }
 
         private static bool IsFloat2Type(string cppType)
