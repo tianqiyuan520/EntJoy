@@ -1,5 +1,4 @@
-// NativeSIMD_math.h — SIMD vector math via SLEEF (cross-platform sin/cos/log/exp/...)
-// Uses SLEEF as git submodule at src/NativeDll/sleef/
+// NativeSIMD_math.h — SIMD vector math (inline AVX2 + per-lane scalar fallbacks)
 // Precision level controlled by -DSIMD_MATH_PRECISION=1|2|3
 //   1 = Fastest (~3.5 ULP, game physics/animation quality)
 //   2 = High   (~1.0 ULP)
@@ -7,39 +6,9 @@
 #pragma once
 #include "NativeSIMD.h"
 
-// SLEEF link: CMakeLists.txt compiles sleef_wrapper.cpp which wraps SLEEF
-// with predictable `sleef_sin_ps`, `sleef_cos_ps` etc. function names.
-// These are C-linkage functions that resolve through the sleef libraries.
-// If HAS_SLEEF=0, native fallbacks uses per-lane scalar loops.
-#pragma once
-#include "NativeSIMD.h"
-
-// Wrapper functions defined in sleef_wrapper.cpp. When HAS_SLEEF=0,
-// these are replaced by the per-lane fallbacks below.
-#if HAS_SLEEF
-extern "C" {
-  n_float sleef_sin_ps(n_float);
-  n_float sleef_cos_ps(n_float);
-  void   sleef_sincos_ps(n_float, n_float*, n_float*);
-  n_float sleef_tan_ps(n_float);
-  n_float sleef_asin_ps(n_float);
-  n_float sleef_acos_ps(n_float);
-  n_float sleef_atan_ps(n_float);
-  n_float sleef_atan2_ps(n_float, n_float);
-  n_float sleef_sinh_ps(n_float);
-  n_float sleef_cosh_ps(n_float);
-  n_float sleef_tanh_ps(n_float);
-  n_float sleef_exp_ps(n_float);
-  n_float sleef_log_ps(n_float);
-  n_float sleef_log10_ps(n_float);
-  n_float sleef_pow_ps(n_float, n_float);
-}
-#endif
-
 // ================================================================
-// Inline AVX2 polynomial implementations (from SLEEF xsinf/xcosf/xlogf)
-// Zero function-call overhead — the compiler inlines everything.
-// Fall-through to SLEEF or per-lane scalar on other platforms.
+// Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
+// Other platforms fall through to per-lane scalar fallbacks below.
 // ================================================================
 #if defined(NSIMD_AVX2)
 
@@ -131,8 +100,8 @@ static inline n_float _n_log_avx2(n_float d) {
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
     #define N_LOG(a)     _n_log_avx2(a)
-    // All other math functions still go through SLEEF
-  #elif HAS_SLEEF
+    // All other math functions: per-lane scalar fallback
+  #else
     #define N_SIN(a)     sleef_sin_ps(a)
     #define N_COS(a)     sleef_cos_ps(a)
     #define N_SINCOS(a,s,c) sleef_sincos_ps(a,s,c)
@@ -148,32 +117,12 @@ static inline n_float _n_log_avx2(n_float d) {
     #define N_LOG(a)     sleef_log_ps(a)
     #define N_LOG10(a)   sleef_log10_ps(a)
     #define N_POW(a,b)   sleef_pow_ps(a,b)
-  #else
-    // Non-AVX2 + no SLEEF: fallback section handles via #ifndef guards
   #endif
-  // No #else — #ifndef guards below provide per-lane scalar fallback
+  // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
 
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
-
-  #if HAS_SLEEF
-    #define N_SIN(a)     sleef_sin_ps(a)
-    #define N_COS(a)     sleef_cos_ps(a)
-    #define N_SINCOS(a,s,c) sleef_sincos_ps(a,s,c)
-    #define N_TAN(a)     sleef_tan_ps(a)
-    #define N_ASIN(a)    sleef_asin_ps(a)
-    #define N_ACOS(a)    sleef_acos_ps(a)
-    #define N_ATAN(a)    sleef_atan_ps(a)
-    #define N_ATAN2(a,b) sleef_atan2_ps(a,b)
-    #define N_SINH(a)    sleef_sinh_ps(a)
-    #define N_COSH(a)    sleef_cosh_ps(a)
-    #define N_TANH(a)    sleef_tanh_ps(a)
-    #define N_EXP(a)     sleef_exp_ps(a)
-    #define N_LOG(a)     sleef_log_ps(a)
-    #define N_LOG10(a)   sleef_log10_ps(a)
-    #define N_POW(a,b)   sleef_pow_ps(a,b)
-  #endif
-  // No #else — #ifndef guards below provide per-lane scalar fallback
+  // No SIMD path — #ifndef guards below provide per-lane scalar fallback
 
 // ===== IEEE (exact scalar) =====
 #else
