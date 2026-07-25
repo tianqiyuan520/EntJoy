@@ -2017,11 +2017,12 @@ namespace NativeTranspiler.Analyzer
             }
             catch (Exception ex)
             {
-                // Fallback: close the batch loop and emit scalar code WITHOUT prelude
+                                // Close the incomplete SIMD batch loop
                 sb.AppendLine("        __simd_exit: ;");
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
-                // Scalar remainder (strip duplicate pointer declarations)
+                // Fallback scalar body
+// Scalar remainder (strip duplicate pointer declarations)
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
                 var methodSyntax = executeMethod != null ? SymbolHelper.GetMethodSyntax(executeMethod) : null;
                 if (methodSyntax?.Body != null)

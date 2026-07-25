@@ -1487,15 +1487,31 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     // Uniform local — emit as scalar
-                    var typeInfo = _semanticModel.GetTypeInfo(stmt.Declaration.Type);
-                    string cppType = typeInfo.Type != null
-                        ? NativeTranspiler.MapCSharpTypeToCpp(typeInfo.Type)
-                        : "int";
+                    // Try semantic model first (may fail on SyntaxFactory-created AST nodes)
+                    string cppType = "float";
+                    try
+                    {
+                        var typeInfo = _semanticModel.GetTypeInfo(stmt.Declaration.Type);
+                        if (typeInfo.Type != null)
+                            cppType = NativeTranspiler.MapCSharpTypeToCpp(typeInfo.Type);
+                    }
+                    catch
+                    {
+                        // Fallback: use type from variable analyzer or default to "float"
+                        if (_variables.TryGetValue(name, out var vInfo) && !string.IsNullOrEmpty(vInfo.CppType))
+                            cppType = vInfo.CppType;
+                        else if (stmt.Declaration.Type is PredefinedTypeSyntax pts)
+                            cppType = pts.Keyword.Text; // "float", "int", "double", etc.
+                    }
 
                     if (variable.Initializer != null)
                     {
                         string initExpr = TranslateExpression(variable.Initializer.Value);
-                        AppendLine($"{cppType} {name} = {initExpr};");
+                        // Uniform local: if initializer is a SIMD register expression, extract lane 0
+                        if (initExpr.StartsWith("simd_"))
+                            AppendLine($"{cppType} {name} = n_extract_lane_f32({initExpr}.v, 0);");
+                        else
+                            AppendLine($"{cppType} {name} = {initExpr};");
                     }
                     else
                     {
@@ -1721,6 +1737,39 @@ namespace NativeTranspiler.Analyzer
             if ((memberName == "x" || memberName == "y") && isVaryingFloat2)
             {
                 return $"{objExpr}.{memberName}";
+            }
+
+            // ★ Struct field gather result: n_gather_ps already returns the component value.
+            //   For .x on a float2 field gather, just return the gather (it's already x).
+            //   For .y, we need the gather at offset+1 (y is at +4 bytes).
+            if ((memberName == "x" || memberName == "y") && objExpr.Contains("n_gather_ps<"))
+            {
+                if (memberName == "y")
+                {
+                    // .y on float2 field: gather with +1 float offset
+                    // Replace "(&arr[0].field)" with "((const float*)(&arr[0].field) + 1)"
+                    string modified = objExpr.Replace(
+                        "n_gather_ps<", "n_gather_ps<");
+                    // Actually simpler: just rewrite the entire expression for y:
+                    // Keep the same gather but advance the base pointer by 1 float
+                    int ptrIdx = objExpr.IndexOf("((const float*)");
+                    if (ptrIdx >= 0)
+                    {
+                        int closeIdx = objExpr.IndexOf(')', ptrIdx);
+                        if (closeIdx >= 0)
+                        {
+                            modified = objExpr.Substring(0, ptrIdx) +
+                                "((const float*)((const float*)" +
+                                objExpr.Substring(ptrIdx + 15, closeIdx - ptrIdx - 15) +
+                                " + 1)" +
+                                objExpr.Substring(closeIdx + 1);
+                            return modified;
+                        }
+                    }
+                    return $"simd_value<float>{{ {objExpr.Replace("n_gather_ps<", "n_gather_ps<")} }}"; // fallback
+                }
+                // For .x: the n_gather_ps already reads at the field offset, returning x component
+                return objExpr;
             }
 
             // ★ Check for hoisted uniform broadcast (pre-broadcast once, reuse in SIMD)
