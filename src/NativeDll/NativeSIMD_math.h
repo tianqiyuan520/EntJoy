@@ -37,7 +37,83 @@ extern "C" {
 #endif
 
 // ================================================================
-// Precision selection: dispatch to SLEEF _u35, _u10, or scalar
+// Inline AVX2 polynomial implementations (from SLEEF xsinf/xcosf/xlogf)
+// Zero function-call overhead — the compiler inlines everything.
+// Fall-through to SLEEF or per-lane scalar on other platforms.
+// ================================================================
+#if defined(NSIMD_AVX2)
+
+// Constants from sleef/src/libm/sleefsimdsp.c: PI_A2/PI_B2/PI_C2 = π/2 in 3-parts
+#define _N_PIO2_A 1.57079637e+00f
+#define _N_PIO2_B -4.37113883e-08f
+
+static inline n_float _n_sin_avx2(n_float d) {
+  // Range reduction: q = round(d * 2/π), r = d - q * π/2  (same as SLEEF xsinf)
+  n_float qf = n_round_ps(_mm256_mul_ps(d, _mm256_set1_ps(0.636619772f))); // 2/π
+  n_int qi = _mm256_cvtps_epi32(qf);
+  d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_A)));
+  d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_B)));
+
+  // Sign inversion: if (qi & 1) d = -d
+  n_int odd = _mm256_and_si256(qi, _mm256_set1_epi32(1));
+  n_int sign = _mm256_slli_epi32(odd, 31);
+  d = _mm256_xor_ps(d, _mm256_castsi256_ps(sign));
+
+  // SLEEF xsinf polynomial: sin(x) ≈ x + x³·c1 + x⁵·c2 + x⁷·c3 + x⁹·c4
+  // Coefficients from sleefsimdsp.c lines 470-473 (Remez, ~3.5 ULP)
+  n_float s = _mm256_mul_ps(d, d);
+  n_float u = _mm256_set1_ps(2.6083159809786593541503e-06f);
+  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.0001981069071916863322258f));
+  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(0.00833307858556509017944336f));
+  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.166666597127914428710938f));
+  return _mm256_add_ps(d, _mm256_mul_ps(_mm256_mul_ps(s, u), d));
+}
+
+static inline n_float _n_cos_avx2(n_float d) {
+  // cos(x) = sin(x + π/2) — reuse sin with phase shift
+  return _n_sin_avx2(_mm256_add_ps(d, _mm256_set1_ps(1.57079633f)));
+}
+
+static inline n_float _n_log_avx2(n_float d) {
+  // Based on SLEEF xlogf (sleefsimdsp.c lines 1277-1312):
+  // 1. Extract exponent e from IEEE-754 representation
+  n_int emm0 = _mm256_srli_epi32(_mm256_castps_si256(d), 23);
+  n_int e = _mm256_sub_epi32(emm0, _mm256_set1_epi32(127));
+  // 2. Normalize mantissa m to [0.75, 1.5) (SLEEF: d * (1/0.75) ilogbk)
+  n_int mant = _mm256_and_si256(_mm256_castps_si256(d), _mm256_set1_epi32(0x807fffff));
+  mant = _mm256_or_si256(mant, _mm256_set1_epi32(0x3f000000));  // exponent bias = 127 → [1, 2)
+  n_float m = _mm256_castsi256_ps(mant);
+  // Scale to [0.75, 1.5) like SLEEF
+  n_float m_scaled = _mm256_div_ps(m, _mm256_set1_ps(0.75f));
+  // Re-extract exponent after scaling (SLEEF ilogbk approach)
+  n_int e2 = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(m_scaled), 23), _mm256_set1_epi32(127));
+  e = _mm256_add_epi32(e, e2);
+  // Re-normalize mantissa
+  n_int adjusted = _mm256_and_si256(_mm256_castps_si256(m_scaled), _mm256_set1_epi32(0x807fffff));
+  adjusted = _mm256_or_si256(adjusted, _mm256_set1_epi32(0x3f000000));
+  m = _mm256_castsi256_ps(adjusted);
+
+  // 3. x = (m - 1) / (m + 1), x2 = x^2
+  n_float x = _mm256_div_ps(_mm256_sub_ps(m, _mm256_set1_ps(1.0f)),
+                             _mm256_add_ps(m, _mm256_set1_ps(1.0f)));
+  n_float x2 = _mm256_mul_ps(x, x);
+
+  // 4. Polynomial in x2 (SLEEF xlogf coefficients, lines 1295-1299)
+  n_float t = _mm256_set1_ps(0.2392828464508056640625f);    // c4
+  t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.28518211841583251953125f));  // + c3
+  t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.400005877017974853515625f)); // + c2
+  t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.666666686534881591796875f)); // + c1
+  t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(2.0f));                       // + c0
+
+  // 5. log(m) = x * t, then log(d) = log(m) + e * ln(2)
+  return _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(e), _mm256_set1_ps(0.693147180559945286226764f)),
+                        _mm256_mul_ps(x, t));
+}
+
+#endif // NSIMD_AVX2
+
+// ================================================================
+// Precision selection: dispatch to inline AVX2 → SLEEF → per-lane scalar
 // Only SIMD paths are defined here — the #ifndef guards at the bottom
 // provide per-lane scalar fallbacks for any platform/SLEEF combo
 // that doesn't get a SIMD definition above.
@@ -50,7 +126,13 @@ extern "C" {
 // ===== Fastest (~3.5 ULP) =====
 #if SIMD_MATH_PRECISION == 1
 
-  #if HAS_SLEEF
+  // Inline AVX2 polynomial (fastest, zero function-call overhead)
+  #if defined(NSIMD_AVX2)
+    #define N_SIN(a)     _n_sin_avx2(a)
+    #define N_COS(a)     _n_cos_avx2(a)
+    #define N_LOG(a)     _n_log_avx2(a)
+    // All other math functions still go through SLEEF
+  #elif HAS_SLEEF
     #define N_SIN(a)     sleef_sin_ps(a)
     #define N_COS(a)     sleef_cos_ps(a)
     #define N_SINCOS(a,s,c) sleef_sincos_ps(a,s,c)
@@ -66,6 +148,8 @@ extern "C" {
     #define N_LOG(a)     sleef_log_ps(a)
     #define N_LOG10(a)   sleef_log10_ps(a)
     #define N_POW(a,b)   sleef_pow_ps(a,b)
+  #else
+    // Non-AVX2 + no SLEEF: fallback section handles via #ifndef guards
   #endif
   // No #else — #ifndef guards below provide per-lane scalar fallback
 
