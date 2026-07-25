@@ -169,7 +169,8 @@ namespace NativeTranspiler.Analyzer
                     else
                     {
                         var header = CppGenerator.GenerateHeader(method);
-                        var impl = CppGenerator.GenerateImplementation(method, ctx.Compilation, userStructs);
+                        var methodAutoSIMD = AttributeHelper.GetAutoSIMD(method, attrSymbol);
+                        var impl = CppGenerator.GenerateImplementation(method, ctx.Compilation, userStructs, methodAutoSIMD);
 
                         string hPath = Path.Combine(outputDir, $"{baseName}.h");
                         string cppPath = Path.Combine(outputDir, $"{baseName}.cpp");
@@ -184,7 +185,7 @@ namespace NativeTranspiler.Analyzer
                         }
                         var cppFile = baseName + ".cpp";
                         cppFiles.Add(cppFile);
-                        if (HasFastCppMathLib(method, attrSymbol))
+                        if (HasFastCppMathLib(method, attrSymbol) || methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                             fastMathCppFiles.Add(cppFile);
                     }
                 }

@@ -41,6 +41,16 @@ namespace EntJoy {
 			}
 		}
 		inline float Sqrt(float x) { return std::sqrt(x); }
+		inline float Log(float x) {
+			// Fast log(x) for x>0: extract exponent + polynomial on [sqrt(0.5), sqrt(2)]
+			int e;
+			float m = std::frexp(x, &e);
+			if (m < 0.7071067812f) { m *= 2.0f; e--; }
+			float u = (m - 1.0f) / (m + 1.0f);
+			float u2 = u * u;
+			return u * (2.0f + u2 * (0.6666666667f + u2 * (0.4f + u2 * (0.2857142857f)))) + e * 0.69314718056f;
+		}
+		inline float Log10(float x) { return Log(x) * 0.4342944819f; }
 	} // namespace FastMath
 
 	namespace Mathematics {

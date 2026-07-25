@@ -776,6 +776,8 @@ namespace NativeTranspiler.Analyzer
                     "Sin" => "EntJoy::FastMath::Sin",
                     "Cos" => "EntJoy::FastMath::Cos",
                     "Sqrt" => "EntJoy::FastMath::Sqrt",
+                    "Log" => "EntJoy::FastMath::Log",
+                    "Log10" => "EntJoy::FastMath::Log10",
                     _ => null
                 };
                 if (fastFunc != null)
