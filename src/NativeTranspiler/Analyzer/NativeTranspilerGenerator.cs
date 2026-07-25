@@ -841,15 +841,13 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            // NativeDll 核心源文件（固定路径，始终存在）
+            // NativeDll 核心源文件 + 生成的 .cpp（精确列表，按文件名排序保证稳定性）
             sb.AppendLine("add_library(NativeDll SHARED");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/NativeWorkerPool.cpp\"");
             sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
-
-            // 所有生成的 .cpp 各自独立编译（按文件名排序）
             foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
@@ -952,12 +950,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Global compiler flags");
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP)");
+            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
-            foreach (var file in fastMathCppFiles.OrderBy(x => x))
-            {
-                sb.AppendLine($"    set_source_files_properties({file} PROPERTIES COMPILE_FLAGS \"/fp:fast\")");
-            }
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
