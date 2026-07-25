@@ -1717,6 +1717,7 @@ namespace NativeTranspiler.Analyzer
         {
             private readonly bool _skipOuterFor;
             private readonly bool _hasResult;
+            private bool _insideForeach; // 跟踪是否已在 foreach 中，避免嵌套 foreach
 
             public MethodIspcTranslator(SemanticModel semanticModel, IMethodSymbol method,
                 bool skipOuterFor = false, int initialIndent = 0, bool needResult = false, bool useUniformVars = false)
@@ -1725,6 +1726,7 @@ namespace NativeTranspiler.Analyzer
                 _skipOuterFor = skipOuterFor;
                 _indentLevel = initialIndent;
                 _hasResult = needResult;
+                _insideForeach = false;
             }
 
             public string TranslateSingleStatement(StatementSyntax stmt)
@@ -1774,7 +1776,8 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 // 检测标准 for (int i = 0; i < limit; i++) 模式，转换为 ISPC foreach
-                if (forStmt.Declaration != null &&
+                if (!_insideForeach &&
+                    forStmt.Declaration != null &&
                     forStmt.Declaration.Variables.Count == 1 &&
                     forStmt.Condition is BinaryExpressionSyntax binExpr &&
                     binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
@@ -1803,6 +1806,8 @@ namespace NativeTranspiler.Analyzer
                             TranslateExpression(binExpr.Right);
                             _builder.AppendLine(")");
 
+                            var saved = _insideForeach;
+                            _insideForeach = true;
                             if (forStmt.Statement is BlockSyntax block)
                                 TranslateBlock(block, skipOuterBraces: false);
                             else
@@ -1812,12 +1817,13 @@ namespace NativeTranspiler.Analyzer
                                 TranslateStatement(forStmt.Statement);
                                 _indentLevel--;
                             }
+                            _insideForeach = saved;
                             return;
                         }
                     }
                 }
 
-                // 不匹配标准模式，回退到普通 for 循环
+                // 不匹配标准模式，或在 foreach 内：回退到 for (uniform int)
                 base.TranslateForStatement(forStmt);
             }
 

@@ -132,28 +132,28 @@ namespace EntJoySample.AutoSIMDTest
         public static void SimpleReduce_Stc_CSharp(
             NativeArray<float> a, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float best = float.MaxValue; int j = 0; while (j < 100) { float v = a[i * 100 + j]; if (v < best) best = v; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = a[i * 100 + j]; if (v < best) best = v; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile]
         public static void SimpleReduce_Stc_Cpp(
             NativeArray<float> a, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float best = float.MaxValue; int j = 0; while (j < 100) { float v = a[i * 100 + j]; if (v < best) best = v; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = a[i * 100 + j]; if (v < best) best = v; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
         public static void SimpleReduce_Stc_SIMD(
             NativeArray<float> a, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float best = float.MaxValue; int j = 0; while (j < 100) { float v = a[i * 100 + j]; if (v < best) best = v; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = a[i * 100 + j]; if (v < best) best = v; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
         public static void SimpleReduce_Stc_ISPC(
             NativeArray<float> a, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float best = float.MaxValue; int j = 0; while (j < 100) { float v = a[i * 100 + j]; if (v < best) best = v; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float best = float.MaxValue; for (int j = 0; j < 100; j++) { float v = a[i * 100 + j]; if (v < best) best = v; } result[i] = best; }
         }
     }
 }

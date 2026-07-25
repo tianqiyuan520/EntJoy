@@ -134,7 +134,7 @@ namespace EntJoySample.AutoSIMDTest
             NativeArray<float> dataX, NativeArray<float> dataY,
             NativeArray<int> index, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; int j = 0; while (j < 50) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; for (int j = 0; j < 50; j++) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile]
@@ -143,7 +143,7 @@ namespace EntJoySample.AutoSIMDTest
             NativeArray<float> dataX, NativeArray<float> dataY,
             NativeArray<int> index, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; int j = 0; while (j < 50) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; for (int j = 0; j < 50; j++) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
@@ -152,7 +152,7 @@ namespace EntJoySample.AutoSIMDTest
             NativeArray<float> dataX, NativeArray<float> dataY,
             NativeArray<int> index, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; int j = 0; while (j < 50) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; for (int j = 0; j < 50; j++) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; } result[i] = best; }
         }
 
         [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
@@ -161,7 +161,7 @@ namespace EntJoySample.AutoSIMDTest
             NativeArray<float> dataX, NativeArray<float> dataY,
             NativeArray<int> index, NativeArray<float> result, int count)
         {
-            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; int j = 0; while (j < 50) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; j++; } result[i] = best; }
+            for (int i = 0; i < count; i++) { float qx = queryX[i], qy = queryY[i], best = float.MaxValue; for (int j = 0; j < 50; j++) { int idx = index[i * 50 + j]; float dx = qx - dataX[idx], dy = qy - dataY[idx], d = dx * dx + dy * dy; if (d < best) best = d; } result[i] = best; }
         }
     }
 }
