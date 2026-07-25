@@ -257,11 +257,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var ibody = innerFor.Statement is BlockSyntax ibs ? ibs
                         : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
-                    // Stride analysis + types must be all float (n_load_ps can't load int*)
-                    bool allFloat = ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
-                        .Where(ea => ea.Expression is IdentifierNameSyntax rid && nap.ContainsKey(rid.Identifier.Text))
-                        .All(ea => nap.TryGetValue(((IdentifierNameSyntax)ea.Expression).Identifier.Text, out var t) && t == "float");
-                    if (allFloat && PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
+                    if (PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
                         return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap);
                 }
             }
@@ -353,7 +349,13 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
             sb.AppendLine(string.Format("        for (int {0} = 0; {0} < {1}; {0} += NSIMD_WIDTH) {{", iv, il));
             foreach (var arr in ias)
-                sb.AppendLine(string.Format("            v_best = {0}(v_best, n_load_ps({1}_ptr + base + {2}));", reduceFn, arr, iv));
+            {
+                string elemType = nap.TryGetValue(arr, out var t) ? t : "float";
+                if (elemType == "int")
+                    sb.AppendLine(string.Format("            v_best = {0}(v_best, simd_value<float>{{ n_cvtepi32_ps(n_load_epi32({1}_ptr + base + {2})) }});", reduceFn, arr, iv));
+                else
+                    sb.AppendLine(string.Format("            v_best = {0}(v_best, n_load_ps({1}_ptr + base + {2}));", reduceFn, arr, iv));
+            }
             sb.AppendLine("        }");
             sb.AppendLine("        float lane[NSIMD_WIDTH]; n_store_ps(lane, v_best);");
             sb.AppendLine("        float h = lane[0];");

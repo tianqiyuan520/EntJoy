@@ -731,6 +731,18 @@ static inline n_float n_trunc_ps(n_float a) {
 // ============================================================
 // Float -> int truncation (toward zero)
 // ============================================================
+static inline n_float n_cvtepi32_ps(n_int a) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cvtepi32_ps(a);
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtepi32_ps(a);
+#elif defined(NSIMD_NEON)
+    return vcvtq_f32_s32(a);
+#else
+    return (float)a;
+#endif
+}
+
 static inline n_int n_cvttps_epi32(n_float a) {
 #if defined(NSIMD_AVX2)
     return _mm256_cvttps_epi32(a);
