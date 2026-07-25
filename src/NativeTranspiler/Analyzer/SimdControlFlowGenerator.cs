@@ -86,6 +86,11 @@ namespace NativeTranspiler.Analyzer
         private string _foldReduceFn = null;
         // Variables whose last value came from a clamped gather — skip redundant clamp
         private readonly HashSet<string> _clampedVars = new();
+        // Struct varying locals: localName → (arrayName, elemCppType, indexExpr)
+        // These are struct-typed locals initialized from array[idx] where array is a struct-typed NativeArray.
+        // Instead of creating a SIMD register for the whole struct, field accesses (temp.Field) are
+        // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
+        private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr)> _structVaryingLocals = new();
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -1465,6 +1470,22 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
+                    // Check: struct-typed local initialized from chunk array element access
+                    // e.g., MovePosition position = positions[idx];
+                    // → defer to _structVaryingLocals for field-level decomposition
+                    if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
+                        && structInitEA.Expression is IdentifierNameSyntax structInitArrId
+                        && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
+                        && structInitElemType != "float" && structInitElemType != "int"
+                        && !structInitElemType.Contains("float2") && !structInitElemType.Contains("int2"))
+                    {
+                        string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
+                            ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
+                            : "0";
+                        _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
+                        continue; // Don't emit declaration; field access decomposed at use site
+                    }
+
                     // Uniform local — emit as scalar
                     var typeInfo = _semanticModel.GetTypeInfo(stmt.Declaration.Type);
                     string cppType = typeInfo.Type != null
@@ -1606,6 +1627,10 @@ namespace NativeTranspiler.Analyzer
             if (_boolFields.TryGetValue(name, out var bv))
                 return bv;  // "true" or "false"
 
+            // Deferred struct local (initialized from struct array element access)
+            if (_structVaryingLocals.ContainsKey(name))
+                return name;
+
             // Known variable (from SimdVariableAnalyzer)
             if (_variables.TryGetValue(name, out var info))
             {
@@ -1640,9 +1665,8 @@ namespace NativeTranspiler.Analyzer
         {
             string memberName = memberAccess.Name.Identifier.Text;
 
-            // ★ Struct NativeArray field access: structArray[idx].fieldName
+                        // ★ Struct NativeArray field access: structArray[idx].fieldName
             //   Generate field-level gather with struct stride (ISPC-style AoS pattern).
-            //   Example: positions[i].Value  →  gathf<MovePosition>(positions_ptr, v_i.v)
             if (memberAccess.Expression is ElementAccessExpressionSyntax ea
                 && ea.Expression is IdentifierNameSyntax arrId)
             {
@@ -1651,23 +1675,20 @@ namespace NativeTranspiler.Analyzer
                     && structElemType != "float" && structElemType != "int"
                     && !structElemType.Contains("float2") && !structElemType.Contains("int2"))
                 {
-                    string fieldName = memberName;
-                    string idxExpr = ea.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea.ArgumentList?.Arguments[0]?.Expression) : "0";
-                    VarKind idxKind = VarKind.Uniform;
-                    if (ea.ArgumentList?.Arguments.Count > 0)
-                        idxKind = _varAnalyzer.ClassifyExpression(ea.ArgumentList?.Arguments[0]?.Expression);
-
-                    if (idxKind >= VarKind.Varying)
-                    {
-                        // SIMD gather with struct stride: n_gather_ps<sizeof(T)>((float*)&arr[0].field, idx)
-                        string safeIdx = _currentMask != "simd_mask::all_true()"
-                            ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
-                            : idxExpr;
-                        return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
-                    }
-                    // Uniform index: scalar field access
-                    return $"{arrName}_ptr[{idxExpr}].{fieldName}";
+                    return TranslateStructArrayFieldAccess(arrName, structElemType, memberName,
+                        ea.ArgumentList?.Arguments.Count > 0 ? ea.ArgumentList.Arguments[0].Expression : null);
                 }
+            }
+
+            // ★ Deferred struct local field access: structLocal.fieldName
+            //   Where structLocal was initialized from structArray[idx].
+            //   Example: position.Value  (where position = positions[i])
+            //   → field-level gather with struct stride
+            if (memberAccess.Expression is IdentifierNameSyntax structLocalId
+                && _structVaryingLocals.TryGetValue(structLocalId.Identifier.Text, out var structLocalInfo))
+            {
+                return TranslateStructFieldAccess(structLocalInfo.arrName, structLocalInfo.elemCppType,
+                    memberName, structLocalInfo.indexExpr);
             }
 
             string objExpr = TranslateExpression(memberAccess.Expression);
@@ -2544,6 +2565,36 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            // ★ Deferred struct local field assignment: structLocal.field = rhs
+            //   Where structLocal = structArray[idx]; decompose into per-lane field scatter
+            //   Example: position.Value = expr  →  positions_ptr[v_i].Value = expr (per-lane scatter)
+            if (assign.Left is MemberAccessExpressionSyntax ma3
+                && ma3.Expression is IdentifierNameSyntax structLocalId2
+                && _structVaryingLocals.TryGetValue(structLocalId2.Identifier.Text, out var structLocalAssignInfo))
+            {
+                string fieldName3 = ma3.Name.Identifier.Text;
+                string arrName3 = structLocalAssignInfo.arrName;
+                string idxExpr3 = structLocalAssignInfo.indexExpr;
+                string rhsExpr3 = TranslateExpression(assign.Right);
+                string op3 = assign.OperatorToken.Text;
+
+                // SIMD context: per-lane field scatter
+                // For varying index, generate per-lane scatter to arr_ptr[v_i_lane].field
+                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || _currentMask != "simd_mask::all_true()")
+                {
+                    string extractFn3 = "n_extract_lane_f32";
+                    string combineExpr = op3 == "=" ? rhsExpr3 : $"{idxExpr3} {op3.Replace("=", "")} {rhsExpr3}";
+
+                    if (_currentMask != "simd_mask::all_true()")
+                    {
+                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
+                    }
+                    return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}";
+                }
+                // Uniform index: scalar field access
+                return $"{arrName3}_ptr[{idxExpr3}].{fieldName3} {op3} {rhsExpr3}";
+            }
+
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
@@ -2602,7 +2653,60 @@ namespace NativeTranspiler.Analyzer
             return $"({condition} ? {whenTrue} : {whenFalse})";
         }
 
-        private string TranslateObjectCreation(ObjectCreationExpressionSyntax objCreation)
+        
+
+        /// <summary>
+        /// Translate field access on struct NativeArray with direct element access.
+        /// Handles: structArray[idx].fieldName
+        /// </summary>
+        private string TranslateStructArrayFieldAccess(string arrName, string structElemType, string fieldName, ExpressionSyntax? indexExpr)
+        {
+            if (indexExpr == null)
+                return $"{arrName}_ptr[0].{fieldName}";
+
+            string idxExpr = TranslateExpression(indexExpr);
+            VarKind idxKind = _varAnalyzer.ClassifyExpression(indexExpr);
+
+            if (idxKind >= VarKind.Varying)
+            {
+                string safeIdx = _currentMask != "simd_mask::all_true()"
+                    ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
+                    : idxExpr;
+                return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
+            }
+            return $"{arrName}_ptr[{idxExpr}].{fieldName}";
+        }
+
+        /// <summary>
+        /// Translate field access on a deferred struct local.
+        /// The local was initialized from structArray[idx]; field access becomes
+        /// a field-level gather with struct stride (ISPC-style).
+        /// Handles: structLocal.fieldName  (where structLocal = structArray[idx])
+        /// </summary>
+        private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string idxExpr)
+        {
+            // Check if the index expression is varying (SIMD context)
+            bool isVarying = idxExpr.Contains("v_") || idxExpr == "v_i" || idxExpr.Contains("simd_");
+            // Also check the current mask context
+            if (_currentMask != "simd_mask::all_true()" || isVarying)
+            {
+                string safeIdx = _currentMask != "simd_mask::all_true()"
+                    ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
+                    : idxExpr;
+                return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
+            }
+            return $"{arrName}_ptr[{idxExpr}].{fieldName}";
+        }
+
+        /// <summary>
+        /// Check if a NativeArray element type is a user-defined struct (not SIMD-primitive).
+        /// </summary>
+        private static bool IsStructNativeArrayType(string elemCppType)
+        {
+            return elemCppType != "float" && elemCppType != "int"
+                && !elemCppType.Contains("float2") && !elemCppType.Contains("int2");
+        }
+private string TranslateObjectCreation(ObjectCreationExpressionSyntax objCreation)
         {
             var type = _semanticModel.GetTypeInfo(objCreation).Type;
             string cppType = type != null ? NativeTranspiler.MapCSharpTypeToCpp(type) : "int";
