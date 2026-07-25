@@ -893,31 +893,10 @@ namespace NativeTranspiler.Analyzer
             string csOpStr = stmt.Condition is BinaryExpressionSyntax condCmp
                 && condCmp.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
 
-            AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
-            AppendLine($"int {ivName}_end{endSuffix} = {endExpr};");
-            AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
-            AppendLine("{");
-            _indent++;
-            // simd_i for blend targets (bestIdx = simd_i)
-            AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({ivName});");
-
-            // Within the loop body, use savedMask (it's in scope)
-            string outerMask = _currentMask;
-            _currentMask = savedMask;
-
-            _loopStack.Push(new LoopFrame
-            {
-                TrackerVar = "",
-                IterActiveVar = "",
-                ExitLabel = exitLabel,
-                ContinueLabel = continueLabel
-            });
-
+            // ★ Pre-scan for SIMD loop-invariant hoisting: detect v_i * N patterns
             var bodyBlock = stmt.Statement is BlockSyntax bs
                 ? bs
                 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
-
-            // ★ SIMD loop-invariant hoisting: detect v_i * N patterns (outer SIMD index * constant)
             var hoistVars = new List<(string name, string expr)>();
             foreach (var bin in bodyBlock.DescendantNodes().OfType<BinaryExpressionSyntax>())
             {
@@ -937,9 +916,29 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
             }
-            // Emit hoisted variables before the loop
+            // Emit hoisted variables BEFORE the loop
             foreach (var (hn, hexpr) in hoistVars)
                 AppendLine($"simd_value<int> {hn} = {hexpr};");
+
+            AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
+            AppendLine($"int {ivName}_end{endSuffix} = {endExpr};");
+            AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
+            AppendLine("{");
+            _indent++;
+            // simd_i for blend targets (bestIdx = simd_i)
+            AppendLine($"simd_value<int> simd_{ivName} = simd_value<int>::broadcast({ivName});");
+
+            // Within the loop body, use savedMask (it's in scope)
+            string outerMask = _currentMask;
+            _currentMask = savedMask;
+
+            _loopStack.Push(new LoopFrame
+            {
+                TrackerVar = "",
+                IterActiveVar = "",
+                ExitLabel = exitLabel,
+                ContinueLabel = continueLabel
+            });
 
             int hoistStart = _builder.Length;
             GenerateBlock(bodyBlock, skipBraces: false);
