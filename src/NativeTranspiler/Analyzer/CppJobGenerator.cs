@@ -1965,7 +1965,7 @@ namespace NativeTranspiler.Analyzer
                     return;
                 }
 
-                                // 2. Generate C++ prelude// 3. Generate C++ prelude
+                                // 2. Generate C++ prelude
                 foreach (var (name, elemType, compIdx) in chunkArrays)
                 {
                     sb.AppendLine($"    auto* RESTRICT {name}_ptr = reinterpret_cast<{elemType}*>(__chunkData->requiredComponentArrays[{compIdx}]);");
@@ -1984,14 +1984,46 @@ namespace NativeTranspiler.Analyzer
                 var variables = varAnalyzer.Analyze(fakeMethod);
                 var nativeArrayParams = BuildChunkArrayNativeArrayParams(chunkArrays);
 
-            // 5. Generate SIMD batch loop
-            sb.AppendLine("    int __simd_end = (__entityCount / NSIMD_WIDTH) * NSIMD_WIDTH;");
-            sb.AppendLine("    if (__simd_end > 0)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
-            sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+                // 5. Check for inner loops (nested for-loops in addition to the entity loop).
+                //    If present, use per-lane SIMD wrapping to avoid mixing SIMD registers with
+                //    scalar loop induction variables (ISPC handles this natively via SPMD semantics,
+                //    but our SimdControlFlowGenerator can't mix uniform-bound loops with SIMD-varying data).
+                bool hasInnerLoops = modifiedBody.DescendantNodes().OfType<ForStatementSyntax>().Any();
+                if (hasInnerLoops)
+                {
+                    var scalarTranslator = new CppChunkStatementTranslator(
+                        semanticModel, jobStruct,
+                        CollectChunkNativeArrayTypes(jobStruct, compilation), useFastMath);
+                    string scalarBody = scalarTranslator.Translate(methodSyntax.Body);
+                    scalarBody = WrapEntityLoopSIMD(scalarBody, entityLoopIv, "__entityCount");
+                    // Strip duplicate pointer/length declarations (already emitted in prelude)
+                    scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);?
+?", "");
+                    scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;?
+?", "");
+                    scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;?
+?", "");
+
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
+                    sb.Append("\n");
+                    sb.Append(scalarBody);
+                    sb.AppendLine("}");
+                    return;
+                }
+
+                // 6. Generate SIMD batch loop
+                sb.AppendLine("    int __simd_end = (__entityCount / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                sb.AppendLine("    if (__simd_end > 0)");
+                sb.AppendLine("    {");
+                sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+                sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            simd_value<int> v_i = v_base + si;");
 
             // 6. SimdControlFlowGenerator on modified body
             var simdGen = new SimdControlFlowGenerator(
