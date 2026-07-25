@@ -1456,8 +1456,8 @@ namespace NativeTranspiler.Analyzer
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);
                             _simdVaryingCppType[name] = info.CppType;
-                            // Track clamped gather results for redundant clamp elimination
-                            if (initExpr.Contains("simd_min(") && initExpr.Contains("simd_max("))
+                            // Track clamped gather results: check GENERATED C++ string for clamp pattern
+                            if (initExpr.Contains("simd_min") && initExpr.Contains("simd_max"))
                                 _clampedVars.Add($"v_{name}");
                             AppendLine($"{varType} v_{name} = {initExpr};");
                         }
@@ -2322,13 +2322,27 @@ namespace NativeTranspiler.Analyzer
                 return $"({left} {op} {right})";
             }
 
+            // ★ FMA detection: a*a + b*b → n_fmadd_ps(a, a, n_mul_ps(b, b))
+            if (anyVarying && op == "+" && binary.Left is BinaryExpressionSyntax lmul
+                && lmul.OperatorToken.Text == "*"
+                && binary.Right is BinaryExpressionSyntax rmul
+                && rmul.OperatorToken.Text == "*")
+            {
+                string la = TranslateExpression(lmul.Left);
+                string lb = TranslateExpression(lmul.Right);
+                string ra = TranslateExpression(rmul.Left);
+                string rb = TranslateExpression(rmul.Right);
+                if (la == lb && ra == rb)
+                    return $"simd_value<float>{{ n_fmadd_ps({la}.v, {la}.v, n_mul_ps({ra}.v, {ra}.v)) }}";
+            }
+
             // At least one varying — SIMD arithmetic
             string simdOp = op switch
             {
                 "+" => "+",
                 "-" => "-",
                 "*" => "*",
-                "/" => "/",  // Not overloaded in simd_value — will use scalar division broadcast
+                "/" => "/",
                 _ => "+"
             };
 
