@@ -1413,6 +1413,9 @@ namespace NativeTranspiler.Analyzer
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);
                             _simdVaryingCppType[name] = info.CppType;
+                            // Track clamped gather results for redundant clamp elimination
+                            if (initExpr.Contains("simd_min(") && initExpr.Contains("simd_max("))
+                                _clampedVars.Add($"v_{name}");
                             AppendLine($"{varType} v_{name} = {initExpr};");
                         }
                     }
@@ -1740,7 +1743,7 @@ namespace NativeTranspiler.Analyzer
                 string safeIdx;
                 if (elementAccess.ArgumentList?.Arguments.Count > 0
                     && elementAccess.ArgumentList.Arguments[0].Expression is IdentifierNameSyntax idxId
-                    && _clampedVars.Contains(idxId.Identifier.Text))
+                    && (_clampedVars.Contains(idxId.Identifier.Text) || _clampedVars.Contains("v_" + idxId.Identifier.Text)))
                 {
                     safeIdx = indexExpr; // already clamped by prior gather
                 }
