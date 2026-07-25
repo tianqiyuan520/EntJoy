@@ -916,7 +916,51 @@ namespace NativeTranspiler.Analyzer
             var bodyBlock = stmt.Statement is BlockSyntax bs
                 ? bs
                 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+
+            // ★ SIMD loop-invariant hoisting: detect v_i * N patterns (outer SIMD index * constant)
+            var hoistVars = new List<(string name, string expr)>();
+            foreach (var bin in bodyBlock.DescendantNodes().OfType<BinaryExpressionSyntax>())
+            {
+                if (bin.OperatorToken.Text == "*")
+                {
+                    string constVal = null;
+                    if (bin.Left is IdentifierNameSyntax hid && hid.Identifier.Text == _indexParamName
+                        && bin.Right is LiteralExpressionSyntax lit)
+                        constVal = lit.Token.Text;
+                    else if (bin.Right is IdentifierNameSyntax hid2 && hid2.Identifier.Text == _indexParamName
+                        && bin.Left is LiteralExpressionSyntax lit2)
+                        constVal = lit2.Token.Text;
+                    if (constVal != null)
+                    {
+                        string hn = $"__hoist_{_maskCounter++}";
+                        hoistVars.Add((hn, $"{_simdIndexVar} * {constVal}"));
+                    }
+                }
+            }
+            // Emit hoisted variables before the loop
+            foreach (var (hn, hexpr) in hoistVars)
+                AppendLine($"simd_value<int> {hn} = {hexpr};");
+
+            int hoistStart = _builder.Length;
             GenerateBlock(bodyBlock, skipBraces: false);
+
+            // Replace v_i * N patterns in the generated body with hoisted variables
+            if (hoistVars.Count > 0)
+            {
+                string bodyText = _builder.ToString(hoistStart, _builder.Length - hoistStart);
+                foreach (var (hn, hexpr) in hoistVars)
+                {
+                    // Only replace exact pattern with delimiters: (v_i * N) or v_i * N+space
+                    // Avoids corrupting larger expressions like v_i * 500
+                    bodyText = bodyText.Replace($"({hexpr})", hn);
+                    bodyText = bodyText.Replace($"{hexpr},", $"{hn},");
+                    bodyText = bodyText.Replace($"{hexpr} ", $"{hn} ");
+                    bodyText = bodyText.Replace($"{hexpr})", $"{hn})");
+                    bodyText = bodyText.Replace($"{hexpr};", $"{hn};");
+                }
+                _builder.Length = hoistStart;
+                _builder.Append(bodyText);
+            }
 
             // Exit early when all lanes resolved (sentinel from scalar write pattern)
             if (!string.IsNullOrEmpty(_sentinelVar))
