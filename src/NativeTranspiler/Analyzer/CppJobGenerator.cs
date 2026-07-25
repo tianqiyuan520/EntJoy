@@ -114,6 +114,18 @@ namespace NativeTranspiler.Analyzer
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
                 sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
+            else if (IsEntityJob(jobStruct))
+            {
+                // auto-SIMD 启用时声明独立函数
+                var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+                var autoSIMD = attrSymbol != null ? AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol) : NativeTranspiler.AutoSIMD.Disabled;
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                {
+                    var chunkParams = BuildChunkJobParameters(jobStruct);
+                    var singleFuncName = GetCppJobFunctionName(jobStruct);
+                    sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
+                }
+            }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
                 var batchParams = BuildBatchJobParameters(jobStruct);
@@ -149,12 +161,19 @@ namespace NativeTranspiler.Analyzer
             // IJobChunk: 生成独立 Execute 函数
             if (IsChunkJob(jobStruct))
             {
-                GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                    GenerateChunkFunctionSIMD(jobStruct, compilation, sb, useFastMath, simdMathPrecision);
+                else
+                    GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
             // IJobEntity: 无独立 Execute，循环体内联到 Adapter 中
             else if (IsEntityJob(jobStruct))
             {
-                // IJobEntity Execute 函数体内联在 Adapter 中，此处不生成独立函数
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                {
+                    GenerateEntityFunctionStandard(jobStruct, compilation, sb, useFastMath);
+                }
+                // auto-SIMD 关闭时：不生成独立函数，体量内联到适配器
             }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
@@ -390,11 +409,58 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
+
+            // Pre-translate scalar body
+            string scalarBody = "";
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var translator = new CppStatementTranslator(semanticModel, useFastMath);
+                scalarBody = translator.Translate(methodSyntax.Body);
+            }
+
+            // Generate per-lane SIMD wrapper + remainder loop
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-            sb.AppendLine("    #pragma loop(ivdep)");
-            sb.AppendLine("    #pragma loop(vector)");
-            sb.AppendLine("    #pragma unroll(4)");
-            sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+            sb.AppendLine("    int __simd_end = (__entity_count / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    if (__simd_end > 0)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                int __entity_index = si + lane;");
+            foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
+            {
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
+                string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
+                sb.AppendLine($"                {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+            }
+            // Append scalar body (with return; → break; for per-lane context)
+            bool hasReturn = scalarBody.Contains("return;");
+            if (hasReturn)
+            {
+                sb.AppendLine("                do {");
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append("                    ").AppendLine(line.Replace("return;", "break;"));
+                }
+                sb.AppendLine("                } while(false);");
+            }
+            else
+            {
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append("                ").AppendLine(line);
+                }
+            }
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+
+            // Remainder scalar loop
+            sb.AppendLine("    for (int __entity_index = __simd_end; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("    {");
             foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
             {
@@ -402,21 +468,23 @@ namespace NativeTranspiler.Analyzer
                 string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
                 sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
             }
-
-            if (methodSyntax?.Body != null)
+            if (hasReturn)
             {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppStatementTranslator(semanticModel, useFastMath);
-                var bodyCode = translator.Translate(methodSyntax.Body);
-                foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                sb.AppendLine("        do {");
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                 {
                     if (line.Length == 0) continue;
-                    sb.Append("    ").AppendLine(line);
+                    sb.Append("            ").AppendLine(line.Replace("return;", "break;"));
                 }
+                sb.AppendLine("        } while(false);");
             }
             else
             {
-                sb.AppendLine("        // TODO: Translate IJobEntity Execute body");
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append("        ").AppendLine(line);
+                }
             }
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -555,7 +623,7 @@ namespace NativeTranspiler.Analyzer
         //              新增：适配函数生成（消除 C# 委托桥接）
         // ===================================================================
 
-        private static void AppendEntityBatchAdapter(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        private static void AppendEntityBatchAdapter(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
         {
             var adapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
@@ -592,30 +660,102 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"        {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__batchData->componentArrays[{i}]);");
                 sb.AppendLine($"        __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
-            sb.AppendLine("        int __entity_count = __batchData->entityCount;");
-            sb.AppendLine("        #pragma loop(ivdep)");
-            sb.AppendLine("        #pragma loop(vector)");
-            sb.AppendLine("        #pragma unroll(4)");
-            sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-            sb.AppendLine("        {");
+
+            // Pre-translate scalar body
+            string scalarBody = "";
+            string adaptedBody = "";
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var translator = new CppStatementTranslator(semanticModel, useFastMath);
-                var bodyCode = translator.Translate(methodSyntax.Body);
+                scalarBody = translator.Translate(methodSyntax.Body);
+                // Replace param.Name. references with __entity_param_N_ptr[__entity_index].
+                adaptedBody = scalarBody;
                 foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
                 {
                     string indexedParam = $"__entity_param_{param.i}_ptr[__entity_index]";
-                    bodyCode = Regex.Replace(bodyCode, $@"\b{Regex.Escape(param.p.Name)}\.", indexedParam + ".");
-                }
-
-                foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
-                {
-                    if (line.Length == 0) continue;
-                    sb.Append("            ").AppendLine(line);
+                    adaptedBody = Regex.Replace(adaptedBody, $@"\b{Regex.Escape(param.p.Name)}\.", indexedParam + ".");
                 }
             }
-            sb.AppendLine("        }");
+
+            bool hasReturn = adaptedBody.Contains("return;");
+
+            if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+            {
+                // Per-lane SIMD entity loop
+                sb.AppendLine("        int __entity_count = __batchData->entityCount;");
+                sb.AppendLine("        int __simd_end = (__entity_count / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                sb.AppendLine("        if (__simd_end > 0)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+                sb.AppendLine("            {");
+                sb.AppendLine("                for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+                sb.AppendLine("                {");
+                sb.AppendLine("                    int __entity_index = si + lane;");
+                if (hasReturn)
+                {
+                    sb.AppendLine("                    do {");
+                    foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                    {
+                        string trimmed = line.TrimEnd();
+                        if (trimmed.Length == 0) continue;
+                        sb.AppendLine($"                        {trimmed.Replace("return;", "break;")}");
+                    }
+                    sb.AppendLine("                    } while(false);");
+                }
+                else
+                {
+                    foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                    {
+                        string trimmed = line.TrimEnd();
+                        if (trimmed.Length == 0) continue;
+                        sb.AppendLine($"                        {trimmed}");
+                    }
+                }
+                sb.AppendLine("                }");
+                sb.AppendLine("            }");
+                sb.AppendLine("        }");
+                // Remainder scalar loop
+                sb.AppendLine("        for (int __entity_index = __simd_end; __entity_index < __batchData->entityCount; ++__entity_index)");
+                sb.AppendLine("        {");
+                if (hasReturn)
+                {
+                    sb.AppendLine("            do {");
+                    foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                    {
+                        string trimmed = line.TrimEnd();
+                        if (trimmed.Length == 0) continue;
+                        sb.AppendLine($"                {trimmed.Replace("return;", "break;")}");
+                    }
+                    sb.AppendLine("            } while(false);");
+                }
+                else
+                {
+                    foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                    {
+                        string trimmed = line.TrimEnd();
+                        if (trimmed.Length == 0) continue;
+                        sb.AppendLine($"                {trimmed}");
+                    }
+                }
+                sb.AppendLine("        }");
+            }
+            else
+            {
+                // Scalar entity loop
+                sb.AppendLine("        int __entity_count = __batchData->entityCount;");
+                sb.AppendLine("        #pragma loop(ivdep)");
+                sb.AppendLine("        #pragma loop(vector)");
+                sb.AppendLine("        #pragma unroll(4)");
+                sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+                sb.AppendLine("        {");
+                foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.AppendLine($"            {line}");
+                }
+                sb.AppendLine("        }");
+            }
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
@@ -788,8 +928,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
 
-            // 检查是否为 ISPC job
+            // 检查是否为 ISPC job 和 auto-SIMD
             var attrSymbol = AttributeHelper.GetAttributeSymbol(compilation);
+            var autoSIMD = attrSymbol != null
+                ? AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol)
+                : NativeTranspiler.AutoSIMD.Disabled;
             bool isIspcJob = attrSymbol != null && 
                 AttributeHelper.GetBackendTarget(jobStruct, attrSymbol) == NativeTranspiler.BackendTarget.Ispc;
 
@@ -847,7 +990,7 @@ namespace NativeTranspiler.Analyzer
 
                 if (isEntityJob)
                 {
-                    AppendEntityBatchAdapter(jobStruct, compilation, sb, useFastMath);
+                    AppendEntityBatchAdapter(jobStruct, compilation, sb, useFastMath, autoSIMD);
                 }
                 else
                 {
@@ -884,31 +1027,88 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
                     }
-                    sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-                    sb.AppendLine("    #pragma loop(ivdep)");
-            sb.AppendLine("    #pragma loop(vector)");
-            sb.AppendLine("    #pragma unroll(4)");
-                    sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-                    sb.AppendLine("    {");
-                    foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
-                    {
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                        string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                        sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
-                    }
 
+                    string _scalarBody2 = "";
                     if (methodSyntax?.Body != null)
                     {
-                        var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                        var translator = new CppStatementTranslator(semanticModel, useFastMath);
-                        var bodyCode = translator.Translate(methodSyntax.Body);
-                        foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
-                        {
-                            if (line.Length == 0) continue;
-                            sb.Append("        ").AppendLine(line);
-                        }
+                        var _sm2 = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                        var _tr2 = new CppStatementTranslator(_sm2, useFastMath);
+                        _scalarBody2 = _tr2.Translate(methodSyntax.Body);
                     }
-                    sb.AppendLine("    }");
+                    bool _hasRet2 = _scalarBody2.Contains("return;");
+
+                    if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                    {
+                        sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+                        sb.AppendLine("    int __simd_end = (__entity_count / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                        sb.AppendLine("    if (__simd_end > 0)");
+                        sb.AppendLine("    {");
+                        sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+                        sb.AppendLine("        {");
+                        sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+                        sb.AppendLine("            {");
+                        sb.AppendLine("                int __entity_index = si + lane;");
+                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
+                        {
+                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
+                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
+                            sb.AppendLine($"                {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+                        }
+                        if (_hasRet2)
+                        {
+                            sb.AppendLine("                do {");
+                            foreach (var _l2 in _scalarBody2.Split('\n'))
+                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"                    {_l2.TrimEnd().Replace("return;", "break;")}"); }
+                            sb.AppendLine("                } while(false);");
+                        }
+                        else
+                        {
+                            foreach (var _l2 in _scalarBody2.Split('\n'))
+                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"                {_l2.TrimEnd()}"); }
+                        }
+                        sb.AppendLine("            }");
+                        sb.AppendLine("        }");
+                        sb.AppendLine("    }");
+                        sb.AppendLine("    for (int __entity_index = __simd_end; __entity_index < __chunkData->entityCount; ++__entity_index)");
+                        sb.AppendLine("    {");
+                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
+                        {
+                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
+                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
+                            sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+                        }
+                        if (_hasRet2)
+                        {
+                            sb.AppendLine("        do {");
+                            foreach (var _l2 in _scalarBody2.Split('\n'))
+                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"            {_l2.TrimEnd().Replace("return;", "break;")}"); }
+                            sb.AppendLine("        } while(false);");
+                        }
+                        else
+                        {
+                            foreach (var _l2 in _scalarBody2.Split('\n'))
+                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"            {_l2.TrimEnd()}"); }
+                        }
+                        sb.AppendLine("    }");
+                    }
+                    else
+                    {
+                        sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+                        sb.AppendLine("    #pragma loop(ivdep)");
+                        sb.AppendLine("    #pragma loop(vector)");
+                        sb.AppendLine("    #pragma unroll(4)");
+                        sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+                        sb.AppendLine("    {");
+                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
+                        {
+                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
+                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
+                            sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+                        }
+                        foreach (var _l2 in _scalarBody2.Split('\n'))
+                        { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"        {_l2.TrimEnd()}"); }
+                        sb.AppendLine("    }");
+                    }
                 }
                 else
                 {
@@ -967,17 +1167,27 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"    const {cppType}& {field.Name} = *{field.Name}_ptr;");
                     }
 
-                    // 内联 Execute 函数体（如同 IJobEntity 的做法）
-                    if (methodSyntax?.Body != null)
+                    // Auto-SIMD: 调用独立函数而非内联
+                    if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
-                        var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                        var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                        var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
-                        var bodyCode = translator.Translate(methodSyntax.Body);
-                        foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                        string funcName = GetCppJobFunctionName(jobStruct);
+                        string callArgs = BuildChunkExecuteCallArgs(jobStruct);
+                        sb.AppendLine($"    {funcName}({callArgs});");
+                    }
+                    else
+                    {
+                        // 内联 Execute 函数体（如同 IJobEntity 的做法）
+                        if (methodSyntax?.Body != null)
                         {
-                            if (line.Length == 0) continue;
-                            sb.Append("    ").AppendLine(line);
+                            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                            var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                            var bodyCode = translator.Translate(methodSyntax.Body);
+                            foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                            {
+                                if (line.Length == 0) continue;
+                                sb.Append("    ").AppendLine(line);
+                            }
                         }
                     }
                 }
@@ -1075,13 +1285,23 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    if (methodSyntax?.Body != null)
+                    // IJobChunk: Range adapter inline Execute body
+                    if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
-                        var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                        var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                        var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
-                        foreach (var l in tr.Translate(methodSyntax.Body).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-                            if (l.Length > 0) sb.Append("        ").AppendLine(l);
+                        string funcName = GetCppJobFunctionName(jobStruct);
+                        string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+                        sb.AppendLine($"        {funcName}(&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs});");
+                    }
+                    else
+                    {
+                        if (methodSyntax?.Body != null)
+                        {
+                            var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                            var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                            var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                            foreach (var l in tr.Translate(methodSyntax.Body).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                                if (l.Length > 0) sb.Append("        ").AppendLine(l);
+                        }
                     }
                 }
                 sb.AppendLine("    }");
@@ -1379,6 +1599,535 @@ namespace NativeTranspiler.Analyzer
         public static string GetRangeAdapterFunctionName(INamedTypeSymbol jobStruct)
         {
             return GetCppJobFunctionName(jobStruct) + "_RangeAdapter";
+        }
+
+        // ===================================================================
+        // IJobChunk Auto-SIMD: Preprocess AST
+        // ===================================================================
+
+        /// <summary>
+        /// 预处理 IJobChunk 的 Execute AST 用于 SIMD 生成：
+        /// 1. 收集 chunk 数组声明（GetComponentDataNativeArray/GetComponentDataSpan）
+        /// 2. 找到实体 for-loop
+        /// 3. SyntaxRewriter: 删除 chunk 数组声明、删除实体 for-loop 头、替换 chunk.Count
+        /// </summary>
+        private static (List<(string name, string elemType, int compIndex)> chunkArrays,
+                        string entityLoopIv,
+                        BlockSyntax modifiedBody)
+            PreprocessIJobChunkAST(MethodDeclarationSyntax methodSyntax, SemanticModel semanticModel,
+                                   INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var chunkArrays = new List<(string name, string elemType, int compIndex)>();
+            var chunkArrayNames = new HashSet<string>();
+            string chunkParamName = methodSyntax.ParameterList.Parameters.Count > 0
+                ? methodSyntax.ParameterList.Parameters[0].Identifier.Text
+                : "chunk";
+
+            // 1. Scan for GetComponentDataNativeArray / GetComponentDataSpan calls
+            var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+            foreach (var localDecl in methodSyntax.Body?.DescendantNodes().OfType<LocalDeclarationStatementSyntax>() ?? Enumerable.Empty<LocalDeclarationStatementSyntax>())
+            {
+                foreach (var variable in localDecl.Declaration.Variables)
+                {
+                    if (variable.Initializer?.Value is InvocationExpressionSyntax inv)
+                    {
+                        var symbol = semanticModel.GetSymbolInfo(inv).Symbol as IMethodSymbol;
+                        if (symbol != null &&
+                            symbol.ContainingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                            (symbol.Name == "GetComponentDataNativeArray" || symbol.Name == "GetComponentDataSpan") &&
+                            symbol.TypeArguments.Length > 0)
+                        {
+                            string varName = variable.Identifier.Text;
+                            var compType = symbol.TypeArguments[0] as INamedTypeSymbol;
+                            if (compType != null)
+                            {
+                                int idx = requiredTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, compType));
+                                string elemCppType = NativeTranspiler.MapCSharpTypeToCpp(compType);
+                                chunkArrays.Add((varName, elemCppType, idx));
+                                chunkArrayNames.Add(varName);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Find entity for-loop
+            string entityLoopIv = "";
+            StatementSyntax? loopBody = null;
+            if (methodSyntax.Body != null)
+            {
+                foreach (var stmt in methodSyntax.Body.Statements)
+                {
+                    if (stmt is ForStatementSyntax forStmt &&
+                        forStmt.Declaration?.Variables.Count == 1)
+                    {
+                        var decl = forStmt.Declaration.Variables[0];
+                        string ivName = decl.Identifier.Text;
+
+                        // Check if this loop's body has element access on chunk arrays
+                        bool hasChunkAccess = forStmt.DescendantNodes()
+                            .OfType<ElementAccessExpressionSyntax>()
+                            .Any(ea => ea.Expression is IdentifierNameSyntax id
+                                      && chunkArrayNames.Contains(id.Identifier.Text));
+
+                        if (hasChunkAccess)
+                        {
+                            entityLoopIv = ivName;
+                            loopBody = forStmt.Statement;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 3. Apply SyntaxRewriter (remove chunk decls, for-loop header, replace chunk.Count)
+            var rewriter = new IJobChunkSimdRewriter(chunkArrayNames, chunkParamName, entityLoopIv);
+            var afterFirstPass = methodSyntax.Body != null
+                ? (BlockSyntax)rewriter.Visit(methodSyntax.Body)
+                : methodSyntax.Body;
+
+            return (chunkArrays, entityLoopIv, afterFirstPass!);
+        }
+
+        /// <summary>
+        /// ISPC-style struct field decomposition rewriter.
+        /// Detects the read-modify-write pattern on struct locals from chunk arrays:
+        ///   StructType temp = array[idx];   // local copy
+        ///   temp.Field += ...;               // field mutation
+        ///   array[idx] = temp;               // write back
+        /// Rewrites to direct field access:
+        ///   array[idx].Field += ...;
+        /// This enables SimdControlFlowGenerator to handle struct field access
+        /// via n_gather_ps<sizeof(T)> with struct stride (matching ISPC behavior).
+        /// </summary>
+        
+
+        /// <summary>
+        /// SyntaxRewriter for IJobChunk SIMD preprocessing:
+        /// - Removes chunk array local declarations
+        /// - Replaces chunk.Count with __entityCount
+        /// - Replaces entity for-loop with its body (keeps body, removes for-header)
+        /// </summary>
+        private sealed class IJobChunkSimdRewriter : CSharpSyntaxRewriter
+        {
+            private readonly HashSet<string> _chunkArrayNames;
+            private readonly string _chunkParamName;
+            private readonly string _entityLoopIvName;
+
+            public IJobChunkSimdRewriter(HashSet<string> chunkArrayNames, string chunkParamName, string entityLoopIvName)
+            {
+                _chunkArrayNames = chunkArrayNames;
+                _chunkParamName = chunkParamName;
+                _entityLoopIvName = entityLoopIvName;
+            }
+
+            public override SyntaxNode? VisitLocalDeclarationStatement(LocalDeclarationStatementSyntax node)
+            {
+                foreach (var variable in node.Declaration.Variables)
+                {
+                    if (_chunkArrayNames.Contains(variable.Identifier.Text))
+                        return null; // Remove: this is a chunk array declaration
+                }
+                return base.VisitLocalDeclarationStatement(node);
+            }
+
+            public override SyntaxNode VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
+            {
+                // chunk.Count → __entityCount
+                if (node.Name.Identifier.Text == "Count"
+                    && node.Expression is IdentifierNameSyntax id
+                    && id.Identifier.Text == _chunkParamName)
+                {
+                    return SyntaxFactory.IdentifierName("__entityCount");
+                }
+                return base.VisitMemberAccessExpression(node);
+            }
+
+            public override SyntaxNode? VisitForStatement(ForStatementSyntax node)
+            {
+                if (node.Declaration?.Variables.Count == 1)
+                {
+                    string ivName = node.Declaration.Variables[0].Identifier.Text;
+                    if (ivName == _entityLoopIvName)
+                    {
+                        // Remove for-header, keep body
+                        return node.Statement;
+                    }
+                }
+                return base.VisitForStatement(node);
+            }
+        }
+
+        /// <summary>
+        /// 从 chunkArrayInfo 构建 _nativeArrayParams 字典
+        /// (SimdControlFlowGenerator 用这个来识别 NativeArray 访问)
+        /// </summary>
+        private static Dictionary<string, string> BuildChunkArrayNativeArrayParams(
+            List<(string name, string elemType, int compIndex)> chunkArrays)
+        {
+            var result = new Dictionary<string, string>();
+            foreach (var (name, elemType, _) in chunkArrays)
+                result[name] = elemType;
+            return result;
+        }
+
+        // ===================================================================
+        // IJobChunk Auto-SIMD: Generate SIMD Code
+        // ===================================================================
+
+        /// <summary>
+        /// 生成 IJobChunk 的 Register-Level SIMD Execute 函数体。
+        /// 流程：
+        ///   1. 生成 C++ prelude（_ptr / _length 声明）
+        ///   2. 生成外层 batch loop（for si; v_i = v_base + si）
+        ///   3. SimdControlFlowGenerator on 修改后的 body（无 for-loop 头）
+        ///   4. 标量 remainder 循环
+        /// </summary>
+        private static void GenerateChunkFunctionSIMD(
+            INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb,
+            bool useFastMath, NativeTranspiler.SimdMathPrecision simdMathPrecision)
+        {
+            // Output function signature (same as GenerateChunkFunctionStandard)
+            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var singleFuncName = GetCppJobFunctionName(jobStruct);
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine("{");
+            AppendLocalVariableDeclarations(jobStruct, sb);
+
+            try
+            {
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+                var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+                if (methodSyntax?.Body == null) return;
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+
+                // 1. Preprocess AST
+                var (chunkArrays, entityLoopIv, modifiedBody) =
+                    PreprocessIJobChunkAST(methodSyntax, semanticModel, jobStruct, compilation);
+
+                if (string.IsNullOrEmpty(entityLoopIv) || chunkArrays.Count == 0)
+                {
+                    // Fallback: use scalar translator
+                    var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                    var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                    sb.Append(translator.Translate(methodSyntax.Body));
+                    return;
+                }
+
+                // 2. Check if element types are structs (not SIMD-primitive).
+                //    Use per-lane SIMD wrapping for struct types (matches ISPC pl_dolane pattern).
+                bool hasStructType = chunkArrays.Any(c =>
+                    c.elemType != "float" && c.elemType != "int" &&
+                    !c.elemType.Contains("float2") && !c.elemType.Contains("int2"));
+
+                if (hasStructType)
+                {
+                    var scalarTranslator = new CppChunkStatementTranslator(
+                        semanticModel, jobStruct,
+                        CollectChunkNativeArrayTypes(jobStruct, compilation), useFastMath);
+                    string scalarBody = scalarTranslator.Translate(methodSyntax.Body);
+                    scalarBody = WrapEntityLoopSIMD(scalarBody, entityLoopIv, "__entityCount");
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
+                    sb.Append(scalarBody);
+                    sb.AppendLine("}");
+                    return;
+                }
+
+                // 3. Generate C++ prelude
+                foreach (var (name, elemType, compIdx) in chunkArrays)
+                {
+                    sb.AppendLine($"    auto* RESTRICT {name}_ptr = reinterpret_cast<{elemType}*>(__chunkData->requiredComponentArrays[{compIdx}]);");
+                    sb.AppendLine($"    int {name}_length = __chunkData->entityCount;");
+                }
+                sb.AppendLine("    int __entityCount = __chunkData->entityCount;");
+
+                // 3. Build fake method with virtual int i parameter
+                var newParamList = methodSyntax.ParameterList.AddParameters(
+                    SyntaxFactory.Parameter(SyntaxFactory.Identifier(entityLoopIv))
+                        .WithType(SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.IntKeyword))));
+                var fakeMethod = methodSyntax.WithParameterList(newParamList).WithBody(modifiedBody);
+
+                // 4. Variable analysis
+                var varAnalyzer = new SimdVariableAnalyzer(semanticModel, jobStruct, entityLoopIv);
+                var variables = varAnalyzer.Analyze(fakeMethod);
+                var nativeArrayParams = BuildChunkArrayNativeArrayParams(chunkArrays);
+
+            // 5. Generate SIMD batch loop
+            sb.AppendLine("    int __simd_end = (__entityCount / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    if (__simd_end > 0)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
+            sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+
+            // 6. SimdControlFlowGenerator on modified body
+            var simdGen = new SimdControlFlowGenerator(
+                semanticModel, jobStruct, variables, varAnalyzer,
+                indexParamName: entityLoopIv,
+                simdIndexVar: "v_i",
+                batchOffsetVar: "0",
+                batchLoopVar: "",
+                nativeArrayParams: nativeArrayParams,
+                simdMathPrecision: simdMathPrecision);
+
+            string simdBody = simdGen.Generate(modifiedBody);
+            foreach (var line in simdBody.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    sb.AppendLine($"            {line.TrimEnd()}");
+
+            sb.AppendLine("        __simd_exit: ;");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+
+            // 7. Scalar remainder loop
+            GenerateChunkFunctionRemainder(jobStruct, compilation, sb, useFastMath, chunkArrays, entityLoopIv);
+            }
+            catch (Exception)
+            {
+                // Fallback: use scalar translator
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+                var methodSyntax = executeMethod != null ? SymbolHelper.GetMethodSyntax(executeMethod) : null;
+                if (methodSyntax?.Body != null)
+                {
+                    var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                    var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                    var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                    sb.Append(translator.Translate(methodSyntax.Body));
+                }
+            }
+
+            sb.AppendLine("}");
+        }
+
+        /// <summary>
+        /// 生成 IJobChunk SIMD 的 scalar remainder 循环。
+        /// 复用 CppChunkStatementTranslator 的标量输出，仅修改实体循环起始值为 __simd_end。
+        /// </summary>
+        private static void GenerateChunkFunctionRemainder(
+            INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb,
+            bool useFastMath,
+            List<(string name, string elemType, int compIndex)> chunkArrays,
+            string entityLoopIv)
+        {
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return;
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+
+            var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+            string scalarBody = translator.Translate(methodSyntax.Body);
+
+            // Remove prelude declarations (already emitted by SIMD generator)
+            foreach (var (name, _, _) in chunkArrays)
+            {
+                string ptrDecl = $"auto* RESTRICT {name}_ptr = reinterpret_cast<";
+                int idx = scalarBody.IndexOf(ptrDecl);
+                if (idx >= 0)
+                {
+                    int semiEnd = scalarBody.IndexOf(';', idx);
+                    if (semiEnd >= 0)
+                    {
+                        int lineEnd = scalarBody.IndexOf('\n', semiEnd);
+                        if (lineEnd < 0) lineEnd = scalarBody.Length;
+                        scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
+                    }
+                }
+
+                string lenDecl = $"int {name}_length =";
+                idx = scalarBody.IndexOf(lenDecl);
+                if (idx >= 0)
+                {
+                    int lineEnd = scalarBody.IndexOf('\n', idx);
+                    if (lineEnd < 0) lineEnd = scalarBody.Length;
+                    scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
+                }
+            }
+
+            // Remove __entityCount declaration if present (already emitted)
+            string ecDecl = "int __entityCount = ";
+            int ecIdx = scalarBody.IndexOf(ecDecl);
+            if (ecIdx >= 0)
+            {
+                int ecEnd = scalarBody.IndexOf('\n', ecIdx);
+                if (ecEnd < 0) ecEnd = scalarBody.Length;
+                scalarBody = scalarBody.Remove(ecIdx, ecEnd - ecIdx + 1);
+            }
+
+            // Remove pragma hints (already in SIMD loop or not needed)
+            scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
+            scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
+            scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
+            scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
+            scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
+            scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
+
+            // Change entity loop start from 0 to __simd_end
+            string loopPattern = $"for (int {entityLoopIv} = 0; {entityLoopIv} <";
+            string loopReplacement = $"for (int {entityLoopIv} = __simd_end; {entityLoopIv} <";
+            scalarBody = scalarBody.Replace(loopPattern, loopReplacement);
+
+            sb.Append(scalarBody);
+        }
+
+        /// <summary>
+        /// 生成调用独立 IJobChunk Execute 函数的实参列表。
+        /// 用于适配器中替代内联 Execute 体。
+        /// </summary>
+        private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct)
+        {
+            return $"__chunkData, __requiredComponentTypeIds, {BuildChunkExecuteFieldArgs(jobStruct)}";
+        }
+
+        /// <summary>
+        /// 仅生成字段参数部分（不含 __chunkData 和 __requiredComponentTypeIds）
+        /// </summary>
+        private static string BuildChunkExecuteFieldArgs(INamedTypeSymbol jobStruct)
+        {
+            var args = new List<string>();
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                {
+                    if (field.Type.Name == "NativeList")
+                        args.Add($"{field.Name}_listData");
+                    else
+                    {
+                        args.Add($"{field.Name}_ptr");
+                        args.Add($"{field.Name}_length");
+                    }
+                }
+                else if (field.Type is IPointerTypeSymbol)
+                    args.Add($"{field.Name}_ptr");
+                else
+                    args.Add($"{field.Name}_ptr");
+            }
+            return string.Join(", ", args);
+        }
+
+        /// <summary>
+        /// 为 IJobEntity 的实体循环生成 per-lane SIMD 包装代码。
+        /// 将 "for (int __entity_index = 0; ... < ... ; ...)" 替换为
+        /// per-lane batch + remainder 循环。
+        /// </summary>
+        private static string WrapEntityLoopSIMD(string scalarBodyWithLoop, string entityIndexVar, string entityCountExpr)
+        {
+            string loopStartPattern = $"for (int {entityIndexVar} = 0; {entityIndexVar} <";
+            string loopEndPattern = $"; ++{entityIndexVar})";
+
+            int loopIdx = scalarBodyWithLoop.IndexOf(loopStartPattern);
+            if (loopIdx < 0)
+            {
+                // Try alternate increment pattern
+                loopStartPattern = $"for (int {entityIndexVar} = 0; {entityIndexVar} <";
+                loopEndPattern = $"; {entityIndexVar}++)";
+                loopIdx = scalarBodyWithLoop.IndexOf(loopStartPattern);
+                if (loopIdx < 0)
+                    return scalarBodyWithLoop; // fallback: no entity loop found
+            }
+
+            // Find the bounds expression (between "<" and ";")
+            int condStart = scalarBodyWithLoop.IndexOf('<', loopIdx);
+            int semiPos = scalarBodyWithLoop.IndexOf(';', condStart);
+            string boundExpr = scalarBodyWithLoop.Substring(condStart + 1, semiPos - condStart - 1).Trim();
+
+            // Find the loop body boundaries
+            int openBrace = scalarBodyWithLoop.IndexOf('{', loopIdx);
+            if (openBrace < 0) return scalarBodyWithLoop;
+            int depth = 1;
+            int closeBrace = -1;
+            for (int i = openBrace + 1; i < scalarBodyWithLoop.Length; i++)
+            {
+                if (scalarBodyWithLoop[i] == '{') depth++;
+                else if (scalarBodyWithLoop[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0) { closeBrace = i; break; }
+                }
+            }
+            if (closeBrace < 0) return scalarBodyWithLoop;
+
+            // Extract the loop body content (without braces)
+            string loopBody = scalarBodyWithLoop.Substring(openBrace + 1, closeBrace - openBrace - 1);
+
+            // Remove #pragma lines from body
+            loopBody = Regex.Replace(loopBody, @"#pragma\s+\w+\([^)]*\)\s*\r?\n?", "");
+            loopBody = Regex.Replace(loopBody, @"#pragma\s+unroll\s*\(\s*\d+\s*\)\s*\r?\n?", "");
+
+            bool hasReturn = loopBody.Contains("return;");
+
+            // Build per-lane SIMD section
+            var simdSection = new StringBuilder();
+            simdSection.AppendLine($"    int __simd_end = ({boundExpr} / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            simdSection.AppendLine("    if (__simd_end > 0)");
+            simdSection.AppendLine("    {");
+            simdSection.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
+            simdSection.AppendLine("        {");
+            simdSection.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            simdSection.AppendLine("            {");
+            simdSection.AppendLine($"                int {entityIndexVar} = si + lane;");
+
+            if (hasReturn)
+            {
+                simdSection.AppendLine("                do {");
+                foreach (var line in loopBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    trimmed = trimmed.Replace("return;", "break;");
+                    simdSection.AppendLine($"                    {trimmed}");
+                }
+                simdSection.AppendLine("                } while(false);");
+            }
+            else
+            {
+                foreach (var line in loopBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    simdSection.AppendLine($"                {trimmed}");
+                }
+            }
+            simdSection.AppendLine("            }");
+            simdSection.AppendLine("        }");
+            simdSection.AppendLine("    }");
+
+            // Build remainder loop
+            simdSection.AppendLine($"    for (int {entityIndexVar} = __simd_end; {entityIndexVar} < {boundExpr}; ++{entityIndexVar})");
+            simdSection.AppendLine("    {");
+            if (hasReturn)
+            {
+                simdSection.AppendLine("        do {");
+                foreach (var line in loopBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    trimmed = trimmed.Replace("return;", "break;");
+                    simdSection.AppendLine($"            {trimmed}");
+                }
+                simdSection.AppendLine("        } while(false);");
+            }
+            else
+            {
+                foreach (var line in loopBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    simdSection.AppendLine($"            {trimmed}");
+                }
+            }
+            simdSection.AppendLine("    }");
+
+            // Replace the original for-loop with per-lane SIMD section
+            string beforeLoop = scalarBodyWithLoop.Substring(0, loopIdx);
+            string afterLoop = scalarBodyWithLoop.Substring(closeBrace + 1);
+            return beforeLoop + simdSection.ToString() + afterLoop;
         }
 
         public static string GetEntityBatchAdapterFunctionName(INamedTypeSymbol jobStruct)
