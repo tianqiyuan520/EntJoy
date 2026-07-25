@@ -434,6 +434,21 @@ static inline n_mask n_not_mask(n_mask m) {
 }
 
 // ============================================================
+// Blend: mask ? b : a (cross-platform)
+// ============================================================
+static inline n_float n_blendv_ps(n_float a, n_float b, n_mask mask) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_blendv_ps(a, b, mask);
+#elif defined(NSIMD_SSE4)
+    return _mm_blendv_ps(a, b, mask);
+#elif defined(NSIMD_NEON)
+    return vbslq_f32(mask, b, a);
+#else
+    return (mask != 0) ? b : a;
+#endif
+}
+
+// ============================================================
 // Integer comparison -> mask (for Full-Width SIMD control flow)
 // ============================================================
 
