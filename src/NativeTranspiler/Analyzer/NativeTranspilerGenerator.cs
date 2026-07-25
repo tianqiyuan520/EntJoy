@@ -273,7 +273,8 @@ namespace NativeTranspiler.Analyzer
                         }
                         var cppFile = plainBase + ".cpp";
                         cppFiles.Add(cppFile);
-                        if (HasFastCppMathLib(job, attrSymbol))
+                        var jobAutoSIMD = AttributeHelper.GetAutoSIMD(job, attrSymbol);
+                        if (HasFastCppMathLib(job, attrSymbol) || jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                             fastMathCppFiles.Add(cppFile);
                     }
 

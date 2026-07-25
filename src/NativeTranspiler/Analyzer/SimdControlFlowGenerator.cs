@@ -1639,6 +1639,37 @@ namespace NativeTranspiler.Analyzer
         private string TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             string memberName = memberAccess.Name.Identifier.Text;
+
+            // ★ Struct NativeArray field access: structArray[idx].fieldName
+            //   Generate field-level gather with struct stride (ISPC-style AoS pattern).
+            //   Example: positions[i].Value  →  gathf<MovePosition>(positions_ptr, v_i.v)
+            if (memberAccess.Expression is ElementAccessExpressionSyntax ea
+                && ea.Expression is IdentifierNameSyntax arrId)
+            {
+                string arrName = arrId.Identifier.Text;
+                if (_nativeArrayParams.TryGetValue(arrName, out var structElemType)
+                    && structElemType != "float" && structElemType != "int"
+                    && !structElemType.Contains("float2") && !structElemType.Contains("int2"))
+                {
+                    string fieldName = memberName;
+                    string idxExpr = ea.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea.ArgumentList?.Arguments[0]?.Expression) : "0";
+                    VarKind idxKind = VarKind.Uniform;
+                    if (ea.ArgumentList?.Arguments.Count > 0)
+                        idxKind = _varAnalyzer.ClassifyExpression(ea.ArgumentList?.Arguments[0]?.Expression);
+
+                    if (idxKind >= VarKind.Varying)
+                    {
+                        // SIMD gather with struct stride: n_gather_ps<sizeof(T)>((float*)&arr[0].field, idx)
+                        string safeIdx = _currentMask != "simd_mask::all_true()"
+                            ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
+                            : idxExpr;
+                        return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
+                    }
+                    // Uniform index: scalar field access
+                    return $"{arrName}_ptr[{idxExpr}].{fieldName}";
+                }
+            }
+
             string objExpr = TranslateExpression(memberAccess.Expression);
 
             // Check if the object is a varying float2/int2
@@ -2479,6 +2510,39 @@ namespace NativeTranspiler.Analyzer
 
                     return $"{baseName}_ptr[{idxExpr}] = {rhsExpr}";
                 }
+
+            // ★ Struct NativeArray field assignment: structArray[idx].field = rhs
+            //   Handle positions[i].Value = expr; pattern with per-lane field scatter.
+            if (assign.Left is MemberAccessExpressionSyntax ma
+                && ma.Expression is ElementAccessExpressionSyntax ea2
+                && ea2.Expression is IdentifierNameSyntax id2)
+            {
+                string arrName2 = id2.Identifier.Text;
+                if (_nativeArrayParams.TryGetValue(arrName2, out var saElemType)
+                    && saElemType != "float" && saElemType != "int"
+                    && !saElemType.Contains("float2") && !saElemType.Contains("int2"))
+                {
+                    string fieldName2 = ma.Name.Identifier.Text;
+                    string idxExpr2 = ea2.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea2.ArgumentList?.Arguments[0]?.Expression) : "0";
+                    string rhsExpr2 = TranslateExpression(assign.Right);
+                    VarKind idxKind2 = VarKind.Uniform;
+                    if (ea2.ArgumentList?.Arguments.Count > 0)
+                        idxKind2 = _varAnalyzer.ClassifyExpression(ea2.ArgumentList?.Arguments[0]?.Expression);
+                    VarKind rhsKind2 = _varAnalyzer.ClassifyExpression(assign.Right);
+
+                    if (idxKind2 >= VarKind.Varying)
+                    {
+                        // Per-lane scatter for struct field write (SIMD context)
+                        if (_currentMask != "simd_mask::all_true()")
+                        {
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}}}";
+                        }
+                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}";
+                    }
+                    // Uniform index: scalar field assignment
+                    return $"{id2.Identifier.Text}_ptr[{idxExpr2}].{fieldName2} = {rhsExpr2}";
+                }
+            }
 
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
