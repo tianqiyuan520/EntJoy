@@ -202,6 +202,20 @@ return _mm256_sub_ps(a, b);
 #endif
 }
 
+
+static inline n_float n_div_ps(n_float a, n_float b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_div_ps(a, b);
+#elif defined(NSIMD_AVX)
+    return _mm256_div_ps(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_div_ps(a, b);
+#elif defined(NSIMD_NEON)
+    return vdivq_f32(a, b);
+#else
+    return a / b;
+#endif
+}
 static inline n_float n_mul_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX2)
     return _mm256_mul_ps(a, b);
@@ -320,6 +334,37 @@ return _mm256_max_ps(a, b);
     return vmaxq_f32(a, b);
 #else
     return (a > b) ? a : b;
+#endif
+}
+
+// ============================================================
+// Absolute value & negation (cross-platform)
+// ============================================================
+static inline n_float n_fabs_ps(n_float a) {
+#if defined(NSIMD_AVX2)
+    return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+#elif defined(NSIMD_AVX)
+    return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+#elif defined(NSIMD_SSE4)
+    return _mm_and_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff)));
+#elif defined(NSIMD_NEON)
+    return vabsq_f32(a);
+#else
+    return (a < 0) ? -a : a;
+#endif
+}
+
+static inline n_float n_neg_ps(n_float a) {
+#if defined(NSIMD_AVX2)
+    return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000)));
+#elif defined(NSIMD_AVX)
+    return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000)));
+#elif defined(NSIMD_SSE4)
+    return _mm_xor_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x80000000)));
+#elif defined(NSIMD_NEON)
+    return vnegq_f32(a);
+#else
+    return -a;
 #endif
 }
 
