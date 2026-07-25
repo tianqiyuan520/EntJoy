@@ -212,17 +212,16 @@ namespace NativeTranspiler.Analyzer
             {
                 string iVar = innerFor.Declaration.Variables[0].Identifier.Text;
                 string iLim = ((BinaryExpressionSyntax)innerFor.Condition).Right.GetText().ToString().Trim();
-                if (int.TryParse(iLim, out int ib) && ib <= 512)
+                if (int.TryParse(iLim, out int _))
                 {
                     var ibody = innerFor.Statement is BlockSyntax ibs ? ibs
                         : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
-                    // Only apply inner vectorization when there's a single input array (simple reduction like Reduce)
-                    var readArrays = ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
-                        .Where(ea => ea.Expression is IdentifierNameSyntax rid && nap.ContainsKey(rid.Identifier.Text)
-                            && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
-                        .Select(ea => ((IdentifierNameSyntax)ea.Expression).Identifier.Text).Distinct().ToList();
-                    if (readArrays.Count == 1 && PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
-                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap, semanticModel);
+                    // Stride analysis + types must be all float (n_load_ps can't load int*)
+                    bool allFloat = ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
+                        .Where(ea => ea.Expression is IdentifierNameSyntax rid && nap.ContainsKey(rid.Identifier.Text))
+                        .All(ea => nap.TryGetValue(((IdentifierNameSyntax)ea.Expression).Identifier.Text, out var t) && t == "float");
+                    if (allFloat && PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
+                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap);
                 }
             }
             return GenerateBatchLoopSIMD(method, forStmt, nap, semanticModel);
@@ -275,7 +274,7 @@ namespace NativeTranspiler.Analyzer
 
         private static string GenerateVectorizedInnerLoop(ForStatementSyntax ofs,
             ForStatementSyntax ifs, BlockSyntax ibody, StatementSyntax outerBodyStmt,
-            Dictionary<string, string> nap, SemanticModel semanticModel)
+            Dictionary<string, string> nap)
         {
             var sb = new StringBuilder();
             string ov = ofs.Declaration.Variables[0].Identifier.Text;

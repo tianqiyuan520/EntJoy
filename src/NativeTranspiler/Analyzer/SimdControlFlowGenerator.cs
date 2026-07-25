@@ -1704,15 +1704,30 @@ namespace NativeTranspiler.Analyzer
                     safeIdx = indexExpr;
                 }
 
-                // Contiguous index optimization: when index == simdIndexVar (v_i) in a batch loop,
-                // use contiguous load instead of gather for much better performance.
-                if (!string.IsNullOrEmpty(_batchLoopVar) && indexExpr == _simdIndexVar)
+                // Contiguous index optimization: when index is _simdIndexVar (v_i/v_j) in a batch loop,
+                // or uniform_part + _simdIndexVar (like i*100 + v_j), use contiguous load instead of gather.
+                if (!string.IsNullOrEmpty(_batchLoopVar))
                 {
-                    if (elemCppType == "float")
-                        return $"simd_value<float>{{ n_load_ps({baseExpr}_ptr + {_batchLoopVar}) }}";
-                    if (elemCppType == "int")
-                        return $"simd_value<int>{{ n_load_epi32({baseExpr}_ptr + {_batchLoopVar}) }}";
-                    // fall through to gather for float2/int2
+                    string contBase = null;
+                    if (indexExpr == _simdIndexVar)
+                        contBase = _batchLoopVar;  // simple: ptr + si
+                    else
+                    {
+                        // Detect: uniform_expr + _simdIndexVar (like "i*100 + v_j")
+                        string suffix = $"+ {_simdIndexVar}";
+                        if (indexExpr.EndsWith(suffix))
+                            contBase = indexExpr.Substring(0, indexExpr.Length - suffix.Length).Trim();
+                        else if (indexExpr.EndsWith($"+ {_simdIndexVar})"))
+                            contBase = indexExpr.Substring(0, indexExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
+                    }
+                    if (contBase != null)
+                    {
+                        string baseOff = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
+                        if (elemCppType == "float")
+                            return $"simd_value<float>{{ n_load_ps({baseExpr}_ptr + {baseOff}) }}";
+                        if (elemCppType == "int")
+                            return $"simd_value<int>{{ n_load_epi32({baseExpr}_ptr + {baseOff}) }}";
+                    }
                 }
 
                 // SIMD gather
@@ -2306,12 +2321,27 @@ namespace NativeTranspiler.Analyzer
 
                     if (idxKind >= VarKind.Varying)
                     {
-                        // Contiguous index optimization: when idx == simdIndexVar in batch loop,
-                        // use contiguous store instead of per-lane scatter.
-                        if (!string.IsNullOrEmpty(_batchLoopVar) && idxExpr == _simdIndexVar)
+                        // Contiguous index optimization: when idx == simdIndexVar or
+                        // uniform_part + simdIndexVar, use contiguous store instead of per-lane scatter.
+                        if (!string.IsNullOrEmpty(_batchLoopVar))
                         {
-                            string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
-                            return $"{storeFn}({baseName}_ptr + {_batchLoopVar}, {rhsExpr}.v)";
+                            string contBase = null;
+                            if (idxExpr == _simdIndexVar)
+                                contBase = _batchLoopVar;
+                            else
+                            {
+                                string suffix = $"+ {_simdIndexVar}";
+                                if (idxExpr.EndsWith(suffix))
+                                    contBase = idxExpr.Substring(0, idxExpr.Length - suffix.Length).Trim();
+                                else if (idxExpr.EndsWith($"+ {_simdIndexVar})"))
+                                    contBase = idxExpr.Substring(0, idxExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
+                            }
+                            if (contBase != null)
+                            {
+                                string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                                string off = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
+                                return $"{storeFn}({baseName}_ptr + {off}, {rhsExpr}.v)";
+                            }
                         }
                         // ★ Mask-guarded per-lane scatter:
                         //   When _currentMask is narrowed (if/else context), the per-lane extract
