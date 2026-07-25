@@ -222,7 +222,7 @@ namespace NativeTranspiler.Analyzer
                             && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
                         .Select(ea => ((IdentifierNameSyntax)ea.Expression).Identifier.Text).Distinct().ToList();
                     if (readArrays.Count == 1 && PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
-                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap);
+                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap, semanticModel);
                 }
             }
             return GenerateBatchLoopSIMD(method, forStmt, nap, semanticModel);
@@ -275,7 +275,7 @@ namespace NativeTranspiler.Analyzer
 
         private static string GenerateVectorizedInnerLoop(ForStatementSyntax ofs,
             ForStatementSyntax ifs, BlockSyntax ibody, StatementSyntax outerBodyStmt,
-            Dictionary<string, string> nap)
+            Dictionary<string, string> nap, SemanticModel semanticModel)
         {
             var sb = new StringBuilder();
             string ov = ofs.Declaration.Variables[0].Identifier.Text;
@@ -284,28 +284,43 @@ namespace NativeTranspiler.Analyzer
             string il = ((BinaryExpressionSyntax)ifs.Condition).Right.GetText().ToString().Trim();
             string ra = null;
             var ias = new HashSet<string>();
-            // Scan outer body for result array writes (e.g. result[i]=best outside inner loop)
+            // Scan for result array and input arrays (type-agnostic)
             foreach (var ea in (outerBodyStmt as BlockSyntax ?? outerBodyStmt).DescendantNodes().OfType<ElementAccessExpressionSyntax>())
                 if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
                     && ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea)
                     ra = id.Identifier.Text;
-            // Scan inner body for input arrays
             foreach (var ea in ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
                 if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
                     && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
                     ias.Add(id.Identifier.Text);
+
+            // Detect reduction type: min (v < best) or max (v > best)
+            string reduceFn = "n_min_ps";
+            string initVal = "3.402823466e+38f";
+            string cmpOp = "<";
+            foreach (var ifStmt in ibody.DescendantNodes().OfType<IfStatementSyntax>())
+            {
+                if (ifStmt.Condition is BinaryExpressionSyntax cond && cond.OperatorToken.Text == "<")
+                { reduceFn = "n_min_ps"; initVal = "3.402823466e+38f"; cmpOp = "<"; break; }
+                if (ifStmt.Condition is BinaryExpressionSyntax cond2 && cond2.OperatorToken.Text == ">")
+                { reduceFn = "n_max_ps"; initVal = "-3.402823466e+38f"; cmpOp = ">"; break; }
+            }
+
+            // Build type-aware load/reduce/store per array
+
             sb.AppendLine(string.Format("    for (int {0} = 0; {0} < {1}; {0}++) {{", ov, ol));
-            sb.AppendLine("        n_float v_best = n_set1_ps(3.402823466e+38f);");
+            sb.AppendLine(string.Format("        n_float v_best = n_set1_ps({0});", initVal));
             sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
             sb.AppendLine(string.Format("        for (int {0} = 0; {0} < {1}; {0} += NSIMD_WIDTH) {{", iv, il));
             foreach (var arr in ias)
-                sb.AppendLine(string.Format("            v_best = n_min_ps(v_best, n_load_ps({0}_ptr + base + {1}));", arr, iv));
+                sb.AppendLine(string.Format("            v_best = {0}(v_best, n_load_ps({1}_ptr + base + {2}));", reduceFn, arr, iv));
             sb.AppendLine("        }");
             sb.AppendLine("        float lane[NSIMD_WIDTH]; n_store_ps(lane, v_best);");
             sb.AppendLine("        float h = lane[0];");
             sb.AppendLine("        for (int i = 1; i < NSIMD_WIDTH; i++)");
-            sb.AppendLine("            if (lane[i] < h) h = lane[i];");
-            if (ra != null) sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", ra, ov));
+            sb.AppendLine(string.Format("            if (lane[i] {0} h) h = lane[i];", cmpOp));
+            if (ra != null)
+                sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", ra, ov));
             sb.AppendLine("    }");
             return sb.ToString();
         }
