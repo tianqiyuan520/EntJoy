@@ -44,7 +44,9 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-    public static string GenerateImplementation(IMethodSymbol method, Compilation compilation, HashSet<INamedTypeSymbol>? userStructs = null)
+    public static string GenerateImplementation(IMethodSymbol method, Compilation compilation,
+        HashSet<INamedTypeSymbol>? userStructs = null,
+        NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
         {
             var sb = new StringBuilder();
             var functionName = GetCppFunctionName(method);
@@ -68,7 +70,11 @@ namespace NativeTranspiler.Analyzer
             }
 
             sb.AppendLine("#include <algorithm>");
-            sb.AppendLine("#include <cmath>");
+            // AutoSIMD: replace slow CRT math with SLEEV/FastMath approximations
+            if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                sb.AppendLine("#include \"../../NativeDll/NativeSIMD.h\"");
+            else
+                sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true));
@@ -101,7 +107,8 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
-                bool useFastMath = AttributeHelper.HasFastCppMathLib(method, attrSymbol);
+                bool useFastMath = AttributeHelper.HasFastCppMathLib(method, attrSymbol)
+                    || autoSIMD == NativeTranspiler.AutoSIMD.Enabled;
                 var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
