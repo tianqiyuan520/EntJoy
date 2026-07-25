@@ -178,7 +178,8 @@ namespace NativeTranspiler.Analyzer
                 indexParamName: indexName, simdIndexVar: "v_i",
                 batchOffsetVar: "0",
                 simdMathPrecision: NativeTranspiler.SimdMathPrecision.Fastest,
-                nativeArrayParams: nativeArrayParams);
+                nativeArrayParams: nativeArrayParams,
+                batchLoopVar: "si");
 
             sb.AppendLine($"    int vec_count = (({limitStr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
             sb.AppendLine("    simd_value<int> v_base = simd_value<int>::sequence(0);");

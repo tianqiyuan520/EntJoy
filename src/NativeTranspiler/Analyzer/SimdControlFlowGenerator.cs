@@ -75,6 +75,8 @@ namespace NativeTranspiler.Analyzer
         private readonly string _batchOffsetVar;
         // NativeArray parameter names → elemCppType (for static methods without job struct)
         private readonly Dictionary<string, string> _nativeArrayParams;
+        // Batch loop variable name (e.g. "si") for contiguous access optimization
+        private readonly string _batchLoopVar;
         // Early-exit sentinel for reduction loops (from scalar body write pattern, e.g. "bestIdx"/"-1")
         internal string _sentinelVar = "";
         internal string _sentinelVal = "";
@@ -92,7 +94,8 @@ namespace NativeTranspiler.Analyzer
             Dictionary<string, string>? boolFields = null,
             string batchOffsetVar = "si",
             NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest,
-            Dictionary<string, string>? nativeArrayParams = null)
+            Dictionary<string, string>? nativeArrayParams = null,
+            string batchLoopVar = "")
         {
             _semanticModel = semanticModel;
             _jobStruct = jobStruct;
@@ -105,6 +108,7 @@ namespace NativeTranspiler.Analyzer
             _boolFields = boolFields ?? new Dictionary<string, string>();
             _batchOffsetVar = batchOffsetVar;
             _nativeArrayParams = nativeArrayParams ?? new Dictionary<string, string>();
+            _batchLoopVar = batchLoopVar;
 
             // Pre-identify float2/int2 variables that are varying
             foreach (var kvp in _variables)
@@ -1700,6 +1704,17 @@ namespace NativeTranspiler.Analyzer
                     safeIdx = indexExpr;
                 }
 
+                // Contiguous index optimization: when index == simdIndexVar (v_i) in a batch loop,
+                // use contiguous load instead of gather for much better performance.
+                if (!string.IsNullOrEmpty(_batchLoopVar) && indexExpr == _simdIndexVar)
+                {
+                    if (elemCppType == "float")
+                        return $"simd_value<float>{{ n_load_ps({baseExpr}_ptr + {_batchLoopVar}) }}";
+                    if (elemCppType == "int")
+                        return $"simd_value<int>{{ n_load_epi32({baseExpr}_ptr + {_batchLoopVar}) }}";
+                    // fall through to gather for float2/int2
+                }
+
                 // SIMD gather
                 if (elemCppType.Contains("float2"))
                 {
@@ -2291,6 +2306,13 @@ namespace NativeTranspiler.Analyzer
 
                     if (idxKind >= VarKind.Varying)
                     {
+                        // Contiguous index optimization: when idx == simdIndexVar in batch loop,
+                        // use contiguous store instead of per-lane scatter.
+                        if (!string.IsNullOrEmpty(_batchLoopVar) && idxExpr == _simdIndexVar)
+                        {
+                            string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                            return $"{storeFn}({baseName}_ptr + {_batchLoopVar}, {rhsExpr}.v)";
+                        }
                         // ★ Mask-guarded per-lane scatter:
                         //   When _currentMask is narrowed (if/else context), the per-lane extract
                         //   loop must NOT write to lanes excluded by the mask. Otherwise lanes
