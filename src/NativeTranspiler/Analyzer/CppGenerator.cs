@@ -134,93 +134,182 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-        /// <summary>
-        /// Detect if the method body contains MathF.Sin/Cos/Sqrt/Log calls that need SLEEF.
-        /// </summary>
+
+
+        private static int GetStrideCoeff(ExpressionSyntax expr, string var)
+        {
+            if (expr is IdentifierNameSyntax id)
+                return id.Identifier.Text == var ? 1 : 0;
+            if (expr is LiteralExpressionSyntax) return 0;
+            if (expr is BinaryExpressionSyntax bin)
+            {
+                int left = GetStrideCoeff(bin.Left, var);
+                int right = GetStrideCoeff(bin.Right, var);
+                if (bin.OperatorToken.Text == "*")
+                {
+                    if (left > 0 && bin.Right is LiteralExpressionSyntax rLit)
+                        return left * (int)(rLit.Token.Value ?? 0);
+                    if (right > 0 && bin.Left is LiteralExpressionSyntax lLit)
+                        return right * (int)(lLit.Token.Value ?? 0);
+                    return left * right;
+                }
+                if (bin.OperatorToken.Text == "+" || bin.OperatorToken.Text == "-")
+                    return bin.OperatorToken.Text == "+" ? left + right : left - right;
+            }
+            if (expr is ParenthesizedExpressionSyntax paren)
+                return GetStrideCoeff(paren.Expression, var);
+            if (expr is CastExpressionSyntax cast)
+                return GetStrideCoeff(cast.Expression, var);
+            return 0;
+        }
+
+        private static string PickBestVectorVar(List<string> loopVars, BlockSyntax body,
+            Dictionary<string, string> nativeArrayParams)
+        {
+            if (loopVars.Count <= 1) return loopVars.FirstOrDefault();
+            var accesses = body.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
+                .Where(ea => ea.Expression is IdentifierNameSyntax id
+                    && nativeArrayParams.ContainsKey(id.Identifier.Text)).ToList();
+            if (accesses.Count == 0) return loopVars[0];
+            var sums = new Dictionary<string, int>();
+            foreach (var v in loopVars) sums[v] = 0;
+            foreach (var ea in accesses)
+            {
+                if (ea.ArgumentList == null || ea.ArgumentList.Arguments.Count == 0) continue;
+                var firstArg = ea.ArgumentList.Arguments[0].Expression;
+                foreach (var v in loopVars)
+                    sums[v] += GetStrideCoeff(firstArg, v);
+            }
+            var valid = sums.Where(kv => kv.Value > 0).ToList();
+            if (valid.Count == 0) return loopVars[0];
+            bool hasIndirect = body.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
+                .Any(ea => ea.Expression is IdentifierNameSyntax id2
+                    && nativeArrayParams.ContainsKey(id2.Identifier.Text)
+                    && ea.ArgumentList?.Arguments.Count > 0
+                    && ea.ArgumentList.Arguments[0].Expression is ElementAccessExpressionSyntax);
+            if (hasIndirect) return loopVars[0];
+            return valid.OrderBy(kv => kv.Value).First().Key;
+        }
 
         private static string GenerateSimdViaCFG(IMethodSymbol method, BlockSyntax body,
             SemanticModel semanticModel, bool useFastMath)
         {
-            var sb = new StringBuilder();
             var forStmt = body.Statements.OfType<ForStatementSyntax>().FirstOrDefault();
-            if (forStmt == null)
-                return FallbackScalarTranslation(method, body, semanticModel, useFastMath);
-
-            string indexName = forStmt.Declaration.Variables[0].Identifier.Text;
+            if (forStmt == null) return FallbackScalarTranslation(method, body, semanticModel, useFastMath);
+            string outerVar = forStmt.Declaration.Variables[0].Identifier.Text;
             var limitExpr = ((BinaryExpressionSyntax)forStmt.Condition).Right;
             string limitStr = limitExpr.GetText().ToString().Trim();
-            BlockSyntax innerBody = forStmt.Statement is BlockSyntax bs ? bs
-                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(forStmt.Statement));
-
-            // Build NativeArray param dict: C# param name → element C++ type
-            var nativeArrayParams = new Dictionary<string, string>();
+            var nap = new Dictionary<string, string>();
             foreach (var param in method.Parameters)
-            {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type) && param.Type.Name == "NativeArray")
                 {
-                    var typeArg = ((INamedTypeSymbol)param.Type).TypeArguments.FirstOrDefault();
-                    string elemCppType = typeArg != null ? NativeTranspiler.MapCSharpTypeToCpp(typeArg) : "float";
-                    nativeArrayParams[param.Name] = elemCppType;
+                    var ta = ((INamedTypeSymbol)param.Type).TypeArguments.FirstOrDefault();
+                    nap[param.Name] = ta != null ? NativeTranspiler.MapCSharpTypeToCpp(ta) : "float";
+                }
+            var innerFor = (forStmt.Statement is BlockSyntax ob)
+                ? ob.Statements.OfType<ForStatementSyntax>().FirstOrDefault() : null;
+            if (innerFor != null)
+            {
+                string iVar = innerFor.Declaration.Variables[0].Identifier.Text;
+                string iLim = ((BinaryExpressionSyntax)innerFor.Condition).Right.GetText().ToString().Trim();
+                if (int.TryParse(iLim, out int ib) && ib <= 512)
+                {
+                    var ibody = innerFor.Statement is BlockSyntax ibs ? ibs
+                        : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
+                    // Only apply inner vectorization when there's a single input array (simple reduction like Reduce)
+                    var readArrays = ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
+                        .Where(ea => ea.Expression is IdentifierNameSyntax rid && nap.ContainsKey(rid.Identifier.Text)
+                            && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
+                        .Select(ea => ((IdentifierNameSyntax)ea.Expression).Identifier.Text).Distinct().ToList();
+                    if (readArrays.Count == 1 && PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
+                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap);
                 }
             }
+            return GenerateBatchLoopSIMD(method, forStmt, nap, semanticModel);
+        }
 
-            var methodSyntax = SymbolHelper.GetMethodSyntax(method);
-            var varAnalyzer = new SimdVariableAnalyzer(semanticModel, null, indexName);
-            var variables = varAnalyzer.Analyze(methodSyntax);
-            // Mark for-loop variable as Varying for SIMD gather
-            if (variables.TryGetValue(indexName, out var idxInfo))
-                idxInfo.Kind = VarKind.Varying;
-            else
-                variables[indexName] = new SimdVariableInfo { Name = indexName, Kind = VarKind.Varying, CppType = "int" };
-
-            var simdGen = new SimdControlFlowGenerator(
-                semanticModel, null, variables, varAnalyzer,
-                indexParamName: indexName, simdIndexVar: "v_i",
-                batchOffsetVar: "0",
+        private static string GenerateBatchLoopSIMD(IMethodSymbol method, ForStatementSyntax forStmt,
+            Dictionary<string, string> nap, SemanticModel semanticModel)
+        {
+            var sb = new StringBuilder();
+            string idx = forStmt.Declaration.Variables[0].Identifier.Text;
+            string lim = ((BinaryExpressionSyntax)forStmt.Condition).Right.GetText().ToString().Trim();
+            BlockSyntax ib = forStmt.Statement is BlockSyntax bs ? bs
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(forStmt.Statement));
+            var ms = SymbolHelper.GetMethodSyntax(method);
+            var va2 = new SimdVariableAnalyzer(semanticModel, null, idx);
+            var vars = va2.Analyze(ms);
+            if (vars.TryGetValue(idx, out var ii)) ii.Kind = VarKind.Varying;
+            else vars[idx] = new SimdVariableInfo { Name = idx, Kind = VarKind.Varying, CppType = "int" };
+            var sg = new SimdControlFlowGenerator(semanticModel, null, vars, va2,
+                indexParamName: idx, simdIndexVar: "v_i", batchOffsetVar: "0",
                 simdMathPrecision: NativeTranspiler.SimdMathPrecision.Fastest,
-                nativeArrayParams: nativeArrayParams,
-                batchLoopVar: "si");
-
-            sb.AppendLine($"    int vec_count = (({limitStr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                nativeArrayParams: nap, batchLoopVar: "si");
+            sb.AppendLine(string.Format("    int vec_count = (({0}) / NSIMD_WIDTH) * NSIMD_WIDTH;", lim));
             sb.AppendLine("    simd_value<int> v_base = simd_value<int>::sequence(0);");
-            sb.AppendLine("    if (vec_count > 0)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        for (int si = 0; si < vec_count; si += NSIMD_WIDTH)");
-            sb.AppendLine("        {");
+            sb.AppendLine("    if (vec_count > 0) {");
+            sb.AppendLine("        for (int si = 0; si < vec_count; si += NSIMD_WIDTH) {");
             sb.AppendLine("            simd_value<int> v_i = v_base + si;");
-
-            string simdBody = simdGen.Generate(innerBody);
-            foreach (var line in simdBody.Split('\n'))
+            foreach (var line in sg.Generate(ib).Split('\n'))
                 if (!string.IsNullOrWhiteSpace(line))
                     sb.AppendLine("            " + line.TrimEnd());
-
-            sb.AppendLine("        __simd_exit: ;");
-            sb.AppendLine("        }");
-            sb.AppendLine("    }");
+            sb.AppendLine("        __simd_exit: ; } }");
             sb.AppendLine();
-
-            // Scalar remainder
-            var remap = new Dictionary<string, string>();
-            foreach (var param in method.Parameters)
-                if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type))
-                    remap[$"{param.Name}["] = $"{param.Name}_ptr[";
-            remap["MathF.Sin("] = "::sinf("; remap["MathF.Cos("] = "::cosf(";
-            remap["MathF.Sqrt("] = "::sqrtf("; remap["MathF.Log("] = "::logf(";
-            remap["MathF.Log10("] = "::log10f("; remap["MathF.Exp("] = "::expf(";
-            remap["MathF.Abs("] = "::fabsf("; remap["float.MaxValue"] = "3.402823466e+38f";
-            sb.AppendLine($"    for (int {indexName} = vec_count; {indexName} < {limitStr}; {indexName}++)");
+            var rm = new Dictionary<string, string>();
+            foreach (var kv in nap) rm[string.Format("{0}[", kv.Key)] = string.Format("{0}_ptr[", kv.Key);
+            rm["MathF.Sin("] = "::sinf("; rm["MathF.Cos("] = "::cosf(";
+            rm["MathF.Sqrt("] = "::sqrtf("; rm["MathF.Log("] = "::logf(";
+            rm["MathF.Log10("] = "::log10f("; rm["MathF.Exp("] = "::expf(";
+            rm["MathF.Abs("] = "::fabsf("; rm["float.MaxValue"] = "3.402823466e+38f";
+            sb.AppendLine(string.Format("    for (int {0} = vec_count; {0} < {1}; {0}++)", idx, lim));
             sb.AppendLine("    {");
-            foreach (var stmt in (forStmt.Statement is BlockSyntax ? innerBody.Statements
-                : new SyntaxList<StatementSyntax>(forStmt.Statement)))
+            foreach (var stmt in (forStmt.Statement is BlockSyntax ? ib.Statements : new SyntaxList<StatementSyntax>(forStmt.Statement)))
             {
-                string line = stmt.GetText().ToString().Trim();
-                foreach (var kvp in remap) line = line.Replace(kvp.Key, kvp.Value);
-                sb.AppendLine($"    {line}");
+                string l = stmt.GetText().ToString().Trim();
+                foreach (var kv in rm) l = l.Replace(kv.Key, kv.Value);
+                sb.AppendLine(string.Format("    {0}", l));
             }
             sb.AppendLine("    }");
-
             return sb.ToString();
         }
+
+        private static string GenerateVectorizedInnerLoop(ForStatementSyntax ofs,
+            ForStatementSyntax ifs, BlockSyntax ibody, StatementSyntax outerBodyStmt,
+            Dictionary<string, string> nap)
+        {
+            var sb = new StringBuilder();
+            string ov = ofs.Declaration.Variables[0].Identifier.Text;
+            string ol = ((BinaryExpressionSyntax)ofs.Condition).Right.GetText().ToString().Trim();
+            string iv = ifs.Declaration.Variables[0].Identifier.Text;
+            string il = ((BinaryExpressionSyntax)ifs.Condition).Right.GetText().ToString().Trim();
+            string ra = null;
+            var ias = new HashSet<string>();
+            // Scan outer body for result array writes (e.g. result[i]=best outside inner loop)
+            foreach (var ea in (outerBodyStmt as BlockSyntax ?? outerBodyStmt).DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+                if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
+                    && ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea)
+                    ra = id.Identifier.Text;
+            // Scan inner body for input arrays
+            foreach (var ea in ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+                if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
+                    && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
+                    ias.Add(id.Identifier.Text);
+            sb.AppendLine(string.Format("    for (int {0} = 0; {0} < {1}; {0}++) {{", ov, ol));
+            sb.AppendLine("        n_float v_best = n_set1_ps(3.402823466e+38f);");
+            sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
+            sb.AppendLine(string.Format("        for (int {0} = 0; {0} < {1}; {0} += NSIMD_WIDTH) {{", iv, il));
+            foreach (var arr in ias)
+                sb.AppendLine(string.Format("            v_best = n_min_ps(v_best, n_load_ps({0}_ptr + base + {1}));", arr, iv));
+            sb.AppendLine("        }");
+            sb.AppendLine("        float lane[NSIMD_WIDTH]; n_store_ps(lane, v_best);");
+            sb.AppendLine("        float h = lane[0];");
+            sb.AppendLine("        for (int i = 1; i < NSIMD_WIDTH; i++)");
+            sb.AppendLine("            if (lane[i] < h) h = lane[i];");
+            if (ra != null) sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", ra, ov));
+            sb.AppendLine("    }");
+            return sb.ToString();
+        }
+
 
         /// <summary>Fallback: translate entire body as scalar C++.</summary>
         private static string FallbackScalarTranslation(IMethodSymbol method, BlockSyntax body,
