@@ -163,6 +163,23 @@ namespace NativeTranspiler.Analyzer
             return 0;
         }
 
+        /// <summary>Resolve a constant int expression: literal, const field, or const local.</summary>
+        private static int? ResolveConstInt(ExpressionSyntax expr, SemanticModel semanticModel)
+        {
+            if (expr is LiteralExpressionSyntax lit && lit.Token.Value is int iv) return iv;
+            if (expr is IdentifierNameSyntax id)
+            {
+                try
+                {
+                    var sym = semanticModel.GetSymbolInfo(id).Symbol;
+                    if (sym is IFieldSymbol f && f.HasConstantValue) return (int)f.ConstantValue;
+                    if (sym is ILocalSymbol l && l.HasConstantValue) return (int)l.ConstantValue;
+                }
+                catch { }
+            }
+            return null;
+        }
+
         private static string PickBestVectorVar(List<string> loopVars, BlockSyntax body,
             Dictionary<string, string> nativeArrayParams)
         {
@@ -171,6 +188,29 @@ namespace NativeTranspiler.Analyzer
                 .Where(ea => ea.Expression is IdentifierNameSyntax id
                     && nativeArrayParams.ContainsKey(id.Identifier.Text)).ToList();
             if (accesses.Count == 0) return loopVars[0];
+
+            // Collect variables that hold indirect array results (idx = b[i]; a[idx])
+            var indirectVars = new HashSet<string>();
+            foreach (var assign in body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                if (assign.Left is IdentifierNameSyntax lhs
+                    && assign.Right is ElementAccessExpressionSyntax)
+                    indirectVars.Add(lhs.Identifier.Text);
+            foreach (var decl in body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in decl.Declaration.Variables)
+                    if (v.Initializer?.Value is ElementAccessExpressionSyntax)
+                        indirectVars.Add(v.Identifier.Text);
+
+            // Check for indirect access: direct a[b[i]] OR idx = b[i]; a[idx]
+            bool hasIndirect = accesses.Any(ea =>
+            {
+                var arg = ea.ArgumentList?.Arguments.FirstOrDefault()?.Expression;
+                if (arg is ElementAccessExpressionSyntax) return true;
+                if (arg is IdentifierNameSyntax id3 && indirectVars.Contains(id3.Identifier.Text))
+                    return true;
+                return false;
+            });
+            if (hasIndirect) return loopVars[0];
+
             var sums = new Dictionary<string, int>();
             foreach (var v in loopVars) sums[v] = 0;
             foreach (var ea in accesses)
@@ -182,12 +222,6 @@ namespace NativeTranspiler.Analyzer
             }
             var valid = sums.Where(kv => kv.Value > 0).ToList();
             if (valid.Count == 0) return loopVars[0];
-            bool hasIndirect = body.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
-                .Any(ea => ea.Expression is IdentifierNameSyntax id2
-                    && nativeArrayParams.ContainsKey(id2.Identifier.Text)
-                    && ea.ArgumentList?.Arguments.Count > 0
-                    && ea.ArgumentList.Arguments[0].Expression is ElementAccessExpressionSyntax);
-            if (hasIndirect) return loopVars[0];
             return valid.OrderBy(kv => kv.Value).First().Key;
         }
 
@@ -211,8 +245,15 @@ namespace NativeTranspiler.Analyzer
             if (innerFor != null)
             {
                 string iVar = innerFor.Declaration.Variables[0].Identifier.Text;
-                string iLim = ((BinaryExpressionSyntax)innerFor.Condition).Right.GetText().ToString().Trim();
-                if (int.TryParse(iLim, out int _))
+                // Resolve inner bound: literal, const field, or const local
+                var innerLimitExpr = ((BinaryExpressionSyntax)innerFor.Condition).Right;
+                int? innerBound = innerLimitExpr switch
+                {
+                    LiteralExpressionSyntax lit when lit.Token.Value is int iv => iv,
+                    IdentifierNameSyntax id => ResolveConstInt(id, semanticModel),
+                    _ => null
+                };
+                if (innerBound.HasValue)
                 {
                     var ibody = innerFor.Statement is BlockSyntax ibs ? ibs
                         : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
