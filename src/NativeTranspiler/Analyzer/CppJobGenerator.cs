@@ -796,12 +796,24 @@ namespace NativeTranspiler.Analyzer
             if (isIspcJob)
             {
                 // ISPC job: 声明 wrapper 函数为 extern（在 wrapper.cpp 中实现）
-                var batchFuncName = GetCppJobFunctionName(jobStruct, isBatch: true);
-                var batchParams = BuildBatchJobParameters(jobStruct);
+                bool isp_batch = IsParallelForJob(jobStruct) || IsForJob(jobStruct);
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 
-                sb.AppendLine($"// ISPC wrapper function (defined in wrapper.cpp)");
-                GenerateBoolVariantDeclarations(jobStruct, boolFields, batchFuncName, batchParams, sb);
+                if (isp_batch)
+                {
+                    var batchFuncName = GetCppJobFunctionName(jobStruct, isBatch: true);
+                    var batchParams = BuildBatchJobParameters(jobStruct);
+                    sb.AppendLine($"// ISPC wrapper function (defined in wrapper.cpp)");
+                    GenerateBoolVariantDeclarations(jobStruct, boolFields, batchFuncName, batchParams, sb);
+                }
+                else
+                {
+                    // IJob: non-batch wrapper
+                    var singleFuncName = GetCppJobFunctionName(jobStruct, isBatch: false);
+                    var singleParams = BuildJobParameters(jobStruct);
+                    sb.AppendLine($"// ISPC wrapper function (defined in wrapper.cpp)");
+                    sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({singleParams});");
+                }
                 sb.AppendLine();
             }
             else
