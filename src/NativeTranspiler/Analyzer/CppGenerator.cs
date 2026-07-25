@@ -124,13 +124,15 @@ namespace NativeTranspiler.Analyzer
 
                 if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled && hasSimdMath)
                 {
-                    // Generate SIMD vector code with SLEEF (for math functions)
+                    // Generate SIMD vector code with SLEEF for math functions
                     string simdCode = GenerateSimdMathCode(method, methodSyntax.Body, semanticModel, useFastMath);
                     sb.Append(simdCode);
                 }
                 else
                 {
-                    // Scalar code path (MSVC auto-vectorization handles simple arithmetic)
+                    // Scalar code path (MSVC auto-vectorizer handles simple arithmetic).
+                    // Complex flow (if/else, indirect gather) gets full SIMD masking via
+                    // IJobFor/IJobPF structs with AutoSIMD, not via static methods.
                     var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
                     sb.Append(bodyCode);
