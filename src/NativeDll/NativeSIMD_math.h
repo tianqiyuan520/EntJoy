@@ -81,11 +81,11 @@ static inline n_float _n_log_avx2(n_float d) {
 
 #endif // NSIMD_AVX2
 
+
 // ================================================================
-// Precision selection: dispatch to inline AVX2 → SLEEF → per-lane scalar
+// Precision selection: dispatch to inline → per-lane scalar
 // Only SIMD paths are defined here — the #ifndef guards at the bottom
-// provide per-lane scalar fallbacks for any platform/SLEEF combo
-// that doesn't get a SIMD definition above.
+// provide per-lane scalar fallbacks when no SIMD path is defined.
 // ================================================================
 
 #if !defined(SIMD_MATH_PRECISION)
@@ -301,3 +301,65 @@ static inline n_float n_exp_ps(n_float a)     { return N_EXP(a); }
 static inline n_float n_log_ps(n_float a)     { return N_LOG(a); }
 static inline n_float n_log10_ps(n_float a)   { return N_LOG10(a); }
 static inline n_float n_pow_ps(n_float a, n_float b) { return N_POW(a, b); }
+// ================================================================
+// Cross-platform inline math (via n_xxx_ps abstraction — all platforms)
+// These work on AVX2, SSE4, NEON — n_xxx_ps maps to the right intrinsic.
+// ================================================================
+
+static inline n_float _n_tan_ps(n_float a) {
+  return n_div_ps(n_sin_ps(a), n_cos_ps(a));
+}
+
+static inline n_float _n_atan2_ps(n_float y, n_float x) {
+  n_float zero = n_set1_ps(0.0f), pi = n_set1_ps(3.141592653589793f), pi_2 = n_set1_ps(1.5707963267948966f);
+  n_float r = n_atan_ps(n_div_ps(y, x));
+  // Quadrant adjustment: if x<0: r ± pi, if x=0: ±pi/2
+  n_float adj = n_blendv_ps(zero, n_mul_ps(n_blendv_ps(pi, n_sub_ps(zero, pi), n_cmp_lt_ps(y, zero)), n_set1_ps(-1.0f)), n_cmp_lt_ps(x, zero));
+  r = n_add_ps(r, adj);
+  // x=0 case: sign(y)*pi/2
+  n_mask xz = n_cmp_eq_ps(x, zero);
+  return n_blendv_ps(r, n_blendv_ps(n_mul_ps(pi_2, n_set1_ps(-1.0f)), pi_2, n_cmp_gt_ps(y, zero)), xz);
+}
+
+static inline n_float _n_asin_ps(n_float a) {
+  // asin(x) = atan2(x, sqrt(1 - x²)) using standard formula
+  n_float s = n_sqrt_ps(n_sub_ps(n_set1_ps(1.0f), n_mul_ps(a, a)));
+  return n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(a, n_add_ps(n_set1_ps(1.0f), s)));
+}
+
+static inline n_float _n_acos_ps(n_float a) {
+  return n_sub_ps(n_set1_ps(1.5707963267948966f), n_asin_ps(a));
+}
+
+static inline n_float _n_atan_ps(n_float a) {
+  // atan polynomial on [-1,1], ~3.5 ULP; for |x|>1 use pi/2 - atan(1/x)
+  n_float one = n_set1_ps(1.0f), pi_2 = n_set1_ps(1.5707963267948966f);
+  // Reduce to [0,1]: x = min(|a|, 1/|a|)
+  n_float ax = n_fabs_ps(a);
+  n_float rx = n_div_ps(one, ax);
+  n_float x = n_blendv_ps(ax, rx, n_cmp_gt_ps(ax, one));
+  n_float x2 = n_mul_ps(x, x);
+  n_float poly = n_set1_ps(0.00282363896258175373077393f);
+  poly = n_fmadd_ps(poly, x2, n_set1_ps(-0.015956902976496002127883f));
+  poly = n_fmadd_ps(poly, x2, n_set1_ps(0.0425049886108115014595081f));
+  poly = n_fmadd_ps(poly, x2, n_set1_ps(-0.074890092593843260168697f));
+  poly = n_fmadd_ps(poly, x2, n_set1_ps(0.166664004772415161132812f));
+  n_float r = n_fmadd_ps(n_mul_ps(x, x2), poly, x);
+  r = n_blendv_ps(r, n_sub_ps(pi_2, r), n_cmp_gt_ps(ax, one));
+  return n_blendv_ps(n_mul_ps(r, n_set1_ps(-1.0f)), r, n_cmp_gt_ps(a, n_set1_ps(0)));
+}
+
+static inline n_float _n_sinh_ps(n_float a) {
+  n_float e = n_exp_ps(a);
+  return n_mul_ps(n_set1_ps(0.5f), n_sub_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+}
+
+static inline n_float _n_cosh_ps(n_float a) {
+  n_float e = n_exp_ps(a);
+  return n_mul_ps(n_set1_ps(0.5f), n_add_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+}
+
+static inline n_float _n_tanh_ps(n_float a) {
+  n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
+  return n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
+}
