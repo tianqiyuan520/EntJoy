@@ -44,14 +44,6 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-    // Map C# operators to n_xxx_ps SIMD functions
-    private static string OpToSimdFn(string op) => op switch
-    {
-        "+" => "n_add_ps", "-" => "n_sub_ps", "*" => "n_mul_ps", "/" => "n_div_ps",
-        ">" => "n_cmp_gt_ps", "<" => "n_cmp_lt_ps", ">=" => "n_cmp_ge_ps", "<=" => "n_cmp_le_ps",
-        _ => null
-    };
-
     public static string GenerateImplementation(IMethodSymbol method, Compilation compilation,
         HashSet<INamedTypeSymbol>? userStructs = null,
         NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
@@ -81,16 +73,6 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <cstdio>");
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
-            bool hasSimdMath = false;
-            bool hasSimdIfElse = false;
-
-            // When AutoSIMD is enabled, detect SIMD-izable patterns in the method body.
-            if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled && methodSyntax?.Body != null)
-            {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                hasSimdMath = DetectSimdMathCalls(methodSyntax.Body, semanticModel);
-                hasSimdIfElse = DetectSimdIfElse(methodSyntax.Body);
-            }
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
@@ -131,15 +113,13 @@ namespace NativeTranspiler.Analyzer
                 bool useFastMath = AttributeHelper.HasFastCppMathLib(method,
                     compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute"));
 
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled && (hasSimdMath || hasSimdIfElse))
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 {
-                    // Generate SIMD vector code with branchless blend for if/else + SLEEF math
-                    string simdCode = GenerateSimdStaticCode(method, methodSyntax.Body, semanticModel, useFastMath);
+                    string simdCode = GenerateSimdViaCFG(method, methodSyntax.Body, semanticModel, useFastMath);
                     sb.Append(simdCode);
                 }
                 else
                 {
-                    // Scalar code path
                     var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
                     sb.Append(bodyCode);
@@ -157,114 +137,80 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// Detect if the method body contains MathF.Sin/Cos/Sqrt/Log calls that need SLEEF.
         /// </summary>
-        private static bool DetectSimdMathCalls(BlockSyntax body, SemanticModel semanticModel)
-        {
-            foreach (var invoc in body.DescendantNodes().OfType<InvocationExpressionSyntax>())
-            {
-                var sym = semanticModel.GetSymbolInfo(invoc).Symbol as IMethodSymbol;
-                if (sym != null && IsMathFMethod(sym))
-                    return true;
-            }
-            return false;
-        }
 
-        /// <summary>Detect if the for-loop body has if/else patterns suitable for SIMD.</summary>
-        private static bool DetectSimdIfElse(BlockSyntax body)
-        {
-            var forStmt = body.Statements.OfType<ForStatementSyntax>().FirstOrDefault();
-            if (forStmt == null) return false;
-            var loopBody = forStmt.Statement is BlockSyntax bs ? bs.Statements
-                : new SyntaxList<StatementSyntax>(forStmt.Statement);
-            return loopBody.Any(s => s is IfStatementSyntax);
-        }
-
-        private static bool IsMathFMethod(IMethodSymbol method)
-        {
-            string? ns = method.ContainingType?.ToDisplayString();
-            if (ns != "System.MathF" && ns != "System.Math") return false;
-            return method.Name switch
-            {
-                "Sin" or "Cos" or "Sqrt" or "Log" or "Log10" or "Exp" or "Pow" or "Tan" => true,
-                _ => false
-            };
-        }
-
-        /// <summary>
-        /// Generate SIMD vector code for static methods with AutoSIMD.
-        /// Handles: MathF calls (sin/cos/sqrt/log), if/else branchless blend, simple arithmetic.
-        /// </summary>
-        private static string GenerateSimdStaticCode(IMethodSymbol method, BlockSyntax body,
+        private static string GenerateSimdViaCFG(IMethodSymbol method, BlockSyntax body,
             SemanticModel semanticModel, bool useFastMath)
         {
             var sb = new StringBuilder();
-
             var forStmt = body.Statements.OfType<ForStatementSyntax>().FirstOrDefault();
-            if (forStmt == null) return FallbackScalarTranslation(method, body, semanticModel, useFastMath);
+            if (forStmt == null)
+                return FallbackScalarTranslation(method, body, semanticModel, useFastMath);
 
             string indexName = forStmt.Declaration.Variables[0].Identifier.Text;
             var limitExpr = ((BinaryExpressionSyntax)forStmt.Condition).Right;
-            var loopBody = forStmt.Statement is BlockSyntax bs ? bs.Statements : new SyntaxList<StatementSyntax>(forStmt.Statement);
             string limitStr = limitExpr.GetText().ToString().Trim();
+            BlockSyntax innerBody = forStmt.Statement is BlockSyntax bs ? bs
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(forStmt.Statement));
 
-            // Gather array parameter names, local float variables, and scalar float params
-            var arrayParams = new HashSet<string>();
-            var floatParams = new HashSet<string>();
+            // Build NativeArray param dict: C# param name → element C++ type
+            var nativeArrayParams = new Dictionary<string, string>();
             foreach (var param in method.Parameters)
             {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type))
-                    arrayParams.Add(param.Name);
-                else if (param.Type.SpecialType == SpecialType.System_Single)
-                    floatParams.Add(param.Name);
-            }
-
-            var floatLocals = new HashSet<string>();
-            foreach (var stmt in loopBody)
-            {
-                if (stmt is LocalDeclarationStatementSyntax localDecl)
+                if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type) && param.Type.Name == "NativeArray")
                 {
-                    foreach (var v in localDecl.Declaration.Variables)
-                    {
-                        var type = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-                        if (type != null && type.SpecialType == SpecialType.System_Single)
-                            floatLocals.Add(v.Identifier.Text);
-                    }
+                    var typeArg = ((INamedTypeSymbol)param.Type).TypeArguments.FirstOrDefault();
+                    string elemCppType = typeArg != null ? NativeTranspiler.MapCSharpTypeToCpp(typeArg) : "float";
+                    nativeArrayParams[param.Name] = elemCppType;
                 }
             }
 
-            sb.AppendLine($"    int vec_count = (count / NSIMD_WIDTH) * NSIMD_WIDTH;");
-            sb.AppendLine();
+            var methodSyntax = SymbolHelper.GetMethodSyntax(method);
+            var varAnalyzer = new SimdVariableAnalyzer(semanticModel, null, indexName);
+            var variables = varAnalyzer.Analyze(methodSyntax);
+            // Mark for-loop variable as Varying for SIMD gather
+            if (variables.TryGetValue(indexName, out var idxInfo))
+                idxInfo.Kind = VarKind.Varying;
+            else
+                variables[indexName] = new SimdVariableInfo { Name = indexName, Kind = VarKind.Varying, CppType = "int" };
 
-            // SIMD main loop
-            sb.AppendLine("    for (int si = 0; si < vec_count; si += NSIMD_WIDTH)");
+            var simdGen = new SimdControlFlowGenerator(
+                semanticModel, null, variables, varAnalyzer,
+                indexParamName: indexName, simdIndexVar: "v_i",
+                batchOffsetVar: "0",
+                simdMathPrecision: NativeTranspiler.SimdMathPrecision.Fastest,
+                nativeArrayParams: nativeArrayParams);
+
+            sb.AppendLine($"    int vec_count = (({limitStr}) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+            sb.AppendLine("    simd_value<int> v_base = simd_value<int>::sequence(0);");
+            sb.AppendLine("    if (vec_count > 0)");
             sb.AppendLine("    {");
-            foreach (var stmt in loopBody)
-            {
-                if (stmt is IfStatementSyntax ifStmt)
-                {
-                    // Branchless SIMD: compute all branches + blend with masks
-                    string ifCode = GenSimdIfElse(ifStmt, indexName, arrayParams, floatLocals, semanticModel);
-                    sb.Append(ifCode);
-                }
-                else
-                {
-                    string? simdLine = GenSimdStmt(stmt, indexName, arrayParams, floatLocals, semanticModel);
-                    if (simdLine != null)
-                        sb.AppendLine($"        {simdLine}");
-                }
-            }
+            sb.AppendLine("        for (int si = 0; si < vec_count; si += NSIMD_WIDTH)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            simd_value<int> v_i = v_base + si;");
+
+            string simdBody = simdGen.Generate(innerBody);
+            foreach (var line in simdBody.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    sb.AppendLine("            " + line.TrimEnd());
+
+            sb.AppendLine("        __simd_exit: ;");
+            sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine();
 
             // Scalar remainder
             var remap = new Dictionary<string, string>();
-            foreach (var ap in arrayParams) remap[$"{ap}["] = $"{ap}_ptr[";
+            foreach (var param in method.Parameters)
+                if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type))
+                    remap[$"{param.Name}["] = $"{param.Name}_ptr[";
             remap["MathF.Sin("] = "::sinf("; remap["MathF.Cos("] = "::cosf(";
             remap["MathF.Sqrt("] = "::sqrtf("; remap["MathF.Log("] = "::logf(";
             remap["MathF.Log10("] = "::log10f("; remap["MathF.Exp("] = "::expf(";
             remap["MathF.Abs("] = "::fabsf("; remap["float.MaxValue"] = "3.402823466e+38f";
             sb.AppendLine($"    for (int {indexName} = vec_count; {indexName} < {limitStr}; {indexName}++)");
             sb.AppendLine("    {");
-            foreach (var stmt in loopBody)
+            foreach (var stmt in (forStmt.Statement is BlockSyntax ? innerBody.Statements
+                : new SyntaxList<StatementSyntax>(forStmt.Statement)))
             {
                 string line = stmt.GetText().ToString().Trim();
                 foreach (var kvp in remap) line = line.Replace(kvp.Key, kvp.Value);
@@ -273,253 +219,6 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    }");
 
             return sb.ToString();
-        }
-
-        // ──  Single SIMD statement (assignment, local decl)  ──
-        private static string? GenSimdStmt(StatementSyntax stmt,
-            string indexName, HashSet<string> arrayParams, HashSet<string> floatLocals,
-            SemanticModel semanticModel)
-        {
-            if (stmt is LocalDeclarationStatementSyntax localDecl)
-            {
-                foreach (var v in localDecl.Declaration.Variables)
-                {
-                    if (v.Initializer != null && floatLocals.Contains(v.Identifier.Text))
-                    {
-                        string init = ExprToSimdStr(v.Initializer.Value, indexName, arrayParams, floatLocals, semanticModel);
-                        return $"n_float v_{v.Identifier.Text} = {init};";
-                    }
-                }
-                return null;
-            }
-
-            if (stmt is ExpressionStatementSyntax exprStmt && exprStmt.Expression is AssignmentExpressionSyntax assign)
-            {
-                if (assign.Left is ElementAccessExpressionSyntax lhsElem)
-                {
-                    string lhsArr = (lhsElem.Expression as IdentifierNameSyntax)?.Identifier.Text ?? "";
-                    if (arrayParams.Contains(lhsArr))
-                    {
-                        string rhs = ExprToSimdStr(assign.Right, indexName, arrayParams, floatLocals, semanticModel);
-                        return $"n_store_ps({lhsArr}_ptr + si, {rhs});";
-                    }
-                }
-            }
-            return null;
-        }
-
-        // ── Branchless if/else: compute all branches, blend with masks  ──
-        private static string GenSimdIfElse(IfStatementSyntax ifStmt,
-            string indexName, HashSet<string> arrayParams, HashSet<string> floatLocals,
-            SemanticModel semanticModel)
-        {
-            // Collect all conditions and bodies: [if-cond, body], [elseif-cond, body], ..., [null, else-body]
-            var conds = new List<string>();      // null = final else (unconditional)
-            var bodies = new List<List<StatementSyntax>>();
-
-            IfStatementSyntax cur = ifStmt;
-            while (true)
-            {
-                string cond = ExprToSimdStr(cur.Condition, indexName, arrayParams, floatLocals, semanticModel);
-                conds.Add(cond);
-                bodies.Add(GetBodyStmts(cur.Statement));
-
-                if (cur.Else != null)
-                {
-                    if (cur.Else.Statement is IfStatementSyntax elif) { cur = elif; continue; }
-                    conds.Add(null); // final else
-                    bodies.Add(GetBodyStmts(cur.Else.Statement));
-                }
-                break;
-            }
-
-            return BuildSimdBlendChain(conds, bodies, indexName, arrayParams, floatLocals, semanticModel);
-        }
-
-        // ── Build the mask + blend chain for if/else  ──
-        private static string BuildSimdBlendChain(List<string> conds,
-            List<List<StatementSyntax>> bodies,
-            string indexName, HashSet<string> arrayParams, HashSet<string> floatLocals,
-            SemanticModel semanticModel)
-        {
-            var sb = new StringBuilder();
-            int maskId = _maskCounter++;
-
-            if (conds.Count == 0) return "";
-
-            // Find which array is written in each branch (e.g. result_ptr[i] = expr)
-            // Extract the RHS expression for each branch
-            var branchRhs = new List<string>();
-
-            // Find the output array name (assume all branches write to the same array)
-            string targetArray = null;
-            foreach (var body in bodies)
-            {
-                foreach (var stmt in body)
-                {
-                    if (stmt is ExpressionStatementSyntax es && es.Expression is AssignmentExpressionSyntax ae
-                        && ae.Left is ElementAccessExpressionSyntax ea)
-                    {
-                        targetArray = (ea.Expression as IdentifierNameSyntax)?.Identifier.Text ?? "";
-                        break;
-                    }
-                }
-                if (targetArray != null) break;
-            }
-
-            // Extract RHS for each branch, and compute default (all-masked-false) value from last else
-            foreach (var body in bodies)
-            {
-                string rhs = null;
-                foreach (var stmt in body)
-                {
-                    if (stmt is ExpressionStatementSyntax es && es.Expression is AssignmentExpressionSyntax ae)
-                        rhs = ExprToSimdStr(ae.Right, indexName, arrayParams, floatLocals, semanticModel);
-                }
-                branchRhs.Add(rhs ?? "n_set1_ps(0.0f)");
-            }
-
-            // Generate masks and blend chain
-            // mask0 = (cond0); then for each cond[i]: mask[i] = cond[i] & !any_prev
-            // build result bottom-up: r = else_val; for i in reverse: r = blend(r, branch_val[i], mask[i])
-
-            // Emit comparison masks; else-if masks are AND-NOT with first mask
-            string m0 = $"__m{maskId}_0";
-            sb.AppendLine($"        n_float {m0} = {conds[0]};");
-            string anyPrev = m0;
-            for (int i = 1; i < conds.Count; i++)
-            {
-                if (conds[i] == null) continue; // final else
-                string mi = $"__m{maskId}_{i}";
-                sb.AppendLine($"        n_float {mi} = n_and_mask({conds[i]}, n_not_mask({anyPrev}));");
-            }
-
-            // Build blend chain from last to first
-            string accum = $"{branchRhs[branchRhs.Count - 1]}";
-            for (int i = conds.Count - 2; i >= 0; i--)
-            {
-                string mask = conds[i] != null ? $"__m{maskId}_{i}" : null;
-                if (mask != null)
-                    accum = $"n_blendv_ps({accum}, {branchRhs[i]}, {mask})";
-                else
-                    accum = branchRhs[i];
-            }
-
-            sb.AppendLine($"        n_store_ps({targetArray}_ptr + si, {accum});");
-            return sb.ToString();
-        }
-
-        private static int _maskCounter; // shared counter for unique mask names
-
-        private static List<StatementSyntax> GetBodyStmts(StatementSyntax stmt)
-        {
-            if (stmt is BlockSyntax block) return block.Statements.ToList();
-            return new List<StatementSyntax> { stmt };
-        }
-
-        // ── Expression to SIMD C++ (n_float operations, comparison masks)  ──
-        private static string ExprToSimdStr(ExpressionSyntax expr,
-            string indexName, HashSet<string> arrayParams, HashSet<string> floatLocals,
-            SemanticModel semanticModel)
-        {
-            // MathF calls → n_sin_ps / n_cos_ps / n_sqrt_ps / n_log_ps
-            if (expr is InvocationExpressionSyntax invoc)
-            {
-                var sym = semanticModel.GetSymbolInfo(invoc).Symbol as IMethodSymbol;
-                if (sym != null)
-                {
-                    string? ns = sym.ContainingType?.ToDisplayString();
-                    if (ns == "System.MathF" || ns == "System.Math")
-                    {
-                        string name = sym.Name;
-                        if (name is "Pow" or "Exp" or "Tan")
-                            return invoc.GetText().ToString().Trim();
-                        var args = invoc.ArgumentList.Arguments;
-                        if (args.Count == 1)
-                        {
-                            string a = ExprToSimdStr(args[0].Expression, indexName, arrayParams, floatLocals, semanticModel);
-                            return $"n_{GetSimdName(name)}_ps({a})";
-                        }
-                    }
-                }
-                return invoc.GetText().ToString().Trim();
-            }
-
-            // Binary ops: comparison → n_cmp_*_ps, arithmetic → n_*_ps
-            if (expr is BinaryExpressionSyntax bin)
-            {
-                string left = ExprToSimdStr(bin.Left, indexName, arrayParams, floatLocals, semanticModel);
-                string right = ExprToSimdStr(bin.Right, indexName, arrayParams, floatLocals, semanticModel);
-                string op = bin.OperatorToken.Text;
-                string fn = op switch
-                {
-                    "+" => "n_add_ps", "-" => "n_sub_ps", "*" => "n_mul_ps", "/" => "n_div_ps",
-                    ">" => "n_cmp_gt_ps", "<" => "n_cmp_lt_ps",
-                    ">=" => "n_cmp_ge_ps", "<=" => "n_cmp_le_ps",
-                    _ => null
-                };
-                if (fn != null) return $"{fn}({left}, {right})";
-                return $"({left} {op} {right})";
-            }
-
-            if (expr is PrefixUnaryExpressionSyntax prefix)
-            {
-                string operand = ExprToSimdStr(prefix.Operand, indexName, arrayParams, floatLocals, semanticModel);
-                if (prefix.OperatorToken.Text == "-")
-                    return $"n_sub_ps(n_set1_ps(0.0f), {operand})";
-                return $"{prefix.OperatorToken.Text}{operand}";
-            }
-
-            if (expr is IdentifierNameSyntax id)
-            {
-                string name = id.Identifier.Text;
-                if (name == indexName) return "si";
-                if (floatLocals.Contains(name)) return $"v_{name}";
-                // Float scalar params need n_set1_ps in SIMD context
-                var typeInfo = semanticModel.GetTypeInfo(id);
-                if (typeInfo.Type != null && typeInfo.Type.SpecialType == SpecialType.System_Single)
-                    return $"n_set1_ps({name})";
-                return name;
-            }
-
-            // a[i] → n_load_ps(a_ptr + si)
-            if (expr is ElementAccessExpressionSyntax elem)
-            {
-                string arrName = (elem.Expression as IdentifierNameSyntax)?.Identifier.Text ?? "";
-                string idx = ExprToSimdStr(elem.ArgumentList.Arguments[0].Expression, indexName, arrayParams, floatLocals, semanticModel);
-                if (arrayParams.Contains(arrName))
-                    return $"n_load_ps({arrName}_ptr + {idx})";
-                return $"{arrName}_ptr[{idx}]";
-            }
-
-            if (expr is ParenthesizedExpressionSyntax paren)
-                return ExprToSimdStr(paren.Expression, indexName, arrayParams, floatLocals, semanticModel);
-
-            // Literals → n_set1_ps(value)
-            if (expr is LiteralExpressionSyntax lit)
-            {
-                if (lit.Token.Value is float f) return $"n_set1_ps({f}f)";
-                if (lit.Token.Value is int iv) return $"n_set1_ps({iv}.0f)";
-                if (lit.Token.Value is double d) return $"n_set1_ps({d})";
-                return lit.Token.Text;
-            }
-
-            if (expr is CastExpressionSyntax cast)
-                return ExprToSimdStr(cast.Expression, indexName, arrayParams, floatLocals, semanticModel);
-
-            return expr.GetText().ToString().Trim();
-        }
-
-        private static string GetSimdName(string mathName)
-        {
-            return mathName switch
-            {
-                "Sqrt" => "sqrt", "Sin" => "sin", "Cos" => "cos",
-                "Log" => "log", "Log10" => "log10",
-                "Exp" => "exp", "Tan" => "tan",
-                "Pow" => "pow", "Abs" => "abs",
-                _ => "sqrt"
-            };
         }
 
         /// <summary>Fallback: translate entire body as scalar C++.</summary>

@@ -73,6 +73,8 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, string> _uniformHoistPending = new();
         // Batch offset variable ("si" for OuterSimdGenerator batch, "0" for standalone IJob/static)
         private readonly string _batchOffsetVar;
+        // NativeArray parameter names → elemCppType (for static methods without job struct)
+        private readonly Dictionary<string, string> _nativeArrayParams;
         // Early-exit sentinel for reduction loops (from scalar body write pattern, e.g. "bestIdx"/"-1")
         internal string _sentinelVar = "";
         internal string _sentinelVal = "";
@@ -89,7 +91,8 @@ namespace NativeTranspiler.Analyzer
             bool useFastMath = false,
             Dictionary<string, string>? boolFields = null,
             string batchOffsetVar = "si",
-            NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
+            NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest,
+            Dictionary<string, string>? nativeArrayParams = null)
         {
             _semanticModel = semanticModel;
             _jobStruct = jobStruct;
@@ -101,6 +104,7 @@ namespace NativeTranspiler.Analyzer
             _simdMathPrecision = simdMathPrecision;
             _boolFields = boolFields ?? new Dictionary<string, string>();
             _batchOffsetVar = batchOffsetVar;
+            _nativeArrayParams = nativeArrayParams ?? new Dictionary<string, string>();
 
             // Pre-identify float2/int2 variables that are varying
             foreach (var kvp in _variables)
@@ -1606,6 +1610,13 @@ namespace NativeTranspiler.Analyzer
                         elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
                 }
             }
+            // Also check _nativeArrayParams (for static methods without job struct)
+            if (!isNativeArray && elementAccess.Expression is IdentifierNameSyntax naId
+                && _nativeArrayParams.TryGetValue(naId.Identifier.Text, out var paramElemType))
+            {
+                isNativeArray = true;
+                elemCppType = paramElemType;
+            }
             string baseExpr = TranslateExpression(elementAccess.Expression);
 
             string indexExpr = "0";
@@ -2235,28 +2246,45 @@ namespace NativeTranspiler.Analyzer
         private string TranslateAssignment(AssignmentExpressionSyntax assign)
         {
             // NativeArray writes: detect element-access LHS
-            if (assign.Left is ElementAccessExpressionSyntax elemAccess
-                && elemAccess.Expression is IdentifierNameSyntax id
-                && _jobStruct != null)
+            string baseName = null;
+            string elemType = "float";
+            ElementAccessExpressionSyntax elemAccess = null;
+            if (assign.Left is ElementAccessExpressionSyntax ea
+                && (elemAccess = ea).Expression is IdentifierNameSyntax id)
             {
-                var members = _jobStruct.GetMembers(id.Identifier.Text);
-                if (members.Length > 0 && members[0] is IFieldSymbol f
-                    && NativeTranspiler.IsEntJoyNativeContainerType(f.Type)
-                    && f.Type.Name == "NativeArray")
+                // 1. Check _nativeArrayParams first (for static methods without job struct)
+                if (_nativeArrayParams.TryGetValue(id.Identifier.Text, out var paramElemType))
                 {
-                    string baseName = id.Identifier.Text;
-                    string idxExpr = TranslateExpression(
-                        elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
-                    string rhsExpr = TranslateExpression(assign.Right);
-                    VarKind idxKind = _varAnalyzer.ClassifyExpression(
-                        elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
-                    VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
-                    string elemType = NativeTranspiler.MapCSharpTypeToCpp(((INamedTypeSymbol)f.Type).TypeArguments[0]);
-                    string extractFn = elemType == "float" ? "n_extract_lane_f32" : "n_extract_lane_epi32";
-                    string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
-                    string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
+                    baseName = id.Identifier.Text;
+                    elemType = paramElemType;
+                }
+                // 2. Check job struct fields (for IJob/IJobFor paths)
+                else if (_jobStruct != null)
+                {
+                    var members = _jobStruct.GetMembers(id.Identifier.Text);
+                    if (members.Length > 0 && members[0] is IFieldSymbol f
+                        && NativeTranspiler.IsEntJoyNativeContainerType(f.Type)
+                        && f.Type.Name == "NativeArray")
+                    {
+                        baseName = id.Identifier.Text;
+                        elemType = NativeTranspiler.MapCSharpTypeToCpp(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                    }
+                }
+            }
 
-                    if (idxKind >= VarKind.Varying && rhsKind < VarKind.Varying)
+            if (baseName != null)
+            {
+                string idxExpr = TranslateExpression(
+                    elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
+                string rhsExpr = TranslateExpression(assign.Right);
+                VarKind idxKind = _varAnalyzer.ClassifyExpression(
+                    elemAccess.ArgumentList?.Arguments[0].Expression ?? assign.Left);
+                VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
+                string extractFn = elemType == "float" ? "n_extract_lane_f32" : "n_extract_lane_epi32";
+                string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
+
+                if (idxKind >= VarKind.Varying && rhsKind < VarKind.Varying)
                     {
                         return $"{storeFnScalar}(&{baseName}_ptr[{_batchOffsetVar}], {setFnScalar}({rhsExpr}))";
                     }
@@ -2285,7 +2313,6 @@ namespace NativeTranspiler.Analyzer
 
                     return $"{baseName}_ptr[{idxExpr}] = {rhsExpr}";
                 }
-            }
 
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
