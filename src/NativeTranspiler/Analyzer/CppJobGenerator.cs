@@ -1686,7 +1686,158 @@ namespace NativeTranspiler.Analyzer
                 ? (BlockSyntax)rewriter.Visit(methodSyntax.Body)
                 : methodSyntax.Body;
 
-            return (chunkArrays, entityLoopIv, afterFirstPass!);
+            // 4. Decompose struct read-modify-write pattern (ISPC-style: eliminate intermediate struct locals)
+            //    Detects: StructType temp = array[idx]; temp.Field += ...; array[idx] = temp;
+            //    Rewrites to: array[idx].Field += ...;
+            var decomposedBody = DecomposeStructLocals(afterFirstPass, chunkArrayNames, entityLoopIv);
+
+            return (chunkArrays, entityLoopIv, decomposedBody);
+        }
+
+        /// <summary>
+        /// Decompose struct read-modify-write pattern into direct field access.
+        /// Replaces:
+        ///   StructType temp = array[idx];   → removed
+        ///   temp.Field += rhs;               → array[idx].Field += rhs
+        ///   array[idx] = temp;               → removed
+        /// This enables SimdControlFlowGenerator to handle struct field access
+        /// directly via field-level gather/scatter (ISPC-style).
+        /// </summary>
+        private static BlockSyntax DecomposeStructLocals(BlockSyntax body, HashSet<string> chunkArrayNames, string entityLoopIv)
+        {
+            if (body == null) return body;
+
+            // First, flatten any nested blocks (e.g., from for-loop body extraction)
+            var flatStatements = FlattenBlockStatements(body);
+
+            var newStatements = new List<StatementSyntax>();
+            int i = 0;
+            var statements = flatStatements.ToArray();
+
+            while (i < statements.Length)
+            {
+                var stmt = statements[i];
+
+                // Detect: StructType temp = array[idx]; (local declaration with element access initializer)
+                if (stmt is LocalDeclarationStatementSyntax localDecl
+                    && localDecl.Declaration.Variables.Count == 1)
+                {
+                    var varDecl = localDecl.Declaration.Variables[0];
+                    string tempName = varDecl.Identifier.Text;
+
+                    if (varDecl.Initializer?.Value is ElementAccessExpressionSyntax initEA
+                        && initEA.Expression is IdentifierNameSyntax initArrId
+                        && chunkArrayNames.Contains(initArrId.Identifier.Text))
+                    {
+                        string arrName = initArrId.Identifier.Text;
+                        string idxText = initEA.ArgumentList?.Arguments.Count > 0
+                            ? initEA.ArgumentList.Arguments[0].ToString()
+                            : "0";
+
+                        // Find write-back: array[idx] = tempName (within next few statements)
+                        int writeBackIdx = -1;
+                        for (int j = i + 1; j < statements.Length; j++)
+                        {
+                            if (statements[j] is ExpressionStatementSyntax es
+                                && es.Expression is AssignmentExpressionSyntax ae
+                                && ae.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                                && ae.Left is ElementAccessExpressionSyntax wbEA
+                                && wbEA.Expression is IdentifierNameSyntax wbArrId
+                                && wbArrId.Identifier.Text == arrName
+                                && wbEA.ArgumentList?.Arguments.Count > 0
+                                && wbEA.ArgumentList.Arguments[0].ToString() == idxText
+                                && ae.Right is IdentifierNameSyntax rhsId
+                                && rhsId.Identifier.Text == tempName)
+                            {
+                                writeBackIdx = j;
+                                break;
+                            }
+                        }
+
+                        if (writeBackIdx > 0)
+                        {
+                            // Rewrite mutation statements between decl and write-back.
+                            // Replace tempName.Field → arrName[idxText].Field
+                            for (int k = i + 1; k < writeBackIdx; k++)
+                            {
+                                var mutationStmt = statements[k];
+                                var rewritten = RewriteTempFieldRefs(mutationStmt, tempName, arrName, idxText);
+                                if (rewritten != null)
+                                    newStatements.Add(rewritten);
+                            }
+                            i = writeBackIdx + 1; // Skip write-back
+                            continue;
+                        }
+                    }
+                }
+
+                newStatements.Add(stmt);
+                i++;
+            }
+
+            return SyntaxFactory.Block(newStatements);
+        }
+
+        /// <summary>
+        /// Flatten nested blocks into a single list of statements.
+        /// </summary>
+        private static List<StatementSyntax> FlattenBlockStatements(BlockSyntax block)
+        {
+            var result = new List<StatementSyntax>();
+            foreach (var stmt in block.Statements)
+            {
+                if (stmt is BlockSyntax nestedBlock)
+                    result.AddRange(FlattenBlockStatements(nestedBlock));
+                else
+                    result.Add(stmt);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Replace tempName.Field with arrName[idxText].Field in a statement.
+        /// Returns null if no replacement needed (keep original).
+        /// </summary>
+        private static StatementSyntax? RewriteTempFieldRefs(StatementSyntax stmt, string tempName, string arrName, string idxText)
+        {
+            // Build the replacement expression: arrName[idxText]
+            var arrayAccess = SyntaxFactory.ElementAccessExpression(
+                SyntaxFactory.IdentifierName(arrName))
+                .WithArgumentList(SyntaxFactory.BracketedArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Argument(SyntaxFactory.ParseExpression(idxText)))));
+
+            // Walk the statement tree and replace tempName.Field with arrName[idxText].Field
+            var rewriter = new TempFieldRewriter(tempName, arrayAccess);
+            return (StatementSyntax)rewriter.Visit(stmt);
+        }
+
+        /// <summary>Rewriter that replaces tempName.Field with arrExpr.Field in member access expressions.</summary>
+        private sealed class TempFieldRewriter : CSharpSyntaxRewriter
+        {
+            private readonly string _tempName;
+            private readonly ExpressionSyntax _replacementExpr;
+
+            public TempFieldRewriter(string tempName, ExpressionSyntax replacementExpr)
+            {
+                _tempName = tempName;
+                _replacementExpr = replacementExpr;
+            }
+
+            public override SyntaxNode VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
+            {
+                // tempName.Field → replacementExpr.Field
+                if (node.Expression is IdentifierNameSyntax id
+                    && id.Identifier.Text == _tempName)
+                {
+                    return SyntaxFactory.MemberAccessExpression(
+                        node.Kind(),
+                        _replacementExpr,
+                        node.Name)
+                        .WithTriviaFrom(node);
+                }
+                return base.VisitMemberAccessExpression(node);
+            }
         }
 
         /// <summary>
@@ -1814,31 +1965,7 @@ namespace NativeTranspiler.Analyzer
                     return;
                 }
 
-                // 2. Check if element types are structs (not SIMD-primitive).
-                //    Use per-lane SIMD wrapping for struct types (matches ISPC pl_dolane pattern).
-                bool hasStructType = chunkArrays.Any(c =>
-                    c.elemType != "float" && c.elemType != "int" &&
-                    !c.elemType.Contains("float2") && !c.elemType.Contains("int2"));
-
-                if (hasStructType)
-                {
-                    var scalarTranslator = new CppChunkStatementTranslator(
-                        semanticModel, jobStruct,
-                        CollectChunkNativeArrayTypes(jobStruct, compilation), useFastMath);
-                    string scalarBody = scalarTranslator.Translate(methodSyntax.Body);
-                    scalarBody = WrapEntityLoopSIMD(scalarBody, entityLoopIv, "__entityCount");
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
-                    sb.Append(scalarBody);
-                    sb.AppendLine("}");
-                    return;
-                }
-
-                // 3. Generate C++ prelude
+                                // 2. Generate C++ prelude// 3. Generate C++ prelude
                 foreach (var (name, elemType, compIdx) in chunkArrays)
                 {
                     sb.AppendLine($"    auto* RESTRICT {name}_ptr = reinterpret_cast<{elemType}*>(__chunkData->requiredComponentArrays[{compIdx}]);");
@@ -1888,9 +2015,13 @@ namespace NativeTranspiler.Analyzer
             // 7. Scalar remainder loop
             GenerateChunkFunctionRemainder(jobStruct, compilation, sb, useFastMath, chunkArrays, entityLoopIv);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Fallback: use scalar translator
+                // Fallback: close the batch loop and emit scalar code WITHOUT prelude
+                sb.AppendLine("        __simd_exit: ;");
+                sb.AppendLine("        }");
+                sb.AppendLine("    }");
+                // Scalar remainder (strip duplicate pointer declarations)
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
                 var methodSyntax = executeMethod != null ? SymbolHelper.GetMethodSyntax(executeMethod) : null;
                 if (methodSyntax?.Body != null)
@@ -1898,7 +2029,18 @@ namespace NativeTranspiler.Analyzer
                     var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                     var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
                     var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
-                    sb.Append(translator.Translate(methodSyntax.Body));
+                    string scalarBody = translator.Translate(methodSyntax.Body);
+                    // Strip duplicate declarations
+                    scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", "");
+                    scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;\r?\n?", "");
+                    scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;\r?\n?", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
+                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
+                    sb.Append(scalarBody);
                 }
             }
 
