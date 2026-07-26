@@ -208,9 +208,9 @@ namespace EntJoySample.AutoSIMDTest
 
             Console.WriteLine();
             Console.WriteLine(eq);
-            Console.WriteLine($"  {"",-9} IJobChunk──           IJobEntity─");
-            Console.WriteLine($"  {"Case",-9} C++    SIMD   ISPC   C++    SIMD   ISPC");
-            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ─────");
+            Console.WriteLine($"  {"",-9} IJobChunk───                 IJobEntity───");
+            Console.WriteLine($"  {"Case",-9} C++    SIMD   VZ     ISPC   C++    SIMD   VZ");
+            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ───── ─────");
 
             double LChCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
             double LChSD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
@@ -219,12 +219,14 @@ namespace EntJoySample.AutoSIMDTest
             double LEnSD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
             double HChCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
             double HChSD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HChVZ = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_Vectorize { DeltaTime = dt }.Schedule(query).Complete(); });
             double HChIP = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_ISPC { DeltaTime = dt }.Schedule(query).Complete(); });
             double HEnCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
             double HEnSD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HEnVZ = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_Vectorize { DeltaTime = dt }.Schedule(query).Complete(); });
 
             Console.WriteLine($"  {"LightMove",-9} {LChCpp,5:F3} {LChSD,5:F3} {LChIP,5:F3}   {LEnCpp,5:F3} {LEnSD,5:F3} {"N/A",5}");
-            Console.WriteLine($"  {"HeavyMove",-9} {HChCpp,5:F3} {HChSD,5:F3} {HChIP,5:F3}   {HEnCpp,5:F3} {HEnSD,5:F3} {"N/A",5}");
+            Console.WriteLine($"  {"HeavyMove",-9} {HChCpp,5:F3} {HChSD,5:F3} {HChVZ,5:F3} {HChIP,5:F3} {HEnCpp,5:F3} {HEnSD,5:F3} {HEnVZ,5:F3}");
             Console.WriteLine(sep);
             Console.WriteLine("  Schedule().Complete() via ECS World");
             Console.WriteLine();

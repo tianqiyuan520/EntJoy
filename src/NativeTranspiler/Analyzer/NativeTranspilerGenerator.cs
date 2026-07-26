@@ -386,6 +386,25 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
+                // 生成 run_clangcl.bat：用 ClangCL (LLVM 后端) 编译 NativeDll
+                {
+                    string solBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+                    var clangBatPath = Path.Combine(outputDir, "run_clangcl.bat");
+                    var clangBat = new StringBuilder();
+                    clangBat.AppendLine("@echo off");
+                    clangBat.AppendLine("cd /d \"%~dp0\"");
+                    clangBat.AppendLine("if not exist build mkdir build");
+                    clangBat.AppendLine("echo Configuring ClangCL (LLVM backend)...");
+                    clangBat.AppendLine("cmake -B build -G \"Visual Studio 17 2022\" -T ClangCL -A x64 -DNATIVE_SIMD_LEVEL=AVX2");
+                    clangBat.AppendLine("if errorlevel 1 exit /b 1");
+                    clangBat.AppendLine("echo Building NativeDll with ClangCL...");
+                    clangBat.AppendLine("cmake --build build --config Release --target NativeDll");
+                    clangBat.AppendLine("if errorlevel 1 exit /b 1");
+                    clangBat.AppendLine("copy /Y build\\Release\\NativeDll.dll \"" + solBinDir + "\"");
+                    clangBat.AppendLine("echo Done. NativeDll.dll copied to " + solBinDir);
+                    WriteAllTextWithRetry(clangBatPath, clangBat.ToString());
+                }
+
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
                 spc.AddSource("NativeTranspiler.Bindings.g.cs", bindingsCode);
                 spc.AddSource("NativeTranspiler_GeneratedMarker.g.cs",
@@ -617,7 +636,8 @@ namespace {AttributeNamespace}
     public enum AutoSIMD
     {{
         Enabled,
-        Disabled
+        Disabled,
+        Vectorize
     }}
 
     public enum SimdMathPrecision
