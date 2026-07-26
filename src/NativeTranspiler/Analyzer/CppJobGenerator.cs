@@ -1754,7 +1754,7 @@ namespace NativeTranspiler.Analyzer
                             }
                         }
 
-                        if (writeBackIdx > 0)
+                        if (writeBackIdx >= 0)
                         {
                             // Rewrite mutation statements between decl and write-back.
                             for (int k = i + 1; k < writeBackIdx; k++)

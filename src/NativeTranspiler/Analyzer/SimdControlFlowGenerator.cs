@@ -1449,6 +1449,25 @@ namespace NativeTranspiler.Analyzer
             {
                 string name = variable.Identifier.Text;
 
+                                // ★ [Priority] Struct-typed local initialized from chunk array element access.
+                //   e.g., MoveVelocity velocity = velocities[index];
+                //   → defer to _structVaryingLocals for field-level decomposition.
+                //   Check BEFORE the general Varying check because the variable analyzer
+                //   may classify it as Varying (via PropagateAssignments from the index)
+                //   but with wrong CppType ("int" for unknown struct types).
+                if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
+                    && structInitEA.Expression is IdentifierNameSyntax structInitArrId
+                    && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
+                    && structInitElemType != "float" && structInitElemType != "int"
+                    && !structInitElemType.Contains("float2") && !structInitElemType.Contains("int2"))
+                {
+                    string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
+                        ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
+                        : "0";
+                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
+                    continue;
+                }
+
                 if (_variables.TryGetValue(name, out var info) && info.Kind >= VarKind.Varying)
                 {
                     string varType = GetSIMDTypeString(info.CppType);
@@ -1461,7 +1480,6 @@ namespace NativeTranspiler.Analyzer
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);
                             _simdVaryingCppType[name] = info.CppType;
-                            // Track clamped gather results: check GENERATED C++ string for clamp pattern
                             if (initExpr.Contains("simd_min") && initExpr.Contains("simd_max"))
                                 _clampedVars.Add($"v_{name}");
                             AppendLine($"{varType} v_{name} = {initExpr};");
@@ -1470,23 +1488,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    // Check: struct-typed local initialized from chunk array element access
-                    // e.g., MovePosition position = positions[idx];
-                    // → defer to _structVaryingLocals for field-level decomposition
-                    if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
-                        && structInitEA.Expression is IdentifierNameSyntax structInitArrId
-                        && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
-                        && structInitElemType != "float" && structInitElemType != "int"
-                        && !structInitElemType.Contains("float2") && !structInitElemType.Contains("int2"))
-                    {
-                        string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
-                            ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
-                            : "0";
-                        _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
-                        continue; // Don't emit declaration; field access decomposed at use site
-                    }
-
-                    // Uniform local — emit as scalar
+                    // Uniform local — emit as scalar// Uniform local — emit as scalar
                     // Try semantic model first (may fail on SyntaxFactory-created AST nodes)
                     string cppType = "float";
                     try
@@ -1771,15 +1773,20 @@ namespace NativeTranspiler.Analyzer
                     int ptrIdx = objExpr.IndexOf("((const float*)");
                     if (ptrIdx >= 0)
                     {
-                        // Skip first ')' (closes "(const float*)") and find the second
+                        // Structure: ((const float*)(&arr[0].field)
+                        // ptrIdx -> start of "((const float*)"
+                        // innerStart -> '(' before "&arr[0].field"
+                        // closeIdx -> ')' closing "(&arr[0].field)"
+                        int innerStart = ptrIdx + 15;
                         int firstClose = objExpr.IndexOf(')', ptrIdx);
                         int closeIdx = firstClose >= 0 ? objExpr.IndexOf(')', firstClose + 1) : -1;
-                        if (closeIdx >= 0)
+                        if (closeIdx >= 0 && innerStart < closeIdx)
                         {
+                            // Extract "&arr[0].field" (skip leading '(')
+                            string innerContent = objExpr.Substring(innerStart + 1, closeIdx - innerStart - 1);
                             modified = objExpr.Substring(0, ptrIdx) +
-                                "((const float*)((const float*)" +
-                                objExpr.Substring(ptrIdx + 15, closeIdx - ptrIdx - 15) +
-                                " + 1)" +
+                                "((const float*)(" + innerContent +
+                                ") + 1)" +
                                 objExpr.Substring(closeIdx + 1);
                             return modified;
                         }
@@ -1978,7 +1985,19 @@ namespace NativeTranspiler.Analyzer
             IMethodSymbol? symbol = null;
             try { symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol; } catch { }
             if (symbol == null)
+            {
+                // Fallback: try name-based matching for common math functions
+                // (GetSymbolInfo can fail on SyntaxFactory-created AST nodes)
+                var ident = invocation.Expression as MemberAccessExpressionSyntax;
+                string? fnName = ident?.Name.Identifier.Text;
+                if (fnName != null)
+                {
+                    string fc = TranslateMathFunction(fnName, invocation);
+                    if (!fc.Contains("/* unknown */"))
+                        return fc;
+                }
                 return "/* unknown function */ 0";
+            }
 
             string containingType = symbol.ContainingType?.ToDisplayString() ?? "";
             string methodName = symbol.Name;
