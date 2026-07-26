@@ -38,23 +38,32 @@
     typedef __m256  n_float;
     typedef __m256i n_int;
     typedef __m256  n_mask;
+    typedef __m256d n_double;
 #elif defined(NSIMD_AVX)
     typedef __m256  n_float;
     typedef __m256i n_int;
     typedef __m256  n_mask;
+    typedef __m256d n_double;
 #elif defined(NSIMD_SSE4)
     typedef __m128  n_float;
     typedef __m128i n_int;
     typedef __m128  n_mask;
+    typedef __m128d n_double;
 #elif defined(NSIMD_NEON)
     typedef float32x4_t n_float;
     typedef int32x4_t   n_int;
     // n_mask is uint32x4_t on NEON (comparison/bitwise ops return this type)
     typedef uint32x4_t  n_mask;
+    #if defined(__aarch64__)
+        typedef float64x2_t  n_double;
+    #else
+        typedef double n_double;  // AArch32 NEON: scalar double fallback
+    #endif
 #else
     typedef float  n_float;
     typedef int    n_int;
     typedef bool   n_mask;
+    typedef double n_double;
 #endif
 
 // ============================================================
@@ -1168,4 +1177,196 @@ static inline int n_hmin_idx(n_float v_val, n_int v_idx) {
         }
     }
     return best_i;
+}
+
+// ============================================================
+// n_double operations (double precision SIMD)
+// ============================================================
+
+static inline n_double n_set1_pd(double s) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_set1_pd(s);
+#elif defined(NSIMD_SSE4)
+    return _mm_set1_pd(s);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vdupq_n_f64(s);
+#else
+    return s;
+#endif
+}
+
+static inline n_double n_load_pd(const double* p) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_loadu_pd(p);
+#elif defined(NSIMD_SSE4)
+    return _mm_loadu_pd(p);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vld1q_f64(p);
+#else
+    return *p;
+#endif
+}
+
+static inline void n_store_pd(double* p, n_double v) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    _mm256_storeu_pd(p, v);
+#elif defined(NSIMD_SSE4)
+    _mm_storeu_pd(p, v);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    vst1q_f64(p, v);
+#else
+    *p = v;
+#endif
+}
+
+static inline n_double n_add_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_add_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_add_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vaddq_f64(a, b);
+#else
+    return a + b;
+#endif
+}
+
+static inline n_double n_sub_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_sub_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_sub_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vsubq_f64(a, b);
+#else
+    return a - b;
+#endif
+}
+
+static inline n_double n_mul_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_mul_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_mul_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vmulq_f64(a, b);
+#else
+    return a * b;
+#endif
+}
+
+static inline n_double n_div_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_div_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_div_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vdivq_f64(a, b);
+#else
+    return a / b;
+#endif
+}
+
+static inline n_double n_sqrt_pd(n_double a) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_sqrt_pd(a);
+#elif defined(NSIMD_SSE4)
+    return _mm_sqrt_pd(a);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vsqrtq_f64(a);
+#else
+    return sqrt(a);
+#endif
+}
+
+// Double FMA
+static inline n_double n_fmadd_pd(n_double a, n_double b, n_double c) {
+#if defined(NSIMD_AVX2) && defined(__FMA__)
+    return _mm256_fmadd_pd(a, b, c);
+#elif defined(NSIMD_SSE4) && defined(__FMA__)
+    return _mm_fmadd_pd(a, b, c);
+#else
+    return n_add_pd(n_mul_pd(a, b), c);
+#endif
+}
+
+// Double min/max
+static inline n_double n_min_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_min_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_min_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vminq_f64(a, b);
+#else
+    return (a < b) ? a : b;
+#endif
+}
+
+static inline n_double n_max_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_max_pd(a, b);
+#elif defined(NSIMD_SSE4)
+    return _mm_max_pd(a, b);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vmaxq_f64(a, b);
+#else
+    return (a > b) ? a : b;
+#endif
+}
+
+// Double comparison → mask (cast between __m256d and __m256 for n_mask)
+static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_LT_OS));
+#elif defined(NSIMD_SSE4)
+    return _mm_castpd_ps(_mm_cmplt_pd(a, b));
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vcltq_f64(a, b);  // NOLINT: returns uint32x4_t which IS n_mask on NEON
+#else
+    return a < b;
+#endif
+}
+
+static inline n_mask n_cmp_eq_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_EQ_OS));
+#elif defined(NSIMD_SSE4)
+    return _mm_castpd_ps(_mm_cmpeq_pd(a, b));
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vceqq_f64(a, b);
+#else
+    return a == b;
+#endif
+}
+
+// Double blend (cast n_mask→__m256d)
+static inline n_double n_blend_pd(n_double f, n_double t, n_mask m) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_blendv_pd(f, t, _mm256_castps_pd(m));
+#elif defined(NSIMD_SSE4)
+    return _mm_blendv_pd(f, t, _mm_castps_pd(m));
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vbslq_f64(m, t, f);
+#else
+    return (m != 0) ? t : f;
+#endif
+}
+
+// Double horizontal operations
+static inline double n_hmin_pd(n_double v) {
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d m = _mm_min_pd(lo, hi);
+    m = _mm_min_pd(m, _mm_shuffle_pd(m, m, 1));
+    return _mm_cvtsd_f64(m);
+#elif defined(NSIMD_SSE4)
+    __m128d m = _mm_min_pd(v, _mm_shuffle_pd(v, v, 1));
+    return _mm_cvtsd_f64(m);
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    return vminvq_f64(v);
+#else
+    return v;
+#endif
 }

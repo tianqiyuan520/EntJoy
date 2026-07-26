@@ -363,3 +363,78 @@ static inline n_float _n_tanh_ps(n_float a) {
   n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
   return n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
 }
+
+// ================================================================
+// Double-precision SLEEF (n_*_pd)
+// ================================================================
+
+// Double precision sin — inline AVX2 polynomial (SLEEF-derived)
+#if defined(NSIMD_AVX2)
+// _PIO2 constants for double
+#define _N_PIO2_A_PD -1.5707963050
+#define _N_PIO2_B_PD -4.37113883e-8
+
+static inline n_double _n_sin_avx2_pd(n_double d) {
+    // Range reduction: q = round(d * 2/π), r = d - q * π/2
+    n_double qf = _mm256_round_pd(_mm256_mul_pd(d, _mm256_set1_pd(0.6366197723675814)), 0);
+    __m128i q_lo = _mm256_cvtpd_epi32(qf);  // q as int (lower 4 lanes)
+    __m128i q_hi = _mm256_cvtpd_epi32(_mm256_permute2f128_pd(qf, qf, 1));
+    n_int qi = _mm256_insertf128_si256(_mm256_castsi128_si256(q_lo), q_hi, 1);
+    n_double r = _mm256_sub_pd(d, _mm256_mul_pd(qf, _mm256_set1_pd(1.5707963267948966)));
+    r = _mm256_sub_pd(r, _mm256_mul_pd(qf, _mm256_set1_pd(6.123233995736766e-17)));
+
+    // Determine sin/cos based on quadrant
+    n_int qi_mod4 = _mm256_and_si256(qi, _mm256_set1_epi32(3));
+    n_mask use_cos_mask = _mm256_castsi256_ps(_mm256_cmpeq_epi32(
+        _mm256_and_si256(qi, _mm256_set1_epi32(2)), _mm256_setzero_si256()));
+    n_mask neg_mask = _mm256_castsi256_ps(_mm256_cmpeq_epi32(
+        _mm256_and_si256(qi_mod4, _mm256_set1_epi32(1)), _mm256_set1_epi32(1)));
+
+    n_double x = _mm256_blendv_pd(r,
+        _mm256_sub_pd(_mm256_set1_pd(1.5707963267948966), r), _mm256_castps_pd(use_cos_mask));
+
+    // Polynomial: sin(x) ≈ x + x³·c1 + x⁵·c2 + x⁷·c3 + x⁹·c4
+    n_double x2 = _mm256_mul_pd(x, x);
+    n_double c = _mm256_set1_pd(-1.66666666666666324348e-01);   // c1
+    c = _mm256_fmadd_pd(c, x2, _mm256_set1_pd(8.33333333332248946124e-03));  // c2
+    c = _mm256_fmadd_pd(c, x2, _mm256_set1_pd(-1.98412698298579493134e-04)); // c3
+    c = _mm256_fmadd_pd(c, x2, _mm256_set1_pd(2.75573137070700676789e-06));  // c4
+    c = _mm256_fmadd_pd(c, x2, _mm256_set1_pd(-2.50507602534068634195e-08)); // c5
+    n_double result = _mm256_fmadd_pd(c, _mm256_mul_pd(x, x2), x);
+
+    // Negate if needed
+    result = _mm256_blendv_pd(result, _mm256_xor_pd(_mm256_castsi256_pd(_mm256_set1_epi64x(0x8000000000000000)), result), _mm256_castps_pd(neg_mask));
+    return result;
+}
+#define N_SIN_PD(a) _n_sin_avx2_pd(a)
+#define N_COS_PD(a) _n_sin_avx2_pd(_mm256_add_pd(a, _mm256_set1_pd(1.5707963267948966)))
+
+#elif defined(NSIMD_SSE4) && defined(__aarch64__)
+// SSE4: use scalar per-lane for each double lane (only 2-wide anyway, scalar is fine)
+#define N_SIN_PD(a) _n_sin_pd_fallback(a)
+#else
+// Fallback: per-lane scalar sin
+static inline n_double _n_sin_pd_fallback(n_double a) {
+    double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
+    n_store_pd(lane, a);
+    for (int i = 0; i < w; i++) lane[i] = sin(lane[i]);
+    return n_load_pd(lane);
+}
+#define N_SIN_PD(a) _n_sin_pd_fallback(a)
+#define N_COS_PD(a) _n_cos_pd_fallback(a)
+#endif
+
+#ifndef N_COS_PD
+static inline n_double _n_cos_pd_fallback(n_double a) {
+    double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
+    n_store_pd(lane, a);
+    for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
+    return n_load_pd(lane);
+}
+#define N_COS_PD(a) _n_cos_pd_fallback(a)
+#endif
+
+// Public API
+static inline n_double n_sin_pd(n_double a)     { return N_SIN_PD(a); }
+static inline n_double n_cos_pd(n_double a)     { return N_COS_PD(a); }
+// sqrt_pd is already defined in NativeSIMD.h as n_sqrt_pd
