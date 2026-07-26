@@ -1762,38 +1762,15 @@ namespace NativeTranspiler.Analyzer
             //   For .y, we need the gather at offset+1 (y is at +4 bytes).
             if ((memberName == "x" || memberName == "y") && objExpr.Contains("n_gather_ps<"))
             {
-                if (memberName == "y")
+                                if (memberName == "y")
                 {
-                    // .y on float2 field: gather with +1 float offset
-                    // Replace "(&arr[0].field)" with "((const float*)(&arr[0].field) + 1)"
-                    string modified = objExpr.Replace(
-                        "n_gather_ps<", "n_gather_ps<");
-                    // Actually simpler: just rewrite the entire expression for y:
-                    // Keep the same gather but advance the base pointer by 1 float
-                    int ptrIdx = objExpr.IndexOf("((const float*)");
-                    if (ptrIdx >= 0)
-                    {
-                        // Structure: ((const float*)(&arr[0].field)
-                        // ptrIdx -> start of "((const float*)"
-                        // innerStart -> '(' before "&arr[0].field"
-                        // closeIdx -> ')' closing "(&arr[0].field)"
-                        int innerStart = ptrIdx + 15;
-                        int firstClose = objExpr.IndexOf(')', ptrIdx);
-                        int closeIdx = firstClose >= 0 ? objExpr.IndexOf(')', firstClose + 1) : -1;
-                        if (closeIdx >= 0 && innerStart < closeIdx)
-                        {
-                            // Extract "&arr[0].field" (skip leading '(')
-                            string innerContent = objExpr.Substring(innerStart + 1, closeIdx - innerStart - 1);
-                            modified = objExpr.Substring(0, ptrIdx) +
-                                "((const float*)(" + innerContent +
-                                ") + 1)" +
-                                objExpr.Substring(closeIdx + 1);
-                            return modified;
-                        }
-                    }
-                    return $"simd_value<float>{{ {objExpr.Replace("n_gather_ps<", "n_gather_ps<")} }}"; // fallback
-                }
-                // For .x: the n_gather_ps already reads at the field offset, returning x component
+                    // For .y: use same gather expression but at base+1 float offset.
+                    // The n_gather_ps reads float at arr_ptr[v_i].field.
+                    // For .y we need: arr_ptr[v_i].field_y which is at offset +4 bytes.
+                    // Simple approach: append " + 1" before v_i.v to advance pointer by 1 float.
+                    string modified = objExpr.Replace(", v_i.v)", " + 1, v_i.v)");
+                    return modified;
+                }// For .x: the n_gather_ps already reads at the field offset, returning x component
                 return objExpr;
             }
 
