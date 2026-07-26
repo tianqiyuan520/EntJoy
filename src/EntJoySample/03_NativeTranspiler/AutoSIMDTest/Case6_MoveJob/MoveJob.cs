@@ -191,6 +191,44 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
+    // ── ISPC IJobEntity variants ──
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct MoveJobEntity_ISPC : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            position.Value += velocity.Value * DeltaTime;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct HeavyJobEntity_ISPC : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref MovePosition position, in MoveVelocity velocity)
+        {
+            float px = position.Value.x, py = position.Value.y;
+            float vx = velocity.Value.x, vy = velocity.Value.y;
+            float accX = px * 0.001f + vx * 0.01f;
+            float accY = py * 0.001f + vy * 0.01f;
+            for (int iteration = 0; iteration < 16; iteration++)
+            {
+                float phaseX = accX + iteration * 0.03125f;
+                float phaseY = accY - iteration * 0.0625f;
+                float wave = MathF.Sin(phaseX) + MathF.Cos(phaseY);
+                float radius = MathF.Sqrt(accX * accX + accY * accY + 1.0f);
+                accX = accX * 0.985f + wave * 0.015f + radius * 0.0002f + vx * 0.0001f;
+                accY = accY * 0.982f - wave * 0.012f + radius * 0.0003f + vy * 0.0001f;
+            }
+            position.Value.x = px + vx * DeltaTime + accX * 0.001f;
+            position.Value.y = py + vy * DeltaTime + accY * 0.001f;
+        }
+    }
+
     // ────────────────────────────────────────────
     // Heavy IJobChunk: auto-vectorize mode (scalar sinf/cosf → Clang @llvm.sin.v8f32)
     // ────────────────────────────────────────────
@@ -292,7 +330,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ISPC variants (IJobChunk only; IJobEntity ISPC has pre-existing generator limitation) ──
+    // ── ISPC variants ──
 
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
     public struct MoveJobChunk_ISPC : IJobChunk
