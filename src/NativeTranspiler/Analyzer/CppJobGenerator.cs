@@ -119,7 +119,7 @@ namespace NativeTranspiler.Analyzer
                 // auto-SIMD 启用时声明独立函数
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
                 var autoSIMD = attrSymbol != null ? AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol) : NativeTranspiler.AutoSIMD.Disabled;
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled || autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
                 {
                     var chunkParams = BuildChunkJobParameters(jobStruct);
                     var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -161,7 +161,9 @@ namespace NativeTranspiler.Analyzer
             // IJobChunk: 生成独立 Execute 函数
             if (IsChunkJob(jobStruct))
             {
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
+                    GenerateChunkFunctionVectorize(jobStruct, compilation, sb, useFastMath);
+                else if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     GenerateChunkFunctionSIMD(jobStruct, compilation, sb, useFastMath, simdMathPrecision);
                 else
                     GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
@@ -169,7 +171,9 @@ namespace NativeTranspiler.Analyzer
             // IJobEntity: 无独立 Execute，循环体内联到 Adapter 中
             else if (IsEntityJob(jobStruct))
             {
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
+                    GenerateEntityFunctionVectorize(jobStruct, compilation, sb, useFastMath);
+                else if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 {
                     GenerateEntityFunctionStandard(jobStruct, compilation, sb, useFastMath);
                 }
@@ -389,6 +393,92 @@ namespace NativeTranspiler.Analyzer
             {
                 sb.AppendLine("    // TODO: Translate IJobChunk Execute body");
             }
+            sb.AppendLine("}");
+        }
+
+        private static void GenerateChunkFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        {
+            // Generate auto-vectorizable scalar loop — Clang generates @llvm.sin.v8f32 / cos.v8f32
+            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var singleFuncName = GetCppJobFunctionName(jobStruct);
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine("{");
+            AppendLocalVariableDeclarations(jobStruct, sb);
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                // Use same chunk translator as standard mode — produces scalar ptr[index].field
+                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                var bodyCode = translator.Translate(methodSyntax.Body);
+                // Insert auto-vectorize pragma before the entity for-loop
+                string pragma = "#ifdef __clang__\n#pragma clang loop vectorize(enable) interleave(enable)\n#endif\n";
+                int forPos = bodyCode.IndexOf("for (");
+                if (forPos >= 0)
+                    bodyCode = bodyCode.Insert(forPos, pragma);
+                sb.Append(bodyCode);
+            }
+            else
+            {
+                sb.AppendLine("    // TODO: Translate IJobChunk Execute body");
+            }
+            sb.AppendLine("}");
+        }
+
+        private static void GenerateEntityFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        {
+            // Flat scalar loop for IJobEntity — compiler auto-vectorizes across entities
+            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var singleFuncName = GetCppJobFunctionName(jobStruct);
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine("{");
+            AppendLocalVariableDeclarations(jobStruct, sb);
+
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            for (int i = 0; i < executeMethod.Parameters.Length; i++)
+            {
+                var param = executeMethod.Parameters[i];
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
+                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+            }
+
+            // Pre-translate scalar body
+            string scalarBody = "";
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var translator = new CppStatementTranslator(semanticModel, useFastMath);
+                scalarBody = translator.Translate(methodSyntax.Body);
+            }
+
+            // Replace param.Name references with array indexing
+            for (int i = 0; i < executeMethod.Parameters.Length; i++)
+            {
+                var param = executeMethod.Parameters[i];
+                scalarBody = scalarBody.Replace(param.Name + ".", $"__entity_param_{i}_ptr[__entity_index].");
+            }
+
+            bool hasReturn = scalarBody.Contains("return;");
+            if (hasReturn)
+                scalarBody = scalarBody.Replace("return;", "");
+
+            // Flat scalar loop with auto-vectorize pragma (must be directly before the for)
+            sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+            sb.AppendLine("#ifdef __clang__");
+            sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
+            sb.AppendLine("#endif");
+            sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+            sb.AppendLine("    {");
+            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (line.Length == 0) continue;
+                sb.Append("        ").AppendLine(line);
+            }
+            sb.AppendLine("    }");
             sb.AppendLine("}");
         }
 

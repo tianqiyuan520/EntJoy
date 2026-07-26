@@ -52,7 +52,8 @@ namespace NativeTranspiler.Analyzer
         public enum AutoSIMD
         {
             Enabled,
-            Disabled
+            Disabled,
+            Vectorize
         }
 
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
