@@ -951,7 +951,13 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Global compiler flags");
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(MSVC)");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            sb.AppendLine("    if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")");
+            sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Oi /fp:fast)");
+            sb.AppendLine("    else()");
+            sb.AppendLine("        # MSVC (default)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            sb.AppendLine("    endif()");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
