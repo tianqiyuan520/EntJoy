@@ -19,6 +19,34 @@ namespace NativeTranspiler.Analyzer
         /// <summary>设置 foreach 上下文标志（由外部生成器在发射 foreach 后调用）</summary>
         public void SetInsideForeach(bool value) => _insideForeach = value;
 
+        /// <summary>设置 uniform-for 上下文标志（由外部生成器在发射 uniform for 后调用）</summary>
+        public void SetInsideUniformFor(bool value) => _insideUniformFor = value;
+
+        /// <summary>预扫描方法体，收集在循环中被赋值的局部变量（reduction 累加器）</summary>
+        public void PreScanAccumulatorVars(MethodDeclarationSyntax methodSyntax)
+        {
+            if (methodSyntax?.Body == null) return;
+
+            // 收集所有局部变量名
+            var localVars = new HashSet<string>();
+            foreach (var localDecl in methodSyntax.Body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in localDecl.Declaration.Variables)
+                    localVars.Add(v.Identifier.Text);
+
+            // 找出在 for/while 循环体中被赋值（左值出现）的局部变量
+            foreach (var loopNode in methodSyntax.Body.DescendantNodes())
+            {
+                if (loopNode is ForStatementSyntax || loopNode is WhileStatementSyntax)
+                {
+                    foreach (var assign in loopNode.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                    {
+                        if (assign.Left is IdentifierNameSyntax id && localVars.Contains(id.Identifier.Text))
+                            _varyingAccumulatorVars.Add(id.Identifier.Text);
+                    }
+                }
+            }
+        }
+
         /// <summary>是否在 uniform for 体内部（内层 for 可转为 foreach 协作 SIMD）</summary>
         protected bool _insideUniformFor;
 

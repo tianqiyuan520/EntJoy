@@ -1534,11 +1534,11 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // 无自修改 + 无原子返回值使用时，使用 foreach 获得最佳 SIMD 加速
-                // field dereference variables are varying (ISPC default)
-                AppendUniformVariableDeclarations(sb, jobStruct);
+                // 无自修改 + 无原子返回值使用时，默认用 foreach 获得最佳 SIMD 加速。
+                // 但如果 Execute 体内有嵌套 for/while（如 reduce 模式），
+                // foreach 使外层 index varying → 内层内存访问变 gather。
+                // 此时改用 for (uniform int) 使 index uniform，内层自然转 foreach 协作 SIMD。
 
-                // 找到第一个 NativeArray 字段的 _length 名作为边界保护
                 string lengthBound = "__startIndex + __count";
                 foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
                 {
@@ -1548,12 +1548,34 @@ namespace NativeTranspiler.Analyzer
                         break;
                     }
                 }
-                sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
-                var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                translator.SetInsideForeach(true); // 告知 translator 在 foreach 内，内层循环需 uniform 修饰
-                var bodyCode = translator.Translate(methodSyntax.Body);
-                sb.Append(bodyCode);
-                sb.AppendLine($"{Indent}}}");
+
+                bool hasNestedLoop = methodSyntax.Body != null &&
+                    methodSyntax.Body.DescendantNodes().Any(n => n is ForStatementSyntax || n is WhileStatementSyntax);
+
+                if (hasNestedLoop)
+                {
+                    // 有嵌套循环：uniform for + 内层 foreach（避免 gather）
+                    // 累加器自动标记为 varying，输出点自动 reduce_min
+                    AppendUniformVariableDeclarations(sb, jobStruct);
+                    sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; {indexParamName}++) {{");
+                    var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                    translator.PreScanAccumulatorVars(methodSyntax);
+                    translator.SetInsideUniformFor(true);
+                    var bodyCode = translator.Translate(methodSyntax.Body);
+                    sb.Append(bodyCode);
+                    sb.AppendLine($"{Indent}}}");
+                }
+                else
+                {
+                    // 简单循环，无嵌套：foreach 最佳 SIMD
+                    AppendUniformVariableDeclarations(sb, jobStruct);
+                    sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
+                    var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                    translator.SetInsideForeach(true);
+                    var bodyCode = translator.Translate(methodSyntax.Body);
+                    sb.Append(bodyCode);
+                    sb.AppendLine($"{Indent}}}");
+                }
             }
             sb.AppendLine("}");
         }
