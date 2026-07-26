@@ -840,42 +840,130 @@ namespace NativeTranspiler.Analyzer
                 GenerateVaryingReductionLoop(ivName, startExpr, endExpr, stmt);
             else if (isUniformBounds && !isReduction)
             {
-                // Docs-style: scalar for() with mask-narrowed body (dx/dy loops)
-                //   for(int dx) {
-                //     v_active = cmp_ult(v_nx, dims);
-                //     if(!v_active.any_true()) continue;
-                //     // body uses v_active as mask
-                //   }
-                // continue emits real C++ continue; (skip iteration when ALL lanes done)
-                string csOpStr2 = stmt.Condition is BinaryExpressionSyntax cbin2
-                    && cbin2.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
-                AppendLine($"// Docs-style scalar for: for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
-                AppendLine($"simd_value<int> simd_{ivName};");
-                // simd_end_{ivName} not needed — uniform loops never compare against end in SIMD
-                string preLoopMask2 = _currentMask;
-                AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
-                AppendLine("{");
-                _indent++;
-                AppendLine($"simd_{ivName} = simd_value<int>::broadcast({ivName});");
-                // Loop frame for continue (real C++ continue;)
-                string exitL = $"__uni_exit_{_labelCounter++}";
-                string contL = $"__uni_cont_{_labelCounter++}";
-                _isUniformScalarLoop = true;
-                _loopStack.Push(new LoopFrame { TrackerVar = "", IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
-                var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
-                GenerateBlock(bodyB, skipBraces: false);
-                _loopStack.Pop();
-                _isUniformScalarLoop = false;
-                if (_gotoTargets.Contains(contL))
-                AppendLine($"{contL}: ;");
-                _indent--;
-                AppendLine("}");
-                _currentMask = preLoopMask2;
-                if (_gotoTargets.Contains(exitL))
-                AppendLine($"{exitL}: ;");
+                // Detect small-constant uniform-bound loops for unrolling.
+                // Parse start/end as integer constants: "0" .. "16", "start" .. "endValue", etc.
+                int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
+                bool canUnroll = int.TryParse(startExpr, out unrollStart)
+                    && int.TryParse(endExpr, out unrollEnd)
+                    && unrollEnd > unrollStart
+                    && (unrollCount = unrollEnd - unrollStart) <= 64;
+
+                if (canUnroll)
+                {
+                    // ★ Full unroll for small uniform-bound loops (HeavyMove 16-iteration sin/cos).
+                    //   Eliminates loop-carried dependencies so MSVC can globally schedule
+                    //   the entire computation chain across all SIMD iterations.
+                    GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
+                }
+                else
+                {
+                    // Docs-style: scalar for() with mask-narrowed body (dx/dy loops)
+                    //   for(int dx) {
+                    //     v_active = cmp_ult(v_nx, dims);
+                    //     if(!v_active.any_true()) continue;
+                    //     // body uses v_active as mask
+                    //   }
+                    // continue emits real C++ continue; (skip iteration when ALL lanes done)
+                    string csOpStr2 = stmt.Condition is BinaryExpressionSyntax cbin2
+                        && cbin2.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
+                    AppendLine($"// Docs-style scalar for: for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
+                    AppendLine($"simd_value<int> simd_{ivName};");
+                    // simd_end_{ivName} not needed — uniform loops never compare against end in SIMD
+                    string preLoopMask2 = _currentMask;
+                    AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
+                    AppendLine("{");
+                    _indent++;
+                    AppendLine($"simd_{ivName} = simd_value<int>::broadcast({ivName});");
+                    // Loop frame for continue (real C++ continue;)
+                    string exitL = $"__uni_exit_{_labelCounter++}";
+                    string contL = $"__uni_cont_{_labelCounter++}";
+                    _isUniformScalarLoop = true;
+                    _loopStack.Push(new LoopFrame { TrackerVar = "", IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
+                    var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+                    GenerateBlock(bodyB, skipBraces: false);
+                    _loopStack.Pop();
+                    _isUniformScalarLoop = false;
+                    if (_gotoTargets.Contains(contL))
+                    AppendLine($"{contL}: ;");
+                    _indent--;
+                    AppendLine("}");
+                    _currentMask = preLoopMask2;
+                    if (_gotoTargets.Contains(exitL))
+                    AppendLine($"{exitL}: ;");
+                }
             }
             else
                 GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
+        }
+
+        // ================================================================
+        // Strategy 0: Full unroll for small uniform-bound non-reduction loops.
+        //   Eliminates loop-carried dependencies so MSVC can globally schedule
+        //   the entire computation chain (like ISPC's LLVM PHI-node approach).
+        //   Only used when iteration count ≤ 64 (HeavyMove: 16, typical inner loops).
+        // ================================================================
+        private void GenerateUnrolledLoop(string ivName, int start, int count, ForStatementSyntax stmt)
+        {
+            string exitLabel = $"__unr_exit_{_labelCounter++}";
+            AppendLine($"// Unrolled loop: {count} iterations (eliminates loop-carried dependencies)");
+            AppendLine($"simd_value<int> simd_{ivName};");
+            string savedMask = _currentMask;
+
+            var bodyBlock = stmt.Statement is BlockSyntax bs
+                ? bs
+                : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+
+            // Pre-scan: does the body contain break/continue?
+            bool hasBreak = bodyBlock.DescendantNodes().OfType<BreakStatementSyntax>().Any();
+            bool hasContinue = bodyBlock.DescendantNodes().OfType<ContinueStatementSyntax>().Any();
+
+            for (int i = start; i < count; i++)
+            {
+                string contLabel = $"__unr_cont_{_labelCounter}_{i}";
+
+                // Reset mask for each iteration
+                _currentMask = savedMask;
+
+                // Broadcast the iteration value
+                AppendLine($"simd_{ivName} = simd_value<int>::broadcast({i});");
+
+                // Body scope: isolate local variables per iteration
+                AppendLine("{");
+                _indent++;
+
+                if (hasBreak || hasContinue)
+                {
+                    // Push a pseudo-loop frame so break/continue generate valid gotos
+                    _loopStack.Push(new LoopFrame
+                    {
+                        TrackerVar = "",
+                        IterActiveVar = "",
+                        ExitLabel = exitLabel,
+                        ContinueLabel = contLabel
+                    });
+                }
+                _isUniformScalarLoop = true;
+
+                GenerateBlock(bodyBlock, skipBraces: false);
+
+                _isUniformScalarLoop = false;
+                if (hasBreak || hasContinue)
+                    _loopStack.Pop();
+
+                _indent--;
+                AppendLine("}");
+
+                // Continue target: next iteration starts here
+                if (hasContinue)
+                {
+                    if (_gotoTargets.Contains(contLabel))
+                        AppendLine($"{contLabel}: ;");
+                }
+            }
+
+            _currentMask = savedMask;
+            if (hasBreak)
+                AppendLine($"{exitLabel}: ;");
         }
 
         // ================================================================
