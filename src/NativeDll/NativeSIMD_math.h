@@ -291,25 +291,27 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
 #endif
 
 // ================================================================
-// Public API: n_sin_ps / n_cos_ps / ... (SIMD width transparent)
+// Public API: n_sin_ps / n_cos_ps / ... (defined as macros to eliminate function call
+// boundary entirely — matches ISPC LLVM IR pattern where sin/cos/sqrt polynomials
+// are direct intrinsics in the main basic block, with no call/ret overhead)
 // These work with n_float (__m256 / __m128 / float32x4_t / float)
 // ================================================================
 
-static N_FORCEINLINE n_float n_sin_ps(n_float a)     { return N_SIN(a); }
-static N_FORCEINLINE n_float n_cos_ps(n_float a)     { return N_COS(a); }
-static N_FORCEINLINE void n_sincos_ps(n_float a, n_float* s, n_float* c) { N_SINCOS(a, s, c); }
-static N_FORCEINLINE n_float n_tan_ps(n_float a)     { return N_TAN(a); }
-static N_FORCEINLINE n_float n_asin_ps(n_float a)    { return N_ASIN(a); }
-static N_FORCEINLINE n_float n_acos_ps(n_float a)    { return N_ACOS(a); }
-static N_FORCEINLINE n_float n_atan_ps(n_float a)    { return N_ATAN(a); }
-static N_FORCEINLINE n_float n_atan2_ps(n_float a, n_float b) { return N_ATAN2(a, b); }
-static N_FORCEINLINE n_float n_sinh_ps(n_float a)    { return N_SINH(a); }
-static N_FORCEINLINE n_float n_cosh_ps(n_float a)    { return N_COSH(a); }
-static N_FORCEINLINE n_float n_tanh_ps(n_float a)    { return N_TANH(a); }
-static N_FORCEINLINE n_float n_exp_ps(n_float a)     { return N_EXP(a); }
-static N_FORCEINLINE n_float n_log_ps(n_float a)     { return N_LOG(a); }
-static N_FORCEINLINE n_float n_log10_ps(n_float a)   { return N_LOG10(a); }
-static N_FORCEINLINE n_float n_pow_ps(n_float a, n_float b) { return N_POW(a, b); }
+#define n_sin_ps(a)     N_SIN(a)
+#define n_cos_ps(a)     N_COS(a)
+#define n_tan_ps(a)     N_TAN(a)
+#define n_asin_ps(a)    N_ASIN(a)
+#define n_acos_ps(a)    N_ACOS(a)
+#define n_atan_ps(a)    N_ATAN(a)
+#define n_atan2_ps(a,b) N_ATAN2(a,b)
+#define n_sinh_ps(a)    N_SINH(a)
+#define n_cosh_ps(a)    N_COSH(a)
+#define n_tanh_ps(a)    N_TANH(a)
+#define n_exp_ps(a)     N_EXP(a)
+#define n_log_ps(a)     N_LOG(a)
+#define n_log10_ps(a)   N_LOG10(a)
+#define n_pow_ps(a,b)   N_POW(a,b)
+#define n_sincos_ps(a,s,c) N_SINCOS(a,s,c)
 // ================================================================
 // Cross-platform inline math (via n_xxx_ps abstraction — all platforms)
 // These work on AVX2, SSE4, NEON — n_xxx_ps maps to the right intrinsic.
