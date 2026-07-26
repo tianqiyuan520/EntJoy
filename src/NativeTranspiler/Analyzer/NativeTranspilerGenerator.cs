@@ -393,7 +393,8 @@ namespace NativeTranspiler.Analyzer
                     var clangBat = new StringBuilder();
                     clangBat.AppendLine("@echo off");
                     clangBat.AppendLine("cd /d \"%~dp0\"");
-                    clangBat.AppendLine("if not exist build mkdir build");
+                    clangBat.AppendLine("echo Cleaning old build cache...");
+                    clangBat.AppendLine("if exist build rmdir /s /q build >nul 2>nul");
                     clangBat.AppendLine("echo Configuring ClangCL (LLVM backend)...");
                     clangBat.AppendLine("cmake -B build -G \"Visual Studio 17 2022\" -T ClangCL -A x64 -DNATIVE_SIMD_LEVEL=AVX2");
                     clangBat.AppendLine("if errorlevel 1 exit /b 1");
