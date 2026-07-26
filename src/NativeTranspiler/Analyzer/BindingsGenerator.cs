@@ -472,9 +472,9 @@ namespace NativeTranspiler.Analyzer
                     if (isIspcEntity)
                     {
                         // IJobEntity + ISPC: 使用 chunk 级 range 调度（绕过 EntityBatch 开销）
-                        scheduleMethod = "ScheduleEntityRangeRawWithWorkerCapAndRangeSize";
+                        scheduleMethod = "ScheduleIspcEntityRangeRaw";
                         funcPtrName = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
-                        extraArgs = useMT ? ", 1, int.MaxValue" : ", 0, 0";
+                        extraArgs = "";
                     }
                     else
                     {
@@ -548,7 +548,7 @@ namespace NativeTranspiler.Analyzer
                     if (isEntityJob)
                     {
                         ispcFuncPtr = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
-                        ispcScheduleMethod = "ScheduleEntityRangeRawWithWorkerCapAndRangeSize";
+                        ispcScheduleMethod = "ScheduleIspcEntityRangeRaw";
                     }
                     else
                     {
@@ -559,25 +559,23 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    string workerCapArgs = isEntityJob
-                        ? (useMT ? "1, int.MaxValue" : $"workerCap, 0")
-                        : (useMT ? "1" : $"workerCap");
                     sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{ispcScheduleMethod}(");
-                    sb.AppendLine($"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {workerCapArgs}, dependsOn._nativeHandle);");
+                    sb.AppendLine(isEntityJob
+                        ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle);"
+                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1" : "workerCap")}, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
                     sb.AppendLine();
 
                     // ScheduleChunkRawWithWorkerCapAndRangeSize for chunk ISPC, EntityBatch for entity ISPC
-                    string ispcScheduleMethod2 = isEntityJob ? "ScheduleEntityRangeRawWithWorkerCapAndRangeSize" : "ScheduleChunkRawWithWorkerCapAndRangeSize";
+                    string ispcScheduleMethod2 = isEntityJob ? "ScheduleIspcEntityRangeRaw" : "ScheduleChunkRawWithWorkerCapAndRangeSize";
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
                     sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{ispcScheduleMethod2}(");
-                    string explicitCapArgs = useMT
-                        ? "1, int.MaxValue"
-                        : "workerCap, rangeSize";
-                    sb.AppendLine($"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {explicitCapArgs}, dependsOn._nativeHandle);");
+                    sb.AppendLine(isEntityJob
+                        ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle);"
+                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1, int.MaxValue" : "workerCap, rangeSize")}, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
                     sb.AppendLine();

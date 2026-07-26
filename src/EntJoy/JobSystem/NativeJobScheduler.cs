@@ -1049,6 +1049,108 @@ public static unsafe partial class NativeJobScheduler
         where T : struct
         => ScheduleNativeChunkRangeRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
 
+    /// <summary>
+    /// IJobEntity ISPC 轻量调度：跳过 entity tracking + query cache，
+    /// 直接迭代 archetype chunk 构建 ChunkJobData 并调度。
+    /// </summary>
+    public static NativeJobHandle ScheduleIspcEntityRangeRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+        where T : struct
+    {
+        using var dependencyLease = new RetainedNativeDependency(dependsOn);
+        if (funcPtr == IntPtr.Zero)
+            throw new ArgumentException("ISPC range scheduling requires a function pointer.", nameof(funcPtr));
+
+        // 直接构建 chunk data（同 BuildRawChunkScheduleCache 逻辑）
+        var chunkList = new List<Chunk>(128);
+        for (int i = 0; i < entityManager.ArchetypeCount; i++)
+        {
+            var arch = entityManager.Archetypes[i];
+            if (arch != null && arch.IsMatch(query))
+                foreach (var c in arch.GetChunks())
+                    if (c.EntityCount > 0) chunkList.Add(c);
+        }
+        int chunkCount = chunkList.Count;
+        if (chunkCount == 0) return default;
+
+        int requiredCount = requiredComponentTypeIds?.Length ?? 0;
+        var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
+        for (int ci = 0; ci < chunkCount; ci++)
+        {
+            var chunk = chunkList[ci];
+            int compCount = chunk.ComponentCount;
+            var compArrays = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
+            var compTypeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+            for (int ci2 = 0; ci2 < compCount; ci2++)
+            {
+                compArrays[ci2] = (void*)chunk.GetComponentArrayPointer(ci2);
+                compTypeIndices[ci2] = chunk.Archetype.Types[ci2].Id;
+            }
+            void** requiredArrays = null;
+            if (requiredCount > 0)
+            {
+                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                for (int r = 0; r < requiredCount; r++)
+                {
+                    requiredArrays[r] = null;
+                    for (int ci2 = 0; ci2 < compCount; ci2++)
+                    {
+                        if (compTypeIndices[ci2] == requiredComponentTypeIds[r])
+                        { requiredArrays[r] = compArrays[ci2]; break; }
+                    }
+                }
+            }
+            chunksPtr[ci] = new ChunkJobData
+            {
+                entityCount = chunk.EntityCount,
+                requiredComponentArrays = requiredArrays,
+                requiredComponentCount = requiredCount,
+                componentCount = compCount,
+                componentArrays = (void**)compArrays,
+                componentSizes = null,
+                componentTypeIndices = compTypeIndices,
+                enableBitMaps = null,
+                chunkHandle = IntPtr.Zero,
+            };
+        }
+
+        try
+        {
+            // 简化 context block：只包含 job struct 数据，无 header
+            int jobSize = Unsafe.SizeOf<T>();
+            var contextBlock = Marshal.AllocHGlobal(sizeof(ChunkContextHeader) + jobSize);
+            var header = (ChunkContextHeader*)contextBlock;
+            *header = new ChunkContextHeader
+            {
+                chunkCount = chunkCount,
+                hasEnabledFilter = 0,
+                queryAllEnabledTypes = IntPtr.Zero,
+                allEnabledCount = 0,
+                gcHandleStartIndex = -1,
+                chunksPtr = (IntPtr)chunksPtr,
+                cleanupInProgress = 0,
+                requiredComponentTypeIds = IntPtr.Zero,
+                requiredComponentTypeIdCount = 0,
+            };
+            Unsafe.CopyBlock((void*)(contextBlock + sizeof(ChunkContextHeader)), Unsafe.AsPointer(ref job), (uint)jobSize);
+
+            var cleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
+            var handle = new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(
+                funcPtr, contextBlock, cleanupPtr,
+                chunksPtr, chunkCount,
+                dependencyLease.Handle,
+                ChunkScheduleMode.PublishAssist, 0, 0));
+            return handle;
+        }
+        catch
+        {
+            for (int ci = 0; ci < chunkCount; ci++)
+                if (chunksPtr[ci].requiredComponentArrays != null)
+                    Marshal.FreeHGlobal((IntPtr)chunksPtr[ci].requiredComponentArrays);
+            Marshal.FreeHGlobal((IntPtr)chunksPtr);
+            throw;
+        }
+    }
+
     public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
