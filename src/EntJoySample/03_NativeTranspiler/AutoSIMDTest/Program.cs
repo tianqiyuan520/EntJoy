@@ -1,6 +1,7 @@
 ﻿// Auto-SIMD — Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
 using EntJoy;
 using EntJoy.Collections;
+using EntJoy.Mathematics;
 using EntJoySample.AutoSIMDTest;
 using NativeTranspiler.Bindings;
 using System.Diagnostics;
@@ -27,19 +28,16 @@ namespace EntJoySample.AutoSIMDTest
             using var p0 = NA(N); using var p1 = NA(N); using var p2 = NA(N);
             using var p3 = NA(N); using var p4 = NA(N); using var p5 = NA(N);
 
-            const int W9 = 8;
-            int totalW = 14 + 16 * (W9 + 1) - 1; // 14 + 16*9 - 1 = 157
+            const int W9 = 9;
+            int cols = 16;
+            int totalW = 10 + cols * (W9 + 1); // case(10) + 16*10 = 170
             var sep = "".PadRight(totalW, '-');
             var eq = "".PadRight(totalW, '=');
 
             Console.WriteLine(eq);
-            Console.WriteLine("  Auto-SIMD: Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC");
-            Console.WriteLine(eq);
-            Console.Write($"{"Case",-14}");
-            string[] grps = { "StC#", "StC++", "StSD", "StIP", "JbC#", "JbC++", "JbSD", "JbIP", "FrC#", "FrC++", "FrSD", "FrIP", "PfC#", "PfC++", "PfSD", "PfIP" };
-            foreach (var g in grps) Console.Write($" {g,W9}");
-            Console.WriteLine();
-            Console.WriteLine(sep);
+            Console.WriteLine($"  {"",-9} Static─         IJob──          IJobFor─         IJobPF──");
+            Console.WriteLine($"  {"Case",-9} C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC");
+            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ─────");
 
             // Static helper
             static double St(System.Action fn, int w, int t)
@@ -55,9 +53,9 @@ namespace EntJoySample.AutoSIMDTest
                 System.Func<double> FrC, System.Func<double> FrCpp, System.Func<double> FrSD, System.Func<double> FrIP,
                 System.Func<double> PfC, System.Func<double> PfCpp, System.Func<double> PfSD, System.Func<double> PfIP)
             {
-                Console.Write($"  {name,-12}");
+                Console.Write($"  {name,-9}");
                 foreach (var fn in new[] { StC, StCpp, StSD, StIP, JbC, JbCpp, JbSD, JbIP, FrC, FrCpp, FrSD, FrIP, PfC, PfCpp, PfSD, PfIP })
-                    Console.Write($"{fn(),W9 + 1:F3}");
+                    Console.Write($" {fn(),W9:F3}");
                 Console.WriteLine();
             }
 
@@ -178,6 +176,55 @@ namespace EntJoySample.AutoSIMDTest
 
             Console.WriteLine(sep);
             Console.WriteLine("  Stc=Static(direct call) | Job=Execute | For=Schedule | PF=Schedule(64)");
+            Console.WriteLine();
+
+            // ─────────────────────────────────────────────────────────────────────
+            // IJobChunk / IJobEntity benchmarks (ECS World-based)
+            // ─────────────────────────────────────────────────────────────────────
+            const int ChunkN = 100000;
+            var query = new QueryBuilder().WithAll<MovePosition, MoveVelocity>();
+            float dt = 1.0f / 60.0f;
+
+            // Light: MoveJob
+            using var lightWorld = new World("Light");
+            for (int i = 0; i < ChunkN; i++)
+            {
+                var e = lightWorld.EntityManager.NewEntity(typeof(MovePosition), typeof(MoveVelocity));
+                lightWorld.EntityManager.Set(e, new MovePosition { Value = new float2(i % 1920, i % 1080) });
+                lightWorld.EntityManager.Set(e, new MoveVelocity { Value = new float2(((i * 17) % 201 - 100) * 0.25f, ((i * 31) % 201 - 100) * 0.25f) });
+            }
+
+            // Heavy: HeavyJob
+            using var heavyWorld = new World("Heavy");
+            for (int i = 0; i < ChunkN; i++)
+            {
+                var e = heavyWorld.EntityManager.NewEntity(typeof(MovePosition), typeof(MoveVelocity));
+                heavyWorld.EntityManager.Set(e, new MovePosition { Value = new float2(i % 1920, i % 1080) });
+                heavyWorld.EntityManager.Set(e, new MoveVelocity { Value = new float2(((i * 17) % 201 - 100) * 0.25f, ((i * 31) % 201 - 100) * 0.25f) });
+            }
+
+            int chunkW = 3, chunkI = 30;
+            double ChRun(System.Action a) { for (int i = 0; i < chunkW; i++) a(); var s = Stopwatch.StartNew(); for (int i = 0; i < chunkI; i++) a(); s.Stop(); return s.Elapsed.TotalMilliseconds / chunkI; }
+
+            Console.WriteLine();
+            Console.WriteLine(eq);
+            Console.WriteLine($"  {"",-9} IJobChunk──      IJobEntity─");
+            Console.WriteLine($"  {"Case",-9} C++    SIMD     C++    SIMD ");
+            Console.WriteLine($"  {"────",-9} ───── ─────   ───── ───── ");
+
+            double LightChunkCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LightChunkSIMD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LightEntCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LightEntSIMD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HeavyChunkCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HeavyChunkSIMD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HeavyEntCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HeavyEntSIMD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+
+            Console.WriteLine($"  {"LightMove",-9} {LightChunkCpp,5:F3} {LightChunkSIMD,5:F3}   {LightEntCpp,5:F3} {LightEntSIMD,5:F3}");
+            Console.WriteLine($"  {"HeavyMove",-9} {HeavyChunkCpp,5:F3} {HeavyChunkSIMD,5:F3}   {HeavyEntCpp,5:F3} {HeavyEntSIMD,5:F3}");
+            Console.WriteLine(sep);
+            Console.WriteLine("  Schedule().Complete() via ECS World");
             Console.WriteLine();
         }
 

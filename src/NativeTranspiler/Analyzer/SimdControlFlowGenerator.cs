@@ -1507,11 +1507,27 @@ namespace NativeTranspiler.Analyzer
                     if (variable.Initializer != null)
                     {
                         string initExpr = TranslateExpression(variable.Initializer.Value);
-                        // Uniform local: if initializer is a SIMD register expression, extract lane 0
+                        // ★ ISPC-style SIMD promotion: when a Uniform local is initialized from a
+                        //   SIMD register expression (e.g. gather result), promote to Varying and
+                        //   emit a SIMD register declaration instead of extracting lane 0.
+                        //   This keeps the data in SIMD registers throughout the computation chain.
                         if (initExpr.StartsWith("simd_"))
-                            AppendLine($"{cppType} {name} = n_extract_lane_f32({initExpr}.v, 0);");
-                        else
-                            AppendLine($"{cppType} {name} = {initExpr};");
+                        {
+                            string simdType = GetSIMDTypeString(cppType);
+                            if (simdType != null)
+                            {
+                                _varDeclEmitted.Add(name);
+                                _simdVaryingVarNames.Add(name);
+                                _simdVaryingCppType[name] = cppType;
+                                if (!_variables.ContainsKey(name))
+                                    _variables[name] = new SimdVariableInfo { Name = name, Kind = VarKind.Varying, CppType = cppType };
+                                else
+                                    _variables[name].Kind = VarKind.Varying;
+                                AppendLine($"{simdType} v_{name} = {initExpr};");
+                                continue;
+                            }
+                        }
+                        AppendLine($"{cppType} {name} = {initExpr};");
                     }
                     else
                     {
