@@ -718,7 +718,14 @@ namespace NativeTranspiler.Analyzer
         public static string GenerateCppWrapper(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                // IJobEntity + ISPC: 使用 chunk 级 wrapper（绕过 EntityBatch 开销）
+                var attrSym = AttributeHelper.GetAttributeSymbol(compilation);
+                bool isIspc = attrSym != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym) == NativeTranspiler.BackendTarget.Ispc;
+                if (isIspc)
+                    return GenerateCppChunkWrapper(jobStruct, compilation);
                 return GenerateCppEntityBatchWrapper(jobStruct, compilation);
+            }
 
             if (CppJobGenerator.IsChunkJob(jobStruct))
                 return GenerateCppChunkWrapper(jobStruct, compilation);
@@ -1083,13 +1090,44 @@ namespace NativeTranspiler.Analyzer
         {
             var sb = new StringBuilder();
             var ispcBase = GetIspcBaseName(jobStruct);
-            var ispcHeaderBase = useMt ? ispcBase + "_mt" : ispcBase;
-            var ispcImplName = useMt ? ispcBase + "_mt_impl" : ispcBase + "_impl";
+            string ispcImplName;
+            string ispcHeaderBase;
+            if (useMt && CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                // IJobEntity ISPC MT: 复用非 MT 的 ISPC 实现（函数名相同）
+                var nonMtBase = ispcBase.Replace("IspcMt", "Ispc");
+                ispcImplName = nonMtBase + "_impl";
+                ispcHeaderBase = nonMtBase;  // 非 MT header，无 _mt 后缀
+            }
+            else
+            {
+                ispcImplName = useMt ? ispcBase + "_mt_impl" : ispcBase + "_impl";
+                ispcHeaderBase = useMt ? ispcBase + "_mt" : ispcBase;
+            }
             var adapterFuncName = CppJobGenerator.GetAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
             var rangeAdapterFuncName = CppJobGenerator.GetRangeAdapterFunctionName(jobStruct);
             var rangeAdapterGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
-            var chunkArrays = CollectChunkNativeArrayLocals(jobStruct, compilation);
+            // IJobEntity + ISPC: 用 Execute 参数的组件类型构建 component array 列表
+            // IJobChunk: 用 ChunkNativeArray locals
+            List<(INamedTypeSymbol type, string name)> chunkArrays;
+            if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                chunkArrays = new List<(INamedTypeSymbol type, string name)>();
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+                if (executeMethod != null)
+                {
+                    foreach (var param in executeMethod.Parameters)
+                    {
+                        if (param.Type is INamedTypeSymbol namedType)
+                            chunkArrays.Add((namedType, param.Name));
+                    }
+                }
+            }
+            else
+            {
+                chunkArrays = CollectChunkNativeArrayLocals(jobStruct, compilation);
+            }
             var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();
 
             sb.AppendLine("#include \"NativeMath.h\"");
@@ -1134,6 +1172,12 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t){name}_ptr % 64 == 0);");
                 callArgs.Add($"{name}_ptr");
+            }
+
+            // IJobEntity ISPC: __entity_count 在 component arrays 之后、field ptrs 之前
+            if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                callArgs.Add("__chunkData->entityCount");
             }
 
             if (chunkArrays.Count > 0)
@@ -1196,10 +1240,13 @@ namespace NativeTranspiler.Analyzer
             }
 
             sb.AppendLine();
-            callArgs.Add("__chunkData->entityCount");
-            if (useMt)
+            // IJobEntity ISPC: __entity_count 已在上面添加（跳过此处）
+            // IJobEntity ISPC MT: 复用非 MT 的 ISPC 函数，不传 thread count
+            if (!CppJobGenerator.IsEntityJob(jobStruct))
             {
-                callArgs.Add("std::thread::hardware_concurrency()");
+                callArgs.Add("__chunkData->entityCount");
+                if (useMt)
+                    callArgs.Add("std::thread::hardware_concurrency()");
             }
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
 
@@ -1245,7 +1292,13 @@ namespace NativeTranspiler.Analyzer
         public static string GenerateCppWrapperMT(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                var attrSym = AttributeHelper.GetAttributeSymbol(compilation);
+                bool isIspc = attrSym != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym) == NativeTranspiler.BackendTarget.Ispc;
+                if (isIspc)
+                    return GenerateCppChunkWrapper(jobStruct, compilation, useMt: true);
                 return GenerateCppEntityBatchWrapper(jobStruct, compilation, useMt: true);
+            }
 
             if (CppJobGenerator.IsChunkJob(jobStruct))
                 return GenerateCppChunkWrapper(jobStruct, compilation, useMt: true);
