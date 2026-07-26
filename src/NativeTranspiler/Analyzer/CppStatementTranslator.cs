@@ -61,6 +61,9 @@ namespace NativeTranspiler.Analyzer
                 case WhileStatementSyntax whileStmt:
                     TranslateWhileStatement(whileStmt);
                     break;
+                case DoStatementSyntax doStmt:
+                    TranslateDoStatement(doStmt);
+                    break;
                 case BreakStatementSyntax breakStmt:
                     AppendIndent();
                     _builder.AppendLine("break;");
@@ -335,6 +338,25 @@ namespace NativeTranspiler.Analyzer
                 ParenthesizedExpressionSyntax p => IsSimpleLValue(p.Expression),
                 _ => false
             };
+        }
+
+        protected virtual void TranslateDoStatement(DoStatementSyntax doStmt)
+        {
+            AppendIndent();
+            _builder.AppendLine("do");
+            if (doStmt.Statement is BlockSyntax block)
+                TranslateBlock(block, skipOuterBraces: false);
+            else
+            {
+                _indentLevel++;
+                AppendIndent();
+                TranslateStatement(doStmt.Statement);
+                _indentLevel--;
+            }
+            AppendIndent();
+            _builder.Append("while (");
+            TranslateExpression(doStmt.Condition);
+            _builder.AppendLine(");");
         }
 
         protected virtual void TranslateWhileStatement(WhileStatementSyntax whileStmt)

@@ -822,6 +822,7 @@ namespace NativeTranspiler.Analyzer
                 // Execute 方法的 ref/in 参数直接通过指针+索引访问
                 translator.AddEntityRefParam(parameter.Name);
             }
+            translator.SetInsideForeach(true); // 告知 translator 在 foreach_tiled 内
             var bodyCode = translator.Translate(methodSyntax.Body);
             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
             {
@@ -883,6 +884,7 @@ namespace NativeTranspiler.Analyzer
             {
                 translator.AddEntityRefParam(parameter.Name);
             }
+            translator.SetInsideForeach(true);
             var bodyCode = translator.Translate(methodSyntax.Body);
             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
             {
@@ -1548,6 +1550,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
                 var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                translator.SetInsideForeach(true); // 告知 translator 在 foreach 内，内层循环需 uniform 修饰
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
                 sb.AppendLine($"{Indent}}}");
@@ -1717,8 +1720,6 @@ namespace NativeTranspiler.Analyzer
         {
             private readonly bool _skipOuterFor;
             private readonly bool _hasResult;
-            private bool _insideForeach; // 跟踪是否已在 foreach 中，避免嵌套 foreach
-
             public MethodIspcTranslator(SemanticModel semanticModel, IMethodSymbol method,
                 bool skipOuterFor = false, int initialIndent = 0, bool needResult = false, bool useUniformVars = false)
                 : base(semanticModel, method, null, false, useUniformVars)
@@ -1726,7 +1727,6 @@ namespace NativeTranspiler.Analyzer
                 _skipOuterFor = skipOuterFor;
                 _indentLevel = initialIndent;
                 _hasResult = needResult;
-                _insideForeach = false;
             }
 
             public string TranslateSingleStatement(StatementSyntax stmt)
@@ -1763,69 +1763,43 @@ namespace NativeTranspiler.Analyzer
                 _builder.AppendLine("return;");
             }
 
-            protected override void TranslateForStatement(ForStatementSyntax forStmt)
-            {
-                if (_skipOuterFor)
-                {
-                    if (forStmt.Statement is BlockSyntax block)
-                    {
-                        foreach (var stmt2 in block.Statements) TranslateStatement(stmt2);
-                    }
-                    else TranslateStatement(forStmt.Statement);
-                    return;
-                }
+            /// <summary>
+            /// 收集在嵌套循环中被写（赋值）的局部变量名。
+            /// 这些变量可能是 reduction 累加器，在 uniform-for + foreach
+            /// 模式下需要声明为 varying，输出时需要 reduce_min。
+            /// </summary>
 
-                // 检测标准 for (int i = 0; i < limit; i++) 模式，转换为 ISPC foreach
-                if (!_insideForeach &&
-                    forStmt.Declaration != null &&
-                    forStmt.Declaration.Variables.Count == 1 &&
-                    forStmt.Condition is BinaryExpressionSyntax binExpr &&
-                    binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
-                    forStmt.Incrementors.Count == 1 &&
-                    forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
-                    postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))
-                {
-                    var varDecl = forStmt.Declaration.Variables[0];
-                    string indexName = varDecl.Identifier.Text;
 
-                    // 验证 increment 的变量名与声明一致
-                    if (postfix.Operand is IdentifierNameSyntax incId &&
-                        incId.Identifier.Text == indexName &&
-                        varDecl.Initializer?.Value is LiteralExpressionSyntax initLit &&
-                        initLit.Token.ValueText == "0")
-                    {
-                        // 验证条件左边也是同一个变量
-                        if (binExpr.Left is IdentifierNameSyntax condId &&
-                            condId.Identifier.Text == indexName)
-                        {
-                            // 成功匹配 for (int i = 0; i < limit; i++) 模式
-                            AppendIndent();
-                            _builder.Append("foreach (");
-                            _builder.Append(indexName);
-                            _builder.Append(" = 0 ... ");
-                            TranslateExpression(binExpr.Right);
-                            _builder.AppendLine(")");
+			protected override void TranslateForStatement(ForStatementSyntax forStmt)
+			{
+				if (_skipOuterFor)
+				{
+					if (forStmt.Statement is BlockSyntax block)
+					{
+						foreach (var stmt2 in block.Statements) TranslateStatement(stmt2);
+					}
+					else TranslateStatement(forStmt.Statement);
+					return;
+				}
+				// 委托到基类 IspcStatementTranslator 的优化版本
+				base.TranslateForStatement(forStmt);
+			}
 
-                            var saved = _insideForeach;
-                            _insideForeach = true;
-                            if (forStmt.Statement is BlockSyntax block)
-                                TranslateBlock(block, skipOuterBraces: false);
-                            else
-                            {
-                                _indentLevel++;
-                                AppendIndent();
-                                TranslateStatement(forStmt.Statement);
-                                _indentLevel--;
-                            }
-                            _insideForeach = saved;
-                            return;
-                        }
-                    }
-                }
+            /// <summary>
+            /// 尝试将 for 转为 foreach（标准模式），否则回退到 base。
+            /// 用于 uniform-for 嵌套内部的内层循环。
+            /// </summary>
 
-                // 不匹配标准模式，或在 foreach 内：回退到 for (uniform int)
-                base.TranslateForStatement(forStmt);
-            }
+            /// <summary>
+            /// 检测 for 循环体是否有内层嵌套 for/while 循环。
+            /// </summary>
+
+
+
+            /// <summary>
+            /// 发射 for (uniform int ...) 循环，确保内层循环变量在 ISPC 中为 uniform。
+            /// </summary>
+
 
             protected override void TranslateMathFunctionCall(IMethodSymbol methodSymbol, InvocationExpressionSyntax invocation)
             {

@@ -11,12 +11,19 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, bool> _constBoolFields = new();
         private readonly bool _useUniformVars;
 
-        /// <summary>
-        /// 在 IJobEntity ISPC 生成中，Execute 方法的 ref/in 参数不应复制为本地 struct，
-        /// 而应直接通过指针+索引访问（例如 position_ptr[__entity_index]）。
-        /// 此集合记录需要这种直接访问的参数名。
-        /// </summary>
         protected readonly HashSet<string> _entityRefParamNames = new();
+
+        /// <summary>是否在 foreach 体内部（内层循环变量需加 uniform 修饰）</summary>
+        protected bool _insideForeach;
+
+        /// <summary>设置 foreach 上下文标志（由外部生成器在发射 foreach 后调用）</summary>
+        public void SetInsideForeach(bool value) => _insideForeach = value;
+
+        /// <summary>是否在 uniform for 体内部（内层 for 可转为 foreach 协作 SIMD）</summary>
+        protected bool _insideUniformFor;
+
+        /// <summary>在 uniform-for + foreach 模式下，被内层 foreach 写入的局部变量（累加器）</summary>
+        protected readonly HashSet<string> _varyingAccumulatorVars = new();
 
         public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
@@ -183,6 +190,34 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
+            // uniform-for + foreach 模式下：累加器变量需加 varying 前缀
+            if (_insideUniformFor)
+            {
+                bool hasAccum = false;
+                foreach (var variable in localDecl.Declaration.Variables)
+                    if (_varyingAccumulatorVars.Contains(variable.Identifier.Text)) { hasAccum = true; break; }
+                if (hasAccum)
+                {
+                    var accumType = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
+                    var accumCppType = NativeTranspiler.MapCSharpTypeToCpp(accumType!);
+                    var accumIspcType = ToIspcType(accumCppType);
+                    foreach (var variable in localDecl.Declaration.Variables)
+                    {
+                        AppendIndent();
+                        if (_varyingAccumulatorVars.Contains(variable.Identifier.Text))
+                            _builder.Append("varying ");
+                        _builder.Append(accumIspcType).Append(' ').Append(variable.Identifier.Text);
+                        if (variable.Initializer != null)
+                        {
+                            _builder.Append(" = ");
+                            TranslateExpression(variable.Initializer.Value);
+                        }
+                        _builder.AppendLine(";");
+                    }
+                    return;
+                }
+            }
+
             AppendIndent();
             var type = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
@@ -645,6 +680,273 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(", 1");
             }
             _builder.Append(')');
+        }
+
+        // ============================================================
+        // 嵌套循环优化：检测外层 for + 内层 for/while 顺序访问模式，
+        // 将外层转为 uniform for、内层转为 foreach、累加器加 varying、
+        // 输出点加 reduce_min() 跨 lane 归约。
+        // ============================================================
+
+        protected override void TranslateForStatement(ForStatementSyntax forStmt)
+        {
+            // 标准 for (int i = 0; i < limit; i++) 模式检测
+            if (!_insideForeach && !_insideUniformFor &&
+                forStmt.Declaration != null &&
+                forStmt.Declaration.Variables.Count == 1 &&
+                forStmt.Condition is BinaryExpressionSyntax binExpr &&
+                binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
+                forStmt.Incrementors.Count == 1 &&
+                forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
+                postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))
+            {
+                var varDecl = forStmt.Declaration.Variables[0];
+                string indexName = varDecl.Identifier.Text;
+
+                if (postfix.Operand is IdentifierNameSyntax incId &&
+                    incId.Identifier.Text == indexName &&
+                    varDecl.Initializer?.Value is LiteralExpressionSyntax initLit &&
+                    initLit.Token.ValueText == "0")
+                {
+                    if (binExpr.Left is IdentifierNameSyntax condId &&
+                        condId.Identifier.Text == indexName)
+                    {
+                        bool hasNestedLoops = HasNestedLoop(forStmt);
+
+                        if (!hasNestedLoops)
+                        {
+                            // 无嵌套 → foreach（最佳 SIMD 加速）
+                            AppendIndent();
+                            _builder.Append("foreach (");
+                            _builder.Append(indexName);
+                            _builder.Append(" = 0 ... ");
+                            TranslateExpression(binExpr.Right);
+                            _builder.AppendLine(")");
+                            var saved = _insideForeach;
+                            _insideForeach = true;
+                            if (forStmt.Statement is BlockSyntax block)
+                                TranslateBlock(block, skipOuterBraces: false);
+                            else
+                            {
+                                _indentLevel++; AppendIndent();
+                                TranslateStatement(forStmt.Statement); _indentLevel--;
+                            }
+                            _insideForeach = saved;
+                            return;
+                        }
+                        else
+                        {
+                            // 有嵌套循环 → uniform for + 内层 foreach
+                            // 外层 index 为 uniform → arr[i*K+j] 无 gather
+                            var accumVars = CollectAccumulatorVars(forStmt);
+
+                            AppendIndent();
+                            _builder.Append("for (uniform int ");
+                            _builder.Append(indexName);
+                            _builder.Append(" = 0; ");
+                            _builder.Append(indexName);
+                            _builder.Append(" < ");
+                            TranslateExpression(binExpr.Right);
+                            _builder.Append("; ++");
+                            _builder.Append(indexName);
+                            _builder.AppendLine(")");
+
+                            var savedF = _insideForeach;
+                            var savedU = _insideUniformFor;
+                            var savedAccum = new HashSet<string>(_varyingAccumulatorVars);
+
+                            _insideForeach = false;
+                            _insideUniformFor = true;
+                            foreach (var v in accumVars) _varyingAccumulatorVars.Add(v);
+
+                            if (forStmt.Statement is BlockSyntax block)
+                                TranslateBlock(block, skipOuterBraces: false);
+                            else
+                            {
+                                _indentLevel++; AppendIndent();
+                                TranslateStatement(forStmt.Statement); _indentLevel--;
+                            }
+
+                            _insideForeach = savedF;
+                            _insideUniformFor = savedU;
+                            _varyingAccumulatorVars.Clear();
+                            foreach (var v in savedAccum) _varyingAccumulatorVars.Add(v);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (_insideForeach)
+            {
+                // foreach 内部：内层循环变量加 uniform 修饰，防止 ISPC 默认视为 varying
+                EmitUniformFor(forStmt);
+            }
+            else if (_insideUniformFor)
+            {
+                // uniform for 内部：将 for 转为 foreach 获得协作 SIMD
+                TryEmitForeachOrFallback(forStmt);
+            }
+            else
+            {
+                base.TranslateForStatement(forStmt);
+            }
+        }
+
+        private static bool HasNestedLoop(ForStatementSyntax forStmt)
+        {
+            var body = forStmt.Statement;
+            if (body == null) return false;
+            bool foundSelf = false;
+            foreach (var node in body.DescendantNodesAndSelf())
+            {
+                if (!foundSelf && node == body) { foundSelf = true; continue; }
+                if (node is ForStatementSyntax || node is WhileStatementSyntax)
+                    return true;
+            }
+            return false;
+        }
+
+        private static HashSet<string> CollectAccumulatorVars(ForStatementSyntax outerFor)
+        {
+            var vars = new HashSet<string>();
+            var body = outerFor.Statement is BlockSyntax blk ? blk : null;
+            if (body == null) return vars;
+
+            var localVars = new HashSet<string>();
+            foreach (var localDecl in body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in localDecl.Declaration.Variables)
+                    localVars.Add(v.Identifier.Text);
+
+            foreach (var nestedFor in body.DescendantNodes().OfType<ForStatementSyntax>())
+            {
+                if (nestedFor == outerFor) continue;
+                CollectAssignmentsInNode(nestedFor, localVars, vars);
+            }
+            foreach (var nestedWhile in body.DescendantNodes().OfType<WhileStatementSyntax>())
+                CollectAssignmentsInNode(nestedWhile, localVars, vars);
+
+            return vars;
+        }
+
+        private static void CollectAssignmentsInNode(SyntaxNode node, HashSet<string> localVars, HashSet<string> results)
+        {
+            foreach (var assign in node.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                if (assign.Left is IdentifierNameSyntax id && localVars.Contains(id.Identifier.Text))
+                    results.Add(id.Identifier.Text);
+        }
+
+        private void EmitUniformFor(ForStatementSyntax forStmt)
+        {
+            AppendIndent();
+            _builder.Append("for (uniform ");
+            if (forStmt.Declaration != null)
+            {
+                var type = _semanticModel.GetTypeInfo(forStmt.Declaration.Type).Type;
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
+                _builder.Append($"{cppType} {forStmt.Declaration.Variables[0].Identifier.Text}");
+                if (forStmt.Declaration.Variables[0].Initializer != null)
+                {
+                    _builder.Append(" = ");
+                    TranslateExpression(forStmt.Declaration.Variables[0].Initializer.Value);
+                }
+            }
+            else if (forStmt.Initializers.Count > 0)
+            {
+                TranslateExpression(forStmt.Initializers[0]);
+            }
+            _builder.Append("; ");
+            if (forStmt.Condition != null) TranslateExpression(forStmt.Condition);
+            _builder.Append("; ");
+            if (forStmt.Incrementors.Count > 0) TranslateExpression(forStmt.Incrementors[0]);
+            _builder.AppendLine(")");
+            if (forStmt.Statement is BlockSyntax block)
+                TranslateBlock(block, skipOuterBraces: false);
+            else
+            {
+                _indentLevel++; AppendIndent();
+                TranslateStatement(forStmt.Statement); _indentLevel--;
+            }
+        }
+
+        private void TryEmitForeachOrFallback(ForStatementSyntax forStmt)
+        {
+            if (forStmt.Declaration != null &&
+                forStmt.Declaration.Variables.Count == 1 &&
+                forStmt.Condition is BinaryExpressionSyntax binExpr &&
+                binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
+                forStmt.Incrementors.Count == 1 &&
+                forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
+                postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))
+            {
+                var varDecl = forStmt.Declaration.Variables[0];
+                string indexName = varDecl.Identifier.Text;
+                if (postfix.Operand is IdentifierNameSyntax incId &&
+                    incId.Identifier.Text == indexName &&
+                    varDecl.Initializer?.Value is LiteralExpressionSyntax initLit &&
+                    initLit.Token.ValueText == "0" &&
+                    binExpr.Left is IdentifierNameSyntax condId &&
+                    condId.Identifier.Text == indexName)
+                {
+                    AppendIndent();
+                    _builder.Append("foreach (");
+                    _builder.Append(indexName);
+                    _builder.Append(" = 0 ... ");
+                    TranslateExpression(binExpr.Right);
+                    _builder.AppendLine(")");
+                    var saved = _insideForeach;
+                    _insideForeach = true;
+                    if (forStmt.Statement is BlockSyntax block)
+                        TranslateBlock(block, skipOuterBraces: false);
+                    else
+                    {
+                        _indentLevel++; AppendIndent();
+                        TranslateStatement(forStmt.Statement); _indentLevel--;
+                    }
+                    _insideForeach = saved;
+                    return;
+                }
+            }
+            base.TranslateForStatement(forStmt);
+        }
+
+
+        protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
+        {
+            if (_insideUniformFor && exprStmt.Expression is AssignmentExpressionSyntax assign &&
+                assign.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                assign.Right is IdentifierNameSyntax rightId &&
+                _varyingAccumulatorVars.Contains(rightId.Identifier.Text))
+            {
+                AppendIndent();
+                TranslateExpression(assign.Left);
+                _builder.Append(" = reduce_min(");
+                TranslateExpression(assign.Right);
+                _builder.AppendLine(");");
+                return;
+            }
+            base.TranslateExpressionStatement(exprStmt);
+        }
+        protected override void TranslateWhileStatement(WhileStatementSyntax whileStmt)
+        {
+            if (_insideForeach && !_insideUniformFor)
+            {
+                AppendIndent();
+                _builder.Append("while (");
+                TranslateExpression(whileStmt.Condition);
+                _builder.AppendLine(")");
+                if (whileStmt.Statement is BlockSyntax block)
+                    TranslateBlock(block, skipOuterBraces: false);
+                else
+                {
+                    _indentLevel++; AppendIndent();
+                    TranslateStatement(whileStmt.Statement); _indentLevel--;
+                }
+            }
+            else
+            {
+                base.TranslateWhileStatement(whileStmt);
+            }
         }
     }
 }

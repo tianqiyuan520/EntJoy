@@ -337,7 +337,7 @@ namespace NativeTranspiler.Analyzer
                         // 并行编译：后台启动 ispc，输出重定向到日志
                         string ispcExtraOpts = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                         batContent.AppendLine($"echo Compiling {ispc}... ({mathLibStr})");
-                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{ispcExtraOpts} > \"build\\{baseName}.log\" 2>&1");
+                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -O3 -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{ispcExtraOpts} > \"build\\{baseName}.log\" 2>&1");
                         batContent.AppendLine();
                         batContent.AppendLine($":skip_{baseName}");
                         batContent.AppendLine();
@@ -951,7 +951,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     string fmaOpt = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                     sb.AppendLine("    add_custom_command(");
                     sb.AppendLine($"        OUTPUT \"{objectPath}\" \"{headerPath}\"");
-                    sb.AppendLine($"        COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{fmaOpt}");
+                    sb.AppendLine($"        COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -O3 -o \"{objectPath}\" -h \"{headerPath}\" --target=avx512skx-i32x16 --math-lib={mathLibStr}{fmaOpt}");
                     sb.AppendLine($"        DEPENDS \"{sourcePath}\"");
                     sb.AppendLine("        WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
                     sb.AppendLine($"        COMMENT \"Compiling ISPC {ispc}\"");
