@@ -1984,39 +1984,7 @@ namespace NativeTranspiler.Analyzer
                 var variables = varAnalyzer.Analyze(fakeMethod);
                 var nativeArrayParams = BuildChunkArrayNativeArrayParams(chunkArrays);
 
-                // 5. Check for inner loops (nested for-loops in addition to the entity loop).
-                //    If present, use per-lane SIMD wrapping to avoid mixing SIMD registers with
-                //    scalar loop induction variables (ISPC handles this natively via SPMD semantics,
-                //    but our SimdControlFlowGenerator can't mix uniform-bound loops with SIMD-varying data).
-                bool hasInnerLoops = modifiedBody.DescendantNodes().OfType<ForStatementSyntax>().Any();
-                if (hasInnerLoops)
-                {
-                    var scalarTranslator = new CppChunkStatementTranslator(
-                        semanticModel, jobStruct,
-                        CollectChunkNativeArrayTypes(jobStruct, compilation), useFastMath);
-                    string scalarBody = scalarTranslator.Translate(methodSyntax.Body);
-                    scalarBody = WrapEntityLoopSIMD(scalarBody, entityLoopIv, "__entityCount");
-                    // Strip duplicate pointer/length declarations (already emitted in prelude)
-                    scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);?
-?", "");
-                    scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;?
-?", "");
-                    scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;?
-?", "");
-
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
-                    sb.Append("\n");
-                    sb.Append(scalarBody);
-                    sb.AppendLine("}");
-                    return;
-                }
-
-                // 6. Generate SIMD batch loop
+                                // 5. Generate SIMD batch loop
                 sb.AppendLine("    int __simd_end = (__entityCount / NSIMD_WIDTH) * NSIMD_WIDTH;");
                 sb.AppendLine("    if (__simd_end > 0)");
                 sb.AppendLine("    {");
@@ -2049,32 +2017,31 @@ namespace NativeTranspiler.Analyzer
             }
             catch (Exception ex)
             {
-                                // Close the incomplete SIMD batch loop
-                sb.AppendLine("        __simd_exit: ;");
-                sb.AppendLine("        }");
-                sb.AppendLine("    }");
-                // Fallback scalar body
-// Scalar remainder (strip duplicate pointer declarations)
-                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
-                var methodSyntax = executeMethod != null ? SymbolHelper.GetMethodSyntax(executeMethod) : null;
-                if (methodSyntax?.Body != null)
+                // Catch block: gracefully close the function with scalar body
+                try
                 {
-                    var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                    var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                    var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
-                    string scalarBody = translator.Translate(methodSyntax.Body);
-                    // Strip duplicate declarations
-                    scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", "");
-                    scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;\r?\n?", "");
-                    scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;\r?\n?", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(ivdep)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma loop(vector)\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "");
-                    scalarBody = scalarBody.Replace("#pragma unroll(4)\n", "");
-                    sb.Append(scalarBody);
+                    sb.AppendLine("        __simd_exit: ;");
+                    sb.AppendLine("        }");
+                    sb.AppendLine("    }");
+                    var em = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+                    var ms = em != null ? SymbolHelper.GetMethodSyntax(em) : null;
+                    if (ms?.Body != null)
+                    {
+                        var sm = compilation.GetSemanticModel(ms.SyntaxTree);
+                        var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                        var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                        string scalarBody = tr.Translate(ms.Body);
+                        // Remove duplicate pointer/length declarations
+                        try { scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", ""); } catch { }
+                        try { scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;\r?\n?", ""); } catch { }
+                        try { scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;\r?\n?", ""); } catch { }
+                        scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "").Replace("#pragma loop(ivdep)\n", "");
+                        scalarBody = scalarBody.Replace("#pragma loop(vector)\r\n", "").Replace("#pragma loop(vector)\n", "");
+                        scalarBody = scalarBody.Replace("#pragma unroll(4)\r\n", "").Replace("#pragma unroll(4)\n", "");
+                        sb.Append(scalarBody);
+                    }
                 }
+                catch { }
             }
 
             sb.AppendLine("}");
@@ -2102,27 +2069,35 @@ namespace NativeTranspiler.Analyzer
             // Remove prelude declarations (already emitted by SIMD generator)
             foreach (var (name, _, _) in chunkArrays)
             {
-                string ptrDecl = $"auto* RESTRICT {name}_ptr = reinterpret_cast<";
-                int idx = scalarBody.IndexOf(ptrDecl);
-                if (idx >= 0)
+                try
                 {
-                    int semiEnd = scalarBody.IndexOf(';', idx);
-                    if (semiEnd >= 0)
+                    string ptrDecl = $"auto* RESTRICT {name}_ptr = reinterpret_cast<";
+                    int idx = scalarBody.IndexOf(ptrDecl);
+                    if (idx >= 0)
                     {
-                        int lineEnd = scalarBody.IndexOf('\n', semiEnd);
-                        if (lineEnd < 0) lineEnd = scalarBody.Length;
-                        scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
+                        int semiEnd = scalarBody.IndexOf(';', idx);
+                        if (semiEnd >= 0)
+                        {
+                            int lineEnd = scalarBody.IndexOf('\n', semiEnd);
+                            if (lineEnd >= 0)
+                                scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
+                            else
+                                scalarBody = scalarBody.Remove(idx);
+                        }
+                    }
+
+                    string lenDecl = $"int {name}_length =";
+                    idx = scalarBody.IndexOf(lenDecl);
+                    if (idx >= 0)
+                    {
+                        int lineEnd = scalarBody.IndexOf('\n', idx);
+                        if (lineEnd >= 0)
+                            scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
+                        else
+                            scalarBody = scalarBody.Remove(idx);
                     }
                 }
-
-                string lenDecl = $"int {name}_length =";
-                idx = scalarBody.IndexOf(lenDecl);
-                if (idx >= 0)
-                {
-                    int lineEnd = scalarBody.IndexOf('\n', idx);
-                    if (lineEnd < 0) lineEnd = scalarBody.Length;
-                    scalarBody = scalarBody.Remove(idx, lineEnd - idx + 1);
-                }
+                catch { }
             }
 
             // Remove __entityCount declaration if present (already emitted)
@@ -2131,8 +2106,10 @@ namespace NativeTranspiler.Analyzer
             if (ecIdx >= 0)
             {
                 int ecEnd = scalarBody.IndexOf('\n', ecIdx);
-                if (ecEnd < 0) ecEnd = scalarBody.Length;
-                scalarBody = scalarBody.Remove(ecIdx, ecEnd - ecIdx + 1);
+                if (ecEnd >= 0)
+                    scalarBody = scalarBody.Remove(ecIdx, ecEnd - ecIdx + 1);
+                else
+                    scalarBody = scalarBody.Remove(ecIdx);
             }
 
             // Remove pragma hints (already in SIMD loop or not needed)

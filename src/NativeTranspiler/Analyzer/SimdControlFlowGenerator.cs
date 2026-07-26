@@ -1973,7 +1973,8 @@ namespace NativeTranspiler.Analyzer
 
         private string TranslateInvocation(InvocationExpressionSyntax invocation)
         {
-            var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+            IMethodSymbol? symbol = null;
+            try { symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol; } catch { }
             if (symbol == null)
                 return "/* unknown function */ 0";
 
@@ -2660,6 +2661,36 @@ namespace NativeTranspiler.Analyzer
                 return $"{arrName3}_ptr[{idxExpr3}].{fieldName3} {op3} {rhsExpr3}";
             }
 
+            // ★ Struct field sub-field assignment: array[idx].field1.field2 = rhs
+            //   Handle positions[i].Value.x = expr; pattern per-lane field scatter.
+            if (assign.Left is MemberAccessExpressionSyntax ma5
+                && ma5.Expression is MemberAccessExpressionSyntax ma6
+                && ma6.Expression is ElementAccessExpressionSyntax ea5
+                && ea5.Expression is IdentifierNameSyntax id5)
+            {
+                string arrName5 = id5.Identifier.Text;
+                if (_nativeArrayParams.TryGetValue(arrName5, out var saElemType5)
+                    && saElemType5 != "float" && saElemType5 != "int"
+                    && !saElemType5.Contains("float2") && !saElemType5.Contains("int2"))
+                {
+                    string fieldPath = ma6.Name.Identifier.Text + "." + ma5.Name.Identifier.Text;
+                    string idxExpr5 = ea5.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea5.ArgumentList?.Arguments[0]?.Expression) : "0";
+                    string rhsExpr5 = TranslateExpression(assign.Right);
+                    VarKind idxKind5 = VarKind.Uniform;
+                    if (ea5.ArgumentList?.Arguments.Count > 0)
+                        idxKind5 = _varAnalyzer.ClassifyExpression(ea5.ArgumentList?.Arguments[0]?.Expression);
+
+                    if (idxKind5 >= VarKind.Varying)
+                    {
+                        // Per-lane scatter for struct sub-field write
+                        if (_currentMask != "simd_mask::all_true()")
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
+                    }
+                    return $"{id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
+                }
+            }
+
             string lhs = TranslateExpression(assign.Left);
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
@@ -2730,7 +2761,9 @@ namespace NativeTranspiler.Analyzer
                 return $"{arrName}_ptr[0].{fieldName}";
 
             string idxExpr = TranslateExpression(indexExpr);
-            VarKind idxKind = _varAnalyzer.ClassifyExpression(indexExpr);
+            // ClassifyExpression may throw on SyntaxFactory nodes (modified AST)
+            VarKind idxKind = VarKind.Varying;
+            try { idxKind = _varAnalyzer.ClassifyExpression(indexExpr); } catch { }
 
             if (idxKind >= VarKind.Varying)
             {
@@ -2773,7 +2806,8 @@ namespace NativeTranspiler.Analyzer
         }
 private string TranslateObjectCreation(ObjectCreationExpressionSyntax objCreation)
         {
-            var type = _semanticModel.GetTypeInfo(objCreation).Type;
+                        INamedTypeSymbol? type = null;
+            try { type = _semanticModel.GetTypeInfo(objCreation).Type as INamedTypeSymbol; } catch { }
             string cppType = type != null ? NativeTranspiler.MapCSharpTypeToCpp(type) : "int";
 
             if (objCreation.ArgumentList != null && objCreation.ArgumentList.Arguments.Count > 0)
