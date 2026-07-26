@@ -6,6 +6,15 @@
 #pragma once
 #include "NativeSIMD.h"
 
+// Cross-platform forceinline: MSVC __forceinline, GCC/Clang always_inline
+#if defined(_MSC_VER)
+    #define N_FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+    #define N_FORCEINLINE inline __attribute__((always_inline))
+#else
+    #define N_FORCEINLINE inline
+#endif
+
 // ================================================================
 // Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
 // Other platforms fall through to per-lane scalar fallbacks below.
@@ -16,7 +25,7 @@
 #define _N_PIO2_A 1.57079637e+00f
 #define _N_PIO2_B -4.37113883e-08f
 
-static inline n_float _n_sin_avx2(n_float d) {
+static N_FORCEINLINE n_float _n_sin_avx2(n_float d) {
   // Range reduction: q = round(d * 2/π), r = d - q * π/2  (same as SLEEF xsinf)
   n_float qf = n_round_ps(_mm256_mul_ps(d, _mm256_set1_ps(0.636619772f))); // 2/π
   n_int qi = _mm256_cvtps_epi32(qf);
@@ -38,12 +47,12 @@ static inline n_float _n_sin_avx2(n_float d) {
   return _mm256_add_ps(d, _mm256_mul_ps(_mm256_mul_ps(s, u), d));
 }
 
-static inline n_float _n_cos_avx2(n_float d) {
+static N_FORCEINLINE n_float _n_cos_avx2(n_float d) {
   // cos(x) = sin(x + π/2) — reuse sin with phase shift
   return _n_sin_avx2(_mm256_add_ps(d, _mm256_set1_ps(1.57079633f)));
 }
 
-static inline n_float _n_log_avx2(n_float d) {
+static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
   // Based on SLEEF xlogf (sleefsimdsp.c lines 1277-1312):
   // 1. Extract exponent e from IEEE-754 representation
   n_int emm0 = _mm256_srli_epi32(_mm256_castps_si256(d), 23);
@@ -141,7 +150,7 @@ static inline n_float _n_log_avx2(n_float d) {
 // ================================================================
 
 #ifndef N_SINCOS
-static inline void _n_sincos_fallback(n_float a, n_float* s, n_float* c) {
+static N_FORCEINLINE void _n_sincos_fallback(n_float a, n_float* s, n_float* c) {
   float ls[NSIMD_WIDTH], lc[NSIMD_WIDTH];
   n_store_ps(ls, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) ls[i] = ::sinf(ls[i]);
@@ -154,7 +163,7 @@ static inline void _n_sincos_fallback(n_float a, n_float* s, n_float* c) {
 #endif
 
 #ifndef N_SIN
-static inline n_float _n_sin_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_sin_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinf(lane[i]);
   return n_load_ps(lane);
@@ -163,7 +172,7 @@ static inline n_float _n_sin_fallback(n_float a) {
 #endif
 
 #ifndef N_COS
-static inline n_float _n_cos_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_cos_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::cosf(lane[i]);
   return n_load_ps(lane);
@@ -172,7 +181,7 @@ static inline n_float _n_cos_fallback(n_float a) {
 #endif
 
 #ifndef N_TAN
-static inline n_float _n_tan_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_tan_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::tanf(lane[i]);
   return n_load_ps(lane);
@@ -181,7 +190,7 @@ static inline n_float _n_tan_fallback(n_float a) {
 #endif
 
 #ifndef N_ASIN
-static inline n_float _n_asin_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_asin_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::asinf(lane[i]);
   return n_load_ps(lane);
@@ -190,7 +199,7 @@ static inline n_float _n_asin_fallback(n_float a) {
 #endif
 
 #ifndef N_ACOS
-static inline n_float _n_acos_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_acos_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::acosf(lane[i]);
   return n_load_ps(lane);
@@ -199,7 +208,7 @@ static inline n_float _n_acos_fallback(n_float a) {
 #endif
 
 #ifndef N_ATAN
-static inline n_float _n_atan_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_atan_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::atanf(lane[i]);
   return n_load_ps(lane);
@@ -208,7 +217,7 @@ static inline n_float _n_atan_fallback(n_float a) {
 #endif
 
 #ifndef N_ATAN2
-static inline n_float _n_atan2_fallback(n_float a, n_float b) {
+static N_FORCEINLINE n_float _n_atan2_fallback(n_float a, n_float b) {
   float la[NSIMD_WIDTH], lb[NSIMD_WIDTH];
   n_store_ps(la, a); n_store_ps(lb, b);
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::atan2f(la[i], lb[i]);
@@ -218,7 +227,7 @@ static inline n_float _n_atan2_fallback(n_float a, n_float b) {
 #endif
 
 #ifndef N_SINH
-static inline n_float _n_sinh_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_sinh_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinhf(lane[i]);
   return n_load_ps(lane);
@@ -227,7 +236,7 @@ static inline n_float _n_sinh_fallback(n_float a) {
 #endif
 
 #ifndef N_COSH
-static inline n_float _n_cosh_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_cosh_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::coshf(lane[i]);
   return n_load_ps(lane);
@@ -236,7 +245,7 @@ static inline n_float _n_cosh_fallback(n_float a) {
 #endif
 
 #ifndef N_TANH
-static inline n_float _n_tanh_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_tanh_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::tanhf(lane[i]);
   return n_load_ps(lane);
@@ -245,7 +254,7 @@ static inline n_float _n_tanh_fallback(n_float a) {
 #endif
 
 #ifndef N_EXP
-static inline n_float _n_exp_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_exp_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::expf(lane[i]);
   return n_load_ps(lane);
@@ -254,7 +263,7 @@ static inline n_float _n_exp_fallback(n_float a) {
 #endif
 
 #ifndef N_LOG
-static inline n_float _n_log_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_log_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::logf(lane[i]);
   return n_load_ps(lane);
@@ -263,7 +272,7 @@ static inline n_float _n_log_fallback(n_float a) {
 #endif
 
 #ifndef N_LOG10
-static inline n_float _n_log10_fallback(n_float a) {
+static N_FORCEINLINE n_float _n_log10_fallback(n_float a) {
   float lane[NSIMD_WIDTH]; n_store_ps(lane, a);
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::log10f(lane[i]);
   return n_load_ps(lane);
@@ -272,7 +281,7 @@ static inline n_float _n_log10_fallback(n_float a) {
 #endif
 
 #ifndef N_POW
-static inline n_float _n_pow_fallback(n_float a, n_float b) {
+static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   float la[NSIMD_WIDTH], lb[NSIMD_WIDTH];
   n_store_ps(la, a); n_store_ps(lb, b);
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::powf(la[i], lb[i]);
@@ -286,31 +295,31 @@ static inline n_float _n_pow_fallback(n_float a, n_float b) {
 // These work with n_float (__m256 / __m128 / float32x4_t / float)
 // ================================================================
 
-static inline n_float n_sin_ps(n_float a)     { return N_SIN(a); }
-static inline n_float n_cos_ps(n_float a)     { return N_COS(a); }
-static inline void n_sincos_ps(n_float a, n_float* s, n_float* c) { N_SINCOS(a, s, c); }
-static inline n_float n_tan_ps(n_float a)     { return N_TAN(a); }
-static inline n_float n_asin_ps(n_float a)    { return N_ASIN(a); }
-static inline n_float n_acos_ps(n_float a)    { return N_ACOS(a); }
-static inline n_float n_atan_ps(n_float a)    { return N_ATAN(a); }
-static inline n_float n_atan2_ps(n_float a, n_float b) { return N_ATAN2(a, b); }
-static inline n_float n_sinh_ps(n_float a)    { return N_SINH(a); }
-static inline n_float n_cosh_ps(n_float a)    { return N_COSH(a); }
-static inline n_float n_tanh_ps(n_float a)    { return N_TANH(a); }
-static inline n_float n_exp_ps(n_float a)     { return N_EXP(a); }
-static inline n_float n_log_ps(n_float a)     { return N_LOG(a); }
-static inline n_float n_log10_ps(n_float a)   { return N_LOG10(a); }
-static inline n_float n_pow_ps(n_float a, n_float b) { return N_POW(a, b); }
+static N_FORCEINLINE n_float n_sin_ps(n_float a)     { return N_SIN(a); }
+static N_FORCEINLINE n_float n_cos_ps(n_float a)     { return N_COS(a); }
+static N_FORCEINLINE void n_sincos_ps(n_float a, n_float* s, n_float* c) { N_SINCOS(a, s, c); }
+static N_FORCEINLINE n_float n_tan_ps(n_float a)     { return N_TAN(a); }
+static N_FORCEINLINE n_float n_asin_ps(n_float a)    { return N_ASIN(a); }
+static N_FORCEINLINE n_float n_acos_ps(n_float a)    { return N_ACOS(a); }
+static N_FORCEINLINE n_float n_atan_ps(n_float a)    { return N_ATAN(a); }
+static N_FORCEINLINE n_float n_atan2_ps(n_float a, n_float b) { return N_ATAN2(a, b); }
+static N_FORCEINLINE n_float n_sinh_ps(n_float a)    { return N_SINH(a); }
+static N_FORCEINLINE n_float n_cosh_ps(n_float a)    { return N_COSH(a); }
+static N_FORCEINLINE n_float n_tanh_ps(n_float a)    { return N_TANH(a); }
+static N_FORCEINLINE n_float n_exp_ps(n_float a)     { return N_EXP(a); }
+static N_FORCEINLINE n_float n_log_ps(n_float a)     { return N_LOG(a); }
+static N_FORCEINLINE n_float n_log10_ps(n_float a)   { return N_LOG10(a); }
+static N_FORCEINLINE n_float n_pow_ps(n_float a, n_float b) { return N_POW(a, b); }
 // ================================================================
 // Cross-platform inline math (via n_xxx_ps abstraction — all platforms)
 // These work on AVX2, SSE4, NEON — n_xxx_ps maps to the right intrinsic.
 // ================================================================
 
-static inline n_float _n_tan_ps(n_float a) {
+static N_FORCEINLINE n_float _n_tan_ps(n_float a) {
   return n_div_ps(n_sin_ps(a), n_cos_ps(a));
 }
 
-static inline n_float _n_atan2_ps(n_float y, n_float x) {
+static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
   n_float zero = n_set1_ps(0.0f), pi = n_set1_ps(3.141592653589793f), pi_2 = n_set1_ps(1.5707963267948966f);
   n_float r = n_atan_ps(n_div_ps(y, x));
   // Quadrant adjustment: if x<0: r ± pi, if x=0: ±pi/2
@@ -321,17 +330,17 @@ static inline n_float _n_atan2_ps(n_float y, n_float x) {
   return n_blendv_ps(r, n_blendv_ps(n_mul_ps(pi_2, n_set1_ps(-1.0f)), pi_2, n_cmp_gt_ps(y, zero)), xz);
 }
 
-static inline n_float _n_asin_ps(n_float a) {
+static N_FORCEINLINE n_float _n_asin_ps(n_float a) {
   // asin(x) = atan2(x, sqrt(1 - x²)) using standard formula
   n_float s = n_sqrt_ps(n_sub_ps(n_set1_ps(1.0f), n_mul_ps(a, a)));
   return n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(a, n_add_ps(n_set1_ps(1.0f), s)));
 }
 
-static inline n_float _n_acos_ps(n_float a) {
+static N_FORCEINLINE n_float _n_acos_ps(n_float a) {
   return n_sub_ps(n_set1_ps(1.5707963267948966f), n_asin_ps(a));
 }
 
-static inline n_float _n_atan_ps(n_float a) {
+static N_FORCEINLINE n_float _n_atan_ps(n_float a) {
   // atan polynomial on [-1,1], ~3.5 ULP; for |x|>1 use pi/2 - atan(1/x)
   n_float one = n_set1_ps(1.0f), pi_2 = n_set1_ps(1.5707963267948966f);
   // Reduce to [0,1]: x = min(|a|, 1/|a|)
@@ -349,17 +358,17 @@ static inline n_float _n_atan_ps(n_float a) {
   return n_blendv_ps(n_mul_ps(r, n_set1_ps(-1.0f)), r, n_cmp_gt_ps(a, n_set1_ps(0)));
 }
 
-static inline n_float _n_sinh_ps(n_float a) {
+static N_FORCEINLINE n_float _n_sinh_ps(n_float a) {
   n_float e = n_exp_ps(a);
   return n_mul_ps(n_set1_ps(0.5f), n_sub_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
 }
 
-static inline n_float _n_cosh_ps(n_float a) {
+static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
   n_float e = n_exp_ps(a);
   return n_mul_ps(n_set1_ps(0.5f), n_add_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
 }
 
-static inline n_float _n_tanh_ps(n_float a) {
+static N_FORCEINLINE n_float _n_tanh_ps(n_float a) {
   n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
   return n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
 }
@@ -374,7 +383,7 @@ static inline n_float _n_tanh_ps(n_float a) {
 #define _N_PIO2_A_PD -1.5707963050
 #define _N_PIO2_B_PD -4.37113883e-8
 
-static inline n_double _n_sin_avx2_pd(n_double d) {
+static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
     // Range reduction: q = round(d * 2/π), r = d - q * π/2
     n_double qf = _mm256_round_pd(_mm256_mul_pd(d, _mm256_set1_pd(0.6366197723675814)), 0);
     __m128i q_lo = _mm256_cvtpd_epi32(qf);  // q as int (lower 4 lanes)
@@ -414,7 +423,7 @@ static inline n_double _n_sin_avx2_pd(n_double d) {
 #define N_SIN_PD(a) _n_sin_pd_fallback(a)
 #else
 // Fallback: per-lane scalar sin
-static inline n_double _n_sin_pd_fallback(n_double a) {
+static N_FORCEINLINE n_double _n_sin_pd_fallback(n_double a) {
     double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
     n_store_pd(lane, a);
     for (int i = 0; i < w; i++) lane[i] = sin(lane[i]);
@@ -425,7 +434,7 @@ static inline n_double _n_sin_pd_fallback(n_double a) {
 #endif
 
 #ifndef N_COS_PD
-static inline n_double _n_cos_pd_fallback(n_double a) {
+static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
     double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
     n_store_pd(lane, a);
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
@@ -435,6 +444,6 @@ static inline n_double _n_cos_pd_fallback(n_double a) {
 #endif
 
 // Public API
-static inline n_double n_sin_pd(n_double a)     { return N_SIN_PD(a); }
-static inline n_double n_cos_pd(n_double a)     { return N_COS_PD(a); }
+static N_FORCEINLINE n_double n_sin_pd(n_double a)     { return N_SIN_PD(a); }
+static N_FORCEINLINE n_double n_cos_pd(n_double a)     { return N_COS_PD(a); }
 // sqrt_pd is already defined in NativeSIMD.h as n_sqrt_pd
