@@ -179,9 +179,9 @@ namespace EntJoySample.AutoSIMDTest
             Console.WriteLine();
 
             // ─────────────────────────────────────────────────────────────────────
-            // IJobChunk / IJobEntity benchmarks (ECS World-based)
+            // IJobChunk / IJobEntity benchmarks (ECS World-based, 100w entities)
             // ─────────────────────────────────────────────────────────────────────
-            const int ChunkN = 100000;
+            const int ChunkN = 1000000;
             var query = new QueryBuilder().WithAll<MovePosition, MoveVelocity>();
             float dt = 1.0f / 60.0f;
 
@@ -208,21 +208,23 @@ namespace EntJoySample.AutoSIMDTest
 
             Console.WriteLine();
             Console.WriteLine(eq);
-            Console.WriteLine($"  {"",-9} IJobChunk──      IJobEntity─");
-            Console.WriteLine($"  {"Case",-9} C++    SIMD     C++    SIMD ");
-            Console.WriteLine($"  {"────",-9} ───── ─────   ───── ───── ");
+            Console.WriteLine($"  {"",-9} IJobChunk──           IJobEntity─");
+            Console.WriteLine($"  {"Case",-9} C++    SIMD   ISPC   C++    SIMD   ISPC");
+            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ─────");
 
-            double LightChunkCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
-            double LightChunkSIMD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
-            double LightEntCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
-            double LightEntSIMD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
-            double HeavyChunkCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
-            double HeavyChunkSIMD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
-            double HeavyEntCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
-            double HeavyEntSIMD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LChCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LChSD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LChIP = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_ISPC { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LEnCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double LEnSD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HChCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HChSD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HChIP = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobChunk_ISPC { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HEnCpp = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
+            double HEnSD = ChRun(() => { World.DefaultWorld = heavyWorld; new HeavyJobEntity_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });
 
-            Console.WriteLine($"  {"LightMove",-9} {LightChunkCpp,5:F3} {LightChunkSIMD,5:F3}   {LightEntCpp,5:F3} {LightEntSIMD,5:F3}");
-            Console.WriteLine($"  {"HeavyMove",-9} {HeavyChunkCpp,5:F3} {HeavyChunkSIMD,5:F3}   {HeavyEntCpp,5:F3} {HeavyEntSIMD,5:F3}");
+            Console.WriteLine($"  {"LightMove",-9} {LChCpp,5:F3} {LChSD,5:F3} {LChIP,5:F3}   {LEnCpp,5:F3} {LEnSD,5:F3} {"N/A",5}");
+            Console.WriteLine($"  {"HeavyMove",-9} {HChCpp,5:F3} {HChSD,5:F3} {HChIP,5:F3}   {HEnCpp,5:F3} {HEnSD,5:F3} {"N/A",5}");
             Console.WriteLine(sep);
             Console.WriteLine("  Schedule().Complete() via ECS World");
             Console.WriteLine();
