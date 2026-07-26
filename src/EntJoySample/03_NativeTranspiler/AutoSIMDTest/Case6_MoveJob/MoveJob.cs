@@ -219,4 +219,44 @@ namespace EntJoySample.AutoSIMDTest
             position.Value.y = py + vy * DeltaTime + accY * 0.001f;
         }
     }
+
+    // ── ISPC variants (IJobChunk only; IJobEntity ISPC has pre-existing generator limitation) ──
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct MoveJobChunk_ISPC : IJobChunk
+    {
+        public float DeltaTime;
+        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+        {
+            NativeArray<MovePosition> p = chunk.GetComponentDataNativeArray<MovePosition>();
+            NativeArray<MoveVelocity> v = chunk.GetComponentDataNativeArray<MoveVelocity>();
+            for (int i = 0; i < p.Length; i++) { var pos = p[i]; pos.Value += v[i].Value * DeltaTime; p[i] = pos; }
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
+    public struct HeavyJobChunk_ISPC : IJobChunk
+    {
+        public float DeltaTime;
+        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+        {
+            NativeArray<MovePosition> p = chunk.GetComponentDataNativeArray<MovePosition>();
+            NativeArray<MoveVelocity> v = chunk.GetComponentDataNativeArray<MoveVelocity>();
+            for (int idx = 0; idx < p.Length; idx++)
+            {
+                float px = p[idx].Value.x, py = p[idx].Value.y;
+                float vx = v[idx].Value.x, vy = v[idx].Value.y;
+                float ax = px * 0.001f + vx * 0.01f, ay = py * 0.001f + vy * 0.01f;
+                for (int it = 0; it < 16; it++)
+                {
+                    float phX = ax + it * 0.03125f, phY = ay - it * 0.0625f;
+                    float w = MathF.Sin(phX) + MathF.Cos(phY);
+                    float r = MathF.Sqrt(ax * ax + ay * ay + 1.0f);
+                    ax = ax * 0.985f + w * 0.015f + r * 0.0002f + vx * 0.0001f;
+                    ay = ay * 0.982f - w * 0.012f + r * 0.0003f + vy * 0.0001f;
+                }
+                var pos = p[idx]; pos.Value.x = px + vx * DeltaTime + ax * 0.001f; pos.Value.y = py + vy * DeltaTime + ay * 0.001f; p[idx] = pos;
+            }
+        }
+    }
 }
