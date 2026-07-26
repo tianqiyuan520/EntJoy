@@ -452,21 +452,68 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
             try
             {
                 var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-                if (symbol == null) return VarKind.Uniform;
-                string ct = symbol.ContainingType?.ToDisplayString() ?? "";
-                if (ct == "EntJoy.Mathematics.math" || ct == "System.MathF")
+                if (symbol != null)
                 {
-                    VarKind mk = VarKind.Uniform;
-                    foreach (var arg in invocation.ArgumentList.Arguments)
+                    string ct = symbol.ContainingType?.ToDisplayString() ?? "";
+                    if (ct == "EntJoy.Mathematics.math" || ct == "System.MathF")
                     {
-                        var ak = ClassifyExpressionInternal(arg.Expression, visiting);
-                        if (ak > mk) mk = ak;
+                        VarKind mk = VarKind.Uniform;
+                        foreach (var arg in invocation.ArgumentList.Arguments)
+                        {
+                            var ak = ClassifyExpressionInternal(arg.Expression, visiting);
+                            if (ak > mk) mk = ak;
+                        }
+                        return mk;
                     }
-                    return mk;
+                }
+
+                // ★ Fallback: when GetSymbolInfo fails (e.g. on SyntaxFactory-created AST nodes),
+                //   try name-based matching for known math functions. If the function name matches
+                //   a known math function (Sin, Cos, Sqrt, etc.) and any argument is Varying,
+                //   return Varying — this keeps inner-loop SIMD propagation alive.
+                if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+                {
+                    string fnName = memberAccess.Name.Identifier.Text;
+                    if (IsKnownMathFunction(fnName))
+                    {
+                        VarKind mk = VarKind.Uniform;
+                        foreach (var arg in invocation.ArgumentList.Arguments)
+                        {
+                            var ak = ClassifyExpressionInternal(arg.Expression, visiting);
+                            if (ak > mk) mk = ak;
+                        }
+                        return mk;
+                    }
                 }
             }
             catch { }
             return VarKind.Uniform;
+        }
+
+        private static bool IsKnownMathFunction(string name)
+        {
+            switch (name)
+            {
+                case "Sin": case "Cos": case "Tan":
+                case "Asin": case "Acos": case "Atan":
+                case "Sinh": case "Cosh": case "Tanh":
+                case "Exp": case "Log": case "Log10":
+                case "Sqrt": case "Abs":
+                case "Min": case "Max":
+                case "Ceiling": case "Floor": case "Round": case "Truncate":
+                case "Atan2": case "Pow":
+                case "sin": case "cos": case "tan":
+                case "asin": case "acos": case "atan":
+                case "sinh": case "cosh": case "tanh":
+                case "exp": case "log": case "log10":
+                case "sqrt": case "abs":
+                case "min": case "max":
+                case "ceil": case "floor": case "round": case "trunc":
+                case "atan2": case "pow":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
 

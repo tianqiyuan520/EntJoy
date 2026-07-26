@@ -6,6 +6,7 @@
 #pragma once
 #include "NativeSIMD.h"
 #include "NativeSIMD_math.h"
+#include "NativeSIMD_ext.h"
 #include "NativeMath.h"
 
 // Forward declarations
@@ -42,12 +43,25 @@ struct simd_value<float> {
     friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ n_add_ps(a.v, b.v) }; }
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ n_sub_ps(a.v, b.v) }; }
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ n_mul_ps(a.v, b.v) }; }
+    friend simd_value operator/(simd_value a, simd_value b) { return simd_value{ n_div_ps(a.v, b.v) }; }
+    // scalar float
     friend simd_value operator+(simd_value a, float b) { return simd_value{ n_add_ps(a.v, n_set1_ps(b)) }; }
     friend simd_value operator-(simd_value a, float b) { return simd_value{ n_sub_ps(a.v, n_set1_ps(b)) }; }
     friend simd_value operator*(simd_value a, float b) { return simd_value{ n_mul_ps(a.v, n_set1_ps(b)) }; }
+    friend simd_value operator/(simd_value a, float b) { return simd_value{ n_div_ps(a.v, n_set1_ps(b)) }; }
     friend simd_value operator+(float a, simd_value b) { return simd_value{ n_add_ps(n_set1_ps(a), b.v) }; }
     friend simd_value operator-(float a, simd_value b) { return simd_value{ n_sub_ps(n_set1_ps(a), b.v) }; }
     friend simd_value operator*(float a, simd_value b) { return simd_value{ n_mul_ps(n_set1_ps(a), b.v) }; }
+    friend simd_value operator/(float a, simd_value b) { return simd_value{ n_div_ps(n_set1_ps(a), b.v) }; }
+    // scalar int → float promotion
+    friend simd_value operator+(simd_value a, int b) { return simd_value{ n_add_ps(a.v, n_cvtepi32_ps(n_set1_epi32(b))) }; }
+    friend simd_value operator-(simd_value a, int b) { return simd_value{ n_sub_ps(a.v, n_cvtepi32_ps(n_set1_epi32(b))) }; }
+    friend simd_value operator*(simd_value a, int b) { return simd_value{ n_mul_ps(a.v, n_cvtepi32_ps(n_set1_epi32(b))) }; }
+    friend simd_value operator/(simd_value a, int b) { return simd_value{ n_div_ps(a.v, n_cvtepi32_ps(n_set1_epi32(b))) }; }
+    friend simd_value operator+(int a, simd_value b) { return simd_value{ n_add_ps(n_cvtepi32_ps(n_set1_epi32(a)), b.v) }; }
+    friend simd_value operator-(int a, simd_value b) { return simd_value{ n_sub_ps(n_cvtepi32_ps(n_set1_epi32(a)), b.v) }; }
+    friend simd_value operator*(int a, simd_value b) { return simd_value{ n_mul_ps(n_cvtepi32_ps(n_set1_epi32(a)), b.v) }; }
+    friend simd_value operator/(int a, simd_value b) { return simd_value{ n_div_ps(n_cvtepi32_ps(n_set1_epi32(a)), b.v) }; }
 
     // SIMD float comparisons (declared only; defined after simd_mask is fully declared)
     friend simd_mask operator<(simd_value a, simd_value b);
@@ -161,6 +175,52 @@ struct simd_value<int> {
     friend simd_value operator*(simd_value a, int b) { return simd_value{ n_mullo_epi32(a.v, n_set1_epi32(b)) }; }
     friend simd_value operator*(int a, simd_value b) { return simd_value{ n_mullo_epi32(n_set1_epi32(a), b.v) }; }
 
+    // Mixed int×float → float promotion (ISPC-style type promotion)
+    friend simd_value<float> operator*(simd_value a, float b) {
+        return simd_value<float>{ n_mul_ps(n_cvtepi32_ps(a.v), n_set1_ps(b)) };
+    }
+    friend simd_value<float> operator*(float a, simd_value b) {
+        return simd_value<float>{ n_mul_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
+    }
+    friend simd_value<float> operator+(simd_value a, float b) {
+        return simd_value<float>{ n_add_ps(n_cvtepi32_ps(a.v), n_set1_ps(b)) };
+    }
+    friend simd_value<float> operator+(float a, simd_value b) {
+        return simd_value<float>{ n_add_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
+    }
+    friend simd_value<float> operator-(simd_value a, float b) {
+        return simd_value<float>{ n_sub_ps(n_cvtepi32_ps(a.v), n_set1_ps(b)) };
+    }
+    friend simd_value<float> operator-(float a, simd_value b) {
+        return simd_value<float>{ n_sub_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
+    }
+    friend simd_value<float> operator/(simd_value a, float b) {
+        return simd_value<float>{ n_div_ps(n_cvtepi32_ps(a.v), n_set1_ps(b)) };
+    }
+    friend simd_value<float> operator/(float a, simd_value b) {
+        return simd_value<float>{ n_div_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
+    }
+
+    // Integer division (no native SIMD instruction, per-lane fallback)
+    friend simd_value operator/(simd_value a, simd_value b) {
+        int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(la, a.v); n_store_epi32(lb, b.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] / lb[i];
+        return simd_value{ n_load_epi32(lr) };
+    }
+    friend simd_value operator/(simd_value a, int b) {
+        int la[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(la, a.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] / b;
+        return simd_value{ n_load_epi32(lr) };
+    }
+    friend simd_value operator/(int a, simd_value b) {
+        int lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(lb, b.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = a / lb[i];
+        return simd_value{ n_load_epi32(lr) };
+    }
+
     // Full-Width SIMD: min/max (vectorized int)
     friend simd_value min(simd_value a, simd_value b) { return simd_value{ n_min_epi32(a.v, b.v) }; }
     friend simd_value max(simd_value a, simd_value b) { return simd_value{ n_max_epi32(a.v, b.v) }; }
@@ -215,16 +275,29 @@ struct simd_value<EntJoy::Mathematics::float2> {
         return v;
     }
 
-    // Component-wise arithmetic
+    // Component-wise arithmetic: float2 × float2
     friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ a.x + b.x, a.y + b.y }; }
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ a.x - b.x, a.y - b.y }; }
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ a.x * b.x, a.y * b.y }; }
+    friend simd_value operator/(simd_value a, simd_value b) { return simd_value{ a.x / b.x, a.y / b.y }; }
+    // scalar float broadcast
     friend simd_value operator+(simd_value a, float b) { return simd_value{ a.x + b, a.y + b }; }
     friend simd_value operator-(simd_value a, float b) { return simd_value{ a.x - b, a.y - b }; }
     friend simd_value operator*(simd_value a, float b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator/(simd_value a, float b) { return simd_value{ a.x / b, a.y / b }; }
     friend simd_value operator+(float a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(float a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
     friend simd_value operator*(float a, simd_value b) { return simd_value{ a * b.x, a * b.y }; }
+    friend simd_value operator/(float a, simd_value b) { return simd_value{ a / b.x, a / b.y }; }
+    // scalar int → float promotion
+    friend simd_value operator+(simd_value a, int b) { return simd_value{ a.x + b, a.y + b }; }
+    friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
+    friend simd_value operator*(simd_value a, int b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator/(simd_value a, int b) { return simd_value{ a.x / b, a.y / b }; }
+    friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
+    friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
+    friend simd_value operator*(int a, simd_value b) { return simd_value{ a * b.x, a * b.y }; }
+    friend simd_value operator/(int a, simd_value b) { return simd_value{ a / b.x, a / b.y }; }
     // scalar float2 broadcast → component-wise (for decomposed varying + uniform)
     friend simd_value<float> operator-(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a - b.x(); }
     friend simd_value<float> operator+(simd_value<float> a, EntJoy::Mathematics::float2 b) { return a + b.x(); }
@@ -280,17 +353,58 @@ struct simd_value<EntJoy::Mathematics::int2> {
         return v;
     }
 
-    // Component-wise arithmetic
+    // Component-wise arithmetic: int2 × int2
     friend simd_value operator+(simd_value a, simd_value b) { return simd_value{ a.x + b.x, a.y + b.y }; }
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ a.x - b.x, a.y - b.y }; }
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ a.x * b.x, a.y * b.y }; }
+    // scalar int broadcast
     friend simd_value operator+(simd_value a, int b) { return simd_value{ a.x + b, a.y + b }; }
     friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
+    friend simd_value operator*(simd_value a, int b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator/(simd_value a, int b) { return simd_value{ a.x / b, a.y / b }; }
     friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
-    friend simd_value<int> operator-(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a - b.x(); }
-    friend simd_value<int> operator+(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a + b.x(); }
-    friend simd_value<int> operator*(simd_value<int> a, EntJoy::Mathematics::int2 b) { return a * b.x(); }
+    friend simd_value operator*(int a, simd_value b) { return simd_value{ a * b.x, a * b.y }; }
+    friend simd_value operator/(int a, simd_value b) { return simd_value{ a / b.x, a / b.y }; }
+    // scalar float → float2 promotion (ISPC-style: int2 × float → float2, int-to-float convert each component)
+    friend simd_value<EntJoy::Mathematics::float2> operator*(simd_value a, float b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_mul_ps(n_cvtepi32_ps(a.x.v), n_set1_ps(b)) },
+            simd_value<float>{ n_mul_ps(n_cvtepi32_ps(a.y.v), n_set1_ps(b)) }
+        };
+    }
+    friend simd_value<EntJoy::Mathematics::float2> operator*(float a, simd_value b) { return b * a; }
+    friend simd_value<EntJoy::Mathematics::float2> operator+(simd_value a, float b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_add_ps(n_cvtepi32_ps(a.x.v), n_set1_ps(b)) },
+            simd_value<float>{ n_add_ps(n_cvtepi32_ps(a.y.v), n_set1_ps(b)) }
+        };
+    }
+    friend simd_value<EntJoy::Mathematics::float2> operator+(float a, simd_value b) { return b + a; }
+    friend simd_value<EntJoy::Mathematics::float2> operator-(simd_value a, float b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_sub_ps(n_cvtepi32_ps(a.x.v), n_set1_ps(b)) },
+            simd_value<float>{ n_sub_ps(n_cvtepi32_ps(a.y.v), n_set1_ps(b)) }
+        };
+    }
+    friend simd_value<EntJoy::Mathematics::float2> operator-(float a, simd_value b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_sub_ps(n_set1_ps(a), n_cvtepi32_ps(b.x.v)) },
+            simd_value<float>{ n_sub_ps(n_set1_ps(a), n_cvtepi32_ps(b.y.v)) }
+        };
+    }
+    friend simd_value<EntJoy::Mathematics::float2> operator/(simd_value a, float b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_div_ps(n_cvtepi32_ps(a.x.v), n_set1_ps(b)) },
+            simd_value<float>{ n_div_ps(n_cvtepi32_ps(a.y.v), n_set1_ps(b)) }
+        };
+    }
+    friend simd_value<EntJoy::Mathematics::float2> operator/(float a, simd_value b) {
+        return simd_value<EntJoy::Mathematics::float2>{
+            simd_value<float>{ n_div_ps(n_set1_ps(a), n_cvtepi32_ps(b.x.v)) },
+            simd_value<float>{ n_div_ps(n_set1_ps(a), n_cvtepi32_ps(b.y.v)) }
+        };
+    }
 
     friend simd_value min(simd_value a, simd_value b) {
         return simd_value{ min(a.x, b.x), min(a.y, b.y) };
