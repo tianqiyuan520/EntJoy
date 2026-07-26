@@ -1988,12 +1988,12 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int __simd_end = (__entityCount / NSIMD_WIDTH) * NSIMD_WIDTH;");
                 sb.AppendLine("    if (__simd_end > 0)");
                 sb.AppendLine("    {");
-                sb.AppendLine("        n_int v_base = n_set_epi32(7,6,5,4,3,2,1,0);");
+                sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
                 sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
                 sb.AppendLine("        {");
-                sb.AppendLine("            n_int v_i = n_add_epi32(v_base, n_set1_epi32(si));");
+                sb.AppendLine("            simd_value<int> v_i = v_base + si;");
 
-            // 6. SimdControlFlowGenerator on modified body (native SIMD mode, bypassing simd_value wrappers)
+            // 6. SimdControlFlowGenerator on modified body
             var simdGen = new SimdControlFlowGenerator(
                 semanticModel, jobStruct, variables, varAnalyzer,
                 indexParamName: entityLoopIv,
@@ -2001,8 +2001,7 @@ namespace NativeTranspiler.Analyzer
                 batchOffsetVar: "0",
                 batchLoopVar: "",
                 nativeArrayParams: nativeArrayParams,
-                simdMathPrecision: simdMathPrecision,
-                useNativeSIMD: true);
+                simdMathPrecision: simdMathPrecision);
 
             string simdBody = simdGen.Generate(modifiedBody);
             foreach (var line in simdBody.Split('\n'))
