@@ -678,21 +678,17 @@ static inline n_float n_floor_ps(n_float a) {
 }
 
 // ============================================================
-// Float sqrt
+// Float sqrt (macro — zero function call boundary)
 // ============================================================
-static inline n_float n_sqrt_ps(n_float a) {
-#if defined(NSIMD_AVX2)
-    return _mm256_sqrt_ps(a);
-#elif defined(NSIMD_AVX)
-    return _mm256_sqrt_ps(a);
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    #define n_sqrt_ps(a) _mm256_sqrt_ps(a)
 #elif defined(NSIMD_SSE4)
-    return _mm_sqrt_ps(a);
+    #define n_sqrt_ps(a) _mm_sqrt_ps(a)
 #elif defined(NSIMD_NEON)
-    return vsqrtq_f32(a);
+    #define n_sqrt_ps(a) vsqrtq_f32(a)
 #else
-    return sqrtf(a);
+    #define n_sqrt_ps(a) sqrtf(a)
 #endif
-}
 
 // ============================================================
 // Float ceil / round / trunc (lightweight, native instructions)
