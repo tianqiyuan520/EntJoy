@@ -1757,7 +1757,6 @@ namespace NativeTranspiler.Analyzer
                         if (writeBackIdx > 0)
                         {
                             // Rewrite mutation statements between decl and write-back.
-                            // Replace tempName.Field → arrName[idxText].Field
                             for (int k = i + 1; k < writeBackIdx; k++)
                             {
                                 var mutationStmt = statements[k];
@@ -1765,9 +1764,10 @@ namespace NativeTranspiler.Analyzer
                                 if (rewritten != null)
                                     newStatements.Add(rewritten);
                             }
-                            i = writeBackIdx + 1; // Skip write-back
+                            i = writeBackIdx + 1;
                             continue;
                         }
+
                     }
                 }
 

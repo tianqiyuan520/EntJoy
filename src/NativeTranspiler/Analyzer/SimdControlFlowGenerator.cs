@@ -1771,7 +1771,9 @@ namespace NativeTranspiler.Analyzer
                     int ptrIdx = objExpr.IndexOf("((const float*)");
                     if (ptrIdx >= 0)
                     {
-                        int closeIdx = objExpr.IndexOf(')', ptrIdx);
+                        // Skip first ')' (closes "(const float*)") and find the second
+                        int firstClose = objExpr.IndexOf(')', ptrIdx);
+                        int closeIdx = firstClose >= 0 ? objExpr.IndexOf(')', firstClose + 1) : -1;
                         if (closeIdx >= 0)
                         {
                             modified = objExpr.Substring(0, ptrIdx) +
@@ -2688,6 +2690,35 @@ namespace NativeTranspiler.Analyzer
                         return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
                     return $"{id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
+                }
+            }
+
+            // ★ Struct field sub-field assignment (two-level member access on struct NativeArray):
+            //   Positions[i].Value.x = expr; → per-lane field scatter with .x() method syntax
+            if (assign.Left is MemberAccessExpressionSyntax _ma5
+                && _ma5.Expression is MemberAccessExpressionSyntax _ma6
+                && _ma6.Expression is ElementAccessExpressionSyntax _ea5
+                && _ea5.Expression is IdentifierNameSyntax _id5)
+            {
+                string arrName5 = _id5.Identifier.Text;
+                if (_nativeArrayParams.TryGetValue(arrName5, out var saElemType5)
+                    && saElemType5 != "float" && saElemType5 != "int"
+                    && !saElemType5.Contains("float2") && !saElemType5.Contains("int2"))
+                {
+                    string fieldPath = _ma6.Name.Identifier.Text + "." + _ma5.Name.Identifier.Text + "()";
+                    string idxExpr5 = _ea5.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(_ea5.ArgumentList?.Arguments[0]?.Expression) : "0";
+                    string rhsExpr5 = TranslateExpression(assign.Right);
+                    VarKind idxKind5 = VarKind.Uniform;
+                    if (_ea5.ArgumentList?.Arguments.Count > 0)
+                        try { idxKind5 = _varAnalyzer.ClassifyExpression(_ea5.ArgumentList?.Arguments[0]?.Expression); } catch { idxKind5 = VarKind.Varying; }
+
+                    if (idxKind5 >= VarKind.Varying)
+                    {
+                        if (_currentMask != "simd_mask::all_true()")
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
+                    }
+                    return $"{_id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
                 }
             }
 
