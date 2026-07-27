@@ -53,6 +53,9 @@ namespace NativeTranspiler.Analyzer
         /// <summary>在 uniform-for + foreach 模式下，被内层 foreach 写入的局部变量（累加器）</summary>
         protected readonly HashSet<string> _varyingAccumulatorVars = new();
 
+        /// <summary>是否有累加器变量（供外部生成器决定外层循环策略）</summary>
+        public bool HasAccumulatorVars() => _varyingAccumulatorVars.Count > 0;
+
         public IspcStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
             string? constBoolFieldName, bool constBoolValue, bool useUniformVars = false)
             : base(semanticModel, jobStruct)
@@ -807,8 +810,9 @@ namespace NativeTranspiler.Analyzer
 
             if (_insideForeach)
             {
-                // foreach 内部：内层循环变量加 uniform 修饰，防止 ISPC 默认视为 varying
-                EmitUniformFor(forStmt);
+                // foreach 内部：内层循环使用标准 for（变量为 varying，每个 lane 独立追踪）。
+                // 不能用 EmitUniformFor（uniform int 在 foreach 上下文中初始值变 varying 冲突）。
+                base.TranslateForStatement(forStmt);
             }
             else if (_insideUniformFor)
             {
