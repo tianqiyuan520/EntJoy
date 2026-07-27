@@ -29,6 +29,21 @@ public unsafe struct ChunkJobData
     public int requiredComponentCount;     // requiredComponentArrays 数量
 }
 
+/// <summary>
+/// NativeTranspile 轻量 Chunk 数据结构（与 C++ ChunkData 一一对应）。
+/// 只包含 NativeTranspile 作业实际需要的字段，跳过 ChunkJobData 的冗余信息。
+/// enableBitMaps 预留为将来支持 IEnableComponent 做准备。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct ChunkData
+{
+    public void** componentArrays;      // 组件数组指针 [requiredCount]，编译时已知索引
+    public int entityCount;             // 实体数量
+    public int requiredComponentCount;  // 组件数组数量
+    public void** enableBitMaps;        // enable 位图 [enableCount]，无过滤时为 null（预留）
+    public int enableBitmapCount;       // enable 位图数量，0 表示无过滤（预留）
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct EntityBatchData
 {
