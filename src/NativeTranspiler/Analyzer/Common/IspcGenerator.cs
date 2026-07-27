@@ -1520,17 +1520,36 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasNestedLoop)
                 {
-                    // 原始设计：for (uniform int) 外层 + 内层 foreach（协作 SIMD）。
-                    // 内层标准 for (int i=0;i<limit;i++) 自动转 foreach（SIMD 并行），
-                    // 非标准 for（如 i=start）由 EmitUniformFor 处理，对 varying 边界回退到 int。
-                    AppendUniformVariableDeclarations(sb, jobStruct);
-                    sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; ++{indexParamName}) {{");
-                    var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                    translator.PreScanAccumulatorVars(methodSyntax);
-                    translator.SetInsideUniformFor(true);
-                    var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
-                    sb.AppendLine($"{Indent}}}");
+                    // 预扫描累加器（在内层 foreach 中被写入的局部变量）
+                    var preScanTranslator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                    preScanTranslator.PreScanAccumulatorVars(methodSyntax);
+                    bool hasAccumWrites = preScanTranslator.HasAccumulatorVars();
+
+                    if (hasAccumWrites)
+                    {
+                        // 有累加器（如 bestIdx 在内层 foreach 中赋值后用于数组索引写入）：
+                        // 用 foreach 外层，使 index 为 varying，写入自动 scatter，无类型冲突。
+                        // 内层 for 用 EmitUniformFor 自动检测边界类型（uniform 边界→uniform int）。
+                        AppendUniformVariableDeclarations(sb, jobStruct);
+                        sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
+                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                        translator.SetInsideForeach(true);
+                        var bodyCode = translator.Translate(methodSyntax.Body);
+                        sb.Append(bodyCode);
+                        sb.AppendLine($"{Indent}}}");
+                    }
+                    else
+                    {
+                        // 无累加器：for (uniform int) 外层 + 内层 foreach（最佳 SIMD，无 gather）
+                        AppendUniformVariableDeclarations(sb, jobStruct);
+                        sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; ++{indexParamName}) {{");
+                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                        translator.PreScanAccumulatorVars(methodSyntax);
+                        translator.SetInsideUniformFor(true);
+                        var bodyCode = translator.Translate(methodSyntax.Body);
+                        sb.Append(bodyCode);
+                        sb.AppendLine($"{Indent}}}");
+                    }
                 }
                 else
                 {
