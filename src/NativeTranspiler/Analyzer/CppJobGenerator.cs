@@ -436,7 +436,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
 
@@ -490,7 +490,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
 
@@ -577,9 +577,8 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 生成 IJobEntity 的独立 C++ 函数（对标 GenerateChunkFunctionStandard）。
         /// 函数签名：
-        ///   void Execute(ChunkJobData* __chunkData, ... field_ptrs ...)
-        /// 不含 __requiredComponentTypeIds（IJobEntity 的组件类型由 Execute 参数决定，无需运行时匹配）。
-        /// 函数体内从 __chunkData->requiredComponentArrays 提取组件数组，循环处理实体。
+        ///   void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
+        /// 使用 ChunkData 轻量结构（不含 __requiredComponentTypeIds），componentArrays 直接索引。
         /// </summary>
         private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
@@ -592,13 +591,13 @@ namespace NativeTranspiler.Analyzer
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
-            // 从 __chunkData->requiredComponentArrays 提取组件数组指针
+            // 从 __chunkData->componentArrays 提取组件数组指针
             for (int i = 0; i < executeMethod.Parameters.Length; i++)
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 string constPrefix = param.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
 
@@ -666,7 +665,10 @@ namespace NativeTranspiler.Analyzer
 
         private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct, bool includeTypeIds = true)
         {
-            var parameters = new List<string> { "const ChunkJobData* __chunkData" };
+            // includeTypeIds=false → 轻量 ChunkData 路径（IJobEntity/Chunk 无需类型匹配）
+            // includeTypeIds=true  → 完整 ChunkJobData 路径（需要 __requiredComponentTypeIds）
+            var chunkType = includeTypeIds ? "ChunkJobData" : "ChunkData";
+            var parameters = new List<string> { $"const {chunkType}* __chunkData" };
             if (includeTypeIds)
                 parameters.Add("const int* __requiredComponentTypeIds");
             AppendFieldParameters(jobStruct, parameters);
@@ -1168,6 +1170,18 @@ namespace NativeTranspiler.Analyzer
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
+                // IJobEntity：轻量 ChunkData 路径（将 ChunkJobData 转换为 ChunkData，跳过冗余字段）
+                if (isEntityJob)
+                {
+                    sb.AppendLine("    // 轻量 ChunkData：只保留 Execute 实际需要的字段");
+                    sb.AppendLine("    ChunkData __chunkDataLite;");
+                    sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
+                    sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
+                    sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
+                    sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;     // 预留 IEnableComponent");
+                    sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+                }
+
                 // IJobEntity 和 IJobChunk：解包作业字段到局部变量（指针）
                     int currentOffset = 0;
                     foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
@@ -1222,11 +1236,13 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     // IJobEntity 或 Auto-SIMD: 调用独立函数而非内联
-                    // IJobEntity 的组件类型由 Execute 参数决定，无需传递 __requiredComponentTypeIds
+                    // IJobEntity 使用轻量 ChunkData 路径（&__chunkDataLite）
                     if (isEntityJob || autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
-                        string callArgs = BuildChunkExecuteCallArgs(jobStruct, includeTypeIds: !isEntityJob);
+                        string callArgs = isEntityJob
+                            ? BuildLiteChunkExecuteCallArgs(jobStruct)
+                            : BuildChunkExecuteCallArgs(jobStruct);
                         sb.AppendLine($"    {funcName}({callArgs});");
                     }
                     else
@@ -1309,12 +1325,18 @@ namespace NativeTranspiler.Analyzer
                 // inline the adapter body into range loop
                 if (isEntityJob)
                 {
-                    // IJobEntity：走独立函数调用路径（不含 __requiredComponentTypeIds）
+                    // IJobEntity：走轻量 ChunkData 路径（转换 ChunkJobData → ChunkData）
+                    sb.AppendLine("        ChunkData __chunkDataLite;");
+                    sb.AppendLine("        __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
+                    sb.AppendLine("        __chunkDataLite.entityCount = __chunkData->entityCount;");
+                    sb.AppendLine("        __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
+                    sb.AppendLine("        __chunkDataLite.enableBitMaps = nullptr;");
+                    sb.AppendLine("        __chunkDataLite.enableBitmapCount = 0;");
                     string funcName = GetCppJobFunctionName(jobStruct);
                     string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
                     string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)
-                        ? $"&__chunks[__chunkIndex]"
-                        : $"&__chunks[__chunkIndex], {fieldArgs}";
+                        ? $"&__chunkDataLite"
+                        : $"&__chunkDataLite, {fieldArgs}";
                     sb.AppendLine($"        {funcName}({rangeCallArgs});");
                 }
                 else
@@ -2188,6 +2210,18 @@ namespace NativeTranspiler.Analyzer
                     return $"__chunkData";
                 return $"__chunkData, {fieldArgs}";
             }
+        }
+
+        /// <summary>
+        /// 为 IJobEntity 生成轻量 ChunkData 调用的实参列表。
+        /// 用 &amp;__chunkDataLite 替代 __chunkData（ChunkJobData* → ChunkData*），不含 __requiredComponentTypeIds。
+        /// </summary>
+        private static string BuildLiteChunkExecuteCallArgs(INamedTypeSymbol jobStruct)
+        {
+            var fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+            if (string.IsNullOrEmpty(fieldArgs))
+                return $"&__chunkDataLite";
+            return $"&__chunkDataLite, {fieldArgs}";
         }
 
         /// <summary>

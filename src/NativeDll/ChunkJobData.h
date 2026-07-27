@@ -16,3 +16,14 @@ struct ChunkJobData {
     void**  requiredComponentArrays; // NativeTranspile IJobChunk required component arrays
     int     requiredComponentCount;  // requiredComponentArrays length
 };
+
+// NativeTranspile 轻量 Chunk 数据结构
+// 只包含 NativeTranspile 作业实际需要的字段，跳过 ChunkJobData 的冗余信息。
+// enableBitMaps 预留为将来支持 IEnableComponent 使用。
+struct ChunkData {
+    void**  componentArrays;    // 组件数组指针 [requiredCount]，编译时已知索引
+    int     entityCount;        // 实体数量
+    int     requiredComponentCount; // 组件数组数量
+    void**  enableBitMaps;      // enable 位图 [enableCount]，无过滤时为 nullptr（预留）
+    int     enableBitmapCount;  // enable 位图数量，0 表示无过滤（预留）
+};

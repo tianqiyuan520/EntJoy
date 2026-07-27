@@ -1031,6 +1031,16 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
             sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
             sb.AppendLine("    const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;");
+            // IJobEntity：轻量 ChunkData 路径（转换 ChunkJobData → ChunkData）
+            if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                sb.AppendLine("    ChunkData __chunkDataLite;");
+                sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
+                sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
+                sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
+                sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;");
+                sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+            }
             sb.AppendLine();
 
             var callArgs = new List<string>();
@@ -1038,7 +1048,9 @@ namespace NativeTranspiler.Analyzer
             {
                 var (type, name) = chunkArrays[i];
                 var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(type));
-                sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine(CppJobGenerator.IsEntityJob(jobStruct)
+                    ? $"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkDataLite.componentArrays[{i}]);"
+                    : $"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
                 sb.AppendLine($"    __assume((intptr_t){name}_ptr % 64 == 0);");
                 callArgs.Add($"{name}_ptr");
             }
@@ -1104,7 +1116,9 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine();
             // __entity_count 放在参数末尾（对齐 ISPC 函数签名）
-            callArgs.Add("__chunkData->entityCount");
+            callArgs.Add(CppJobGenerator.IsEntityJob(jobStruct)
+                ? "__chunkDataLite.entityCount"
+                : "__chunkData->entityCount");
             // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
             if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
                 callArgs.Add("std::thread::hardware_concurrency()");
