@@ -810,9 +810,21 @@ namespace NativeTranspiler.Analyzer
 
             if (_insideForeach)
             {
-                // foreach 内部：内层循环使用标准 for（变量为 varying，每个 lane 独立追踪）。
-                // 不能用 EmitUniformFor（uniform int 在 foreach 上下文中初始值变 varying 冲突）。
-                base.TranslateForStatement(forStmt);
+                // foreach 内部：根据循环边界表达式类型决定 uniform/varying。
+                // - 边界全是字面量/常数 → uniform int（无 gather，最优性能）
+                // - 边界含变量（如 start/end 来自数组读取）→ int（varying，每个 lane 独立追踪）
+                if (forStmt.Declaration?.Variables.Count == 1 &&
+                    forStmt.Declaration.Variables[0].Initializer?.Value is ExpressionSyntax init &&
+                    IsLiteralOrUniformMinus(init) &&
+                    forStmt.Condition is BinaryExpressionSyntax cond &&
+                    IsUniformExpr(cond.Right))
+                {
+                    EmitUniformFor(forStmt);
+                }
+                else
+                {
+                    base.TranslateForStatement(forStmt);
+                }
             }
             else if (_insideUniformFor)
             {
@@ -866,6 +878,43 @@ namespace NativeTranspiler.Analyzer
             foreach (var assign in node.DescendantNodes().OfType<AssignmentExpressionSyntax>())
                 if (assign.Left is IdentifierNameSyntax id && localVars.Contains(id.Identifier.Text))
                     results.Add(id.Identifier.Text);
+        }
+
+        /// <summary>判断表达式是否为字面量或 -literal/+literal（如 -1 实际是 PrefixUnary(-)(1)）</summary>
+        private static bool IsLiteralOrUniformMinus(ExpressionSyntax expr)
+        {
+            if (expr is LiteralExpressionSyntax) return true;
+            if (expr is PrefixUnaryExpressionSyntax pre &&
+                (pre.OperatorToken.IsKind(SyntaxKind.MinusToken) ||
+                 pre.OperatorToken.IsKind(SyntaxKind.PlusToken)) &&
+                pre.Operand is LiteralExpressionSyntax)
+                return true;
+            return false;
+        }
+
+        /// <summary>判断表达式在 foreach 上下文中是否保证为 uniform。
+        /// 字面量 → 总是 uniform。
+        /// 字段 → AppendUniformVariableDeclarations 在 foreach 前已复制为 uniform 局部变量。
+        /// 标识符 → 可能是局部变量（可能 varying），不是字段名则不保证 uniform。
+        /// 数组/列表访问 → 必定 varying（foreach 上下文中 gather）。
+        /// </summary>
+        private bool IsUniformExpr(ExpressionSyntax expr)
+        {
+            if (expr is LiteralExpressionSyntax) return true;
+            if (expr is PrefixUnaryExpressionSyntax pre)
+                return IsUniformExpr(pre.Operand);
+            if (expr is BinaryExpressionSyntax bin)
+                return IsUniformExpr(bin.Left) && IsUniformExpr(bin.Right);
+            if (expr is ParenthesizedExpressionSyntax paren)
+                return IsUniformExpr(paren.Expression);
+            if (expr is IdentifierNameSyntax id)
+            {
+                // 字段引用 → 已复制为 uniform 局部变量
+                var sym = _semanticModel.GetSymbolInfo(id).Symbol;
+                return sym is IFieldSymbol;
+            }
+            // 数组访问、方法调用等 → varying
+            return false;
         }
 
         private void EmitUniformFor(ForStatementSyntax forStmt)
