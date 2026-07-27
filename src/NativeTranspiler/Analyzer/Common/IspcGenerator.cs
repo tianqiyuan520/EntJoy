@@ -1520,14 +1520,14 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasNestedLoop)
                 {
-                    // 统一用 foreach 外层循环。内层 for 使用 varying 索引（每个 lane 独立追踪），
-                    // 避免 for (uniform int) + 内层 foreach 模式在各种复杂嵌套下的 uniform/varying
-                    // 类型冲突（累加器、array index、复杂控制流等）。
-                    // 内层 varying 索引在小规模搜索中的 gather 开销可接受。
+                    // 原始设计：for (uniform int) 外层 + 内层 foreach（协作 SIMD）。
+                    // 内层标准 for (int i=0;i<limit;i++) 自动转 foreach（SIMD 并行），
+                    // 非标准 for（如 i=start）由 EmitUniformFor 处理，对 varying 边界回退到 int。
                     AppendUniformVariableDeclarations(sb, jobStruct);
-                    sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
+                    sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; ++{indexParamName}) {{");
                     var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                    translator.SetInsideForeach(true);
+                    translator.PreScanAccumulatorVars(methodSyntax);
+                    translator.SetInsideUniformFor(true);
                     var bodyCode = translator.Translate(methodSyntax.Body);
                     sb.Append(bodyCode);
                     sb.AppendLine($"{Indent}}}");
