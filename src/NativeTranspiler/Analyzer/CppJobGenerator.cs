@@ -116,8 +116,8 @@ namespace NativeTranspiler.Analyzer
             }
             else if (IsEntityJob(jobStruct))
             {
-                // IJobEntity：始终生成独立的 Chunk 级 Execute 函数声明（与 IJobChunk 一致）
-                var chunkParams = BuildChunkJobParameters(jobStruct);
+                // IJobEntity：始终生成独立的 Chunk 级 Execute 函数声明（不含 __requiredComponentTypeIds）
+                var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
                 sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
@@ -424,7 +424,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateEntityFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             // Flat scalar loop for IJobEntity — compiler auto-vectorizes across entities
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -478,7 +478,7 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateEntityFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -576,13 +576,14 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 生成 IJobEntity 的独立 C++ 函数（对标 GenerateChunkFunctionStandard）。
-        /// 函数签名与 IJobChunk 一致：
-        ///   void Execute(ChunkJobData* __chunkData, int* __requiredComponentTypeIds, ... field_ptrs ...)
+        /// 函数签名：
+        ///   void Execute(ChunkJobData* __chunkData, ... field_ptrs ...)
+        /// 不含 __requiredComponentTypeIds（IJobEntity 的组件类型由 Execute 参数决定，无需运行时匹配）。
         /// 函数体内从 __chunkData->requiredComponentArrays 提取组件数组，循环处理实体。
         /// </summary>
         private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -663,9 +664,11 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", parameters);
         }
 
-        private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct)
+        private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct, bool includeTypeIds = true)
         {
-            var parameters = new List<string> { "const ChunkJobData* __chunkData", "const int* __requiredComponentTypeIds" };
+            var parameters = new List<string> { "const ChunkJobData* __chunkData" };
+            if (includeTypeIds)
+                parameters.Add("const int* __requiredComponentTypeIds");
             AppendFieldParameters(jobStruct, parameters);
             return string.Join(", ", parameters);
         }
@@ -1219,10 +1222,11 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     // IJobEntity 或 Auto-SIMD: 调用独立函数而非内联
+                    // IJobEntity 的组件类型由 Execute 参数决定，无需传递 __requiredComponentTypeIds
                     if (isEntityJob || autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
-                        string callArgs = BuildChunkExecuteCallArgs(jobStruct);
+                        string callArgs = BuildChunkExecuteCallArgs(jobStruct, includeTypeIds: !isEntityJob);
                         sb.AppendLine($"    {funcName}({callArgs});");
                     }
                     else
@@ -1305,12 +1309,12 @@ namespace NativeTranspiler.Analyzer
                 // inline the adapter body into range loop
                 if (isEntityJob)
                 {
-                    // IJobEntity：走独立函数调用路径（与 ChunkAdapter 一致）
+                    // IJobEntity：走独立函数调用路径（不含 __requiredComponentTypeIds）
                     string funcName = GetCppJobFunctionName(jobStruct);
                     string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
                     string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)
-                        ? $"&__chunks[__chunkIndex], __requiredComponentTypeIds"
-                        : $"&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs}";
+                        ? $"&__chunks[__chunkIndex]"
+                        : $"&__chunks[__chunkIndex], {fieldArgs}";
                     sb.AppendLine($"        {funcName}({rangeCallArgs});");
                 }
                 else
@@ -2169,12 +2173,21 @@ namespace NativeTranspiler.Analyzer
         /// 生成调用独立 IJobChunk Execute 函数的实参列表。
         /// 用于适配器中替代内联 Execute 体。
         /// </summary>
-        private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct)
+        private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct, bool includeTypeIds = true)
         {
             var fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
-            if (string.IsNullOrEmpty(fieldArgs))
-                return $"__chunkData, __requiredComponentTypeIds";
-            return $"__chunkData, __requiredComponentTypeIds, {fieldArgs}";
+            if (includeTypeIds)
+            {
+                if (string.IsNullOrEmpty(fieldArgs))
+                    return $"__chunkData, __requiredComponentTypeIds";
+                return $"__chunkData, __requiredComponentTypeIds, {fieldArgs}";
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(fieldArgs))
+                    return $"__chunkData";
+                return $"__chunkData, {fieldArgs}";
+            }
         }
 
         /// <summary>
