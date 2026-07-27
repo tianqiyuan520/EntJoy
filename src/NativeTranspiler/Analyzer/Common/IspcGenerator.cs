@@ -1520,34 +1520,17 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasNestedLoop)
                 {
-                    // 预扫描累加器变量（在内层 foreach 中被写入，外层 uniform 写入时导致类型冲突）
-                    var preScanTranslator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                    preScanTranslator.PreScanAccumulatorVars(methodSyntax);
-                    bool hasAccumWrites = preScanTranslator.HasAccumulatorVars();
-
-                    if (hasAccumWrites)
-                    {
-                        // 有累加器 → 外层用 foreach（index 为 varying），避免 uniform/varying 类型冲突。
-                        // 内层 for 循环使用 varying 索引（gather），对于小规模搜索可接受。
-                        AppendUniformVariableDeclarations(sb, jobStruct);
-                        sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
-                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                        translator.SetInsideForeach(true);
-                        var bodyCode = translator.Translate(methodSyntax.Body);
-                        sb.Append(bodyCode);
-                        sb.AppendLine($"{Indent}}}");
-                    }
-                    else
-                    {
-                        // 无累加器：uniform for + 内层 foreach（最佳 SIMD，避免 gather）
-                        AppendUniformVariableDeclarations(sb, jobStruct);
-                        sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; {indexParamName}++) {{");
-                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                        translator.SetInsideUniformFor(true);
-                        var bodyCode = translator.Translate(methodSyntax.Body);
-                        sb.Append(bodyCode);
-                        sb.AppendLine($"{Indent}}}");
-                    }
+                    // 统一用 foreach 外层循环。内层 for 使用 varying 索引（每个 lane 独立追踪），
+                    // 避免 for (uniform int) + 内层 foreach 模式在各种复杂嵌套下的 uniform/varying
+                    // 类型冲突（累加器、array index、复杂控制流等）。
+                    // 内层 varying 索引在小规模搜索中的 gather 开销可接受。
+                    AppendUniformVariableDeclarations(sb, jobStruct);
+                    sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
+                    var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                    translator.SetInsideForeach(true);
+                    var bodyCode = translator.Translate(methodSyntax.Body);
+                    sb.Append(bodyCode);
+                    sb.AppendLine($"{Indent}}}");
                 }
                 else
                 {
