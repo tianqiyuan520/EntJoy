@@ -116,15 +116,10 @@ namespace NativeTranspiler.Analyzer
             }
             else if (IsEntityJob(jobStruct))
             {
-                // auto-SIMD 启用时声明独立函数
-                var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
-                var autoSIMD = attrSymbol != null ? AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol) : NativeTranspiler.AutoSIMD.Disabled;
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled || autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
-                {
-                    var chunkParams = BuildChunkJobParameters(jobStruct);
-                    var singleFuncName = GetCppJobFunctionName(jobStruct);
-                    sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
-                }
+                // IJobEntity：始终生成独立的 Chunk 级 Execute 函数声明（与 IJobChunk 一致）
+                var chunkParams = BuildChunkJobParameters(jobStruct);
+                var singleFuncName = GetCppJobFunctionName(jobStruct);
+                sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
@@ -168,16 +163,15 @@ namespace NativeTranspiler.Analyzer
                 else
                     GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
-            // IJobEntity: 无独立 Execute，循环体内联到 Adapter 中
+            // IJobEntity：生成独立的 Chunk 级 Execute 函数（与 IJobChunk 一致）
             else if (IsEntityJob(jobStruct))
             {
                 if (autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
                     GenerateEntityFunctionVectorize(jobStruct, compilation, sb, useFastMath);
                 else if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                {
                     GenerateEntityFunctionStandard(jobStruct, compilation, sb, useFastMath);
-                }
-                // auto-SIMD 关闭时：不生成独立函数，体量内联到适配器
+                else
+                    GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
@@ -578,6 +572,85 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("    }");
             sb.AppendLine("}");
+        }
+
+        /// <summary>
+        /// 生成 IJobEntity 的独立 C++ 函数（对标 GenerateChunkFunctionStandard）。
+        /// 函数签名与 IJobChunk 一致：
+        ///   void Execute(ChunkJobData* __chunkData, int* __requiredComponentTypeIds, ... field_ptrs ...)
+        /// 函数体内从 __chunkData->requiredComponentArrays 提取组件数组，循环处理实体。
+        /// </summary>
+        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        {
+            var chunkParams = BuildChunkJobParameters(jobStruct);
+            var singleFuncName = GetCppJobFunctionName(jobStruct);
+            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine("{");
+            AppendLocalVariableDeclarations(jobStruct, sb);
+
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+
+            // 从 __chunkData->requiredComponentArrays 提取组件数组指针
+            for (int i = 0; i < executeMethod.Parameters.Length; i++)
+            {
+                var param = executeMethod.Parameters[i];
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
+                string constPrefix = param.RefKind == RefKind.In ? "const " : "";
+                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
+                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+            }
+
+            // 预翻译标量 body
+            string scalarBody = "";
+            if (methodSyntax?.Body != null)
+            {
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var translator = new CppStatementTranslator(semanticModel, useFastMath);
+                scalarBody = translator.Translate(methodSyntax.Body);
+            }
+
+            bool hasReturn = scalarBody.Contains("return;");
+
+            // 实体循环
+            sb.AppendLine();
+            sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+            sb.AppendLine("    #pragma loop(ivdep)");
+            sb.AppendLine("    #pragma loop(vector)");
+            sb.AppendLine("    #pragma unroll(4)");
+            sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+            sb.AppendLine("    {");
+            foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
+            {
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
+                string constPrefix = p.RefKind == RefKind.In ? "const " : "";
+                sb.AppendLine($"        {constPrefix}{cppType}& {p.Name} = __entity_param_{i}_ptr[__entity_index];");
+            }
+
+            if (hasReturn)
+            {
+                sb.AppendLine("        do {");
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    sb.AppendLine($"            {trimmed.Replace("return;", "break;")}");
+                }
+                sb.AppendLine("        } while(false);");
+            }
+            else
+            {
+                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    string trimmed = line.TrimEnd();
+                    if (trimmed.Length == 0) continue;
+                    sb.AppendLine($"        {trimmed}");
+                }
+            }
+
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
         }
 
         private static string BuildJobParameters(INamedTypeSymbol jobStruct)
@@ -1078,11 +1151,7 @@ namespace NativeTranspiler.Analyzer
                 bool isEntityJob = IsEntityJob(jobStruct);
                 bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
 
-                if (isEntityJob)
-                {
-                    AppendEntityBatchAdapter(jobStruct, compilation, sb, useFastMath, autoSIMD);
-                }
-                else
+                // IJobEntity 和 IJobChunk 统一走 ChunkAdapter 路径
                 {
                 sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
                 sb.AppendLine("{");
@@ -1096,115 +1165,7 @@ namespace NativeTranspiler.Analyzer
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
-                if (isEntityJob)
-                {
-                    // IJobEntity: 直接在 Adapter 内联循环体
-                    int currentOffset = 0;
-                    foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-                    {
-                        int offset = CalculateFieldOffset(field, ref currentOffset);
-                        if (!NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                        {
-                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                            sb.AppendLine($"    auto {field.Name} = *({cppType}*)(__jobContext + {offset});");
-                        }
-                    }
-
-                    for (int i = 0; i < executeMethod.Parameters.Length; i++)
-                    {
-                        var param = executeMethod.Parameters[i];
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                        sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
-                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
-                    }
-
-                    string _scalarBody2 = "";
-                    if (methodSyntax?.Body != null)
-                    {
-                        var _sm2 = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                        var _tr2 = new CppStatementTranslator(_sm2, useFastMath);
-                        _scalarBody2 = _tr2.Translate(methodSyntax.Body);
-                    }
-                    bool _hasRet2 = _scalarBody2.Contains("return;");
-
-                    if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                    {
-                        sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-                        sb.AppendLine("    int __simd_end = (__entity_count / NSIMD_WIDTH) * NSIMD_WIDTH;");
-                        sb.AppendLine("    if (__simd_end > 0)");
-                        sb.AppendLine("    {");
-                        sb.AppendLine("        for (int si = 0; si < __simd_end; si += NSIMD_WIDTH)");
-                        sb.AppendLine("        {");
-                        sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
-                        sb.AppendLine("            {");
-                        sb.AppendLine("                int __entity_index = si + lane;");
-                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
-                        {
-                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                            sb.AppendLine($"                {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
-                        }
-                        if (_hasRet2)
-                        {
-                            sb.AppendLine("                do {");
-                            foreach (var _l2 in _scalarBody2.Split('\n'))
-                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"                    {_l2.TrimEnd().Replace("return;", "break;")}"); }
-                            sb.AppendLine("                } while(false);");
-                        }
-                        else
-                        {
-                            foreach (var _l2 in _scalarBody2.Split('\n'))
-                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"                {_l2.TrimEnd()}"); }
-                        }
-                        sb.AppendLine("            }");
-                        sb.AppendLine("        }");
-                        sb.AppendLine("    }");
-                        sb.AppendLine("    for (int __entity_index = __simd_end; __entity_index < __chunkData->entityCount; ++__entity_index)");
-                        sb.AppendLine("    {");
-                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
-                        {
-                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                            sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
-                        }
-                        if (_hasRet2)
-                        {
-                            sb.AppendLine("        do {");
-                            foreach (var _l2 in _scalarBody2.Split('\n'))
-                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"            {_l2.TrimEnd().Replace("return;", "break;")}"); }
-                            sb.AppendLine("        } while(false);");
-                        }
-                        else
-                        {
-                            foreach (var _l2 in _scalarBody2.Split('\n'))
-                            { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"            {_l2.TrimEnd()}"); }
-                        }
-                        sb.AppendLine("    }");
-                    }
-                    else
-                    {
-                        sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-                        sb.AppendLine("    #pragma loop(ivdep)");
-                        sb.AppendLine("    #pragma loop(vector)");
-                        sb.AppendLine("    #pragma unroll(4)");
-                        sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-                        sb.AppendLine("    {");
-                        foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
-                        {
-                            var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                            string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                            sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
-                        }
-                        foreach (var _l2 in _scalarBody2.Split('\n'))
-                        { if (_l2.Trim().Length == 0) continue; sb.AppendLine($"        {_l2.TrimEnd()}"); }
-                        sb.AppendLine("    }");
-                    }
-                }
-                else
-                {
-                    // IJobChunk: 内联 Execute 循环体
-
-                    // 解包作业字段到局部变量
+                // IJobEntity 和 IJobChunk：解包作业字段到局部变量（指针）
                     int currentOffset = 0;
                     foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
                     {
@@ -1257,8 +1218,8 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"    const {cppType}& {field.Name} = *{field.Name}_ptr;");
                     }
 
-                    // Auto-SIMD: 调用独立函数而非内联
-                    if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                    // IJobEntity 或 Auto-SIMD: 调用独立函数而非内联
+                    if (isEntityJob || autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
                         string callArgs = BuildChunkExecuteCallArgs(jobStruct);
@@ -1280,7 +1241,6 @@ namespace NativeTranspiler.Analyzer
                             }
                         }
                     }
-                }
 
                 sb.AppendLine("}");
                 sb.AppendLine();
@@ -1345,33 +1305,13 @@ namespace NativeTranspiler.Analyzer
                 // inline the adapter body into range loop
                 if (isEntityJob)
                 {
-                    for (int i = 0; i < executeMethod.Parameters.Length; i++)
-                    {
-                        var param = executeMethod.Parameters[i];
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                        sb.AppendLine($"        auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->requiredComponentArrays[{i}]);");
-                        sb.AppendLine($"        __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
-                    }
-                    sb.AppendLine("        int __entity_count = __chunkData->entityCount;");
-                    sb.AppendLine("        #pragma loop(ivdep)");
-                sb.AppendLine("        #pragma loop(vector)");
-                sb.AppendLine("        #pragma unroll(4)");
-                    sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-                    sb.AppendLine("        {");
-                    foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
-                    {
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
-                        string constPrefix = p.RefKind == RefKind.In ? "const " : "";
-                        sb.AppendLine($"            {constPrefix}{cppType}& {p.Name} = __entity_param_{i}_ptr[__entity_index];");
-                    }
-                    if (methodSyntax?.Body != null)
-                    {
-                        var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                        var tr = new CppStatementTranslator(sm, useFastMath);
-                        foreach (var l in tr.Translate(methodSyntax.Body).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-                            if (l.Length > 0) sb.Append("            ").AppendLine(l);
-                    }
-                    sb.AppendLine("        }");
+                    // IJobEntity：走独立函数调用路径（与 ChunkAdapter 一致）
+                    string funcName = GetCppJobFunctionName(jobStruct);
+                    string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+                    string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)
+                        ? $"&__chunks[__chunkIndex], __requiredComponentTypeIds"
+                        : $"&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs}";
+                    sb.AppendLine($"        {funcName}({rangeCallArgs});");
                 }
                 else
                 {
@@ -1380,7 +1320,10 @@ namespace NativeTranspiler.Analyzer
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
                         string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
-                        sb.AppendLine($"        {funcName}(&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs});");
+                        string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)
+                            ? $"&__chunks[__chunkIndex], __requiredComponentTypeIds"
+                            : $"&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs}";
+                        sb.AppendLine($"        {funcName}({rangeCallArgs});");
                     }
                     else
                     {
@@ -1402,7 +1345,9 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
                 sb.AppendLine("}");
 
-                // ★ Unity 风格 EntityBatch 适配器（替代 ChunkJobData 间接层）
+                // ★ Unity 风格 EntityBatch 适配器（IJobChunk 专用，IJobEntity 已走 ChunkRangeRaw）
+                if (!isEntityJob)
+                {
                 // 接收 EntityBatchData* 而非 ChunkJobData*，消除 requiredComponentArrays 指针追访
                 // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
                 // 比 ChunkJobData（72 字节）更紧凑，cache 效率更高
@@ -1483,6 +1428,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){entityBatchAdapterFuncName};");
                 sb.AppendLine("}");
+
+                } // end if (!isEntityJob)
 
                 }
             }
@@ -2224,7 +2171,10 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct)
         {
-            return $"__chunkData, __requiredComponentTypeIds, {BuildChunkExecuteFieldArgs(jobStruct)}";
+            var fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+            if (string.IsNullOrEmpty(fieldArgs))
+                return $"__chunkData, __requiredComponentTypeIds";
+            return $"__chunkData, __requiredComponentTypeIds, {fieldArgs}";
         }
 
         /// <summary>

@@ -1028,7 +1028,7 @@ public static unsafe partial class NativeJobScheduler
         => ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn);
 
     public static NativeJobHandle ScheduleChunkRangeRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr rangeFuncPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
-        where T : struct, IJobChunk
+        where T : struct
         => ScheduleNativeChunkRangeRawCore(
             ref job, entityManager, query, rangeFuncPtr,
             requiredComponentTypeIds, dependsOn, workerCap: 0, rangeSize: 0);
