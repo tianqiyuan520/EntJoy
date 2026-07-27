@@ -1520,16 +1520,34 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasNestedLoop)
                 {
-                    // 有嵌套循环：uniform for + 内层 foreach（避免 gather）
-                    // 累加器自动标记为 varying，输出点自动 reduce_min
-                    AppendUniformVariableDeclarations(sb, jobStruct);
-                    sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; {indexParamName}++) {{");
-                    var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
-                    translator.PreScanAccumulatorVars(methodSyntax);
-                    translator.SetInsideUniformFor(true);
-                    var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
-                    sb.AppendLine($"{Indent}}}");
+                    // 预扫描累加器变量（在内层 foreach 中被写入，外层 uniform 写入时导致类型冲突）
+                    var preScanTranslator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                    preScanTranslator.PreScanAccumulatorVars(methodSyntax);
+                    bool hasAccumWrites = preScanTranslator.HasAccumulatorVars();
+
+                    if (hasAccumWrites)
+                    {
+                        // 有累加器 → 外层用 foreach（index 为 varying），避免 uniform/varying 类型冲突。
+                        // 内层 for 循环使用 varying 索引（gather），对于小规模搜索可接受。
+                        AppendUniformVariableDeclarations(sb, jobStruct);
+                        sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... {lengthBound}) {{");
+                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                        translator.SetInsideForeach(true);
+                        var bodyCode = translator.Translate(methodSyntax.Body);
+                        sb.Append(bodyCode);
+                        sb.AppendLine($"{Indent}}}");
+                    }
+                    else
+                    {
+                        // 无累加器：uniform for + 内层 foreach（最佳 SIMD，避免 gather）
+                        AppendUniformVariableDeclarations(sb, jobStruct);
+                        sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {lengthBound}; {indexParamName}++) {{");
+                        var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
+                        translator.SetInsideUniformFor(true);
+                        var bodyCode = translator.Translate(methodSyntax.Body);
+                        sb.Append(bodyCode);
+                        sb.AppendLine($"{Indent}}}");
+                    }
                 }
                 else
                 {
