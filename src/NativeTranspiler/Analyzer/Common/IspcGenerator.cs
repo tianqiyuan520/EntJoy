@@ -620,11 +620,7 @@ namespace NativeTranspiler.Analyzer
 
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
 
-            if (CppJobGenerator.IsEntityJob(jobStruct))
-            {
-                GenerateIspcEntityFunction(sb, baseName + "_impl", jobStruct, semanticModel, methodSyntax);
-            }
-            else if (CppJobGenerator.IsChunkJob(jobStruct))
+            if (CppJobGenerator.IsEntityJob(jobStruct) || CppJobGenerator.IsChunkJob(jobStruct))
             {
                 GenerateIspcChunkFunction(sb, baseName + "_impl", jobStruct, compilation, semanticModel, methodSyntax);
             }
@@ -668,8 +664,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>生成 Job 的 ISPC 多任务源文件</summary>
         public static string GenerateIspcMTSource(INamedTypeSymbol jobStruct, Compilation compilation, HashSet<INamedTypeSymbol> userStructs)
         {
-            if (CppJobGenerator.IsEntityJob(jobStruct))
-                return GenerateIspcEntityMTSource(jobStruct, compilation);
 
             if (CppJobGenerator.IsChunkJob(jobStruct))
                 return GenerateIspcChunkMTSource(jobStruct, compilation);
@@ -792,133 +786,6 @@ namespace NativeTranspiler.Analyzer
 
             return sb.ToString();
         }
-
-        private static void GenerateIspcEntityFunction(StringBuilder sb, string functionName,
-            INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax)
-        {
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
-            var fields = GetFieldsFromJob(jobStruct);
-            var pars = new StringBuilder();
-
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                if (pars.Length > 0) pars.Append(", ");
-                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                pars.Append($"uniform {ispcType} {parameter.Name}_ptr[]");
-            }
-
-            if (pars.Length > 0) pars.Append(", ");
-            pars.Append("uniform int __entity_count");
-
-            foreach (var (type, name) in fields)
-            {
-                if (pars.Length > 0) pars.Append(", ");
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
-                pars.Append($"uniform {ToIspcType(cppType)} * uniform {name}_ptr");
-            }
-
-            sb.AppendLine($"export void {functionName}({pars})");
-            sb.AppendLine("{");
-            AppendUniformVariableDeclarations(sb, jobStruct);
-            sb.AppendLine($"{Indent}foreach_tiled (__entity_index = 0 ... __entity_count) {{");
-
-            // 不再生成 struct copy-in，而是让 translator 直接通过 ptr[index] 访问
-            var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                // Execute 方法的 ref/in 参数直接通过指针+索引访问
-                translator.AddEntityRefParam(parameter.Name);
-            }
-            translator.SetInsideForeach(true); // 告知 translator 在 foreach_tiled 内
-            var bodyCode = translator.Translate(methodSyntax.Body);
-            foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
-            {
-                if (line.Length == 0) continue;
-                sb.Append(Indent).Append(line).AppendLine();
-            }
-
-            sb.AppendLine($"{Indent}}}");
-            sb.AppendLine("}");
-        }
-
-        private static string GenerateIspcEntityMTSource(INamedTypeSymbol jobStruct, Compilation compilation)
-        {
-            var sb = new StringBuilder();
-            var baseName = GetIspcBaseName(jobStruct);
-            sb.AppendLine($"// Auto-generated ISPC MT source for {jobStruct.Name}");
-
-            var fields = GetFieldsFromJob(jobStruct);
-            var includes = CollectIncludesFromFields(fields);
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
-            foreach (var parameter in executeMethod.Parameters)
-                CollectTypeInclude(parameter.Type, includes);
-            WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
-
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            if (methodSyntax?.Body == null) return "// Error: no Execute body";
-            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-
-            // ECS storage is physically chunked and component arrays are not
-            // contiguous across chunks. Pass the complete EntityBatchData table
-            // to one ISPC launch instead of launching a new ISPC task group for
-            // every physical batch. EntityBatchData is three 64-bit words on
-            // 64-bit targets: componentArrays, enableBitMaps, packed int counts.
-            var pars = new StringBuilder();
-            pars.Append("uniform uint64 __batch_words[], uniform int __batch_count");
-            foreach (var (type, name) in fields)
-            {
-                if (pars.Length > 0) pars.Append(", ");
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
-                pars.Append($"uniform {ToIspcType(cppType)} * uniform {name}_ptr");
-            }
-
-            sb.AppendLine($"task void {baseName}_task({pars})");
-            sb.AppendLine("{");
-            AppendUniformVariableDeclarations(sb, jobStruct);
-            sb.AppendLine($"{Indent}for (uniform int __batch_index = taskIndex; __batch_index < __batch_count; __batch_index += taskCount) {{");
-            sb.AppendLine($"{Indent}{Indent}uniform uint64 * uniform __component_addresses = (uniform uint64 * uniform)__batch_words[__batch_index * 3];");
-            sb.AppendLine($"{Indent}{Indent}uniform int __entity_count = (uniform int)(__batch_words[__batch_index * 3 + 2] & 0xffffffff);");
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type));
-                int parameterIndex = executeMethod.Parameters.IndexOf(parameter);
-                sb.AppendLine($"{Indent}{Indent}uniform {ispcType} * uniform {parameter.Name}_ptr = (uniform {ispcType} * uniform)__component_addresses[{parameterIndex}];");
-            }
-            sb.AppendLine($"{Indent}{Indent}foreach_tiled (__entity_index = 0 ... __entity_count) {{");
-
-            var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
-            foreach (var parameter in executeMethod.Parameters)
-            {
-                translator.AddEntityRefParam(parameter.Name);
-            }
-            translator.SetInsideForeach(true);
-            var bodyCode = translator.Translate(methodSyntax.Body);
-            foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
-            {
-                if (line.Length == 0) continue;
-                sb.Append(Indent).Append(Indent).Append(line).AppendLine();
-            }
-            sb.AppendLine($"{Indent}{Indent}}}");
-            sb.AppendLine($"{Indent}}}");
-            sb.AppendLine("}");
-            sb.AppendLine();
-
-            var mtCallArgs = new List<string>();
-            mtCallArgs.Add("__batch_words");
-            mtCallArgs.Add("__batch_count");
-            foreach (var (_, name) in fields)
-                mtCallArgs.Add($"{name}_ptr");
-
-            string mtParams = pars.Length == 0 ? "uniform int numTasks" : $"{pars}, uniform int numTasks";
-            sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
-            sb.AppendLine("{");
-            sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({string.Join(", ", mtCallArgs)});");
-            sb.AppendLine($"{Indent}sync;");
-            sb.AppendLine("}");
-
-            return sb.ToString();
-        }
-
         private static string GenerateIspcChunkMTSource(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var sb = new StringBuilder();
@@ -927,7 +794,9 @@ namespace NativeTranspiler.Analyzer
 
             var fields = GetFieldsFromJob(jobStruct);
             var includes = CollectIncludesFromFields(fields);
-            var chunkArrays = CollectChunkNativeArrayLocals(jobStruct, compilation);
+            var chunkArrays = CppJobGenerator.IsEntityJob(jobStruct)
+                ? CollectEntityNativeArrays(jobStruct)
+                : CollectChunkNativeArrayLocals(jobStruct, compilation);
             foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
@@ -1174,12 +1043,6 @@ namespace NativeTranspiler.Analyzer
                 callArgs.Add($"{name}_ptr");
             }
 
-            // IJobEntity ISPC: __entity_count 在 component arrays 之后、field ptrs 之前
-            if (CppJobGenerator.IsEntityJob(jobStruct))
-            {
-                callArgs.Add("__chunkData->entityCount");
-            }
-
             if (chunkArrays.Count > 0)
             {
                 sb.AppendLine();
@@ -1240,14 +1103,11 @@ namespace NativeTranspiler.Analyzer
             }
 
             sb.AppendLine();
-            // IJobEntity ISPC: __entity_count 已在上面添加（跳过此处）
-            // IJobEntity ISPC MT: 复用非 MT 的 ISPC 函数，不传 thread count
-            if (!CppJobGenerator.IsEntityJob(jobStruct))
-            {
-                callArgs.Add("__chunkData->entityCount");
-                if (useMt)
-                    callArgs.Add("std::thread::hardware_concurrency()");
-            }
+            // __entity_count 放在参数末尾（对齐 ISPC 函数签名）
+            callArgs.Add("__chunkData->entityCount");
+            // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
+            if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
+                callArgs.Add("std::thread::hardware_concurrency()");
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
 
             foreach (var field in fields)
@@ -1439,7 +1299,9 @@ namespace NativeTranspiler.Analyzer
             INamedTypeSymbol jobStruct, Compilation compilation, SemanticModel semanticModel,
             MethodDeclarationSyntax methodSyntax)
         {
-            var chunkArrays = CollectChunkNativeArrayLocals(jobStruct, compilation);
+            var chunkArrays = CppJobGenerator.IsEntityJob(jobStruct)
+                ? CollectEntityNativeArrays(jobStruct)
+                : CollectChunkNativeArrayLocals(jobStruct, compilation);
             var fields = GetFieldsFromJob(jobStruct);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
 
@@ -1447,9 +1309,31 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendUniformVariableDeclarations(sb, jobStruct);
 
-            var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
-            var bodyCode = translator.Translate(methodSyntax.Body);
-            sb.Append(bodyCode);
+            if (CppJobGenerator.IsEntityJob(jobStruct))
+            {
+                // IJobEntity: use IspcStatementTranslator + AddEntityRefParam + foreach_tiled
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
+                var entityTranslator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
+                foreach (var parameter in executeMethod.Parameters)
+                    entityTranslator.AddEntityRefParam(parameter.Name);
+                entityTranslator.SetInsideForeach(true);
+                var bodyCode = entityTranslator.Translate(methodSyntax.Body);
+                sb.AppendLine("    foreach_tiled (__entity_index = 0 ... __entity_count) {");
+                foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append(Indent).Append(line).AppendLine();
+                }
+                sb.AppendLine("    }");
+            }
+            else
+            {
+                // IJobChunk: use IspcChunkStatementTranslator
+                var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
+                var bodyCode2 = translator.Translate(methodSyntax.Body);
+                sb.Append(bodyCode2);
+            }
+
             sb.AppendLine("}");
         }
 
@@ -1530,6 +1414,21 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            return result;
+        }
+
+        /// <summary>
+        /// 从 IJobEntity 的 Execute 参数收集组件类型列表
+        /// </summary>
+        private static List<(INamedTypeSymbol type, string name)> CollectEntityNativeArrays(
+            INamedTypeSymbol jobStruct)
+        {
+            var result = new List<(INamedTypeSymbol type, string name)>();
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+            if (executeMethod == null) return result;
+            foreach (var param in executeMethod.Parameters)
+                if (param.Type is INamedTypeSymbol namedType)
+                    result.Add((namedType, param.Name));
             return result;
         }
 

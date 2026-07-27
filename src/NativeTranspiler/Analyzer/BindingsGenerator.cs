@@ -158,15 +158,9 @@ namespace NativeTranspiler.Analyzer
             {
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
-                    var attrSymLocal2 = AttributeHelper.GetAttributeSymbol(compilation);
-                    bool isIspcEntityLocal2 = attrSymLocal2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSymLocal2) == NativeTranspiler.BackendTarget.Ispc;
-                    if (isIspcEntityLocal2)
-                    {
-                        sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
-                        sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
-                    }
-                    else
-                        sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_EntityBatchFuncPtr;");
+                    // IJobEntity 统一走 Chunk 级调度（与 ISPC 路径一致）
+                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
+                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
                 }
                 else
                 {
@@ -228,15 +222,9 @@ namespace NativeTranspiler.Analyzer
             {
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
-                    var attrSymLocal3 = AttributeHelper.GetAttributeSymbol(compilation);
-                    bool isIspcEntityLocal3 = attrSymLocal3 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSymLocal3) == NativeTranspiler.BackendTarget.Ispc;
-                    if (isIspcEntityLocal3)
-                    {
-                        sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                        sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
-                    }
-                    else if (!useMT)
-                        sb.AppendLine($"            s_{jobStruct.Name}_EntityBatchFuncPtr = Get_{jobStruct.Name}_EntityBatchAdapterPtr();");
+                    // IJobEntity 统一走 Chunk 级调度（与 ISPC 路径一致）
+                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
+                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
                 }
                 else
                 {
@@ -330,23 +318,13 @@ namespace NativeTranspiler.Analyzer
             {
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
-                    var attrSymLocal4 = AttributeHelper.GetAttributeSymbol(compilation);
-                    bool isIspcEntityLocal4 = attrSymLocal4 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSymLocal4) == NativeTranspiler.BackendTarget.Ispc;
-                    if (isIspcEntityLocal4)
-                    {
-                        var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
-                        var rangeGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{rangeGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
-                    }
-                    else
-                    {
-                        var entityBatchGetterName = CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct);
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{entityBatchGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_EntityBatchAdapterPtr();");
-                    }
+                    // IJobEntity 统一走 Chunk 级调度
+                    var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+                    var rangeGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{rangeGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
                 }
                 else
                 {
@@ -467,23 +445,10 @@ namespace NativeTranspiler.Analyzer
                 string scheduleMethod;
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
-                    var attrSymLocal = AttributeHelper.GetAttributeSymbol(compilation);
-                    bool isIspcEntity = attrSymLocal != null && AttributeHelper.GetBackendTarget(jobStruct, attrSymLocal) == NativeTranspiler.BackendTarget.Ispc;
-                    if (isIspcEntity)
-                    {
-                        // IJobEntity + ISPC: 使用 chunk 级 range 调度（绕过 EntityBatch 开销）
-                        scheduleMethod = "ScheduleIspcEntityRangeRaw";
-                        funcPtrName = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
-                        extraArgs = "";
-                    }
-                    else
-                    {
-                        scheduleMethod = "ScheduleEntityBatchRawWithWorkerCapAndRangeSize";
-                        funcPtrName = useMT
-                            ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr"
-                            : $"s_{jobStruct.Name}_EntityBatchFuncPtr";
-                        extraArgs = useMT ? ", 1, int.MaxValue" : ", 0, 0";
-                    }
+                    // IJobEntity 统一走 Chunk 级 range 调度
+                    scheduleMethod = "ScheduleChunkRangeRaw";
+                    funcPtrName = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
+                    extraArgs = "";
                 }
                 else
                 {
@@ -548,7 +513,7 @@ namespace NativeTranspiler.Analyzer
                     if (isEntityJob)
                     {
                         ispcFuncPtr = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
-                        ispcScheduleMethod = "ScheduleIspcEntityRangeRaw";
+                        ispcScheduleMethod = "ScheduleChunkRangeRaw";
                     }
                     else
                     {
@@ -568,7 +533,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine();
 
                     // ScheduleChunkRawWithWorkerCapAndRangeSize for chunk ISPC, EntityBatch for entity ISPC
-                    string ispcScheduleMethod2 = isEntityJob ? "ScheduleIspcEntityRangeRaw" : "ScheduleChunkRawWithWorkerCapAndRangeSize";
+                    string ispcScheduleMethod2 = isEntityJob ? "ScheduleChunkRangeRaw" : "ScheduleChunkRawWithWorkerCapAndRangeSize";
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
@@ -582,9 +547,11 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    string capFuncPtr = (CppJobGenerator.IsEntityJob(jobStruct) && useMT) ? $"s_{jobStruct.Name.Replace("IspcMt", "Ispc")}_EntityBatchFuncPtr" : (CppJobGenerator.IsEntityJob(jobStruct) ? $"s_{jobStruct.Name}_EntityBatchFuncPtr" : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr");
+                    string capFuncPtr = CppJobGenerator.IsEntityJob(jobStruct)
+                        ? $"s_{jobStruct.Name}_ChunkRangeFuncPtr"
+                        : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr";
                     string capMethod = CppJobGenerator.IsEntityJob(jobStruct)
-                        ? "ScheduleEntityBatchRawWithWorkerCapAndRangeSize"
+                        ? "ScheduleEntityRangeRawWithWorkerCapAndRangeSize"
                         : "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
 
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
