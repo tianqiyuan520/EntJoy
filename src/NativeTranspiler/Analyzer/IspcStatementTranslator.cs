@@ -810,21 +810,9 @@ namespace NativeTranspiler.Analyzer
 
             if (_insideForeach)
             {
-                // foreach 内部：根据循环边界表达式类型决定 uniform/varying。
-                // - 边界全是字面量/常数 → uniform int（无 gather，最优性能）
-                // - 边界含变量（如 start/end 来自数组读取）→ int（varying，每个 lane 独立追踪）
-                if (forStmt.Declaration?.Variables.Count == 1 &&
-                    forStmt.Declaration.Variables[0].Initializer?.Value is ExpressionSyntax init &&
-                    IsLiteralOrUniformMinus(init) &&
-                    forStmt.Condition is BinaryExpressionSyntax cond &&
-                    IsUniformExpr(cond.Right))
-                {
-                    EmitUniformFor(forStmt);
-                }
-                else
-                {
-                    base.TranslateForStatement(forStmt);
-                }
+                // foreach 内部：内层循环变量加 uniform 修饰，防止 ISPC 默认视为 varying。
+                // EmitUniformFor 内部已检查边界是否为 uniform-safe，非 uniform 边界自动回退到 int。
+                EmitUniformFor(forStmt);
             }
             else if (_insideUniformFor)
             {
@@ -919,6 +907,19 @@ namespace NativeTranspiler.Analyzer
 
         private void EmitUniformFor(ForStatementSyntax forStmt)
         {
+            // 检查初始化值和边界是否为 uniform-safe（字面量/字段）。
+            // 如果边界表达式引用局部变量（可能 varying），不能强制 uniform int。
+            bool safeInitializer = forStmt.Declaration?.Variables.Count > 0 &&
+                forStmt.Declaration.Variables[0].Initializer?.Value is ExpressionSyntax init &&
+                IsLiteralOrUniformMinus(init);
+            bool safeCondition = forStmt.Condition is BinaryExpressionSyntax cond &&
+                IsUniformExpr(cond.Right);
+            if (!safeInitializer || !safeCondition)
+            {
+                base.TranslateForStatement(forStmt);
+                return;
+            }
+
             AppendIndent();
             _builder.Append("for (uniform ");
             if (forStmt.Declaration != null)
@@ -988,7 +989,8 @@ namespace NativeTranspiler.Analyzer
                     return;
                 }
             }
-            base.TranslateForStatement(forStmt);
+            // 非标准 for（如 dx = -1; dx <= 1; dx++）→ 边界为 uniform-safe 用 EmitUniformFor
+            EmitUniformFor(forStmt);
         }
 
 
@@ -1006,7 +1008,54 @@ namespace NativeTranspiler.Analyzer
                 _builder.AppendLine(");");
                 return;
             }
+
+
+            // 检测 uniform-for 上下文中累加器作为数组索引导致的 uniform/varying 类型冲突。
+            // 如: Results_ptr[index] = HashIndex_ptr[bestIdx].y;
+            //   index 是 uniform，bestIdx 是 varying → 类型不匹配。
+            // 修复: { varying int __s = index; Results_ptr[__s] = HashIndex_ptr[bestIdx].y; }
+            if (_insideUniformFor && exprStmt.Expression is AssignmentExpressionSyntax assign2 &&
+                assign2.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                assign2.Left is ElementAccessExpressionSyntax lhsEA2 &&
+                lhsEA2.ArgumentList?.Arguments.Count > 0 &&
+                HasAccumulatorIndexInRHS(assign2.Right))
+            {
+                string lhsArrName = lhsEA2.Expression.ToString();
+                AppendIndent();
+                _builder.AppendLine("{");
+                _indentLevel++;
+                AppendIndent();
+                _builder.Append("varying int __s = ");
+                TranslateExpression(lhsEA2.ArgumentList.Arguments[0].Expression);
+                _builder.AppendLine(";");
+                AppendIndent();
+                // 用 varying 索引写入，接受 varying 值
+                _builder.Append(lhsArrName).Append("_ptr[__s] = ");
+                // 翻译 RHS（累加器索引保持 varying）
+                TranslateExpression(assign2.Right);
+                _builder.AppendLine(";");
+                _indentLevel--;
+                AppendIndent();
+                _builder.AppendLine("}");
+                return;
+            }
+
             base.TranslateExpressionStatement(exprStmt);
+        }
+
+        /// <summary>检查 RHS 表达式中是否有累加器变量被用作数组索引</summary>
+        private bool HasAccumulatorIndexInRHS(ExpressionSyntax expr)
+        {
+            if (expr == null) return false;
+            foreach (var node in expr.DescendantNodesAndSelf())
+            {
+                if (node is ElementAccessExpressionSyntax ea &&
+                    ea.ArgumentList?.Arguments.Count > 0 &&
+                    ea.ArgumentList.Arguments[0].Expression is IdentifierNameSyntax id &&
+                    _varyingAccumulatorVars.Contains(id.Identifier.Text))
+                    return true;
+            }
+            return false;
         }
         protected override void TranslateWhileStatement(WhileStatementSyntax whileStmt)
         {
