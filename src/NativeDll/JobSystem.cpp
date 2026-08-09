@@ -378,7 +378,18 @@ namespace JobSystem
         stats->workerExecutedRanges = g_workerExecutedRanges.load(std::memory_order_relaxed);
         stats->mainExecutedRanges = g_mainExecutedRanges.load(std::memory_order_relaxed);
         stats->stealCount = g_stealCount.load(std::memory_order_relaxed);
-        stats->parkWakeCount = g_parkWakeCount.load(std::memory_order_relaxed);
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPool && g_nativeWorkerPool)
+        {
+            uint64_t parkWake = 0, hotSpin = 0;
+            g_nativeWorkerPool->GetCounters(&parkWake, &hotSpin);
+            stats->parkWakeCount = parkWake;
+            stats->hotSpinHits = hotSpin;
+        }
+        else
+        {
+            stats->parkWakeCount = g_parkWakeCount.load(std::memory_order_relaxed);
+            stats->hotSpinHits = 0;
+        }
         stats->publishedJobs = g_publishedJobs.load(std::memory_order_relaxed);
         stats->waitFallbacks = g_waitFallbacks.load(std::memory_order_relaxed);
         stats->notifiedWorkers = g_notifiedWorkers.load(std::memory_order_relaxed);
@@ -428,7 +439,6 @@ namespace JobSystem
         stats->frameTasksCompleted = 0;
         stats->deferredRuns = 0;
         stats->prewakeCount = 0;
-        stats->hotSpinHits = 0;
         stats->coldBatches = 0;
         stats->scheduleModePublishNoAssist = 0;
         stats->scheduleModePublishAssist = 0;
@@ -473,6 +483,8 @@ namespace JobSystem
         g_mainExecutedRanges.store(0, std::memory_order_relaxed);
         g_stealCount.store(0, std::memory_order_relaxed);
         g_parkWakeCount.store(0, std::memory_order_relaxed);
+        if (g_executionBackend == ExecutionBackend::NativeWorkerPool && g_nativeWorkerPool)
+            g_nativeWorkerPool->ResetCounters();
         g_publishedJobs.store(0, std::memory_order_relaxed);
         g_waitFallbacks.store(0, std::memory_order_relaxed);
         g_notifiedWorkers.store(0, std::memory_order_relaxed);
@@ -2003,7 +2015,7 @@ namespace JobSystem
 
     void Scheduler::KeepWorkersWarm(int /*microseconds*/)
     {
-        // No-op: taskflow manages its own thread lifecycle
+        // keep-warm 实验已还原（数据：紧循环无效、睡眠模式回归）。no-op。
     }
 
     void Scheduler::SetFrameLowLatencyMode(bool /*enabled*/) {}

@@ -40,6 +40,12 @@ extern "C" {
     JOB_API void JobSystem_KeepWorkersWarm(int microseconds);
     JOB_API void JobSystem_FlushScheduledJobs();
 
+    // 注册托管 Persistent 分配器回调（NativeContainers.h 的 UnsafeList 扩容/释放走托管侧，
+    // 杜绝原生 free 内部指针导致的堆损坏）。alloc/free 参数为 C# 侧函数指针（cdecl）。
+    typedef void* (*PersistentAllocCallback)(int32_t size);
+    typedef void  (*PersistentFreeCallback)(void* ptr);
+    JOB_API void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free);
+
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);

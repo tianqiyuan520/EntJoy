@@ -283,6 +283,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_KeepWorkersWarm;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_FlushScheduledJobs;
+    private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
@@ -476,6 +477,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_KeepWorkersWarm");
         _jobSystem_FlushScheduledJobs = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_FlushScheduledJobs");
+        _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterPersistentAllocator");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
         _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
@@ -704,6 +707,21 @@ public static unsafe partial class NativeJobScheduler
     {
         Interlocked.Exchange(ref _shutdownRequested, 0);
         JobSystem_Initialize(numThreads);
+        RegisterPersistentAllocator();
+    }
+
+    // 托管 Persistent 分配器回调：原生 UnsafeList 扩容/释放走托管侧（C# 池化块 payload=base+16，
+    // 原生 free(Ptr) 是内部指针释放 → 堆损坏 0xc0000374）。用 [UnmanagedCallersOnly] 免 GC 根、直通。
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void* PersistentAllocUnmanaged(int size) => EntJoy.Collections.PersistentAllocator.Alloc(size);
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void PersistentFreeUnmanaged(void* ptr) => EntJoy.Collections.PersistentAllocator.Free(ptr);
+
+    private static void RegisterPersistentAllocator()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterPersistentAllocator == null) return;
+        _jobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
     }
     /// <summary>
     /// 当前持久 Job Worker 数。与 Unity JobsUtility.JobWorkerCount 的用途一致；

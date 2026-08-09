@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
+using System.Threading;
 using Vector3 = System.Numerics.Vector3;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
@@ -6,12 +7,81 @@ using EntJoy.Mathematics;
 
 public class TestGridSearch
 {
+    private const int N = 100000;
+    private const int K = 100000;
+    private const int DefaultWarmup = 5;
+    private const int DefaultMeasure = 100;
+    private const int FrameSleepMilliseconds = 16;
+
+    private static int ReadPositiveEnvironmentInt(string name, int fallback)
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable(name), out int value) && value > 0
+            ? value
+            : fallback;
+    }
+
+    // 复用 IJobChunkMoveCompareSample.cs:1054 的插值分位数实现（保持两端一致）
+    private static double Percentile(double[] sorted, double percentile)
+    {
+        if (sorted.Length == 0) return 0;
+        double position = (sorted.Length - 1) * percentile;
+        int lower = (int)Math.Floor(position);
+        int upper = (int)Math.Ceiling(position);
+        if (lower == upper) return sorted[lower];
+        double weight = position - lower;
+        return sorted[lower] * (1.0 - weight) + sorted[upper] * weight;
+    }
+
+    private static void PrintSummary(string label, double[] samples)
+    {
+        var sorted = (double[])samples.Clone();
+        Array.Sort(sorted);
+        double sum = 0;
+        foreach (double s in samples) sum += s;
+        double avg = sum / samples.Length;
+        double p50 = Percentile(sorted, 0.50);
+        double p95 = Percentile(sorted, 0.95);
+        double p99 = Percentile(sorted, 0.99);
+        double max = sorted[samples.Length - 1];
+        Console.WriteLine($"{label,-28}: avg={avg:F3} ms, p50={p50:F3} ms, p95={p95:F3} ms, p99={p99:F3} ms, max={max:F3} ms");
+        Console.WriteLine(FormattableString.Invariant(
+            $"BENCH|runtime=EntJoy|case={label}|entities={N}|queries={K}|frames={samples.Length}|trace=0|avg={avg:F6}|p50={p50:F6}|p95={p95:F6}|p99={p99:F6}|max={max:F6}"));
+    }
+
+    // 稳态采样：Stopwatch.GetTimestamp 计时，与 Unity 端 RunBenchmark 一致；sleepMs>0 时每帧后插 Thread.Sleep
+    private static double[] RunSteadyPhase(int warmup, int measure, int sleepMs, Action step, Action onSample)
+    {
+        for (int i = 0; i < warmup; i++)
+        {
+            step();
+            if (sleepMs > 0) Thread.Sleep(sleepMs);
+        }
+
+        var samples = new double[measure];
+        for (int i = 0; i < measure; i++)
+        {
+            long start = Stopwatch.GetTimestamp();
+            step();
+            long end = Stopwatch.GetTimestamp();
+            samples[i] = (end - start) * 1000.0 / Stopwatch.Frequency;
+            onSample();
+            if (sleepMs > 0) Thread.Sleep(sleepMs);
+        }
+        return samples;
+    }
+
     public static void Main()
     {
         NativeJobScheduler.Initialize();
+        NativeJobScheduler.PrewakeWorkersOnce(); // 镜像 IJobChunkMoveCompareSample.cs:498
 
-        int N = 100000;
-        int K = 100000;
+        if (int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_QUERY_BATCH"), out int qb))
+            GridSearch2D.QueryBatchSize = qb; // tile 粒度实验：0=默认(~1667)，256/512 更细
+
+        int warmup = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", DefaultWarmup);
+        int measure = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", DefaultMeasure);
+        bool sleepMode = Environment.GetEnvironmentVariable("ENTJOY_BENCH_SLEEP") == "1";
+        int sleepMs = sleepMode ? FrameSleepMilliseconds : 0;
 
         var pos = new Vector3[N];
         var queries = new Vector3[K];
@@ -28,81 +98,65 @@ public class TestGridSearch
 
         var gsb = new GridSearch2D(-1f, 200);
 
-        const int warmup = 2;
-        const int iterations = 1000;
+        Console.WriteLine("=== GridSearch2D SoA + ISPC 稳态测量 ===");
+        Console.WriteLine($"Warmup: {warmup}, Measure: {measure}, Sleep: {(sleepMode ? sleepMs + "ms" : "off")}, QueryBatch: {GridSearch2D.QueryBatchSize}, WorkerCount: {NativeJobScheduler.JobWorkerCount}");
 
-        Console.WriteLine("=== GridSearch2D SoA + ISPC MT 测试 ===");
-        Console.WriteLine("预热次数: {0}, 迭代次数: {1}\n", warmup, iterations);
+        // ---- COLD 阶段：每轮全量重建（对齐 Unity GridSearchBurst 真实路径） ----
+        // 墙钟 = Dispose + 重新分配 + 复制 + 6 个 job；core = 纯 job 阶段
+        var coreBuildCold = new double[measure];
+        int coldIdx = 0;
+        double[] buildWallCold = RunSteadyPhase(warmup, measure, sleepMs,
+            () => gsb.InitializeGrid(nativePos).Complete(),
+            () => coreBuildCold[coldIdx++] = gsb.LastBuildTimings.CoreBuildTotal);
 
-        for (int i = 0; i < warmup; i++)
-        {
-            gsb.InitializeGrid(nativePos).Complete();
-            gsb.SearchClosestPoint(nativeQueries).Dispose();
-        }
+        var coldTimings = gsb.LastBuildTimings;
+        Console.WriteLine($"COLD 分配诊断 (最后一次): dispose={coldTimings.DisposeNative:F3} ms, alloc+copy={coldTimings.CreateAndCopy:F3} ms — 不计入稳态指标");
 
-        double totalBuild = 0.0;
-        double totalQuery = 0.0;
-        GridSearch2D.BuildTimings sumTimings = default;
+        // ---- STEADY 阶段：暖路径重排（复用缓冲，无重分配），隔离分配器/冷内存方差 ----
+        var coreBuildSteady = new double[measure];
+        int steadyIdx = 0;
+        double[] buildWallSteady = RunSteadyPhase(warmup, measure, sleepMs,
+            () => gsb.UpdatePositions(nativePos).Complete(),
+            () => coreBuildSteady[steadyIdx++] = gsb.LastBuildTimings.CoreBuildTotal);
 
-        for (int i = 0; i < iterations; i++)
-        {
-            var swBuild = Stopwatch.StartNew();
-            var handle = gsb.InitializeGrid(nativePos);
-            handle.Complete();
-            swBuild.Stop();
-            double buildMs = swBuild.Elapsed.TotalMilliseconds;
-            totalBuild += buildMs;
+        // ---- QUERY 阶段：对同一网格重复查询 ----
+        var coreQuery = new double[measure];
+        int queryIdx = 0;
+        double[] queryWall = RunSteadyPhase(warmup, measure, sleepMs,
+            () => gsb.SearchClosestPoint(nativeQueries).Dispose(),
+            () => coreQuery[queryIdx++] = gsb.LastBuildTimings.QueryTotal);
 
-            var swQuery = Stopwatch.StartNew();
-            var queryResults = gsb.SearchClosestPoint(nativeQueries);
-            swQuery.Stop();
-            double queryMs = swQuery.Elapsed.TotalMilliseconds;
-            totalQuery += queryMs;
-
-            var timings = gsb.LastBuildTimings;
-            sumTimings.DisposeNative += timings.DisposeNative;
-            sumTimings.CreateAndCopy += timings.CreateAndCopy;
-            sumTimings.BoundingBox += timings.BoundingBox;
-            sumTimings.HashCounting += timings.HashCounting;
-            sumTimings.PrefixAndFill += timings.PrefixAndFill;
-            sumTimings.ElementPlacement += timings.ElementPlacement;
-            sumTimings.CoreBuildTotal += timings.CoreBuildTotal;
-            sumTimings.QueryTotal += timings.QueryTotal;
-
-            if (i == iterations - 1)
-            {
-                var resultsArray = new int[queryResults.Length];
-                queryResults.CopyTo(resultsArray);
-                Console.WriteLine("查询结果前10个: {0}", string.Join(" ", resultsArray[..10]));
-            }
-
-            queryResults.Dispose();
-
-            if ((i + 1) % 10 == 0) Console.Write(".");
-        }
         Console.WriteLine();
+        PrintSummary("GridSearch-BuildCore-Cold", coreBuildCold);   // 纯 job 阶段（冷分配），跨端主指标 vs Unity BuildCore
+        PrintSummary("GridSearch-BuildWall-Cold", buildWallCold);   // 墙钟 = Dispose+alloc+copy+6 job，对齐 Unity BuildWall
+        PrintSummary("GridSearch-BuildCore-Steady", coreBuildSteady); // 暖路径纯 job，隔离分配噪声
+        PrintSummary("GridSearch-Query", queryWall);                // 墙钟，含 TempJob results 分配，与 Unity swQuery 对齐
+        PrintSummary("GridSearch-QueryCore", coreQuery);            // 纯 job 查询
 
-        double avgBuild = totalBuild / iterations;
-        double avgQuery = totalQuery / iterations;
+        // 结果抽查（沿用原逻辑）
+        var results = gsb.SearchClosestPoint(nativeQueries);
+        var resultsArray = new int[results.Length];
+        results.CopyTo(resultsArray);
+        Console.WriteLine("查询结果前10个: {0}", string.Join(" ", resultsArray[..10]));
+        results.Dispose();
 
-        Console.WriteLine("\n--- 平均详细计时 ---");
-        Console.WriteLine("[Init] 释放 NativeCollections: {0:F3} ms", sumTimings.DisposeNative / iterations);
-        Console.WriteLine("[Init] 创建 NativeCollections + 复制数据: {0:F3} ms", sumTimings.CreateAndCopy / iterations);
-        Console.WriteLine("[Init] 包围盒计算: {0:F3} ms", sumTimings.BoundingBox / iterations);
-        Console.WriteLine("[Init] 哈希分配+计数: {0:F3} ms", sumTimings.HashCounting / iterations);
-        Console.WriteLine("[Init] 前缀和+填充起止: {0:F3} ms", sumTimings.PrefixAndFill / iterations);
-        Console.WriteLine("[Init] 元素放置: {0:F3} ms", sumTimings.ElementPlacement / iterations);
-        Console.WriteLine("[Init] 核心构建总耗时: {0:F3} ms", sumTimings.CoreBuildTotal / iterations);
-        Console.WriteLine("[Init] 核心查询总耗时: {0:F3} ms", sumTimings.QueryTotal / iterations);
-
-        Console.WriteLine("\n=== 平均性能结果 ===");
-        Console.WriteLine("平均构建时间: {0:F3} ms", avgBuild);
-        Console.WriteLine("平均查询时间: {0:F3} ms", avgQuery);
-        Console.WriteLine("总耗时 (构建+查询): {0:F3} ms", avgBuild + avgQuery);
+        // ---- DIAG 行（镜像 Unity DIAG| 形状，含 worker 数与调度器 park 诊断） ----
+        var js = NativeJobScheduler.GetStats();
+        Console.WriteLine(FormattableString.Invariant(
+            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}|coldDisposeMs={coldTimings.DisposeNative:F6}|coldCreateCopyMs={coldTimings.CreateAndCopy:F6}|schedule=InitializeGrid|steadySchedule=UpdatePositions"));
 
         gsb.Dispose();
         nativePos.Dispose();
         nativeQueries.Dispose();
+
+        // Persistent free-list 统计（门控：ENTJOY_PERSISTENT_POOL_STATS=1）
+        if (Environment.GetEnvironmentVariable("ENTJOY_PERSISTENT_POOL_STATS") == "1")
+        {
+            var ps = PersistentAllocator.GetStats();
+            double hitRate = ps.Allocs > 0 ? (double)ps.Hits / ps.Allocs * 100.0 : 0.0;
+            Console.WriteLine(FormattableString.Invariant(
+                $"PERSISTENT_POOL|allocs={ps.Allocs}|frees={ps.Frees}|hits={ps.Hits}|misses={ps.Misses}|toOS={ps.ToOS}|foreign={ps.Foreign}|hitRate={hitRate:F1}%"));
+        }
 
         Console.WriteLine("\n测试完成。");
         //Console.Read();

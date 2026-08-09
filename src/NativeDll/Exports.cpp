@@ -3,6 +3,7 @@
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
+#include "NativeContainers.h"
 #include <cstdio>
 
 // 运行时输出当前 SIMD 配置（DLL 加载时执行）
@@ -67,6 +68,11 @@ extern "C"
     void JobSystem_FlushScheduledJobs()
     {
         JobSystem::Scheduler::FlushScheduledJobs();
+    }
+
+    void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free)
+    {
+        EntJoy::Collections::RegisterPersistentAllocator(alloc, free);
     }
 
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)

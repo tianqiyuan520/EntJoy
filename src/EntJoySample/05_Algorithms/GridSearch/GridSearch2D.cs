@@ -33,6 +33,9 @@ public class GridSearch2D : IDisposable
     private BuildTimings _lastTimings;
     public BuildTimings LastBuildTimings => _lastTimings;
 
+    /// <summary>查询 tile 粒度实验：0 = 默认 ResolveChunkSize（~1667）；显式值如 256/512 使 tile 更细，平滑密度不平衡。</summary>
+    public static int QueryBatchSize = 256; // 实验定标：256 较 0（默认 ~1667 粗 tile）QueryCore p50 -10.6%，全部高百分位下降
+
     public float2 GridMin => _minMaxPositions[0];
     public float2 GridMax => _minMaxPositions[1];
     public int2 GridDimensions => _gridDimensions[0];
@@ -146,7 +149,7 @@ public class GridSearch2D : IDisposable
             SquaredEpsilonSelf = epsilon * epsilon,
             Results = results
         };
-        var handle = job.Schedule(qPoints.Length, 0);
+        var handle = job.Schedule(qPoints.Length, QueryBatchSize);
         handle.Complete();
 
         int[] res = new int[results.Length];
@@ -177,7 +180,7 @@ public class GridSearch2D : IDisposable
             SquaredEpsilonSelf = epsilon * epsilon,
             Results = results
         };
-        var handle = job.Schedule(queryPoints.Length, 0);
+        var handle = job.Schedule(queryPoints.Length, QueryBatchSize);
         handle.Complete();
 
         sw.Stop();
