@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 
 namespace EntJoy.Collections
 {
@@ -13,7 +12,7 @@ namespace EntJoy.Collections
             switch (allocator)
             {
                 case Allocator.Persistent:
-                    return (void*)Marshal.AllocHGlobal(size);
+                    return PersistentAllocator.Alloc(size);
                 case Allocator.Temp:
                 case Allocator.TempJob:
                     if (safetyHandleIndex < 0)
@@ -31,7 +30,7 @@ namespace EntJoy.Collections
             switch (allocator)
             {
                 case Allocator.Persistent:
-                    Marshal.FreeHGlobal((IntPtr)buffer);
+                    PersistentAllocator.Free(buffer);
                     break;
                 case Allocator.Temp:
                 case Allocator.TempJob:

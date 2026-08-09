@@ -67,11 +67,15 @@ namespace JobSystem
         std::vector<std::unique_ptr<BatchDescriptor>> descriptorStorage;
         std::vector<BatchDescriptor*> freeDescriptors;
         std::vector<std::unique_ptr<WorkerState>> workers;
-        size_t outstandingBatches{ 0 };
+        std::atomic<size_t> outstandingBatches{ 0 };
         uint32_t nextSubmissionWorker{ 0 };
         bool accepting{ false };
         bool bindWorkers{ false };
         std::atomic<bool> stopRequested{ false };
+
+        // 诊断计数器（keep-warm 实验后保留；Hot/Warm/Cold 自旋已还原，hotSpinHits 恒为 0）
+        std::atomic<uint64_t> parkWakeCount{ 0 };  // worker 实际 park 次数
+        std::atomic<uint64_t> hotSpinHits{ 0 };    // 预留：自旋命中数（实验后弃用）
 
         BatchDescriptor* AcquireDescriptorLocked()
         {
@@ -150,6 +154,10 @@ namespace JobSystem
 #endif
             while (true)
             {
+                // keep-warm 实验结论（2026-08）：Hot/Warm/Cold 自旋对紧循环尾宽无改善，
+                // 且在 16ms 帧间隙场景因自旋与主线程 Complete 争抢而回归。已还原为裸 park，
+                // 仅保留 parkWakeCount 计数供诊断。
+                ++parkWakeCount;
                 worker->wake.acquire();
                 DrainAvailableWork(workerIndex);
                 if (stopRequested.load(std::memory_order_acquire))
@@ -259,5 +267,17 @@ namespace JobSystem
     {
         std::lock_guard<std::mutex> lock(_impl->lifecycleMutex);
         return static_cast<uint32_t>(_impl->workers.size());
+    }
+
+    void NativeWorkerPool::GetCounters(uint64_t* parkWakeCount, uint64_t* hotSpinHits) const noexcept
+    {
+        if (parkWakeCount) *parkWakeCount = _impl->parkWakeCount.load(std::memory_order_relaxed);
+        if (hotSpinHits) *hotSpinHits = _impl->hotSpinHits.load(std::memory_order_relaxed);
+    }
+
+    void NativeWorkerPool::ResetCounters() noexcept
+    {
+        _impl->parkWakeCount.store(0, std::memory_order_relaxed);
+        _impl->hotSpinHits.store(0, std::memory_order_relaxed);
     }
 }

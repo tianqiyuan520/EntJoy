@@ -16,6 +16,21 @@ namespace EntJoy {
 			Persistent = 4,
 		};
 
+		// ---------- 托管 Persistent 分配器回调（由 C# 经 JobSystem_RegisterPersistentAllocator 注册） ----------
+		// UnsafeList 扩容/释放必须走托管分配器，避免原生 free 内部指针：
+		// C# 池化块布局是 header+payload（payload = base+16），原生 free(Ptr) 是内部指针释放 → 堆损坏 (0xc0000374)。
+		// 回调未注册时回退 malloc/free（原生独立构建/列表由原生创建场景，保持自洽）。
+		using PersistentAllocCallback = void* (*)(int32_t size);
+		using PersistentFreeCallback  = void  (*)(void* ptr);
+
+		inline PersistentAllocCallback& PersistentAllocFn() { static PersistentAllocCallback fn = nullptr; return fn; }
+		inline PersistentFreeCallback&  PersistentFreeFn()  { static PersistentFreeCallback  fn = nullptr; return fn; }
+
+		inline void RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free) {
+			PersistentAllocFn() = alloc;
+			PersistentFreeFn()  = free;
+		}
+
 		// ---------- 原子安全句柄（布局与 C# AtomicSafetyHandle 一致） ----------
 		struct AtomicSafetyHandle {
 			intptr_t handle;
@@ -87,13 +102,19 @@ namespace EntJoy {
 					newCapacity64 = INT32_MAX;  // 最大容量上限
 				if (newCapacity64 < minCapacity) newCapacity64 = minCapacity;
 				int32_t newCapacity = static_cast<int32_t>(newCapacity64);
-				T* newPtr = static_cast<T*>(malloc(static_cast<size_t>(newCapacity) * sizeof(T)));
-				if (!newPtr) return;  // malloc 失败时保持原状
+				// 优先走托管分配器回调（C# 池化块，payload = base+16；free 必须由托管侧完成，
+				// 否则 free(Ptr) 是内部指针释放 → 堆损坏）。未注册时回退 malloc/free。
+				PersistentAllocCallback alloc = PersistentAllocFn();
+				PersistentFreeCallback fre = PersistentFreeFn();
+				T* newPtr = (alloc != nullptr)
+					? static_cast<T*>(alloc(static_cast<int32_t>(static_cast<size_t>(newCapacity) * sizeof(T))))
+					: static_cast<T*>(malloc(static_cast<size_t>(newCapacity) * sizeof(T)));
+				if (!newPtr) return;  // 分配失败时保持原状
 				if (Ptr) {
 					for (int32_t i = 0; i < Length; ++i) {
 						newPtr[i] = Ptr[i];
 					}
-					free(Ptr);
+					if (fre != nullptr) fre(Ptr); else free(Ptr);
 				}
 				Ptr = newPtr;
 				Capacity = newCapacity;
@@ -109,7 +130,8 @@ namespace EntJoy {
 			// 释放内部缓冲区
 			void Dispose() {
 				if (Ptr) {
-					free(Ptr);
+					PersistentFreeCallback fre = PersistentFreeFn();
+					if (fre != nullptr) fre(Ptr); else free(Ptr);
 					Ptr = nullptr;
 					Length = 0;
 					Capacity = 0;
