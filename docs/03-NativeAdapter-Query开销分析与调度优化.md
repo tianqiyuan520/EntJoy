@@ -230,3 +230,66 @@ NativeJobScheduler.cs `ConfigureGuidedFromEnv()`（:752）→ `JobSystem_Configu
 | QueryCore p95 | 0.84 | **改善** |
 | BuildCore-Steady（uniform 代价 job） | 0.545 | 0.544（不回归） |
 | 正确性 `74945 ... 87386` | — | 不变（只改调度不改语义） |
+
+---
+
+## 8. ISPC 翻译质量评估：执行地板归因（能否靠提高翻译质量追上 Burst？）
+
+> 配套 [docs/04 §5](04-基准测量方法论与调度开销分析.md) 的层分劈分：C++ 执行占 QueryCore ~93%（~600μs）。
+> 本文回答：这 600μs 是不是"翻译质量不行"造成的？提高 ISPC 翻译质量/对齐 Burst 能挤多少？
+> **结论：不能——至少这份负载上不能。翻译质量已到 Burst 同级，地板是内存延迟不是代码生成。**
+
+### 8.1 当前翻译产物与编译配置（已实测确认）
+
+生成的 `ClosestPointJobPointer_Execute_Batch.ispc` 结构（逐行核对过产物）：
+
+- 外层 `foreach (index = start ... start+count)`：**1D tile 内每 lane 一个 query**（SPMD 正确姿势）。
+- `IgnoreSelf` 运行时 bool → transpiler 生成 `_false_impl`/`_true_impl` **两个变体**，编译期把 `if (IgnoreSelf && ...)` 折叠成死代码（`if (false && ...)` 被 -O3 清除）。
+- `float2 pos = SortedPositions_ptr[i]`：`i` 是 varying → **ISPC gather**（每 lane 独立地址）。
+- `int2 range = CellStartEnd->_data[cellHash]`：varying 下标 → gather。
+- `distancesq(q, pos)` 算术向量化；`Results_ptr[index]` 连续下标 → 流式写。
+
+编译 flags（CMakeLists.txt:208）：`ispc ... -O3 --target=avx2-i32x8 --math-lib=fast`。
+**AVX2 8-wide + -O3 + fast-math 全开**——已是 ISPC 满配。
+
+### 8.2 为什么"翻译质量"不是杠杆
+
+- 内层点循环 `for (i = start; i < end; i++)` 是 **varying 循环界**（每 lane 的 start/end 不同），
+  ISPC 按最大界生成**掩码串行循环**，稀疏 cell（平均 2.5 点）lane 大量空转——这是 SPMD-over-query
+  对**变长内循环**的固有代价，任何编译器（含 Burst）都这么出。
+- 瓶颈是 **`SortedPositions`（800KB，AoS float2）随机 gather 的**内存延迟**，不是 SIMD 吞吐**。
+  ISPC 无法让 gather 快过 cache 延迟——**SIMD 宽度在延迟受限负载上不带来加速**。
+- **不对称实证**（既有结论，本负载直接适用）：同套 transpiler，IJobChunk（chunk 级连续数组，计算密集）
+  ISPC **6x 加速**；IJobEntity（entity 级间接寻址，gather 型）ISPC **无改善**。
+  → SIMD 的 win 在 compute-bound 上已被榨取；GridSearch query 正是 gather-bound 那一类。
+
+### 8.3 与 Burst / IL2CPP 对比
+
+- **IL2CPP 无关**：它消的是托管 JIT 开销；本负载已走原生 adapter（native→native），无托管桥。
+- **Burst 同级**：Burst 对这份 gather 模式会生成同样的掩码 gather。Burst 的快来自 ECS **chunk 级
+  SoA 连续布局**（带宽友好），不是代码生成更好——GridSearch 是空间哈希随机 gather（平均 2.5 点/cell，
+  一个 cache line 都填不满），布局冻结，学不了。docs/04 §3 已论证 Unity 在这份负载上不会更快。
+
+### 8.4 真正能挤执行段的框架侧方向（按现实收益排序）
+
+> **预取已实测证伪**（2026-08-12，同机各 3 次）：
+>
+> | 版本 | QueryCore p50 ×3（ms） |
+> |---|---|
+> | baseline（无预取） | 0.603 / 0.612 / 0.603 |
+> | 预取 v1（9 cell × 2 × `prefetch_l1`，无守卫） | 0.904 / 0.935 / 0.743（mean ~0.86） |
+> | 预取 v2（9 cell × 1 × `prefetch_l2`，pIn 守卫） | **0.717 / 0.752 / 0.713（mean ~0.727）** |
+>
+> **预取稳定回归 ~20%**（v1 更差）。机理：该负载的 gather 延迟**已被 CPU OOO 充分隐藏
+> （掩码 SPMD 循环内大量相互独立的 gather 提供充足 MLP）**，预取只叠加指令开销 + MSHR 压力 +
+> （v1）重复 9 次 CellStartEnd gather + 越界 lane 预取地址 0 污染 L1。→ 预取不是杠杆。
+
+| 方向 | 预期 | 性质 | 约束 |
+|---|---|---|---|
+| 软件预取（transpiler 发 `prefetch_l1/l2`） | **~-20%（实测回归）** | 已证伪 | MLP 已充足，预取纯增开销 |
+| **稠密 cell 内层 SIMD 特化**（对点循环按点数向量化） | 收 straggler 尾（80~853μs 的稠密 tile） | 数据相关重构 | 复杂；只帮稠密 cell，均值收益未知 |
+| **SoA 化 / 按 cell 重排 query** | 20~40% | 数据布局 | **GridSearch 冻结**，需解冻 |
+| 提高 ISPC 翻译质量本身 | ~0 | 已到满配 | — |
+
+**一句话**：执行段 ~600μs 是内存延迟地板（且 MLP 已充分，预取无效），翻译质量已对齐 Burst（flags
+满配 + 产物结构正确）；要再挤只能动**数据访问模式**（布局/重排，其中大部分被 GridSearch 冻结挡住）。
