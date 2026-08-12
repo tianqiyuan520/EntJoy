@@ -64,9 +64,10 @@ internal unsafe struct ChunkContextHeader
     public int hasEnabledFilter;         // 是否有 enable 过滤
     public IntPtr queryAllEnabledTypes;  // int[]（类型哈希数组）指针
     public int allEnabledCount;          // AllEnabled 数组长度
-    public int gcHandleStartIndex;       // GCHandle 列表起始索引
+    public int gcHandleStartIndex;       // GCHandle 列表起始索引（-1 = 无 GCHandle）
     public IntPtr chunksPtr;             // ChunkJobData 数组指针（用于 cleanup 回收）
     public int cleanupInProgress;        // 防止重复清理的标志
+    public int ownsChunkData;            // 该 context 是否负责释放 chunksPtr + 每 chunk 缓冲区（与 GCHandle 解耦）
     public IntPtr requiredComponentTypeIds; // NativeTranspiler IJobChunk 所需组件类型 ID 数组
     public int requiredComponentTypeIdCount; // 所需组件类型 ID 数量
     // 紧接着是 job 的原始数据（变长）
@@ -805,7 +806,31 @@ public static unsafe partial class NativeJobScheduler
             return;
         if (Interlocked.Exchange(ref _shutdownRequested, 1) != 0)
             return;
+        DumpTimingDiagnosticsIfRequested();
         JobSystem_Shutdown();
+    }
+
+    /// <summary>
+    /// ENTJOY_DIAG_TIMING=1：进程退出前 dump 原生侧 batch 时序劈分（框架诊断，零侵入——batchTotal /
+    /// submitToFirstWorker / executionSpan / maxRange 由 RecordFinalizedBatchTiming 无条件采集，
+    /// 无需开 g_timingDiagnosticsEnabled）。
+    /// 用途：把 C# 侧 QueryCore（Stopwatch 墙钟）劈成 C# 包装 / C++ 调度 / C++ 执行 三段，
+    /// 验证瓶颈是否真在 C# 开销。最慢批次（slowBatch，reservoir 内 batchTotal 最大）必是 query 批次。
+    /// </summary>
+    private static void DumpTimingDiagnosticsIfRequested()
+    {
+        if (Environment.GetEnvironmentVariable("ENTJOY_DIAG_TIMING") != "1") return;
+        NativeJobSystemStats s = JobSystem_GetStats();
+        static double us(ulong ns) => ns / 1000.0;
+        Console.WriteLine("[TIMING] 注意: reservoir 混合 build+query 批次; P50 偏 build(批数多), P99/max + slowBatch 由 query 主导");
+        Console.WriteLine($"[TIMING] samples={s.TimingSampleCount} dropped={s.TimingSamplesDropped}");
+        Console.WriteLine($"[TIMING] batchTotal    p50={us(s.BatchTotalP50Ns):F1} p95={us(s.BatchTotalP95Ns):F1} p99={us(s.BatchTotalP99Ns):F1} max={us(s.BatchTotalMaxNs):F1} us  (原生侧单batch总耗时分布)");
+        Console.WriteLine($"[TIMING] submit2First  p50={us(s.SubmitToFirstWorkerP50Ns):F1} max={us(s.SubmitToFirstWorkerMaxNs):F1} us  (调度→首个worker认领 = wake)");
+        Console.WriteLine($"[TIMING] workerSpread  p50={us(s.WorkerStartSpreadP50Ns):F1} max={us(s.WorkerStartSpreadMaxNs):F1} us  (首worker→末worker开始)");
+        Console.WriteLine($"[TIMING] executionSpan p50={us(s.ExecutionSpanP50Ns):F1} max={us(s.ExecutionSpanMaxNs):F1} us  (首tile开始→末tile结束 = 纯C++执行段)");
+        Console.WriteLine($"[TIMING] maxRange      p50={us(s.MaxRangeP50Ns):F1} p95={us(s.MaxRangeP95Ns):F1} max={us(s.MaxRangeMaxNs):F1} us  (单tile执行耗时分布 = 执行地板)");
+        Console.WriteLine($"[TIMING] slowBatch     id={s.SlowBatchId} total={us(s.SlowBatchTotalNs):F1} submit2First={us(s.SlowSubmitToFirstWorkerNs):F1} spread={us(s.SlowWorkerStartSpreadNs):F1} execSpan={us(s.SlowExecutionSpanNs):F1} maxRange={us(s.SlowMaxRangeNs):F1} assistTiles={s.SlowAssistTiles} coreMigrations={s.SlowCoreMigrations} (最慢批次=query 分解)");
+        Console.WriteLine($"[TIMING] ewma          wakeLatency={us(s.WakeLatencyEwmaNs):F1} submit2First={us(s.SubmitToFirstWorkerEwmaNs):F1} workerSpread={us(s.WorkerStartSpreadEwmaNs):F1} lastTileToDone={us(s.LastTileToTopologyDoneEwmaNs):F1} us | assistExecPct={s.AssistExecPctEwma}% | prewake={s.PrewakeCount} parkWake={s.ParkWakeCount}");
     }
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
@@ -1270,7 +1295,7 @@ public static unsafe partial class NativeJobScheduler
             cache.BatchCount == 0)
             return default;
 
-        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
+        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease);
         try
         {
             var callback = GetOrCreateDelegateCache<TExecutor, EntityBatchJobFuncDelegate>(() => CreateManagedEntityBatchCallback<TJob, TExecutor>());
@@ -1312,7 +1337,7 @@ public static unsafe partial class NativeJobScheduler
             rawCache.ChunkCount > 0)
         {
             var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
-            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1328,7 +1353,7 @@ public static unsafe partial class NativeJobScheduler
             TryGetManagedChunkScheduleCache(entityManager, query, out var csharpRawCache, out var csharpRawCacheLease) &&
             csharpRawCache.ChunkCount > 0)
         {
-            var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, null, csharpRawCacheLease);
+            var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, false, null, csharpRawCacheLease);
             try
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
@@ -1375,17 +1400,22 @@ public static unsafe partial class NativeJobScheduler
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
 
-        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
-        var gcHandles = new GCHandle[chunkCount];
-        for (int ci = 0; ci < chunkCount; ci++)
-            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
-
-        int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock)
+        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱。
+        // 仅托管回调（funcPtr == 0）需要 GCHandle 恢复 chunk 对象。
+        bool nativeCallback = funcPtr != IntPtr.Zero;
+        var gcHandles = nativeCallback ? null : new GCHandle[chunkCount];
+        int gcHandleStartIndex = -1;
+        if (!nativeCallback)
         {
-            gcHandleStartIndex = _chunkGCHandles.Count;
+            // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
             for (int ci = 0; ci < chunkCount; ci++)
-                _chunkGCHandles.Add(gcHandles[ci]);
+                gcHandles![ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
+            lock (_chunkGCHandlesLock)
+            {
+                gcHandleStartIndex = _chunkGCHandles.Count;
+                for (int ci = 0; ci < chunkCount; ci++)
+                    _chunkGCHandles.Add(gcHandles[ci]);
+            }
         }
 
         var contextBlock = IntPtr.Zero;
@@ -1442,13 +1472,13 @@ public static unsafe partial class NativeJobScheduler
                     componentSizes = compSizes,
                     enableBitMaps = bitmaps,
                     componentTypeIndices = typeIndices,
-                    chunkHandle = (IntPtr)gcHandles[ci],
+                    chunkHandle = nativeCallback ? IntPtr.Zero : (IntPtr)gcHandles![ci],
                     requiredComponentArrays = requiredArrays,
                     requiredComponentCount = requiredCount
                 };
             }
 
-            contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
+            contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
 
             IntPtr callbackPtr = funcPtr;
             if (callbackPtr == IntPtr.Zero)
@@ -1482,8 +1512,9 @@ public static unsafe partial class NativeJobScheduler
                     }
                     Marshal.FreeHGlobal((IntPtr)chunksPtr);
                 }
-                foreach (var gch in gcHandles)
-                    if (gch.IsAllocated) gch.Free();
+                if (gcHandles != null)
+                    foreach (var gch in gcHandles)
+                        if (gch.IsAllocated) gch.Free();
                 // 注：GCHandle 已释放，但对应 slot 仍在 _chunkGCHandles 中。
                 // 异常路径罕见，孤立条目可接受；正常路径的尾压实可回收尾部段落。
             }
@@ -1503,7 +1534,7 @@ public static unsafe partial class NativeJobScheduler
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1527,18 +1558,8 @@ public static unsafe partial class NativeJobScheduler
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
-        var gcHandles = new GCHandle[chunkCount];
-        for (int ci = 0; ci < chunkCount; ci++)
-            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
-
-        int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock)
-        {
-            gcHandleStartIndex = _chunkGCHandles.Count;
-            for (int ci = 0; ci < chunkCount; ci++)
-                _chunkGCHandles.Add(gcHandles[ci]);
-        }
+        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱（无 GCHandle）。
+        const int gcHandleStartIndex = -1;
 
         for (int ci = 0; ci < chunkCount; ci++)
         {
@@ -1591,13 +1612,13 @@ public static unsafe partial class NativeJobScheduler
                 componentSizes = compSizes,
                 enableBitMaps = bitmaps,
                 componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gcHandles[ci],
+                chunkHandle = IntPtr.Zero,
                 requiredComponentArrays = requiredArrays,
                 requiredComponentCount = requiredCount
             };
         }
 
-        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
+        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1618,7 +1639,7 @@ public static unsafe partial class NativeJobScheduler
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
-            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
+            var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1642,18 +1663,8 @@ public static unsafe partial class NativeJobScheduler
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-        // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
-        var gcHandles = new GCHandle[chunkCount];
-        for (int ci = 0; ci < chunkCount; ci++)
-            gcHandles[ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
-
-        int gcHandleStartIndex;
-        lock (_chunkGCHandlesLock)
-        {
-            gcHandleStartIndex = _chunkGCHandles.Count;
-            for (int ci = 0; ci < chunkCount; ci++)
-                _chunkGCHandles.Add(gcHandles[ci]);
-        }
+        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱（无 GCHandle）。
+        const int gcHandleStartIndex = -1;
 
         for (int ci = 0; ci < chunkCount; ci++)
         {
@@ -1706,13 +1717,13 @@ public static unsafe partial class NativeJobScheduler
                 componentSizes = compSizes,
                 enableBitMaps = bitmaps,
                 componentTypeIndices = typeIndices,
-                chunkHandle = (IntPtr)gcHandles[ci],
+                chunkHandle = IntPtr.Zero,
                 requiredComponentArrays = requiredArrays,
                 requiredComponentCount = requiredCount
             };
         }
 
-        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, requiredComponentTypeIds);
+        var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1736,7 +1747,7 @@ public static unsafe partial class NativeJobScheduler
             cache.BatchCount == 0)
             return default;
 
-        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, requiredComponentTypeIds, cacheLease);
+        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease);
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
@@ -1758,7 +1769,7 @@ public static unsafe partial class NativeJobScheduler
             rawCache.ChunkCount == 0)
             return default;
 
-        var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, requiredComponentTypeIds, rawCacheLease);
+        var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
         try
         {
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative)));
@@ -2449,7 +2460,7 @@ public static unsafe partial class NativeJobScheduler
     private static readonly CleanupFunc _managedChunkCleanup = ManagedChunkCleanup;
     private static readonly IntPtr _managedChunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_managedChunkCleanup);
 
-    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
+    private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
     {
         int jobSize = Unsafe.SizeOf<T>();
         int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
@@ -2472,6 +2483,7 @@ public static unsafe partial class NativeJobScheduler
         header->chunkCount = chunkCount;
         header->hasEnabledFilter = hasEnabledFilter ? 1 : 0;
         header->gcHandleStartIndex = gcHandleStartIndex;
+        header->ownsChunkData = ownsChunkData ? 1 : 0;
         header->chunksPtr = (IntPtr)chunksPtr;
         header->cleanupInProgress = 0;
         if (hasEnabledFilter && typeHashes != null)
@@ -2545,9 +2557,9 @@ public static unsafe partial class NativeJobScheduler
         int chunkCount = header->chunkCount;
         int gcHandleStartIndex = header->gcHandleStartIndex;
         var chunksPtr = (ChunkJobData*)header->chunksPtr;
-        bool ownsChunkData = gcHandleStartIndex >= 0;
+        bool ownsChunkData = header->ownsChunkData != 0;
 
-        if (chunksPtr != null && ownsChunkData)
+        if (chunksPtr != null && gcHandleStartIndex >= 0)
         {
             lock (_chunkGCHandlesLock)
             {
