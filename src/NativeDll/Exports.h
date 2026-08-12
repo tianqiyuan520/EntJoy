@@ -38,6 +38,8 @@ extern "C" {
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
     JOB_API void JobSystem_KeepWorkersWarm(int microseconds);
+    JOB_API void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker);
+    JOB_API void JobSystem_ConfigureGuided(int enabled, int k, int floor);
     JOB_API void JobSystem_FlushScheduledJobs();
 
     // 注册托管 Persistent 分配器回调（NativeContainers.h 的 UnsafeList 扩容/释放走托管侧，

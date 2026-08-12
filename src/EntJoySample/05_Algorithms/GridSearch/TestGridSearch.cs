@@ -75,8 +75,9 @@ public class TestGridSearch
         NativeJobScheduler.Initialize();
         NativeJobScheduler.PrewakeWorkersOnce(); // 镜像 IJobChunkMoveCompareSample.cs:498
 
-        if (int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_QUERY_BATCH"), out int qb))
-            GridSearch2D.QueryBatchSize = qb; // tile 粒度实验：0=默认(~1667)，256/512 更细
+        // tile 粒度直接改字段：GridSearch2D.QueryBatchSize（0=走 ResolveChunkSize）、
+        // NativeJobScheduler.TilesPerWorker（0=用原生默认 16）。DIAG 行显示生效值。
+        int tilesPerWorker = NativeJobScheduler.TilesPerWorker > 0 ? NativeJobScheduler.TilesPerWorker : 16; // 16 = 原生 kDefaultTilesPerWorker
 
         int warmup = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", DefaultWarmup);
         int measure = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", DefaultMeasure);
@@ -103,11 +104,25 @@ public class TestGridSearch
 
         // ---- COLD 阶段：每轮全量重建（对齐 Unity GridSearchBurst 真实路径） ----
         // 墙钟 = Dispose + 重新分配 + 复制 + 6 个 job；core = 纯 job 阶段
+        // sumPhases/sumQueryCore：恢复原始分阶段计时（[核心]XXX耗时，对齐 b22a56c 的 平均详细计时 块）
+        GridSearch2D.BuildTimings sumPhases = default;
+        double sumQueryCore = 0;
         var coreBuildCold = new double[measure];
         int coldIdx = 0;
         double[] buildWallCold = RunSteadyPhase(warmup, measure, sleepMs,
             () => gsb.InitializeGrid(nativePos).Complete(),
-            () => coreBuildCold[coldIdx++] = gsb.LastBuildTimings.CoreBuildTotal);
+            () =>
+            {
+                var t = gsb.LastBuildTimings;
+                coreBuildCold[coldIdx++] = t.CoreBuildTotal;
+                sumPhases.DisposeNative += t.DisposeNative;
+                sumPhases.CreateAndCopy += t.CreateAndCopy;
+                sumPhases.BoundingBox += t.BoundingBox;
+                sumPhases.HashCounting += t.HashCounting;
+                sumPhases.PrefixAndFill += t.PrefixAndFill;
+                sumPhases.ElementPlacement += t.ElementPlacement;
+                sumPhases.CoreBuildTotal += t.CoreBuildTotal;
+            });
 
         var coldTimings = gsb.LastBuildTimings;
         Console.WriteLine($"COLD 分配诊断 (最后一次): dispose={coldTimings.DisposeNative:F3} ms, alloc+copy={coldTimings.CreateAndCopy:F3} ms — 不计入稳态指标");
@@ -124,7 +139,11 @@ public class TestGridSearch
         int queryIdx = 0;
         double[] queryWall = RunSteadyPhase(warmup, measure, sleepMs,
             () => gsb.SearchClosestPoint(nativeQueries).Dispose(),
-            () => coreQuery[queryIdx++] = gsb.LastBuildTimings.QueryTotal);
+            () =>
+            {
+                coreQuery[queryIdx++] = gsb.LastBuildTimings.QueryTotal;
+                sumQueryCore += gsb.LastBuildTimings.QueryTotal;
+            });
 
         Console.WriteLine();
         PrintSummary("GridSearch-BuildCore-Cold", coreBuildCold);   // 纯 job 阶段（冷分配），跨端主指标 vs Unity BuildCore
@@ -132,6 +151,21 @@ public class TestGridSearch
         PrintSummary("GridSearch-BuildCore-Steady", coreBuildSteady); // 暖路径纯 job，隔离分配噪声
         PrintSummary("GridSearch-Query", queryWall);                // 墙钟，含 TempJob results 分配，与 Unity swQuery 对齐
         PrintSummary("GridSearch-QueryCore", coreQuery);            // 纯 job 查询
+
+        // ---- 平均详细计时（恢复原始输出，对齐 b22a56c）：分阶段 [核心]XXX耗时 ----
+        // Percentile 假定入参已排序（PrintSummary 内部先 Sort），此处必须先排再算 p50
+        var buildSorted = (double[])coreBuildCold.Clone(); Array.Sort(buildSorted);
+        var querySorted = (double[])coreQuery.Clone(); Array.Sort(querySorted);
+        Console.WriteLine();
+        Console.WriteLine("--- 平均详细计时 (COLD 冷分配路径) ---");
+        Console.WriteLine($"[外围] 释放 NativeCollections: {sumPhases.DisposeNative / measure:F3} ms");
+        Console.WriteLine($"[外围] 创建 NativeCollections + 复制数据: {sumPhases.CreateAndCopy / measure:F3} ms");
+        Console.WriteLine($"[核心] 包围盒计算: {sumPhases.BoundingBox / measure:F3} ms");
+        Console.WriteLine($"[核心] 哈希分配+计数: {sumPhases.HashCounting / measure:F3} ms");
+        Console.WriteLine($"[核心] 前缀和+填充起止: {sumPhases.PrefixAndFill / measure:F3} ms");
+        Console.WriteLine($"[核心] 元素放置: {sumPhases.ElementPlacement / measure:F3} ms");
+        Console.WriteLine($"[核心] 核心构建总耗时: {sumPhases.CoreBuildTotal / measure:F3} ms (p50 {Percentile(buildSorted, 0.50):F3} ms)");
+        Console.WriteLine($"[核心] 核心查询总耗时: {sumQueryCore / measure:F3} ms (p50 {Percentile(querySorted, 0.50):F3} ms)");
 
         // 结果抽查（沿用原逻辑）
         var results = gsb.SearchClosestPoint(nativeQueries);
@@ -143,7 +177,7 @@ public class TestGridSearch
         // ---- DIAG 行（镜像 Unity DIAG| 形状，含 worker 数与调度器 park 诊断） ----
         var js = NativeJobScheduler.GetStats();
         Console.WriteLine(FormattableString.Invariant(
-            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}|coldDisposeMs={coldTimings.DisposeNative:F6}|coldCreateCopyMs={coldTimings.CreateAndCopy:F6}|schedule=InitializeGrid|steadySchedule=UpdatePositions"));
+            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|tilesPerWorker={tilesPerWorker}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}|coldDisposeMs={coldTimings.DisposeNative:F6}|coldCreateCopyMs={coldTimings.CreateAndCopy:F6}|schedule=InitializeGrid|steadySchedule=UpdatePositions"));
 
         gsb.Dispose();
         nativePos.Dispose();

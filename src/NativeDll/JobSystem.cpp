@@ -72,6 +72,20 @@ namespace JobSystem
     ExecutionBackend g_executionBackend{ ExecutionBackend::Taskflow };
     int g_numThreads = 0;
 
+    // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
+    // GridSearch A/B 定标：可变代价 job 最优 ~26 tiles/worker；默认 16 为
+    // 可变代价(job 受益) 与均匀代价(job 少付 claim 开销) 的折中。env 可覆盖。
+    constexpr int kDefaultTilesPerWorker = 16;
+    int g_configuredTilesPerWorker = kDefaultTilesPerWorker;
+
+    // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。
+    // 0=off（uniform 现状）；>0=on。on 时 chunk = max(floor, ceil(remaining/(W*k)))，
+    // 头部大块（Poisson 平滑、非 straggler）+ 尾部小块（钳 straggler 上界），
+    // 总认领数 ~ W*k*ln(N/floor) 少于 uniform k=26。由 JobSystem_ConfigureGuided 设置。
+    int g_guidedEnabled = 0;
+    int g_guidedK = 2;
+    int g_guidedFloor = 16;
+
     std::mutex g_statePoolMutex;
     std::vector<HandleState*> g_statePool;
 
@@ -739,7 +753,10 @@ namespace JobSystem
         if (length <= 0) return 1;
         if (requestedChunk > 0) return requestedChunk;
         int wc = std::max(1, g_numThreads);
-        return std::max(64, (length + wc * 4 - 1) / (wc * 4));
+        // 默认 g_configuredTilesPerWorker 个 tile/worker（可调，默认 16），
+        // 比 Unity 默认 4/worker 更细：可变代价 job 的负载均衡收益 > claim 开销。
+        // batch = N/(W*k) 随 N 自动缩放，无需每 job 标代价。
+        return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
     }
 
     // ============================================================
@@ -797,6 +814,49 @@ namespace JobSystem
         uint32_t itemCount;
         TileKind kind;
     };
+
+    // Guided（OpenMP schedule(guided) 同族）tile 大小：chunk = ceil(remaining/(W*k))，
+    // 头部大块（Poisson 平滑、非 straggler）、尾部递减到 floor（钳 straggler 上界）。
+    // 总认领数 ~ W*k*ln(N/floor)，少于 uniform k=26 的同时尾部更细。
+    // k/floor 由 JobSystem_ConfigureGuided 配置。返回实际 tile 数。
+    static int GuidedTileCount(int length, int workerCount, int k, int floor) noexcept
+    {
+        const int denom = std::max(1, workerCount) * std::max(1, k);
+        const int f = std::max(1, floor);
+        int offset = 0;
+        int count = 0;
+        while (offset < length)
+        {
+            const int remaining = length - offset;
+            int size = (remaining + denom - 1) / denom;   // ceil(remaining/denom)
+            if (size < f) size = f;                        // floor 兜底
+            if (size > remaining) size = remaining;
+            offset += size;
+            ++count;
+        }
+        return count;
+    }
+
+    static int BuildGuidedTiles(ExecutionTile* tiles, int length, int workerCount,
+        int k, int floor, TileKind kind = TileKind::GeneralRange) noexcept
+    {
+        const int denom = std::max(1, workerCount) * std::max(1, k);
+        const int f = std::max(1, floor);
+        int offset = 0;
+        int i = 0;
+        while (offset < length)
+        {
+            const int remaining = length - offset;
+            int size = (remaining + denom - 1) / denom;   // ceil(remaining/denom)
+            if (size < f) size = f;                        // floor 兜底
+            if (size > remaining) size = remaining;
+            tiles[i] = { static_cast<uint32_t>(offset),
+                static_cast<uint32_t>(size), kind };
+            offset += size;
+            ++i;
+        }
+        return i;   // 实际 tile 数
+    }
 
     // One cache line per participant. Both boundaries live in one atomic word,
     // so owner-front claims and thief-back claims cannot overlap even when they
@@ -2018,6 +2078,22 @@ namespace JobSystem
         // keep-warm 实验已还原（数据：紧循环无效、睡眠模式回归）。no-op。
     }
 
+    void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
+    {
+        // 并行 for 默认粒度（batchSize=0 时 ResolveChunkSize 用）。Initialize 期调用，写后由 job
+        // 提交的 release/acquire 对 worker 可见。默认 16，见 kDefaultTilesPerWorker 注释。
+        g_configuredTilesPerWorker = std::max(1, tilesPerWorker);
+    }
+
+    void Scheduler::ConfigureGuided(int enabled, int k, int floor)
+    {
+        // guided（chunk ∝ 剩余工作量）tile 调度开关 + 参数。Initialize 期调用，
+        // 写后由 job 提交的 release/acquire 对 worker 可见。0=off（uniform 现状）。
+        g_guidedEnabled = enabled != 0 ? 1 : 0;
+        g_guidedK = std::max(1, k);
+        g_guidedFloor = std::max(1, floor);
+    }
+
     void Scheduler::SetFrameLowLatencyMode(bool /*enabled*/) {}
     void Scheduler::FlushScheduledJobs() {}
 
@@ -2066,24 +2142,37 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
+        // guided 只作用于 batchSize=0 的默认路径（用户显式 batchSize 走 uniform）。
+        const bool guided = g_guidedEnabled != 0 && batchSize <= 0;
+        const int tileCount = guided
+            ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
+            : rc;
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(rc), 0);
+            static_cast<uint32_t>(tileCount), 0);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
-        batch->tileCount = static_cast<uint32_t>(rc);
+        batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->claimMode = TileClaimMode::AtomicRange;
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
-        for (uint32_t i = 0; i < batch->tileCount; ++i)
+        if (guided)
         {
-            const uint32_t first = i * static_cast<uint32_t>(cs);
-            storage->tileBuffer[i] = {
-                first,
-                std::min(static_cast<uint32_t>(cs),
-                    static_cast<uint32_t>(length) - first),
-                TileKind::GeneralRange };
+            BuildGuidedTiles(storage->tileBuffer, length,
+                static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < batch->tileCount; ++i)
+            {
+                const uint32_t first = i * static_cast<uint32_t>(cs);
+                storage->tileBuffer[i] = {
+                    first,
+                    std::min(static_cast<uint32_t>(cs),
+                        static_cast<uint32_t>(length) - first),
+                    TileKind::GeneralRange };
+            }
         }
         batch->tiles = storage->tileBuffer;
         batch->workerCount = targetWorkers;
@@ -2115,23 +2204,36 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
+        // guided 只作用于 batchSize=0 的默认路径（用户显式 batchSize / forceAsync 走 uniform）。
+        const bool guided = g_guidedEnabled != 0 && reqBatch <= 0;
+        const int tileCount = guided
+            ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
+            : rc;
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(rc), 0);
+            static_cast<uint32_t>(tileCount), 0);
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
-        batch->tileCount = static_cast<uint32_t>(rc);
+        batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->claimMode = TileClaimMode::AtomicRange;
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
-        for (uint32_t i = 0; i < batch->tileCount; ++i)
+        if (guided)
         {
-            const uint32_t first = i * static_cast<uint32_t>(cs);
-            storage->tileBuffer[i] = {
-                first,
-                std::min(static_cast<uint32_t>(cs),
-                    static_cast<uint32_t>(length) - first),
-                TileKind::GeneralRange };
+            BuildGuidedTiles(storage->tileBuffer, length,
+                static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < batch->tileCount; ++i)
+            {
+                const uint32_t first = i * static_cast<uint32_t>(cs);
+                storage->tileBuffer[i] = {
+                    first,
+                    std::min(static_cast<uint32_t>(cs),
+                        static_cast<uint32_t>(length) - first),
+                    TileKind::GeneralRange };
+            }
         }
         batch->tiles = storage->tileBuffer;
         batch->workerCount = targetWorkers;
@@ -2185,7 +2287,12 @@ namespace JobSystem
 
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches };
-        const uint32_t tileCount = static_cast<uint32_t>(rc);
+        // guided 只作用于 rangeSize=0 的默认路径（用户显式 rangeSize 走 uniform）。
+        const bool guided = g_guidedEnabled != 0 && rangeSize <= 0;
+        const uint32_t tileCount = guided
+            ? static_cast<uint32_t>(GuidedTileCount(itemCount,
+                provisionalWorkers, g_guidedK, g_guidedFloor))
+            : static_cast<uint32_t>(rc);
         const int targetWorkers = ResolveWorkerTarget(
             workerCap, static_cast<int>(tileCount));
         auto* storage = AcquireBatchStorage(tileCount, 0);
@@ -2200,13 +2307,21 @@ namespace JobSystem
                 ? TileKind::ChunkCallbacks
                 : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
             auto* tiles = storage->tileBuffer;
-            for (uint32_t i = 0; i < tileCount; i++)
+            if (guided)
             {
-                const uint32_t first = i * static_cast<uint32_t>(rs);
-                tiles[i].firstItem = first;
-                tiles[i].itemCount = std::min(static_cast<uint32_t>(rs),
-                    static_cast<uint32_t>(itemCount) - first);
-                tiles[i].kind = tileKind;
+                BuildGuidedTiles(tiles, itemCount, targetWorkers,
+                    g_guidedK, g_guidedFloor, tileKind);
+            }
+            else
+            {
+                for (uint32_t i = 0; i < tileCount; i++)
+                {
+                    const uint32_t first = i * static_cast<uint32_t>(rs);
+                    tiles[i].firstItem = first;
+                    tiles[i].itemCount = std::min(static_cast<uint32_t>(rs),
+                        static_cast<uint32_t>(itemCount) - first);
+                    tiles[i].kind = tileKind;
+                }
             }
 
             batch->executeTile = &ChunkExecuteTile;

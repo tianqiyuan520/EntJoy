@@ -282,6 +282,8 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_KeepWorkersWarm;
+    private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_ConfigureTilesPerWorker;
+    private static delegate* unmanaged[Cdecl]<int, int, int, void> _jobSystem_ConfigureGuided;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_FlushScheduledJobs;
     private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
@@ -475,6 +477,10 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
         _jobSystem_KeepWorkersWarm = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_KeepWorkersWarm");
+        _jobSystem_ConfigureTilesPerWorker = (delegate* unmanaged[Cdecl]<int, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureTilesPerWorker");
+        _jobSystem_ConfigureGuided = (delegate* unmanaged[Cdecl]<int, int, int, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureGuided");
         _jobSystem_FlushScheduledJobs = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_FlushScheduledJobs");
         _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
@@ -566,6 +572,18 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_KeepWorkersWarm == null) return;
         _jobSystem_KeepWorkersWarm(microseconds);
+    }
+
+    private static void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_ConfigureTilesPerWorker == null) return;
+        _jobSystem_ConfigureTilesPerWorker(tilesPerWorker);
+    }
+
+    private static void JobSystem_ConfigureGuided(int enabled, int k, int floor)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_ConfigureGuided == null) return;
+        _jobSystem_ConfigureGuided(enabled, k, floor);
     }
 
     private static void JobSystem_FlushScheduledJobs()
@@ -708,6 +726,47 @@ public static unsafe partial class NativeJobScheduler
         Interlocked.Exchange(ref _shutdownRequested, 0);
         JobSystem_Initialize(numThreads);
         RegisterPersistentAllocator();
+        if (TilesPerWorker > 0)
+            JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
+        ConfigureGuidedFromEnv();
+    }
+
+    /// <summary>
+    /// 并行 for 默认 tiles/worker：batchSize=0 时原生 ResolveChunkSize 按此值个 tile/worker 切分。
+    /// 26 = N=100k/15 worker → batch 257 / 390 tiles，等价于 batch=256 定标（p50 0.577 / p99 0.714）。
+    /// 0 = 用原生默认；&gt;0 时在 Initialize 期覆盖。
+    /// 测试要扫描粒度直接改此字段重编译即可。
+    /// </summary>
+    public static int TilesPerWorker = 26; // k=26, rc=390：GridSearch 可变代价最优（A/B 与 adapter 双确认）
+
+    /// <summary>
+    /// Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。
+    /// 头部大块（Poisson 平滑、非 straggler）+ 尾部小块（钳 straggler 上界），
+    /// 总认领数 ~ W*k*ln(N/floor)。默认开启（A/B：QueryCore p50 -7~14%、uniform 不回归）。
+    /// env 可覆盖：ENTJOY_GUIDED_TILES=0 关闭 / ENTJOY_GUIDED_K / ENTJOY_GUIDED_FLOOR 调参。
+    /// </summary>
+    public static bool GuidedEnabled = true;
+    public static int GuidedK = 4;        // A/B 实测甜点（p50 0.596 / p95 0.778 @ floor=16；k=2 略逊、k=8 回归）
+    public static int GuidedFloor = 16;
+
+    private static void ConfigureGuidedFromEnv()
+    {
+        // env 覆盖（A/B 用，无需重编译）：ENTJOY_GUIDED_TILES=1 开，K/FLOOR 调参。
+        string on = System.Environment.GetEnvironmentVariable("ENTJOY_GUIDED_TILES");
+        if (!string.IsNullOrEmpty(on) && int.TryParse(on, out int onVal))
+            GuidedEnabled = onVal > 0;
+        string k = System.Environment.GetEnvironmentVariable("ENTJOY_GUIDED_K");
+        if (!string.IsNullOrEmpty(k) && int.TryParse(k, out int kVal) && kVal > 0)
+            GuidedK = kVal;
+        string floor = System.Environment.GetEnvironmentVariable("ENTJOY_GUIDED_FLOOR");
+        if (!string.IsNullOrEmpty(floor) && int.TryParse(floor, out int floorVal) && floorVal > 0)
+            GuidedFloor = floorVal;
+
+        if (GuidedEnabled)
+            JobSystem_ConfigureGuided(1, GuidedK, GuidedFloor);
+        else
+            JobSystem_ConfigureGuided(0, GuidedK, GuidedFloor);
+        System.Console.WriteLine($"JobSystem|guided={GuidedEnabled}|k={GuidedK}|floor={GuidedFloor}");
     }
 
     // 托管 Persistent 分配器回调：原生 UnsafeList 扩容/释放走托管侧（C# 池化块 payload=base+16，

@@ -221,6 +221,8 @@ namespace JobSystem {
         static void Shutdown();
         static void PrewakeWorkers();
         static void KeepWorkersWarm(int microseconds);
+        static void ConfigureTilesPerWorker(int tilesPerWorker);
+        static void ConfigureGuided(int enabled, int k, int floor);
         static void SetFrameLowLatencyMode(bool enabled);
         static void FlushScheduledJobs();
 
