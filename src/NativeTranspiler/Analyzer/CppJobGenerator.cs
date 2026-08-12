@@ -951,21 +951,17 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 获取 C# 类型在 Sequential 布局下的大小（64位）
         /// </summary>
-        private static int GetCSharpFieldSize(ITypeSymbol type)
+        internal static int GetCSharpFieldSize(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol) return 8;
-            
-            if (type is INamedTypeSymbol named && named.IsGenericType)
-            {
-                var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                // FullyQualifiedFormat includes "global::" prefix, so check both variants
-                if (fullName == "EntJoy.Collections.NativeArray<T>" || fullName == "global::EntJoy.Collections.NativeArray<T>")
-                    return 32; // _buffer(8) + _length(4) + _allocator(4) + _safety(8) + _isOwner(1) + padding(7)
-                if (fullName == "EntJoy.Collections.NativeList<T>" || fullName == "global::EntJoy.Collections.NativeList<T>")
-                    return 24; // _listData(8) + _allocator(4) + _safety(8) + padding(4)
-                if (fullName == "EntJoy.Collections.UnsafeList<T>" || fullName == "global::EntJoy.Collections.UnsafeList<T>")
-                    return 20; // Ptr(8) + Length(4) + Capacity(4) + Allocator(4)
-            }
+
+            // 引用类型字段（DisposeSentinel / string / class）= 64 位指针，占 8 字节。
+            // 这使 #if DEBUG 下的 sentinel 被正确计入 Debug 布局（40B），Release 无 sentinel 为 32B。
+            if (type.IsReferenceType) return 8;
+
+            // 枚举：大小等于其底层类型（默认 int→4）。
+            if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol enumType)
+                return GetCSharpFieldSize(enumType.EnumUnderlyingType);
 
             // 检查是否为 EntJoy.Mathematics 向量类型
             var ns = type.ContainingNamespace?.ToDisplayString();
@@ -989,7 +985,11 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
-                _ => type is INamedTypeSymbol namedType && namedType.IsValueType && namedType.TypeKind != TypeKind.Enum
+                // 容器（NativeArray/NativeList/UnsafeList）不再硬编码，改为按真实字段布局递归推导，
+                // 与运行时编译配置自动保持一致（Unity/Burst 的做法）：
+                //   Release（无 sentinel）：NativeArray=32，NativeList=24，UnsafeList=20
+                //   Debug  （#if DEBUG sentinel 存在）：NativeArray=40，NativeList=32，UnsafeList=20
+                _ => type is INamedTypeSymbol namedType && namedType.IsValueType
                     ? GetStructSizeRecursive(namedType) : 4 // 默认
             };
         }
@@ -997,7 +997,7 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 递归计算 struct 类型的大小（按 Sequential 布局）
         /// </summary>
-        private static int GetStructSizeRecursive(INamedTypeSymbol structType)
+        internal static int GetStructSizeRecursive(INamedTypeSymbol structType)
         {
             int maxAlignment = 1;
             int offset = 0;
@@ -1018,20 +1018,14 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 获取 C# 类型在 Sequential 布局下的对齐要求（64位）
         /// </summary>
-        private static int GetCSharpFieldAlignment(ITypeSymbol type)
+        internal static int GetCSharpFieldAlignment(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol) return 8;
+            if (type.IsReferenceType) return 8;
 
-            if (type is INamedTypeSymbol named && named.IsGenericType)
-            {
-                var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fullName == "EntJoy.Collections.NativeArray<T>" || fullName == "global::EntJoy.Collections.NativeArray<T>")
-                    return 8;
-                if (fullName == "EntJoy.Collections.NativeList<T>" || fullName == "global::EntJoy.Collections.NativeList<T>")
-                    return 8;
-                if (fullName == "EntJoy.Collections.UnsafeList<T>" || fullName == "global::EntJoy.Collections.UnsafeList<T>")
-                    return 8;
-            }
+            // 枚举：对齐等于其底层类型（默认 int→4）。
+            if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol enumType)
+                return GetCSharpFieldAlignment(enumType.EnumUnderlyingType);
 
             var ns = type.ContainingNamespace?.ToDisplayString();
             if (ns == "EntJoy.Mathematics")
@@ -1054,6 +1048,7 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
+                // 容器对齐同样按真实字段布局递归推导（NativeArray/NativeList/UnsafeList 首字段均为指针 → 8）。
                 _ => type is INamedTypeSymbol namedType && namedType.IsValueType
                     ? GetStructAlignmentRecursive(namedType) : 4
             };
@@ -1062,7 +1057,7 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 递归计算 struct 类型的对齐要求（字段对齐的 max）
         /// </summary>
-        private static int GetStructAlignmentRecursive(INamedTypeSymbol structType)
+        internal static int GetStructAlignmentRecursive(INamedTypeSymbol structType)
         {
             int maxAlign = 1;
             foreach (var member in structType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))

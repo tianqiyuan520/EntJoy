@@ -1,6 +1,4 @@
-﻿#define DEBUG
-
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.Collections

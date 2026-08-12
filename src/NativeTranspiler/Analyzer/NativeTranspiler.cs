@@ -245,72 +245,11 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 计算 C# struct 在 Sequential 布局下的总大小（64位）。
         /// 用于生成的 C++ static_assert 校验，无需用户手动加 [StructLayout]。
+        /// 尺寸/对齐统一委托给 CppJobGenerator 的递归布局推导（单一事实来源），
+        /// 消除第二份硬编码容器尺寸表：容器字段按真实字段布局推导，
+        /// Release 无 sentinel = 32/24/20，Debug 带 #if DEBUG sentinel = 40/32/20。
         /// </summary>
         private static int ComputeStructSize(INamedTypeSymbol structType)
-        {
-            int maxAlignment = 1;
-            int offset = 0;
-            foreach (var member in structType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-            {
-                int fieldSize = GetSizeOfCSharpField(member.Type);
-                int fieldAlignment = GetAlignmentOfCSharpField(member.Type);
-                if (fieldAlignment > maxAlignment) maxAlignment = fieldAlignment;
-                offset = (offset + fieldAlignment - 1) / fieldAlignment * fieldAlignment;
-                offset += fieldSize;
-            }
-            offset = (offset + maxAlignment - 1) / maxAlignment * maxAlignment;
-            return Math.Max(1, offset);
-        }
-
-        private static int GetSizeOfCSharpField(ITypeSymbol type)
-        {
-            if (type is IPointerTypeSymbol) return 8;
-            if (type is INamedTypeSymbol named && named.IsGenericType)
-            {
-                var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fullName.Contains("NativeArray<")) return 32;
-                if (fullName.Contains("NativeList<")) return 24;
-                if (fullName.Contains("UnsafeList<")) return 20;
-            }
-            var ns = type.ContainingNamespace?.ToDisplayString();
-            if (ns == "EntJoy.Mathematics")
-                return type.Name switch { "float2" => 8, "int2" => 8, "uint2" => 8, _ => 8 };
-            return type.SpecialType switch
-            {
-                SpecialType.System_Int32 => 4,
-                SpecialType.System_UInt32 => 4,
-                SpecialType.System_Int64 => 8,
-                SpecialType.System_UInt64 => 8,
-                SpecialType.System_Single => 4,
-                SpecialType.System_Double => 8,
-                SpecialType.System_Boolean => 1,
-                _ => type is INamedTypeSymbol namedType && namedType.IsValueType && namedType.TypeKind != TypeKind.Enum
-                    ? ComputeStructSize(namedType) : 4
-            };
-        }
-
-        private static int GetAlignmentOfCSharpField(ITypeSymbol type)
-        {
-            if (type is IPointerTypeSymbol) return 8;
-            if (type is INamedTypeSymbol named && named.IsGenericType)
-            {
-                var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fullName.Contains("NativeArray<") || fullName.Contains("NativeList<") || fullName.Contains("UnsafeList<"))
-                    return 8;
-            }
-            var ns = type.ContainingNamespace?.ToDisplayString();
-            if (ns == "EntJoy.Mathematics") return 4;
-            return type.SpecialType switch
-            {
-                SpecialType.System_Int32 => 4,
-                SpecialType.System_UInt32 => 4,
-                SpecialType.System_Int64 => 8,
-                SpecialType.System_UInt64 => 8,
-                SpecialType.System_Single => 4,
-                SpecialType.System_Double => 8,
-                SpecialType.System_Boolean => 1,
-                _ => 4
-            };
-        }
+            => CppJobGenerator.GetStructSizeRecursive(structType);
     }
 }
