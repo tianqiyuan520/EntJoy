@@ -917,6 +917,18 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("target_compile_definitions(NativeDll PRIVATE SIMD_MATH_PRECISION=${NATIVE_SIMD_MATH_PRECISION})");
             sb.AppendLine();
 
+            // Sentinel: match C# #if DEBUG DisposeSentinel container layout.
+            // C# Debug 编译下 NativeArray=40B / NativeList=32B（带 sentinel），Release=32/24B。
+            // 原生侧以 -DENTJOY_ENABLE_SENTINEL=ON 编译时 C++ 容器模板加 8B sentinel 字段对齐，
+            // 否则 C# Debug + 原生适配器的 mirror static_assert 会失败（fail-fast）。Release 保持默认 OFF。
+            sb.AppendLine("# Sentinel layout: match C# #if DEBUG DisposeSentinel (native templates add 8B sentinel field)");
+            sb.AppendLine("option(ENTJOY_ENABLE_SENTINEL \"Match C# #if DEBUG DisposeSentinel container layout\" OFF)");
+            sb.AppendLine("if(ENTJOY_ENABLE_SENTINEL)");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_ENABLE_SENTINEL)");
+            sb.AppendLine("    message(STATUS \"NativeDll: ENTJOY_ENABLE_SENTINEL ON (NativeArray=40B / NativeList=32B)\")");
+            sb.AppendLine("endif()");
+            sb.AppendLine();
+
             // ISPC: x86 only, optional
             if (ispcFiles.Count > 0)
             {

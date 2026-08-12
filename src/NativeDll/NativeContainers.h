@@ -43,7 +43,9 @@ namespace EntJoy {
 		};
 
 		// ========== NativeArray ==========
-		// 内存布局与 C# 侧 EntJoy.Collections.NativeArray<T> 完全一致
+		// 内存布局与 C# 侧 EntJoy.Collections.NativeArray<T> 完全一致。
+		// Release（无 sentinel）= 32B；Debug（#if DEBUG DisposeSentinel）=
+		// 40B，须以 -DENTJOY_ENABLE_SENTINEL 编译使两者一致（Unity/Burst 宏门控做法）。
 		template<typename T>
 		struct NativeArray {
 			void* m_Buffer;               // 对应 C# 的 void* _buffer
@@ -51,7 +53,9 @@ namespace EntJoy {
 			Allocator m_Allocator;        // 对应 Allocator _allocator
 			AtomicSafetyHandle m_Safety;  // 对应 AtomicSafetyHandle _safety
 			bool m_IsOwner;               // 对应 bool _isOwner
-			// 调试字段忽略
+#if defined(ENTJOY_ENABLE_SENTINEL)
+			void* m_Sentinel;             // 对应 C# #if DEBUG DisposeSentinel（引用=8B 指针）
+#endif
 
 			T* data() const { return static_cast<T*>(m_Buffer); }
 			T* GetUnsafePtr() const { return static_cast<T*>(m_Buffer); }
@@ -141,12 +145,17 @@ namespace EntJoy {
 
 		// ========== NativeList ==========
 		// 与 C# 侧 NativeList<T> 布局一致，包装 UnsafeList<T>*
+		// Release = 24B；Debug 带 sentinel = 32B（-DENTJOY_ENABLE_SENTINEL）。
+		// 注意：C# 无 _isOwner 字段，此 m_IsOwner 充当 padding 占位（不影响偏移/大小）。
 		template<typename T>
 		struct NativeList {
 			UnsafeList<T>* m_ListData;    // 指向非托管堆上的 UnsafeList
 			Allocator m_Allocator;
 			AtomicSafetyHandle m_Safety;
 			bool m_IsOwner;
+#if defined(ENTJOY_ENABLE_SENTINEL)
+			void* m_Sentinel;             // 对应 C# #if DEBUG DisposeSentinel（引用=8B 指针）
+#endif
 
 			// 便捷访问（直接操作 UnsafeList）
 			UnsafeList<T>* operator->() const { return m_ListData; }
