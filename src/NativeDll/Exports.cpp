@@ -65,6 +65,16 @@ extern "C"
         JobSystem::Scheduler::KeepWorkersWarm(microseconds);
     }
 
+    void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker)
+    {
+        JobSystem::Scheduler::ConfigureTilesPerWorker(tilesPerWorker);
+    }
+
+    void JobSystem_ConfigureGuided(int enabled, int k, int floor)
+    {
+        JobSystem::Scheduler::ConfigureGuided(enabled, k, floor);
+    }
+
     void JobSystem_FlushScheduledJobs()
     {
         JobSystem::Scheduler::FlushScheduledJobs();

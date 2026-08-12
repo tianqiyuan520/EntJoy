@@ -33,8 +33,8 @@ public class GridSearch2D : IDisposable
     private BuildTimings _lastTimings;
     public BuildTimings LastBuildTimings => _lastTimings;
 
-    /// <summary>查询 tile 粒度实验：0 = 默认 ResolveChunkSize（~1667）；显式值如 256/512 使 tile 更细，平滑密度不平衡。</summary>
-    public static int QueryBatchSize = 256; // 实验定标：256 较 0（默认 ~1667 粗 tile）QueryCore p50 -10.6%，全部高百分位下降
+    /// <summary>查询 tile 粒度实验：0 = 默认 ResolveChunkSize（按 tiles/worker 切分）；显式值如 256/512 使 tile 更细，平滑密度不平衡。</summary>
+    public static int QueryBatchSize = 0; // 归零：走通用化 tiles/worker 粒度（native 默认 16，见 NativeJobScheduler.TilesPerWorker）
 
     public float2 GridMin => _minMaxPositions[0];
     public float2 GridMax => _minMaxPositions[1];
@@ -703,5 +703,6 @@ public class GridSearch2D : IDisposable
             }
         }
     }
+
 }
 
