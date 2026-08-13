@@ -2,13 +2,11 @@
 #include "ThreadAffinity.h"
 
 #include <atomic>
-#include <climits>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <semaphore>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -25,6 +23,12 @@ namespace JobSystem
         _mm_pause();
 #endif
     }
+
+    // 混合等待的有界自旋窗：约 8192 × pause ≈ 360µs。
+    // 连续模式背靠背 job 的 straggler 尾（快 worker 干完到 Submit 下一帧）在 µs~几百µs 量级，
+    // 自旋须覆盖该尾宽才能避免 park；16ms 帧间隔远超此窗 → 仍 park，不烧 CPU
+    //（keep-warm 无界自旋烧穿整个间隔的回归，有界即不碰）。
+    static constexpr uint32_t kMaxSpinCount = 8192;
 
     struct NativeWorkerPool::Impl
     {
@@ -58,7 +62,9 @@ namespace JobSystem
             // Unity-style local-queue/work-stealing topology.
             std::mutex queueMutex;
             std::deque<WorkItem> queue;
-            std::counting_semaphore<INT_MAX> wake{ 0 };
+            // futex 式唤醒标志（C++20 std::atomic::wait，MSVC 下即 futex），
+            // 取代 counting_semaphore（MSVC 下为 win32 内核对象，每次唤醒走内核态）。
+            std::atomic<uint32_t> wakeFlag{ 0 };
             std::thread thread;
         };
 
@@ -73,9 +79,9 @@ namespace JobSystem
         bool bindWorkers{ false };
         std::atomic<bool> stopRequested{ false };
 
-        // 诊断计数器（keep-warm 实验后保留；Hot/Warm/Cold 自旋已还原，hotSpinHits 恒为 0）
-        std::atomic<uint64_t> parkWakeCount{ 0 };  // worker 实际 park 次数
-        std::atomic<uint64_t> hotSpinHits{ 0 };    // 预留：自旋命中数（实验后弃用）
+        // 诊断计数器（keep-warm 实验后；有界 futex 混合等待下 hotSpinHits 重新启用）
+        std::atomic<uint64_t> parkWakeCount{ 0 };  // worker 实际 park（内核态等待）次数
+        std::atomic<uint64_t> hotSpinHits{ 0 };    // 混合等待命中（自旋/初始即有活，未 park）
 
         BatchDescriptor* AcquireDescriptorLocked()
         {
@@ -154,11 +160,26 @@ namespace JobSystem
 #endif
             while (true)
             {
-                // keep-warm 实验结论（2026-08）：Hot/Warm/Cold 自旋对紧循环尾宽无改善，
-                // 且在 16ms 帧间隙场景因自旋与主线程 Complete 争抢而回归。已还原为裸 park，
-                // 仅保留 parkWakeCount 计数供诊断。
-                ++parkWakeCount;
-                worker->wake.acquire();
+                // 混合等待：有界自旋 → std::atomic::wait（C++20，MSVC 下即 futex）。
+                // 自旋只覆盖背靠背 job（µs 级），不烧 16ms 间隔
+                //（keep-warm 无界自旋回归的负结果 + futex 化唤醒 = 行业标准两件套）。
+                uint32_t spins = 0;
+                while (worker->wakeFlag.load(std::memory_order_acquire) == 0 && spins < kMaxSpinCount)
+                {
+                    CpuPause();
+                    ++spins;
+                }
+                if (worker->wakeFlag.load(std::memory_order_acquire) == 0)
+                {
+                    ++parkWakeCount;
+                    while (worker->wakeFlag.load(std::memory_order_acquire) == 0)
+                        worker->wakeFlag.wait(0, std::memory_order_acquire); // 同 JobSystem.cpp completed.wait
+                }
+                else
+                {
+                    ++hotSpinHits; // 自旋/初始即有活 → 未 park
+                }
+                worker->wakeFlag.store(0, std::memory_order_relaxed);
                 DrainAvailableWork(workerIndex);
                 if (stopRequested.load(std::memory_order_acquire))
                 {
@@ -217,7 +238,11 @@ namespace JobSystem
             _impl->idle.wait(lock, [this] { return _impl->outstandingBatches == 0; });
             _impl->stopRequested.store(true, std::memory_order_release);
         }
-        for (auto& worker : _impl->workers) worker->wake.release();
+        for (auto& worker : _impl->workers)
+        {
+            worker->wakeFlag.store(1, std::memory_order_relaxed);
+            worker->wakeFlag.notify_one();
+        }
         for (auto& worker : _impl->workers)
             if (worker->thread.joinable()) worker->thread.join();
         _impl->workers.clear();
@@ -253,7 +278,11 @@ namespace JobSystem
             }
         }
         for (uint32_t i = 0; i < wakeCounts.size(); ++i)
-            if (wakeCounts[i] != 0) _impl->workers[i]->wake.release();
+            if (wakeCounts[i] != 0)
+            {
+                _impl->workers[i]->wakeFlag.store(1, std::memory_order_release);
+                _impl->workers[i]->wakeFlag.notify_one();
+            }
         return true;
     }
 
