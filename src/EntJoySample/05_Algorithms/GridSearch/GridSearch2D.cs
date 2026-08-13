@@ -1,4 +1,5 @@
-﻿using EntJoy.Collections;
+﻿/*
+using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -705,4 +706,5 @@ public class GridSearch2D : IDisposable
     }
 
 }
+*/
 

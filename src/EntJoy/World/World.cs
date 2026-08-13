@@ -37,6 +37,14 @@ namespace EntJoy
             return new EntityQuery(this, builder);
         }
 
+        /// <summary>实体级查询（chunk 序 struct query，密集 OOD 访问面）。</summary>
+        public QueryEnumerable<T0, T1> Query<T0, T1>() where T0 : struct where T1 : struct
+            => new QueryEnumerable<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
+
+        /// <summary>实体级查询（复用已构建的 <see cref="QueryBuilder"/>，避免热路径分配）。</summary>
+        public QueryEnumerable<T0, T1> Query<T0, T1>(QueryBuilder builder) where T0 : struct where T1 : struct
+            => new QueryEnumerable<T0, T1>(_entityManager, builder);
+
         public void Dispose()
         {
             _entityManager?.Dispose();
