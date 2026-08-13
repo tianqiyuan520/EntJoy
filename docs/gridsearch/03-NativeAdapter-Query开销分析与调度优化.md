@@ -235,7 +235,7 @@ NativeJobScheduler.cs `ConfigureGuidedFromEnv()`（:752）→ `JobSystem_Configu
 
 ## 8. ISPC 翻译质量评估：执行地板归因（能否靠提高翻译质量追上 Burst？）
 
-> 配套 [docs/04 §5](04-基准测量方法论与调度开销分析.md) 的层分劈分：C++ 执行占 QueryCore ~93%（~600μs）。
+> 配套 [gridsearch/04 §5](04-基准测量方法论与调度开销分析.md) 的层分劈分：C++ 执行占 QueryCore ~93%（~600μs）。
 > 本文回答：这 600μs 是不是"翻译质量不行"造成的？提高 ISPC 翻译质量/对齐 Burst 能挤多少？
 > **结论：不能——至少这份负载上不能。翻译质量已到 Burst 同级，地板是内存延迟不是代码生成。**
 
@@ -268,7 +268,7 @@ NativeJobScheduler.cs `ConfigureGuidedFromEnv()`（:752）→ `JobSystem_Configu
 - **IL2CPP 无关**：它消的是托管 JIT 开销；本负载已走原生 adapter（native→native），无托管桥。
 - **Burst 同级**：Burst 对这份 gather 模式会生成同样的掩码 gather。Burst 的快来自 ECS **chunk 级
   SoA 连续布局**（带宽友好），不是代码生成更好——GridSearch 是空间哈希随机 gather（平均 2.5 点/cell，
-  一个 cache line 都填不满），布局冻结，学不了。docs/04 §3 已论证 Unity 在这份负载上不会更快。
+  一个 cache line 都填不满），布局冻结，学不了。gridsearch/04 §3 已论证 Unity 在这份负载上不会更快。
 
 ### 8.4 真正能挤执行段的框架侧方向（按现实收益排序）
 

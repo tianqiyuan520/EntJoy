@@ -126,6 +126,6 @@ transpiler 已经支持 ISPC 代码生成（`Target = BackendTarget.Ispc`），�
 
 ## 参考
 
-- [ISPC optimization journey](performance/ispc-optimization-journey.md)
+- [ISPC optimization journey](../performance/ispc-optimization-journey.md)
 - [Auto-SIMD 实现记录](simd-auto-ijobchunk-implementation.md)
-- [记忆文件](../../.claude/projects/e--GODOT-Project-EntJoy/memory/clangcl-ispc-gap-analysis.md)
+- [记忆文件](../../../.claude/projects/e--GODOT-Project-EntJoy/memory/clangcl-ispc-gap-analysis.md)

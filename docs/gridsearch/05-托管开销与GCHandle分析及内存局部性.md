@@ -13,8 +13,8 @@
 |---|---|---|
 | ISPC 翻译（生成/手写 `*.ispc`） | `SharpNative_..._Execute_Batch.ispc` 等 | **0 处**。实验加的 `prefetch_l1/l2` 已完全还原（核对产物） |
 | C++ 调度器 tile 预取 | `JobSystem.cpp:1698` `PrefetchNextTileData` | `_mm_prefetch NTA`，仅 `EntityBatchRange`/`ChunkCallbacks`/`ChunkRange`（ECS chunk/entity job） |
-| 文档提及 | `docs/03 §8.4`、`docs/04 §4` | 均为 prefetch **负结果**的记录，非生产代码 |
-| 历史实验 | `docs/performance/benchmark-analysis-2026-07-20.md` | 旧 NTA 变体实验（同 `PrefetchNextTileData` 一系） |
+| 文档提及 | `gridsearch/03 §8.4`、`gridsearch/04 §4` | 均为 prefetch **负结果**的记录，非生产代码 |
+| 历史实验 | `docs/archive/performance/benchmark-analysis-2026-07-20.md` | 旧 NTA 变体实验（同 `PrefetchNextTileData` 一系） |
 
 **结论**：GridSearch 的 query 路径（`TileKind::GeneralRange`）在 `PrefetchNextTileData` 两个分支都不命中 → no-op。
 `PrefetchNextTileData` 服务的是 IJobChunk 顺序遍历（计算密集），与 gather-bound query 是两类负载。
@@ -34,7 +34,7 @@
 | Schedule+Complete 两次 P/Invoke + delegate 缓存 + 异常检查 | — | ~1μs | 合并 P/Invoke |
 | `Marshal.FreeHGlobal` | `:317` | ~0.2-1μs | ✅ ContextPool |
 
-实测 C# 层合计 **~6-12μs/帧**（`docs/04 §5.1`，QueryCore p50=646μs 的 1-2%）。
+实测 C# 层合计 **~6-12μs/帧**（`gridsearch/04 §5.1`，QueryCore p50=646μs 的 1-2%）。
 
 ### 2.2 解决方案（按收益）
 
@@ -90,13 +90,13 @@ GridSearch 基准不经过它。→ 当前 query 性能与 GCHandle 无关。
 job 期间复用）。对纯托管 IJobChunk（funcPtr==0）有意义；transpiled 路径已不需。与 Unity 的本质差异：
 Unity chunk 内存是 archetype 持有的原生指针，根本不装箱 → 无 per-chunk 句柄。
 
-> 注意：这不影响 GridSearch 基准（不走 IJobChunk）；只对 IJobChunk/IJobEntity 工作负载（`docs/03 §8.2` 的 6x SIMD 案例）有意义。
+> 注意：这不影响 GridSearch 基准（不走 IJobChunk）；只对 IJobChunk/IJobEntity 工作负载（`gridsearch/03 §8.2` 的 6x SIMD 案例）有意义。
 
 ---
 
 ## 4. 重新分析：还能挤哪（内存热页 / 缓存局部性，参考其他项目）
 
-### 4.1 分层现状（实测，`docs/04 §5`）
+### 4.1 分层现状（实测，`gridsearch/04 §5`）
 
 | 层 | 量级 | 占比 | 已到地板? |
 |---|---|---|---|
@@ -117,8 +117,8 @@ cell → 每次 gather 大概率 miss，但 miss **已被 CPU OOO 掩盖**（MLP
 
 | 项目 | 做法 | 对 GridSearch 的启示 | 可行? |
 |---|---|---|---|
-| **Unity DOTS** | chunk-major SoA：16KB chunk 内组件连续 → 顺序遍历带宽友好 | 这是它快的唯一来源，不是调度（`docs/03 §8.3`） | GridSearch 是空间哈希随机 gather，**布局冻结** |
-| **TBB `auto_partitioner`** | 剩余驱动 chunk | 已落地为 guided（`docs/03 §7`） | ✅ 已做 |
+| **Unity DOTS** | chunk-major SoA：16KB chunk 内组件连续 → 顺序遍历带宽友好 | 这是它快的唯一来源，不是调度（`gridsearch/03 §8.3`） | GridSearch 是空间哈希随机 gather，**布局冻结** |
+| **TBB `auto_partitioner`** | 剩余驱动 chunk | 已落地为 guided（`gridsearch/03 §7`） | ✅ 已做 |
 | **Rayon** | 递归切分 + 尾部偷取 | guided 的确定性版本已覆盖 | 不需 |
 | **数据导向设计**（经典 DOD） | AoS→SoA、按访问键重排 | 见 4.4 | 框架层 API，GridSearch 需解冻 |
 
@@ -142,6 +142,6 @@ cell → 每次 gather 大概率 miss，但 miss **已被 CPU OOO 掩盖**（MLP
 
 | 文件 | 状态 |
 |---|---|
-| `docs/05-托管开销与GCHandle分析及内存局部性.md` | 新建（本文） |
+| `gridsearch/05-托管开销与GCHandle分析及内存局部性.md` | 新建（本文） |
 | `src/EntJoy/JobSystem/NativeJobScheduler.cs` | **transpiled chunk fallback 不装箱**（§3.3，`ChunkContextHeader.ownsChunkData` + 三处 fallback 门控 + `ChunkCleanup`） |
 | （未动代码） | ContextPool 化 transpiled 绑定（§2.2.1，候选）；chunk GCHandle 跨 schedule 缓存（§3.3，候选） |

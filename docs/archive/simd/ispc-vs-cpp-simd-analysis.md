@@ -211,6 +211,6 @@ hmin/hmin_idx → 水平规约回标量
 
 | 文件 | 说明 |
 |------|------|
-| `docs/closestpoint_ispc.ll` | ISPC 生成的 LLVM IR（3824 行） |
-| `docs/closestpoint_ispc_source.ispc` | ISPC 源码（149 行） |
+| `closestpoint_ispc.ll` | ISPC 生成的 LLVM IR（3824 行） |
+| `closestpoint_ispc_source.ispc` | ISPC 源码（149 行） |
 | `src/NativeTranspiler/Analyzer/OuterSimdGenerator.cs` | `GenerateReductionSIMD` 实现 |

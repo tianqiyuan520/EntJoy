@@ -30,7 +30,7 @@
 - `src/NativeTranspiler/Analyzer/BindingsGenerator.cs`: binds native `IJobChunk` jobs to their generated range adapter.
 - `src/NativeTranspiler/Analyzer/CppJobGenerator.cs`: hoists native job-context decoding outside the generated per-Chunk range loop.
 - `src/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/IJobChunkMoveCompareSample.cs`: removes benchmark keep-warm calls, records frame distributions, and prints scheduler attribution.
-- `docs/performance/cooperative-chunk-executor-results.md`: records reproducible before/after commands, correctness, latency, and regression decisions.
+- `docs/archive/performance/cooperative-chunk-executor-results.md`: records reproducible before/after commands, correctness, latency, and regression decisions.
 
 ---
 
@@ -777,7 +777,7 @@ git commit -m "test(bench): report cooperative chunk latency distribution"
 ### Task 7: Run Full Correctness, Stress, and Performance Acceptance
 
 **Files:**
-- Create: `docs/performance/cooperative-chunk-executor-results.md`
+- Create: `docs/archive/performance/cooperative-chunk-executor-results.md`
 - Verify only: all implementation files from Tasks 1-6
 
 **Interfaces:**
@@ -841,7 +841,7 @@ If a latency gate misses, record the actual attribution counters and stop this p
 
 - [ ] **Step 5: Write the results document**
 
-Create `docs/performance/cooperative-chunk-executor-results.md` containing:
+Create `docs/archive/performance/cooperative-chunk-executor-results.md` containing:
 
 ```markdown
 # Cooperative Chunk Executor Results
@@ -880,7 +880,7 @@ Populate every environment and table value from the commands in Steps 1-4 before
 - [ ] **Step 6: Commit the verified results**
 
 ```powershell
-git add docs/performance/cooperative-chunk-executor-results.md
+git add docs/archive/performance/cooperative-chunk-executor-results.md
 git commit -m "docs(perf): record cooperative chunk executor results"
 ```
 

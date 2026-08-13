@@ -29,7 +29,7 @@
 - Modify `src/NativeDll/Exports.cpp`: keep `JobSystem_PrewakeWorkers` mapped to the compatibility wrapper.
 - Modify `src/EntJoy/JobSystem/NativeJobScheduler.cs`: route automatic normal-job prewake to a new internal native export only if an ABI-preserving export addition is unavoidable; preferred implementation keeps this routing native-side.
 - Modify `src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs`: restore the baseline ISPC attribute for `AssignAndCountJobPointer` only after preserving the user's current uncommented state.
-- Create `docs/performance/job-system-assist-results.md`: record commands, hardware, median, P95, and before/after results.
+- Create `docs/archive/performance/job-system-assist-results.md`: record commands, hardware, median, P95, and before/after results.
 
 ### Task 1: Native Regression-Test Harness
 
@@ -701,7 +701,7 @@ git commit -m "perf(jobs): tune batching and split worker prewake"
 **Files:**
 - Modify: `src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs`
 - Modify: `src/EntJoySample/05_Algorithms/GridSearch/TestGridSearch.cs`
-- Create: `docs/performance/job-system-assist-results.md`
+- Create: `docs/archive/performance/job-system-assist-results.md`
 
 **Interfaces:**
 - Consumes: completed scheduler implementation and the user's currently enabled GridSearch sample.
@@ -765,7 +765,7 @@ git rev-parse HEAD
 Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors
 ```
 
-Create `docs/performance/job-system-assist-results.md`. Record the exact commit and CPU command output, Release/detached-debugger configuration, 100,000/100,000 dataset, and 2/1000 warmup/iteration counts. Add a GridSearch table containing the fixed baselines `fa41acd: build 0.600 ms, query 0.600 ms` and `before change: build 2.466 ms, query 1.727 ms`, followed by the computed after-change median and P95 milliseconds from the three run files. End with three explicit acceptance lines covering query median at most 0.8 ms, build median at most 1.0 ms, and unchanged first-ten indices; state `PASS` or `FAIL` beside each measured value.
+Create `docs/archive/performance/job-system-assist-results.md`. Record the exact commit and CPU command output, Release/detached-debugger configuration, 100,000/100,000 dataset, and 2/1000 warmup/iteration counts. Add a GridSearch table containing the fixed baselines `fa41acd: build 0.600 ms, query 0.600 ms` and `before change: build 2.466 ms, query 1.727 ms`, followed by the computed after-change median and P95 milliseconds from the three run files. End with three explicit acceptance lines covering query median at most 0.8 ms, build median at most 1.0 ms, and unchanged first-ten indices; state `PASS` or `FAIL` beside each measured value.
 
 - [ ] **Step 6: Run Chunk continuous and 16 ms sleep benchmarks**
 
@@ -787,7 +787,7 @@ Expected: tests and build pass; no whitespace errors; only intended implementati
 - [ ] **Step 8: Commit benchmark changes separately**
 
 ```powershell
-git add src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs src/EntJoySample/05_Algorithms/GridSearch/TestGridSearch.cs docs/performance/job-system-assist-results.md
+git add src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs src/EntJoySample/05_Algorithms/GridSearch/TestGridSearch.cs docs/archive/performance/job-system-assist-results.md
 git commit -m "perf(samples): validate unified job assist throughput"
 ```
 

@@ -10,6 +10,8 @@
 
 # Claude Code config/cache
 **/.claude/
+.agents/
+.claude/
 
 # .NET build artifacts
 **/bin/

@@ -132,7 +132,7 @@ dotnet build src/EntJoySample/EntJoySample.csproj -c Release
 .\bin\EntJoySample.exe
 ```
 
-当前启用的入口位于 [`IJobChunkMoveCompareTest/Program.cs`](src/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs)。样例工程采用“同一时间只启用一个 `Program.Main`”的约定；切换样例时，请注释当前入口并取消目标目录中 `Program.cs` 的注释。
+当前启用的入口位于 [`06_HotFieldHandle/Program.cs`](src/EntJoySample/06_HotFieldHandle/Program.cs)。样例工程采用“同一时间只启用一个 `Program.Main`”的约定；切换样例时，请注释当前入口并取消目标目录中 `Program.cs` 的注释。
 
 ## 配置自己的项目
 
@@ -513,7 +513,11 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 ### 05 Algorithms
 
-- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验。
+- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验。（2026-08 整体注释停用，设计见 [docs/06-HotFieldHandle设计.md](docs/06-HotFieldHandle设计.md)）
+
+### 06 HotField Handle
+
+- [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle)：HotField 可行性原型——普通 class + `[HotFieldEntity]` 属性 → 字段级 SoA 存储（`HotStore`）+ int 索引 + `ref` 属性重定向，System（`IJobParallelFor`）直接消费同一存储。验证「OOP 游戏代码与 plain class 逐字节相同（无感）、Attribute 机械部分零成本、OOD↔DOD 共享存储结果一致；1M 密集 OOP 的 SoA 结构税如实报告（批量走 System）」。
 
 性能样例请使用 Release x64、关闭调试器，并保持电源模式和后台负载一致。README 不固定记录单台机器的结果；请在目标硬件上运行样例获得可比较数据。
 
@@ -703,7 +707,7 @@ The first build is slower than incremental builds. When generated and native sou
 .\bin\EntJoySample.exe
 ```
 
-The active entry point is currently [`IJobChunkMoveCompareTest/Program.cs`](src/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs). EntJoySample keeps only one `Program.Main` enabled at a time. To switch samples, comment the current entry point and uncomment the `Program.cs` in the target sample directory.
+The active entry point is currently [`06_HotFieldHandle/Program.cs`](src/EntJoySample/06_HotFieldHandle/Program.cs). EntJoySample keeps only one `Program.Main` enabled at a time. To switch samples, comment the current entry point and uncomment the `Program.cs` in the target sample directory.
 
 ## Configure Your Own Project
 
@@ -1078,7 +1082,11 @@ Working sources:
 
 ### 05 Algorithms
 
-- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search.
+- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search. (Entirely commented out since 2026-08; design notes in [docs/06-HotFieldHandle设计.md](docs/06-HotFieldHandle设计.md))
+
+### 06 HotField Handle
+
+- [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle): HotField feasibility prototype — an ordinary class + `[HotFieldEntity]` attribute → field-level SoA storage (`HotStore`) + int index + `ref`-property redirection, with Systems (`IJobParallelFor`) consuming the same store directly. Verifies that OOP game code stays byte-identical to a plain class (seamless), the attribute machinery is zero-cost, and OOD↔DOD share storage with identical results; the dense-1M OOP SoA structural tax is reported honestly (bulk goes through Systems).
 
 Run performance samples in Release x64 without a debugger, and keep power mode and background load consistent. This README intentionally avoids fixed results from one machine; run the samples on the target hardware for meaningful comparisons.
 

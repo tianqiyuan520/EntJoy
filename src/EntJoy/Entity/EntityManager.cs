@@ -169,6 +169,7 @@ namespace EntJoy
         /// </summary>
         /// <param name="index"></param>
         /// <returns></returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref EntityIndexInWorld GetEntityInfoRef(int index)
         {
             if ((uint)index >= (uint)entities.Length)
@@ -656,6 +657,37 @@ namespace EntJoy
                 arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
             }
         }
+
+        /// <summary>
+        /// 读取组件值（返回引用，OOD 稀疏访问面）。
+        /// 返回的 ref 在下次结构变更（add/remove/destroy → 实体迁移 chunk）前有效，与 <see cref="EntityIndexInWorld"/> 同一纪律。
+        /// 读路径 lock-free（main-thread only 纪律）：结构性 API 先 CompleteActiveJobs 且 IsExecutingJob 时抛异常，
+        /// 结构性变更不可能与读并发；多线程场景可定义 ENTJOY_SAFE_ENTITY_READS 恢复锁。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ref T GetComponent<T>(Entity entity) where T : struct, IComponentData
+        {
+            CheckDisposed();
+#if ENTJOY_SAFE_ENTITY_READS
+            lock (_structuralLock)
+#endif
+            {
+                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
+                if (entityInfoRef.Archetype == null)
+                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
+                if (entityInfoRef.Version != entity.Version)
+                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
+                var arch = entityInfoRef.Archetype;
+                return ref arch.GetComponent<T>(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+            }
+        }
+
+        /// <summary>
+        /// 创建稀疏随机访问句柄（对齐 Unity ComponentLookup）。普通 struct，可作系统字段；
+        /// main-thread only，持有本 EntityManager 强引用。
+        /// </summary>
+        public unsafe ComponentLookup<T> GetComponentLookup<T>() where T : struct
+            => new ComponentLookup<T>(this);
     }
 
     public unsafe partial class EntityManager
@@ -690,8 +722,7 @@ namespace EntJoy
                     throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
 
                 int compIdx = archetype.GetComponentTypeIndex<T>();
-                var chunks = archetype.GetChunks();
-                var chunk = chunks[info.ChunkIndex];
+                var chunk = archetype.ChunkList[info.ChunkIndex];
 
                 chunk.SetComponentEnabled(compIdx, info.SlotInChunk, enabled);
             }
@@ -708,7 +739,9 @@ namespace EntJoy
         public bool IsComponentEnabled<T>(Entity entity) where T : struct, IEnableableComponent
         {
             CheckDisposed();
+#if ENTJOY_SAFE_ENTITY_READS
             lock (_structuralLock)
+#endif
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
                 var archetype = info.Archetype;
@@ -722,8 +755,7 @@ namespace EntJoy
                     throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
 
                 int compIdx = archetype.GetComponentTypeIndex<T>();
-                var chunks = archetype.GetChunks();
-                var chunk = chunks[info.ChunkIndex];
+                var chunk = archetype.ChunkList[info.ChunkIndex];
 
                 return chunk.GetComponentEnabled(compIdx, info.SlotInChunk);
             }

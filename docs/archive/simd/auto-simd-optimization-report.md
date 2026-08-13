@@ -188,5 +188,5 @@ for (int iter = 0; iter < maxIter; iter++)
 | `src/NativeTranspiler/Analyzer/SimdControlFlowGenerator.cs` | AST→SIMD C++ 核心生成器 |
 | `src/NativeTranspiler/Analyzer/SimdVariableAnalyzer.cs` | uniform/varying 变量分类 |
 | `src/NativeDll/SimdValue.h` | `simd_value<T>` 包装类 |
-| `docs/closestpoint_ispc_source.ispc` | ISPC 参考实现 |
-| `docs/SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute.cpp` | 手写参考代码（0.6ms） |
+| `closestpoint_ispc_source.ispc` | ISPC 参考实现 |
+| `SharpNative_Job__global_namespace__GridSearch2D_ClosestPointJobPointer_Execute.cpp` | 手写参考代码（0.6ms） |

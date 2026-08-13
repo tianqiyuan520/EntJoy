@@ -60,7 +60,7 @@ Free(payload):
 
 ### 2.3 设计要点
 
-- **线程安全（必须）**：[GridSearch2D.cs:432](src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs#L432) 的 `CellStartEnd.Resize` 在 worker 线程 job 内增长 Persistent NativeList。
+- **线程安全（必须）**：[GridSearch2D.cs:432](../../src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs#L432) 的 `CellStartEnd.Resize` 在 worker 线程 job 内增长 Persistent NativeList。
 - **外来块护栏**：杜绝"对内部指针减 HeaderSize 再释放"导致的堆损坏（STATUS_HEAP_CORRUPTION 0xc0000374）。
 - **对齐**：payload 16 字节对齐（当前 Persistent 类型 float2/int2/float/int 均 ≤8，16 对齐充裕）。
 
@@ -115,7 +115,7 @@ inline void RegisterPersistentAllocator(PersistentAllocCallback alloc, Persisten
 
 > ⚠️ **已演进**：本节的 `QueryBatchSize=256` 实验结论已被「tiles/worker 通用化粒度」取代。
 > 现状：`QueryBatchSize=0`（回归默认 ResolveChunkSize），粒度由 `NativeJobScheduler.TilesPerWorker=26` 控制，
-> 详见 `docs/03-NativeAdapter-Query开销分析与调度优化.md` §2。
+> 详见 `gridsearch/03-NativeAdapter-Query开销分析与调度优化.md` §2。
 
 ### 5.1 改动
 
