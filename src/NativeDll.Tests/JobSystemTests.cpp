@@ -1479,7 +1479,10 @@ namespace
         std::atomic<int> callbacks{ 0 };
 
         JobSystem::ResetStatsSnapshot();
-        for (int batchIndex = 0; batchIndex < 2; ++batchIndex)
+        // 近无锁：batch storage 走 per-thread 缓存，回收先进本线程缓存、满额才批量迁移
+        // 共享池（跨线程复用）。batch 的 retire 线程（worker 或 assist 的 main）不确定，
+        // 故用多轮让至少一个线程缓存溢出到共享池，再断言跨线程/同线程复用必然发生。
+        for (int batchIndex = 0; batchIndex < 64; ++batchIndex)
         {
             auto handle = JobSystem::Scheduler::ScheduleChunks(
                 [](void* raw, const ChunkJobData*)
@@ -1503,10 +1506,10 @@ namespace
 
         JobSystem::JobSystemStatsSnapshot stats{};
         JobSystem::GetStatsSnapshot(&stats);
-        Require(callbacks.load(std::memory_order_relaxed) == itemCount * 2,
+        Require(callbacks.load(std::memory_order_relaxed) == itemCount * 64,
             "pooled batches missed or duplicated callbacks");
         Require(stats.batchStorageReused >= 1,
-            "second sequential batch did not reuse storage");
+            "sequential batches did not reuse storage after cache overflow");
         Require(stats.batchStorageReturned ==
             stats.batchStorageCreated + stats.batchStorageReused,
             "batch storage acquire/return accounting did not reconcile");

@@ -37,6 +37,9 @@ namespace JobSystem {
         Entity = 1,
     };
 
+    // 无锁 continuation 链节点（前向声明；完整定义在 JobSystem.cpp）。
+    struct ContinuationNode;
+
     // 对齐到缓存行，避免伪共享
     struct alignas(hardware_destructive_interference_size) HandleState {
         std::atomic<uint32_t> refCount{ 1 };
@@ -45,10 +48,14 @@ namespace JobSystem {
         std::atomic<int> waiterCount{ 0 };
         std::atomic<uint64_t> diagnosticBatchId{ 0 };
 
-        // 延续任务相关
-        std::function<void()> inlineContinuation;
+        // 延续任务相关。无锁快路径：单个 continuation 经 CAS 存进原子槽（堆节点）、
+        // CompleteState 原子摘取执行；多 continuation（同 handle 扇出，罕见）才退化到
+        // mtx + vector。C# HandleStateView 仅读前 8 字节（refCount/completed），
+        // 此布局变化不破坏托管侧 ABI。
+        std::atomic<ContinuationNode*> continuationSlot{ nullptr };
+        std::atomic<bool> hasExtraContinuations{ false };
         std::vector<std::function<void()>> continuations;
-        std::mutex mtx;  // 保护 continuations
+        std::mutex mtx;  // 仅保护多 continuation 溢出 + retire 协调
 
         // Assist: Complete() 可以协助执行未完成的 range
         // readers 计数在 HandleState 上，因为 handle 生命周期长于 batch

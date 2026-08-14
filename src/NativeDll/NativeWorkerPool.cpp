@@ -83,16 +83,67 @@ namespace JobSystem
         std::atomic<uint64_t> parkWakeCount{ 0 };  // worker 实际 park（内核态等待）次数
         std::atomic<uint64_t> hotSpinHits{ 0 };    // 混合等待命中（自旋/初始即有活，未 park）
 
-        BatchDescriptor* AcquireDescriptorLocked()
+        // 近无锁：descriptor per-thread 缓存。命中零锁；共享池（freeDescriptors）仅在
+        // 缓存空/满时批量迁移（一次锁 / ~32 次）。poolId 防跨池代次（Start/Stop/Start）
+        // 复用陈旧缓存指针：换代后直接丢弃缓存（旧 descriptorStorage 已释放，不可触碰）。
+        static constexpr size_t kDescriptorCacheCap = 32;
+        struct ThreadDescriptorCache
         {
-            if (!freeDescriptors.empty())
+            uintptr_t poolId{ 0 };
+            std::vector<BatchDescriptor*> entries;
+        };
+        static thread_local ThreadDescriptorCache t_descriptorCache;
+
+        BatchDescriptor* AcquireDescriptor()
+        {
+            auto& cache = t_descriptorCache;
+            if (cache.poolId != reinterpret_cast<uintptr_t>(this))
             {
-                auto* descriptor = freeDescriptors.back();
+                cache.poolId = reinterpret_cast<uintptr_t>(this);
+                cache.entries.clear();
+            }
+            if (!cache.entries.empty())
+            {
+                auto* d = cache.entries.back();
+                cache.entries.pop_back();
+                return d;
+            }
+            // 缓存空：锁内从共享池批量补满，池空则创建。
+            std::lock_guard<std::mutex> lock(lifecycleMutex);
+            const size_t available = std::min(freeDescriptors.size(), kDescriptorCacheCap);
+            if (available > 0)
+            {
+                auto* d = freeDescriptors.back();
                 freeDescriptors.pop_back();
-                return descriptor;
+                for (size_t i = 1; i < available; ++i)
+                {
+                    cache.entries.push_back(freeDescriptors.back());
+                    freeDescriptors.pop_back();
+                }
+                return d;
             }
             descriptorStorage.push_back(std::make_unique<BatchDescriptor>());
             return descriptorStorage.back().get();
+        }
+
+        void ReleaseDescriptor(BatchDescriptor* descriptor) noexcept
+        {
+            auto& cache = t_descriptorCache;
+            if (cache.poolId != reinterpret_cast<uintptr_t>(this))
+            {
+                cache.poolId = reinterpret_cast<uintptr_t>(this);
+                cache.entries.clear();
+            }
+            if (cache.entries.size() < kDescriptorCacheCap)
+            {
+                cache.entries.push_back(descriptor);
+                return;
+            }
+            // 缓存满：整体迁移共享池（一次锁）。
+            std::lock_guard<std::mutex> lock(lifecycleMutex);
+            for (auto* d : cache.entries) freeDescriptors.push_back(d);
+            cache.entries.clear();
+            cache.entries.push_back(descriptor);
         }
 
         bool TryPopLocal(uint32_t workerIndex, WorkItem& item) noexcept
@@ -130,14 +181,12 @@ namespace JobSystem
 
             // All work items have returned before the counter reaches zero.
             // Completion may publish dependent jobs, so it must run outside the
-            // lifecycle lock.
+            // lifecycle lock. 近无锁：descriptor 归还走 per-thread 缓存（零锁除非满），
+            // outstanding 原子递减，末位递减才通知 idle（无锁 notify 对谓词等待安全）。
             batch->completion(batch->context);
-            {
-                std::lock_guard<std::mutex> lock(lifecycleMutex);
-                freeDescriptors.push_back(batch);
-                --outstandingBatches;
-                if (outstandingBatches == 0) idle.notify_all();
-            }
+            ReleaseDescriptor(batch);
+            if (outstandingBatches.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                idle.notify_all();
         }
 
         void DrainAvailableWork(uint32_t workerIndex) noexcept
@@ -189,6 +238,12 @@ namespace JobSystem
             }
         }
     };
+
+    // 定义静态 thread_local 成员。线程退出时缓存中的 descriptor 不归还共享池——
+    // 它们仍归 descriptorStorage（unique_ptr）所有，随池析构释放，无泄漏；仅
+    // 失去复用（有界浪费，正常池生命周期内 worker 常驻无影响）。
+    thread_local NativeWorkerPool::Impl::ThreadDescriptorCache
+        NativeWorkerPool::Impl::t_descriptorCache;
 
     NativeWorkerPool::NativeWorkerPool() : _impl(std::make_unique<Impl>()) {}
     NativeWorkerPool::~NativeWorkerPool() { Stop(); }
@@ -256,26 +311,30 @@ namespace JobSystem
     {
         if (slotCount == 0 || !runSlot || !completion) return false;
         std::vector<uint32_t> wakeCounts;
+        uint32_t workerCount = 0, first = 0;
         {
+            // 仅 guard 临界区：accepting 检查 + outstanding 递增 + 快照 worker。
+            // 临界区外取 descriptor（per-thread 缓存，零锁除非空）与入队（各 worker 队列锁）。
+            // outstanding 已递增，Stop 的 idle 等待在 <0 之外阻塞，workers 不会被 clear。
             std::lock_guard<std::mutex> lock(_impl->lifecycleMutex);
             if (!_impl->accepting || _impl->workers.empty()) return false;
-            auto* descriptor = _impl->AcquireDescriptorLocked();
-            descriptor->Reset(context, runSlot, completion, slotCount);
-            ++_impl->outstandingBatches;
+            _impl->outstandingBatches.fetch_add(1, std::memory_order_relaxed);
+            workerCount = static_cast<uint32_t>(_impl->workers.size());
+            first = _impl->nextSubmissionWorker++ % workerCount;
+        }
 
-            const uint32_t workerCount = static_cast<uint32_t>(_impl->workers.size());
-            wakeCounts.assign(workerCount, 0);
-            const uint32_t first = _impl->nextSubmissionWorker++ % workerCount;
-            for (uint32_t slot = 0; slot < slotCount; ++slot)
+        auto* descriptor = _impl->AcquireDescriptor();
+        descriptor->Reset(context, runSlot, completion, slotCount);
+        wakeCounts.assign(workerCount, 0);
+        for (uint32_t slot = 0; slot < slotCount; ++slot)
+        {
+            const uint32_t workerIndex = (first + slot) % workerCount;
+            auto& worker = *_impl->workers[workerIndex];
             {
-                const uint32_t workerIndex = (first + slot) % workerCount;
-                auto& worker = *_impl->workers[workerIndex];
-                {
-                    std::lock_guard<std::mutex> queueLock(worker.queueMutex);
-                    worker.queue.push_front({ descriptor, slot });
-                }
-                ++wakeCounts[workerIndex];
+                std::lock_guard<std::mutex> queueLock(worker.queueMutex);
+                worker.queue.push_front({ descriptor, slot });
             }
+            ++wakeCounts[workerIndex];
         }
         for (uint32_t i = 0; i < wakeCounts.size(); ++i)
             if (wakeCounts[i] != 0)
