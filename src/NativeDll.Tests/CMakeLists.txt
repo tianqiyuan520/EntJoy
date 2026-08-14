@@ -25,12 +25,10 @@ add_executable(NativeWorkerPoolTests
 
 target_include_directories(JobSystemTests PRIVATE
     ../NativeDll
-    ../../external/cpp-taskflow
 )
 
 target_include_directories(AssistLifetimeTests PRIVATE
     ../NativeDll
-    ../../external/cpp-taskflow
 )
 
 target_include_directories(NativeWorkerPoolTests PRIVATE

@@ -165,6 +165,92 @@ namespace
             "dependent parallel job ran before dependency");
     }
 
+    // 回归：依赖未完成时，小任务（length<=512 / rc<=1）不得 inline 提前执行。
+    // 修前这些路径绕过依赖直接同步执行（依赖顺序违反）；修后统一走异步提交
+    //（ScheduleWithDependency / ScheduleFastPath / AddContinuationOrRunNow），
+    // 由依赖完成触发。每个子 job 独立计数，失败可定位到具体入口。
+    void TestSmallJobsRespectPendingDependencies()
+    {
+        std::atomic<bool> dependencyFinished{ false };
+        auto dependency = JobSystem::Scheduler::Schedule(
+            [](void* raw)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                static_cast<std::atomic<bool>*>(raw)->store(true, std::memory_order_release);
+            }, &dependencyFinished);
+
+        struct ChildContext
+        {
+            std::atomic<bool>* dependencyFinished;
+            std::atomic<int>* childRanBeforeDep;
+        };
+
+        // ScheduleFor(length=100)：修前 length<=512 直接 inline
+        {
+            std::atomic<int> ranEarly{ 0 };
+            ChildContext ctx{ &dependencyFinished, &ranEarly };
+            auto child = JobSystem::Scheduler::ScheduleFor(
+                [](void* raw, int)
+                {
+                    auto& c = *static_cast<ChildContext*>(raw);
+                    if (!c.dependencyFinished->load(std::memory_order_acquire))
+                        c.childRanBeforeDep->fetch_add(1, std::memory_order_release);
+                }, &ctx, 100, nullptr, dependency);
+            child.Complete();
+            Require(ranEarly.load(std::memory_order_acquire) == 0,
+                "ScheduleFor(length=100) ran before pending dependency");
+        }
+
+        // ScheduleParallelFor(length=200)：修前 length<=512 直接 inline
+        {
+            std::atomic<int> ranEarly{ 0 };
+            ChildContext ctx{ &dependencyFinished, &ranEarly };
+            auto child = JobSystem::Scheduler::ScheduleParallelFor(
+                [](void* raw, int)
+                {
+                    auto& c = *static_cast<ChildContext*>(raw);
+                    if (!c.dependencyFinished->load(std::memory_order_acquire))
+                        c.childRanBeforeDep->fetch_add(1, std::memory_order_release);
+                }, &ctx, 200, 0, nullptr, dependency);
+            child.Complete();
+            Require(ranEarly.load(std::memory_order_acquire) == 0,
+                "ScheduleParallelFor(length=200) ran before pending dependency");
+        }
+
+        // ScheduleParallelForBatch(length=100, batchSize=1000) → rc<=1：修前 inline
+        {
+            std::atomic<int> ranEarly{ 0 };
+            ChildContext ctx{ &dependencyFinished, &ranEarly };
+            auto child = JobSystem::Scheduler::ScheduleParallelForBatch(
+                [](void* raw, int, int)
+                {
+                    auto& c = *static_cast<ChildContext*>(raw);
+                    if (!c.dependencyFinished->load(std::memory_order_acquire))
+                        c.childRanBeforeDep->fetch_add(1, std::memory_order_release);
+                }, &ctx, 100, 1000, nullptr, dependency);
+            child.Complete();
+            Require(ranEarly.load(std::memory_order_acquire) == 0,
+                "ScheduleParallelForBatch(rc<=1) ran before pending dependency");
+        }
+
+        // ScheduleChunks(1 chunk) → rc<=1 && workerCap<=1：修前 inline
+        {
+            std::atomic<int> ranEarly{ 0 };
+            ChildContext ctx{ &dependencyFinished, &ranEarly };
+            ChunkJobData chunk{};
+            auto child = JobSystem::Scheduler::ScheduleChunks(
+                [](void* raw, const ChunkJobData*)
+                {
+                    auto& c = *static_cast<ChildContext*>(raw);
+                    if (!c.dependencyFinished->load(std::memory_order_acquire))
+                        c.childRanBeforeDep->fetch_add(1, std::memory_order_release);
+                }, &ctx, nullptr, &chunk, 1, dependency);
+            child.Complete();
+            Require(ranEarly.load(std::memory_order_acquire) == 0,
+                "ScheduleChunks(rc<=1) ran before pending dependency");
+        }
+    }
+
     void TestAutomaticBatchDensity()
     {
         constexpr int length = 100'000;
@@ -176,10 +262,13 @@ namespace
             }, &callbackCount, length, 0);
         handle.Complete();
         const int workers = JobSystem::CurrentWorkerCount();
-        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 3,
+        // Default tile policy is kDefaultTilesPerWorker == 16 tiles/worker
+        // (grid-search tuned; the old bound here predated the 4→16 change).
+        // rc = ceil(N / ceil(N / (W*16))) lands within [W*16 - 1, W*16].
+        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 16 - 1,
             "automatic batching created too few work units for tail balancing");
-        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 4 + 1,
-            "automatic batching exceeded the four-per-worker target");
+        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 16,
+            "automatic batching exceeded the per-worker tile target");
     }
 
     struct ChunkRangeContext
@@ -282,6 +371,205 @@ namespace
         combined.Complete();
         Require(completed.load(std::memory_order_acquire) == 2,
             "combined dependency completed before its inputs");
+    }
+
+    // ============================================================
+    // B1: transitive dependency-chain assist (V-D) + nested Complete (V-A)
+    // ============================================================
+    // 每个链环用独立的 gate：tile 回调在完成前阻塞于 releaseWorkers，
+    // 只有标记为 "chain completer" 的线程执行 tile 才能放行。由于 worker
+    // 在回调内阻塞时最多持有一个已认领 tile，Complete-caller 的协助循环
+    // 永远有可认领的剩余 tile —— 判定是确定性的（无竞态）。
+    struct ChainLinkContext
+    {
+        std::vector<std::atomic<int>> hits;
+        std::atomic<int> cleanupCount{ 0 };
+        std::atomic<int> completerExecutions{ 0 };
+        std::atomic<bool> releaseWorkers{ false };
+        // std::atomic<int> is non-movable, so the vector must be sized at
+        // construction (resize() would need to relocate elements).
+        explicit ChainLinkContext(size_t size) : hits(size) {}
+    };
+
+    thread_local bool g_isChainCompleter = false;
+
+    void ExecuteGatedChainRange(void* raw, int start, int count)
+    {
+        auto& context = *static_cast<ChainLinkContext*>(raw);
+        if (g_isChainCompleter)
+        {
+            // Complete-caller 线程执行了本链环的 tile —— 传递协助的证据。
+            context.completerExecutions.fetch_add(1, std::memory_order_relaxed);
+            context.releaseWorkers.store(true, std::memory_order_release);
+            context.releaseWorkers.notify_all();
+        }
+        else
+        {
+            // worker 阻塞：等待 completer 线程证明它能协助本链环。
+            context.releaseWorkers.wait(false, std::memory_order_acquire);
+        }
+        for (int index = start; index < start + count; ++index)
+            context.hits[static_cast<size_t>(index)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void CleanupChainGate(void* raw)
+    {
+        static_cast<ChainLinkContext*>(raw)->cleanupCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TestTransitiveAssistDrivesDependencyChain()
+    {
+        constexpr int length = 100'000;
+        constexpr int batchSize = 257;
+        ChainLinkContext c(length), b(length), a(length);
+
+        // A ← B ← C 依赖链（C 为根，先提交）。
+        auto cHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &c, length, batchSize, &CleanupChainGate);
+        auto bHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &b, length, batchSize, &CleanupChainGate, cHandle);
+        auto aHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &a, length, batchSize, &CleanupChainGate, bHandle);
+
+        // 看门狗：B1 缺失时主线程 park 在未提交的目标上、gate 死锁。触发即
+        // 记录失败（watchdogFired，断言会失败）——不再静默放行掩盖 flake。
+        // 上限定 2s：远大于 assist 墙钟预算（10ms），只拦真死锁，不误伤慢链。
+        std::atomic<bool> finished{ false };
+        std::atomic<bool> watchdogFired{ false };
+        std::jthread watchdog([&]
+        {
+            for (int i = 0; i < 2000 && !finished.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!finished.load(std::memory_order_acquire))
+                watchdogFired.store(true, std::memory_order_relaxed);
+            c.releaseWorkers.store(true, std::memory_order_release);
+            c.releaseWorkers.notify_all();
+            b.releaseWorkers.store(true, std::memory_order_release);
+            b.releaseWorkers.notify_all();
+            a.releaseWorkers.store(true, std::memory_order_release);
+            a.releaseWorkers.notify_all();
+        });
+
+        g_isChainCompleter = true;
+        aHandle.Complete();
+        g_isChainCompleter = false;
+        finished.store(true, std::memory_order_release);
+
+        Require(!watchdogFired.load(std::memory_order_relaxed),
+            "B1 chain deadlocked; watchdog had to release the gates");
+
+        for (auto* link : { &c, &b, &a })
+        {
+            for (const auto& hit : link->hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "B1 chain link tile was missed or duplicated");
+            Require(link->cleanupCount.load(std::memory_order_relaxed) == 1,
+                "B1 chain link cleanup must run exactly once");
+        }
+        // 传递协助证明：C/B/A 的 workers 都被 gate 阻塞，只能由 Complete-caller
+        // 执行 tile 放行 —— 三个环的 completerExecutions 必须都 > 0。
+        Require(c.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 Complete caller did not transitively assist chain root C");
+        Require(b.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 Complete caller did not transitively assist chain link B");
+        Require(a.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 Complete caller did not transitively assist chain link A");
+    }
+
+    struct NestedCompleteJobContext
+    {
+        JobSystem::JobHandle aHandle;
+        std::atomic<bool>* enteredComplete;
+        std::atomic<bool>* go;
+    };
+
+    // ScheduleFor(length=5000) → SubmitBackendAsync：单 slot 池任务，恰好一个
+    // pool worker 执行。index==0 时进入嵌套 Complete（停在 go 上直到链构造完），
+    // 其余 index 直接返回。该 worker 在嵌套期间不占池 slot，成为链的执行者。
+    void ExecuteNestedCompleteJob(void* raw, int index)
+    {
+        if (index != 0) return;
+        auto& context = *static_cast<NestedCompleteJobContext*>(raw);
+        g_isChainCompleter = true;
+        context.enteredComplete->store(true, std::memory_order_release);
+        while (!context.go->load(std::memory_order_acquire))
+            std::this_thread::yield();
+        context.aHandle.Complete();
+        g_isChainCompleter = false;
+    }
+
+    void TestNestedCompleteResolvesWithoutWorkerExhaustion()
+    {
+        constexpr int length = 100'000;
+        constexpr int batchSize = 257;
+        ChainLinkContext c(length), b(length), a(length);
+        std::atomic<bool> enteredComplete{ false };
+        std::atomic<bool> go{ false };
+        NestedCompleteJobContext jobContext;
+        jobContext.enteredComplete = &enteredComplete;
+        jobContext.go = &go;
+
+        // 先提交嵌套 job（单 slot，恰好一个 worker 执行）：该 worker 停在 go 上，
+        // 其余 W-1 个 worker 空闲。之后链 C/B/A 提交时才不会耗尽 worker。
+        // （旧设计先提交链，所有 worker 都被 gate 阻塞 → 嵌套 job 无 worker 执行。）
+        auto jobHandle = JobSystem::Scheduler::ScheduleFor(
+            &ExecuteNestedCompleteJob, &jobContext, 5000, nullptr, {});
+
+        // 等 worker 进入嵌套 job（停在 go 上）再构造链，确保它不会抢链的 slot。
+        for (int retry = 0; retry < 50'000 && !enteredComplete.load(std::memory_order_acquire); ++retry)
+            std::this_thread::yield();
+        Require(enteredComplete.load(std::memory_order_acquire),
+            "B1 nested Complete was never entered by a pool worker");
+
+        auto cHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &c, length, batchSize, &CleanupChainGate);
+        auto bHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &b, length, batchSize, &CleanupChainGate, cHandle);
+        auto aHandle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            &ExecuteGatedChainRange, &a, length, batchSize, &CleanupChainGate, bHandle);
+
+        // 放行嵌套 completer：它成为整条链的执行者（驱动 C→B→A）。
+        jobContext.aHandle = aHandle;
+        go.store(true, std::memory_order_release);
+
+        // 看门狗：B1 缺失时 completer worker park、其他 worker 被 gate 阻塞 →
+        // 死锁。触发即记录失败（watchdogFired，断言会失败），上限定 2s。
+        std::atomic<bool> finished{ false };
+        std::atomic<bool> watchdogFired{ false };
+        std::jthread watchdog([&]
+        {
+            for (int i = 0; i < 2000 && !finished.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!finished.load(std::memory_order_acquire))
+                watchdogFired.store(true, std::memory_order_relaxed);
+            c.releaseWorkers.store(true, std::memory_order_release);
+            c.releaseWorkers.notify_all();
+            b.releaseWorkers.store(true, std::memory_order_release);
+            b.releaseWorkers.notify_all();
+            a.releaseWorkers.store(true, std::memory_order_release);
+            a.releaseWorkers.notify_all();
+        });
+
+        jobHandle.Complete();
+        finished.store(true, std::memory_order_release);
+
+        Require(!watchdogFired.load(std::memory_order_relaxed),
+            "B1 nested chain deadlocked; watchdog had to release the gates");
+
+        for (auto* link : { &c, &b, &a })
+        {
+            for (const auto& hit : link->hits)
+                Require(hit.load(std::memory_order_relaxed) == 1,
+                    "B1 nested chain link tile was missed or duplicated");
+            Require(link->cleanupCount.load(std::memory_order_relaxed) == 1,
+                "B1 nested chain link cleanup must run exactly once");
+        }
+        Require(c.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 nested worker did not transitively assist chain root C");
+        Require(b.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 nested worker did not transitively assist chain link B");
+        Require(a.completerExecutions.load(std::memory_order_relaxed) > 0,
+            "B1 nested worker did not transitively assist chain link A");
     }
 
     void TestShutdownWithOutstandingWork()
@@ -596,46 +884,6 @@ namespace
                 THREAD_PRIORITY_NORMAL,
             "Chunk worker priority can preempt the completing thread");
     }
-
-    struct TaskflowWorkerPriorityContext
-    {
-        std::atomic<int> observedPriority{ INT_MIN };
-        std::thread::id caller;
-    };
-
-    void RecordTaskflowWorkerPriority(void* raw, int, int)
-    {
-        auto& context = *static_cast<TaskflowWorkerPriorityContext*>(raw);
-        if (std::this_thread::get_id() != context.caller)
-        {
-            int expected = INT_MIN;
-            context.observedPriority.compare_exchange_strong(
-                expected,
-                GetThreadPriority(GetCurrentThread()),
-                std::memory_order_release,
-                std::memory_order_relaxed);
-        }
-    }
-
-    void TestTaskflowWorkersDoNotPreemptCompletingThread()
-    {
-        TaskflowWorkerPriorityContext context;
-        context.caller = std::this_thread::get_id();
-        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
-            &RecordTaskflowWorkerPriority, &context, 100'000, 1);
-
-        for (int retry = 0;
-            retry < 1'000 && context.observedPriority.load(std::memory_order_acquire) == INT_MIN;
-            ++retry)
-        {
-            std::this_thread::yield();
-        }
-        handle.Complete();
-
-        Require(context.observedPriority.load(std::memory_order_acquire) ==
-                THREAD_PRIORITY_NORMAL,
-            "Taskflow worker priority can preempt the completing thread");
-    }
 #endif
 
     void TestTraceOverflow()
@@ -846,7 +1094,7 @@ namespace
         Require(executions.load(std::memory_order_relaxed) == chunkCount,
             "trace identity test missed chunk callbacks");
         Require(sawCompleteEnter, "trace did not record CompleteEnter");
-        Require(sawWorkerExecution, "trace did not identify a Taskflow worker");
+        Require(sawWorkerExecution, "trace did not identify a worker execution");
         JobSystem::TraceClear();
     }
 
@@ -1334,102 +1582,6 @@ namespace
             "slow batch was not correlated with the maximum batch sample");
     }
 
-    void SetBackendEnvironment(const char* value)
-    {
-#ifdef _WIN32
-        _putenv_s("ENTJOY_JOB_BACKEND", value ? value : "");
-#else
-        if (value) setenv("ENTJOY_JOB_BACKEND", value, 1);
-        else unsetenv("ENTJOY_JOB_BACKEND");
-#endif
-    }
-
-    void TestExecutionBackendSelection()
-    {
-        constexpr int itemCount = 31;
-        std::vector<ChunkJobData> chunks(itemCount);
-        std::atomic<int> callbacks{ 0 };
-        auto scheduleChunkBatch = [&]
-        {
-            auto handle = JobSystem::Scheduler::ScheduleChunks(
-                [](void* raw, const ChunkJobData*)
-                {
-                    static_cast<std::atomic<int>*>(raw)->fetch_add(
-                        1, std::memory_order_relaxed);
-                },
-                &callbacks, nullptr, chunks.data(), itemCount, {},
-                JobSystem::ChunkScheduleMode::PublishAssist, 4, 1);
-            handle.Complete();
-        };
-
-        JobSystem::ResetStatsSnapshot();
-        scheduleChunkBatch();
-        JobSystem::JobSystemStatsSnapshot stats{};
-        JobSystem::GetStatsSnapshot(&stats);
-        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 1,
-            "default backend was not exclusively the native worker pool");
-
-        JobSystem::Scheduler::Shutdown();
-        SetBackendEnvironment("taskflow");
-        JobSystem::Scheduler::Initialize(4);
-        callbacks.store(0, std::memory_order_relaxed);
-        JobSystem::ResetStatsSnapshot();
-        scheduleChunkBatch();
-        JobSystem::GetStatsSnapshot(&stats);
-        Require(stats.taskflowBatches == 1 && stats.nativeBatches == 0,
-            "explicit Taskflow compatibility backend was not selected");
-
-        JobSystem::Scheduler::Shutdown();
-        SetBackendEnvironment("native");
-        JobSystem::Scheduler::Initialize(4);
-        callbacks.store(0, std::memory_order_relaxed);
-        JobSystem::ResetStatsSnapshot();
-        scheduleChunkBatch();
-        std::atomic<int> parallelItems{ 0 };
-        auto parallel = JobSystem::Scheduler::ScheduleParallelForBatch(
-            [](void* raw, int, int count)
-            {
-                static_cast<std::atomic<int>*>(raw)->fetch_add(
-                    count, std::memory_order_relaxed);
-            },
-            &parallelItems, 10'000, -100);
-        parallel.Complete();
-        std::atomic<int> forItems{ 0 };
-        auto forHandle = JobSystem::Scheduler::ScheduleFor(
-            [](void* raw, int)
-            {
-                static_cast<std::atomic<int>*>(raw)->fetch_add(
-                    1, std::memory_order_relaxed);
-            },
-            &forItems, 10'000);
-        forHandle.Complete();
-        JobSystem::GetStatsSnapshot(&stats);
-        Require(callbacks.load(std::memory_order_relaxed) == itemCount,
-            "native backend missed or duplicated chunks");
-        Require(parallelItems.load(std::memory_order_relaxed) == 10'000,
-            "native backend missed ParallelForBatch items");
-        Require(forItems.load(std::memory_order_relaxed) == 10'000,
-            "native backend missed ScheduleFor items");
-        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 2,
-            "native backend batch counters were not mutually exclusive");
-
-        JobSystem::Scheduler::Shutdown();
-        JobSystem::ResetStatsSnapshot();
-        SetBackendEnvironment("invalid-value");
-        JobSystem::Scheduler::Initialize(4);
-        callbacks.store(0, std::memory_order_relaxed);
-        scheduleChunkBatch();
-        JobSystem::GetStatsSnapshot(&stats);
-        Require(stats.invalidBackendSelections == 1,
-            "invalid backend selection was not diagnosed");
-        Require(stats.taskflowBatches == 0 && stats.nativeBatches == 1,
-            "invalid backend did not fall back to the native worker pool");
-
-        JobSystem::Scheduler::Shutdown();
-        SetBackendEnvironment(nullptr);
-        JobSystem::Scheduler::Initialize();
-    }
-
     void TestWorkerCapParameterized()
     {
         const int workerCount = JobSystem::CurrentWorkerCount();
@@ -1577,13 +1729,13 @@ int main()
         std::cout << "PASS ExplicitBatchSizes\n";
         TestDependencyOrdering();
         std::cout << "PASS DependencyOrdering\n";
+        TestSmallJobsRespectPendingDependencies();
+        std::cout << "PASS SmallJobsRespectPendingDependencies\n";
         TestChunkRangeExactOnce();
         std::cout << "PASS ChunkRangeExactOnce\n";
 #ifdef _WIN32
         TestChunkWorkersDoNotPreemptCompletingThread();
         std::cout << "PASS ChunkWorkersDoNotPreemptCompletingThread\n";
-        TestTaskflowWorkersDoNotPreemptCompletingThread();
-        std::cout << "PASS TaskflowWorkersDoNotPreemptCompletingThread\n";
 #endif
         TestConcurrentChunkComplete();
         std::cout << "PASS ConcurrentChunkComplete\n";
@@ -1599,12 +1751,14 @@ int main()
         std::cout << "PASS CopiedHandleCleansUpOnce\n";
         TestCombinedDependencies();
         std::cout << "PASS CombinedDependencies\n";
+        TestTransitiveAssistDrivesDependencyChain();
+        std::cout << "PASS TransitiveAssistDrivesDependencyChain\n";
+        TestNestedCompleteResolvesWithoutWorkerExhaustion();
+        std::cout << "PASS NestedCompleteResolvesWithoutWorkerExhaustion\n";
         TestShutdownWithOutstandingWork();
         std::cout << "PASS ShutdownWithOutstandingWork\n";
         TestWorkerCapParameterized();
         std::cout << "PASS WorkerCapParameterized\n";
-        TestExecutionBackendSelection();
-        std::cout << "PASS ExecutionBackendSelection\n";
         JobSystem::Scheduler::Shutdown();
         return 0;
     }

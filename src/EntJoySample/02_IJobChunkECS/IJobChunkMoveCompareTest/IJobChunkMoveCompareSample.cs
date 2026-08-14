@@ -842,12 +842,12 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                     // Detailed numbers come from the final warmup frame and are
                     // intentionally separate from the clean measured samples.
                     NativeJobSystemStats stats = diagnosticStats;
-                    string backend = stats.NativeBatches > 0 ? "Native" : "Taskflow";
+                    string backend = "Native";
                     Console.WriteLine($"  ── Config ──────────────────────────────");
                     Console.WriteLine($"     backend={backend,-7} batches={stats.PublishedJobs}  " +
                         $"participants={stats.FrameTasksSubmitted}/{stats.ActiveWorkersPeak}  " +
                         $"workerTarget={stats.WorkerTargetTotal}  " +
-                        $"taskflowBatches={stats.TaskflowBatches}  native={stats.NativeBatches}");
+                        $"native={stats.NativeBatches}");
                     Console.WriteLine($"  ── Work ────────────────────────────────");
                     Console.WriteLine($"     tiles={stats.TotalTilesPublished}  " +
                         $"local={stats.LocalTiles}  stolen={stats.StolenTiles}  " +

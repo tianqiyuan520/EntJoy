@@ -48,6 +48,11 @@ extern "C" {
     typedef void  (*PersistentFreeCallback)(void* ptr);
     JOB_API void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free);
 
+    // B5: 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、出口 cb(0)，
+    // C# 异常按 batch 归属（修 V-B 全局异常队列归属错乱）。
+    typedef void (*CurrentBatchIdCallback)(uint64_t batchId);
+    JOB_API void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb);
+
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);
@@ -59,6 +64,8 @@ extern "C" {
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
+    // B5: 读 handle 的 diagnosticBatchId（Complete 后 batch 必已 submit，id 已设置）。
+    JOB_API uint64_t JobSystem_GetDiagnosticBatchId(void* handle);
     // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
     // 返回已完成的 handle
     JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
@@ -135,7 +142,6 @@ extern "C" {
         unsigned long long workerStartSpreadEwmaNs;
         unsigned long long lastTileToTopologyDoneEwmaNs;
         unsigned long long completeWakeToReturnEwmaNs;
-        unsigned long long taskflowBatches;
         unsigned long long nativeBatches;
         unsigned long long invalidBackendSelections;
         // Appended exact per-batch timing distribution; keep order in sync with C#.
