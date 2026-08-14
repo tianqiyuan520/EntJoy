@@ -1,5 +1,4 @@
-﻿/*
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -41,6 +40,11 @@ public class GridSearch2D : IDisposable
     public float2 GridMax => _minMaxPositions[1];
     public int2 GridDimensions => _gridDimensions[0];
     public float Resolution => _gridResolution[0];
+
+    // GPU offload 上传访问器（09_GPU_GridSearch 读取驻留数据）
+    internal NativeArray<float2> SortedPositions => _sortedPositions;
+    internal NativeArray<int2> HashIndex => _hashIndex;
+    internal NativeList<int2> CellStartEnd => _cellStartEnd;
 
     public GridSearch2D(float resolution = -1f, int targetGrid = 32)
     {
@@ -706,5 +710,5 @@ public class GridSearch2D : IDisposable
     }
 
 }
-*/
+
 

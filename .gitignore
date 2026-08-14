@@ -55,6 +55,9 @@ src/NativeDll.Tests/build*
 src/NativeDll.Tests/*.vcxproj
 src/NativeDll.Tests/*.sln
 
+# Docs are local-only; publish a public subset under docs/public if needed
+/docs/
+
 # Only public documentation belongs to this repository.
 /docs/*
 !/docs/public/
