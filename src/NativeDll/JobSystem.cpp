@@ -925,15 +925,6 @@ namespace JobSystem
         EntityBatchRange
     };
 
-    enum class TileClaimMode : uint8_t
-    {
-        // Unity-style parallel-for ranges: one cache-hot atomic cursor and
-        // coarse callbacks. This avoids ECS partition scans for short jobs.
-        AtomicRange,
-        // ECS jobs keep stable local ownership and steal only at the tail.
-        LocalPartitions
-    };
-
     struct ExecutionTile {
         uint32_t firstItem;
         uint32_t itemCount;
@@ -983,30 +974,6 @@ namespace JobSystem
         return i;   // 实际 tile 数
     }
 
-    // One cache line per participant. Both boundaries live in one atomic word,
-    // so owner-front claims and thief-back claims cannot overlap even when they
-    // race. This replaces the single cache-line-hot nextTile counter.
-    struct alignas(64) LocalPartition
-    {
-        std::atomic<uint64_t> bounds{ 0 };
-    };
-
-    static constexpr uint64_t PackBounds(uint32_t front, uint32_t back) noexcept
-    {
-        return static_cast<uint64_t>(front) |
-            (static_cast<uint64_t>(back) << 32);
-    }
-
-    static constexpr uint32_t BoundsFront(uint64_t bounds) noexcept
-    {
-        return static_cast<uint32_t>(bounds);
-    }
-
-    static constexpr uint32_t BoundsBack(uint64_t bounds) noexcept
-    {
-        return static_cast<uint32_t>(bounds >> 32);
-    }
-
     // ============================================================
     // BatchState
     // ============================================================
@@ -1022,11 +989,7 @@ namespace JobSystem
         // storage boundaries; tiles are contiguous descriptor/index ranges.
         ExecutionTile* tiles{ nullptr };
         uint32_t tileCount{ 0 };
-        TileClaimMode claimMode{ TileClaimMode::LocalPartitions };
         std::atomic<uint32_t> nextTile{ 0 };
-        LocalPartition* partitions{ nullptr };
-        uint32_t partitionCount{ 0 };
-        std::atomic<uint32_t> assistPartitionCursor{ 0 };
         uint32_t workerCount{ 0 };
         std::atomic<uint32_t> workerSlotsEntered{ 0 };
         // Logical completion is driven by finished tiles, not by participant
@@ -1113,14 +1076,11 @@ namespace JobSystem
         BatchState batch;
         ExecutionTile* tileBuffer{ nullptr };
         uint32_t tileCapacity{ 0 };
-        LocalPartition* partitionBuffer{ nullptr };
-        uint32_t partitionCapacity{ 0 };
 
         BatchStorage() noexcept { batch.storage = this; }
         ~BatchStorage()
         {
             delete[] tileBuffer;
-            delete[] partitionBuffer;
         }
     };
 
@@ -1173,9 +1133,7 @@ namespace JobSystem
         t_batchStorageCache.entries.clear();
     }
 
-    static BatchStorage* AcquireBatchStorage(
-        uint32_t tileCapacity,
-        uint32_t partitionCapacity)
+    static BatchStorage* AcquireBatchStorage(uint32_t tileCapacity)
     {
         BatchStorage* storage = nullptr;
         if (!t_batchStorageCache.entries.empty())
@@ -1218,17 +1176,8 @@ namespace JobSystem
             storage->tileBuffer = replacement;
             storage->tileCapacity = tileCapacity;
         }
-        if (storage->partitionCapacity < partitionCapacity)
-        {
-            auto* replacement = new LocalPartition[partitionCapacity];
-            delete[] storage->partitionBuffer;
-            storage->partitionBuffer = replacement;
-            storage->partitionCapacity = partitionCapacity;
-        }
         storage->batch.storage = storage;
         storage->batch.tiles = tileCapacity > 0 ? storage->tileBuffer : nullptr;
-        storage->batch.partitions = partitionCapacity > 0
-            ? storage->partitionBuffer : nullptr;
         return storage;
     }
 
@@ -1342,92 +1291,6 @@ namespace JobSystem
         return true;
     }
 
-    static void AtomicMaxTimestamp(
-        std::atomic<uint64_t>& target,
-        uint64_t value) noexcept
-    {
-        uint64_t current = target.load(std::memory_order_relaxed);
-        while (value > current && !target.compare_exchange_weak(
-            current, value, std::memory_order_release,
-            std::memory_order_relaxed)) {}
-    }
-
-    static uint32_t PartitionRemaining(const LocalPartition& partition) noexcept
-    {
-        const uint64_t bounds = partition.bounds.load(std::memory_order_acquire);
-        const uint32_t front = BoundsFront(bounds);
-        const uint32_t back = BoundsBack(bounds);
-        return back > front ? back - front : 0;
-    }
-
-    static bool TryTakePartitionFrontSpan(
-        LocalPartition& partition,
-        uint32_t maxCount,
-        uint32_t& first,
-        uint32_t& end) noexcept
-    {
-        uint64_t bounds = partition.bounds.load(std::memory_order_relaxed);
-        while (true)
-        {
-            const uint32_t front = BoundsFront(bounds);
-            const uint32_t back = BoundsBack(bounds);
-            if (front >= back) return false;
-            const uint32_t count = std::min(maxCount, back - front);
-            const uint64_t next = PackBounds(front + count, back);
-            if (partition.bounds.compare_exchange_weak(
-                bounds, next, std::memory_order_acq_rel,
-                std::memory_order_relaxed))
-            {
-                first = front;
-                end = front + count;
-                return true;
-            }
-        }
-    }
-
-    static bool TryStealPartitionHalf(
-        LocalPartition& partition,
-        uint32_t& first,
-        uint32_t& end) noexcept
-    {
-        uint64_t bounds = partition.bounds.load(std::memory_order_acquire);
-        while (true)
-        {
-            const uint32_t front = BoundsFront(bounds);
-            const uint32_t back = BoundsBack(bounds);
-            const uint32_t remaining = back > front ? back - front : 0;
-            if (remaining < 2) return false;
-            const uint32_t stealCount = remaining / 2;
-            const uint32_t newBack = back - stealCount;
-            const uint64_t next = PackBounds(front, newBack);
-            if (partition.bounds.compare_exchange_weak(
-                bounds, next, std::memory_order_acq_rel,
-                std::memory_order_acquire))
-            {
-                first = newBack;
-                end = back;
-                return true;
-            }
-        }
-    }
-
-    static void InitializeLocalPartitions(BatchState* batch) noexcept
-    {
-        batch->partitionCount = batch->workerCount;
-        batch->assistPartitionCursor.store(0, std::memory_order_relaxed);
-        for (uint32_t slot = 0; slot < batch->partitionCount; ++slot)
-        {
-            const uint32_t first = static_cast<uint32_t>(
-                (static_cast<uint64_t>(batch->tileCount) * slot) /
-                batch->partitionCount);
-            const uint32_t end = static_cast<uint32_t>(
-                (static_cast<uint64_t>(batch->tileCount) * (slot + 1)) /
-                batch->partitionCount);
-            batch->partitions[slot].bounds.store(
-                PackBounds(first, end), std::memory_order_relaxed);
-        }
-    }
-
     static void RecordWorkerEntry(BatchState* batch) noexcept
     {
         const uint64_t now = MonotonicNowNs();
@@ -1464,157 +1327,21 @@ namespace JobSystem
         g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
     }
 
-    // Worker loop for partition mode:
-    // 1. Process local tiles from partition[slot] front
-    // 2. Steal half from victims
-    static void WorkerTileLoop(BatchState* batch, uint32_t slot) noexcept
-    {
-        if (!batch || slot >= batch->workerCount || batch->tileCount == 0) return;
-        if (batch->claimMode == TileClaimMode::AtomicRange)
-        {
-            WorkerAtomicRangeLoop(batch);
-            return;
-        }
-        RecordWorkerEntry(batch);
-
-        const uint64_t active =
-            g_activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
-        uint64_t peak = g_activeWorkersPeak.load(std::memory_order_relaxed);
-        while (active > peak && !g_activeWorkersPeak.compare_exchange_weak(
-            peak, active, std::memory_order_relaxed)) {}
-        g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
-
-        uint64_t localCount = 0;
-        uint64_t stolenCount = 0;
-        uint64_t stealAttempts = 0;
-        uint64_t stealSuccesses = 0;
-        uint64_t victimScans = 0;
-        bool executedAny = false;
-        uint32_t stealRound = 0;
-
-        // Keep partition-front claim granularity at one tile so that
-        // the main thread's assist path can still pick up remaining work
-        // when a worker is slow to wake (cold cache / Sleep scenario).
-        constexpr uint32_t kLocalClaimSize = 1;
-        uint32_t first = 0;
-        uint32_t end = 0;
-        while (TryTakePartitionFrontSpan(
-            batch->partitions[slot], kLocalClaimSize, first, end))
-        {
-            for (uint32_t local = first; local < end; ++local)
-            {
-                TryExecuteOneTile(batch, local);
-                ++localCount;
-                executedAny = true;
-            }
-        }
-
-        // Only the tail-balancing path scans other partitions. Steal a span,
-        // not a single tile, so the successful CAS is amortized over half of a
-        // victim's remaining work.
-        while (true)
-        {
-            uint32_t victim = batch->partitionCount;
-            uint32_t largest = 0;
-            const uint32_t candidatesToScan = std::min<uint32_t>(
-                4, batch->partitionCount > 0 ? batch->partitionCount - 1 : 0);
-            for (uint32_t scan = 0; scan < candidatesToScan; ++scan)
-            {
-                uint32_t candidate =
-                    (slot + 1 + stealRound + scan) % batch->partitionCount;
-                if (candidate == slot)
-                    candidate = (candidate + 1) % batch->partitionCount;
-                const uint32_t remaining =
-                    PartitionRemaining(batch->partitions[candidate]);
-                ++victimScans;
-                if (remaining > largest)
-                {
-                    largest = remaining;
-                    victim = candidate;
-                }
-            }
-            stealRound += candidatesToScan;
-            if (victim == batch->partitionCount || largest == 0) break;
-
-            ++stealAttempts;
-            first = 0;
-            end = 0;
-            if (largest == 1)
-            {
-                if (!TryTakePartitionFrontSpan(
-                    batch->partitions[victim], 1, first, end))
-                    continue;
-            }
-            else if (!TryStealPartitionHalf(
-                batch->partitions[victim], first, end))
-            {
-                continue;
-            }
-
-            ++stealSuccesses;
-            for (uint32_t stolen = first; stolen < end; ++stolen)
-            {
-                TryExecuteOneTile(batch, stolen);
-                ++stolenCount;
-                executedAny = true;
-            }
-        }
-
-        if (executedAny)
-            AtomicMaxTimestamp(batch->lastTileAt, MonotonicNowNs());
-        g_workerExecutedRanges.fetch_add(
-            localCount + stolenCount, std::memory_order_relaxed);
-        g_localTiles.fetch_add(localCount, std::memory_order_relaxed);
-        g_stolenTiles.fetch_add(stolenCount, std::memory_order_relaxed);
-        g_stealAttempts.fetch_add(stealAttempts, std::memory_order_relaxed);
-        g_stealSuccesses.fetch_add(stealSuccesses, std::memory_order_relaxed);
-        g_stealCount.fetch_add(stealSuccesses, std::memory_order_relaxed);
-        g_victimScans.fetch_add(victimScans, std::memory_order_relaxed);
-        if (stealAttempts != 0 && stealSuccesses == 0)
-            g_stealEmptyExits.fetch_add(1, std::memory_order_relaxed);
-        g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
-    }
-
     static bool AssistExecuteOneTile(void* ptr) noexcept
     {
         auto* batch = static_cast<BatchState*>(ptr);
         if (!batch) return false;
-        if (batch->claimMode == TileClaimMode::AtomicRange)
-        {
-            const uint32_t tile = batch->nextTile.fetch_add(
-                1, std::memory_order_relaxed);
-            if (tile >= batch->tileCount) return false;
-            SetCurrentBatchId(batch->diagnosticId);
-            TryExecuteOneTile(batch, tile);
-            SetCurrentBatchId(0);
-            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
-            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        }
-        if (batch->partitionCount == 0) return false;
-        const uint32_t start = batch->assistPartitionCursor.fetch_add(
-            1, std::memory_order_relaxed) % batch->partitionCount;
-        for (uint32_t offset = 0; offset < batch->partitionCount; ++offset)
-        {
-            const uint32_t partition = (start + offset) % batch->partitionCount;
-            uint32_t first = 0;
-            uint32_t end = 0;
-            if (!TryTakePartitionFrontSpan(
-                batch->partitions[partition], 1, first, end))
-                continue;
-            SetCurrentBatchId(batch->diagnosticId);
-            TryExecuteOneTile(batch, first);
-            SetCurrentBatchId(0);
-            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            g_assistTiles.fetch_add(1, std::memory_order_relaxed);
-            batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
-            AtomicMaxTimestamp(batch->lastTileAt, MonotonicNowNs());
-            return true;
-        }
-        return false;
+        const uint32_t tile = batch->nextTile.fetch_add(
+            1, std::memory_order_relaxed);
+        if (tile >= batch->tileCount) return false;
+        SetCurrentBatchId(batch->diagnosticId);
+        TryExecuteOneTile(batch, tile);
+        SetCurrentBatchId(0);
+        g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+        g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+        g_assistTiles.fetch_add(1, std::memory_order_relaxed);
+        batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 
     static void RecordTopologyCompletion(BatchState* batch) noexcept
@@ -1774,7 +1501,7 @@ namespace JobSystem
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
         // B5: worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
         SetCurrentBatchId(batch->diagnosticId);
-        WorkerTileLoop(batch, slot);
+        WorkerAtomicRangeLoop(batch);
         SetCurrentBatchId(0);
         const int endProcessor = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
@@ -2372,13 +2099,12 @@ namespace JobSystem
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(tileCount), 0);
+            static_cast<uint32_t>(tileCount));
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->tileCount = static_cast<uint32_t>(tileCount);
-        batch->claimMode = TileClaimMode::AtomicRange;
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
         if (guided)
@@ -2448,12 +2174,11 @@ namespace JobSystem
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;
         auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(tileCount), 0);
+            static_cast<uint32_t>(tileCount));
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->tileCount = static_cast<uint32_t>(tileCount);
-        batch->claimMode = TileClaimMode::AtomicRange;
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
         if (guided)
@@ -2536,7 +2261,7 @@ namespace JobSystem
             : static_cast<uint32_t>(rc);
         const int targetWorkers = ResolveWorkerTarget(
             workerCap, static_cast<int>(tileCount));
-        auto* storage = AcquireBatchStorage(tileCount, 0);
+        auto* storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
@@ -2568,7 +2293,6 @@ namespace JobSystem
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
-            batch->claimMode = TileClaimMode::AtomicRange;
             batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(tileCount, std::memory_order_relaxed);
             batch->workerCount = static_cast<uint32_t>(targetWorkers);
