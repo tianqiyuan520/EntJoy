@@ -597,7 +597,35 @@ namespace JobSystem
         return std::max(1, g_numThreads);
     }
 
-    // ---------- State lifecycle (unchanged) ----------
+    // ---------- State lifecycle ----------
+    // 无锁 continuation 节点：fn 完整构造后才 CAS 入原子槽（无发布竞态）。
+    // CompleteState 摘取后执行并 delete。槽位 ≤1 节点，CAS 只对 nullptr 比较，
+    // 无 Treiber 栈的 ABA 问题（不会拿陈旧节点指针做比较）。
+    struct ContinuationNode {
+        std::function<void()> fn;
+        ContinuationNode* next{ nullptr };
+    };
+
+    // 执行并释放一条 continuation 链（含单个节点）。异常吞掉，与旧行为一致。
+    static void RunContinuationChain(ContinuationNode* head) noexcept
+    {
+        while (head)
+        {
+            ContinuationNode* next = head->next;
+            if (head->fn) { try { head->fn(); } catch (...) {} }
+            delete head;
+            head = next;
+        }
+    }
+
+    // 兜底取回 state 上可能残留的 continuation（正常路径 CompleteState 已摘尽；
+    // 仅供 RecycleState 防泄漏）。
+    static void DrainContinuationSlot(HandleState* state) noexcept
+    {
+        if (auto* leftover = state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel))
+            RunContinuationChain(leftover);
+    }
+
     void RecycleState(HandleState* state) noexcept
     {
         if (!state) return;
@@ -611,7 +639,8 @@ namespace JobSystem
         for (auto* dep : state->dependencies)
             ReleaseState(dep);
         state->dependencies.clear();
-        state->inlineContinuation = {};
+        DrainContinuationSlot(state);
+        state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
         state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
@@ -662,7 +691,8 @@ namespace JobSystem
         state->backendRetired.store(true, std::memory_order_relaxed);
         state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
-        state->inlineContinuation = {};
+        state->continuationSlot.store(nullptr, std::memory_order_relaxed);
+        state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
         state->dependency = nullptr;
         state->dependencies.clear();
@@ -738,18 +768,27 @@ namespace JobSystem
     void CompleteState(HandleState* state)
     {
         if (!state) return;
-        std::function<void()> inlineContinuation;
-        std::vector<std::function<void()>> continuations;
-        {
-            std::lock_guard<std::mutex> lock(state->mtx);
-            if (state->completed.exchange(true, std::memory_order_acq_rel)) return;
-            inlineContinuation = std::move(state->inlineContinuation);
-            continuations.swap(state->continuations);
-        }
+        if (state->completed.exchange(true, std::memory_order_acq_rel)) return;
+
+        // 无锁快路径：原子摘取 continuation 槽（≤1 节点）。completed 先置位再摘取，
+        // 保证 AddContinuationOrRunNow 的 G2 重检能看到本摘取已发生或未发生。
+        ContinuationNode* node =
+            state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel);
         state->completed.notify_all();
-        if (inlineContinuation) { try { inlineContinuation(); } catch (...) {} }
-        for (auto& cont : continuations)
-            if (cont) { try { cont(); } catch (...) {} }
+        if (node) RunContinuationChain(node);
+
+        // 多 continuation（同 handle 扇出）溢出到 mtx + vector。hasExtra 原子跳过空
+        // 路径，使单 continuation 的常见完成路径零 mutex。
+        if (state->hasExtraContinuations.exchange(false, std::memory_order_acq_rel))
+        {
+            std::vector<std::function<void()>> extra;
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                extra.swap(state->continuations);
+            }
+            for (auto& cont : extra)
+                if (cont) { try { cont(); } catch (...) {} }
+        }
     }
 
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation)
@@ -759,14 +798,52 @@ namespace JobSystem
             if (continuation) continuation();
             return;
         }
+        // 无锁快路径：单 continuation 直接 CAS 入原子槽。fn 先完整 move 进节点再发布，
+        // 无数据竞态；CAS 失败时 move 回调用方走慢路径。
+        auto* node = new ContinuationNode{ {}, nullptr };
+        node->fn.swap(continuation);
+        ContinuationNode* expected = nullptr;
+        if (state->continuationSlot.compare_exchange_strong(
+            expected, node, std::memory_order_acq_rel, std::memory_order_relaxed))
+        {
+            // 发布后已完成：Completer 可能已摘取本节点（正常执行），也可能漏掉
+            // （摘取早于本 CAS）——此时自己取回并执行，保证每节点恰执行一次。
+            if (state->completed.load(std::memory_order_acquire))
+            {
+                if (auto* mine = state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel))
+                    RunContinuationChain(mine);
+            }
+            return;
+        }
+        continuation.swap(node->fn);
+        delete node;
+
+        // 慢路径：槽已占（第 2+ 个 continuation）。mtx 内判 completed，完成后不再入列。
         std::function<void()> toRun;
         {
             std::lock_guard<std::mutex> lock(state->mtx);
             if (state->completed.load(std::memory_order_acquire)) toRun = std::move(continuation);
-            else if (!state->inlineContinuation) state->inlineContinuation = std::move(continuation);
             else state->continuations.emplace_back(std::move(continuation));
         }
-        if (toRun) toRun();
+        if (toRun) { toRun(); return; }
+        // 已入列。若 CompleteState 的 hasExtra 摘取早于本发布而漏检（completed 已置位），
+        // 取回自己的条目执行；向量已空说明被 Completer 取走，不会重复。
+        state->hasExtraContinuations.store(true, std::memory_order_release);
+        if (state->completed.load(std::memory_order_acquire))
+        {
+            std::function<void()> mine;
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                if (!state->continuations.empty())
+                {
+                    mine = std::move(state->continuations.back());
+                    state->continuations.pop_back();
+                    if (state->continuations.empty())
+                        state->hasExtraContinuations.store(false, std::memory_order_release);
+                }
+            }
+            if (mine) { try { mine(); } catch (...) {} }
+        }
     }
 
     struct BackendAsyncContext
@@ -1047,40 +1124,91 @@ namespace JobSystem
         }
     };
 
+    // 近无锁：batch storage per-thread 缓存。命中零锁；共享池仅在缓存空/满时批量
+    // 迁移（一次锁 / ~8 次 acquire 或 release）。弃用原 O(n) 最佳适配扫描——buffer
+    // 在 AcquireBatchStorage 按需增长，缓存里任何 storage 都可用，扫描纯属全局锁竞争点。
     std::mutex g_batchStoragePoolMutex;
     std::vector<BatchStorage*> g_batchStoragePool;
+
+    constexpr size_t kBatchStorageCacheCap = 8;
+    struct ThreadBatchStorageCache
+    {
+        std::vector<BatchStorage*> entries;
+        ~ThreadBatchStorageCache()
+        {
+            // 线程退出（worker join / 进程 teardown）时把缓存 storage 交还共享池或释放
+            // （池满）。全局互斥体在 Shutdown 中始终存活（本对象先于 g_batchStoragePoolMutex
+            // 初始化，按标准后销毁），此处取锁安全。
+            if (entries.empty()) return;
+            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+            for (auto* s : entries)
+            {
+                if (g_batchStoragePool.size() < kMaxPooledBatchStorage)
+                    g_batchStoragePool.push_back(s);
+                else
+                {
+                    g_batchStorageDropped.fetch_add(1, std::memory_order_relaxed);
+                    delete s;
+                }
+            }
+            entries.clear();
+        }
+    };
+    thread_local ThreadBatchStorageCache t_batchStorageCache;
+
+    static void FlushBatchStorageCacheToSharedPool()
+    {
+        if (t_batchStorageCache.entries.empty()) return;
+        std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+        for (auto* s : t_batchStorageCache.entries)
+        {
+            if (g_batchStoragePool.size() < kMaxPooledBatchStorage)
+                g_batchStoragePool.push_back(s);
+            else
+            {
+                g_batchStorageDropped.fetch_add(1, std::memory_order_relaxed);
+                delete s;
+            }
+        }
+        t_batchStorageCache.entries.clear();
+    }
 
     static BatchStorage* AcquireBatchStorage(
         uint32_t tileCapacity,
         uint32_t partitionCapacity)
     {
         BatchStorage* storage = nullptr;
+        if (!t_batchStorageCache.entries.empty())
         {
-            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
-            auto best = g_batchStoragePool.end();
-            for (auto it = g_batchStoragePool.begin();
-                it != g_batchStoragePool.end(); ++it)
-            {
-                if ((*it)->tileCapacity < tileCapacity ||
-                    (*it)->partitionCapacity < partitionCapacity)
-                    continue;
-                if (best == g_batchStoragePool.end() ||
-                    (*it)->tileCapacity < (*best)->tileCapacity)
-                    best = it;
-            }
-            if (best != g_batchStoragePool.end())
-            {
-                storage = *best;
-                g_batchStoragePool.erase(best);
-            }
-        }
-
-        if (storage)
+            storage = t_batchStorageCache.entries.back();
+            t_batchStorageCache.entries.pop_back();
             g_batchStorageReused.fetch_add(1, std::memory_order_relaxed);
+        }
         else
         {
-            storage = new BatchStorage();
-            g_batchStorageCreated.fetch_add(1, std::memory_order_relaxed);
+            // 缓存空：一次性从共享池批量补满（一次锁），池空则 new。
+            {
+                std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
+                const size_t available =
+                    std::min(g_batchStoragePool.size(), kBatchStorageCacheCap);
+                if (available > 0)
+                {
+                    storage = g_batchStoragePool.back();
+                    g_batchStoragePool.pop_back();
+                    for (size_t i = 1; i < available; ++i)
+                    {
+                        t_batchStorageCache.entries.push_back(g_batchStoragePool.back());
+                        g_batchStoragePool.pop_back();
+                    }
+                }
+            }
+            if (storage)
+                g_batchStorageReused.fetch_add(1, std::memory_order_relaxed);
+            else
+            {
+                storage = new BatchStorage();
+                g_batchStorageCreated.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         if (storage->tileCapacity < tileCapacity)
@@ -1112,20 +1240,14 @@ namespace JobSystem
         storage->batch.storage = storage;
         g_batchStorageReturned.fetch_add(1, std::memory_order_relaxed);
 
-        bool pooled = false;
+        // 近无锁：先入 per-thread 缓存；满额时整体迁移共享池（一次锁 / ~8 次回收）。
+        if (t_batchStorageCache.entries.size() < kBatchStorageCacheCap)
         {
-            std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
-            if (g_batchStoragePool.size() < kMaxPooledBatchStorage)
-            {
-                g_batchStoragePool.push_back(storage);
-                pooled = true;
-            }
+            t_batchStorageCache.entries.push_back(storage);
+            return;
         }
-        if (!pooled)
-        {
-            g_batchStorageDropped.fetch_add(1, std::memory_order_relaxed);
-            delete storage;
-        }
+        FlushBatchStorageCacheToSharedPool();
+        t_batchStorageCache.entries.push_back(storage);
     }
 
     static void ClearBatchStoragePool() noexcept
@@ -2136,6 +2258,9 @@ namespace JobSystem
         }
         if (nativePool) nativePool->Stop();
         ConsumeLongBatchBarriers();
+        // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
+        // worker 已由 nativePool->Stop() join，其 thread_local 缓存已在退出时交还。
+        FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
         // B2: 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
         // worker 线程已由 nativePool->Stop() join，其 thread_local 缓存已在
