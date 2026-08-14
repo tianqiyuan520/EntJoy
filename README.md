@@ -96,17 +96,11 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 
 ### 3. 克隆仓库
 
-仓库包含 Git 子模块（如 `sleef`），因此请递归克隆：
+仓库无子模块依赖，普通克隆即可：
 
 ```powershell
-git clone --recursive https://github.com/tianqiyuan520/EntJoy.git
+git clone https://github.com/tianqiyuan520/EntJoy.git
 cd EntJoy
-```
-
-如果已经使用普通 `git clone`，补充初始化子模块：
-
-```powershell
-git submodule update --init --recursive
 ```
 
 ### 4. Release 构建
@@ -537,7 +531,7 @@ ispc --version
 
 ### 子模块缺失
 
-初始化子模块（`src/NativeDll/sleef`）：
+仓库已无子模块依赖；若检出旧提交（仍引用 `sleef` 子模块），执行：
 
 ```powershell
 git submodule update --init --recursive
@@ -669,17 +663,11 @@ The currently recommended environment is:
 
 ### 3. Clone
 
-The repository contains Git submodules (e.g. `sleef`), so clone recursively:
+The repository has no Git submodule dependencies; clone normally:
 
 ```powershell
-git clone --recursive https://github.com/tianqiyuan520/EntJoy.git
+git clone https://github.com/tianqiyuan520/EntJoy.git
 cd EntJoy
-```
-
-For an existing non-recursive clone:
-
-```powershell
-git submodule update --init --recursive
 ```
 
 ### 4. Build Release
@@ -1103,6 +1091,8 @@ ispc --version
 Install Desktop development with C++, MSVC v143, and a Windows SDK through Visual Studio Installer. Build from Developer PowerShell for VS 2022.
 
 ### Submodules are missing
+
+The repository no longer has submodules. If an old commit (still referencing the `sleef` submodule) is checked out, initialize it:
 
 ```powershell
 git submodule update --init --recursive

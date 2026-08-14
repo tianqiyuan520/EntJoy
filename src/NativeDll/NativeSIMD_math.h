@@ -109,24 +109,8 @@ static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
     #define N_LOG(a)     _n_log_avx2(a)
-    // All other math functions: per-lane scalar fallback
-  #else
-    #define N_SIN(a)     sleef_sin_ps(a)
-    #define N_COS(a)     sleef_cos_ps(a)
-    #define N_SINCOS(a,s,c) sleef_sincos_ps(a,s,c)
-    #define N_TAN(a)     sleef_tan_ps(a)
-    #define N_ASIN(a)    sleef_asin_ps(a)
-    #define N_ACOS(a)    sleef_acos_ps(a)
-    #define N_ATAN(a)    sleef_atan_ps(a)
-    #define N_ATAN2(a,b) sleef_atan2_ps(a,b)
-    #define N_SINH(a)    sleef_sinh_ps(a)
-    #define N_COSH(a)    sleef_cosh_ps(a)
-    #define N_TANH(a)    sleef_tanh_ps(a)
-    #define N_EXP(a)     sleef_exp_ps(a)
-    #define N_LOG(a)     sleef_log_ps(a)
-    #define N_LOG10(a)   sleef_log10_ps(a)
-    #define N_POW(a,b)   sleef_pow_ps(a,b)
   #endif
+  // 非 AVX2 平台：Sleef 已移除，由下方 #ifndef N_* 守卫的逐通道标量回退覆盖。
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
 
 // ===== High (~1.0 ULP) =====
