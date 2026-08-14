@@ -85,6 +85,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
@@ -102,6 +103,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
@@ -117,6 +119,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <FavorSizeOrSpeed>Neither</FavorSizeOrSpeed>
       <Optimization>MaxSpeed</Optimization>
@@ -143,6 +146,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -164,6 +168,7 @@
     <ClInclude Include="Exports.h" />
     <ClInclude Include="JobProfiler.h" />
     <ClInclude Include="JobSystem.h" />
+    <ClInclude Include="JobSystemInternal.h" />
     <ClInclude Include="Native.h" />
     <ClInclude Include="NativeContainers.h" />
     <ClInclude Include="NativeMath.h" />
@@ -177,6 +182,9 @@
     <ClCompile Include="Exports.cpp" />
     <ClCompile Include="JobProfiler.cpp" />
     <ClCompile Include="JobSystem.cpp" />
+    <ClCompile Include="JobSystem_State.cpp" />
+    <ClCompile Include="JobSystem_Tiles.cpp" />
+    <ClCompile Include="JobSystem_Scheduler.cpp" />
     <ClCompile Include="Native.cpp" />
     <ClCompile Include="NativeWorkerPool.cpp" />
     <ClCompile Include="tasksys.cpp" />

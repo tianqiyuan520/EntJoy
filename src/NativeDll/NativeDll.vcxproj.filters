@@ -54,6 +54,9 @@
     <ClInclude Include="SimdValue.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="JobSystemInternal.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Native.cpp">
@@ -72,6 +75,15 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="NativeWorkerPool.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JobSystem_Tiles.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JobSystem_Scheduler.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JobSystem_State.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
