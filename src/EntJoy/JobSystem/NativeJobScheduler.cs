@@ -163,7 +163,6 @@ public struct NativeJobSystemStats
     public ulong WorkerStartSpreadEwmaNs;
     public ulong LastTileToTopologyDoneEwmaNs;
     public ulong CompleteWakeToReturnEwmaNs;
-    public ulong TaskflowBatches;
     public ulong NativeBatches;
     public ulong InvalidBackendSelections;
     // Exact per-batch timing distribution appended for ABI compatibility.
@@ -261,9 +260,11 @@ internal enum NativeEcsJobKind
 public static unsafe partial class NativeJobScheduler
 {
     private const int MaxRecordedJobExceptions = 16;
-    private static readonly ConcurrentQueue<ExceptionDispatchInfo> _jobExceptions = new();
     private static int _recordedJobExceptionCount;
     [ThreadStatic] private static int _jobExecutionDepth;
+    // B5: native 每 job 执行窗口 set/clear 的当前 batch id。C# 异常按此归属，
+    // Complete(h) 只抛本 handle 的异常（修 V-B 全局异常队列归属错乱）。
+    [ThreadStatic] private static ulong _currentBatchId;
 
     internal static bool IsExecutingJob => _jobExecutionDepth > 0;
 
@@ -291,6 +292,9 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_CompleteAndRelease;
+    private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
+    private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_GetDiagnosticBatchId;
+    private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void> _jobSystem_RegisterCurrentBatchId;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_RetainHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
@@ -494,6 +498,12 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleFor");
         _jobSystem_CompleteAndRelease = (delegate* unmanaged[Cdecl]<IntPtr, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
+        _jobSystem_Complete = (delegate* unmanaged[Cdecl]<IntPtr, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_Complete");
+        _jobSystem_GetDiagnosticBatchId = (delegate* unmanaged[Cdecl]<IntPtr, ulong>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_GetDiagnosticBatchId");
+        _jobSystem_RegisterCurrentBatchId = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterCurrentBatchId");
         _jobSystem_RetainHandle = (delegate* unmanaged[Cdecl]<IntPtr, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_RetainHandle");
         _jobSystem_IsCompleted = (delegate* unmanaged[Cdecl]<IntPtr, int>)
@@ -617,6 +627,18 @@ public static unsafe partial class NativeJobScheduler
         _jobSystem_CompleteAndRelease(handle);
     }
 
+    private static void JobSystem_Complete(IntPtr handle)
+    {
+        EnsureNativeLoaded();
+        _jobSystem_Complete(handle);
+    }
+
+    private static ulong JobSystem_GetDiagnosticBatchId(IntPtr handle)
+    {
+        EnsureNativeLoaded();
+        return _jobSystem_GetDiagnosticBatchId(handle);
+    }
+
     private static void JobSystem_RetainHandle(IntPtr handle)
     {
         EnsureNativeLoaded();
@@ -727,6 +749,7 @@ public static unsafe partial class NativeJobScheduler
         Interlocked.Exchange(ref _shutdownRequested, 0);
         JobSystem_Initialize(numThreads);
         RegisterPersistentAllocator();
+        RegisterCurrentBatchIdCallback();
         if (TilesPerWorker > 0)
             JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
         ConfigureGuidedFromEnv();
@@ -782,6 +805,18 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterPersistentAllocator == null) return;
         _jobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
+    }
+
+    // B5: native 每 job 执行窗口调 SetCurrentBatchId 写线程局部当前 batch。
+    // 回调在 job 执行线程（worker/main/assist）上执行，_currentBatchId 为
+    // [ThreadStatic]，各线程各持一份，无跨线程污染。
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void SetCurrentBatchId(ulong batchId) => _currentBatchId = batchId;
+
+    private static void RegisterCurrentBatchIdCallback()
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterCurrentBatchId == null) return;
+        _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
     }
     /// <summary>
     /// 当前持久 Job Worker 数。与 Unity JobsUtility.JobWorkerCount 的用途一致；
@@ -945,11 +980,13 @@ public static unsafe partial class NativeJobScheduler
         IntPtr handle = h.Detach();
         if (handle == IntPtr.Zero) return;
 
-        // 始终使用 P/Invoke 完成等待，确保同步正确性
-        // C++ std::atomic::wait 在内部自旋后执行等待原语，效率接近忙等但更可靠
-        JobSystem_CompleteAndRelease(handle);
-
-        ThrowRecordedJobExceptions();
+        // B5: 先等待（Complete 保留调用方引用），再读 batchId，最后释放——
+        // batch 可能在依赖链完成后才提交，diagnosticBatchId 提交后才有效，
+        // 因此必须在等待之后、释放之前读。然后只抛本 batch 的异常。
+        JobSystem_Complete(handle);
+        ulong batchId = JobSystem_GetDiagnosticBatchId(handle);
+        JobSystem_ReleaseHandle(handle);
+        ThrowRecordedJobExceptions(batchId);
     }
 
     public static bool IsCompleted(NativeJobHandle h)
@@ -2656,7 +2693,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2684,7 +2721,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2713,7 +2750,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2741,7 +2778,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2810,7 +2847,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2856,7 +2893,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2897,7 +2934,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -2976,7 +3013,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -3003,7 +3040,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -3029,7 +3066,7 @@ public static unsafe partial class NativeJobScheduler
             }
             catch (Exception exception)
             {
-                RecordJobException(exception);
+                RecordJobException(_currentBatchId, exception);
             }
             finally
             {
@@ -3184,38 +3221,29 @@ public static unsafe partial class NativeJobScheduler
         return cache;
     }
 
+    // B5: 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
+    // batch 0 为未归属异常（实际不发生，防御兜底），由 Flush 统一抛。
     private static readonly object _exceptionLock = new();
-    private static List<ExceptionDispatchInfo> _recordedJobExceptions = new();
+    private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();
 
-    private static void RecordJobException(Exception exception)
+    private static void RecordJobException(ulong batchId, Exception exception)
     {
         lock (_exceptionLock)
         {
-            if (_recordedJobExceptions.Count < MaxRecordedJobExceptions)
-                _recordedJobExceptions.Add(ExceptionDispatchInfo.Capture(exception));
+            if (_recordedJobExceptionCount >= MaxRecordedJobExceptions) return;
+            if (!_recordedJobExceptions.TryGetValue(batchId, out var list))
+            {
+                list = new List<ExceptionDispatchInfo>();
+                _recordedJobExceptions[batchId] = list;
+            }
+            list.Add(ExceptionDispatchInfo.Capture(exception));
+            _recordedJobExceptionCount++;
         }
     }
 
-    /// <summary>
-    /// 抛出所有已记录的 Job 异常。
-    /// 公有接口，可在帧末通过 TempAllocator.Reset() 或自定义检查点调用。
-    /// </summary>
-    public static void FlushRecordedExceptions()
+    private static void ThrowAll(List<ExceptionDispatchInfo> captured)
     {
-        ThrowRecordedJobExceptions();
-    }
-
-    private static void ThrowRecordedJobExceptions()
-    {
-        List<ExceptionDispatchInfo> captured;
-        lock (_exceptionLock)
-        {
-            captured = _recordedJobExceptions;
-            _recordedJobExceptions = new List<ExceptionDispatchInfo>();
-        }
-
         if (captured.Count == 0) return;
-
         if (captured.Count == 1)
         {
             ExceptionDispatchInfo.Capture(captured[0].SourceException).Throw();
@@ -3225,6 +3253,36 @@ public static unsafe partial class NativeJobScheduler
         foreach (var ei in captured)
             exceptions.Add(ei.SourceException);
         throw new AggregateException("One or more scheduled C# jobs failed.", exceptions);
+    }
+
+    /// <summary>
+    /// 抛出所有已记录的 Job 异常（跨所有 batch，含未归属的 batch 0）。
+    /// 公有接口，可在帧末通过 TempAllocator.Reset() 或自定义检查点调用。
+    /// </summary>
+    public static void FlushRecordedExceptions()
+    {
+        List<ExceptionDispatchInfo> all = new();
+        lock (_exceptionLock)
+        {
+            foreach (var list in _recordedJobExceptions.Values)
+                all.AddRange(list);
+            _recordedJobExceptions.Clear();
+            _recordedJobExceptionCount = 0;
+        }
+        ThrowAll(all);
+    }
+
+    private static void ThrowRecordedJobExceptions(ulong batchId)
+    {
+        List<ExceptionDispatchInfo> captured;
+        lock (_exceptionLock)
+        {
+            if (!_recordedJobExceptions.TryGetValue(batchId, out captured))
+                return;
+            _recordedJobExceptions.Remove(batchId);
+            _recordedJobExceptionCount -= captured.Count;
+        }
+        ThrowAll(captured);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -20,11 +20,6 @@ constexpr size_t hardware_destructive_interference_size = 64;
 
 namespace JobSystem {
 
-    enum class ExecutionBackend : uint8_t {
-        Taskflow,
-        NativeWorkerPool
-    };
-
     enum class ChunkScheduleMode : int {
         PublishNoAssist = 0,
         PublishAssist = 1,
@@ -61,6 +56,13 @@ namespace JobSystem {
         std::atomic<void*> assistContext{ nullptr };
         std::atomic<int> assistReaders{ 0 };
         std::atomic<void (*)(void*) noexcept> assistReadersDrained{ nullptr };
+
+        // B1 传递协助依赖链：Complete() 在目标 job 无 tile 可认领时沿此链
+        // 回溯协助祖先。单依赖走 `dependency`（热路径）；CombineDependencies
+        // 合成 state 走 `dependencies`。两者均持有引用（AcquireState），在
+        // RecycleState 释放，保证 handle 被丢弃后链不会悬垂。
+        HandleState* dependency{ nullptr };
+        std::vector<HandleState*> dependencies;
 
 #ifdef _DEBUG
         std::atomic<uint32_t> generation{ 0 };
@@ -103,6 +105,10 @@ namespace JobSystem {
     void CompleteState(HandleState* state);
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
     int CurrentWorkerCount();
+
+    // B5: C# 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、
+    // 出口 cb(0)，C# 异常按此绑定到具体 batch（修 V-B 全局异常队列归属错乱）。
+    void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept;
 
     struct JobSystemStatsSnapshot {
         uint64_t completeWaitLoops;
@@ -162,7 +168,6 @@ namespace JobSystem {
         uint64_t workerStartSpreadEwmaNs;
         uint64_t lastTileToTopologyDoneEwmaNs;
         uint64_t completeWakeToReturnEwmaNs;
-        uint64_t taskflowBatches;
         uint64_t nativeBatches;
         uint64_t invalidBackendSelections;
 

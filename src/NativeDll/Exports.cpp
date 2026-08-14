@@ -85,6 +85,11 @@ extern "C"
         EntJoy::Collections::RegisterPersistentAllocator(alloc, free);
     }
 
+    void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb)
+    {
+        JobSystem::RegisterCurrentBatchIdCallback(cb);
+    }
+
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
     {
         JobSystem::JobHandle dep;
@@ -129,6 +134,14 @@ extern "C"
         // 仅等待任务完成，不改变引用计数
         if (handle)
             JobSystem::JobHandle(fromHandle(handle), true).Complete();
+    }
+
+    uint64_t JobSystem_GetDiagnosticBatchId(void* handle)
+    {
+        // B5: 读 handle 的 diagnosticBatchId。调用方须在 Complete 之后、Release 之前
+        // 调用（此时 batch 必已 submit、id 已设置，且调用方引用使 state 存活）。
+        if (!handle) return 0;
+        return fromHandle(handle)->diagnosticBatchId.load(std::memory_order_acquire);
     }
 
     void JobSystem_CompleteAndRelease(void* handle)
@@ -181,7 +194,7 @@ extern "C"
         int chunkCount,
         void* dependency)
     {
-        // 委托给 JobSystem.cpp 中的完整实现（包含 taskflow 头文件）
+        // 委托给 JobSystem.cpp 中的完整实现
         JobSystem::JobHandle dep;
         if (dependency)
             dep = JobSystem::JobHandle(fromHandle(dependency), true);
@@ -376,7 +389,6 @@ extern "C"
         stats->workerStartSpreadEwmaNs = snapshot.workerStartSpreadEwmaNs;
         stats->lastTileToTopologyDoneEwmaNs = snapshot.lastTileToTopologyDoneEwmaNs;
         stats->completeWakeToReturnEwmaNs = snapshot.completeWakeToReturnEwmaNs;
-        stats->taskflowBatches = snapshot.taskflowBatches;
         stats->nativeBatches = snapshot.nativeBatches;
         stats->invalidBackendSelections = snapshot.invalidBackendSelections;
         stats->timingSampleCount = snapshot.timingSampleCount;

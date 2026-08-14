@@ -8,7 +8,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "../../external/cpp-taskflow/taskflow/taskflow.hpp"
 
 #include <algorithm>
 #include <array>
@@ -39,37 +38,14 @@ namespace JobSystem
 {
     std::atomic<bool> g_workerAffinityEnabled{ false };
 
-    class AffinityWorkerInterface final : public tf::WorkerInterface
-    {
-    public:
-        void scheduler_prologue(tf::Worker& worker) override
-        {
-            if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
-                BindCurrentThreadToLogicalProcessor(
-                    static_cast<uint32_t>(worker.id()));
-#if defined(_WIN32)
-            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
-#endif
-        }
-
-        void scheduler_epilogue(
-            tf::Worker&,
-            std::exception_ptr) override
-        {
-        }
-    };
-
     constexpr size_t kMaxPooledStates = 4096;
-    constexpr size_t kMaxPooledTaskflows = 1024;
     constexpr size_t kMaxPooledBatchStorage = 256;
     constexpr int kSyncExecutionLengthThreshold = 512;
     constexpr int kSyncWithCompletedDepThreshold = 4096;
 
     // ---------- Globals ----------
-    std::mutex g_executorMutex;
-    std::shared_ptr<tf::Executor> g_executor;
+    std::mutex g_schedulerMutex;
     std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
-    ExecutionBackend g_executionBackend{ ExecutionBackend::Taskflow };
     int g_numThreads = 0;
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
@@ -86,11 +62,56 @@ namespace JobSystem
     int g_guidedK = 2;
     int g_guidedFloor = 16;
 
+    // B1: AssistDependencyChain 连续零工作的墙钟预算。零工作不代表链卡死
+    // （workers 可能正在执行祖先、即将提交下一环），所以用有界回访覆盖祖先
+    // completion→下一环 submit 的交接窗口；仅在持续零工作超过该预算后交还
+    // 调用方的 spin/futex。以墙钟而非 pass 数计：pass 上限与循环内 yield 的
+    // 时长耦合，量级太小会过早 park（V-A 退化 / V-D 残余空等）。
+    // 预算内每 pass 带 yield 降频，覆盖亚毫秒~毫秒级的交接窗口绰绰有余；
+    // 链持续推进时预算随 worked 重置，不会误伤正常链。
+    constexpr uint64_t kAssistStallBudgetNs = 10'000'000; // 10ms
+
     std::mutex g_statePoolMutex;
     std::vector<HandleState*> g_statePool;
 
-    std::mutex g_taskflowPoolMutex;
-    std::vector<tf::Taskflow*> g_taskflowPool;
+    // B2: per-thread state 缓存。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
+    // state 单 owner（refCount==0 才回池），跨线程迁移只发生在共享池锁内，无 ABA。
+    constexpr size_t kStateCacheCap = 64;
+    struct ThreadStateCache
+    {
+        std::vector<HandleState*> entries;
+        ~ThreadStateCache()
+        {
+            // 线程退出（worker join / 进程 teardown）时把缓存 state 交还共享池，
+            // 由 Shutdown 统一清空。全局互斥体在 Shutdown 中始终存活（本对象先于
+            // g_statePoolMutex 初始化，按标准后销毁），此处取锁安全。
+            if (entries.empty()) return;
+            std::lock_guard<std::mutex> lock(g_statePoolMutex);
+            for (auto* s : entries)
+            {
+                if (g_statePool.size() < kMaxPooledStates)
+                    g_statePool.push_back(s);
+                else
+                    delete s;
+            }
+            entries.clear();
+        }
+    };
+    thread_local ThreadStateCache t_stateCache;
+
+    static void FlushStateCacheToSharedPool()
+    {
+        if (t_stateCache.entries.empty()) return;
+        std::lock_guard<std::mutex> lock(g_statePoolMutex);
+        for (auto* s : t_stateCache.entries)
+        {
+            if (g_statePool.size() < kMaxPooledStates)
+                g_statePool.push_back(s);
+            else
+                delete s;
+        }
+        t_stateCache.entries.clear();
+    }
 
     // Stats — all counters restored
     std::atomic<uint64_t> g_completeWaitLoops{ 0 };
@@ -125,7 +146,6 @@ namespace JobSystem
     std::atomic<uint64_t> g_workerStartSpreadEwmaNs{ 0 };
     std::atomic<uint64_t> g_lastTileToTopologyDoneEwmaNs{ 0 };
     std::atomic<uint64_t> g_completeWakeToReturnEwmaNs{ 0 };
-    std::atomic<uint64_t> g_taskflowBatches{ 0 };
     std::atomic<uint64_t> g_nativeBatches{ 0 };
     std::atomic<uint64_t> g_invalidBackendSelections{ 0 };
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
@@ -134,6 +154,39 @@ namespace JobSystem
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
+
+    // B5: 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
+    // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch（修 V-B）。
+    std::atomic<void (*)(uint64_t)> g_currentBatchIdCallback{ nullptr };
+    void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept
+    {
+        g_currentBatchIdCallback.store(cb, std::memory_order_release);
+    }
+    static inline void SetCurrentBatchId(uint64_t id) noexcept
+    {
+        auto cb = g_currentBatchIdCallback.load(std::memory_order_acquire);
+        if (cb) cb(id);
+    }
+    // 给非 batch 快速路径 job 分配诊断 id（batch 路径由 SubmitBatch 从
+    // batch->diagnosticId 设置），保证 Complete(h) 按 id 抛对应异常。
+    static uint64_t AssignStateDiagnosticId(HandleState* state) noexcept
+    {
+        const uint64_t id = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (state) state->diagnosticBatchId.store(id, std::memory_order_relaxed);
+        return id;
+    }
+
+    // B5: 内联同步执行窗口包装。分配诊断 id 并在 C# func 执行期间 set/clear
+    // 当前-batch，使内联 job 抛出的异常也能按本 job 归属（而非记到 batch 0
+    // 只在 Flush 时抛，避免 Complete(h) 单异常 rethrow 语义回归）。
+    template <typename Fn>
+    static void RunSyncJob(HandleState* state, Fn&& fn) noexcept
+    {
+        const uint64_t id = AssignStateDiagnosticId(state);
+        SetCurrentBatchId(id);
+        fn();
+        SetCurrentBatchId(0);
+    }
 
     constexpr size_t kBatchTimingSampleCapacity = 2048;
     struct BatchTimingSample
@@ -392,7 +445,7 @@ namespace JobSystem
         stats->workerExecutedRanges = g_workerExecutedRanges.load(std::memory_order_relaxed);
         stats->mainExecutedRanges = g_mainExecutedRanges.load(std::memory_order_relaxed);
         stats->stealCount = g_stealCount.load(std::memory_order_relaxed);
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPool && g_nativeWorkerPool)
+        if (g_nativeWorkerPool)
         {
             uint64_t parkWake = 0, hotSpin = 0;
             g_nativeWorkerPool->GetCounters(&parkWake, &hotSpin);
@@ -432,7 +485,6 @@ namespace JobSystem
         stats->workerStartSpreadEwmaNs = g_workerStartSpreadEwmaNs.load(std::memory_order_relaxed);
         stats->lastTileToTopologyDoneEwmaNs = g_lastTileToTopologyDoneEwmaNs.load(std::memory_order_relaxed);
         stats->completeWakeToReturnEwmaNs = g_completeWakeToReturnEwmaNs.load(std::memory_order_relaxed);
-        stats->taskflowBatches = g_taskflowBatches.load(std::memory_order_relaxed);
         stats->nativeBatches = g_nativeBatches.load(std::memory_order_relaxed);
         stats->invalidBackendSelections = g_invalidBackendSelections.load(std::memory_order_relaxed);
         PopulateBatchTimingSnapshot(stats);
@@ -497,7 +549,7 @@ namespace JobSystem
         g_mainExecutedRanges.store(0, std::memory_order_relaxed);
         g_stealCount.store(0, std::memory_order_relaxed);
         g_parkWakeCount.store(0, std::memory_order_relaxed);
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPool && g_nativeWorkerPool)
+        if (g_nativeWorkerPool)
             g_nativeWorkerPool->ResetCounters();
         g_publishedJobs.store(0, std::memory_order_relaxed);
         g_waitFallbacks.store(0, std::memory_order_relaxed);
@@ -523,7 +575,6 @@ namespace JobSystem
         g_workerStartSpreadEwmaNs.store(0, std::memory_order_relaxed);
         g_lastTileToTopologyDoneEwmaNs.store(0, std::memory_order_relaxed);
         g_completeWakeToReturnEwmaNs.store(0, std::memory_order_relaxed);
-        g_taskflowBatches.store(0, std::memory_order_relaxed);
         g_nativeBatches.store(0, std::memory_order_relaxed);
         g_invalidBackendSelections.store(0, std::memory_order_relaxed);
         g_publishToCompletionEwmaNs.store(0, std::memory_order_relaxed);
@@ -550,6 +601,16 @@ namespace JobSystem
     void RecycleState(HandleState* state) noexcept
     {
         if (!state) return;
+        // B1: 释放依赖链持有引用（依赖 state 可能仍被自身 batch 持有，不会悬垂）。
+        if (state->dependency)
+        {
+            auto* dep = state->dependency;
+            state->dependency = nullptr;
+            ReleaseState(dep);
+        }
+        for (auto* dep : state->dependencies)
+            ReleaseState(dep);
+        state->dependencies.clear();
         state->inlineContinuation = {};
         state->continuations.clear();
         state->waiterCount.store(0, std::memory_order_relaxed);
@@ -561,19 +622,39 @@ namespace JobSystem
         state->assistContext.store(nullptr, std::memory_order_release);
         state->assistReaders.store(0, std::memory_order_relaxed);
         state->assistReadersDrained.store(nullptr, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(g_statePoolMutex);
-        if (g_statePool.size() < kMaxPooledStates)
-            g_statePool.push_back(state);
-        else
-            delete state;
+        // B2: 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
+        if (t_stateCache.entries.size() < kStateCacheCap)
+        {
+            t_stateCache.entries.push_back(state);
+            return;
+        }
+        FlushStateCacheToSharedPool();
+        t_stateCache.entries.push_back(state);
     }
 
     HandleState* CreateState(bool completed)
     {
         HandleState* state = nullptr;
+        if (!t_stateCache.entries.empty())
         {
+            state = t_stateCache.entries.back();
+            t_stateCache.entries.pop_back();
+        }
+        else
+        {
+            // B2: 从共享池批量补满线程缓存（一次锁 / 64 次创建），池空则 new。
             std::lock_guard<std::mutex> lock(g_statePoolMutex);
-            if (!g_statePool.empty()) { state = g_statePool.back(); g_statePool.pop_back(); }
+            const size_t available = std::min(g_statePool.size(), kStateCacheCap);
+            if (available > 0)
+            {
+                state = g_statePool.back();
+                g_statePool.pop_back();
+                for (size_t i = 1; i < available; ++i)
+                {
+                    t_stateCache.entries.push_back(g_statePool.back());
+                    g_statePool.pop_back();
+                }
+            }
         }
         if (!state) state = new HandleState(completed);
         state->refCount.store(1, std::memory_order_relaxed);
@@ -583,7 +664,18 @@ namespace JobSystem
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->inlineContinuation = {};
         state->continuations.clear();
+        state->dependency = nullptr;
+        state->dependencies.clear();
         return state;
+    }
+
+    // B1: 把依赖 state 挂到被依赖 state 上并持引用，保证传递协助链不会悬垂。
+    // 释放点在 RecycleState（refcount 归零时）。仅在依赖未完成（需要等）时调用。
+    static void RetainDependency(HandleState* state, HandleState* dep) noexcept
+    {
+        if (!state || !dep) return;
+        AcquireState(dep);
+        state->dependency = dep;
     }
 
     void AcquireState(HandleState* state) noexcept
@@ -677,39 +769,6 @@ namespace JobSystem
         if (toRun) toRun();
     }
 
-    // ---------- Taskflow helpers ----------
-    void ReturnTaskflow(tf::Taskflow* taskflow) noexcept
-    {
-        if (!taskflow) return;
-        taskflow->clear();
-        std::lock_guard<std::mutex> lock(g_taskflowPoolMutex);
-        if (g_taskflowPool.size() < kMaxPooledTaskflows) g_taskflowPool.push_back(taskflow);
-        else delete taskflow;
-    }
-
-    std::shared_ptr<tf::Taskflow> AcquireTaskflow()
-    {
-        tf::Taskflow* taskflow = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(g_taskflowPoolMutex);
-            if (!g_taskflowPool.empty()) { taskflow = g_taskflowPool.back(); g_taskflowPool.pop_back(); }
-        }
-        if (!taskflow) taskflow = new tf::Taskflow();
-        return std::shared_ptr<tf::Taskflow>(taskflow, [](tf::Taskflow* ptr) { ReturnTaskflow(ptr); });
-    }
-
-    std::shared_ptr<tf::Executor> EnsureExecutor()
-    {
-        std::lock_guard<std::mutex> lock(g_executorMutex);
-        if (!g_executor)
-        {
-            auto hw = std::thread::hardware_concurrency();
-            g_numThreads = (hw > 1) ? static_cast<int>(hw) - 1 : 1;
-            g_executor = std::make_shared<tf::Executor>(static_cast<size_t>(g_numThreads));
-        }
-        return g_executor;
-    }
-
     struct BackendAsyncContext
     {
         std::function<void()> work;
@@ -729,23 +788,12 @@ namespace JobSystem
     static void SubmitBackendAsync(std::function<void()> work)
     {
         auto* context = new BackendAsyncContext{ std::move(work) };
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
-        {
-            if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
-                context, 1, &RunBackendAsync, &CompleteBackendAsync))
-            {
-                RunBackendAsync(context, 0);
-                CompleteBackendAsync(context);
-            }
-            return;
-        }
-
-        auto executor = EnsureExecutor();
-        executor->silent_async([context]
+        if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
+            context, 1, &RunBackendAsync, &CompleteBackendAsync))
         {
             RunBackendAsync(context, 0);
             CompleteBackendAsync(context);
-        });
+        }
     }
 
     int ResolveChunkSize(int length, int requestedChunk)
@@ -1414,7 +1462,9 @@ namespace JobSystem
             const uint32_t tile = batch->nextTile.fetch_add(
                 1, std::memory_order_relaxed);
             if (tile >= batch->tileCount) return false;
+            SetCurrentBatchId(batch->diagnosticId);
             TryExecuteOneTile(batch, tile);
+            SetCurrentBatchId(0);
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
             g_assistTiles.fetch_add(1, std::memory_order_relaxed);
@@ -1432,7 +1482,9 @@ namespace JobSystem
             if (!TryTakePartitionFrontSpan(
                 batch->partitions[partition], 1, first, end))
                 continue;
+            SetCurrentBatchId(batch->diagnosticId);
             TryExecuteOneTile(batch, first);
+            SetCurrentBatchId(0);
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
             g_assistTiles.fetch_add(1, std::memory_order_relaxed);
@@ -1514,7 +1566,13 @@ namespace JobSystem
 
     static void TryCompleteLogicalBatch(BatchState* batch) noexcept
     {
-        if (!batch || batch->logicalCompleted.exchange(
+        // handle is cleared by construct_at in ReleaseBatchStorage, so a null
+        // handle means the batch was already finalized, retired and recycled.
+        // Finalization is single-owned by the last tile executor, but keep this
+        // guard so a stale duplicate call can never touch a recycled batch's
+        // state (would crash on the null-handle dereference below).
+        if (!batch || !batch->handle) return;
+        if (batch->logicalCompleted.exchange(
             true, std::memory_order_acq_rel)) return;
 
         auto* state = batch->handle;
@@ -1577,14 +1635,13 @@ namespace JobSystem
     }
 
     // The last assist reader only requests finalization. Batch memory remains
-    // alive until Taskflow has also finished every worker task.
+    // alive until every worker slot has also finished its tile loop.
     static void OnAssistReadersDrained(void* handlePtr) noexcept
     {
         TryRetireCompletedBatch(static_cast<HandleState*>(handlePtr));
     }
 
     // Acquire assist reader: returns false if batch is already finalized
-    // Submit a BatchState via taskflow
     static void ExecuteBatchSlot(void* raw, uint32_t slot) noexcept
     {
         auto* batch = static_cast<BatchState*>(raw);
@@ -1593,7 +1650,10 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+        // B5: worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
+        SetCurrentBatchId(batch->diagnosticId);
         WorkerTileLoop(batch, slot);
+        SetCurrentBatchId(0);
         const int endProcessor = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (startProcessor >= 0 && endProcessor >= 0 && startProcessor != endProcessor)
@@ -1607,10 +1667,12 @@ namespace JobSystem
         RecordTopologyCompletion(batch);
         state->assistCallback.store(nullptr, std::memory_order_release);
         batch->workersFinished.store(true, std::memory_order_release);
-        // Logical completion normally happened on the final tile. Keep this
-        // defensive fallback for custom/empty execution adapters.
-        if (batch->tilesRemaining.load(std::memory_order_acquire) == 0)
-            TryCompleteLogicalBatch(batch);
+        // Logical completion is owned exclusively by the last tile executor
+        // (TryCompleteLogicalBatch in TryExecuteOneTile), which provably cannot
+        // run on a retired/recycled batch (it holds a worker slot or an assist
+        // reader, both of which block retirement). The old defensive second
+        // call here could double-finalize a batch after it was recycled —
+        // removed; tileCount is always >= 1 so no empty-batch path needs it.
         TryRetireCompletedBatch(state);
         ReleaseState(state);
     }
@@ -1644,41 +1706,17 @@ namespace JobSystem
         g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
         const uint64_t publishedAt = MonotonicNowNs();
         batch->publishedAt.store(publishedAt, std::memory_order_release);
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
+        g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
+        if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
+            batch,
+            static_cast<uint32_t>(participantCount),
+            &ExecuteBatchSlot,
+            &CompleteBackendBatch))
         {
-            g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
-            if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
-                batch,
-                static_cast<uint32_t>(participantCount),
-                &ExecuteBatchSlot,
-                &CompleteBackendBatch))
-            {
-                for (int slot = 0; slot < participantCount; ++slot)
-                    ExecuteBatchSlot(batch, static_cast<uint32_t>(slot));
-                CompleteBackendBatch(batch);
-            }
-            return;
-        }
-
-        // Native batches return above without touching Taskflow. Constructing the
-        // graph here also guarantees every acquired graph reaches its completion
-        // callback and is returned to the graph pool.
-        auto taskflow = AcquireTaskflow();
-        for (int slot = 0; slot < participantCount; ++slot)
-        {
-            taskflow->emplace([batch, slot]() {
-                if (WorkerIndexManager::GetCurrentIndex() < 0)
-                    WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-                WorkerTileLoop(batch, static_cast<uint32_t>(slot));
-            });
-        }
-
-        g_taskflowBatches.fetch_add(1, std::memory_order_relaxed);
-        auto executor = EnsureExecutor();
-        executor->run(*taskflow, [taskflow, batch]() mutable
-        {
+            for (int slot = 0; slot < participantCount; ++slot)
+                ExecuteBatchSlot(batch, static_cast<uint32_t>(slot));
             CompleteBackendBatch(batch);
-        });
+        }
     }
 
     // ---------- Chunk/Entity adaptors ----------
@@ -1810,6 +1848,84 @@ namespace JobSystem
 #endif
     }
 
+    // B1: 协助单个 state —— 认领并执行其 tile 直到无工作或已完成。
+    // 调用方被计为该 state 的一个 assistReader（生命周期与 Complete 一致）。
+    // 返回是否实际执行了任何 tile。
+    static bool AssistState(HandleState* state) noexcept
+    {
+        if (!state || state->completed.load(std::memory_order_acquire)) return false;
+        bool worked = false;
+        state->assistReaders.fetch_add(1, std::memory_order_acq_rel);
+        auto cb = state->assistCallback.load(std::memory_order_acquire);
+        auto ctx = state->assistContext.load(std::memory_order_acquire);
+        if (cb && ctx && !state->completed.load(std::memory_order_acquire))
+        {
+            g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
+            // Unlimited assist: 认领 tile 直到无工作剩余，消除 P95 尾部延迟。
+            while (!state->completed.load(std::memory_order_acquire))
+            {
+                if (!cb(ctx)) break;
+                worked = true;
+                g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (state->assistReaders.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            auto drained = state->assistReadersDrained.load(std::memory_order_acquire);
+            if (drained) drained(state);
+        }
+        return worked;
+    }
+
+    // B1: 传递依赖链协助。目标 job 未提交（前驱还在跑）时，沿 dependency 链
+    // 回溯协助所有未完成祖先执行其 tile，让链推进到目标。worker 内嵌套
+    // Complete() 不再 park 空等，而是成为自己依赖链的执行者（消解 V-A 死锁）；
+    // 主线程也从空等变干活（修 V-D）。单依赖走 dependency，合并依赖走
+    // dependencies 向量；DAG 无环，固定容量栈做安全网。
+    //
+    // 迭代语义：一次 pass 认领不到 tile 并不代表链卡死 —— workers 可能正在
+    // 执行祖先的 tile，即将触发其 continuation 提交下一环（EntJoy 的提交是
+    // deferred 的，随依赖完成逐个 submit）。若在第一个零工作 pass 就 break，
+    // 调用方会 park，而此时链上其余 worker 正被 gate 在调用方（如嵌套
+    // Complete 场景）→ 退化为 V-A 死锁。因此链未完成时持续回访：只要任一
+    // pass 推进了链就重置墙钟预算；零工作 pass 加 yield 降频（把 CPU 让给
+    // 正在推进的 worker），仅持续零工作超过 kAssistStallBudgetNs 才放弃，
+    // 交还调用方的 spin/futex 等待。
+    static void AssistDependencyChain(HandleState* target) noexcept
+    {
+        HandleState* stack[64];
+        uint64_t budgetEnd = MonotonicNowNs() + kAssistStallBudgetNs;
+        while (!target->completed.load(std::memory_order_acquire))
+        {
+            bool worked = false;
+            int sp = 0;
+            if (sp < 64) stack[sp++] = target;
+            if (target->dependency && sp < 64) stack[sp++] = target->dependency;
+            for (auto* d : target->dependencies)
+                if (sp < 64) stack[sp++] = d;
+            while (sp > 0 && !target->completed.load(std::memory_order_acquire))
+            {
+                auto* cur = stack[--sp];
+                if (!cur) continue;
+                if (AssistState(cur)) worked = true;
+                if (cur->dependency && sp < 64) stack[sp++] = cur->dependency;
+                for (auto* d : cur->dependencies)
+                    if (sp < 64) stack[sp++] = d;
+            }
+            if (worked)
+            {
+                // 本 pass 推进了链（认领并执行了 tile）→ 重置墙钟预算。
+                budgetEnd = MonotonicNowNs() + kAssistStallBudgetNs;
+                continue;
+            }
+            // 零工作 pass：链可能仍在其他线程上推进。yield 降频 + 有界回访，
+            // 覆盖祖先 completion → 下一环 submit 的交接窗口；墙钟预算耗尽后
+            // 交还调用方的 spin/futex（正常场景 workers 自行跑完，futex 即醒）。
+            if (MonotonicNowNs() >= budgetEnd) break;
+            std::this_thread::yield();
+        }
+    }
+
     void JobHandle::Complete() const
     {
         if (!_state) return;
@@ -1821,28 +1937,20 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 0: Assist — reader count on HandleState (safe, outlives batch)
-        _state->assistReaders.fetch_add(1, std::memory_order_acq_rel);
-        auto cb = _state->assistCallback.load(std::memory_order_acquire);
-        auto ctx = _state->assistContext.load(std::memory_order_acquire);
-        if (cb && ctx && !_state->completed.load(std::memory_order_acquire))
+        // Phase 0: 协助目标 job 自身（reader 计数在 HandleState 上，生命周期长于 batch）
+        if (AssistState(_state))
         {
-            g_assistAttempts.fetch_add(1, std::memory_order_relaxed);
-            // Unlimited assist: main thread claims tiles until no work
-            // remains. This eliminates P95 tail latency from OS worker
-            // scheduling, matching Unity's approach.
-            while (!_state->completed.load(std::memory_order_acquire))
-            {
-                if (!cb(ctx)) break;
-                g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
-            }
+            if (_state->completed.load(std::memory_order_acquire)) return;
         }
-        if (_state->assistReaders.fetch_sub(1, std::memory_order_acq_rel) == 1)
+
+        // Phase 0.5 (B1): 目标无 tile 可认领（可能根本没被提交——前驱还在跑），
+        // 沿依赖链回溯协助祖先。无依赖的 job 此路径完全不执行，零回归。
+        if (!_state->completed.load(std::memory_order_acquire) &&
+            (_state->dependency || !_state->dependencies.empty()))
         {
-            auto drained = _state->assistReadersDrained.load(std::memory_order_acquire);
-            if (drained) drained(_state);
+            AssistDependencyChain(_state);
+            if (_state->completed.load(std::memory_order_acquire)) return;
         }
-        if (_state->completed.load(std::memory_order_acquire)) return;
 
         // Phase 2: dense spin first (never yield before we've given the job a
         // chance to complete — yield triggers a full OS context switch).
@@ -1891,7 +1999,11 @@ namespace JobSystem
         if (pending.empty()) return JobHandle(CreateState(true));
         auto* cs = CreateState(false);
         auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(pending.size()));
+        // B1: 合成 state 持有每个父依赖的引用，保证传递协助链不悬垂；
+        // 在 RecycleState 释放。
+        cs->dependencies = pending;
         for (auto* ds : pending) {
+            AcquireState(ds);
             AcquireState(cs);
             AddContinuationOrRunNow(ds, [cs, remaining]() {
                 if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
@@ -1909,9 +2021,11 @@ namespace JobSystem
     JobHandle ScheduleWithDependency(const JobHandle& dep, WorkBuilder&& builder)
     {
         auto* state = CreateState(false);
+        AssignStateDiagnosticId(state);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire)) { builder(state); return JobHandle(state); }
         AcquireState(state);
+        RetainDependency(state, ds);
         AddContinuationOrRunNow(ds, [state, b = std::forward<WorkBuilder>(builder)]() mutable {
             b(state);
             ReleaseState(state);
@@ -1924,7 +2038,12 @@ namespace JobSystem
     {
         AcquireState(state);
         SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
+            // B5: 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
+            // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
+            const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+            if (id != 0) SetCurrentBatchId(id);
             try { work(); } catch (...) {}
+            if (id != 0) SetCurrentBatchId(0);
             if (cleanup) cleanup(ctx);
             CompleteState(state);
             ReleaseState(state);
@@ -1935,10 +2054,12 @@ namespace JobSystem
     JobHandle ScheduleFastPath(Work&& work, void* ctx, void (*cleanup)(void*), const JobHandle& dep)
     {
         auto* state = CreateState(false);
+        AssignStateDiagnosticId(state);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
         { FastPath(std::forward<Work>(work), ctx, cleanup, state); return JobHandle(state); }
         AcquireState(state);
+        RetainDependency(state, ds);
         AddContinuationOrRunNow(ds, [state, work = std::forward<Work>(work), ctx, cleanup]() mutable {
             FastPath(std::forward<Work>(work), ctx, cleanup, state);
             ReleaseState(state);
@@ -1949,35 +2070,6 @@ namespace JobSystem
     // ============================================================
     // Scheduler
     // ============================================================
-    static ExecutionBackend ResolveConfiguredBackend() noexcept
-    {
-        std::string value;
-#if defined(_WIN32)
-        char* raw = nullptr;
-        std::size_t rawLength = 0;
-        if (_dupenv_s(&raw, &rawLength, "ENTJOY_JOB_BACKEND") != 0)
-            raw = nullptr;
-        if (raw)
-        {
-            value.assign(raw);
-            std::free(raw);
-        }
-#else
-        const char* raw = std::getenv("ENTJOY_JOB_BACKEND");
-        if (raw)
-            value.assign(raw);
-#endif
-        // The native persistent pool is now the production path. Taskflow stays
-        // available only as an explicit compatibility/A-B backend.
-        if (value.empty()) return ExecutionBackend::NativeWorkerPool;
-        std::transform(value.begin(), value.end(), value.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (value == "taskflow") return ExecutionBackend::Taskflow;
-        if (value == "native") return ExecutionBackend::NativeWorkerPool;
-        g_invalidBackendSelections.fetch_add(1, std::memory_order_relaxed);
-        return ExecutionBackend::NativeWorkerPool;
-    }
-
     static bool ResolveWorkerAffinityEnabled() noexcept
     {
         std::string value;
@@ -2011,14 +2103,13 @@ namespace JobSystem
         ::timeBeginPeriod(1);
 #endif
         {
-            std::lock_guard<std::mutex> lock(g_executorMutex);
+            std::lock_guard<std::mutex> lock(g_schedulerMutex);
             int resolved = numThreads > 0 ? numThreads :
                 (g_numThreads > 0 ? g_numThreads :
                     std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1));
-            if (g_executor || (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning()))
+            if (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning())
                 return;
             g_numThreads = resolved;
-            g_executionBackend = ResolveConfiguredBackend();
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
@@ -2027,50 +2118,36 @@ namespace JobSystem
             if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
                 BindCurrentThreadToLogicalProcessor(0);
 
-            if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
-            {
-                g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
-                g_nativeWorkerPool->Start(
-                    static_cast<uint32_t>(resolved),
-                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
-                return;
-            }
-            auto workerInterface =
-                tf::make_worker_interface<AffinityWorkerInterface>();
-            g_executor = std::make_shared<tf::Executor>(
-                static_cast<size_t>(resolved), workerInterface);
+            g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
+            g_nativeWorkerPool->Start(
+                static_cast<uint32_t>(resolved),
+                g_workerAffinityEnabled.load(std::memory_order_relaxed));
         }
     }
 
     void Scheduler::Shutdown()
     {
         g_shuttingDown.store(true, std::memory_order_release);
-        std::shared_ptr<tf::Executor> exec;
         std::unique_ptr<NativeWorkerPool> nativePool;
         {
-            std::lock_guard<std::mutex> lock(g_executorMutex);
-            exec = std::move(g_executor);
+            std::lock_guard<std::mutex> lock(g_schedulerMutex);
             nativePool = std::move(g_nativeWorkerPool);
             g_numThreads = 0;
         }
-        if (exec) exec->wait_for_all();
         if (nativePool) nativePool->Stop();
         ConsumeLongBatchBarriers();
         ClearBatchStoragePool();
+        // B2: 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
+        // worker 线程已由 nativePool->Stop() join，其 thread_local 缓存已在
+        // 退出时交还，故此处清空覆盖全部 state。
+        FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
-        { std::lock_guard<std::mutex> lock(g_taskflowPoolMutex); for (auto* tf : g_taskflowPool) delete tf; g_taskflowPool.clear(); }
     }
 
     void Scheduler::PrewakeWorkers()
     {
-        if (g_executionBackend == ExecutionBackend::NativeWorkerPool)
-            return;
-        auto exec = EnsureExecutor();
-        // Submit NOP tasks to wake all workers
-        auto taskflow = AcquireTaskflow();
-        for (int i = 0; i < g_numThreads; i++)
-            taskflow->emplace([]() { });
-        exec->run(*taskflow, [taskflow]() mutable { });
+        // C# 初始化经 GetProcAddress 解析此导出，保留为 no-op。
+        // NativeWorkerPool 的 worker 常驻 spin/futex，无需显式唤醒。
     }
 
     void Scheduler::KeepWorkersWarm(int /*microseconds*/)
@@ -2102,7 +2179,13 @@ namespace JobSystem
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (!func) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        if (!dependency.State() || dependency.IsCompleted()) { func(context); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (!dependency.State() || dependency.IsCompleted())
+        {
+            auto* st = CreateState(true);
+            RunSyncJob(st, [func, context]() { func(context); });
+            if (cleanup) cleanup(context);
+            return JobHandle(st);
+        }
         return ScheduleFastPath([func, context]() { func(context); }, context, cleanup, dependency);
     }
 
@@ -2112,13 +2195,23 @@ namespace JobSystem
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
-        if (length <= kSyncExecutionLengthThreshold || (depOk && length <= kSyncWithCompletedDepThreshold))
-        { for (int i = 0; i < length; i++) func(context, i); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
+        if (depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        {
+            auto* st = CreateState(true);
+            RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
+            if (cleanup) cleanup(context);
+            return JobHandle(st);
+        }
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             AcquireState(state);
             SubmitBackendAsync([func, context, length, cleanup, state]() {
+                // B5: state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
+                const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+                if (id != 0) SetCurrentBatchId(id);
                 for (int i = 0; i < length; i++) func(context, i);
+                if (id != 0) SetCurrentBatchId(0);
                 if (cleanup) cleanup(context);
                 CompleteState(state);
                 ReleaseState(state);
@@ -2133,8 +2226,14 @@ namespace JobSystem
         ConsumeLongBatchBarriers();
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
-        if (length <= kSyncExecutionLengthThreshold || (depOk && length <= kSyncWithCompletedDepThreshold))
-        { for (int i = 0; i < length; i++) func(context, i); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
+        if (depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        {
+            auto* st = CreateState(true);
+            RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
+            if (cleanup) cleanup(context);
+            return JobHandle(st);
+        }
         int cs = ResolveChunkSize(length, batchSize);
         int rc = (length + cs - 1) / cs;
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
@@ -2182,7 +2281,7 @@ namespace JobSystem
 
         auto* ds = dependency.State();
         if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
+        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
 
@@ -2195,11 +2294,25 @@ namespace JobSystem
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         bool forceAsync = batchSize < 0; int reqBatch = forceAsync ? -batchSize : batchSize;
-        if (!forceAsync && (length <= kSyncExecutionLengthThreshold || (depOk && length <= kSyncWithCompletedDepThreshold)))
-        { func(context, 0, length); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (!forceAsync && depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        {
+            auto* st = CreateState(true);
+            RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
+            if (cleanup) cleanup(context);
+            return JobHandle(st);
+        }
         int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0));
         int rc = (length + cs - 1) / cs;
-        if (rc <= 1) { func(context, 0, length); if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (!forceAsync && depOk && rc <= 1)
+        {
+            auto* st = CreateState(true);
+            RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
+            if (cleanup) cleanup(context);
+            return JobHandle(st);
+        }
+        // 依赖未完成或强制异步时不得 inline：走 ScheduleFastPath（按依赖排序的池任务）。
+        if (rc <= 1)
+            return ScheduleFastPath([func, context, length]() { func(context, 0, length); }, context, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
@@ -2243,7 +2356,7 @@ namespace JobSystem
 
         auto* ds = dependency.State();
         if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
+        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
 
@@ -2262,6 +2375,8 @@ namespace JobSystem
         // but must consume the stored value to keep the barrier mechanism clean).
         g_useFineRangesForNextEcsBatch.exchange(false, std::memory_order_acq_rel);
         if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        // 依赖未完成时不得 inline —— 小任务也走异步提交（由依赖完成触发）。
+        const bool depOk = !dependency.State() || dependency.IsCompleted();
 
         // Choose the execution range from workload size and worker cohort.
         // Physical 16 KiB chunks remain storage units only.
@@ -2274,15 +2389,16 @@ namespace JobSystem
         // useFineRanges deliberately disabled: it doubled tile count without benefit.
         int rc = (itemCount + rs - 1) / rs;
 
-        // Inline for trivial work
-        if (rc <= 1 && workerCap <= 1)
+        // Inline for trivial work（依赖已完成/无依赖时；依赖未完成走异步提交）
+        if (depOk && rc <= 1 && workerCap <= 1)
         {
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            if (func) { for (int i = 0; i < itemCount; i++) func(context, &chunks[i]); }
-            else if (rangeFunc) { rangeFunc(context, chunks, 0, itemCount); }
-            else if (entityRangeFunc) { entityRangeFunc(context, batches, 0, itemCount); }
+            auto* st = CreateState(true);
+            if (func) RunSyncJob(st, [&]() { for (int i = 0; i < itemCount; i++) func(context, &chunks[i]); });
+            else if (rangeFunc) RunSyncJob(st, [&]() { rangeFunc(context, chunks, 0, itemCount); });
+            else if (entityRangeFunc) RunSyncJob(st, [&]() { entityRangeFunc(context, batches, 0, itemCount); });
             if (cleanup) cleanup(context);
-            return JobHandle(CreateState(true));
+            return JobHandle(st);
         }
 
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
@@ -2337,7 +2453,7 @@ namespace JobSystem
 
         auto* ds = dependency.State();
         if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, workerCap); }
-        else { AcquireState(state); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
+        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
         return JobHandle(state);
     }
 

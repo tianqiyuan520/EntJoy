@@ -49,7 +49,6 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | 从 MSBuild 调用 CMake 的自定义任务 |
 | [`src/NativeDll`](src/NativeDll) | C++ JobSystem、Profiler 和原生容器支持 |
 | [`src/EntJoySample`](src/EntJoySample) | 功能验证、用法示例和性能测试 |
-| [`external/cpp-taskflow`](external/cpp-taskflow) | JobSystem 使用的 Taskflow 子模块 |
 
 ## 安装
 
@@ -97,7 +96,7 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 
 ### 3. 克隆仓库
 
-Taskflow 是 Git 子模块，因此请递归克隆：
+仓库包含 Git 子模块（如 `sleef`），因此请递归克隆：
 
 ```powershell
 git clone --recursive https://github.com/tianqiyuan520/EntJoy.git
@@ -536,9 +535,9 @@ ispc --version
 
 确认 Visual Studio Installer 已安装“使用 C++ 的桌面开发”、MSVC v143 和 Windows SDK，并在 Developer PowerShell for VS 2022 中构建。
 
-### Taskflow 头文件不存在
+### 子模块缺失
 
-初始化子模块：
+初始化子模块（`src/NativeDll/sleef`）：
 
 ```powershell
 git submodule update --init --recursive
@@ -568,7 +567,6 @@ EntJoy 的设计和实现受到以下项目与技术的启发：
 - [coinsoundsbetter/EntJoy](https://github.com/coinsoundsbetter/EntJoy)：项目早期版本的起点。
 - [Arch](https://github.com/genaray/Arch)：高性能 Archetype ECS 的设计参考。
 - [Friflo.Engine.ECS](https://github.com/friflo/Friflo.Engine.ECS)：C# ECS API 与数据布局的实现参考。
-- [Taskflow](https://github.com/taskflow/taskflow)：原生任务执行与依赖调度基础设施。
 - [Intel ISPC](https://ispc.github.io/)：面向 SPMD/SIMD 的原生计算后端。
 
 感谢这些项目的作者和贡献者公开他们的工作，使 EntJoy 能够在已有经验之上继续探索 C#、C++ 与 SIMD ECS 技术栈。
@@ -626,7 +624,6 @@ EntJoy combines a convenient managed API with native execution backends:
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | Custom MSBuild task that invokes CMake |
 | [`src/NativeDll`](src/NativeDll) | C++ JobSystem, profiler, and native container support |
 | [`src/EntJoySample`](src/EntJoySample) | Usage, correctness, and performance samples |
-| [`external/cpp-taskflow`](external/cpp-taskflow) | Taskflow Git submodule used by JobSystem |
 
 ## Installation
 
@@ -672,7 +669,7 @@ The currently recommended environment is:
 
 ### 3. Clone
 
-Taskflow is a Git submodule, so clone recursively:
+The repository contains Git submodules (e.g. `sleef`), so clone recursively:
 
 ```powershell
 git clone --recursive https://github.com/tianqiyuan520/EntJoy.git
@@ -1105,7 +1102,7 @@ ispc --version
 
 Install Desktop development with C++, MSVC v143, and a Windows SDK through Visual Studio Installer. Build from Developer PowerShell for VS 2022.
 
-### Taskflow headers are missing
+### Submodules are missing
 
 ```powershell
 git submodule update --init --recursive
@@ -1131,7 +1128,6 @@ EntJoy's design and implementation are informed by:
 - [coinsoundsbetter/EntJoy](https://github.com/coinsoundsbetter/EntJoy), the starting point of the early project.
 - [Arch](https://github.com/genaray/Arch), a reference for high-performance Archetype ECS design.
 - [Friflo.Engine.ECS](https://github.com/friflo/Friflo.Engine.ECS), a reference for C# ECS APIs and data layout.
-- [Taskflow](https://github.com/taskflow/taskflow), native task execution and dependency infrastructure.
 - [Intel ISPC](https://ispc.github.io/), the SPMD/SIMD native compute backend.
 
 Thanks to the authors and contributors of these projects for making their work available and enabling EntJoy to continue exploring a combined C#, C++, and SIMD ECS stack.

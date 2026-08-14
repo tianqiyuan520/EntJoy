@@ -1,6 +1,0 @@
-[submodule "external/cpp-taskflow"]
-	path = external/cpp-taskflow
-	url = https://github.com/taskflow/taskflow.git
-[submodule "src/NativeDll/sleef"]
-	path = src/NativeDll/sleef
-	url = https://github.com/shibatch/sleef
