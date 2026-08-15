@@ -60,11 +60,6 @@ extern "C"
         JobSystem::Scheduler::PrewakeWorkers();
     }
 
-    void JobSystem_KeepWorkersWarm(int microseconds)
-    {
-        JobSystem::Scheduler::KeepWorkersWarm(microseconds);
-    }
-
     void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker)
     {
         JobSystem::Scheduler::ConfigureTilesPerWorker(tilesPerWorker);
@@ -73,11 +68,6 @@ extern "C"
     void JobSystem_ConfigureGuided(int enabled, int k, int floor)
     {
         JobSystem::Scheduler::ConfigureGuided(enabled, k, floor);
-    }
-
-    void JobSystem_FlushScheduledJobs()
-    {
-        JobSystem::Scheduler::FlushScheduledJobs();
     }
 
     void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free)

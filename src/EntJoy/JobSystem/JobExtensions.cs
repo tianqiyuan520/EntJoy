@@ -1,5 +1,4 @@
 ﻿using EntJoy;
-using EntJoy.JobSystem;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -17,7 +16,7 @@ public static class JobExtensions
     /// <summary>调度 IJob（带依赖）</summary>
     public static JobHandle Schedule<T>(this T job, JobHandle dependsOn) where T : struct, IJob
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(NativeJobScheduler.Schedule(ref job, nativeDep));
     }
 
@@ -27,7 +26,7 @@ public static class JobExtensions
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
         JobHandle dependsOn = default) where T : struct, IJobParallelFor
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, nativeDep));
     }
@@ -38,7 +37,7 @@ public static class JobExtensions
     public static JobHandle Schedule<T>(this T job, int arrayLength,
         JobHandle dependsOn = default) where T : struct, IJobFor
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleFor(ref job, arrayLength, nativeDep));
     }
@@ -49,7 +48,7 @@ public static class JobExtensions
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
         JobHandle dependsOn = default) where T : struct, IJobParallelForBatch
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
     }
@@ -67,7 +66,7 @@ public static class JobExtensions
         if (world == null)
             throw new InvalidOperationException("No active World found.");
 
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
 
         return new JobHandle(
             NativeJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep));
@@ -81,7 +80,7 @@ public static class JobExtensions
         if (world == null)
             throw new InvalidOperationException("No active World found.");
 
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(NativeJobScheduler.ScheduleChunkWithWorkerCap(
             ref job, world.EntityManager, query, workerCap, nativeDep));
     }
@@ -94,7 +93,7 @@ public static class JobExtensions
     {
         // 当前 C++ 调度器尚未支持 ThreadCounter，直接调度
         // 如果需要计数，可以在 C++ 端或回调中统计
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, nativeDep));
     }
@@ -103,7 +102,7 @@ public static class JobExtensions
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
         JobHandle dependsOn, ThreadCounter counter) where T : struct, IJobParallelForBatch
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
     }
@@ -116,7 +115,7 @@ public static class JobExtensions
         if (world == null)
             throw new InvalidOperationException("No active World found.");
 
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependencyOrCompleteManaged();
+        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
 
         return new JobHandle(
             NativeJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep));

@@ -1,29 +1,13 @@
-﻿using EntJoy.JobSystem;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
 
 /// <summary>
-/// 作业句柄，统一封装 C# Task 句柄和 C++ 原生句柄。
-/// 当 NativeHandle 有效时优先使用 C++ 作业调度，否则回退到 Task 调度。
+/// 作业句柄，统一封装 C++ 原生句柄（NativeJobScheduler）。
 /// </summary>
 public struct JobHandle
 {
-    private Task _task;
-    private Task[] _tasks;
     public NativeJobHandle _nativeHandle;
-
-    internal JobHandle(Task task)
-    {
-        _task = task;
-        _tasks = null;
-        _nativeHandle = default;
-    }
 
     public JobHandle(NativeJobHandle nativeHandle)
     {
-        _task = null;
-        _tasks = null;
         _nativeHandle = nativeHandle;
     }
 
@@ -32,160 +16,34 @@ public struct JobHandle
     {
         get
         {
-            // 原生句柄优先
-            if (_nativeHandle.IsValid)
-                return NativeJobScheduler.IsCompleted(_nativeHandle);
-
-            if (_task != null)
-                return _task.IsCompleted;
-            if (_tasks != null)
-            {
-                foreach (var t in _tasks)
-                    if (!t.IsCompleted) return false;
+            if (!_nativeHandle.IsValid)
                 return true;
-            }
-            return true;
+            return NativeJobScheduler.IsCompleted(_nativeHandle);
         }
     }
 
     /// <summary>强制等待所有关联 Job 完成（阻塞当前线程）</summary>
     public void Complete()
     {
-        if (_nativeHandle.IsValid)
-        {
-            NativeJobScheduler.Complete(ref _nativeHandle);
+        if (!_nativeHandle.IsValid)
             return;
-        }
-
-        if (_task != null)
-            _task.Wait();
-        else if (_tasks != null)
-            Task.WaitAll(_tasks);
+        NativeJobScheduler.Complete(ref _nativeHandle);
     }
 
-    internal Task GetTask()
-    {
-        if (_nativeHandle.IsValid)
-        {
-            var handle = this;
-            return Task.Run(() => handle.Complete());
-        }
-        if (_task != null) return _task;
-        if (_tasks != null) return Task.WhenAll(_tasks);
-        return Task.CompletedTask;
-    }
-
-    internal NativeJobHandle? GetNativeDependencyOrCompleteManaged()
-    {
-        if (_nativeHandle.IsValid)
-            return _nativeHandle;
-
-        if (!IsCompleted)
-            Complete();
-
-        return null;
-    }
+    /// <summary>原生依赖句柄（本路径句柄恒为原生，直接返回）</summary>
+    internal NativeJobHandle GetNativeDependency() => _nativeHandle;
 
     /// <summary>合并多个依赖句柄</summary>
     public static JobHandle CombineDependencies(params JobHandle[] handles)
     {
         if (handles == null || handles.Length == 0)
-            return new JobHandle(Task.CompletedTask);
+            return default;
 
-        // 检查是否有原生句柄
-        bool hasNative = false;
+        var nativeHandles = new NativeJobHandle[handles.Length];
         for (int i = 0; i < handles.Length; i++)
-        {
-            if (handles[i]._nativeHandle.IsValid)
-            {
-                hasNative = true;
-                break;
-            }
-        }
+            nativeHandles[i] = handles[i]._nativeHandle;
 
-        if (hasNative)
-        {
-            bool hasManagedTask = false;
-            for (int i = 0; i < handles.Length; i++)
-            {
-                if (!handles[i]._nativeHandle.IsValid && !handles[i].IsCompleted)
-                {
-                    hasManagedTask = true;
-                    break;
-                }
-            }
-
-            if (hasManagedTask)
-            {
-                var tasks = new Task[handles.Length];
-                for (int i = 0; i < handles.Length; i++)
-                    tasks[i] = handles[i].GetTask();
-                return new JobHandle(Task.WhenAll(tasks));
-            }
-
-            var nativeHandles = new NativeJobHandle[handles.Length];
-            for (int i = 0; i < handles.Length; i++)
-                nativeHandles[i] = handles[i]._nativeHandle;
-            var combined = NativeJobScheduler.CombineDependencies(nativeHandles);
-            return new JobHandle(combined);
-        }
-
-        // 回退到 Task 合并
-        Task singleTask = null;
-        int validCount = 0;
-        for (int i = 0; i < handles.Length; i++)
-        {
-            var t = handles[i].GetTask();
-            if (t != null && t != Task.CompletedTask)
-            {
-                validCount++;
-                singleTask = t;
-            }
-        }
-
-        if (validCount == 0)
-            return new JobHandle(Task.CompletedTask);
-        if (validCount == 1)
-            return new JobHandle(singleTask);
-
-        // 多个依赖
-        var combineNode = new CombineNode(validCount);
-        for (int i = 0; i < handles.Length; i++)
-        {
-            var t = handles[i].GetTask();
-            if (t != null && t != Task.CompletedTask)
-                t.ContinueWith(_ => combineNode.Decrement(), TaskContinuationOptions.ExecuteSynchronously);
-            else
-                combineNode.Decrement();
-        }
-        return new JobHandle(combineNode.Task);
-    }
-
-    /// <summary>
-    /// 显式发布已延迟调度的原生 Job，语义接近 Unity JobHandle.ScheduleBatchedJobs。
-    /// </summary>
-    public static void ScheduleBatchedJobs()
-    {
-        NativeJobScheduler.FlushScheduledJobs();
-    }
-
-    private class CombineNode
-    {
-        private int _remaining;
-        private TaskCompletionSource<bool> _tcs;
-
-        public CombineNode(int initialCount)
-        {
-            _remaining = initialCount;
-            _tcs = new TaskCompletionSource<bool>();
-        }
-
-        public Task Task => _tcs.Task;
-
-        public void Decrement()
-        {
-            if (Interlocked.Decrement(ref _remaining) == 0)
-                _tcs.TrySetResult(true);
-        }
+        var combined = NativeJobScheduler.CombineDependencies(nativeHandles);
+        return new JobHandle(combined);
     }
 }
