@@ -186,7 +186,16 @@ namespace JobSystem
             batch->completion(batch->context);
             ReleaseDescriptor(batch);
             if (outstandingBatches.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            {
+                // 持锁 notify：堵住 Stop 的 lost-wakeup 窗口。
+                // Stop 在 lifecycleMutex 内检查谓词 outstanding==0；若末位 fetch_sub→0
+                // 恰在 Stop 谓词检查(false) 与 wait 真正阻塞之间无锁 notify，唤醒即丢失 →
+                // Stop 永久阻塞（实测 ~60% 概率挂死）。末位递减先于取锁，Stop 持锁检查时
+                // 要么看到 0（直接放行），要么看到 >0（阻塞，worker 随后取锁 notify 必然唤醒）。
+                // 锁仅在末位 batch 取一次，热路径零开销。
+                std::lock_guard<std::mutex> lock(lifecycleMutex);
                 idle.notify_all();
+            }
         }
 
         void DrainAvailableWork(uint32_t workerIndex) noexcept
