@@ -25,15 +25,5 @@ internal static class TempBuffer
         }
         return _threadBufferPtr;
     }
-
-    public unsafe static void ReleaseCurrentThreadBuffer()
-    {
-        if (_threadBufferHandle.IsAllocated)
-        {
-            _threadBufferHandle.Free();
-            _threadBuffer = null;
-            _threadBufferPtr = null;
-        }
-    }
 }
 }

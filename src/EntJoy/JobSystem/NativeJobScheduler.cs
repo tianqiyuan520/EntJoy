@@ -75,37 +75,10 @@ internal unsafe struct ChunkContextHeader
     // 紧接着是 job 的原始数据（变长）
 }
 
-[StructLayout(LayoutKind.Sequential)]
-internal unsafe struct ManagedChunkContextHeader
-{
-    public IntPtr jobHandle;             // GCHandle -> ManagedJobBox<T>
-    public int chunkCount;               // Chunk 数量
-    public int hasEnabledFilter;         // 是否有 enable 过滤
-    public IntPtr queryAllEnabledTypes;  // int[]（类型哈希数组）指针
-    public int allEnabledCount;          // AllEnabled 数组长度
-    public IntPtr chunksPtr;             // ChunkJobData 数组指针（用于 cleanup 回收）
-    public int ownsChunkData;            // 是否由该 context 释放 chunksPtr
-}
 
 /// <summary>
 /// HandleState 的 C# 侧视图（与 C++ HandleState 内存布局一一对应）
 /// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal unsafe struct HandleStateView
-{
-    // C++ HandleState:
-    // std::atomic<uint32_t> refCount;   // offset 0
-    // std::atomic<bool> completed;       // offset 4
-    private uint _refCount;
-    private byte _completed;
-
-    public bool Completed
-    {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => Thread.VolatileRead(ref _completed) != 0;
-    }
-}
-
 [StructLayout(LayoutKind.Sequential)]
 public struct NativeJobSystemStats
 {
@@ -261,8 +234,6 @@ internal enum NativeEcsJobKind
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
-    private const int MaxRecordedJobExceptions = 16;
-    private static int _recordedJobExceptionCount;
     [ThreadStatic] private static int _jobExecutionDepth;
     // B5: native 每 job 执行窗口 set/clear 的当前 batch id。C# 异常按此归属，
     // Complete(h) 只抛本 handle 的异常（修 V-B 全局异常队列归属错乱）。
@@ -291,7 +262,6 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
-    private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_CompleteAndRelease;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
     private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_GetDiagnosticBatchId;
     private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void> _jobSystem_RegisterCurrentBatchId;
@@ -492,8 +462,6 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleParallelForBatch");
         _jobSystem_ScheduleFor = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleFor");
-        _jobSystem_CompleteAndRelease = (delegate* unmanaged[Cdecl]<IntPtr, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
         _jobSystem_Complete = (delegate* unmanaged[Cdecl]<IntPtr, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Complete");
         _jobSystem_GetDiagnosticBatchId = (delegate* unmanaged[Cdecl]<IntPtr, ulong>)
@@ -615,13 +583,6 @@ public static unsafe partial class NativeJobScheduler
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleFor(funcPtr, context, cleanupPtr, length, dependency);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void JobSystem_CompleteAndRelease(IntPtr handle)
-    {
-        EnsureNativeLoaded();
-        _jobSystem_CompleteAndRelease(handle);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1204,104 +1165,6 @@ public static unsafe partial class NativeJobScheduler
     /// IJobEntity ISPC 轻量调度：跳过 entity tracking + query cache，
     /// 直接迭代 archetype chunk 构建 ChunkJobData 并调度。
     /// </summary>
-    public static NativeJobHandle ScheduleIspcEntityRangeRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
-        where T : struct
-    {
-        using var dependencyLease = new RetainedNativeDependency(dependsOn);
-        if (funcPtr == IntPtr.Zero)
-            throw new ArgumentException("ISPC range scheduling requires a function pointer.", nameof(funcPtr));
-
-        // 直接构建 chunk data（同 BuildRawChunkScheduleCache 逻辑）
-        var chunkList = new List<Chunk>(128);
-        for (int i = 0; i < entityManager.ArchetypeCount; i++)
-        {
-            var arch = entityManager.Archetypes[i];
-            if (arch != null && arch.IsMatch(query))
-                foreach (var c in arch.GetChunks())
-                    if (c.EntityCount > 0) chunkList.Add(c);
-        }
-        int chunkCount = chunkList.Count;
-        if (chunkCount == 0) return default;
-
-        int requiredCount = requiredComponentTypeIds?.Length ?? 0;
-        var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-        for (int ci = 0; ci < chunkCount; ci++)
-        {
-            var chunk = chunkList[ci];
-            int compCount = chunk.ComponentCount;
-            var compArrays = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-            var compTypeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
-            for (int ci2 = 0; ci2 < compCount; ci2++)
-            {
-                compArrays[ci2] = (void*)chunk.GetComponentArrayPointer(ci2);
-                compTypeIndices[ci2] = chunk.Archetype.Types[ci2].Id;
-            }
-            void** requiredArrays = null;
-            if (requiredCount > 0)
-            {
-                requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                for (int r = 0; r < requiredCount; r++)
-                {
-                    requiredArrays[r] = null;
-                    for (int ci2 = 0; ci2 < compCount; ci2++)
-                    {
-                        if (compTypeIndices[ci2] == requiredComponentTypeIds[r])
-                        { requiredArrays[r] = compArrays[ci2]; break; }
-                    }
-                }
-            }
-            chunksPtr[ci] = new ChunkJobData
-            {
-                entityCount = chunk.EntityCount,
-                requiredComponentArrays = requiredArrays,
-                requiredComponentCount = requiredCount,
-                componentCount = compCount,
-                componentArrays = (void**)compArrays,
-                componentSizes = null,
-                componentTypeIndices = compTypeIndices,
-                enableBitMaps = null,
-                chunkHandle = IntPtr.Zero,
-            };
-        }
-
-        try
-        {
-            // 简化 context block：只包含 job struct 数据，无 header
-            int jobSize = Unsafe.SizeOf<T>();
-            var contextBlock = Marshal.AllocHGlobal(sizeof(ChunkContextHeader) + jobSize);
-            var header = (ChunkContextHeader*)contextBlock;
-            *header = new ChunkContextHeader
-            {
-                chunkCount = chunkCount,
-                hasEnabledFilter = 0,
-                queryAllEnabledTypes = IntPtr.Zero,
-                allEnabledCount = 0,
-                gcHandleStartIndex = -1,
-                chunksPtr = (IntPtr)chunksPtr,
-                cleanupInProgress = 0,
-                requiredComponentTypeIds = IntPtr.Zero,
-                requiredComponentTypeIdCount = 0,
-            };
-            Unsafe.CopyBlock((void*)(contextBlock + sizeof(ChunkContextHeader)), Unsafe.AsPointer(ref job), (uint)jobSize);
-
-            var cleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
-            var handle = new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(
-                funcPtr, contextBlock, cleanupPtr,
-                chunksPtr, chunkCount,
-                dependencyLease.Handle,
-                ChunkScheduleMode.PublishAssist, 0, 0));
-            return handle;
-        }
-        catch
-        {
-            for (int ci = 0; ci < chunkCount; ci++)
-                if (chunksPtr[ci].requiredComponentArrays != null)
-                    Marshal.FreeHGlobal((IntPtr)chunksPtr[ci].requiredComponentArrays);
-            Marshal.FreeHGlobal((IntPtr)chunksPtr);
-            throw;
-        }
-    }
-
     public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
@@ -2464,8 +2327,6 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 内部实现 ========================
     private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
     private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
-    private static readonly CleanupFunc _managedChunkCleanup = ManagedChunkCleanup;
-    private static readonly IntPtr _managedChunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_managedChunkCleanup);
 
     private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
     {
@@ -2514,43 +2375,6 @@ public static unsafe partial class NativeJobScheduler
         if (cacheLease != null)
         {
             _chunkContextLeases[block] = GCHandle.Alloc(cacheLease, GCHandleType.Normal);
-        }
-
-        return block;
-    }
-
-    private unsafe static IntPtr CreateManagedChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, bool ownsChunkData) where T : struct
-    {
-        int headerSize = Unsafe.SizeOf<ManagedChunkContextHeader>();
-        int typesDataSize = 0;
-        int[] typeHashes = null;
-        if (hasEnabledFilter && allEnabledTypes != null)
-        {
-            typeHashes = new int[allEnabledTypes.Length];
-            for (int i = 0; i < allEnabledTypes.Length; i++) typeHashes[i] = allEnabledTypes[i].GetHashCode();
-            typesDataSize = typeHashes.Length * sizeof(int);
-        }
-
-        var block = Marshal.AllocHGlobal(headerSize + typesDataSize);
-        Unsafe.InitBlockUnaligned((void*)block, 0, (uint)(headerSize + typesDataSize));
-        var header = (ManagedChunkContextHeader*)block;
-        header->jobHandle = AllocManagedContext(ref job);
-        header->chunkCount = chunkCount;
-        header->hasEnabledFilter = hasEnabledFilter ? 1 : 0;
-        header->chunksPtr = (IntPtr)chunksPtr;
-        header->ownsChunkData = ownsChunkData ? 1 : 0;
-
-        if (typeHashes != null && typeHashes.Length > 0)
-        {
-            var typeHashPtr = (int*)((byte*)block + headerSize);
-            for (int i = 0; i < typeHashes.Length; i++) typeHashPtr[i] = typeHashes[i];
-            header->allEnabledCount = typeHashes.Length;
-            header->queryAllEnabledTypes = (IntPtr)typeHashPtr;
-        }
-        else
-        {
-            header->allEnabledCount = 0;
-            header->queryAllEnabledTypes = IntPtr.Zero;
         }
 
         return block;
@@ -2611,36 +2435,6 @@ public static unsafe partial class NativeJobScheduler
         var pooledBlock = contextBlock - IntPtr.Size;
         int pooledSize = *(int*)pooledBlock;
         ContextPool.Return(pooledBlock, pooledSize);
-    }
-
-    private unsafe static void ManagedChunkCleanup(IntPtr contextBlock)
-    {
-        if (contextBlock == IntPtr.Zero) return;
-        var header = (ManagedChunkContextHeader*)contextBlock;
-        ManagedCleanup(header->jobHandle);
-
-        var chunksPtr = (ChunkJobData*)header->chunksPtr;
-        if (chunksPtr != null && header->ownsChunkData != 0)
-        {
-            for (int i = 0; i < header->chunkCount; i++)
-            {
-                var cd = chunksPtr[i];
-                if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
-                if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
-                if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
-                if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
-                if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
-                if (cd.chunkHandle != IntPtr.Zero)
-                {
-                    var handle = GCHandle.FromIntPtr(cd.chunkHandle);
-                    if (handle.IsAllocated) handle.Free();
-                }
-            }
-
-            Marshal.FreeHGlobal((IntPtr)chunksPtr);
-        }
-
-        Marshal.FreeHGlobal(contextBlock);
     }
 
     // ======================== 回调工厂 ========================
@@ -2942,55 +2736,6 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    private unsafe static ChunkJobFuncDelegate CreateManagedChunkCallback<T>() where T : struct, IJobChunk
-    {
-        return (IntPtr ctx, ChunkJobData* cd) =>
-        {
-            EnterJobExecution();
-            try
-            {
-                var header = (ManagedChunkContextHeader*)ctx;
-                ref var job = ref GetManagedJob<T>(header->jobHandle);
-                ExecuteManagedChunk(ref job, header, cd);
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
-    private unsafe static BatchJobFunc CreateManagedChunkBatchCallback<T>() where T : struct, IJobChunk
-    {
-        return (IntPtr ctx, int start, int count) =>
-        {
-            EnterJobExecution();
-            try
-            {
-                var header = (ManagedChunkContextHeader*)ctx;
-                ref var job = ref GetManagedJob<T>(header->jobHandle);
-                var chunks = (ChunkJobData*)header->chunksPtr;
-                int end = start + count;
-                for (int index = start; index < end; index++)
-                {
-                    ExecuteManagedChunk(ref job, header, &chunks[index]);
-                }
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
     private unsafe static BatchJobFunc CreateChunkArrayBatchCallback<T>() where T : struct, IJobChunk
     {
         bool managedContext = JobHasManagedReferences<T>();
@@ -3054,54 +2799,6 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe static void ExecuteManagedChunk<T>(ref T job, ManagedChunkContextHeader* header, ChunkJobData* cd) where T : struct, IJobChunk
-    {
-        var chunkHandle = cd->chunkHandle;
-        Chunk chunk = null;
-        if (chunkHandle != IntPtr.Zero)
-        {
-            try
-            {
-                var gch = GCHandle.FromIntPtr(chunkHandle);
-                if (gch.IsAllocated && gch.Target is Chunk c) chunk = c;
-            }
-            catch { }
-        }
-        if (chunk == null) return;
-
-        if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
-        {
-            int* typeHashArray = (int*)header->queryAllEnabledTypes;
-            int ulongCount = (cd->entityCount + 63) / 64;
-            ulong* combinedMask = TempBuffer.GetBuffer(ulongCount);
-
-            bool firstFound = false;
-            for (int j = 0; j < header->allEnabledCount; j++)
-            {
-                int typeHash = typeHashArray[j];
-                var arch = chunk.Archetype;
-                for (int k = 0; k < cd->componentCount; k++)
-                {
-                    if (arch.Types[k].GetHashCode() == typeHash)
-                    {
-                        ulong* bitmap = (ulong*)cd->enableBitMaps[k];
-                        if (bitmap != null)
-                        {
-                            if (!firstFound) { Buffer.MemoryCopy(bitmap, combinedMask, ulongCount * 8, ulongCount * 8); firstFound = true; }
-                            else { for (int b = 0; b < ulongCount; b++) combinedMask[b] &= bitmap[b]; }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            if (firstFound) job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(combinedMask, cd->entityCount));
-            else job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
-        }
-        else job.Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));
-    }
-
     // ======================== 上下文内存池 ========================
     private static class ContextPool
     {
@@ -3154,32 +2851,35 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 辅助方法 ========================
     private static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
     {
-        var type = typeof(T);
-        if (!_delegateCache.TryGetValue(type, out var cache))
-        {
-            cache = new DelegateCache(factory());
-            _delegateCache[type] = cache;
-        }
-        return cache;
+        // 必须用 GetOrAdd：手写 TryGetValue-创建-赋值在并发首次调度同一 T 时，
+        // loser 实例会被覆盖，其委托可能被 GC 回收但函数指针已交原生侧 → 悬空。
+        return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
     }
 
     // B5: 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
     // batch 0 为未归属异常（实际不发生，防御兜底），由 Flush 统一抛。
     private static readonly object _exceptionLock = new();
     private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();
+    // 每 batch 上限而非全局：一个坏 batch 不应饿死其它 batch 的异常上报。
+    private const int MaxRecordedJobExceptionsPerBatch = 16;
+    // 因每 batch 容量被丢弃的异常数（上报而非静默丢失）。
+    private static int _droppedJobExceptionCount;
 
     private static void RecordJobException(ulong batchId, Exception exception)
     {
         lock (_exceptionLock)
         {
-            if (_recordedJobExceptionCount >= MaxRecordedJobExceptions) return;
             if (!_recordedJobExceptions.TryGetValue(batchId, out var list))
             {
                 list = new List<ExceptionDispatchInfo>();
                 _recordedJobExceptions[batchId] = list;
             }
+            if (list.Count >= MaxRecordedJobExceptionsPerBatch)
+            {
+                _droppedJobExceptionCount++;
+                return;
+            }
             list.Add(ExceptionDispatchInfo.Capture(exception));
-            _recordedJobExceptionCount++;
         }
     }
 
@@ -3204,26 +2904,34 @@ public static unsafe partial class NativeJobScheduler
     public static void FlushRecordedExceptions()
     {
         List<ExceptionDispatchInfo> all = new();
+        int dropped;
         lock (_exceptionLock)
         {
             foreach (var list in _recordedJobExceptions.Values)
                 all.AddRange(list);
             _recordedJobExceptions.Clear();
-            _recordedJobExceptionCount = 0;
+            dropped = _droppedJobExceptionCount;
+            _droppedJobExceptionCount = 0;
         }
+        if (dropped > 0)
+            Console.Error.WriteLine($"[JobSystem] {dropped} job exceptions dropped (per-batch cap {MaxRecordedJobExceptionsPerBatch}).");
         ThrowAll(all);
     }
 
     private static void ThrowRecordedJobExceptions(ulong batchId)
     {
         List<ExceptionDispatchInfo> captured;
+        int dropped;
         lock (_exceptionLock)
         {
             if (!_recordedJobExceptions.TryGetValue(batchId, out captured))
                 return;
             _recordedJobExceptions.Remove(batchId);
-            _recordedJobExceptionCount -= captured.Count;
+            dropped = _droppedJobExceptionCount;
+            _droppedJobExceptionCount = 0;
         }
+        if (dropped > 0)
+            Console.Error.WriteLine($"[JobSystem] {dropped} job exceptions dropped (per-batch cap {MaxRecordedJobExceptionsPerBatch}).");
         ThrowAll(captured);
     }
 

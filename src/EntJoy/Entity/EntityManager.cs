@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using EntJoy.JobSystem;
 
 namespace EntJoy
@@ -144,10 +145,21 @@ namespace EntJoy
                 _activeJobs.Clear();
             }
 
+            // 即使某个 job 抛异常也必须完成剩余 job——否则它们从 _activeJobs 移除后
+            // 仍挂在后台写内存，调用方继续推进会产生数据竞态。统一在全部完成后抛第一个。
+            ExceptionDispatchInfo? pending = null;
             for (int i = 0; i < jobs.Length; i++)
             {
-                jobs[i].Complete();
+                try
+                {
+                    jobs[i].Complete();
+                }
+                catch (Exception ex)
+                {
+                    pending ??= ExceptionDispatchInfo.Capture(ex);
+                }
             }
+            pending?.Throw();
         }
 
         private void PruneCompletedJobsNoLock()

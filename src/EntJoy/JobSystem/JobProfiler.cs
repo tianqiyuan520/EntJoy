@@ -154,9 +154,6 @@ public static class JobProfiler
             return false;
         }
 
-        if (_rawEntries.Length < MaxBatchRead)
-            _rawEntries = new ProfilerEntry[MaxBatchRead];
-
         int nativeCount = 0;
         if (NativeJobScheduler.Profiler_IsEnabled() != 0)
             nativeCount = NativeJobScheduler.Profiler_ReadAll(_rawEntries, MaxBatchRead);
