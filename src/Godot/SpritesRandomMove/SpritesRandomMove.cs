@@ -4,6 +4,7 @@ using EntJoy.Mathematics;
 using Godot;
 using System;
 using System.Diagnostics;
+using EntJoy.JobSystem;
 
 public struct Position : IComponentData
 {

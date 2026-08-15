@@ -1,5 +1,6 @@
 using Godot;
 using System.Threading;
+using EntJoy.JobSystem;
 
 public partial class JobDependencyTest : Node
 {

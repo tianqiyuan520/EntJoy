@@ -10,6 +10,8 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using EntJoy;
+namespace EntJoy.JobSystem
+{
 
 /// <summary>
 /// 跨语言共享的 Chunk 任务数据结构（与 C++ ChunkJobData 一一对应）
@@ -208,7 +210,7 @@ public struct NativeJobSystemStats
     public int SlowRangeEndPhysicalCore;
 }
 
-public enum TraceEventType : ushort
+public enum NativeTraceEventType : ushort
 {
     Publish,
     CompleteEnter,
@@ -233,7 +235,7 @@ public struct NativeTraceEvent
     public int ThreadId;
     public int ProcessorIndex;
     public short WorkerIndex;
-    public TraceEventType EventType;
+    public NativeTraceEventType EventType;
 }
 
 internal enum ChunkScheduleMode
@@ -3357,4 +3359,5 @@ public static unsafe partial class NativeJobScheduler
         int size = *(int*)((byte*)dataPtr - sizeof(int));
         ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
     }
+}
 }

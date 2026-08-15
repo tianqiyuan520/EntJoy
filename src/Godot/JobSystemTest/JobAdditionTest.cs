@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
 using Environment = System.Environment;
+using EntJoy.JobSystem;
 
 
 public struct AdditionJobSIMD : IJobParallelForBatch

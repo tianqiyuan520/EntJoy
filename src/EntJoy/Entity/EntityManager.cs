@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using EntJoy.JobSystem;
 
 namespace EntJoy
 {
@@ -104,7 +105,7 @@ namespace EntJoy
 
             archetypeMap.Clear();
             recycleEntities.Clear();
-            global::NativeJobScheduler.ClearRawChunkScheduleCaches(this);
+            NativeJobScheduler.ClearRawChunkScheduleCaches(this);
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
@@ -130,7 +131,7 @@ namespace EntJoy
 
         internal void CompleteActiveJobs()
         {
-            if (global::NativeJobScheduler.IsExecutingJob)
+            if (NativeJobScheduler.IsExecutingJob)
             {
                 throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing. Complete the job before modifying entities or components.");
             }

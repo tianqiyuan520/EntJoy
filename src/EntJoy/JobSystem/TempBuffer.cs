@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+namespace EntJoy.JobSystem
+{
 
 internal static class TempBuffer
 {
@@ -33,4 +35,5 @@ internal static class TempBuffer
             _threadBufferPtr = null;
         }
     }
+}
 }

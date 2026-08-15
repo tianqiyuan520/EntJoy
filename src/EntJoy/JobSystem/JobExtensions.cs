@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+namespace EntJoy.JobSystem
+{
 
 public static class JobExtensions
 {
@@ -191,4 +193,5 @@ public static class JobExtensions
             }
         }
     }
+}
 }
