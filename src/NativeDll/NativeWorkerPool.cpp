@@ -169,22 +169,32 @@ namespace JobSystem
         std::atomic<uint64_t> hotSpinHits{ 0 };    // 混合等待命中（自旋/初始即有活，未 park）
 
         // 近无锁：descriptor per-thread 缓存。命中零锁；共享池（freeDescriptors）仅在
-        // 缓存空/满时批量迁移（一次锁 / 缓存容量次）。poolId 防跨池代次
+        // 缓存空/满时批量迁移（一次锁 / 缓存容量次）。poolSerial 防跨池代次
         //（Start/Stop/Start）复用陈旧缓存指针：换代后直接丢弃缓存。
+        // 注意：身份不能使用 this 指针——池销毁后再建，Impl 可能落在同一堆地址，
+        // this 相等会误判「同池」而复用已释放的陈旧 descriptor（UAF）。用单调
+        // 递增的 poolSerial 唯一标识一代池，代次相等才允许复用缓存。
         static constexpr size_t kDescriptorCacheCap = 32;
         struct ThreadDescriptorCache
         {
-            uintptr_t poolId{ 0 };
+            uint64_t poolSerial{ 0 };
             std::vector<BatchDescriptor*> entries;
         };
         static thread_local ThreadDescriptorCache t_descriptorCache;
+        const uint64_t poolSerial;
+        Impl() : poolSerial(NextPoolSerial()) {}
+        static uint64_t NextPoolSerial()
+        {
+            static std::atomic<uint64_t> serial{ 0 };
+            return serial.fetch_add(1, std::memory_order_relaxed);
+        }
 
         BatchDescriptor* AcquireDescriptor()
         {
             auto& cache = t_descriptorCache;
-            if (cache.poolId != reinterpret_cast<uintptr_t>(this))
+            if (cache.poolSerial != poolSerial)
             {
-                cache.poolId = reinterpret_cast<uintptr_t>(this);
+                cache.poolSerial = poolSerial;
                 cache.entries.clear();
             }
             if (!cache.entries.empty())
@@ -214,9 +224,9 @@ namespace JobSystem
         void ReleaseDescriptor(BatchDescriptor* descriptor) noexcept
         {
             auto& cache = t_descriptorCache;
-            if (cache.poolId != reinterpret_cast<uintptr_t>(this))
+            if (cache.poolSerial != poolSerial)
             {
-                cache.poolId = reinterpret_cast<uintptr_t>(this);
+                cache.poolSerial = poolSerial;
                 cache.entries.clear();
             }
             if (cache.entries.size() < kDescriptorCacheCap)
