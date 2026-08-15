@@ -155,11 +155,6 @@ namespace JobSystem
         // NativeWorkerPool 的 worker 常驻 spin/futex，无需显式唤醒。
     }
 
-    void Scheduler::KeepWorkersWarm(int /*microseconds*/)
-    {
-        // keep-warm 实验已还原（数据：紧循环无效、睡眠模式回归）。no-op。
-    }
-
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
     {
         // 并行 for 默认粒度（batchSize=0 时 ResolveChunkSize 用）。Initialize 期调用，写后由 job
@@ -175,9 +170,6 @@ namespace JobSystem
         g_guidedK = std::max(1, k);
         g_guidedFloor = std::max(1, floor);
     }
-
-    void Scheduler::SetFrameLowLatencyMode(bool /*enabled*/) {}
-    void Scheduler::FlushScheduledJobs() {}
 
     // ---------- IJob ----------
     JobHandle Scheduler::Schedule(void (*func)(void*), void* context, void (*cleanup)(void*), const JobHandle& dependency)

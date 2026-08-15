@@ -283,10 +283,8 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<int> _jobSystem_GetWorkerCount;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
-    private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_KeepWorkersWarm;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_ConfigureTilesPerWorker;
     private static delegate* unmanaged[Cdecl]<int, int, int, void> _jobSystem_ConfigureGuided;
-    private static delegate* unmanaged[Cdecl]<void> _jobSystem_FlushScheduledJobs;
     private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
     private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
@@ -480,14 +478,10 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
         _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
-        _jobSystem_KeepWorkersWarm = (delegate* unmanaged[Cdecl]<int, void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_KeepWorkersWarm");
         _jobSystem_ConfigureTilesPerWorker = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureTilesPerWorker");
         _jobSystem_ConfigureGuided = (delegate* unmanaged[Cdecl]<int, int, int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureGuided");
-        _jobSystem_FlushScheduledJobs = (delegate* unmanaged[Cdecl]<void>)
-            NativeLibrary.GetExport(dllHandle, "JobSystem_FlushScheduledJobs");
         _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterPersistentAllocator");
         _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
@@ -579,12 +573,6 @@ public static unsafe partial class NativeJobScheduler
         _jobSystem_PrewakeWorkers();
     }
 
-    private static void JobSystem_KeepWorkersWarm(int microseconds)
-    {
-        if (_nativeDll == IntPtr.Zero || _jobSystem_KeepWorkersWarm == null) return;
-        _jobSystem_KeepWorkersWarm(microseconds);
-    }
-
     private static void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker)
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_ConfigureTilesPerWorker == null) return;
@@ -595,12 +583,6 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_ConfigureGuided == null) return;
         _jobSystem_ConfigureGuided(enabled, k, floor);
-    }
-
-    private static void JobSystem_FlushScheduledJobs()
-    {
-        if (_nativeDll == IntPtr.Zero || _jobSystem_FlushScheduledJobs == null) return;
-        _jobSystem_FlushScheduledJobs();
     }
 
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
@@ -726,8 +708,6 @@ public static unsafe partial class NativeJobScheduler
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void EntityBatchJobFuncDelegate(IntPtr context, EntityBatchData* batches, int startIndex, int count);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CleanupFunc(IntPtr context);
 
     // ======================== 委托缓存 ========================
@@ -832,8 +812,6 @@ public static unsafe partial class NativeJobScheduler
     }
     public static void Shutdown() => SafeShutdown();
     public static void PrewakeWorkersOnce() => JobSystem_PrewakeWorkers();
-    public static void KeepWorkersWarm(int microseconds) => JobSystem_KeepWorkersWarm(microseconds);
-    public static void FlushScheduledJobs() => JobSystem_FlushScheduledJobs();
 
     private static void SafeShutdown()
     {
@@ -1320,33 +1298,6 @@ public static unsafe partial class NativeJobScheduler
     public static NativeJobHandle ScheduleAndCompleteEntityBatchRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap = 0, int rangeSize = 0)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, null, workerCap, rangeSize, useScheduleAndComplete: true);
-
-    public static NativeJobHandle ScheduleManagedEntityBatch<TJob, TExecutor>(ref TJob job, EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null, int workerCap = 0)
-        where TJob : struct, IJobEntity
-        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
-    {
-        if (query.AllEnabled != null && query.AllEnabled.Length > 0)
-            throw new NotSupportedException("Direct managed IJobEntity batches do not support AllEnabled filters.");
-
-        if (!TryGetEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds, out var cache, out var cacheLease) ||
-            cache.BatchCount == 0)
-            return default;
-
-        var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease);
-        try
-        {
-            var callback = GetOrCreateDelegateCache<TExecutor, EntityBatchJobFuncDelegate>(() => CreateManagedEntityBatchCallback<TJob, TExecutor>());
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleEntityBatchJobEx(
-                callback.FuncPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount,
-                dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap)));
-        }
-        catch
-        {
-            ChunkCleanup(contextBlock);
-            throw;
-        }
-    }
 
     public static void RunChunkRawImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
         where T : struct, IJobChunk
@@ -2913,34 +2864,6 @@ public static unsafe partial class NativeJobScheduler
         }
         catch { }
         return null;
-    }
-
-    private unsafe static EntityBatchJobFuncDelegate CreateManagedEntityBatchCallback<TJob, TExecutor>()
-        where TJob : struct, IJobEntity
-        where TExecutor : struct, IJobEntityBatchExecutor<TJob>
-    {
-        return (IntPtr ctx, EntityBatchData* batches, int startIndex, int count) =>
-        {
-            EnterJobExecution();
-            try
-            {
-                var header = (ChunkContextHeader*)ctx;
-                int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
-                int typesDataSize = header->allEnabledCount * sizeof(int);
-                int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
-                byte* jobPtr = (byte*)ctx + headerSize + typesDataSize + requiredTypesDataSize;
-                ref var job = ref Unsafe.AsRef<TJob>(jobPtr);
-                TExecutor.Execute(ref job, batches, startIndex, count);
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

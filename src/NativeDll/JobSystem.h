@@ -232,11 +232,8 @@ namespace JobSystem {
         static void Initialize(int numThreads = 0);
         static void Shutdown();
         static void PrewakeWorkers();
-        static void KeepWorkersWarm(int microseconds);
         static void ConfigureTilesPerWorker(int tilesPerWorker);
         static void ConfigureGuided(int enabled, int k, int floor);
-        static void SetFrameLowLatencyMode(bool enabled);
-        static void FlushScheduledJobs();
 
         static JobHandle Schedule(
             void (*func)(void*), void* context,
