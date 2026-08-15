@@ -55,7 +55,6 @@ namespace JobSystem
         DrainContinuationSlot(state);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
-        state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
@@ -102,7 +101,6 @@ namespace JobSystem
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
-        state->waiterCount.store(0, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->continuationSlot.store(nullptr, std::memory_order_relaxed);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
@@ -135,7 +133,6 @@ namespace JobSystem
     std::mutex g_longBatchBarrierMutex;
     std::vector<HandleState*> g_longBatchBarriers;
     thread_local HandleState* g_completingBatchState = nullptr;
-    std::atomic<bool> g_useFineRangesForNextEcsBatch{ false };
 
     void RegisterLongBatchBarrier(HandleState* state) noexcept
     {
@@ -150,7 +147,6 @@ namespace JobSystem
     {
         std::vector<HandleState*> barriers;
         std::vector<HandleState*> deferred;
-        bool waitedForBarrier = false;
         {
             std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
             barriers.swap(g_longBatchBarriers);
@@ -164,7 +160,6 @@ namespace JobSystem
             }
             while (!state->backendRetired.load(std::memory_order_acquire))
                 state->backendRetired.wait(false, std::memory_order_relaxed);
-            waitedForBarrier = true;
             ReleaseState(state);
         }
         if (!deferred.empty())
@@ -173,8 +168,6 @@ namespace JobSystem
             g_longBatchBarriers.insert(
                 g_longBatchBarriers.end(), deferred.begin(), deferred.end());
         }
-        if (waitedForBarrier)
-            g_useFineRangesForNextEcsBatch.store(true, std::memory_order_release);
     }
 
     void CompleteState(HandleState* state)
