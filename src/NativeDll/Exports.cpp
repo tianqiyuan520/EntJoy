@@ -89,16 +89,6 @@ extern "C"
         return toHandle(handle);
     }
 
-    void* JobSystem_ScheduleParallelFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup,
-        int length, int batchSize, void* dependency)
-    {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::ScheduleParallelFor(func, context, length, batchSize, cleanup, dep);
-        return toHandle(handle);
-    }
-
     void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup,
         int length, void* dependency)
     {
@@ -158,6 +148,7 @@ extern "C"
 
     void JobSystem_ReleaseHandle(void* handle)
     {
+        if (!handle) return;
         JobSystem::JobHandle::Release(fromHandle(handle));
     }
 

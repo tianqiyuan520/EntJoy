@@ -30,7 +30,6 @@ namespace JobSystem
     // ---- 跨模块常量（inline 保证 ODR，各 TU 一份） ----
     inline constexpr size_t kMaxPooledStates = 4096;
     inline constexpr size_t kMaxPooledBatchStorage = 256;
-    inline constexpr int kSyncExecutionLengthThreshold = 512;
     inline constexpr int kSyncWithCompletedDepThreshold = 4096;
 
     // B2: per-thread state 缓存上限。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
@@ -136,7 +135,6 @@ namespace JobSystem
     extern std::mutex g_longBatchBarrierMutex;
     extern std::vector<HandleState*> g_longBatchBarriers;
     extern thread_local HandleState* g_completingBatchState;
-    extern std::atomic<bool> g_useFineRangesForNextEcsBatch;
 
     // ---- 跨模块类型 ----
 

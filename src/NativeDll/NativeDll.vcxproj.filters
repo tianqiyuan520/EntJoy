@@ -39,9 +39,6 @@
     <ClInclude Include="ChunkNativeArray.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="ContinuationQueue.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="EntityBatchData.h">
       <Filter>头文件</Filter>
     </ClInclude>

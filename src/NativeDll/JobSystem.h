@@ -45,7 +45,6 @@ namespace JobSystem {
         std::atomic<uint32_t> refCount{ 1 };
         std::atomic<bool> completed{ false };
         std::atomic<bool> backendRetired{ true };
-        std::atomic<int> waiterCount{ 0 };
         std::atomic<uint64_t> diagnosticBatchId{ 0 };
 
         // 延续任务相关。无锁快路径：单个 continuation 经 CAS 存进原子槽（堆节点）、
@@ -70,11 +69,6 @@ namespace JobSystem {
         // RecycleState 释放，保证 handle 被丢弃后链不会悬垂。
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
-
-#ifdef _DEBUG
-        std::atomic<uint32_t> generation{ 0 };
-        std::atomic<bool> inPool{ false };
-#endif
 
         explicit HandleState(bool initialCompleted = false) noexcept
             : completed(initialCompleted) {

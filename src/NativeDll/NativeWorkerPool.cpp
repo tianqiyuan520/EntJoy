@@ -142,8 +142,10 @@ namespace JobSystem
             // 无锁 MPMC 环：Submit round-robin push，owner pop，thief steal（victim 环 pop）。
             MpmcRing<WorkItem, kLocalQueueCapacity> queue;
             // 双 bit 职责分离：
-            //  - wakeFlag：唤醒标志。Submit 置 1（push 前后各一次），owner 在 drain 开始消费。
-            //    永不事后 clear——否则会抹掉 Submit 刚置的 flag，使落环 job 失去保护。
+            //  - wakeFlag：唤醒标志。Submit 置 1（push 前后各一次），owner 在 drain 开始
+            //    exchange(0) 消费。flag 只在 draining==1 期间被清；Submit 的双 store 闭环
+            //    「owner 已消费 pre-push flag → job 落环时 flag 已被抹」的窗口，保证
+            //    「环非空 ⟹ flag==1 或 draining==1」。
             //  - draining：owner-priority。owner drain 全程置 1，thief 跳过，防「偷走 owner
             //    即将认领的阻塞 job → 自身被阻塞 → 自身队列搁浅」。
             std::atomic<uint32_t> wakeFlag{ 0 };
@@ -259,7 +261,7 @@ namespace JobSystem
                 // owner-priority：owner 正在 drain（draining）或待醒（wakeFlag）→
                 // 即将/正在认领自己的环，跳过。防「偷走阻塞 job → 自身被阻塞 →
                 // 自身队列搁浅」。由「Submit 置 flag 后才 push + owner 只在 drain 内消费 +
-                // 永不事后 clear」保证：环非空 ⟹ flag==1 或 draining==1，跳过者必是
+                // Submit 双 store」保证：环非空 ⟹ flag==1 或 draining==1，跳过者必是
                 // owner 即将认领的环，不误跳被遗弃的环。
                 const uint32_t protecting = victim.draining.load(std::memory_order_acquire) |
                     victim.wakeFlag.load(std::memory_order_acquire);
@@ -276,7 +278,18 @@ namespace JobSystem
                     {
                         // 归还给 victim；环满（空位在头部，enqueuePos 处仍占用）则直接执行。
                         if (!victim.queue.Push(stolen))
+                        {
                             FinishWork(stolen);
+                            continue;
+                        }
+                        // 归还后必须重武装 flag + 唤醒：owner 可能已在「预检与 pop 之间」
+                        // 消费 flag（exchange 0）并退出 drain 进入 park（wait(0)），
+                        // 此刻 item 落环但 flag==0 && draining==0 → 永久搁浅，甚至
+                        // 最后一个 outstanding batch 会让 Stop() 永久挂起。
+                        // 置 flag 后 notify：即便 owner 仍在 drain 也会在下次自旋/等待
+                        // 读到 flag 续排空，空转一次无害。
+                        victim.wakeFlag.store(1, std::memory_order_release);
+                        victim.wakeFlag.notify_one();
                         continue;
                     }
                     item = stolen;
@@ -364,8 +377,9 @@ namespace JobSystem
                 }
 
                 // 进入 drain：先置 draining 再消费 flag——防「消费 flag 与真正认领」
-                // 之间的空窗被 thief 抢走未认领 job。wakeFlag 只负责唤醒（drain 后
-                // 永不 clear），draining 只负责 owner-priority。
+                // 之间的空窗被 thief 抢走未认领 job。flag 在此 exchange(0)（draining 保护
+                // 内清），draining 只负责 owner-priority；Submit 的双 store 在 push 后
+                // 重新武装 flag。
                 worker->draining.store(1, std::memory_order_release);
                 worker->wakeFlag.exchange(0, std::memory_order_acq_rel);
                 DrainAvailableWork(workerIndex);
@@ -462,51 +476,71 @@ namespace JobSystem
             first = _impl->nextSubmissionWorker++ % workerCount;
         }
 
-        auto* descriptor = _impl->AcquireDescriptor();
-        descriptor->Reset(context, runSlot, completion, slotCount);
-        wakeCounts.assign(workerCount, 0);
-        bool overflowUsed = false;
-        for (uint32_t slot = 0; slot < slotCount; ++slot)
+        NativeWorkerPool::Impl::BatchDescriptor* descriptor = nullptr;
+        try
         {
-            const uint32_t workerIndex = (first + slot) % workerCount;
-            auto& worker = *_impl->workers[workerIndex];
-            // flag 先置（release）再 push：落环 job 必带 pending wake。push 成功后
-            // 再置一次 flag——闭环「owner 在 drain 内消费 pre-push flag → job 落环时
-            // flag 已被抹」的窗口，保证「环非空 ⟹ flag==1 或 draining==1」。
-            // push 失败走全局溢出环，由末尾 wake-all 兜底。
-            worker.wakeFlag.store(1, std::memory_order_release);
-            if (worker.queue.Push({ descriptor, slot }))
+            // 临界区外可能抛异常（descriptor 池 make_unique / wakeCounts 分配）：
+            // outstanding 已递增但 batch 从未入队 → 无 worker 会递减，Stop 的
+            // idle.wait(outstanding==0) 将永久阻塞。catch 中回滚 outstanding 并
+            // 归还 descriptor，保证 OOM 时池子仍可正常 Shutdown。
+            descriptor = _impl->AcquireDescriptor();
+            descriptor->Reset(context, runSlot, completion, slotCount);
+            wakeCounts.assign(workerCount, 0);
+            bool overflowUsed = false;
+            for (uint32_t slot = 0; slot < slotCount; ++slot)
             {
+                const uint32_t workerIndex = (first + slot) % workerCount;
+                auto& worker = *_impl->workers[workerIndex];
+                // flag 先置（release）再 push：落环 job 必带 pending wake。push 成功后
+                // 再置一次 flag——闭环「owner 在 drain 内消费 pre-push flag → job 落环时
+                // flag 已被抹」的窗口，保证「环非空 ⟹ flag==1 或 draining==1」。
+                // push 失败走全局溢出环，由末尾 wake-all 兜底。
                 worker.wakeFlag.store(1, std::memory_order_release);
-                ++wakeCounts[workerIndex];
-            }
-            else
-            {
-                overflowUsed = true;
-                while (!_impl->overflow.Push({ descriptor, slot }))
+                if (worker.queue.Push({ descriptor, slot }))
                 {
-                    // 全局环也满 = 病理过载：唤醒全部 worker 排空后自旋。
-                    // worker 永不阻塞，必收敛。
-                    for (auto& w : _impl->workers)
-                        w->wakeFlag.store(1, std::memory_order_release);
-                    for (auto& w : _impl->workers)
-                        w->wakeFlag.notify_one();
-                    std::this_thread::yield();
+                    worker.wakeFlag.store(1, std::memory_order_release);
+                    ++wakeCounts[workerIndex];
+                }
+                else
+                {
+                    overflowUsed = true;
+                    while (!_impl->overflow.Push({ descriptor, slot }))
+                    {
+                        // 全局环也满 = 病理过载：唤醒全部 worker 排空后自旋。
+                        // worker 永不阻塞，必收敛。
+                        for (auto& w : _impl->workers)
+                            w->wakeFlag.store(1, std::memory_order_release);
+                        for (auto& w : _impl->workers)
+                            w->wakeFlag.notify_one();
+                        std::this_thread::yield();
+                    }
+                }
+            }
+            for (uint32_t i = 0; i < wakeCounts.size(); ++i)
+                if (wakeCounts[i] != 0)
+                {
+                    _impl->workers[i]->wakeFlag.notify_one();
+                }
+            if (overflowUsed)
+            {
+                for (auto& w : _impl->workers)
+                {
+                    w->wakeFlag.store(1, std::memory_order_release);
+                    w->wakeFlag.notify_one();
                 }
             }
         }
-        for (uint32_t i = 0; i < wakeCounts.size(); ++i)
-            if (wakeCounts[i] != 0)
-            {
-                _impl->workers[i]->wakeFlag.notify_one();
-            }
-        if (overflowUsed)
+        catch (...)
         {
-            for (auto& w : _impl->workers)
+            // OOM：batch 从未入队，回滚 outstanding 并归还 descriptor。
+            if (descriptor)
+                _impl->ReleaseDescriptor(descriptor);
+            if (_impl->outstandingBatches.fetch_sub(1, std::memory_order_acq_rel) == 1)
             {
-                w->wakeFlag.store(1, std::memory_order_release);
-                w->wakeFlag.notify_one();
+                std::lock_guard<std::mutex> lock(_impl->lifecycleMutex);
+                _impl->idle.notify_all();
             }
+            return false;
         }
         return true;
     }

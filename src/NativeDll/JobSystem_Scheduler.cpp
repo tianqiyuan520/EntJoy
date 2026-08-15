@@ -193,7 +193,7 @@ namespace JobSystem
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
-        if (depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        if (depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
             RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
@@ -224,7 +224,7 @@ namespace JobSystem
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
-        if (depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        if (depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
             RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
@@ -290,7 +290,7 @@ namespace JobSystem
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
         bool forceAsync = batchSize < 0; int reqBatch = forceAsync ? -batchSize : batchSize;
-        if (!forceAsync && depOk && (length <= kSyncExecutionLengthThreshold || length <= kSyncWithCompletedDepThreshold))
+        if (!forceAsync && depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
             RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
@@ -366,9 +366,6 @@ namespace JobSystem
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
-        // Clear the fine-range flag (no longer used for scheduling decisions,
-        // but must consume the stored value to keep the barrier mechanism clean).
-        g_useFineRangesForNextEcsBatch.exchange(false, std::memory_order_acq_rel);
         if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         // 依赖未完成时不得 inline —— 小任务也走异步提交（由依赖完成触发）。
         const bool depOk = !dependency.State() || dependency.IsCompleted();
