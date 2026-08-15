@@ -28,12 +28,6 @@ public struct NativeJobHandle : IEquatable<NativeJobHandle>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal readonly void Clear()
-    {
-        _box?.Clear();
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal readonly IntPtr RetainForUse()
     {
         return _box?.RetainForUse() ?? IntPtr.Zero;
@@ -88,12 +82,6 @@ internal sealed class NativeJobHandleBox
             _handle = IntPtr.Zero;
             return handle;
         }
-    }
-
-    public void Clear()
-    {
-        lock (_gate)
-            _handle = IntPtr.Zero;
     }
 
     ~NativeJobHandleBox()
