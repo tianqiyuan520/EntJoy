@@ -863,13 +863,20 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            // NativeDll 核心源文件 + 生成的 .cpp（精确列表，按文件名排序保证稳定性）
+            // NativeDll 核心源文件（按目录 glob，TU 拆分/新增时免维护漏列）+ 生成的 .cpp。
+            // 曾硬编码 JobSystem.cpp 单文件，模块化拆分为 State/Tiles/Scheduler 后漏列
+            // 三个新 TU → 链接期 LNK2019（Scheduler/JobHandle 未定义）。glob 从根上消除该类回归。
             sb.AppendLine("add_library(NativeDll SHARED");
-            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Exports.cpp\"");
-            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobProfiler.cpp\"");
-            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/JobSystem.cpp\"");
-            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/NativeWorkerPool.cpp\"");
-            sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/Native.cpp\"");
+            var nativeDllAbsDir = Path.GetFullPath(Path.Combine(outputDir, relativeNativeDllDir));
+            var nativeDllCppFiles = Directory.Exists(nativeDllAbsDir)
+                ? Directory.GetFiles(nativeDllAbsDir, "*.cpp")
+                    .Select(f => Path.GetFileName(f))
+                    .Where(f => !string.Equals(f, "tasksys.cpp", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList()
+                : new List<string>();
+            foreach (var f in nativeDllCppFiles)
+                sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/{f}\"");
             foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
@@ -984,12 +991,15 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Global compiler flags");
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(MSVC)");
+            sb.AppendLine("    # 源文件为 UTF-8 无 BOM（含中文注释）。不加 /utf-8 时 MSVC 按本地代码页");
+            sb.AppendLine("    # （中文系统=936/GBK）读取：UTF-8 汉字字节序列在 GBK 下可能被误判为含");
+            sb.AppendLine("    # 0x5C 反斜杠 → 注释内触发行拼接吃掉下一行 → C4819 + C2065/C2447 级联解析错误。");
             sb.AppendLine("    if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")");
             sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Oi /fp:fast)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast)");
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("    endif()");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("else()");
