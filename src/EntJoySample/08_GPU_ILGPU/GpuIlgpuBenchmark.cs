@@ -8,6 +8,7 @@ using EntJoySample.IJobChunkMoveCompareTest;
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.Cuda;
+using EntJoy.JobSystem;
 
 namespace EntJoySample.GpuIlgpu
 {
