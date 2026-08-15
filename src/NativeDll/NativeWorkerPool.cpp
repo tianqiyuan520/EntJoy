@@ -4,7 +4,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -30,8 +29,93 @@ namespace JobSystem
     //（keep-warm 无界自旋烧穿整个间隔的回归，有界即不碰）。
     static constexpr uint32_t kMaxSpinCount = 8192;
 
+    // 每 worker 本地队列容量 + 全局溢出队列容量（须为 2 的幂）。
+    // 本地环容纳 round-robin 分发的在飞任务（正常帧内远小于此值）；
+    // 满则溢出到全局环（worker 空闲时优先排空），全局也满 = 病理过载，
+    // Submit 唤醒全部 worker 后自旋等待排空（worker 永不阻塞，必收敛）。
+    static constexpr uint32_t kLocalQueueCapacity = 2048;
+    static constexpr uint32_t kGlobalQueueCapacity = 32768;
+
     struct NativeWorkerPool::Impl
     {
+        // 无锁有界 MPMC 环形队列（Dmitry Vyukov 经典算法）。
+        // 序列号免 ABA：每槽位带单调 seq，producer/consumer 各持 CAS 头；
+        // 无竞争时 Push/Pop 各只一次 CAS。满/空返回 false 由调用方处理。
+        template <typename T, uint32_t Capacity>
+        struct MpmcRing
+        {
+            static_assert((Capacity & (Capacity - 1)) == 0, "capacity must be a power of two");
+
+            struct Cell
+            {
+                std::atomic<uint64_t> seq{ 0 };
+                T data;
+            };
+
+            std::atomic<uint64_t> enqueuePos{ 0 };
+            std::atomic<uint64_t> dequeuePos{ 0 };
+            Cell cells[Capacity];
+
+            MpmcRing() noexcept
+            {
+                for (uint32_t i = 0; i < Capacity; ++i)
+                    cells[i].seq.store(i, std::memory_order_relaxed);
+            }
+
+            bool Push(const T& value) noexcept
+            {
+                uint64_t pos = enqueuePos.load(std::memory_order_relaxed);
+                for (;;)
+                {
+                    Cell& cell = cells[pos & (Capacity - 1)];
+                    const uint64_t seq = cell.seq.load(std::memory_order_acquire);
+                    const int64_t diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos);
+                    if (diff == 0)
+                    {
+                        if (enqueuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                            break;
+                    }
+                    else if (diff < 0)
+                    {
+                        return false; // full
+                    }
+                    else
+                    {
+                        pos = enqueuePos.load(std::memory_order_relaxed);
+                    }
+                }
+                cells[pos & (Capacity - 1)].data = value;
+                cells[pos & (Capacity - 1)].seq.store(pos + 1, std::memory_order_release);
+                return true;
+            }
+
+            bool Pop(T& value) noexcept
+            {
+                uint64_t pos = dequeuePos.load(std::memory_order_relaxed);
+                for (;;)
+                {
+                    Cell& cell = cells[pos & (Capacity - 1)];
+                    const uint64_t seq = cell.seq.load(std::memory_order_acquire);
+                    const int64_t diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos + 1);
+                    if (diff == 0)
+                    {
+                        if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                            break;
+                    }
+                    else if (diff < 0)
+                    {
+                        return false; // empty
+                    }
+                    else
+                    {
+                        pos = dequeuePos.load(std::memory_order_relaxed);
+                    }
+                }
+                value = cells[pos & (Capacity - 1)].data;
+                cells[pos & (Capacity - 1)].seq.store(pos + Capacity, std::memory_order_release);
+                return true;
+            }
+        };
         struct BatchDescriptor
         {
             void* context{ nullptr };
@@ -57,14 +141,17 @@ namespace JobSystem
 
         struct WorkerState
         {
-            // The owner pops from the front; thieves pop from the back. A mutex
-            // keeps the first implementation portable while preserving the
-            // Unity-style local-queue/work-stealing topology.
-            std::mutex queueMutex;
-            std::deque<WorkItem> queue;
+            // 无锁 MPMC 环：Submit round-robin push，owner pop，thief steal
+            //（victim 环 pop）。序列号免 ABA，各操作一次 CAS。
+            MpmcRing<WorkItem, kLocalQueueCapacity> queue;
             // futex 式唤醒标志（C++20 std::atomic::wait，MSVC 下即 futex），
             // 取代 counting_semaphore（MSVC 下为 win32 内核对象，每次唤醒走内核态）。
+            // 职责单一：Submit 置 1 唤醒，owner 在 drain 开始时消费（置 0）。
+            // owner 永不在 drain 后 clear——clobber（清掉 Submit 刚置的 flag）由此不存在；
+            // drain 期间的 owner-priority 由 draining bit 承担。
             std::atomic<uint32_t> wakeFlag{ 0 };
+            // owner-priority：owner drain 全程置 1，thief 跳过（防 steal→block→搁浅）。
+            std::atomic<uint32_t> draining{ 0 };
             std::thread thread;
         };
 
@@ -73,6 +160,8 @@ namespace JobSystem
         std::vector<std::unique_ptr<BatchDescriptor>> descriptorStorage;
         std::vector<BatchDescriptor*> freeDescriptors;
         std::vector<std::unique_ptr<WorkerState>> workers;
+        // 本地环满时的全局溢出环（worker 空闲时优先排空）。
+        MpmcRing<WorkItem, kGlobalQueueCapacity> overflow;
         std::atomic<size_t> outstandingBatches{ 0 };
         uint32_t nextSubmissionWorker{ 0 };
         bool accepting{ false };
@@ -148,26 +237,49 @@ namespace JobSystem
 
         bool TryPopLocal(uint32_t workerIndex, WorkItem& item) noexcept
         {
-            auto& worker = *workers[workerIndex];
-            std::lock_guard<std::mutex> lock(worker.queueMutex);
-            if (worker.queue.empty()) return false;
-            item = worker.queue.front();
-            worker.queue.pop_front();
-            return true;
+            return workers[workerIndex]->queue.Pop(item);
         }
 
         bool TrySteal(uint32_t thiefIndex, WorkItem& item) noexcept
         {
+            // 全局溢出环优先排空（FIFO），再偷各 worker 本地环。
+            if (overflow.Pop(item))
+                return true;
             const uint32_t count = static_cast<uint32_t>(workers.size());
             for (uint32_t offset = 1; offset < count; ++offset)
             {
                 const uint32_t victimIndex = (thiefIndex + offset) % count;
                 auto& victim = *workers[victimIndex];
-                std::unique_lock<std::mutex> lock(victim.queueMutex, std::try_to_lock);
-                if (!lock || victim.queue.empty()) continue;
-                item = victim.queue.back();
-                victim.queue.pop_back();
-                return true;
+                // owner-priority：owner 正在 drain（draining）或待醒（wakeFlag）→
+                // 即将/正在认领自己的环，跳过。防「thief 偷走一个阻塞 job → 自身被阻塞 →
+                // 自己队列的 job 搁浅」：唯一能抢走 victim 未认领 job 的时机，恰是
+                // victim 尚未开始认领。dual-bit 下「环非空 ⟹ flag==1 或 draining==1」
+                //（Submit 置 flag 后才 push + owner 只在 drain 内消费 + 永不事后 clear），
+                // 因此凡被跳过者必是 owner 即将认领的环，绝不误跳「被遗弃」的环。
+                const uint32_t protecting = victim.draining.load(std::memory_order_acquire) |
+                    victim.wakeFlag.load(std::memory_order_acquire);
+                if (protecting != 0)
+                    continue;
+                WorkItem stolen{};
+                if (victim.queue.Pop(stolen))
+                {
+                    // 双检：flag/draining 读与 ring pop 之间，Submit 可能已完成
+                    //「置 flag → push」（check-then-pop 竞态——thief 读到陈旧 0，
+                    // pop 却命中刚提交的 job）。pop 后重读：若 victim 已被保护
+                    //（新 wake/新 drain 落定）→ 把 job 归还其环，由 owner 认领。
+                    // 归还落环即被其 drain 命中（或下一轮 spin），不会重蹈搁浅。
+                    if ((victim.draining.load(std::memory_order_acquire) |
+                        victim.wakeFlag.load(std::memory_order_acquire)) != 0)
+                    {
+                        // 归还给 victim。病理下环满（刚 pop 出的空位在头部，
+                        // enqueuePos 处仍占用）则直接执行兜底。
+                        if (!victim.queue.Push(stolen))
+                            FinishWork(stolen);
+                        continue;
+                    }
+                    item = stolen;
+                    return true;
+                }
             }
             return false;
         }
@@ -181,18 +293,16 @@ namespace JobSystem
 
             // All work items have returned before the counter reaches zero.
             // Completion may publish dependent jobs, so it must run outside the
-            // lifecycle lock. 近无锁：descriptor 归还走 per-thread 缓存（零锁除非满），
-            // outstanding 原子递减，末位递减才通知 idle（无锁 notify 对谓词等待安全）。
+            // lifecycle lock. 近无锁：descriptor 归还走 per-thread 缓存（零锁除非满）。
+            // outstanding 原子递减；末位递减须持锁 notify——否则 Stop 的
+            // idle.wait(lock, outstanding==0) 在「谓词检查(false) 与 真正阻塞」之间会
+            // 丢失末位 notify 而永久阻塞（预存 bug，见提交 2ae4457）。末位递减先于取锁，
+            // Stop 持锁检查要么看到 0（直接放行）要么看到 >0（阻塞，worker 取锁 notify 必然唤醒）。
+            // 锁仅在末位 batch 取一次。
             batch->completion(batch->context);
             ReleaseDescriptor(batch);
             if (outstandingBatches.fetch_sub(1, std::memory_order_acq_rel) == 1)
             {
-                // 持锁 notify：堵住 Stop 的 lost-wakeup 窗口。
-                // Stop 在 lifecycleMutex 内检查谓词 outstanding==0；若末位 fetch_sub→0
-                // 恰在 Stop 谓词检查(false) 与 wait 真正阻塞之间无锁 notify，唤醒即丢失 →
-                // Stop 永久阻塞（实测 ~60% 概率挂死）。末位递减先于取锁，Stop 持锁检查时
-                // 要么看到 0（直接放行），要么看到 >0（阻塞，worker 随后取锁 notify 必然唤醒）。
-                // 锁仅在末位 batch 取一次，热路径零开销。
                 std::lock_guard<std::mutex> lock(lifecycleMutex);
                 idle.notify_all();
             }
@@ -219,17 +329,33 @@ namespace JobSystem
             while (true)
             {
                 // 混合等待：有界自旋 → std::atomic::wait（C++20，MSVC 下即 futex）。
-                // 自旋只覆盖背靠背 job（µs 级），不烧 16ms 间隔
-                //（keep-warm 无界自旋回归的负结果 + futex 化唤醒 = 行业标准两件套）。
+                // 自旋只覆盖背靠背 job（µs 级），不烧 16ms 间隔。
                 uint32_t spins = 0;
                 while (worker->wakeFlag.load(std::memory_order_acquire) == 0 && spins < kMaxSpinCount)
                 {
                     CpuPause();
                     ++spins;
                 }
-                if (worker->wakeFlag.load(std::memory_order_acquire) == 0)
+                const bool hasPendingFlag =
+                    worker->wakeFlag.load(std::memory_order_acquire) != 0;
+                if (!hasPendingFlag)
                 {
                     ++parkWakeCount;
+                    // 睡前自查（在 draining 保护内）：Submit 先置 flag 后 push 的窗口内
+                    // flag 可能已被本 worker 提前消费而 job 此刻才落环——直接 park 将错过
+                    // 直到下次唤醒。自查在 draining 保护内进行，防自查空窗被 thief 抢走
+                    // 自家环（自查命中时 draining 全程=1，自家环受保护）。
+                    worker->draining.store(1, std::memory_order_release);
+                    WorkItem preItem{};
+                    if (TryPopLocal(workerIndex, preItem))
+                    {
+                        FinishWork(preItem);
+                        worker->wakeFlag.exchange(0, std::memory_order_acq_rel); // 消费自查期新置的 flag
+                        DrainAvailableWork(workerIndex);
+                        worker->draining.store(0, std::memory_order_release);
+                        continue; // 已排空，回到 spin 层
+                    }
+                    worker->draining.store(0, std::memory_order_release);
                     while (worker->wakeFlag.load(std::memory_order_acquire) == 0)
                         worker->wakeFlag.wait(0, std::memory_order_acquire); // 同 JobSystem.cpp completed.wait
                 }
@@ -237,8 +363,18 @@ namespace JobSystem
                 {
                     ++hotSpinHits; // 自旋/初始即有活 → 未 park
                 }
-                worker->wakeFlag.store(0, std::memory_order_relaxed);
+
+                // 进入 drain。双 bit 职责分离：
+                //  - wakeFlag 只负责唤醒：Submit 置（push 前后各一次），此处消费（置 0）。
+                //    drain 后**永不 clear**——Submit 的新 flag 不可能被旧 clear 抹掉
+                //   （clobber 根源被移除），环内任一 job 必然带 flag==1（post-push store）。
+                //  - draining 只负责 owner-priority：全程置 1，thief 跳过（TrySteal 读它）。
+                // 顺序：先置 draining 再消费 flag——杜绝 thief 在「消费 flag 与真正认领」
+                // 之间的空窗抢走未认领 job。
+                worker->draining.store(1, std::memory_order_release);
+                worker->wakeFlag.exchange(0, std::memory_order_acq_rel);
                 DrainAvailableWork(workerIndex);
+                worker->draining.store(0, std::memory_order_release);
                 if (stopRequested.load(std::memory_order_acquire))
                 {
                     DrainAvailableWork(workerIndex);
@@ -335,22 +471,52 @@ namespace JobSystem
         auto* descriptor = _impl->AcquireDescriptor();
         descriptor->Reset(context, runSlot, completion, slotCount);
         wakeCounts.assign(workerCount, 0);
+        bool overflowUsed = false;
         for (uint32_t slot = 0; slot < slotCount; ++slot)
         {
             const uint32_t workerIndex = (first + slot) % workerCount;
             auto& worker = *_impl->workers[workerIndex];
+            // flag 先置（release）再 push：push 落环即带 pending wake，thief 的
+            // owner-priority 跳过本环 → 无人能偷走尚未认领的 job（防
+            // steal→block→自身队列搁浅）。push 成功后**再置一次 flag**：闭环
+            // 「owner 在 drain 内消费了 pre-push flag → job 落环时 flag 已被抹」的
+            // 残余窗口——post-push store 保证任一落环 job 必带 flag==1，配合
+            // owner 永不事后 clear，「环非空 ⟹ flag==1 或 draining==1」不变量成立。
+            // push 失败的溢出路径由末尾 wake-all 兜底。
+            worker.wakeFlag.store(1, std::memory_order_release);
+            if (worker.queue.Push({ descriptor, slot }))
             {
-                std::lock_guard<std::mutex> queueLock(worker.queueMutex);
-                worker.queue.push_front({ descriptor, slot });
+                worker.wakeFlag.store(1, std::memory_order_release);
+                ++wakeCounts[workerIndex];
             }
-            ++wakeCounts[workerIndex];
+            else
+            {
+                overflowUsed = true;
+                while (!_impl->overflow.Push({ descriptor, slot }))
+                {
+                    // 全局环也满 = 病理过载：唤醒全部 worker 排空后自旋。
+                    // worker 永不阻塞，必收敛，不会死锁。
+                    for (auto& w : _impl->workers)
+                        w->wakeFlag.store(1, std::memory_order_release);
+                    for (auto& w : _impl->workers)
+                        w->wakeFlag.notify_one();
+                    std::this_thread::yield();
+                }
+            }
         }
         for (uint32_t i = 0; i < wakeCounts.size(); ++i)
             if (wakeCounts[i] != 0)
             {
-                _impl->workers[i]->wakeFlag.store(1, std::memory_order_release);
                 _impl->workers[i]->wakeFlag.notify_one();
             }
+        if (overflowUsed)
+        {
+            for (auto& w : _impl->workers)
+            {
+                w->wakeFlag.store(1, std::memory_order_release);
+                w->wakeFlag.notify_one();
+            }
+        }
         return true;
     }
 
