@@ -437,7 +437,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk" || i.Name == "IJobEntity") == true)
+                SymbolHelper.IsEntJoyJobInterface(i, "IJob") || SymbolHelper.IsEntJoyJobInterface(i, "IJobParallelFor") || SymbolHelper.IsEntJoyJobInterface(i, "IJobFor") || SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk") || SymbolHelper.IsEntJoyJobInterface(i, "IJobEntity")) == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
