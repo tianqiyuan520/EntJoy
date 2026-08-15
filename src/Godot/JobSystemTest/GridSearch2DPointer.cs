@@ -1,5 +1,4 @@
 //using EntJoy.Collections;
-//using EntJoy.JobSystem;
 //using EntJoy.Mathematics;
 //using System;
 //using System.Collections.Concurrent;
