@@ -588,7 +588,13 @@ namespace
 
     void TestConcurrentChunkComplete()
     {
-        constexpr int chunkCount = 4'096;
+        // 规模上限由 trace per-thread 缓冲（kMaxTraceEventsPerThread=4096）决定：
+        // 每 tile 发 3 条事件（Claim/ExecuteBegin/ExecuteEnd），单线程认领全部 tile 时
+        // 事件数 = 3×tileCount。4096 tiles → 12288 条会溢出 4096 缓冲 → 丢事件 →
+        // beginCount 断言 flake。1024 tiles → 最多 3072 条，永不足 4096，零溢出；
+        // 而 4 个 Complete caller + 8 worker 并发认领 1024 个 tile 已充分撑起
+        // "并发 Complete 必须重叠"的判定（worker 阻塞在 releaseWorkers 上，callers 必认领）。
+        constexpr int chunkCount = 1'024;
         std::vector<ChunkJobData> chunks(chunkCount);
         std::vector<std::atomic<int>> hits(chunkCount);
         std::atomic<int> cleanupCount{ 0 };
@@ -1478,11 +1484,20 @@ namespace
         std::vector<ChunkJobData> chunks(itemCount);
         std::atomic<int> callbacks{ 0 };
 
-        JobSystem::ResetStatsSnapshot();
         // 近无锁：batch storage 走 per-thread 缓存，回收先进本线程缓存、满额才批量迁移
-        // 共享池（跨线程复用）。batch 的 retire 线程（worker 或 assist 的 main）不确定，
-        // 故用多轮让至少一个线程缓存溢出到共享池，再断言跨线程/同线程复用必然发生。
-        for (int batchIndex = 0; batchIndex < 64; ++batchIndex)
+        // 共享池（跨线程复用）。acquire 恒在调度线程（main），release 在最后一个 tile
+        // 的执行线程（main 或任一 worker）——回收线程分布是调度决定的，不可控。
+        //
+        // 因此 batch 数不能拍脑袋取 64：若被 workerCount+1 个线程平均分摊，每个线程
+        // 回收 <9 个（per-thread 缓存 cap=8），共享池永远不会被填充，reused==0 → flake。
+        // 改用鸽笼原理：batchCount = 8×(workerCount+1)+2 保证至少一个线程回收 ≥9 个
+        // storage → 缓存溢出到共享池 → 后续 main 的 acquire 必从共享池复用 → reused≥1
+        // 确定性成立（与调度分布无关）。
+        const int workerCount = JobSystem::CurrentWorkerCount();
+        const int batchCount = 8 * (workerCount + 1) + 2;
+
+        JobSystem::ResetStatsSnapshot();
+        for (int batchIndex = 0; batchIndex < batchCount; ++batchIndex)
         {
             auto handle = JobSystem::Scheduler::ScheduleChunks(
                 [](void* raw, const ChunkJobData*)
@@ -1506,7 +1521,7 @@ namespace
 
         JobSystem::JobSystemStatsSnapshot stats{};
         JobSystem::GetStatsSnapshot(&stats);
-        Require(callbacks.load(std::memory_order_relaxed) == itemCount * 64,
+        Require(callbacks.load(std::memory_order_relaxed) == itemCount * batchCount,
             "pooled batches missed or duplicated callbacks");
         Require(stats.batchStorageReused >= 1,
             "sequential batches did not reuse storage after cache overflow");
