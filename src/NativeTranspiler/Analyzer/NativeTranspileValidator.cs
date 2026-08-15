@@ -134,9 +134,12 @@ namespace NativeTranspiler.Analyzer
             if (!structSymbol.IsValueType)
                 diagnostics.Add(Diagnostic.Create(InvalidJobTypeError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 
-            bool isChunkJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJobChunk");
-            bool isEntityJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJobEntity");
-            bool implementsJob = structSymbol.AllInterfaces.Any(i => i.Name == "IJob" || i.Name == "IJobParallelFor" || i.Name == "IJobFor" || i.Name == "IJobChunk" || i.Name == "IJobEntity");
+            bool isChunkJob = structSymbol.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk"));
+            bool isEntityJob = structSymbol.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobEntity"));
+            bool implementsJob = structSymbol.AllInterfaces.Any(i =>
+                SymbolHelper.IsEntJoyJobInterface(i, "IJob") || SymbolHelper.IsEntJoyJobInterface(i, "IJobParallelFor") ||
+                SymbolHelper.IsEntJoyJobInterface(i, "IJobFor") || SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk") ||
+                SymbolHelper.IsEntJoyJobInterface(i, "IJobEntity"));
             if (!implementsJob)
                 diagnostics.Add(Diagnostic.Create(MissingJobInterfaceError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 

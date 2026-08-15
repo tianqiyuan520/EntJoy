@@ -576,7 +576,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>判断是否为纯 IJob（非 ParallelFor/For）</summary>
         public static bool IsIJob(INamedTypeSymbol jobStruct) =>
-            jobStruct.AllInterfaces.Any(i => i.Name == "IJob") &&
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJob")) &&
             !CppJobGenerator.IsParallelForJob(jobStruct) &&
             !CppJobGenerator.IsForJob(jobStruct) &&
             !CppJobGenerator.IsChunkJob(jobStruct);

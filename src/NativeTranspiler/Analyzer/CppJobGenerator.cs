@@ -23,13 +23,13 @@ namespace NativeTranspiler.Analyzer
         }
 
         public static bool IsParallelForJob(INamedTypeSymbol jobStruct) =>
-            jobStruct.AllInterfaces.Any(i => i.Name == "IJobParallelFor");
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobParallelFor"));
         public static bool IsForJob(INamedTypeSymbol jobStruct) =>
-            jobStruct.AllInterfaces.Any(i => i.Name == "IJobFor");
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobFor"));
         public static bool IsChunkJob(INamedTypeSymbol jobStruct) =>
-            jobStruct.AllInterfaces.Any(i => i.Name == "IJobChunk");
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk"));
         public static bool IsEntityJob(INamedTypeSymbol jobStruct) =>
-            jobStruct.AllInterfaces.Any(i => i.Name == "IJobEntity");
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobEntity"));
         public static bool IsChunkScheduledJob(INamedTypeSymbol jobStruct) =>
             IsChunkJob(jobStruct) || IsEntityJob(jobStruct);
 

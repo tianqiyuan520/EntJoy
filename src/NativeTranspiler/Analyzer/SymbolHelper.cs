@@ -26,6 +26,14 @@ namespace NativeTranspiler.Analyzer
             "uint8_t", "uint16_t", "uint32_t", "uint64_t", "size_t", "ptrdiff_t"
         };
 
+        /// <summary>
+        /// 判断接口是否确为 EntJoy.JobSystem 命名空间下的 Job 接口。
+        /// 命名空间 + 名字双校验，避免与用户自定义同名接口（如自己的 IJobChunk）歧义。
+        /// </summary>
+        public static bool IsEntJoyJobInterface(INamedTypeSymbol interfaceSymbol, string name) =>
+            interfaceSymbol.Name == name &&
+            interfaceSymbol.ContainingNamespace?.ToDisplayString() == "EntJoy.JobSystem";
+
         public static MethodDeclarationSyntax? GetMethodSyntax(IMethodSymbol methodSymbol)
         {
             var syntaxRef = methodSymbol.DeclaringSyntaxReferences.FirstOrDefault();
