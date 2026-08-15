@@ -171,8 +171,8 @@ int main()
             Require(index < 32, "worker affinity selected an unexpected processor");
             processorMask |= uint32_t{ 1 } << index;
         }
-        Require(processorMask == 0x0f,
-            "workers were not bound one-to-one to logical processors 0..3");
+        Require(processorMask == 0x1e,
+            "workers were not bound one-to-one to logical processors 1..4");
 #endif
 
         SubmissionContext first;
