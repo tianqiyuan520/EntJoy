@@ -1,6 +1,7 @@
 using Godot;
 using System;
 using System.Diagnostics;
+using EntJoy.JobSystem;
 
 /// <summary>
 /// Job Profiler 完整演示。

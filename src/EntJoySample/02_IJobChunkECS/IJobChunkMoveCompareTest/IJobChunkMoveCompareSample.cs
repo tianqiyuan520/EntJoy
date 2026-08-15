@@ -3,6 +3,7 @@ using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
 using System.Threading;
+using EntJoy.JobSystem;
 
 namespace EntJoySample.IJobChunkMoveCompareTest
 {
@@ -932,7 +933,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
             for (int i = 0; i < count; ++i)
             {
                 ref readonly NativeTraceEvent traceEvent = ref events[i];
-                if (traceEvent.EventType == TraceEventType.Publish && traceEvent.BatchId != 0)
+                if (traceEvent.EventType == NativeTraceEventType.Publish && traceEvent.BatchId != 0)
                 {
                     batchId = traceEvent.BatchId;
                     publishNs = traceEvent.TimestampNs;
@@ -946,16 +947,16 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                 if (traceEvent.BatchId != batchId) continue;
                 switch (traceEvent.EventType)
                 {
-                    case TraceEventType.CompleteEnter:
+                    case NativeTraceEventType.CompleteEnter:
                         completeEnterNs = traceEvent.TimestampNs;
                         break;
-                    case TraceEventType.Claim:
+                    case NativeTraceEventType.Claim:
                         ++claims;
                         if (traceEvent.WorkerIndex < 0) ++mainClaims;
                         else workerClaims[traceEvent.WorkerIndex] =
                             workerClaims.GetValueOrDefault(traceEvent.WorkerIndex) + 1;
                         break;
-                    case TraceEventType.ExecuteBegin:
+                    case NativeTraceEventType.ExecuteBegin:
                         begins[traceEvent.TileIndex] = traceEvent;
                         if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? beginCores))
                         {
@@ -972,7 +973,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                             workerFirstExecute[traceEvent.WorkerIndex] = traceEvent.TimestampNs;
                         }
                         break;
-                    case TraceEventType.ExecuteEnd:
+                    case NativeTraceEventType.ExecuteEnd:
                         lastExecuteNs = Math.Max(lastExecuteNs, traceEvent.TimestampNs);
                         if (!workerCores.TryGetValue(traceEvent.WorkerIndex, out HashSet<int>? endCores))
                         {
@@ -989,10 +990,10 @@ namespace EntJoySample.IJobChunkMoveCompareTest
                                 begin.ProcessorIndex, traceEvent.ProcessorIndex));
                         }
                         break;
-                    case TraceEventType.FinalizeBegin:
+                    case NativeTraceEventType.FinalizeBegin:
                         finalizeNs = traceEvent.TimestampNs;
                         break;
-                    case TraceEventType.HandleComplete:
+                    case NativeTraceEventType.HandleComplete:
                         handleCompleteNs = traceEvent.TimestampNs;
                         break;
                 }

@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
+using EntJoy.JobSystem;
 
 namespace EntJoy.Collections
 {

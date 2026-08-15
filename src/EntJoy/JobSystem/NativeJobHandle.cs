@@ -2,6 +2,8 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+namespace EntJoy.JobSystem
+{
 
 /// <summary>
 /// 表示一个由 C++ JobSystem 调度的原生作业句柄。
@@ -103,4 +105,5 @@ internal sealed class NativeJobHandleBox
             NativeJobScheduler.ReleaseRawHandleForFinalizer(handle);
         }
     }
+}
 }

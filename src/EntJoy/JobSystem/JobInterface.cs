@@ -1,4 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
+namespace EntJoy.JobSystem
+{
 
 public interface IJob
 {
@@ -28,3 +30,4 @@ public interface IJobEntity
 {
 }
 
+}

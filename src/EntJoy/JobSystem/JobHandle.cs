@@ -1,3 +1,5 @@
+namespace EntJoy.JobSystem
+{
 
 /// <summary>
 /// 作业句柄，统一封装 C++ 原生句柄（NativeJobScheduler）。
@@ -46,4 +48,5 @@ public struct JobHandle
         var combined = NativeJobScheduler.CombineDependencies(nativeHandles);
         return new JobHandle(combined);
     }
+}
 }

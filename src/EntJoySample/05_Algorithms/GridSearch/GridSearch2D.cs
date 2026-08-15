@@ -3,6 +3,7 @@ using EntJoy.Mathematics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Vector3 = System.Numerics.Vector3;
+using EntJoy.JobSystem;
 
 public class GridSearch2D : IDisposable
 {

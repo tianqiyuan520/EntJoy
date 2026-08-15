@@ -5,6 +5,8 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+namespace EntJoy.JobSystem
+{
 
 [StructLayout(LayoutKind.Sequential)]
 public struct ProfilerEntry
@@ -350,4 +352,5 @@ public static class JobProfiler
         public WorkerJobEntry[] Jobs;
         public string ThreadLabel => ThreadIndex < 0 ? "Main" : $"Worker {ThreadIndex}";
     }
+}
 }

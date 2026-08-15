@@ -1,6 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
 
-namespace EntJoy
+namespace EntJoy.JobSystem
 {
     public interface IJobChunk
     {
