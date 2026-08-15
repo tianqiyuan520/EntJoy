@@ -551,10 +551,19 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 包装函数 ========================
     private static bool IsNativeLoaded => _nativeDll != IntPtr.Zero && _jobSystem_Initialize != null;
 
+    // 热路径守卫：主体只剩一个分支 + 冷调用，保证可被 JIT 内联进包装函数。
+    // throw 抽到 NoInlining 冷路径，否则异常路径会让方法无法内联。
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void EnsureNativeLoaded()
     {
         if (!IsNativeLoaded)
-            throw new InvalidOperationException("NativeDll.dll is not loaded. Ensure NativeDll.dll is copied next to the executable or Godot output directory.");
+            ThrowNativeNotLoaded();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNativeNotLoaded()
+    {
+        throw new InvalidOperationException("NativeDll.dll is not loaded. Ensure NativeDll.dll is copied next to the executable or Godot output directory.");
     }
 
     private static void JobSystem_Initialize(int numThreads)
@@ -587,48 +596,56 @@ public static unsafe partial class NativeJobScheduler
         _jobSystem_ConfigureGuided(enabled, k, floor);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_Schedule(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, IntPtr dependency)
     {
         EnsureNativeLoaded();
         return _jobSystem_Schedule(funcPtr, context, cleanupPtr, dependency);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleParallelForBatch(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, int batchSize, IntPtr dependency)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleFor(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, IntPtr dependency)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleFor(funcPtr, context, cleanupPtr, length, dependency);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void JobSystem_CompleteAndRelease(IntPtr handle)
     {
         EnsureNativeLoaded();
         _jobSystem_CompleteAndRelease(handle);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void JobSystem_Complete(IntPtr handle)
     {
         EnsureNativeLoaded();
         _jobSystem_Complete(handle);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong JobSystem_GetDiagnosticBatchId(IntPtr handle)
     {
         EnsureNativeLoaded();
         return _jobSystem_GetDiagnosticBatchId(handle);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void JobSystem_RetainHandle(IntPtr handle)
     {
         EnsureNativeLoaded();
         _jobSystem_RetainHandle(handle);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int JobSystem_IsCompleted(IntPtr handle)
     {
         EnsureNativeLoaded();
@@ -645,35 +662,35 @@ public static unsafe partial class NativeJobScheduler
         _jobSystem_ReleaseHandle(handle);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_CombineDependencies(IntPtr[] handles, int count)
     {
         EnsureNativeLoaded();
         fixed (IntPtr* ptr = handles) return _jobSystem_CombineDependencies(ptr, count);
     }
-    private static IntPtr JobSystem_ScheduleChunkJob(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency)
-    {
-        EnsureNativeLoaded();
-        return _jobSystem_ScheduleChunkJob(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency);
-    }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleChunkJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleChunkJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleChunkRangeJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleChunkRangeJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static IntPtr JobSystem_ScheduleAndCompleteEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode = ChunkScheduleMode.PublishAssist, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
     {
         EnsureNativeLoaded();
