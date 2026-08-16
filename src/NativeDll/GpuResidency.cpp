@@ -129,7 +129,7 @@ struct ResidencyJob {
 
     WGPUBuffer* resident = nullptr;       // per storage（STORAGE|COPY_DST|COPY_SRC）
     WGPUBuffer* staging[2] = { nullptr, nullptr };   // 双缓冲 per storage（scatter/gather 目标，快照轮换）
-    WGPUBuffer* readback = nullptr;       // per storage（MAP_READ|COPY_DST；D3D12 禁 MapRead+Storage 混用）
+    WGPUBuffer* readback[2] = { nullptr, nullptr };  // 双缓冲 per storage（MAP_READ|COPY_DST；上帧 map 未 unmap 期间本帧 copy 写另一组）
     WGPUBuffer chunkIdx = nullptr;        // dirty chunk 索引（i32，容量 nchunk）
     WGPUBuffer resParams = nullptr;       // uniform {chunkU32s, dirtyCount}（16B）
     WGPUBuffer uniform = nullptr;         // job uniform（hasUniform）
@@ -145,6 +145,8 @@ struct ResidencyJob {
     int pending = 0;                      // 1 = 有已提交未完成（等待下帧 Sync / Complete）
     int lastIncr = 0;                     // 上帧提交是否增量（0=全量；完成时决定读回/patch 方式）
     void* const* lastOutPtrs = nullptr;   // 上次 Sync 的 outPtrs（Complete 复用；C# 数组跨帧稳定）
+    int nxtBuf = 0;                       // 上帧缓冲索引（= 完成时的 cur^1）
+    void* mapped[2] = { nullptr, nullptr };  // per storage：readback mapAsync 后的指针（Begin 拿，End 拷贝+unmap）
 
     size_t fullBytes = 0;                 // 每 storage 全量字节（count*elemBytes）
     bool residentUploaded = false;
@@ -231,26 +233,51 @@ static bool resCopyMapRead(WGPUBuffer src, WGPUBuffer readback, void* out, size_
     return resMapRead(readback, out, size);
 }
 
-/// 完成上帧 pending：读回 → patch outPtrs → pending=0。
-///   （wait 由 resMapRead 内部 DevicePoll(wait) 覆盖：copy 是上帧提交的队列工作，
-///     wait 等队列空 + process events 触发 map 回调，无需单独 wait）
-///   增量上帧：staging[nxt]（gather 输出）→ readback → stagingHost[nxt] → patch outPtrs 的 dirty chunk
-///   全量上帧：resident → readback → 直接覆盖 outPtrs
-static bool resCompleteFrame(ResidencyJob* j, void* const* outPtrs) {
+/// 完成上帧 · Begin：wait → mapAsync 全部 readback → 存 mapped 指针（不 memcpy、不 unmap）。
+///   调用后即可提交本帧（GPU 跑本帧期间再做 End 的 memcpy+patch → 藏进 GPU 执行期）。
+static bool resCompleteFrameBegin(ResidencyJob* j) {
     if (!j->pending) return true;
-    int nxt = j->cur ^ 1;
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    j->nxtBuf = j->cur ^ 1;
+    for (int s = 0; s < j->storageCount; s++) {
+        size_t sz = j->lastIncr ? (size_t)j->nd[j->nxtBuf] * j->chunkBytes[s] : (size_t)j->fullBytes;
+        AsyncWait aw;
+        WGPUBufferMapCallbackInfo info;
+        memset(&info, 0, sizeof(info));
+        info.mode = WGPUCallbackMode_AllowProcessEvents;
+        info.callback = onBufferMapRes;
+        info.userdata1 = &aw;
+        W.BufferMapAsync(j->readback[j->nxtBuf][s], WGPUMapMode_Read, 0, sz, info);
+        W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+        if (!aw.done) pollDeviceRes(&aw.done);
+        if (!aw.done || aw.status != WGPUMapAsyncStatus_Success) { resError("mapAsync 失败 status=%d", aw.status); return false; }
+        j->mapped[s] = W.BufferGetMappedRange(j->readback[j->nxtBuf][s], 0, sz);
+        if (!j->mapped[s]) { resError("GetMappedRange 失败"); return false; }
+    }
+    return true;
+}
+
+/// 完成上帧 · End：memcpy（READBACK→目标）+ unmap + patch outPtrs → pending=0。
+///   GPU 跑本帧期间执行，全量模式 ~2ms 的 READBACK memcpy 藏出关键路径。
+static bool resCompleteFrameEnd(ResidencyJob* j, void* const* outPtrs) {
+    if (!j->pending) return true;
+    int nxt = j->nxtBuf;
     int ndPrev = j->nd[nxt];
     if (j->lastIncr) {
         for (int s = 0; s < j->storageCount; s++) {
-            if (!resMapRead(j->readback[s], j->stagingHost[nxt][s], (size_t)ndPrev * j->chunkBytes[s])) return false;
+            size_t sz = (size_t)ndPrev * j->chunkBytes[s];
+            fastCopy(j->stagingHost[nxt][s], j->mapped[s], sz);
+            W.BufferUnmap(j->readback[nxt][s]);
             uint8_t* out = (uint8_t*)outPtrs[s];
             for (int k = 0; k < ndPrev; k++)
                 memcpy(out + (size_t)j->dirtyIdx[nxt][k] * j->chunkBytes[s],
                        j->stagingHost[nxt][s] + (size_t)k * j->chunkBytes[s], (size_t)j->chunkBytes[s]);
         }
     } else {
-        for (int s = 0; s < j->storageCount; s++)
-            if (!resMapRead(j->readback[s], outPtrs[s], (size_t)j->fullBytes)) return false;
+        for (int s = 0; s < j->storageCount; s++) {
+            fastCopy(outPtrs[s], j->mapped[s], (size_t)j->fullBytes);
+            W.BufferUnmap(j->readback[nxt][s]);
+        }
     }
     j->pending = 0;
     return true;
@@ -299,11 +326,11 @@ JOB_API void GpuResidency_ReleaseJob(void* job) {
             if (j->scatterBG[b] && j->scatterBG[b][s]) W.BindGroupRelease(j->scatterBG[b][s]);
             if (j->gatherBG[b] && j->gatherBG[b][s]) W.BindGroupRelease(j->gatherBG[b][s]);
             if (j->staging[b] && j->staging[b][s]) W.BufferDestroy(j->staging[b][s]);
+            if (j->readback[b] && j->readback[b][s]) W.BufferDestroy(j->readback[b][s]);
         }
     }
     for (int s = 0; s < j->storageCount; s++) {
         if (j->resident && j->resident[s]) W.BufferDestroy(j->resident[s]);
-        if (j->readback && j->readback[s]) W.BufferDestroy(j->readback[s]);
     }
     if (j->chunkIdx) W.BufferDestroy(j->chunkIdx);
     if (j->resParams) W.BufferDestroy(j->resParams);
@@ -315,8 +342,8 @@ JOB_API void GpuResidency_ReleaseJob(void* job) {
     delete[] j->chunkU32s;
     delete[] j->chunkBytes;
     delete[] j->resident;
-    delete[] j->readback;
     for (int b = 0; b < 2; b++) {
+        delete[] j->readback[b];
         delete[] j->staging[b];
         delete[] j->scatterBG[b];
         delete[] j->gatherBG[b];
@@ -347,8 +374,8 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         j->nchunk = (count + j->chunkEntities - 1) / j->chunkEntities;
         j->fullBytes = (size_t)count * j->elemBytes[0];
         j->resident = new WGPUBuffer[j->storageCount];
-        j->readback = new WGPUBuffer[j->storageCount];
         for (int b = 0; b < 2; b++) {
+            j->readback[b] = new WGPUBuffer[j->storageCount];
             j->staging[b] = new WGPUBuffer[j->storageCount];
             j->scatterBG[b] = new WGPUBindGroup[j->storageCount];
             j->gatherBG[b] = new WGPUBindGroup[j->storageCount];
@@ -359,12 +386,13 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         for (int s = 0; s < j->storageCount; s++) {
             size_t bytes = (size_t)count * j->elemBytes[s];
             j->resident[s] = resMakeBuffer(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc, bytes);
-            j->readback[s] = resMakeBuffer(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, bytes);
             for (int b = 0; b < 2; b++) {
+                j->readback[b][s] = resMakeBuffer(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, bytes);
                 j->staging[b][s] = resMakeBuffer(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc, bytes);
                 j->stagingHost[b][s] = new uint8_t[bytes];
             }
-            if (!j->resident[s] || !j->readback[s] || !j->staging[0][s] || !j->staging[1][s]) {
+            if (!j->resident[s] || !j->readback[0][s] || !j->readback[1][s] ||
+                !j->staging[0][s] || !j->staging[1][s]) {
                 resError("创建常驻 buffer 失败"); return 0;
             }
         }
@@ -407,7 +435,7 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         resDispatch(j->jobKernel, j->jobBG, (uint32_t)((count + 63) / 64));
         W.DevicePoll(g_device, WGPU_TRUE, nullptr);
         for (int s = 0; s < j->storageCount; s++) {
-            if (!resCopyMapRead(j->resident[s], j->readback[s], outPtrs[s], (size_t)count * j->elemBytes[s])) return 0;
+            if (!resCopyMapRead(j->resident[s], j->readback[0][s], outPtrs[s], (size_t)count * j->elemBytes[s])) return 0;
             for (int c = 0; c < j->nchunk; c++)
                 j->hashTab[(size_t)c * j->storageCount + s] =
                     crc32c_4chain((const uint8_t*)inPtrs[s] + (size_t)c * j->chunkBytes[s], (size_t)j->chunkBytes[s] / 8);
@@ -460,8 +488,8 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         }
     }
 
-    // ---- 阶段 B：完成上帧（wait + 读回 + patch outPtrs） ----
-    if (!resCompleteFrame(j, outPtrs)) return 0;
+    // ---- 阶段 B：完成上帧 Begin（wait + mapAsync 拿指针，不 memcpy） ----
+    if (!resCompleteFrameBegin(j)) return 0;
 
     // ---- 阶段 C：提交本帧（不 wait，下帧 Sync / Complete 完成） ----
     if (j->hasUniform) W.QueueWriteBuffer(g_queue, j->uniform, 0, uniformBytes, (size_t)uniformSize);
@@ -492,7 +520,7 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         W.ComputePassEncoderEnd(pass);
         W.ComputePassEncoderRelease(pass);
         for (int s = 0; s < j->storageCount; s++)
-            W.CommandEncoderCopyBufferToBuffer(enc, j->staging[c0][s], 0, j->readback[s], 0, (size_t)ndc * j->chunkBytes[s]);
+            W.CommandEncoderCopyBufferToBuffer(enc, j->staging[c0][s], 0, j->readback[c0][s], 0, (size_t)ndc * j->chunkBytes[s]);
         WGPUCommandBuffer cmd = W.CommandEncoderFinish(enc, nullptr);
         W.QueueSubmit(g_queue, 1, &cmd);
         W.CommandBufferRelease(cmd);
@@ -509,12 +537,14 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         W.ComputePassEncoderEnd(pass);
         W.ComputePassEncoderRelease(pass);
         for (int s = 0; s < j->storageCount; s++)
-            W.CommandEncoderCopyBufferToBuffer(enc, j->resident[s], 0, j->readback[s], 0, (size_t)count * j->elemBytes[s]);
+            W.CommandEncoderCopyBufferToBuffer(enc, j->resident[s], 0, j->readback[c0][s], 0, (size_t)count * j->elemBytes[s]);
         WGPUCommandBuffer cmd = W.CommandEncoderFinish(enc, nullptr);
         W.QueueSubmit(g_queue, 1, &cmd);
         W.CommandBufferRelease(cmd);
         W.CommandEncoderRelease(enc);
     }
+    // ---- 阶段 D：完成上帧 End（memcpy + patch，GPU 跑本帧期间 → 藏出关键路径） ----
+    if (!resCompleteFrameEnd(j, outPtrs)) return 0;
     j->lastIncr = doIncr ? 1 : 0;
     j->pending = 1;
     j->lastOutPtrs = outPtrs;
@@ -527,7 +557,8 @@ JOB_API int GpuResidency_Complete(void* job) {
     if (!j) { resError("参数非法"); return 0; }
     resClear();
     if (!j->residentUploaded) return 1;
-    return resCompleteFrame(j, j->lastOutPtrs) ? 1 : 0;
+    if (!resCompleteFrameBegin(j)) return 0;
+    return resCompleteFrameEnd(j, j->lastOutPtrs) ? 1 : 0;
 }
 
 } // extern "C"
