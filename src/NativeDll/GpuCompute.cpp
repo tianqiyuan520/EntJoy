@@ -134,10 +134,27 @@ JOB_API int GpuCompute_Initialize(const char* wgpuDllPath) {
     const char* path = wgpuDllPath ? wgpuDllPath : "wgpu_native.dll";
     if (LoadWgpu(path)) { setError("加载 wgpu_native.dll 失败或缺少导出: %s", path); return 0; }
 
-    // 后端选择：默认全部（Windows 上 wgpu 选 D3D12）。
-    // 实验结论（2026-08-16）：强制 Vulkan 无优势——READBACK mapped 带宽（8-12GB/s）
-    // 是 GPU 平台普遍特性，Vulkan 回读/常驻 dispatch 均不优于 D3D12 → 保持默认。
-    g_instance = W.CreateInstance(nullptr);
+    // 后端选择（环境变量 ENTJOY_GPU_BACKEND = "vulkan" / "d3d12" / 空=默认全部，Windows 上 wgpu 自动选 D3D12）
+    // 3 轮对比实测（2026-08-16，RTX 4060 Laptop）：Vulkan vs D3D12 无决定性差异——
+    // 常驻 kernel 持平（min 0.149 vs 0.169）、回读 16MB D3D12 快 ~16%（2.46 vs 2.86ms）、
+    // 全量往返持平（4.98 vs 4.99）、增量 sp=1% D3D12 略优（Move 1.17 vs 1.21 / Heavy 1.24 vs 1.35）。
+    // READBACK 映射带宽 8-12GB/s 是平台特性（非 D3D12 特有）→ 保持默认 D3D12。
+    WGPUInstanceDescriptor id;
+    memset(&id, 0, sizeof(id));
+    const char* backend = getenv("ENTJOY_GPU_BACKEND");
+    WGPUInstanceExtras iex;
+    memset(&iex, 0, sizeof(iex));
+    iex.chain.sType = WGPUSType_InstanceExtras;
+    if (backend && _stricmp(backend, "vulkan") == 0) {
+        iex.backends = WGPUInstanceBackend_Vulkan;
+        id.nextInChain = (WGPUChainedStruct*)&iex;
+    } else if (backend && _stricmp(backend, "d3d12") == 0) {
+        iex.backends = WGPUInstanceBackend_DX12;
+        id.nextInChain = (WGPUChainedStruct*)&iex;
+    }
+    fprintf(stderr, "[GpuCompute] backend env=%s -> %s\n", backend ? backend : "(null)",
+            backend && _stricmp(backend, "vulkan") == 0 ? "Vulkan" : "default(D3D12)");
+    g_instance = W.CreateInstance(&id);
     if (!g_instance) { setError("wgpuCreateInstance 失败"); return 0; }
     // adapter（null options = 全后端）
     {
