@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -30,6 +30,11 @@
 	<ItemGroup>
 		<!-- ILGPU：Gate 1a GPU 快速验证（doc/10 §11），JIT 零工程投入 -->
 		<PackageReference Include="ILGPU" Version="1.5.3" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- wgpu-native v29：Gate 2 Milestone 2 运行时（探针 GpuNativeProbe 已下载该 dll） -->
+		<None Include="..\GpuNativeProbe\wgpu\lib\wgpu_native.dll" Link="wgpu_native.dll" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
 	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检查
@@ -66,6 +71,15 @@
 
 	<Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
 		<Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
+	</Target>
+
+	<!-- Gate 2 Milestone 2：wgpu 已作为 thirdParty 集成进 NativeDll（C++ 执行后端）；
+	     运行时 NativeDll 动态加载 wgpu_native.dll → 复制到输出目录 -->
+	<Target Name="CopyWgpuNativeDll" AfterTargets="Build">
+		<ItemGroup>
+			<WgpuNativeDll Include="$(MSBuildThisFileDirectory)..\NativeDll\thirdParty\wgpu\lib\wgpu_native.dll" />
+		</ItemGroup>
+		<Copy SourceFiles="@(WgpuNativeDll)" DestinationFolder="$(OutputPath)" Condition="Exists('$(MSBuildThisFileDirectory)..\NativeDll\thirdParty\wgpu\lib\wgpu_native.dll')" SkipUnchangedFiles="true" />
 	</Target>
 
 </Project>

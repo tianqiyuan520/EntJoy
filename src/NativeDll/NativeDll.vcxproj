@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -166,6 +166,8 @@
     <ClInclude Include="ChunkJobData.h" />
     <ClInclude Include="ChunkNativeArray.h" />
     <ClInclude Include="Exports.h" />
+<ClInclude Include="GpuCompute.h" />
+<ClInclude Include="GpuResidency.h" />
     <ClInclude Include="JobProfiler.h" />
     <ClInclude Include="JobSystem.h" />
     <ClInclude Include="JobSystemInternal.h" />
@@ -179,6 +181,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Exports.cpp" />
+<ClCompile Include="GpuCompute.cpp" />
+<ClCompile Include="GpuResidency.cpp" />
     <ClCompile Include="JobProfiler.cpp" />
     <ClCompile Include="JobSystem.cpp" />
     <ClCompile Include="JobSystem_State.cpp" />
