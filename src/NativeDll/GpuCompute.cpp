@@ -334,7 +334,7 @@ JOB_API int GpuCompute_ReadBack(void* buffer, void* outData, unsigned long long 
     W.QueueSubmit(g_queue, 1, &cmd);
     W.CommandBufferRelease(cmd);
     W.CommandEncoderRelease(enc);
-    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    // 不在此 wait：mapAsync 后的 DevicePoll(wait) 一并等 copy + 触发 map 回调
 
     AsyncWait aw;
     WGPUBufferMapCallbackInfo info;
@@ -343,7 +343,9 @@ JOB_API int GpuCompute_ReadBack(void* buffer, void* outData, unsigned long long 
     info.callback = onBufferMap;
     info.userdata1 = &aw;
     W.BufferMapAsync(staging, WGPUMapMode_Read, 0, (size_t)size, info);
-    pollDevice(g_device, &aw.done);
+    // wait=true 等队列（copy 已提交）+ process events → 直接触发 map 回调，省忙等固定延迟
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    if (!aw.done) pollDevice(g_device, &aw.done);
     if (!aw.done || aw.status != WGPUMapAsyncStatus_Success) {
         setError("mapAsync 失败 status=%d", aw.status);
         W.BufferDestroy(staging);

@@ -194,7 +194,10 @@ static bool resMapRead(WGPUBuffer buf, void* out, size_t size) {
     info.callback = onBufferMapRes;
     info.userdata1 = &aw;
     W.BufferMapAsync(buf, WGPUMapMode_Read, 0, size, info);
-    pollDeviceRes(&aw.done);
+    // mapAsync 回调由 DevicePoll 处理：wait=true 等已提交工作 + process events，
+    // 通常直接触发回调（省去忙等轮询的固定延迟）；未触发则回退忙等保险
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    if (!aw.done) pollDeviceRes(&aw.done);
     if (!aw.done || aw.status != WGPUMapAsyncStatus_Success) { resError("mapAsync 失败 status=%d", aw.status); return false; }
     void* mapped = W.BufferGetMappedRange(buf, 0, size);
     if (mapped) memcpy(out, mapped, size);
@@ -215,12 +218,13 @@ static bool resCopyMapRead(WGPUBuffer src, WGPUBuffer readback, void* out, size_
     return resMapRead(readback, out, size);
 }
 
-/// 完成上帧 pending：wait → 读回 → patch outPtrs → pending=0。
+/// 完成上帧 pending：读回 → patch outPtrs → pending=0。
+///   （wait 由 resMapRead 内部 DevicePoll(wait) 覆盖：copy 是上帧提交的队列工作，
+///     wait 等队列空 + process events 触发 map 回调，无需单独 wait）
 ///   增量上帧：staging[nxt]（gather 输出）→ readback → stagingHost[nxt] → patch outPtrs 的 dirty chunk
 ///   全量上帧：resident → readback → 直接覆盖 outPtrs
 static bool resCompleteFrame(ResidencyJob* j, void* const* outPtrs) {
     if (!j->pending) return true;
-    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
     int nxt = j->cur ^ 1;
     int ndPrev = j->nd[nxt];
     if (j->lastIncr) {
