@@ -136,6 +136,10 @@ namespace EntJoySample.GpuJob
             const uint groups = (uint)((1_000_000 + 63) / 64);
 
             NativeTranspiler.Bindings.NativeExports.GpuCompute_EnsureInitialized();
+            // 传输带宽诊断（UPLOAD 写 / QueueWriteBuffer / READBACK 读）——定位全量往返开销构成
+            GpuCompute_DiagTransfer(16);
+            // 原生 D3D12 对照（判定 wgpu 的 ~10GB/s 是平台特性还是 wgpu 实现问题）
+            GpuCompute_DiagNativeD3D12(16);
             IntPtr k = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateKernel(wgsl, 2, 1);
             if (k == IntPtr.Zero) { Console.WriteLine($"[FAIL] kernel: {NativeTranspiler.Bindings.NativeExports.GpuCompute_GetLastErrorText()}"); return; }
             IntPtr b0 = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateStorageBuffer(size8);
@@ -255,6 +259,10 @@ namespace EntJoySample.GpuJob
         private static extern int GpuResidency_GetMode(IntPtr job);
         [DllImport("NativeDll", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr GpuResidency_GetLastError();
+        [DllImport("NativeDll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void GpuCompute_DiagTransfer(int sizeMB);
+        [DllImport("NativeDll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void GpuCompute_DiagNativeD3D12(int sizeMB);
 
         /// <summary>
         /// GpuResidencyManager v2 验证：输入/输出分离 + 跨帧流水。
