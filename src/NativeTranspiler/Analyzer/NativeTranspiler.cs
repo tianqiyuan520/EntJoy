@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using System;
 using System.Linq;
 using System.Text;
@@ -13,7 +13,8 @@ namespace NativeTranspiler.Analyzer
         public enum BackendTarget
         {
             Cpp,
-            Ispc
+            Ispc,
+            Gpu
         }
 
         /// <summary>

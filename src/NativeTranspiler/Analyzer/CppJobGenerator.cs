@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -26,6 +26,8 @@ namespace NativeTranspiler.Analyzer
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobParallelFor"));
         public static bool IsForJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobFor"));
+        public static bool IsIJob(INamedTypeSymbol jobStruct) =>
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJob"));
         public static bool IsChunkJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk"));
         public static bool IsEntityJob(INamedTypeSymbol jobStruct) =>

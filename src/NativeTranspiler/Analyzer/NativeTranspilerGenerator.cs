@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
@@ -166,6 +166,10 @@ namespace NativeTranspiler.Analyzer
                             cppFiles.Add($"{baseName}_mt_wrapper.cpp");
                         }
                     }
+                    else if (target == NativeTranspiler.BackendTarget.Gpu)
+                    {
+                        // GPU 目标仅支持 Job 结构体；静态方法标记 Gpu 由校验器 NT014 拒绝，这里不生成任何文件。
+                    }
                     else
                     {
                         var header = CppGenerator.GenerateHeader(method);
@@ -250,6 +254,24 @@ namespace NativeTranspiler.Analyzer
                             cppFiles.Add($"{ispcBase}_mt_wrapper.cpp");
                         }
                     }
+                    else if (target == NativeTranspiler.BackendTarget.Gpu)
+                    {
+                        // GPU 目标：生成 .wgsl 内核，不生成 C++/ISPC（NativeDll 无需重建）。
+                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt.ispc"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
+                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}_Adapter.cpp"));
+
+                        var wgslSource = WgslGenerator.GenerateWgslSource(job, ctx.Compilation);
+                        string wgslPath = Path.Combine(outputDir, $"{WgslGenerator.GetWgslBaseName(job)}.wgsl");
+                        bool disabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
+                        bool fileExists = File.Exists(wgslPath);
+                        if (!disabledAutoRefresh || !fileExists)
+                            WriteAllTextWithRetry(wgslPath, wgslSource);
+                    }
                     else
                     {
                         DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
@@ -280,7 +302,7 @@ namespace NativeTranspiler.Analyzer
 
                     bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
                                                              CppJobGenerator.IsChunkScheduledJob(job);
-                    if (!adapterProvidedByIspcChunkWrapper)
+                    if (!adapterProvidedByIspcChunkWrapper && target != NativeTranspiler.BackendTarget.Gpu)
                     {
                         // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
                         // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
@@ -618,7 +640,8 @@ namespace {AttributeNamespace}
     public enum BackendTarget
     {{
         Cpp,
-        Ispc
+        Ispc,
+        Gpu
     }}
 
     public enum IspcMathLib
