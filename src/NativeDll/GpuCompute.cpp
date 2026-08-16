@@ -134,9 +134,11 @@ JOB_API int GpuCompute_Initialize(const char* wgpuDllPath) {
     const char* path = wgpuDllPath ? wgpuDllPath : "wgpu_native.dll";
     if (LoadWgpu(path)) { setError("加载 wgpu_native.dll 失败或缺少导出: %s", path); return 0; }
 
+    // 后端选择：默认全部（Windows 上 wgpu 选 D3D12）。
+    // 实验结论（2026-08-16）：强制 Vulkan 无优势——READBACK mapped 带宽（8-12GB/s）
+    // 是 GPU 平台普遍特性，Vulkan 回读/常驻 dispatch 均不优于 D3D12 → 保持默认。
     g_instance = W.CreateInstance(nullptr);
     if (!g_instance) { setError("wgpuCreateInstance 失败"); return 0; }
-
     // adapter（null options = 全后端）
     {
         AsyncWait aw;
