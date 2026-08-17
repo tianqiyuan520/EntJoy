@@ -38,16 +38,16 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 2. **Query** 使用 `WithAll`、`WithAny`、`WithNone` 和 `WithEnabled` 选择匹配的 Chunk。
 3. **JobSystem** 把 for、batch、chunk 或 entity 工作提交给原生工作线程，并通过 `JobHandle` 表达依赖。
 4. **Source Generator** 为 `IJobEntity`、原生绑定和调度扩展生成代码。
-5. **NativeTranspiler** 将标记了 `[NativeTranspile]` 的受支持 C# 代码生成 C++ 或 ISPC。
-6. **NativeDll** 编译生成的代码，并提供统一的原生调度器和运行时 ABI。
+5. **NativeTranspiler** 将标记了 `[NativeTranspile]` 的受支持 C# 代码生成 C++、ISPC、WGSL（wgpu）或 CUDA（`.cu` → cubin）。
+6. **NativeDll** 编译生成的代码，并提供统一的原生调度器、GPU 执行后端（wgpu / CUDA 驱动 API）和运行时 ABI。
 
 | 目录 | 作用 |
 | --- | --- |
 | [`src/EntJoy`](src/EntJoy) | ECS、Query、JobSystem、Native Collections 和基础运行时 |
 | [`src/EntJoy.SourceGenerator`](src/EntJoy.SourceGenerator) | ECS Job 的 C# Source Generator |
-| [`src/NativeTranspiler`](src/NativeTranspiler) | C# 到 C++/ISPC 的生成器与分析器 |
+| [`src/NativeTranspiler`](src/NativeTranspiler) | C# 到 C++/ISPC/WGSL/CUDA 的生成器与分析器 |
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | 从 MSBuild 调用 CMake 的自定义任务 |
-| [`src/NativeDll`](src/NativeDll) | C++ JobSystem、Profiler 和原生容器支持 |
+| [`src/NativeDll`](src/NativeDll) | C++ JobSystem、Profiler、原生容器与 wgpu/CUDA GPU 执行后端 |
 | [`src/EntJoySample`](src/EntJoySample) | 功能验证、用法示例和性能测试 |
 
 ## 安装
@@ -125,7 +125,7 @@ dotnet build src/EntJoySample/EntJoySample.csproj -c Release
 .\bin\EntJoySample.exe
 ```
 
-当前启用的入口位于 [`06_HotFieldHandle/Program.cs`](src/EntJoySample/06_HotFieldHandle/Program.cs)。样例工程采用“同一时间只启用一个 `Program.Main`”的约定；切换样例时，请注释当前入口并取消目标目录中 `Program.cs` 的注释。
+当前启用的入口位于 [`07_GpuJob/Program.cs`](src/EntJoySample/07_GpuJob/Program.cs)，默认输出 C# / C++ / ISPC / WGPU / CUDA 五路对比（Move、Heavy）与 GridSearch 构建/查询耗时。样例工程采用"同一时间只启用一个 `Program.Main`"的约定；切换样例时，请注释当前入口并取消目标目录中 `Program.cs` 的注释。
 
 ## 配置自己的项目
 
@@ -512,6 +512,18 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 - [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle)：HotField 可行性原型——普通 class + `[HotFieldEntity]` 属性 → 字段级 SoA 存储（`HotStore`）+ int 索引 + `ref` 属性重定向，System（`IJobParallelFor`）直接消费同一存储。验证「OOP 游戏代码与 plain class 逐字节相同（无感）、Attribute 机械部分零成本、OOD↔DOD 共享存储结果一致；1M 密集 OOP 的 SoA 结构税如实报告（批量走 System）」。
 
+### 07 GpuJob（当前默认入口）
+
+- [`Program.cs`](src/EntJoySample/07_GpuJob/Program.cs)：C# / C++ / ISPC / WGPU / CUDA 五路对比（Move、Heavy @1M，p50 + parity）与 GridSearch closest 构建/查询耗时表（C#/C++/ISPC/CUDA/GPU）。
+  - WGPU：`[NativeTranspile(Target=Gpu)]` → WGSL → wgpu-native 执行（`ScheduleGpu`）。
+  - CUDA：`[NativeTranspile(Target=Cuda)]` → `.cu` → nvcc cubin → 驱动 API 执行（`ScheduleCuda`，pinned NativeArray 直连免拷贝）。
+  - 诊断深挖（GPU 阶段拆解 / Residency / GridSearch 全流程）以 `ENTJOY_GPU_DIAG=1` 开启；`ENTJOY_CUDA_ONLY=1` 只跑 CUDA 验证。
+- [`GridSearchFullUpdate.cs`](src/EntJoySample/07_GpuJob/GridSearchFullUpdate.cs)：counting-sort grid 5-pass 全量更新（count → CPU prefix → place → query）。
+
+### 08 Entity Random Access
+
+- [`RandomAccess`](src/EntJoySample/08_EntityRandomAccess)：稀疏 Entity 随机访问开销基准（ComponentLookup 优化）。
+
 性能样例请使用 Release x64、关闭调试器，并保持电源模式和后台负载一致。README 不固定记录单台机器的结果；请在目标硬件上运行样例获得可比较数据。
 
 ## 常见问题
@@ -607,8 +619,8 @@ EntJoy combines a convenient managed API with native execution backends:
 2. **Query** selects matching Chunks through `WithAll`, `WithAny`, `WithNone`, and `WithEnabled`.
 3. **JobSystem** submits for, batch, chunk, or entity work to native workers and expresses dependencies with `JobHandle`.
 4. **Source Generator** emits code for `IJobEntity`, native bindings, and scheduling extensions.
-5. **NativeTranspiler** generates C++ or ISPC from supported C# code marked with `[NativeTranspile]`.
-6. **NativeDll** compiles generated code and provides the shared native scheduler and runtime ABI.
+5. **NativeTranspiler** generates C++, ISPC, WGSL (wgpu), or CUDA (`.cu` → cubin) from supported C# code marked with `[NativeTranspile]`.
+6. **NativeDll** compiles generated code and provides the shared native scheduler, GPU execution backends (wgpu / CUDA driver API), and runtime ABI.
 
 | Directory | Purpose |
 | --- | --- |
@@ -692,7 +704,7 @@ The first build is slower than incremental builds. When generated and native sou
 .\bin\EntJoySample.exe
 ```
 
-The active entry point is currently [`06_HotFieldHandle/Program.cs`](src/EntJoySample/06_HotFieldHandle/Program.cs). EntJoySample keeps only one `Program.Main` enabled at a time. To switch samples, comment the current entry point and uncomment the `Program.cs` in the target sample directory.
+The active entry point is currently [`07_GpuJob/Program.cs`](src/EntJoySample/07_GpuJob/Program.cs), which by default prints the five-backend C# / C++ / ISPC / WGPU / CUDA comparison (Move, Heavy) and a GridSearch build/query table. EntJoySample keeps only one `Program.Main` enabled at a time. To switch samples, comment the current entry point and uncomment the `Program.cs` in the target sample directory.
 
 ## Configure Your Own Project
 
@@ -1072,6 +1084,18 @@ Working sources:
 ### 06 HotField Handle
 
 - [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle): HotField feasibility prototype — an ordinary class + `[HotFieldEntity]` attribute → field-level SoA storage (`HotStore`) + int index + `ref`-property redirection, with Systems (`IJobParallelFor`) consuming the same store directly. Verifies that OOP game code stays byte-identical to a plain class (seamless), the attribute machinery is zero-cost, and OOD↔DOD share storage with identical results; the dense-1M OOP SoA structural tax is reported honestly (bulk goes through Systems).
+
+### 07 GpuJob (current default entry)
+
+- [`Program.cs`](src/EntJoySample/07_GpuJob/Program.cs): five-backend comparison C# / C++ / ISPC / WGPU / CUDA (Move, Heavy @1M, p50 + parity) and a GridSearch closest build/query time table (C#/C++/ISPC/CUDA/GPU).
+  - WGPU: `[NativeTranspile(Target=Gpu)]` → WGSL → wgpu-native execution (`ScheduleGpu`).
+  - CUDA: `[NativeTranspile(Target=Cuda)]` → `.cu` → nvcc cubin → driver-API execution (`ScheduleCuda`; pinned NativeArray direct transfers avoid C# copies).
+  - Deep diagnostics (GPU stage breakdown / Residency / full GridSearch flow) are enabled with `ENTJOY_GPU_DIAG=1`; `ENTJOY_CUDA_ONLY=1` runs only the CUDA verification.
+- [`GridSearchFullUpdate.cs`](src/EntJoySample/07_GpuJob/GridSearchFullUpdate.cs): counting-sort grid 5-pass full update (count → CPU prefix → place → query).
+
+### 08 Entity Random Access
+
+- [`RandomAccess`](src/EntJoySample/08_EntityRandomAccess): sparse Entity random-access overhead benchmark (ComponentLookup optimization).
 
 Run performance samples in Release x64 without a debugger, and keep power mode and background load consistent. This README intentionally avoids fixed results from one machine; run the samples on the target hardware for meaningful comparisons.
 

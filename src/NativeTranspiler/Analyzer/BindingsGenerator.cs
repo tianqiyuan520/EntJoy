@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -40,8 +40,20 @@ namespace NativeTranspiler.Analyzer
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
 
+            // GPU/CUDA Job 无 native 符号（WGSL 由 wgpu 执行、CUDA 由驱动 API 执行）→ 从 native bindings 排除，
+            // GPU 单独走 GpuCompute_*（wgpu 后端）→ ScheduleGpu；CUDA 走 GpuComputeCuda_*（后续 ScheduleCuda）。
+            bool IsGpuLike(INamedTypeSymbol j) => j != null && attrSymbol != null &&
+                (AttributeHelper.GetBackendTarget(j, attrSymbol) == NativeTranspiler.BackendTarget.Gpu ||
+                 AttributeHelper.GetBackendTarget(j, attrSymbol) == NativeTranspiler.BackendTarget.Cuda);
+            var nativeJobs = jobStructs
+                .Where(j => j == null || attrSymbol == null || !IsGpuLike(j))
+                .ToList();
+            var gpuJobs = jobStructs
+                .Where(j => IsGpuLike(j))
+                .ToList();
+
             // 1. 为每个 Job 结构体生成静态缓存的委托字段和函数指针
-            foreach (var jobStruct in jobStructs)
+            foreach (var jobStruct in nativeJobs)
             {
                 GenerateStaticDelegateFields(sb, jobStruct, compilation);
             }
@@ -49,9 +61,17 @@ namespace NativeTranspiler.Analyzer
             // 2. 静态构造函数：初始化所有缓存的委托和函数指针
             sb.AppendLine("        static NativeExports()");
             sb.AppendLine("        {");
-            foreach (var jobStruct in jobStructs)
+            foreach (var jobStruct in nativeJobs)
             {
                 GenerateStaticConstructorInitialization(sb, jobStruct, compilation);
+            }
+            // 注册 Job 字段显式写入器（chunk 路径 CreateChunkContextBlock 分发用）
+            foreach (var jobStruct in nativeJobs)
+            {
+                if (ComputeJobFieldMarshal(jobStruct).explicitOk)
+                {
+                    sb.AppendLine($"            NativeJobScheduler.RegisterJobFieldWriter(typeof({jobStruct.ToDisplayString()}), (NativeJobScheduler.JobFieldWriter<{jobStruct.ToDisplayString()}>)WriteJobFields_{jobStruct.Name});");
+                }
             }
             sb.AppendLine("        }");
             sb.AppendLine();
@@ -69,10 +89,49 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 4. Job 结构体的 DllImport 和 Schedule 方法
-            foreach (var jobStruct in jobStructs)
+            foreach (var jobStruct in nativeJobs)
             {
                 GenerateJobDllImport(sb, jobStruct, compilation);
                 GenerateJobScheduleMethod(sb, jobStruct, compilation);
+            }
+
+            // 4b. GPU/CUDA Job：GpuCompute_*（wgpu）与 GpuComputeCuda_*（CUDA 驱动）P/Invoke + kernel 静态缓存字段
+            var wgpuJobs = gpuJobs
+                .Where(j => j != null && AttributeHelper.GetBackendTarget(j, compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute")) == NativeTranspiler.BackendTarget.Gpu)
+                .ToList();
+            var cudaJobs = gpuJobs
+                .Where(j => j != null && AttributeHelper.GetBackendTarget(j, compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute")) == NativeTranspiler.BackendTarget.Cuda)
+                .ToList();
+            if (wgpuJobs.Count > 0)
+            {
+                GenerateGpuComputeDllImports(sb);
+                foreach (var jobStruct in wgpuJobs)
+                    sb.AppendLine($"        internal static IntPtr __gpuKernel_{jobStruct.Name} = IntPtr.Zero;");
+            }
+            if (cudaJobs.Count > 0)
+            {
+                GenerateCudaComputeDllImports(sb);
+                foreach (var jobStruct in cudaJobs)
+                {
+                    sb.AppendLine($"        internal static IntPtr __cudaKernel_{jobStruct.Name} = IntPtr.Zero;");
+                    // device/pinned buffer 静态缓存（长度不变则不重分配；避免每帧 cuMemAlloc 开销）
+                    foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic && NativeTranspiler.IsEntJoyNativeContainerType(f.Type)))
+                    {
+                        sb.AppendLine($"        internal static IntPtr __cudaDev_{jobStruct.Name}_{f.Name} = IntPtr.Zero;");
+                        sb.AppendLine($"        internal static IntPtr __cudaHost_{jobStruct.Name}_{f.Name} = IntPtr.Zero;");
+                        sb.AppendLine($"        internal static ulong __cudaSize_{jobStruct.Name}_{f.Name} = 0;");
+                    }
+                }
+            }
+
+            // 4c. 显式 Job 字段写入器（chunk 路径 CreateChunkContextBlock 用）：
+            //     Debug 下 DisposeSentinel 使 Job struct 非 blittable → 裸拷贝布局不可靠，
+            //     逐 Job 生成类型化写入器，静态构造时注册进 NativeJobScheduler 的注册表（EntJoy 侧）。
+            if (nativeJobs.Count > 0)
+            {
+                foreach (var jobStruct in nativeJobs)
+                    GenerateJobFieldWriterMethod(sb, jobStruct);
+                sb.AppendLine();
             }
 
             sb.AppendLine(GenerateCleanupFactoryMethod());
@@ -83,10 +142,18 @@ namespace NativeTranspiler.Analyzer
             // 5. Job 扩展方法（Schedule 和 Run）
             sb.AppendLine("public static partial class JobExtensions");
             sb.AppendLine("{");
-            foreach (var jobStruct in jobStructs)
+            foreach (var jobStruct in nativeJobs)
             {
                 GenerateJobExtensionMethod(sb, jobStruct);
                 GenerateJobRunMethod(sb, jobStruct, compilation);
+            }
+            foreach (var jobStruct in wgpuJobs)
+            {
+                GenerateGpuScheduleMethod(sb, jobStruct, compilation);
+            }
+            foreach (var jobStruct in cudaJobs)
+            {
+                GenerateCudaScheduleMethod(sb, jobStruct, compilation);
             }
             sb.AppendLine("}");
 
@@ -451,11 +518,26 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("        {");
             if (!isChunk)
             {
-                sb.AppendLine($"            int size = sizeof({jobTypeName});");
-                sb.AppendLine($"            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
-                sb.AppendLine($"            void* originalPtr = Unsafe.AsPointer(ref job);");
-                sb.AppendLine($"            Unsafe.CopyBlockUnaligned((void*)nativePtr, originalPtr, (uint)size);");
-                sb.AppendLine();
+                // Debug 下 NativeArray 含 GC 引用（DisposeSentinel）→ Job struct 非 blittable，裸拷贝布局不可靠；
+                // 改为显式逐字段写入（与 C++ Adapter 偏移一致），Debug/Release 均正确。
+                var (marshalled, explicitOk, totalSize) = ComputeJobFieldMarshal(jobStruct);
+                if (explicitOk)
+                {
+                    sb.AppendLine($"            int size = {totalSize};");
+                    sb.AppendLine("            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
+                    sb.AppendLine("            byte* __dst = (byte*)nativePtr;");
+                    EmitExplicitFieldWrites(sb, marshalled, "__dst", "job");
+                    sb.AppendLine();
+                }
+                else
+                {
+                    // 含不支持字段（NativeList 等）：退回裸拷贝（Release 正确；Debug 由显式路径覆盖的场景外）
+                    sb.AppendLine($"            int size = sizeof({jobTypeName});");
+                    sb.AppendLine("            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
+                    sb.AppendLine("            void* originalPtr = Unsafe.AsPointer(ref job);");
+                    sb.AppendLine("            Unsafe.CopyBlockUnaligned((void*)nativePtr, originalPtr, (uint)size);");
+                    sb.AppendLine();
+                }
             }
 
             if (isChunk)
@@ -503,9 +585,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    // 0 = 直通原生 ResolveChunkSize（tiles/worker 通用化粒度），与托管 IJobParallelFor 一致；
-                    // >0 显式 batch 原样传。旧的 32*ProcessorCount 硬编码默认会绕过 tiles/worker 调优，
-                    // 使 transpiled job 与托管 job 粒度不一致（GridSearch A/B 已验证：非 MT job 走 ResolveChunkSize 更优）。
+                    // 0 = 直通原生 ResolveChunkSize（tiles/worker 通用化粒度）；>0 显式 batch 原样传
                     sb.AppendLine($"            int actualBatchSize = innerBatchCount;");
                 }
 
@@ -785,6 +865,169 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", args);
         }
 
+        // ---------- 显式逐字段 marshalling（Debug sentinel 布局修复共用） ----------
+
+        /// <summary>
+        /// 计算 Job 结构体所有实例字段在 C++ context 布局下的偏移（与 CppJobGenerator.CalculateFieldOffset 同源），
+        /// 并把字段递归展开为"叶子"（含 GC 引用的非 blittable struct 也递归：值子字段显式写、引用槽零填充）。
+        /// 叶子：type==null 表示引用槽（8B 零填充，C++ 侧为 void*，Execute 不应访问）。
+        /// 返回 (叶子列表, 是否全部支持, 总大小)。
+        /// </summary>
+        private static (List<(string accessor, int offset, ITypeSymbol type)> leaves, bool explicitOk, int totalSize) ComputeJobFieldMarshal(INamedTypeSymbol jobStruct)
+        {
+            var leaves = new List<(string accessor, int offset, ITypeSymbol type)>();
+            int running = 0;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                int off = CppJobGenerator.CalculateFieldOffset(field, ref running);
+                if (field.Type.IsReferenceType)
+                {
+                    leaves.Add(("", off, null));   // 顶层引用字段 → void* 槽零填充
+                    continue;
+                }
+                if (!CollectLeaves(leaves, field.Name, field.Type, off)) return (leaves, false, running);
+            }
+            return (leaves, true, running);
+        }
+
+        /// <summary>递归展开字段为叶子：容器/指针/标量/枚举/blittable struct → 单叶子；非 blittable struct → 递归（引用子字段 → 零填充槽）</summary>
+        private static bool CollectLeaves(List<(string accessor, int offset, ITypeSymbol type)> leaves,
+            string accessor, ITypeSymbol type, int offset)
+        {
+            if (type is IPointerTypeSymbol) { leaves.Add((accessor, offset, type)); return true; }
+            if (NativeTranspiler.IsEntJoyNativeContainerType(type)) { leaves.Add((accessor, offset, type)); return true; }
+            if (type.TypeKind == TypeKind.Enum) { leaves.Add((accessor, offset, type)); return true; }
+            var st = type.SpecialType;
+            if (st is SpecialType.System_Single or SpecialType.System_Int32
+                or SpecialType.System_UInt32 or SpecialType.System_Boolean)
+            { leaves.Add((accessor, offset, type)); return true; }
+            if (type is INamedTypeSymbol nts && nts.IsValueType)
+            {
+                if (IsBlittableStruct(nts)) { leaves.Add((accessor, offset, type)); return true; }
+                int running = 0;
+                foreach (var f in nts.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                {
+                    int subOff = CppJobGenerator.CalculateFieldOffset(f, ref running);
+                    if (f.Type.IsReferenceType)
+                    {
+                        leaves.Add(("", offset + subOff, null));   // 引用槽：8B 零填充（C++ 为 void*，Execute 不应访问）
+                        continue;
+                    }
+                    string child = accessor.Length == 0 ? f.Name : accessor + "." + f.Name;
+                    if (!CollectLeaves(leaves, child, f.Type, offset + subOff)) return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>struct 是否 blittable（递归：指针/标量/枚举/仅含这些的嵌套 struct）——Debug sentinel 含 GC 引用，非 blittable</summary>
+        private static bool IsBlittableStruct(INamedTypeSymbol structType)
+        {
+            foreach (var member in structType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                if (member.Type is IPointerTypeSymbol) continue;
+                if (member.Type.TypeKind == TypeKind.Enum) continue;
+                var st = member.Type.SpecialType;
+                if (st is SpecialType.System_Single or SpecialType.System_Int32
+                    or SpecialType.System_UInt32 or SpecialType.System_Boolean
+                    or SpecialType.System_Int64 or SpecialType.System_UInt64
+                    or SpecialType.System_Double or SpecialType.System_Byte
+                    or SpecialType.System_SByte or SpecialType.System_Int16
+                    or SpecialType.System_UInt16 or SpecialType.System_Char) continue;
+                if (member.Type is INamedTypeSymbol nested && nested.IsValueType)
+                {
+                    if (IsBlittableStruct(nested)) continue;
+                    return false;
+                }
+                return false;   // 引用类型/其他 → 非 blittable
+            }
+            return true;
+        }
+
+        /// <summary>生成逐字段显式写入语句：{srcExpr}.{accessor} 写到 {dstExpr} + 偏移（不依赖 struct 运行时布局）</summary>
+        private static void EmitExplicitFieldWrites(StringBuilder sb,
+            List<(string accessor, int offset, ITypeSymbol type)> leaves, string dstExpr, string srcExpr)
+        {
+            foreach (var (accessor, off, type) in leaves)
+            {
+                if (type == null)
+                {
+                    // 引用槽（object/string 等）：8B 零填充（C++ 侧为 void*，Execute 不应访问）
+                    sb.AppendLine($"            *((long*)({dstExpr} + {off})) = 0;");
+                    continue;
+                }
+                if (NativeTranspiler.IsEntJoyNativeContainerType(type))
+                {
+                    if (type.Name == "NativeArray")
+                    {
+                        // NativeArray：显式写 buffer@off / length@off+8（与 Adapter 读取一致）
+                        sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.GetUnsafePtr();");
+                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 8})) = {srcExpr}.{accessor}.Length;");
+                    }
+                    else if (type.Name == "NativeList")
+                    {
+                        // NativeList：_listData（UnsafeList*，堆上稳定）在偏移 0，C++ 解引用读取
+                        sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.GetListData();");
+                    }
+                    else // UnsafeList（值字段）：C++ 取 &blob[off] 为 UnsafeList* → 内联写 Ptr/Length/Capacity/Allocator
+                    {
+                        sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.Ptr;");
+                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 8})) = {srcExpr}.{accessor}.Length;");
+                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 12})) = {srcExpr}.{accessor}.Capacity;");
+                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 16})) = (int){srcExpr}.{accessor}.Allocator;");
+                    }
+                }
+                else if (type is IPointerTypeSymbol)
+                {
+                    // 指针字段：写指针值（同一进程地址空间，C++ 直接解引用；指向内存须非托管/固定且在 Job 期间存活）
+                    sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor};");
+                }
+                else if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol enumSym)
+                {
+                    string underlying = enumSym.EnumUnderlyingType.SpecialType == SpecialType.System_UInt32 ? "uint" : "int";
+                    sb.AppendLine($"            *(({underlying}*)({dstExpr} + {off})) = ({underlying}){srcExpr}.{accessor};");
+                }
+                else if (type.SpecialType == SpecialType.System_Single)
+                {
+                    sb.AppendLine($"            *((float*)({dstExpr} + {off})) = {srcExpr}.{accessor};");
+                }
+                else if (type.SpecialType == SpecialType.System_Int32)
+                {
+                    sb.AppendLine($"            *((int*)({dstExpr} + {off})) = {srcExpr}.{accessor};");
+                }
+                else if (type.SpecialType == SpecialType.System_UInt32)
+                {
+                    sb.AppendLine($"            *((uint*)({dstExpr} + {off})) = {srcExpr}.{accessor};");
+                }
+                else if (type.SpecialType == SpecialType.System_Boolean)
+                {
+                    sb.AppendLine($"            *((byte*)({dstExpr} + {off})) = (byte)({srcExpr}.{accessor} ? 1 : 0);");
+                }
+                else
+                {
+                    // blittable 值 struct（float2/用户纯值结构等）：Unsafe.Write 直写（blittable → Sequential 生效）
+                    sb.AppendLine($"            System.Runtime.CompilerServices.Unsafe.Write((void*)({dstExpr} + {off}), {srcExpr}.{accessor});");
+                }
+            }
+        }
+
+        /// <summary>
+        /// 生成 Job 字段显式写入器（chunk 路径 CreateChunkContextBlock 用）：
+        /// 以类型化 ref 读取逻辑字段值（布局无关），显式写到 C++ context 偏移。
+        /// </summary>
+        private static void GenerateJobFieldWriterMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
+        {
+            var (marshalled, explicitOk, _) = ComputeJobFieldMarshal(jobStruct);
+            if (!explicitOk) return;   // 含不支持字段：不注册，chunk 路径回退裸拷贝
+            string jobTypeName = jobStruct.ToDisplayString();
+            sb.AppendLine($"        internal static void WriteJobFields_{jobStruct.Name}(byte* dst, ref {jobTypeName} job)");
+            sb.AppendLine("        {");
+            EmitExplicitFieldWrites(sb, marshalled, "dst", "job");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
         private static void GenerateJobExtensionMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
@@ -980,6 +1223,477 @@ namespace NativeTranspiler.Analyzer
                 Marshal.FreeHGlobal(native);
             };
         }";
+        }
+
+        // ============================================================
+        // GPU Job（BackendTarget.Gpu）：ScheduleGpu —— P/Invoke NativeDll GpuCompute_*
+        // ============================================================
+
+        private const string NativeLibraryNameGpu = "NativeDll";
+        private const int GpuWorkgroupSize = 256;   // 与 WgslGenerator.WorkgroupSize 一致（dispatch 组数）
+
+        private static void GenerateGpuComputeDllImports(StringBuilder sb)
+        {
+            sb.AppendLine("        // ---- NativeDll GpuCompute_*（wgpu compute 后端，C++ 实现） ----");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_Initialize\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern int GpuCompute_Initialize([MarshalAs(UnmanagedType.LPStr)] string wgpuDllPath);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_Shutdown\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_Shutdown();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_GetLastError\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuCompute_GetLastError();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_CreateKernel\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuCompute_CreateKernel([MarshalAs(UnmanagedType.LPStr)] string wgsl, int storageBindingCount, int hasUniform);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_ReleaseKernel\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_ReleaseKernel(IntPtr kernel);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_CreateStorageBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuCompute_CreateStorageBuffer(ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_CreateUniformBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuCompute_CreateUniformBuffer(ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_WriteBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_WriteBuffer(IntPtr buffer, IntPtr data, ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_ReleaseBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_ReleaseBuffer(IntPtr buffer);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_CreateBindGroup\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuCompute_CreateBindGroup(IntPtr kernel, IntPtr[] buffers, ulong[] sizes, int bufferCount);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_ReleaseBindGroup\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_ReleaseBindGroup(IntPtr group);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_Dispatch\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_Dispatch(IntPtr kernel, IntPtr bindGroup, uint workgroupX);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_Sync\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuCompute_Sync();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuCompute_ReadBack\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern int GpuCompute_ReadBack(IntPtr buffer, IntPtr outData, ulong size);");
+            sb.AppendLine();
+            sb.AppendLine("        internal static string GpuCompute_GetLastErrorText()");
+            sb.AppendLine("        {");
+            sb.AppendLine("            IntPtr p = GpuCompute_GetLastError();");
+            sb.AppendLine("            return p == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(p);");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            sb.AppendLine("        /// <summary>GPU 运行时初始化（幂等；失败抛异常）</summary>");
+            sb.AppendLine("        internal static void GpuCompute_EnsureInitialized()");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (GpuCompute_Initialize(\"wgpu_native.dll\") == 0)");
+            sb.AppendLine("                throw new InvalidOperationException(\"GpuCompute_Initialize 失败: \" + GpuCompute_GetLastErrorText());");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        /// <summary>
+        /// 为 GPU Job 生成 ScheduleGpu：
+        ///   storage buffer 逐个创建+上传（NativeArray 指针直传，零拷贝）→ uniform 打包（标量字段序 + _count）→
+        ///   bind group → dispatch(ceil(length/64)) → sync → 就地回读 → 释放。
+        /// 同步执行（跨帧流水/脏同步属 GpuResidencyManager，后续叠加）。
+        /// </summary>
+        private static void GenerateGpuScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            bool isIndexed = CppJobGenerator.IsParallelForJob(jobStruct) || CppJobGenerator.IsForJob(jobStruct);
+            string jobTypeName = jobStruct.ToDisplayString();
+            string wgsl = WgslGenerator.GenerateWgslSource(jobStruct, compilation);
+            string wgslLiteral = "@\"" + wgsl.Replace("\"", "\"\"") + "\"";
+            string kernelField = $"NativeTranspiler.Bindings.NativeExports.__gpuKernel_{jobStruct.Name}";
+
+            var arrayFields = new List<IFieldSymbol>();
+            var scalarFields = new List<IFieldSymbol>();
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) arrayFields.Add(field);
+                else scalarFields.Add(field);
+            }
+
+            string signature = isIndexed
+                ? $"public static unsafe JobHandle ScheduleGpu(this {jobTypeName} job, int length)"
+                : $"public static unsafe JobHandle ScheduleGpu(this {jobTypeName} job)";
+            sb.AppendLine($"    {signature}");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.GpuCompute_EnsureInitialized();");
+            sb.AppendLine($"        const string __wgsl = {wgslLiteral};");
+            sb.AppendLine($"        if ({kernelField} == IntPtr.Zero)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            {kernelField} = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateKernel(__wgsl, {arrayFields.Count}, {(scalarFields.Count > 0 || isIndexed ? 1 : 0)});");
+            sb.AppendLine($"            if ({kernelField} == IntPtr.Zero)");
+            sb.AppendLine("                throw new InvalidOperationException(\"GpuCompute_CreateKernel 失败（naga 拒绝 WGSL）: \" + NativeTranspiler.Bindings.NativeExports.GpuCompute_GetLastErrorText());");
+            sb.AppendLine("        }");
+            sb.AppendLine("        IntPtr __kernel = " + kernelField + ";");
+            sb.AppendLine();
+            sb.AppendLine("        try");
+            sb.AppendLine("        {");
+
+            // storage buffers：创建 + 上传
+            foreach (var f in arrayFields)
+            {
+                int elemSize = GetGpuElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                string sizeExpr = $"(ulong)(job.{f.Name}.Length * {elemSize})";
+                sb.AppendLine($"            IntPtr __b_{f.Name} = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateStorageBuffer({sizeExpr});");
+                sb.AppendLine($"            NativeTranspiler.Bindings.NativeExports.GpuCompute_WriteBuffer(__b_{f.Name}, (IntPtr)job.{f.Name}.GetUnsafePtr(), {sizeExpr});");
+            }
+
+            // uniform buffer：标量字段声明序 + _count
+            int uniformSize = 0;
+            foreach (var f in scalarFields) uniformSize += GetGpuScalarSize(f.Type);
+            if (isIndexed) uniformSize += 4;
+            if (uniformSize > 0)
+            {
+                sb.AppendLine($"            var __uni = new byte[{uniformSize}];");
+                int offset = 0;
+                foreach (var f in scalarFields)
+                {
+                    string conv = GetGpuScalarConv(f.Type, $"job.{f.Name}");
+                    sb.AppendLine($"            BitConverter.GetBytes({conv}).CopyTo(__uni, {offset});");
+                    offset += GetGpuScalarSize(f.Type);
+                }
+                if (isIndexed)
+                {
+                    sb.AppendLine($"            BitConverter.GetBytes(length).CopyTo(__uni, {offset});");
+                }
+                sb.AppendLine("            IntPtr __uniform = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateUniformBuffer((ulong)__uni.Length);");
+                sb.AppendLine("            fixed (byte* __p = __uni)");
+                sb.AppendLine("                NativeTranspiler.Bindings.NativeExports.GpuCompute_WriteBuffer(__uniform, (IntPtr)__p, (ulong)__uni.Length);");
+            }
+
+            // bind group
+            sb.Append("            IntPtr[] __bufs = { ");
+            bool firstBuf = true;
+            foreach (var f in arrayFields)
+            {
+                if (!firstBuf) sb.Append(", ");
+                sb.Append($"__b_{f.Name}"); firstBuf = false;
+            }
+            if (uniformSize > 0)
+            {
+                if (!firstBuf) sb.Append(", ");
+                sb.Append("__uniform");
+            }
+            sb.AppendLine(" };");
+            sb.Append("            ulong[] __sizes = { ");
+            firstBuf = true;
+            foreach (var f in arrayFields)
+            {
+                if (!firstBuf) sb.Append(", ");
+                sb.Append($"(ulong)(job.{f.Name}.Length * {GetGpuElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0])})");
+                firstBuf = false;
+            }
+            if (uniformSize > 0)
+            {
+                if (!firstBuf) sb.Append(", ");
+                sb.Append($"{(ulong)uniformSize}uL");
+            }
+            sb.AppendLine(" };");
+            int bufCount = arrayFields.Count + (uniformSize > 0 ? 1 : 0);
+            sb.AppendLine($"            IntPtr __bg = NativeTranspiler.Bindings.NativeExports.GpuCompute_CreateBindGroup(__kernel, __bufs, __sizes, {bufCount});");
+            sb.AppendLine("            if (__bg == IntPtr.Zero)");
+            sb.AppendLine("                throw new InvalidOperationException(\"GpuCompute_CreateBindGroup 失败\");");
+            sb.AppendLine();
+
+            // dispatch + sync
+            if (isIndexed)
+            {
+                sb.AppendLine($"            uint __groups = (uint)((length + {GpuWorkgroupSize} - 1) / {GpuWorkgroupSize});");
+                sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuCompute_Dispatch(__kernel, __bg, __groups);");
+            }
+            else
+            {
+                sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuCompute_Dispatch(__kernel, __bg, 1u);");
+            }
+            sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuCompute_Sync();");
+            sb.AppendLine();
+
+            // 就地回读（写回 NativeArray）
+            foreach (var f in arrayFields)
+            {
+                int elemSize = GetGpuElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                sb.AppendLine($"            NativeTranspiler.Bindings.NativeExports.GpuCompute_ReadBack(__b_{f.Name}, (IntPtr)job.{f.Name}.GetUnsafePtr(), (ulong)(job.{f.Name}.Length * {elemSize}));");
+            }
+
+            // 释放
+            sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuCompute_ReleaseBindGroup(__bg);");
+            foreach (var f in arrayFields)
+                sb.AppendLine($"            NativeTranspiler.Bindings.NativeExports.GpuCompute_ReleaseBuffer(__b_{f.Name});");
+            if (uniformSize > 0)
+                sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuCompute_ReleaseBuffer(__uniform);");
+            sb.AppendLine("        }");
+            sb.AppendLine("        catch");
+            sb.AppendLine("        {");
+            sb.AppendLine("            throw;");
+            sb.AppendLine("        }");
+            sb.AppendLine("        return default;");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        // CUDA Job（BackendTarget.Cuda）：ScheduleCuda —— P/Invoke NativeDll GpuComputeCuda_*（驱动 API，pinned 单跳）
+        // ============================================================
+
+        private static void GenerateCudaComputeDllImports(StringBuilder sb)
+        {
+            sb.AppendLine("        // ---- NativeDll GpuComputeCuda_*（CUDA 驱动后端，nvcc 预编译 cubin 运行时加载） ----");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_Initialize\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern int GpuComputeCuda_Initialize();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_Shutdown\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_Shutdown();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_GetLastError\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuComputeCuda_GetLastError();");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_CreateKernel\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuComputeCuda_CreateKernel(byte[] cubin, [MarshalAs(UnmanagedType.LPStr)] string entryPoint);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_ReleaseKernel\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_ReleaseKernel(IntPtr kernel);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_CreateDeviceBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuComputeCuda_CreateDeviceBuffer(ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_CreatePinnedBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern IntPtr GpuComputeCuda_CreatePinnedBuffer(ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_ReleaseDeviceBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_ReleaseDeviceBuffer(IntPtr buffer);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_ReleasePinnedBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_ReleasePinnedBuffer(IntPtr buffer);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_WriteBuffer\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_WriteBuffer(IntPtr device, IntPtr data, ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_ReadBack\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_ReadBack(IntPtr device, IntPtr outData, ulong size);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_Dispatch\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_Dispatch(IntPtr kernel, IntPtr[] kernelParams, uint gridX, uint blockX);");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryNameGpu}\", EntryPoint = \"GpuComputeCuda_Sync\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine("        internal static extern void GpuComputeCuda_Sync();");
+            sb.AppendLine();
+            sb.AppendLine("        internal static string GpuComputeCuda_GetLastErrorText()");
+            sb.AppendLine("        {");
+            sb.AppendLine("            IntPtr p = GpuComputeCuda_GetLastError();");
+            sb.AppendLine("            return p == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(p);");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            sb.AppendLine("        /// <summary>CUDA 运行时初始化（幂等；失败抛异常）</summary>");
+            sb.AppendLine("        internal static void GpuComputeCuda_EnsureInitialized()");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (GpuComputeCuda_Initialize() == 0)");
+            sb.AppendLine("                throw new InvalidOperationException(\"GpuComputeCuda_Initialize 失败: \" + GpuComputeCuda_GetLastErrorText());");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            sb.AppendLine("        /// <summary>向上查找 NativeTranspiler_Generated/{kernelName}.cubin（nvcc 产物；从 bin 反推到仓库根）</summary>");
+            sb.AppendLine("        internal static string FindGeneratedCubin(string kernelName)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            string fileName = kernelName + \".cubin\";");
+            sb.AppendLine("            var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory);");
+            sb.AppendLine("            for (int i = 0; i < 12 && dir != null; i++, dir = dir.Parent)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                string p1 = System.IO.Path.Combine(dir.FullName, \"NativeTranspiler_Generated\", fileName);");
+            sb.AppendLine("                if (System.IO.File.Exists(p1)) return p1;");
+            sb.AppendLine("                string p2 = System.IO.Path.Combine(dir.FullName, \"src\", \"EntJoySample\", \"NativeTranspiler_Generated\", fileName);");
+            sb.AppendLine("                if (System.IO.File.Exists(p2)) return p2;");
+            sb.AppendLine("            }");
+            sb.AppendLine("            return System.IO.Path.Combine(AppContext.BaseDirectory, \"NativeTranspiler_Generated\", fileName);");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        /// <summary>
+        /// 为 CUDA Job 生成 ScheduleCuda：
+        ///   device buffer + pinned buffer 创建 → NativeArray 拷入 pinned → cuMemcpyHtoD（真单跳）→
+        ///   参数槽（数组→设备指针、标量→值、count）→ cuLaunchKernel(ceil(length/256)) → sync →
+        ///   cuMemcpyDtoH 回读 pinned → 拷回 NativeArray → 释放。
+        /// 同步执行；cubin 由 CMake CudaKernels 规则（nvcc -cubin）产出，运行时 FindGeneratedCubin 查找。
+        /// </summary>
+        private static void GenerateCudaScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            bool isIndexed = CppJobGenerator.IsParallelForJob(jobStruct) || CppJobGenerator.IsForJob(jobStruct);
+            string jobTypeName = jobStruct.ToDisplayString();
+            string kernelName = CudaGenerator.GetCudaKernelName(jobStruct);
+            string kernelField = $"NativeTranspiler.Bindings.NativeExports.__cudaKernel_{jobStruct.Name}";
+
+            var arrayFields = new List<IFieldSymbol>();
+            var scalarFields = new List<IFieldSymbol>();
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) arrayFields.Add(field);
+                else scalarFields.Add(field);
+            }
+            // kernel 签名：{数组指针...}{标量值...} int count（CudaGenerator 恒追加 count 槽）
+            int paramCount = arrayFields.Count + scalarFields.Count + 1;
+
+            string signature = isIndexed
+                ? $"public static unsafe JobHandle ScheduleCuda(this {jobTypeName} job, int length)"
+                : $"public static unsafe JobHandle ScheduleCuda(this {jobTypeName} job)";
+            sb.AppendLine($"    {signature}");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_EnsureInitialized();");
+            sb.AppendLine($"        string __cubin = NativeTranspiler.Bindings.NativeExports.FindGeneratedCubin(\"{kernelName}\");");
+            sb.AppendLine("        if (!System.IO.File.Exists(__cubin))");
+            sb.AppendLine($"            throw new System.IO.FileNotFoundException(\"cubin 未生成（需 nvcc + CudaKernels 规则编译 \" + \"{kernelName}.cu\" + \"）: \" + __cubin);");
+            sb.AppendLine($"        if ({kernelField} == IntPtr.Zero)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            {kernelField} = NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_CreateKernel(System.IO.File.ReadAllBytes(__cubin), \"{kernelName}\");");
+            sb.AppendLine($"            if ({kernelField} == IntPtr.Zero)");
+            sb.AppendLine("                throw new InvalidOperationException(\"GpuComputeCuda_CreateKernel 失败: \" + NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_GetLastErrorText());");
+            sb.AppendLine("        }");
+            sb.AppendLine("        IntPtr __kernel = " + kernelField + ";");
+            sb.AppendLine();
+            sb.AppendLine("        try");
+            sb.AppendLine("        {");
+
+            // device + pinned buffer：静态缓存（长度不变不重分配）+ NativeArray 拷入 pinned（单跳上传源）
+            foreach (var f in arrayFields)
+            {
+                int elemSize = GetCudaElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                string sizeExpr = $"(ulong)(job.{f.Name}.Length * {elemSize})";
+                string devField = $"NativeTranspiler.Bindings.NativeExports.__cudaDev_{jobStruct.Name}_{f.Name}";
+                string hostField = $"NativeTranspiler.Bindings.NativeExports.__cudaHost_{jobStruct.Name}_{f.Name}";
+                string sizeField = $"NativeTranspiler.Bindings.NativeExports.__cudaSize_{jobStruct.Name}_{f.Name}";
+                sb.AppendLine($"            ulong __sz_{f.Name} = {sizeExpr};");
+                sb.AppendLine($"            if ({devField} == IntPtr.Zero || {sizeField} != __sz_{f.Name})");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                if ({devField} != IntPtr.Zero)");
+                sb.AppendLine("                {");
+                sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_ReleaseDeviceBuffer({devField});");
+                sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_ReleasePinnedBuffer({hostField});");
+                sb.AppendLine("                }");
+                sb.AppendLine($"                {devField} = NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_CreateDeviceBuffer(__sz_{f.Name});");
+                sb.AppendLine($"                if ({devField} == IntPtr.Zero) throw new InvalidOperationException(\"GpuComputeCuda_CreateDeviceBuffer 失败: \" + NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_GetLastErrorText());");
+                sb.AppendLine($"                {hostField} = NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_CreatePinnedBuffer(__sz_{f.Name});");
+                sb.AppendLine($"                if ({hostField} == IntPtr.Zero) throw new InvalidOperationException(\"GpuComputeCuda_CreatePinnedBuffer 失败\");");
+                sb.AppendLine($"                {sizeField} = __sz_{f.Name};");
+                sb.AppendLine("            }");
+                sb.AppendLine($"            IntPtr __d_{f.Name} = {devField};");
+                sb.AppendLine($"            IntPtr __h_{f.Name} = {hostField};");
+                sb.AppendLine($"            Buffer.MemoryCopy(job.{f.Name}.GetUnsafePtr(), __h_{f.Name}.ToPointer(), (long)(__sz_{f.Name}), (long)(__sz_{f.Name}));");
+            }
+
+            // 参数槽（cuLaunchKernel kernelParams：每个槽 8 字节，数组→设备指针 / 标量→低 4 字节值 / count→int）
+            sb.AppendLine($"            var __slot = stackalloc byte[{paramCount * 8}];");
+            int slot = 0;
+            foreach (var f in arrayFields)
+            {
+                sb.AppendLine($"            *(ulong*)(__slot + {slot * 8}) = (ulong)__d_{f.Name};");
+                slot++;
+            }
+            foreach (var f in scalarFields)
+            {
+                string cast = GetCudaScalarSlotCast(f.Type);
+                string val = GetGpuScalarConv(f.Type, $"job.{f.Name}");
+                if (f.Type.TypeKind == TypeKind.Enum) val = $"({cast})" + val;
+                sb.AppendLine($"            *({cast}*)(__slot + {slot * 8}) = {val};");
+                slot++;
+            }
+            sb.AppendLine($"            *(int*)(__slot + {(paramCount - 1) * 8}) = {(isIndexed ? "length" : "0")};");
+            sb.AppendLine($"            var __args = new IntPtr[{paramCount}];");
+            sb.AppendLine("            for (int __i = 0; __i < __args.Length; __i++) __args[__i] = (IntPtr)(__slot + __i * 8);");
+            sb.AppendLine();
+
+            // 上传：pinned NativeArray（FromExternalPtr(pinned:true) 登记）→ CPU 已直写页锁定内存 → 单跳直连；
+            //       普通 NativeArray → 经缓存 pinned staging 拷贝（两跳，C# 侧拷贝由本 API 承担）
+            foreach (var f in arrayFields)
+            {
+                int elemSize = GetCudaElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                string sizeExpr = $"(ulong)(job.{f.Name}.Length * {elemSize})";
+                sb.AppendLine($"            if (PinnedMemory.IsPinned(job.{f.Name}.GetUnsafePtr()))");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_WriteBuffer(__d_{f.Name}, (IntPtr)job.{f.Name}.GetUnsafePtr(), {sizeExpr});");
+                sb.AppendLine("            }");
+                sb.AppendLine("            else");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                Buffer.MemoryCopy(job.{f.Name}.GetUnsafePtr(), __h_{f.Name}.ToPointer(), (long)({sizeExpr}), (long)({sizeExpr}));");
+                sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_WriteBuffer(__d_{f.Name}, __h_{f.Name}, {sizeExpr});");
+                sb.AppendLine("            }");
+            }
+            if (isIndexed)
+                sb.AppendLine("            uint __blocks = (uint)((length + 255) / 256);");
+            else
+                sb.AppendLine("            uint __blocks = 1u;");
+            sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_Dispatch(__kernel, __args, __blocks, 256u);");
+            sb.AppendLine("            NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_Sync();");
+            sb.AppendLine();
+
+            // 回读：pinned NativeArray → 直连写入（结果已在页锁定内存）；普通数组 → 经 staging 拷贝回 NativeArray
+            foreach (var f in arrayFields)
+            {
+                int elemSize = GetCudaElementSize(((INamedTypeSymbol)f.Type).TypeArguments[0]);
+                string sizeExpr = $"(ulong)(job.{f.Name}.Length * {elemSize})";
+                sb.AppendLine($"            if (PinnedMemory.IsPinned(job.{f.Name}.GetUnsafePtr()))");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_ReadBack(__d_{f.Name}, (IntPtr)job.{f.Name}.GetUnsafePtr(), {sizeExpr});");
+                sb.AppendLine("            }");
+                sb.AppendLine("            else");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.GpuComputeCuda_ReadBack(__d_{f.Name}, __h_{f.Name}, {sizeExpr});");
+                sb.AppendLine($"                Buffer.MemoryCopy(__h_{f.Name}.ToPointer(), job.{f.Name}.GetUnsafePtr(), (long)({sizeExpr}), (long)({sizeExpr}));");
+                sb.AppendLine("            }");
+            }
+            // buffers 常驻缓存（下次调用复用；释放由 GpuComputeCuda_Shutdown/进程退出承担）
+            sb.AppendLine("        }");
+            sb.AppendLine("        catch");
+            sb.AppendLine("        {");
+            sb.AppendLine("            throw;");
+            sb.AppendLine("        }");
+            sb.AppendLine("        return default;");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        /// <summary>CUDA kernel 参数元素字节大小（float2=8/int2=8/float3=12/float4=16，与 CUDA 内建布局一致）</summary>
+        private static int GetCudaElementSize(ITypeSymbol elemType)
+        {
+            string n = elemType.ToDisplayString();
+            switch (n)
+            {
+                case "EntJoy.Mathematics.float2": return 8;
+                case "EntJoy.Mathematics.int2": return 8;
+                case "EntJoy.Mathematics.uint2": return 8;
+                case "EntJoy.Mathematics.float3": return 12;
+                case "EntJoy.Mathematics.float4": return 16;
+            }
+            return GetGpuElementSize(elemType);
+        }
+
+        /// <summary>CUDA 标量参数槽的类型（低 4 字节写值；枚举取底层类型）</summary>
+        private static string GetCudaScalarSlotCast(ITypeSymbol type)
+        {
+            if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol et)
+                return GetCudaScalarSlotCast(et.EnumUnderlyingType);
+            return type.SpecialType switch
+            {
+                SpecialType.System_Int32 => "int",
+                SpecialType.System_UInt32 => "uint",
+                _ => "float"
+            };
+        }
+
+        /// <summary>GPU storage buffer 元素字节大小（与 WGSL 布局一致）</summary>
+        private static int GetGpuElementSize(ITypeSymbol elemType)
+        {
+            string w = WgslTypes.ToWgslType(elemType);
+            if (w != null)
+            {
+                return w switch
+                {
+                    "f32" or "i32" or "u32" => 4,
+                    "vec2f" or "vec2i" or "vec2u" => 8,
+                    "vec3f" => 12,
+                    "vec4f" => 16,
+                    _ => 4
+                };
+            }
+            return CppJobGenerator.GetCSharpFieldSize(elemType);
+        }
+
+        private static int GetGpuScalarSize(ITypeSymbol type)
+        {
+            if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol et)
+                return GetGpuScalarSize(et.EnumUnderlyingType);
+            return type.SpecialType switch
+            {
+                SpecialType.System_Single or SpecialType.System_Int32 or SpecialType.System_UInt32 => 4,
+                _ => 4
+            };
+        }
+
+        private static string GetGpuScalarConv(ITypeSymbol type, string expr)
+        {
+            if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol et)
+                return GetGpuScalarConv(et.EnumUnderlyingType, expr);
+            return type.SpecialType switch
+            {
+                SpecialType.System_Single => expr,
+                SpecialType.System_Int32 => expr,
+                SpecialType.System_UInt32 => expr,
+                _ => expr
+            };
         }
     }
 }

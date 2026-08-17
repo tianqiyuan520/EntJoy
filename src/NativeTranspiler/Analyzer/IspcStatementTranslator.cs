@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -279,11 +279,13 @@ namespace NativeTranspiler.Analyzer
             string cppType = type != null ? NativeTranspiler.MapCSharpTypeToCpp(type) : objectCreation.Type.ToString();
             string ispcType = ToIspcType(cppType);
 
+            // uniform 上下文（原子返回值/自修改的串行路径）用 make_uniform_*（make_* 返回 varying struct）
+            string prefix = _useUniformVars ? "make_uniform_" : "make_";
             string maker = ispcType switch
             {
-                "float2" => "make_float2",
-                "int2" => "make_int2",
-                "uint2" => "make_uint2",
+                "float2" => prefix + "float2",
+                "int2" => prefix + "int2",
+                "uint2" => prefix + "uint2",
                 _ => null
             };
 

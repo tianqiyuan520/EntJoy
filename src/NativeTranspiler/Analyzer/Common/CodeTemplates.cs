@@ -113,6 +113,15 @@ static struct uint2 make_uint2(unsigned int x, unsigned int y) {
     struct uint2 r; r.x = x; r.y = y; return r;
 }
 static struct uint2 make_uint2(unsigned int v) { return make_uint2(v, v); }
+static uniform struct float2 make_uniform_float2(uniform float x, uniform float y) {
+    uniform struct float2 r; r.x = x; r.y = y; return r;
+}
+static uniform struct int2 make_uniform_int2(uniform int x, uniform int y) {
+    uniform struct int2 r; r.x = x; r.y = y; return r;
+}
+static uniform struct uint2 make_uniform_uint2(uniform unsigned int x, uniform unsigned int y) {
+    uniform struct uint2 r; r.x = x; r.y = y; return r;
+}
 
 // type conversions
 static struct float2 float2_from_int2(struct int2 v) { return make_float2(v.x, v.y); }

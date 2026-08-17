@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using System;
 using System.Linq;
 using System.Text;
@@ -13,7 +13,9 @@ namespace NativeTranspiler.Analyzer
         public enum BackendTarget
         {
             Cpp,
-            Ispc
+            Ispc,
+            Gpu,
+            Cuda
         }
 
         /// <summary>
@@ -60,6 +62,9 @@ namespace NativeTranspiler.Analyzer
         {
             if (type is IPointerTypeSymbol pointerType)
                 return MapCSharpTypeToCpp(pointerType.PointedAtType) + "*";
+
+            // 引用字段（object/string/class）无法跨语言：C++ 侧映射为 void* 8B 槽位（零填充，Execute 不应访问）
+            if (type.IsReferenceType) return "void*";
 
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
@@ -173,6 +178,9 @@ namespace NativeTranspiler.Analyzer
         {
             if (type is IPointerTypeSymbol pointerType)
                 return MapCSharpTypeToIspc(pointerType.PointedAtType) + " *";
+
+            // 引用字段（object/string/class）→ ISPC void* 8B 槽位（零填充，不应访问）
+            if (type.IsReferenceType) return "void*";
 
             if (type is INamedTypeSymbol named && named.IsGenericType)
                 return type.Name; // ISPC 无泛型，不应出现

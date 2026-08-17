@@ -1,4 +1,5 @@
-﻿//using System.Diagnostics;
+﻿//using EntJoy.JobSystem;
+//using System.Diagnostics;
 //using Environment = System.Environment;
 
 //[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.system, UseISPC_MT = true)]
@@ -32,6 +33,7 @@
 
 //    public static void Main()
 //    {
+//        NativeJobScheduler.Initialize(Environment.ProcessorCount);
 //        try
 //        {
 //            // 预热
