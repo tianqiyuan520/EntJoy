@@ -432,7 +432,7 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         for (int s = 0; s < j->storageCount; s++)
             W.QueueWriteBuffer(g_queue, j->resident[s], 0, inPtrs[s], (size_t)count * j->elemBytes[s]);
         if (j->hasUniform) W.QueueWriteBuffer(g_queue, j->uniform, 0, uniformBytes, (size_t)uniformSize);
-        resDispatch(j->jobKernel, j->jobBG, (uint32_t)((count + 63) / 64));
+        resDispatch(j->jobKernel, j->jobBG, (uint32_t)((count + 255) / 256));
         W.DevicePoll(g_device, WGPU_TRUE, nullptr);
         for (int s = 0; s < j->storageCount; s++) {
             if (!resCopyMapRead(j->resident[s], j->readback[0][s], outPtrs[s], (size_t)count * j->elemBytes[s])) return 0;
@@ -511,7 +511,7 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         }
         W.ComputePassEncoderSetPipeline(pass, j->jobKernel->pipe);
         W.ComputePassEncoderSetBindGroup(pass, 0, j->jobBG, 0, nullptr);
-        W.ComputePassEncoderDispatchWorkgroups(pass, (uint32_t)((count + 63) / 64), 1, 1);
+        W.ComputePassEncoderDispatchWorkgroups(pass, (uint32_t)((count + 255) / 256), 1, 1);
         for (int s = 0; s < j->storageCount; s++) {
             W.ComputePassEncoderSetPipeline(pass, j->gatherKernel->pipe);
             W.ComputePassEncoderSetBindGroup(pass, 0, j->gatherBG[c0][s], 0, nullptr);
@@ -533,7 +533,7 @@ JOB_API int GpuResidency_Sync(void* job, void* const* inPtrs, void* const* outPt
         WGPUComputePassEncoder pass = W.CommandEncoderBeginComputePass(enc, nullptr);
         W.ComputePassEncoderSetPipeline(pass, j->jobKernel->pipe);
         W.ComputePassEncoderSetBindGroup(pass, 0, j->jobBG, 0, nullptr);
-        W.ComputePassEncoderDispatchWorkgroups(pass, (uint32_t)((count + 63) / 64), 1, 1);
+        W.ComputePassEncoderDispatchWorkgroups(pass, (uint32_t)((count + 255) / 256), 1, 1);
         W.ComputePassEncoderEnd(pass);
         W.ComputePassEncoderRelease(pass);
         for (int s = 0; s < j->storageCount; s++)

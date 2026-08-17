@@ -19,7 +19,8 @@ namespace NativeTranspiler.Analyzer
 {
     public static class WgslGenerator
     {
-        public const int WorkgroupSize = 64;
+        // 256 对齐探针 wgpu_probe.cpp（探针 kernel 常驻 0.036 vs 64 时 0.16ms，wave 利用更优）
+        public const int WorkgroupSize = 256;
 
         /// <summary>WGSL 文件名基名（与 C++ Job 函数名一致，保证唯一）</summary>
         public static string GetWgslBaseName(INamedTypeSymbol jobStruct)
