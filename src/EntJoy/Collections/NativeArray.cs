@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 using EntJoy.JobSystem;
 
@@ -93,6 +93,19 @@ namespace EntJoy.Collections
 #if DEBUG
             //_sentinel = null;
 #endif
+        }
+
+        /// <summary>
+        /// 从外部内存创建非拥有视图（isOwner=false，Dispose 不释放外部内存）。
+        /// 页锁定内存（CUDA cuMemAllocHost 等 CPU 可直写、GPU 可直读）请传 pinned:true ——
+        /// 指针登记进 <see cref="PinnedMemory"/>，GPU 调度（ScheduleCuda 等）识别后
+        /// 上传/回读直连单跳，免 C# 侧拷贝。外部内存生命周期由调用方负责。
+        /// </summary>
+        public static NativeArray<T> FromExternalPtr(T* ptr, int length, bool pinned = false)
+        {
+            if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+            if (pinned) PinnedMemory.Register(ptr);
+            return new NativeArray<T>(ptr, length, Allocator.None, SafetyHandleManager.Allocate(), isOwner: false);
         }
 
         // ========== 释放 ==========

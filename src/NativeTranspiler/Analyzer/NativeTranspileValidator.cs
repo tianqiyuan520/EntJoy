@@ -76,11 +76,15 @@ namespace NativeTranspiler.Analyzer
             diagnostics = new List<Diagnostic>();
 
             var attrSym = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
-            if (attrSym != null && AttributeHelper.GetBackendTarget(method, attrSym) == NativeTranspiler.BackendTarget.Gpu)
+            if (attrSym != null)
             {
-                diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, method.Locations.FirstOrDefault(),
-                    method.Name, "BackendTarget.Gpu 仅支持 Job 结构体（IJobParallelFor / IJobFor / IJob），静态方法请使用 Cpp/Ispc"));
-                return false;
+                var mTarget = AttributeHelper.GetBackendTarget(method, attrSym);
+                if (mTarget == NativeTranspiler.BackendTarget.Gpu || mTarget == NativeTranspiler.BackendTarget.Cuda)
+                {
+                    diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, method.Locations.FirstOrDefault(),
+                        method.Name, $"{mTarget} 仅支持 Job 结构体（IJobParallelFor / IJobFor），静态方法请使用 Cpp/Ispc"));
+                    return false;
+                }
             }
 
             if (!IsUnmanagedTypeOrVoid(method.ReturnType))
@@ -182,6 +186,8 @@ namespace NativeTranspiler.Analyzer
                 var target2 = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol2);
                 if (target2 == NativeTranspiler.BackendTarget.Gpu)
                     ValidateGpuJobStruct(structSymbol, executeMethod, compilation, diagnostics);
+                else if (target2 == NativeTranspiler.BackendTarget.Cuda)
+                    ValidateGpuJobStruct(structSymbol, executeMethod, compilation, diagnostics);   // CUDA 复用 GPU 的 Job 约束（同字段/形状限制）
             }
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -234,7 +240,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// GPU Job 专项校验（Milestone 1 约束）：
-        ///   仅支持 IJobParallelFor / IJobFor / IJob；
+        ///   仅支持 IJobParallelFor / IJobFor（IJob 不支持：GPU 内核无索引语义）；
         ///   字段仅支持 NativeArray<T>（T 为 host-shareable）或标量 float/int/uint/enum；
         ///   不支持 NativeList/指针/bool 标量/double/long/用户 struct 标量字段、do-while。
         /// </summary>
@@ -242,12 +248,11 @@ namespace NativeTranspiler.Analyzer
             Compilation compilation, List<Diagnostic> diagnostics)
         {
             bool supportedKind = CppJobGenerator.IsParallelForJob(structSymbol) ||
-                                 CppJobGenerator.IsForJob(structSymbol) ||
-                                 CppJobGenerator.IsIJob(structSymbol);
+                                 CppJobGenerator.IsForJob(structSymbol);
             if (!supportedKind)
             {
                 diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, structSymbol.Locations.FirstOrDefault(),
-                    structSymbol.Name, "BackendTarget.Gpu 仅支持 IJobParallelFor / IJobFor / IJob（IJobChunk/IJobEntity 暂不支持）"));
+                    structSymbol.Name, "BackendTarget.Gpu 仅支持 IJobParallelFor / IJobFor（IJob 无索引语义、IJobChunk/IJobEntity 暂不支持）"));
             }
 
             foreach (var field in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))

@@ -147,6 +147,21 @@ static WGPUBuffer makeBuffer(WGPUDevice dev, WGPUBufferUsage usage, size_t size)
     return W.DeviceCreateBuffer(dev, &d);
 }
 
+// ---- readback staging 池：每帧创建/销毁 D3D12 committed resource（~0.5-1ms）是探针 vs 我们
+//    （2.7 vs 1.8ms）差距的主因；按 size 缓存复用（探针 wgpu_probe.cpp 的 staging 即常驻） ----
+static std::vector<std::pair<size_t, WGPUBuffer>> g_readbackPool;
+static WGPUBuffer GetReadbackStaging(size_t size) {
+    for (auto& e : g_readbackPool)
+        if (e.first == size) return e.second;
+    WGPUBuffer b = makeBuffer(g_device, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, size);
+    if (b) g_readbackPool.emplace_back(size, b);
+    return b;
+}
+static void ReleaseReadbackPool() {
+    for (auto& e : g_readbackPool) if (e.second) W.BufferDestroy(e.second);
+    g_readbackPool.clear();
+}
+
 // ---------------- 导出实现 ----------------
 
 extern "C" {
@@ -221,6 +236,7 @@ JOB_API int GpuCompute_Initialize(const char* wgpuDllPath) {
 }
 
 JOB_API void GpuCompute_Shutdown() {
+    ReleaseReadbackPool();
     if (g_queue)   { W.QueueRelease(g_queue); g_queue = nullptr; }
     if (g_device)  { W.DeviceRelease(g_device); g_device = nullptr; }
     if (g_adapter) { W.AdapterRelease(g_adapter); g_adapter = nullptr; }
@@ -368,7 +384,7 @@ JOB_API void GpuCompute_Sync() {
 JOB_API int GpuCompute_ReadBack(void* buffer, void* outData, unsigned long long size) {
     clearError();
     WGPUBuffer storage = (WGPUBuffer)buffer;
-    WGPUBuffer staging = makeBuffer(g_device, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, (size_t)size);
+    WGPUBuffer staging = GetReadbackStaging((size_t)size);
     if (!staging) { setError("创建 staging buffer 失败"); return 0; }
 
     WGPUCommandEncoder enc = W.DeviceCreateCommandEncoder(g_device, nullptr);
@@ -391,14 +407,12 @@ JOB_API int GpuCompute_ReadBack(void* buffer, void* outData, unsigned long long 
     if (!aw.done) pollDevice(g_device, &aw.done);
     if (!aw.done || aw.status != WGPUMapAsyncStatus_Success) {
         setError("mapAsync 失败 status=%d", aw.status);
-        W.BufferDestroy(staging);
-        return 0;
+        return 0;   // staging 池化，失败不销毁（下次复用）
     }
     void* mapped = W.BufferGetMappedRange(staging, 0, (size_t)size);
     if (mapped) memcpy(outData, mapped, (size_t)size);
     W.BufferUnmap(staging);
-    W.BufferDestroy(staging);
-    return mapped ? 1 : 0;
+    return mapped ? 1 : 0;   // staging 池化复用，不销毁
 }
 
 // ---- 临时诊断：wgpu 传输路径带宽拆解（UPLOAD CPU 写 / QueueWriteBuffer / READBACK CPU 读） ----
@@ -567,6 +581,142 @@ JOB_API void GpuCompute_DiagNativeD3D12(int sizeMB) {
     }
     (void)sink;
     free(host);
+}
+
+// ============================================================
+// CUDA 驱动后端（GpuComputeCuda_*）：动态加载 nvcuda.dll，kernel 用 nvcc 预编译 PTX
+// （cuModuleLoadData 由驱动 JIT，无需 nvrtc/Toolkit dll）。句柄全用 void*/u64，不依赖 cuda.h。
+// 页锁定（cuMemAllocHost）实现真单跳传输 —— 对照 wgpu 的 READBACK 两跳。
+// ============================================================
+
+typedef int  (*PFN_cuInit)(unsigned int);
+typedef int  (*PFN_cuDeviceGet)(int*, int);
+typedef int  (*PFN_cuCtxCreate)(void** ctx, unsigned int flags, int device);
+typedef int  (*PFN_cuCtxSynchronize)(void);
+typedef int  (*PFN_cuCtxDestroy)(void* ctx);
+typedef int  (*PFN_cuMemAlloc)(unsigned long long* dptr, size_t size);
+typedef int  (*PFN_cuMemFree)(unsigned long long dptr);
+typedef int  (*PFN_cuMemAllocHost)(void** pp, size_t size);
+typedef int  (*PFN_cuMemFreeHost)(void* p);
+typedef int  (*PFN_cuMemcpyHtoD)(unsigned long long dstDevice, const void* srcHost, size_t count);
+typedef int  (*PFN_cuMemcpyDtoH)(void* dstHost, unsigned long long srcDevice, size_t count);
+typedef int  (*PFN_cuModuleLoadData)(void** module, const void* image);
+typedef int  (*PFN_cuModuleUnload)(void* module);
+typedef int  (*PFN_cuModuleGetFunction)(void** func, void* module, const char* name);
+typedef int  (*PFN_cuLaunchKernel)(void* func, unsigned gx, unsigned gy, unsigned gz,
+                                   unsigned bx, unsigned by, unsigned bz, unsigned sharedMem,
+                                   void* stream, void** kernelParams, void** extra);
+
+struct CudaApi {
+    HMODULE module = nullptr;
+    PFN_cuInit Init = nullptr;
+    PFN_cuDeviceGet DeviceGet = nullptr;
+    PFN_cuCtxCreate CtxCreate = nullptr;
+    PFN_cuCtxSynchronize CtxSync = nullptr;
+    PFN_cuCtxDestroy CtxDestroy = nullptr;
+    PFN_cuMemAlloc MemAlloc = nullptr;
+    PFN_cuMemFree MemFree = nullptr;
+    PFN_cuMemAllocHost MemAllocHost = nullptr;
+    PFN_cuMemFreeHost MemFreeHost = nullptr;
+    PFN_cuMemcpyHtoD MemcpyHtoD = nullptr;
+    PFN_cuMemcpyDtoH MemcpyDtoH = nullptr;
+    PFN_cuModuleLoadData ModuleLoadData = nullptr;
+    PFN_cuModuleUnload ModuleUnload = nullptr;
+    PFN_cuModuleGetFunction ModuleGetFunction = nullptr;
+    PFN_cuLaunchKernel LaunchKernel = nullptr;
+};
+static CudaApi C;
+static void* g_cudaCtx = nullptr;
+static char g_cudaError[1024] = { 0 };
+#define CP(name) C.name = (PFN_cu##name)GetProcAddress(C.module, "cu" #name)
+static int LoadCuda() {
+    C.module = LoadLibraryA("nvcuda.dll");
+    if (!C.module) return 1;
+    CP(Init); CP(DeviceGet); CP(CtxCreate); CP(CtxDestroy);
+    C.CtxSync = (PFN_cuCtxSynchronize)GetProcAddress(C.module, "cuCtxSynchronize");
+    CP(MemAlloc); CP(MemFree); CP(MemAllocHost); CP(MemFreeHost);
+    CP(MemcpyHtoD); CP(MemcpyDtoH); CP(ModuleLoadData); CP(ModuleUnload);
+    CP(ModuleGetFunction); CP(LaunchKernel);
+    if (!C.Init || !C.CtxCreate || !C.MemAlloc || !C.MemcpyHtoD || !C.ModuleLoadData || !C.LaunchKernel) return 1;
+    return 0;
+}
+#undef CP
+
+JOB_API int GpuComputeCuda_Initialize() {
+    g_cudaError[0] = 0;
+    if (g_cudaCtx) return 1;
+    if (LoadCuda()) { snprintf(g_cudaError, sizeof(g_cudaError), "加载 nvcuda.dll 失败"); return 0; }
+    if (C.Init(0) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuInit 失败（无 CUDA 驱动？）"); return 0; }
+    int dev = 0;
+    if (C.DeviceGet(&dev, 0) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuDeviceGet 失败"); return 0; }
+    if (C.CtxCreate(&g_cudaCtx, 0, dev) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuCtxCreate 失败"); return 0; }
+    return 1;
+}
+
+JOB_API void GpuComputeCuda_Shutdown() {
+    if (g_cudaCtx) { C.CtxDestroy(g_cudaCtx); g_cudaCtx = nullptr; }
+    if (C.module) { FreeLibrary(C.module); C.module = nullptr; }
+    memset(&C, 0, sizeof(C));
+}
+
+JOB_API const char* GpuComputeCuda_GetLastError() {
+    return g_cudaError[0] ? g_cudaError : nullptr;
+}
+
+struct CudaKernel { void* module = nullptr; void* func = nullptr; };
+// image：nvcc 预编译的 cubin 二进制（cuModuleLoadData 直接加载，无 PTX ISA 兼容问题）
+JOB_API void* GpuComputeCuda_CreateKernel(const void* image, const char* entryPoint) {
+    g_cudaError[0] = 0;
+    if (!g_cudaCtx) { snprintf(g_cudaError, sizeof(g_cudaError), "未初始化"); return nullptr; }
+    CudaKernel* k = new CudaKernel();
+    int rc = C.ModuleLoadData(&k->module, image);
+    if (rc != 0) {
+        snprintf(g_cudaError, sizeof(g_cudaError), "cuModuleLoadData 失败 rc=%d（PTX 无效/架构不符）", rc);
+        delete k; return nullptr;
+    }
+    rc = C.ModuleGetFunction(&k->func, k->module, entryPoint);
+    if (rc != 0) {
+        snprintf(g_cudaError, sizeof(g_cudaError), "cuModuleGetFunction 失败 rc=%d: %s", rc, entryPoint ? entryPoint : "(null)");
+        C.ModuleUnload(k->module); delete k; return nullptr;
+    }
+    return k;
+}
+JOB_API void GpuComputeCuda_ReleaseKernel(void* kernel) {
+    CudaKernel* k = (CudaKernel*)kernel;
+    if (!k) return;
+    if (k->module) C.ModuleUnload(k->module);
+    delete k;
+}
+
+JOB_API void* GpuComputeCuda_CreateDeviceBuffer(unsigned long long size) {
+    unsigned long long dptr = 0;
+    if (C.MemAlloc(&dptr, (size_t)size) != 0) return nullptr;
+    return (void*)dptr;
+}
+JOB_API void* GpuComputeCuda_CreatePinnedBuffer(unsigned long long size) {
+    void* p = nullptr;
+    if (C.MemAllocHost(&p, (size_t)size) != 0) return nullptr;
+    return p;
+}
+JOB_API void GpuComputeCuda_ReleaseDeviceBuffer(void* buffer) {
+    if (buffer) C.MemFree((unsigned long long)(uintptr_t)buffer);
+}
+JOB_API void GpuComputeCuda_ReleasePinnedBuffer(void* buffer) {
+    if (buffer) C.MemFreeHost(buffer);
+}
+JOB_API void GpuComputeCuda_WriteBuffer(void* device, const void* data, unsigned long long size) {
+    C.MemcpyHtoD((unsigned long long)(uintptr_t)device, data, (size_t)size);
+}
+JOB_API void GpuComputeCuda_ReadBack(void* device, void* out, unsigned long long size) {
+    C.MemcpyDtoH(out, (unsigned long long)(uintptr_t)device, (size_t)size);
+}
+JOB_API void GpuComputeCuda_Dispatch(void* kernel, void* const* kernelParams, unsigned int gridX, unsigned int blockX) {
+    CudaKernel* k = (CudaKernel*)kernel;
+    if (!k) return;
+    C.LaunchKernel(k->func, gridX, 1, 1, blockX, 1, 1, 0, nullptr, (void**)kernelParams, nullptr);
+}
+JOB_API void GpuComputeCuda_Sync() {
+    if (g_cudaCtx) C.CtxSync();
 }
 
 } // extern "C"
