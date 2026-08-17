@@ -1,4 +1,4 @@
-﻿#include "Exports.h"
+#include "Exports.h"
 #include "JobSystem.h"
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
@@ -118,7 +118,7 @@ extern "C"
 
     uint64_t JobSystem_GetDiagnosticBatchId(void* handle)
     {
-        // B5: 读 handle 的 diagnosticBatchId。调用方须在 Complete 之后、Release 之前
+        // 读 handle 的 diagnosticBatchId。调用方须在 Complete 之后、Release 之前
         // 调用（此时 batch 必已 submit、id 已设置，且调用方引用使 state 存活）。
         if (!handle) return 0;
         return fromHandle(handle)->diagnosticBatchId.load(std::memory_order_acquire);

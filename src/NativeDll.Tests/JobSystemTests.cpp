@@ -374,7 +374,7 @@ namespace
     }
 
     // ============================================================
-    // B1: transitive dependency-chain assist (V-D) + nested Complete (V-A)
+    // transitive dependency-chain assist (V-D) + nested Complete (V-A)
     // ============================================================
     // 每个链环用独立的 gate：tile 回调在完成前阻塞于 releaseWorkers，
     // 只有标记为 "chain completer" 的线程执行 tile 才能放行。由于 worker

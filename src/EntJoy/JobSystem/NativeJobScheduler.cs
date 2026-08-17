@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -235,7 +235,7 @@ internal enum NativeEcsJobKind
 public static unsafe partial class NativeJobScheduler
 {
     [ThreadStatic] private static int _jobExecutionDepth;
-    // B5: native 每 job 执行窗口 set/clear 的当前 batch id。C# 异常按此归属，
+    // native 每 job 执行窗口 set/clear 的当前 batch id。C# 异常按此归属，
     // Complete(h) 只抛本 handle 的异常（修 V-B 全局异常队列归属错乱）。
     [ThreadStatic] private static ulong _currentBatchId;
 
@@ -767,7 +767,7 @@ public static unsafe partial class NativeJobScheduler
         _jobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
     }
 
-    // B5: native 每 job 执行窗口调 SetCurrentBatchId 写线程局部当前 batch。
+    // native 每 job 执行窗口调 SetCurrentBatchId 写线程局部当前 batch。
     // 回调在 job 执行线程（worker/main/assist）上执行，_currentBatchId 为
     // [ThreadStatic]，各线程各持一份，无跨线程污染。
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -938,7 +938,7 @@ public static unsafe partial class NativeJobScheduler
         IntPtr handle = h.Detach();
         if (handle == IntPtr.Zero) return;
 
-        // B5: 先等待（Complete 保留调用方引用），再读 batchId，最后释放——
+        // 先等待（Complete 保留调用方引用），再读 batchId，最后释放——
         // batch 可能在依赖链完成后才提交，diagnosticBatchId 提交后才有效，
         // 因此必须在等待之后、释放之前读。然后只抛本 batch 的异常。
         JobSystem_Complete(handle);
@@ -2328,6 +2328,17 @@ public static unsafe partial class NativeJobScheduler
     private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
     private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
 
+    // 显式逐字段写入器注册表：Debug 下 NativeArray 含 GC 引用（DisposeSentinel）→ Job struct 非 blittable，
+    // 裸拷贝布局不可靠；NativeTranspiler 为每个 transpiled Job 生成 WriteJobFields_{Job}，静态构造时登记，
+    // CreateChunkContextBlock 按类型分发，未登记（非 transpiled / 含不支持字段）回退裸拷贝。
+    public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
+    private static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
+
+    /// <summary>注册 Job 字段显式写入器（由 NativeTranspiler 生成代码在 NativeExports 静态构造时调用）</summary>
+    public static void RegisterJobFieldWriter(Type type, Delegate writer) => s_jobFieldWriters[type] = writer;
+
+    internal static bool TryGetJobFieldWriter(Type type, out Delegate writer) => s_jobFieldWriters.TryGetValue(type, out writer);
+
     private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
     {
         int jobSize = Unsafe.SizeOf<T>();
@@ -2371,7 +2382,15 @@ public static unsafe partial class NativeJobScheduler
         }
         else { header->requiredComponentTypeIdCount = 0; header->requiredComponentTypeIds = IntPtr.Zero; }
         byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
-        Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)jobSize);
+        // 优先走显式逐字段写入器（非 blittable Job struct 裸拷贝布局不可靠）；未登记回退裸拷贝。
+        if (TryGetJobFieldWriter(typeof(T), out var __fieldWriter))
+        {
+            ((JobFieldWriter<T>)__fieldWriter)(jobPtr, ref job);
+        }
+        else
+        {
+            Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)jobSize);
+        }
         if (cacheLease != null)
         {
             _chunkContextLeases[block] = GCHandle.Alloc(cacheLease, GCHandleType.Normal);
@@ -2856,7 +2875,7 @@ public static unsafe partial class NativeJobScheduler
         return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
     }
 
-    // B5: 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
+    // 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
     // batch 0 为未归属异常（实际不发生，防御兜底），由 Flush 统一抛。
     private static readonly object _exceptionLock = new();
     private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();

@@ -485,11 +485,8 @@ namespace JobSystem
         g_completingBatchState = state;
         PushTraceEvent(TraceEventType::FinalizeBegin,
             batch->diagnosticId, -1, 0, 0);
-        if (batch->cleanup)
-        {
-            batch->cleanup(batch->context);
-            batch->context = nullptr;
-        }
+        // context/blob 释放延迟到 TryRetireCompletedBatch（assistReaders==0 && workersFinished 门控）——
+        // 主线程 assist 可能正拿着 bc/context 执行 tile；此处不可等待 readers（末块由 assist 自执时自死锁）。
         PushTraceEvent(TraceEventType::HandleComplete,
             batch->diagnosticId, -1, 0, 0);
         CompleteState(state);
@@ -519,6 +516,12 @@ namespace JobSystem
 
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
+            // 本处保证 assistReaders==0 && workersFinished（无执行者在使用 bc/context）
+            if (batch->cleanup)
+            {
+                batch->cleanup(batch->context);
+                batch->context = nullptr;
+            }
             ReleaseBatch(batch);
             state->backendRetired.store(true, std::memory_order_release);
             state->backendRetired.notify_all();
@@ -544,7 +547,7 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-        // B5: worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
+        // worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
         SetCurrentBatchId(batch->diagnosticId);
         WorkerAtomicRangeLoop(batch);
         SetCurrentBatchId(0);

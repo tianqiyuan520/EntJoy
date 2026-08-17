@@ -1,0 +1,722 @@
+// ============================================================
+// GpuCompute.cpp — NativeDll 的 wgpu compute 执行后端实现。
+//   动态加载 wgpu_native.dll（LoadLibrary + GetProcAddress 函数表，
+//   镜像 GpuNativeProbe/wgpu_probe.cpp），v29 异步回调 + DevicePoll 轮询同步。
+//   数据面（buffer 生命周期、staging 回读）归 C++，C# 只持句柄。
+// ============================================================
+#include "GpuCompute.h"
+
+#include <windows.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <vector>
+
+#include <d3d12.h>
+#include <wrl/client.h>
+using Microsoft::WRL::ComPtr;
+
+// d3dx12.h 的便捷 helper 在 CMake 的 SDK include 路径下不可用（C1083），手写等价的 D3D12 结构体初始化
+static D3D12_HEAP_PROPERTIES d3dHeapProp(D3D12_HEAP_TYPE t) {
+    D3D12_HEAP_PROPERTIES h = {};
+    h.Type = t;
+    return h;
+}
+static D3D12_RESOURCE_DESC d3dBufferDesc(size_t bytes) {
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes;
+    d.Height = 1;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_UNKNOWN;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    d.Flags = D3D12_RESOURCE_FLAG_NONE;
+    return d;
+}
+
+#include "thirdParty/wgpu/include/webgpu/wgpu.h"
+
+// ---------------- 函数表（GetProcAddress；定义见 GpuCompute.h 的 WgpuApi） ----------------
+
+#define WP(name) W.name = (decltype(W.name))GetProcAddress(W.module, "wgpu" #name)
+static int LoadWgpu(const char* path) {
+    W.module = LoadLibraryA(path);
+    if (!W.module) return 1;
+    WP(CreateInstance); WP(InstanceRequestAdapter); WP(DevicePoll); WP(AdapterRequestDevice);
+    WP(DeviceCreateBuffer); WP(BufferDestroy); WP(BufferMapAsync); WP(BufferGetMappedRange); WP(BufferUnmap);
+    WP(DeviceCreateCommandEncoder); WP(CommandEncoderBeginComputePass);
+    WP(ComputePassEncoderSetPipeline); WP(ComputePassEncoderSetBindGroup);
+    WP(ComputePassEncoderDispatchWorkgroups); WP(ComputePassEncoderEnd); WP(CommandEncoderFinish);
+    WP(CommandEncoderCopyBufferToBuffer); WP(QueueSubmit); WP(QueueWriteBuffer); WP(DeviceGetQueue);
+    WP(DeviceCreateShaderModule); WP(DeviceCreateComputePipeline);
+    WP(DeviceCreateBindGroup); WP(DeviceCreateBindGroupLayout); WP(DeviceCreatePipelineLayout);
+    WP(InstanceProcessEvents); WP(InstanceRelease); WP(AdapterRelease); WP(DeviceRelease);
+    WP(CommandBufferRelease); WP(CommandEncoderRelease); WP(ComputePassEncoderRelease);
+    WP(ShaderModuleRelease);
+    WP(ComputePipelineRelease); WP(BindGroupRelease); WP(BindGroupLayoutRelease); WP(PipelineLayoutRelease);
+    WP(QueueRelease);
+    if (!W.CreateInstance || !W.InstanceRequestAdapter || !W.AdapterRequestDevice || !W.DeviceCreateBuffer ||
+        !W.BufferMapAsync || !W.DeviceGetQueue || !W.QueueSubmit || !W.QueueWriteBuffer || !W.DevicePoll ||
+        !W.DeviceCreateShaderModule || !W.DeviceCreateComputePipeline || !W.DeviceCreateBindGroup ||
+        !W.DeviceCreateBindGroupLayout || !W.DeviceCreatePipelineLayout || !W.DeviceCreateCommandEncoder ||
+        !W.CommandEncoderBeginComputePass || !W.CommandEncoderFinish || !W.BufferGetMappedRange || !W.BufferUnmap) {
+        return 1;
+    }
+    return 0;
+}
+#undef WP
+
+// ---------------- 全局状态（定义；extern 声明见 GpuCompute.h，供 GpuResidency.cpp 复用） ----------------
+
+WgpuApi W;
+WGPUInstance g_instance = nullptr;
+WGPUAdapter  g_adapter = nullptr;
+WGPUDevice   g_device = nullptr;
+WGPUQueue    g_queue = nullptr;
+
+// 错误文本（单提交线程语义；多线程接入时改为 TLS/加锁）
+static char g_lastError[1024] = { 0 };
+static void setError(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_lastError, sizeof(g_lastError), fmt, ap);
+    va_end(ap);
+}
+static void clearError() { g_lastError[0] = 0; }
+
+// ---------------- 异步回调等待（v29：AllowProcessEvents + 轮询） ----------------
+
+struct AsyncWait { volatile int done = 0; volatile int status = 0; WGPUAdapter adapter = nullptr; WGPUDevice device = nullptr; };
+
+static void onRequestAdapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void* u1, void* u2) {
+    AsyncWait* w = (AsyncWait*)u1;
+    w->status = (int)status; w->adapter = adapter; w->done = 1;
+}
+static void onRequestDevice(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void* u1, void* u2) {
+    AsyncWait* w = (AsyncWait*)u1;
+    w->status = (int)status; w->device = device; w->done = 1;
+}
+static void onBufferMap(WGPUMapAsyncStatus status, WGPUStringView message, void* u1, void* u2) {
+    AsyncWait* w = (AsyncWait*)u1;
+    w->status = (int)status; w->done = 1;
+}
+static void onUncapturedError(const WGPUDevice* device, WGPUErrorType type, WGPUStringView message, void* u1, void* u2) {
+    if (message.data && message.length > 0 && message.length < sizeof(g_lastError) - 1) {
+        memcpy(g_lastError, message.data, message.length);
+        g_lastError[message.length] = 0;
+    } else {
+        snprintf(g_lastError, sizeof(g_lastError), "wgpu error type=%d", (int)type);
+    }
+}
+
+static void pollInstance(WGPUInstance inst, volatile int* done) {
+    for (int i = 0; !(*done) && i < 5000000; i++) {
+        W.InstanceProcessEvents(inst);
+        if (!(*done)) Sleep(0);
+    }
+}
+static void pollDevice(WGPUDevice dev, volatile int* done) {
+    for (int i = 0; !(*done) && i < 5000000; i++) {
+        W.DevicePoll(dev, WGPU_FALSE, NULL);
+        if (!(*done)) Sleep(0);
+    }
+}
+
+// ---------------- 通用创建辅助 ----------------
+
+// GpuKernel 结构定义见 GpuCompute.h
+
+static WGPUShaderModule makeShader(WGPUDevice dev, const char* wgsl) {
+    WGPUShaderSourceWGSL src;
+    memset(&src, 0, sizeof(src));
+    src.chain.sType = WGPUSType_ShaderSourceWGSL;
+    src.code.data = wgsl;
+    src.code.length = strlen(wgsl);
+    WGPUShaderModuleDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.nextInChain = (WGPUChainedStruct*)&src;
+    return W.DeviceCreateShaderModule(dev, &d);
+}
+
+static WGPUBuffer makeBuffer(WGPUDevice dev, WGPUBufferUsage usage, size_t size) {
+    WGPUBufferDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.usage = usage;
+    d.size = size;
+    return W.DeviceCreateBuffer(dev, &d);
+}
+
+// ---- readback staging 池：每帧创建/销毁 D3D12 committed resource（~0.5-1ms）是探针 vs 我们
+//    （2.7 vs 1.8ms）差距的主因；按 size 缓存复用（探针 wgpu_probe.cpp 的 staging 即常驻） ----
+static std::vector<std::pair<size_t, WGPUBuffer>> g_readbackPool;
+static WGPUBuffer GetReadbackStaging(size_t size) {
+    for (auto& e : g_readbackPool)
+        if (e.first == size) return e.second;
+    WGPUBuffer b = makeBuffer(g_device, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, size);
+    if (b) g_readbackPool.emplace_back(size, b);
+    return b;
+}
+static void ReleaseReadbackPool() {
+    for (auto& e : g_readbackPool) if (e.second) W.BufferDestroy(e.second);
+    g_readbackPool.clear();
+}
+
+// ---------------- 导出实现 ----------------
+
+extern "C" {
+
+JOB_API int GpuCompute_Initialize(const char* wgpuDllPath) {
+    clearError();
+    if (g_device) return 1; // 已初始化
+
+    const char* path = wgpuDllPath ? wgpuDllPath : "wgpu_native.dll";
+    if (LoadWgpu(path)) { setError("加载 wgpu_native.dll 失败或缺少导出: %s", path); return 0; }
+
+    // 后端选择（环境变量 ENTJOY_GPU_BACKEND = "vulkan" / "d3d12" / 空=默认全部，Windows 上 wgpu 自动选 D3D12）
+    // 3 轮对比实测（2026-08-16，RTX 4060 Laptop）：Vulkan vs D3D12 无决定性差异——
+    // 常驻 kernel 持平（min 0.149 vs 0.169）、回读 16MB D3D12 快 ~16%（2.46 vs 2.86ms）、
+    // 全量往返持平（4.98 vs 4.99）、增量 sp=1% D3D12 略优（Move 1.17 vs 1.21 / Heavy 1.24 vs 1.35）。
+    // READBACK 映射带宽 8-12GB/s 是平台特性（非 D3D12 特有）→ 保持默认 D3D12。
+    WGPUInstanceDescriptor id;
+    memset(&id, 0, sizeof(id));
+    const char* backend = getenv("ENTJOY_GPU_BACKEND");
+    WGPUInstanceExtras iex;
+    memset(&iex, 0, sizeof(iex));
+    iex.chain.sType = (WGPUSType)WGPUSType_InstanceExtras;  // WGPUNativeSType → WGPUSType 显式转换
+    if (backend && _stricmp(backend, "vulkan") == 0) {
+        iex.backends = WGPUInstanceBackend_Vulkan;
+        id.nextInChain = (WGPUChainedStruct*)&iex;
+    } else if (backend && _stricmp(backend, "d3d12") == 0) {
+        iex.backends = WGPUInstanceBackend_DX12;
+        id.nextInChain = (WGPUChainedStruct*)&iex;
+    }
+    fprintf(stderr, "[GpuCompute] backend env=%s -> %s\n", backend ? backend : "(null)",
+            backend && _stricmp(backend, "vulkan") == 0 ? "Vulkan" : "default(D3D12)");
+    g_instance = W.CreateInstance(&id);
+    if (!g_instance) { setError("wgpuCreateInstance 失败"); return 0; }
+    // adapter（null options = 全后端）
+    {
+        AsyncWait aw;
+        WGPURequestAdapterCallbackInfo info;
+        memset(&info, 0, sizeof(info));
+        info.mode = WGPUCallbackMode_AllowProcessEvents;
+        info.callback = onRequestAdapter;
+        info.userdata1 = &aw;
+        W.InstanceRequestAdapter(g_instance, nullptr, info);
+        pollInstance(g_instance, &aw.done);
+        if (!aw.done || aw.status != WGPURequestAdapterStatus_Success || !aw.adapter) {
+            setError("wgpuInstanceRequestAdapter 失败 status=%d", aw.status); return 0;
+        }
+        g_adapter = aw.adapter;
+    }
+
+    // device（descriptor 携带 uncaptured-error 回调 → GpuCompute_GetLastError）
+    {
+        AsyncWait aw;
+        WGPUDeviceDescriptor dd;
+        memset(&dd, 0, sizeof(dd));
+        dd.uncapturedErrorCallbackInfo.callback = onUncapturedError;
+        WGPURequestDeviceCallbackInfo info;
+        memset(&info, 0, sizeof(info));
+        info.mode = WGPUCallbackMode_AllowProcessEvents;
+        info.callback = onRequestDevice;
+        info.userdata1 = &aw;
+        W.AdapterRequestDevice(g_adapter, &dd, info);
+        pollInstance(g_instance, &aw.done);
+        if (!aw.done || aw.status != WGPURequestDeviceStatus_Success || !aw.device) {
+            setError("wgpuAdapterRequestDevice 失败 status=%d", aw.status); return 0;
+        }
+        g_device = aw.device;
+    }
+
+    g_queue = W.DeviceGetQueue(g_device);
+    if (!g_queue) { setError("wgpuDeviceGetQueue 失败"); return 0; }
+    return 1;
+}
+
+JOB_API void GpuCompute_Shutdown() {
+    ReleaseReadbackPool();
+    if (g_queue)   { W.QueueRelease(g_queue); g_queue = nullptr; }
+    if (g_device)  { W.DeviceRelease(g_device); g_device = nullptr; }
+    if (g_adapter) { W.AdapterRelease(g_adapter); g_adapter = nullptr; }
+    if (g_instance){ W.InstanceRelease(g_instance); g_instance = nullptr; }
+    if (W.module)  { FreeLibrary(W.module); W.module = nullptr; }
+    memset(&W, 0, sizeof(W));
+    clearError();
+}
+
+JOB_API const char* GpuCompute_GetLastError() {
+    return g_lastError[0] ? g_lastError : nullptr;
+}
+
+JOB_API void* GpuCompute_CreateKernel(const char* wgsl, int storageBindingCount, int hasUniform) {
+    return GpuCompute_CreateKernelEx(wgsl, storageBindingCount, hasUniform, "main");
+}
+
+JOB_API void* GpuCompute_CreateKernelEx(const char* wgsl, int storageBindingCount, int hasUniform, const char* entryPoint) {
+    clearError();
+    if (!g_device) { setError("GpuCompute 未初始化"); return nullptr; }
+    if (!entryPoint) entryPoint = "main";
+
+    GpuKernel* k = new GpuKernel();
+    k->module = makeShader(g_device, wgsl);
+    if (!k->module) { setError("createShaderModule 失败（naga 拒绝 WGSL，见错误回调）"); delete k; return nullptr; }
+
+    // bind group layout：storageBindingCount 个 storage(read_write) + 可选 uniform
+    int entryCount = storageBindingCount + (hasUniform ? 1 : 0);
+    std::vector<WGPUBindGroupLayoutEntry> entries((size_t)entryCount);
+    for (int i = 0; i < storageBindingCount; i++) {
+        WGPUBindGroupLayoutEntry& e = entries[i];
+        memset(&e, 0, sizeof(e));
+        e.binding = (uint32_t)i;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = WGPUBufferBindingType_Storage;
+    }
+    if (hasUniform) {
+        WGPUBindGroupLayoutEntry& e = entries[storageBindingCount];
+        memset(&e, 0, sizeof(e));
+        e.binding = (uint32_t)storageBindingCount;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = WGPUBufferBindingType_Uniform;
+    }
+    WGPUBindGroupLayoutDescriptor bglDesc;
+    memset(&bglDesc, 0, sizeof(bglDesc));
+    bglDesc.entryCount = (size_t)entryCount;
+    bglDesc.entries = entries.data();
+    k->bgl = W.DeviceCreateBindGroupLayout(g_device, &bglDesc);
+    if (!k->bgl) { setError("createBindGroupLayout 失败"); W.ShaderModuleRelease(k->module); delete k; return nullptr; }
+
+    WGPUPipelineLayoutDescriptor plDesc;
+    memset(&plDesc, 0, sizeof(plDesc));
+    WGPUBindGroupLayout layouts[1] = { k->bgl };
+    plDesc.bindGroupLayoutCount = 1;
+    plDesc.bindGroupLayouts = layouts;
+    k->pl = W.DeviceCreatePipelineLayout(g_device, &plDesc);
+    if (!k->pl) { setError("createPipelineLayout 失败"); W.ShaderModuleRelease(k->module); W.BindGroupLayoutRelease(k->bgl); delete k; return nullptr; }
+
+    // entryPoint 必须显式提供（v29 空 entryPoint 崩溃）
+    WGPUComputePipelineDescriptor cpDesc;
+    memset(&cpDesc, 0, sizeof(cpDesc));
+    cpDesc.layout = k->pl;
+    cpDesc.compute.module = k->module;
+    cpDesc.compute.entryPoint.data = entryPoint;
+    cpDesc.compute.entryPoint.length = strlen(entryPoint);
+    k->pipe = W.DeviceCreateComputePipeline(g_device, &cpDesc);
+    if (!k->pipe) {
+        setError("createComputePipeline 失败（kernel 绑定与 WGSL 绑定不匹配？）");
+        W.ShaderModuleRelease(k->module); W.BindGroupLayoutRelease(k->bgl); W.PipelineLayoutRelease(k->pl);
+        delete k; return nullptr;
+    }
+    return k;
+}
+
+JOB_API void GpuCompute_ReleaseKernel(void* kernel) {
+    GpuKernel* k = (GpuKernel*)kernel;
+    if (!k) return;
+    if (k->pipe)   W.ComputePipelineRelease(k->pipe);
+    if (k->pl)     W.PipelineLayoutRelease(k->pl);
+    if (k->bgl)    W.BindGroupLayoutRelease(k->bgl);
+    if (k->module) W.ShaderModuleRelease(k->module);
+    delete k;
+}
+
+JOB_API void* GpuCompute_CreateStorageBuffer(unsigned long long size) {
+    return makeBuffer(g_device, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc, (size_t)size);
+}
+
+JOB_API void* GpuCompute_CreateUniformBuffer(unsigned long long size) {
+    return makeBuffer(g_device, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, (size_t)size);
+}
+
+JOB_API void GpuCompute_WriteBuffer(void* buffer, const void* data, unsigned long long size) {
+    W.QueueWriteBuffer(g_queue, (WGPUBuffer)buffer, 0, data, (size_t)size);
+}
+
+JOB_API void GpuCompute_ReleaseBuffer(void* buffer) {
+    if (buffer) W.BufferDestroy((WGPUBuffer)buffer);
+}
+
+JOB_API void* GpuCompute_CreateBindGroup(void* kernel, void* const* buffers,
+                                         const unsigned long long* sizes, int bufferCount) {
+    GpuKernel* k = (GpuKernel*)kernel;
+    if (!k || bufferCount <= 0) return nullptr;
+    std::vector<WGPUBindGroupEntry> entries((size_t)bufferCount);
+    for (int i = 0; i < bufferCount; i++) {
+        WGPUBindGroupEntry& e = entries[i];
+        memset(&e, 0, sizeof(e));
+        e.binding = (uint32_t)i;
+        e.buffer = (WGPUBuffer)buffers[i];
+        e.size = sizes[i];
+    }
+    WGPUBindGroupDescriptor desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.layout = k->bgl;
+    desc.entryCount = (size_t)bufferCount;
+    desc.entries = entries.data();
+    return W.DeviceCreateBindGroup(g_device, &desc);
+}
+
+JOB_API void GpuCompute_ReleaseBindGroup(void* group) {
+    if (group) W.BindGroupRelease((WGPUBindGroup)group);
+}
+
+JOB_API void GpuCompute_Dispatch(void* kernel, void* bindGroup, unsigned int workgroupX) {
+    GpuKernel* k = (GpuKernel*)kernel;
+    if (!k) return;
+    WGPUCommandEncoder enc = W.DeviceCreateCommandEncoder(g_device, nullptr);
+    WGPUComputePassEncoder pass = W.CommandEncoderBeginComputePass(enc, nullptr);
+    W.ComputePassEncoderSetPipeline(pass, k->pipe);
+    W.ComputePassEncoderSetBindGroup(pass, 0, (WGPUBindGroup)bindGroup, 0, nullptr);
+    W.ComputePassEncoderDispatchWorkgroups(pass, workgroupX, 1, 1);
+    W.ComputePassEncoderEnd(pass);
+    WGPUCommandBuffer cmd = W.CommandEncoderFinish(enc, nullptr);
+    W.QueueSubmit(g_queue, 1, &cmd);
+    W.ComputePassEncoderRelease(pass);
+    W.CommandEncoderRelease(enc);
+    W.CommandBufferRelease(cmd);
+}
+
+JOB_API void GpuCompute_Sync() {
+    if (g_device) W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+}
+
+JOB_API int GpuCompute_ReadBack(void* buffer, void* outData, unsigned long long size) {
+    clearError();
+    WGPUBuffer storage = (WGPUBuffer)buffer;
+    WGPUBuffer staging = GetReadbackStaging((size_t)size);
+    if (!staging) { setError("创建 staging buffer 失败"); return 0; }
+
+    WGPUCommandEncoder enc = W.DeviceCreateCommandEncoder(g_device, nullptr);
+    W.CommandEncoderCopyBufferToBuffer(enc, storage, 0, staging, 0, (size_t)size);
+    WGPUCommandBuffer cmd = W.CommandEncoderFinish(enc, nullptr);
+    W.QueueSubmit(g_queue, 1, &cmd);
+    W.CommandBufferRelease(cmd);
+    W.CommandEncoderRelease(enc);
+    // 不在此 wait：mapAsync 后的 DevicePoll(wait) 一并等 copy + 触发 map 回调
+
+    AsyncWait aw;
+    WGPUBufferMapCallbackInfo info;
+    memset(&info, 0, sizeof(info));
+    info.mode = WGPUCallbackMode_AllowProcessEvents;
+    info.callback = onBufferMap;
+    info.userdata1 = &aw;
+    W.BufferMapAsync(staging, WGPUMapMode_Read, 0, (size_t)size, info);
+    // wait=true 等队列（copy 已提交）+ process events → 直接触发 map 回调，省忙等固定延迟
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    if (!aw.done) pollDevice(g_device, &aw.done);
+    if (!aw.done || aw.status != WGPUMapAsyncStatus_Success) {
+        setError("mapAsync 失败 status=%d", aw.status);
+        return 0;   // staging 池化，失败不销毁（下次复用）
+    }
+    void* mapped = W.BufferGetMappedRange(staging, 0, (size_t)size);
+    if (mapped) memcpy(outData, mapped, (size_t)size);
+    W.BufferUnmap(staging);
+    return mapped ? 1 : 0;   // staging 池化复用，不销毁
+}
+
+// ---- 临时诊断：wgpu 传输路径带宽拆解（UPLOAD CPU 写 / QueueWriteBuffer / READBACK CPU 读） ----
+JOB_API void GpuCompute_DiagTransfer(int sizeMB) {
+    if (!g_device) return;
+    size_t bytes = (size_t)sizeMB * 1024 * 1024;
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    auto dms = [&](LARGE_INTEGER a, LARGE_INTEGER b) {
+        return (double)(b.QuadPart - a.QuadPart) / f.QuadPart * 1000.0;
+    };
+
+    // ① UPLOAD 型（mappedAtCreation）：CPU 写带宽（WC 映射）
+    WGPUBufferDescriptor d;
+    memset(&d, 0, sizeof(d));
+    d.usage = WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc;
+    d.size = bytes;
+    d.mappedAtCreation = WGPU_TRUE;
+    WGPUBuffer upload = W.DeviceCreateBuffer(g_device, &d);
+    void* uptr = W.BufferGetMappedRange(upload, 0, bytes);
+    memset(uptr, 0xAB, bytes);  // warmup
+    QueryPerformanceCounter(&t0);
+    for (int r = 0; r < 3; r++) memset(uptr, r, bytes);
+    QueryPerformanceCounter(&t1);
+    fprintf(stderr, "[Diag] UPLOAD CPU写 %dMB: %.3f ms/次 (%.1f GB/s)\n",
+            sizeMB, dms(t0, t1) / 3, bytes / 1e9 / (dms(t0, t1) / 3 / 1000.0));
+    W.BufferUnmap(upload);
+    W.BufferDestroy(upload);
+
+    // ② QueueWriteBuffer（上传路径总耗时：内部 staging 拷贝 + GPU copy 提交）
+    WGPUBuffer dst = makeBuffer(g_device, WGPUBufferUsage_CopyDst, bytes);
+    void* host = malloc(bytes);
+    memset(host, 0xCD, bytes);
+    QueryPerformanceCounter(&t0);
+    for (int r = 0; r < 3; r++) W.QueueWriteBuffer(g_queue, dst, 0, host, bytes);
+    QueryPerformanceCounter(&t1);
+    fprintf(stderr, "[Diag] QueueWriteBuffer %dMB: %.3f ms/次 (%.1f GB/s)\n",
+            sizeMB, dms(t0, t1) / 3, bytes / 1e9 / (dms(t0, t1) / 3 / 1000.0));
+    W.BufferDestroy(dst);
+
+    // ③ READBACK：GPU copy → map → CPU 读带宽
+    WGPUBuffer src = makeBuffer(g_device, WGPUBufferUsage_CopySrc, bytes);
+    WGPUBuffer rb = makeBuffer(g_device, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst, bytes);
+    WGPUCommandEncoder enc = W.DeviceCreateCommandEncoder(g_device, nullptr);
+    W.CommandEncoderCopyBufferToBuffer(enc, src, 0, rb, 0, bytes);
+    WGPUCommandBuffer cmd = W.CommandEncoderFinish(enc, nullptr);
+    W.QueueSubmit(g_queue, 1, &cmd);
+    W.CommandBufferRelease(cmd);
+    W.CommandEncoderRelease(enc);
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    AsyncWait aw;
+    WGPUBufferMapCallbackInfo info;
+    memset(&info, 0, sizeof(info));
+    info.mode = WGPUCallbackMode_AllowProcessEvents;
+    info.callback = onBufferMap;
+    info.userdata1 = &aw;
+    W.BufferMapAsync(rb, WGPUMapMode_Read, 0, bytes, info);
+    W.DevicePoll(g_device, WGPU_TRUE, nullptr);
+    if (!aw.done) pollDevice(g_device, &aw.done);
+    if (!aw.done) { fprintf(stderr, "[Diag] READBACK map failed\n"); return; }
+    void* rptr = W.BufferGetMappedRange(rb, 0, bytes);
+    volatile size_t sink = 0;
+    for (size_t i = 0; i < bytes; i += 64) sink += ((const uint8_t*)rptr)[i];  // warmup 读
+    QueryPerformanceCounter(&t0);
+    for (int r = 0; r < 3; r++) { memcpy(host, rptr, bytes); sink += ((volatile uint8_t*)host)[0]; }
+    QueryPerformanceCounter(&t1);
+    fprintf(stderr, "[Diag] READBACK CPU读 %dMB: %.3f ms/次 (%.1f GB/s)\n",
+            sizeMB, dms(t0, t1) / 3, bytes / 1e9 / (dms(t0, t1) / 3 / 1000.0));
+    (void)sink;
+    W.BufferUnmap(rb);
+    W.BufferDestroy(rb);
+    W.BufferDestroy(src);
+    free(host);
+}
+
+// ---- 临时诊断：原生 D3D12 UPLOAD/READBACK 映射带宽（判定 wgpu 的 ~10GB/s 是平台特性还是 wgpu 实现问题） ----
+JOB_API void GpuCompute_DiagNativeD3D12(int sizeMB) {
+    size_t bytes = (size_t)sizeMB * 1024 * 1024;
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    auto dms = [&](LARGE_INTEGER a, LARGE_INTEGER b) {
+        return (double)(b.QuadPart - a.QuadPart) / f.QuadPart * 1000.0;
+    };
+    ComPtr<ID3D12Device> dev;
+    typedef HRESULT(WINAPI* PFN_D3D12CreateDevice)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    HMODULE hD3d12 = LoadLibraryA("d3d12.dll");
+    if (!hD3d12) { fprintf(stderr, "[DiagN] load d3d12.dll fail\n"); return; }
+    PFN_D3D12CreateDevice fnCreate = (PFN_D3D12CreateDevice)GetProcAddress(hD3d12, "D3D12CreateDevice");
+    if (!fnCreate || FAILED(fnCreate(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)))) {
+        fprintf(stderr, "[DiagN] D3D12CreateDevice fail\n");
+        return;
+    }
+    void* host = malloc(bytes);
+    memset(host, 0xCD, bytes);
+    volatile size_t sink = 0;
+
+    // ① 原生 D3D12 UPLOAD heap：CPU 写带宽
+    {
+        D3D12_HEAP_PROPERTIES hp = d3dHeapProp(D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RESOURCE_DESC rd = d3dBufferDesc(bytes);
+        ComPtr<ID3D12Resource> up;
+        dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&up));
+        void* p;
+        up->Map(0, nullptr, &p);
+        memset(p, 0xAB, bytes);
+        QueryPerformanceCounter(&t0);
+        for (int r = 0; r < 3; r++) memset(p, r, bytes);
+        QueryPerformanceCounter(&t1);
+        fprintf(stderr, "[DiagN] D3D12 UPLOAD CPU写 %dMB: %.3f ms/次 (%.1f GB/s)\n",
+                sizeMB, dms(t0, t1) / 3, bytes / 1e9 / (dms(t0, t1) / 3 / 1000.0));
+        up->Unmap(0, nullptr);
+    }
+
+    // ② 原生 D3D12 READBACK：UPLOAD→copy→READBACK 正规回读路径，CPU 读带宽
+    {
+        D3D12_HEAP_PROPERTIES hpDef = d3dHeapProp(D3D12_HEAP_TYPE_DEFAULT);
+        D3D12_HEAP_PROPERTIES hpUp = d3dHeapProp(D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_HEAP_PROPERTIES hpRb = d3dHeapProp(D3D12_HEAP_TYPE_READBACK);
+        D3D12_RESOURCE_DESC rd = d3dBufferDesc(bytes);
+        ComPtr<ID3D12Resource> def, up, rb;
+        dev->CreateCommittedResource(&hpDef, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&def));
+        dev->CreateCommittedResource(&hpUp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&up));
+        dev->CreateCommittedResource(&hpRb, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb));
+        void* upPtr;
+        up->Map(0, nullptr, &upPtr);
+        memcpy(upPtr, host, bytes);
+        up->Unmap(0, nullptr);
+        ComPtr<ID3D12CommandQueue> queue;
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+        dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue));
+        ComPtr<ID3D12CommandAllocator> alloc;
+        dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&alloc));
+        ComPtr<ID3D12GraphicsCommandList> cl;
+        dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, alloc.Get(), nullptr, IID_PPV_ARGS(&cl));
+        cl->CopyBufferRegion(def.Get(), 0, up.Get(), 0, bytes);
+        cl->Close();
+        ComPtr<ID3D12Fence> fence;
+        dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        HANDLE ev = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        ID3D12CommandList* lists[1] = { cl.Get() };
+        queue->ExecuteCommandLists(1, lists);
+        queue->Signal(fence.Get(), 1);
+        if (fence->GetCompletedValue() < 1) { fence->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+        // READBACK copy（GPU 写系统内存）
+        ComPtr<ID3D12CommandAllocator> alloc2;
+        dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&alloc2));
+        alloc2->Reset();
+        cl->Reset(alloc2.Get(), nullptr);
+        cl->CopyBufferRegion(rb.Get(), 0, def.Get(), 0, bytes);
+        cl->Close();
+        queue->ExecuteCommandLists(1, lists);
+        queue->Signal(fence.Get(), 2);
+        if (fence->GetCompletedValue() < 2) { fence->SetEventOnCompletion(2, ev); WaitForSingleObject(ev, INFINITE); }
+        // CPU 读
+        void* p;
+        rb->Map(0, nullptr, &p);
+        for (size_t i = 0; i < bytes; i += 64) sink += ((const uint8_t*)p)[i];
+        QueryPerformanceCounter(&t0);
+        for (int r = 0; r < 3; r++) { memcpy(host, p, bytes); sink += ((volatile uint8_t*)host)[0]; }
+        QueryPerformanceCounter(&t1);
+        fprintf(stderr, "[DiagN] D3D12 READBACK CPU读 %dMB: %.3f ms/次 (%.1f GB/s)\n",
+                sizeMB, dms(t0, t1) / 3, bytes / 1e9 / (dms(t0, t1) / 3 / 1000.0));
+        rb->Unmap(0, nullptr);
+        CloseHandle(ev);
+    }
+    (void)sink;
+    free(host);
+}
+
+// ============================================================
+// CUDA 驱动后端（GpuComputeCuda_*）：动态加载 nvcuda.dll，kernel 用 nvcc 预编译 PTX
+// （cuModuleLoadData 由驱动 JIT，无需 nvrtc/Toolkit dll）。句柄全用 void*/u64，不依赖 cuda.h。
+// 页锁定（cuMemAllocHost）实现真单跳传输 —— 对照 wgpu 的 READBACK 两跳。
+// ============================================================
+
+typedef int  (*PFN_cuInit)(unsigned int);
+typedef int  (*PFN_cuDeviceGet)(int*, int);
+typedef int  (*PFN_cuCtxCreate)(void** ctx, unsigned int flags, int device);
+typedef int  (*PFN_cuCtxSynchronize)(void);
+typedef int  (*PFN_cuCtxDestroy)(void* ctx);
+typedef int  (*PFN_cuMemAlloc)(unsigned long long* dptr, size_t size);
+typedef int  (*PFN_cuMemFree)(unsigned long long dptr);
+typedef int  (*PFN_cuMemAllocHost)(void** pp, size_t size);
+typedef int  (*PFN_cuMemFreeHost)(void* p);
+typedef int  (*PFN_cuMemcpyHtoD)(unsigned long long dstDevice, const void* srcHost, size_t count);
+typedef int  (*PFN_cuMemcpyDtoH)(void* dstHost, unsigned long long srcDevice, size_t count);
+typedef int  (*PFN_cuModuleLoadData)(void** module, const void* image);
+typedef int  (*PFN_cuModuleUnload)(void* module);
+typedef int  (*PFN_cuModuleGetFunction)(void** func, void* module, const char* name);
+typedef int  (*PFN_cuLaunchKernel)(void* func, unsigned gx, unsigned gy, unsigned gz,
+                                   unsigned bx, unsigned by, unsigned bz, unsigned sharedMem,
+                                   void* stream, void** kernelParams, void** extra);
+
+struct CudaApi {
+    HMODULE module = nullptr;
+    PFN_cuInit Init = nullptr;
+    PFN_cuDeviceGet DeviceGet = nullptr;
+    PFN_cuCtxCreate CtxCreate = nullptr;
+    PFN_cuCtxSynchronize CtxSync = nullptr;
+    PFN_cuCtxDestroy CtxDestroy = nullptr;
+    PFN_cuMemAlloc MemAlloc = nullptr;
+    PFN_cuMemFree MemFree = nullptr;
+    PFN_cuMemAllocHost MemAllocHost = nullptr;
+    PFN_cuMemFreeHost MemFreeHost = nullptr;
+    PFN_cuMemcpyHtoD MemcpyHtoD = nullptr;
+    PFN_cuMemcpyDtoH MemcpyDtoH = nullptr;
+    PFN_cuModuleLoadData ModuleLoadData = nullptr;
+    PFN_cuModuleUnload ModuleUnload = nullptr;
+    PFN_cuModuleGetFunction ModuleGetFunction = nullptr;
+    PFN_cuLaunchKernel LaunchKernel = nullptr;
+};
+static CudaApi C;
+static void* g_cudaCtx = nullptr;
+static char g_cudaError[1024] = { 0 };
+#define CP(name) C.name = (PFN_cu##name)GetProcAddress(C.module, "cu" #name)
+static int LoadCuda() {
+    C.module = LoadLibraryA("nvcuda.dll");
+    if (!C.module) return 1;
+    CP(Init); CP(DeviceGet); CP(CtxCreate); CP(CtxDestroy);
+    C.CtxSync = (PFN_cuCtxSynchronize)GetProcAddress(C.module, "cuCtxSynchronize");
+    CP(MemAlloc); CP(MemFree); CP(MemAllocHost); CP(MemFreeHost);
+    CP(MemcpyHtoD); CP(MemcpyDtoH); CP(ModuleLoadData); CP(ModuleUnload);
+    CP(ModuleGetFunction); CP(LaunchKernel);
+    if (!C.Init || !C.CtxCreate || !C.MemAlloc || !C.MemcpyHtoD || !C.ModuleLoadData || !C.LaunchKernel) return 1;
+    return 0;
+}
+#undef CP
+
+JOB_API int GpuComputeCuda_Initialize() {
+    g_cudaError[0] = 0;
+    if (g_cudaCtx) return 1;
+    if (LoadCuda()) { snprintf(g_cudaError, sizeof(g_cudaError), "加载 nvcuda.dll 失败"); return 0; }
+    if (C.Init(0) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuInit 失败（无 CUDA 驱动？）"); return 0; }
+    int dev = 0;
+    if (C.DeviceGet(&dev, 0) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuDeviceGet 失败"); return 0; }
+    if (C.CtxCreate(&g_cudaCtx, 0, dev) != 0) { snprintf(g_cudaError, sizeof(g_cudaError), "cuCtxCreate 失败"); return 0; }
+    return 1;
+}
+
+JOB_API void GpuComputeCuda_Shutdown() {
+    if (g_cudaCtx) { C.CtxDestroy(g_cudaCtx); g_cudaCtx = nullptr; }
+    if (C.module) { FreeLibrary(C.module); C.module = nullptr; }
+    memset(&C, 0, sizeof(C));
+}
+
+JOB_API const char* GpuComputeCuda_GetLastError() {
+    return g_cudaError[0] ? g_cudaError : nullptr;
+}
+
+struct CudaKernel { void* module = nullptr; void* func = nullptr; };
+// image：nvcc 预编译的 cubin 二进制（cuModuleLoadData 直接加载，无 PTX ISA 兼容问题）
+JOB_API void* GpuComputeCuda_CreateKernel(const void* image, const char* entryPoint) {
+    g_cudaError[0] = 0;
+    if (!g_cudaCtx) { snprintf(g_cudaError, sizeof(g_cudaError), "未初始化"); return nullptr; }
+    CudaKernel* k = new CudaKernel();
+    int rc = C.ModuleLoadData(&k->module, image);
+    if (rc != 0) {
+        snprintf(g_cudaError, sizeof(g_cudaError), "cuModuleLoadData 失败 rc=%d（PTX 无效/架构不符）", rc);
+        delete k; return nullptr;
+    }
+    rc = C.ModuleGetFunction(&k->func, k->module, entryPoint);
+    if (rc != 0) {
+        snprintf(g_cudaError, sizeof(g_cudaError), "cuModuleGetFunction 失败 rc=%d: %s", rc, entryPoint ? entryPoint : "(null)");
+        C.ModuleUnload(k->module); delete k; return nullptr;
+    }
+    return k;
+}
+JOB_API void GpuComputeCuda_ReleaseKernel(void* kernel) {
+    CudaKernel* k = (CudaKernel*)kernel;
+    if (!k) return;
+    if (k->module) C.ModuleUnload(k->module);
+    delete k;
+}
+
+JOB_API void* GpuComputeCuda_CreateDeviceBuffer(unsigned long long size) {
+    unsigned long long dptr = 0;
+    if (C.MemAlloc(&dptr, (size_t)size) != 0) return nullptr;
+    return (void*)dptr;
+}
+JOB_API void* GpuComputeCuda_CreatePinnedBuffer(unsigned long long size) {
+    void* p = nullptr;
+    if (C.MemAllocHost(&p, (size_t)size) != 0) return nullptr;
+    return p;
+}
+JOB_API void GpuComputeCuda_ReleaseDeviceBuffer(void* buffer) {
+    if (buffer) C.MemFree((unsigned long long)(uintptr_t)buffer);
+}
+JOB_API void GpuComputeCuda_ReleasePinnedBuffer(void* buffer) {
+    if (buffer) C.MemFreeHost(buffer);
+}
+JOB_API void GpuComputeCuda_WriteBuffer(void* device, const void* data, unsigned long long size) {
+    C.MemcpyHtoD((unsigned long long)(uintptr_t)device, data, (size_t)size);
+}
+JOB_API void GpuComputeCuda_ReadBack(void* device, void* out, unsigned long long size) {
+    C.MemcpyDtoH(out, (unsigned long long)(uintptr_t)device, (size_t)size);
+}
+JOB_API void GpuComputeCuda_Dispatch(void* kernel, void* const* kernelParams, unsigned int gridX, unsigned int blockX) {
+    CudaKernel* k = (CudaKernel*)kernel;
+    if (!k) return;
+    C.LaunchKernel(k->func, gridX, 1, 1, blockX, 1, 1, 0, nullptr, (void**)kernelParams, nullptr);
+}
+JOB_API void GpuComputeCuda_Sync() {
+    if (g_cudaCtx) C.CtxSync();
+}
+
+} // extern "C"

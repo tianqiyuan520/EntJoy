@@ -40,7 +40,7 @@ namespace JobSystem
     {
         AcquireState(state);
         SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
-            // B5: 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
+            // 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
             // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
             if (id != 0) SetCurrentBatchId(id);
@@ -142,7 +142,7 @@ namespace JobSystem
         // worker 已由 nativePool->Stop() join，其 thread_local 缓存已在退出时交还。
         FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
-        // B2: 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
+        // 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
         // worker 线程已由 nativePool->Stop() join，其 thread_local 缓存已在
         // 退出时交还，故此处清空覆盖全部 state。
         FlushStateCacheToSharedPool();
@@ -204,7 +204,7 @@ namespace JobSystem
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             AcquireState(state);
             SubmitBackendAsync([func, context, length, cleanup, state]() {
-                // B5: state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
+                // state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
                 const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
                 if (id != 0) SetCurrentBatchId(id);
                 for (int i = 0; i < length; i++) func(context, i);
