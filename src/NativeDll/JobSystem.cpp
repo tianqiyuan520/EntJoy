@@ -112,7 +112,7 @@ namespace JobSystem
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
 
-    // B5: 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
+    // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
     // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch（修 V-B）。
     std::atomic<void (*)(uint64_t)> g_currentBatchIdCallback{ nullptr };
     void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept

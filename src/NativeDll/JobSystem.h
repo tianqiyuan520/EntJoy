@@ -107,7 +107,7 @@ namespace JobSystem {
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
     int CurrentWorkerCount();
 
-    // B5: C# 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、
+    // C# 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、
     // 出口 cb(0)，C# 异常按此绑定到具体 batch（修 V-B 全局异常队列归属错乱）。
     void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept;
 
