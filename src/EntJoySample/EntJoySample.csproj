@@ -28,11 +28,6 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<!-- ILGPU：Gate 1a GPU 快速验证（doc/10 §11），JIT 零工程投入 -->
-		<PackageReference Include="ILGPU" Version="1.5.3" />
-	</ItemGroup>
-
-	<ItemGroup>
 		<!-- wgpu-native v29：Gate 2 Milestone 2 运行时（探针 GpuNativeProbe 已下载该 dll） -->
 		<None Include="..\GpuNativeProbe\wgpu\lib\wgpu_native.dll" Link="wgpu_native.dll" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
