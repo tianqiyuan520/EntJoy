@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
@@ -46,7 +46,7 @@ extern "C" {
     typedef void  (*PersistentFreeCallback)(void* ptr);
     JOB_API void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free);
 
-    // B5: 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、出口 cb(0)，
+    // 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、出口 cb(0)，
     // C# 异常按 batch 归属（修 V-B 全局异常队列归属错乱）。
     typedef void (*CurrentBatchIdCallback)(uint64_t batchId);
     JOB_API void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb);
@@ -61,7 +61,7 @@ extern "C" {
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
-    // B5: 读 handle 的 diagnosticBatchId（Complete 后 batch 必已 submit，id 已设置）。
+    // 读 handle 的 diagnosticBatchId（Complete 后 batch 必已 submit，id 已设置）。
     JOB_API uint64_t JobSystem_GetDiagnosticBatchId(void* handle);
     // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
     // 返回已完成的 handle

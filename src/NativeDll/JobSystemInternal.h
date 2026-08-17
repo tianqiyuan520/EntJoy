@@ -32,11 +32,11 @@ namespace JobSystem
     inline constexpr size_t kMaxPooledBatchStorage = 256;
     inline constexpr int kSyncWithCompletedDepThreshold = 4096;
 
-    // B2: per-thread state 缓存上限。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
+    // per-thread state 缓存上限。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
     // state 单 owner（refCount==0 才回池），跨线程迁移只发生在共享池锁内，无 ABA。
     inline constexpr size_t kStateCacheCap = 64;
 
-    // B1: AssistDependencyChain 连续零工作的墙钟预算。零工作不代表链卡死
+    // AssistDependencyChain 连续零工作的墙钟预算。零工作不代表链卡死
     // （workers 可能正在执行祖先、即将提交下一环），所以用有界回访覆盖祖先
     // completion→下一环 submit 的交接窗口；仅在持续零工作超过该预算后交还
     // 调用方的 spin/futex。以墙钟而非 pass 数计：pass 上限与循环内 yield 的
@@ -52,7 +52,7 @@ namespace JobSystem
     // 可变代价(job 受益) 与均匀代价(job 少付 claim 开销) 的折中。env 可覆盖。
     inline constexpr int kDefaultTilesPerWorker = 16;
 
-    // B2: per-thread state 缓存类型。定义在本头使 t_stateCache 可跨 TU extern
+    // per-thread state 缓存类型。定义在本头使 t_stateCache 可跨 TU extern
     // （State 模块 RecycleState/CreateState 直接读写）。析构把缓存 state 批量
     // 交还共享池；全局互斥体在 Shutdown 中始终存活（本对象先于 g_statePoolMutex
     // 初始化，按标准后销毁），线程退出取锁安全。

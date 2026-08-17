@@ -42,7 +42,7 @@ namespace JobSystem
     void RecycleState(HandleState* state) noexcept
     {
         if (!state) return;
-        // B1: 释放依赖链持有引用（依赖 state 可能仍被自身 batch 持有，不会悬垂）。
+        // 释放依赖链持有引用（依赖 state 可能仍被自身 batch 持有，不会悬垂）。
         if (state->dependency)
         {
             auto* dep = state->dependency;
@@ -63,7 +63,7 @@ namespace JobSystem
         state->assistContext.store(nullptr, std::memory_order_release);
         state->assistReaders.store(0, std::memory_order_relaxed);
         state->assistReadersDrained.store(nullptr, std::memory_order_release);
-        // B2: 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
+        // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
         if (t_stateCache.entries.size() < kStateCacheCap)
         {
             t_stateCache.entries.push_back(state);
@@ -83,7 +83,7 @@ namespace JobSystem
         }
         else
         {
-            // B2: 从共享池批量补满线程缓存（一次锁 / 64 次创建），池空则 new。
+            // 从共享池批量补满线程缓存（一次锁 / 64 次创建），池空则 new。
             std::lock_guard<std::mutex> lock(g_statePoolMutex);
             const size_t available = std::min(g_statePool.size(), kStateCacheCap);
             if (available > 0)
@@ -110,7 +110,7 @@ namespace JobSystem
         return state;
     }
 
-    // B1: 把依赖 state 挂到被依赖 state 上并持引用，保证传递协助链不会悬垂。
+    // 把依赖 state 挂到被依赖 state 上并持引用，保证传递协助链不会悬垂。
     // 释放点在 RecycleState（refcount 归零时）。仅在依赖未完成（需要等）时调用。
     void RetainDependency(HandleState* state, HandleState* dep) noexcept
     {
@@ -322,7 +322,7 @@ namespace JobSystem
 #endif
     }
 
-    // B1: 协助单个 state —— 认领并执行其 tile 直到无工作或已完成。
+    // 协助单个 state —— 认领并执行其 tile 直到无工作或已完成。
     // 调用方被计为该 state 的一个 assistReader（生命周期与 Complete 一致）。
     // 返回是否实际执行了任何 tile。
     static bool AssistState(HandleState* state) noexcept
@@ -351,7 +351,7 @@ namespace JobSystem
         return worked;
     }
 
-    // B1: 传递依赖链协助。目标 job 未提交（前驱还在跑）时，沿 dependency 链
+    // 传递依赖链协助。目标 job 未提交（前驱还在跑）时，沿 dependency 链
     // 回溯协助所有未完成祖先执行其 tile，让链推进到目标。worker 内嵌套
     // Complete() 不再 park 空等，而是成为自己依赖链的执行者（消解 V-A 死锁）；
     // 主线程也从空等变干活（修 V-D）。单依赖走 dependency，合并依赖走
@@ -473,7 +473,7 @@ namespace JobSystem
         if (pending.empty()) return JobHandle(CreateState(true));
         auto* cs = CreateState(false);
         auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(pending.size()));
-        // B1: 合成 state 持有每个父依赖的引用，保证传递协助链不悬垂；
+        // 合成 state 持有每个父依赖的引用，保证传递协助链不悬垂；
         // 在 RecycleState 释放。
         cs->dependencies = pending;
         for (auto* ds : pending) {
