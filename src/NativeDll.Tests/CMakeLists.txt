@@ -11,6 +11,7 @@ add_executable(JobSystemTests
     ../NativeDll/JobSystem_Tiles.cpp
     ../NativeDll/JobSystem_Scheduler.cpp
     ../NativeDll/JobProfiler.cpp
+    ../NativeDll/JobDebuggerGUI.cpp
     ../NativeDll/NativeWorkerPool.cpp
 )
 
@@ -21,6 +22,7 @@ add_executable(AssistLifetimeTests
     ../NativeDll/JobSystem_Tiles.cpp
     ../NativeDll/JobSystem_Scheduler.cpp
     ../NativeDll/JobProfiler.cpp
+    ../NativeDll/JobDebuggerGUI.cpp
     ../NativeDll/NativeWorkerPool.cpp
 )
 

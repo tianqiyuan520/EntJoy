@@ -110,8 +110,16 @@ namespace JobSystem
             batch->totalRangeThreadCycles.fetch_add(threadCycles, std::memory_order_relaxed);
             batch->measuredRangeThreadCycles.fetch_add(1, std::memory_order_relaxed);
         }
+        // 慢诊断锁：有界自旋，避免持锁线程崩溃/卡死时其他 worker 无限自旋。
+        // 超时（约 ~1s yield 窗）放弃获取 → 跳过本次慢记录（诊断数据丢失可接受）。
+        constexpr int kSlowRangeLockSpinLimit = 1'000'000;
+        int spinCount = 0;
         while (batch->slowRangeLock.test_and_set(std::memory_order_acquire))
+        {
+            if (++spinCount >= kSlowRangeLockSpinLimit)
+                return;   // 未持锁，绝不能 clear，否则破坏持锁者
             std::this_thread::yield();
+        }
         if (wallNs > batch->maxRangeDurationNs.load(std::memory_order_relaxed))
         {
             batch->maxRangeDurationNs.store(wallNs, std::memory_order_relaxed);

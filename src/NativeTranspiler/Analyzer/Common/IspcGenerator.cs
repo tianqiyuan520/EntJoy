@@ -477,21 +477,33 @@ namespace NativeTranspiler.Analyzer
             int nextTaskIdx = 0;
             var directTranslator = new MethodIspcTranslator(semanticModel, method, initialIndent: 1, needResult: false);
 
+            // 并行化：连续 for 循环批量 launch，末尾统一 sync（ISPC sync 等待本函数内
+            // 所有已 launch 任务）→ 相邻无依赖循环真正并行，消除逐个 launch+sync 的串行退化。
+            // 依赖规则：相邻循环若操作共享可变数据，须由用户保证无读写依赖（生成器不跨循环
+            // 分析依赖）；循环间出现非循环语句时先 sync（该语句在已 launch 循环完成后执行）。
+            int pendingLaunches = 0;
             foreach (var stmt in methodSyntax.Body.Statements)
             {
                 if (stmt is ForStatementSyntax)
                 {
                     var (idx, loop) = loops[nextTaskIdx];
                     sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task{idx}(0, {loop.Limit}, {callArgs});");
-                    sb.AppendLine($"{Indent}sync;");
+                    ++pendingLaunches;
                     nextTaskIdx++;
                 }
                 else
                 {
+                    if (pendingLaunches > 0)
+                    {
+                        sb.AppendLine($"{Indent}sync;");
+                        pendingLaunches = 0;
+                    }
                     string stmtCode = directTranslator.TranslateSingleStatement(stmt);
                     sb.Append(stmtCode);
                 }
             }
+            if (pendingLaunches > 0)
+                sb.AppendLine($"{Indent}sync;");
 
             sb.AppendLine("}");
             return sb.ToString();
