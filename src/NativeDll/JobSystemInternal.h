@@ -18,6 +18,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -76,6 +77,13 @@ namespace JobSystem
         }
     };
 
+    // ---- 调试面板 per-worker 实时状态 ----
+    inline constexpr int kMaxTrackedWorkers = 64;
+    extern std::atomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers];
+    extern std::atomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers];
+    extern std::atomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers];
+    extern std::atomic<bool>     g_workerIsActive[kMaxTrackedWorkers];
+
     // ---- base 模块（JobSystem.cpp）定义的全局 ----
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
@@ -130,6 +138,21 @@ namespace JobSystem
     extern std::atomic<bool> g_timingDiagnosticsEnabled;
     extern std::atomic<void (*)(uint64_t)> g_currentBatchIdCallback;
     extern std::atomic<uint32_t> g_backendBatchesOutstanding;
+
+    // ---- 原生发布活动事件（供 GUI Activity 完整记录微秒级 batch；动态保留全部）----
+    struct NativeActivityEvent { uint64_t batchId; uint32_t tiles; double timeMs; };
+    extern std::atomic<bool> g_nativeActivityCaptureEnabled;
+    extern std::atomic<bool> g_debugPaused; // GUI 暂停时停止记录新段，避免环形缓冲覆盖历史
+    void RecordPublishedJob(uint64_t batchId, uint32_t tiles) noexcept;
+    int ConsumePublishedJobs(NativeActivityEvent* out, int maxCount, uint64_t* readIndex) noexcept;
+    void ClearPublishedJobs() noexcept;
+    // 直接调用（不经 JobSystem 调度器，如 ISPC-MT 方法直跑）也记录进 activity，并维护 id→名字表
+    void RecordDirectCall(const char* jobName, uint32_t tiles) noexcept;
+    // 直调执行窗口：Begin 分配 id + 记发布 + 开执行窗口（当前线程泳道），End 关闭窗口
+    //（追加共享时间线段）。由 transpiler 包装器在 native 调用前后成对调用。
+    uint64_t BeginDirectCall(const char* jobName, uint32_t tiles) noexcept;
+    void EndDirectCall(uint64_t id) noexcept;
+    int ResolveNativeJobName(uint64_t batchId, char* buf, int bufLen) noexcept;
 
     // ---- State 模块（JobSystem_State.cpp）定义的全局 ----
     extern std::mutex g_longBatchBarrierMutex;
@@ -264,13 +287,115 @@ namespace JobSystem
         if (cb) cb(id);
     }
     uint64_t AssignStateDiagnosticId(HandleState* state) noexcept;
+
+    // ---- 调试面板：执行窗口上报（事件驱动，非每帧采样）----
+    // 每次 job 执行（无论 schedule 路径）在入口记录"开始"事件（压栈 + 时间戳），
+    // 在出口记录"结束"事件（把完整窗口 [startMs, endMs] 直接追加进共享时间线历史）。
+    // GUI 每帧只渲染共享历史，不做任何状态迁移检测——Job 的 start/end 发生时即被
+    // 检测并记录，微秒级 Job（两帧之间跑完）也不会丢失，且无需环形握手缓冲。
+    // 有 worker 索引的线程（pool worker，WorkerLoop 预分配）上报到其泳道；无索引的
+    // 调用线程（典型为主线程 inline）上报到预留的 M 泳道（index == CurrentWorkerCount()）。
+    inline int DebugReportLaneId() noexcept
+    {
+        const int wi = WorkerIndexManager::GetCurrentIndex();
+        if (wi >= 0) return wi;
+        const int mc = CurrentWorkerCount();
+        return (mc >= 0 && mc < kMaxTrackedWorkers) ? mc : -1;
+    }
+    inline double DebugNowMs() noexcept
+    {
+        using namespace std::chrono;
+        return duration_cast<duration<double, std::milli>>(
+            steady_clock::now().time_since_epoch()).count();
+    }
+
+    // ---- 共享时间线历史（base 模块定义；job 执行线程在结束瞬间追加，GUI 只读渲染）----
+    constexpr int kDebugSegmentMax = 16384;
+    // isDirect：是否为直调方法（transpiler 直跑，非调度式 Job）；GUI 用于把直调标记为 [D]。
+    // workers：参与本次执行 / 认领工作的 worker 数（batch 为计划参与数；同步/快速路径为 1；直调为并行度）。
+    struct DebugSegment { int lane; uint64_t batchId; double startMs; double endMs; uint32_t tiles; uint32_t workers; bool isDirect; };
+    extern DebugSegment g_debugSegments[kDebugSegmentMax];
+    extern std::atomic<unsigned int> g_debugSegHead;    // 槽位分配（写者 fetch_add relaxed）
+    extern std::atomic<unsigned int> g_debugSegVisible; // 已发布的段数（写者 fetch_add release 发布；读者 acquire）
+    // 写者协议：先写槽内容，再 fetch_add(release) 发布计数——保证读者 acquire 读到计数时
+    // 槽内容必已可见（无"计数先行、内容滞后"竞态）。读者用 visible 推算槽下标，回绕安全。
+
+    // 每个泳道的嵌套执行栈（job 体内再 inline 调度 job）：保存开始时间戳与 id，
+    // 结束时弹栈配对。非原子——仅单写者线程访问（M 泳道罕见多写者时仅可能短暂错配）。
+    struct ExecWindowRing
+    {
+        int depth = 0;
+        struct ExecFrame { uint64_t id; double startMs; uint32_t tiles; uint32_t workers; bool isDirect; } stack[8];
+    };
+    extern ExecWindowRing g_execWindows[kMaxTrackedWorkers];
+
+    inline void DebugBeginExec(uint64_t id, uint32_t tiles, uint32_t workers, bool isDirect) noexcept
+    {
+        // 零开销守门：仅调试面板开启（g_nativeActivityCaptureEnabled）才采集。
+        // 注意：优先级需高于 id==0 判断，确保面板关闭时完全不触碰任何原子。
+        if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
+        // 暂停时停止记录新段：不压栈、不写共享历史，环形缓冲不被覆盖、历史得以保留。
+        if (g_debugPaused.load(std::memory_order_relaxed)) return;
+        const int lane = DebugReportLaneId();
+        if (id == 0 || lane < 0) return;
+        auto& st = g_execWindows[lane];
+        if (st.depth < 8)
+            st.stack[st.depth++] = ExecWindowRing::ExecFrame{ id, DebugNowMs(), tiles, workers, isDirect };
+        else if (st.depth == 8) // 栈满：覆盖最内层，至少保持"活跃"语义
+            st.stack[7] = ExecWindowRing::ExecFrame{ id, DebugNowMs(), tiles, workers, isDirect };
+        g_workerCurrentBatchId[lane].store(id, std::memory_order_relaxed);
+        g_workerCurrentTile[lane].store(0, std::memory_order_relaxed);
+        g_workerBatchTileCount[lane].store(tiles, std::memory_order_relaxed);
+        g_workerIsActive[lane].store(true, std::memory_order_release);
+    }
+    inline void DebugEndExec() noexcept
+    {
+        if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
+        const int lane = DebugReportLaneId();
+        if (lane < 0) return;
+        auto& st = g_execWindows[lane];
+        if (st.depth > 0)
+        {
+            const ExecWindowRing::ExecFrame f = st.stack[--st.depth];
+            if (g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed) &&
+                !g_debugPaused.load(std::memory_order_relaxed))
+            {
+                // 结束事件：完整窗口直接追加进共享时间线历史（GUI 只读渲染）。
+                // 先写槽内容，再 fetch_add(release) 发布计数——读者永不读到未写完的槽。
+                const unsigned int h = g_debugSegHead.fetch_add(1, std::memory_order_relaxed);
+                g_debugSegments[h % kDebugSegmentMax] = DebugSegment{ lane, f.id, f.startMs, DebugNowMs(), f.tiles, f.workers, f.isDirect };
+                g_debugSegVisible.fetch_add(1, std::memory_order_release);
+            }
+        }
+        g_workerIsActive[lane].store(false, std::memory_order_release);
+        g_workerCurrentBatchId[lane].store(0, std::memory_order_release);
+        g_workerCurrentTile[lane].store(0, std::memory_order_release);
+        g_workerBatchTileCount[lane].store(0, std::memory_order_release);
+    }
+    // 更新当前执行窗口（栈顶）已认领执行的 tile 数（worker 在 batch 执行中累计后调用）。
+    // 让 segment.tiles = 该 worker 实际领取的 tile 数，而非整批 tileCount。
+    inline void DebugUpdateExecTiles(uint32_t tiles) noexcept
+    {
+        if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
+        const int lane = DebugReportLaneId();
+        if (lane < 0) return;
+        auto& st = g_execWindows[lane];
+        if (st.depth > 0)
+            st.stack[st.depth - 1].tiles = tiles;
+    }
+
     template <typename Fn>
     void RunSyncJob(HandleState* state, Fn&& fn) noexcept
     {
-        const uint64_t id = AssignStateDiagnosticId(state);
+        // 幂等：调用方可能已为 state 预分配诊断 id（inline 路径先报到 published），
+        // 复用同一 id 保证 事件 id == 执行窗口 id == handle 的 diagnosticBatchId。
+        uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+        if (id == 0) id = AssignStateDiagnosticId(state);
+        DebugBeginExec(id, 1, 1, false); // 同步 inline Job：单线程执行
         SetCurrentBatchId(id);
         fn();
         SetCurrentBatchId(0);
+        DebugEndExec();
     }
     void RecordBatchTiming(const BatchTimingSample& sample) noexcept;
     uint64_t MonotonicNowNs() noexcept;
@@ -286,6 +411,14 @@ namespace JobSystem
     void RegisterLongBatchBarrier(HandleState* state) noexcept;
     void SubmitBackendAsync(std::function<void()> work);
     int ResolveChunkSize(int length, int requestedChunk);
+
+    // ---- ISPC MT 任务挂钩（tasksys.cpp 调用，事件驱动显示每个参与 worker 的耗时）----
+    // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（在 W/M 之后）。
+    uint64_t DebugIspcTaskBegin(const char* name) noexcept;
+    void DebugIspcTaskEnd(uint64_t id) noexcept;
+    // 当前已分配的最高 ISPC 泳道数（GUI 据此扩展泳道条数）
+    int DebugIspcLaneCount() noexcept;
+    constexpr int kIspcLaneBase = kMaxTrackedWorkers - 16; // 预留 16 条高位泳道给 ISPC
 
     // ---- Tiles 模块（定义在 JobSystem_Tiles.cpp） ----
     int ResolveWorkerTarget(int workerCap, int targetCount) noexcept;

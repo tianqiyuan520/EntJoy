@@ -82,7 +82,9 @@ public partial class SpritesRandomMove : Node2D
 
 	public override void _Ready()
 	{
-		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateWorld").Pressed += CreateWorld;
+        NativeJobScheduler.Initialize();
+        NativeJobScheduler.LaunchDebuggerGUI();
+        GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateWorld").Pressed += CreateWorld;
 		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateEntity").Pressed += NewEntity;
 		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("PrintEntity").Pressed += Display;
 		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("Report").Pressed += Report;

@@ -1,5 +1,6 @@
 #include "JobSystemInternal.h"
 #include "ThreadAffinity.h"
+#include "JobDebuggerGUI.h"
 
 #include <algorithm>
 #include <cctype>
@@ -43,9 +44,12 @@ namespace JobSystem
             // 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
             // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+            // 调试面板：pool 执行窗口上报到本 worker 泳道（WorkerLoop 已预分配索引）
+            DebugBeginExec(id, 1, 1, false); // 快速路径 Job：单线程执行
             if (id != 0) SetCurrentBatchId(id);
             try { work(); } catch (...) {}
             if (id != 0) SetCurrentBatchId(0);
+            DebugEndExec();
             if (cleanup) cleanup(ctx);
             CompleteState(state);
             ReleaseState(state);
@@ -56,7 +60,10 @@ namespace JobSystem
     JobHandle ScheduleFastPath(Work&& work, void* ctx, void (*cleanup)(void*), const JobHandle& dep)
     {
         auto* state = CreateState(false);
-        AssignStateDiagnosticId(state);
+        const uint64_t id = AssignStateDiagnosticId(state);
+        // 与 SubmitBatch 同语义：调度即"发布"（pool 执行窗口另由 FastPath 上报泳道）
+        g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+        RecordPublishedJob(id, 1);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
         { FastPath(std::forward<Work>(work), ctx, cleanup, state); return JobHandle(state); }
@@ -124,6 +131,9 @@ namespace JobSystem
             g_nativeWorkerPool->Start(
                 static_cast<uint32_t>(resolved),
                 g_workerAffinityEnabled.load(std::memory_order_relaxed));
+
+            // 若设置了 ENTJOY_DEBUG=1，启动 Dear ImGui 调试窗口
+            JobDebuggerGUI::TryLaunch();
         }
     }
 
@@ -179,6 +189,9 @@ namespace JobSystem
         if (!dependency.State() || dependency.IsCompleted())
         {
             auto* st = CreateState(true);
+            const uint64_t diag = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diag, 1);
             RunSyncJob(st, [func, context]() { func(context); });
             if (cleanup) cleanup(context);
             return JobHandle(st);
@@ -196,19 +209,27 @@ namespace JobSystem
         if (depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
+            const uint64_t diag = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diag, 1);
             RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
             if (cleanup) cleanup(context);
             return JobHandle(st);
         }
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
+            const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(id, 1);
             AcquireState(state);
             SubmitBackendAsync([func, context, length, cleanup, state]() {
                 // state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
                 const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+                DebugBeginExec(id, 1, 1, false); // ScheduleFor（异步单任务）Job：单线程执行
                 if (id != 0) SetCurrentBatchId(id);
                 for (int i = 0; i < length; i++) func(context, i);
                 if (id != 0) SetCurrentBatchId(0);
+                DebugEndExec();
                 if (cleanup) cleanup(context);
                 CompleteState(state);
                 ReleaseState(state);
@@ -227,6 +248,9 @@ namespace JobSystem
         if (depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
+            const uint64_t diag = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diag, 1);
             RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
             if (cleanup) cleanup(context);
             return JobHandle(st);
@@ -293,6 +317,9 @@ namespace JobSystem
         if (!forceAsync && depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
+            const uint64_t diag = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diag, 1);
             RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
             if (cleanup) cleanup(context);
             return JobHandle(st);
@@ -302,6 +329,9 @@ namespace JobSystem
         if (!forceAsync && depOk && rc <= 1)
         {
             auto* st = CreateState(true);
+            const uint64_t diag = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diag, 1);
             RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
             if (cleanup) cleanup(context);
             return JobHandle(st);
@@ -384,8 +414,10 @@ namespace JobSystem
         // Inline for trivial work（依赖已完成/无依赖时；依赖未完成走异步提交）
         if (depOk && rc <= 1 && workerCap <= 1)
         {
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             auto* st = CreateState(true);
+            const uint64_t diagId = AssignStateDiagnosticId(st);
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            RecordPublishedJob(diagId, 1);
             if (func) RunSyncJob(st, [&]() { for (int i = 0; i < itemCount; i++) func(context, &chunks[i]); });
             else if (rangeFunc) RunSyncJob(st, [&]() { rangeFunc(context, chunks, 0, itemCount); });
             else if (entityRangeFunc) RunSyncJob(st, [&]() { entityRangeFunc(context, batches, 0, itemCount); });

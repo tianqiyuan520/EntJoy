@@ -357,12 +357,19 @@ namespace JobSystem
             peak, active, std::memory_order_relaxed)) {}
         g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
 
+        const int wi = WorkerIndexManager::GetCurrentIndex();
+
         uint64_t executed = 0;
         while (true)
         {
             const uint32_t tile = batch->nextTile.fetch_add(
                 1, std::memory_order_relaxed);
             if (tile >= batch->tileCount) break;
+
+            // ---- 调试面板：更新当前 tile 索引 ----
+            if (wi >= 0 && wi < kMaxTrackedWorkers)
+                g_workerCurrentTile[wi].store(tile, std::memory_order_relaxed);
+
             TryExecuteOneTile(batch, tile);
             ++executed;
         }
@@ -370,6 +377,8 @@ namespace JobSystem
         g_workerExecutedRanges.fetch_add(executed, std::memory_order_relaxed);
         g_localTiles.fetch_add(executed, std::memory_order_relaxed);
         g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
+        // 调试面板：把当前执行窗口的 tiles 更新为本 worker 实际认领执行的 tile 数
+        DebugUpdateExecTiles(static_cast<uint32_t>(executed));
     }
 
     static bool AssistExecuteOneTile(void* ptr) noexcept
@@ -547,10 +556,19 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (WorkerIndexManager::GetCurrentIndex() < 0)
             WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
+
+        // ---- 调试面板：执行窗口事件上报（start 时记录时间戳，end 时追加共享历史）----
+        DebugBeginExec(batch->diagnosticId, static_cast<uint32_t>(batch->tileCount),
+                       batch->workerCount, false); // Job：记录计划参与 worker 数
+
         // worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
         SetCurrentBatchId(batch->diagnosticId);
         WorkerAtomicRangeLoop(batch);
         SetCurrentBatchId(0);
+
+        // ---- 调试面板：执行窗口结束 ----
+        DebugEndExec();
+
         const int endProcessor = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
         if (startProcessor >= 0 && endProcessor >= 0 && startProcessor != endProcessor)
@@ -586,6 +604,8 @@ namespace JobSystem
         g_totalTilesPublished.fetch_add(
             static_cast<uint64_t>(batch->tileCount),
             std::memory_order_relaxed);
+
+        RecordPublishedJob(batch->diagnosticId, static_cast<uint32_t>(batch->tileCount));
 
         // Register assist callback + readersDrained for Complete()
         state->assistCallback.store(assistFn, std::memory_order_release);

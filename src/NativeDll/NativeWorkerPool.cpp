@@ -1,5 +1,6 @@
 #include "NativeWorkerPool.h"
 #include "ThreadAffinity.h"
+#include "JobProfiler.h" // WorkerIndexManager：pool 线程预分配索引，供调试面板泳道上报
 
 #include <atomic>
 #include <condition_variable>
@@ -330,6 +331,8 @@ namespace JobSystem
 
         void WorkerLoop(uint32_t workerIndex, WorkerState* worker) noexcept
         {
+            // 调试面板：pool 线程按固定索引上报泳道（FastPath/BackendAsync 执行窗口用）
+            WorkerIndexManager::SetCurrentIndex(static_cast<int>(workerIndex));
             if (bindWorkers)
             {
                 // Workers use logical cores 1..N so they avoid competing with
