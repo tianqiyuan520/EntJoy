@@ -51,7 +51,7 @@ extern "C" {
     JOB_API void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free);
 
     // 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、出口 cb(0)，
-    // C# 异常按 batch 归属（修 V-B 全局异常队列归属错乱）。
+    // C# 异常按 batch 归属。
     typedef void (*CurrentBatchIdCallback)(uint64_t batchId);
     JOB_API void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb);
 

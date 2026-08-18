@@ -236,7 +236,7 @@ public static unsafe partial class NativeJobScheduler
 {
     [ThreadStatic] private static int _jobExecutionDepth;
     // native 每 job 执行窗口 set/clear 的当前 batch id。C# 异常按此归属，
-    // Complete(h) 只抛本 handle 的异常（修 V-B 全局异常队列归属错乱）。
+    // Complete(h) 只抛本 handle 的异常。
     [ThreadStatic] private static ulong _currentBatchId;
 
     // batchId → Job 名，供 native Dear ImGui Timeline 显示 Job 名。
