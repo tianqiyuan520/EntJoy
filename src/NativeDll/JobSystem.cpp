@@ -37,6 +37,7 @@ namespace JobSystem
     std::atomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers]{};
     std::atomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers]{};
     std::atomic<bool>     g_workerIsActive[kMaxTrackedWorkers]{};
+    std::atomic<bool>     g_debugPaused{ false }; // GUI 暂停标志：暂停时停止记录新段
     ExecWindowRing g_execWindows[kMaxTrackedWorkers]{};
     // 共享时间线历史：job 执行线程在结束瞬间追加（DebugEndExec），GUI 线程只读渲染
     DebugSegment g_debugSegments[kDebugSegmentMax]{};

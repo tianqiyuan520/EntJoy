@@ -291,6 +291,7 @@ namespace JobSystem
                     g_winSpanMs = newSpan;
                     g_viewRightMs = anchorT + (1.0 - anchorFrac) * newSpan;
                     g_timelinePaused = true; // 手动缩放即脱离实时跟随
+                    g_debugPaused.store(true, std::memory_order_release); // 缩放即停止采样
                     // 注意：此处绝不能 return —— BeginChild 尚未 EndChild，提前 return 会破坏 ImGui 栈
                 }
 
@@ -310,6 +311,7 @@ namespace JobSystem
                     {
                         if (!g_dragging) { g_dragging = true; g_dragBaseRight = g_viewRightMs; }
                         g_timelinePaused = true;
+                        g_debugPaused.store(true, std::memory_order_release); // 拖拽即停止采样
                         g_viewRightMs = g_dragBaseRight + (double)(g_clickDownPos.x - mouse.x) / plotW * span;
                     }
                 }
@@ -446,7 +448,8 @@ namespace JobSystem
                 if (ImGui::SliderFloat("##tspan", &frac, 0.0f, 1.0f, "view"))
                 {
                     g_viewRightMs = tMin + frac * (tMax - tMin) + span;
-                    if (!g_timelinePaused) g_timelinePaused = true; // 手动滑即脱离实时跟随
+                    g_timelinePaused = true; // 手动滑即脱离实时跟随
+                        g_debugPaused.store(true, std::memory_order_release); // 滑动即停止采样
                 }
                 ImGui::SameLine();
                 ImGui::Text("  -%.1fs", span / 1000.0);
@@ -553,9 +556,12 @@ namespace JobSystem
                 {
                     // 工具栏：实时/暂停 + 快捷窗长
                     if (ImGui::Button(g_timelinePaused ? "Resume (live)" : "Pause (hold)"))
+                    {
                         g_timelinePaused = !g_timelinePaused;
+                        g_debugPaused.store(g_timelinePaused, std::memory_order_release); // 暂停即停止采样
+                    }
                     ImGui::SameLine();
-                    if (ImGui::Button("Live")) { g_timelinePaused = false; g_viewRightMs = 0.0; g_winSpanMs = 8000.0; }
+                    if (ImGui::Button("Live")) { g_timelinePaused = false; g_debugPaused.store(false, std::memory_order_release); g_viewRightMs = 0.0; g_winSpanMs = 8000.0; }
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(110.0f);
                     const char* presets[] = { "0.5s", "1s", "2s", "4s", "8s", "15s", "30s", "60s", "120s" };

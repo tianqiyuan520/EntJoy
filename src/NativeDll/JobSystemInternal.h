@@ -142,6 +142,7 @@ namespace JobSystem
     // ---- 原生发布活动事件（供 GUI Activity 完整记录微秒级 batch；动态保留全部）----
     struct NativeActivityEvent { uint64_t batchId; uint32_t tiles; double timeMs; };
     extern std::atomic<bool> g_nativeActivityCaptureEnabled;
+    extern std::atomic<bool> g_debugPaused; // GUI 暂停时停止记录新段，避免环形缓冲覆盖历史
     void RecordPublishedJob(uint64_t batchId, uint32_t tiles) noexcept;
     int ConsumePublishedJobs(NativeActivityEvent* out, int maxCount, uint64_t* readIndex) noexcept;
     void ClearPublishedJobs() noexcept;
@@ -333,6 +334,8 @@ namespace JobSystem
         // 零开销守门：仅调试面板开启（g_nativeActivityCaptureEnabled）才采集。
         // 注意：优先级需高于 id==0 判断，确保面板关闭时完全不触碰任何原子。
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
+        // 暂停时停止记录新段：不压栈、不写共享历史，环形缓冲不被覆盖、历史得以保留。
+        if (g_debugPaused.load(std::memory_order_relaxed)) return;
         const int lane = DebugReportLaneId();
         if (id == 0 || lane < 0) return;
         auto& st = g_execWindows[lane];
@@ -354,7 +357,8 @@ namespace JobSystem
         if (st.depth > 0)
         {
             const ExecWindowRing::ExecFrame f = st.stack[--st.depth];
-            if (g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed))
+            if (g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed) &&
+                !g_debugPaused.load(std::memory_order_relaxed))
             {
                 // 结束事件：完整窗口直接追加进共享时间线历史（GUI 只读渲染）。
                 // 先写槽内容，再 fetch_add(release) 发布计数——读者永不读到未写完的槽。

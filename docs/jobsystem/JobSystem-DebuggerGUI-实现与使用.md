@@ -35,7 +35,7 @@ NativeJobScheduler.LaunchDebuggerGUI();  // 启动面板并开始监听
 - **底部横向滑块**：在历史时间内拖动平移窗口（保留横向滚时间轴能力）
 - **泳道竖向滚动条**：泳道过多（含 ISPC W\* 泳道）时上下滚动
 - **单击彩条**：选中并显示详情（Name、Where、Batch、Duration、Tiles 或直调并行度、Range）
-- **Pause / Resume**：手动切换实时跟随；暂停时冻结时间窗右界（now 不推进也不漂移）
+- **Pause / Resume**：手动切换实时跟随；**暂停=停止采样+冻结视图**（`g_timelinePaused` 冻结时间窗右界，`g_debugPaused` 令原生侧停止记录新段 → 环形缓冲不被覆盖、历史保留；缩放/拖拽/横向滑块也会自动进入暂停态并停止采样）
 - **Live**：一键回到实时跟随，重置窗长 8s
 - **窗长下拉**：快捷切换 0.5s~120s
 
@@ -115,16 +115,42 @@ JobDebuggerGUI.h / .cpp
 - `GenerateMethodWrapper`：直调方法插入 `RecordDirectCall`
 - `GenerateJobScheduleMethod`：`ScheduleParallelForBatchRaw` / `ScheduleRaw` 后插入 `RegisterScheduledJob`
 
+## 冻结 / 暂停的实现
+
+- **目标**：点击 Pause 后停止采样、view 不再滚动、之前的历史不被覆盖丢失。
+- **机制**：两个标志协同：
+  - `g_timelinePaused`（GUI 静态）：冻结时间窗右界 `viewRight`，使视图停止跟随 now。
+  - `g_debugPaused`（原生共享原子，`JobSystemInternal.h` 声明 / `JobSystem.cpp` 定义）：
+    - `DebugBeginExec` 暂停时**第一行直接 return**（不压栈、不记录）
+    - `DebugEndExec` 暂停时**跳过段写入** → `g_debugSegVisible` 不再增长，环形缓冲不被新段覆盖，历史保留
+  - `StartPause` 时 `g_timelinePaused=true; g_debugPaused.store(true)`；`Resume`/`Live` 清空两者。
+  - 缩放(Ctrl+滚轮)、拖拽、横向滑块也会自动进入暂停态并 `g_debugPaused=true`（只要手动脱离实时跟随即停采样）。
+
+## 踩坑与经验
+
+1. **字体图集崩溃（最隐蔽）**：`ImGui::NewFrame` 在首帧构建字体图集，`GetGlyphRangesChineseFull()` + 微软雅黑 + **放大 `SizePixels`**（如 24px、或按 DPI 放大后 40px+）会把图集撑成巨型，导致 stb_truetype/D3D 上传访问越界 `0xc0000005`（崩溃有时被误归因到其它改动）。**修法**：字号固定小值（20px），改用 `io.FontGlobalScale`（绘制时缩放）按窗口 DPI 放大，图集保持小型、物理大小仍一致。
+2. **高 DPI 下字体不一致**：`EntJoySample.exe` 是 DPI-unaware（系统整体放大），Godot 是高 DPI-aware（不放大）→ 同一 DLL 同一字号，Godot 里就显得小。**修法**：`GetDpiForWindow(hwnd)` 取真实 DPI，`io.FontGlobalScale = dpi/96`。注意本 vendored imgui **没有 `ImGuiConfigFlags_DpiEnableScaleFonts`**，需手动设。
+3. **Godot 拷贝的 DLL 不是 bin 的**：`Godot.csproj` 的 `CopyDllsToGodot` 优先拷贝 `Godot\NativeTranspiler_Generated\build\Release\NativeDll.dll`（生成 DLL），**只有它不存在才回退拷贝 repo 根 `bin\`**。所以更新调试面板 DLL 时,不能只更新 `bin/`，还要同步 Godot 生成路径（否则 Godot 一直用旧的生成 DLL）。
+4. **Godot 构建 CMake 失败（MSB4019）**：Godot 在 `dotnet build`（MSBuild 宿主）内触发 `NativeCompileTask`→cmake，子进程继承了 .NET SDK 注入的 `VCTargetsPath`（指向 dotnet sdk 目录），CMake 探测 VS 失败。**修法**：`NativeCompileTask` 调 cmake 前清除 `VCTargetsPath/MSBUILD_EXE_PATH/MSBuildSDKsPath/VisualStudioVersion/VSINSTALLDIR` 等环境变量（让 CMake 用 vswhere 重新探测）。
+5. **暂停期间不改用"GUI 侧冻结段计数"方案**（`g_pauseSegLimit`）也可以，但更简单可靠的是"原生 `g_debugPaused` 直接停写"：二者目的相同，后者更彻底（环形缓冲不被动）。
+6. **诊断崩溃的手段**：`SetUnhandledExceptionFilter` + 写 `dbg_crash.txt`（记录异常地址/读or写/模块偏移/`g_crashPhase` 阶段标记），比反汇编符号缺失的 Release 更快定位。
+7. **ISPC MT 泳道复用特性**：ConcRT 是动态线程池，同一 T 泳道会串行跑多个任务（时间上不重叠），有的线程没被分到任务则空 → 属正常现象，非 bug。
+
 ## 涉及的原生文件
 
 | 文件 | 用途 |
 |------|------|
 | `JobDebuggerGUI.h` | 类声明（`TryLaunch` / `Launch` / `Shutdown`） |
-| `JobDebuggerGUI.cpp` | 全部 GUI 实现（~970 行） |
-| `JobSystemInternal.h` | `NativeActivityEvent`、`RecordPublishedJob` 声明 |
-| `JobSystem.cpp` | 原生活动事件环形、`RecordDirectCall`、名字表 |
-| `JobSystem_Scheduler.cpp` | inline 路径发布计数的补全 |
-| `JobSystem_Tiles.cpp` | `SubmitBatch` 发布计数 |
-| `Exports.h / Exports.cpp` | `JobSystem_RegisterNameResolver`、`JobSystem_RecordDirectCall` 等 C ABI 导出 |
-| `thirdParty/imgui/` | Dear ImGui 库（Win32 + D3D11 后端） |
+| `JobDebuggerGUI.cpp` | 全部 GUI 实现 + DPI 字体缩放 + 冻结按钮接线 |
+| `JobSystemInternal.h` | `NativeActivityEvent`、`RecordPublishedJob`、`g_debugPaused` 声明 |
+| `JobSystem.cpp` | 原生活动事件、`RecordDirectCall`、名字表、`g_debugPaused` 定义 |
+| `JobSystem_Scheduler.cpp` | inline 路径发布计数、崩溃日志（临时） |
+| `JobSystem_Tiles.cpp` | `SubmitBatch` 发布计数、per-worker tile 实际领取数 |
+| `Exports.h / Exports.cpp` | `JobSystem_RegisterNameResolver`、`JobSystem_RecordDirectCall`、直调窗口 ABI |
+| `NativeWorkerPool.cpp/h` | worker 索引预分配、`WorkerSnapshot` |
+| `tasksys.cpp` | ISPC MT 任务挂钩（`DebugIspcTaskBegin/End`） |
+| `NativeCompileTask.cs` | Godot 构建下清理 MSBuild 环境变量（CMake 修复） |
+| `NativeJobScheduler.cs` | `LaunchDebuggerGUI`、直调 `Begin/EndDirectCall`、记名 |
+| `BindingsGenerator.cs` | 直调方法包 try/finally 报执行窗口 |
 | `NativeTranspilerGenerator.cs` | CMake 生成：ImGui 源文件集成到 NativeDll 构建 |
+| `thirdParty/imgui/` | Dear ImGui 库（Win32 + D3D11 后端） |
