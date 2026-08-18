@@ -34,14 +34,6 @@
 
 - `06_HotFieldHandle/HotFieldHandle`：HotField 可行性原型（class + `[HotFieldEntity]` → 字段级 SoA 存储）。
 
-## `07_GpuJob`（当前默认入口）
-
-- `07_GpuJob/Program.cs`：C# / C++ / ISPC / WGPU / CUDA 五路对比（Move、Heavy @1M，p50 + parity）+ GridSearch 构建/查询耗时表（C#/C++/ISPC/CUDA/GPU）。
-  - `[NativeTranspile(Target=Gpu)]` → WGSL → wgpu-native（`ScheduleGpu`）。
-  - `[NativeTranspile(Target=Cuda)]` → `.cu` → nvcc cubin → CUDA 驱动 API（`ScheduleCuda`，pinned NativeArray 直连）。
-  - `ENTJOY_GPU_DIAG=1`：GPU 阶段拆解 / Residency / GridSearch 全流程；`ENTJOY_CUDA_ONLY=1`：只跑 CUDA。
-- `07_GpuJob/GridSearchFullUpdate.cs`：counting-sort grid 5-pass 全量更新（count → CPU prefix → place → query）。
-
 ## `08_EntityRandomAccess`
 
 - `08_EntityRandomAccess`：稀疏 Entity 随机访问开销基准（ComponentLookup 优化）。

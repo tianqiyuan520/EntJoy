@@ -170,8 +170,6 @@
     <ClInclude Include="ChunkJobData.h" />
     <ClInclude Include="ChunkNativeArray.h" />
     <ClInclude Include="Exports.h" />
-<ClInclude Include="GpuCompute.h" />
-<ClInclude Include="GpuResidency.h" />
     <ClInclude Include="JobDebuggerGUI.h" />
     <ClInclude Include="JobProfiler.h" />
     <ClInclude Include="JobSystem.h" />
@@ -191,8 +189,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Exports.cpp" />
-<ClCompile Include="GpuCompute.cpp" />
-<ClCompile Include="GpuResidency.cpp" />
     <ClCompile Include="JobDebuggerGUI.cpp" />
     <ClCompile Include="JobProfiler.cpp" />
     <ClCompile Include="JobSystem.cpp" />
