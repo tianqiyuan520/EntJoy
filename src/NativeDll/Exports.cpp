@@ -86,12 +86,14 @@ extern "C"
     // 托管 Persistent 回调槽的单一存储（唯一归属 NativeDll.dll）。
     // DLL 分离后，NativeTranspiled.dll 的生成代码经这两个导出访问器读写同一槽，
     // 避免 inline+static 导致跨 DLL 各持一份副本（回退 malloc/free → 堆损坏）。
+    // 定义显式带 ENTJOY_PERSISTENT_ALLOC_API（NativeDll 编译时=extern "C" dllexport，
+    // 与 NativeContainers.h 声明一致），确保符号进入 NativeDll.dll 导出表。
     namespace {
         PersistentAllocCallback g_persistentAlloc = nullptr;
         PersistentFreeCallback  g_persistentFree  = nullptr;
     }
-    PersistentAllocCallback* EntJoy_GetPersistentAllocRef() { return &g_persistentAlloc; }
-    PersistentFreeCallback*  EntJoy_GetPersistentFreeRef()  { return &g_persistentFree; }
+    ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback* EntJoy_GetPersistentAllocRef() { return &g_persistentAlloc; }
+    ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback*  EntJoy_GetPersistentFreeRef()  { return &g_persistentFree; }
 
     void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb)
     {
