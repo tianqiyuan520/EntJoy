@@ -8,14 +8,12 @@ namespace NativeTranspiler.Analyzer
     public static partial class NativeTranspiler
     {
         /// <summary>
-        /// 后端目标类型枚举。
+        /// 后端目标类型枚举。（GPU/WGSL/CUDA 后端已拆分至 feature/gpu-offload 分支）
         /// </summary>
         public enum BackendTarget
         {
             Cpp,
-            Ispc,
-            Gpu,
-            Cuda
+            Ispc
         }
 
         /// <summary>

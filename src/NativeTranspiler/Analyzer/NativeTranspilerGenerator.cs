@@ -89,7 +89,6 @@ namespace NativeTranspiler.Analyzer
                 var cppFiles = new List<string>();
                 var fastMathCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
-                var cudaFiles = new List<string>();
                 var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{AttributeNamespace}.{AttributeName}Attribute");
 
                 // 收集被标记的方法和 Job 结构体
@@ -166,10 +165,6 @@ namespace NativeTranspiler.Analyzer
                             ispcFiles.Add(($"{baseName}_mt.ispc", mathLib));
                             cppFiles.Add($"{baseName}_mt_wrapper.cpp");
                         }
-                    }
-                    else if (target == NativeTranspiler.BackendTarget.Gpu)
-                    {
-                        // GPU 目标仅支持 Job 结构体；静态方法标记 Gpu 由校验器 NT014 拒绝，这里不生成任何文件。
                     }
                     else
                     {
@@ -255,44 +250,6 @@ namespace NativeTranspiler.Analyzer
                             cppFiles.Add($"{ispcBase}_mt_wrapper.cpp");
                         }
                     }
-                    else if (target == NativeTranspiler.BackendTarget.Gpu)
-                    {
-                        // GPU 目标：生成 .wgsl 内核，不生成 C++/ISPC（NativeDll 无需重建）。
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}_Adapter.cpp"));
-
-                        var wgslSource = WgslGenerator.GenerateWgslSource(job, ctx.Compilation);
-                        string wgslPath = Path.Combine(outputDir, $"{WgslGenerator.GetWgslBaseName(job)}.wgsl");
-                        bool disabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
-                        bool fileExists = File.Exists(wgslPath);
-                        if (!disabledAutoRefresh || !fileExists)
-                            WriteAllTextWithRetry(wgslPath, wgslSource);
-                    }
-                    else if (target == NativeTranspiler.BackendTarget.Cuda)
-                    {
-                        // CUDA 目标：生成 .cu 内核源（nvcc 编译 cubin 由 CMakeLists 规则负责），不生成 C++/ISPC/WGSL。
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}_Adapter.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.wgsl"));
-
-                        var cudaSource = CudaGenerator.GenerateCudaSource(job, ctx.Compilation);
-                        string cuPath = Path.Combine(outputDir, $"{CudaGenerator.GetCudaKernelName(job)}.cu");
-                        bool cudaDisabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
-                        bool cudaFileExists = File.Exists(cuPath);
-                        if (!cudaDisabledAutoRefresh || !cudaFileExists)
-                            WriteAllTextWithRetry(cuPath, cudaSource);
-                        cudaFiles.Add(CudaGenerator.GetCudaKernelName(job) + ".cu");
-                    }
                     else
                     {
                         DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
@@ -323,8 +280,7 @@ namespace NativeTranspiler.Analyzer
 
                     bool adapterProvidedByIspcChunkWrapper = target == NativeTranspiler.BackendTarget.Ispc &&
                                                              CppJobGenerator.IsChunkScheduledJob(job);
-                    if (!adapterProvidedByIspcChunkWrapper && target != NativeTranspiler.BackendTarget.Gpu
-                        && target != NativeTranspiler.BackendTarget.Cuda)
+                    if (!adapterProvidedByIspcChunkWrapper)
                     {
                         // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
                         // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
@@ -421,7 +377,7 @@ namespace NativeTranspiler.Analyzer
                     string nativeDllDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "NativeDll"));
                     var relativeNativeDllDir = GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
                     bool hasFastMath = fastMathCppFiles.Count > 0;
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, cudaFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
                     string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
@@ -662,9 +618,7 @@ namespace {AttributeNamespace}
     public enum BackendTarget
     {{
         Cpp,
-        Ispc,
-        Gpu,
-        Cuda
+        Ispc
     }}
 
     public enum IspcMathLib
@@ -865,7 +819,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
         }
 
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
-                                  List<string> cudaFiles,
                                   string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath)
         {
             var sb = new StringBuilder();
@@ -1082,43 +1035,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("    if(TASKSYS_SRC)");
                 sb.AppendLine("        set_source_files_properties(${TASKSYS_SRC} PROPERTIES COMPILE_FLAGS \"/arch:AVX\")");
                 sb.AppendLine("    endif()");
-                sb.AppendLine("endif()");
-                sb.AppendLine();
-            }
-
-            // CUDA：可选（nvcc → cubin，驱动 API 运行时加载；无 nvcc 则跳过，运行时 GpuComputeCuda skip）
-            if (cudaFiles.Count > 0)
-            {
-                sb.AppendLine("# ============================================================");
-                sb.AppendLine("# CUDA: optional (nvcc -cubin, driver API loads at runtime)");
-                sb.AppendLine("# ============================================================");
-                sb.AppendLine("find_program(NVCC_EXECUTABLE nvcc)");
-                sb.AppendLine("if(NVCC_EXECUTABLE)");
-                sb.AppendLine("    message(STATUS \"NativeDll: nvcc found at ${NVCC_EXECUTABLE}\")");
-                sb.AppendLine("    set(CUDA_ARCH sm_89)");
-                sb.AppendLine("    set(CUDA_OBJECTS");
-                foreach (var cu in cudaFiles)
-                {
-                    string baseName = Path.GetFileNameWithoutExtension(cu);
-                    sb.AppendLine($"        \"${{CMAKE_CURRENT_SOURCE_DIR}}/{baseName}.cubin\"");
-                }
-                sb.AppendLine("    )");
-                sb.AppendLine();
-                foreach (var cu in cudaFiles)
-                {
-                    string baseName = Path.GetFileNameWithoutExtension(cu);
-                    string sourcePath = "${CMAKE_CURRENT_SOURCE_DIR}/" + cu.Replace("\\", "/");
-                    string cubinPath = "${CMAKE_CURRENT_SOURCE_DIR}/" + baseName + ".cubin";
-                    sb.AppendLine("    add_custom_command(");
-                    sb.AppendLine($"        OUTPUT \"{cubinPath}\"");
-                    sb.AppendLine($"        COMMAND \"${{NVCC_EXECUTABLE}}\" -cubin -arch=${{CUDA_ARCH}} -ccbin \"${{CMAKE_CXX_COMPILER}}\" \"{sourcePath}\" -o \"{cubinPath}\"");
-                    sb.AppendLine($"        DEPENDS \"{sourcePath}\"");
-                    sb.AppendLine("        WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
-                    sb.AppendLine($"        COMMENT \"Compiling CUDA {cu} -> cubin\"");
-                    sb.AppendLine("        VERBATIM");
-                    sb.AppendLine("    )");
-                }
-                sb.AppendLine("    add_custom_target(CudaKernels ALL DEPENDS ${CUDA_OBJECTS})");
                 sb.AppendLine("endif()");
                 sb.AppendLine();
             }

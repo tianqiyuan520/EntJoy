@@ -21,7 +21,6 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor InvalidGpuJobError = new("NT014", "Invalid GPU Job", "[NativeTranspile] GPU Job '{0}': {1}", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -78,13 +77,7 @@ namespace NativeTranspiler.Analyzer
             var attrSym = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
             if (attrSym != null)
             {
-                var mTarget = AttributeHelper.GetBackendTarget(method, attrSym);
-                if (mTarget == NativeTranspiler.BackendTarget.Gpu || mTarget == NativeTranspiler.BackendTarget.Cuda)
-                {
-                    diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, method.Locations.FirstOrDefault(),
-                        method.Name, $"{mTarget} 仅支持 Job 结构体（IJobParallelFor / IJobFor），静态方法请使用 Cpp/Ispc"));
-                    return false;
-                }
+                // GPU/CUDA 后端已拆分至 feature/gpu-offload 分支，此处仅校验 Cpp/Ispc。
             }
 
             if (!IsUnmanagedTypeOrVoid(method.ReturnType))
@@ -182,12 +175,7 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                var attrSymbol2 = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
-                var target2 = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol2);
-                if (target2 == NativeTranspiler.BackendTarget.Gpu)
-                    ValidateGpuJobStruct(structSymbol, executeMethod, compilation, diagnostics);
-                else if (target2 == NativeTranspiler.BackendTarget.Cuda)
-                    ValidateGpuJobStruct(structSymbol, executeMethod, compilation, diagnostics);   // CUDA 复用 GPU 的 Job 约束（同字段/形状限制）
+                // GPU/CUDA Job 校验已随后端拆分至 feature/gpu-offload 分支，dev 仅保留 Cpp/Ispc。
             }
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -236,91 +224,6 @@ namespace NativeTranspiler.Analyzer
             }
 
             return diagnostics.Count == 0;
-        }
-
-        /// <summary>
-        /// GPU Job 专项校验（Milestone 1 约束）：
-        ///   仅支持 IJobParallelFor / IJobFor（IJob 不支持：GPU 内核无索引语义）；
-        ///   字段仅支持 NativeArray<T>（T 为 host-shareable）或标量 float/int/uint/enum；
-        ///   不支持 NativeList/指针/bool 标量/double/long/用户 struct 标量字段、do-while。
-        /// </summary>
-        private static void ValidateGpuJobStruct(INamedTypeSymbol structSymbol, IMethodSymbol executeMethod,
-            Compilation compilation, List<Diagnostic> diagnostics)
-        {
-            bool supportedKind = CppJobGenerator.IsParallelForJob(structSymbol) ||
-                                 CppJobGenerator.IsForJob(structSymbol);
-            if (!supportedKind)
-            {
-                diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, structSymbol.Locations.FirstOrDefault(),
-                    structSymbol.Name, "BackendTarget.Gpu 仅支持 IJobParallelFor / IJobFor（IJob 无索引语义、IJobChunk/IJobEntity 暂不支持）"));
-            }
-
-            foreach (var field in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-            {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                {
-                    if (field.Type.Name != "NativeArray")
-                    {
-                        diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, field.Locations.FirstOrDefault(),
-                            structSymbol.Name, $"字段 '{field.Name}'：NativeList/UnsafeList 暂不支持 GPU，仅 NativeArray"));
-                        continue;
-                    }
-                    var elem = ((INamedTypeSymbol)field.Type).TypeArguments[0];
-                    if (!IsWgslHostShareable(elem))
-                    {
-                        diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, field.Locations.FirstOrDefault(),
-                            structSymbol.Name, $"字段 '{field.Name}' 的元素类型 '{elem.ToDisplayString()}' 不支持 GPU（支持 float/int/uint/float2/int2/uint2 及仅含这些的 struct）"));
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, field.Locations.FirstOrDefault(),
-                        structSymbol.Name, $"字段 '{field.Name}'：指针字段暂不支持 GPU"));
-                }
-                else
-                {
-                    var st = field.Type.SpecialType;
-                    bool okScalar = st is SpecialType.System_Single or SpecialType.System_Int32 or SpecialType.System_UInt32;
-                    bool isEnum = field.Type.TypeKind == TypeKind.Enum;
-                    if (!okScalar && !isEnum)
-                    {
-                        diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, field.Locations.FirstOrDefault(),
-                            structSymbol.Name, $"字段 '{field.Name}' 类型 '{field.Type.ToDisplayString()}' 不支持 GPU（标量仅支持 float/int/uint/enum）"));
-                    }
-                }
-            }
-
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            if (methodSyntax?.Body != null)
-            {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                foreach (var node in methodSyntax.Body.DescendantNodes())
-                {
-                    if (node is DoStatementSyntax)
-                    {
-                        diagnostics.Add(Diagnostic.Create(InvalidGpuJobError, node.GetLocation(),
-                            structSymbol.Name, "do-while 循环在 WGSL 中不支持"));
-                    }
-                }
-            }
-        }
-
-        /// <summary>判断类型是否为 WGSL host-shareable（数组元素可用）</summary>
-        private static bool IsWgslHostShareable(ITypeSymbol type)
-        {
-            if (WgslTypes.ToWgslType(type) != null)
-                return WgslTypes.ToWgslType(type) != "f64"; // double 需要可选扩展
-            if (type.IsValueType && type.TypeKind == TypeKind.Struct &&
-                !NativeTranspiler.IsBuiltinUnmanaged(type) && !NativeTranspiler.IsEntJoyPredefinedType(type))
-            {
-                foreach (var f in ((INamedTypeSymbol)type).GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-                {
-                    if (!IsWgslHostShareable(f.Type))
-                        return false;
-                }
-                return true;
-            }
-            return false;
         }
 
         public static bool IsUnmanagedType(ITypeSymbol type)
