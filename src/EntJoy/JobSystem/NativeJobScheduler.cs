@@ -1097,9 +1097,18 @@ public static unsafe partial class NativeJobScheduler
         // 先等待（Complete 保留调用方引用），再读 batchId，最后释放——
         // batch 可能在依赖链完成后才提交，diagnosticBatchId 提交后才有效，
         // 因此必须在等待之后、释放之前读。然后只抛本 batch 的异常。
-        JobSystem_Complete(handle);
-        ulong batchId = JobSystem_GetDiagnosticBatchId(handle);
-        JobSystem_ReleaseHandle(handle);
+        // finally 保证：即使 JobSystem_Complete / GetDiagnosticBatchId 抛异常
+        //（如 DLL 卸载、进程退出竞态），ReleaseHandle 也必然执行，避免 HandleState 泄漏。
+        ulong batchId = 0;
+        try
+        {
+            JobSystem_Complete(handle);
+            batchId = JobSystem_GetDiagnosticBatchId(handle);
+        }
+        finally
+        {
+            JobSystem_ReleaseHandle(handle);
+        }
         ThrowRecordedJobExceptions(batchId);
     }
 
@@ -2586,51 +2595,67 @@ public static unsafe partial class NativeJobScheduler
         var chunksPtr = (ChunkJobData*)header->chunksPtr;
         bool ownsChunkData = header->ownsChunkData != 0;
 
-        if (chunksPtr != null && gcHandleStartIndex >= 0)
+        try
         {
-            lock (_chunkGCHandlesLock)
+            if (chunksPtr != null && gcHandleStartIndex >= 0)
             {
-                for (int i = 0; i < chunkCount && (gcHandleStartIndex + i) < _chunkGCHandles.Count; i++)
+                lock (_chunkGCHandlesLock)
                 {
-                    int index = gcHandleStartIndex + i;
-                    if (_chunkGCHandles[index].IsAllocated) { _chunkGCHandles[index].Free(); _chunkGCHandles[index] = default; }
-                }
-                // 清理尾部连续的 default 条目，防止 _chunkGCHandles 无界增长
-                while (_chunkGCHandles.Count > 0 && !_chunkGCHandles[_chunkGCHandles.Count - 1].IsAllocated)
-                    _chunkGCHandles.RemoveAt(_chunkGCHandles.Count - 1);
-            }
-        }
-
-        if (ownsChunkData)
-        {
-            for (int i = 0; i < chunkCount; i++)
-            {
-                if (chunksPtr != null)
-                {
-                    var cd = chunksPtr[i];
-                    if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
-                    if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
-                    if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
-                    if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
-                    if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                    for (int i = 0; i < chunkCount && (gcHandleStartIndex + i) < _chunkGCHandles.Count; i++)
+                    {
+                        int index = gcHandleStartIndex + i;
+                        if (_chunkGCHandles[index].IsAllocated) { _chunkGCHandles[index].Free(); _chunkGCHandles[index] = default; }
+                    }
+                    // 清理尾部连续的 default 条目，防止 _chunkGCHandles 无界增长
+                    while (_chunkGCHandles.Count > 0 && !_chunkGCHandles[_chunkGCHandles.Count - 1].IsAllocated)
+                        _chunkGCHandles.RemoveAt(_chunkGCHandles.Count - 1);
                 }
             }
-        }
 
-        if (chunksPtr != null && ownsChunkData) Marshal.FreeHGlobal((IntPtr)chunksPtr);
-        if (_chunkContextLeases.TryRemove(contextBlock, out var leaseHandle))
-        {
-            if (leaseHandle.Target is IDisposable lease)
+            if (ownsChunkData)
             {
-                lease.Dispose();
+                for (int i = 0; i < chunkCount; i++)
+                {
+                    if (chunksPtr != null)
+                    {
+                        var cd = chunksPtr[i];
+                        if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
+                        if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
+                        if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
+                        if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
+                        if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                    }
+                }
             }
 
-            leaseHandle.Free();
+            if (chunksPtr != null && ownsChunkData) Marshal.FreeHGlobal((IntPtr)chunksPtr);
         }
+        finally
+        {
+            // 兜底（#7/#16）：即使上面释放过程中抛异常（AccessViolation/StackOverflow 等），
+            // 也必须复位 cleanupInProgress、释放 _chunkContextLeases 的 IDisposable 并归还池块，
+            // 否则 flag 永久置位 + lease 泄漏（chunk 数据 MB 级永不回收）。
+            if (_chunkContextLeases.TryRemove(contextBlock, out var leaseHandle))
+            {
+                try
+                {
+                    if (leaseHandle.Target is IDisposable lease)
+                        lease.Dispose();
+                }
+                catch { }
+                try { leaseHandle.Free(); } catch { }
+            }
 
-        var pooledBlock = contextBlock - IntPtr.Size;
-        int pooledSize = *(int*)pooledBlock;
-        ContextPool.Return(pooledBlock, pooledSize);
+            try
+            {
+                var pooledBlock = contextBlock - IntPtr.Size;
+                int pooledSize = *(int*)pooledBlock;
+                ContextPool.Return(pooledBlock, pooledSize);
+            }
+            catch { }
+
+            Interlocked.Exchange(ref header->cleanupInProgress, 0);
+        }
     }
 
     // ======================== 回调工厂 ========================
@@ -3015,14 +3040,19 @@ public static unsafe partial class NativeJobScheduler
             return idx >= MaxBucket ? -1 : idx;
         }
 
-        /// <summary>安全计算桶大小，避免 1&lt;&lt;31 / 1&lt;&lt;32 溢出。</summary>
+        /// <summary>返回桶 idx 对应的分配大小。</summary>
+        /// <remarks>
+        /// 桶 idx 覆盖 size ∈ (64*idx, 64*(idx+1)]，分配桶上界 64*(idx+1) 即可。
+        /// 修复两个历史缺陷：
+        ///  1) 旧实现 1L&lt;&lt;(6+idx) 幂次分配：idx=63 时 1L&lt;&lt;69 在 C# long 移位只取低 6 位
+        ///     回绕为 1L&lt;&lt;5=32 字节 → 请求 3969-4032 字节却分配 32 → 堆缓冲区溢出；
+        ///  2) idx≥26 时 2^(6+idx) ≥ 2^32 → clamp 到 int.MaxValue(~2GB) → 必然 OOM。
+        /// 线性上界同时消除溢出、爆炸、与线性分桶不匹配的浪费。
+        /// </remarks>
         private static int GetBucketAllocSize(int idx)
         {
-            // idx 范围 0..63, BucketShift=6 → 移位 6..69
-            // C# int 左移只用低 5 位，idx>=26 时会截断导致分配远小于预期。
-            // 改用 long 计算再 clamp。
-            long size = 1L << (BucketShift + idx);
-            return (int)Math.Min(size, int.MaxValue);
+            // idx 最大 63 → (63+1)&lt;&lt;6 = 4096，int 无溢出
+            return (idx + 1) << BucketShift;
         }
 
         public static IntPtr Rent(int size)

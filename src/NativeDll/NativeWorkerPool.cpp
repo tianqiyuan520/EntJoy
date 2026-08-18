@@ -3,8 +3,10 @@
 #include "JobProfiler.h" // WorkerIndexManager：pool 线程预分配索引，供调试面板泳道上报
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -446,7 +448,18 @@ namespace JobSystem
                 return;
             }
             _impl->accepting = false;
-            _impl->idle.wait(lock, [this] { return _impl->outstandingBatches == 0; });
+            // 看门狗超时：正常路径 outstandingBatches 应随末位 batch 完成归零，
+            // 若 worker 卡死/死锁导致永远 >0，无条件无限等待会让进程退出永久挂起。
+            // 等待固定窗口（30s）后强推 shutdown，宁可丢未完成 batch 也要可退出。
+            constexpr auto kStopDrainTimeout = std::chrono::seconds(30);
+            if (!_impl->idle.wait_for(lock, kStopDrainTimeout,
+                    [this] { return _impl->outstandingBatches == 0; }))
+            {
+                // 超时：仍有 outstandingBatches（可能 worker 死锁）。记录并继续强制停止。
+                std::fprintf(stderr,
+                    "[NativeWorkerPool] WARNING: Stop() drained for 30s with %zu outstanding batches; forcing shutdown.\n",
+                    _impl->outstandingBatches.load(std::memory_order_relaxed));
+            }
             _impl->stopRequested.store(true, std::memory_order_release);
         }
         for (auto& worker : _impl->workers)
