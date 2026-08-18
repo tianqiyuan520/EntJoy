@@ -8,7 +8,9 @@ namespace NativeTranspiler.Analyzer
 {
     public static class BindingsGenerator
     {
-        private const string NativeLibraryName = "NativeDll";
+        // DLL 分离后：生成代码（wrapper/adapter）编译进 NativeTranspiled.dll，
+        // 核心 runtime（JobSystem 等）仍在 NativeDll.dll。
+        private const string NativeLibraryName = "NativeTranspiled";
 
         public static string GenerateBindingsClass(
             IEnumerable<IMethodSymbol> methods,

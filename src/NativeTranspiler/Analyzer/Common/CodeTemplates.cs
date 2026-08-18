@@ -13,7 +13,12 @@ namespace NativeTranspiler.Analyzer.Common
     {
         /// <summary>
         /// 导出宏定义：
-        ///   HEAD: dllexport/dllimport, CALLINGCONVENTION: __cdecl,
+        ///   HEAD: dllexport/dllimport（NativeDll 核心；保留兼容旧生成代码）
+        ///   GENERATED_API: NativeTranspiled.dll 专用的 dllexport/dllimport
+        ///      —— DLL 分离后生成代码（wrapper/adapter）编译进 NativeTranspiled.dll，
+        ///         由 CMake 定义 GENERATED_EXPORTS 使其 dllexport；使用侧（头文件包含方）
+        ///         不定义则 dllimport。
+        ///   CALLINGCONVENTION: __cdecl,
         ///   RESTRICT: __restrict/__restrict__ 跨平台兼容
         /// </summary>
         public static string GenerateExportMacros() => @"
@@ -25,14 +30,25 @@ namespace NativeTranspiler.Analyzer.Common
 
 #ifdef _WIN32
 #define CALLINGCONVENTION __cdecl
-#else
-#define CALLINGCONVENTION
-#endif
-
 #ifdef DLL_IMPORT
 #define HEAD EXTERNC __declspec(dllimport)
+#define GENERATED_API EXTERNC __declspec(dllimport)
 #else
+// NativeDll 核心导出（默认 dllexport，旧语义保留）
 #define HEAD EXTERNC __declspec(dllexport)
+// NativeTranspiled.dll 专用导出宏（DLL 分离：生成代码独立 DLL）。
+// 由 CMake 对 NativeTranspiled 目标定义 GENERATED_EXPORTS → dllexport；
+// 被他人包含声明时（不定义 GENERATED_EXPORTS）→ dllimport。
+#ifdef GENERATED_EXPORTS
+#define GENERATED_API EXTERNC __declspec(dllexport)
+#else
+#define GENERATED_API EXTERNC __declspec(dllimport)
+#endif
+#endif
+#else
+#define CALLINGCONVENTION
+#define HEAD EXTERNC
+#define GENERATED_API EXTERNC
 #endif
 
 // restrict keyword compatibility

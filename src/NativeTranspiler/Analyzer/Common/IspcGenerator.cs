@@ -516,9 +516,9 @@ namespace NativeTranspiler.Analyzer
             string cppParams = BuildCppWrapperParamList(fields, false);
 
             if (isVoid)
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {baseName}({cppParams})");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {baseName}({cppParams})");
             else
-                sb.AppendLine($"HEAD {cppReturnType} CALLINGCONVENTION {baseName}({cppParams})");
+                sb.AppendLine($"GENERATED_API {cppReturnType} CALLINGCONVENTION {baseName}({cppParams})");
             sb.AppendLine("{");
 
             sb.Append(GenerateContextFillCode(fields, isFill: true));
@@ -558,7 +558,7 @@ namespace NativeTranspiler.Analyzer
             string cppParams = BuildCppWrapperParamList(fields, false);
             string mtParams = string.IsNullOrEmpty(cppParams) ? "int numTasks" : cppParams + ", int numTasks";
 
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {baseName}_mt({mtParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {baseName}_mt({mtParams})");
             sb.AppendLine("{");
             sb.Append(GenerateContextFillCode(fields, isFill: true));
 
@@ -748,7 +748,7 @@ namespace NativeTranspiler.Analyzer
             {
                 string funcName = ispcBase + suffix;
                 string implName = ispcBase + ispcImplSuffix;
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {funcName}({cppParamList})");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({cppParamList})");
                 sb.AppendLine("{");
                 sb.Append(GenerateContextFillCode(fields, isFill: true));
                 sb.AppendLine($"    ispc::{implName}({BuildIspcCallArgsForWrapper(fields, hasBatch)});");
@@ -898,7 +898,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("};");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
             sb.AppendLine("{");
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
@@ -948,7 +948,7 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void* CALLINGCONVENTION {adapterGetterName}()");
+            sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION {adapterGetterName}()");
             sb.AppendLine("{");
             sb.AppendLine($"    return (void*){adapterFuncName};");
             sb.AppendLine("}");
@@ -1023,7 +1023,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("};");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
             sb.AppendLine("{");
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
@@ -1141,12 +1141,12 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void* CALLINGCONVENTION {adapterGetterName}()");
+            sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION {adapterGetterName}()");
             sb.AppendLine("{");
             sb.AppendLine($"    return (void*){adapterFuncName};");
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
             sb.AppendLine("{");
             sb.AppendLine("    const int __endIndex = __startIndex + __count;");
             sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
@@ -1155,7 +1155,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void* CALLINGCONVENTION {rangeAdapterGetterName}()");
+            sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION {rangeAdapterGetterName}()");
             sb.AppendLine("{");
             sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
             sb.AppendLine("}");
@@ -1204,7 +1204,7 @@ namespace NativeTranspiler.Analyzer
             {
                 string funcName = ispcBase + suffix;
                 string implName = ispcBase + ispcImplSuffix;
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {funcName}({cppParamList})");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({cppParamList})");
                 sb.AppendLine("{");
                 sb.Append(GenerateContextFillCode(fields, isFill: true));
                 sb.AppendLine("    int numTasks = std::thread::hardware_concurrency();");

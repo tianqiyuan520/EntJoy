@@ -414,8 +414,20 @@ namespace JobSystem
 
     // ---- ISPC MT 任务挂钩（tasksys.cpp 调用，事件驱动显示每个参与 worker 的耗时）----
     // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（在 W/M 之后）。
-    uint64_t DebugIspcTaskBegin(const char* name) noexcept;
-    void DebugIspcTaskEnd(uint64_t id) noexcept;
+    // DLL 分离：tasksys.cpp（含 ISPCAlloc/Launch/Sync 任务系统）移入 NativeTranspiled.dll，
+    // 故 DebugIspcTaskBegin/End 必须从 NativeDll 导出——NativeDll 编译时 JOB_SYSTEM_EXPORT
+    // 已定义→dllexport；NativeTranspiled 编译时未定义→dllimport。
+#ifdef _WIN32
+#ifdef JOB_SYSTEM_EXPORT
+#define ENTJOY_ISPC_DEBUG_API __declspec(dllexport)
+#else
+#define ENTJOY_ISPC_DEBUG_API __declspec(dllimport)
+#endif
+#else
+#define ENTJOY_ISPC_DEBUG_API
+#endif
+    ENTJOY_ISPC_DEBUG_API uint64_t DebugIspcTaskBegin(const char* name) noexcept;
+    ENTJOY_ISPC_DEBUG_API void DebugIspcTaskEnd(uint64_t id) noexcept;
     // 当前已分配的最高 ISPC 泳道数（GUI 据此扩展泳道条数）
     int DebugIspcLaneCount() noexcept;
     constexpr int kIspcLaneBase = kMaxTrackedWorkers - 16; // 预留 16 条高位泳道给 ISPC

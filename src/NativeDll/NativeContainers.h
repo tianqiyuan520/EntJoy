@@ -1,4 +1,4 @@
-﻿// NativeContainers.h
+// NativeContainers.h
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -20,11 +20,36 @@ namespace EntJoy {
 		// UnsafeList 扩容/释放必须走托管分配器，避免原生 free 内部指针：
 		// C# 池化块布局是 header+payload（payload = base+16），原生 free(Ptr) 是内部指针释放 → 堆损坏 (0xc0000374)。
 		// 回调未注册时回退 malloc/free（原生独立构建/列表由原生创建场景，保持自洽）。
+		//
+		// 跨 DLL 关键设计（DLL 分离）：PersistentAllocFn/PersistentFreeFn 的存储必须唯一归属
+		// NativeDll.dll。若用 (inline + static 局部) 实现，NativeDll 与 NativeTranspiled 各持一份
+		// COMDAT 副本 → 生成代码在 NativeTranspiled 中看到的回调为 null → UnsafeList::Resize 回退
+		// free/malloc 释放由 C# 池化器分配的内存 → 堆损坏。故此处经 NativeDll 导出访问器读取：
+		//   - NativeDll 编译本头：JOB_SYSTEM_EXPORT 已定义 → dllexport（实现定义在 Exports.cpp）
+		//   - NativeTranspiled 编译本头：JOB_SYSTEM_EXPORT 未定义 → dllimport（导入表访问同一存储）
 		using PersistentAllocCallback = void* (*)(int32_t size);
 		using PersistentFreeCallback  = void  (*)(void* ptr);
 
-		inline PersistentAllocCallback& PersistentAllocFn() { static PersistentAllocCallback fn = nullptr; return fn; }
-		inline PersistentFreeCallback&  PersistentFreeFn()  { static PersistentFreeCallback  fn = nullptr; return fn; }
+		// 本头自足导出宏：NativeContainers.h 会被生成代码（NativeTranspiled）直接 include，
+		// 彼处不定义 JOB_API，故不能依赖 Exports.h，需在此声明本地宏按编译方切换导出/导入。
+#ifndef ENTJOY_PERSISTENT_ALLOC_API
+#if defined(_WIN32)
+#ifdef JOB_SYSTEM_EXPORT
+#define ENTJOY_PERSISTENT_ALLOC_API extern "C" __declspec(dllexport)
+#else
+#define ENTJOY_PERSISTENT_ALLOC_API extern "C" __declspec(dllimport)
+#endif
+#else
+#define ENTJOY_PERSISTENT_ALLOC_API extern "C"
+#endif
+#endif
+
+		// 返回 NativeDll 内唯一持有的回调槽的引用（指针）。Exports.cpp 定义。
+		ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback* EntJoy_GetPersistentAllocRef();
+		ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback*  EntJoy_GetPersistentFreeRef();
+
+		inline PersistentAllocCallback& PersistentAllocFn() { return *EntJoy_GetPersistentAllocRef(); }
+		inline PersistentFreeCallback&  PersistentFreeFn()  { return *EntJoy_GetPersistentFreeRef(); }
 
 		inline void RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free) {
 			PersistentAllocFn() = alloc;
