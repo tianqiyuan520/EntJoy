@@ -22,20 +22,28 @@ NativeJobScheduler.LaunchDebuggerGUI();  // 启动面板并开始监听
 - 所有统计值均通过 `GetStatsSnapshot()` 快照读取，面板打开即开始计数。
 
 ### Timeline（时间线 — Unity 风格 Gantt 图）
-- 每条 Worker 一条泳道，Job 用彩色横条沿时间轴从左往右铺（start→end）。
-- 数据来源：GUI 每帧检测 Worker 的 start/end 迁移，用 `steady_clock` 记录时间戳，产生 `JobSegment{worker, batchId, startMs, endMs, tiles}`。
+- 每条 Worker 一条泳道（末条 `M` = 主/调用线程），Job/直调用彩色横条沿时间轴铺（start→end）。
+- 数据来源：共享时间线历史 `g_debugSegments`，原生在 Job/直调 `start/end` 事件发生时记录完整窗口（`DebugBeginExec`/`DebugEndExec`），GUI 只读渲染，不采样。
+- 直调方法（transpiler 直跑，如 `Fill`）标记 `[D]`（蓝青色），与调度式 Job 区分。
+- 泳道画布**横向可滚**：画布以最早事件为原点横向铺开，底部横向滚动条 / 左键拖拽平移时间，竖向滚动条仅在泳道过多时出现。泳道区右/底部预留滚动条宽度，**拖拽判定不抢滚动条事件**。
+- **ISPC MT 直调**：每个实际参与的 worker 会渲染出任务条，泳道标签 `T#`（ISPC ConcRT 任务线程，独立泳道，与 JobSystem 的 W 泳道区分）。
+- **性能零开销**：`DebugBeginExec/DebugEndExec`、`DebugIspcTaskBegin/End`、直调上报等在面板未开启（`g_nativeActivityCaptureEnabled==false`）时**第一行直接短路**，不影响正常调度热路径与 ISPC 任务执行。
 
 **交互**：
-- **Ctrl+滚轮**：缩放时间窗（200ms~120s），以鼠标位置为锚点居中缩放
-- **左键拖拽**：平移时间轴，超过 3px 自动进入暂停态（脱离实时跟随）
-- **单击彩条**：选中并显示详情（Job 名、Worker、Duration、Tiles、Range 相对程序启动 + 调度路径开销 EWMA）
-- **Pause / Resume**：手动切换实时跟随
+- **Ctrl+滚轮**：缩放时间窗（200ms~120s），以光标位置的时间为锚点，缩放后保持锚点相对位置（灵敏）
+- **左键拖拽**：平移时间轴（改变可视时间窗右界），超过 3px 自动进入暂停态
+- **底部横向滑块**：在历史时间内拖动平移窗口（保留横向滚时间轴能力）
+- **泳道竖向滚动条**：泳道过多（含 ISPC W\* 泳道）时上下滚动
+- **单击彩条**：选中并显示详情（Name、Where、Batch、Duration、Tiles 或直调并行度、Range）
+- **Pause / Resume**：手动切换实时跟随；暂停时冻结时间窗右界（now 不推进也不漂移）
 - **Live**：一键回到实时跟随，重置窗长 8s
 - **窗长下拉**：快捷切换 0.5s~120s
 
-### Activity（活动日志）
-- 记录每个已发布的 batch（来自 `RecordPublishedJob` / `RecordDirectCall`）。
-- 原生调度器每次 `SubmitBatch` 或 inline 执行时写入一条发布事件，Activity 完整保留所有记录（最多 4096 条，动态 vector 不覆盖）。
+**时间窗模型**：一窗 `[winLeft, winRight]` 映射到固定可视宽，所有交互（拖拽/缩放/滑块）统一走 `winRight` 与 `span`，不再依赖 ImGui 像素滚动定位，故始终灵敏。
+
+### Activity（执行窗口 + 发布事件）
+- **执行窗口**：逐条列出每个 Job/直调执行（`Wxx: JobName  耗时  tiles  workers`，直调前缀 `[D]`），来源同 Timeline（事件驱动，最多显示最近 2048 条）。
+- **发布事件**：原生发布事件日志（`RecordPublishedJob` / 直调），保留全部历史（最多 4096 条，动态 vector 不覆盖）。
 
 ## 架构
 
@@ -55,17 +63,23 @@ JobDebuggerGUI.h / .cpp
 
 ### 数据采集
 
-#### 1. 调度器发布（`SubmitBatch` / inline 路径）
-- `JobSystem_Tiles.cpp` `SubmitBatch()`：`g_publishedJobs++` → `RecordPublishedJob(batchId, tiles)`
-- `JobSystem_Scheduler.cpp` `ScheduleParallelForBatch` inline 路径：`g_publishedJobs++` → `RecordPublishedJob(id, 1)`
-- `JobSystem_Scheduler.cpp` `ScheduleChunkBatchCore` inline 路径同上
+统一口径：**发布 = 计数 + 记 Activity**。`g_publishedJobs` 与 Activity 事件一一对应（面板开启后的增量部分）。
 
-#### 2. Worker 快照（Timeline 段）
-- `CollectWorkerRows()`：每帧读取 `g_workerCurrentBatchId`、`g_workerCurrentTile`、`g_workerBatchTileCount`、`g_workerIsActive`
-- `RecordActivity()`：比较上一帧状态，检测 start/end 迁移 → `StartSegment()` / `EndSegment()`
+#### 1. 调度器发布（`SubmitBatch` / inline / 快速路径 / 同步路径）
+- `JobSystem_Tiles.cpp` `SubmitBatch()`：`g_publishedJobs++` → `RecordPublishedJob(batchId, tiles)`
+- `JobSystem_Scheduler.cpp` inline / 同步阈值 / `ScheduleFastPath`（`Schedule`、`ScheduleFor`、rc≤1 的 `ParallelFor`/`ParallelForBatch`）与 `ScheduleFor`>64 的 `ScheduleWithDependency` 路径：全部 `g_publishedJobs++` → `RecordPublishedJob(id, 1)`，保证每个 Job 都会被发布并计入
+
+#### 2. 执行窗口事件记录（Timeline 段）——不按帧采样
+- 每个执行窗口（`ExecuteBatchSlot` 的 tile 循环、`FastPath`/`ScheduleFor`>64 的 pool 执行、`RunSyncJob` 的 inline 同步执行）在 **start 瞬间** 由 `DebugBeginExec` 记录开始时间戳（压栈），在 **end 瞬间** 由 `DebugEndExec` 把完整窗口 `{lane, batchId, startMs, endMs, tiles}` 直接追加进共享时间线历史 `g_debugSegments`（base 模块数组，容量 16384）
+- GUI 每帧只**渲染**共享历史，不再采样 worker 迁移——微秒级 Job（两帧之间跑完）也能在结束瞬间被完整记录，无采样丢失
+- 泳道归属：
+  - pool worker 线程由 `WorkerLoop` 预分配 worker 索引 → 上报到对应 `W#` 泳道
+  - 主/调用线程（无索引）→ 上报到预留的 `M` 泳道（index == worker 数）
+- 因此 **Timeline 能看到所有 Job**：tile 批次在 `W#`，快速路径/大 `ScheduleFor` 在 worker 泳道，inline/同步在 `M` 泳道
+- 泳道区为可滚动 child：垂直滚动条 + 普通滚轮滚动泳道，Ctrl+滚轮缩放时间轴
 
 #### 3. 直调方法（ISPC-MT 等不经调度器）
-- C# `RecordDirectCall(string jobName, uint tiles)` → native `JobSystem_RecordDirectCall` → `RecordPublishedJob(id, tiles)`（不增 `g_publishedJobs`，但加入 Activity）
+- C# `RecordDirectCall(string jobName, uint tiles)` → native `JobSystem_RecordDirectCall` → `g_publishedJobs++` → `RecordPublishedJob(id, tiles)`（直调也计入 published，与 Activity 一致；只以 Activity 形式呈现，不映射到泳道）
 - transpiler `GenerateMethodWrapper` 自动为每个 `[NativeTranspile]` 直调方法插入 `RecordDirectCall`
 
 ### 名字解析

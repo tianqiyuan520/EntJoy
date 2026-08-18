@@ -1,8 +1,11 @@
 #include "Exports.h"
 #include "JobSystem.h"
+#include "JobSystemInternal.h"
+#include "NativeWorkerPool.h"
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
+#include "JobDebuggerGUI.h"
 #include "NativeContainers.h"
 #include <cstdio>
 
@@ -45,6 +48,11 @@ extern "C"
         JobSystem::Scheduler::Initialize(numThreads);
     }
 
+    void JobDebuggerGUI_Launch()
+    {
+        JobSystem::JobDebuggerGUI::Launch();
+    }
+
     int JobSystem_GetWorkerCount()
     {
         return JobSystem::CurrentWorkerCount();
@@ -78,6 +86,40 @@ extern "C"
     void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb)
     {
         JobSystem::RegisterCurrentBatchIdCallback(cb);
+    }
+
+    // batchId→Job名 解析器（C# 注册，供 ImGui Timeline 用）。GUI-only，存静态指针。
+    namespace { BatchJobNameResolver g_batchNameResolver = nullptr; BatchJobNameClear g_batchNameClear = nullptr; }
+
+    void JobSystem_RegisterNameResolver(BatchJobNameResolver cb, BatchJobNameClear clearCb)
+    {
+        g_batchNameResolver = cb;
+        g_batchNameClear = clearCb;
+    }
+
+    const BatchJobNameResolver& JobSystem_GetNameResolver()
+    {
+        return g_batchNameResolver;
+    }
+
+    void JobSystem_ClearNameResolver()
+    {
+        if (g_batchNameClear) g_batchNameClear();
+    }
+
+    void JobSystem_RecordDirectCall(const char* jobName, unsigned int tiles)
+    {
+        JobSystem::RecordDirectCall(jobName, tiles);
+    }
+
+    uint64_t JobSystem_BeginDirectCall(const char* jobName, unsigned int tiles)
+    {
+        return JobSystem::BeginDirectCall(jobName, tiles);
+    }
+
+    void JobSystem_EndDirectCall(uint64_t id)
+    {
+        JobSystem::EndDirectCall(id);
     }
 
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
@@ -122,6 +164,23 @@ extern "C"
         // 调用（此时 batch 必已 submit、id 已设置，且调用方引用使 state 存活）。
         if (!handle) return 0;
         return fromHandle(handle)->diagnosticBatchId.load(std::memory_order_acquire);
+    }
+
+    int JobSystem_GetWorkerSnapshots(WorkerSnapshot* buffer, int maxCount)
+    {
+        if (!buffer || maxCount <= 0) return 0;
+        const int workerCount = JobSystem::CurrentWorkerCount();
+        const int count = (maxCount < workerCount) ? maxCount : workerCount;
+        for (int i = 0; i < count; ++i)
+        {
+            auto& snap = buffer[i];
+            snap.workerIndex = i;
+            snap.currentBatchId = JobSystem::g_workerCurrentBatchId[i].load(std::memory_order_relaxed);
+            snap.currentTile = JobSystem::g_workerCurrentTile[i].load(std::memory_order_relaxed);
+            snap.tileCount = JobSystem::g_workerBatchTileCount[i].load(std::memory_order_relaxed);
+            snap.isActive = JobSystem::g_workerIsActive[i].load(std::memory_order_relaxed);
+        }
+        return count;
     }
 
     void JobSystem_CompleteAndRelease(void* handle)

@@ -239,6 +239,13 @@ public static unsafe partial class NativeJobScheduler
     // Complete(h) 只抛本 handle 的异常（修 V-B 全局异常队列归属错乱）。
     [ThreadStatic] private static ulong _currentBatchId;
 
+    // batchId → Job 名，供 native Dear ImGui Timeline 显示 Job 名。
+    // GUI 线程只读并发字典，无锁安全。
+    private static readonly ConcurrentDictionary<ulong, string> _batchIdToJobName = new();
+
+    // 仅当调试面板（LaunchDebuggerGUI）开启后才记录 batchId→名字，避免影响正常调度热路径
+    private static volatile bool _debugNameCaptureEnabled;
+
     internal static bool IsExecutingJob => _jobExecutionDepth > 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -246,6 +253,28 @@ public static unsafe partial class NativeJobScheduler
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ExitJobExecution() => _jobExecutionDepth--;
+
+    // 记录当前 batch 对应的 Job 名（托管回调路径：执行线程上 native 已 set batch id）。
+    private static void RegisterCurrentBatchJobName(string name)
+    {
+        if (!_debugNameCaptureEnabled) return;
+        ulong batchId = _currentBatchId;
+        if (batchId == 0) return;
+        _batchIdToJobName[batchId] = name;
+    }
+
+    // 记录某个已调度 handle 的 Job 名（原生直跑路径：调度返回后立读 diagnosticId）。
+    // 仅对立即发布的调度模式有效（ImmediateNative/PublishAssist 等）；延迟发布取不到则跳过。
+    private static void RegisterScheduledJobName(IntPtr handle, string name)
+    {
+        if (!_debugNameCaptureEnabled || handle == IntPtr.Zero || _jobSystem_GetDiagnosticBatchId == null)
+            return;
+        ulong id = _jobSystem_GetDiagnosticBatchId(handle);
+        if (id != 0)
+        {
+            _batchIdToJobName.TryAdd(id, name);
+        }
+    }
 
     // ======================== DLL 函数指针 ========================
     private static IntPtr _nativeDll = IntPtr.Zero;
@@ -265,6 +294,7 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
     private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_GetDiagnosticBatchId;
     private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void> _jobSystem_RegisterCurrentBatchId;
+    private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, byte*, int, int>, delegate* unmanaged[Cdecl]<void>, void> _jobSystem_RegisterNameResolver;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_RetainHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
@@ -277,6 +307,10 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
+    private static delegate* unmanaged[Cdecl]<void> _jobSystem_LaunchGUI;
+    private static delegate* unmanaged[Cdecl]<byte*, uint, void> _jobSystem_RecordDirectCall;
+    private static delegate* unmanaged[Cdecl]<byte*, uint, ulong> _jobSystem_BeginDirectCall;
+    private static delegate* unmanaged[Cdecl]<ulong, void> _jobSystem_EndDirectCall;
     // Profiler 函数指针
     private static delegate* unmanaged[Cdecl]<int, void> _profiler_SetEnabled;
     private static delegate* unmanaged[Cdecl]<int> _profiler_IsEnabled;
@@ -468,6 +502,8 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_GetDiagnosticBatchId");
         _jobSystem_RegisterCurrentBatchId = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterCurrentBatchId");
+        _jobSystem_RegisterNameResolver = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, byte*, int, int>, delegate* unmanaged[Cdecl]<void>, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterNameResolver");
         _jobSystem_RetainHandle = (delegate* unmanaged[Cdecl]<IntPtr, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_RetainHandle");
         _jobSystem_IsCompleted = (delegate* unmanaged[Cdecl]<IntPtr, int>)
@@ -492,6 +528,15 @@ public static unsafe partial class NativeJobScheduler
             NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
         _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_SetTimingDiagnostics");
+        _jobSystem_LaunchGUI = (delegate* unmanaged[Cdecl]<void>)
+            NativeLibrary.GetExport(dllHandle, "JobDebuggerGUI_Launch");
+        _jobSystem_RecordDirectCall = (delegate* unmanaged[Cdecl]<byte*, uint, void>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_RecordDirectCall");
+        // 新导出用 TryGetExport：旧 DLL 缺失时降级（Begin 返回 0 = 无窗口，不影响运行）
+        if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_BeginDirectCall", out IntPtr fnBeginDirectCall))
+            _jobSystem_BeginDirectCall = (delegate* unmanaged[Cdecl]<byte*, uint, ulong>)fnBeginDirectCall;
+        if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_EndDirectCall", out IntPtr fnEndDirectCall))
+            _jobSystem_EndDirectCall = (delegate* unmanaged[Cdecl]<ulong, void>)fnEndDirectCall;
 
         _profiler_SetEnabled = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobProfiler_SetEnabled");
@@ -716,6 +761,50 @@ public static unsafe partial class NativeJobScheduler
     }
 
     /// <summary>
+    /// 强制启动 Dear ImGui 调试面板并开始监听 JobSystem 实时状态（不依赖 ENTJOY_DEBUG 环境变量）。
+    /// 幂等：重复调用只启动一次。需在 Initialize() 之后调用。
+    /// </summary>
+    public static void LaunchDebuggerGUI()
+    {
+        _debugNameCaptureEnabled = true; // 仅调试面板开启后记录 batchId→Job名
+        if (_nativeDll == IntPtr.Zero || _jobSystem_LaunchGUI == null) return;
+        _jobSystem_LaunchGUI();
+    }
+
+    // transpiler 直调方法（C#/C++/ISPC/ISPC-MT，不经调度器）也上报一次"发布"，计入面板统计。
+    public static unsafe void RecordDirectCall(string jobName, uint tiles)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_RecordDirectCall == null) return;
+        Span<byte> nameBuf = stackalloc byte[128];
+        int n = Math.Min(jobName.Length, 127);
+        for (int i = 0; i < n; i++) nameBuf[i] = (byte)jobName[i];
+        nameBuf[n] = 0;
+        fixed (byte* p = nameBuf) _jobSystem_RecordDirectCall(p, tiles);
+    }
+
+    /// <summary>
+    /// 直调执行窗口开始（transpiler 包装器在 native 调用前调用）：分配 id、记发布、
+    /// 并在当前线程泳道开启执行窗口（事件驱动）。返回 0 表示面板未开启（无窗口）。
+    /// 必须与 <see cref="EndDirectCall"/> 成对调用（包装器用 try/finally 保证）。
+    /// </summary>
+    public static unsafe ulong BeginDirectCall(string jobName, uint tiles)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_BeginDirectCall == null) return 0;
+        Span<byte> nameBuf = stackalloc byte[128];
+        int n = Math.Min(jobName.Length, 127);
+        for (int i = 0; i < n; i++) nameBuf[i] = (byte)jobName[i];
+        nameBuf[n] = 0;
+        fixed (byte* p = nameBuf) return _jobSystem_BeginDirectCall(p, tiles);
+    }
+
+    /// <summary>直调执行窗口结束：关闭当前线程泳道窗口，追加共享时间线段。</summary>
+    public static void EndDirectCall(ulong id)
+    {
+        if (_nativeDll == IntPtr.Zero || _jobSystem_EndDirectCall == null) return;
+        _jobSystem_EndDirectCall(id);
+    }
+
+    /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时原生 ResolveChunkSize 按此值个 tile/worker 切分。
     /// 26 = N=100k/15 worker → batch 257 / 390 tiles，等价于 batch=256 定标（p50 0.577 / p99 0.714）。
     /// 0 = 用原生默认；&gt;0 时在 Initialize 期覆盖。
@@ -777,6 +866,33 @@ public static unsafe partial class NativeJobScheduler
     {
         if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterCurrentBatchId == null) return;
         _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
+        // 同时把 batchId→Job名 解析回调注册给 native，供 Dear ImGui Timeline 显示名字
+        if (_jobSystem_RegisterNameResolver != null)
+            _jobSystem_RegisterNameResolver(&ResolveBatchJobName, &ClearBatchJobNames);
+    }
+
+    // native 调试面板经此查询某 batch 对应的 Job 名。
+    // 返回名长；无映射返回 0。在 GUI 线程调用，仅读并发字典，安全。
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int ResolveBatchJobName(ulong batchId, byte* buf, int bufLen)
+    {
+        if (buf == null || bufLen <= 0) return 0;
+        if (_batchIdToJobName.TryGetValue(batchId, out var name) && !string.IsNullOrEmpty(name))
+        {
+            int n = Math.Min(name.Length, bufLen - 1);
+            for (int i = 0; i < n; i++) buf[i] = (byte)name[i];
+            buf[n] = 0;
+            return n;
+        }
+        return 0;
+    }
+
+    // 调试面板关闭（GUI 线程退出）时由 native 调用，清空名字字典避免长期运行累积。
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void ClearBatchJobNames()
+    {
+        _batchIdToJobName.Clear();
+        _debugNameCaptureEnabled = false;
     }
     /// <summary>
     /// 当前持久 Job Worker 数。与 Unity JobsUtility.JobWorkerCount 的用途一致；
@@ -837,6 +953,7 @@ public static unsafe partial class NativeJobScheduler
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             IntPtr handle = JobSystem_Schedule(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, dependencyLease.Handle);
             cleanupByCpp = true; // C++ now owns ctx via cleanup callback
+            RegisterScheduledJobName(handle, typeof(T).Name);
             return new NativeJobHandle(handle);
         }
         catch
@@ -863,6 +980,7 @@ public static unsafe partial class NativeJobScheduler
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             IntPtr handle = JobSystem_ScheduleFor(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, dependencyLease.Handle);
             cleanupByCpp = true;
+            RegisterScheduledJobName(handle, typeof(T).Name);
             return new NativeJobHandle(handle);
         }
         catch
@@ -889,6 +1007,7 @@ public static unsafe partial class NativeJobScheduler
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             IntPtr handle = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle);
             cleanupByCpp = true;
+            RegisterScheduledJobName(handle, typeof(T).Name);
             return new NativeJobHandle(handle);
         }
         catch
@@ -915,6 +1034,7 @@ public static unsafe partial class NativeJobScheduler
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             IntPtr handle = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle);
             cleanupByCpp = true;
+            RegisterScheduledJobName(handle, typeof(T).Name);
             return new NativeJobHandle(handle);
         }
         catch
@@ -1017,6 +1137,12 @@ public static unsafe partial class NativeJobScheduler
     {
         using var dependencyLease = new RetainedNativeDependency(dependsOn);
         return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
+    }
+
+    // transpiler 生成的 Schedule_{Job} 在调度后调用，把 batchId → Job 名注册进调试器字典。
+    public static void RegisterScheduledJob(IntPtr handle, string jobName)
+    {
+        RegisterScheduledJobName(handle, jobName);
     }
 
     public static NativeJobSystemStats GetStats() => JobSystem_GetStats();
@@ -1211,7 +1337,9 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
+                IntPtr h1268 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
+                RegisterScheduledJobName(h1268, typeof(T).Name);
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1268));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1228,7 +1356,9 @@ public static unsafe partial class NativeJobScheduler
             {
                 var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+                IntPtr h1285 = JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
+                RegisterScheduledJobName(h1285, typeof(T).Name);
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1285));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -1244,7 +1374,9 @@ public static unsafe partial class NativeJobScheduler
             {
                 var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateChunkArrayBatchCallback<T>());
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle)));
+                IntPtr h1301 = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle);
+                RegisterScheduledJobName(h1301, typeof(T).Name);
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1301));
             }
             catch
             {
@@ -1358,7 +1490,9 @@ public static unsafe partial class NativeJobScheduler
             }
             var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)));
+            IntPtr h1415 = JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
+            RegisterScheduledJobName(h1415, typeof(T).Name);
+            return TrackEntityJob(entityManager, new NativeJobHandle(h1415));
         }
         catch
         {
@@ -1408,7 +1542,9 @@ public static unsafe partial class NativeJobScheduler
             try
             {
                 using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+                IntPtr h1465 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
+                RegisterScheduledJobName(h1465, typeof(T).Name);
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1465));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -1492,7 +1628,9 @@ public static unsafe partial class NativeJobScheduler
         try
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+            IntPtr h1549 = JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
+            RegisterScheduledJobName(h1549, typeof(T).Name);
+            return TrackEntityJob(entityManager, new NativeJobHandle(h1549));
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -1624,6 +1762,7 @@ public static unsafe partial class NativeJobScheduler
             var handle = useScheduleAndComplete
                 ? JobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, jobKind)
                 : JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, jobKind);
+            RegisterScheduledJobName(handle, typeof(T).Name);
             return TrackEntityJob(entityManager, new NativeJobHandle(handle));
         }
         catch { ChunkCleanup(contextBlock); throw; }
@@ -1642,7 +1781,9 @@ public static unsafe partial class NativeJobScheduler
         var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
         try
         {
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative)));
+            IntPtr h1699 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative);
+            RegisterScheduledJobName(h1699, typeof(T).Name);
+            return TrackEntityJob(entityManager, new NativeJobHandle(h1699));
         }
         catch { ChunkCleanup(rawContextBlock); throw; }
     }
@@ -2466,6 +2607,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(name);
             try
             {
                 long start = 0;
@@ -2494,6 +2636,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, int i) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(name);
             try
             {
                 long start = 0;
@@ -2522,6 +2665,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, int start, int count) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(name);
             try
             {
                 long startTicks = 0;
@@ -2551,6 +2695,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, int start, int count) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(name);
             try
             {
                 long startTicks = 0;
@@ -2575,6 +2720,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, ChunkJobData* cd) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 var header = (ChunkContextHeader*)ctx;
@@ -2645,6 +2791,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, ChunkJobData* chunks, int startIndex, int count) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 var header = (ChunkContextHeader*)ctx;
@@ -2761,6 +2908,7 @@ public static unsafe partial class NativeJobScheduler
         return (IntPtr ctx, int start, int count) =>
         {
             EnterJobExecution();
+            RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 ref var job = ref GetChunkBatchJob<T>(ctx, managedContext, out var chunks, out var allEnabledTypes);

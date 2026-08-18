@@ -939,6 +939,28 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine(")");
             sb.AppendLine();
 
+            // ---- 调试面板：Dear ImGui 集成（Windows + D3D11 后端） ----
+            // 源码位于 NativeDll/thirdParty/imgui。Windows 上编译 imgui 核心 + Win32 + D3D11。
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# Dear ImGui debug panel (Windows / D3D11)");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("if(WIN32)");
+            sb.AppendLine($"    set(IMGUI_DIR   \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/thirdParty/imgui\")");
+            sb.AppendLine("    set(IMGUI_BACK  \"${IMGUI_DIR}/backends\")");
+            sb.AppendLine("    target_include_directories(NativeDll PRIVATE ${IMGUI_DIR} ${IMGUI_BACK})");
+            sb.AppendLine("    target_sources(NativeDll PRIVATE");
+            sb.AppendLine("        ${IMGUI_DIR}/imgui.cpp");
+            sb.AppendLine("        ${IMGUI_DIR}/imgui_draw.cpp");
+            sb.AppendLine("        ${IMGUI_DIR}/imgui_tables.cpp");
+            sb.AppendLine("        ${IMGUI_DIR}/imgui_widgets.cpp");
+            sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_win32.cpp");
+            sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_dx11.cpp");
+            sb.AppendLine("    )");
+            sb.AppendLine("    target_link_libraries(NativeDll PRIVATE d3d11 dxgi)");
+            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_IMGUI_ENABLED=1)");
+            sb.AppendLine("endif()");
+            sb.AppendLine();
+
             // SIMD arch flags + defines (after add_library)
             sb.AppendLine("# ============================================================");
             sb.AppendLine("# SIMD arch flags + defines");

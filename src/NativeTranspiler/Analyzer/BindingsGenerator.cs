@@ -195,10 +195,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"        public static {returnType} {methodName}({string.Join(", ", parameters)})");
             sb.AppendLine("        {");
             sb.AppendLine("            unsafe {");
+            // 直调执行窗口：Begin 在调用前开窗口（当前线程泳道，事件驱动），
+            // finally 确保无论异常与否都关闭窗口并上报共享时间线段。
+            sb.AppendLine($"            ulong __dbgId = NativeJobScheduler.BeginDirectCall(\"{methodName}\", {(useMT ? "(uint)Environment.ProcessorCount" : "1u")});");
+            sb.AppendLine("            try {");
             if (method.ReturnType.SpecialType != SpecialType.System_Void)
-                sb.Append("            return ");
+                sb.Append("                return ");
             else
-                sb.Append("            ");
+                sb.Append("                ");
 
             if (useMT)
             {
@@ -214,6 +218,8 @@ namespace NativeTranspiler.Analyzer
                 sb.Append(string.Join(", ", args));
             }
             sb.AppendLine(");");
+            sb.AppendLine("            }");
+            sb.AppendLine("            finally { NativeJobScheduler.EndDirectCall(__dbgId); }");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine();
@@ -591,12 +597,14 @@ namespace NativeTranspiler.Analyzer
 
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleParallelForBatchRaw(");
                 sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle);");
+                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
             else
             {
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleRaw(");
                 sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, dependsOn._nativeHandle);");
+                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
             sb.AppendLine("        }");
