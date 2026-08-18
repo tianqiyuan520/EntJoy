@@ -1,6 +1,7 @@
 #include "JobSystemInternal.h"
 
 #include <algorithm>
+#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -180,6 +181,7 @@ namespace JobSystem
         ContinuationNode* node =
             state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel);
         state->completed.notify_all();
+        state->completedCv.notify_all();
         if (node) RunContinuationChain(node);
 
         // 多 continuation（同 handle 扇出）溢出到 mtx + vector。hasExtra 原子跳过空
@@ -446,11 +448,28 @@ namespace JobSystem
         }
         if (_state->completed.load(std::memory_order_acquire)) return;
 
-        // Phase 3: blocking wait
+        // Phase 3: blocking wait with periodic dependency-chain revisit.
+        // 正常路径：worker 完成 → notify_all → condvar 谓词满足立即唤醒（无额外延迟）。
+        // 病理路径：目标 job 的完成依赖本线程去执行（协助被 10ms 预算切断的极端场景）——
+        // 无限等待会永久阻塞（死锁）。故用 wait_for(1ms) 超时，超时后重新沿依赖链
+        // 协助一次；链持续推进（worked）则 AssistDependencyChain 内部重置预算，正常推进。
+        // wait_for 睡眠期间释放 mtx，不阻塞其他持锁者（CompleteState/Retire 均不受影响）。
         g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
         g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
+        constexpr auto kCompleteRevisit = std::chrono::milliseconds(1); // 1ms 回访间隔
         while (!_state->completed.load(std::memory_order_acquire))
-            _state->completed.wait(false, std::memory_order_acquire);
+        {
+            {
+                std::unique_lock<std::mutex> lock(_state->mtx);
+                if (_state->completedCv.wait_for(lock, kCompleteRevisit,
+                        [state = _state] { return state->completed.load(std::memory_order_acquire); }))
+                    break;   // 谓词满足：completed 已置位
+            }
+            // 超时未完成：可能"完成依赖本线程"，回访依赖链协助推进。
+            if (_state->completed.load(std::memory_order_acquire)) break;
+            if (_state->dependency || !_state->dependencies.empty())
+                AssistDependencyChain(_state);   // 内部 10ms budget + worked 重置
+        }
         const uint64_t completeWakeAt = MonotonicNowNs();
         const uint64_t completeReturnAt = MonotonicNowNs();
         if (completeReturnAt >= completeWakeAt)

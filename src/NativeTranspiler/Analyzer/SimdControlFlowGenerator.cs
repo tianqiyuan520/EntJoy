@@ -2823,6 +2823,33 @@ namespace NativeTranspiler.Analyzer
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
 
+            // ★ struct-varying local 重赋值刷新（#13）：structLocal = array[other_idx] 后，
+            //   _structVaryingLocals 里的 (arrName, elemType, indexExpr) 必须同步更新，
+            //   否则后续 structLocal.field 访问仍用旧 indexExpr → gather/scatter 地址错误。
+            //   仅整体重赋值（左值是纯 identifier）适用；字段赋值（structLocal.field = x）
+            //   已在上方 scatter 分支处理，不在此刷新。
+            if (op == "=" && assign.Left is IdentifierNameSyntax svlId
+                && _structVaryingLocals.ContainsKey(svlId.Identifier.Text))
+            {
+                if (assign.Right is ElementAccessExpressionSyntax svlEA
+                    && svlEA.Expression is IdentifierNameSyntax svlArrId
+                    && _nativeArrayParams.TryGetValue(svlArrId.Identifier.Text, out var svlElemType)
+                    && svlElemType != "float" && svlElemType != "int"
+                    && !svlElemType.Contains("float2") && !svlElemType.Contains("int2"))
+                {
+                    string svlIdxExpr = svlEA.ArgumentList?.Arguments.Count > 0
+                        ? TranslateExpression(svlEA.ArgumentList.Arguments[0].Expression)
+                        : "0";
+                    _structVaryingLocals[svlId.Identifier.Text] = (svlArrId.Identifier.Text, svlElemType, svlIdxExpr);
+                }
+                else
+                {
+                    // 重赋值为非数组元素（普通值/其他表达式）→ 该 local 不再指向数组元素，
+                    // 移除映射；后续 field 访问回落通用路径（可能按标量/其他方式处理）。
+                    _structVaryingLocals.Remove(svlId.Identifier.Text);
+                }
+            }
+
             // Scope narrowing: declare at first assignment
             string? declLhs = assign.Left is IdentifierNameSyntax declId ? declId.Identifier.Text : null;
             if (op == "=" && declLhs != null && _variables.TryGetValue(declLhs, out var lhsInfo) && lhsInfo.Kind >= VarKind.Varying && !_varDeclEmitted.Contains(declLhs))

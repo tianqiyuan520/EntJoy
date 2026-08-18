@@ -55,6 +55,10 @@ namespace JobSystem {
         std::atomic<bool> hasExtraContinuations{ false };
         std::vector<std::function<void()>> continuations;
         std::mutex mtx;  // 仅保护多 continuation 溢出 + retire 协调
+        // 条件变量：Complete() Phase 3 用 wait_for 超时实现"周期回访依赖链"，
+        // 避免无限 wait(false) 在"完成依赖本线程"的病理场景死锁。wait_for 期间
+        // 释放 mtx，不阻塞其他持锁者；notify_all 在 CompleteState 中与 completed 一起发。
+        std::condition_variable completedCv;
 
         // Assist: Complete() 可以协助执行未完成的 range
         // readers 计数在 HandleState 上，因为 handle 生命周期长于 batch
