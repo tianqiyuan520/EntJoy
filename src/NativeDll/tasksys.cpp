@@ -1,4 +1,4 @@
-﻿/*
+/*
   Copyright (c) 2011-2025, Intel Corporation
 
   SPDX-License-Identifier: BSD-3-Clause
@@ -82,6 +82,9 @@
 #include <concrt.h>
 using namespace Concurrency;
 #endif // ISPC_USE_CONCRT
+// EntJoy 调试面板：让 ISPC MT 任务也能在泳道上显示每个参与 worker 的耗时。
+// include 放在 concrt 之后以复用其类型；本文件仍保持 BSD 许可，改动仅在条目层。
+#include "JobSystemInternal.h"
 #ifdef ISPC_USE_GCD
 #include <dispatch/dispatch.h>
 #include <pthread.h>
@@ -513,6 +516,8 @@ static void InitTaskSystem() {
 
 static void __cdecl lRunTask(LPVOID param) {
     TaskInfo* ti = (TaskInfo*)param;
+    // EntJoy 调试挂钩：为参与本次 MT 的每个 worker 开一条泳道窗口（若面板开启）
+    uint64_t __dbg = JobSystem::DebugIspcTaskBegin("MT");
 
     // Actually run the task.
     // FIXME: like the GCD implementation for OS X, this is passing bogus
@@ -525,6 +530,7 @@ static void __cdecl lRunTask(LPVOID param) {
 
     // Signal the event that this task is done
     ti->taskEvent.set();
+    JobSystem::DebugIspcTaskEnd(__dbg);
 }
 
 inline void TaskGroup::Launch(int baseIndex, int count) {

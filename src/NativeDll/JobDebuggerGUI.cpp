@@ -76,54 +76,13 @@ namespace JobSystem
             std::fprintf(stderr, "[EntJoy ImGui] %s\n", msg);
         }
 
-        // ---- 数据快照（从 JobSystem 全局读） ----
-        struct WorkerRow
-        {
-            int index;
-            uint64_t batchId;
-            uint32_t tile;
-            uint32_t tileCount;
-            bool active;
-        };
-
-        void CollectWorkerRows(std::vector<WorkerRow>& rows)
-        {
-            rows.clear();
-            const int maxWorkers = CurrentWorkerCount();
-            const int cap = maxWorkers < kMaxTrackedWorkers ? maxWorkers : kMaxTrackedWorkers;
-            if (cap <= 0) return;
-            rows.reserve(cap);
-            for (int i = 0; i < cap; ++i)
-            {
-                WorkerRow r;
-                r.index = i;
-                r.batchId = g_workerCurrentBatchId[i].load(std::memory_order_relaxed);
-                r.tile = g_workerCurrentTile[i].load(std::memory_order_relaxed);
-                r.tileCount = g_workerBatchTileCount[i].load(std::memory_order_relaxed);
-                r.active = g_workerIsActive[i].load(std::memory_order_relaxed);
-                rows.push_back(r);
-            }
-        }
-
-        // clamp 进度
-        float SafeProgress(uint32_t tile, uint32_t count)
-        {
-            if (count == 0) return 0.0f;
-            float p = static_cast<float>(tile) / static_cast<float>(count);
-            return p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
-        }
-
         // ---- 监听：滚动活动日志 ----
-        // 每个 worker 的 start/end/publish 以文本行形式记录，容量足够大避免早期 batch 被立即覆盖。
+        // 每个发布事件以文本行形式记录（来自原生发布事件流），容量足够大避免早期 batch 被立即覆盖。
         struct ActivityEntry { char text[160]; };
         static constexpr int kActivityMax = 4096;
         static ActivityEntry g_activity[kActivityMax];
         static int g_activityHead = 0;   // 下一个写入位置
         static int g_activityCount = 0;  // 有效条数
-        static uint64_t g_prevBatch[kMaxTrackedWorkers]{};
-        static bool g_prevActive[kMaxTrackedWorkers]{};
-        static uint64_t g_prevPublished = 0;
-        static bool g_activityPrimed = false;
 
         static void LogActivity(const char* fmt, ...)
         {
@@ -137,24 +96,15 @@ namespace JobSystem
             if (g_activityCount < kActivityMax) ++g_activityCount;
         }
 
-        // "回看"：冻结实时刷新，把当前快照按在屏幕上慢慢看（job 瞬时完成后进度条会消失）
-        static bool g_frozen = false;
-
         // ---- 时间线段（Timeline/Gantt 可视化数据）----
-        // 每个 worker 的 job 段记录 (worker, batchId, startMs, endMs)。GUI 每帧从瞬时原子
-        // 快照检测 worker 的 start/end 迁移，补上时间戳，供 Timeline 画带起止的彩色横条。
+        // ---- Timeline 数据：直接渲染共享时间线历史 ----
+        // Job 的 start/end 由原生侧在事件发生时记录（DebugBeginExec/DebugEndExec 在
+        // 执行瞬间把完整窗口追加进 g_debugSegments），GUI 只读渲染，不采样、不迁移检测。
         double NowMs()
         {
             using namespace std::chrono;
             return duration_cast<duration<double, std::milli>>(steady_clock::now().time_since_epoch()).count();
         }
-
-        constexpr int kSegmentMax = 16384; // 历史段容量（撑起最长达 120s 的回看窗）
-        struct JobSegment { int worker; uint64_t batchId; double startMs; double endMs; uint32_t tiles; };
-        static JobSegment g_segments[kSegmentMax];
-        static int g_segHead = 0;   // 下一个写入槽
-        static int g_segCount = 0;  // 有效段数
-        static int g_openIdx[kMaxTrackedWorkers]; // worker 当前进行中的段下标，-1=无
 
         // ---- Timeline 交互状态（缩放/平移/暂停/点选）----
         static double g_winSpanMs = 8000.0;   // 可视窗长（滚轮缩放，200ms~120000ms）
@@ -164,51 +114,30 @@ namespace JobSystem
         static bool   g_dragging = false;
         static ImVec2 g_clickDownPos{};
         static double g_dragBaseRight = 0.0;
-        static JobSegment g_selected{};
+        static DebugSegment g_selected{};
         static bool   g_hasSelected = false;
+        static bool   g_pauseFrozen = false;
 
         // "相对程序启动"的参考时间：GUI 线程首帧记录（原始值），详情页用偏移量显示
         static double g_guiBootMs = 0.0;
         static uint64_t g_guiBootPublished = 0;   // 面板打开时的 published 基准（Stats 显示增量）
         double ProcessElapsedMs(double rawMs) { return g_guiBootMs > 0.0 ? rawMs - g_guiBootMs : rawMs; }
 
-        void StartSegment(int worker, uint64_t batchId, uint32_t tiles)
+        // 按耗时着色：越短越绿（0ms → 亮绿），越长越暖（→ 黄 → 橙红）。
+        // 用对数轴归一，短耗时对比更明显。
+        ImU32 DurationColor(double startMs, double endMs)
         {
-            if (worker < 0 || worker >= kMaxTrackedWorkers) return;
-            if (g_segCount == kSegmentMax)
-            {
-                const int old = g_segHead; // 淘汰最旧段（已是完成段）
-                if (g_openIdx[g_segments[old].worker] == old)
-                    g_openIdx[g_segments[old].worker] = -1;
-            }
-            else
-            {
-                ++g_segCount;
-            }
-            g_segments[g_segHead] = JobSegment{ worker, batchId, NowMs(), 0.0, tiles };
-            g_openIdx[worker] = g_segHead;
-            g_segHead = (g_segHead + 1) % kSegmentMax;
-        }
-
-        void EndSegment(int worker, uint32_t tiles)
-        {
-            if (worker < 0 || worker >= kMaxTrackedWorkers) return;
-            const int idx = g_openIdx[worker];
-            if (idx < 0) return;
-            g_segments[idx].endMs = NowMs();
-            g_segments[idx].tiles = tiles;
-            g_openIdx[worker] = -1;
-        }
-
-        // batchId → 稳定彩色（HSV），Unity 风格区分不同 job
-        ImU32 BatchColor(uint64_t id)
-        {
-            const uint32_t seed = (uint32_t)(id ^ (id >> 32));
-            const float hue = (float)(seed % 360u) / 360.0f;
-            const float sat = 0.75f, val = 0.85f;
-            const int i = (int)(hue * 6.0f);
-            const float f = hue * 6.0f - i;
-            const float p = val * (1.0f - sat), q = val * (1.0f - sat * f), t = val * (1.0f - sat * (1.0f - f));
+            const double durMs = endMs - startMs;
+            double h = durMs <= 0.0 ? 0.0 : (std::log1p(durMs) / std::log1p(10.0));
+            if (h > 1.0) h = 1.0;
+            if (h < 0.0) h = 0.0;
+            // 色相从绿(120°)渐变到红(0°)：色彩沿 120→0，饱和度/亮度固定。
+            const int hue = (int)((1.0 - h) * 120.0); // 120(绿)..0(红)
+            const float sat = 0.80f, val = 0.90f;
+            const float f = (float)hue / 60.0f;
+            const int i = (int)f;
+            const float fr = f - i;
+            const float p = val * (1.0f - sat), q = val * (1.0f - sat * fr), t = val * (1.0f - sat * (1.0f - fr));
             float r, gx, b;
             switch (i % 6)
             {
@@ -236,64 +165,7 @@ namespace JobSystem
             return std::string(buf, static_cast<size_t>(n));
         }
 
-        void RecordActivity(const std::vector<WorkerRow>& rows)
-        {
-            if (!g_activityPrimed)
-            {
-                g_activityPrimed = true;
-                std::memset(g_openIdx, -1, sizeof(g_openIdx));
-                for (const auto& r : rows)
-                {
-                    if (r.index >= kMaxTrackedWorkers) continue;
-                    g_prevActive[r.index] = r.active;
-                    g_prevBatch[r.index] = r.batchId;
-                }
-                g_prevPublished = g_publishedJobs.load(std::memory_order_relaxed);
-                return;
-            }
-
-            for (const auto& r : rows)
-            {
-                if (r.index >= kMaxTrackedWorkers) continue;
-                const bool wasActive = g_prevActive[r.index];
-                const uint64_t wasBatch = g_prevBatch[r.index];
-
-                if (!wasActive && r.active)
-                {
-                    // worker 开始跑新 batch
-                    const std::string nm = ResolveJobName(r.batchId);
-                    LogActivity("W%d << #%llu %s", r.index, (unsigned long long)r.batchId, nm.c_str());
-                    StartSegment(r.index, r.batchId, r.tileCount);
-                }
-                else if (wasActive && !r.active)
-                {
-                    // worker 结束一个片段
-                    const std::string nm = ResolveJobName(wasBatch);
-                    LogActivity("W%d >> #%llu %s (%u tiles)", r.index, (unsigned long long)wasBatch, nm.c_str(), r.tileCount);
-                    EndSegment(r.index, r.tileCount);
-                }
-                else if (r.active && wasBatch != r.batchId)
-                {
-                    // worker 从旧 batch 切到新 batch
-                    EndSegment(r.index, r.tileCount);
-                    const std::string nm = ResolveJobName(r.batchId);
-                    LogActivity("W%d -> #%llu %s", r.index, (unsigned long long)r.batchId, nm.c_str());
-                    StartSegment(r.index, r.batchId, r.tileCount);
-                }
-                g_prevActive[r.index] = r.active;
-                g_prevBatch[r.index] = r.batchId;
-            }
-
-            const uint64_t published = g_publishedJobs.load(std::memory_order_relaxed);
-            if (published > g_prevPublished)
-            {
-                LogActivity("publish: %llu (+%llu)",
-                            (unsigned long long)published, (unsigned long long)(published - g_prevPublished));
-                g_prevPublished = published;
-            }
-        }
-
-        // 消费原生发布事件，追加到 Activity 文本日志（完整覆盖微秒级 batch，不依赖 worker 采样）
+        // 消费原生发布事件，追加到 Activity 文本日志（完整覆盖微秒级 batch，事件驱动）
         void DrainNativeActivity()
         {
             if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
@@ -313,236 +185,301 @@ namespace JobSystem
         }
 
         // ---- Timeline：Unity 风格 Gantt 泳道图 ----
-        // 每条 worker 一条泳道，job 用彩色横条沿时间轴从左往右铺（start→end）。
+        // 每条 worker 一条泳道（末条 M = 主/调用线程），job 用彩色横条沿时间轴铺。
+        // 时间窗口模型：一窗 [winLeft, winRight] 映射到固定可视宽。拖拽平移 winRight、
+        // Ctrl+滚轮缩放 span（锚点保持）、可选横向滚动条也驱动 winRight——解耦后始终灵敏。
+        // 直调（isDirect）标记 [D]；ISPC MT 任务的条画在 W 泳道（连续编号，不单独用 T 泳道）。
+        // 条色由耗时决定：越短越绿、越长越暖（红）。
         void DrawTimeline()
         {
             const double now = NowMs();
             const int lanes = CurrentWorkerCount();
-            const int laneCount = lanes < kMaxTrackedWorkers ? lanes : kMaxTrackedWorkers;
+            // 泳道：W(*lanes) + M(1) + ISPC 泳道（连续编号排到 M 之后，标签显示为 W<idx>）
+            const int jobLaneCount = (lanes < kMaxTrackedWorkers - 1 ? lanes : kMaxTrackedWorkers - 1) + 1;
+            const int ispcLaneCount = DebugIspcLaneCount();
+            const int laneCount = jobLaneCount + ispcLaneCount;
             if (laneCount <= 0)
             {
                 ImGui::Text("no workers");
                 return;
             }
+            // seg.lane → 行号：W/M 区原样（0..jobLaneCount-1，M 在 lanes 处）；ISPC 保留区排到 jobLaneCount 之后
+            auto rowOf = [&](int lane) -> int {
+                if (lane < 0) return -1;
+                if (lane < kIspcLaneBase) return lane;
+                return jobLaneCount + (lane - kIspcLaneBase);
+            };
 
-            // 最早一段的起点（限制左移越界）
-            double minSegStart = now;
-            for (int i = 0; i < g_segCount; ++i)
+            // 共享历史快照
+            const unsigned int visible = g_debugSegVisible.load(std::memory_order_acquire);
+            const unsigned int segCount = visible < (unsigned int)kDebugSegmentMax ? visible : (unsigned int)kDebugSegmentMax;
+            const unsigned int startSlot = visible - segCount;
+
+            // 历史最晚时间（用于实时跟随右界 / 暂停锚点）
+            double tLatest = now;
+            for (unsigned int i = 0; i < segCount; ++i)
             {
-                const int idx = (g_segHead - g_segCount + kSegmentMax * 2 + i) % kSegmentMax;
-                if (g_segments[idx].startMs < minSegStart) minSegStart = g_segments[idx].startMs;
+                const double e = g_debugSegments[(startSlot + i) % kDebugSegmentMax].endMs;
+                if (e > tLatest) tLatest = e;
             }
+
+            // ---- 时间窗口 [winStart, winEnd]：实时跟随 now 或暂停固定 ----
+            double viewRight = g_timelinePaused ? g_viewRightMs : now;
+            if (g_timelinePaused)
+            {
+                // 首次暂停冻结右界（避免 now 推进导致窗口漂移）
+                if (!g_pauseFrozen)
+                {
+                    g_viewRightMs = tLatest > now ? tLatest : now;
+                    g_pauseFrozen = true;
+                }
+                else
+                {
+                    viewRight = g_viewRightMs;
+                }
+            }
+            else
+            {
+                g_pauseFrozen = false;
+                g_viewRightMs = now;
+            }
+            double winStart = viewRight - g_winSpanMs;
+            const double span = g_winSpanMs;
+            if (span <= 0.0) return;
 
             const float labelW = 48.0f;
             const float laneH = 22.0f;
             const ImVec2 avail = ImGui::GetContentRegionAvail();
-            float plotW = avail.x - labelW;
-            float plotH = laneCount * laneH + 16.0f;
-            if (plotH > avail.y - 88.0f) plotH = avail.y - 88.0f;
-            if (plotW < 20.0f) plotW = 20.0f;
-            if (plotH < 20.0f) plotH = 20.0f;
+            const float plotW = avail.x - labelW - 12.0f; // 时间绘图区宽（给竖向滚动条留一点）
+            const float contentH = laneCount * laneH;
+            float viewH = avail.y - 118.0f;               // 底部给横向滑块 + 详情
+            if (viewH > contentH) viewH = contentH;
+            if (viewH < 40.0f) viewH = 40.0f;
 
-            const ImVec2 o = ImGui::GetCursorScreenPos();
-            const ImVec2 mouse = ImGui::GetIO().MousePos;
-            const bool hovered = (mouse.x >= o.x + labelW && mouse.x <= o.x + labelW + plotW &&
-                                  mouse.y >= o.y && mouse.y <= o.y + plotH);
-
-            // 实时时右端贴 now；暂停后固定 viewRight
-            if (!g_timelinePaused) g_viewRightMs = now;
-
-            const double span0 = g_winSpanMs;
-            double winStartBase = g_viewRightMs - span0;
-
-            // 缩放：仅 Ctrl+滚轮，且以鼠标位置为锚点居中缩放（不做参考点，光标处时间保持不动）
-            const float wheel = ImGui::GetIO().MouseWheel;
-            const bool ctrlHeld = ImGui::GetIO().KeyCtrl;
-            if (hovered && ctrlHeld && wheel != 0.0f)
-            {
-                const double frac = (double)(mouse.x - (o.x + labelW)) / (double)plotW;
-                const double anchorTime = winStartBase + frac * span0;
-                const double newSpan = std::clamp(span0 * std::pow(2.0, -(double)wheel), 200.0, 120000.0);
-                const double newStart = anchorTime - frac * newSpan;
-                g_winSpanMs = newSpan;
-                g_viewRightMs = newStart + newSpan;
-                g_timelinePaused = true; // 手动缩放即脱离实时跟随，便于观察
-            }
-
-            // 平移（拖拽）：左键按住拖动进入暂停态；松开且几乎没动 → 点选。
-            // 用"按下点与当前点距离"判拖拽（>=3px），比 MouseDelta 累加灵敏稳定。
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered)
-            {
-                g_clickDown = true;
-                g_clickDownPos = mouse;
-                g_dragging = false;
-                g_dragBaseRight = g_viewRightMs; // 记录拖拽基点（按下时的时间线右端）
-            }
-            if (g_clickDown && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-            {
-                const float distX = mouse.x - g_clickDownPos.x;
-                const float distY = mouse.y - g_clickDownPos.y;
-                if (distX * distX + distY * distY >= 3.0f * 3.0f)
-                {
-                    if (!g_dragging)
-                    {
-                        g_dragging = true;
-                        g_dragBaseRight = g_viewRightMs;
-                    }
-                    g_timelinePaused = true;
-                    // 恒定相对"拖拽基点"平移，松开即停（不累积）
-                    g_viewRightMs = g_dragBaseRight + (double)(g_clickDownPos.x - mouse.x) / (double)plotW * g_winSpanMs;
-                }
-            }
-
-            double viewRight = g_viewRightMs;
-            double winStart = viewRight - g_winSpanMs;
-            if (winStart < minSegStart) { winStart = minSegStart; viewRight = winStart + g_winSpanMs; }
-            const double span = g_winSpanMs;
-            if (span <= 0.0) return;
-
-            // 命中测试 & 点选
-            auto pick = [&](const ImVec2& p) -> bool
-            {
-                for (int i = 0; i < g_segCount; ++i)
-                {
-                    const int idx = (g_segHead - g_segCount + kSegmentMax * 2 + i) % kSegmentMax;
-                    const JobSegment& seg = g_segments[idx];
-                    if (seg.worker < 0 || seg.worker >= laneCount) continue;
-                    const double end = seg.endMs > 0 ? seg.endMs : now;
-                    if (end < winStart || seg.startMs > viewRight) continue;
-                    const double s = seg.startMs < winStart ? winStart : seg.startMs;
-                    const double e = end > viewRight ? viewRight : end;
-                    if (e <= s) continue;
-                    const float x0 = o.x + labelW + (float)((s - winStart) / span) * plotW;
-                    const float x1 = o.x + labelW + (float)((e - winStart) / span) * plotW;
-                    const float y0 = o.y + seg.worker * laneH + 2.0f;
-                    const float bh = laneH - 4.0f;
-                    if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y0 + bh)
-                    {
-                        g_selected = seg;
-                        if (g_selected.endMs <= 0.0) g_selected.endMs = now;
-                        g_hasSelected = true;
-                        return true;
-                    }
-                }
-                return false;
+            // 时间 → x（固定映射到可视宽，与缩放解耦）
+            auto mapX = [&](double t)->float {
+                return (float)((t - winStart) / span) * plotW;
             };
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+
+            const float sbw = ImGui::GetStyle().ScrollbarSize + 6.0f;
+            const float canvasH = viewH; // 泳道画布可视高（竖向滚动用）
+
+            // 泳道画布：child 承担竖向滚动（泳道过多时可滚）；横向时间窗由拖拽/缩放/底部滑块控制。
+            // SetNextWindowContentSize 告知 child 内容高度=所有泳道，竖向滚动条才能滚到后面的 T# 泳道。
+            ImGui::SetNextWindowContentSize(ImVec2(plotW, contentH));
+            ImGui::BeginChild("tlLanes", ImVec2(avail.x, canvasH), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             {
-                if (g_clickDown && !g_dragging)
-                    pick(g_clickDownPos);
-                g_clickDown = false;
-                g_dragging = false;
-            }
+                // 泳道内容原点（屏幕坐标）。显式加竖向滚动偏移，使绘制与命中(y)始终对齐：
+                // 滚动后 GetCursorScreenPos 的 y 不可靠，改为 winPos - scrollY。
+                const ImVec2 winPos = ImGui::GetWindowPos();
+                const float scrollY = ImGui::GetScrollY();
+                const ImVec2 o = ImVec2(winPos.x, winPos.y - scrollY);
+                const ImVec2 mouse = ImGui::GetIO().MousePos;
+                // 命中区：必须用可视窗口的屏幕范围（winPos..winPos+canvasH），与滚动无关。
+                // 滚动后 o.y=winPos.y-scrollY 会整体上移，用它做命中区会把下方泳道排除在外。
+                const bool hovered = (mouse.y >= winPos.y && mouse.y <= winPos.y + canvasH - (contentH > canvasH ? sbw : 0.0f) &&
+                                      mouse.x >= winPos.x + labelW && mouse.x <= winPos.x + labelW + plotW - (plotW < avail.x - labelW ? sbw : 0.0f));
 
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(o, ImVec2(o.x + labelW + plotW, o.y + plotH), IM_COL32(18, 18, 22, 255));
-
-            // 垂直网格：按 zoom 自适应间距
-            double step = 100.0;
-            if (span > 20000.0) step = 2000.0;
-            else if (span > 5000.0) step = 500.0;
-            else if (span < 1500.0) step = 50.0;
-            for (double t = winStart + span - std::fmod(winStart, step); t >= winStart; t -= step)
-            {
-                const float x = o.x + labelW + (float)((t - winStart) / span) * plotW;
-                dl->AddLine(ImVec2(x, o.y), ImVec2(x, o.y + plotH), IM_COL32(60, 60, 70, 80));
-            }
-
-            // 彩色作业条
-            for (int i = 0; i < g_segCount; ++i)
-            {
-                const int idx = (g_segHead - g_segCount + kSegmentMax * 2 + i) % kSegmentMax;
-                const JobSegment& seg = g_segments[idx];
-                if (seg.worker < 0 || seg.worker >= laneCount) continue;
-                const double end = seg.endMs > 0 ? seg.endMs : now;
-                if (end < winStart || seg.startMs > viewRight) continue;
-                const double s = seg.startMs < winStart ? winStart : seg.startMs;
-                const double e = end > viewRight ? viewRight : end;
-                if (e <= s) continue;
-                const float x0 = o.x + labelW + (float)((s - winStart) / span) * plotW;
-                const float x1 = o.x + labelW + (float)((e - winStart) / span) * plotW;
-                const float y0 = o.y + seg.worker * laneH + 2.0f;
-                const float bh = laneH - 4.0f;
-                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + bh), BatchColor(seg.batchId));
-                dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + bh), IM_COL32(0, 0, 0, 120));
-
-                // 条够宽时在条内画 Job 名（微秒级条极窄，缩到足够窗长才显示；Workers 页的 Job 列兜底）
-                if (x1 - x0 > 48.0f)
+                // ---- 缩放：Ctrl+滚轮，锚点=鼠标所在时间，缩放后保持锚点时间在屏幕相对位置 ----
+                const float wheel = ImGui::GetIO().MouseWheel;
+                const bool ctrlHeld = ImGui::GetIO().KeyCtrl;
+                if (hovered && ctrlHeld && wheel != 0.0f)
                 {
-                    const std::string nm = ResolveJobName(seg.batchId);
-                    if (nm != "?")
+                    const double anchorFrac = (double)((mouse.x - (o.x + labelW)) / plotW);
+                    const double anchorT = winStart + anchorFrac * span;
+                    const double newSpan = std::clamp(span * std::pow(2.0, -(double)wheel), 200.0, 120000.0);
+                    g_winSpanMs = newSpan;
+                    g_viewRightMs = anchorT + (1.0 - anchorFrac) * newSpan;
+                    g_timelinePaused = true; // 手动缩放即脱离实时跟随
+                    // 注意：此处绝不能 return —— BeginChild 尚未 EndChild，提前 return 会破坏 ImGui 栈
+                }
+
+                // ---- 拖拽平移：左键拖动改 viewRight；松开且几乎没动 → 点选 ----
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered)
+                {
+                    g_clickDown = true;
+                    g_clickDownPos = mouse;
+                    g_dragging = false;
+                    g_dragBaseRight = g_viewRightMs;
+                }
+                if (g_clickDown && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                {
+                    const float distX = mouse.x - g_clickDownPos.x;
+                    const float distY = mouse.y - g_clickDownPos.y;
+                    if (distX * distX + distY * distY >= 3.0f * 3.0f)
                     {
-                        const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
-                        if (ts.x + 8.0f < (x1 - x0))
+                        if (!g_dragging) { g_dragging = true; g_dragBaseRight = g_viewRightMs; }
+                        g_timelinePaused = true;
+                        g_viewRightMs = g_dragBaseRight + (double)(g_clickDownPos.x - mouse.x) / plotW * span;
+                    }
+                }
+
+                // 命中测试 & 点选
+                auto pick = [&](const ImVec2& p) -> bool
+                {
+                    for (unsigned int i = 0; i < segCount; ++i)
+                    {
+                        const DebugSegment& seg = g_debugSegments[(startSlot + i) % kDebugSegmentMax];
+                        const int row = rowOf(seg.lane);
+                        if (row < 0) continue;
+                        if (seg.endMs < winStart || seg.startMs > viewRight) continue;
+                        const double s = seg.startMs < winStart ? winStart : seg.startMs;
+                        const double e = seg.endMs > viewRight ? viewRight : seg.endMs;
+                        if (e <= s) continue;
+                        const float x0 = o.x + labelW + mapX(s), x1 = o.x + labelW + mapX(e);
+                        const float y0 = o.y + row * laneH + 2.0f;
+                        const float bh = laneH - 4.0f;
+                        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y0 + bh)
                         {
-                            dl->AddText(ImVec2(x0 + 4.0f, y0 + (bh - ts.y) * 0.5f),
-                                        IM_COL32(255, 255, 255, 230), nm.c_str());
+                            g_selected = seg;
+                            g_hasSelected = true;
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                {
+                    if (g_clickDown && !g_dragging)
+                        pick(g_clickDownPos);
+                    g_clickDown = false;
+                    g_dragging = false;
+                }
+
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(o, ImVec2(o.x + labelW + plotW, o.y + contentH), IM_COL32(18, 18, 22, 255));
+
+                // 垂直网格
+                double step = 100.0;
+                if (span > 20000.0) step = 2000.0;
+                else if (span > 5000.0) step = 500.0;
+                else if (span < 1500.0) step = 50.0;
+                for (double t = winStart + span - std::fmod(winStart, step); t >= winStart; t -= step)
+                {
+                    const float x = o.x + labelW + mapX(t);
+                    dl->AddLine(ImVec2(x, o.y), ImVec2(x, o.y + contentH), IM_COL32(60, 60, 70, 80));
+                }
+
+                // 彩色作业条（色由耗时决定：越短越绿、越长越暖）
+                for (unsigned int i = 0; i < segCount; ++i)
+                {
+                    const DebugSegment& seg = g_debugSegments[(startSlot + i) % kDebugSegmentMax];
+                    const int row = rowOf(seg.lane);
+                    if (row < 0) continue;
+                    if (seg.endMs < winStart || seg.startMs > viewRight) continue;
+                    const double s = seg.startMs < winStart ? winStart : seg.startMs;
+                    const double e = seg.endMs > viewRight ? viewRight : seg.endMs;
+                    if (e <= s) continue;
+                    const float x0 = o.x + labelW + mapX(s), x1 = o.x + labelW + mapX(e);
+                    const float y0 = o.y + row * laneH + 2.0f;
+                    const float bh = laneH - 4.0f;
+                    ImU32 col = seg.isDirect
+                        ? IM_COL32(120, 200, 255, 150)                 // 直调：蓝青半透明
+                        : DurationColor(seg.startMs, seg.endMs);       // Job：按耗时着色
+                    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + bh), col);
+                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + bh), IM_COL32(0, 0, 0, 120));
+
+                    if (x1 - x0 > 48.0f)
+                    {
+                        const std::string nm = ResolveJobName(seg.batchId);
+                        if (!nm.empty() && nm != "?")
+                        {
+                            std::string disp = seg.isDirect ? ("[D]" + nm) : nm;
+                            const ImVec2 ts = ImGui::CalcTextSize(disp.c_str());
+                            if (ts.x + 8.0f < (x1 - x0))
+                                dl->AddText(ImVec2(x0 + 4.0f, y0 + (bh - ts.y) * 0.5f),
+                                            IM_COL32(255, 255, 255, 235), disp.c_str());
                         }
                     }
                 }
-            }
 
-            // 选中高亮
-            if (g_hasSelected)
-            {
-                const JobSegment& seg = g_selected;
-                const double end = seg.endMs > 0 ? seg.endMs : now;
-                const double s = seg.startMs < winStart ? winStart : seg.startMs;
-                const double e = end > viewRight ? viewRight : end;
-                if (e > s && seg.worker >= 0 && seg.worker < laneCount)
+                // 选中高亮
+                if (g_hasSelected)
                 {
-                    const float x0 = o.x + labelW + (float)((s - winStart) / span) * plotW;
-                    const float x1 = o.x + labelW + (float)((e - winStart) / span) * plotW;
-                    const float y0 = o.y + seg.worker * laneH + 2.0f;
-                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y0 + laneH - 4.0f),
-                                IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+                    const DebugSegment& seg = g_selected;
+                    const int selRow = rowOf(seg.lane);
+                    if (selRow >= 0 && seg.endMs >= winStart && seg.startMs <= viewRight)
+                    {
+                        const double s = seg.startMs < winStart ? winStart : seg.startMs;
+                        const double e = seg.endMs > viewRight ? viewRight : seg.endMs;
+                        if (e > s)
+                        {
+                            const float y0 = o.y + selRow * laneH + 2.0f;
+                            dl->AddRect(ImVec2(o.x + labelW + mapX(s), y0),
+                                        ImVec2(o.x + labelW + mapX(e), y0 + laneH - 4.0f),
+                                        IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+                        }
+                    }
+                }
+
+                // 泳道标签 + 横向分隔（row → 标签：前 W 区 W#，M，其后为 ISPC 任务 T#）
+                for (int r = 0; r < laneCount; ++r)
+                {
+                    const float y0 = o.y + r * laneH;
+                    dl->AddLine(ImVec2(o.x + labelW, y0), ImVec2(o.x + labelW + plotW, y0), IM_COL32(60, 60, 70, 80));
+                    char lb[16];
+                    if (r == lanes) // M 泳道（index = CurrentWorkerCount）
+                        snprintf(lb, sizeof(lb), "M");
+                    else if (r < lanes)
+                        snprintf(lb, sizeof(lb), "W%d", r);
+                    else
+                        snprintf(lb, sizeof(lb), "T%d", r - lanes - 1); // ISPC ConcRT 任务泳道
+                    const ImVec2 ts = ImGui::CalcTextSize(lb);
+                    dl->AddText(ImVec2(o.x + (labelW - ts.x) * 0.5f, y0 + (laneH - ts.y) * 0.5f),
+                                IM_COL32(210, 210, 215, 255), lb);
                 }
             }
+            ImGui::EndChild();
 
-            // 泳道标签 + 横向分隔
-            for (int w = 0; w < laneCount; ++w)
+            // ---- 底部横向滑块：驱动时间平移（保留横向滚时间轴，但与拖拽/缩放统一走 winStart/span）----
+            if (segCount > 0)
             {
-                const float y0 = o.y + w * laneH;
-                dl->AddLine(ImVec2(o.x + labelW, y0), ImVec2(o.x + labelW + plotW, y0), IM_COL32(60, 60, 70, 80));
-                char lb[16];
-                snprintf(lb, sizeof(lb), "W%d", w);
-                const ImVec2 ts = ImGui::CalcTextSize(lb);
-                dl->AddText(ImVec2(o.x + (labelW - ts.x) * 0.5f, y0 + (laneH - ts.y) * 0.5f),
-                            IM_COL32(210, 210, 215, 255), lb);
+                double tMin = winStart, tMax = tLatest > now ? tLatest : now;
+                for (unsigned int i = 0; i < segCount; ++i)
+                {
+                    const double s = g_debugSegments[(startSlot + i) % kDebugSegmentMax].startMs;
+                    if (s < tMin) tMin = s;
+                }
+                if (tMax - tMin < span) tMax = tMin + span;
+                float frac = (float)((winStart - tMin) / (tMax - tMin));
+                ImGui::SetNextItemWidth(avail.x - 20.0f);
+                if (ImGui::SliderFloat("##tspan", &frac, 0.0f, 1.0f, "view"))
+                {
+                    g_viewRightMs = tMin + frac * (tMax - tMin) + span;
+                    if (!g_timelinePaused) g_timelinePaused = true; // 手动滑即脱离实时跟随
+                }
+                ImGui::SameLine();
+                ImGui::Text("  -%.1fs", span / 1000.0);
             }
 
-            // 底轴时间标签（左=窗长，右=now）
-            ImGui::SetCursorScreenPos(ImVec2(o.x + labelW, o.y + plotH + 2.0f));
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "-%.0fs", span / 1000.0);
-            ImGui::SameLine(o.x + labelW + plotW - 46.0f);
-            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), g_timelinePaused ? "paused" : "now");
-
-            ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + plotH + 22.0f));
-
-            // 点选详情
+            // 点选详情（child 外）
             if (g_hasSelected)
             {
-                const JobSegment& s = g_selected;
+                const DebugSegment& s = g_selected;
                 const double durMs = s.endMs - s.startMs;
                 const std::string nm = ResolveJobName(s.batchId);
-                // 路径开销：提交→首 worker 的典型 EWMA（从全局快照读个近似）；无则显示 "-"
-                JobSystemStatsSnapshot ss;
-                GetStatsSnapshot(&ss);
-                const double s2fUs = (double)ss.submitToFirstWorkerEwmaNs / 1000.0;
-                const double execUs = (double)ss.perRangeExecEwmaNs / 1000.0;
+                const int row = rowOf(s.lane);
+                std::string whereName;
+                if (s.lane >= kIspcLaneBase)
+                    whereName = "T" + std::to_string(row - lanes - 1) + " (ISPC ConcRT 任务线程)";
+                else if (s.lane == lanes)
+                    whereName = "M (调用线程)";
+                else
+                    whereName = "W" + std::to_string(s.lane) + " (worker线程)";
 
-                ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Selected Job");
+                ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Selected %s", s.isDirect ? "Direct Call" : "Job");
                 ImGui::Separator();
-                ImGui::Text("Job      : %s", nm.c_str());
-                ImGui::Text("Worker   : W%d", s.worker);
+                ImGui::Text("Name     : %s%s", s.isDirect ? "[D]" : "", nm.c_str());
+                ImGui::Text("Where    : %s", whereName.c_str());
                 ImGui::Text("Batch    : #%llu", (unsigned long long)s.batchId);
                 ImGui::Text("Duration : %.2f ms", durMs);
-                ImGui::Text("Tiles    : %u (本 worker 认领的工作切片数)", s.tiles);
+                if (s.isDirect)
+                    ImGui::Text("Tasks    : %u (直调并行度)", s.tiles);
+                else
+                    ImGui::Text("Tiles    : %u (此 worker 实际领取执行)", s.tiles);
                 ImGui::Text("Range    : %.3f ~ %.3f ms (相对程序启动)", ProcessElapsedMs(s.startMs), ProcessElapsedMs(s.endMs));
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "调度路径开销 (EWMA)");
-                ImGui::Text("Submit→首 Worker : %.1f us", s2fUs);
-                ImGui::Text("单 Range 执行    : %.1f us", execUs);
+                if (!s.isDirect && s.workers > 1)
+                    ImGui::Text("整批占用 : %u 个 worker 并行执行", s.workers);
                 ImGui::Spacing();
             }
         }
@@ -550,13 +487,6 @@ namespace JobSystem
         void DrawGuiFrame()
         {
             DrainNativeActivity(); // 消费原生发布事件，完整记录每个 batch
-
-            static std::vector<WorkerRow> rows;
-            if (!g_frozen)
-            {
-                CollectWorkerRows(rows);
-                RecordActivity(rows);
-            }
 
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -566,9 +496,6 @@ namespace JobSystem
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus |
                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings);
 
-            ImGui::Checkbox("Freeze (hold frame to inspect)", &g_frozen);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("暂停实时刷新：job 瞬时完成后进度条会消失，勾选后把当前快照按在屏幕上慢慢回看。");
             ImGui::Separator();
 
             if (ImGui::BeginTabBar("MainTabs"))
@@ -596,7 +523,13 @@ namespace JobSystem
                             ImGui::TableSetColumnIndex(1); ImGui::Text("%s", v);
                         };
                         char buf[64];
-                        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)s.publishedJobs); srow("Published Jobs", buf);
+                        // 与 Activity/Timeline 同口径：显示面板打开以来的增量（发布即计数，
+                        // 不含面板开启前已在跑的 batch），另附累计值供参考。
+                        const uint64_t pubDelta = s.publishedJobs >= g_guiBootPublished
+                            ? s.publishedJobs - g_guiBootPublished : s.publishedJobs;
+                        snprintf(buf, sizeof(buf), "+%llu (total %llu)",
+                                 (unsigned long long)pubDelta, (unsigned long long)s.publishedJobs);
+                        srow("Published Jobs", buf);
                         snprintf(buf, sizeof(buf), "%llu", (unsigned long long)s.totalTilesPublished); srow("Tiles Total", buf);
                         snprintf(buf, sizeof(buf), "%llu", (unsigned long long)s.localTiles); srow("Tiles Local", buf);
                         snprintf(buf, sizeof(buf), "%llu", (unsigned long long)s.stolenTiles); srow("Tiles Stolen", buf);
@@ -631,7 +564,7 @@ namespace JobSystem
                     if (ImGui::Combo("##span", &presetIdx, presets, IM_ARRAYSIZE(presets)))
                         g_winSpanMs = presetMs[presetIdx];
                     ImGui::SameLine();
-                    ImGui::Text("%s | Ctrl+wheel=zoom, drag=pan, click=inspect",
+                    ImGui::Text("%s | Ctrl+wheel=zoom, drag=pan, click=inspect | M=main/caller",
                                 g_timelinePaused ? "Paused" : "Live");
 
                     ImGui::Separator();
@@ -640,13 +573,43 @@ namespace JobSystem
                     ImGui::EndTabItem();
                 }
 
-                // ---------- Activity tab：滚动事件日志 ----------
+                // ---------- Activity tab：执行窗口（worker: job）+ 发布事件 ----------
                 if (ImGui::BeginTabItem("Activity"))
                 {
-                    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Recent Activity (rolling %d)", kActivityMax);
+                    // 执行窗口：事件驱动记录，每条 = worker 泳道上的一个 Job/直调执行
+                    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f),
+                                       "执行窗口 (Wxx: JobName   耗时   tiles   worker数)   [D]=直调");
                     ImGui::Separator();
+                    const unsigned int visible = g_debugSegVisible.load(std::memory_order_acquire);
+                    const unsigned int totalSegs = visible < (unsigned int)kDebugSegmentMax ? visible : (unsigned int)kDebugSegmentMax;
+                    const unsigned int shownSegs = totalSegs < 2048u ? totalSegs : 2048u; // 只画最近 2048 条
+                    const unsigned int segStart = visible - shownSegs;
+                    const int actLanes = CurrentWorkerCount();
+                    for (unsigned int i = 0; i < shownSegs; ++i)
+                    {
+                        const DebugSegment& seg = g_debugSegments[(segStart + i) % kDebugSegmentMax];
+                        char lb[16];
+                        if (seg.lane >= kIspcLaneBase)
+                            snprintf(lb, sizeof(lb), "T%02d", seg.lane - kIspcLaneBase); // ISPC 任务线程
+                        else if (seg.lane >= 0 && seg.lane < actLanes)
+                            snprintf(lb, sizeof(lb), "W%02d", seg.lane);
+                        else
+                            snprintf(lb, sizeof(lb), "M");
+                        const std::string nm = seg.batchId != 0 ? ResolveJobName(seg.batchId) : std::string("?");
+                        const char* prefix = seg.isDirect ? "[D]" : "";
+                        if (seg.workers > 0)
+                            ImGui::Text("%s: %s%s   %.2f ms  |  tiles=%u  workers=%u",
+                                        lb, prefix, nm.c_str(),
+                                        seg.endMs - seg.startMs, seg.tiles, seg.workers);
+                        else
+                            ImGui::Text("%s: %s%s   %.2f ms",
+                                        lb, prefix, nm.c_str(), seg.endMs - seg.startMs);
+                    }
                     ImGui::Spacing();
 
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "发布事件 (rolling %d)", kActivityMax);
+                    ImGui::Separator();
                     const int start = (g_activityHead - g_activityCount + kActivityMax * 2) % kActivityMax;
                     for (int i = 0; i < g_activityCount; ++i)
                     {
