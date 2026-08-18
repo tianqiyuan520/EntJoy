@@ -1,4 +1,4 @@
-﻿using Microsoft.Build.Framework;
+using Microsoft.Build.Framework;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -137,7 +137,8 @@ namespace NativeTranspiler.Tasks
                     "-B", buildDir
                 };
                 Log.LogMessage(MessageImportance.High, $"Running CMake configure: cmake {string.Join(" ", configureArgs)}");
-                var configureResult = RunProcessWithTimeout("cmake", configureArgs.ToArray(), NativeCodeGenDir, 120000);
+                var configureResult = RunProcessWithTimeout("cmake", configureArgs.ToArray(), NativeCodeGenDir, 120000,
+                    cleanseDotnetMSBuildEnv: true);
                 if (configureResult.ExitCode != 0)
                 {
                     Log.LogError($"CMake configuration failed.\nOutput: {configureResult.Output}\nError: {configureResult.Error}");
@@ -148,7 +149,8 @@ namespace NativeTranspiler.Tasks
             // ---- CMake 构建 ----
             var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel" };
             Log.LogMessage(MessageImportance.High, $"Running CMake build: cmake {string.Join(" ", buildArgs)}");
-            var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
+            var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000,
+                    cleanseDotnetMSBuildEnv: true);
             if (buildResult.ExitCode != 0)
             {
                 // A cancelled/overlapping IDE build can leave CMakeCache.txt behind
@@ -156,14 +158,16 @@ namespace NativeTranspiler.Tasks
                 // generated build system once before reporting a hard failure.
                 Log.LogWarning($"CMake build failed. Reconfiguring once before retry.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
                 var repairArgs = new[] { "-S", NativeCodeGenDir, "-B", buildDir };
-                var repairResult = RunProcessWithTimeout("cmake", repairArgs, NativeCodeGenDir, 120000);
+                var repairResult = RunProcessWithTimeout("cmake", repairArgs, NativeCodeGenDir, 120000,
+                    cleanseDotnetMSBuildEnv: true);
                 if (repairResult.ExitCode != 0)
                 {
                     Log.LogError($"CMake repair configuration failed.\nOutput: {repairResult.Output}\nError: {repairResult.Error}");
                     return false;
                 }
 
-                buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000);
+                buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000,
+                    cleanseDotnetMSBuildEnv: true);
                 if (buildResult.ExitCode != 0)
                 {
                     Log.LogError($"CMake build failed after repair.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
@@ -356,7 +360,8 @@ namespace NativeTranspiler.Tasks
         }
 
         private (int ExitCode, string Output, string Error) RunProcessWithTimeout(
-            string fileName, string[] arguments, string workingDir, int timeoutMilliseconds)
+            string fileName, string[] arguments, string workingDir, int timeoutMilliseconds,
+            bool cleanseDotnetMSBuildEnv = false)
         {
             var argsString = string.Join(" ", arguments.Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
 
@@ -368,6 +373,21 @@ namespace NativeTranspiler.Tasks
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+
+            // 本任务常由 dotnet build（MSBuild 宿主）触发。dotnet SDK 会把 MSBuild 相关环境
+            // 变量注入进程并被子进程继承，导致 cmake -S/-B 探测 VS 时拿到错误的 VCTargetsPath
+            //（指向 C:\Program Files\dotnet\sdk\...\Microsoft\VC\v170），配置必然失败。
+            // 这里把这一类变量从子进程环境中移除，让 CMake 用 vswhere 重新探测真实 VS。
+            if (cleanseDotnetMSBuildEnv && startInfo.EnvironmentVariables != null)
+            {
+                string[] dotnetInjected = {
+                    "VCTargetsPath", "VCTargetsPath32", "VCTargetsPath64",
+                    "MSBUILD_EXE_PATH", "MSBuildSDKsPath", "MSBuildExtensionsPath",
+                    "VisualStudioVersion", "VSINSTALLDIR", "VCINSTALLDIR",
+                };
+                foreach (var key in dotnetInjected)
+                    startInfo.EnvironmentVariables.Remove(key);
+            }
 
             using (var process = new Process { StartInfo = startInfo })
             {
