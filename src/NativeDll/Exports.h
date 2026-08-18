@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "NativeWorkerPool.h"
 
 #ifdef _WIN32
 #ifdef JOB_SYSTEM_EXPORT
@@ -32,6 +33,9 @@ extern "C" {
     typedef void (*EntityBatchRangeJobFunc)(void* context, const struct EntityBatchData* batches, int startIndex, int count);
 
     JOB_API void JobSystem_Initialize(int numThreads);
+    // 强制启动 Dear ImGui 调试面板并开始监听（不依赖 ENTJOY_DEBUG 环境变量，幂等）。
+    // 由 C# NativeJobScheduler.LaunchDebuggerGUI() 调用。
+    JOB_API void JobDebuggerGUI_Launch();
     // Unity JobsUtility.JobWorkerCount equivalent: the number of persistent
     // job workers selected when the scheduler was initialized.
     JOB_API int JobSystem_GetWorkerCount();
@@ -51,6 +55,22 @@ extern "C" {
     typedef void (*CurrentBatchIdCallback)(uint64_t batchId);
     JOB_API void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb);
 
+    // 注册"batch→Job 名"解析回调，供 Dear ImGui Timeline 显示 Job 名。
+    // C# 侧维护 batchId→名字映射；GUI 线程按需查询。cb 返回写入 buf 的名长（0=无映射）。
+    // 第二个参数为"清空"回调：GUI 线程退出时由 native 调用，让 C# 清空累积的字典并关闭捕获。
+    typedef int (*BatchJobNameResolver)(uint64_t batchId, char* buf, int bufLen);
+    typedef void (*BatchJobNameClear)();
+    JOB_API void JobSystem_RegisterNameResolver(BatchJobNameResolver cb, BatchJobNameClear clearCb);
+    // 供 ImGui GUI 读取已注册的解析器（无则返回 nullptr）
+    JOB_API const BatchJobNameResolver& JobSystem_GetNameResolver();
+    // 供 ImGui GUI 在退出时触发 C# 清理
+    JOB_API void JobSystem_ClearNameResolver();
+    // C# 直接调用（ISPC-MT 等方法直跑）时报告一次"发布"，计入 published + Activity
+    JOB_API void JobSystem_RecordDirectCall(const char* jobName, unsigned int tiles);
+    // 直调执行窗口（transpiler 包装器在 native 调用前后成对调用，事件驱动开/关泳道窗口）
+    JOB_API uint64_t JobSystem_BeginDirectCall(const char* jobName, unsigned int tiles);
+    JOB_API void JobSystem_EndDirectCall(uint64_t id);
+
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
@@ -63,6 +83,13 @@ extern "C" {
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
     // 读 handle 的 diagnosticBatchId（Complete 后 batch 必已 submit，id 已设置）。
     JOB_API uint64_t JobSystem_GetDiagnosticBatchId(void* handle);
+
+    // ---- 调试面板：实时 Worker 状态快照 ----
+    // WorkerSnapshot 定义在 NativeWorkerPool.h（已通过 include 引入）
+    // 读取所有 worker 的实时状态快照，写入 buffer（最多 maxCount 条）。
+    // 返回实际写入的条目数。
+    JOB_API int JobSystem_GetWorkerSnapshots(struct WorkerSnapshot* buffer, int maxCount);
+
     // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
     // 返回已完成的 handle
     JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(

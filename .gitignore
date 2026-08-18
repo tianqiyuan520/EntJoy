@@ -57,3 +57,6 @@ src/NativeDll.Tests/*.sln
 
 # Docs are local-only; publish a public subset under docs/public if needed
 /docs/
+
+# ImGui runtime config
+imgui.ini
