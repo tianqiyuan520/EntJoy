@@ -765,9 +765,22 @@ namespace JobSystem
             ImGui::CreateContext();
             ImGuiIO& io = ImGui::GetIO();
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-            // 优先加载系统微软雅黑（支持中文 UI），失败才回退到默认字体
+
+            // 统一高 DPI 面板：让调试窗口在任何宿主进程(控制台/Godot)下字体物理大小一致。
+            // 用 io.FontGlobalScale(绘制时缩放)按窗口 DPI 放大字体，而不是加大 SizePixels——
+            // 中文图集(微软雅黑全字符)在放大字号下会变成巨型图集，导致 NewFrame 构建失败崩溃。
+            // 注：本 vendored imgui 无 DpiEnableScaleFonts flag，故手动按窗口 DPI 设 FontGlobalScale。
+            UINT winDpi = 96;
+            if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+            {
+                typedef UINT(WINAPI* GetDpiForWindowFn)(HWND);
+                auto getDpi = (GetDpiForWindowFn)GetProcAddress(user32, "GetDpiForWindow");
+                if (getDpi) { UINT d = getDpi(hwnd); if (d >= 96) winDpi = d; }
+            }
+            const float dpiScale = (float)winDpi / 96.0f;
+
             ImFontConfig fontCfg;
-            fontCfg.SizePixels = 20.0f;   // 重新栅格化大字号，避免放大默认位图发糊
+            fontCfg.SizePixels = 20.0f;   // 基础字号：图集保持小型，避免大字号栅格化崩溃
             fontCfg.OversampleH = 3;
             fontCfg.OversampleV = 3;
             const char* yaheiPaths[] = {
@@ -786,7 +799,7 @@ namespace JobSystem
                 io.Fonts->AddFontDefault(&fontCfg);
                 LogGui("Warning: system CJK font not found; Chinese labels will show as '?'");
             }
-            io.FontGlobalScale = 1.0f;
+            io.FontGlobalScale = dpiScale;
 
             ImGui_ImplWin32_Init(hwnd);
             ImGui_ImplDX11_Init(st.device, st.context);
