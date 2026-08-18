@@ -355,9 +355,8 @@ namespace JobSystem
 
     // 传递依赖链协助。目标 job 未提交（前驱还在跑）时，沿 dependency 链
     // 回溯协助所有未完成祖先执行其 tile，让链推进到目标。worker 内嵌套
-    // Complete() 不再 park 空等，而是成为自己依赖链的执行者（消解 V-A 死锁）；
-    // 主线程也从空等变干活（修 V-D）。单依赖走 dependency，合并依赖走
-    // dependencies 向量；DAG 无环，固定容量栈做安全网。
+    // Complete() 不 park 空等，而是成为自己依赖链的执行者；主线程也协助推进。
+    // 单依赖走 dependency，合并依赖走 dependencies 向量；DAG 无环，固定容量栈做安全网。
     //
     // 迭代语义：一次 pass 认领不到 tile 并不代表链卡死 —— workers 可能正在
     // 执行祖先的 tile，即将触发其 continuation 提交下一环（EntJoy 的提交是

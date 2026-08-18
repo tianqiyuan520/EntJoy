@@ -112,7 +112,7 @@ namespace JobSystem {
     int CurrentWorkerCount();
 
     // C# 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、
-    // 出口 cb(0)，C# 异常按此绑定到具体 batch（修 V-B 全局异常队列归属错乱）。
+    // 出口 cb(0)，C# 异常按此绑定到具体 batch。
     void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept;
 
     struct JobSystemStatsSnapshot {
