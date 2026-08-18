@@ -60,11 +60,14 @@
 	<Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
 		<ItemGroup>
 			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" />
+			<!-- DLL 分离：生成代码独立 DLL，一并复制到输出 -->
+			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" />
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" />
 	</Target>
 
 	<Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
+		<!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
 		<Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
 	</Target>
 

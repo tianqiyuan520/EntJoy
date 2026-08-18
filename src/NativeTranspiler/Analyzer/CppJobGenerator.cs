@@ -73,7 +73,7 @@ namespace NativeTranspiler.Analyzer
         {
             if (boolFields.Count == 0)
             {
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {baseFuncName}({batchParams});");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {baseFuncName}({batchParams});");
                 return;
             }
 
@@ -85,7 +85,7 @@ namespace NativeTranspiler.Analyzer
                     values.Add((mask & (1 << i)) != 0);
                 
                 string suffix = BuildBoolVariantSuffix(boolFields, values);
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {baseFuncName}{suffix}({batchParams});");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {baseFuncName}{suffix}({batchParams});");
             }
         }
 
@@ -114,14 +114,14 @@ namespace NativeTranspiler.Analyzer
             {
                 var chunkParams = BuildChunkJobParameters(jobStruct);
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
             else if (IsEntityJob(jobStruct))
             {
                 // IJobEntity：始终生成独立的 Chunk 级 Execute 函数声明（不含 __requiredComponentTypeIds）
                 var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams});");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
             else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
             {
@@ -134,7 +134,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var singleParams = BuildJobParameters(jobStruct);
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({singleParams});");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({singleParams});");
             }
             return sb.ToString();
         }
@@ -243,7 +243,7 @@ namespace NativeTranspiler.Analyzer
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {funcName}({paramsStr})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
@@ -280,7 +280,7 @@ namespace NativeTranspiler.Analyzer
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {funcName}({paramsStr})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
@@ -330,7 +330,7 @@ namespace NativeTranspiler.Analyzer
         {
             var singleParams = BuildJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({singleParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({singleParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
@@ -372,7 +372,7 @@ namespace NativeTranspiler.Analyzer
         {
             var chunkParams = BuildChunkJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
@@ -397,7 +397,7 @@ namespace NativeTranspiler.Analyzer
             // Generate auto-vectorizable scalar loop — Clang generates @llvm.sin.v8f32 / cos.v8f32
             var chunkParams = BuildChunkJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
@@ -428,7 +428,7 @@ namespace NativeTranspiler.Analyzer
             // Flat scalar loop for IJobEntity — compiler auto-vectorizes across entities
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
 
@@ -482,7 +482,7 @@ namespace NativeTranspiler.Analyzer
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
 
@@ -586,7 +586,7 @@ namespace NativeTranspiler.Analyzer
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
 
@@ -799,7 +799,7 @@ namespace NativeTranspiler.Analyzer
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == "Execute");
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
             sb.AppendLine("{");
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
@@ -929,7 +929,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+            sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
             sb.AppendLine("{");
             sb.AppendLine($"    return (void*){adapterFuncName};");
             sb.AppendLine("}");
@@ -1120,7 +1120,7 @@ namespace NativeTranspiler.Analyzer
                     var singleFuncName = GetCppJobFunctionName(jobStruct, isBatch: false);
                     var singleParams = BuildJobParameters(jobStruct);
                     sb.AppendLine($"// ISPC wrapper function (defined in wrapper.cpp)");
-                    sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({singleParams});");
+                    sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({singleParams});");
                 }
                 sb.AppendLine();
             }
@@ -1155,7 +1155,7 @@ namespace NativeTranspiler.Analyzer
 
                 // IJobEntity 和 IJobChunk 统一走 ChunkAdapter 路径
                 {
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
                 sb.AppendLine("{");
                 sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
                 sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
@@ -1262,14 +1262,14 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("}");
                 sb.AppendLine();
 
-                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+                sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
                 sb.AppendLine();
 
                 var rangeAdapterFuncName = GetRangeAdapterFunctionName(jobStruct);
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
                 sb.AppendLine("{");
                 // 内联 Adapter：将 header + job 字段提至循环外
                 sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
@@ -1363,7 +1363,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
                 sb.AppendLine();
-                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{rangeAdapterFuncName}Ptr()");
+                sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{rangeAdapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
                 sb.AppendLine("}");
@@ -1375,7 +1375,7 @@ namespace NativeTranspiler.Analyzer
                 // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
                 // 比 ChunkJobData（72 字节）更紧凑，cache 效率更高
                 var entityBatchAdapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
-                var entityBatchHeader = $@"HEAD void CALLINGCONVENTION {entityBatchAdapterFuncName}(void* context, const EntityBatchData* __batches, int __startIndex, int __count)
+                var entityBatchHeader = $@"GENERATED_API void CALLINGCONVENTION {entityBatchAdapterFuncName}(void* context, const EntityBatchData* __batches, int __startIndex, int __count)
 {{
     auto* __header = (__EntJoyChunkContextHeader*)context;
     int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);
@@ -1447,7 +1447,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
                 sb.AppendLine();
-                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{entityBatchAdapterFuncName}Ptr()");
+                sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{entityBatchAdapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){entityBatchAdapterFuncName};");
                 sb.AppendLine("}");
@@ -1461,7 +1461,7 @@ namespace NativeTranspiler.Analyzer
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 
                 // 生成适配函数
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context, int __startIndex, int __count)");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, int __startIndex, int __count)");
                 sb.AppendLine("{");
                 
                 // 生成字段读取代码
@@ -1553,7 +1553,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine();
 
                 // 生成 Get_XXX_AdapterPtr 导出函数
-                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+                sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
@@ -1562,7 +1562,7 @@ namespace NativeTranspiler.Analyzer
             {
                 // IJob（非 ParallelFor）：适配函数签名匹配 JobFunc(void* context)
                 // 同样生成适配函数
-                sb.AppendLine($"HEAD void CALLINGCONVENTION {adapterFuncName}(void* context)");
+                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context)");
                 sb.AppendLine("{");
                 
                 var fieldReads = new StringBuilder();
@@ -1611,7 +1611,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine();
 
                 // 生成 Get_XXX_AdapterPtr 导出函数
-                sb.AppendLine($"HEAD void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
+                sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
@@ -2001,7 +2001,7 @@ namespace NativeTranspiler.Analyzer
             // Output function signature (same as GenerateChunkFunctionStandard)
             var chunkParams = BuildChunkJobParameters(jobStruct);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"HEAD void CALLINGCONVENTION {singleFuncName}({chunkParams})");
+            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
 

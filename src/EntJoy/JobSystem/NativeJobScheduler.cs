@@ -476,6 +476,13 @@ public static unsafe partial class NativeJobScheduler
             Console.Error.WriteLine($"[NativeJobScheduler] Loaded NativeDll: {loadedPath} (UTC: {File.GetLastWriteTimeUtc(loadedPath):O})");
         }
 
+        // DLL 分离：生成代码（wrapper/adapter）编译进 NativeTranspiled.dll，通过
+        // [DllImport("NativeTranspiled", ...)] 由 CLR 延迟加载。此处主动从 NativeDll
+        // 所在目录显式加载它，确保两块 DLL 都在运行时被找到、且 NativeDll 先于
+        // NativeTranspiled 加载满足其 DLL 依赖。NativeTranspiled.dll 缺失不影响核心
+        // 调度（仅生成代码路径不可用），故仅记录、不抛错。
+        TryLoadNativeTranspiled(loadedPath);
+
         _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, void>)
             NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
         _jobSystem_GetWorkerCount = (delegate* unmanaged[Cdecl]<int>)
@@ -559,6 +566,35 @@ public static unsafe partial class NativeJobScheduler
 
         AppDomain.CurrentDomain.ProcessExit += static (_, _) => SafeShutdown();
         AppDomain.CurrentDomain.DomainUnload += static (_, _) => SafeShutdown();
+    }
+
+    // DLL 分离：从 NativeDll 所在目录显式加载 NativeTranspiled.dll（生成代码 wrapper/adapter）。
+    // 非致命——缺失仅使生成代码路径不可用，核心调度照常。加载成功后由 CLR 的
+    // [DllImport("NativeTranspiled", ...)] 复用同一已加载模块，无需再次解析导出。
+    private static void TryLoadNativeTranspiled(string nativeDllPath)
+    {
+        const string generatedDllName = "NativeTranspiled.dll";
+        try
+        {
+            if (!string.IsNullOrEmpty(nativeDllPath))
+            {
+                string dir = Path.GetDirectoryName(nativeDllPath);
+                string candidate = Path.Combine(dir ?? string.Empty, generatedDllName);
+                if (File.Exists(candidate))
+                {
+                    NativeLibrary.Load(candidate);
+                    Console.Error.WriteLine($"[NativeJobScheduler] Loaded {generatedDllName} from {candidate}");
+                    return;
+                }
+            }
+            // 回退：交给 CLR 默认搜索（基目录/PATH）
+            try { NativeLibrary.Load(generatedDllName); }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[NativeJobScheduler] Warning: could not load {generatedDllName}: {ex.Message}");
+        }
     }
 
     // ======================== 包装函数 ========================

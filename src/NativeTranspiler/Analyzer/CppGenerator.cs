@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
@@ -417,7 +417,7 @@ namespace NativeTranspiler.Analyzer
             }
             string paramStr = string.Join(", ", parameters);
             if (fullyQualified)
-                return $"HEAD {returnType} CALLINGCONVENTION {funcName}({paramStr})";
+                return $"GENERATED_API {returnType} CALLINGCONVENTION {funcName}({paramStr})";
             else
                 return $"{returnType} {funcName}({paramStr})";
         }

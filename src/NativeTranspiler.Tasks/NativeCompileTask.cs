@@ -94,14 +94,15 @@ namespace NativeTranspiler.Tasks
             var hashFile = Path.Combine(NativeCodeGenDir, "native_compile.hash");
             var buildDir = Path.Combine(NativeCodeGenDir, "build");
             var expectedNativeDll = Path.Combine(buildDir, "Release", "NativeDll.dll");
-            if (IsUpToDateByHash(dependencies, hashFile) && File.Exists(expectedNativeDll))
+            var expectedGeneratedDll = Path.Combine(buildDir, "Release", "NativeTranspiled.dll");
+            if (IsUpToDateByHash(dependencies, hashFile) && File.Exists(expectedNativeDll) && File.Exists(expectedGeneratedDll))
             {
                 Log.LogMessage(MessageImportance.High, "Native code is up-to-date (content hashes unchanged). Skipping CMake build.");
                 return true;
             }
-            if (!File.Exists(expectedNativeDll))
+            if (!File.Exists(expectedNativeDll) || !File.Exists(expectedGeneratedDll))
             {
-                Log.LogMessage(MessageImportance.High, "Native output missing. CMake build required.");
+                Log.LogMessage(MessageImportance.High, "Native output missing (NativeDll.dll / NativeTranspiled.dll). CMake build required.");
             }
 
             // 分离 CMakeLists.txt 和其他依赖的检测：

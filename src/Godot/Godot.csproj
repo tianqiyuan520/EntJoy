@@ -43,21 +43,26 @@
   </Target>
 
   <PropertyGroup>
-    <_GodotGeneratedNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll</_GodotGeneratedNativeDllPath>
+    <_GodotGeneratedNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll</_GodotGeneratedNativeDllPath>
+    <_GodotGeneratedCoreNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll</_GodotGeneratedCoreNativeDllPath>
     <_NativeDllSourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll')">$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll</_NativeDllSourcePath>
     <_NativeDllSourcePath Condition="'$(_NativeDllSourcePath)' == '' And Exists('$(MSBuildThisFileDirectory)bin\NativeDll.dll')">$(MSBuildThisFileDirectory)bin\NativeDll.dll</_NativeDllSourcePath>
     <_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy\bin\$(Configuration)\net8.0\EntJoy.dll')">$(MSBuildThisFileDirectory)..\EntJoy\bin\$(Configuration)\net8.0\EntJoy.dll</_EntJoySourcePath>
   </PropertyGroup>
 
   <Target Name="CopyDllsToGodot" AfterTargets="Build">
-    <Copy SourceFiles="$(_GodotGeneratedNativeDllPath)" DestinationFiles="$(OutputPath)NativeDll.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedNativeDllPath)')" />
-    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="!Exists('$(_GodotGeneratedNativeDllPath)') And Exists('$(_NativeDllSourcePath)')" />
+    <!-- 生成代码 DLL（NativeTranspiled.dll）优先从生成目录拷贝 -->
+    <Copy SourceFiles="$(_GodotGeneratedNativeDllPath)" DestinationFiles="$(OutputPath)NativeTranspiled.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedNativeDllPath)')" />
+    <!-- 核心 DLL：优先用生成目录的（与生成代码同批编译），否则回退到 bin -->
+    <Copy SourceFiles="$(_GodotGeneratedCoreNativeDllPath)" DestinationFiles="$(OutputPath)NativeDll.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedCoreNativeDllPath)')" />
+    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="!Exists('$(_GodotGeneratedCoreNativeDllPath)') And Exists('$(_NativeDllSourcePath)')" />
     <Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
   </Target>
 
   <Target Name="CopyDllsToGodotPublish" AfterTargets="Publish">
-    <Copy SourceFiles="$(_GodotGeneratedNativeDllPath)" DestinationFiles="$(PublishDir)NativeDll.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedNativeDllPath)')" />
-    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="!Exists('$(_GodotGeneratedNativeDllPath)') And Exists('$(_NativeDllSourcePath)')" />
+    <Copy SourceFiles="$(_GodotGeneratedNativeDllPath)" DestinationFiles="$(PublishDir)NativeTranspiled.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedNativeDllPath)')" />
+    <Copy SourceFiles="$(_GodotGeneratedCoreNativeDllPath)" DestinationFiles="$(PublishDir)NativeDll.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedCoreNativeDllPath)')" />
+    <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="!Exists('$(_GodotGeneratedCoreNativeDllPath)') And Exists('$(_NativeDllSourcePath)')" />
     <Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />
   </Target>
 </Project>

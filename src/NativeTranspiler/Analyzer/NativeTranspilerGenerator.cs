@@ -919,9 +919,17 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            // NativeDll 核心源文件（按目录 glob，TU 拆分/新增时免维护漏列）+ 生成的 .cpp。
+            // ============================================================
+            // DLL 分离：NativeDll.dll（核心 runtime）+ NativeTranspiled.dll（生成代码）
+            //   - NativeDll：JobSystem / WorkerPool / Profiler / Debugger / imgui / tasksys
+            //   - NativeTranspiled：transpiled job wrappers + ISPC objects，链接 NativeDll
+            //     生成代码只依赖 NativeDll 的 header-only 类型（模板/POD/inline）与
+            //     JOB_API 导出函数，跨 DLL 边界通过链接 NativeDll import lib 解析。
+            // ============================================================
+            // NativeDll 核心源文件（按目录 glob，TU 拆分/新增时免维护漏列）。
             // 曾硬编码 JobSystem.cpp 单文件，模块化拆分为 State/Tiles/Scheduler 后漏列
             // 三个新 TU → 链接期 LNK2019（Scheduler/JobHandle 未定义）。glob 从根上消除该类回归。
+            sb.AppendLine("# Core runtime (NativeDll.dll)");
             sb.AppendLine("add_library(NativeDll SHARED");
             var nativeDllAbsDir = Path.GetFullPath(Path.Combine(outputDir, relativeNativeDllDir));
             var nativeDllCppFiles = Directory.Exists(nativeDllAbsDir)
@@ -933,10 +941,18 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 : new List<string>();
             foreach (var f in nativeDllCppFiles)
                 sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/{f}\"");
+            sb.AppendLine(")");
+            sb.AppendLine();
+            sb.AppendLine("# Generated job wrappers + ISPC runtime (NativeTranspiled.dll)");
+            sb.AppendLine("#   tasksys.cpp（ISPCAlloc/ISPCLaunch/ISPCSync 任务系统）必须与 ISPC 编译产物");
+            sb.AppendLine("#   同 DLL：ISPC .obj 以普通符号引用 ISPCLaunch 等，MSVC 无法从另一 DLL");
+            sb.AppendLine("#   自动导入普通符号（非 __imp_），故 tasksys + ISPC objects + 生成代码要同库。");
+            sb.AppendLine("add_library(NativeTranspiled SHARED");
             foreach (var file in cppFiles.OrderBy(x => x))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
+            sb.AppendLine("target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
             sb.AppendLine();
 
             // ---- 调试面板：Dear ImGui 集成（Windows + D3D11 后端） ----
@@ -962,44 +978,45 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine();
 
             // SIMD arch flags + defines (after add_library)
+            // 生成代码（NativeTranspiled）与核心（NativeDll）都 include Native Containes/Math
+            // 头（含 SIMD），须应用相同的 SIMD 级别/数学精度/sentinel 布局，保证跨 DLL 一致。
             sb.AppendLine("# ============================================================");
-            sb.AppendLine("# SIMD arch flags + defines");
+            sb.AppendLine("# SIMD arch flags + defines（NativeDll + NativeTranspiled 一致）");
             sb.AppendLine("# ============================================================");
-            sb.AppendLine("if(NATIVE_SIMD_LEVEL STREQUAL \"AVX2\")");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8)");
-            sb.AppendLine("    if(MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /arch:AVX2)");
+            sb.AppendLine("foreach(SIMD_TGT NativeDll NativeTranspiled)");
+            sb.AppendLine("    if(NATIVE_SIMD_LEVEL STREQUAL \"AVX2\")");
+            sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8)");
+            sb.AppendLine("        if(MSVC)");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE /arch:AVX2)");
+            sb.AppendLine("        else()");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE -mavx2 -mbmi2 -mfma)");
+            sb.AppendLine("        endif()");
+            sb.AppendLine("    elseif(NATIVE_SIMD_LEVEL STREQUAL \"AVX\")");
+            sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_AVX NSIMD_WIDTH=8)");
+            sb.AppendLine("        if(MSVC)");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE /arch:AVX)");
+            sb.AppendLine("        else()");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE -mavx)");
+            sb.AppendLine("        endif()");
+            sb.AppendLine("    elseif(NATIVE_SIMD_LEVEL STREQUAL \"SSE4\")");
+            sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_SSE4 NSIMD_WIDTH=4)");
+            sb.AppendLine("        if(NOT MSVC)");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE -msse4.2)");
+            sb.AppendLine("        endif()");
+            sb.AppendLine("    elseif(NATIVE_SIMD_LEVEL STREQUAL \"NEON\")");
+            sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_NEON NSIMD_WIDTH=4)");
+            sb.AppendLine("        if(NOT MSVC)");
+            sb.AppendLine("            target_compile_options(${SIMD_TGT} PRIVATE -march=armv8-a+simd)");
+            sb.AppendLine("        endif()");
             sb.AppendLine("    else()");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -mavx2 -mbmi2 -mfma)");
+            sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_SCALAR NSIMD_WIDTH=1)");
             sb.AppendLine("    endif()");
-            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"AVX\")");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_AVX NSIMD_WIDTH=8)");
-            sb.AppendLine("    if(MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /arch:AVX)");
-            sb.AppendLine("    else()");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -mavx)");
+            sb.AppendLine("    # SIMD math precision: 1=Fastest(~3.5ULP) 2=High(~1.0ULP) 3=IEEE(exact)");
+            sb.AppendLine("    if(NOT DEFINED NATIVE_SIMD_MATH_PRECISION)");
+            sb.AppendLine("        set(NATIVE_SIMD_MATH_PRECISION \"1\" CACHE STRING \"SIMD math precision level: 1=Fastest 2=High 3=IEEE\")");
             sb.AppendLine("    endif()");
-            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"SSE4\")");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_SSE4 NSIMD_WIDTH=4)");
-            sb.AppendLine("    if(NOT MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -msse4.2)");
-            sb.AppendLine("    endif()");
-            sb.AppendLine("elseif(NATIVE_SIMD_LEVEL STREQUAL \"NEON\")");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_NEON NSIMD_WIDTH=4)");
-            sb.AppendLine("    if(NOT MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE -march=armv8-a+simd)");
-            sb.AppendLine("    endif()");
-            sb.AppendLine("else()");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NSIMD_SCALAR NSIMD_WIDTH=1)");
-            sb.AppendLine("endif()");
-            sb.AppendLine();
-
-            // Math: inline AVX2 polynomials (sin/cos/log from SLEEF coefficients, zero call overhead)
-            sb.AppendLine("# SIMD math precision: 1=Fastest(~3.5ULP) 2=High(~1.0ULP) 3=IEEE(exact)");
-            sb.AppendLine("if(NOT DEFINED NATIVE_SIMD_MATH_PRECISION)");
-            sb.AppendLine("    set(NATIVE_SIMD_MATH_PRECISION \"1\" CACHE STRING \"SIMD math precision level: 1=Fastest 2=High 3=IEEE\")");
-            sb.AppendLine("endif()");
-            sb.AppendLine("target_compile_definitions(NativeDll PRIVATE SIMD_MATH_PRECISION=${NATIVE_SIMD_MATH_PRECISION})");
+            sb.AppendLine("    target_compile_definitions(${SIMD_TGT} PRIVATE SIMD_MATH_PRECISION=${NATIVE_SIMD_MATH_PRECISION})");
+            sb.AppendLine("endforeach()");
             sb.AppendLine();
 
             // Sentinel: match C# #if DEBUG DisposeSentinel container layout.
@@ -1010,7 +1027,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("option(ENTJOY_ENABLE_SENTINEL \"Match C# #if DEBUG DisposeSentinel container layout\" OFF)");
             sb.AppendLine("if(ENTJOY_ENABLE_SENTINEL)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_ENABLE_SENTINEL)");
-            sb.AppendLine("    message(STATUS \"NativeDll: ENTJOY_ENABLE_SENTINEL ON (NativeArray=40B / NativeList=32B)\")");
+            sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE ENTJOY_ENABLE_SENTINEL)");
+            sb.AppendLine("    message(STATUS \"NativeDll/NativeTranspiled: ENTJOY_ENABLE_SENTINEL ON (NativeArray=40B / NativeList=32B)\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
@@ -1056,7 +1074,10 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     sb.AppendLine("    )");
                 }
                 sb.AppendLine("    set_source_files_properties(${ISPC_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)");
-                sb.AppendLine("    target_sources(NativeDll PRIVATE ${ISPC_OBJECTS})");
+                // ISPC 对象由生成代码 wrapper 调用 → 链接进 NativeTranspiled？
+                // 否——ISPC _impl 被生成代码 wrapper 直接函数调用，须在同一 DLL。
+                // ISPC 编译产物是纯 avx 目标代码，与 NativeTranspiled 一起链接。
+                sb.AppendLine("    target_sources(NativeTranspiled PRIVATE ${ISPC_OBJECTS})");
                 sb.AppendLine();
                 sb.AppendLine("    if(TASKSYS_SRC)");
                 sb.AppendLine("        set_source_files_properties(${TASKSYS_SRC} PROPERTIES COMPILE_FLAGS \"/arch:AVX\")");
@@ -1112,14 +1133,20 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")");
             sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
             sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast)");
+            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast)");
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
             sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("    endif()");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            sb.AppendLine("    # NativeTranspiled 导出生成代码 wrapper/adapter（GENERATED_API → dllexport）");
+            sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
+            sb.AppendLine("    target_compile_options(NativeTranspiled PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
@@ -1128,13 +1155,21 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(WIN32)");
             sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dll\")");
+            sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".dll\")");
             sb.AppendLine("elseif(APPLE)");
             sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dylib\")");
+            sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".dylib\")");
             sb.AppendLine("else()");
             sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".so\")");
+            sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".so\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
             sb.AppendLine("set_target_properties(NativeDll PROPERTIES");
+            sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+            sb.AppendLine(")");
+            sb.AppendLine("set_target_properties(NativeTranspiled PROPERTIES");
             sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
             sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
             sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
