@@ -344,10 +344,11 @@ namespace NativeTranspiler.Analyzer
                     }
 
                     // 等待所有 ISPC 编译完成
+                    // #23：tasklist | find /c 的计数文本依赖区域设置（中文输出"找到 N 个"），
+                    // 改用 findstr 判断进程是否存在（errorlevel 区域无关）：仍存在则 errorlevel=0。
                     batContent.AppendLine(":wait_all");
-                    batContent.AppendLine("set RUNNING=0");
-                    batContent.AppendLine("for /f %%p in ('tasklist /fi \"imagename eq ispc.exe\" 2^>nul ^| find /c \"ispc.exe\"') do set RUNNING=%%p");
-                    batContent.AppendLine("if !RUNNING! GTR 0 (");
+                    batContent.AppendLine("tasklist /fi \"imagename eq ispc.exe\" 2>nul | findstr /i \"ispc.exe\" >nul 2>nul");
+                    batContent.AppendLine("if not errorlevel 1 (");
                     batContent.AppendLine("    >nul timeout /t 1 /nobreak");
                     batContent.AppendLine("    goto :wait_all");
                     batContent.AppendLine(")");
@@ -398,12 +399,16 @@ namespace NativeTranspiler.Analyzer
                     clangBat.AppendLine("echo Configuring ClangCL (LLVM backend)...");
                     clangBat.AppendLine("cmake -B build -G \"Visual Studio 17 2022\" -T ClangCL -A x64 -DNATIVE_SIMD_LEVEL=AVX2");
                     clangBat.AppendLine("if errorlevel 1 exit /b 1");
-                    clangBat.AppendLine("echo Building NativeDll with ClangCL...");
-                    clangBat.AppendLine("cmake --build build --config Release --target NativeDll");
+                    clangBat.AppendLine("echo Building NativeDll + NativeTranspiled with ClangCL...");
+                    clangBat.AppendLine("cmake --build build --config Release --target NativeDll --target NativeTranspiled");
                     clangBat.AppendLine("if errorlevel 1 exit /b 1");
                     clangBat.AppendLine("copy /Y build\\Release\\NativeDll.dll \"" + solBinDir + "\"");
-                    clangBat.AppendLine("echo Done. NativeDll.dll copied to " + solBinDir);
-                    WriteAllTextWithRetry(clangBatPath, clangBat.ToString());
+                    clangBat.AppendLine("copy /Y build\\Release\\NativeTranspiled.dll \"" + solBinDir + "\"");
+                    clangBat.AppendLine("echo Done. NativeDll.dll + NativeTranspiled.dll copied to " + solBinDir);
+                    // 内容未变则不写（#22）：避免时间戳更新触发无关重编/检查
+                    string clangBatContent = clangBat.ToString();
+                    if (!File.Exists(clangBatPath) || File.ReadAllText(clangBatPath) != clangBatContent)
+                        WriteAllTextWithRetry(clangBatPath, clangBatContent);
                 }
 
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);

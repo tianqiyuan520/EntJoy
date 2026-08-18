@@ -571,11 +571,33 @@ public static unsafe partial class NativeJobScheduler
     // DLL 分离：从 NativeDll 所在目录显式加载 NativeTranspiled.dll（生成代码 wrapper/adapter）。
     // 非致命——缺失仅使生成代码路径不可用，核心调度照常。加载成功后由 CLR 的
     // [DllImport("NativeTranspiled", ...)] 复用同一已加载模块，无需再次解析导出。
+    // #21：同时注册 DllImportResolver，使 [DllImport("NativeTranspiled")] 的 P/Invoke
+    // 解析走同一路径逻辑（NativeDll 目录 → 基目录 → CLR 默认），不再依赖脆弱搜索。
     private static void TryLoadNativeTranspiled(string nativeDllPath)
     {
         const string generatedDllName = "NativeTranspiled.dll";
         try
         {
+            // 解析器：按 NativeDll 目录 / AppContext.BaseDirectory / 基目录子目录 / CLR 默认
+            NativeLibrary.SetDllImportResolver(typeof(NativeJobScheduler).Assembly, (libName, assembly, searchPath) =>
+            {
+                if (!string.Equals(libName, "NativeTranspiled", StringComparison.OrdinalIgnoreCase))
+                    return IntPtr.Zero;
+                string[] searchDirs =
+                {
+                    !string.IsNullOrEmpty(nativeDllPath) ? Path.GetDirectoryName(nativeDllPath) : null,
+                    AppContext.BaseDirectory,
+                };
+                foreach (var dir in searchDirs)
+                {
+                    if (string.IsNullOrEmpty(dir)) continue;
+                    string candidate = Path.Combine(dir, generatedDllName);
+                    if (File.Exists(candidate))
+                        return NativeLibrary.Load(candidate);
+                }
+                return IntPtr.Zero;   // 让 CLR 走默认搜索
+            });
+
             if (!string.IsNullOrEmpty(nativeDllPath))
             {
                 string dir = Path.GetDirectoryName(nativeDllPath);
@@ -2609,6 +2631,11 @@ public static unsafe partial class NativeJobScheduler
                     // 清理尾部连续的 default 条目，防止 _chunkGCHandles 无界增长
                     while (_chunkGCHandles.Count > 0 && !_chunkGCHandles[_chunkGCHandles.Count - 1].IsAllocated)
                         _chunkGCHandles.RemoveAt(_chunkGCHandles.Count - 1);
+                    // #24：空洞积累（中间 default 条目被活跃 job 的 gcHandleStartIndex 引用，
+                    // 不能移动元素；但底层数组可能远大于 Count）。TrimExcess 收缩容量但不移动
+                    // 元素，释放空洞占用的数组空间，不影响索引寻址。仅在大容量时触发避免频繁拷贝。
+                    if (_chunkGCHandles.Capacity > 8192 && _chunkGCHandles.Capacity > _chunkGCHandles.Count * 4)
+                        _chunkGCHandles.TrimExcess();
                 }
             }
 

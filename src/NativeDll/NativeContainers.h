@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 
 namespace EntJoy {
@@ -135,6 +136,19 @@ namespace EntJoy {
 				// 否则 free(Ptr) 是内部指针释放 → 堆损坏）。未注册时回退 malloc/free。
 				PersistentAllocCallback alloc = PersistentAllocFn();
 				PersistentFreeCallback fre = PersistentFreeFn();
+				// fail-fast（#1）：Persistent 列表必须已注册托管分配器。若未注册（Initialize()
+				// 未调用/回调为空），扩容回退 malloc 会与 C# 池化器分配混用 → 释放时堆损坏。
+				// Debug 断言暴露编程错误；Release 记日志避免静默损坏。
+				if ((alloc == nullptr || fre == nullptr) && Allocator == Allocator::Persistent) {
+#if defined(_DEBUG) || defined(ENTJOY_ENABLE_SENTINEL)
+					std::abort();  // 或 __debugbreak()；明确失败而非静默堆损坏
+#else
+					std::fprintf(stderr,
+						"[UnsafeList] ERROR: Persistent list without registered allocator (Initialize() not called?); capacity %d->%d. Aborting.\n",
+						Capacity, newCapacity);
+					std::abort();
+#endif
+				}
 				T* newPtr = (alloc != nullptr)
 					? static_cast<T*>(alloc(static_cast<int32_t>(static_cast<size_t>(newCapacity) * sizeof(T))))
 					: static_cast<T*>(malloc(static_cast<size_t>(newCapacity) * sizeof(T)));
@@ -160,6 +174,16 @@ namespace EntJoy {
 			void Dispose() {
 				if (Ptr) {
 					PersistentFreeCallback fre = PersistentFreeFn();
+					// fail-fast（#1）：Persistent 列表未注册分配器时禁止回退 free（混用堆损坏）。
+					if (fre == nullptr && Allocator == Allocator::Persistent) {
+#if defined(_DEBUG) || defined(ENTJOY_ENABLE_SENTINEL)
+						std::abort();
+#else
+						std::fprintf(stderr,
+							"[UnsafeList] ERROR: Persistent list Dispose without registered allocator. Aborting.\n");
+						std::abort();
+#endif
+					}
 					if (fre != nullptr) fre(Ptr); else free(Ptr);
 					Ptr = nullptr;
 					Length = 0;
