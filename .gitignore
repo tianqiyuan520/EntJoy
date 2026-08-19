@@ -61,6 +61,12 @@ src/NativeDll.Tests/*.sln
 # ImGui runtime config
 imgui.ini
 
+# Benchmarks & tooling (local-only; not part of library sources)
+/tools/
+
+# Local offline NuGet package-source config (machine-specific)
+NuGet.Offline.config
+
 # Only public documentation belongs to this repository.
 /docs/*
 !/docs/public/

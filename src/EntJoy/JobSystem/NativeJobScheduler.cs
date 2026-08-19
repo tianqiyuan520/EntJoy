@@ -1061,7 +1061,9 @@ public static unsafe partial class NativeJobScheduler
         bool cleanupByCpp = false;
         try
         {
-            var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
+            // 自动批处理回调：若 T 同时实现 IJobParallelForBatch，则回调内一次 Execute(start,count)；
+            // 否则退回逐元素 Execute(i)。减少轻任务(Native S1/S2)上逐元素接口调度的开销，调用方无需改代码。
+            var cache = AutoParallelForCallback<T>.GetCache();
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
             IntPtr handle = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, ctx, managedContext ? _managedCleanupPtr : _cleanupPtr, length, batchSize, dependencyLease.Handle);
             cleanupByCpp = true;
@@ -3114,6 +3116,34 @@ public static unsafe partial class NativeJobScheduler
         // 必须用 GetOrAdd：手写 TryGetValue-创建-赋值在并发首次调度同一 T 时，
         // loser 实例会被覆盖，其委托可能被 GC 回收但函数指针已交原生侧 → 悬空。
         return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
+    }
+
+    /// <summary>
+    /// 自动批处理回调（per 泛型 T 缓存一次）：若 T 同时实现 IJobParallelForBatch，则调度用批回调
+    /// （回调内一次 Execute(start,count)），否则退回逐元素 Execute(i)。减少轻任务上逐元素接口调度开销。
+    /// 用反射仅在首次调度该类型时做一次 IsAssignableFrom 判定 + 泛型构造，热路径零开销。
+    /// </summary>
+    private static class AutoParallelForCallback<T>
+        where T : struct, IJobParallelFor
+    {
+        public static readonly DelegateCache Cache = Build();
+
+        private static DelegateCache Build()
+        {
+            if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
+            {
+                // T 同时是 IJobParallelForBatch → 批回调
+                var create = typeof(NativeJobScheduler)
+                    .GetMethod(nameof(CreateParallelForBatchCallback), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+                    .MakeGenericMethod(typeof(T))
+                    .Invoke(null, null);
+                return new DelegateCache((BatchJobFunc)create!);
+            }
+            // 退回逐元素回调
+            return GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
+        }
+
+        public static DelegateCache GetCache() => Cache;
     }
 
     // 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
