@@ -1,4 +1,6 @@
 using System.Threading;
+using EntJoy.Collections;
+using EntJoy.JobSystem;
 
 namespace EntJoy
 {
@@ -28,6 +30,17 @@ namespace EntJoy
                 if (DefaultWorld == null)
                 {
                     DefaultWorld = this;
+
+                    // 注册 TempAllocator 回调：Collections 项目不引用 ECS/Jobs，
+                    // 通过静态回调实现依赖反转。
+                    TempAllocator.OnBeforeReset = () =>
+                    {
+                        DefaultWorld?._entityManager.CompleteActiveJobs();
+                    };
+                    TempAllocator.OnAfterReset = () =>
+                    {
+                        NativeJobScheduler.FlushRecordedExceptions();
+                    };
                 }
             }
         }

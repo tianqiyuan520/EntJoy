@@ -9,7 +9,7 @@
 		<BaseOutputPath>..\..\bin</BaseOutputPath>
 		<OutputPath>..\..\bin</OutputPath>
 
-		<!-- 关键设置：取消自动追加 TargetFramework 子目录 -->
+		<!-- 关键设置：取消自动追�?TargetFramework 子目�?-->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 	</PropertyGroup>
 
@@ -21,14 +21,14 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<ProjectReference Include="..\EntJoy\EntJoy.csproj" />
+		<ProjectReference Include="..\EntJoy.ECS\EntJoy.ECS.csproj" />
 		<ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<!-- ★ 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
+		<!-- �?新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
 		<ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
 	</ItemGroup>
 
-	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检查
-	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编译 -->
+	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检�?
+	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编�?-->
 	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
 	<Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
@@ -55,7 +55,7 @@
 	<Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
 		<ItemGroup>
 			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" />
-			<!-- DLL 分离：生成代码独立 DLL，一并复制到输出 -->
+			<!-- DLL 分离：生成代码独�?DLL，一并复制到输出 -->
 			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" />
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" />

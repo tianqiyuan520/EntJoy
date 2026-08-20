@@ -1,6 +1,5 @@
 using System;
 using System.Runtime.CompilerServices;
-using EntJoy.JobSystem;
 
 namespace EntJoy.Collections
 {

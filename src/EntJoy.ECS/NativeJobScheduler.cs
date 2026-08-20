@@ -265,7 +265,7 @@ public static unsafe partial class NativeJobScheduler
 
     // 记录某个已调度 handle 的 Job 名（原生直跑路径：调度返回后立读 diagnosticId）。
     // 仅对立即发布的调度模式有效（ImmediateNative/PublishAssist 等）；延迟发布取不到则跳过。
-    private static void RegisterScheduledJobName(IntPtr handle, string name)
+    internal static void RegisterScheduledJobName(IntPtr handle, string name)
     {
         if (!_debugNameCaptureEnabled || handle == IntPtr.Zero || _jobSystem_GetDiagnosticBatchId == null)
             return;
@@ -299,11 +299,11 @@ public static unsafe partial class NativeJobScheduler
     private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
     private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
-    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
-    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkJobEx;
-    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
-    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
-    private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
     private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
     private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
     private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
@@ -734,28 +734,28 @@ public static unsafe partial class NativeJobScheduler
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static IntPtr JobSystem_ScheduleChunkJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    internal static IntPtr JobSystem_ScheduleChunkJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleChunkJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static IntPtr JobSystem_ScheduleChunkRangeJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    internal static IntPtr JobSystem_ScheduleChunkRangeJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleChunkRangeJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static IntPtr JobSystem_ScheduleEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
+    internal static IntPtr JobSystem_ScheduleEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static IntPtr JobSystem_ScheduleAndCompleteEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode = ChunkScheduleMode.PublishAssist, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
+    internal static IntPtr JobSystem_ScheduleAndCompleteEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode = ChunkScheduleMode.PublishAssist, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
     {
         EnsureNativeLoaded();
         return _jobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind);
@@ -791,20 +791,20 @@ public static unsafe partial class NativeJobScheduler
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void CleanupFunc(IntPtr context);
+    internal delegate void CleanupFunc(IntPtr context);
 
     // ======================== 委托缓存 ========================
-    private static readonly ConcurrentDictionary<Type, DelegateCache> _delegateCache = new();
-    private sealed class DelegateCache { public readonly Delegate Delegate; public readonly IntPtr FuncPtr; public DelegateCache(Delegate del) { Delegate = del; FuncPtr = Marshal.GetFunctionPointerForDelegate(del); } }
+    internal static readonly ConcurrentDictionary<Type, DelegateCache> _delegateCache = new();
+    internal sealed class DelegateCache { public readonly Delegate Delegate; public readonly IntPtr FuncPtr; public DelegateCache(Delegate del) { Delegate = del; FuncPtr = Marshal.GetFunctionPointerForDelegate(del); } }
 
     private static readonly CleanupFunc _cleanup = Cleanup;
     private static readonly IntPtr _cleanupPtr = Marshal.GetFunctionPointerForDelegate(_cleanup);
-    private static readonly CleanupFunc _managedCleanup = ManagedCleanup;
-    private static readonly IntPtr _managedCleanupPtr = Marshal.GetFunctionPointerForDelegate(_managedCleanup);
-    private static readonly CleanupFunc _rawChunkBatchCleanup = RawChunkBatchCleanup;
-    private static readonly IntPtr _rawChunkBatchCleanupPtr = Marshal.GetFunctionPointerForDelegate(_rawChunkBatchCleanup);
-    private static readonly object _chunkGCHandlesLock = new();
-    private static readonly List<GCHandle> _chunkGCHandles = new();
+    internal static readonly CleanupFunc _managedCleanup = ManagedCleanup;
+    internal static readonly IntPtr _managedCleanupPtr = Marshal.GetFunctionPointerForDelegate(_managedCleanup);
+    internal static readonly CleanupFunc _rawChunkBatchCleanup = RawChunkBatchCleanup;
+    internal static readonly IntPtr _rawChunkBatchCleanupPtr = Marshal.GetFunctionPointerForDelegate(_rawChunkBatchCleanup);
+    internal static readonly object _chunkGCHandlesLock = new();
+    internal static readonly List<GCHandle> _chunkGCHandles = new();
 
     // ======================== 公共接口 ========================
     public static void Initialize(int numThreads = 0)
@@ -918,7 +918,7 @@ public static unsafe partial class NativeJobScheduler
     // 回调在 job 执行线程（worker/main/assist）上执行，_currentBatchId 为
     // [ThreadStatic]，各线程各持一份，无跨线程污染。
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static void SetCurrentBatchId(ulong batchId) => _currentBatchId = batchId;
+    internal static void SetCurrentBatchId(ulong batchId) => _currentBatchId = batchId;
 
     private static void RegisterCurrentBatchIdCallback()
     {
@@ -1163,7 +1163,7 @@ public static unsafe partial class NativeJobScheduler
         JobSystem_RetainHandle(handle);
     }
 
-    private readonly struct RetainedNativeDependency : IDisposable
+    internal readonly struct RetainedNativeDependency : IDisposable
     {
         public readonly IntPtr Handle;
 
@@ -1264,11 +1264,11 @@ public static unsafe partial class NativeJobScheduler
     }
 
     // ======================== IJobChunk 调度 ========================
-    private static readonly object _rawChunkScheduleCacheLock = new();
-    private static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
-    private static readonly Dictionary<RawChunkScheduleCacheKey, ManagedChunkScheduleCache> _managedChunkScheduleCaches = new();
-    private static readonly Dictionary<RawChunkScheduleCacheKey, EntityBatchScheduleCache> _entityBatchScheduleCaches = new();
-    private static readonly ConcurrentDictionary<IntPtr, GCHandle> _chunkContextLeases = new();
+    internal static readonly object _rawChunkScheduleCacheLock = new();
+    internal static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
+    internal static readonly Dictionary<RawChunkScheduleCacheKey, ManagedChunkScheduleCache> _managedChunkScheduleCaches = new();
+    internal static readonly Dictionary<RawChunkScheduleCacheKey, EntityBatchScheduleCache> _entityBatchScheduleCaches = new();
+    internal static readonly ConcurrentDictionary<IntPtr, GCHandle> _chunkContextLeases = new();
 
     public static void ClearRawChunkScheduleCaches(EntityManager entityManager)
     {
@@ -2287,7 +2287,7 @@ public static unsafe partial class NativeJobScheduler
         return hash.ToHashCode();
     }
 
-    private readonly struct RawChunkScheduleCacheKey : IEquatable<RawChunkScheduleCacheKey>
+    internal readonly struct RawChunkScheduleCacheKey : IEquatable<RawChunkScheduleCacheKey>
     {
         private readonly EntityManager _entityManager;
         private readonly int _managerHash;
@@ -2320,7 +2320,7 @@ public static unsafe partial class NativeJobScheduler
             => HashCode.Combine(_managerHash, _queryHash, _requiredHash, _mode);
     }
 
-    private sealed class RawChunkScheduleCache : IDisposable
+    internal sealed class RawChunkScheduleCache : IDisposable
     {
         public readonly int StructuralVersion;
         public readonly ChunkJobData* ChunksPtr;
@@ -2408,7 +2408,7 @@ public static unsafe partial class NativeJobScheduler
             Marshal.FreeHGlobal((IntPtr)ChunksPtr);
         }
 
-        private sealed class CacheLease : IDisposable
+        internal sealed class CacheLease : IDisposable
         {
             private RawChunkScheduleCache _owner;
 
@@ -2425,7 +2425,7 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    private sealed class ManagedChunkScheduleCache
+    internal sealed class ManagedChunkScheduleCache
     {
         public readonly int StructuralVersion;
         public readonly Chunk[] Chunks;
@@ -2437,7 +2437,7 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    private sealed class EntityBatchScheduleCache : IDisposable
+    internal sealed class EntityBatchScheduleCache : IDisposable
     {
         public readonly int StructuralVersion;
         public readonly EntityBatchData* BatchesPtr;
@@ -2517,7 +2517,7 @@ public static unsafe partial class NativeJobScheduler
             Marshal.FreeHGlobal((IntPtr)BatchesPtr);
         }
 
-        private sealed class CacheLease : IDisposable
+        internal sealed class CacheLease : IDisposable
         {
             private EntityBatchScheduleCache _owner;
 
@@ -2535,14 +2535,14 @@ public static unsafe partial class NativeJobScheduler
     }
 
     // ======================== 内部实现 ========================
-    private static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
-    private static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
+    internal static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
+    internal static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
 
     // 显式逐字段写入器注册表：Debug 下 NativeArray 含 GC 引用（DisposeSentinel）→ Job struct 非 blittable，
     // 裸拷贝布局不可靠；NativeTranspiler 为每个 transpiled Job 生成 WriteJobFields_{Job}，静态构造时登记，
     // CreateChunkContextBlock 按类型分发，未登记（非 transpiled / 含不支持字段）回退裸拷贝。
     public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
-    private static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
+    internal static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
 
     /// <summary>注册 Job 字段显式写入器（由 NativeTranspiler 生成代码在 NativeExports 静态构造时调用）</summary>
     public static void RegisterJobFieldWriter(Type type, Delegate writer) => s_jobFieldWriters[type] = writer;
@@ -3111,7 +3111,7 @@ public static unsafe partial class NativeJobScheduler
     }
 
     // ======================== 辅助方法 ========================
-    private static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
+    internal static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
     {
         // 必须用 GetOrAdd：手写 TryGetValue-创建-赋值在并发首次调度同一 T 时，
         // loser 实例会被覆盖，其委托可能被 GC 回收但函数指针已交原生侧 → 悬空。
@@ -3334,7 +3334,7 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    private static void ManagedCleanup(IntPtr ctx)
+    internal static void ManagedCleanup(IntPtr ctx)
     {
         if (ctx == IntPtr.Zero) return;
         var handle = GCHandle.FromIntPtr(ctx);
