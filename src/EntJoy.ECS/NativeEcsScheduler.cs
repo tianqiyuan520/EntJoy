@@ -3,32 +3,194 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using EntJoy;
 
 namespace EntJoy.JobSystem
 {
+
+// ======================== Chunk 任务数据结构（与 C++ 一一对应） ========================
+
+/// <summary>
+/// 跨语言共享的 Chunk 任务数据结构（与 C++ ChunkJobData 一一对应）
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct ChunkJobData
+{
+    public void* entityArray;           // Entity 数组首地址
+    public int entityCount;             // 实体数量
+    public int componentCount;          // 组件种类数
+    public void** componentArrays;      // 每个组件数组首地址（长度为 componentCount）
+    public int* componentSizes;         // 每个组件大小（字节，长度为 componentCount）
+    public void** enableBitMaps;        // 每个 enableable 组件位图指针（可为 null，长度为 componentCount）
+    public int* componentTypeIndices;   // 组件类型索引数组
+    public IntPtr chunkHandle;          // GCHandle IntPtr，用于在回调中恢复 Chunk 对象
+    public void** requiredComponentArrays; // NativeTranspile IJobChunk 所需组件数组指针
+    public int requiredComponentCount;     // requiredComponentArrays 数量
+}
+
+/// <summary>
+/// NativeTranspile 轻量 Chunk 数据结构（与 C++ ChunkData 一一对应）。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct ChunkData
+{
+    public void** componentArrays;      // 组件数组指针 [requiredCount]
+    public int entityCount;             // 实体数量
+    public int requiredComponentCount;  // 组件数组数量
+    public void** enableBitMaps;        // enable 位图 [enableCount]，无过滤时为 null（预留）
+    public int enableBitmapCount;       // enable 位图数量，0 表示无过滤（预留）
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct EntityBatchData
+{
+    public void** componentArrays;
+    public void** enableBitMaps;
+    public int entityCount;
+    public int enableBitmapCount;
+}
+
+/// <summary>
+/// Chunk 上下文包的内存布局（非托管），必须 Sequential 以确保布局与指针访问一致。
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct ChunkContextHeader
+{
+    public int chunkCount;               // Chunk 数量
+    public int hasEnabledFilter;         // 是否有 enable 过滤
+    public IntPtr queryAllEnabledTypes;  // int[]（类型哈希数组）指针
+    public int allEnabledCount;          // AllEnabled 数组长度
+    public int gcHandleStartIndex;       // GCHandle 列表起始索引（-1 = 无 GCHandle）
+    public IntPtr chunksPtr;             // ChunkJobData 数组指针（用于 cleanup 回收）
+    public int cleanupInProgress;        // 防止重复清理的标志
+    public int ownsChunkData;            // 该 context 是否负责释放 chunksPtr + 每 chunk 缓冲区
+    public IntPtr requiredComponentTypeIds; // NativeTranspiler IJobChunk 所需组件类型 ID 数组
+    public int requiredComponentTypeIdCount; // 所需组件类型 ID 数量
+}
+
+internal enum ChunkScheduleMode
+{
+    PublishNoAssist = 0,
+    PublishAssist = 1,
+    DeferTinyOnly = 2,
+    ImmediateNative = 3,
+    DeferredPublish = 4,
+    DeferredPublishNoAssist = 5
+}
+
+internal enum NativeEcsJobKind
+{
+    Chunk = 0,
+    Entity = 1
+}
+
+/// <summary>
+/// <see cref="NativeJobScheduler"/> 的 ECS 扩展（独立类）。
+/// 包含所有依赖 Chunk/ComponentType/EntityManager/QueryBuilder 的调度方法。
+/// 共享的可变状态（委托缓存、上下文池、异常、纯 P/Invoke 指针）由
+/// <see cref="NativeJobEngine"/> 独占持有；本类只保留 chunk 专属结构/指针与状态。
+/// </summary>
+public static unsafe class NativeEcsScheduler
+{
+    // ======================== Chunk P/Invoke 函数指针 ========================
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr> _jobSystem_ScheduleChunkJob;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
+    internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
+
+    private static readonly object _chunkPointerLoadLock = new();
+    private static int _chunkPointersLoaded;
+
     /// <summary>
-    /// NativeJobScheduler 的 ECS 扩展部分（partial class）。
-    /// 包含所有依赖 Chunk/ComponentType/EntityManager/QueryBuilder 的调度方法。
-    /// 与 NativeJobScheduler 在同一 assembly（ECS）。
+    /// 从 <see cref="NativeJobEngine.NativeDllHandle"/> 加载 chunk 专属导出。
+    /// 首次 chunk 调度时幂等调用。
     /// </summary>
-    public static unsafe partial class NativeJobScheduler
+    internal static void LoadNativeChunkPointers(IntPtr dllHandle)
     {
+        _jobSystem_ScheduleChunkJob = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJob");
+        _jobSystem_ScheduleChunkJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkJobEx");
+        _jobSystem_ScheduleChunkRangeJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleChunkRangeJobEx");
+        _jobSystem_ScheduleEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleEntityBatchJobEx");
+        _jobSystem_ScheduleAndCompleteEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, IntPtr>)
+            NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleAndCompleteEntityBatchJobEx");
+    }
+
+    private static void EnsureChunkPointersLoaded()
+    {
+        if (Volatile.Read(ref _chunkPointersLoaded) != 0) return;
+        lock (_chunkPointerLoadLock)
+        {
+            if (_chunkPointersLoaded != 0) return;
+            LoadNativeChunkPointers(NativeJobEngine.NativeDllHandle);
+            Interlocked.Exchange(ref _chunkPointersLoaded, 1);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static IntPtr JobSystem_ScheduleChunkJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    {
+        NativeJobEngine.EnsureNativeLoaded();
+        EnsureChunkPointersLoaded();
+        return _jobSystem_ScheduleChunkJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static IntPtr JobSystem_ScheduleChunkRangeJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, ChunkJobData* chunks, int chunkCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0)
+    {
+        NativeJobEngine.EnsureNativeLoaded();
+        EnsureChunkPointersLoaded();
+        return _jobSystem_ScheduleChunkRangeJobEx(funcPtr, context, cleanupPtr, chunks, chunkCount, dependency, (int)mode, workerCap, rangeSize);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static IntPtr JobSystem_ScheduleEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
+    {
+        NativeJobEngine.EnsureNativeLoaded();
+        EnsureChunkPointersLoaded();
+        return _jobSystem_ScheduleEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static IntPtr JobSystem_ScheduleAndCompleteEntityBatchJobEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, EntityBatchData* batches, int batchCount, IntPtr dependency, ChunkScheduleMode mode = ChunkScheduleMode.PublishAssist, int workerCap = 0, int rangeSize = 0, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
+    {
+        NativeJobEngine.EnsureNativeLoaded();
+        EnsureChunkPointersLoaded();
+        return _jobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind);
+    }
+
+    // ======================== Chunk 回调委托 ========================
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
+
+    // ======================== Job 名登记 / 实体跟踪 ========================
     private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle)
     {
         entityManager?.RegisterActiveJob(handle);
         return handle;
     }
 
-    // ======================== IJobChunk 调度 ========================
+    // ======================== Chunk 调度缓存（归属 ECS，与 engine 解耦） ========================
     internal static readonly object _rawChunkScheduleCacheLock = new();
     internal static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
     internal static readonly Dictionary<RawChunkScheduleCacheKey, ManagedChunkScheduleCache> _managedChunkScheduleCaches = new();
     internal static readonly Dictionary<RawChunkScheduleCacheKey, EntityBatchScheduleCache> _entityBatchScheduleCaches = new();
     internal static readonly ConcurrentDictionary<IntPtr, GCHandle> _chunkContextLeases = new();
+    internal static readonly object _chunkGCHandlesLock = new();
+    internal static readonly List<GCHandle> _chunkGCHandles = new();
+
+    internal static readonly NativeJobEngine.CleanupFunc _chunkCleanup = ChunkCleanup;
+    internal static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
+    internal static readonly NativeJobEngine.CleanupFunc _rawChunkBatchCleanup = RawChunkBatchCleanup;
+    internal static readonly IntPtr _rawChunkBatchCleanupPtr = Marshal.GetFunctionPointerForDelegate(_rawChunkBatchCleanup);
 
     public static void ClearRawChunkScheduleCaches(EntityManager entityManager)
     {
@@ -82,6 +244,7 @@ namespace EntJoy.JobSystem
         }
     }
 
+    // ======================== IJobChunk 调度 ========================
     public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null)
         where T : struct, IJobChunk
         => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn);
@@ -116,10 +279,7 @@ namespace EntJoy.JobSystem
         where T : struct
         => ScheduleNativeChunkRangeRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
 
-    /// <summary>
-    /// IJobEntity ISPC 轻量调度：跳过 entity tracking + query cache，
-    /// 直接迭代 archetype chunk 构建 ChunkJobData 并调度。
-    /// </summary>
+    /// <summary>IJobEntity ISPC 轻量调度：跳过 entity tracking + query cache。</summary>
     public static NativeJobHandle ScheduleEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
@@ -128,10 +288,7 @@ namespace EntJoy.JobSystem
         where T : struct, IJobChunk
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, jobKind: NativeEcsJobKind.Chunk);
 
-    /// <summary>
-    /// Schedule + Complete 一步完成，消除一次 P/Invoke 往返和 handle boxing 开销。
-    /// 适用于基准测试和一次性同步 job。
-    /// </summary>
+    /// <summary>Schedule + Complete 一步完成，消除一次 P/Invoke 往返和 handle boxing 开销。</summary>
     public static NativeJobHandle ScheduleAndCompleteEntityBatchRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap = 0, int rangeSize = 0)
         where T : struct
         => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, null, workerCap, rangeSize, useScheduleAndComplete: true);
@@ -140,14 +297,14 @@ namespace EntJoy.JobSystem
         where T : struct, IJobChunk
     {
         var handle = ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, null, ChunkScheduleMode.ImmediateNative);
-        Complete(ref handle);
+        NativeJobScheduler.Complete(ref handle);
     }
 
     public static void RunEntityRawImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
         where T : struct
     {
         var handle = ScheduleNativeChunkRawImmediateCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds);
-        Complete(ref handle);
+        NativeJobScheduler.Complete(ref handle);
     }
 
     private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0)
@@ -165,15 +322,15 @@ namespace EntJoy.JobSystem
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
                 IntPtr h1268 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
-                RegisterScheduledJobName(h1268, typeof(T).Name);
+                NativeJobEngine.RegisterScheduledJobName(h1268, typeof(T).Name);
                 return TrackEntityJob(entityManager, new NativeJobHandle(h1268));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
 
-        bool jobHasManagedReferences = JobHasManagedReferences<T>();
+        bool jobHasManagedReferences = NativeJobEngine.JobHasManagedReferences<T>();
 
         if (funcPtr == IntPtr.Zero &&
             !jobHasManagedReferences &&
@@ -183,10 +340,10 @@ namespace EntJoy.JobSystem
             var csharpRawContextBlock = CreateChunkContextBlock(ref job, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, false, null, csharpRawCacheLease);
             try
             {
-                var cache = GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
-                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                var cache = NativeJobEngine.GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => CreateChunkRangeCallback<T>());
+                using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
                 IntPtr h1285 = JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
-                RegisterScheduledJobName(h1285, typeof(T).Name);
+                NativeJobEngine.RegisterScheduledJobName(h1285, typeof(T).Name);
                 return TrackEntityJob(entityManager, new NativeJobHandle(h1285));
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
@@ -201,15 +358,15 @@ namespace EntJoy.JobSystem
                 : AllocRawChunkBatchContext(ref job, managedCache.Chunks, allEnabledTypes);
             try
             {
-                var cache = GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateChunkArrayBatchCallback<T>());
-                using var dependencyLease = new RetainedNativeDependency(dependsOn);
-                IntPtr h1301 = JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? _managedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle);
-                RegisterScheduledJobName(h1301, typeof(T).Name);
+                var cache = NativeJobEngine.GetOrCreateDelegateCache<T, NativeJobEngine.BatchJobFunc>(() => CreateChunkArrayBatchCallback<T>());
+                using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
+                IntPtr h1301 = NativeJobEngine.JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? NativeJobEngine.ManagedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle);
+                NativeJobEngine.RegisterScheduledJobName(h1301, typeof(T).Name);
                 return TrackEntityJob(entityManager, new NativeJobHandle(h1301));
             }
             catch
             {
-                if (jobHasManagedReferences) ManagedCleanup(managedContextBlock);
+                if (jobHasManagedReferences) NativeJobEngine.ManagedCleanup(managedContextBlock);
                 else RawChunkBatchCleanup(managedContextBlock);
                 throw;
             }
@@ -231,14 +388,11 @@ namespace EntJoy.JobSystem
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
 
-        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱。
-        // 仅托管回调（funcPtr == 0）需要 GCHandle 恢复 chunk 对象。
         bool nativeCallback = funcPtr != IntPtr.Zero;
         var gcHandles = nativeCallback ? null : new GCHandle[chunkCount];
         int gcHandleStartIndex = -1;
         if (!nativeCallback)
         {
-            // 先预分配所有 GCHandle（无锁安全），再原子性加入列表
             for (int ci = 0; ci < chunkCount; ci++)
                 gcHandles![ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
             lock (_chunkGCHandlesLock)
@@ -314,13 +468,13 @@ namespace EntJoy.JobSystem
             IntPtr callbackPtr = funcPtr;
             if (callbackPtr == IntPtr.Zero)
             {
-                var cache = GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
+                var cache = NativeJobEngine.GetOrCreateDelegateCache<T, ChunkJobFuncDelegate>(() => CreateChunkCallback<T>());
                 callbackPtr = cache.FuncPtr;
             }
             var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
             IntPtr h1415 = JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
-            RegisterScheduledJobName(h1415, typeof(T).Name);
+            NativeJobEngine.RegisterScheduledJobName(h1415, typeof(T).Name);
             return TrackEntityJob(entityManager, new NativeJobHandle(h1415));
         }
         catch
@@ -331,7 +485,6 @@ namespace EntJoy.JobSystem
             }
             else
             {
-                // 分配循环未完成：部分清理 per-chunk 分配和 chunksPtr
                 if (chunksPtr != null)
                 {
                     for (int ci = 0; ci < chunkCount; ci++)
@@ -348,8 +501,6 @@ namespace EntJoy.JobSystem
                 if (gcHandles != null)
                     foreach (var gch in gcHandles)
                         if (gch.IsAllocated) gch.Free();
-                // 注：GCHandle 已释放，但对应 slot 仍在 _chunkGCHandles 中。
-                // 异常路径罕见，孤立条目可接受；正常路径的尾压实可回收尾部段落。
             }
             throw;
         }
@@ -370,9 +521,9 @@ namespace EntJoy.JobSystem
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
                 IntPtr h1465 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
-                RegisterScheduledJobName(h1465, typeof(T).Name);
+                NativeJobEngine.RegisterScheduledJobName(h1465, typeof(T).Name);
                 return TrackEntityJob(entityManager, new NativeJobHandle(h1465));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
@@ -393,7 +544,6 @@ namespace EntJoy.JobSystem
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱（无 GCHandle）。
         const int gcHandleStartIndex = -1;
 
         for (int ci = 0; ci < chunkCount; ci++)
@@ -456,9 +606,9 @@ namespace EntJoy.JobSystem
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
         try
         {
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
             IntPtr h1549 = JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
-            RegisterScheduledJobName(h1549, typeof(T).Name);
+            NativeJobEngine.RegisterScheduledJobName(h1549, typeof(T).Name);
             return TrackEntityJob(entityManager, new NativeJobHandle(h1549));
         }
         catch { ChunkCleanup(contextBlock); throw; }
@@ -472,14 +622,14 @@ namespace EntJoy.JobSystem
 
         var allEnabledTypes = query.AllEnabled;
         bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
-            if (!hasEnabledFilter &&
+        if (!hasEnabledFilter &&
             TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
             rawCache.ChunkCount > 0)
         {
             var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
             try
             {
-                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
                 return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
@@ -500,7 +650,6 @@ namespace EntJoy.JobSystem
         if (chunkCount == 0) return default;
 
         var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-        // 原生 adapter 回调只读 ChunkJobData 原始指针，无需恢复托管 Chunk 对象 → 不装箱（无 GCHandle）。
         const int gcHandleStartIndex = -1;
 
         for (int ci = 0; ci < chunkCount; ci++)
@@ -563,7 +712,7 @@ namespace EntJoy.JobSystem
         var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
         try
         {
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
             return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
         }
         catch { ChunkCleanup(contextBlock); throw; }
@@ -587,11 +736,11 @@ namespace EntJoy.JobSystem
         var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease);
         try
         {
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
+            using var dependencyLease = new NativeJobEngine.RetainedNativeDependency(dependsOn);
             var handle = useScheduleAndComplete
                 ? JobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, jobKind)
                 : JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, _chunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, jobKind);
-            RegisterScheduledJobName(handle, typeof(T).Name);
+            NativeJobEngine.RegisterScheduledJobName(handle, typeof(T).Name);
             return TrackEntityJob(entityManager, new NativeJobHandle(handle));
         }
         catch { ChunkCleanup(contextBlock); throw; }
@@ -611,12 +760,13 @@ namespace EntJoy.JobSystem
         try
         {
             IntPtr h1699 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, IntPtr.Zero, ChunkScheduleMode.ImmediateNative);
-            RegisterScheduledJobName(h1699, typeof(T).Name);
+            NativeJobEngine.RegisterScheduledJobName(h1699, typeof(T).Name);
             return TrackEntityJob(entityManager, new NativeJobHandle(h1699));
         }
         catch { ChunkCleanup(rawContextBlock); throw; }
     }
 
+    // ======================== 调度缓存 ========================
     private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache, out IDisposable lease)
     {
         lease = null;
@@ -765,14 +915,10 @@ namespace EntJoy.JobSystem
         bool hasEnableFilter = query.AllEnabled != null && query.AllEnabled.Length > 0;
         int enableBitmapCount = hasEnableFilter ? requiredCount : 0;
 
-        // 三次分配替代 per-chunk × N 次分配：
-        // 1) EntityBatchData 数组
         var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(batchCount * sizeof(EntityBatchData));
-        // 2) 所有 componentArrays 指针（连续存储）
         void* componentArraysBlock = null;
         if (requiredCount > 0)
             componentArraysBlock = (void*)Marshal.AllocHGlobal(batchCount * requiredCount * sizeof(void*));
-        // 3) 所有 enableBitMaps 指针（连续存储，可选）
         void* enableBitMapsBlock = null;
         if (enableBitmapCount > 0)
             enableBitMapsBlock = (void*)Marshal.AllocHGlobal(batchCount * enableBitmapCount * sizeof(void*));
@@ -782,7 +928,6 @@ namespace EntJoy.JobSystem
             var chunk = chunkList[batchIndex];
             var archetype = chunk.Archetype;
 
-            // 用偏移量填充连续块，而非每次分配
             if (componentArraysBlock != null)
             {
                 void** arraysBase = (void**)componentArraysBlock + batchIndex * requiredCount;
@@ -1202,8 +1347,8 @@ namespace EntJoy.JobSystem
         public readonly int StructuralVersion;
         public readonly EntityBatchData* BatchesPtr;
         public readonly int BatchCount;
-        private void* _componentArraysBlock;  // 批量分配的 componentArrays（可为 null）
-        private void* _enableBitMapsBlock;    // 批量分配的 enableBitMaps（可为 null）
+        private void* _componentArraysBlock;
+        private void* _enableBitMapsBlock;
         private int _leaseCount;
         private int _retired;
         private int _disposed;
@@ -1269,7 +1414,6 @@ namespace EntJoy.JobSystem
                 return;
             }
 
-            // 释放批量分配的块（仅 2-3 次 Free，而非 per-chunk）
             if (_componentArraysBlock != null)
                 Marshal.FreeHGlobal((IntPtr)_componentArraysBlock);
             if (_enableBitMapsBlock != null)
@@ -1294,21 +1438,7 @@ namespace EntJoy.JobSystem
         }
     }
 
-    // ======================== 内部实现 ========================
-    internal static readonly CleanupFunc _chunkCleanup = ChunkCleanup;
-    internal static readonly IntPtr _chunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
-
-    // 显式逐字段写入器注册表：Debug 下 NativeArray 含 GC 引用（DisposeSentinel）→ Job struct 非 blittable，
-    // 裸拷贝布局不可靠；NativeTranspiler 为每个 transpiled Job 生成 WriteJobFields_{Job}，静态构造时登记，
-    // CreateChunkContextBlock 按类型分发，未登记（非 transpiled / 含不支持字段）回退裸拷贝。
-    public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
-    internal static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
-
-    /// <summary>注册 Job 字段显式写入器（由 NativeTranspiler 生成代码在 NativeExports 静态构造时调用）</summary>
-    public static void RegisterJobFieldWriter(Type type, Delegate writer) => s_jobFieldWriters[type] = writer;
-
-    internal static bool TryGetJobFieldWriter(Type type, out Delegate writer) => s_jobFieldWriters.TryGetValue(type, out writer);
-
+    // ======================== 上下文块创建 / 清理 ========================
     private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null) where T : struct
     {
         int jobSize = Unsafe.SizeOf<T>();
@@ -1324,7 +1454,7 @@ namespace EntJoy.JobSystem
         int requiredTypesDataSize = requiredComponentTypeIds != null ? requiredComponentTypeIds.Length * sizeof(int) : 0;
         int totalSize = headerSize + typesDataSize + requiredTypesDataSize + jobSize;
         int pooledSize = IntPtr.Size + totalSize;
-        var pooledBlock = ContextPool.Rent(pooledSize);
+        var pooledBlock = NativeJobEngine.ContextPool.Rent(pooledSize);
         var block = pooledBlock + IntPtr.Size;
         *(int*)pooledBlock = pooledSize;
         Unsafe.InitBlockUnaligned((void*)block, 0, (uint)totalSize);
@@ -1352,10 +1482,9 @@ namespace EntJoy.JobSystem
         }
         else { header->requiredComponentTypeIdCount = 0; header->requiredComponentTypeIds = IntPtr.Zero; }
         byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
-        // 优先走显式逐字段写入器（非 blittable Job struct 裸拷贝布局不可靠）；未登记回退裸拷贝。
-        if (TryGetJobFieldWriter(typeof(T), out var __fieldWriter))
+        if (NativeJobScheduler.TryGetJobFieldWriter(typeof(T), out var __fieldWriter))
         {
-            ((JobFieldWriter<T>)__fieldWriter)(jobPtr, ref job);
+            ((NativeJobScheduler.JobFieldWriter<T>)__fieldWriter)(jobPtr, ref job);
         }
         else
         {
@@ -1390,12 +1519,8 @@ namespace EntJoy.JobSystem
                         int index = gcHandleStartIndex + i;
                         if (_chunkGCHandles[index].IsAllocated) { _chunkGCHandles[index].Free(); _chunkGCHandles[index] = default; }
                     }
-                    // 清理尾部连续的 default 条目，防止 _chunkGCHandles 无界增长
                     while (_chunkGCHandles.Count > 0 && !_chunkGCHandles[_chunkGCHandles.Count - 1].IsAllocated)
                         _chunkGCHandles.RemoveAt(_chunkGCHandles.Count - 1);
-                    // #24：空洞积累（中间 default 条目被活跃 job 的 gcHandleStartIndex 引用，
-                    // 不能移动元素；但底层数组可能远大于 Count）。TrimExcess 收缩容量但不移动
-                    // 元素，释放空洞占用的数组空间，不影响索引寻址。仅在大容量时触发避免频繁拷贝。
                     if (_chunkGCHandles.Capacity > 8192 && _chunkGCHandles.Capacity > _chunkGCHandles.Count * 4)
                         _chunkGCHandles.TrimExcess();
                 }
@@ -1421,9 +1546,6 @@ namespace EntJoy.JobSystem
         }
         finally
         {
-            // 兜底（#7/#16）：即使上面释放过程中抛异常（AccessViolation/StackOverflow 等），
-            // 也必须复位 cleanupInProgress、释放 _chunkContextLeases 的 IDisposable 并归还池块，
-            // 否则 flag 永久置位 + lease 泄漏（chunk 数据 MB 级永不回收）。
             if (_chunkContextLeases.TryRemove(contextBlock, out var leaseHandle))
             {
                 try
@@ -1439,7 +1561,7 @@ namespace EntJoy.JobSystem
             {
                 var pooledBlock = contextBlock - IntPtr.Size;
                 int pooledSize = *(int*)pooledBlock;
-                ContextPool.Return(pooledBlock, pooledSize);
+                NativeJobEngine.ContextPool.Return(pooledBlock, pooledSize);
             }
             catch { }
 
@@ -1447,130 +1569,13 @@ namespace EntJoy.JobSystem
         }
     }
 
-    // ======================== 回调工厂 ========================
-    private unsafe static JobFunc CreateJobCallback<T>() where T : struct, IJob
-    {
-        string name = typeof(T).Name;
-        ulong hash = StableHash.Compute(name);
-        JobProfiler.RegisterJobName(hash, name);
-        bool managedContext = JobHasManagedReferences<T>();
-        return (IntPtr ctx) =>
-        {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(name);
-            try
-            {
-                long start = 0;
-                if (JobProfiler.Enabled) start = Stopwatch.GetTimestamp();
-                ref var job = ref GetJob<T>(ctx, managedContext);
-                job.Execute();
-                if (JobProfiler.Enabled) { int threadId = Environment.CurrentManagedThreadId; long end = Stopwatch.GetTimestamp(); ProfilerRecorder.Record(hash, start, end, threadId, 0); }
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
-    private unsafe static IndexJobFunc CreateForCallback<T>() where T : struct, IJobFor
-    {
-        string name = typeof(T).Name;
-        ulong hash = StableHash.Compute(name);
-        JobProfiler.RegisterJobName(hash, name);
-        bool managedContext = JobHasManagedReferences<T>();
-        return (IntPtr ctx, int i) =>
-        {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(name);
-            try
-            {
-                long start = 0;
-                if (JobProfiler.Enabled) start = Stopwatch.GetTimestamp();
-                ref var job = ref GetJob<T>(ctx, managedContext);
-                job.Execute(i);
-                if (JobProfiler.Enabled) { int threadId = Environment.CurrentManagedThreadId; long end = Stopwatch.GetTimestamp(); ProfilerRecorder.Record(hash, start, end, threadId, 1); }
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
-    private unsafe static BatchJobFunc CreateParallelForIndexCallback<T>() where T : struct, IJobParallelFor
-    {
-        string name = typeof(T).Name;
-        ulong hash = StableHash.Compute(name);
-        JobProfiler.RegisterJobName(hash, name);
-        bool managedContext = JobHasManagedReferences<T>();
-        return (IntPtr ctx, int start, int count) =>
-        {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(name);
-            try
-            {
-                long startTicks = 0;
-                if (JobProfiler.Enabled) startTicks = Stopwatch.GetTimestamp();
-                ref var job = ref GetJob<T>(ctx, managedContext);
-                int end = start + count;
-                for (int i = start; i < end; i++) job.Execute(i);
-                if (JobProfiler.Enabled) { int threadId = Environment.CurrentManagedThreadId; long endTicks = Stopwatch.GetTimestamp(); ProfilerRecorder.Record(hash, startTicks, endTicks, threadId, 2); }
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
-    private unsafe static BatchJobFunc CreateParallelForBatchCallback<T>() where T : struct, IJobParallelForBatch
-    {
-        string name = typeof(T).Name;
-        ulong hash = StableHash.Compute(name);
-        JobProfiler.RegisterJobName(hash, name);
-        bool managedContext = JobHasManagedReferences<T>();
-        return (IntPtr ctx, int start, int count) =>
-        {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(name);
-            try
-            {
-                long startTicks = 0;
-                if (JobProfiler.Enabled) startTicks = Stopwatch.GetTimestamp();
-                ref var job = ref GetJob<T>(ctx, managedContext);
-                job.Execute(start, count);
-                if (JobProfiler.Enabled) { int threadId = Environment.CurrentManagedThreadId; long endTicks = Stopwatch.GetTimestamp(); ProfilerRecorder.Record(hash, startTicks, endTicks, threadId, 3); }
-            }
-            catch (Exception exception)
-            {
-                RecordJobException(_currentBatchId, exception);
-            }
-            finally
-            {
-                ExitJobExecution();
-            }
-        };
-    }
-
+    // ======================== Chunk 回调工厂 ========================
     private unsafe static ChunkJobFuncDelegate CreateChunkCallback<T>() where T : struct, IJobChunk
     {
         return (IntPtr ctx, ChunkJobData* cd) =>
         {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(typeof(T).Name);
+            NativeJobEngine.EnterJobExecution();
+            NativeJobEngine.RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 var header = (ChunkContextHeader*)ctx;
@@ -1626,11 +1631,11 @@ namespace EntJoy.JobSystem
             }
             catch (Exception exception)
             {
-                RecordJobException(_currentBatchId, exception);
+                NativeJobEngine.RecordJobException(NativeJobEngine.CurrentBatchId, exception);
             }
             finally
             {
-                ExitJobExecution();
+                NativeJobEngine.ExitJobExecution();
             }
         };
     }
@@ -1640,8 +1645,8 @@ namespace EntJoy.JobSystem
     {
         return (IntPtr ctx, ChunkJobData* chunks, int startIndex, int count) =>
         {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(typeof(T).Name);
+            NativeJobEngine.EnterJobExecution();
+            NativeJobEngine.RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 var header = (ChunkContextHeader*)ctx;
@@ -1652,7 +1657,6 @@ namespace EntJoy.JobSystem
                 ref var job = ref Unsafe.AsRef<T>(jobPtr);
 
                 int end = startIndex + count;
-                // 快速路径：无 enabled filter，减少调用链
                 if (header->hasEnabledFilter == 0 || header->allEnabledCount == 0)
                 {
                     for (int index = startIndex; index < end; index++)
@@ -1673,11 +1677,11 @@ namespace EntJoy.JobSystem
             }
             catch (Exception exception)
             {
-                RecordJobException(_currentBatchId, exception);
+                NativeJobEngine.RecordJobException(NativeJobEngine.CurrentBatchId, exception);
             }
             finally
             {
-                ExitJobExecution();
+                NativeJobEngine.ExitJobExecution();
             }
         };
     }
@@ -1752,13 +1756,13 @@ namespace EntJoy.JobSystem
         }
     }
 
-    private unsafe static BatchJobFunc CreateChunkArrayBatchCallback<T>() where T : struct, IJobChunk
+    private unsafe static NativeJobEngine.BatchJobFunc CreateChunkArrayBatchCallback<T>() where T : struct, IJobChunk
     {
-        bool managedContext = JobHasManagedReferences<T>();
+        bool managedContext = NativeJobEngine.JobHasManagedReferences<T>();
         return (IntPtr ctx, int start, int count) =>
         {
-            EnterJobExecution();
-            RegisterCurrentBatchJobName(typeof(T).Name);
+            NativeJobEngine.EnterJobExecution();
+            NativeJobEngine.RegisterCurrentBatchJobName(typeof(T).Name);
             try
             {
                 ref var job = ref GetChunkBatchJob<T>(ctx, managedContext, out var chunks, out var allEnabledTypes);
@@ -1770,11 +1774,11 @@ namespace EntJoy.JobSystem
             }
             catch (Exception exception)
             {
-                RecordJobException(_currentBatchId, exception);
+                NativeJobEngine.RecordJobException(NativeJobEngine.CurrentBatchId, exception);
             }
             finally
             {
-                ExitJobExecution();
+                NativeJobEngine.ExitJobExecution();
             }
         };
     }
@@ -1816,189 +1820,7 @@ namespace EntJoy.JobSystem
         }
     }
 
-    // ======================== 上下文内存池 ========================
-    private static class ContextPool
-    {
-        private const int BucketShift = 6;
-        private const int MaxBucket = 64;
-        private static readonly ConcurrentStack<IntPtr>[] _buckets = new ConcurrentStack<IntPtr>[MaxBucket];
-
-        private static int GetBucketIndex(int size)
-        {
-            int idx = (size + (1 << BucketShift) - 1) >> BucketShift;
-            return idx >= MaxBucket ? -1 : idx;
-        }
-
-        /// <summary>返回桶 idx 对应的分配大小。</summary>
-        /// <remarks>
-        /// 桶 idx 覆盖 size ∈ (64*idx, 64*(idx+1)]，分配桶上界 64*(idx+1) 即可。
-        /// 修复两个历史缺陷：
-        ///  1) 旧实现 1L&lt;&lt;(6+idx) 幂次分配：idx=63 时 1L&lt;&lt;69 在 C# long 移位只取低 6 位
-        ///     回绕为 1L&lt;&lt;5=32 字节 → 请求 3969-4032 字节却分配 32 → 堆缓冲区溢出；
-        ///  2) idx≥26 时 2^(6+idx) ≥ 2^32 → clamp 到 int.MaxValue(~2GB) → 必然 OOM。
-        /// 线性上界同时消除溢出、爆炸、与线性分桶不匹配的浪费。
-        /// </remarks>
-        private static int GetBucketAllocSize(int idx)
-        {
-            // idx 最大 63 → (63+1)&lt;&lt;6 = 4096，int 无溢出
-            return (idx + 1) << BucketShift;
-        }
-
-        public static IntPtr Rent(int size)
-        {
-            int idx = GetBucketIndex(size);
-            if (idx < 0) return Marshal.AllocHGlobal(size);
-            var bucket = _buckets[idx];
-            if (bucket != null && bucket.TryPop(out var ptr)) return ptr;
-            return Marshal.AllocHGlobal(GetBucketAllocSize(idx));
-        }
-
-        public static void Return(IntPtr ptr, int size)
-        {
-            if (ptr == IntPtr.Zero) return;
-            int idx = GetBucketIndex(size);
-            if (idx < 0) { Marshal.FreeHGlobal(ptr); return; }
-            var bucket = Volatile.Read(ref _buckets[idx]);
-            if (bucket == null)
-            {
-                bucket = new ConcurrentStack<IntPtr>();
-                bucket = Interlocked.CompareExchange(ref _buckets[idx], bucket, null) ?? bucket;
-            }
-            const int MaxPerBucket = 256;
-            if (bucket.Count < MaxPerBucket) bucket.Push(ptr);
-            else Marshal.FreeHGlobal(ptr);
-        }
-    }
-
-    // ======================== 辅助方法 ========================
-    internal static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
-    {
-        // 必须用 GetOrAdd：手写 TryGetValue-创建-赋值在并发首次调度同一 T 时，
-        // loser 实例会被覆盖，其委托可能被 GC 回收但函数指针已交原生侧 → 悬空。
-        return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
-    }
-
-    /// <summary>
-    /// 自动批处理回调（per 泛型 T 缓存一次）：若 T 同时实现 IJobParallelForBatch，则调度用批回调
-    /// （回调内一次 Execute(start,count)），否则退回逐元素 Execute(i)。减少轻任务上逐元素接口调度开销。
-    /// 用反射仅在首次调度该类型时做一次 IsAssignableFrom 判定 + 泛型构造，热路径零开销。
-    /// </summary>
-    private static class AutoParallelForCallback<T>
-        where T : struct, IJobParallelFor
-    {
-        public static readonly DelegateCache Cache = Build();
-
-        private static DelegateCache Build()
-        {
-            if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
-            {
-                // T 同时是 IJobParallelForBatch → 批回调
-                var create = typeof(NativeJobScheduler)
-                    .GetMethod(nameof(CreateParallelForBatchCallback), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
-                    .MakeGenericMethod(typeof(T))
-                    .Invoke(null, null);
-                return new DelegateCache((BatchJobFunc)create!);
-            }
-            // 退回逐元素回调
-            return GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
-        }
-
-        public static DelegateCache GetCache() => Cache;
-    }
-
-    // 按 batchId 归集的 Job 异常。Complete(h) 只抛本 batch 的异常；
-    // batch 0 为未归属异常（实际不发生，防御兜底），由 Flush 统一抛。
-    private static readonly object _exceptionLock = new();
-    private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();
-    // 每 batch 上限而非全局：一个坏 batch 不应饿死其它 batch 的异常上报。
-    private const int MaxRecordedJobExceptionsPerBatch = 16;
-    // 因每 batch 容量被丢弃的异常数（上报而非静默丢失）。
-    private static int _droppedJobExceptionCount;
-
-    private static void RecordJobException(ulong batchId, Exception exception)
-    {
-        lock (_exceptionLock)
-        {
-            if (!_recordedJobExceptions.TryGetValue(batchId, out var list))
-            {
-                list = new List<ExceptionDispatchInfo>();
-                _recordedJobExceptions[batchId] = list;
-            }
-            if (list.Count >= MaxRecordedJobExceptionsPerBatch)
-            {
-                _droppedJobExceptionCount++;
-                return;
-            }
-            list.Add(ExceptionDispatchInfo.Capture(exception));
-        }
-    }
-
-    private static void ThrowAll(List<ExceptionDispatchInfo> captured)
-    {
-        if (captured.Count == 0) return;
-        if (captured.Count == 1)
-        {
-            ExceptionDispatchInfo.Capture(captured[0].SourceException).Throw();
-        }
-
-        var exceptions = new List<Exception>(captured.Count);
-        foreach (var ei in captured)
-            exceptions.Add(ei.SourceException);
-        throw new AggregateException("One or more scheduled C# jobs failed.", exceptions);
-    }
-
-    /// <summary>
-    /// 抛出所有已记录的 Job 异常（跨所有 batch，含未归属的 batch 0）。
-    /// 公有接口，可在帧末通过 TempAllocator.Reset() 或自定义检查点调用。
-    /// </summary>
-    public static void FlushRecordedExceptions()
-    {
-        List<ExceptionDispatchInfo> all = new();
-        int dropped;
-        lock (_exceptionLock)
-        {
-            foreach (var list in _recordedJobExceptions.Values)
-                all.AddRange(list);
-            _recordedJobExceptions.Clear();
-            dropped = _droppedJobExceptionCount;
-            _droppedJobExceptionCount = 0;
-        }
-        if (dropped > 0)
-            Console.Error.WriteLine($"[JobSystem] {dropped} job exceptions dropped (per-batch cap {MaxRecordedJobExceptionsPerBatch}).");
-        ThrowAll(all);
-    }
-
-    private static void ThrowRecordedJobExceptions(ulong batchId)
-    {
-        List<ExceptionDispatchInfo> captured;
-        int dropped;
-        lock (_exceptionLock)
-        {
-            if (!_recordedJobExceptions.TryGetValue(batchId, out captured))
-                return;
-            _recordedJobExceptions.Remove(batchId);
-            dropped = _droppedJobExceptionCount;
-            _droppedJobExceptionCount = 0;
-        }
-        if (dropped > 0)
-            Console.Error.WriteLine($"[JobSystem] {dropped} job exceptions dropped (per-batch cap {MaxRecordedJobExceptionsPerBatch}).");
-        ThrowAll(captured);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool JobHasManagedReferences<T>() where T : struct
-        => RuntimeHelpers.IsReferenceOrContainsReferences<T>();
-
-    private sealed class ManagedJobBox<T> where T : struct
-    {
-        public T Job;
-
-        public ManagedJobBox(T job)
-        {
-            Job = job;
-        }
-    }
-
+    // ======================== Chunk 批上下文 ========================
     private sealed class RawChunkBatchContext
     {
         public IntPtr JobPtr;
@@ -2028,17 +1850,6 @@ namespace EntJoy.JobSystem
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe static ref T GetJob<T>(IntPtr ctx, bool managedContext) where T : struct
-    {
-        if (managedContext)
-        {
-            return ref GetManagedJob<T>(ctx);
-        }
-
-        return ref Unsafe.AsRef<T>((void*)ctx);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private unsafe static ref T GetChunkBatchJob<T>(IntPtr ctx, bool managedContext, out Chunk[] chunks, out ComponentType[] allEnabledTypes)
         where T : struct, IJobChunk
     {
@@ -2059,20 +1870,6 @@ namespace EntJoy.JobSystem
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ref T GetManagedJob<T>(IntPtr ctx) where T : struct
-    {
-        var handle = GCHandle.FromIntPtr(ctx);
-        var box = (ManagedJobBox<T>)handle.Target;
-        return ref box.Job;
-    }
-
-    private static IntPtr AllocManagedContext<T>(ref T job) where T : struct
-    {
-        var handle = GCHandle.Alloc(new ManagedJobBox<T>(job), GCHandleType.Normal);
-        return GCHandle.ToIntPtr(handle);
-    }
-
     private static IntPtr AllocManagedChunkBatchContext<T>(ref T job, Chunk[] chunks, ComponentType[] allEnabledTypes) where T : struct, IJobChunk
     {
         var handle = GCHandle.Alloc(new ManagedChunkBatchContext<T>(job, chunks, allEnabledTypes), GCHandleType.Normal);
@@ -2081,7 +1878,7 @@ namespace EntJoy.JobSystem
 
     private static IntPtr AllocRawChunkBatchContext<T>(ref T job, Chunk[] chunks, ComponentType[] allEnabledTypes) where T : struct, IJobChunk
     {
-        IntPtr jobPtr = AllocContext(ref job);
+        IntPtr jobPtr = NativeJobEngine.AllocContext(ref job);
         try
         {
             var handle = GCHandle.Alloc(new RawChunkBatchContext(jobPtr, chunks, allEnabledTypes), GCHandleType.Normal);
@@ -2089,16 +1886,9 @@ namespace EntJoy.JobSystem
         }
         catch
         {
-            Cleanup(jobPtr);
+            NativeJobEngine.Cleanup(jobPtr);
             throw;
         }
-    }
-
-    internal static void ManagedCleanup(IntPtr ctx)
-    {
-        if (ctx == IntPtr.Zero) return;
-        var handle = GCHandle.FromIntPtr(ctx);
-        if (handle.IsAllocated) handle.Free();
     }
 
     private static void RawChunkBatchCleanup(IntPtr ctx)
@@ -2109,31 +1899,12 @@ namespace EntJoy.JobSystem
         {
             if (handle.Target is RawChunkBatchContext context)
             {
-                Cleanup(context.JobPtr);
+                NativeJobEngine.Cleanup(context.JobPtr);
                 context.JobPtr = IntPtr.Zero;
             }
 
             handle.Free();
         }
     }
-
-    private unsafe static IntPtr AllocContext<T>(ref T job) where T : struct
-    {
-        int size = Unsafe.SizeOf<T>();
-        int totalSize = size + sizeof(int);
-        IntPtr dataPtr = ContextPool.Rent(totalSize);
-        *(int*)dataPtr = size;
-        byte* jobPtr = (byte*)dataPtr + sizeof(int);
-        Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)size);
-        return (IntPtr)jobPtr;
-    }
-
-    private unsafe static void Cleanup(IntPtr dataPtr)
-    {
-        if (dataPtr == IntPtr.Zero) return;
-        int size = *(int*)((byte*)dataPtr - sizeof(int));
-        ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
-    }
-    }
 }
-
+}

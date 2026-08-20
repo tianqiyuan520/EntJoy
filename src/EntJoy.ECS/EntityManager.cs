@@ -106,7 +106,7 @@ namespace EntJoy
 
             archetypeMap.Clear();
             recycleEntities.Clear();
-            NativeJobScheduler.ClearRawChunkScheduleCaches(this);
+            NativeEcsScheduler.ClearRawChunkScheduleCaches(this);
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
