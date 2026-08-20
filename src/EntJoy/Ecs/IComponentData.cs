@@ -1,4 +1,4 @@
-﻿namespace EntJoy
+namespace EntJoy
 {
     public interface IComponentData
     { }
