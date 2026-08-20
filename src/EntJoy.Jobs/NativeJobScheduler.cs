@@ -145,7 +145,7 @@ public struct NativeTraceEvent
 /// <summary>
 /// 原生调度器门面（Jobs 程序集内的薄门面）。零 ECS 依赖，不持有任何被共享的可变状态——
 /// 所有共享状态（委托缓存、上下文池、异常、ThreadStatic、纯 P/Invoke 指针）由
-/// <see cref="NativeJobEngine"/> 独占持有。ECS 的 chunk 调度（NativeEcsScheduler）
+/// <see cref="NativeJobCore"/> 独占持有。ECS 的 chunk 调度（NativeEcsScheduler）
 /// 与本文共用同一个引擎。
 /// </summary>
 public static unsafe partial class NativeJobScheduler
@@ -174,35 +174,35 @@ public static unsafe partial class NativeJobScheduler
             GuidedFloor = floorVal;
 
         if (GuidedEnabled)
-            NativeJobEngine.JobSystem_ConfigureGuided(1, GuidedK, GuidedFloor);
+            NativeJobCore.JobSystem_ConfigureGuided(1, GuidedK, GuidedFloor);
         else
-            NativeJobEngine.JobSystem_ConfigureGuided(0, GuidedK, GuidedFloor);
+            NativeJobCore.JobSystem_ConfigureGuided(0, GuidedK, GuidedFloor);
         System.Console.WriteLine($"JobSystem|guided={GuidedEnabled}|k={GuidedK}|floor={GuidedFloor}");
     }
 
     // ======================== 生命周期 ========================
     public static void Initialize(int numThreads = 0)
     {
-        NativeJobEngine.JobSystem_Initialize(numThreads);
+        NativeJobCore.JobSystem_Initialize(numThreads);
         RegisterPersistentAllocator();
-        NativeJobEngine.RegisterCurrentBatchIdCallback();
+        NativeJobCore.RegisterCurrentBatchIdCallback();
         if (TilesPerWorker > 0)
-            NativeJobEngine.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
+            NativeJobCore.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
         ConfigureGuidedFromEnv();
     }
 
     public static int JobWorkerCount
     {
-        get => NativeJobEngine.JobSystem_GetWorkerCount();
+        get => NativeJobCore.JobSystem_GetWorkerCount();
     }
 
-    public static void Shutdown() => NativeJobEngine.SafeShutdown();
-    public static void PrewakeWorkersOnce() => NativeJobEngine.JobSystem_PrewakeWorkers();
+    public static void Shutdown() => NativeJobCore.SafeShutdown();
+    public static void PrewakeWorkersOnce() => NativeJobCore.JobSystem_PrewakeWorkers();
 
     public static void LaunchDebuggerGUI()
     {
-        NativeJobEngine.SetDebugNameCapture(true);
-        NativeJobEngine.JobSystem_LaunchGUI();
+        NativeJobCore.SetDebugNameCapture(true);
+        NativeJobCore.JobSystem_LaunchGUI();
     }
 
     // ======================== 持久分配器（托管回调注册到 native） ========================
@@ -214,36 +214,36 @@ public static unsafe partial class NativeJobScheduler
 
     private static void RegisterPersistentAllocator()
     {
-        NativeJobEngine.JobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
+        NativeJobCore.JobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
     }
 
     // ======================== 直调面板 ========================
     public static unsafe void RecordDirectCall(string jobName, uint tiles)
     {
-        if (NativeJobEngine.NativeDllHandle == IntPtr.Zero) return;
+        if (NativeJobCore.NativeDllHandle == IntPtr.Zero) return;
         if (jobName.Length > 127) jobName = jobName.Substring(0, 127);
         Span<byte> nameBuf = stackalloc byte[128];
         int n = jobName.Length;
         for (int i = 0; i < n; i++) nameBuf[i] = (byte)jobName[i];
         nameBuf[n] = 0;
-        fixed (byte* p = nameBuf) NativeJobEngine.JobSystem_RecordDirectCall(p, tiles);
+        fixed (byte* p = nameBuf) NativeJobCore.JobSystem_RecordDirectCall(p, tiles);
     }
 
     public static unsafe ulong BeginDirectCall(string jobName, uint tiles)
     {
-        if (NativeJobEngine.NativeDllHandle == IntPtr.Zero) return 0;
+        if (NativeJobCore.NativeDllHandle == IntPtr.Zero) return 0;
         if (jobName.Length > 127) jobName = jobName.Substring(0, 127);
         Span<byte> nameBuf = stackalloc byte[128];
         int n = jobName.Length;
         for (int i = 0; i < n; i++) nameBuf[i] = (byte)jobName[i];
         nameBuf[n] = 0;
-        fixed (byte* p = nameBuf) return NativeJobEngine.JobSystem_BeginDirectCall(p, tiles);
+        fixed (byte* p = nameBuf) return NativeJobCore.JobSystem_BeginDirectCall(p, tiles);
     }
 
     public static void EndDirectCall(ulong id)
     {
-        if (NativeJobEngine.NativeDllHandle == IntPtr.Zero) return;
-        NativeJobEngine.JobSystem_EndDirectCall(id);
+        if (NativeJobCore.NativeDllHandle == IntPtr.Zero) return;
+        NativeJobCore.JobSystem_EndDirectCall(id);
     }
 
     // ======================== 类型化调度 API ========================
@@ -251,22 +251,22 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJob
     {
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
-        var ctx = managedContext ? NativeJobEngine.AllocManagedContext(ref job) : NativeJobEngine.AllocContext(ref job);
+        var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobEngine.GetOrCreateDelegateCache<T, NativeJobEngine.JobFunc>(() => NativeJobEngine.CreateJobCallback<T>());
-            NativeJobHandle handle = NativeJobEngine.ScheduleRaw(cache.FuncPtr, ctx, managedContext ? NativeJobEngine.ManagedCleanupPtr : NativeJobEngine.CleanupPtr, dependsOn);
+            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.JobFunc>(() => NativeJobCore.CreateJobCallback<T>());
+            NativeJobHandle handle = NativeJobCore.ScheduleRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, dependsOn);
             cleanupByCpp = true;
-            NativeJobEngine.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
+            NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
             if (!cleanupByCpp)
             {
-                if (managedContext) NativeJobEngine.ManagedCleanup(ctx);
-                else NativeJobEngine.Cleanup(ctx);
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
             }
             throw;
         }
@@ -277,22 +277,22 @@ public static unsafe partial class NativeJobScheduler
     {
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
-        var ctx = managedContext ? NativeJobEngine.AllocManagedContext(ref job) : NativeJobEngine.AllocContext(ref job);
+        var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobEngine.GetOrCreateDelegateCache<T, NativeJobEngine.IndexJobFunc>(() => NativeJobEngine.CreateForCallback<T>());
-            NativeJobHandle handle = NativeJobEngine.ScheduleForRaw(cache.FuncPtr, ctx, managedContext ? NativeJobEngine.ManagedCleanupPtr : NativeJobEngine.CleanupPtr, length, dependsOn);
+            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.IndexJobFunc>(() => NativeJobCore.CreateForCallback<T>());
+            NativeJobHandle handle = NativeJobCore.ScheduleForRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, dependsOn);
             cleanupByCpp = true;
-            NativeJobEngine.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
+            NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
             if (!cleanupByCpp)
             {
-                if (managedContext) NativeJobEngine.ManagedCleanup(ctx);
-                else NativeJobEngine.Cleanup(ctx);
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
             }
             throw;
         }
@@ -303,22 +303,22 @@ public static unsafe partial class NativeJobScheduler
     {
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
-        var ctx = managedContext ? NativeJobEngine.AllocManagedContext(ref job) : NativeJobEngine.AllocContext(ref job);
+        var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobEngine.GetAutoParallelForCache<T>();
-            NativeJobHandle handle = NativeJobEngine.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobEngine.ManagedCleanupPtr : NativeJobEngine.CleanupPtr, length, batchSize, dependsOn);
+            var cache = NativeJobCore.GetAutoParallelForCache<T>();
+            NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn);
             cleanupByCpp = true;
-            NativeJobEngine.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
+            NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
             if (!cleanupByCpp)
             {
-                if (managedContext) NativeJobEngine.ManagedCleanup(ctx);
-                else NativeJobEngine.Cleanup(ctx);
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
             }
             throw;
         }
@@ -329,22 +329,22 @@ public static unsafe partial class NativeJobScheduler
     {
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
-        var ctx = managedContext ? NativeJobEngine.AllocManagedContext(ref job) : NativeJobEngine.AllocContext(ref job);
+        var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobEngine.GetOrCreateDelegateCache<T, NativeJobEngine.BatchJobFunc>(() => NativeJobEngine.CreateParallelForBatchCallback<T>());
-            NativeJobHandle handle = NativeJobEngine.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobEngine.ManagedCleanupPtr : NativeJobEngine.CleanupPtr, length, batchSize, dependsOn);
+            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.BatchJobFunc>(() => NativeJobCore.CreateParallelForBatchCallback<T>());
+            NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn);
             cleanupByCpp = true;
-            NativeJobEngine.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
+            NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
             if (!cleanupByCpp)
             {
-                if (managedContext) NativeJobEngine.ManagedCleanup(ctx);
-                else NativeJobEngine.Cleanup(ctx);
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
             }
             throw;
         }
@@ -359,20 +359,20 @@ public static unsafe partial class NativeJobScheduler
         ulong batchId = 0;
         try
         {
-            NativeJobEngine.JobSystem_Complete(handle);
-            batchId = NativeJobEngine.JobSystem_GetDiagnosticBatchId(handle);
+            NativeJobCore.JobSystem_Complete(handle);
+            batchId = NativeJobCore.JobSystem_GetDiagnosticBatchId(handle);
         }
         finally
         {
-            NativeJobEngine.JobSystem_ReleaseHandle(handle);
+            NativeJobCore.JobSystem_ReleaseHandle(handle);
         }
-        NativeJobEngine.ThrowRecordedJobExceptions(batchId);
+        NativeJobCore.ThrowRecordedJobExceptions(batchId);
     }
 
     public static bool IsCompleted(NativeJobHandle h)
     {
-        using var handleLease = new NativeJobEngine.RetainedNativeDependency(h);
-        return handleLease.Handle == IntPtr.Zero || NativeJobEngine.JobSystem_IsCompleted(handleLease.Handle) != 0;
+        using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
+        return handleLease.Handle == IntPtr.Zero || NativeJobCore.JobSystem_IsCompleted(handleLease.Handle) != 0;
     }
 
     public static void Release(NativeJobHandle h)
@@ -380,7 +380,7 @@ public static unsafe partial class NativeJobScheduler
         IntPtr handle = h.Detach();
         if (handle != IntPtr.Zero)
         {
-            NativeJobEngine.JobSystem_ReleaseHandle(handle);
+            NativeJobCore.JobSystem_ReleaseHandle(handle);
         }
     }
 
@@ -388,15 +388,15 @@ public static unsafe partial class NativeJobScheduler
     {
         if (handles == null || handles.Length == 0) return default;
         var ptrs = new IntPtr[handles.Length];
-        var leases = new NativeJobEngine.RetainedNativeDependency[handles.Length];
+        var leases = new NativeJobCore.RetainedNativeDependency[handles.Length];
         try
         {
             for (int i = 0; i < handles.Length; i++)
             {
-                leases[i] = new NativeJobEngine.RetainedNativeDependency(handles[i]);
+                leases[i] = new NativeJobCore.RetainedNativeDependency(handles[i]);
                 ptrs[i] = leases[i].Handle;
             }
-            return new NativeJobHandle(NativeJobEngine.JobSystem_CombineDependencies(ptrs, handles.Length));
+            return new NativeJobHandle(NativeJobCore.JobSystem_CombineDependencies(ptrs, handles.Length));
         }
         finally
         {
@@ -407,53 +407,53 @@ public static unsafe partial class NativeJobScheduler
 
     // ======================== 低级原始接口（transpiler 直调） ========================
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
-        => NativeJobEngine.ScheduleRaw(funcPtr, contextPtr, cleanupPtr, dependsOn);
+        => NativeJobCore.ScheduleRaw(funcPtr, contextPtr, cleanupPtr, dependsOn);
 
     public static NativeJobHandle ScheduleForRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, NativeJobHandle? dependsOn = null)
-        => NativeJobEngine.ScheduleForRaw(funcPtr, contextPtr, cleanupPtr, length, dependsOn);
+        => NativeJobCore.ScheduleForRaw(funcPtr, contextPtr, cleanupPtr, length, dependsOn);
 
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
-        => NativeJobEngine.ScheduleParallelForBatchRaw(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn);
+        => NativeJobCore.ScheduleParallelForBatchRaw(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn);
 
     // transpiler 生成的 Schedule_{Job} 在调度后调用，把 batchId → Job 名注册进调试器字典。
     public static void RegisterScheduledJob(IntPtr handle, string jobName)
     {
-        NativeJobEngine.RegisterScheduledJobName(handle, jobName);
+        NativeJobCore.RegisterScheduledJobName(handle, jobName);
     }
 
     // ======================== 面板 / 状态 ========================
-    public static NativeJobSystemStats GetStats() => NativeJobEngine.JobSystem_GetStats();
-    public static void ResetStats() => NativeJobEngine.JobSystem_ResetStats();
+    public static NativeJobSystemStats GetStats() => NativeJobCore.JobSystem_GetStats();
+    public static void ResetStats() => NativeJobCore.JobSystem_ResetStats();
     public static void SetTimingDiagnosticsEnabled(bool enabled) =>
-        NativeJobEngine.JobSystem_SetTimingDiagnostics(enabled);
+        NativeJobCore.JobSystem_SetTimingDiagnostics(enabled);
 
     // ======================== Profiler 透传（内部） ========================
-    internal static void Profiler_SetEnabled(int enabled) => NativeJobEngine.Profiler_SetEnabled(enabled);
-    internal static int Profiler_IsEnabled() => NativeJobEngine.Profiler_IsEnabled();
-    internal static unsafe int Profiler_ReadAll(ProfilerEntry[] buffer, int maxCount) => NativeJobEngine.Profiler_ReadAll(buffer, maxCount);
-    internal static void Profiler_Clear() => NativeJobEngine.Profiler_Clear();
+    internal static void Profiler_SetEnabled(int enabled) => NativeJobCore.Profiler_SetEnabled(enabled);
+    internal static int Profiler_IsEnabled() => NativeJobCore.Profiler_IsEnabled();
+    internal static unsafe int Profiler_ReadAll(ProfilerEntry[] buffer, int maxCount) => NativeJobCore.Profiler_ReadAll(buffer, maxCount);
+    internal static void Profiler_Clear() => NativeJobCore.Profiler_Clear();
 
     // ======================== Trace 透传 ========================
-    public static void TraceSetEnabled(bool enabled) => NativeJobEngine.Trace_SetEnabled(enabled);
-    public static bool TraceIsEnabled() => NativeJobEngine.Trace_IsEnabled();
-    public static ulong TraceDroppedEvents() => NativeJobEngine.Trace_DroppedEvents();
-    public static void TraceClear() => NativeJobEngine.Trace_Clear();
+    public static void TraceSetEnabled(bool enabled) => NativeJobCore.Trace_SetEnabled(enabled);
+    public static bool TraceIsEnabled() => NativeJobCore.Trace_IsEnabled();
+    public static ulong TraceDroppedEvents() => NativeJobCore.Trace_DroppedEvents();
+    public static void TraceClear() => NativeJobCore.Trace_Clear();
     public static int TraceReadAll(NativeTraceEvent[] buffer, int maxCount)
     {
         ArgumentNullException.ThrowIfNull(buffer);
-        return NativeJobEngine.Trace_ReadAll(buffer, maxCount);
+        return NativeJobCore.Trace_ReadAll(buffer, maxCount);
     }
 
     // ======================== 执行中 / 异常冲排（透传） ========================
     /// <summary>当前线程是否正在执行某个 job。</summary>
-    public static bool IsExecutingJob => NativeJobEngine.IsExecutingJob;
+    public static bool IsExecutingJob => NativeJobCore.IsExecutingJob;
 
     /// <summary>抛出所有已记录的 Job 异常（跨所有 batch）。</summary>
-    public static void FlushRecordedExceptions() => NativeJobEngine.FlushRecordedExceptions();
+    public static void FlushRecordedExceptions() => NativeJobCore.FlushRecordedExceptions();
 
     // ======================== 句柄辅助（内部，供 ECS/句柄使用） ========================
-    internal static void RetainRawHandleForUse(IntPtr handle) => NativeJobEngine.RetainRawHandleForUse(handle);
-    internal static void ReleaseRawHandleForFinalizer(IntPtr handle) => NativeJobEngine.ReleaseRawHandleForFinalizer(handle);
+    internal static void RetainRawHandleForUse(IntPtr handle) => NativeJobCore.RetainRawHandleForUse(handle);
+    internal static void ReleaseRawHandleForFinalizer(IntPtr handle) => NativeJobCore.ReleaseRawHandleForFinalizer(handle);
 
     // ======================== Job 字段写入器注册表（为 IJobChunk 非 blittable 结构） ========================
     public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
