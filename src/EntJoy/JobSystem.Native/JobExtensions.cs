@@ -1,4 +1,4 @@
-﻿using EntJoy;
+using EntJoy;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
