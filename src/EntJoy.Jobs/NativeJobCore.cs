@@ -17,7 +17,7 @@ namespace EntJoy.JobSystem
     /// 与 ECS 的 <c>NativeEcsScheduler</c>（chunk 调度）共用。所有被两者共享的可变状态
     /// （委托缓存、上下文池、异常、ThreadStatic、纯 P/Invoke 函数指针）必须独占于此。
     /// </summary>
-    internal static unsafe class NativeJobEngine
+    internal static unsafe class NativeJobCore
     {
         // ======================== 委托类型 ========================
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -131,7 +131,7 @@ namespace EntJoy.JobSystem
             const string dllName = "NativeDll.dll";
             string cwd = Environment.CurrentDirectory;
             string baseDir = AppContext.BaseDirectory;
-            string assemblyDir = Path.GetDirectoryName(typeof(NativeJobEngine).Assembly.Location);
+            string assemblyDir = Path.GetDirectoryName(typeof(NativeJobCore).Assembly.Location);
             string entryDir = Path.GetDirectoryName(Assembly.GetEntryAssembly()?.Location);
 
             var paths = new List<string>();
@@ -359,7 +359,7 @@ namespace EntJoy.JobSystem
             const string generatedDllName = "NativeTranspiled.dll";
             try
             {
-                NativeLibrary.SetDllImportResolver(typeof(NativeJobEngine).Assembly, (libName, assembly, searchPath) =>
+                NativeLibrary.SetDllImportResolver(typeof(NativeJobCore).Assembly, (libName, assembly, searchPath) =>
                 {
                     if (!string.Equals(libName, "NativeTranspiled", StringComparison.OrdinalIgnoreCase))
                         return IntPtr.Zero;
@@ -705,7 +705,7 @@ namespace EntJoy.JobSystem
             {
                 if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
                 {
-                    var create = typeof(NativeJobEngine)
+                    var create = typeof(NativeJobCore)
                         .GetMethod(nameof(CreateParallelForBatchCallback), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
                         .MakeGenericMethod(typeof(T))
                         .Invoke(null, null);
