@@ -135,6 +135,10 @@ namespace EntJoy.JobSystem.Managed
         private static void ReturnCompletionCore(ManagedCompletion c)
         {
             c.Reset();
+            // 归还即代际 +1：任何仍持有本 completion 的旧 handle 立即可判“过期”。
+            // 这是防止“已自动归还/已重置的槽位被误等待”的关键——否则还原后的 Remaining=1 会让
+            // 释放方之外的用户 Complete() 误以为未完成而永久等待（曾导致零长度并行 for 挂死）。
+            Interlocked.Increment(ref c.Generation);
             int idx = c.SlotIndex;
             if (idx < 0) return; // 兜底分配的，不在预分配池内
             while (true)
@@ -150,9 +154,20 @@ namespace EntJoy.JobSystem.Managed
 
         // ──────────────────── 调度 API ────────────────────
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void EnsureInitialized()
+        {
+            // 未 Initialize() 时 _globalQueue/_completionSlots 为 null，后续会 NRE。
+            // 生产环境宁可抛清晰异常，也不隐式建线程池（避免默认 worker 数/生命周期意外）。
+            if (_globalQueue == null)
+                throw new InvalidOperationException(
+                    "ManagedJobScheduler 尚未初始化：请先调用 ManagedJobScheduler.Initialize().");
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static ManagedJobHandle Schedule<T>(ref T job) where T : struct, IJob
         {
+            EnsureInitialized();
             var completion = ManagedJobScheduler.RentCompletion();
             completion.Remaining = 1;
             var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
@@ -163,6 +178,7 @@ namespace EntJoy.JobSystem.Managed
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static ManagedJobHandle Schedule<T>(ref T job, ManagedJobHandle dependsOn) where T : struct, IJob
         {
+            EnsureInitialized();
             var completion = ManagedJobScheduler.RentCompletion();
             completion.Remaining = 1;
             var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
@@ -180,12 +196,18 @@ namespace EntJoy.JobSystem.Managed
         public static ManagedJobHandle Schedule<T>(ref T job, int arrayLength, int innerBatchCount, ManagedJobHandle dependsOn = default)
             where T : struct, IJobParallelFor
         {
+            EnsureInitialized();
             if (arrayLength <= 0)
             {
+                // 零长度并行 for：无任何分片会执行，立即完成并自动归还。必须在 Signal（触发自动归还，代际+1）
+                // **之前**构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出“已归还”
+                // 已被复用的槽位，用户 Complete() 会误等一个 Remaining 已被重置=1 的槽位而永久挂死。
                 var zero = ManagedJobScheduler.RentCompletion();
                 zero.Remaining = 1;
+                var h = new ManagedJobHandle(zero);
+                Volatile.Write(ref zero._autoReturn, 1);
                 zero.Signal();
-                return new ManagedJobHandle(zero);
+                return h;
             }
 
             bool depOk = dependsOn.Completion == null || dependsOn.IsCompleted;
@@ -199,14 +221,14 @@ namespace EntJoy.JobSystem.Managed
             }
 
             if (innerBatchCount > 0)
-                return ScheduleSharedRange<T>(ref job, arrayLength, innerBatchCount, dependsOn, depOk);
-            return ScheduleStaticSlices<T>(ref job, arrayLength, dependsOn, depOk);
+                return ScheduleSharedRange<T>(ref job, arrayLength, innerBatchCount, dependsOn);
+            return ScheduleStaticSlices<T>(ref job, arrayLength, dependsOn);
         }
 
         /// <summary>静态粗分片执行：并行 for 拆 ~worker 个固定大 chunk 入全局队列，一次性唤醒；无共享游标竞争。
         /// 每 worker 一块连续执行（极轻任务 S2 少 dequeue/Signal 开销，对齐 TPool/静态分片）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static ManagedJobHandle ScheduleStaticSlices<T>(ref T job, int arrayLength, ManagedJobHandle dependsOn, bool depOk)
+        private static ManagedJobHandle ScheduleStaticSlices<T>(ref T job, int arrayLength, ManagedJobHandle dependsOn)
             where T : struct, IJobParallelFor
         {
             var completion = RentCompletion();
@@ -242,21 +264,14 @@ namespace EntJoy.JobSystem.Managed
                 Publish();
             }
 
-            if (!depOk)
-            {
-                // 依赖 completion 完成后自动归还（中间 handle 不主动 Complete，防泄漏）
-                Volatile.Write(ref dependsOn.Completion._autoReturn, 1);
-                dependsOn.Completion.OnCompleted(EnqueueSlices);
-            }
-            else
-                EnqueueSlices();
+            ChainAfter(dependsOn.Completion, completion, EnqueueSlices);
             return new ManagedJobHandle(completion);
         }
 
         /// <summary>共享游标细粒度认领执行：建共享 range，向全局队列投入 participants 个参与名额，一次性唤醒；
         /// worker 拿名额后紧循环 Interlocked.Add 认领分片（重计算 S5 动态负载均衡）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static ManagedJobHandle ScheduleSharedRange<T>(ref T job, int arrayLength, int batchSize, ManagedJobHandle dependsOn, bool depOk)
+        private static ManagedJobHandle ScheduleSharedRange<T>(ref T job, int arrayLength, int batchSize, ManagedJobHandle dependsOn)
             where T : struct, IJobParallelFor
         {
             var completion = RentCompletion();
@@ -275,7 +290,6 @@ namespace EntJoy.JobSystem.Managed
                 Length = arrayLength,
                 Batch = batch,
                 Current = 0,
-                Completion = completion,
             };
             var claimer = new ManagedTask
             {
@@ -300,15 +314,37 @@ namespace EntJoy.JobSystem.Managed
                 Publish();
             }
 
-            if (!depOk)
+            ChainAfter(dependsOn.Completion, completion, EnqueueClaimers);
+            return new ManagedJobHandle(completion);
+        }
+
+        /// <summary>
+        /// 统一挂接依赖启动：不管依赖此刻是否已完成，都把它标记为“完成后自动归还”（防中间 handle 泄漏），
+        /// 并把依赖的 job 异常传播到新 job 的 completion（供末端 Complete() 抛出），然后执行 enqueue。
+        /// OnCompleted 在“依赖已就绪”时立即回调，天然覆盖已完成/未完成两种情况 —— 消除了原先 depOk
+        /// 分支导致的“是否自动归还取决于时序”的不确定泄漏。
+        /// </summary>
+        private static void ChainAfter(ManagedCompletion dep, ManagedCompletion dependent, Action enqueue)
+        {
+            if (dep == null) { enqueue(); return; }
+            Volatile.Write(ref dep._autoReturn, 1);
+            void Propagate()
             {
-                // 依赖 completion 完成后自动归还（中间 handle 不主动 Complete，防泄漏）
-                Volatile.Write(ref dependsOn.Completion._autoReturn, 1);
-                dependsOn.Completion.OnCompleted(EnqueueClaimers);
+                var ex = dep.ReadException();
+                if (ex != null && dependent != null) dependent.RecordException(ex);
+                enqueue();
+            }
+            if (dep.IsCompleted)
+            {
+                // 依赖在调度前就已就绪：立即传播 + 启动，并当场归还（Signal 已跑过，不会自动归还，否则泄漏槽位）。
+                Propagate();
+                ManagedJobScheduler.AutoReturnCompletion(dep);
             }
             else
-                EnqueueClaimers();
-            return new ManagedJobHandle(completion);
+            {
+                // 依赖尚未完成：挂回调；完成后 Signal 内部会因 _autoReturn==1 自动归还。
+                dep.OnCompleted(Propagate);
+            }
         }
 
         // ──────────────────── 主线程协作完成 ────────────────────
@@ -353,9 +389,24 @@ namespace EntJoy.JobSystem.Managed
         {
             if (dependsOn.Completion == null) { EnqueueGlobal(task); return; }
             var dep = dependsOn.Completion;
-            // 依赖 completion：完成后自动归还（中间 handle 调用方不主动 Complete，防 completion 槽位/闭包泄漏）
+            // 依赖 completion：完成后自动归还（中间 handle 调用方不主动 Complete，防 completion 槽位/闭包泄漏），
+            // 并把依赖异常传播到本 job 的 completion（供末端 Complete() 抛出）。
             Volatile.Write(ref dep._autoReturn, 1);
-            dep.OnCompleted(() => EnqueueGlobal(task));
+            void Propagate()
+            {
+                var ex = dep.ReadException();
+                if (ex != null) task.Completion?.RecordException(ex);
+                EnqueueGlobal(task);
+            }
+            if (dep.IsCompleted)
+            {
+                Propagate();
+                ManagedJobScheduler.AutoReturnCompletion(dep); // 已在调度前完成：当场归还，防泄漏
+            }
+            else
+            {
+                dep.OnCompleted(Propagate);
+            }
         }
 
         // ──────────────────── Worker 循环 ────────────────────
@@ -393,9 +444,22 @@ namespace EntJoy.JobSystem.Managed
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private static void ExecuteTask(ManagedTask task)
         {
-            task.Runner(task.Job, task.Start, task.Count);
-            task.Completion?.Signal();
-            task.Release?.Invoke(task.Job);
+            // 异常边界：任何 job 抛异常都不得打死 worker 线程（否则依赖它的 completion 永远到不了 0
+            // → Complete() 永久死锁）。捕获并记录到 completion（first-wins，供末端 Complete() 抛出），
+            // 且无论如何都要 Signal 完成并释放 job 盒，保证调度器在不抛异常的路径上继续推进。
+            try
+            {
+                task.Runner(task.Job, task.Start, task.Count);
+            }
+            catch (Exception ex)
+            {
+                task.Completion?.RecordException(ex);
+            }
+            finally
+            {
+                task.Completion?.Signal();
+                task.Release?.Invoke(task.Job);
+            }
         }
 
         // ──────────────────── 泛型委托缓存 ────────────────────
@@ -465,7 +529,8 @@ namespace EntJoy.JobSystem.Managed
                     int end = Math.Min(claimed + range.Batch, range.Length);
                     for (int i = claimed; i < end; i++) job.Execute(i);
                 }
-                range.Completion.Signal();
+                // 注意：这里**不**再自行 Signal —— 完成信号统一由 ExecuteTask 的 finally 发出，
+                // 否则与 ExecuteTask 的 Signal 重复，会提前触发 completion（导致提前完成 + job 盒提前归还）。
             }
         }
 
@@ -501,7 +566,6 @@ namespace EntJoy.JobSystem.Managed
             public int Length;
             public int Batch;            // 认领粒度
             public int Current;          // 共享游标（Interlocked.Add 认领）
-            public ManagedCompletion Completion;
         }
     }
 }
