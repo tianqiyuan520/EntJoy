@@ -14,6 +14,13 @@ namespace NativeTranspiler.Tasks
         [Required]
         public string NativeCodeGenDir { get; set; }
 
+        /// <summary>
+        /// 可选：宿主项目显式配置的原生 NativeDll 源码目录（含 Exports.cpp）。
+        /// 未配置时由 NativeCompileTask 从仓库结构自动探测（向上找 src/NativeDll/Exports.cpp）。
+        /// 用户也可绕过此任务，直接用 CMake 编译 NativeTranspiler_Generated 中的 CMakeLists.txt。
+        /// </summary>
+        public string NativeDllDir { get; set; }
+
         public ITaskItem[] ExtraDependencies { get; set; }
 
         public override bool Execute()
@@ -239,10 +246,19 @@ namespace NativeTranspiler.Tasks
                     files.Add(f);
             }
 
-            // NativeCodeGenDir is <project>/NativeTranspiler_Generated. Resolve
-            // the shared runtime explicitly; Directory.GetParent behaves
-            // differently when the input retains a trailing separator.
-            var nativeDllDir = Path.GetFullPath(Path.Combine(rootDir, "..", "..", "NativeDll"));
+            // NativeDllDir 可选：显式配置优先，未配置时自动探测仓库根
+            string nativeDllDir;
+            if (!string.IsNullOrEmpty(NativeDllDir))
+            {
+                nativeDllDir = Path.GetFullPath(NativeDllDir);
+            }
+            else
+            {
+                // 自动探测：从 NativeCodeGenDir 向上找 src/NativeDll/Exports.cpp
+                nativeDllDir = FindNativeDllDir(rootDir);
+                if (nativeDllDir == null)
+                    nativeDllDir = Path.GetFullPath(Path.Combine(rootDir, "..", "..", "..", "src", "NativeDll"));
+            }
             if (Directory.Exists(nativeDllDir))
             {
                 Log.LogMessage(MessageImportance.Low, $"  Including shared native sources: {nativeDllDir}");
@@ -428,6 +444,20 @@ namespace NativeTranspiler.Tasks
                     return (process.ExitCode, output.ToString(), error.ToString());
                 }
             }
+        }
+
+        /// <summary>从 startDir 向上探测，返回包含 src/NativeDll/Exports.cpp 的 NativeDll 路径；找不到返回 null。</summary>
+        private static string FindNativeDllDir(string startDir)
+        {
+            var dir = new DirectoryInfo(startDir);
+            while (dir != null)
+            {
+                string candidate = Path.Combine(dir.FullName, "src", "NativeDll");
+                if (File.Exists(Path.Combine(candidate, "Exports.cpp")))
+                    return candidate;
+                dir = dir.Parent;
+            }
+            return null;
         }
     }
 }

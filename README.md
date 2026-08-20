@@ -510,7 +510,7 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 ### 05 Algorithms
 
-- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验。（2026-08 整体注释停用，设计见 [docs/06-HotFieldHandle设计.md](docs/06-HotFieldHandle设计.md)）
+- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验。（2026-08 整体注释停用）
 
 ### 06 HotField Handle
 
@@ -1079,7 +1079,7 @@ Working sources:
 
 ### 05 Algorithms
 
-- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search. (Entirely commented out since 2026-08; design notes in [docs/06-HotFieldHandle设计.md](docs/06-HotFieldHandle设计.md))
+- [`GridSearch`](src/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search. (Entirely commented out since 2026-08)
 
 ### 06 HotField Handle
 

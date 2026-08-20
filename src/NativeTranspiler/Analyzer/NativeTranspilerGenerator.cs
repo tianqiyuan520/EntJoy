@@ -374,8 +374,24 @@ namespace NativeTranspiler.Analyzer
                 // 只在内容变化时写入 CMakeLists.txt，避免触发 CMake reconfigure
                 if (cppFiles.Count > 0 || ispcFiles.Count > 0)
                 {
-            string solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
-                    string nativeDllDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "NativeDll"));
+                    var globalOptions = ctx.Options.GlobalOptions;
+            string nativeDllDir;
+            string solutionBinDir;
+            // 优先读宿主 csproj 显式配置的 EntJoyNativeDllDir（源生成器 + 编译任务共用同一属性）
+            if (globalOptions.TryGetValue("build_property.EntJoyNativeDllDir", out var configuredDllDir) && !string.IsNullOrWhiteSpace(configuredDllDir))
+            {
+                nativeDllDir = Path.GetFullPath(configuredDllDir);
+                solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+            }
+            else
+            {
+                // 未配置时自动探测仓库根（从输出目录向上找 src/NativeDll/Exports.cpp）
+                var repoRoot = FindRepoRoot(ctx.GetProjectDirectory());
+                if (repoRoot == null)
+                    repoRoot = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", ".."));
+                solutionBinDir = Path.GetFullPath(Path.Combine(repoRoot, "bin"));
+                nativeDllDir = Path.GetFullPath(Path.Combine(repoRoot, "src", "NativeDll"));
+            }
                     var relativeNativeDllDir = GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
                     bool hasFastMath = fastMathCppFiles.Count > 0;
                     var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
@@ -389,7 +405,10 @@ namespace NativeTranspiler.Analyzer
 
                 // 生成 run_clangcl.bat：用 ClangCL (LLVM 后端) 编译 NativeDll
                 {
-                    string solBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+                    var repoRoot2 = FindRepoRoot(ctx.GetProjectDirectory());
+                    string solBinDir = repoRoot2 != null
+                        ? Path.GetFullPath(Path.Combine(repoRoot2, "bin"))
+                        : Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
                     var clangBatPath = Path.Combine(outputDir, "run_clangcl.bat");
                     var clangBat = new StringBuilder();
                     clangBat.AppendLine("@echo off");
@@ -808,6 +827,22 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
 ";
+        }
+
+        /// <summary>
+        /// 从 startDir 向上逐级探测，返回包含 <c>src/NativeDll/Exports.cpp</c> 的仓库根目录。
+        /// 不依赖项目目录深度，工程无论放多深都能自动指向。找不到返回 null。
+        /// </summary>
+        private static string? FindRepoRoot(string startDir)
+        {
+            var dir = new DirectoryInfo(startDir);
+            while (dir != null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "src", "NativeDll", "Exports.cpp")))
+                    return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
         }
 
         /// <summary>计算相对路径（兼容 netstandard2.0，不支持 Path.GetRelativePath）</summary>

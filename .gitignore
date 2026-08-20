@@ -41,7 +41,7 @@ cmake_install.cmake
 compile_commands.json
 
 # Godot generated temp/cache
-src/Godot/.godot/
+**/.godot/
 
 # Native transpiler generated sources
 **/NativeTranspiler_Generated/
