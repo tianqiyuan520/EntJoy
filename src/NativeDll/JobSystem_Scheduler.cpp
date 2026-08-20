@@ -427,43 +427,29 @@ namespace JobSystem
 
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches };
-        // guided 只作用于 rangeSize=0 的默认路径（用户显式 rangeSize 走 uniform）。
-        const bool guided = g_guidedEnabled != 0 && rangeSize <= 0;
-        const uint32_t tileCount = guided
-            ? static_cast<uint32_t>(GuidedTileCount(itemCount,
-                provisionalWorkers, g_guidedK, g_guidedFloor))
-            : static_cast<uint32_t>(rc);
-        const int targetWorkers = ResolveWorkerTarget(
-            workerCap, static_cast<int>(tileCount));
+
+        // ---- 实体数衡 tile ----：按每个 unit(chunk/batch) 的存活实体数前向扫描切块，让每块
+        // 约含 targetEnt 个实体（而非固定 chunk 数），消除满/半满/空 chunk 混排时的负载失衡。
+        // 先规划 worker 数（用 chunk 数的粗略 rc 即可，只作参与 worker 上限），再实体扫描定 tile。
+        const TileKind tileKind = func
+            ? TileKind::ChunkCallbacks
+            : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
+        const int targetWorkers = ResolveWorkerTarget(workerCap, rc);
+        long totalEntities = 0;
+        for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
+        const int targetEnt = ResolveEcsEntityTileTarget(static_cast<int>(totalEntities), targetWorkers);
+        const uint32_t tileCount = static_cast<uint32_t>(
+            BuildEntityBalancedTiles(nullptr, cc, tileKind, itemCount, targetEnt));
+
         auto* storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
         auto* state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        // Every Chunk/Entity entry point uses the same Tile/partition protocol.
         {
-            const TileKind tileKind = func
-                ? TileKind::ChunkCallbacks
-                : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
             auto* tiles = storage->tileBuffer;
-            if (guided)
-            {
-                BuildGuidedTiles(tiles, itemCount, targetWorkers,
-                    g_guidedK, g_guidedFloor, tileKind);
-            }
-            else
-            {
-                for (uint32_t i = 0; i < tileCount; i++)
-                {
-                    const uint32_t first = i * static_cast<uint32_t>(rs);
-                    tiles[i].firstItem = first;
-                    tiles[i].itemCount = std::min(static_cast<uint32_t>(rs),
-                        static_cast<uint32_t>(itemCount) - first);
-                    tiles[i].kind = tileKind;
-                }
-            }
-
+            BuildEntityBalancedTiles(tiles, cc, tileKind, itemCount, targetEnt);
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
