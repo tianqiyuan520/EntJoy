@@ -32,8 +32,8 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             sb.AppendLine("#pragma once");
             sb.AppendLine();
-            sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
-            sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
+            sb.AppendLine("#include \"NativeContainers.h\"");
+            sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include <cstddef>");
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
@@ -76,8 +76,8 @@ namespace NativeTranspiler.Analyzer
 
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                sb.AppendLine("#include \"../../NativeDll/NativeSIMD.h\"");
-                sb.AppendLine("#include \"../../NativeDll/SimdValue.h\"");
+                sb.AppendLine("#include \"NativeSIMD.h\"");
+                sb.AppendLine("#include \"SimdValue.h\"");
             }
             else
                 sb.AppendLine("#include <cmath>");

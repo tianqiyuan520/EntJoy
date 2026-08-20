@@ -19,7 +19,7 @@
     <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
 
-  <!-- 鏄惧紡閰嶇疆鍘熺敓 NativeDll 婧愮爜鐩綍锛堟簮鐢熸垚鍣?+ 缂栬瘧浠诲姟鍏辩敤锛?-->
+  <!-- 显式配置原生 NativeDll 源码目录（源生成器 + 编译任务共用）-->
   <PropertyGroup>
     <EntJoyNativeDllDir>$(MSBuildThisFileDirectory)..\..\src\NativeDll</EntJoyNativeDllDir>
   </PropertyGroup>
@@ -59,9 +59,9 @@
   </PropertyGroup>
 
   <Target Name="CopyDllsToGodot" AfterTargets="Build">
-    <!-- 鐢熸垚浠ｇ爜 DLL锛圢ativeTranspiled.dll锛変紭鍏堜粠鐢熸垚鐩綍鎷疯礉 -->
+    <!-- 生成代码 DLL（NativeTranspiled.dll）优先从生成目录拷贝 -->
     <Copy SourceFiles="$(_GodotGeneratedNativeDllPath)" DestinationFiles="$(OutputPath)NativeTranspiled.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedNativeDllPath)')" />
-    <!-- 鏍稿績 DLL锛氫紭鍏堢敤鐢熸垚鐩綍鐨勶紙涓庣敓鎴愪唬鐮佸悓鎵圭紪璇戯級锛屽惁鍒欏洖閫€鍒?bin -->
+    <!-- 核心 DLL：优先用生成目录的（与生成代码同批编译），否则回退到 bin -->
     <Copy SourceFiles="$(_GodotGeneratedCoreNativeDllPath)" DestinationFiles="$(OutputPath)NativeDll.dll" SkipUnchangedFiles="true" Condition="Exists('$(_GodotGeneratedCoreNativeDllPath)')" />
     <Copy SourceFiles="$(_NativeDllSourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="!Exists('$(_GodotGeneratedCoreNativeDllPath)') And Exists('$(_NativeDllSourcePath)')" />
     <Copy SourceFiles="$(_EntJoySourcePath)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_EntJoySourcePath)')" />

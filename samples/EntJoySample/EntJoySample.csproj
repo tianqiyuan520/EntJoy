@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -9,7 +9,7 @@
 		<BaseOutputPath>..\..\..\bin</BaseOutputPath>
 		<OutputPath>..\..\..\bin</OutputPath>
 
-		<!-- 鍏抽敭璁剧疆锛氬彇娑堣嚜鍔ㄨ拷锟?TargetFramework 瀛愮洰锟?-->
+		<!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 	</PropertyGroup>
 
@@ -23,11 +23,11 @@
 		<ProjectReference Include="..\..\src\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
 		<ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<!-- 锟?鏂板锛氬紩鐢ㄤ换鍔￠」鐩紝浠ョ‘淇濆畠鍏堟瀯寤猴紝浣嗕笉澶嶅埗鍒拌繍琛屾椂 -->
+		<!-- 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
 		<ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
 	</ItemGroup>
 
-	<!-- 鏄惧紡閰嶇疆鍘熺敓 NativeDll 婧愮爜鐩綍锛堟簮鐢熸垚鍣?+ 缂栬瘧浠诲姟鍏辩敤锛?-->
+	<!-- 显式配置原生 NativeDll 源码目录（源生成+ 编译任务共用-->
 	<PropertyGroup>
 		<EntJoyNativeDllDir>$(MSBuildThisFileDirectory)..\..\src\NativeDll</EntJoyNativeDllDir>
 	</PropertyGroup>
@@ -35,8 +35,8 @@
 		<CompilerVisibleProperty Include="EntJoyNativeDllDir" />
 	</ItemGroup>
 
-	<!-- 涓嶅啀寮哄埗娓呴櫎鐢熸垚鐩綍锛涗繚鐣欎笂娆＄敓鎴愮殑鏂囦欢浠ユ敮鎸佸閲忔锟?
-	      NativeCompileTask 渚濊禆 stamp 鏂囦欢瀵规瘮鏃堕棿鎴虫潵鍒ゆ柇鏄惁闇€瑕侀噸鏂扮紪锟?-->
+	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检
+	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编-->
 	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
 	<Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
@@ -63,14 +63,14 @@
 	<Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
 		<ItemGroup>
 			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll')" />
-			<!-- DLL 鍒嗙锛氱敓鎴愪唬鐮佺嫭锟?DLL锛屼竴骞跺鍒跺埌杈撳嚭 -->
+			<!-- DLL 分离：生成代码独DLL，一并复制到输出 -->
 			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="@(NativeDll) != ''" />
 	</Target>
 
 	<Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
-		<!-- 鍘嗗彶閬楃暀锛氬悎骞跺墠鐨勫崟 DLL 鍚嶏紝鍒犻櫎閬垮厤涓叉棫鐗堟湰 -->
+		<!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
 		<Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
 	</Target>
 

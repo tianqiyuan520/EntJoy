@@ -100,7 +100,7 @@ namespace EntJoy.JobSystem.Managed
             _autoReturn = 0;
         }
 
-        /// <summary>注册完成回调（原子累积，防菱形依赖并发注册丢回调）。若已完成后注册则立即调用。</summary>
+        /// <summary>注册完成回调（原子累积，防菱形依赖并发注册丢回调）。</summary>
         internal void OnCompleted(Action callback)
         {
             while (true)
@@ -110,7 +110,19 @@ namespace EntJoy.JobSystem.Managed
                 if (Interlocked.CompareExchange(ref _onComplete, next, cur) == cur)
                     break;
             }
-            if (IsCompleted) callback();
+            // 若已完成则竞争派发：与 Signal 共享原子取出，保证回调只派发一次（消除双重执行竞态）。
+            if (IsCompleted) DispatchComplete();
+        }
+
+        /// <summary>
+        /// 原子取出并清空完成回调，只派发一次。
+        /// 消除 OnCompleted 的同步回调与 Signal 的完成回调间的双重执行竞态：
+        /// 该竞态会让依赖链的 Propagate 执行两次（EnqueueSlices 二次覆盖 Remaining→计数错乱→依赖链死锁）。
+        /// </summary>
+        private void DispatchComplete()
+        {
+            var c = Interlocked.Exchange(ref _onComplete, null);
+            if (c != null) c();
         }
 
         /// <summary>任务片段完成；Remaining 减到 0 时触发完成信号，并（若标记自动归还）回池。</summary>
@@ -119,12 +131,7 @@ namespace EntJoy.JobSystem.Managed
             if (Interlocked.Decrement(ref Remaining) == 0)
             {
                 _done.Set();
-                var c = Volatile.Read(ref _onComplete);
-                if (c != null)
-                {
-                    Volatile.Write(ref _onComplete, null); // 立即清，防回调引用驻留
-                    c();
-                }
+                DispatchComplete();
                 // 依赖链中间 handle：完成后由完成线程自动归还，避免只等末端 handle 导致的连中部 completion 泄漏。
                 if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0)
                     ManagedJobScheduler.AutoReturnCompletion(this);
