@@ -1,42 +1,71 @@
+#nullable enable
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
-namespace EntJoy.SourceGenerator
+namespace EntJoy.ECS.SourceGenerator
 {
-    [Generator]
-    public sealed class IJobEntitySourceGenerator : ISourceGenerator
+    /// <summary>
+    /// IJobEntity → IJobChunk 适配器生成器（由总入口 <see cref="ECSSourceGenerator"/> 调度加载，不直接注册）。
+    /// </summary>
+    internal sealed class IJobEntitySourceGenerator : IIncrementalGenerator
     {
-        public void Initialize(GeneratorInitializationContext context)
+        private const string JobAdapterSuffix = "_IJobEntityAdapter.g.cs";
+
+        public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            context.RegisterForSyntaxNotifications(() => new Receiver());
+            var jobProvider = context.SyntaxProvider
+                .CreateSyntaxProvider(
+                    predicate: static (node, _) => IsCandidate(node),
+                    transform: static (ctx, ct) => GetJob(ctx, ct))
+                .Where(static j => j != null);
+
+            var collected = jobProvider.Collect();
+
+            context.RegisterSourceOutput(collected, static (spc, jobs) =>
+            {
+                foreach (var job in jobs)
+                {
+                    if (job == null) continue;
+                    string source = Generate(job.JobType, job.Execute);
+                    spc.AddSource(
+                        $"{Sanitize(job.JobType.ToDisplayString())}{JobAdapterSuffix}",
+                        SourceText.From(source, Encoding.UTF8));
+                }
+            });
         }
 
-        public void Execute(GeneratorExecutionContext context)
+        private static bool IsCandidate(SyntaxNode node)
         {
-            if (!(context.SyntaxReceiver is Receiver receiver))
-                return;
+            return node is StructDeclarationSyntax s &&
+                   s.BaseList != null &&
+                   s.BaseList.Types.Any(t => t.Type.ToString().Contains(Config.IJobEntity));
+        }
 
-            foreach (var candidate in receiver.Candidates)
-            {
-                var model = context.Compilation.GetSemanticModel(candidate.SyntaxTree);
-                if (!(model.GetDeclaredSymbol(candidate) is INamedTypeSymbol jobType))
-                    continue;
+        private static JobCandidate? GetJob(GeneratorSyntaxContext context, CancellationToken ct)
+        {
+            if (context.Node is not StructDeclarationSyntax candidate)
+                return null;
 
-                if (!jobType.AllInterfaces.Any(i => i.Name == "IJobEntity"))
-                    continue;
+            var model = context.SemanticModel;
+            if (model.GetDeclaredSymbol(candidate, ct) is not INamedTypeSymbol jobType)
+                return null;
 
-                var execute = jobType.GetMembers().OfType<IMethodSymbol>()
-                    .FirstOrDefault(m => m.Name == "Execute" && m.Parameters.Length > 0 && m.ReturnsVoid);
-                if (execute == null)
-                    continue;
+            if (!jobType.AllInterfaces.Any(i => i.Name == Config.IJobEntity &&
+                                                i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoy))
+                return null;
 
-                string source = Generate(jobType, execute);
-                context.AddSource($"{Sanitize(jobType.ToDisplayString())}_IJobEntityAdapter.g.cs", source);
-            }
+            var execute = jobType.GetMembers().OfType<IMethodSymbol>()
+                .FirstOrDefault(m => m.Name == Config.Execute && m.Parameters.Length > 0 && m.ReturnsVoid);
+            if (execute == null)
+                return null;
+
+            return new JobCandidate(jobType, execute);
         }
 
         private static string Generate(INamedTypeSymbol jobType, IMethodSymbol execute)
@@ -46,10 +75,9 @@ namespace EntJoy.SourceGenerator
             string namespaceName = jobType.ContainingNamespace?.IsGlobalNamespace == false
                 ? jobType.ContainingNamespace.ToDisplayString()
                 : string.Empty;
-            string componentDecls = string.Join("\n", execute.Parameters.Select((p, i) =>
-                $"            var __c{i} = chunk.GetComponentDataSpan<{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>();"));
-            string callArgs = string.Join(", ", execute.Parameters.Select((p, i) =>
-                p.RefKind == RefKind.In ? $"in __c{i}[i]" : $"ref __c{i}[i]"));
+            string componentDecls = string.Join("\n", execute.Parameters.Select((p, _) =>
+                $"            var {p.Name} = __chunk.GetComponentDataSpan<{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>();"));
+            string inlinedBody = BuildInlinedBody(jobType, execute);
 
             var sb = new StringBuilder();
             sb.AppendLine("// <auto-generated/>");
@@ -66,17 +94,17 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
             sb.AppendLine("    {");
-            sb.AppendLine($"        return new {adapterName} {{ Job = job }}.Schedule(query, dependsOn);");
+            sb.AppendLine($"        return ChunkJobExtensions.Schedule(new {adapterName} {{ Job = job }}, query, dependsOn);");
             sb.AppendLine("    }");
             sb.AppendLine();
             sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
             sb.AppendLine("    {");
-            sb.AppendLine($"        return new {adapterName} {{ Job = job }}.ScheduleWithWorkerCap(query, workerCap, dependsOn);");
+            sb.AppendLine($"        return ChunkJobExtensions.ScheduleWithWorkerCap(new {adapterName} {{ Job = job }}, query, workerCap, dependsOn);");
             sb.AppendLine("    }");
             sb.AppendLine();
             sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
             sb.AppendLine("    {");
-            sb.AppendLine($"        new {adapterName} {{ Job = job }}.Run(query);");
+            sb.AppendLine($"        ChunkJobExtensions.Run(new {adapterName} {{ Job = job }}, query);");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
@@ -84,39 +112,15 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine($"    public {jobFullName} Job;");
             sb.AppendLine();
-            // Schedule/ScheduleWithWorkerCap/Run 方法：调用 NativeJobScheduler 调度
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine("    public JobHandle Schedule(QueryBuilder query, JobHandle dependsOn = default)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        var world = World.DefaultWorld;");
-            sb.AppendLine("        if (world == null) throw new InvalidOperationException(\"No active World found.\");");
-            sb.AppendLine("        NativeJobHandle? nativeDep = dependsOn._nativeHandle;");
-            sb.AppendLine("        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref this, world.EntityManager, query, nativeDep));");
-            sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine("    public JobHandle ScheduleWithWorkerCap(QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        var world = World.DefaultWorld;");
-            sb.AppendLine("        if (world == null) throw new InvalidOperationException(\"No active World found.\");");
-            sb.AppendLine("        NativeJobHandle? nativeDep = dependsOn._nativeHandle;");
-            sb.AppendLine("        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref this, world.EntityManager, query, workerCap, nativeDep));");
-            sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine("    public void Run(QueryBuilder query)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        var handle = Schedule(query);");
-            sb.AppendLine("        handle.Complete();");
-            sb.AppendLine("    }");
-            sb.AppendLine();
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]");
-            sb.AppendLine("    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)");
+            sb.AppendLine("    public void Execute(ArchetypeChunk __chunk, in ChunkEnabledMask __enabledMask)");
             sb.AppendLine("    {");
             sb.AppendLine(componentDecls);
-            sb.AppendLine("        int count = chunk.Count;");
-            sb.AppendLine("        for (int i = 0; i < count; i++)");
+            sb.AppendLine("        int __count = __chunk.Count;");
+            sb.AppendLine("        for (int __idx = 0; __idx < __count; __idx++)");
             sb.AppendLine("        {");
-            sb.AppendLine($"            Job.Execute({callArgs});");
+            if (!string.IsNullOrEmpty(inlinedBody))
+                sb.Append(inlinedBody);
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -127,6 +131,95 @@ namespace EntJoy.SourceGenerator
             return sb.ToString();
         }
 
+        private static string BuildInlinedBody(INamedTypeSymbol jobType, IMethodSymbol execute)
+        {
+            // 取 Execute 方法体，执行"managed 源码级内联"：
+            //   形参 p/v (in/ref 组件)  ->  __c{i}[__idx]
+            //   Job 自定义字段 (DeltaTime) -> Job.DeltaTime （内联进适配器后字段在 Job 字段里）
+            //   this -> Job ；void return; -> continue; （否则第一实体后整个 Execute 退出，破坏循环）
+            if (execute.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not MethodDeclarationSyntax ms ||
+                ms.Body == null)
+                return "";
+
+            var paramMap = new Dictionary<string, string>();
+            for (int i = 0; i < execute.Parameters.Length; i++)
+                paramMap[execute.Parameters[i].Name] = $"{execute.Parameters[i].Name}[__idx]";
+
+            var localNames = new HashSet<string>();
+            foreach (var node in ms.Body.DescendantNodes())
+            {
+                switch (node)
+                {
+                    case LocalDeclarationStatementSyntax ld:
+                        foreach (var v in ld.Declaration.Variables) localNames.Add(v.Identifier.Text);
+                        break;
+                    case ForStatementSyntax f when f.Declaration != null:
+                        foreach (var v in f.Declaration.Variables) localNames.Add(v.Identifier.Text);
+                        break;
+                    case ForEachStatementSyntax fe:
+                        localNames.Add(fe.Identifier.Text);
+                        break;
+                }
+            }
+
+            var fieldNames = new HashSet<string>(
+                jobType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).Select(f => f.Name));
+
+            var rewriter = new InlineBodyRewriter(paramMap, localNames, fieldNames);
+            var rewritten = (BlockSyntax)rewriter.Visit(ms.Body)!;
+
+            var sb = new StringBuilder();
+            const string indent = "            "; // 12 空格，位于生成的外层 for 内
+            foreach (var stmt in rewritten.Statements)
+            {
+                var text = stmt.NormalizeWhitespace().ToFullString();
+                foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+                    sb.Append(indent).AppendLine(line);
+            }
+            return sb.ToString();
+        }
+
+        private sealed class InlineBodyRewriter : CSharpSyntaxRewriter
+        {
+            private readonly Dictionary<string, string> _paramMap;
+            private readonly HashSet<string> _localNames;
+            private readonly HashSet<string> _fieldNames;
+
+            public InlineBodyRewriter(Dictionary<string, string> paramMap, HashSet<string> localNames, HashSet<string> fieldNames)
+            {
+                _paramMap = paramMap;
+                _localNames = localNames;
+                _fieldNames = fieldNames;
+            }
+
+            public override SyntaxNode? VisitIdentifierName(IdentifierNameSyntax node)
+            {
+                // 跳过成员访问/绑定/命名实参的"名称"侧，避免把 .Value / 具名实参 误替换
+                if (node.Parent is MemberAccessExpressionSyntax mem && ReferenceEquals(mem.Name, node)) return node;
+                if (node.Parent is MemberBindingExpressionSyntax) return node;
+                if (node.Parent is NameColonSyntax) return node;
+                if (node.Identifier.Text == "this")
+                    return SyntaxFactory.ParseExpression("Job").WithTriviaFrom(node);
+
+                if (_localNames.Contains(node.Identifier.Text)) return node;
+
+                if (_paramMap.TryGetValue(node.Identifier.Text, out var repl))
+                    return SyntaxFactory.ParseExpression(repl).WithTriviaFrom(node);
+
+                if (_fieldNames.Contains(node.Identifier.Text))
+                    return SyntaxFactory.ParseExpression("Job." + node.Identifier.Text).WithTriviaFrom(node);
+
+                return node;
+            }
+
+            public override SyntaxNode? VisitReturnStatement(ReturnStatementSyntax node)
+            {
+                if (node.Expression == null)
+                    return SyntaxFactory.ContinueStatement().WithTriviaFrom(node);
+                return node;
+            }
+        }
+
         private static string Sanitize(string value)
         {
             var sb = new StringBuilder(value.Length);
@@ -134,20 +227,16 @@ namespace EntJoy.SourceGenerator
                 sb.Append(char.IsLetterOrDigit(c) ? c : '_');
             return sb.ToString();
         }
-
-        private sealed class Receiver : ISyntaxReceiver
+        private sealed class JobCandidate
         {
-            public readonly List<StructDeclarationSyntax> Candidates = new List<StructDeclarationSyntax>();
-
-            public void OnVisitSyntaxNode(SyntaxNode syntaxNode)
+            public JobCandidate(INamedTypeSymbol jobType, IMethodSymbol execute)
             {
-                if (syntaxNode is StructDeclarationSyntax s &&
-                    s.BaseList != null &&
-                    s.BaseList.Types.Any(t => t.Type.ToString().Contains("IJobEntity")))
-                {
-                    Candidates.Add(s);
-                }
+                JobType = jobType;
+                Execute = execute;
             }
+
+            public INamedTypeSymbol JobType { get; }
+            public IMethodSymbol Execute { get; }
         }
     }
 }

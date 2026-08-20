@@ -5,6 +5,7 @@
 // ============================================================
 using Microsoft.CodeAnalysis;
 using System.Linq;
+using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer.Common
 {
@@ -14,7 +15,7 @@ namespace NativeTranspiler.Analyzer.Common
     /// </summary>
     public static class AttributeHelper
     {
-        private const string AttributeName = "NativeTranspileAttribute";
+        private const string AttributeName = Config.NativeTranspileAttribute;
         private const string AttributeNamespace = "NativeTranspiler";
 
         /// <summary>

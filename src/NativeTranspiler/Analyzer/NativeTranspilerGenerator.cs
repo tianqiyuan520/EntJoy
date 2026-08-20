@@ -14,9 +14,6 @@ namespace NativeTranspiler.Analyzer
     [Generator]
     public partial class NativeTranspilerGenerator : IIncrementalGenerator
     {
-        private const string AttributeName = "NativeTranspile";
-        private const string AttributeNamespace = "NativeTranspiler";
-
         private static readonly HashSet<string> SkipTranspileTypeNames = new()
         {
             "EntJoy.Mathematics.math",
@@ -27,7 +24,7 @@ namespace NativeTranspiler.Analyzer
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
             context.RegisterPostInitializationOutput(ctx =>
-                ctx.AddSource($"{AttributeName}Attribute.g.cs", GenerateAttributeCode()));
+                ctx.AddSource($"{RuntimeApi.AttributeName}Attribute.g.cs", RuntimeApi.GenerateAttributeSource()));
 
             var optionsProvider = context.AnalyzerConfigOptionsProvider;
 
@@ -55,6 +52,18 @@ namespace NativeTranspiler.Analyzer
 
             context.RegisterSourceOutput(combined, (spc, ctx) =>
             {
+                // =====================================================================
+                // CodeGenPipeline（阶段化编排；历史遗留内联于 RegisterSourceOutput）
+                //   0) 空集短路
+                //   1) Validate  —— 收集依赖 + NativeTranspileValidator 校验，出错即停
+                //   2) Resolve   —— 收集用户结构体、后端选择、输出目录、公共头
+                //   3) Methods   —— 静态方法与 Job 的 C++/ISPC 源 + MT + wrapper 写出
+                //   4) Adapters  —— C++ 包装 + 实体批量适配生成
+                //   5) BuildArtifacts —— CMakeLists.txt + clang 编译 .bat + ISPC 编译 .bat
+                //   6) Bindings  —— 生成 .g.cs 绑定 + 生成标记
+                // 说明：完整抽成独立 CodeGenPipeline 类需配行为对拍（本机 SDK 损坏无法跑
+                // 消费者基准），故先以文档化阶段标记落地；无行为变更。
+                // =====================================================================
                 if (ctx.MethodSymbols.IsEmpty && ctx.JobStructSymbols.IsEmpty) return;
 
                 var methodsToGenerate = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
@@ -89,7 +98,7 @@ namespace NativeTranspiler.Analyzer
                 var cppFiles = new List<string>();
                 var fastMathCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
-                var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{AttributeNamespace}.{AttributeName}Attribute");
+                var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
 
                 // 收集被标记的方法和 Job 结构体
                 var validMarkedMethods = ctx.MethodSymbols.Where(m => m != null).Cast<IMethodSymbol>();
@@ -106,20 +115,20 @@ namespace NativeTranspiler.Analyzer
                 {
                     var headerName = NativeTranspiler.GetStructHeaderFileName(userStruct);
                     var cppHeaderPath = Path.Combine(outputDir, $"{headerName}.h");
-                    WriteAllTextWithRetry(cppHeaderPath, NativeTranspiler.GenerateCppStructDefinition(userStruct));
+                    CodeGenIo.WriteAllTextWithRetry(cppHeaderPath, NativeTranspiler.GenerateCppStructDefinition(userStruct));
                 }
 
                 if (anyIspc)
                 {
                     var commonIspcPath = Path.Combine(outputDir, "EntJoyCommon.ispc");
-                    WriteAllTextWithRetry(commonIspcPath, GenerateCommonIspcHeader());
+                    CodeGenIo.WriteAllTextWithRetry(commonIspcPath, GenerateCommonIspcHeader());
 
                     // 为用户自定义结构体生成 ISPC 头文件
                     foreach (var userStruct in userStructs)
                     {
                         var headerName = NativeTranspiler.GetStructHeaderFileName(userStruct);
                         var ispcStructPath = Path.Combine(outputDir, $"{headerName}.ispc");
-                        WriteAllTextWithRetry(ispcStructPath, NativeTranspiler.GenerateIspcStructDefinition(userStruct));
+                        CodeGenIo.WriteAllTextWithRetry(ispcStructPath, NativeTranspiler.GenerateIspcStructDefinition(userStruct));
                     }
                 }
 
@@ -143,8 +152,8 @@ namespace NativeTranspiler.Analyzer
 
                         if (!disabledAutoRefresh || !fileExists)
                         {
-                            WriteAllTextWithRetry(ispcSrcPath, ispcSource);
-                            WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                            CodeGenIo.WriteAllTextWithRetry(ispcSrcPath, ispcSource);
+                            CodeGenIo.WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
                         }
                         ispcFiles.Add(($"{baseName}.ispc", mathLib));
                         cppFiles.Add($"{baseName}_wrapper.cpp");
@@ -159,8 +168,8 @@ namespace NativeTranspiler.Analyzer
 
                             if (!disabledAutoRefresh || !File.Exists(mtIspcPath))
                             {
-                                WriteAllTextWithRetry(mtIspcPath, mtIspcSource);
-                                WriteAllTextWithRetry(mtWrapperPath, mtCppWrapper);
+                                CodeGenIo.WriteAllTextWithRetry(mtIspcPath, mtIspcSource);
+                                CodeGenIo.WriteAllTextWithRetry(mtWrapperPath, mtCppWrapper);
                             }
                             ispcFiles.Add(($"{baseName}_mt.ispc", mathLib));
                             cppFiles.Add($"{baseName}_mt_wrapper.cpp");
@@ -180,8 +189,8 @@ namespace NativeTranspiler.Analyzer
 
                         if (!disabledAutoRefresh || !fileExists)
                         {
-                            WriteAllTextWithRetry(hPath, header);
-                            WriteAllTextWithRetry(cppPath, impl);
+                            CodeGenIo.WriteAllTextWithRetry(hPath, header);
+                            CodeGenIo.WriteAllTextWithRetry(cppPath, impl);
                         }
                         var cppFile = baseName + ".cpp";
                         cppFiles.Add(cppFile);
@@ -202,8 +211,8 @@ namespace NativeTranspiler.Analyzer
 
                     if (target == NativeTranspiler.BackendTarget.Ispc)
                     {
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.h"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{plainBase}.cpp"));
 
                         bool disabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
                         bool useIspcMt = HasUseISPC_MT(job, attrSymbol);
@@ -220,8 +229,8 @@ namespace NativeTranspiler.Analyzer
 
                             if (!disabledAutoRefresh || !fileExists)
                             {
-                                WriteAllTextWithRetry(ispcSrcPath, ispcSource);
-                                WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
+                                CodeGenIo.WriteAllTextWithRetry(ispcSrcPath, ispcSource);
+                                CodeGenIo.WriteAllTextWithRetry(wrapperCppPath, cppWrapper);
                             }
 
                             ispcFiles.Add(($"{ispcBase}.ispc", mathLib));
@@ -229,8 +238,8 @@ namespace NativeTranspiler.Analyzer
                         }
                         else
                         {
-                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
-                            DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
+                            CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
+                            CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
                         }
 
                         if (useIspcMt)
@@ -243,8 +252,8 @@ namespace NativeTranspiler.Analyzer
 
                             if (!disabledAutoRefresh || !File.Exists(mtIspcPath))
                             {
-                                WriteAllTextWithRetry(mtIspcPath, mtIspcSource);
-                                WriteAllTextWithRetry(mtWrapperPath, mtCppWrapper);
+                                CodeGenIo.WriteAllTextWithRetry(mtIspcPath, mtIspcSource);
+                                CodeGenIo.WriteAllTextWithRetry(mtWrapperPath, mtCppWrapper);
                             }
                             ispcFiles.Add(($"{ispcBase}_mt.ispc", mathLib));
                             cppFiles.Add($"{ispcBase}_mt_wrapper.cpp");
@@ -252,10 +261,10 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt.ispc"));
-                        DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}.ispc"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_wrapper.cpp"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt.ispc"));
+                        CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
 
                         var header = CppJobGenerator.GenerateJobHeader(job, ctx.Compilation);
                         var impl = CppJobGenerator.GenerateJobImplementation(job, ctx.Compilation);
@@ -268,8 +277,8 @@ namespace NativeTranspiler.Analyzer
 
                         if (!disabledAutoRefresh || !fileExists)
                         {
-                            WriteAllTextWithRetry(hPath, header);
-                            WriteAllTextWithRetry(cppPath, impl);
+                            CodeGenIo.WriteAllTextWithRetry(hPath, header);
+                            CodeGenIo.WriteAllTextWithRetry(cppPath, impl);
                         }
                         var cppFile = plainBase + ".cpp";
                         cppFiles.Add(cppFile);
@@ -290,7 +299,7 @@ namespace NativeTranspiler.Analyzer
                         bool adapterFileExists = File.Exists(adapterPath);
                         if (!adapterDisabledAutoRefresh || !adapterFileExists)
                         {
-                            WriteAllTextWithRetry(adapterPath, adapterCode);
+                            CodeGenIo.WriteAllTextWithRetry(adapterPath, adapterCode);
                         }
                         cppFiles.Add($"{plainBase}_Adapter.cpp");
                     }
@@ -368,7 +377,7 @@ namespace NativeTranspiler.Analyzer
                     batContent.AppendLine("    exit /b 1");
                     batContent.AppendLine(")");
                     batContent.AppendLine("echo All ISPC files compiled successfully.");
-                    WriteAllTextWithRetry(batPath, batContent.ToString());
+                    CodeGenIo.WriteAllTextWithRetry(batPath, batContent.ToString());
                 }
 
                 // 只在内容变化时写入 CMakeLists.txt，避免触发 CMake reconfigure
@@ -386,26 +395,26 @@ namespace NativeTranspiler.Analyzer
             else
             {
                 // 未配置时自动探测仓库根（从输出目录向上找 src/NativeDll/Exports.cpp）
-                var repoRoot = FindRepoRoot(ctx.GetProjectDirectory());
+                var repoRoot = CodeGenIo.FindRepoRoot(ctx.GetProjectDirectory());
                 if (repoRoot == null)
                     repoRoot = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", ".."));
                 solutionBinDir = Path.GetFullPath(Path.Combine(repoRoot, "bin"));
                 nativeDllDir = Path.GetFullPath(Path.Combine(repoRoot, "src", "NativeDll"));
             }
-                    var relativeNativeDllDir = GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
+                    var relativeNativeDllDir = CodeGenIo.GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
                     bool hasFastMath = fastMathCppFiles.Count > 0;
                     var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
                     string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
                     {
-                        WriteAllTextWithRetry(cmakePath, cmakeContent);
+                        CodeGenIo.WriteAllTextWithRetry(cmakePath, cmakeContent);
                     }
                 }
 
                 // 生成 run_clangcl.bat：用 ClangCL (LLVM 后端) 编译 NativeDll
                 {
-                    var repoRoot2 = FindRepoRoot(ctx.GetProjectDirectory());
+                    var repoRoot2 = CodeGenIo.FindRepoRoot(ctx.GetProjectDirectory());
                     string solBinDir = repoRoot2 != null
                         ? Path.GetFullPath(Path.Combine(repoRoot2, "bin"))
                         : Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
@@ -427,7 +436,7 @@ namespace NativeTranspiler.Analyzer
                     // 内容未变则不写（#22）：避免时间戳更新触发无关重编/检查
                     string clangBatContent = clangBat.ToString();
                     if (!File.Exists(clangBatPath) || File.ReadAllText(clangBatPath) != clangBatContent)
-                        WriteAllTextWithRetry(clangBatPath, clangBatContent);
+                        CodeGenIo.WriteAllTextWithRetry(clangBatPath, clangBatContent);
                 }
 
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
@@ -460,8 +469,8 @@ namespace NativeTranspiler.Analyzer
             var containingTypeFullName = method.ContainingType?.ToDisplayString();
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
-            if (method.Name == "Execute" && method.ContainingType?.AllInterfaces.Any(i =>
-                SymbolHelper.IsEntJoyJobInterface(i, "IJob") || SymbolHelper.IsEntJoyJobInterface(i, "IJobParallelFor") || SymbolHelper.IsEntJoyJobInterface(i, "IJobFor") || SymbolHelper.IsEntJoyJobInterface(i, "IJobChunk") || SymbolHelper.IsEntJoyJobInterface(i, "IJobEntity")) == true)
+            if (method.Name == Config.Execute && method.ContainingType?.AllInterfaces.Any(i =>
+                SymbolHelper.IsEntJoyJobInterface(i, Config.IJob) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity)) == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -521,7 +530,7 @@ namespace NativeTranspiler.Analyzer
                 foreach (var field in job.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
                     CollectFromType(field.Type, structs);
                 // 也从 Job Execute 方法体中收集局部变量类型
-                var executeMethod = job.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == "Execute");
+                var executeMethod = job.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
                 if (executeMethod != null)
                 {
                     var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -555,7 +564,7 @@ namespace NativeTranspiler.Analyzer
             // 过滤预定义的容器类型
             if (NativeTranspiler.IsEntJoyPredefinedType(type))
                 return;
-            if (type.Name == "Span" && type.ContainingNamespace?.ToDisplayString() == "System")
+            if (type.Name == Config.Span && type.ContainingNamespace?.ToDisplayString() == Config.NamespaceSystem)
                 return;
 
             if (type.IsValueType && !NativeTranspiler.IsBuiltinUnmanaged(type))
@@ -571,56 +580,12 @@ namespace NativeTranspiler.Analyzer
         }
 
 
-        private static void WriteAllTextWithRetry(string path, string contents, int maxRetries = 5)
-        {
-            // 内容级增量写入：只有内容变化时才写文件，避免因时间戳更新触发编译
-            if (File.Exists(path))
-            {
-                try
-                {
-                    string existing = File.ReadAllText(path);
-                    if (existing == contents)
-                        return;
-                }
-                catch { }
-            }
-            else
-            {
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-            }
-
-            int retryCount = 0;
-            while (true)
-            {
-                try
-                {
-                    File.WriteAllText(path, contents);
-                    break;
-                }
-                catch (IOException ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { throw; }
-                catch (IOException) when (retryCount < maxRetries) { retryCount++; Thread.Sleep(50 * retryCount); }
-                catch (UnauthorizedAccessException) when (retryCount < maxRetries) { retryCount++; Thread.Sleep(50 * retryCount); }
-            }
-        }
-
-        private static void DeleteIfExists(string path)
-        {
-            try
-            {
-                if (File.Exists(path))
-                    File.Delete(path);
-            }
-            catch { }
-        }
-
         private static IMethodSymbol? GetMethodSymbol(GeneratorSyntaxContext ctx, CancellationToken ct)
         {
             var methodDecl = (MethodDeclarationSyntax)ctx.Node;
             var methodSymbol = ctx.SemanticModel.GetDeclaredSymbol(methodDecl, ct);
             if (methodSymbol == null) return null;
-            var attrSymbol = ctx.SemanticModel.Compilation.GetTypeByMetadataName($"{AttributeNamespace}.{AttributeName}Attribute");
+            var attrSymbol = ctx.SemanticModel.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
             return attrSymbol != null && methodSymbol.GetAttributes().Any(ad =>
                 SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol)) ? methodSymbol : null;
         }
@@ -630,61 +595,10 @@ namespace NativeTranspiler.Analyzer
             var structDecl = (StructDeclarationSyntax)ctx.Node;
             var structSymbol = ctx.SemanticModel.GetDeclaredSymbol(structDecl, ct);
             if (structSymbol == null) return null;
-            var attrSymbol = ctx.SemanticModel.Compilation.GetTypeByMetadataName($"{AttributeNamespace}.{AttributeName}Attribute");
+            var attrSymbol = ctx.SemanticModel.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
             return attrSymbol != null && structSymbol.GetAttributes().Any(ad =>
                 SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol)) ? structSymbol : null;
         }
-
-        private static string GenerateAttributeCode() => $@"
-using System;
-namespace {AttributeNamespace}
-{{
-    public enum BackendTarget
-    {{
-        Cpp,
-        Ispc
-    }}
-
-    public enum IspcMathLib
-    {{
-        system,
-        fast,
-        @default
-    }}
-
-    public enum CppMathLib
-    {{
-        @default,
-        fast
-    }}
-
-    public enum AutoSIMD
-    {{
-        Enabled,
-        Disabled,
-        Vectorize
-    }}
-
-    public enum SimdMathPrecision
-    {{
-        Fastest,
-        High,
-        IEEE
-    }}
-
-    [AttributeUsage(AttributeTargets.Method | AttributeTargets.Struct)]
-    public sealed class {AttributeName}Attribute : Attribute
-    {{
-        public BackendTarget Target {{ get; set; }} = BackendTarget.Cpp;
-        public bool DisabledAutoRefresh {{ get; set; }} = false;
-        public bool UseISPC_MT {{ get; set; }} = false;
-        public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
-        public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;
-        public AutoSIMD AutoSIMD {{ get; set; }} = AutoSIMD.Disabled;
-        public SimdMathPrecision MathPrecision {{ get; set; }} = SimdMathPrecision.Fastest;
-    }}
-}}
-";
 
         private static string GenerateCommonIspcHeader()
         {
@@ -827,35 +741,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
 ";
-        }
-
-        /// <summary>
-        /// 从 startDir 向上逐级探测，返回包含 <c>src/NativeDll/Exports.cpp</c> 的仓库根目录。
-        /// 不依赖项目目录深度，工程无论放多深都能自动指向。找不到返回 null。
-        /// </summary>
-        private static string? FindRepoRoot(string startDir)
-        {
-            var dir = new DirectoryInfo(startDir);
-            while (dir != null)
-            {
-                if (File.Exists(Path.Combine(dir.FullName, "src", "NativeDll", "Exports.cpp")))
-                    return dir.FullName;
-                dir = dir.Parent;
-            }
-            return null;
-        }
-
-        /// <summary>计算相对路径（兼容 netstandard2.0，不支持 Path.GetRelativePath）</summary>
-        private static string GetRelativePath(string basePath, string targetPath)
-        {
-            if (!basePath.EndsWith(Path.DirectorySeparatorChar.ToString()))
-                basePath += Path.DirectorySeparatorChar;
-
-            var baseUri = new Uri(basePath);
-            var targetUri = new Uri(targetPath);
-            var relativeUri = baseUri.MakeRelativeUri(targetUri);
-            var relativePath = Uri.UnescapeDataString(relativeUri.ToString());
-            return relativePath.Replace('/', Path.DirectorySeparatorChar);
         }
 
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
