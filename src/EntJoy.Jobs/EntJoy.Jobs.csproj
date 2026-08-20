@@ -5,7 +5,4 @@
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.Jobs</AssemblyName>
   </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />
-  </ItemGroup>
 </Project>
