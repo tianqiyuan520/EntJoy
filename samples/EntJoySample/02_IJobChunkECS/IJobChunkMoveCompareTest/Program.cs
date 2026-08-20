@@ -1,16 +1,16 @@
 ﻿using EntJoy.JobSystem;
 
-namespace EntJoySample.SchedulerCompareTest
+namespace EntJoySample.IJobChunkMoveCompareTest
 {
     public static class Program
     {
         public static void Main()
         {
             NativeJobScheduler.Initialize();
-            NativeJobScheduler.PrewakeWorkersOnce();
 
-            using var sample = new SchedulerCompareSample();
+            using var sample = new IJobChunkMoveCompareSample();
             sample.Run();
+
         }
     }
 }

@@ -29,12 +29,6 @@ namespace EntJoy.SourceGenerator
                 if (!jobType.AllInterfaces.Any(i => i.Name == "IJobEntity"))
                     continue;
 
-                // NativeTranspile 类型的 IJobEntity 由 NativeTranspiler 生成 Schedule 方法
-                // 跳过源生成器，避免同名扩展方法冲突（命名空间优先级导致源生成器方法覆盖原生调度路径）
-                if (jobType.GetAttributes().Any(a =>
-                    a.AttributeClass?.ToDisplayString() == "NativeTranspiler.NativeTranspileAttribute"))
-                    continue;
-
                 var execute = jobType.GetMembers().OfType<IMethodSymbol>()
                     .FirstOrDefault(m => m.Name == "Execute" && m.Parameters.Length > 0 && m.ReturnsVoid);
                 if (execute == null)
@@ -89,6 +83,44 @@ namespace EntJoy.SourceGenerator
             sb.AppendLine($"internal struct {adapterName} : IJobChunk");
             sb.AppendLine("{");
             sb.AppendLine($"    public {jobFullName} Job;");
+            sb.AppendLine();
+            // Schedule/ScheduleWithWorkerCap/Run 方法：调用 NativeJobScheduler 调度
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine("    public JobHandle Schedule(QueryBuilder query, JobHandle dependsOn = default)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        var world = World.DefaultWorld;");
+            sb.AppendLine("        if (world == null) throw new InvalidOperationException(\"No active World found.\");");
+            sb.AppendLine("        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();");
+            sb.AppendLine("        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref this, world.EntityManager, query, nativeDep));");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine("    public JobHandle ScheduleWithWorkerCap(QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        var world = World.DefaultWorld;");
+            sb.AppendLine("        if (world == null) throw new InvalidOperationException(\"No active World found.\");");
+            sb.AppendLine("        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();");
+            sb.AppendLine("        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref this, world.EntityManager, query, workerCap, nativeDep));");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+            sb.AppendLine("    public void Run(QueryBuilder query)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        var world = World.DefaultWorld;");
+            sb.AppendLine("        if (world == null) throw new InvalidOperationException(\"No active World found.\");");
+            sb.AppendLine("        var entityManager = world.EntityManager;");
+            sb.AppendLine("        for (int i = 0; i < entityManager.ArchetypeCount; i++)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var arch = entityManager.Archetypes[i];");
+            sb.AppendLine("            if (arch != null && arch.IsMatch(query))");
+            sb.AppendLine("            {");
+            sb.AppendLine("                foreach (var chunk in arch.GetChunks())");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (chunk.EntityCount == 0) continue;");
+            sb.AppendLine("                    Execute(new ArchetypeChunk(chunk), new ChunkEnabledMask(null, 0));");
+            sb.AppendLine("                }");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
             sb.AppendLine();
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]");
             sb.AppendLine("    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)");
