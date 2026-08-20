@@ -4,6 +4,10 @@
 
 **中文** | [English](#english)
 
+> **项目定位：** EntJoy 是一个 **Headless GameFramework**——提供 Archetype ECS、并行 JobSystem、NativeTranspiler（C#→C++/ISPC）和跨平台原生运行时，不内置渲染器。渲染层由上层应用按需接入（Godot、Unity、自研引擎均可）。
+>
+> **Disclaimer:** EntJoy is not affiliated with, endorsed by, or sponsored by Unity Technologies.
+
 EntJoy 是一个由 **C#、C++ 和 ISPC** 编写的 Archetype ECS 与 JobSystem 技术栈。它借鉴 Unity DOTS 的数据导向设计：实体数据按 Archetype 和 Chunk 连续存储，工作通过统一 JobSystem 并行调度，同一份 C# Job 还可以由 Source Generator 转译为 C++ 或 ISPC 后端。
 
 项目目前提供：
@@ -125,7 +129,7 @@ dotnet build src/EntJoySample/EntJoySample.csproj -c Release
 .\bin\EntJoySample.exe
 ```
 
-当前启用的入口位于 [`07_GpuJob/Program.cs`](src/EntJoySample/07_GpuJob/Program.cs)，默认输出 C# / C++ / ISPC / WGPU / CUDA 五路对比（Move、Heavy）与 GridSearch 构建/查询耗时。样例工程采用"同一时间只启用一个 `Program.Main`"的约定；切换样例时，请注释当前入口并取消目标目录中 `Program.cs` 的注释。
+当前启用的入口位于 [`SchedulerCompareTest/Program.cs`](src/EntJoySample/01_JobSystem/SchedulerCompareTest/Program.cs)，首次运行时自动执行 Managed JobSystem 正确性自检；切换样例请注释当前入口并取消目标目录中 `Program.cs` 的注释。
 
 ## 配置自己的项目
 
@@ -512,14 +516,6 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 - [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle)：HotField 可行性原型——普通 class + `[HotFieldEntity]` 属性 → 字段级 SoA 存储（`HotStore`）+ int 索引 + `ref` 属性重定向，System（`IJobParallelFor`）直接消费同一存储。验证「OOP 游戏代码与 plain class 逐字节相同（无感）、Attribute 机械部分零成本、OOD↔DOD 共享存储结果一致；1M 密集 OOP 的 SoA 结构税如实报告（批量走 System）」。
 
-### 07 GpuJob（当前默认入口）
-
-- [`Program.cs`](src/EntJoySample/07_GpuJob/Program.cs)：C# / C++ / ISPC / WGPU / CUDA 五路对比（Move、Heavy @1M，p50 + parity）与 GridSearch closest 构建/查询耗时表（C#/C++/ISPC/CUDA/GPU）。
-  - WGPU：`[NativeTranspile(Target=Gpu)]` → WGSL → wgpu-native 执行（`ScheduleGpu`）。
-  - CUDA：`[NativeTranspile(Target=Cuda)]` → `.cu` → nvcc cubin → 驱动 API 执行（`ScheduleCuda`，pinned NativeArray 直连免拷贝）。
-  - 诊断深挖（GPU 阶段拆解 / Residency / GridSearch 全流程）以 `ENTJOY_GPU_DIAG=1` 开启；`ENTJOY_CUDA_ONLY=1` 只跑 CUDA 验证。
-- [`GridSearchFullUpdate.cs`](src/EntJoySample/07_GpuJob/GridSearchFullUpdate.cs)：counting-sort grid 5-pass 全量更新（count → CPU prefix → place → query）。
-
 ### 08 Entity Random Access
 
 - [`RandomAccess`](src/EntJoySample/08_EntityRandomAccess)：稀疏 Entity 随机访问开销基准（ComponentLookup 优化）。
@@ -584,6 +580,10 @@ EntJoy 的设计和实现受到以下项目与技术的启发：
 # EntJoy (English)
 
 [中文](#entjoy) | **English**
+
+> **Positioning:** EntJoy is a **Headless GameFramework** — providing Archetype ECS, a parallel JobSystem, NativeTranspiler (C#→C++/ISPC), and cross-platform native runtimes, with no built-in renderer. The rendering layer is plugged in by the upper-layer application (Godot, Unity, custom engines, etc.).
+>
+> **Disclaimer:** EntJoy is not affiliated with, endorsed by, or sponsored by Unity Technologies.
 
 EntJoy is an Archetype ECS and JobSystem stack written in **C#, C++, and ISPC**. Inspired by the data-oriented design of Unity DOTS, it stores entities by Archetype and Chunk, schedules work through a unified JobSystem, and can transpile supported C# jobs to C++ or ISPC with source generators.
 
@@ -704,7 +704,7 @@ The first build is slower than incremental builds. When generated and native sou
 .\bin\EntJoySample.exe
 ```
 
-The active entry point is currently [`07_GpuJob/Program.cs`](src/EntJoySample/07_GpuJob/Program.cs), which by default prints the five-backend C# / C++ / ISPC / WGPU / CUDA comparison (Move, Heavy) and a GridSearch build/query table. EntJoySample keeps only one `Program.Main` enabled at a time. To switch samples, comment the current entry point and uncomment the `Program.cs` in the target sample directory.
+The active entry point is currently [`SchedulerCompareTest/Program.cs`](src/EntJoySample/01_JobSystem/SchedulerCompareTest/Program.cs), which runs a Managed JobSystem correctness self-check on first launch; to switch samples, comment the current entry and uncomment `Program.cs` in the target directory.
 
 ## Configure Your Own Project
 
@@ -1084,14 +1084,6 @@ Working sources:
 ### 06 HotField Handle
 
 - [`HotFieldHandle`](src/EntJoySample/06_HotFieldHandle): HotField feasibility prototype — an ordinary class + `[HotFieldEntity]` attribute → field-level SoA storage (`HotStore`) + int index + `ref`-property redirection, with Systems (`IJobParallelFor`) consuming the same store directly. Verifies that OOP game code stays byte-identical to a plain class (seamless), the attribute machinery is zero-cost, and OOD↔DOD share storage with identical results; the dense-1M OOP SoA structural tax is reported honestly (bulk goes through Systems).
-
-### 07 GpuJob (current default entry)
-
-- [`Program.cs`](src/EntJoySample/07_GpuJob/Program.cs): five-backend comparison C# / C++ / ISPC / WGPU / CUDA (Move, Heavy @1M, p50 + parity) and a GridSearch closest build/query time table (C#/C++/ISPC/CUDA/GPU).
-  - WGPU: `[NativeTranspile(Target=Gpu)]` → WGSL → wgpu-native execution (`ScheduleGpu`).
-  - CUDA: `[NativeTranspile(Target=Cuda)]` → `.cu` → nvcc cubin → driver-API execution (`ScheduleCuda`; pinned NativeArray direct transfers avoid C# copies).
-  - Deep diagnostics (GPU stage breakdown / Residency / full GridSearch flow) are enabled with `ENTJOY_GPU_DIAG=1`; `ENTJOY_CUDA_ONLY=1` runs only the CUDA verification.
-- [`GridSearchFullUpdate.cs`](src/EntJoySample/07_GpuJob/GridSearchFullUpdate.cs): counting-sort grid 5-pass full update (count → CPU prefix → place → query).
 
 ### 08 Entity Random Access
 
