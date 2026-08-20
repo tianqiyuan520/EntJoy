@@ -1,9 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
-using System.Threading;
-using EntJoy.JobSystem;
 
 namespace EntJoy.Collections
 {
@@ -14,6 +11,17 @@ namespace EntJoy.Collections
 
         // Reset 期间阻止并发分配，防止快照遗漏 + use-after-free
         private static readonly object _resetLock = new();
+
+        /// <summary>
+        /// 由 ECS 层在 World 初始化时注册：在释放 Temp 内存前完成所有活跃 Job。
+        /// 签名：无参数、可抛异常（异常会被 Reset 捕获并在内存释放后重新抛出）。
+        /// </summary>
+        public static Action? OnBeforeReset;
+
+        /// <summary>
+        /// 由 ECS 层在 World 初始化时注册：在 Temp 内存释放完成后刷新调度器异常记录。
+        /// </summary>
+        public static Action? OnAfterReset;
 
         /// <summary>分配临时内存，并关联安全句柄索引。</summary>
         public static IntPtr Alloc(int size, int safetyHandleIndex)
@@ -39,23 +47,20 @@ namespace EntJoy.Collections
             lock (_resetLock)
             {
                 // ① 先完成所有活跃异步 Job，确保没有 C++ Worker 线程还在读写 Temp 内存。
-                // 若 job 抛异常也须继续——下面的内存释放不能跳过。
-                ExceptionDispatchInfo? pending = null;
-                if (World.DefaultWorld != null)
+                //    若 job 抛异常也须继续——下面的内存释放不能跳过。
+                Exception? pending = null;
+                try
                 {
-                    try
-                    {
-                        World.DefaultWorld._entityManager.CompleteActiveJobs();
-                    }
-                    catch (Exception ex)
-                    {
-                        pending = ExceptionDispatchInfo.Capture(ex);
-                    }
+                    OnBeforeReset?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    pending = ex;
                 }
 
                 // ② 释放内存（锁内执行，无并发干扰，无需快照）。
-                // 即使 job 异常也必须执行，否则 Temp 内存 + 安全句柄泄漏，
-                // 且活跃 job 跨帧运行会让主线程读未完成输出（数据竞态）。
+                //    即使 job 异常也必须执行，否则 Temp 内存 + 安全句柄泄漏，
+                //    且活跃 job 跨帧运行会让主线程读未完成输出（数据竞态）。
                 foreach (var kvp in _active)
                 {
                     SafetyHandleManager.MarkReleased(kvp.Value);
@@ -64,8 +69,9 @@ namespace EntJoy.Collections
                 _active.Clear();
 
                 // ③ 最后抛异常（job 异常 + 帧内未归属异常）。
-                pending?.Throw();
-                NativeJobScheduler.FlushRecordedExceptions();
+                //    FlushRecordedExceptions 由 ECS 层通过 OnAfterReset 注册。
+                OnAfterReset?.Invoke();
+                if (pending != null) throw pending;
             }
         }
     }

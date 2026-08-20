@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.SourceGenerator\EntJoy.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-    <ProjectReference Include="..\EntJoy\EntJoy.csproj" />
+    <ProjectReference Include="..\EntJoy.ECS\EntJoy.ECS.csproj" />
     <ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
@@ -47,7 +47,7 @@
     <_GodotGeneratedCoreNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll</_GodotGeneratedCoreNativeDllPath>
     <_NativeDllSourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll')">$(MSBuildThisFileDirectory)..\..\bin\NativeDll.dll</_NativeDllSourcePath>
     <_NativeDllSourcePath Condition="'$(_NativeDllSourcePath)' == '' And Exists('$(MSBuildThisFileDirectory)bin\NativeDll.dll')">$(MSBuildThisFileDirectory)bin\NativeDll.dll</_NativeDllSourcePath>
-    <_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy\bin\$(Configuration)\net8.0\EntJoy.dll')">$(MSBuildThisFileDirectory)..\EntJoy\bin\$(Configuration)\net8.0\EntJoy.dll</_EntJoySourcePath>
+    <_EntJoySourcePath Condition="Exists('$(MSBuildThisFileDirectory)..\EntJoy.ECS\bin\$(Configuration)\net8.0\EntJoy.ECS.dll')">$(MSBuildThisFileDirectory)..\EntJoy.ECS\bin\$(Configuration)\net8.0\EntJoy.ECS.dll</_EntJoySourcePath>
   </PropertyGroup>
 
   <Target Name="CopyDllsToGodot" AfterTargets="Build">
