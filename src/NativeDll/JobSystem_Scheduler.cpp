@@ -262,8 +262,10 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
-        // guided 只作用于 batchSize=0 的默认路径（用户显式 batchSize 走 uniform）。
-        const bool guided = g_guidedEnabled != 0 && batchSize <= 0;
+        // General 路径默认走"等量 tile"（而非 guided 大前小后）：配合批量认领既均衡又低争用。
+        // （requires: ENTJOY_GUIDED=1/ConfigureGuided(1) 仍可显式启用 guided，供可变代价 job 使用；
+        //  这里保持 g_guidedEnabled 读取，默认环境若开启则在其 5. 场景下按需 —— 见下方注释）
+        const bool guided = false;   // 修复 S5：General 大并行屏障用等量 tile + 批量认领，均衡且无争用
         const int tileCount = guided
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;
@@ -343,8 +345,8 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
-        // guided 只作用于 batchSize=0 的默认路径（用户显式 batchSize / forceAsync 走 uniform）。
-        const bool guided = g_guidedEnabled != 0 && reqBatch <= 0;
+        // General 路径：等量 tile（配合批量认领）S5 均衡且低争用；guided 仅为可变代价 job 显式启用。
+        const bool guided = false;
         const int tileCount = guided
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;

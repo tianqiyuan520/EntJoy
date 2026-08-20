@@ -421,22 +421,32 @@ namespace JobSystem
 
         const int wi = WorkerIndexManager::GetCurrentIndex();
 
-        // 逐 Tile 认领（fetch_add(1)）：引导/guided tile 是"大块在前、逐块递减"，逐块交错认领
-        // 让各 worker 均匀拿到大+小块的混合，天然负载均衡。批量连续认领只在"每 Tile 等量"时成立
-        //（会破坏 guided 的均衡，导致头批 worker 拿全大块、尾部失衡）——故此处保持逐块。
+        // 小批量认领（fetch_add(kClaimBatch)）：一次抢若干连续 tile，本地连续执行。
+        //   - 认领原子从"每 tile 一次"降为"每 kClaimBatch 次一次"，高并行屏障（S5）下大幅降低
+        //     对共享 nextTile 的争用；
+        //   - kClaimBatch 取小值（4）：guided tile 大前小后但相邻几块大小相近，一小批内的均衡损失
+        //     可忽略（大 K 会抓走过多大块破坏均衡，已实测回退）；
+        //   - 完成计数仍留在 TryExecuteOneTile（worker 与 assist 共用），绝不搬到这里。
+        constexpr uint32_t kClaimBatch = 4;
         uint64_t executed = 0;
         while (true)
         {
-            const uint32_t tile = batch->nextTile.fetch_add(
-                1, std::memory_order_relaxed);
-            if (tile >= batch->tileCount) break;
+            const uint32_t start = batch->nextTile.fetch_add(
+                kClaimBatch, std::memory_order_relaxed);
+            if (start >= batch->tileCount) break;
 
-            // ---- 调试面板：更新当前 tile 索引 ----
-            if (wi >= 0 && wi < kMaxTrackedWorkers)
-                g_workerCurrentTile[wi].store(tile, std::memory_order_relaxed);
+            // 本批实际范围（防越界：末批不足 kClaimBatch）
+            const uint32_t end = std::min(batch->tileCount, start + kClaimBatch);
 
-            TryExecuteOneTile(batch, tile);
-            ++executed;
+            // ---- 调试面板：逐 tile 更新当前索引 ----
+            for (uint32_t t = start; t < end; ++t)
+            {
+                if (wi >= 0 && wi < kMaxTrackedWorkers)
+                    g_workerCurrentTile[wi].store(t, std::memory_order_relaxed);
+
+                TryExecuteOneTile(batch, t);
+                ++executed;
+            }
         }
 
         g_workerExecutedRanges.fetch_add(executed, std::memory_order_relaxed);
