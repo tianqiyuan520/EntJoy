@@ -220,8 +220,8 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             sb.AppendLine("#pragma once");
             sb.AppendLine();
-            sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
-            sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
+            sb.AppendLine("#include \"NativeContainers.h\"");
+            sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include <cstddef>");
             sb.AppendLine();
 

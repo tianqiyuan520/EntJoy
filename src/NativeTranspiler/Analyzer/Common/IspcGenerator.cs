@@ -886,7 +886,7 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
-            sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
+            sb.AppendLine("#include \"EntityBatchData.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
             if (useMt)
             {
@@ -1013,8 +1013,8 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
-            sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
-            sb.AppendLine("#include \"../../NativeDll/ChunkNativeArray.h\"");
+            sb.AppendLine("#include \"ChunkJobData.h\"");
+            sb.AppendLine("#include \"ChunkNativeArray.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
             if (useMt)
                 sb.AppendLine("#include <thread>");

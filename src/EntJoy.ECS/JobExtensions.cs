@@ -1,4 +1,4 @@
-using EntJoy;
+﻿using EntJoy;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -75,6 +75,28 @@ public static partial class JobExtensions
         NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
         return new JobHandle(
             NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
+    }
+
+    // ======================== IJobChunk 调度 ========================
+
+    /// <summary>调度 IJobChunk</summary>
+    public static JobHandle Schedule<T>(this T job, QueryBuilder query,
+        JobHandle dependsOn = default) where T : struct, IJobChunk
+    {
+        var world = World.DefaultWorld;
+        if (world == null) throw new InvalidOperationException("No active World found.");
+        NativeJobHandle? nativeDep = dependsOn._nativeHandle;
+        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep));
+    }
+
+    /// <summary>调度 IJobChunk（带 workerCap）</summary>
+    public static JobHandle ScheduleWithWorkerCap<T>(this T job, QueryBuilder query, int workerCap,
+        JobHandle dependsOn = default) where T : struct, IJobChunk
+    {
+        var world = World.DefaultWorld;
+        if (world == null) throw new InvalidOperationException("No active World found.");
+        NativeJobHandle? nativeDep = dependsOn._nativeHandle;
+        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep));
     }
 
     // ======================== Run 方法（主线程执行，调试用） ========================

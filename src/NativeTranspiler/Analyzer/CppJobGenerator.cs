@@ -94,12 +94,12 @@ namespace NativeTranspiler.Analyzer
             var sb = new StringBuilder();
             sb.AppendLine("#pragma once");
             sb.AppendLine();
-            sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
-            sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
+            sb.AppendLine("#include \"NativeMath.h\"");
+            sb.AppendLine("#include \"NativeContainers.h\"");
             if (IsChunkScheduledJob(jobStruct))
             {
-                sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
-                sb.AppendLine("#include \"../../NativeDll/ChunkNativeArray.h\"");
+                sb.AppendLine("#include \"ChunkJobData.h\"");
+                sb.AppendLine("#include \"ChunkNativeArray.h\"");
             }
             foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
                 sb.AppendLine($"#include \"{include}.h\"");
@@ -151,8 +151,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
-            sb.AppendLine("#include \"../../NativeDll/NativeSIMD.h\"");
-            sb.AppendLine("#include \"../../NativeDll/SimdValue.h\"");
+            sb.AppendLine("#include \"NativeSIMD.h\"");
+            sb.AppendLine("#include \"SimdValue.h\"");
             sb.AppendLine();
 
             // IJobChunk: 生成独立 Execute 函数
@@ -1081,12 +1081,12 @@ namespace NativeTranspiler.Analyzer
             var baseFuncName = GetCppJobFunctionName(jobStruct);
             var adapterFuncName = baseFuncName + "_Adapter";
 
-            sb.AppendLine("#include \"../../NativeDll/NativeMath.h\"");
-            sb.AppendLine("#include \"../../NativeDll/NativeContainers.h\"");
+            sb.AppendLine("#include \"NativeMath.h\"");
+            sb.AppendLine("#include \"NativeContainers.h\"");
             if (IsChunkScheduledJob(jobStruct))
             {
-                sb.AppendLine("#include \"../../NativeDll/ChunkJobData.h\"");
-                sb.AppendLine("#include \"../../NativeDll/EntityBatchData.h\"");
+                sb.AppendLine("#include \"ChunkJobData.h\"");
+                sb.AppendLine("#include \"EntityBatchData.h\"");
                 foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
                     sb.AppendLine($"#include \"{include}.h\"");
             }

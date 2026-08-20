@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
@@ -30,9 +30,15 @@ namespace NativeTranspiler.Analyzer
         /// 判断接口是否确为 EntJoy.JobSystem 命名空间下的 Job 接口。
         /// 命名空间 + 名字双校验，避免与用户自定义同名接口（如自己的 IJobChunk）歧义。
         /// </summary>
-        public static bool IsEntJoyJobInterface(INamedTypeSymbol interfaceSymbol, string name) =>
-            interfaceSymbol.Name == name &&
-            interfaceSymbol.ContainingNamespace?.ToDisplayString() == "EntJoy.JobSystem";
+        public static bool IsEntJoyJobInterface(INamedTypeSymbol interfaceSymbol, string name)
+        {
+            if (interfaceSymbol.Name != name) return false;
+            var ns = interfaceSymbol.ContainingNamespace?.ToDisplayString();
+            // IJobChunk 定义在 EntJoy 命名空间，其余 Job 接口在 EntJoy.JobSystem
+            if (name == "IJobChunk")
+                return ns == "EntJoy";
+            return ns == "EntJoy.JobSystem";
+        }
 
         public static MethodDeclarationSyntax? GetMethodSyntax(IMethodSymbol methodSymbol)
         {
