@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 namespace EntJoy.JobSystem
 {
 
@@ -24,10 +24,6 @@ public interface IJobParallelForBatch
 {
     [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
     void Execute(int startIndex, int count);
-}
-
-public interface IJobEntity
-{
 }
 
 }
