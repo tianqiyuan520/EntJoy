@@ -31,6 +31,13 @@ namespace EntJoy.JobSystem.Managed
         private const int QueueCapacity = 1 << 16;
         private const int SyncInlineThreshold = 1024;
 
+        /// <summary>
+        /// Complete 的周期协助间隔（对齐 Native Complete 的 wait_for(1ms) + 依赖链回访）：
+        /// 等待期间以此间隔周期苏醒并协助认领全局队列任务推进链；completion 完成时 _done 立即唤醒，
+        /// 该间隔只是"空闲复查"频率。无墙钟超时 —— 合法长任务（worker 活跃/队列有活）绝不误报死锁。
+        /// </summary>
+        private static readonly TimeSpan CompleteAssistInterval = TimeSpan.FromMilliseconds(8);
+
         // ──────────────────── 生命周期 ────────────────────
 
         public static void Initialize(int workerCount = 0)
@@ -107,9 +114,11 @@ namespace EntJoy.JobSystem.Managed
                 if (Interlocked.CompareExchange(ref _completionFreeHead, newHead, head) == head)
                 {
                     var c = _completionSlots[index];
-                    // 新 job 干净状态：清归还/自动归还标记；代际+1 → 旧 handle 判过期（防 ABA）
+                    // 回收槽位上可能残留并发注册的续体回调（dep 已完成，属主已换代）。先派发再 Reset：
+                    // DispatchComplete 经 Interlocked.Exchange 保证续体至多执行一次，杜绝续体在重租时被 Reset 静默清空（丢回调死锁）。
                     Interlocked.Exchange(ref c._returned, 0);
-                    Volatile.Write(ref c._autoReturn, 0);
+                    c.DispatchComplete();
+                    c.Reset();
                     Interlocked.Increment(ref c.Generation);
                     return c;
                 }
@@ -134,7 +143,9 @@ namespace EntJoy.JobSystem.Managed
 
         private static void ReturnCompletionCore(ManagedCompletion c)
         {
-            c.Reset();
+            // 归还时**不** Reset：保留完成态（Remaining=0、_done=Set），完整 Reset 推迟到 RentCompletion 分配时执行。
+            // 这使“已完成但要被并发注册依赖”的 completion 始终被读为已完成的正确状态，
+            // 避免 Signal 的自动归还把 Remaining 改回 1 而让 ChainAfter/OnCompleted 误判未完成、把回调永久挂死在已回收槽位。
             // 归还即代际 +1：任何仍持有本 completion 的旧 handle 立即可判“过期”。
             // 这是防止“已自动归还/已重置的槽位被误等待”的关键——否则还原后的 Remaining=1 会让
             // 释放方之外的用户 Complete() 误以为未完成而永久等待（曾导致零长度并行 for 挂死）。
@@ -169,7 +180,7 @@ namespace EntJoy.JobSystem.Managed
         {
             EnsureInitialized();
             var completion = ManagedJobScheduler.RentCompletion();
-            completion.Remaining = 1;
+            Interlocked.Exchange(ref completion.Remaining, 1);
             var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
             EnqueueGlobal(task);
             return new ManagedJobHandle(completion);
@@ -180,7 +191,7 @@ namespace EntJoy.JobSystem.Managed
         {
             EnsureInitialized();
             var completion = ManagedJobScheduler.RentCompletion();
-            completion.Remaining = 1;
+            Interlocked.Exchange(ref completion.Remaining, 1);
             var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
             EnqueueAfterGlobal(task, dependsOn);
             return new ManagedJobHandle(completion);
@@ -203,7 +214,7 @@ namespace EntJoy.JobSystem.Managed
                 // **之前**构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出“已归还”
                 // 已被复用的槽位，用户 Complete() 会误等一个 Remaining 已被重置=1 的槽位而永久挂死。
                 var zero = ManagedJobScheduler.RentCompletion();
-                zero.Remaining = 1;
+                Interlocked.Exchange(ref zero.Remaining, 1);
                 var h = new ManagedJobHandle(zero);
                 Volatile.Write(ref zero._autoReturn, 1);
                 zero.Signal();
@@ -215,7 +226,7 @@ namespace EntJoy.JobSystem.Managed
             // [同步内联] 小并行 for 且依赖满足 → 调用线程同步执行，零调度开销（S4 调度延迟命门）
             if (depOk && arrayLength <= SyncInlineThreshold)
             {
-                var c = RentCompletion(); c.Remaining = 1;
+                var c = RentCompletion(); Interlocked.Exchange(ref c.Remaining, 1);
                 ExecuteTask(new ManagedTask { Job = ParallelCache<T>.Box(job), Runner = SelectRunner<T>(), Release = ParallelCache<T>.ReleaseBox, Start = 0, Count = arrayLength, Completion = c });
                 return new ManagedJobHandle(c);
             }
@@ -235,7 +246,7 @@ namespace EntJoy.JobSystem.Managed
             int workers = Math.Max(1, _workerCount);
             int targetSlice = Math.Max(1, (arrayLength + workers - 1) / workers);
             int n = (arrayLength + targetSlice - 1) / targetSlice;
-            completion.Remaining = n;
+            Interlocked.Exchange(ref completion.Remaining, n);
 
             var box = ParallelCache<T>.Box(job);
             completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
@@ -264,7 +275,7 @@ namespace EntJoy.JobSystem.Managed
                 Publish();
             }
 
-            ChainAfter(dependsOn.Completion, completion, EnqueueSlices);
+            ChainAfter(dependsOn.Completion, dependsOn.Gen, completion, EnqueueSlices);
             return new ManagedJobHandle(completion);
         }
 
@@ -279,7 +290,7 @@ namespace EntJoy.JobSystem.Managed
             int batch = Math.Max(1, batchSize);
             int totalBatches = (arrayLength + batch - 1) / batch;
             int participants = Math.Max(1, Math.Min(totalBatches, workers));
-            completion.Remaining = participants;
+            Interlocked.Exchange(ref completion.Remaining, participants);
 
             var box = ParallelCache<T>.Box(job);
             completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
@@ -314,19 +325,26 @@ namespace EntJoy.JobSystem.Managed
                 Publish();
             }
 
-            ChainAfter(dependsOn.Completion, completion, EnqueueClaimers);
+            ChainAfter(dependsOn.Completion, dependsOn.Gen, completion, EnqueueClaimers);
             return new ManagedJobHandle(completion);
         }
 
         /// <summary>
-        /// 统一挂接依赖启动：不管依赖此刻是否已完成，都把它标记为“完成后自动归还”（防中间 handle 泄漏），
-        /// 并把依赖的 job 异常传播到新 job 的 completion（供末端 Complete() 抛出），然后执行 enqueue。
-        /// OnCompleted 在“依赖已就绪”时立即回调，天然覆盖已完成/未完成两种情况 —— 消除了原先 depOk
-        /// 分支导致的“是否自动归还取决于时序”的不确定泄漏。
+        /// 统一挂接依赖启动。带**代际守卫**杜绝跨链 ABA：dep 槽位已被归还/重租（Generation 已前进，
+        /// 与调用方看到的 handle 代际不一致）时，原依赖已完成或已过期 → 直接把 dependent 视为就绪立即启动，
+        /// **绝不把续体回调注册到已被复用的 completion 对象上**（否则该回调可能被后续重租的 Reset 清空而永远丢失，
+        /// 正是并发依赖链丢回调死锁的根因）。
+        /// 代际仍匹配时才走"已完成直派 / 未完成挂回调"两条正常路径，且把依赖标记为完成后自动归还
+        /// （防中间 handle 泄漏）并把依赖异常传播到新 job 的 completion。
         /// </summary>
-        private static void ChainAfter(ManagedCompletion dep, ManagedCompletion dependent, Action enqueue)
+        private static void ChainAfter(ManagedCompletion dep, int depGen, ManagedCompletion dependent, Action enqueue)
         {
-            if (dep == null) { enqueue(); return; }
+            if (dep == null || Volatile.Read(ref dep.Generation) != depGen)
+            {
+                // 依赖槽位已换代：原依赖完成/过期，立即启动 dependent（不等待、不注册、不触碰新槽位属主）。
+                enqueue();
+                return;
+            }
             Volatile.Write(ref dep._autoReturn, 1);
             void Propagate()
             {
@@ -361,7 +379,18 @@ namespace EntJoy.JobSystem.Managed
                 if (++idle >= CooperativeIdleBudget) break;
                 Thread.Yield();
             }
-            if (!completion.IsCompleted) completion.Wait();
+            if (!completion.IsCompleted)
+            {
+                // Native 式周期协助（对齐 Native Complete 的 wait_for + 依赖链回访）：等待期间以
+                // CompleteAssistInterval 周期苏醒，协助认领全局队列任务推进链，直到完成。
+                // 无墙钟超时 → 合法长任务（worker 活跃/队列有活）绝不误报死锁；completion 完成时
+                // _done 立即唤醒，协助周期只是空闲复查兜底。
+                while (!completion.IsCompleted)
+                {
+                    if (completion.Wait(CompleteAssistInterval)) break;
+                    TryExecuteAnyTask();
+                }
+            }
         }
 
         /// <summary>主线程协作：从全局队列取任务执行。</summary>
@@ -389,6 +418,8 @@ namespace EntJoy.JobSystem.Managed
         {
             if (dependsOn.Completion == null) { EnqueueGlobal(task); return; }
             var dep = dependsOn.Completion;
+            // 代际守卫：依赖槽位已换代（原依赖完成/过期）→ 本 job 视为已就绪立即入队，不把续体挂到被复用的对象上。
+            if (Volatile.Read(ref dep.Generation) != dependsOn.Gen) { EnqueueGlobal(task); return; }
             // 依赖 completion：完成后自动归还（中间 handle 调用方不主动 Complete，防 completion 槽位/闭包泄漏），
             // 并把依赖异常传播到本 job 的 completion（供末端 Complete() 抛出）。
             Volatile.Write(ref dep._autoReturn, 1);
@@ -435,6 +466,8 @@ namespace EntJoy.JobSystem.Managed
                 while (!_shutdown)
                 {
                     if (_globalQueue.TryDequeue(out var g)) { ExecuteTask(g); return true; }
+                    // 锁内条件变量：检查和 Wait 在同一把锁内原子衔接；入队后必有 Publish 持同一把锁
+                    // PulseAll → 无 lost-wakeup 空窗（对齐 Native 的 futex 原子 check+wait，无需超时兜底）。
                     Monitor.Wait(_workMonitor);
                 }
             }

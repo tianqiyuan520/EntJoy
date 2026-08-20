@@ -46,7 +46,7 @@ namespace EntJoy.JobSystem.Managed
                 return handles[0];
 
             var combined = ManagedJobScheduler.RentCompletion();
-            combined.Remaining = handles.Length;
+            Interlocked.Exchange(ref combined.Remaining, handles.Length);
             foreach (var h in handles)
             {
                 // 依赖槽位若已被复用（过期）视为已完成，直接计入；否则挂回调等其完成
@@ -118,8 +118,10 @@ namespace EntJoy.JobSystem.Managed
         /// 原子取出并清空完成回调，只派发一次。
         /// 消除 OnCompleted 的同步回调与 Signal 的完成回调间的双重执行竞态：
         /// 该竞态会让依赖链的 Propagate 执行两次（EnqueueSlices 二次覆盖 Remaining→计数错乱→依赖链死锁）。
+        /// 也被 ManagedJobScheduler.RentCompletion 用作“回收槽位续体清空兜底”：把并发注册到已回收槽位上
+        /// 的遗留续体派发掉（dep 已完成 → 现在执行正确），经 Exchange 保证至多一次，杜绝续体在重租时被静默丢弃。
         /// </summary>
-        private void DispatchComplete()
+        internal void DispatchComplete()
         {
             var c = Interlocked.Exchange(ref _onComplete, null);
             if (c != null) c();
@@ -146,6 +148,13 @@ namespace EntJoy.JobSystem.Managed
         {
             if (IsCompleted) return;
             _done.Wait();
+        }
+
+        /// <summary>带超时阻塞等待完成；超时返回 false（供 Complete 周期协助使用：完成即真，超时则由调用方协助推进）。</summary>
+        internal bool Wait(TimeSpan timeout)
+        {
+            if (IsCompleted) return true;
+            return _done.Wait(timeout);
         }
     }
 }

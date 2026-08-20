@@ -109,5 +109,17 @@ namespace EntJoy.JobSystem.Managed
 
         /// <summary>尽力而为的空判断，用于优雅退出。</summary>
         public bool IsEmpty => Volatile.Read(ref _dequeuePos) >= Volatile.Read(ref _enqueuePos);
+
+        /// <summary>尽力而为的队内元素数估算（诊断用，非精确）。环形落后/并发下可能瞬时失真。</summary>
+        internal long DiagnosticCount
+        {
+            get
+            {
+                long d = Volatile.Read(ref _dequeuePos);
+                long e = Volatile.Read(ref _enqueuePos);
+                long n = e - d;
+                return n < 0 ? 0 : n;
+            }
+        }
     }
 }
