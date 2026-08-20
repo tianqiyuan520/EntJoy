@@ -40,6 +40,60 @@ namespace JobSystem
             kMinChunksPerTile,
             kMaxChunksPerTile);
     }
+
+    // ---- 实体数衡 tile（Entity-Count-Balanced Tile）----
+    // 每个 unit(chunk/batch) 的存活实体数。实体数衡 tile 用它切分，替代"固定 chunk 数"。
+    int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept
+    {
+        if (kind == TileKind::EntityBatchRange)
+            return cc->entityBatches[unit].entityCount;
+        return cc->chunks[unit].entityCount;
+    }
+
+    // 实体数衡 tile 目标：每块约 targetTilesPerWorker 个 worker、约 totalEntities/(workerCount*4) 个实体。
+    // 钳制上下限：下限防"极度稀疏实体的空块贪块"，上限防"大工作负载下单块过重/失衡"。
+    int ResolveEcsEntityTileTarget(int totalEntities, int workerCount) noexcept
+    {
+        // 保持与旧 chunk 计数路径相当的并行粒度（~16 tiles/worker），同时每块实体数均衡：
+        // 足够多的小块 → 并行填充充分、尾部均衡；实体均衡 → 稀疏/聚集实体不再让单块过重。
+        constexpr int kTargetTilesPerWorker = 16;
+        constexpr int kMinEntitiesPerTile = 256;      // 防"极度稀疏实体的空块贪块"导致块数爆炸
+        constexpr int kMaxEntitiesPerTile = 1 << 18;  // 262144，仅防超大均匀负载单块过粗
+        const int targetTiles = std::max(1, workerCount * kTargetTilesPerWorker);
+        int target = (totalEntities + targetTiles - 1) / targetTiles;
+        target = std::clamp(target, kMinEntitiesPerTile, kMaxEntitiesPerTile);
+        return std::max(1, target);
+    }
+
+    // 按实体数前向扫描切 tile：累计实体数达 target 即切一刀。切点恒为整 unit 边界（不拆单块）；
+    // 单块实体数>target 的超块自行成块；空块（0 实体）并入当前块、不做无谓切分。
+    // tiles==nullptr 时只计数并返回 tile 数；否则写入 tiles 并返回 tile 数（两遍必一致，供先取存储再回填）。
+    int BuildEntityBalancedTiles(ExecutionTile* tiles, const ChunkBatchContext* cc,
+        TileKind kind, int itemCount, int targetEntities) noexcept
+    {
+        if (targetEntities < 1) targetEntities = 1;
+        int tileCount = 0;
+        int unitStart = 0;
+        long acc = 0;
+        for (int unit = 0; unit < itemCount; ++unit)
+        {
+            acc += UnitEntityCount(cc, kind, unit);
+            const bool last = (unit + 1 == itemCount);
+            if (acc >= targetEntities || last)
+            {
+                if (tiles)
+                {
+                    tiles[tileCount].kind = kind;
+                    tiles[tileCount].firstItem = static_cast<uint32_t>(unitStart);
+                    tiles[tileCount].itemCount = static_cast<uint32_t>(unit - unitStart + 1);
+                }
+                ++tileCount;
+                unitStart = unit + 1;
+                acc = 0;
+            }
+        }
+        return tileCount;
+    }
     // TileKind / ExecutionTile / BatchState / BatchStorage / ChunkBatchContext /
     // GeneralBatchContext 类型定义在 JobSystemInternal.h（跨模块共享：Scheduler 构造
     // batch 字段、Tiles 消费执行）。
@@ -367,6 +421,9 @@ namespace JobSystem
 
         const int wi = WorkerIndexManager::GetCurrentIndex();
 
+        // 逐 Tile 认领（fetch_add(1)）：引导/guided tile 是"大块在前、逐块递减"，逐块交错认领
+        // 让各 worker 均匀拿到大+小块的混合，天然负载均衡。批量连续认领只在"每 Tile 等量"时成立
+        //（会破坏 guided 的均衡，导致头批 worker 拿全大块、尾部失衡）——故此处保持逐块。
         uint64_t executed = 0;
         while (true)
         {

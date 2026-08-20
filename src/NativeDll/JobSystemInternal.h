@@ -412,6 +412,12 @@ namespace JobSystem
     void SubmitBackendAsync(std::function<void()> work);
     int ResolveChunkSize(int length, int requestedChunk);
 
+    // ---- 实体数衡 tile（定义在 JobSystem_Tiles.cpp） ----
+    int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept;
+    int ResolveEcsEntityTileTarget(int totalEntities, int workerCount) noexcept;
+    int BuildEntityBalancedTiles(ExecutionTile* tiles, const ChunkBatchContext* cc,
+        TileKind kind, int itemCount, int targetEntities) noexcept;
+
     // ---- ISPC MT 任务挂钩（tasksys.cpp 调用，事件驱动显示每个参与 worker 的耗时）----
     // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（在 W/M 之后）。
     // DLL 分离：tasksys.cpp（含 ISPCAlloc/Launch/Sync 任务系统）移入 NativeTranspiled.dll，
