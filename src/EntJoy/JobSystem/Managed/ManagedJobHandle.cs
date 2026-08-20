@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 
 namespace EntJoy.JobSystem.Managed
@@ -25,7 +26,12 @@ namespace EntJoy.JobSystem.Managed
             var c = Completion;
             if (c == null || IsExpired) return; // 槽位已复用 → 本 handle 过期，避免误操作新 job（防 ABA）
             ManagedJobScheduler.CompleteSchedule(c);
+            // 等待期间本 completion 可能已被“自动归还”并立即被另一 job 重租（代际已 +1）。
+            // 二次代际校验：若已过期则绝不再归还，杜绝双重释放/误操作新 job（防 ABA 双重归还）。
+            if (IsExpired) return;
+            var ex = c.ReadException();   // 先在归还前取出异常（ReturnCompletion 的 Reset 会清空）
             ManagedJobScheduler.ReturnCompletion(c);
+            if (ex != null) ExceptionDispatchInfo.Capture(ex).Throw();
         }
 
         /// <summary>槽位是否已被复用（代际不匹配）→ 本 handle 过期，不再有效引用原 job。</summary>
@@ -69,16 +75,27 @@ namespace EntJoy.JobSystem.Managed
         internal int Generation;       // 槽位代际：每次被 Rent 分配新 job 时递增；旧 handle 存快照以判过期（防 ABA）
         internal int _returned;        // 1=已归还/自动归还（幂等防 double-return）。归还后保持 1，Rent 新 job 时清 0。
         internal int _autoReturn;      // 1=此 job 完成后由调度器自动归还（依赖链中间 handle，防泄漏）；一律经 Volatile.Read/Write 访问
+        internal Exception _exception; // 首个 job 异常（first-wins），供异常传播；Reset 时清空
 
         internal ManagedCompletion()
         {
         }
+
+        /// <summary>记录首个 job 异常（并发安全：多个分片/线程竞争时只保留第一个）。</summary>
+        internal void RecordException(Exception ex)
+        {
+            if (ex != null) Interlocked.CompareExchange(ref _exception, ex, null);
+        }
+
+        /// <summary>读取已记录的异常（无则 null）。</summary>
+        internal Exception ReadException() => Volatile.Read(ref _exception);
 
         /// <summary>重置为可复用状态。不清 _returned/Geration（归还后保持，直到被新 job Rent 时更新）。</summary>
         internal void Reset()
         {
             Remaining = 1;
             _onComplete = null;
+            _exception = null;
             _done.Reset();
             _autoReturn = 0;
         }
