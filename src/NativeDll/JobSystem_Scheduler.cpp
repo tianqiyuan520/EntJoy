@@ -48,7 +48,14 @@ namespace JobSystem
             // 调试面板：pool 执行窗口上报到本 worker 泳道（WorkerLoop 已预分配索引）
             DebugBeginExec(id, 1, 1, false); // 快速路径 Job：单线程执行
             if (id != 0) SetCurrentBatchId(id);
-            try { work(); } catch (...) {}
+            try { work(); }
+            catch (...)
+            {
+                // C++ 异常协议：快速路径（pool 窗口）异常记录到 handle state，
+                // Complete() 统一重抛——不再静默吞掉。
+                if (state->batchExceptionPtr == nullptr)
+                    state->batchExceptionPtr = std::current_exception();
+            }
             if (id != 0) SetCurrentBatchId(0);
             DebugEndExec();
             if (cleanup) cleanup(ctx);

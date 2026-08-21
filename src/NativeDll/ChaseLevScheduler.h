@@ -67,6 +67,13 @@ namespace JobSystem
         // 从共享认领表注销 batch，并等正认领的 worker 完成（防 use-after-free）。
         void UnregisterBatch(BatchState* batch) noexcept;
 
+        // 主线程协助执行：扫描共享认领表认领一片并执行（对齐旧 MPMC 的 assist——
+        // 主线程是第 16 个执行者，等 Complete 时也参与认领，兜底"最后一片被某个
+        // 被 OS 抢占的 worker 握着"导致的尾延迟）。返回是否执行了任务。
+        // 与 worker 相同的 claimers handshake（防 batch 退役 UAF）；执行整片后
+        // taskDone 一次（与 worker 的 cnt==1 内联路径记账一致）。
+        bool TryAssistOne() noexcept;
+
         bool IsRunning() const noexcept;
         uint32_t WorkerCount() const noexcept;
 
@@ -90,6 +97,23 @@ namespace JobSystem
         std::atomic<uint64_t> totalTasksPushed{ 0 };
         std::atomic<uint64_t> totalTasksDone{ 0 };
 
+        // 全局在飞任务计数（对齐 tejchid/job-system 的 runnable_）：
+        // SubmitBatch 注册时 += taskCount，每个任务 taskDone 后 -= 1。
+        // worker park 前读它：若 >0 说明全局仍有未认领任务（可能被别的 worker
+        // 短暂持有），做短自旋再 park —— 自愈式避免"唤醒竞态"（不用摸 worker 状态）。
+        std::atomic<int64_t> activeTasks{ 0 };
+
+        // 唤醒纪元（C++20 atomic::wait）：per-worker 独立 stamp。
+        // SubmitBatch 按任务数只唤醒需要的 worker 数（对齐 Misaki 的
+        // SemaphoreSlim.Release(N) 精确唤醒），round-robin 游标轮换起始。
+        // 自愈保证（对齐 tejchid runnable_ 谓词）：activeTasks>0 时 worker 不 park
+        // （WorkerLoop 4.5）→ 任何"有活"时刻至少有一个醒着的 worker 在循环消费，
+        // 即使唤醒的 N 个都正忙/都错过，刚完成任务的 worker 也会继续 scan 而不睡；
+        // 因此"只唤醒 N 个"不会丢任务/死锁（09806fb 选择性唤醒失败时无此谓词）。
+        // 无 ResetEvent 丢失窗口：wait(旧 stamp) 在 bump 后必返。
+        std::atomic<uint64_t> wakeStamp[kMaxTrackedWorkers];
+        std::atomic<uint32_t> wakeRoundRobin{ 0 };
+
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
 
@@ -101,7 +125,12 @@ namespace JobSystem
         // 槽上的 claimers 计数让"正在认领"的 worker 先完成（handshake）。
         static constexpr uint32_t kMaxClaimableBatches = 256;
         // 单次认领的 tile 数（对齐旧路径 kClaimBatch=4 的动态认领粒度）。
+        // 实测 kClaim=8/16 拖慢 GridSearch Query p50（粗粒度破坏不规则负载均衡），
+        // 保持 4。
         static constexpr uint32_t kClaimBatchSize = 4;
+        // park 前自旋窗（条件启用见 WorkerLoop；实测任何条件自旋在共享注册表模型下
+        // 均拖慢 p95/tail，保持 0 = 直接 park）。
+        static constexpr uint32_t kParkSpinMax = 0;
 
         // 注册槽。batch 原子指针 + claimers 计数（清槽前等 claimers==0）。
         struct ClaimSlot
@@ -112,8 +141,8 @@ namespace JobSystem
         struct alignas(64) ClaimSlotPadded : ClaimSlot {};
         std::array<ClaimSlotPadded, kMaxClaimableBatches> claimSlots_{};
 
-        // 下次注册尝试的起始槽位（round-robin 起始，避免每次都从 0 扫描）
-        std::atomic<uint32_t> claimSlotCursor_{ 0 };
+        // 已用槽位高水位（只增不减；worker 空转只扫描 [0, highWater) 而非全部 256 槽）。
+        std::atomic<uint32_t> claimSlotHighWater_{ 0 };
 
         // 注册 / 注销 batch。注销由退役方调用（须在 ReleaseBatch 之前）。
         void RegisterBatch(BatchState* batch) noexcept;
@@ -124,9 +153,6 @@ namespace JobSystem
         {
             std::unique_ptr<SparseTileDeque> deque;
             std::thread thread;
-#if defined(_WIN32)
-            HANDLE wakeEvent{ nullptr }; // manual-reset event for precise wake
-#endif
         };
 
         void WorkerLoop(uint32_t workerIndex, WorkerContext& ctx) noexcept;

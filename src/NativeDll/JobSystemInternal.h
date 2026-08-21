@@ -18,6 +18,8 @@
 #include "SparseTileDeque.h"
 
 #include <array>
+#include <exception>
+#include <limits>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -259,6 +261,15 @@ namespace JobSystem
         std::atomic<bool> finalized{ false };
         std::atomic<bool> workersFinished{ false };
 
+        // ---- C++ 异常协议（对齐 TBB/Taskflow 的异常传播语义）----
+        // 用户 C++ 回调抛出的异常被捕获（TryExecuteOneTile 内 try-catch），
+        // 任务计数正常递减（不悬挂）；第一个异常经 atomic guard 只记录一次
+        //（exceptionRecorded false→true 后写入 firstException），
+        // Complete() 在退役完成后用 std::rethrow_exception 重新抛出给调用方。
+        // 与 C# 路径无关（托管侧在 NativeJobCore.cs 自有 try-catch 记录）。
+        std::atomic<bool> exceptionRecorded{ false };
+        std::exception_ptr firstException;
+
         uint64_t diagnosticId{ 0 };
     };
 
@@ -405,7 +416,17 @@ namespace JobSystem
         if (id == 0) id = AssignStateDiagnosticId(state);
         DebugBeginExec(id, 1, 1, false); // 同步 inline Job：单线程执行
         SetCurrentBatchId(id);
-        fn();
+        // C++ 异常协议：inline/同步路径（小 job 直跑）异常也捕获到 handle state，
+        // 由 Complete() 统一重抛（与批量路径一致；noexcept 下若不捕获会 terminate）。
+        try
+        {
+            fn();
+        }
+        catch (...)
+        {
+            if (state->batchExceptionPtr == nullptr)
+                state->batchExceptionPtr = std::current_exception();
+        }
         SetCurrentBatchId(0);
         DebugEndExec();
     }
