@@ -81,6 +81,8 @@ namespace JobSystem
     // ============================================================
     static bool ResolveWorkerAffinityEnabled() noexcept
     {
+        // 默认开启 CPU 亲和性：worker 绑定固定核心（跳过核心0留给主线程），
+        // 降低 OS 调度抖动 / 核心迁移。ENTJOY_WORKER_AFFINITY=0 可关闭。
         std::string value;
 #if defined(_WIN32)
         char* raw = nullptr;
@@ -96,7 +98,8 @@ namespace JobSystem
 #endif
         std::transform(value.begin(), value.end(), value.begin(),
             [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return value == "1" || value == "true" || value == "on";
+        // 空（未设置）→ 默认开启。显式 "0"/"off" 关闭。
+        return value != "0" && value != "false" && value != "off";
     }
 
     void Scheduler::Initialize(int numThreads)
@@ -265,7 +268,7 @@ namespace JobSystem
         // General 路径默认走"等量 tile"（而非 guided 大前小后）：配合批量认领既均衡又低争用。
         // （requires: ENTJOY_GUIDED=1/ConfigureGuided(1) 仍可显式启用 guided，供可变代价 job 使用；
         //  这里保持 g_guidedEnabled 读取，默认环境若开启则在其 5. 场景下按需 —— 见下方注释）
-        const bool guided = false;   // 修复 S5：General 大并行屏障用等量 tile + 批量认领，均衡且无争用
+        const bool guided = g_guidedEnabled != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
         const int tileCount = guided
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;
@@ -345,8 +348,8 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
-        // General 路径：等量 tile（配合批量认领）S5 均衡且低争用；guided 仅为可变代价 job 显式启用。
-        const bool guided = false;
+        // General 路径：guided 按工作量切 tile（可变代价 job 负载均衡）。
+        const bool guided = g_guidedEnabled != 0;
         const int tileCount = guided
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
             : rc;
