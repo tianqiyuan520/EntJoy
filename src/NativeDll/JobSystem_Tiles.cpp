@@ -879,7 +879,8 @@ namespace JobSystem
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
             // 注销注册表（必须先于 ReleaseBatch：注册表持有 batch 指针，
-            // 注销后 storage 才允许回收复用）
+            // 注销后 storage 才允许回收复用）。UnregisterBatch 内部等 claimers==0，
+            // 保证无 worker 仍在认领临界内引用本 batch。
             {
                 std::lock_guard<std::mutex> lock(g_chaseLevActiveMutex);
                 auto it = std::find(g_chaseLevActiveBatches.begin(),
@@ -887,6 +888,8 @@ namespace JobSystem
                 if (it != g_chaseLevActiveBatches.end())
                     g_chaseLevActiveBatches.erase(it);
             }
+            if (g_chaseLevScheduler)
+                g_chaseLevScheduler->UnregisterBatch(batch);
             if (batch->cleanup)
             {
                 batch->cleanup(batch->context);
