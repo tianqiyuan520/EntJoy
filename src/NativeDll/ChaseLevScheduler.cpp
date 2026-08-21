@@ -21,59 +21,7 @@ namespace JobSystem
     ChaseLevScheduler::~ChaseLevScheduler() { Stop(); }
 
     // ============================================================
-    // 每 worker MPSC 注入队列（多生产者 → 单消费者）
-    // ============================================================
-
-    bool ChaseLevScheduler::InjectPush(uint32_t workerIndex, const TileTask& task) noexcept
-    {
-        if (workerIndex >= injects_.size()) return false;
-        auto& q = *injects_[workerIndex];
-        uint64_t pos = q.enqueuePos.load(std::memory_order_relaxed);
-        for (;;)
-        {
-            InjectSlot& cell = q.cells[pos & (kInjectCapacity - 1)];
-            const uint64_t seq = cell.seq.load(std::memory_order_acquire);
-            const int64_t diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos);
-            if (diff == 0)
-            {
-                if (q.enqueuePos.compare_exchange_weak(pos, pos + 1,
-                        std::memory_order_relaxed))
-                {
-                    cell.task = task;
-                    cell.seq.store(pos + 1, std::memory_order_release);
-                    return true;
-                }
-            }
-            else if (diff < 0)
-            {
-                return false; // full
-            }
-            else
-            {
-                pos = q.enqueuePos.load(std::memory_order_relaxed);
-            }
-        }
-    }
-
-    bool ChaseLevScheduler::InjectPop(uint32_t workerIndex, TileTask& task) noexcept
-    {
-        if (workerIndex >= injects_.size()) return false;
-        auto& q = *injects_[workerIndex];
-        // 单消费者（owner worker）：dequeuePos 非原子，无 CAS 竞争。
-        // 生产者（其他线程）并发 CAS enqueuePos —— 用 acquire 读 seq 确认可见。
-        const uint64_t pos = q.dequeuePos;
-        InjectSlot& cell = q.cells[pos & (kInjectCapacity - 1)];
-        const uint64_t seq = cell.seq.load(std::memory_order_acquire);
-        const int64_t diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos + 1);
-        if (diff != 0) return false; // empty（seq 未到 pos+1）
-        task = cell.task;
-        cell.seq.store(pos + kInjectCapacity, std::memory_order_release);
-        q.dequeuePos = pos + 1;
-        return true;
-    }
-
-    // ============================================================
-    // Start — 创建持久 worker 线程 + deque + 注入队列
+    // Start — 创建持久 worker 线程 + deque
     // ============================================================
 
     bool ChaseLevScheduler::Start(uint32_t workerCount, TileExecutor executor,
@@ -95,18 +43,23 @@ namespace JobSystem
         totalTasksDone.store(0, std::memory_order_relaxed);
         for (int i = 0; i < kMaxTrackedWorkers; ++i)
         {
-            injectPushed[i].store(0, std::memory_order_relaxed);
-            injectPopped[i].store(0, std::memory_order_relaxed);
             dequePushed[i].store(0, std::memory_order_relaxed);
             dequePopped[i].store(0, std::memory_order_relaxed);
             dequeStolen[i].store(0, std::memory_order_relaxed);
             tasksExecuted[i].store(0, std::memory_order_relaxed);
         }
 
+        // 清空认领注册表（Start 前可能残留 Stop 未清的状态）
+        for (auto& slot : claimSlots_)
+        {
+            slot.batch.store(nullptr, std::memory_order_relaxed);
+            slot.claimers.store(0, std::memory_order_relaxed);
+        }
+        claimSlotCursor_.store(0, std::memory_order_relaxed);
+
         try
         {
             workers_.reserve(workerCount);
-            injects_.reserve(workerCount);
             for (uint32_t i = 0; i < workerCount; ++i)
             {
                 auto ctx = std::make_unique<WorkerContext>();
@@ -116,11 +69,6 @@ namespace JobSystem
                 ctx->wakeEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
 #endif
                 workers_.push_back(std::move(ctx));
-                // 每 worker 一个 MPSC 注入队列：槽 seq 初始 = i（Vyukov）
-                auto q = std::make_unique<InjectQueue>();
-                for (uint32_t s = 0; s < kInjectCapacity; ++s)
-                    q->cells[s].seq.store(s, std::memory_order_relaxed);
-                injects_.push_back(std::move(q));
             }
 
             for (uint32_t i = 0; i < workerCount; ++i)
@@ -171,14 +119,90 @@ namespace JobSystem
 #endif
         }
         workers_.clear();
-        injects_.clear();
     }
 
     // ============================================================
-    // SubmitBatch — 任务 round-robin 进各 worker 的 MPSC 注入队列，唤醒 worker
+    // 共享认领注册表（标准 Chase-Lev Injector 角色）
+    // ============================================================
+
+    void ChaseLevScheduler::RegisterBatch(BatchState* batch) noexcept
+    {
+        // round-robin 起始扫描空槽；释放语义时序在 UnregisterBatch 的 claimers
+        // handshake 上（先清槽再等认领者归零→ReleaseBatch 在调用方）。
+        for (uint32_t attempt = 0; attempt < kMaxClaimableBatches; ++attempt)
+        {
+            const uint32_t idx = (claimSlotCursor_.fetch_add(1, std::memory_order_relaxed)
+                + attempt) % kMaxClaimableBatches;
+            auto& slot = claimSlots_[idx];
+            BatchState* expected = nullptr;
+            // 空 slot 且 claimers==0（无人认领）才可注册
+            if (slot.claimers.load(std::memory_order_acquire) == 0 &&
+                slot.batch.compare_exchange_strong(expected, batch,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                return;
+            }
+        }
+        // 注册表满（病理：并发在飞 batch > 容量）→ 自旋等空槽（不该发生）
+        std::fprintf(stderr, "[ChaseLev] WARNING: claimable-batch table full, spinning\n");
+        std::fflush(stderr);
+        while (true)
+        {
+            for (uint32_t attempt = 0; attempt < kMaxClaimableBatches; ++attempt)
+            {
+                const uint32_t idx = (attempt) % kMaxClaimableBatches;
+                auto& slot = claimSlots_[idx];
+                BatchState* expected = nullptr;
+                if (slot.claimers.load(std::memory_order_acquire) == 0 &&
+                    slot.batch.compare_exchange_strong(expected, batch,
+                        std::memory_order_acq_rel, std::memory_order_acquire))
+                {
+                    return;
+                }
+            }
+            std::this_thread::yield();
+        }
+    }
+
+    void ChaseLevScheduler::UnregisterBatch(BatchState* batch) noexcept
+    {
+        // 找到 batch 所在的槽，清空指针。
+        for (auto& slot : claimSlots_)
+        {
+            BatchState* cur = slot.batch.load(std::memory_order_acquire);
+            if (cur == batch)
+            {
+                // 先清指针（新认领者看到 null 跳过），再等正认领中的 worker 归零。
+                // 清指针与等 claimers 之间的排序保证：正在 claimers++ 的 worker 要么
+                // 在清指针前完成（其认领已在 lastTile 执行前完成），要么在清后看到
+                // null 而放弃。claimers==0 后才允许调用方 ReleaseBatch。
+                slot.batch.store(nullptr, std::memory_order_release);
+                while (slot.claimers.load(std::memory_order_acquire) != 0)
+                    std::this_thread::yield();
+                return;
+            }
+        }
+        // 未找到（可能注册表被 Stop 清空 / 从未来得及注册）——直接忽略。
+    }
+
+    bool ChaseLevScheduler::ClaimRange(
+        BatchState* batch, uint32_t& first, uint32_t& count) noexcept
+    {
+        // 调用前提：调用方已确认 batch 在注册表中且已通过 claimers handshake。
+        // 动态认领一片 tile：nextTile.fetch_add(kClaim)，返回值即本 worker 认领的
+        // 起点；越界（>= tileCount）→ 无任务返回 false。
+        const uint32_t start = batch->nextTile.fetch_add(
+            kClaimBatchSize, std::memory_order_acq_rel);
+        if (start >= batch->tileCount) return false;
+        first = start;
+        count = std::min(kClaimBatchSize, batch->tileCount - start);
+        return true;
+    }
+
+    // ============================================================
+    // SubmitBatch — 注册 batch 到共享认领表，唤醒所有 worker
     // 可被任意线程调用（主线程 / 依赖 continuation 的 worker 线程）。
-    // 无线程亲和直入：全部经注入队列（单消费者），避免跨线程 PushBottom
-    // 与 PopBottom 并发导致的孤儿元素覆盖（已验证稳定性）。
+    // 任务不再预切分进私有注入队列：worker 从 nextTile.fetch_add 动态认领。
     // ============================================================
 
     void ChaseLevScheduler::SubmitBatch(BatchState* batch) noexcept
@@ -187,30 +211,14 @@ namespace JobSystem
         const uint32_t wc = workerCount_;
         if (wc == 0) return;
 
-        // 任务粒度：每 worker 约 kTasksPerWorker 个范围任务，再均匀切分。
-        constexpr uint32_t kTasksPerWorker = 4;
-        const uint32_t tileCount = batch->tileCount;
-        uint32_t taskCount = wc * kTasksPerWorker;
-        if (taskCount > tileCount) taskCount = tileCount;
-        const uint32_t chunk = (tileCount + taskCount - 1) / taskCount;
-        uint32_t actualTasks = (tileCount + chunk - 1) / chunk;
+        // 任务总数按认领粒度预置 pendingTasks（防 use-after-free：退役需等所有任务完成）；
+        // 实际认领数 = ceil(tileCount/kClaim)，与 taskDone 次数一致。
+        const uint32_t taskCount = (batch->tileCount + kClaimBatchSize - 1) / kClaimBatchSize;
+        batch->pendingTasks.store(taskCount, std::memory_order_release);
 
-        // 记录在飞任务数（防 use-after-free：退役需等所有任务完成）
-        batch->pendingTasks.store(actualTasks, std::memory_order_release);
-
-        // 任务 round-robin 分发到各 worker 的 MPSC 注入队列
-        uint32_t wi = 0;
-        for (uint32_t start = 0; start < tileCount; start += chunk)
-        {
-            const uint32_t cnt = std::min(chunk, tileCount - start);
-            wi = (wi + 1) % wc;
-            TileTask t{ batch, start, cnt };
-            while (!InjectPush(wi, t))
-                std::this_thread::yield(); // 队列满（病理过载）：自旋等消费
-            if (wi < kMaxTrackedWorkers)
-                injectPushed[wi].fetch_add(1, std::memory_order_relaxed);
-            totalTasksPushed.fetch_add(1, std::memory_order_relaxed);
-        }
+        // 注册该 batch 到共享认领表（worker 可开始认领）
+        RegisterBatch(batch);
+        totalTasksPushed.fetch_add(taskCount, std::memory_order_relaxed);
 
         // 唤醒所有 worker（他们可能正在 park）
         for (auto& ctx : workers_)
@@ -226,9 +234,10 @@ namespace JobSystem
     // WorkerLoop — Chase-Lev 工作循环
     //
     //   1. 从自己 deque PopBottom（LIFO，owner-only）
-    //   2. 从自己的 MPSC 注入队列批量拉取到 deque（单消费者）
-    //   3. 从其他 worker deque StealTop（FIFO，CAS）
-    //   4. 空 → park（event wait）→ 被唤醒后重试
+    //   2. 空 → 扫描共享认领注册表：claimers 上锁 → 确认 batch 仍注册 →
+    //      nextTile.fetch_add(kClaim) 认领一片 → 推入自己 deque → 解锁
+    //   3. 仍空 → 从其他 worker deque StealTop（FIFO，CAS）
+    //   4. 全空 → park（event wait）→ 被唤醒后重试
     //   5. quit_ → 排空 deque 后退出
     // ============================================================
 
@@ -257,20 +266,34 @@ namespace JobSystem
 
             if (!got)
             {
-                // ---- 1.5 从【自己的】MPSC 注入队列批量拉取到 deque ----
-                // 单消费者零 CAS 竞争；生产者（SubmitBatch 可来自任意线程）
-                // 并发 CAS enqueuePos，注入队列内部保证可见性。
-                uint32_t pulled = 0;
-                TileTask t;
-                while (pulled < 16 && InjectPop(workerIndex, t))
+                // ---- 1.5 扫描共享认领注册表：动态认领 tile 范围到自己的 deque ----
+                // 认领前必须确认 batch 仍注册（不被退役回收）。用槽上 claimers 计数
+                // handshake：claimers++ 后重读 batch 指针，若已被 UnregisterBatch 清空
+                // （batch 正在退役）则放弃本次认领。退役方等 claimers==0 才 ReleaseBatch，
+                // 因此持有 claimers 的 worker 认领临界内 batch 保证存活。
+                for (uint32_t s = 0; s < kMaxClaimableBatches; ++s)
                 {
-                    myDeque->PushBottom(t);
-                    ++pulled;
-                    if (workerIndex < kMaxTrackedWorkers)
+                    auto& slot = claimSlots_[s];
+                    BatchState* b = slot.batch.load(std::memory_order_acquire);
+                    if (!b) continue;
+                    slot.claimers.fetch_add(1, std::memory_order_acq_rel);
+                    // 重读：若 batch 已被清槽（退役中），放弃本次认领
+                    if (slot.batch.load(std::memory_order_acquire) != b)
                     {
-                        injectPopped[workerIndex].fetch_add(1, std::memory_order_relaxed);
-                        dequePushed[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                        slot.claimers.fetch_sub(1, std::memory_order_acq_rel);
+                        continue;
                     }
+                    uint32_t first = 0, cnt = 0;
+                    if (ClaimRange(b, first, cnt))
+                    {
+                        // 认领成功：推入自己的 deque（owner-only PushBottom）
+                        myDeque->PushBottom(TileTask{ b, first, cnt });
+                        if (workerIndex < kMaxTrackedWorkers)
+                            dequePushed[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                        slot.claimers.fetch_sub(1, std::memory_order_acq_rel);
+                        break; // 拿到一片即可；deque 里已有可执行的
+                    }
+                    slot.claimers.fetch_sub(1, std::memory_order_acq_rel);
                 }
                 got = myDeque->PopBottom(task);
                 if (got && workerIndex < kMaxTrackedWorkers)
@@ -389,20 +412,26 @@ namespace JobSystem
         for (uint32_t i = 0; i < workers_.size(); ++i)
         {
             const auto& dq = *workers_[i]->deque;
-            const uint64_t eq = injects_[i]->enqueuePos.load(std::memory_order_relaxed);
-            const uint64_t dq2 = injects_[i]->dequeuePos;
-            std::fprintf(stderr, "  worker[%u] empty=%d approx=%u curBatch=%llu injectQueued=%llu"
-                " injP=%llu injC=%llu dqP=%llu dqC=%llu dqS=%llu exec=%llu\n",
+            std::fprintf(stderr, "  worker[%u] empty=%d approx=%u curBatch=%llu"
+                " dqP=%llu dqC=%llu dqS=%llu exec=%llu\n",
                 i, (int)dq.IsEmpty(), dq.ApproxSize(),
                 (unsigned long long)workerCurrentBatch[i].load(std::memory_order_relaxed),
-                (unsigned long long)(eq - dq2),
-                (unsigned long long)injectPushed[i].load(std::memory_order_relaxed),
-                (unsigned long long)injectPopped[i].load(std::memory_order_relaxed),
                 (unsigned long long)dequePushed[i].load(std::memory_order_relaxed),
                 (unsigned long long)dequePopped[i].load(std::memory_order_relaxed),
                 (unsigned long long)dequeStolen[i].load(std::memory_order_relaxed),
                 (unsigned long long)tasksExecuted[i].load(std::memory_order_relaxed));
         }
+        // 活动 batch 注册表快照
+        std::fprintf(stderr, "  claimSlots:");
+        for (uint32_t s = 0; s < kMaxClaimableBatches; ++s)
+        {
+            auto* b = claimSlots_[s].batch.load(std::memory_order_relaxed);
+            if (!b) continue;
+            std::fprintf(stderr, " [%u]=id%llu(nt=%u/tc=%u) ",
+                s, (unsigned long long)b->diagnosticId,
+                b->nextTile.load(std::memory_order_relaxed), b->tileCount);
+        }
+        std::fprintf(stderr, "\n");
         std::fflush(stderr);
     }
 } // namespace JobSystem
