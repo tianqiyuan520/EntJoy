@@ -83,7 +83,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;NOMINMAX;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -101,7 +101,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;NOMINMAX;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -117,7 +117,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;ENTJOY_IMGUI_ENABLED=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;NOMINMAX;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;ENTJOY_IMGUI_ENABLED=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -146,7 +146,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;ENTJOY_IMGUI_ENABLED=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;NOMINMAX;NATIVEDLL_EXPORTS;JOB_SYSTEM_EXPORT;_WINDOWS;_USRDLL;ENTJOY_IMGUI_ENABLED=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -179,6 +179,8 @@
     <ClInclude Include="NativeMath.h" />
     <ClInclude Include="NativeSIMD.h" />
     <ClInclude Include="NativeWorkerPool.h" />
+    <ClInclude Include="ChaseLevScheduler.h" />
+    <ClInclude Include="SparseTileDeque.h" />
     <ClInclude Include="EntityBatchData.h" />
     <ClInclude Include="SimdValue.h" />
     <ClInclude Include="thirdParty\imgui\imgui.h" />
@@ -197,6 +199,7 @@
     <ClCompile Include="JobSystem_Scheduler.cpp" />
     <ClCompile Include="Native.cpp" />
     <ClCompile Include="NativeWorkerPool.cpp" />
+    <ClCompile Include="ChaseLevScheduler.cpp" />
     <ClCompile Include="tasksys.cpp" />
     <ClCompile Include="thirdParty\imgui\imgui.cpp" />
     <ClCompile Include="thirdParty\imgui\imgui_draw.cpp" />

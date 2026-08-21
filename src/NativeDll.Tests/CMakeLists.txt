@@ -13,6 +13,7 @@ add_executable(JobSystemTests
     ../NativeDll/JobProfiler.cpp
     ../NativeDll/JobDebuggerGUI.cpp
     ../NativeDll/NativeWorkerPool.cpp
+    ../NativeDll/ChaseLevScheduler.cpp
 )
 
 add_executable(AssistLifetimeTests
@@ -24,11 +25,36 @@ add_executable(AssistLifetimeTests
     ../NativeDll/JobProfiler.cpp
     ../NativeDll/JobDebuggerGUI.cpp
     ../NativeDll/NativeWorkerPool.cpp
+    ../NativeDll/ChaseLevScheduler.cpp
+)
+
+add_executable(ChaseLevIntegrationTests
+    ChaseLevIntegrationTests.cpp
+    ../NativeDll/JobSystem.cpp
+    ../NativeDll/JobSystem_State.cpp
+    ../NativeDll/JobSystem_Tiles.cpp
+    ../NativeDll/JobSystem_Scheduler.cpp
+    ../NativeDll/JobProfiler.cpp
+    ../NativeDll/JobDebuggerGUI.cpp
+    ../NativeDll/NativeWorkerPool.cpp
+    ../NativeDll/ChaseLevScheduler.cpp
 )
 
 add_executable(NativeWorkerPoolTests
     NativeWorkerPoolTests.cpp
     ../NativeDll/NativeWorkerPool.cpp
+)
+
+add_executable(SparseTileDequeTests
+    SparseTileDequeTests.cpp
+)
+
+add_executable(SparseTileDequeSmoketest
+    SparseTileDequeSmoketest.cpp
+)
+
+add_executable(SparseTileDequeTrace
+    SparseTileDequeTrace.cpp
 )
 
 target_include_directories(JobSystemTests PRIVATE
@@ -39,7 +65,23 @@ target_include_directories(AssistLifetimeTests PRIVATE
     ../NativeDll
 )
 
+target_include_directories(ChaseLevIntegrationTests PRIVATE
+    ../NativeDll
+)
+
 target_include_directories(NativeWorkerPoolTests PRIVATE
+    ../NativeDll
+)
+
+target_include_directories(SparseTileDequeTests PRIVATE
+    ../NativeDll
+)
+
+target_include_directories(SparseTileDequeSmoketest PRIVATE
+    ../NativeDll
+)
+
+target_include_directories(SparseTileDequeTrace PRIVATE
     ../NativeDll
 )
 
@@ -52,6 +94,18 @@ if(MSVC)
     target_compile_options(AssistLifetimeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2)
     target_compile_definitions(AssistLifetimeTests PRIVATE NOMINMAX)
 
+    target_compile_options(ChaseLevIntegrationTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(ChaseLevIntegrationTests PRIVATE NDEBUG NOMINMAX)
+
     target_compile_options(NativeWorkerPoolTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /MP)
     target_compile_definitions(NativeWorkerPoolTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(SparseTileDequeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(SparseTileDequeTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(SparseTileDequeSmoketest PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(SparseTileDequeSmoketest PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(SparseTileDequeTrace PRIVATE /utf-8 /Od /arch:AVX2 /MP)
+    target_compile_definitions(SparseTileDequeTrace PRIVATE NOMINMAX)
 endif()

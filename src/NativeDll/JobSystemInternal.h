@@ -15,6 +15,7 @@
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
 #include "NativeWorkerPool.h"
+#include "SparseTileDeque.h"
 
 #include <array>
 #include <atomic>
@@ -28,6 +29,8 @@
 
 namespace JobSystem
 {
+    class ChaseLevScheduler; // forward declare
+
     // ---- 跨模块常量（inline 保证 ODR，各 TU 一份） ----
     inline constexpr size_t kMaxPooledStates = 4096;
     inline constexpr size_t kMaxPooledBatchStorage = 256;
@@ -88,11 +91,13 @@ namespace JobSystem
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
     extern std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
+    extern std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
     extern int g_numThreads;
     extern int g_configuredTilesPerWorker;
     extern int g_guidedEnabled;
     extern int g_guidedK;
     extern int g_guidedFloor;
+    extern bool g_useWorkStealing;   // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
     extern thread_local ThreadStateCache t_stateCache;
 
     // 统计计数器（base 定义；Tiles 递增 / base GetStatsSnapshot 读取）。
@@ -218,6 +223,13 @@ namespace JobSystem
         // steal loop after the public JobHandle is already complete.
         std::atomic<uint32_t> tilesRemaining{ 0 };
         std::atomic<bool> logicalCompleted{ false };
+        // ---- Chase-Lev：在飞任务计数（防 use-after-free）----
+        // SubmitBatch 时 = 任务数；每个任务执行完 fetch_sub(1)。
+        // 退役必须满足 tilesRemaining==0 && pendingTasks==0：
+        // tilesRemaining=0 只代表所有 tile 执行完，但 worker 的 deque 里可能
+        // 还有已 pop 未执行的任务（task.batch 引用本 storage），必须等它们
+        // 全部完成才能 ReleaseBatch。由"最后者"（tile 完成者 或 task 完成者）执行退役。
+        std::atomic<uint32_t> pendingTasks{ 0 };
 
         std::atomic<uint64_t> publishedAt{ 0 };
         std::atomic<uint64_t> firstWorkerAt{ 0 };
@@ -452,4 +464,18 @@ namespace JobSystem
     void CleanupChunkContext(void* ctx) noexcept;
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile) noexcept;
     void CleanupGeneralContext(void* ctx) noexcept;
+
+    // ---- Chase-Lev tile 级窃取（新路径，定义在 JobSystem_Tiles.cpp） ----
+    // ChaseLevScheduler 回调 trampoline（供 Scheduler::Initialize 传给 ChaseLevScheduler::Start）
+    void ChaseLevExecuteTile(BatchState* batch, uint32_t tileIndex) noexcept;
+    // ChaseLev 双条件退役：tilesRemaining==0 && pendingTasks==0 时才释放 storage。
+    void TryFinalizeChaseLevBatch(BatchState* batch) noexcept;
+    // ChaseLev 任务完成回调：pendingTasks--，归零时触发双条件退役检查。
+    void ChaseLevTaskDone(BatchState* batch) noexcept;
+    // ---- 死锁排查：在飞 ChaseLev batch 注册表（SubmitBatch 登记 / 退役注销，互斥锁保护）----
+    // 死锁 dump 时打印每个未退役 batch 的 tr/pt/logicalCompleted，区分
+    // 「任务没执行完（tr>0）」与「执行完但退役被跳过（tr==0 && pt>0）」。
+    extern std::mutex g_chaseLevActiveMutex;
+    extern std::vector<BatchState*> g_chaseLevActiveBatches;
+    void DebugDumpChaseLevState() noexcept;
 } // namespace JobSystem
