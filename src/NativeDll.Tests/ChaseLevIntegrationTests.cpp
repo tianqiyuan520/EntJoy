@@ -91,8 +91,9 @@ namespace
         handle.Complete();
         std::cout << " done" << std::endl;
 
-        Require(cleanupCount.load() == 1, "cleanup count mismatch");
         std::cout << "  cleanup=" << cleanupCount.load() << std::endl;
+        Require(cleanupCount.load() == 1, "cleanup count mismatch");
+        std::cout << "  cleanup ok" << std::endl;
     }
 
     // ============================================================
@@ -170,6 +171,41 @@ namespace
         // batchFunc 按 tile 调用：每 batch tileCount = ResolveChunkSize 推导的 rc
         Require(count.load() > 0, "batch chain lost work");
     }
+
+    // ============================================================
+    // Test 5: C++ 异常协议——回调抛异常 → 任务计数正常 + Complete 重抛
+    // （TBB/Taskflow 语义；验证调度器不悬挂、异常传递给调用方）
+    // ============================================================
+    void TestExceptionPropagation()
+    {
+        struct ThrowCtx { std::atomic<int> executed{ 0 }; };
+        ThrowCtx ctx;
+
+        auto fn = [](void* raw, int) {
+            auto* c = static_cast<ThrowCtx*>(raw);
+            c->executed.fetch_add(1, std::memory_order_relaxed);
+            if (c->executed.load(std::memory_order_relaxed) >= 2)
+                throw std::runtime_error("intentional job failure");
+        };
+
+        std::cout << "  scheduling throwing parallel-for..." << std::flush;
+        auto handle = JobSystem::Scheduler::ScheduleParallelFor(fn, &ctx, 1000, 0, nullptr, {});
+        std::cout << " done" << std::endl;
+
+        bool caught = false;
+        std::cout << "  Complete() (expect rethrow)..." << std::flush;
+        try
+        {
+            handle.Complete();
+        }
+        catch (const std::exception& e)
+        {
+            caught = true;
+            std::cout << " caught: " << e.what() << std::endl;
+        }
+        Require(caught, "Complete() did not rethrow the job exception");
+        std::cout << "  executed=" << ctx.executed.load() << " (all tiles ran, no hang)" << std::endl;
+    }
 }
 
 int main()
@@ -181,6 +217,7 @@ int main()
         RunWithTimeout("TestChunkComplete", TestChunkComplete);
         RunWithTimeout("TestDependencyChainComplete", TestDependencyChainComplete);
         RunWithTimeout("TestBatchDependencyChainRepeated", TestBatchDependencyChainRepeated);
+        RunWithTimeout("TestExceptionPropagation", TestExceptionPropagation);
         std::cout << "PASS all\n";
         JobSystem::Scheduler::Shutdown();
         return 0;

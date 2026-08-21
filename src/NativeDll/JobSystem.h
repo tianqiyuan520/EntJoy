@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -73,6 +74,11 @@ namespace JobSystem {
         // RecycleState 释放，保证 handle 被丢弃后链不会悬垂。
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
+
+        // C++ 异常协议：退役时从 BatchState 转移的第一个回调异常；
+        // Complete() 在退役完成后 std::rethrow_exception 抛给调用方（TBB 语义）。
+        // 仅在 C++ 回调路径使用（C# 侧在 NativeJobCore.cs 记录，不走此字段）。
+        std::exception_ptr batchExceptionPtr;
 
         explicit HandleState(bool initialCompleted = false) noexcept
             : completed(initialCompleted) {

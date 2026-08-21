@@ -233,7 +233,17 @@ namespace EntJoy.JobSystem.Managed
 
             if (innerBatchCount > 0)
                 return ScheduleSharedRange<T>(ref job, arrayLength, innerBatchCount, dependsOn);
-            return ScheduleStaticSlices<T>(ref job, arrayLength, dependsOn);
+            // innerBatchCount == 0：由调度器自动计算认领粒度（对齐 Native 的
+            // ResolveChunkSize：batch = max(16, ceil(N / (W*16)))，W=worker 数）。
+            // 重计算 job（S5）需要细粒度共享游标均衡（8192 硬编码=13 片尾部失衡）；
+            // 轻量 job 的批量认领开销由 chunk 自动放大覆盖。不再走静态大分片
+            //（静态分片在可变代价/高竞争下不均衡）。
+            {
+                int workers = Math.Max(1, _workerCount);
+                int autoBatch = Math.Max(16,
+                    (arrayLength + workers * 16 - 1) / (workers * 16));
+                return ScheduleSharedRange<T>(ref job, arrayLength, autoBatch, dependsOn);
+            }
         }
 
         /// <summary>静态粗分片执行：并行 for 拆 ~worker 个固定大 chunk 入全局队列，一次性唤醒；无共享游标竞争。

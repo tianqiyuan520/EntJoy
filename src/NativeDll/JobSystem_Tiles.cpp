@@ -364,7 +364,22 @@ namespace JobSystem
         if (tileIndex + 1 < batch->tileCount)
             PrefetchNextTileData(batch->context, batch->tiles[tileIndex + 1]);
 
-        batch->executeTile(batch->context, batch->tiles[tileIndex]);
+        // C++ 异常协议：捕获用户回调异常 → 记录第一个（原子 guard CAS）→
+        // 计数继续正常递减（任务不悬挂）；Complete() 在退役后 rethrow。
+        // 多次异常只保留第一个（后续忽略但计数正常）；TBB/Taskflow 同语义。
+        try
+        {
+            batch->executeTile(batch->context, batch->tiles[tileIndex]);
+        }
+        catch (...)
+        {
+            bool expected = false;
+            if (batch->exceptionRecorded.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel))
+            {
+                batch->firstException = std::current_exception();
+            }
+        }
         const int rangeEndLogicalCore = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
         const uint64_t threadCyclesFinishedAt = timingEnabled
@@ -894,6 +909,13 @@ namespace JobSystem
             {
                 batch->cleanup(batch->context);
                 batch->context = nullptr;
+            }
+            // C++ 异常协议：退役时把 batch 上记录的第一个异常传给 HandleState
+            //（batch 即将 Release 回收，异常必须转移才能被 Complete 重抛）。
+            if (batch->exceptionRecorded.load(std::memory_order_acquire) &&
+                state->batchExceptionPtr == nullptr)
+            {
+                state->batchExceptionPtr = batch->firstException;
             }
             ReleaseBatch(batch);
             state->backendRetired.store(true, std::memory_order_release);
