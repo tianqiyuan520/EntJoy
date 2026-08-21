@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <memory>
 
+// Forward declaration for Chase-Lev tile deque
+namespace JobSystem { class SparseTileDeque; }
+
 // 实时 Worker 状态快照（供调试面板读取）
 // 放在全局命名空间，与 Exports.h 的 extern "C" 声明匹配
 struct WorkerSnapshot {
@@ -37,6 +40,11 @@ namespace JobSystem
 
         bool IsRunning() const noexcept;
         uint32_t WorkerCount() const noexcept;
+
+        // ---- Chase-Lev tile 级窃取：per-worker 持久 deque ----
+        // 返回指定 worker 的持久 SparseTileDeque（worker 生命周期）。
+        // workerIndex 必须 < WorkerCount()，否则返回 nullptr。
+        SparseTileDeque* GetWorkerDeque(uint32_t workerIndex) noexcept;
 
         // 诊断计数器（有界 futex 混合等待；parkWakeCount = 实际内核态 park 次数，
         // hotSpinHits = 混合等待命中数（自旋/初始即有活，未 park））

@@ -1,4 +1,5 @@
 #include "JobSystemInternal.h"
+#include "ChaseLevScheduler.h"
 #include "ThreadAffinity.h"
 #include "JobDebuggerGUI.h"
 
@@ -125,15 +126,52 @@ namespace JobSystem
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
+            // 读取 ENTJOY_USE_WORKSTEALING 环境变量：开启 tile 级 Chase-Lev 工作窃取。
+            // 默认关闭（走旧 WorkerAtomicRangeLoop）；=1 开启新路径。
+            {
+                std::string value;
+#if defined(_WIN32)
+                char* raw = nullptr;
+                std::size_t rawLength = 0;
+                if (_dupenv_s(&raw, &rawLength, "ENTJOY_USE_WORKSTEALING") == 0 && raw)
+                {
+                    value.assign(raw);
+                    std::free(raw);
+                }
+#else
+                if (const char* raw = std::getenv("ENTJOY_USE_WORKSTEALING"))
+                    value.assign(raw);
+#endif
+                std::transform(value.begin(), value.end(), value.begin(),
+                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                // 默认 true（新路径）；显式 "0"/"false"/"off" 关闭。
+                g_useWorkStealing = (value != "0" && value != "false" && value != "off");
+            }
+
             // Pin the calling thread (main thread) to logical core 0 so it
             // is never preempted by a worker that shares its L1/L2 cache.
             if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
                 BindCurrentThreadToLogicalProcessor(0);
 
             g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
-            g_nativeWorkerPool->Start(
-                static_cast<uint32_t>(resolved),
-                g_workerAffinityEnabled.load(std::memory_order_relaxed));
+            if (!g_useWorkStealing)
+            {
+                // 旧路径：启动 NativeWorkerPool（batch 级 work-item + WorkerAtomicRangeLoop）
+                g_nativeWorkerPool->Start(
+                    static_cast<uint32_t>(resolved),
+                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
+            }
+
+            // Chase-Lev 调度器：新路径的 worker 线程 + 持久 deque
+            if (g_useWorkStealing)
+            {
+                g_chaseLevScheduler = std::make_unique<ChaseLevScheduler>();
+                g_chaseLevScheduler->Start(
+                    static_cast<uint32_t>(resolved),
+                    &ChaseLevExecuteTile,
+                    &ChaseLevTaskDone,
+                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
+            }
 
             // 若设置了 ENTJOY_DEBUG=1，启动 Dear ImGui 调试窗口
             JobDebuggerGUI::TryLaunch();
@@ -150,6 +188,7 @@ namespace JobSystem
             g_numThreads = 0;
         }
         if (nativePool) nativePool->Stop();
+        if (g_chaseLevScheduler) { g_chaseLevScheduler->Stop(); g_chaseLevScheduler.reset(); }
         ConsumeLongBatchBarriers();
         // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
         // worker 已由 nativePool->Stop() join，其 thread_local 缓存已在退出时交还。

@@ -1,4 +1,5 @@
 #include "JobSystemInternal.h"
+#include "ChaseLevScheduler.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -49,6 +50,7 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
     std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
+    std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
     int g_numThreads = 0;
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
@@ -124,6 +126,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
+    bool g_useWorkStealing{ true };  // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
     // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch。

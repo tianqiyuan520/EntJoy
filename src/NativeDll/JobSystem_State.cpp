@@ -329,6 +329,9 @@ namespace JobSystem
     // 返回是否实际执行了任何 tile。
     static bool AssistState(HandleState* state) noexcept
     {
+        // Chase-Lev 模式：tiles 在持久 deque，assist 无意义且会引发 assistReaders 竞态，
+        // 直接返回（主线程只等待 completed，由 worker 完成退役）。
+        if (g_useWorkStealing) return false;
         if (!state || state->completed.load(std::memory_order_acquire)) return false;
         bool worked = false;
         state->assistReaders.fetch_add(1, std::memory_order_acq_rel);
@@ -412,6 +415,12 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire)) return;
 
+        // Chase-Lev 模式：主线程不协助（tiles 在持久 deque，assist 会引发 assistReaders
+        // 竞态导致退役被跳过 → g_backendBatchesOutstanding 永不归零 → 死锁）。
+        // 直接进入 spin/wait，由 worker 完成退役并置 completed。
+        if (g_useWorkStealing)
+            goto wait_for_completion;
+
         // Phase 0: 协助目标 job 自身（reader 计数在 HandleState 上，生命周期长于 batch）
         if (AssistState(_state))
         {
@@ -427,6 +436,7 @@ namespace JobSystem
             if (_state->completed.load(std::memory_order_acquire)) return;
         }
 
+    wait_for_completion:
         // Phase 2: dense spin first (never yield before we've given the job a
         // chance to complete — yield triggers a full OS context switch).
         for (int i = 0; i < 2048; i++)

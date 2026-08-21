@@ -1,6 +1,7 @@
 #include "NativeWorkerPool.h"
 #include "ThreadAffinity.h"
 #include "JobProfiler.h" // WorkerIndexManager：pool 线程预分配索引，供调试面板泳道上报
+#include "SparseTileDeque.h"
 
 #include <atomic>
 #include <chrono>
@@ -15,6 +16,13 @@
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 #include <immintrin.h>
+#endif
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace JobSystem
@@ -36,6 +44,10 @@ namespace JobSystem
     //（worker 空闲时优先排空），全局也满 = 病理过载，wake-all 后自旋排空。
     static constexpr uint32_t kLocalQueueCapacity = 2048;
     static constexpr uint32_t kGlobalQueueCapacity = 32768;
+
+    // 每个 worker 的持久 tile deque 容量（覆盖绝大多数 batch 的 tile 分布）。
+    // tileCount > 此值时回退到全局 nextTile 兜底。
+    static constexpr uint32_t kWorkerDequeCapacity = 4096;
 
     struct NativeWorkerPool::Impl
     {
@@ -144,6 +156,9 @@ namespace JobSystem
         {
             // 无锁 MPMC 环：Submit round-robin push，owner pop，thief steal（victim 环 pop）。
             MpmcRing<WorkItem, kLocalQueueCapacity> queue;
+            // Chase-Lev 持久 deque：tile 级工作窃取（worker 生命周期）。
+            // SubmitBatch 时 PushBottom(tileIndex)，Worker 执行时 PopBottom / StealTop。
+            std::unique_ptr<SparseTileDeque> tileDeque;
             // 双 bit 职责分离：
             //  - wakeFlag：唤醒标志。Submit 置 1（push 前后各一次），owner 在 drain 开始
             //    exchange(0) 消费。flag 只在 draining==1 期间被清；Submit 的双 store 闭环
@@ -154,6 +169,17 @@ namespace JobSystem
             std::atomic<uint32_t> wakeFlag{ 0 };
             std::atomic<uint32_t> draining{ 0 };
             std::thread thread;
+#if defined(_WIN32)
+            // Windows semaphore：混合等待 Phase3，替代无超时 futex。
+            // 初始计数 0（worker 启动即等待），最大计数 1（合并连续唤醒）。
+            HANDLE wakeSemaphore{ nullptr };
+#endif
+            ~WorkerState() noexcept
+            {
+#if defined(_WIN32)
+                if (wakeSemaphore) { ::CloseHandle(wakeSemaphore); wakeSemaphore = nullptr; }
+#endif
+            }
         };
 
         // 【优先唤醒活跃 worker】精确唤醒收到 work 的 worker（对齐 Misaki _workSignal.Release(N)）：
@@ -163,7 +189,15 @@ namespace JobSystem
             const uint32_t n = static_cast<uint32_t>(std::min<size_t>(wakeCounts.size(), workers.size()));
             for (uint32_t i = 0; i < n; ++i)
                 if (wakeCounts[i] != 0)
+                {
                     workers[i]->wakeFlag.notify_all();
+#if defined(_WIN32)
+                    // 同时 signal semaphore：worker 可能已过自旋+Yield 进入 semaphore wait，
+                    // 仅 wakeFlag.notify_all() 无法唤醒内核态等待的线程。
+                    if (workers[i]->wakeSemaphore)
+                        ::ReleaseSemaphore(workers[i]->wakeSemaphore, 1, nullptr);
+#endif
+                }
         }
 
         // 统计实际收到 work 的 worker 数。
@@ -183,6 +217,10 @@ namespace JobSystem
             {
                 w->wakeFlag.store(1, std::memory_order_release);
                 w->wakeFlag.notify_all();
+#if defined(_WIN32)
+                if (w->wakeSemaphore)
+                    ::ReleaseSemaphore(w->wakeSemaphore, 1, nullptr);
+#endif
             }
         }
 
@@ -372,22 +410,57 @@ namespace JobSystem
 #endif
             while (true)
             {
-                // 混合等待：有界自旋 → std::atomic::wait（C++20，MSVC 下即 futex）。
-                // 自旋只覆盖背靠背 job（µs 级），不烧 16ms 间隔。
+                // ═══════════════════════════════════════════════════════════════
+                // 混合等待三阶段（对齐 Unity JobSystem Worker 设计）：
+                //
+                // Phase 1 — 有界自旋（~360μs）：覆盖背靠背 job 的尾宽，
+                //          零延迟认领，不进内核。
+                // Phase 2 — Yield（~0μs）：让出当前时间片给同核心其他线程，
+                //          不进内核态，仍可被 wakeFlag.notify_all 唤醒。
+                // Phase 3 — Semaphore wait（有超时 1ms）：进内核等待，
+                //          但超时后重试，不会永久睡眠。
+                //
+                // 对比旧版 futex wait(无超时)：worker 可能睡 10ms+，
+                // 导致 S5 workerSpread max ~5ms 的方差主因。
+                // ═══════════════════════════════════════════════════════════════
+
+                // ---- Phase 1: 有界自旋 ----
                 uint32_t spins = 0;
                 while (worker->wakeFlag.load(std::memory_order_acquire) == 0 && spins < kMaxSpinCount)
                 {
                     CpuPause();
                     ++spins;
                 }
-                const bool hasPendingFlag =
-                    worker->wakeFlag.load(std::memory_order_acquire) != 0;
-                if (!hasPendingFlag)
+                if (worker->wakeFlag.load(std::memory_order_acquire) != 0)
+                {
+                    ++hotSpinHits; // 自旋命中（未进 Phase2/3）
+                    goto drain;
+                }
+
+                // ---- Phase 2: Yield（让出时间片，不进内核）----
+                // SwitchToThread 让同核心的其他线程运行（对超线程友好），
+                // 比 Sleep(0) 更轻量（不强制切换到其他核心）。
+                for (uint32_t y = 0; y < 8; ++y)
+                {
+#if defined(_WIN32)
+                    ::SwitchToThread();
+#endif
+                    if (worker->wakeFlag.load(std::memory_order_acquire) != 0)
+                    {
+                        ++hotSpinHits; // Yield 命中（未进 Phase3）
+                        goto drain;
+                    }
+                }
+
+                // ---- Phase 3: Semaphore wait（有超时 1ms）----
+                // 进内核等待，但 1ms 超时后重试，避免永久睡眠。
+                // Submit 通过 ReleaseSemaphore(1) 同时 signal flag + semaphore，
+                // 确保 worker 在任一阶段都能被唤醒。
                 {
                     ++parkWakeCount;
                     // 睡前自查（draining 保护内）：Submit 先置 flag 后 push，本 worker
                     // 可能已消费 flag 而 job 此刻才落环——直接 park 会错过。命中即排空，
-                    // 仍空才睡（std::atomic::wait 原子比较+注册，无丢失唤醒）。
+                    // 仍空才睡。
                     worker->draining.store(1, std::memory_order_release);
                     WorkItem preItem{};
                     if (TryPopLocal(workerIndex, preItem))
@@ -399,14 +472,32 @@ namespace JobSystem
                         continue;
                     }
                     worker->draining.store(0, std::memory_order_release);
+
+#if defined(_WIN32)
+                    // Windows: WaitForSingleObject 超时 1ms。
+                    // wakeSemaphore 初始计数 0 = 无信号，ReleaseSemaphore(1) 后唤醒。
+                    // 超时后重新检查 wakeFlag + 重试，不会永久睡眠。
+                    if (worker->wakeSemaphore)
+                    {
+                        ::WaitForSingleObject(worker->wakeSemaphore, 1/*ms*/);
+                    }
+                    else
+                    {
+                        // fallback：无 semaphore 时退回 futex
+                        while (worker->wakeFlag.load(std::memory_order_acquire) == 0)
+                            worker->wakeFlag.wait(0, std::memory_order_acquire);
+                    }
+#else
+                    // 非 Windows：仍用 futex（C++20 atomic::wait）
                     while (worker->wakeFlag.load(std::memory_order_acquire) == 0)
                         worker->wakeFlag.wait(0, std::memory_order_acquire);
+#endif
                 }
-                else
-                {
-                    ++hotSpinHits; // 自旋/初始即有活 → 未 park
-                }
+                // 超时醒来后重试：回到 Phase 1 检查 wakeFlag
 
+                continue;
+
+            drain:
                 // 进入 drain：先置 draining 再消费 flag——防「消费 flag 与真正认领」
                 // 之间的空窗被 thief 抢走未认领 job。flag 在此 exchange(0)（draining 保护
                 // 内清），draining 只负责 owner-priority；Submit 的双 store 在 push 后
@@ -444,7 +535,17 @@ namespace JobSystem
         {
             _impl->workers.reserve(workerCount);
             for (uint32_t i = 0; i < workerCount; ++i)
-                _impl->workers.push_back(std::make_unique<Impl::WorkerState>());
+            {
+                auto ws = std::make_unique<Impl::WorkerState>();
+                ws->tileDeque = std::make_unique<SparseTileDeque>(kWorkerDequeCapacity);
+#if defined(_WIN32)
+                // 混合等待 Phase3：CreateSemaphoreW(NULL, 0, 1, NULL)
+                // 初始计数 0 = 无信号（worker 启动即等待），
+                // 最大计数 1 = 合并连续唤醒（Release(1) 到 1 后不再累加）。
+                ws->wakeSemaphore = ::CreateSemaphoreW(nullptr, 0, 1, nullptr);
+#endif
+                _impl->workers.push_back(std::move(ws));
+            }
             for (uint32_t i = 0; i < workerCount; ++i)
             {
                 auto* raw = _impl->workers[i].get();
@@ -589,6 +690,13 @@ namespace JobSystem
     {
         std::lock_guard<std::mutex> lock(_impl->lifecycleMutex);
         return static_cast<uint32_t>(_impl->workers.size());
+    }
+
+    SparseTileDeque* NativeWorkerPool::GetWorkerDeque(uint32_t workerIndex) noexcept
+    {
+        std::lock_guard<std::mutex> lock(_impl->lifecycleMutex);
+        if (workerIndex >= _impl->workers.size()) return nullptr;
+        return _impl->workers[workerIndex]->tileDeque.get();
     }
 
     void NativeWorkerPool::GetCounters(uint64_t* parkWakeCount, uint64_t* hotSpinHits) const noexcept
