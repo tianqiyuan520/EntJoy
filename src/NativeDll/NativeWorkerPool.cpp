@@ -156,6 +156,36 @@ namespace JobSystem
             std::thread thread;
         };
 
+        // 【优先唤醒活跃 worker】精确唤醒收到 work 的 worker（对齐 Misaki _workSignal.Release(N)）：
+        // 只在 activeCount 少时用，唤醒活跃的并让它们尽快开始，避免广播惊群。
+        void SelectiveWake(const std::vector<uint32_t>& wakeCounts) noexcept
+        {
+            const uint32_t n = static_cast<uint32_t>(std::min<size_t>(wakeCounts.size(), workers.size()));
+            for (uint32_t i = 0; i < n; ++i)
+                if (wakeCounts[i] != 0)
+                    workers[i]->wakeFlag.notify_all();
+        }
+
+        // 统计实际收到 work 的 worker 数。
+        uint32_t CountActiveWorkers(const std::vector<uint32_t>& wakeCounts) noexcept
+        {
+            uint32_t cnt = 0;
+            const uint32_t n = static_cast<uint32_t>(std::min<size_t>(wakeCounts.size(), workers.size()));
+            for (uint32_t i = 0; i < n; ++i)
+                if (wakeCounts[i] != 0) ++cnt;
+            return cnt;
+        }
+
+        // 唤醒全部 worker（置 flag + 各自 notify_all，用于 overflow / Stop）。
+        void WakeAll() noexcept
+        {
+            for (auto& w : workers)
+            {
+                w->wakeFlag.store(1, std::memory_order_release);
+                w->wakeFlag.notify_all();
+            }
+        }
+
         mutable std::mutex lifecycleMutex;
         std::condition_variable idle;
         std::vector<std::unique_ptr<BatchDescriptor>> descriptorStorage;
@@ -261,23 +291,19 @@ namespace JobSystem
             {
                 const uint32_t victimIndex = (thiefIndex + offset) % count;
                 auto& victim = *workers[victimIndex];
-                // owner-priority：owner 正在 drain（draining）或待醒（wakeFlag）→
-                // 即将/正在认领自己的环，跳过。防「偷走阻塞 job → 自身被阻塞 →
-                // 自身队列搁浅」。由「Submit 置 flag 后才 push + owner 只在 drain 内消费 +
-                // Submit 双 store」保证：环非空 ⟹ flag==1 或 draining==1，跳过者必是
-                // owner 即将认领的环，不误跳被遗弃的环。
-                const uint32_t protecting = victim.draining.load(std::memory_order_acquire) |
-                    victim.wakeFlag.load(std::memory_order_acquire);
-                if (protecting != 0)
+                // 【Relaxed TrySteal】只跳过正在 drain 的 victim（owner 正在认领自己的环）。
+                // 不跳过 wakeFlag victim —— 允许快 worker 偷取 OS 延迟唤醒、积压未消费的
+                // job（S5 workerSpread max 的来源）。双检防竞态：pop 后 victim 若已开始
+                // drain 则归还其环由 owner 认领。文档：S5 方差 ±60%→±24%（↓2.5x）。
+                if (victim.draining.load(std::memory_order_acquire) != 0)
                     continue;
                 WorkItem stolen{};
                 if (victim.queue.Pop(stolen))
                 {
                     // 双检：预检读与 pop 之间 Submit 可能已完成「置 flag → push」
                     //（check-then-pop 竞态，读到陈旧 0 却 pop 到刚提交的 job）。
-                    // pop 后重读：若 victim 已被保护 → 归还其环由 owner 认领。
-                    if ((victim.draining.load(std::memory_order_acquire) |
-                        victim.wakeFlag.load(std::memory_order_acquire)) != 0)
+                    // pop 后重读：若 victim 已开始 drain → 归还其环由 owner 认领。
+                    if (victim.draining.load(std::memory_order_acquire) != 0)
                     {
                         // 归还给 victim；环满（空位在头部，enqueuePos 处仍占用）则直接执行。
                         if (!victim.queue.Push(stolen))
@@ -292,7 +318,7 @@ namespace JobSystem
                         // 置 flag 后 notify：即便 owner 仍在 drain 也会在下次自旋/等待
                         // 读到 flag 续排空，空转一次无害。
                         victim.wakeFlag.store(1, std::memory_order_release);
-                        victim.wakeFlag.notify_one();
+                        victim.wakeFlag.notify_all();
                         continue;
                     }
                     item = stolen;
@@ -462,11 +488,7 @@ namespace JobSystem
             }
             _impl->stopRequested.store(true, std::memory_order_release);
         }
-        for (auto& worker : _impl->workers)
-        {
-            worker->wakeFlag.store(1, std::memory_order_relaxed);
-            worker->wakeFlag.notify_one();
-        }
+        _impl->WakeAll();   // 唤醒全部 worker 退出（置 flag + notify_all）
         for (auto& worker : _impl->workers)
             if (worker->thread.joinable()) worker->thread.join();
         _impl->workers.clear();
@@ -524,26 +546,22 @@ namespace JobSystem
                     {
                         // 全局环也满 = 病理过载：唤醒全部 worker 排空后自旋。
                         // worker 永不阻塞，必收敛。
-                        for (auto& w : _impl->workers)
-                            w->wakeFlag.store(1, std::memory_order_release);
-                        for (auto& w : _impl->workers)
-                            w->wakeFlag.notify_one();
+                        _impl->WakeAll();
                         std::this_thread::yield();
                     }
                 }
             }
-            for (uint32_t i = 0; i < wakeCounts.size(); ++i)
-                if (wakeCounts[i] != 0)
-                {
-                    _impl->workers[i]->wakeFlag.notify_one();
-                }
+            // 【自适应唤醒】优先唤醒活跃 worker，让它们尽快开始：
+            //  - activeCount 少（低并行）→ SelectiveWake：只精确唤醒活跃的，避免广播惊群
+            //  - activeCount 多（高并行/S5）→ 全部唤醒（广播，单遍 notify_all 更高效）
+            //    阈值约定：活跃超过半数即走全唤醒（此时几乎全部有活，定向无差别）。
+            if (_impl->CountActiveWorkers(wakeCounts) <= static_cast<uint32_t>(workerCount) / 2)
+                _impl->SelectiveWake(wakeCounts);
+            else
+                _impl->WakeAll();
             if (overflowUsed)
             {
-                for (auto& w : _impl->workers)
-                {
-                    w->wakeFlag.store(1, std::memory_order_release);
-                    w->wakeFlag.notify_one();
-                }
+                _impl->WakeAll();  // overflow 需全部 worker 排空
             }
         }
         catch (...)
