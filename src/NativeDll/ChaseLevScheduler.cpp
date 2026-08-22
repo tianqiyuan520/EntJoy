@@ -91,6 +91,10 @@ namespace JobSystem
         if (injector_.Pop(task))
         {
             ExecuteAndRelease(task, workerIndex);
+            // 主线程 assist 计数
+            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            g_assistTiles.fetch_add(task->tileCount, std::memory_order_relaxed);
             return true;
         }
 
@@ -135,6 +139,13 @@ namespace JobSystem
 
                     if (workerIndex < kMaxTrackedWorkers)
                         tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+
+                    // 主线程 assist 计数
+                    g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                    g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+                    g_assistTiles.fetch_add(tileTask.tileCount, std::memory_order_relaxed);
+                    tileTask.batch->batchAssistTiles.fetch_add(
+                        tileTask.tileCount, std::memory_order_relaxed);
 
                     // 从 deque 窃取的任务也需要 taskDone（pendingTasks--）
                     if (taskDone_)
@@ -401,6 +412,8 @@ namespace JobSystem
                 // 执行从 deque 取出的任务
                 if (workerIndex < kMaxTrackedWorkers)
                     tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                g_localTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
+                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
 
                 uint32_t end = task.firstTile + task.tileCount;
                 if (end > task.batch->tileCount) end = task.batch->tileCount;
@@ -471,6 +484,8 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                g_localTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
+                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
 
                 uint32_t end = task.firstTile + task.tileCount;
                 if (end > task.batch->tileCount) end = task.batch->tileCount;

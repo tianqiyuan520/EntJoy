@@ -185,27 +185,9 @@ namespace JobSystem
                 g_useWorkStealing = (value != "0" && value != "false" && value != "off");
             }
 
-            // 读取 ENTJOY_ASSIST 环境变量：默认开启主线程协助；
-            // 显式 "0"/"false"/"off" 关闭（A/B 诊断：纯 worker 模式）。
-            {
-                std::string value;
-#if defined(_WIN32)
-                char* raw = nullptr;
-                std::size_t rawLength = 0;
-                if (_dupenv_s(&raw, &rawLength, "ENTJOY_ASSIST") == 0 && raw)
-                {
-                    value.assign(raw);
-                    std::free(raw);
-                }
-#else
-                if (const char* raw = std::getenv("ENTJOY_ASSIST"))
-                    value.assign(raw);
-#endif
-                std::transform(value.begin(), value.end(), value.begin(),
-                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                g_mainThreadAssistEnabled =
-                    (value != "0" && value != "false" && value != "off");
-            }
+            // 主线程 assist 默认关闭（g_mainThreadAssistEnabled = false）。
+            // 运行时可通过 JobSystem_SetMainThreadAssist(int) 切换。
+            // 不再读取 ENTJOY_ASSIST 环境变量（避免空字符串误启用）。
 
             // Pin the calling thread (main thread) to logical core 0 so it
             // is never preempted by a worker that shares its L1/L2 cache.
