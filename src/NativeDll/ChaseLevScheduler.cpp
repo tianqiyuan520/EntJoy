@@ -61,7 +61,6 @@ namespace JobSystem
 
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
-        SetCurrentBatchId(0);
         DebugEndExec();
 
         // 诊断计数
@@ -134,7 +133,6 @@ namespace JobSystem
 
                     if (workerIndex < kMaxTrackedWorkers)
                         workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
-                    SetCurrentBatchId(0);
                     DebugEndExec();
 
                     if (workerIndex < kMaxTrackedWorkers)
@@ -264,12 +262,11 @@ namespace JobSystem
 
         const uint32_t tileCount = batch->tileCount;
 
-        // 池容量保险（AI 审查 3.1）：极端大 batch（tileCount 极大）时增大
-        // claimBatch 粒度，保证 taskCount ≤ 池容量/2（游标池不回收，回绕
-        // 复用未释放 task → 竞态；此保险把单批上限钳在安全区间）。
-        // 正常场景（GridSearch/S5 ~100 task）claimBatch 保持 4，零开销。
-        uint32_t claimBatch = kClaimBatchSize;
-        if (tileCount / kClaimBatchSize >= RangeTaskPool::kPoolSize / 2)
+        // 粒度：目标 taskCount ≈ wc*16（平衡预切分开销与 steal 负载均衡）。
+        uint32_t claimBatch = std::max(1u, (tileCount + wc * 16 - 1) / (wc * 16));
+
+        // 池容量保险：taskCount ≤ 池容量/2，防止游标回绕复用未释放任务
+        if (tileCount / claimBatch >= RangeTaskPool::kPoolSize / 2)
         {
             while (claimBatch < tileCount &&
                    (tileCount + claimBatch - 1) / claimBatch >=
@@ -278,16 +275,20 @@ namespace JobSystem
         }
         const uint32_t taskCount = (tileCount + claimBatch - 1) / claimBatch;
 
-        // 预置 pendingTasks
         batch->pendingTasks.store(taskCount, std::memory_order_release);
         activeTasks.fetch_add(static_cast<int64_t>(taskCount), std::memory_order_acq_rel);
 
         // 预切分为 RangeTasks 并推入 Injector（满时有限退避，非忙等）
         for (uint32_t i = 0; i < taskCount; ++i)
         {
+            // 池耗尽兜底：堆分配任务（poolIndex=UINT32_MAX，Release 时 delete）。
+            // 不跳过任务 —— pendingTasks 预设为 taskCount，跳过会导致永不到 0。
             RangeTask* task = s_taskPool_.Acquire();
-            if (!task) { std::this_thread::yield(); task = s_taskPool_.Acquire(); }
-            if (!task) continue;
+            if (!task)
+            {
+                task = new RangeTask();
+                task->poolIndex = UINT32_MAX; // 堆分配标记
+            }
 
             task->batch = batch;
             task->firstTile = i * claimBatch;
@@ -430,7 +431,6 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
-                SetCurrentBatchId(0);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -502,7 +502,6 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
-                SetCurrentBatchId(0);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -518,61 +517,84 @@ namespace JobSystem
             // ---- 4. 无工作 ----
             if (quit_.load(std::memory_order_acquire))
             {
-                // 退出前排空 deque
-                while (myDeque->PopBottom(task))
+                // 退出前协作排空 Injector + 自己 deque，防止遗留任务永久悬挂。
+                bool anyWork = true;
+                while (anyWork)
                 {
-                    if (task.batch && task.tileCount > 0)
+                    anyWork = false;
+
+                    // 从 Injector 拉取（协作排空）
+                    RangeTask* rangeTask = nullptr;
+                    if (injector_.Pop(rangeTask))
                     {
-                        uint32_t end2 = task.firstTile + task.tileCount;
-                        if (end2 > task.batch->tileCount) end2 = task.batch->tileCount;
-                        SetCurrentBatchId(task.batch->diagnosticId);
-                        for (uint32_t t = task.firstTile; t < end2; ++t)
-                            executor_(task.batch, t);
-                        SetCurrentBatchId(0);
+                        anyWork = true;
+                        ExecuteAndRelease(rangeTask, workerIndex);
+                        continue; // 继续排空
+                    }
+
+                    // 从 deque 弹出
+                    if (myDeque->PopBottom(task))
+                    {
+                        anyWork = true;
+                        if (task.batch && task.tileCount > 0)
+                        {
+                            uint32_t end2 = task.firstTile + task.tileCount;
+                            if (end2 > task.batch->tileCount) end2 = task.batch->tileCount;
+                            SetCurrentBatchId(task.batch->diagnosticId);
+                            for (uint32_t t = task.firstTile; t < end2; ++t)
+                                executor_(task.batch, t);
+                            SetCurrentBatchId(0);
+                            // 从 deque 执行的任务也需要 taskDone
+                            if (taskDone_)
+                            {
+                                activeTasks.fetch_sub(1, std::memory_order_acq_rel);
+                                taskDone_(task.batch);
+                                totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
                     }
                 }
                 break;
             }
 
-            // ---- 5. Park — 有界自旋等待 + atomic::wait ----
-            // 有界自旋（跨平台通用，零竞争：只读 activeTasks + 自己的 wakeStamp）：
-            // 批间隙（Complete→Schedule）内 SubmitBatch 会 bump wakeStamp，
-            // 本 worker 自旋检测到 stamp 变化立即回主循环认领；
-            // 自旋阶段【不】executor 找活（主循环刚找过，避免 15 worker 竞争）。
-            // activeTasks==0 或自旋超时 → park（wait 在 stamp 变化时立即返回）。
-            if (activeTasks.load(std::memory_order_acquire) > 0)
+            // ---- 5. Park — 有界自旋 + atomic::wait ----
+            // 自旋 256 次（~10µs）覆盖新批到达窗口，期间检查 injector/deque
+            // 与 wakeStamp；超时后 park（atomic::wait，跨平台 futex）。
             {
                 uint64_t spinStamp = 0;
                 if (workerIndex < kMaxTrackedWorkers)
                     spinStamp = wakeStamp[workerIndex].load(std::memory_order_acquire);
                 uint32_t s = 0;
-                while (s < 2048)  // ~90µs：覆盖短批间隙，防空转烧 CPU
+                while (s < 256)
                 {
+                    if (quit_.load(std::memory_order_acquire))
+                        break;
                     // 新批唤醒（stamp 变化）→ 回主循环认领
                     if (workerIndex < kMaxTrackedWorkers &&
                         wakeStamp[workerIndex].load(std::memory_order_acquire) != spinStamp)
-                        break;
-                    // 任务全部消失 → 直接 park
-                    if (activeTasks.load(std::memory_order_acquire) == 0)
-                        break;
+                        goto main_loop;
+                    // 检查 injector 和 deque 是否有任务（不依赖 activeTasks）
+                    if (!injector_.IsEmpty() || !myDeque->IsEmpty())
+                        goto main_loop;
                     CpuPause();
                     ++s;
                 }
-                // 自旋结束：stamp 变化（有活）→ 回主循环；否则落 park
-                if (workerIndex < kMaxTrackedWorkers &&
-                    wakeStamp[workerIndex].load(std::memory_order_acquire) != spinStamp)
-                    continue;
+                // 最后检查一次 injector（自旋期间可能有新任务到达）
+                if (!injector_.IsEmpty())
+                    goto main_loop;
             }
 
-#if defined(_WIN32)
+// ---- 5. Park — wait(workerIndex 界限防御) ----
+            // C++20 atomic::wait（跨平台 futex，非 Windows 亦低功耗阻塞）
             if (workerIndex < kMaxTrackedWorkers)
             {
                 seenStamp = wakeStamp[workerIndex].load(std::memory_order_acquire);
                 wakeStamp[workerIndex].wait(seenStamp, std::memory_order_relaxed);
             }
-#else
-            std::this_thread::yield();
-#endif
+            continue; // 唤醒后回到主循环
+
+        main_loop:
+            ; // 回到 while(true) 顶部
         }
     }
 

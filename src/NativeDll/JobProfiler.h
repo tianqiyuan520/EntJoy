@@ -37,6 +37,10 @@ namespace JobSystem
 
     inline constexpr int kMaxTraceEventsPerThread = 4096;
 
+    // trace 开关（定义见 JobProfiler.cpp）。调用方热路径用它做快速守卫：
+    // trace 关闭时跳过 PushTraceEvent（内联 relaxed load，零 call 开销）。
+    extern std::atomic<bool> g_traceEnabled;
+
     void TraceSetEnabled(bool enabled) noexcept;
     void TracePrepareCurrentThread() noexcept;
     bool TraceIsEnabled() noexcept;

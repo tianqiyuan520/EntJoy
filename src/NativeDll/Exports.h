@@ -217,6 +217,11 @@ extern "C" {
     JOB_API void JobSystem_SetMainThreadAssist(int enabled);
     JOB_API void JobSystem_SetWorkerAffinity(int enabled);
 
+    /** 布局防御：返回 C++ JobSystemStatsNative 结构体字节数。
+     *  C# 侧 Marshal.SizeOf&lt;NativeJobSystemStats&gt; 必须与之相等，
+     *  否则 GetStats 会越界写（新增字段未同步 → 堆损坏）。*/
+    JOB_API uint32_t JobSystem_GetStatsSize();
+
     /** 
      * 调度多个 Chunk 任务，每个 Chunk 并行执行一次 func 回调。
      * @param func        C# 回调函数指针

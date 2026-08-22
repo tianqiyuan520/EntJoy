@@ -114,6 +114,12 @@ namespace JobSystem
             uint64_t deq = dequeuePos.load(std::memory_order_relaxed);
             return static_cast<uint32_t>(enq >= deq ? enq - deq : 0);
         }
+
+        // 诊断：是否为空（尽力而为，并发时可能不精确）
+        bool IsEmpty() const noexcept
+        {
+            return ApproxSize() == 0;
+        }
     };
 
 } // namespace JobSystem

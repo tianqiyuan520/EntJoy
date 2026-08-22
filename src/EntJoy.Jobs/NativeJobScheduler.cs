@@ -192,6 +192,7 @@ public static unsafe partial class NativeJobScheduler
         }
         NativeJobCore.JobSystem_Initialize(numThreads);
         RegisterPersistentAllocator();
+        NativeJobCore.ValidateStatsLayout(); // 布局防御：C#/C++ 统计结构字节数一致
         NativeJobCore.RegisterCurrentBatchIdCallback();
         if (TilesPerWorker > 0)
             NativeJobCore.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);

@@ -1,4 +1,4 @@
-using EntJoy.JobSystem;
+﻿using EntJoy.JobSystem;
 
 using System.Diagnostics;
 using System.Threading;

@@ -174,7 +174,9 @@ extern "C" {
 // TaskGroupBase
 
 #define LOG_TASK_QUEUE_CHUNK_SIZE 14
-#define MAX_TASK_QUEUE_CHUNKS 128
+// 总任务上限 = MAX_TASK_QUEUE_CHUNKS × CHUNK_SIZE（约 3300 万）。
+// taskInfo[] 为指针数组（8B/项），chunk 惰性分配，超限时 GetTaskInfo exit(1)。
+#define MAX_TASK_QUEUE_CHUNKS 2048
 #define TASK_QUEUE_CHUNK_SIZE (1 << LOG_TASK_QUEUE_CHUNK_SIZE)
 
 #define MAX_LAUNCHED_TASKS (MAX_TASK_QUEUE_CHUNKS * TASK_QUEUE_CHUNK_SIZE)

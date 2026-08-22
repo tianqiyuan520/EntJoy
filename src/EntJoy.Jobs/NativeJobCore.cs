@@ -108,6 +108,7 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
         private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
         private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
+        private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetStatsSize;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetMainThreadAssist;
@@ -319,6 +320,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_CombineDependencies");
             _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
+            _jobSystem_GetStatsSize = (delegate* unmanaged[Cdecl]<uint>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_GetStatsSize");
             _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
             _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
@@ -530,6 +533,20 @@ namespace EntJoy.JobSystem
             NativeJobSystemStats stats = default;
             _jobSystem_GetStats(&stats);
             return stats;
+        }
+
+        /// <summary>布局防御：校验 C#/C++ 统计结构体字节数一致（防 GetStats 越界写）。
+        /// 新增统计字段时必须两处同步。</summary>
+        internal static void ValidateStatsLayout()
+        {
+            if (_nativeDll == IntPtr.Zero || _jobSystem_GetStatsSize == null) return;
+            uint nativeSize = _jobSystem_GetStatsSize();
+            int managedSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeJobSystemStats>();
+            if (nativeSize != managedSize)
+            {
+                throw new InvalidOperationException(
+                    $"NativeJobSystemStats 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 Exports.h 与 NativeJobScheduler.cs 字段。");
+            }
         }
         internal static void JobSystem_ResetStats()
         {

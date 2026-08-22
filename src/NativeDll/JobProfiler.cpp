@@ -18,6 +18,10 @@ std::atomic<bool> g_profilerEnabled{ false };
 
 namespace JobSystem
 {
+    // trace 开关（命名空间可见）：调用方编译单元用它做快速守卫，
+    // trace 关闭时跳过 PushTraceEvent 的跨 TU 调用（内联 relaxed load）。
+    std::atomic<bool> g_traceEnabled{ false };
+
     namespace
     {
         struct TraceThreadBuffer
@@ -26,7 +30,6 @@ namespace JobSystem
             std::atomic<int> publishedCount{ 0 };
         };
 
-        std::atomic<bool> g_traceEnabled{ false };
         std::atomic<uint64_t> g_traceDroppedEvents{ 0 };
         std::atomic<uint64_t> g_traceSequence{ 0 };
         std::mutex g_traceRegistryMutex;
