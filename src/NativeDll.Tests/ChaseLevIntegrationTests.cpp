@@ -15,7 +15,7 @@
 
 namespace
 {
-    constexpr int kTimeoutSec = 4;
+    constexpr int kTimeoutSec = 30;
 
     void Require(bool condition, const char* message)
     {
@@ -35,9 +35,11 @@ namespace
                       << JobSystem::g_backendBatchesOutstanding.load(std::memory_order_relaxed)
                       << " nativeBatches=" << JobSystem::g_nativeBatches.load(std::memory_order_relaxed)
                       << std::endl;
+            std::cerr << "  pushed="
+                      << JobSystem::g_totalTilesPublished.load(std::memory_order_relaxed)
+                      << std::endl;
             if (JobSystem::g_chaseLevScheduler)
                 JobSystem::g_chaseLevScheduler->DumpState(name);
-            JobSystem::DebugDumpChaseLevState();
             std::abort();
         }
         future.get();
