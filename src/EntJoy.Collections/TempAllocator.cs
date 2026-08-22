@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -10,6 +11,11 @@ namespace EntJoy.Collections
     /// 帧末 Reset 归还池而非直通 OS——避免每帧 new + 首次触摸缺页（GridSearch Query
     /// 的 100k int results 每帧 AllocHGlobal 400KB + 首触 100 页 = Query tail 根因）。
     /// 小块直通（碎块无收益）。对齐 PersistentAllocator 的 free-list 范式。
+    ///
+    /// 2026-08-22（v3 Phase 1.1a）：分配/释放快路径**不再取全局锁**——
+    /// 存活登记从全局 ConcurrentDictionary + `_resetLock`（Alloc/Free/Reset 全抢同一把锁）
+    /// 改为 **per-thread pending 列表**（每线程一把私有无争用 gate；帧末 Reset 依次收集）。
+    /// 全局 `_resetLock` 仅由 Reset 与跨线程 Free 慢路径获取。
     /// </summary>
     public static class TempAllocator
     {
@@ -24,10 +30,35 @@ namespace EntJoy.Collections
         private static readonly ConcurrentStack<IntPtr>[] _classes = new ConcurrentStack<IntPtr>[MaxClassIndex + 2];
         private static int s_allocs, s_frees, s_hits, s_misses, s_toOS;
 
-        // 使用字典记录所有活跃的 Temp 内存指针 -> 对应的安全句柄索引
-        private static readonly ConcurrentDictionary<IntPtr, int> _active = new ConcurrentDictionary<IntPtr, int>();
+        // ---- 每线程存活登记（v3 Phase 1.1a） ----
+        // 每个托管线程（主线程 / 原生 worker 的托管入口）一条登记表：
+        // gate 只被 owner（分配/释放快路径）与帧末 Reset（慢路径收集）接触，
+        // owner 单线程访问 → gate 无争用，分配/释放快路径不触碰任何跨线程共享锁。
+        private sealed class ThreadEntry
+        {
+            public readonly object gate = new();
+            public readonly List<Pending> items = new();
+        }
 
-        // Reset 期间阻止并发分配，防止快照遗漏 + use-after-free
+        private readonly struct Pending
+        {
+            public readonly IntPtr Payload;   // 返回给调用者的指针
+            public readonly int SafetyHandleIndex;
+            public readonly byte Released;    // 1 = 已被用户手动 Free（Reset 跳过）
+
+            public Pending(IntPtr payload, int safetyHandleIndex, byte released)
+            {
+                Payload = payload;
+                SafetyHandleIndex = safetyHandleIndex;
+                Released = released;
+            }
+        }
+
+        [ThreadStatic]
+        private static ThreadEntry? tls;
+        private static readonly ConcurrentBag<ThreadEntry> s_entries = new();
+
+        // Reset 期间的协调锁：只被 Reset 与跨线程 Free 慢路径获取（分配/释放快路径无锁）。
         private static readonly object _resetLock = new();
 
         /// <summary>
@@ -40,6 +71,16 @@ namespace EntJoy.Collections
         /// 由 ECS 层在 World 初始化时注册：在 Temp 内存释放完成后刷新调度器异常记录。
         /// </summary>
         public static Action? OnAfterReset;
+
+        private static ThreadEntry GetOrCreateThreadEntry()
+        {
+            var e = tls;
+            if (e != null) return e;
+            e = new ThreadEntry();
+            s_entries.Add(e); // 注册供 Reset 收集；线程退出残留的实例为空表（可忽略）
+            tls = e;
+            return e;
+        }
 
         private static int SizeToClass(int size)
         {
@@ -93,18 +134,66 @@ namespace EntJoy.Collections
                 WriteHeader(basePtr, idx);
                 payload = basePtr + HeaderSize;
             }
-            lock (_resetLock) _active.TryAdd(payload, safetyHandleIndex);
+
+            // 存活登记：本线程私有列表（owner 无锁追加；Reset 持 gate 收集）。
+            var entry = GetOrCreateThreadEntry();
+            lock (entry.gate)
+                entry.items.Add(new Pending(payload, safetyHandleIndex, 0));
             return payload;
         }
 
         /// <summary>释放临时内存（用户手动调用 Dispose 时调用），同时移除映射。</summary>
         public static void Free(IntPtr ptr)
         {
+            if (ptr == IntPtr.Zero) return;
+
+            // 快路径：本线程登记表（通常即分配线程；表很小，从尾扫热区）。
+            var entry = tls;
+            if (entry != null)
+            {
+                if (TryReleaseIn(entry, ptr, out bool found))
+                {
+                    if (found) return;
+                }
+            }
+
+            // 慢路径：跨线程释放（罕见）或本线程表为空——持 Reset 锁遍历全部登记表，
+            // 与 Reset 互斥保证"恰一次"释放（未在任一表找到 → 已释放过/未知，幂等忽略）。
             lock (_resetLock)
             {
-                if (_active.TryRemove(ptr, out _))
-                    FreeImpl(ptr);
+                foreach (var e in s_entries)
+                {
+                    if (TryReleaseIn(e, ptr, out bool found2))
+                    {
+                        if (found2) return;
+                    }
+                }
             }
+        }
+
+        /// <summary>在单张登记表中查找并释放；返回是否命中（found）。</summary>
+        private static bool TryReleaseIn(ThreadEntry e, IntPtr ptr, out bool found)
+        {
+            found = false;
+            lock (e.gate)
+            {
+                var items = e.items;
+                for (int i = items.Count - 1; i >= 0; i--)
+                {
+                    var p = items[i];
+                    if (p.Payload == ptr)
+                    {
+                        found = true;
+                        if (p.Released == 0)
+                        {
+                            items[i] = new Pending(p.Payload, p.SafetyHandleIndex, 1);
+                            FreeImpl(ptr);
+                        }
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static void FreeImpl(IntPtr ptr)
@@ -157,15 +246,24 @@ namespace EntJoy.Collections
                     pending = ex;
                 }
 
-                // ② 释放内存（锁内执行，无并发干扰，无需快照）。
+                // ② 逐线程释放（锁内执行，无并发干扰）。
                 //    即使 job 异常也必须执行，否则 Temp 内存 + 安全句柄泄漏，
                 //    且活跃 job 跨帧运行会让主线程读未完成输出（数据竞态）。
-                foreach (var kvp in _active)
+                foreach (var e in s_entries)
                 {
-                    SafetyHandleManager.MarkReleased(kvp.Value);
-                    FreeImpl(kvp.Key);
+                    List<Pending> taken;
+                    lock (e.gate)
+                    {
+                        taken = e.items;
+                        e.items.Clear();
+                    }
+                    foreach (var p in taken)
+                    {
+                        if (p.Released != 0) continue; // 用户已手动 Free
+                        SafetyHandleManager.MarkReleased(p.SafetyHandleIndex);
+                        FreeImpl(p.Payload);
+                    }
                 }
-                _active.Clear();
 
                 // ③ 最后抛异常（job 异常 + 帧内未归属异常）。
                 //    FlushRecordedExceptions 由 ECS 层通过 OnAfterReset 注册。

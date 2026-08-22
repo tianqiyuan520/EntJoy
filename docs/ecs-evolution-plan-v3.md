@@ -146,7 +146,7 @@ Phase 9 之前必须建立组件生命周期协议，至少包含：
 
 ---
 
-## Phase 1：基础设施优化
+## Phase 1：基础设施优化 ✅ 已完成（2026-08-22）
 
 ### 目标
 
@@ -154,7 +154,11 @@ Phase 9 之前必须建立组件生命周期协议，至少包含：
 
 ### 变更点
 
-#### 1.1 TempAllocator：Per-Thread Stack
+#### 1.1 TempAllocator：Per-Thread Stack ✅ 已完成（1.1a 方案）
+
+> 2026-08-22 实施：完整 per-thread 栈暂缓（收益/风险比低），改为 **1.1a 去全局锁**——
+> `_active` ConcurrentDictionary + `_resetLock` → per-thread `ThreadEntry`（gate 锁，owner 无争用）；
+> Alloc/Free 快路径无全局锁；Reset 逐线程收集。GridSearch 回归通过。
 
 **目标形态：**
 
@@ -175,7 +179,10 @@ Phase 9 之前必须建立组件生命周期协议，至少包含：
 - 常规帧末释放从 O(n) 降至 O(threadCount)。
 - 超过栈容量的大块分配不越界。
 
-#### 1.2 ChunkPool：保留对齐的池化
+#### 1.2 ChunkPool：保留对齐的池化 ✅ 已完成
+
+> 2026-08-22 实现：`ChunkMemoryPool.cs`（64KB 块池化器），Archetype AllocateFromSlab/Dispose
+> 改用池。GridSearch 全栈回归通过。
 
 **目标形态：**
 
@@ -209,7 +216,10 @@ Trim()
 - 同布局 archetype 之间可复用。
 - 不同布局 archetype 之间不会错误复用。
 
-#### 1.3 AddEntity 去 O(n)
+#### 1.3 AddEntity 去 O(n) ✅ 已完成
+
+> 2026-08-22 实现：`Archetype.AddEntity` `_chunkList.IndexOf(targetChunk)` → `Count-1`
+> （targetChunk 恒为末块或新建末块不变量）。
 
 将：
 
@@ -229,7 +239,10 @@ chunkIndex = _chunkList.Count - 1;
 
 - 10000 次 AddEntity 不再随 chunk 数线性增长。
 
-#### 1.4 GetChunks 零分配
+#### 1.4 GetChunks 零分配 ✅ 已完成
+
+> 2026-08-22 实现：`Archetype.ChunkSpan`（CollectionsMarshal.AsSpan 零拷贝），
+> NativeEcsScheduler 7 处 + EntityQuery.Refresh + sample 迁移。
 
 不直接返回可变内部列表。
 
@@ -244,7 +257,10 @@ chunkIndex = _chunkList.Count - 1;
 - 查询调度路径不再每次 `new List<Chunk>`。
 - 外部 API 不会绕过 `Archetype` 修改内部列表。
 
-#### 1.5 QueryBuilder 零分配
+#### 1.5 QueryBuilder 零分配 ✅ 已完成
+
+> 2026-08-22 实现：`WithAll<T>/<T,T2>/WithEnabled<T>` 单组件直接引用 `ComponentTypes<T>.Share`（0 分配）；
+> 链式追加用 `Merge`（1 次 Array 分配，替代 List+ToArray 2 次）。
 
 `WithAll<T>()` 不能简单写为：
 

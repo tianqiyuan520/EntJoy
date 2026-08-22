@@ -63,7 +63,7 @@ namespace EntJoy
                 }
 
                 _matchingArchetypes.Add(archetype);
-                foreach (var chunk in archetype.GetChunks())
+                foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
                     {

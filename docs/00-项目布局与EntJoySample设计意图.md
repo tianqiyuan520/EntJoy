@@ -10,36 +10,42 @@
 ```
 EntJoy/
 ├── bin/                 ← 构建输出（EntJoy.dll、EntJoySample.exe、NativeDll.dll …）
-├── docs/                ← 设计文档（本文、gridsearch/ 场景分析、archive/ 历史；GPU offload 探索见 [10-GPU-Offload探索分析](10-GPU-Offload探索分析.md)）
-├── external/cpp-taskflow/ ← Taskflow Git 子模块（原生执行器的兼容/A-B 后端）
+├── docs/                ← 设计文档（本文、gridsearch/ 场景分析、archive/ 历史）
 ├── src/
-│   ├── EntJoy/          ← 托管层核心库（ECS、Query、JobSystem、Native Collections、数学）
-│   ├── EntJoy.SourceGenerator/ ← C# Source Generator（IJobEntity、QueryBuilder、EntitySystem）
-│   ├── NativeTranspiler/        ← C# → C++/ISPC 生成器与分析器（编译时 MSBuild Analyzer）
-│   ├── NativeTranspiler.Tasks/  ← MSBuild 自定义任务：调 CMake 编译生成的原生代码
-│   ├── NativeDll/              ← 原生运行时：C++ JobSystem、WorkerPool、Profiler、容器支持
-│   ├── NativeDll.Tests/        ← 原生单元测试（CMake + C++ Test）
+│   ├── EntJoy.Mathematics/  ← 数学库（float2/math，零依赖）
+│   ├── EntJoy.Collections/  ← 原生容器（NativeArray/NativeList/PersistentAllocator/TempAllocator）
+│   ├── EntJoy.Jobs/          ← JobSystem 托管层（NativeJobCore/NativeJobScheduler/ManagedJobScheduler）
+│   ├── EntJoy.ECS/           ← ECS 核心（Archetype/Chunk/Entity/World/Query/ChunkMemoryPool）
+│   ├── EntJoy.ECS.SourceGenerator/ ← IJobEntity 适配器 + 调度扩展生成
+│   ├── NativeTranspiler/        ← C# → C++/ISPC 生成器与分析器
+│   ├── NativeTranspiler.Tasks/  ← MSBuild 任务：调 CMake 编译
+│   ├── NativeTranspiler.Tests/  ← NativeTranspiler 单元测试
+│   ├── NativeDll/              ← C++ 运行时（调度/WorkerPool/ChaseLev/Profiler）
+│   ├── NativeDll.Tests/        ← C++ 单元测试
 │   ├── EntJoySample/           ← 样例工程（本文 §3 详述）
-│   └── Godot/                  ← Godot 4.4.1 集成工程（C#，复用同一套 NativeDll）
-└── JobSystem.cpp        ← ⚠️ 根目录遗留副本（87eb7fd 时期，无任何构建引用，可删）
+│   └── Godot/                  ← Godot 4.4.1 集成工程
+└── tools/                ← 独立基准工具（JobLibsBenchmark/NativeEntityTileBench/…）
 ```
 
 ## 2. 各工程角色
 
 | 工程 | 语言 | 角色 | 关键内容 |
 |---|---|---|---|
-| `src/EntJoy` | C# | 托管核心库 | ECS（Archetype/Chunk/Entity/Component/System/World）、Query、JobSystem（`JobScheduler`/`NativeJobScheduler`）、Collections（`NativeArray`/`NativeList`/`PersistentAllocator`） |
-| `src/EntJoy.SourceGenerator` | C# (Roslyn) | 编译时代码生成 | `IJobEntity` 调度扩展、`QueryBuilder`、`EntitySystem` |
+| `src/EntJoy.Mathematics` | C# | 数学库（零依赖） | `float2`/`math` |
+| `src/EntJoy.Collections` | C# | 原生容器 | `NativeArray`（含 ENTJOY_SAFETY 宏）、`NativeList`、`PersistentAllocator`、`TempAllocator`（per-thread 去全局锁）、`UnsafeUtility` |
+| `src/EntJoy.Jobs` | C# | JobSystem 托管层 | `NativeJobCore`（P/Invoke）、`NativeJobScheduler`（类型化门面）、`ManagedJobScheduler`（纯 C# MPMC）、`ManagedJobHandle`（代际防 ABA） |
+| `src/EntJoy.ECS` | C# | ECS 核心 | `Archetype`/`Chunk`/`Entity`/`World`/`Query`/`ChunkMemoryPool`、`NativeEcsScheduler`（chunk 调度）、`ChunkJobExtensions` |
+| `src/EntJoy.ECS.SourceGenerator` | C# (Roslyn) | 编译时代码生成 | `IJobEntity` 适配器 + 调度扩展（IIncrementalGenerator） |
 | `src/NativeTranspiler` | C# (Roslyn Analyzer) | C# → C++/ISPC 生成 | `CppJobGenerator`/`IspcGenerator`/`BindingsGenerator`、布局推导、SIMD 生成器 |
 | `src/NativeTranspiler.Tasks` | C# (MSBuild task) | 构建编排 | `NativeCompileTask`：调 CMake/MSVC/ISPC，增量编译生成物 |
-| `src/NativeDll` | C++ | 原生运行时 | `JobSystem.cpp`（调度）、`NativeWorkerPool.*`（worker 池）、`NativeContainers.h`、`NativeSIMD.h`/`SimdValue.h`、`Exports.*`（C ABI） |
-| `src/NativeDll.Tests` | C++ | 原生测试 | `JobSystemTests`/`AssistLifetimeTests` |
+| `src/NativeDll` | C++ | 原生运行时 | `JobSystem.cpp`（调度）、`NativeWorkerPool.*`（worker 池）、`ChaseLevScheduler.*`（Chase-Lev 工作窃取）、`SparseTileDeque.h`（无锁 deque）、`NativeContainers.h`、`Exports.*`（C ABI） |
+| `src/NativeDll.Tests` | C++ | 原生测试 | `JobSystemTests`/`AssistLifetimeTests`/`ChaseLevIntegrationTests`/`SparseTileDequeTests` |
 | `src/EntJoySample` | C# | 样例/基准（本文 §3） | 01–05 分类样例，唯一的 EXE 工程 |
 | `src/Godot` | C# (Godot.NET.Sdk) | 编辑器集成示例 | 复用 `EntJoy` + `NativeDll`，验证引擎内运行 |
 
 ### 2.1 构建链（一次 `dotnet build -c Release`）
 
-1. 编译 `EntJoy` + 两个 Roslyn Generator（`EntJoy.SourceGenerator`、`NativeTranspiler`）。
+1. 编译 `EntJoy.Mathematics` → `EntJoy.Collections` → `EntJoy.Jobs` → `EntJoy.ECS`，加上两个 Roslyn Generator（`EntJoy.ECS.SourceGenerator`、`NativeTranspiler`）。
 2. `NativeTranspiler` 把标记了 `[NativeTranspile]` 的 C# Job 生成 C# bindings + C++/ISPC 到 `EntJoySample/NativeTranspiler_Generated/`。
 3. `NativeCompileTask`（`NativeTranspiler.Tasks`）调 CMake → MSVC 编译 C++、ISPC 编译 SIMD kernel，产出 `NativeDll.dll`。
 4. `NativeDll.dll` 复制到仓库根 `bin/`，与 `EntJoySample.exe` 一起运行。

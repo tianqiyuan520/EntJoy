@@ -27,11 +27,12 @@ namespace EntJoy.Collections
             {
                 unchecked
                 {
+#if ENTJOY_SAFETY
                     SafetyHandleManager.CheckReadAndThrow(_safety);
                     if (index < 0 || index >= _length)
                         throw new IndexOutOfRangeException();
+#endif
                     return UnsafeUtility.ReadArrayElement<T>(_buffer, index);
-                    //return Unsafe.Read<T>((byte*)_buffer + index * sizeof(T));
                 }
             }
             [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -39,11 +40,12 @@ namespace EntJoy.Collections
             {
                 unchecked
                 {
+#if ENTJOY_SAFETY
                     SafetyHandleManager.CheckWriteAndThrow(_safety);
                     if (index < 0 || index >= _length)
                         throw new IndexOutOfRangeException();
+#endif
                     UnsafeUtility.WriteArrayElement(_buffer, index, value);
-                    //Unsafe.Write((byte*)_buffer + index * sizeof(T), value);
                 }
             }
         }

@@ -125,6 +125,22 @@ namespace EntJoy
 
         public int ChunkCount => _chunkList.Count;
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
+        /// <summary>
+        /// 内部 _chunkList 的零拷贝只读视图（v3 Phase 1.4：调度/查询热路径遍历
+        /// 不再经 GetChunks() 每次 new List&lt;Chunk&gt; 拷贝）。
+        /// 使用前提：同线程顺序模型——构建快照期间主线程不会并发结构变更；
+        /// job 并行执行期间对列表的后续修改不影响已构建的 ChunkJobData/EntityBatchData 快照。
+        /// </summary>
+        public ReadOnlySpan<Chunk> ChunkSpan
+        {
+            get
+            {
+                // .NET 10+ 签名：CollectionsMarshal.AsSpan(List<T>?) 为无 ref 重载
+                //（本机 SDK 10 下旧 ref 重载解析为 CS1615，见 2026-08-22 排查）。
+                // 返回 List 底层数组的零拷贝视图（List<T> 为引用类型，别名零拷贝）。
+                return CollectionsMarshal.AsSpan(_chunkList);
+            }
+        }
 
         private static int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
@@ -177,7 +193,10 @@ namespace EntJoy
 
             slotInChunk = targetChunk.EntityCount;
             targetChunk.AddEntity(entity);
-            chunkIndex = _chunkList.IndexOf(targetChunk);
+            // targetChunk 只可能是：①现有最后一块（ChunkCount>0 且未满时取的 _chunkList[^1]），
+            // 或 ②本方法内新建并追加到末尾的块。故其下标恒等于 Count-1——
+            // 用 IndexOf(targetChunk) 是每实体新增 O(chunkCount) 的线性扫描（v3 Phase 1.3 消除）。
+            chunkIndex = _chunkList.Count - 1;
             EntityCount++;
         }
 
@@ -208,8 +227,9 @@ namespace EntJoy
             // Ensure slab allocation
             if (_currentSlab == nint.Zero || _currentSlabOffset + _chunkStride > SLAB_SIZE)
             {
-                int slabAllocSize = SLAB_SIZE + SLAB_ALIGNMENT;
-                nint raw = Marshal.AllocHGlobal(slabAllocSize);
+                // ChunkMemoryPool.Allocate 返回 kBlockSize + kOverAlloc（128KB），
+                // 下面的对齐计算保证返回的 _currentSlab 满足 SLAB_ALIGNMENT（64KB）。
+                nint raw = ChunkMemoryPool.Allocate();
                 long addr = raw.ToInt64();
                 long aligned = (addr + SLAB_ALIGNMENT - 1) & ~(SLAB_ALIGNMENT - 1);
                 _currentSlab = new nint(aligned);
@@ -316,7 +336,7 @@ namespace EntJoy
         public void Dispose()
         {
             foreach (var raw in _slabs)
-                Marshal.FreeHGlobal(raw);
+                ChunkMemoryPool.Free(raw);
             _slabs.Clear();
             _chunkList.Clear();
         }

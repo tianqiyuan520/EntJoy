@@ -1,16 +1,16 @@
-﻿using EntJoy.JobSystem;
+﻿//using EntJoy.JobSystem;
 
-namespace EntJoySample.SchedulerCompareTest
-{
-    public static class Program
-    {
-        public static void Main()
-        {
-            NativeJobScheduler.Initialize();
-            NativeJobScheduler.PrewakeWorkersOnce();
+//namespace EntJoySample.SchedulerCompareTest
+//{
+//    public static class Program
+//    {
+//        public static void Main()
+//        {
+//            NativeJobScheduler.Initialize();
+//            NativeJobScheduler.PrewakeWorkersOnce();
 
-            using var sample = new SchedulerCompareSample();
-            sample.Run();
-        }
-    }
-}
+//            using var sample = new SchedulerCompareSample();
+//            sample.Run();
+//        }
+//    }
+//}

@@ -378,7 +378,7 @@ public static unsafe class NativeEcsScheduler
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
-                foreach (var c in arch.GetChunks())
+                foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
         }
@@ -535,7 +535,7 @@ public static unsafe class NativeEcsScheduler
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
-                foreach (var c in arch.GetChunks())
+                foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
         }
@@ -641,7 +641,7 @@ public static unsafe class NativeEcsScheduler
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
-                foreach (var c in arch.GetChunks())
+                foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
         }
@@ -895,7 +895,7 @@ public static unsafe class NativeEcsScheduler
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
-                foreach (var chunk in archetype.GetChunks())
+                foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
                     {
@@ -991,7 +991,7 @@ public static unsafe class NativeEcsScheduler
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
-                foreach (var chunk in archetype.GetChunks())
+                foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
                     {
@@ -1012,7 +1012,7 @@ public static unsafe class NativeEcsScheduler
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
-                foreach (var chunk in archetype.GetChunks())
+                foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
                     {
@@ -1094,7 +1094,7 @@ public static unsafe class NativeEcsScheduler
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
-                foreach (var chunk in archetype.GetChunks())
+                foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
                     {
