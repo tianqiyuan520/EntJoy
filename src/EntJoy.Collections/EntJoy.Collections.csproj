@@ -4,6 +4,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.Collections</AssemblyName>
+    <!-- ENTJOY_SAFETY：默认开启安全检查（边界+句柄）。
+         极致性能场景可通过删除此行或传入 -p:DefineConstants=ENTJOY_SAFETY_DISABLED 关闭。 -->
+    <DefineConstants>$(DefineConstants);ENTJOY_SAFETY</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Mathematics\EntJoy.Mathematics.csproj" />
