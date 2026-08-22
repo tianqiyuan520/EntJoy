@@ -100,7 +100,7 @@ namespace JobSystem
     extern int g_guidedK;
     extern int g_guidedFloor;
     extern bool g_useWorkStealing;   // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
-    extern bool g_mainThreadAssistEnabled;  // ENTJOY_ASSIST=0 关闭主线程协助（诊断）
+    extern bool g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
     extern thread_local ThreadStateCache t_stateCache;
 
     // 统计计数器（base 定义；Tiles 递增 / base GetStatsSnapshot 读取）。

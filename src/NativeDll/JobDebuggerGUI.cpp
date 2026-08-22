@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -114,6 +115,7 @@ namespace JobSystem
         static bool   g_dragging = false;
         static ImVec2 g_clickDownPos{};
         static double g_dragBaseRight = 0.0;
+        static float  g_dragBaseScrollY = 0.0f;   // 拖拽起点 child 竖向滚动位置
         static DebugSegment g_selected{};
         static bool   g_hasSelected = false;
         static bool   g_pauseFrozen = false;
@@ -295,13 +297,14 @@ namespace JobSystem
                     // 注意：此处绝不能 return —— BeginChild 尚未 EndChild，提前 return 会破坏 ImGui 栈
                 }
 
-                // ---- 拖拽平移：左键拖动改 viewRight；松开且几乎没动 → 点选 ----
+                // ---- 拖拽平移：左键拖动改 viewRight + 竖向滚动；松开且几乎没动 → 点选 ----
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered)
                 {
                     g_clickDown = true;
                     g_clickDownPos = mouse;
                     g_dragging = false;
                     g_dragBaseRight = g_viewRightMs;
+                    g_dragBaseScrollY = ImGui::GetScrollY();
                 }
                 if (g_clickDown && ImGui::IsMouseDown(ImGuiMouseButton_Left))
                 {
@@ -309,10 +312,14 @@ namespace JobSystem
                     const float distY = mouse.y - g_clickDownPos.y;
                     if (distX * distX + distY * distY >= 3.0f * 3.0f)
                     {
-                        if (!g_dragging) { g_dragging = true; g_dragBaseRight = g_viewRightMs; }
+                        if (!g_dragging) { g_dragging = true; g_dragBaseRight = g_viewRightMs; g_dragBaseScrollY = ImGui::GetScrollY(); }
                         g_timelinePaused = true;
                         g_debugPaused.store(true, std::memory_order_release); // 拖拽即停止采样
+                        // 水平：拖动内容 → 平移时间窗（向右拖=看更早时间=viewRight 减小）
                         g_viewRightMs = g_dragBaseRight + (double)(g_clickDownPos.x - mouse.x) / plotW * span;
+                        // 垂直：拖动内容 → 竖向滚动泳道（向下拖=看上方=scrollY 减小）。
+                        // 两个维度同时应用：对角拖拽时水平平移时间 + 垂直滚动泳道，平滑联动。
+                        ImGui::SetScrollY(g_dragBaseScrollY + (g_clickDownPos.y - mouse.y));
                     }
                 }
 
@@ -483,6 +490,40 @@ namespace JobSystem
                 ImGui::Text("Range    : %.3f ~ %.3f ms (相对程序启动)", ProcessElapsedMs(s.startMs), ProcessElapsedMs(s.endMs));
                 if (!s.isDirect && s.workers > 1)
                     ImGui::Text("整批占用 : %u 个 worker 并行执行", s.workers);
+
+                // ---- 整批最终总耗时：扫描可见段中同 batchId 的所有执行窗口 ----
+                // 端到端 = 最早窗口 start → 最晚窗口 end（真实运行跨度，含等待/窃取间隙）；
+                // 总执行 = 各窗口耗时之和（所有 worker 的实际 CPU 执行时间）。
+                if (s.batchId != 0)
+                {
+                    double batchStart = (std::numeric_limits<double>::max)();
+                    double batchEnd = (std::numeric_limits<double>::lowest)();
+                    double totalExecMs = 0.0;
+                    int segmentCount = 0;
+                    int distinctLanes = 0;
+                    int lastLane = -1;
+                    const unsigned int vseg = g_debugSegVisible.load(std::memory_order_acquire);
+                    const unsigned int vcnt = vseg < (unsigned int)kDebugSegmentMax ? vseg : (unsigned int)kDebugSegmentMax;
+                    const unsigned int vstartSlot = vseg - vcnt;
+                    for (unsigned int i = 0; i < vcnt; ++i)
+                    {
+                        const DebugSegment& seg = g_debugSegments[(vstartSlot + i) % kDebugSegmentMax];
+                        if (seg.batchId != s.batchId) continue;
+                        if (seg.startMs < batchStart) batchStart = seg.startMs;
+                        if (seg.endMs > batchEnd) batchEnd = seg.endMs;
+                        totalExecMs += seg.endMs - seg.startMs;
+                        ++segmentCount;
+                        if (seg.lane != lastLane) { ++distinctLanes; lastLane = seg.lane; }
+                    }
+                    if (segmentCount > 0)
+                    {
+                        ImGui::Separator();
+                        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                                           "整批最终总耗时 : %.3f ms (端到端)", batchEnd - batchStart);
+                        ImGui::Text("各窗口总执行  : %.3f ms (%d 个窗口 %d 条泳道)",
+                                    totalExecMs, segmentCount, distinctLanes);
+                    }
+                }
                 ImGui::Spacing();
             }
         }

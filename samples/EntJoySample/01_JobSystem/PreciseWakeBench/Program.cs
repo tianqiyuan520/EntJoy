@@ -88,7 +88,7 @@ namespace EntJoySample.PreciseWakeBench
             NativeJobScheduler.Initialize();
             NativeJobScheduler.PrewakeWorkersOnce();
 
-            // 读取环境变量（可开关 assist；guided 默认关）
+            // 读取环境变量设置 assist / guided（可选，也可直接用 API）
             string? assistEnv = Environment.GetEnvironmentVariable("ENTJOY_ASSIST");
             if (int.TryParse(assistEnv, out int aOn))
                 NativeJobScheduler.SetMainThreadAssistEnabled(aOn > 0);

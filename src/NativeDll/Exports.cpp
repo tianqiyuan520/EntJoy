@@ -497,7 +497,7 @@ extern "C"
         JobSystem::SetTimingDiagnosticsEnabled(enabled != 0);
     }
 
-    // 主线程 assist 运行时开关（ENTJOY_ASSIST 环境变量仍可在 Initialize 时覆盖）。
+    // 主线程 assist 运行时开关。默认关闭，由 API 控制。
     // g_mainThreadAssistEnabled 声明于 JobSystemInternal.h（namespace JobSystem 内）
     void JobSystem_SetMainThreadAssist(int enabled)
     {

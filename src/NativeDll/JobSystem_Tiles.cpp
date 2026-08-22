@@ -841,9 +841,6 @@ namespace JobSystem
     // 使用持久 per-worker deque（ChaseLevScheduler 持有），无需 per-batch 分配。
     // ============================================================
 
-    // ---- 死锁排查：在飞 ChaseLev batch 注册表 ----
-    // （已删除：标准 Chase-Lev 不需要共享注册表追踪）
-
     // ChaseLev 回调：供 ChaseLevScheduler::WorkerLoop 调用。
     // 因为 TryExecuteOneTile 是 static，通过此 trampoline 暴露给 ChaseLevScheduler。
     void ChaseLevExecuteTile(BatchState* batch, uint32_t tileIndex) noexcept
