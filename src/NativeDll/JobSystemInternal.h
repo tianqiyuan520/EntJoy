@@ -493,10 +493,5 @@ namespace JobSystem
     void TryFinalizeChaseLevBatch(BatchState* batch) noexcept;
     // ChaseLev 任务完成回调：pendingTasks--，归零时触发双条件退役检查。
     void ChaseLevTaskDone(BatchState* batch) noexcept;
-    // ---- 死锁排查：在飞 ChaseLev batch 注册表（SubmitBatch 登记 / 退役注销，互斥锁保护）----
-    // 死锁 dump 时打印每个未退役 batch 的 tr/pt/logicalCompleted，区分
-    // 「任务没执行完（tr>0）」与「执行完但退役被跳过（tr==0 && pt>0）」。
-    extern std::mutex g_chaseLevActiveMutex;
-    extern std::vector<BatchState*> g_chaseLevActiveBatches;
-    void DebugDumpChaseLevState() noexcept;
+    // （标准 Chase-Lev 不需要共享注册表追踪）
 } // namespace JobSystem

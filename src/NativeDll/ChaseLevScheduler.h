@@ -1,28 +1,26 @@
 #pragma once
 
-// ChaseLevScheduler — Chase-Lev 工作窃取调度器（crossbeam-deque 模型）。
+// ChaseLevScheduler — 标准 Chase-Lev 工作窃取调度器（crossbeam-deque 模型）。
 //
-// 模型（标准 Chase-Lev：共享入口 + 本地 Deque + 窃取）：
+// 模型（标准 Chase-Lev：Injector + 本地 Deque + 窃取）：
 //   - 每个 worker 持有一个 SparseTileDeque（LIFO pop，FIFO steal）——执行队列
-//   - 【共享活动 batch 注册表 + per-batch 原子游标】——任务入口。
-//     SubmitBatch 构建任务的 tile 范围表并注册 batch；worker 用
-//     batch->nextTile.fetch_add(kClaim) 动态认领一片，推入自己 deque 执行。
-//     这是标准 Chase-Lev 的 Injector 角色，但用原子游标替代 MPMC 环形队列：
-//     无全局队列 dequeue 争用（每次认领是分散到各 batch 的 relaxed fetch_add）。
-//   - 动态认领保证负载均衡（快 worker 多拿），避免"每 worker 私有注入队列"
-//     造成的 ① 任务锁死在私有队列不可被窃取（尾延迟爆炸）② 固定任务切分丢失
-//     动态认领（p50 回归）。
+//   - MPMCInjector（Vyukov 无锁 MPMC 环形队列）——跨线程提交入口
+//   - SubmitBatch 预切分为 RangeTask 并推入 Injector；worker 从 Injector 拉取
+//     推入自己 deque（owner-only PushBottom），标准 Chase-Lev 循环执行。
+//   - 无共享注册表、无 claimers handshake、无扫描开销。
 //
-// 生命周期（防 use-after-free）：
-//   Batch 退役需满足双条件 tilesRemaining==0（所有 tile 执行完）&& pendingTasks==0
-//   （所有任务执行完，无任务再引用本 storage）。认领临界安全：
-//   只从"已注册 batch"认领，注册到退役期间 pendingTasks>0（任务计数）守护 batch
-//   不回收，注册槽由退役方（TryFinalizeChaseLevBatch）清空——与旧路径一致。
+// 标准 Chase-Lev 协议：
+//   - PopBottom: owner-only，SeqCst fence 阻断 x86 store→load 重排
+//   - PushBottom: owner-only，release store
+//   - StealTop: thief，CAS + seq 校验（防数据未发布）
+//   - 本地操作零竞争（PopBottom 仅 owner 调用）
+//   - 窃取是低频事件（StealTop 仅在本地 deque 空时触发）
 
 #include "SparseTileDeque.h"
+#include "MPMCInjector.h"
+#include "RangeTaskPool.h"
 #include "JobSystemInternal.h"
 
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -53,25 +51,18 @@ namespace JobSystem
         ChaseLevScheduler(const ChaseLevScheduler&) = delete;
         ChaseLevScheduler& operator=(const ChaseLevScheduler&) = delete;
 
-        // 初始化：创建 workerCount 个持久 worker 线程 + deque。
+        // 初始化：创建 workerCount 个持久 worker 线程 + deque + Injector。
         bool Start(uint32_t workerCount, TileExecutor executor,
             TaskDoneFn taskDone, bool bindThreads = false);
         void Stop() noexcept;
 
-        // 提交一个 batch 的所有 tiles：注册该 batch 到共享认领表并唤醒所有 worker。
+        // 提交一个 batch 的所有 tiles：预切分为 RangeTask 推入 Injector 并唤醒 worker。
         // 可被任意线程调用（主线程或依赖 continuation 的 worker 线程）。
         // batch 的完成由 batch->tilesRemaining 归零驱动。
         void SubmitBatch(BatchState* batch) noexcept;
 
-        // 退役方（TryFinalizeChaseLevBatch）在 ReleaseBatch 之前调用——
-        // 从共享认领表注销 batch，并等正认领的 worker 完成（防 use-after-free）。
-        void UnregisterBatch(BatchState* batch) noexcept;
-
-        // 主线程协助执行：扫描共享认领表认领一片并执行（对齐旧 MPMC 的 assist——
-        // 主线程是第 16 个执行者，等 Complete 时也参与认领，兜底"最后一片被某个
-        // 被 OS 抢占的 worker 握着"导致的尾延迟）。返回是否执行了任务。
-        // 与 worker 相同的 claimers handshake（防 batch 退役 UAF）；执行整片后
-        // taskDone 一次（与 worker 的 cnt==1 内联路径记账一致）。
+        // 主线程协助执行：从 Injector 或其他 worker deque 窃取一个任务并执行。
+        // 返回是否执行了任务。
         bool TryAssistOne() noexcept;
 
         bool IsRunning() const noexcept;
@@ -80,80 +71,52 @@ namespace JobSystem
         // 获取指定 worker 的持久 deque（供调试/诊断）。
         SparseTileDeque* GetWorkerDeque(uint32_t workerIndex) noexcept;
 
-        // 诊断：dump 各 worker deque 状态（top/bottom/是否空）到 stderr。
+        // 诊断：dump 各 worker deque 状态到 stderr。
         void DumpState(const char* tag) const noexcept;
 
         // 诊断：每个 worker 当前正在执行的 batch（0=空闲）。worker 线程写入，dump 读取。
         std::atomic<uint64_t> workerCurrentBatch[kMaxTrackedWorkers];
 
-        // ---- 诊断计数（死锁/丢任务排查，relaxed 足够）----
-        // 任务流计数：PushBottom / PopBottom / StealTop 成功 / 实际执行任务数。
-        // dequePushed > dequePopped+dequeStolen 说明 deque 丢任务。
+        // ---- 诊断计数（relaxed 足够）----
         std::atomic<uint64_t> dequePushed[kMaxTrackedWorkers];
         std::atomic<uint64_t> dequePopped[kMaxTrackedWorkers];
         std::atomic<uint64_t> dequeStolen[kMaxTrackedWorkers];
         std::atomic<uint64_t> tasksExecuted[kMaxTrackedWorkers];
-        // 全局：认领任务总数（SubmitBatch 任务数） vs taskDone 调用总数。
         std::atomic<uint64_t> totalTasksPushed{ 0 };
         std::atomic<uint64_t> totalTasksDone{ 0 };
 
-        // 全局在飞任务计数（对齐 tejchid/job-system 的 runnable_）：
-        // SubmitBatch 注册时 += taskCount，每个任务 taskDone 后 -= 1。
-        // worker park 前读它：若 >0 说明全局仍有未认领任务（可能被别的 worker
-        // 短暂持有），做短自旋再 park —— 自愈式避免"唤醒竞态"（不用摸 worker 状态）。
+        // 全局在飞任务计数（park 谓词）：
+        // SubmitBatch += taskCount，每个任务 taskDone 后 -= 1。
+        // worker park 前读它：若 >0 说明全局仍有未认领任务，做短自旋再 park。
         std::atomic<int64_t> activeTasks{ 0 };
 
         // 唤醒纪元（C++20 atomic::wait）：per-worker 独立 stamp。
-        // SubmitBatch 按任务数只唤醒需要的 worker 数（对齐 Misaki 的
-        // SemaphoreSlim.Release(N) 精确唤醒），round-robin 游标轮换起始。
-        // 自愈保证（对齐 tejchid runnable_ 谓词）：activeTasks>0 时 worker 不 park
-        // （WorkerLoop 4.5）→ 任何"有活"时刻至少有一个醒着的 worker 在循环消费，
-        // 即使唤醒的 N 个都正忙/都错过，刚完成任务的 worker 也会继续 scan 而不睡；
-        // 因此"只唤醒 N 个"不会丢任务/死锁（09806fb 选择性唤醒失败时无此谓词）。
-        // 无 ResetEvent 丢失窗口：wait(旧 stamp) 在 bump 后必返。
         std::atomic<uint64_t> wakeStamp[kMaxTrackedWorkers];
         std::atomic<uint32_t> wakeRoundRobin{ 0 };
 
+        // 全局 Injector（标准 Chase-Lev 的任务入口）
+        static constexpr uint32_t kInjectorCapacity = 32768;
+        MPMCInjector<RangeTask*, kInjectorCapacity> injector_;
+
+        // 全局 RangeTask 池
+        static RangeTaskPool s_taskPool_;
+
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
-
-        // ---- 共享活动 batch 注册表（标准 Chase-Lev 的 Injector 角色）----
-        // SubmitBatch 注册 batch；worker 从注册表中的 batch 用 nextTile.fetch_add
-        // 动态认领 tile 范围。容量须覆盖并发在飞的 batch 数（依赖链 2-3 个；256 足够）。
-        // 认领临界防 UAF：batch 在 pendingTasks>0（任务计数）期间不回收；
-        // 退役方（TryFinalizeChaseLevBatch）先清注册槽再 ReleaseBatch，且用
-        // 槽上的 claimers 计数让"正在认领"的 worker 先完成（handshake）。
-        static constexpr uint32_t kMaxClaimableBatches = 256;
-        // 单次认领的 tile 数（对齐旧路径 kClaimBatch=4 的动态认领粒度）。
-        // 实测 kClaim=8/16 拖慢 GridSearch Query p50（粗粒度破坏不规则负载均衡），
-        // 保持 4。
+        // 每次认领的 tile 数（预切分粒度）
         static constexpr uint32_t kClaimBatchSize = 4;
-        // park 前自旋窗（条件启用见 WorkerLoop；实测任何条件自旋在共享注册表模型下
-        // 均拖慢 p95/tail，保持 0 = 直接 park）。
-        static constexpr uint32_t kParkSpinMax = 0;
-
-        // 注册槽。batch 原子指针 + claimers 计数（清槽前等 claimers==0）。
-        struct ClaimSlot
-        {
-            std::atomic<BatchState*> batch{ nullptr };
-            std::atomic<uint32_t> claimers{ 0 };   // 认领中的 worker 数（退役 handshake）
-        };
-        struct alignas(64) ClaimSlotPadded : ClaimSlot {};
-        std::array<ClaimSlotPadded, kMaxClaimableBatches> claimSlots_{};
-
-        // 已用槽位高水位（只增不减；worker 空转只扫描 [0, highWater) 而非全部 256 槽）。
-        std::atomic<uint32_t> claimSlotHighWater_{ 0 };
-
-        // 注册 / 注销 batch。注销由退役方调用（须在 ReleaseBatch 之前）。
-        void RegisterBatch(BatchState* batch) noexcept;
-        // worker 从注册表认领一片 tile 范围到任务（返回 false = 无可用任务）。
-        bool ClaimRange(BatchState* batch, uint32_t& first, uint32_t& count) noexcept;
 
         struct WorkerContext
         {
             std::unique_ptr<SparseTileDeque> deque;
             std::thread thread;
         };
+
+        // 执行一个 RangeTask 并释放回池
+        void ExecuteAndRelease(RangeTask* task, uint32_t workerIndex) noexcept;
+
+        // 从 Injector 或其他 worker 窃取一个任务并执行（TryAssistOne 内部）
+        bool StealAndExecute(uint32_t workerIndex) noexcept;
 
         void WorkerLoop(uint32_t workerIndex, WorkerContext& ctx) noexcept;
 

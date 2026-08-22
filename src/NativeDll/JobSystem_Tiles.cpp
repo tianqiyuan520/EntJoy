@@ -726,11 +726,6 @@ namespace JobSystem
             batch->publishedAt.store(publishedAt, std::memory_order_release);
             g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
 
-            {
-                std::lock_guard<std::mutex> lock(g_chaseLevActiveMutex);
-                g_chaseLevActiveBatches.push_back(batch);
-            }
-
             g_chaseLevScheduler->SubmitBatch(batch);
         }
         else
@@ -846,26 +841,7 @@ namespace JobSystem
     // ============================================================
 
     // ---- 死锁排查：在飞 ChaseLev batch 注册表 ----
-    std::mutex g_chaseLevActiveMutex;
-    std::vector<BatchState*> g_chaseLevActiveBatches;
-
-    void DebugDumpChaseLevState() noexcept
-    {
-        std::lock_guard<std::mutex> lock(g_chaseLevActiveMutex);
-        std::fprintf(stderr, "[ChaseLevActiveBatches] count=%zu\n",
-            g_chaseLevActiveBatches.size());
-        for (auto* b : g_chaseLevActiveBatches)
-        {
-            std::fprintf(stderr,
-                "  batch id=%llu tileCount=%u tr=%u pt=%u logicalCompleted=%d finalized=%d\n",
-                (unsigned long long)b->diagnosticId, b->tileCount,
-                b->tilesRemaining.load(std::memory_order_relaxed),
-                b->pendingTasks.load(std::memory_order_relaxed),
-                (int)b->logicalCompleted.load(std::memory_order_relaxed),
-                (int)b->finalized.load(std::memory_order_relaxed));
-        }
-        std::fflush(stderr);
-    }
+    // （已删除：标准 Chase-Lev 不需要共享注册表追踪）
 
     // ChaseLev 回调：供 ChaseLevScheduler::WorkerLoop 调用。
     // 因为 TryExecuteOneTile 是 static，通过此 trampoline 暴露给 ChaseLevScheduler。
@@ -893,18 +869,8 @@ namespace JobSystem
         // 若 ReleaseState 在块外，两者都会执行 → double release → use-after-free。
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
-            // 注销注册表（必须先于 ReleaseBatch：注册表持有 batch 指针，
-            // 注销后 storage 才允许回收复用）。UnregisterBatch 内部等 claimers==0，
-            // 保证无 worker 仍在认领临界内引用本 batch。
-            {
-                std::lock_guard<std::mutex> lock(g_chaseLevActiveMutex);
-                auto it = std::find(g_chaseLevActiveBatches.begin(),
-                    g_chaseLevActiveBatches.end(), batch);
-                if (it != g_chaseLevActiveBatches.end())
-                    g_chaseLevActiveBatches.erase(it);
-            }
-            if (g_chaseLevScheduler)
-                g_chaseLevScheduler->UnregisterBatch(batch);
+            // 标准 Chase-Lev：不需要 UnregisterBatch（无共享注册表）
+            // RangeTask 对象在执行后立即释放回池，不持有 batch 引用
             if (batch->cleanup)
             {
                 batch->cleanup(batch->context);

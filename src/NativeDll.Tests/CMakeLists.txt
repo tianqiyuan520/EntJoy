@@ -57,6 +57,10 @@ add_executable(SparseTileDequeTrace
     SparseTileDequeTrace.cpp
 )
 
+add_executable(MPMCInjectorTests
+    MPMCInjectorTests.cpp
+)
+
 target_include_directories(JobSystemTests PRIVATE
     ../NativeDll
 )
@@ -85,6 +89,10 @@ target_include_directories(SparseTileDequeTrace PRIVATE
     ../NativeDll
 )
 
+target_include_directories(MPMCInjectorTests PRIVATE
+    ../NativeDll
+)
+
 if(MSVC)
     # 源文件为 UTF-8 无 BOM（含中文注释）。不加 /utf-8 时 MSVC 按本地代码页
     # (936) 解析，多字节注释破坏行结构，报出大量与磁盘内容对不上的伪错误。
@@ -108,4 +116,7 @@ if(MSVC)
 
     target_compile_options(SparseTileDequeTrace PRIVATE /utf-8 /Od /arch:AVX2 /MP)
     target_compile_definitions(SparseTileDequeTrace PRIVATE NOMINMAX)
+
+    target_compile_options(MPMCInjectorTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(MPMCInjectorTests PRIVATE NDEBUG NOMINMAX)
 endif()
