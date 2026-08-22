@@ -214,6 +214,8 @@ extern "C" {
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
     JOB_API void JobSystem_ResetStats();
     JOB_API void JobSystem_SetTimingDiagnostics(int enabled);
+    JOB_API void JobSystem_SetMainThreadAssist(int enabled);
+    JOB_API void JobSystem_SetWorkerAffinity(int enabled);
 
     /** 
      * 调度多个 Chunk 任务，每个 Chunk 并行执行一次 func 回调。

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -156,8 +156,8 @@ public static unsafe partial class NativeJobScheduler
     /// </summary>
     public static int TilesPerWorker = 26;
 
-    /// <summary>Guided（chunk ∝ 剩余工作量）tile 调度。</summary>
-    public static bool GuidedEnabled = true;
+    /// <summary>Guided（chunk ∝ 剩余工作量）tile 调度。默认关闭（uniform 更通用）。</summary>
+    public static bool GuidedEnabled = false;
     public static int GuidedK = 4;
     public static int GuidedFloor = 16;
 
@@ -183,6 +183,13 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 生命周期 ========================
     public static void Initialize(int numThreads = 0)
     {
+        // ENTJOY_JOB_WORKERS 环境变量可覆盖 worker 数（0=自动 PC-1）
+        if (numThreads == 0)
+        {
+            string? env = Environment.GetEnvironmentVariable("ENTJOY_JOB_WORKERS");
+            if (int.TryParse(env, out int w) && w >= 0)
+                numThreads = w;
+        }
         NativeJobCore.JobSystem_Initialize(numThreads);
         RegisterPersistentAllocator();
         NativeJobCore.RegisterCurrentBatchIdCallback();
@@ -423,6 +430,21 @@ public static unsafe partial class NativeJobScheduler
 
     // ======================== 面板 / 状态 ========================
     public static NativeJobSystemStats GetStats() => NativeJobCore.JobSystem_GetStats();
+
+    /// <summary>运行时开关主线程 assist（第 N+1 个执行者）。默认关闭。</summary>
+    public static void SetMainThreadAssistEnabled(bool enabled) =>
+        NativeJobCore.JobSystem_SetMainThreadAssist(enabled);
+
+    /// <summary>运行时开关 worker CPU 亲和性。默认关闭（OS 自由调度）。</summary>
+    public static void SetWorkerAffinityEnabled(bool enabled) =>
+        NativeJobCore.JobSystem_SetWorkerAffinity(enabled);
+
+    /// <summary>运行时开关 guided tile 调度（chunk ∝ 剩余）。默认关闭（uniform 更通用）。</summary>
+    public static void SetGuidedEnabled(bool enabled)
+    {
+        GuidedEnabled = enabled;
+        NativeJobCore.JobSystem_ConfigureGuided(enabled ? 1 : 0, GuidedK, GuidedFloor);
+    }
     public static void ResetStats() => NativeJobCore.JobSystem_ResetStats();
     public static void SetTimingDiagnosticsEnabled(bool enabled) =>
         NativeJobCore.JobSystem_SetTimingDiagnostics(enabled);

@@ -100,6 +100,7 @@ namespace JobSystem
     extern int g_guidedK;
     extern int g_guidedFloor;
     extern bool g_useWorkStealing;   // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
+    extern bool g_mainThreadAssistEnabled;  // ENTJOY_ASSIST=0 关闭主线程协助（诊断）
     extern thread_local ThreadStateCache t_stateCache;
 
     // 统计计数器（base 定义；Tiles 递增 / base GetStatsSnapshot 读取）。
@@ -493,5 +494,7 @@ namespace JobSystem
     void TryFinalizeChaseLevBatch(BatchState* batch) noexcept;
     // ChaseLev 任务完成回调：pendingTasks--，归零时触发双条件退役检查。
     void ChaseLevTaskDone(BatchState* batch) noexcept;
+    // 记录 worker 进入批次的时间（firstWorkerAt/lastWorkerAt），供 timing 诊断。
+    void ChaseLevRecordWorkerEntry(BatchState* batch) noexcept;
     // （标准 Chase-Lev 不需要共享注册表追踪）
 } // namespace JobSystem

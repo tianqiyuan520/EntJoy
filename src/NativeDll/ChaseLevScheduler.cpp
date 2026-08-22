@@ -107,6 +107,9 @@ namespace JobSystem
                 // 从 deque 窃取的是 TileTask，需要转换为 RangeTask 处理
                 if (tileTask.batch && tileTask.tileCount > 0)
                 {
+                    // 记录 worker 进入批次时间（供 timing 诊断）
+                    ChaseLevRecordWorkerEntry(tileTask.batch);
+
                     // 创建临时 RangeTask 执行（不走池，因为是从 deque 窃取的）
                     RangeTask tempTask;
                     tempTask.batch = tileTask.batch;
@@ -249,13 +252,26 @@ namespace JobSystem
         if (wc == 0) return;
 
         const uint32_t tileCount = batch->tileCount;
-        const uint32_t taskCount = (tileCount + kClaimBatchSize - 1) / kClaimBatchSize;
+
+        // 池容量保险（AI 审查 3.1）：极端大 batch（tileCount 极大）时增大
+        // claimBatch 粒度，保证 taskCount ≤ 池容量/2（游标池不回收，回绕
+        // 复用未释放 task → 竞态；此保险把单批上限钳在安全区间）。
+        // 正常场景（GridSearch/S5 ~100 task）claimBatch 保持 4，零开销。
+        uint32_t claimBatch = kClaimBatchSize;
+        if (tileCount / kClaimBatchSize >= RangeTaskPool::kPoolSize / 2)
+        {
+            while (claimBatch < tileCount &&
+                   (tileCount + claimBatch - 1) / claimBatch >=
+                       RangeTaskPool::kPoolSize / 2)
+                claimBatch *= 2;
+        }
+        const uint32_t taskCount = (tileCount + claimBatch - 1) / claimBatch;
 
         // 预置 pendingTasks
         batch->pendingTasks.store(taskCount, std::memory_order_release);
         activeTasks.fetch_add(static_cast<int64_t>(taskCount), std::memory_order_acq_rel);
 
-        // 预切分为 RangeTasks 并推入 Injector
+        // 预切分为 RangeTasks 并推入 Injector（满时有限退避，非忙等）
         for (uint32_t i = 0; i < taskCount; ++i)
         {
             RangeTask* task = s_taskPool_.Acquire();
@@ -263,19 +279,33 @@ namespace JobSystem
             if (!task) continue;
 
             task->batch = batch;
-            task->firstTile = i * kClaimBatchSize;
-            task->tileCount = std::min(kClaimBatchSize, tileCount - task->firstTile);
+            task->firstTile = i * claimBatch;
+            task->tileCount = std::min(claimBatch, tileCount - task->firstTile);
 
-            while (!injector_.Push(task))
-                std::this_thread::yield();
+            // Injector 满：有限退避（yield + pause），避免提交线程 busy-loop
+            if (!injector_.Push(task))
+            {
+                uint32_t backoff = 0;
+                while (!injector_.Push(task))
+                {
+                    ++backoff;
+                    if ((backoff & 15) == 0)
+                        std::this_thread::yield();
+                    else
+                        CpuPause();
+                    if (backoff > 4096) { std::this_thread::yield(); backoff = 0; }
+                }
+            }
         }
 
         totalTasksPushed.fetch_add(taskCount, std::memory_order_relaxed);
 
-        // 唤醒需要的 worker 数
-        const uint32_t needWake = std::min(wc, taskCount);
-        const uint32_t start = wakeRoundRobin.fetch_add(needWake, std::memory_order_relaxed) % wc;
-        for (uint32_t i = 0; i < needWake; ++i)
+        // 唤醒所有 worker（广播）：精确唤醒（只醒 needWake 个）实测在高竞争场景
+        // 触发 35ms 滞留尖峰（部分 worker 未醒→任务锁 Injector 等 spin 超时），
+        // 与文档附9/09806fb 的选择性唤醒竞态一致。wake-all 最稳：
+        // 未找到工作的 worker 立即重新 park，广播唤醒开销可忽略。
+        const uint32_t start = wakeRoundRobin.fetch_add(wc, std::memory_order_relaxed) % wc;
+        for (uint32_t i = 0; i < wc; ++i)
         {
             const uint32_t idx = (start + i) % wc;
             wakeStamp[idx].fetch_add(1, std::memory_order_release);
@@ -292,6 +322,40 @@ namespace JobSystem
         if (!running_.load(std::memory_order_acquire)) return false;
         // 主线程没有 workerIndex，用 0 作为诊断索引（不影响正确性）
         return StealAndExecute(0);
+    }
+
+    // ============================================================
+    // ApplyAffinity — 运行时切换 worker CPU 亲和性
+    // ============================================================
+
+    void ChaseLevScheduler::ApplyAffinity(bool enabled) noexcept
+    {
+        bindThreads_ = enabled;
+#if defined(_WIN32)
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        for (uint32_t i = 0; i < workers_.size(); ++i)
+        {
+            auto* ctx = workers_[i].get();
+            if (!ctx->thread.joinable()) continue;
+            HANDLE handle = ctx->thread.native_handle();
+            if (enabled)
+            {
+                // 绑定逻辑核心 1+i（与 WorkerLoop 启动时一致）
+                GROUP_AFFINITY affinity{};
+                affinity.Group = 0;
+                affinity.Mask = static_cast<KAFFINITY>(1) << (1 + i);
+                ::SetThreadGroupAffinity(handle, &affinity, nullptr);
+            }
+            else
+            {
+                // 清除：允许当前 group 所有核心
+                GROUP_AFFINITY affinity{};
+                affinity.Group = 0;
+                affinity.Mask = static_cast<KAFFINITY>(~static_cast<KAFFINITY>(0));
+                ::SetThreadGroupAffinity(handle, &affinity, nullptr);
+            }
+        }
+#endif
     }
 
     // ============================================================
@@ -318,6 +382,7 @@ namespace JobSystem
         TileTask task;
         uint64_t seenStamp = 0;
         (void)seenStamp;
+        uint32_t idleSpin = 0;  // 有界条件自旋计数（tejchid runnable_ 谓词）
 
         while (true)
         {
@@ -330,6 +395,9 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                // 记录 worker 进入批次时间（供 timing 诊断）
+                ChaseLevRecordWorkerEntry(task.batch);
+
                 // 执行从 deque 取出的任务
                 if (workerIndex < kMaxTrackedWorkers)
                     tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
@@ -398,6 +466,9 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                // 记录 worker 进入批次时间（供 timing 诊断）
+                ChaseLevRecordWorkerEntry(task.batch);
+
                 if (workerIndex < kMaxTrackedWorkers)
                     tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
 
@@ -448,12 +519,34 @@ namespace JobSystem
                 break;
             }
 
-            // ---- 5. Park — 等待唤醒 ----
+            // ---- 5. Park — 有界自旋等待 + atomic::wait ----
+            // 有界自旋（跨平台通用，零竞争：只读 activeTasks + 自己的 wakeStamp）：
+            // 批间隙（Complete→Schedule）内 SubmitBatch 会 bump wakeStamp，
+            // 本 worker 自旋检测到 stamp 变化立即回主循环认领；
+            // 自旋阶段【不】executor 找活（主循环刚找过，避免 15 worker 竞争）。
+            // activeTasks==0 或自旋超时 → park（wait 在 stamp 变化时立即返回）。
             if (activeTasks.load(std::memory_order_acquire) > 0)
             {
-                // 还有任务在飞，短自旋
-                CpuPause();
-                continue;
+                uint64_t spinStamp = 0;
+                if (workerIndex < kMaxTrackedWorkers)
+                    spinStamp = wakeStamp[workerIndex].load(std::memory_order_acquire);
+                uint32_t s = 0;
+                while (s < 2048)  // ~90µs：覆盖短批间隙，防空转烧 CPU
+                {
+                    // 新批唤醒（stamp 变化）→ 回主循环认领
+                    if (workerIndex < kMaxTrackedWorkers &&
+                        wakeStamp[workerIndex].load(std::memory_order_acquire) != spinStamp)
+                        break;
+                    // 任务全部消失 → 直接 park
+                    if (activeTasks.load(std::memory_order_acquire) == 0)
+                        break;
+                    CpuPause();
+                    ++s;
+                }
+                // 自旋结束：stamp 变化（有活）→ 回主循环；否则落 park
+                if (workerIndex < kMaxTrackedWorkers &&
+                    wakeStamp[workerIndex].load(std::memory_order_acquire) != spinStamp)
+                    continue;
             }
 
 #if defined(_WIN32)

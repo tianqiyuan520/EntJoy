@@ -479,6 +479,8 @@ namespace JobSystem
     wait_for_completion:
         // Phase 2: dense spin first (never yield before we've given the job a
         // chance to complete — yield triggers a full OS context switch).
+        // Chase-Lev 模式：主线程在 spin 期间即参与认领执行（第 16 个执行者），
+        // 不等 1ms 超时——消除"慢 worker 被 OS 抢占 + 主线程干等 1ms"的尾延迟。
         for (int i = 0; i < 2048; i++)
         {
             if (_state->completed.load(std::memory_order_acquire))
@@ -486,6 +488,12 @@ namespace JobSystem
                 WaitBackendRetired(_state);
             RethrowBatchException(_state);
                 return;
+            }
+            // Chase-Lev：spin 期间协助认领（每 16 次，更积极兜底慢 worker）
+            if (g_mainThreadAssistEnabled && g_useWorkStealing &&
+                g_chaseLevScheduler && (i & 15) == 0)
+            {
+                if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领，继续 spin */ }
             }
             CpuPause();
         }
@@ -508,6 +516,11 @@ namespace JobSystem
             RethrowBatchException(_state);
                 return;
             }
+            if (g_mainThreadAssistEnabled && g_useWorkStealing &&
+                g_chaseLevScheduler && (i & 15) == 0)
+            {
+                if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领 */ }
+            }
             CpuPause();
         }
         if (_state->completed.load(std::memory_order_acquire))
@@ -527,22 +540,13 @@ namespace JobSystem
         // 第 16 个执行者兜底"最后一片被 OS 抢占 worker 握着"的尾延迟）。
         g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
         g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
-        constexpr auto kCompleteRevisit = std::chrono::milliseconds(1); // 1ms 回访间隔
+        constexpr auto kCompleteRevisit = std::chrono::microseconds(256); // 256µs 回访间隔（更快兜底）
         while (!_state->completed.load(std::memory_order_acquire))
         {
-            {
-                std::unique_lock<std::mutex> lock(_state->mtx);
-                if (_state->completedCv.wait_for(lock, kCompleteRevisit,
-                        [state = _state] { return state->completed.load(std::memory_order_acquire); }))
-                    break;   // 谓词满足：completed 已置位
-            }
-            // 超时未完成：可能"完成依赖本线程"，回访依赖链协助推进。
-            if (_state->completed.load(std::memory_order_acquire)) break;
-            // Chase-Lev 主线程协助：认领执行共享注册表中的任务（兜底慢 worker）。
-            // 有界（每轮最多 16 片）：避免链条级联时主线程无限 assist 不回查
-            // completed（此前 1/20 超时根因）；16 片足以兜底"最后一片被慢 worker
-            // 握着"的常见场景（每 batch 任务数 = tileCount/4，16 片可完成 64 tile）。
-            if (g_useWorkStealing && g_chaseLevScheduler)
+            // 先 assist 再 wait：主线程持续认领执行（第 16 个执行者），
+            // 避免"干等 256µs 才再干活的停顿窗口"。循环内每轮最多 16 片，
+            // 防止链条级联时主线程无限 assist 不回查 completed。
+            if (g_mainThreadAssistEnabled && g_useWorkStealing && g_chaseLevScheduler)
             {
                 for (int assistN = 0; assistN < 16; ++assistN)
                 {
@@ -552,6 +556,18 @@ namespace JobSystem
             }
             if (_state->dependency || !_state->dependencies.empty())
                 AssistDependencyChain(_state);   // 内部 10ms budget + worked 重置
+
+            if (_state->completed.load(std::memory_order_acquire)) break;
+
+            // 无事可做才 wait（短超时兜底）
+            {
+                std::unique_lock<std::mutex> lock(_state->mtx);
+                if (!_state->completedCv.wait_for(lock, kCompleteRevisit,
+                        [state = _state] { return state->completed.load(std::memory_order_acquire); }))
+                {
+                    // 超时：继续 assist 循环
+                }
+            }
         }
         WaitBackendRetired(_state);
             RethrowBatchException(_state);

@@ -1,6 +1,8 @@
 #include "Exports.h"
 #include "JobSystem.h"
 #include "JobSystemInternal.h"
+#include "ChaseLevScheduler.h"
+#include "ThreadAffinity.h"
 #include "NativeWorkerPool.h"
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
@@ -493,6 +495,30 @@ extern "C"
     void JobSystem_SetTimingDiagnostics(int enabled)
     {
         JobSystem::SetTimingDiagnosticsEnabled(enabled != 0);
+    }
+
+    // 主线程 assist 运行时开关（ENTJOY_ASSIST 环境变量仍可在 Initialize 时覆盖）。
+    // g_mainThreadAssistEnabled 声明于 JobSystemInternal.h（namespace JobSystem 内）
+    void JobSystem_SetMainThreadAssist(int enabled)
+    {
+        JobSystem::g_mainThreadAssistEnabled = enabled != 0;
+    }
+
+    // CPU 亲和性运行时开关：立即应用到主线程 + 所有 worker。
+    void JobSystem_SetWorkerAffinity(int enabled)
+    {
+        JobSystem::g_workerAffinityEnabled.store(
+            enabled != 0, std::memory_order_relaxed);
+        // worker：遍历已启动线程设置/清除亲和性
+        if (JobSystem::g_chaseLevScheduler)
+            JobSystem::g_chaseLevScheduler->ApplyAffinity(enabled != 0);
+        // 主线程：绑定核心 0 或清除
+#if defined(_WIN32)
+        if (enabled)
+            JobSystem::BindCurrentThreadToLogicalProcessor(0);
+        else
+            JobSystem::ClearCurrentThreadAffinity();
+#endif
     }
 
     // ======================== Profiler API ========================
