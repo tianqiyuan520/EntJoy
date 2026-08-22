@@ -89,8 +89,10 @@ namespace JobSystem
     // ============================================================
     static bool ResolveWorkerAffinityEnabled() noexcept
     {
-        // 默认开启 CPU 亲和性：worker 绑定固定核心（跳过核心0留给主线程），
-        // 降低 OS 调度抖动 / 核心迁移。ENTJOY_WORKER_AFFINITY=0 可关闭。
+        // 默认关闭 CPU 亲和性：worker 由 OS 自由调度（SMT 机器上避免
+        // 每物理核心 2 线程死绑共享执行单元；实测 AMD 8845H 8物理16逻辑
+        // 关闭绑定 p99 0.83ms vs 绑定 1.0-1.2ms）。ENTJOY_WORKER_AFFINITY=1
+        // 可显式开启（无 SMT / 独占机器场景）。
         std::string value;
 #if defined(_WIN32)
         char* raw = nullptr;
@@ -106,8 +108,8 @@ namespace JobSystem
 #endif
         std::transform(value.begin(), value.end(), value.begin(),
             [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        // 空（未设置）→ 默认开启。显式 "0"/"off" 关闭。
-        return value != "0" && value != "false" && value != "off";
+        // 显式 "1"/"true"/"on" 才开启；其余（含未设置/0/off）默认关闭。
+        return value == "1" || value == "true" || value == "on";
     }
 
     void Scheduler::Initialize(int numThreads)
@@ -124,9 +126,37 @@ namespace JobSystem
 #endif
         {
             std::lock_guard<std::mutex> lock(g_schedulerMutex);
-            int resolved = numThreads > 0 ? numThreads :
-                (g_numThreads > 0 ? g_numThreads :
-                    std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1));
+            int resolved;
+            int envWorkers = 0;
+            // 默认 worker 数 = 逻辑核心-1（Unity 式，GridSearch 100K 大任务吞吐最优）。
+            // SMT 竞争由"自适应亲和（SMT→关闭绑定）"消化，无需限制 worker ≤ 物理核心
+            // （实测 7 物理-1 worker p50 0.68 vs 15 worker 0.60，吞吐损失更明显）。
+            // ENTJOY_JOB_WORKERS>0 显式覆盖。
+            {
+                    std::string value;
+#if defined(_WIN32)
+                    char* raw = nullptr;
+                    std::size_t rawLength = 0;
+                    if (_dupenv_s(&raw, &rawLength, "ENTJOY_JOB_WORKERS") == 0 && raw)
+                    {
+                        value.assign(raw);
+                        std::free(raw);
+                    }
+#else
+                    if (const char* raw = std::getenv("ENTJOY_JOB_WORKERS"))
+                        value.assign(raw);
+#endif
+                    int v = 0;
+                    if (!value.empty())
+                    {
+                        try { v = std::stoi(value); } catch (...) { v = 0; }
+                    }
+                    if (v > 0) envWorkers = v;
+            }
+            resolved = numThreads > 0 ? numThreads :
+                (envWorkers > 0 ? envWorkers :
+                    std::max(1, static_cast<int>(
+                        std::thread::hardware_concurrency()) - 1));
             if (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning())
                 return;
             g_numThreads = resolved;
@@ -153,6 +183,28 @@ namespace JobSystem
                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
                 // 默认 true（新路径）；显式 "0"/"false"/"off" 关闭。
                 g_useWorkStealing = (value != "0" && value != "false" && value != "off");
+            }
+
+            // 读取 ENTJOY_ASSIST 环境变量：默认开启主线程协助；
+            // 显式 "0"/"false"/"off" 关闭（A/B 诊断：纯 worker 模式）。
+            {
+                std::string value;
+#if defined(_WIN32)
+                char* raw = nullptr;
+                std::size_t rawLength = 0;
+                if (_dupenv_s(&raw, &rawLength, "ENTJOY_ASSIST") == 0 && raw)
+                {
+                    value.assign(raw);
+                    std::free(raw);
+                }
+#else
+                if (const char* raw = std::getenv("ENTJOY_ASSIST"))
+                    value.assign(raw);
+#endif
+                std::transform(value.begin(), value.end(), value.begin(),
+                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                g_mainThreadAssistEnabled =
+                    (value != "0" && value != "false" && value != "off");
             }
 
             // Pin the calling thread (main thread) to logical core 0 so it

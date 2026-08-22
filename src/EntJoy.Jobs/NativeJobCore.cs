@@ -110,6 +110,8 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
+        private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetMainThreadAssist;
+        private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetWorkerAffinity;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_LaunchGUI;
         private static delegate* unmanaged[Cdecl]<byte*, uint, void> _jobSystem_RecordDirectCall;
         private static delegate* unmanaged[Cdecl]<byte*, uint, ulong> _jobSystem_BeginDirectCall;
@@ -321,6 +323,10 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
             _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_SetTimingDiagnostics");
+            _jobSystem_SetMainThreadAssist = (delegate* unmanaged[Cdecl]<int, void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SetMainThreadAssist");
+            _jobSystem_SetWorkerAffinity = (delegate* unmanaged[Cdecl]<int, void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SetWorkerAffinity");
             _jobSystem_LaunchGUI = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobDebuggerGUI_Launch");
             _jobSystem_RecordDirectCall = (delegate* unmanaged[Cdecl]<byte*, uint, void>)
@@ -534,6 +540,16 @@ namespace EntJoy.JobSystem
         {
             EnsureNativeLoaded();
             _jobSystem_SetTimingDiagnostics(enabled ? 1 : 0);
+        }
+        internal static void JobSystem_SetMainThreadAssist(bool enabled)
+        {
+            EnsureNativeLoaded();
+            _jobSystem_SetMainThreadAssist(enabled ? 1 : 0);
+        }
+        internal static void JobSystem_SetWorkerAffinity(bool enabled)
+        {
+            EnsureNativeLoaded();
+            _jobSystem_SetWorkerAffinity(enabled ? 1 : 0);
         }
 
         internal static void JobSystem_LaunchGUI()

@@ -65,6 +65,10 @@ namespace JobSystem
         // 返回是否执行了任务。
         bool TryAssistOne() noexcept;
 
+        // 运行时切换 worker CPU 亲和性（enabled=true 绑定核心 1+i；false 清除）。
+        // 应用到所有已启动的 worker 线程。主线程绑定核心 0 由调用方处理。
+        void ApplyAffinity(bool enabled) noexcept;
+
         bool IsRunning() const noexcept;
         uint32_t WorkerCount() const noexcept;
 

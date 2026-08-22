@@ -75,11 +75,9 @@ public class TestGridSearch
     public static void Main()
     {
         NativeJobScheduler.Initialize();
-        NativeJobScheduler.PrewakeWorkersOnce(); // 镜像 IJobChunkMoveCompareSample.cs:498
+        NativeJobScheduler.PrewakeWorkersOnce();
 
-        // tile 粒度直接改字段：GridSearch2D.QueryBatchSize（0=走 ResolveChunkSize）、
-        // NativeJobScheduler.TilesPerWorker（0=用原生默认 16）。DIAG 行显示生效值。
-        int tilesPerWorker = NativeJobScheduler.TilesPerWorker > 0 ? NativeJobScheduler.TilesPerWorker : 16; // 16 = 原生 kDefaultTilesPerWorker
+        int tilesPerWorker = NativeJobScheduler.TilesPerWorker > 0 ? NativeJobScheduler.TilesPerWorker : 16;
 
         int warmup = ReadPositiveEnvironmentInt("ENTJOY_BENCH_WARMUP", DefaultWarmup);
         int measure = ReadPositiveEnvironmentInt("ENTJOY_BENCH_FRAMES", DefaultMeasure);
@@ -176,10 +174,14 @@ public class TestGridSearch
         Console.WriteLine("查询结果前10个: {0}", string.Join(" ", resultsArray[..10]));
         results.Dispose();
 
-        // ---- DIAG 行（镜像 Unity DIAG| 形状，含 worker 数与调度器 park 诊断） ----
+        // ---- DIAG 行 ----
         var js = NativeJobScheduler.GetStats();
         Console.WriteLine(FormattableString.Invariant(
-            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|tilesPerWorker={tilesPerWorker}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}|coldDisposeMs={coldTimings.DisposeNative:F6}|coldCreateCopyMs={coldTimings.CreateAndCopy:F6}|schedule=InitializeGrid|steadySchedule=UpdatePositions"));
+            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|tilesPerWorker={tilesPerWorker}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}"));
+        Console.WriteLine(FormattableString.Invariant(
+            $"TIMING|submitToFirstWorker={js.SubmitToFirstWorkerEwmaNs / 1000.0:F1}us|workerSpread={js.WorkerStartSpreadEwmaNs / 1000.0:F1}us|lastTileToTopology={js.LastTileToTopologyDoneEwmaNs / 1000.0:F1}us|completeWaitLoops={js.CompleteWaitLoops}|assistAttempts={js.AssistAttempts}|assistExecuted={js.AssistExecuted}|assistPct={js.AssistExecPctEwma}"));
+        Console.WriteLine(FormattableString.Invariant(
+            $"TIMING2|publishToFirstWorkerClaim={js.PublishToFirstWorkerClaimEwmaNs / 1000.0:F1}us|publishToCompletion={js.PublishToCompletionEwmaNs / 1000.0:F1}us|perRangeExec={js.PerRangeExecEwmaNs / 1000.0:F1}us|completionOverhead={js.CompletionOverheadUs}us|wakeLatency={js.WakeLatencyEwmaNs / 1000.0:F1}us"));
 
         gsb.Dispose();
         nativePos.Dispose();

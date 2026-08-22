@@ -597,6 +597,7 @@ namespace JobSystem
         {
             // Chase-Lev 新路径：退役由双条件驱动（tilesRemaining==0 && pendingTasks==0），
             // 这里只完成逻辑部分，实际退役交给最后一个完成者（可能不是本线程）。
+            RecordTopologyCompletion(batch);
             TryFinalizeChaseLevBatch(batch);
         }
     }
@@ -848,6 +849,12 @@ namespace JobSystem
     void ChaseLevExecuteTile(BatchState* batch, uint32_t tileIndex) noexcept
     {
         TryExecuteOneTile(batch, tileIndex);
+    }
+
+    // ChaseLev 记录 worker 进入批次时间（供 timing 诊断）。
+    void ChaseLevRecordWorkerEntry(BatchState* batch) noexcept
+    {
+        RecordWorkerEntry(batch);
     }
 
     // Chase-Lev 双条件退役：tilesRemaining==0（所有 tile 执行完）&& pendingTasks==0

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -6,6 +6,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<!-- 当前入口：01_JobSystem/PreciseWakeBench（唤醒 A/B）。切 GridSearch 时改此行为 TestGridSearch -->
+		<StartupObject>EntJoySample.PreciseWakeBench.Program</StartupObject>
 		<BaseOutputPath>..\..\..\bin</BaseOutputPath>
 		<OutputPath>..\..\..\bin</OutputPath>
 

@@ -49,4 +49,29 @@ namespace JobSystem
         return false;
 #endif
     }
+
+    // 清除当前线程的 CPU 亲和性（恢复允许所有核心）。
+    inline bool ClearCurrentThreadAffinity() noexcept
+    {
+#if defined(_WIN32)
+        // 恢复允许当前 group 所有核心：遍历线程所在 group 设置全 mask。
+        for (WORD group = 0; group < ::GetActiveProcessorGroupCount(); ++group)
+        {
+            GROUP_AFFINITY affinity{};
+            affinity.Group = group;
+            affinity.Mask = static_cast<KAFFINITY>(~static_cast<KAFFINITY>(0));
+            if (::SetThreadGroupAffinity(
+                    ::GetCurrentThread(), &affinity, nullptr) != FALSE)
+                return true;
+        }
+        return false;
+#elif defined(__linux__)
+        cpu_set_t affinity;
+        CPU_ZERO(&affinity);
+        for (int i = 0; i < CPU_SETSIZE; ++i) CPU_SET(i, &affinity);
+        return ::sched_setaffinity(0, sizeof(affinity), &affinity) == 0;
+#else
+        return false;
+#endif
+    }
 }
