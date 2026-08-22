@@ -383,6 +383,13 @@ extern "C"
         return toHandle(handle);
     }
 
+    uint32_t JobSystem_GetStatsSize()
+    {
+        // 布局防御：必须与 C# NativeJobSystemStats（Marshal.SizeOf）相等。
+        // 新增统计字段时若不同步，C# GetStats 会越界写 → 堆损坏。
+        return static_cast<uint32_t>(sizeof(JobSystemStatsNative));
+    }
+
     void JobSystem_GetStats(JobSystemStatsNative* stats)
     {
         if (!stats) return;

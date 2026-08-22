@@ -185,8 +185,8 @@ namespace JobSystem
                 g_useWorkStealing = (value != "0" && value != "false" && value != "off");
             }
 
-            // 主线程 assist 默认关闭（g_mainThreadAssistEnabled = false）。
-            // 运行时可通过 JobSystem_SetMainThreadAssist(int) 切换。
+            // 主线程 assist 默认关闭（g_mainThreadAssistEnabled = false，纯 worker 模式）。
+            // 运行时可通过 JobSystem_SetMainThreadAssist(int) 开启（兜底慢 worker 尾延迟）。
             // 不再读取 ENTJOY_ASSIST 环境变量（避免空字符串误启用）。
 
             // Pin the calling thread (main thread) to logical core 0 so it

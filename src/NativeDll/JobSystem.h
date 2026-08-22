@@ -72,6 +72,10 @@ namespace JobSystem {
         // 回溯协助祖先。单依赖走 `dependency`（热路径）；CombineDependencies
         // 合成 state 走 `dependencies`。两者均持有引用（AcquireState），在
         // RecycleState 释放，保证 handle 被丢弃后链不会悬垂。
+        //
+        // 【约束】依赖图必须是无环 DAG：若用户构造循环依赖（A→B→A），
+        // AssistDependencyChain 会无限回溯、Complete() 永远不返回。
+        // 运行时不做环检测（开销大），调用方必须保证无环。
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
 

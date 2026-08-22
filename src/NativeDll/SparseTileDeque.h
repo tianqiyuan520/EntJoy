@@ -77,13 +77,9 @@ namespace JobSystem
             uint64_t b = bottom_ - 1;
             bottom_ = b;
 
-            // 【关键修复】x86 允许 store→load 重排：`bottom_ = b` 是普通 store，
-            // 会滞留在 store buffer；紧随的 `top_.load`（acquire）可能提前执行、
-            // 读到**陈旧**的 top_ —— owner 据此把 b 判为"非最后元素"直接取走，
-            // 而一个已读过旧 bottom_ 的 thief 同时 CAS 认领同一槽位 → 双执行。
-            // crossbeam 在 back store 与 front load 之间插入 SeqCst fence 阻断
-            // 该重排（back.store(b, Relaxed); fence(SeqCst); front.load(Relaxed)）。
-            // 缺少此 fence 是本实现依赖链 105 轮偶发死锁（~11/30）的根因。
+            // SeqCst fence：阻断 x86 store→load 重排 —— `bottom_ = b` 是普通 store，
+            // 紧随的 `top_.load` 可能先执行读到陈旧 top_，使 owner 与 thief 双认领
+            // 同一槽位（双执行）。对齐 crossbeam 的 back.store; fence(SeqCst); front.load。
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             uint64_t t = top_.load(std::memory_order_acquire);
@@ -119,25 +115,29 @@ namespace JobSystem
 
         bool StealTop(TileTask& out) noexcept
         {
-            uint64_t t = top_.load(std::memory_order_acquire);
-            uint64_t b = bottom_;
-            if (static_cast<int64_t>(t) >= static_cast<int64_t>(b))
-                return false;
+            // CAS 失败（其他 thief 抢先）重试有限次数，提高高并发窃取成功率。
+            for (uint32_t attempt = 0; attempt < 4; ++attempt)
+            {
+                uint64_t t = top_.load(std::memory_order_acquire);
+                uint64_t b = bottom_;
+                if (static_cast<int64_t>(t) >= static_cast<int64_t>(b))
+                    return false;
 
-            Slot& s = Get(t);
+                Slot& s = Get(t);
 
-            // 【关键】CAS 前先 acquire 校验数据已完整发布：
-            // PushBottom 顺序是 s.data → s.seq(release)。若 CAS 成功后才发现
-            // 数据未发布，top_ 已推进 → 任务永久丢失。故 CAS 前校验 seq==t+1。
-            if (s.seq.load(std::memory_order_acquire) != t + 1)
-                return false; // 数据未发布（push 进行中）：放弃本次 steal
+                // CAS 前 acquire 校验数据已发布：PushBottom 顺序是 data → seq(release)，
+                // CAS 成功后才发现未发布则任务已丢失，故必须先验 seq==t+1。
+                if (s.seq.load(std::memory_order_acquire) != t + 1)
+                    return false; // 数据未发布（push 进行中）：放弃本次 steal
 
-            if (!top_.compare_exchange_strong(t, t + 1,
-                    std::memory_order_acq_rel, std::memory_order_acquire))
-                return false;
-
-            out = s.data;
-            return true;
+                if (top_.compare_exchange_strong(t, t + 1,
+                        std::memory_order_acq_rel, std::memory_order_acquire))
+                {
+                    out = s.data;
+                    return true;
+                }
+            }
+            return false;
         }
 
         bool IsEmpty() const noexcept

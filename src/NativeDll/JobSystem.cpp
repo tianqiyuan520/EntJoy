@@ -127,8 +127,9 @@ namespace JobSystem
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
     bool g_useWorkStealing{ true };  // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
-    // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭：
-    // 纯 worker 模式（Unity 式），实测 p99 0.83-0.97ms 与开启相当。
+    // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式，
+    // Unity 式）：实测关闭时 p99 0.83-0.97ms 与开启相当，且释放主线程参与竞争。
+    // 可靠性兜底场景（慢 worker 被 OS 抢占导致的尾延迟）可运行时 SetMainThreadAssistEnabled(true)。
     bool g_mainThreadAssistEnabled{ false };
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口

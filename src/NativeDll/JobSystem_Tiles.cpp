@@ -336,14 +336,19 @@ namespace JobSystem
         if (!batch || tileIndex >= batch->tileCount) return false;
 
         const auto& tile = batch->tiles[tileIndex];
-        PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
-            static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstItem),
-            static_cast<int>(tile.itemCount));
-        PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
-            static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstItem),
-            static_cast<int>(tile.itemCount));
+        // trace 关闭时跳过事件上报（fast path：一次内联 load，零 call）。
+        const bool traceOn = g_traceEnabled.load(std::memory_order_relaxed);
+        if (traceOn)
+        {
+            PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
+                static_cast<int>(tileIndex),
+                static_cast<int>(tile.firstItem),
+                static_cast<int>(tile.itemCount));
+            PushTraceEvent(TraceEventType::ExecuteBegin, batch->diagnosticId,
+                static_cast<int>(tileIndex),
+                static_cast<int>(tile.firstItem),
+                static_cast<int>(tile.itemCount));
+        }
         const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
         const uint64_t rangeStartedAt = timingEnabled ? MonotonicNowNs() : 0;
         const uint64_t threadCpuStartedAt = timingEnabled
@@ -400,10 +405,11 @@ namespace JobSystem
                 rangeStartLogicalCore,
                 rangeEndLogicalCore);
         }
-        PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
-            static_cast<int>(tileIndex),
-            static_cast<int>(tile.firstItem),
-            static_cast<int>(tile.itemCount));
+        if (traceOn)
+            PushTraceEvent(TraceEventType::ExecuteEnd, batch->diagnosticId,
+                static_cast<int>(tileIndex),
+                static_cast<int>(tile.firstItem),
+                static_cast<int>(tile.itemCount));
 
         // Completion follows actual callback completion.  This is the hot-path
         // atomic that replaces the much more expensive requirement that every
@@ -418,13 +424,13 @@ namespace JobSystem
 
     static void RecordWorkerEntry(BatchState* batch) noexcept
     {
-        const uint64_t now = MonotonicNowNs();
-        uint64_t empty = 0;
-        batch->firstWorkerAt.compare_exchange_strong(
-            empty, now, std::memory_order_acq_rel, std::memory_order_relaxed);
-        if (batch->workerSlotsEntered.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-            batch->workerCount)
-            batch->lastWorkerAt.store(now, std::memory_order_release);
+        // 诊断计数：relaxed 足够（只记录首/末 worker 进入时刻）。
+        const uint32_t entered =
+            batch->workerSlotsEntered.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (entered == 1)
+            batch->firstWorkerAt.store(MonotonicNowNs(), std::memory_order_relaxed);
+        if (entered == batch->workerCount)
+            batch->lastWorkerAt.store(MonotonicNowNs(), std::memory_order_relaxed);
     }
 
     static void WorkerAtomicRangeLoop(BatchState* batch) noexcept
