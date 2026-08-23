@@ -524,6 +524,12 @@ namespace NativeTranspiler.Analyzer
             StatementSyntax? elseBody = null;
             string savedMask = "";
             bool savedMaskEmitted = false;
+            // ★ P1-2: 递推"已排除条件"组合掩码。excludedMaskVar 持有 ~c0 & ~c1 & ... & ~c_{k-1}，
+            //   每个分支只在前一个变量上增量 AND 一个 ~c_k（O(1) 深度），替代 BuildNotChain 的
+            //   O(N) 嵌套内联 —— 5+ 分支链会生成 5 层 n_and_mask 嵌套，寄存器压力剧增。
+            string excludedMaskVar = null;
+            // excludedCount = excludedMaskVar 已包含的条件个数（= conditions.Count 在上一分支时的值）
+            int excludedCount = 0;
 
             // Save-blend needed when the chain has an else clause OR writes a varying variable.
             // A single if without else that modifies a varying variable must still blend,
@@ -593,9 +599,16 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"simd_mask {cm} = {negCond};");
                     string entryMask = _currentMask;
                     _currentMask = cm;
+                    // ★ Per-branch write analysis for else body (empty if →反转条件→直接走else)
+                    HashSet<string> elseWrites2 = new();
+                    CollectWrites(current.Else.Statement, elseWrites2);
                     GenerateBlock(EnsureBlock(current.Else.Statement), skipBraces: false);
-                    if (needsSaveBlend)
-                        EmitBlendVaryingVars(saveIdx, savedVarNames, cm);
+                    if (needsSaveBlend && elseWrites2.Count > 0)
+                    {
+                        var elseSavedNames2 = savedVarNames.Where(name => elseWrites2.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
+                        if (elseSavedNames2.Count > 0)
+                            EmitBlendVaryingVars(saveIdx, elseSavedNames2, cm);
+                    }
                     _currentMask = entryMask;
                     return;
                 }
@@ -710,9 +723,14 @@ namespace NativeTranspiler.Analyzer
                             trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
                         else
                         {
-                            string notPrev = BuildNotChain(conditions);
+                            // ★ P1-2: 引用递推排除变量（已含 ~c0 & ... & ~c_{k-1}），
+                            //   不再内联 BuildNotChain 的 O(N) 嵌套。
+                            EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
+                            string notPrev = excludedMaskVar ?? BuildNotChain(conditions);
                             trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
-                            trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
+                            // ★ Skip redundant AND when savedMask is all_true: all_true & X == X
+                            if (savedMask != "simd_mask::all_true()")
+                                trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
                         }
 
                         conditions.Add(condVar);
@@ -732,11 +750,21 @@ namespace NativeTranspiler.Analyzer
                     //   mutate _currentMask; blending with the post-body value would reference
                     //   loop-local mask variables out of scope.
                     string branchMask = _currentMask;
+                    // ★ Per-branch write analysis: only blend variables actually modified in this branch
+                    HashSet<string> branchWrites = new();
                     if (!bodyEmpty)
+                    {
+                        CollectWrites(current.Statement, branchWrites);
                         GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                    // Save-blend: restore non-active lanes after branch body
-                    if (needsSaveBlend && !bodyEmpty && !bodyHasGoto)
-                        EmitBlendVaryingVars(saveIdx, savedVarNames, branchMask);
+                    }
+                    // Save-blend: restore non-active lanes after branch body (only for vars written in this branch)
+                    if (needsSaveBlend && !bodyEmpty && !bodyHasGoto && branchWrites.Count > 0)
+                    {
+                        // Filter savedVarNames to only include variables written in this branch
+                        var branchSavedNames = savedVarNames.Where(name => branchWrites.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
+                        if (branchSavedNames.Count > 0)
+                            EmitBlendVaryingVars(saveIdx, branchSavedNames, branchMask);
+                    }
                 }
 
                 if (current.Else == null) break;
@@ -756,10 +784,20 @@ namespace NativeTranspiler.Analyzer
             if (elseBody != null)
             {
                 string elseMaskExpr;
+                // ★ P1-2: 优先复用递推排除变量（~c0 & ... & ~c_{k-1}），避免内联 O(N) 嵌套。
+                //   else 分支需排除全部条件 → 确保递推变量覆盖到 conditions.Count。
+                EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
+                string notChain = excludedMaskVar ?? BuildNotChain(conditions);
                 if (savedMaskEmitted)
-                    elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
+                {
+                    // ★ Skip redundant AND when savedMask is all_true: all_true & X == X
+                    if (savedMask == "simd_mask::all_true()")
+                        elseMaskExpr = notChain;
+                    else
+                        elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {notChain}.m) }}";
+                }
                 else if (savedMask == "simd_mask::all_true()")
-                    elseMaskExpr = BuildNotChain(conditions);
+                    elseMaskExpr = notChain;
                 else
                     elseMaskExpr = _currentMask;
 
@@ -772,10 +810,20 @@ namespace NativeTranspiler.Analyzer
                 bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody);
                 if (elseHasGoto)
                     AppendLine($"if ({elseMaskVar}.any_true())");
+                // ★ Per-branch write analysis for else body
+                HashSet<string> elseWrites = new();
                 if (!elseBodyEmpty)
+                {
+                    CollectWrites(elseBody, elseWrites);
                     GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
-                if (hasElseClause && !elseBodyEmpty && !elseHasGoto)
-                    EmitBlendVaryingVars(saveIdx, savedVarNames, elseMaskVar);
+                }
+                // Save-blend: restore non-active lanes after else body (only for vars written in else)
+                if (hasElseClause && !elseBodyEmpty && !elseHasGoto && elseWrites.Count > 0)
+                {
+                    var elseSavedNames = savedVarNames.Where(name => elseWrites.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
+                    if (elseSavedNames.Count > 0)
+                        EmitBlendVaryingVars(saveIdx, elseSavedNames, elseMaskVar);
+                }
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
@@ -798,6 +846,38 @@ namespace NativeTranspiler.Analyzer
             for (int i = 1; i < condVars.Count; i++)
                 expr = $"simd_mask{{ n_and_mask({expr}.m, simd_mask{{ n_not_mask({condVars[i]}.m) }}.m) }}";
             return expr;
+        }
+
+        /// <summary>
+        /// ★ P1-2: 确保递推排除变量 excludedMaskVar 已覆盖 ~c0 & ~c1 & ... & ~c_{k-1}
+        /// （conditions 中的全部历史条件 —— 调用时 conditions 为已加入条件，不含当前分支条件；
+        ///  else 分支时含全部条件，语义相同：排除它们全部）。增量式：每个条件只生成一次
+        /// n_and_mask，分支掩码深度从 O(N) 降到 O(1)，总生成量保持 O(N)。
+        /// </summary>
+        private void EnsureExcludedMaskUpTo(List<string> conditions, ref string excludedMaskVar, ref int excludedCount)
+        {
+            int target = conditions.Count;
+            if (target <= 0)
+            {
+                if (target < 0) { excludedMaskVar = null; excludedCount = 0; }
+                return;
+            }
+
+            if (excludedCount == 0)
+            {
+                // 首次：生成 ~c0
+                excludedMaskVar = $"__excl_{_maskCounter++}";
+                AppendLine($"simd_mask {excludedMaskVar} = simd_mask{{ n_not_mask({conditions[0]}.m) }};");
+                excludedCount = 1;
+            }
+            // 增量扩展：从 excludedCount 到 target，逐个 AND ~c_i
+            for (int i = excludedCount; i < target; i++)
+            {
+                string newExcl = $"__excl_{_maskCounter++}";
+                AppendLine($"simd_mask {newExcl} = simd_mask{{ n_and_mask({excludedMaskVar}.m, simd_mask{{ n_not_mask({conditions[i]}.m) }}.m) }};");
+                excludedMaskVar = newExcl;
+                excludedCount = i + 1;
+            }
         }
 
         /// <summary>检查 if 语句体是否是单条的 continue;</summary>
@@ -1165,7 +1245,13 @@ namespace NativeTranspiler.Analyzer
                     vars.Add(id.Identifier.Text);
                 else if (node is PostfixUnaryExpressionSyntax postfix && postfix.Operand is IdentifierNameSyntax id2)
                     vars.Add(id2.Identifier.Text);
-                else if (node is PrefixUnaryExpressionSyntax prefix && prefix.Operand is IdentifierNameSyntax id3)
+                // ★ Prefix unary: ONLY ++a / --a are writes. Unary minus (-a) / !a / ~a are reads —
+                //   treating them as writes caused redundant save/blend (e.g. else v = -a * 3f
+                //   wrongly saved+blended v_a even though a is never modified).
+                else if (node is PrefixUnaryExpressionSyntax prefix
+                    && prefix.Operand is IdentifierNameSyntax id3
+                    && (prefix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken)
+                        || prefix.OperatorToken.IsKind(SyntaxKind.MinusMinusToken)))
                     vars.Add(id3.Identifier.Text);
             }
         }
