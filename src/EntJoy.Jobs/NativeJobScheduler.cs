@@ -163,9 +163,11 @@ public static unsafe partial class NativeJobScheduler
     public static int GuidedFloor = 16;
 
     /// <summary>
-    /// 启用 per-job 自动 batch（JobCostCache）。关闭时（默认）走纯 tpw=4。
-    /// 启用后，worker 按每 job 的每元素成本 EWMA 自动求解最优 tile 数：
+    /// 启用 per-job 自动 batch（JobCostCache）。默认开启：
+    /// worker 按每 job 的每元素成本 EWMA 自动求解最优 tile 数——
     /// 轻任务自动减 tiles（→ 减参与 worker → 减唤醒成本），重任务维持并行度。
+    /// 关闭后走纯 tpw=4（冷启动/保守场景）。压测已验证：并发/成本波动/
+    /// 泄漏/ASAN 全绿；冷启动 tpw=4 兜底 + kMaxAutoChunk 护栏无退化。
     /// </summary>
     public static bool JobCostCacheEnabled
     {
@@ -177,7 +179,7 @@ public static unsafe partial class NativeJobScheduler
             NativeJobCore.JobSystem_SetJobCostCacheEnabled(value ? 1 : 0);
         }
     }
-    private static bool _jobCostCacheEnabled = false;
+    private static bool _jobCostCacheEnabled = true;
 
     private static void ConfigureGuidedFromEnv()
     {
@@ -214,6 +216,8 @@ public static unsafe partial class NativeJobScheduler
         NativeJobCore.RegisterCurrentBatchIdCallback();
         if (TilesPerWorker > 0)
             NativeJobCore.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
+        // 强制同步 JobCostCache 默认（默认开启；防 DLL 重载后 native 与托管不一致）
+        NativeJobCore.JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled ? 1 : 0);
         ConfigureGuidedFromEnv();
     }
 

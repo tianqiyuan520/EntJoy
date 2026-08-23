@@ -58,8 +58,10 @@ namespace JobSystem
     int g_configuredTilesPerWorker = kDefaultTilesPerWorker;
 
     // JobCostCache export flag（JobSystem_State.cpp 的 ResolveChunkSize 读取，
-    // JobSystem_Tiles.cpp 的退役路径读取）。默认 false → 不记录、不使用。
-    std::atomic<bool> g_jobCostCacheEnabled{ false };
+    // JobSystem_Tiles.cpp 的退役路径读取）。默认开启：per-job 自动 batch 收益显著
+    //（S2 3.7x/S3 1.6x/S5 3.0x 协同自适应自旋）且压测零回归；C# Initialize 会强制
+    // 同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
+    std::atomic<bool> g_jobCostCacheEnabled{ true };
 
     // 诊断开关（进程启动时读 env 一次，之后只读）：ENTJOY_JCC_VERBOSE=1
     // 打印 per-job 自动 batch 的决策与学习快照。
