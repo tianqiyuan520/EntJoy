@@ -61,6 +61,12 @@ namespace JobSystem
         // batch 的完成由 batch->tilesRemaining 归零驱动。
         void SubmitBatch(BatchState* batch) noexcept;
 
+        // 提交一个通用 work 任务（无 batch，独立完成链由调用方负责）。
+        // 用于 SubmitBackendAsync 等"异步执行任意函数"通道（Chase-Lev 下 NativeWorkerPool 未 Start，
+        // 原 fallback 同步执行会阻塞调用线程——嵌套 Complete 等场景卡死）。
+        // 投 Injector 由 worker 执行：workFn(ctx) → workCleanup(ctx) → Release。
+        void SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
+
         // 主线程协助执行：从 Injector 或其他 worker deque 窃取一个任务并执行。
         // 返回是否执行了任务。
         bool TryAssistOne() noexcept;
@@ -94,9 +100,11 @@ namespace JobSystem
         // worker park 前读它：若 >0 说明全局仍有未认领任务，做短自旋再 park。
         std::atomic<int64_t> activeTasks{ 0 };
 
-        // 唤醒纪元（C++20 atomic::wait）：per-worker 独立 stamp。
-        std::atomic<uint64_t> wakeStamp[kMaxTrackedWorkers];
-        std::atomic<uint32_t> wakeRoundRobin{ 0 };
+        // 唤醒纪元（C++20 atomic::wait）：单一共享 epoch，所有 worker wait 在同一个原子。
+        // SubmitBatch/Stop 一次 fetch_add + notify_all = 1 次 futex 系统调用唤醒全部 waiter
+        //（替代旧的 15 次 per-worker notify_all，固定唤醒成本降 ~15x）。
+        // 保持 wake-all 语义不变（绝不做选择性唤醒——选择性唤醒有 35ms 滞留尖峰教训）。
+        std::atomic<uint64_t> wakeEpoch{ 0 };
 
         // 全局 Injector（标准 Chase-Lev 的任务入口）
         static constexpr uint32_t kInjectorCapacity = 32768;
@@ -109,6 +117,16 @@ namespace JobSystem
         static constexpr uint32_t kDequeCapacity = 4096;
         // 每次认领的 tile 数（预切分粒度）
         static constexpr uint32_t kClaimBatchSize = 4;
+        // workerCap 令牌标记：firstTile==UINT32_MAX 的 task 是"参与令牌"，
+        // 执行体原子认领 batch->nextTile（实际并行度 ≤ 令牌数 = workerCap）。
+        static constexpr uint32_t kClaimTokenMarker = UINT32_MAX;
+
+        // workerCap 令牌执行：原子认领 nextTile 直到空（实际并行受令牌数限制）。
+        // 内部处理 taskDone（pendingTasks--）；不 Release（调用方负责）。
+        void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex) noexcept;
+
+        // Injector 满时有限退避入队（yield + pause），供所有提交路径共用。
+        void PushTaskBackoff(RangeTask* task) noexcept;
 
         struct WorkerContext
         {
