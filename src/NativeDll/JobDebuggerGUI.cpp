@@ -666,6 +666,62 @@ namespace JobSystem
                     ImGui::EndTabItem();
                 }
 
+                // ---------- JobCostCache（per-job 自动 batch）观测 ----------
+                if (ImGui::BeginTabItem("JobCostCache"))
+                {
+                    const bool enabled = g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+                    ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "JobCostCache (per-job auto batch)");
+                    ImGui::Separator();
+                    if (ImGui::Button(enabled ? "Disable (tpw fallback)" : "Enable"))
+                    {
+                        g_jobCostCacheEnabled.store(!enabled, std::memory_order_release);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(enabled ? "ON — EWMA 驱动的自动 tile" : "OFF — 纯 tpw=4");
+
+                    int occupied = 0;
+                    for (int s = 0; s < kJobCostSlots; ++s)
+                        if (g_jobCostCache.slotHash[s].load(std::memory_order_relaxed) != 0)
+                            ++occupied;
+                    ImGui::Text("slots used: %d / %d (collision → re-learn)", occupied, kJobCostSlots);
+                    ImGui::Spacing();
+
+                    if (ImGui::BeginTable("jcc", 5,
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+                    {
+                        ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 40);
+                        ImGui::TableSetupColumn("FuncHash", ImGuiTableColumnFlags_WidthFixed, 80);
+                        ImGui::TableSetupColumn("perElem (ns)", ImGuiTableColumnFlags_WidthStretch, 1);
+                        ImGui::TableSetupColumn("total @100k (us)", ImGuiTableColumnFlags_WidthStretch, 1);
+                        ImGui::TableSetupColumn("auto tiles @100k", ImGuiTableColumnFlags_WidthStretch, 1);
+                        ImGui::TableHeadersRow();
+                        constexpr int kRefLen = 100'000;
+                        for (int s = 0; s < kJobCostSlots; ++s)
+                        {
+                            const uint32_t h = g_jobCostCache.slotHash[s].load(std::memory_order_relaxed);
+                            if (h == 0) continue;
+                            const double perElem = g_jobCostCache.GetPerElemCost(h);
+                            const double totalUs = perElem * kRefLen / 1000.0;
+                            // 与 ResolveChunkSize 同公式（含 floor），估算参考 tiles
+                            const int wc = std::max(1, CurrentWorkerCount());
+                            double tilesD = totalUs / 150.0;
+                            if (tilesD < 1.0) tilesD = 1.0;
+                            if (tilesD > wc * 16.0) tilesD = wc * 16.0;
+                            int floor = (kRefLen + 32768 - 1) / 32768;
+                            if (floor > wc) floor = wc;
+                            const int tiles = std::max((int)tilesD, floor);
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0); ImGui::Text("%d", s);
+                            ImGui::TableSetColumnIndex(1); ImGui::Text("0x%08X", h);
+                            ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f", perElem);
+                            ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", totalUs);
+                            ImGui::TableSetColumnIndex(4); ImGui::Text("%d", tiles);
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::EndTabItem();
+                }
+
                 ImGui::EndTabBar();
             }
 
@@ -926,7 +982,7 @@ namespace JobSystem
 
     void JobDebuggerGUI::TryLaunch()
     {
-        // 旧路径：仅当 ENTJOY_DEBUG=1 时自动启动。未设置时直接返回，
+        // 仅当 ENTJOY_DEBUG=1 时自动启动。未设置时直接返回，
         // 且不再占用一次性标志，以便随后仍可由 C# JobDebuggerGUI_Launch 强制启动。
         std::string env;
 #if defined(_WIN32)

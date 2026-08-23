@@ -264,12 +264,12 @@ namespace
             }, &callbackCount, length, 0);
         handle.Complete();
         const int workers = JobSystem::CurrentWorkerCount();
-        // Default tile policy is kDefaultTilesPerWorker == 16 tiles/worker
-        // (grid-search tuned; the old bound here predated the 4→16 change).
-        // rc = ceil(N / ceil(N / (W*16))) lands within [W*16 - 1, W*16].
-        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 16 - 1,
+        // Default tile policy is kDefaultTilesPerWorker == 4 tiles/worker
+        // (tpw=4 落地 2026-08-23；与 ECS kTargetTilesPerWorker=4 一致)。
+        // rc = ceil(N / ceil(N / (W*4))) lands within [W*4 - 1, W*4]。
+        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 4 - 1,
             "automatic batching created too few work units for tail balancing");
-        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 16,
+        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 4,
             "automatic batching exceeded the per-worker tile target");
     }
 
@@ -1840,6 +1840,474 @@ namespace
     }
 }
 
+// ============================================================
+// JobCostCache（per-job 自动 batch）单元测试
+// ============================================================
+
+void TestJobCostCacheBasic()
+{
+    JobSystem::g_jobCostCache.Init();
+    const uint32_t h = 0x1234ABCDu;
+    Require(JobSystem::g_jobCostCache.GetPerElemCost(h) == 0.0,
+        "JobCostCache cold start must return 0");
+
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 1.0);   // 1 ns/elem
+    double v1 = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v1 > 0.9 && v1 < 1.1, "JobCostCache first learn must take sample (1.0ns)");
+
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 2.0);   // 2x 增长（不触发 4x 尖峰阻尼）
+                                                           // EWMA: 0.25*1 + 0.75*2 = 1.75
+    double v2 = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v2 > 1.6 && v2 < 1.9, "JobCostCache EWMA up (alpha=0.75) failed");
+
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 0.5);   // 下降: 0.25*1.75 + 0.75*0.5 = 0.8125
+    double v3 = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v3 > 0.7 && v3 < 0.95, "JobCostCache EWMA down failed");
+    std::cout << "PASS JobCostCacheBasic\n";
+}
+
+void TestJobCostCacheNoUnderflow()
+{
+    // 回归测试：sample < oldVal 时无符号下溢会把 EWMA 炸到 ~2^64（tiles 钉死上限）。
+    JobSystem::g_jobCostCache.Init();
+    const uint32_t h = 0xDEADBEEFu;
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 100.0);  // old = 100ns
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 1.0);    // sample 1 < old 100
+    double v = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v < 30.0, "JobCostCache downward blend must not explode (underflow bug)");
+    Require(v > 1.0, "JobCostCache downward blend must stay within bounds");
+    std::cout << "PASS JobCostCacheNoUnderflow\n";
+}
+
+void TestJobCostCacheSpikeSelfHeal()
+{
+    // 尖峰自愈（2026-08-23 移除 4x 升限后）：100x 尖峰样本立即反映（模式切换快响应），
+    // 下一轮正常样本迅速拉回 —— 无 4x 阻尼也不产生持续污染（下溢修复保证下降自由）。
+    JobSystem::g_jobCostCache.Init();
+    const uint32_t h = 0xCAFEBABEu;
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 2.0);      // old = 2ns
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 200.0);    // 100x 尖峰：EWMA = 2+0.75*198 = 150.5
+    double v1 = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v1 > 140.0 && v1 < 160.0, "spike must be tracked fast (no 4x damp)");
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 2.0);      // 恢复: 150.5 - 0.75*148.5 = 39.1
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 2.0);      // 39.1 → 11.3
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h, 2.0);      // 11.3 → 4.3
+    double v2 = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v2 < 6.0, "spike must self-heal within ~3 normal samples (no persistent pollution)");
+    std::cout << "PASS JobCostCacheSpikeSelfHeal\n";
+}
+
+void TestJobCostCacheCollisionReuse()
+{
+    // 2^k 槽：两个不同 hash 映射同一槽位 → 后者覆盖前者（重学，无正确性风险）。
+    JobSystem::g_jobCostCache.Init();
+    const int slots = JobSystem::kJobCostSlots;
+    const uint32_t h1 = 0x00000001u;
+    const uint32_t h2 = static_cast<uint32_t>(1 + 1 * static_cast<uint64_t>(slots)); // 同槽不同值
+    Require((h1 & (slots - 1)) == (h2 & (slots - 1)), "test hashes must collide");
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h1, 1.0);
+    Require(JobSystem::g_jobCostCache.GetPerElemCost(h1) > 0.9,
+        "hash1 must be readable before collision");
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h2, 3.0);   // 与 h1 同槽：EWMA blend（1→3 → 2.5）
+    Require(JobSystem::g_jobCostCache.GetPerElemCost(h2) > 2.4,
+        "hash2 must overwrite collided slot (EWMA re-learn)");
+    Require(JobSystem::g_jobCostCache.GetPerElemCost(h1) == 0.0,
+        "collided hash1 must be invalidated (slotHash mismatch)");
+    std::cout << "PASS JobCostCacheCollisionReuse\n";
+}
+
+void TestResolveChunkSizeFallback()
+{
+    // flag 关闭 / funcHash=0 → ResolveChunkSize 行为与 tpw 兜底一致（零回归）。
+    const bool saved = JobSystem::g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCache.UpdatePerElemCost(0x7777u, 0.05);  // 若有数据也被 flag 关掉
+    int chunk = JobSystem::ResolveChunkSize(100'000, 0, 0x7777u);
+    int workers = std::max(1, JobSystem::CurrentWorkerCount());
+    int tpwChunk = std::max(16, (100'000 + workers * 4 - 1) / (workers * 4));
+    Require(chunk == tpwChunk, "flag-off ResolveChunkSize must equal tpw fallback");
+    JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
+    std::cout << "PASS ResolveChunkSizeFallback\n";
+}
+
+// ============================================================
+// JobCostCache 对抗性压力测试（并发 / 正确性 / 稳定性）
+// ============================================================
+
+using JccJobFn = void (*)(void*, int, int);
+
+// 4 种不同成本的确定性 job（不同函数地址 → 不同 funcHash → 不同 cache 槽）
+static void JccJobLight0(void* ctx, int start, int count)
+{
+    int* out = static_cast<int*>(ctx);
+    for (int i = start; i < start + count; ++i) out[i] = i * 3 + 1;
+}
+static void JccJobLight1(void* ctx, int start, int count)
+{
+    int* out = static_cast<int*>(ctx);
+    for (int i = start; i < start + count; ++i) out[i] = (i * 5 + 2) ^ 0xABCDu;
+}
+static int JccLcg(uint32_t seed, int iters)
+{
+    uint32_t x = seed * 2654435761u + 1u;
+    for (int j = 0; j < iters; ++j) x = x * 1664525u + 1013904223u;
+    return static_cast<int>(x);
+}
+static void JccJobHeavy0(void* ctx, int start, int count)
+{
+    int* out = static_cast<int*>(ctx);
+    for (int i = start; i < start + count; ++i) out[i] = JccLcg(static_cast<uint32_t>(i), 100);
+}
+static void JccJobHeavy1(void* ctx, int start, int count)
+{
+    int* out = static_cast<int*>(ctx);
+    for (int i = start; i < start + count; ++i) out[i] = JccLcg(static_cast<uint32_t>(i) + 1u, 500);
+}
+
+static constexpr int JccRefLight0(int i) { return i * 3 + 1; }
+static constexpr int JccRefLight1(int i) { return (i * 5 + 2) ^ 0xABCDu; }
+static int JccRefHeavy0(int i) { return JccLcg(static_cast<uint32_t>(i), 100); }
+static int JccRefHeavy1(int i) { return JccLcg(static_cast<uint32_t>(i) + 1u, 500); }
+
+// ── 并发异构：8 线程 × 4 种成本 job 交错调度，结果必须全部 = 串行参考 ──
+void TestJccConcurrentHeterogeneous()
+{
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    constexpr int N = 100'000;
+    const JccJobFn fns[4] = { JccJobLight0, JccJobLight1, JccJobHeavy0, JccJobHeavy1 };
+    std::vector<std::vector<int>> outs(4, std::vector<int>(N, -1));
+    std::atomic<int> errors{ 0 };
+
+    const int kThreads = 8;
+    const int kRounds = 30;   // 每线程 30 轮 ×4 job ≈ 960 次调度，足够 EWMA 收敛 + 并发争用
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t)
+    {
+        threads.emplace_back([&, t]() {
+            for (int r = 0; r < kRounds; ++r)
+            {
+                const int jobIdx = (t + r) % 4;   // 多线程交错不同 job（并发冲 cache 槽）
+                auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
+                    fns[jobIdx], outs[jobIdx].data(), N, 0);
+                h.Complete();   // 死锁/悬挂会卡在这里（无超时即失败）
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    for (int j = 0; j < 4; ++j)
+    {
+        const auto& out = outs[j];
+        for (int i = 0; i < N; ++i)
+        {
+            int ref = (j == 0) ? JccRefLight0(i) : (j == 1) ? JccRefLight1(i)
+                : (j == 2) ? JccRefHeavy0(i) : JccRefHeavy1(i);
+            if (out[i] != ref) { errors.fetch_add(1, std::memory_order_relaxed); break; }
+        }
+        // 每个 job 必须学到独立成本（4 个不同 hash → 4 个正 perElem）
+        const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
+        Require(JobSystem::g_jobCostCache.GetPerElemCost(h) > 0.0,
+            "concurrent job must learn its per-element cost");
+    }
+    Require(errors.load(std::memory_order_relaxed) == 0,
+        "concurrent heterogeneous results must match serial reference");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccConcurrentHeterogeneous\n";
+}
+
+// ── 跨 tile 切分结果不变性：同 job，flag OFF（tpw 60 tiles）vs flag ON（自动 4 tiles）──
+void TestJccResultsInvariantAcrossTiles()
+{
+    constexpr int N = 100'000;
+    std::vector<int> outOff(N, -1), outOn(N, -1);
+
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    auto h = JobSystem::Scheduler::ScheduleParallelForBatch(JccJobLight0, outOff.data(), N, 0);
+    h.Complete();
+
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    for (int i = 0; i < 10; ++i)   // 预热学习 → 塌缩到 floor tiles（4）
+    {
+        auto hh = JobSystem::Scheduler::ScheduleParallelForBatch(JccJobLight0, outOn.data(), N, 0);
+        hh.Complete();
+    }
+    // 验证 flag ON 确实用了更少 tiles（4 vs 60）：通过派生 chunk 判断——不直接可读，
+    // 但结果一致性是硬要求
+    for (int i = 0; i < N; ++i)
+        Require(outOff[i] == outOn[i] && outOff[i] == JccRefLight0(i),
+            "results must be identical across tile configs and match reference");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccResultsInvariantAcrossTiles\n";
+}
+
+// ── flag 在任务在飞时反复切换：无死锁 / 无崩溃 / 结果正确 ──
+void TestJccFlagToggleMidFlight()
+{
+    constexpr int N = 50'000;
+    std::vector<int> out(N, -1);
+    const JccJobFn fns[2] = { JccJobLight0, JccJobHeavy0 };
+    std::atomic<bool> stop{ false };
+    std::atomic<int> errors{ 0 };
+
+    std::thread worker([&]() {
+        int round = 0;
+        while (!stop.load(std::memory_order_acquire))
+        {
+            const int j = round & 1;
+            auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
+                fns[j], out.data(), N, 0);
+            h.Complete();
+            for (int i = 0; i < N; ++i)
+            {
+                const int ref = j ? JccRefHeavy0(i) : JccRefLight0(i);
+                if (out[i] != ref) { errors.fetch_add(1, std::memory_order_relaxed); break; }
+            }
+            ++round;
+        }
+    });
+
+    // 主线程反复 toggle flag（在飞任务中改变 cache 行为）
+    for (int i = 0; i < 2000; ++i)
+    {
+        JobSystem::g_jobCostCacheEnabled.store((i & 1) != 0, std::memory_order_relaxed);
+    }
+    stop.store(true, std::memory_order_release);
+    worker.join();
+    Require(errors.load(std::memory_order_relaxed) == 0,
+        "flag-toggle mid-flight must not corrupt results");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccFlagToggleMidFlight\n";
+}
+
+// ── 碰撞槽并发读写：同槽 2 hash 被 4 线程同时 Update，无崩溃 / 无撕裂 ──
+void TestJccCollisionSlotConcurrent()
+{
+    JobSystem::g_jobCostCache.Init();
+    const uint32_t h1 = 0x00000111u;
+    const uint32_t h2 = h1 + static_cast<uint32_t>(JobSystem::kJobCostSlots);   // 同槽不同值
+    Require((h1 & (JobSystem::kJobCostSlots - 1)) == (h2 & (JobSystem::kJobCostSlots - 1)),
+        "test hashes must collide");
+    // 先由 h1 持有槽位
+    JobSystem::g_jobCostCache.UpdatePerElemCost(h1, 10.0);
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t)
+    {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < 50'000; ++i)
+            {
+                if ((t + i) & 1)
+                    JobSystem::g_jobCostCache.UpdatePerElemCost(h1, 10.0 + (i % 7));
+                else
+                    JobSystem::g_jobCostCache.UpdatePerElemCost(h2, 30.0 + (i % 5));
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    // 结束后：槽位由 h1 或 h2 之一持有；被淘汰方 Get 必须 0；持有方 > 0 且在合法区间
+    double v1 = JobSystem::g_jobCostCache.GetPerElemCost(h1);
+    double v2 = JobSystem::g_jobCostCache.GetPerElemCost(h2);
+    bool h1Holds = (v1 > 0.0 && v2 == 0.0);
+    bool h2Holds = (v2 > 0.0 && v1 == 0.0);
+    Require(h1Holds || h2Holds, "collision slot must be owned by exactly one hash");
+    Require(!(h1Holds && v1 > 100.0) && !(h2Holds && v2 > 100.0),
+        "collision EWMA must stay in sane bounds (no underflow/overflow)");
+    std::cout << "PASS JccCollisionSlotConcurrent\n";
+}
+
+// ── 同 funcHash 多 batch 在飞 + 并发退役：同槽 EWMA 被多 worker 同时 CAS ──
+// 直接回答"多 worker 同时改自适应值是否有竞态"：
+// 6 线程各自调度【同一 job 函数】（同 hash → 同槽），每个线程独立输出 buffer，
+// 全部在飞交替完成 → 同槽被 6 路并发 UpdatePerElemCost CAS。
+// 验证：各自结果正确、无死锁、槽位最终收敛到合法区间。
+void TestJccConcurrentSameHashBatches()
+{
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    constexpr int N = 100'000;
+    constexpr int kThreads = 6;
+    std::vector<std::vector<int>> outs(kThreads, std::vector<int>(N, -1));
+    std::atomic<int> errors{ 0 };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t)
+    {
+        threads.emplace_back([&, t]() {
+            for (int r = 0; r < 25; ++r)   // 每线程 25 次；6 线程并发在飞同 hash batch
+            {
+                // 同一函数指针 → 同一 funcHash → 同一 cache 槽
+                auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
+                    JccJobLight0, outs[t].data(), N, 0);
+                h.Complete();   // 退役 → UpdatePerElemCost 同槽 CAS
+            }
+            // 完成校验（本线程自己的 buffer）
+            for (int i = 0; i < N; ++i)
+                if (outs[t][i] != JccRefLight0(i))
+                { errors.fetch_add(1, std::memory_order_relaxed); break; }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    Require(errors.load(std::memory_order_relaxed) == 0,
+        "same-hash concurrent batches must all produce correct results");
+    const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(JccJobLight0));
+    const double v = JobSystem::g_jobCostCache.GetPerElemCost(h);
+    Require(v > 0.0 && v < 100.0,
+        "same-hash concurrent updates must converge to a sane perElem (no torn/overflow)");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccConcurrentSameHashBatches\n";
+}
+
+// ── 成本波动敏感性：同一 job 依赖外部参数（10 次 ↔ 10000 次循环切换）──
+// 同一函数指针 → 同 hash → 同槽。交替模式检验 EWMA 是否跟得上、结果是否仍正确。
+static std::atomic<int> g_jccWaveIters{ 10 };
+static void JccJobWave(void* ctx, int start, int count)
+{
+    int* out = static_cast<int*>(ctx);
+    const int iters = g_jccWaveIters.load(std::memory_order_relaxed);
+    for (int i = start; i < start + count; ++i) out[i] = JccLcg(static_cast<uint32_t>(i), iters);
+}
+static int JccRefWave(int i, int iters) { return JccLcg(static_cast<uint32_t>(i), iters); }
+
+void TestJccWaveCostVariance()
+{
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    constexpr int N = 100'000;
+    std::vector<int> out(N, -1);
+    double waveLog[24];   // 观测 EWMA 跟随序列
+    constexpr int kRounds = 24;
+
+    for (int r = 0; r < kRounds; ++r)
+    {
+        const bool heavy = (r >= 6 && r < 18);   // 6 轮轻 → 12 轮重 → 6 轮轻（模拟参数切换）
+        std::atomic_store(&g_jccWaveIters, heavy ? 10'000 : 10);
+        auto h = JobSystem::Scheduler::ScheduleParallelForBatch(JccJobWave, out.data(), N, 0);
+        h.Complete();
+        // 结果必须与当前模式参考一致（正确性不受波动影响）
+        for (int i = 0; i < N; ++i)
+            Require(out[i] == JccRefWave(i, heavy ? 10'000 : 10),
+                "wave-mode results must match the reference for the active mode");
+        // 观测槽内 EWMA 学到什么
+        const uint32_t hh = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(JccJobWave));
+        waveLog[r] = JobSystem::g_jobCostCache.GetPerElemCost(hh);
+    }
+    std::cout << "[JCC-WAVE] perElem(light=10iters) vs heavy=10000iters: ";
+    for (int r = 0; r < kRounds; ++r)
+        std::cout << (r == 6 ? "| " : "") << static_cast<int>(waveLog[r]) << " ";
+    std::cout << "ns\n";
+    // 边界 sanity：EWMA 全程不越界（< 10000×1000×0.01ns 量级上限 → 用 1e6 ns 保守）
+    for (int r = 0; r < kRounds; ++r)
+        Require(waveLog[r] > 0.0 && waveLog[r] < 1'000'000.0,
+            "wave EWMA must stay within sane bounds");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccWaveCostVariance (results correct under mode switch)\n";
+}
+
+// ── 随机方差敏感性：每轮成本独立随机（不可预测）──
+// 1) 数值模拟三策略平均墙钟（oracle 下界 / EWMA 自适应 / 固定 tpw=4）：
+//    "随机波动下自适应是否仍优于固定 tpw" —— 结论：EWMA 收敛到均值 = 该场景信息论最优启发。
+// 2) 真实调度器随机成本 30 轮：结果每轮 == 参考（正确性不受方差影响）。
+static int JccRandRange(int lo, int hi)
+{
+    return lo + (std::rand() % (hi - lo + 1));
+}
+
+void TestJccRandomVariance()
+{
+    // ---- 1) 数值模拟（不依赖调度器）----
+    // 模型标定：wave 实验 10000 iters → perElem ~575ns → 0.0575ns/iter；N=100k。
+    //   cUs = iters × 0.0575 × N / 1000          （本轮真实串行计算量 μs）
+    //   tiles(w) = clamp(N×perElem/150000, floor=4, cap=240)
+    //   wall(w)  = cUs/w + (3 + 0.9×min(w,15)) μs （dispatch 拟合 2w→5 / 15w→16.5μs）
+    constexpr int N = 100'000;
+    constexpr double perIterNs = 0.0575;
+    constexpr double floorT = 4.0, capT = 240.0;
+    constexpr int kSimRounds = 400;
+    constexpr int kWarm = 100;   // EWMA 预热轮（不计统计）
+
+    double sumOracle = 0, sumEwma = 0, sumFixed = 0;
+    double ewma = 0.0;
+    int stat = 0;
+    std::srand(12345);
+    for (int r = 0; r < kSimRounds; ++r)
+    {
+        const int iters = JccRandRange(10, 10'000);
+        const double cUs = static_cast<double>(iters) * perIterNs * N / 1000.0;
+        const double opt = std::clamp(cUs / 150.0, floorT, capT);
+        const double wallOracle = cUs / opt + (3.0 + 0.9 * std::min(opt, 15.0));
+        const double perElemSample = cUs * 1000.0 / N;   // ns（该轮真实 perElem）
+        const double tilesE = std::clamp((N * ewma) / 150'000.0, floorT, capT);
+        const double wallEwma = cUs / tilesE + (3.0 + 0.9 * std::min(tilesE, 15.0));
+        const double wallFixed = cUs / 60.0 + (3.0 + 0.9 * 15.0);
+        ewma = (ewma == 0.0) ? perElemSample : ewma + ((perElemSample - ewma) * 3.0) / 4.0;
+
+        if (r >= kWarm)
+        {
+            sumOracle += wallOracle; sumEwma += wallEwma; sumFixed += wallFixed;
+            ++stat;
+        }
+    }
+    const double aO = sumOracle / stat, aE = sumEwma / stat, aF = sumFixed / stat;
+    std::cout << "[JCC-RANDOM] avg wall μs: oracle=" << static_cast<int>(aO)
+              << " ewma=" << static_cast<int>(aE) << " fixed60=" << static_cast<int>(aF)
+              << " | ewma=" << static_cast<int>(100.0 * aE / aF) << "% of fixed\n";
+    Require(aE < aF * 0.9, "random-variance EWMA must beat fixed tpw (cost-aware wins)");
+
+    // ---- 2) 真实调度器：随机成本 30 轮，抽样校验结果 == 参考 ----
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    std::vector<int> out(N, -1);
+    for (int r = 0; r < 30; ++r)
+    {
+        const int iters = JccRandRange(10, 5'000);
+        std::atomic_store(&g_jccWaveIters, iters);
+        auto h = JobSystem::Scheduler::ScheduleParallelForBatch(JccJobWave, out.data(), N, 0);
+        h.Complete();
+        for (int i = 0; i < N; i += 7)
+            Require(out[i] == JccRefWave(i, iters),
+                "random-variance results must match reference");
+    }
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccRandomVariance (correct under random cost)\n";
+}
+
+// ── 长跑稳定性：大量调度混合 job，结果正确 + cache 槽位占用不增长（无泄漏面）──
+void TestJccLongRunStability()
+{
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    constexpr int N = 20'000;
+    const JccJobFn fns[4] = { JccJobLight0, JccJobLight1, JccJobHeavy0, JccJobHeavy1 };
+    std::vector<std::vector<int>> outs(4, std::vector<int>(N, -1));
+
+    for (int round = 0; round < 3000; ++round)   // 3000 × 4 job = 12000 次调度
+    {
+        const int j = round & 3;
+        auto h = JobSystem::Scheduler::ScheduleParallelForBatch(fns[j], outs[j].data(), N, 0);
+        h.Complete();
+    }
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < N; ++i)
+        {
+            int ref = (j == 0) ? JccRefLight0(i) : (j == 1) ? JccRefLight1(i)
+                : (j == 2) ? JccRefHeavy0(i) : JccRefHeavy1(i);
+            Require(outs[j][i] == ref, "long-run results corrupted");
+        }
+    // cache 是固定 256 槽静态数组（无分配）→ 无泄漏面；占用数 = 实际学习的 hash 数
+    int occupied = 0;
+    for (int s = 0; s < JobSystem::kJobCostSlots; ++s)
+        if (JobSystem::g_jobCostCache.slotHash[s].load(std::memory_order_relaxed) != 0)
+            ++occupied;
+    Require(occupied <= 4, "cache occupancy must not exceed live job count");
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    std::cout << "PASS JccLongRunStability\n";
+}
+
 int main()
 {
     std::cout << std::unitbuf;
@@ -1918,6 +2386,23 @@ int main()
         std::cout << "PASS TokenShutdownMix\n";
         TestScheduleCompletePressure();
         std::cout << "PASS ScheduleCompletePressure\n";
+
+        // ── JobCostCache（per-job 自动 batch，2026-08-23）──
+        TestJobCostCacheBasic();
+        TestJobCostCacheNoUnderflow();
+        TestJobCostCacheSpikeSelfHeal();
+        TestJobCostCacheCollisionReuse();
+        TestResolveChunkSizeFallback();
+
+        // ── JobCostCache 对抗性压力（并发 / 正确性 / 稳定性）──
+        TestJccConcurrentHeterogeneous();
+        TestJccResultsInvariantAcrossTiles();
+        TestJccFlagToggleMidFlight();
+        TestJccCollisionSlotConcurrent();
+        TestJccConcurrentSameHashBatches();
+        TestJccWaveCostVariance();
+        TestJccRandomVariance();
+        TestJccLongRunStability();
 
         JobSystem::Scheduler::Shutdown();
         return 0;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include "NativeWorkerPool.h"
+#include "WorkerSnapshot.h"
 
 #ifdef _WIN32
 #ifdef JOB_SYSTEM_EXPORT
@@ -43,6 +43,9 @@ extern "C" {
     JOB_API void JobSystem_PrewakeWorkers();
     JOB_API void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker);
     JOB_API void JobSystem_ConfigureGuided(int enabled, int k, int floor);
+    // 启用/关闭 per-job 自动 batch（JobCostCache）。0=关闭（默认，纯 tpw=4），
+    // 1=启用（worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数）。
+    JOB_API void JobSystem_SetJobCostCacheEnabled(int enabled);
 
     // 注册托管 Persistent 分配器回调（NativeContainers.h 的 UnsafeList 扩容/释放走托管侧，
     // 杜绝原生 free 内部指针导致的堆损坏）。alloc/free 参数为 C# 侧函数指针（cdecl）。
@@ -85,9 +88,8 @@ extern "C" {
     JOB_API uint64_t JobSystem_GetDiagnosticBatchId(void* handle);
 
     // ---- 调试面板：实时 Worker 状态快照 ----
-    // WorkerSnapshot 定义在 NativeWorkerPool.h（已通过 include 引入）
     // 读取所有 worker 的实时状态快照，写入 buffer（最多 maxCount 条）。
-    // 返回实际写入的条目数。
+    // 返回实际写入的条目数。WorkerSnapshot 定义在 WorkerSnapshot.h。
     JOB_API int JobSystem_GetWorkerSnapshots(struct WorkerSnapshot* buffer, int maxCount);
 
     // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返

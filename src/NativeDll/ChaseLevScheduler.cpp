@@ -528,6 +528,16 @@ namespace JobSystem
         TileTask task;
         uint64_t seenStamp;  // park epoch（第 5 步赋值后 wait 使用）
 
+        // ── 自适应自旋预算 ──
+        // 固定 256 次自旋无法兼顾连续/间歇调度：连续时 workers 停在自旋区（dispatch 3-7μs），
+        // 间歇时 park（dispatch 16-20μs）。策略：
+        //  - 执行过任务的 worker 拉满 kSpinMax → 新批到达时仍在自旋 → 零唤醒
+        //  - 空转耗尽后指数退火（÷2，下限 kSpinMin）→ 空闲期快速让出 CPU
+        //  - 全局仍有在飞任务（activeTasks>0）时用更大窗口（kSpinBusy）：
+        //    本 worker 暂无活，但下一个任务即将被认领，自旋比 park+唤醒更省。
+        // thread_local：每个 worker 线程独立一份，互不影响。
+        thread_local uint32_t spinBudget = kSpinBase;
+
         while (true)
         {
             bool got = false;
@@ -539,6 +549,7 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                spinBudget = kSpinMax;   // 有活：拉高自旋预算
                 // workerCap 令牌（firstTile==kClaimTokenMarker）：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
                 {
@@ -585,6 +596,7 @@ namespace JobSystem
             RangeTask* rangeTask = nullptr;
             if (injector_.Pop(rangeTask))
             {
+                spinBudget = kSpinMax;   // 有活：拉高自旋预算
                 // 通用 work 任务（batch==nullptr）：直执行（不能 PushBottom 到 deque，
                 // TileTask 无 work 回调，入 deque 会丢失 work）。
                 if (rangeTask->batch == nullptr)
@@ -624,6 +636,7 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                spinBudget = kSpinMax;   // 有活（窃取成功）：拉高自旋预算
                 // workerCap 令牌：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
                 {
@@ -715,11 +728,17 @@ namespace JobSystem
                 break;
             }
 
-            // ---- 5. Park — 有界自旋（覆盖新批到达窗口）+ atomic::wait（跨平台 futex）----
+            // ---- 5. Park — 自适应自旋（覆盖新批到达窗口）+ atomic::wait（跨平台 futex）----
             {
                 uint64_t spinStamp = wakeEpoch.load(std::memory_order_acquire);
+                // 全局仍有在飞任务：本 worker 虽暂无活，新任务即将被认领 → 更大自旋窗。
+                // （与 JobCostCache 协同：轻任务塌缩后参与 worker 少，未参与 worker
+                //   靠此窗口停在自旋区，避免每帧重复 park+唤醒。）
+                const bool globalBusy =
+                    activeTasks.load(std::memory_order_acquire) > 0;
+                const uint32_t spinCap = globalBusy ? kSpinBusy : spinBudget;
                 uint32_t s = 0;
-                while (s < 256)
+                while (s < spinCap)
                 {
                     if (quit_.load(std::memory_order_acquire))
                         goto drain_quit;
@@ -731,6 +750,9 @@ namespace JobSystem
                     CpuPause();
                     ++s;
                 }
+                // 本轮无活：指数退火（快速让出 CPU 回 park），下限 kSpinMin 保底。
+                if (spinBudget > kSpinMin)
+                    spinBudget /= 2;
                 if (!injector_.IsEmpty())
                     goto main_loop;
             }

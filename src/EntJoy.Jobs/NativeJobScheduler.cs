@@ -162,6 +162,23 @@ public static unsafe partial class NativeJobScheduler
     public static int GuidedK = 4;
     public static int GuidedFloor = 16;
 
+    /// <summary>
+    /// 启用 per-job 自动 batch（JobCostCache）。关闭时（默认）走纯 tpw=4。
+    /// 启用后，worker 按每 job 的每元素成本 EWMA 自动求解最优 tile 数：
+    /// 轻任务自动减 tiles（→ 减参与 worker → 减唤醒成本），重任务维持并行度。
+    /// </summary>
+    public static bool JobCostCacheEnabled
+    {
+        get => _jobCostCacheEnabled;
+        set
+        {
+            if (_jobCostCacheEnabled == value) return;
+            _jobCostCacheEnabled = value;
+            NativeJobCore.JobSystem_SetJobCostCacheEnabled(value ? 1 : 0);
+        }
+    }
+    private static bool _jobCostCacheEnabled = false;
+
     private static void ConfigureGuidedFromEnv()
     {
         string on = System.Environment.GetEnvironmentVariable("ENTJOY_GUIDED_TILES");

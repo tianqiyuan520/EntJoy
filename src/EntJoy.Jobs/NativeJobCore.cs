@@ -95,6 +95,7 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_ConfigureTilesPerWorker;
         private static delegate* unmanaged[Cdecl]<int, int, int, void> _jobSystem_ConfigureGuided;
+        private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetJobCostCacheEnabled;
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
@@ -294,6 +295,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureTilesPerWorker");
             _jobSystem_ConfigureGuided = (delegate* unmanaged[Cdecl]<int, int, int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureGuided");
+            _jobSystem_SetJobCostCacheEnabled = (delegate* unmanaged[Cdecl]<int, void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SetJobCostCacheEnabled");
             _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterPersistentAllocator");
             _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
@@ -451,6 +454,12 @@ namespace EntJoy.JobSystem
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_ConfigureGuided == null) return;
             _jobSystem_ConfigureGuided(enabled, k, floor);
+        }
+
+        internal static void JobSystem_SetJobCostCacheEnabled(int enabled)
+        {
+            if (_nativeDll == IntPtr.Zero || _jobSystem_SetJobCostCacheEnabled == null) return;
+            _jobSystem_SetJobCostCacheEnabled(enabled);
         }
 
         internal static int JobSystem_GetWorkerCount()

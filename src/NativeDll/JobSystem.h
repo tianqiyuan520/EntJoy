@@ -56,26 +56,16 @@ namespace JobSystem {
         std::atomic<bool> hasExtraContinuations{ false };
         std::vector<std::function<void()>> continuations;
         std::mutex mtx;  // 仅保护多 continuation 溢出 + retire 协调
-        // 条件变量：Complete() Phase 3 用 wait_for 超时实现"周期回访依赖链"，
-        // 避免无限 wait(false) 在"完成依赖本线程"的病理场景死锁。wait_for 期间
-        // 释放 mtx，不阻塞其他持锁者；notify_all 在 CompleteState 中与 completed 一起发。
+        // 条件变量：Complete() wait_for 超时实现"周期回访"（避免病理场景死锁）。
+        // wait_for 期间释放 mtx；notify_all 在 CompleteState 中与 completed 一起发。
         std::condition_variable completedCv;
 
-        // Assist: Complete() 可以协助执行未完成的 range
-        // readers 计数在 HandleState 上，因为 handle 生命周期长于 batch
-        std::atomic<bool (*)(void*) noexcept> assistCallback{ nullptr };
-        std::atomic<void*> assistContext{ nullptr };
-        std::atomic<int> assistReaders{ 0 };
-        std::atomic<void (*)(void*) noexcept> assistReadersDrained{ nullptr };
-
-        // B1 传递协助依赖链：Complete() 在目标 job 无 tile 可认领时沿此链
-        // 回溯协助祖先。单依赖走 `dependency`（热路径）；CombineDependencies
-        // 合成 state 走 `dependencies`。两者均持有引用（AcquireState），在
-        // RecycleState 释放，保证 handle 被丢弃后链不会悬垂。
+        // 依赖（经 CombineDependencies 或 Schedule 依赖参数建立）。
+        // 单依赖走 `dependency`（热路径）；合并走 `dependencies` 向量。
+        // 均持有引用（AcquireState），RecycleState 释放，保证 handle 被丢弃后不悬垂。
         //
         // 【约束】依赖图必须是无环 DAG：若用户构造循环依赖（A→B→A），
-        // AssistDependencyChain 会无限回溯、Complete() 永远不返回。
-        // 运行时不做环检测（开销大），调用方必须保证无环。
+        // Complete() 永不返回。运行时不做环检测（开销大），调用方必须保证无环。
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
 

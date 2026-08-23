@@ -12,7 +12,6 @@ add_executable(JobSystemTests
     ../NativeDll/JobSystem_Scheduler.cpp
     ../NativeDll/JobProfiler.cpp
     ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/NativeWorkerPool.cpp
     ../NativeDll/ChaseLevScheduler.cpp
 )
 
@@ -24,7 +23,6 @@ add_executable(AssistLifetimeTests
     ../NativeDll/JobSystem_Scheduler.cpp
     ../NativeDll/JobProfiler.cpp
     ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/NativeWorkerPool.cpp
     ../NativeDll/ChaseLevScheduler.cpp
 )
 
@@ -36,13 +34,7 @@ add_executable(ChaseLevIntegrationTests
     ../NativeDll/JobSystem_Scheduler.cpp
     ../NativeDll/JobProfiler.cpp
     ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/NativeWorkerPool.cpp
     ../NativeDll/ChaseLevScheduler.cpp
-)
-
-add_executable(NativeWorkerPoolTests
-    NativeWorkerPoolTests.cpp
-    ../NativeDll/NativeWorkerPool.cpp
 )
 
 add_executable(SparseTileDequeTests
@@ -73,10 +65,6 @@ target_include_directories(ChaseLevIntegrationTests PRIVATE
     ../NativeDll
 )
 
-target_include_directories(NativeWorkerPoolTests PRIVATE
-    ../NativeDll
-)
-
 target_include_directories(SparseTileDequeTests PRIVATE
     ../NativeDll
 )
@@ -104,9 +92,6 @@ if(MSVC)
 
     target_compile_options(ChaseLevIntegrationTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
     target_compile_definitions(ChaseLevIntegrationTests PRIVATE NDEBUG NOMINMAX)
-
-    target_compile_options(NativeWorkerPoolTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /MP)
-    target_compile_definitions(NativeWorkerPoolTests PRIVATE NDEBUG NOMINMAX)
 
     target_compile_options(SparseTileDequeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
     target_compile_definitions(SparseTileDequeTests PRIVATE NDEBUG NOMINMAX)

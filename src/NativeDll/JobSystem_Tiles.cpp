@@ -321,7 +321,6 @@ namespace JobSystem
     // Partition-based execution (Phase 1)
     // ============================================================
     static void TryCompleteLogicalBatch(BatchState* batch) noexcept;
-    static void TryRetireCompletedBatch(HandleState* state) noexcept;
     void TryFinalizeChaseLevBatch(BatchState* batch) noexcept;   // Chase-Lev 双条件退役（定义见文件尾）
 
     // Forward declaration for tile prefetch (defined after ChunkBatchContext).
@@ -433,66 +432,7 @@ namespace JobSystem
             batch->lastWorkerAt.store(MonotonicNowNs(), std::memory_order_relaxed);
     }
 
-    static void WorkerAtomicRangeLoop(BatchState* batch) noexcept
-    {
-        RecordWorkerEntry(batch);
-        const uint64_t active =
-            g_activeWorkers.fetch_add(1, std::memory_order_acq_rel) + 1;
-        uint64_t peak = g_activeWorkersPeak.load(std::memory_order_relaxed);
-        while (active > peak && !g_activeWorkersPeak.compare_exchange_weak(
-            peak, active, std::memory_order_relaxed)) {}
-        g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
-
-        const int wi = WorkerIndexManager::GetCurrentIndex();
-
-        // 小批量认领：一次抢 kClaimBatch 个连续 tile 本地执行，降低共享 nextTile 争用。
-        // kClaimBatch 取小值 4：guided 相邻块大小相近，小批内均衡损失可忽略（大 K 会破坏均衡）。
-        // 完成计数留在 TryExecuteOneTile（worker 与 assist 共用）。
-        constexpr uint32_t kClaimBatch = 4;
-        uint64_t executed = 0;
-        while (true)
-        {
-            const uint32_t start = batch->nextTile.fetch_add(
-                kClaimBatch, std::memory_order_relaxed);
-            if (start >= batch->tileCount) break;
-
-            // 本批实际范围（防越界：末批不足 kClaimBatch）
-            const uint32_t end = std::min(batch->tileCount, start + kClaimBatch);
-
-            // ---- 调试面板：逐 tile 更新当前索引 ----
-            for (uint32_t t = start; t < end; ++t)
-            {
-                if (wi >= 0 && wi < kMaxTrackedWorkers)
-                    g_workerCurrentTile[wi].store(t, std::memory_order_relaxed);
-
-                TryExecuteOneTile(batch, t);
-                ++executed;
-            }
-        }
-
-        g_workerExecutedRanges.fetch_add(executed, std::memory_order_relaxed);
-        g_localTiles.fetch_add(executed, std::memory_order_relaxed);
-        g_activeWorkers.fetch_sub(1, std::memory_order_acq_rel);
-        // 调试面板：把当前执行窗口的 tiles 更新为本 worker 实际认领执行的 tile 数
-        DebugUpdateExecTiles(static_cast<uint32_t>(executed));
-    }
-
-    static bool AssistExecuteOneTile(void* ptr) noexcept
-    {
-        auto* batch = static_cast<BatchState*>(ptr);
-        if (!batch) return false;
-        const uint32_t tile = batch->nextTile.fetch_add(
-            1, std::memory_order_relaxed);
-        if (tile >= batch->tileCount) return false;
-        SetCurrentBatchId(batch->diagnosticId);
-        TryExecuteOneTile(batch, tile);
-        SetCurrentBatchId(0);
-        g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-        g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-        g_assistTiles.fetch_add(1, std::memory_order_relaxed);
-        batch->batchAssistTiles.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
+    // 执行入口统一在 ChaseLevScheduler（WorkerLoop / 主线程 TryAssistOne）。
 
     static void RecordTopologyCompletion(BatchState* batch) noexcept
     {
@@ -574,9 +514,6 @@ namespace JobSystem
         if (batch->logicalCompleted.exchange(
             true, std::memory_order_acq_rel)) return;
         auto* state = batch->handle;
-        // Stop admitting new assist calls. Readers that already captured the
-        // callback can only observe empty partitions at this point.
-        state->assistCallback.store(nullptr, std::memory_order_release);
 
         RecordFinalizedBatchTiming(batch);
         const uint64_t publishedAt =
@@ -589,114 +526,15 @@ namespace JobSystem
         g_completingBatchState = state;
         PushTraceEvent(TraceEventType::FinalizeBegin,
             batch->diagnosticId, -1, 0, 0);
-        // context/blob 释放延迟到 TryRetireCompletedBatch（assistReaders==0 && workersFinished 门控）——
-        // 主线程 assist 可能正拿着 bc/context 执行 tile；此处不可等待 readers（末块由 assist 自执时自死锁）。
         PushTraceEvent(TraceEventType::HandleComplete,
             batch->diagnosticId, -1, 0, 0);
         CompleteState(state);
         g_completingBatchState = previousCompletingState;
 
-        if (g_useWorkStealing)
-        {
-            // Chase-Lev 新路径：退役由双条件驱动（tilesRemaining==0 && pendingTasks==0），
-            // 这里只完成逻辑部分，实际退役交给最后一个完成者（可能不是本线程）。
-            RecordTopologyCompletion(batch);
-            TryFinalizeChaseLevBatch(batch);
-        }
-    }
-
-    static void TryRetireCompletedBatch(HandleState* state) noexcept
-    {
-        if (!state) return;
-
-        BatchState* batch = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(state->mtx);
-            batch = static_cast<BatchState*>(
-                state->assistContext.load(std::memory_order_acquire));
-            if (!batch ||
-                !batch->logicalCompleted.load(std::memory_order_acquire) ||
-                !batch->workersFinished.load(std::memory_order_acquire) ||
-                state->assistReaders.load(std::memory_order_acquire) != 0)
-            {
-                return;
-            }
-
-            state->assistContext.store(nullptr, std::memory_order_release);
-            state->assistReadersDrained.store(nullptr, std::memory_order_release);
-        }
-
-        if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
-        {
-            // 本处保证 assistReaders==0 && workersFinished（无执行者在使用 bc/context）
-            if (batch->cleanup)
-            {
-                batch->cleanup(batch->context);
-                batch->context = nullptr;
-            }
-            // 释放 Chase-Lev tile deque（新路径分配的 per-batch deque 数组）
-            // 新路径使用持久 per-worker deque，无需 per-batch 释放。
-            ReleaseBatch(batch);
-            state->backendRetired.store(true, std::memory_order_release);
-            state->backendRetired.notify_all();
-            g_backendBatchesOutstanding.fetch_sub(
-                1, std::memory_order_acq_rel);
-            g_backendBatchesOutstanding.notify_all();
-        }
-    }
-
-    // The last assist reader only requests finalization. Batch memory remains
-    // alive until every worker slot has also finished its tile loop.
-    static void OnAssistReadersDrained(void* handlePtr) noexcept
-    {
-        TryRetireCompletedBatch(static_cast<HandleState*>(handlePtr));
-    }
-
-    // Acquire assist reader: returns false if batch is already finalized
-    static void ExecuteBatchSlot(void* raw, uint32_t slot) noexcept
-    {
-        auto* batch = static_cast<BatchState*>(raw);
-        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
-        const int startProcessor = timingEnabled
-            ? CurrentProcessorIndexForDiagnostics() : -1;
-        if (WorkerIndexManager::GetCurrentIndex() < 0)
-            WorkerIndexManager::SetCurrentIndex(WorkerIndexManager::AllocateIndex());
-
-        // ---- 调试面板：执行窗口事件上报（start 时记录时间戳，end 时追加共享历史）----
-        DebugBeginExec(batch->diagnosticId, static_cast<uint32_t>(batch->tileCount),
-                       batch->workerCount, false); // Job：记录计划参与 worker 数
-
-        // worker 整个 slot 只执行这一个 batch —— 窗口一次，覆盖槽内所有 tile。
-        // 注：ExecuteBatchSlot 仅被旧路径 NativeWorkerPool::Submit 调用；
-        // Chase-Lev 模式走 ChaseLevScheduler::WorkerLoop，不经过这里。
-        SetCurrentBatchId(batch->diagnosticId);
-        WorkerAtomicRangeLoop(batch);
-        SetCurrentBatchId(0);
-
-        // ---- 调试面板：执行窗口结束 ----
-        DebugEndExec();
-
-        const int endProcessor = timingEnabled
-            ? CurrentProcessorIndexForDiagnostics() : -1;
-        if (startProcessor >= 0 && endProcessor >= 0 && startProcessor != endProcessor)
-            batch->coreMigrations.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    static void CompleteBackendBatch(void* raw) noexcept
-    {
-        auto* batch = static_cast<BatchState*>(raw);
-        auto* state = batch->handle;
+        // Chase-Lev 唯一路径：退役由双条件驱动（tilesRemaining==0 && pendingTasks==0），
+        // 这里只完成逻辑部分，实际退役交给最后一个完成者（可能不是本线程）。
         RecordTopologyCompletion(batch);
-        state->assistCallback.store(nullptr, std::memory_order_release);
-        batch->workersFinished.store(true, std::memory_order_release);
-        // Logical completion is owned exclusively by the last tile executor
-        // (TryCompleteLogicalBatch in TryExecuteOneTile), which provably cannot
-        // run on a retired/recycled batch (it holds a worker slot or an assist
-        // reader, both of which block retirement). The old defensive second
-        // call here could double-finalize a batch after it was recycled —
-        // removed; tileCount is always >= 1 so no empty-batch path needs it.
-        TryRetireCompletedBatch(state);
-        ReleaseState(state);
+        TryFinalizeChaseLevBatch(batch);
     }
 
     void SubmitBatch(BatchState* batch, int /*workerCap*/)
@@ -721,41 +559,14 @@ namespace JobSystem
 
         AcquireState(state);
 
-        if (g_useWorkStealing && g_chaseLevScheduler)
-        {
-            // ---- Chase-Lev 新路径 ----
-            state->backendRetired.store(false, std::memory_order_release);
-            g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
-            const uint64_t publishedAt = MonotonicNowNs();
-            batch->publishedAt.store(publishedAt, std::memory_order_release);
-            g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
+        // ---- Chase-Lev 路径 ----
+        state->backendRetired.store(false, std::memory_order_release);
+        g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
+        const uint64_t publishedAt = MonotonicNowNs();
+        batch->publishedAt.store(publishedAt, std::memory_order_release);
+        g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
 
-            g_chaseLevScheduler->SubmitBatch(batch);
-        }
-        else
-        {
-            // ---- 旧路径：NativeWorkerPool ----
-            bool (*assistFn)(void*) noexcept = &AssistExecuteOneTile;
-            state->assistCallback.store(assistFn, std::memory_order_release);
-            state->assistContext.store(batch, std::memory_order_release);
-            state->assistReadersDrained.store(&OnAssistReadersDrained, std::memory_order_release);
-
-            state->backendRetired.store(false, std::memory_order_release);
-            g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
-            const uint64_t publishedAt = MonotonicNowNs();
-            batch->publishedAt.store(publishedAt, std::memory_order_release);
-            g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
-            if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
-                batch,
-                static_cast<uint32_t>(participantCount),
-                &ExecuteBatchSlot,
-                &CompleteBackendBatch))
-            {
-                for (int slot = 0; slot < participantCount; ++slot)
-                    ExecuteBatchSlot(batch, static_cast<uint32_t>(slot));
-                CompleteBackendBatch(batch);
-            }
-        }
+        g_chaseLevScheduler->SubmitBatch(batch);
     }
 
     // ---------- Chunk/Entity adaptors ----------
@@ -876,6 +687,30 @@ namespace JobSystem
         // 若 ReleaseState 在块外，两者都会执行 → double release → use-after-free。
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
+            // ---- JobCostCache：batch 退役时更新 per-job 每元素成本 EWMA ----
+            // 安全保证：
+            //  - topologyDoneAt 在 TryCompleteLogicalBatch 中设置（所有 tile 已执行完）
+            //  - finalized.exchange 保证单线程执行本块
+            //  - 读取在 ReleaseBatch 之前 → batch 仍存活，无 use-after-free
+            //  - flag 默认关闭 → 跳过（relaxed 读取，零热路径开销）
+            if (g_jobCostCacheEnabled.load(std::memory_order_relaxed) &&
+                batch->funcHash != 0 && batch->totalElements > 0)
+            {
+                const uint64_t published =
+                    batch->publishedAt.load(std::memory_order_relaxed);
+                const uint64_t completed =
+                    batch->topologyDoneAt.load(std::memory_order_relaxed);
+                if (completed > published)
+                {
+                    const double totalNs = static_cast<double>(completed - published);
+                    const double perElemNs = totalNs / static_cast<double>(batch->totalElements);
+                    g_jobCostCache.UpdatePerElemCost(batch->funcHash, perElemNs);
+                    if (g_jobCostCacheVerbose)
+                        std::printf("[JCC] L hash=%08x tiles=%u N=%u wallUs=%.1f perElem=%.2fns\n",
+                            batch->funcHash, batch->tileCount, batch->totalElements,
+                            totalNs / 1000.0, perElemNs);
+                }
+            }
             // 标准 Chase-Lev：不需要 UnregisterBatch（无共享注册表）
             // RangeTask 对象在执行后立即释放回池，不持有 batch 引用
             if (batch->cleanup)
@@ -896,7 +731,7 @@ namespace JobSystem
             g_backendBatchesOutstanding.fetch_sub(
                 1, std::memory_order_acq_rel);
             g_backendBatchesOutstanding.notify_all();
-            // 平衡 SubmitBatch 里的 AcquireState（旧路径由 CompleteBackendBatch ReleaseState）
+            // 平衡 SubmitBatch 里的 AcquireState（ReleaseState 由最后一个完成者执行）
             ReleaseState(state);
         }
     }
