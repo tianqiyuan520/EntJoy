@@ -82,27 +82,34 @@
 ## Per-job 自动 Batch（JobCostCache）— 2026-08-23 落地
 
 用 per-job 的**每元素成本 EWMA** 自动求解最优 tile 数，替代固定 tpw=4 一刀切。
-export flag 默认关闭（`NativeJobScheduler.JobCostCacheEnabled = false`），
-显式启用或环境变量 `ENTJOY_JOB_COST_CACHE=1`。
+**默认开启**（`NativeJobScheduler.JobCostCacheEnabled = true`）；
+关闭走纯 tpw=4（`=false` 或 env `ENTJOY_JOB_COST_CACHE=0`，1=开启）。
 
 ### 实测对比（flag ON vs OFF，同机同轮）：
 
 | 场景 | flag OFF | flag ON | 变化 |
 |---|---|---|---|
-| S1 Cpp | 0.020ms | 0.019ms | 持平 ✓ |
-| S2 Cpp | 0.025ms | **0.013ms** | 🚀 2x |
-| S3 Cpp | 0.087ms | 0.087ms | 持平 ✓（无回归）|
-| S5 Cpp | 0.024ms | **0.008ms** | 🚀 3x（超目标 0.013）|
-| S6 Cpp | 39.98ms | 38.45ms | 微升 ✓ |
+| S1 Cpp | 0.020ms | 0.017ms | 持平 ✓ |
+| S2 Cpp | 0.025ms | **0.006ms** | 🚀 4x |
+| S3 Cpp | 0.087ms | **0.049ms** | 🚀 1.8x |
+| S5 Cpp | 0.024ms | **0.006ms** | 🚀 4x（超目标 0.013）|
+| S6 Cpp | 39.98ms | **36.8ms** | ✓ 提升 |
 
 > 环境噪声 ±30-100%，单轮对比为近似值；方向与设计一致。
+
+### 真实场景验证（GridSearch2D，10 万实体 × 10 万查询）
+
+| 场景 | JCC OFF | JCC ON（修前） | JCC ON（serialUs 修正） |
+|---|---|---|---|
+| BuildCore-Steady | 0.628ms | 1.085ms（2x 退化）| **0.695ms** ✓ |
+| Query | 0.758ms | 2.116ms（3.1x 退化）| **0.805ms** ✓ |
 
 ### 实现要点
 
 | 组件 | 说明 |
 |---|---|
 | `JobCostCache.h`（新建） | 256 槽无锁数组（Q22 定点），funcHash（FNV-1a）定位，碰撞复用重学 |
-| `ResolveChunkSize(len, batch, funcHash)` | 有数据时 `tiles = clamp(totalUs/150μs, 1, wc×16)` + **安全护栏 floor** |
+| `ResolveChunkSize(len, batch, funcHash)` | 有数据时 `tiles = clamp(serialUs/150μs, 1, wc×16)`，**`serialUs = totalUs×wc`**（并行稀释校正）+ 安全护栏 floor |
 | `BatchState.funcHash/totalElements` | Schedule 入口设置，退役时算 perElem = (topologyDoneAt−publishedAt)/N |
 | EWMA α=0.75 | **有符号分支防下溢**（下溢曾把 tiles 钉死 240）+ **双向对称无上升阻尼**（CAS 循环防并发丢更新）|
 | 安全护栏 | 单 tile ≤ 32k 元素（kMaxAutoChunk），防大 job 塌缩成串行巨型 tile |
