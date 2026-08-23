@@ -40,6 +40,11 @@ int main()
 
     AssistLifetimeContext context;
     ChunkJobData chunks[2]{};
+    // 实体数衡 tile：entityCount 必须非零（空 chunk 会按实体数合并成 1 个 tile，
+    // 导致回调次数≠chunk 数，测试断言 started==2 永不满足）。每 chunk 1024 实体 →
+    // 2 个 tile、2 次回调（对齐实体数衡 tile 语义）。
+    chunks[0].entityCount = 1024;
+    chunks[1].entityCount = 1024;
     auto handle = JobSystem::Scheduler::ScheduleChunks(
         &ExecuteBlockedChunk,
         &context,

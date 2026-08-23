@@ -270,9 +270,21 @@ namespace JobSystem
         delete static_cast<BackendAsyncContext*>(raw);
     }
 
+    // Chase-Lev SubmitWork 回调（单参数适配器）：worker 执行 work
+    static void RunBackendAsyncSingle(void* raw) noexcept
+    {
+        RunBackendAsync(raw, 0);
+    }
+
     void SubmitBackendAsync(std::function<void()> work)
     {
         auto* context = new BackendAsyncContext{ std::move(work) };
+        // Chase-Lev 下 NativeWorkerPool 未 Start（Submit 必失败）→ 投通用 work 任务，避免同步执行阻塞调用线程。
+        if (g_useWorkStealing && g_chaseLevScheduler && g_chaseLevScheduler->IsRunning())
+        {
+            g_chaseLevScheduler->SubmitWork(&RunBackendAsyncSingle, context, &CompleteBackendAsync);
+            return;
+        }
         if (!g_nativeWorkerPool || !g_nativeWorkerPool->Submit(
             context, 1, &RunBackendAsync, &CompleteBackendAsync))
         {

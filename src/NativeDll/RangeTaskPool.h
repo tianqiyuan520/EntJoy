@@ -29,6 +29,11 @@ namespace JobSystem
         uint32_t firstTile{ 0 };
         uint32_t tileCount{ 0 };
         uint32_t poolIndex{ 0 };  // 在 storage_ 中的索引（用于 Release）
+        // 通用 work 任务（batch==nullptr 时有效）：Chase-Lev SubmitWork 通道，
+        // 无 batch/完成链（work 内的 CompleteState 由调用方负责）。
+        void (*workFn)(void*){ nullptr };
+        void* workCtx{ nullptr };
+        void (*workCleanup)(void*){ nullptr };
     };
 
     class RangeTaskPool
@@ -87,6 +92,9 @@ namespace JobSystem
             task->batch = nullptr;
             task->firstTile = 0;
             task->tileCount = 0;
+            task->workFn = nullptr;
+            task->workCtx = nullptr;
+            task->workCleanup = nullptr;
 
             uint64_t head = freeHead_.load(std::memory_order_relaxed);
             while (true)

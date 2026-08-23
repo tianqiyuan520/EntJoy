@@ -445,12 +445,9 @@ namespace JobSystem
 
         const int wi = WorkerIndexManager::GetCurrentIndex();
 
-        // 小批量认领（fetch_add(kClaimBatch)）：一次抢若干连续 tile，本地连续执行。
-        //   - 认领原子从"每 tile 一次"降为"每 kClaimBatch 次一次"，高并行屏障（S5）下大幅降低
-        //     对共享 nextTile 的争用；
-        //   - kClaimBatch 取小值（4）：guided tile 大前小后但相邻几块大小相近，一小批内的均衡损失
-        //     可忽略（大 K 会抓走过多大块破坏均衡，已实测回退）；
-        //   - 完成计数仍留在 TryExecuteOneTile（worker 与 assist 共用），绝不搬到这里。
+        // 小批量认领：一次抢 kClaimBatch 个连续 tile 本地执行，降低共享 nextTile 争用。
+        // kClaimBatch 取小值 4：guided 相邻块大小相近，小批内均衡损失可忽略（大 K 会破坏均衡）。
+        // 完成计数留在 TryExecuteOneTile（worker 与 assist 共用）。
         constexpr uint32_t kClaimBatch = 4;
         uint64_t executed = 0;
         while (true)
