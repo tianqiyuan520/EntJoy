@@ -54,9 +54,8 @@ namespace JobSystem
     inline constexpr uint64_t kLongBatchBarrierNs = 800'000;
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
-    // GridSearch A/B 定标：可变代价 job 最优 ~26 tiles/worker；默认 16 为
-    // 可变代价(job 受益) 与均匀代价(job 少付 claim 开销) 的折中。env 可覆盖。
-    inline constexpr int kDefaultTilesPerWorker = 16;
+    // tpw=4 平衡 light/heavy 场景性能，与 ECS kTargetTilesPerWorker=4 一致。
+    inline constexpr int kDefaultTilesPerWorker = 4;
 
     // per-thread state 缓存类型。定义在本头使 t_stateCache 可跨 TU extern
     // （State 模块 RecycleState/CreateState 直接读写）。析构把缓存 state 批量

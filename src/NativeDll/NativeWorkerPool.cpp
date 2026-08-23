@@ -1,4 +1,5 @@
 #include "NativeWorkerPool.h"
+#include "CpuPause.h"
 #include "ThreadAffinity.h"
 #include "JobProfiler.h" // WorkerIndexManager：pool 线程预分配索引，供调试面板泳道上报
 #include "SparseTileDeque.h"
@@ -27,12 +28,7 @@
 
 namespace JobSystem
 {
-    static inline void CpuPause() noexcept
-    {
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
-        _mm_pause();
-#endif
-    }
+    // CpuPause() defined in CpuPause.h (unity build safe)
 
     // 混合等待的有界自旋窗：约 8192 × pause ≈ 360µs。
     // 覆盖背靠背 job 的尾宽（µs~几百µs），避免连续模式 park/wake；

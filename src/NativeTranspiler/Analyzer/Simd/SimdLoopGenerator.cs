@@ -46,6 +46,7 @@ namespace NativeTranspiler.Analyzer
                 _variables[ivName].Kind = VarKind.Varying;
                 _variables[ivName].CppType = "int";
             }
+            RegisterScopedVariable(ivName);
 
             // Determine start and end expressions
             string startExpr = "0";
@@ -84,17 +85,21 @@ namespace NativeTranspiler.Analyzer
             {
                 // Detect small-constant uniform-bound loops for unrolling.
                 // Parse start/end as integer constants: "0" .. "16", "start" .. "endValue", etc.
+                // ★ The bound may be inclusive (i <= end) or exclusive (i < end):
+                //   iteration count = end - start + (inclusive ? 1 : 0).
+                //   The old code always used end - start, dropping the last iteration
+                //   of inclusive loops (ST5: for (dx = -1; dx <= 1; dx++) only ran 2 of 3).
+                bool unrollInclusive = stmt.Condition is BinaryExpressionSyntax unrollCond
+                    && unrollCond.IsKind(SyntaxKind.LessThanOrEqualExpression);
                 int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
                 bool canUnroll = int.TryParse(startExpr, out unrollStart)
                     && int.TryParse(endExpr, out unrollEnd)
                     && unrollEnd > unrollStart
-                    && (unrollCount = unrollEnd - unrollStart) <= 64;
+                    && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
 
                 if (canUnroll)
                 {
-                    // ★ Full unroll for small uniform-bound loops (HeavyMove 16-iteration sin/cos).
-                    //   Eliminates loop-carried dependencies so MSVC can globally schedule
-                    //   the entire computation chain across all SIMD iterations.
+                    // Full unroll for small uniform-bound loops (HeavyMove 16-iteration sin/cos).
                     GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
                 }
                 else
@@ -124,7 +129,10 @@ namespace NativeTranspiler.Analyzer
                     string exitL = $"__uni_exit_{_labelCounter++}";
                     string contL = $"__uni_cont_{_labelCounter++}";
                     _isUniformScalarLoop = true;
-                    _loopStack.Push(new LoopFrame { TrackerVar = "", IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
+                    // ★ Uniform loop with a per-lane break condition: the saved mask doubles
+                    //   as the lane tracker so break can drop matched lanes and keep matching
+                    //   others (see GenerateBreakStatement).
+                    _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
                     var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
                     GenerateBlock(bodyB, skipBraces: false);
                     _loopStack.Pop();
@@ -163,7 +171,7 @@ namespace NativeTranspiler.Analyzer
             bool hasBreak = bodyBlock.DescendantNodes().OfType<BreakStatementSyntax>().Any();
             bool hasContinue = bodyBlock.DescendantNodes().OfType<ContinueStatementSyntax>().Any();
 
-            for (int i = start; i < count; i++)
+            for (int i = start; i < start + count; i++)
             {
                 string contLabel = $"__unr_cont_{_labelCounter}_{i}";
 
@@ -225,14 +233,19 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__uni_exit_{_labelCounter++}";
             string continueLabel = $"__uni_cont_{_labelCounter++}";
 
-            // ★ Mask scope fix: save current mask as a named variable OUTSIDE the for scope
+            // ★ Save the entry mask BEFORE the loop: __saved_N doubles as the lane
+            //   tracker (breaks drop lanes from it), so restoring _currentMask from
+            //   __saved_N after the loop would leak a narrowed mask into the code
+            //   that follows (e.g. the final R[i]=... store skips broken lanes).
+            string preLoopMask = _currentMask;
+            // Save current mask as a named variable outside the for scope
             string savedMask = $"__saved_{_maskCounter++}";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             string csOpStr = stmt.Condition is BinaryExpressionSyntax condCmp
                 && condCmp.IsKind(SyntaxKind.LessThanOrEqualExpression) ? "<=" : "<";
 
-            // ★ Pre-scan for SIMD loop-invariant hoisting: detect v_i * N patterns
+            // Pre-scan for SIMD loop-invariant hoisting: detect v_i * N patterns
             var bodyBlock = stmt.Statement is BlockSyntax bs
                 ? bs
                 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
@@ -260,7 +273,9 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"simd_value<int> {hn} = {hexpr};");
 
             AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
-            AppendLine($"int {ivName}_end{endSuffix} = {endExpr};");
+            // ★ ≤ bound gets +1: the emitted loop uses <, so dy <= 1 must loop to 2.
+            //   Otherwise the last iteration is silently dropped.
+            AppendLine($"int {ivName}_end{endSuffix} = {endExpr}{(csOpStr == "<=" ? " + 1" : "")};");
             AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
             AppendLine("{");
             _indent++;
@@ -273,7 +288,9 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Push(new LoopFrame
             {
-                TrackerVar = "",
+                // ★ Saved mask doubles as lane tracker so per-lane breaks drop matched
+                //   lanes and keep unmatched ones iterating.
+                TrackerVar = savedMask,
                 IterActiveVar = "",
                 ExitLabel = exitLabel,
                 ContinueLabel = continueLabel
@@ -310,8 +327,8 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{continueLabel}: ;");
             _indent--;
             AppendLine("}");
-            // ★ Restore mask after loop: use the saved variable (still in scope)
-            _currentMask = savedMask;
+            // ★ Restore the ENTRY mask (not the tracker — breaks may have narrowed it)
+            _currentMask = preLoopMask;
             if (_gotoTargets.Contains(exitLabel))
                 AppendLine($"{exitLabel}: ;");
         }
@@ -333,16 +350,16 @@ namespace NativeTranspiler.Analyzer
                 && condBinary.IsKind(SyntaxKind.LessThanOrEqualExpression);
             string simdCmpFunc = isLessOrEqual ? "n_cmp_le_epi32" : "n_cmp_lt_epi32";
 
-            // ★ Mask scope fix: save current mask as a named variable OUTSIDE the for scope
+            // Save current mask as a named variable outside the for scope
             string savedMask = $"__saved_{_maskCounter++}";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             AppendLine($"// Varying-bound reduction: count-loop + hmax + ivdep");
             AppendLine($"simd_value<int> simd_{ivName} = {startExpr};");
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
-            // ★ Zero masked-lane start so garbage doesn't inflate hmax
+            // Zero masked-lane start so garbage doesn't inflate hmax
             AppendLine($"simd_{ivName} = simd_max(simd_{ivName}, simd_value<int>(0));");
-            // ★ Hoist SortedPositions_length-1 broadcast for safe gather inside loop
+            // Hoist SortedPositions_length-1 broadcast for safe gather inside loop
             string sortedLenVar = FindSortedLengthVar(stmt);
             if (sortedLenVar != null)
             {
@@ -357,8 +374,7 @@ namespace NativeTranspiler.Analyzer
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
 
-            // ★ Use v_active directly — no and with savedMask (redundant: dead lanes have v_active=false)
-            //   simd_i/simd_end_i were clamped to ≥0 above, so dead-cell lanes have v_active=false.
+            // Use v_active directly — dead lanes have v_active=false due to clamp above
             _currentMask = $"v_active{sid}";
 
             _loopStack.Push(new LoopFrame
@@ -382,7 +398,6 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"simd_{ivName} = simd_{ivName} + 1;");
             _indent--;
             AppendLine("}");
-            // ★ Restore mask after loop: use the saved variable (still in scope)
             _currentMask = savedMask;
             _inVaryingReductionLoop = false;
             _hoistedSafeMaxVar = null;
@@ -507,25 +522,25 @@ namespace NativeTranspiler.Analyzer
                 string ct = _simdVaryingCppType[name];
                 if (ct.Contains("float2"))
                 {
-                    AppendLine($"float __{name}_x_{sid}[NSIMD_WIDTH]; n_store_ps(__{name}_x_{sid}, v_{name}.x.v);");
-                    AppendLine($"float __{name}_y_{sid}[NSIMD_WIDTH]; n_store_ps(__{name}_y_{sid}, v_{name}.y.v);");
+                    AppendLine($"float __{name}_x_{sid}[g_simdWidthInt]; n_store_ps(__{name}_x_{sid}, v_{name}.x.v);");
+                    AppendLine($"float __{name}_y_{sid}[g_simdWidthInt]; n_store_ps(__{name}_y_{sid}, v_{name}.y.v);");
                 }
                 else if (ct.Contains("int2"))
                 {
-                    AppendLine($"int __{name}_x_{sid}[NSIMD_WIDTH]; n_store_epi32(__{name}_x_{sid}, v_{name}.x.v);");
-                    AppendLine($"int __{name}_y_{sid}[NSIMD_WIDTH]; n_store_epi32(__{name}_y_{sid}, v_{name}.y.v);");
+                    AppendLine($"int __{name}_x_{sid}[g_simdWidthInt]; n_store_epi32(__{name}_x_{sid}, v_{name}.x.v);");
+                    AppendLine($"int __{name}_y_{sid}[g_simdWidthInt]; n_store_epi32(__{name}_y_{sid}, v_{name}.y.v);");
                 }
                 else
                 {
                     string store = ct == "float" ? "n_store_ps" : "n_store_epi32";
-                    AppendLine($"{ct} __{name}_{sid}[NSIMD_WIDTH]; {store}(__{name}_{sid}, v_{name}.v);");
+                    AppendLine($"{ct} __{name}_{sid}[g_simdWidthInt]; {store}(__{name}_{sid}, v_{name}.v);");
                 }
             }
-            AppendLine($"int __start_{sid}[NSIMD_WIDTH]; n_store_epi32(__start_{sid}, simd_{ivName}.v);");
-            AppendLine($"int __end_{sid}[NSIMD_WIDTH]; n_store_epi32(__end_{sid}, simd_end_{ivName}.v);");
+            AppendLine($"int __start_{sid}[g_simdWidthInt]; n_store_epi32(__start_{sid}, simd_{ivName}.v);");
+            AppendLine($"int __end_{sid}[g_simdWidthInt]; n_store_epi32(__end_{sid}, simd_end_{ivName}.v);");
 
             // --- 4. Per-lane scalar loop ---
-            AppendLine("for (int __lane = 0; __lane < NSIMD_WIDTH; __lane++)");
+            AppendLine("for (int __lane = 0; __lane < g_simdWidthInt; __lane++)");
             AppendLine("{");
             _indent++;
             AppendLine($"if (!(__mask_{sid} & (1 << __lane))) continue;");

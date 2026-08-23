@@ -48,9 +48,16 @@ namespace NativeTranspiler.Analyzer
                     return TranslateBinary(binary);
 
                 case PrefixUnaryExpressionSyntax prefix:
-                    // For !, -, etc.
+                    // For !, -, ~
                     if (prefix.IsKind(SyntaxKind.LogicalNotExpression))
                         return $"simd_mask{{ n_not_mask({TranslateExpression(prefix.Operand)}.m) }}";
+                    if (prefix.IsKind(SyntaxKind.BitwiseNotExpression))
+                    {
+                        // ★ ~x → x ^ -1 (bitwise NOT). The old code emitted "-x" for "~x",
+                        //   producing ~3 = -3 instead of -4 (ST6: s & ~3 → s & -3, off-by-one).
+                        string inner = TranslateExpression(prefix.Operand);
+                        return $"({inner} ^ -1)";
+                    }
                     return $"-{TranslateExpression(prefix.Operand)}";
 
                 case ParenthesizedExpressionSyntax paren:
@@ -109,7 +116,21 @@ namespace NativeTranspiler.Analyzer
                 return "true";
             if (literal.IsKind(SyntaxKind.FalseLiteralExpression))
                 return "false";
-            return literal.Token.Text;
+            string text = literal.Token.Text;
+            // ★ Fix: integer-valued float literals (40f, -3f, 2f) must become
+            //   40.0f / -3.0f / 2.0f — "40f" is an invalid C++ decimal constant.
+            if (literal.IsKind(SyntaxKind.NumericLiteralExpression) &&
+                (text.EndsWith("f") || text.EndsWith("F")))
+            {
+                string num = text.Substring(0, text.Length - 1);
+                if (!num.Contains('.') && !num.Contains('e') && !num.Contains('E'))
+                    text = num + ".0f";
+            }
+            else if (literal.IsKind(SyntaxKind.NumericLiteralExpression) && text is ("." or "0" or "-0"))
+            {
+                // edge: integer literals are passed through as-is (valid C++)
+            }
+            return text;
         }
 
         private string TranslateIdentifier(IdentifierNameSyntax identifier)
@@ -136,13 +157,7 @@ namespace NativeTranspiler.Analyzer
             if (_variables.TryGetValue(name, out var info))
             {
                 if (info.Kind == VarKind.Uniform)
-                {
-                    // In SIMD context: uniform variables in SIMD loops should use v_ prefix
-                    // (e.g., `uint r = x % 13u` → r is UNIFORM but v_r is simd_value<int>)
-                    if (_isUniformScalarLoop)
-                        return $"v_{name}";
                     return name; // scalar
-                }
 
                 // Varying or Reduction
                 if (IsFloat2Type(info.CppType))
@@ -830,11 +845,34 @@ namespace NativeTranspiler.Analyzer
                 string rightV = rightKind >= VarKind.Varying ? $"({right}).v" : $"{right}";
 
                 bool cmpIsInt = false;
-                foreach (var side in new ExpressionSyntax[] { binary.Left, binary.Right }) {
+                bool cmpIsUint = false;   // (uint)x-style comparisons need unsigned semantics
+                foreach (var side0 in new ExpressionSyntax[] { binary.Left, binary.Right })
+                {
+                    // Unwrap parentheses so (j & 1) is seen as a bitwise op, (uint)x as a cast.
+                    var side = (side0 as ParenthesizedExpressionSyntax)?.Expression ?? side0;
+                    // (uint)x / (int)x casts
+                    if (side is CastExpressionSyntax castExpr)
+                    {
+                        if (castExpr.Type.ToString().Contains("uint"))
+                            cmpIsUint = true;
+                        var castInner = (castExpr.Expression as ParenthesizedExpressionSyntax)?.Expression ?? castExpr.Expression;
+                        if (castInner is IdentifierNameSyntax ccid && _variables.TryGetValue(ccid.Identifier.Text, out var cciv) && cciv.CppType == "int") cmpIsInt = true;
+                    }
                     if (side is IdentifierNameSyntax cid && _variables.TryGetValue(cid.Identifier.Text, out var civ) && civ.CppType == "int") cmpIsInt = true;
-                    if (side is CastExpressionSyntax cce && cce.Expression is IdentifierNameSyntax ccid && _variables.TryGetValue(ccid.Identifier.Text, out var cciv) && cciv.CppType == "int") cmpIsInt = true;
+                    // Detect integer bitwise operations: x & 7u, x | mask, x ^ val
+                    if (side is BinaryExpressionSyntax bitwise &&
+                        (bitwise.IsKind(SyntaxKind.BitwiseAndExpression) ||
+                         bitwise.IsKind(SyntaxKind.BitwiseOrExpression) ||
+                         bitwise.IsKind(SyntaxKind.ExclusiveOrExpression)))
+                        cmpIsInt = true;
+                    // Detect unsigned integer literals: 7u, 0u, etc.
+                    if (side is LiteralExpressionSyntax litExpr && litExpr.Token.Text.EndsWith("u"))
+                        cmpIsUint = true;
                 }
-                string bc = cmpIsInt ? "n_set1_epi32" : "n_set1_ps";
+                // Any explicit uint operand (u-literal or (uint) cast) makes the compare unsigned —
+// the variable may be recorded as int but its value is uint semantics.
+bool useUnsignedCmp = cmpIsUint;
+string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_set1_ps");
                 // ★ Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
                 bool rightIsHoisted = right.StartsWith("__uni_");
                 bool leftIsHoisted = left.StartsWith("__uni_");
@@ -856,6 +894,21 @@ namespace NativeTranspiler.Analyzer
                 if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"({right}).v";
                 if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"({left}).v";
 
+                if (useUnsignedCmp) {
+                    // Unsigned compare: x^0x80000000 converts two's-complement order to
+                    // sign-magnitude order, so the signed compare works on the flipped values.
+                    string flipConst = "(int)0x80000000";
+                    string leftUniform = left.StartsWith("__uni_") ? $"({left}).v" : $"n_set1_epi32({left})";
+                    string rightUniform = right.StartsWith("__uni_") ? $"({right}).v" : $"n_set1_epi32({right})";
+                    string leftFlip = leftKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({leftV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({leftUniform}, n_set1_epi32({flipConst}))";
+                    string rightFlip = rightKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({rightV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({rightUniform}, n_set1_epi32({flipConst}))";
+                    string ic2 = op switch {
+                        "<" => "n_cmp_lt_epi32", ">" => "n_cmp_gt_epi32", "<=" => "n_cmp_le_epi32",
+                        ">=" => "n_cmp_ge_epi32", "==" => "n_cmp_eq_epi32", "!=" => "n_cmp_ne_epi32",
+                        _ => "n_cmp_eq_epi32"
+                    };
+                    return $"simd_mask{{ {ic2}({leftFlip}, {rightFlip}) }}";
+                }
                 if (cmpIsInt) {
                     string ic = op switch {
                         "<" => "n_cmp_lt_epi32", ">" => "n_cmp_gt_epi32", "<=" => "n_cmp_le_epi32",
@@ -929,6 +982,18 @@ namespace NativeTranspiler.Analyzer
             }
 
             // At least one varying — SIMD arithmetic
+            // Type-specific optimization: constant modulo
+            if (anyVarying && op == "%" && binary.Right is LiteralExpressionSyntax lit 
+                && lit.Token.Value is uint modVal && modVal > 0)
+            {
+                // Power of 2: x % (2^n) = x & (2^n - 1)
+                if ((modVal & (modVal - 1)) == 0)
+                    return $"({left} & {modVal - 1}u)";
+                // General case: optimized magic number multiplication
+                if (modVal <= 10000)
+                    return $"simd_mod_u32({left}, {modVal}u)";
+            }
+
             string simdOp = op switch
             {
                 "+" => "+",
@@ -1025,13 +1090,29 @@ namespace NativeTranspiler.Analyzer
                 string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
                 string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
 
-                if (idxKind >= VarKind.Varying && rhsKind < VarKind.Varying)
+                if (idxKind >= VarKind.Varying)
                     {
-                        return $"{storeFnScalar}(&{baseName}_ptr[{_batchOffsetVar}], {setFnScalar}({rhsExpr}))";
-                    }
+                        // ★ Conditional (if/else) store: when the current mask is narrowed,
+                        //   ANY store (contiguous or not, uniform or varying rhs) must be
+                        //   masked per-lane — otherwise branch bodies write unconditionally
+                        //   and later branches overwrite earlier ones.
+                        bool inNarrowedContext = _currentMask != "simd_mask::all_true()";
+                        if (inNarrowedContext)
+                        {
+                            // rhs may be uniform (scalar literal) or varying (SIMD expr).
+                            // Normalize to a SIMD expression so per-lane extract works.
+                            string rhsSimdExpr;
+                            if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                                rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
+                            else
+                                rhsSimdExpr = rhsExpr;
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsSimdExpr}.v,__l);}}}}}}";
+                        }
+                        if (rhsKind < VarKind.Varying)
+                        {
+                            return $"{storeFnScalar}({baseName}_ptr + {_batchOffsetVar}, {setFnScalar}({rhsExpr}))";
+                        }
 
-                    if (idxKind >= VarKind.Varying)
-                    {
                         // Contiguous index optimization: when idx == simdIndexVar or
                         // uniform_part + simdIndexVar, use contiguous store instead of per-lane scatter.
                         if (!string.IsNullOrEmpty(_batchLoopVar))
@@ -1054,18 +1135,7 @@ namespace NativeTranspiler.Analyzer
                                 return $"{storeFn}({baseName}_ptr + {off}, {rhsExpr}.v)";
                             }
                         }
-                        // ★ Mask-guarded per-lane scatter:
-                        //   When _currentMask is narrowed (if/else context), the per-lane extract
-                        //   loop must NOT write to lanes excluded by the mask. Otherwise lanes
-                        //   where the condition was false get garbage Results.
-                        //   From ISPC LLVM IR (closestpoint_ispc.ll line 130-135):
-                        //   "notequal_bestIdx_load_ = icmp ne <8 x i32> %bestIdx.1, splat (-1)"
-                        //   → per-lane guard on the write.
-                        if (_currentMask != "simd_mask::all_true()")
-                        {
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}}}";
-                        }
-                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}";
                     }
 
                     // uniform idx + varying rhs -> extract lane 0
@@ -1101,9 +1171,9 @@ namespace NativeTranspiler.Analyzer
                         // Per-lane scatter for struct field write (SIMD context)
                         if (_currentMask != "simd_mask::all_true()")
                         {
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}}}";
                         }
-                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}";
                     }
                     // Uniform index: scalar field assignment
                     return $"{id2.Identifier.Text}_ptr[{idxExpr2}].{fieldName2} = {rhsExpr2}";
@@ -1132,9 +1202,9 @@ namespace NativeTranspiler.Analyzer
 
                     if (_currentMask != "simd_mask::all_true()")
                     {
-                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
+                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
                     }
-                    return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}";
                 }
                 // Uniform index: scalar field access
                 return $"{arrName3}_ptr[{idxExpr3}].{fieldName3} {op3} {rhsExpr3}";
@@ -1163,8 +1233,8 @@ namespace NativeTranspiler.Analyzer
                     {
                         // Per-lane scatter for struct sub-field write
                         if (_currentMask != "simd_mask::all_true()")
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
-                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
                     return $"{id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
                 }
@@ -1192,8 +1262,8 @@ namespace NativeTranspiler.Analyzer
                     if (idxKind5 >= VarKind.Varying)
                     {
                         if (_currentMask != "simd_mask::all_true()")
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<NSIMD_WIDTH;__l++){{if(__sg&(1<<__l)){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
-                        return $"{{for(int __l=0;__l<NSIMD_WIDTH;__l++){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{_id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
                     return $"{_id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
                 }

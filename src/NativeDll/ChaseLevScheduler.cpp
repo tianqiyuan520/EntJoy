@@ -1,4 +1,5 @@
 #include "ChaseLevScheduler.h"
+#include "CpuPause.h"
 #include "JobProfiler.h"
 #include "ThreadAffinity.h"
 
@@ -28,15 +29,7 @@ namespace JobSystem
     // ============================================================
     // 自旋 pause
     // ============================================================
-
-    static inline void CpuPause() noexcept
-    {
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
-        _mm_pause();
-#else
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-#endif
-    }
+    // CpuPause() defined in CpuPause.h (unity build safe)
 
     // ============================================================
     // ExecuteAndRelease — 执行一个 RangeTask 并释放回池

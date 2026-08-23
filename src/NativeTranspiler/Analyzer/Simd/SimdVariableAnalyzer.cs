@@ -90,7 +90,15 @@ namespace NativeTranspiler.Analyzer
                 {
                     string name = param.Identifier.Text;
                     bool isIndex = name == _indexParamName;
-                    AddVariable(name, "int", isIndex ? VarKind.Varying : VarKind.Uniform, null);
+                    // ★ Type from the parameter's declared type — static-method scalar params
+                    //   (e.g. float threshold) must not be classified as int, otherwise float
+                    //   comparisons compile to n_cmp_*_epi32 and produce wrong results.
+                    string paramCppType = "int";
+                    if (param.Type is PredefinedTypeSyntax pts)
+                        paramCppType = pts.Keyword.Text; // "float", "double", "bool", ...
+                    else if (param.Type is ArrayTypeSyntax)
+                        paramCppType = "int";
+                    AddVariable(name, paramCppType, isIndex ? VarKind.Varying : VarKind.Uniform, null);
                 }
 
                 // 1b：Job struct 字段预分类（在 OuterSimdGenerator 或 CppJobGenerator 层级处理）

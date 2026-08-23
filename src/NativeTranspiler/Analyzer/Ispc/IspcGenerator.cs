@@ -664,6 +664,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine();
             GenerateResizeCallbacks(sb, fields.Select(f => (f.Type, f.Name)));
             sb.AppendLine();
+            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
+            sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
             sb.AppendLine("struct __EntJoyChunkContextHeader");
             sb.AppendLine("{");
             sb.AppendLine("    int chunkCount;");
@@ -676,6 +678,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    void* requiredComponentTypeIds;");
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("};");
+            sb.AppendLine("#endif");
             sb.AppendLine();
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
             sb.AppendLine("{");
@@ -789,6 +792,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine();
             GenerateResizeCallbacks(sb, fields.Select(f => (f.Type, f.Name)));
             sb.AppendLine();
+            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
+            sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
             sb.AppendLine("struct __EntJoyChunkContextHeader");
             sb.AppendLine("{");
             sb.AppendLine("    int chunkCount;");
@@ -801,6 +806,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    void* requiredComponentTypeIds;");
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("};");
+            sb.AppendLine("#endif");
             sb.AppendLine();
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
             sb.AppendLine("{");

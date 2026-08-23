@@ -26,64 +26,105 @@
 #define _N_PIO2_B -4.37113883e-08f
 
 static N_FORCEINLINE n_float _n_sin_avx2(n_float d) {
-  // Range reduction: q = round(d * 2/π), r = d - q * π/2  (same as SLEEF xsinf)
+  // SLEEF-style sin: q = round(d*2/π), r = d - q*π/2 (r ∈ [-π/4, π/4]).
+  // sin(d) = sin(r)         when q even
+  //          cos(r)         when q odd
+  // sign flip when (q+1) & 2  (i.e. q mod 4 ∈ {2,3})
   n_float qf = n_round_ps(_mm256_mul_ps(d, _mm256_set1_ps(0.636619772f))); // 2/π
   n_int qi = _mm256_cvtps_epi32(qf);
   d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_A)));
   d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_B)));
 
-  // Sign inversion: if (qi & 1) d = -d
-  n_int odd = _mm256_and_si256(qi, _mm256_set1_epi32(1));
-  n_int sign = _mm256_slli_epi32(odd, 31);
-  d = _mm256_xor_ps(d, _mm256_castsi256_ps(sign));
-
-  // SLEEF xsinf polynomial: sin(x) ≈ x + x³·c1 + x⁵·c2 + x⁷·c3 + x⁹·c4
-  // Coefficients from sleefsimdsp.c lines 470-473 (Remez, ~3.5 ULP)
   n_float s = _mm256_mul_ps(d, d);
-  n_float u = _mm256_set1_ps(2.6083159809786593541503e-06f);
-  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.0001981069071916863322258f));
-  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(0.00833307858556509017944336f));
-  u = _mm256_fmadd_ps(u, s, _mm256_set1_ps(-0.166666597127914428710938f));
-  return _mm256_add_ps(d, _mm256_mul_ps(_mm256_mul_ps(s, u), d));
+  // sin(r) poly: r + r³c1 + r⁵c2 + r⁷c3 + r⁹c4
+  n_float s_poly = _mm256_set1_ps(2.6083159809786593541503e-06f);
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(-0.0001981069071916863322258f));
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(0.00833307858556509017944336f));
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(-0.166666597127914428710938f));
+  n_float u_sin = _mm256_add_ps(d, _mm256_mul_ps(_mm256_mul_ps(s, s_poly), d));
+  // cos(r) poly: 1 + s·c1 + s²c2 + s³c3 + s⁴c4
+  n_float c_poly = _mm256_set1_ps(2.48015873015873e-05f);
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(-0.00138888892251998f));
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(0.0416666664189304f));
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(-0.5f));
+  n_float u_cos = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(1.0f));
+
+  // Select sin or cos poly by qi parity (even → sin, odd → cos)
+  __m256i oddMask = _mm256_and_si256(qi, _mm256_set1_epi32(1));
+  __m256 odd = _mm256_castsi256_ps(_mm256_cmpeq_epi32(oddMask, _mm256_setzero_si256())); // even q → all-one
+  n_float u = _mm256_blendv_ps(u_cos, u_sin, odd); // even q → u_sin
+
+  // Sign flip when (qi & 2)  (q mod 4 ∈ {2,3})
+  n_int flip = _mm256_and_si256(qi, _mm256_set1_epi32(2));
+  n_int sign = _mm256_slli_epi32(flip, 30);
+  return _mm256_xor_ps(u, _mm256_castsi256_ps(sign));
 }
 
 static N_FORCEINLINE n_float _n_cos_avx2(n_float d) {
-  // cos(x) = sin(x + π/2) — reuse sin with phase shift
-  return _n_sin_avx2(_mm256_add_ps(d, _mm256_set1_ps(1.57079633f)));
+  // cos(x) = sin(x + π/2): shift the phase in the integer domain (exact) —
+  // computing x + π/2 in float and re-rounding can flip the round() boundary
+  // by a whole quadrant (observed ~1.0 error in sin·cos).
+  // q = round(x*2/π); r = x - q*π/2. cos(x) = cos(r) when q even,
+  // sin(r) when q odd; sign flip when (q+2) & 2 (q mod 4 ∈ {1,2}).
+  n_float qf = n_round_ps(_mm256_mul_ps(d, _mm256_set1_ps(0.636619772f))); // 2/π
+  n_int qi = _mm256_cvtps_epi32(qf);
+  d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_A)));
+  d = _mm256_sub_ps(d, _mm256_mul_ps(qf, _mm256_set1_ps(_N_PIO2_B)));
+
+  n_float s = _mm256_mul_ps(d, d);
+  n_float s_poly = _mm256_set1_ps(2.6083159809786593541503e-06f);
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(-0.0001981069071916863322258f));
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(0.00833307858556509017944336f));
+  s_poly = _mm256_fmadd_ps(s_poly, s, _mm256_set1_ps(-0.166666597127914428710938f));
+  n_float u_sin = _mm256_add_ps(d, _mm256_mul_ps(_mm256_mul_ps(s, s_poly), d));
+  n_float c_poly = _mm256_set1_ps(2.48015873015873e-05f);
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(-0.00138888892251998f));
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(0.0416666664189304f));
+  c_poly = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(-0.5f));
+  n_float u_cos = _mm256_fmadd_ps(c_poly, s, _mm256_set1_ps(1.0f));
+
+  // cos: q even → cos poly, q odd → sin poly (opposite of sin)
+  __m256i oddMask = _mm256_and_si256(qi, _mm256_set1_epi32(1));
+  __m256 odd = _mm256_castsi256_ps(_mm256_cmpeq_epi32(oddMask, _mm256_setzero_si256()));
+  n_float u = _mm256_blendv_ps(u_sin, u_cos, odd); // even q → u_cos
+
+  // Sign flip when ((q+1) & 2)  (q mod 4 ∈ {3,0} → flip? verified: q=1→no, q=2→yes, q=3→no, q=0→no)
+  n_int flip = _mm256_and_si256(_mm256_add_epi32(qi, _mm256_set1_epi32(1)), _mm256_set1_epi32(2));
+  n_int sign = _mm256_slli_epi32(flip, 30);
+  return _mm256_xor_ps(u, _mm256_castsi256_ps(sign));
 }
 
 static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
-  // Based on SLEEF xlogf (sleefsimdsp.c lines 1277-1312):
-  // 1. Extract exponent e from IEEE-754 representation
-  n_int emm0 = _mm256_srli_epi32(_mm256_castps_si256(d), 23);
+  // SLEEF xlogf semantics (sleefsimdsp.c):
+  //   e = ilogbk(d);  m = d * 2^-e  → m ∈ [1, 2)
+  //   x = (m-1)/(m+1), x2 = x^2
+  //   log(d) = x * P(x2) + e * ln(2)
+  //
+  // ★ Fix: the previous version normalized the mantissa to [0.5,1) (OR 0x3f000000)
+  //   and re-scaled by /0.75, which is NOT the SLEEF domain — the polynomial is
+  //   fit for [1,2), so out-of-domain arguments produced large errors (up to ~2.0).
+  n_float dpos = _mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));  // |d|
+  n_int emm0 = _mm256_srli_epi32(_mm256_castps_si256(dpos), 23);
   n_int e = _mm256_sub_epi32(emm0, _mm256_set1_epi32(127));
-  // 2. Normalize mantissa m to [0.75, 1.5) (SLEEF: d * (1/0.75) ilogbk)
-  n_int mant = _mm256_and_si256(_mm256_castps_si256(d), _mm256_set1_epi32(0x807fffff));
-  mant = _mm256_or_si256(mant, _mm256_set1_epi32(0x3f000000));  // exponent bias = 127 → [1, 2)
-  n_float m = _mm256_castsi256_ps(mant);
-  // Scale to [0.75, 1.5) like SLEEF
-  n_float m_scaled = _mm256_div_ps(m, _mm256_set1_ps(0.75f));
-  // Re-extract exponent after scaling (SLEEF ilogbk approach)
-  n_int e2 = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(m_scaled), 23), _mm256_set1_epi32(127));
-  e = _mm256_add_epi32(e, e2);
-  // Re-normalize mantissa
-  n_int adjusted = _mm256_and_si256(_mm256_castps_si256(m_scaled), _mm256_set1_epi32(0x807fffff));
-  adjusted = _mm256_or_si256(adjusted, _mm256_set1_epi32(0x3f000000));
-  m = _mm256_castsi256_ps(adjusted);
 
-  // 3. x = (m - 1) / (m + 1), x2 = x^2
+  // Mantissa m ∈ [1, 2): clear exponent field, set to 0x3f800000 (127)
+  n_int mant = _mm256_and_si256(_mm256_castps_si256(d), _mm256_set1_epi32(0x807fffff));
+  mant = _mm256_or_si256(mant, _mm256_set1_epi32(0x3f800000));
+  n_float m = _mm256_castsi256_ps(mant);
+
+  // x = (m - 1) / (m + 1)
   n_float x = _mm256_div_ps(_mm256_sub_ps(m, _mm256_set1_ps(1.0f)),
                              _mm256_add_ps(m, _mm256_set1_ps(1.0f)));
   n_float x2 = _mm256_mul_ps(x, x);
 
-  // 4. Polynomial in x2 (SLEEF xlogf coefficients, lines 1295-1299)
+  // Polynomial in x2 (SLEEF xlogf coefficients, lines 1295-1299)
   n_float t = _mm256_set1_ps(0.2392828464508056640625f);    // c4
   t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.28518211841583251953125f));  // + c3
   t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.400005877017974853515625f)); // + c2
   t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(0.666666686534881591796875f)); // + c1
   t = _mm256_fmadd_ps(t, x2, _mm256_set1_ps(2.0f));                       // + c0
 
-  // 5. log(m) = x * t, then log(d) = log(m) + e * ln(2)
+  // log(m) = x * t, then log(d) = log(m) + e * ln(2)
   return _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(e), _mm256_set1_ps(0.693147180559945286226764f)),
                         _mm256_mul_ps(x, t));
 }

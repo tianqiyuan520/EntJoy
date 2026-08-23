@@ -181,7 +181,8 @@ namespace NativeTranspiler.Tasks
             }
 
             // ---- CMake 构建 ----
-            var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel" };
+            // Only build NativeTranspiled (skip NativeDll if unchanged — saves ~15s ClangCL startup)
+            var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel", "--target", "NativeTranspiled" };
             Log.LogMessage(MessageImportance.High, $"Running CMake build: cmake {string.Join(" ", buildArgs)}");
             var buildResult = RunProcessWithTimeout("cmake", buildArgs, NativeCodeGenDir, 600000,
                     cleanseDotnetMSBuildEnv: true);
