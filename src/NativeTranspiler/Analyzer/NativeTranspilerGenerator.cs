@@ -754,9 +754,12 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("set(CMAKE_CXX_STANDARD 20)");
             sb.AppendLine("set(CMAKE_CXX_STANDARD_REQUIRED ON)");
             sb.AppendLine();
-            // Unity Build: merge multiple .cpp into 1 TU → ClangCL startup ~20x → 1x
+            // Unity Build: merge multiple .cpp batches → 减少 ClangCL 启动开销的同时
+            // 保留并行度。BATCH_SIZE=0（单 TU）在生成代码量大时（EntJoySample 207 cpp +
+            // 40 ispc）单 TU ClangCL 编译串行成为瓶颈（全量 ~33s）；拆批后
+            // `cmake --build --parallel` 并行编译多 TU，增量也只重编变化的 TU。
             sb.AppendLine("set(CMAKE_UNITY_BUILD ON)");
-            sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 0)");
+            sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)");
             sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
@@ -978,8 +981,10 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    # 0x5C 反斜杠 → 注释内触发行拼接吃掉下一行 → C4819 + C2065/C2447 级联解析错误。");
             sb.AppendLine("    if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")");
             sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast)");
-            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast)");
+            sb.AppendLine("        # /MP：Unity Build 拆批后同 project 内的多个 TU 并行编译");
+            sb.AppendLine("        #（--parallel 只并行 project 间；缺 /MP 时拆批反而串行更慢）");
+            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
+            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
             sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
