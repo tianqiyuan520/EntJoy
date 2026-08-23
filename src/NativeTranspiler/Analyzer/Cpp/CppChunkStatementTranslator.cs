@@ -327,11 +327,9 @@ namespace NativeTranspiler.Analyzer
         }
 
         // ——— 向量化提示 ———
-        // #pragma loop(ivdep) 强制 MSVC 消除指针别名保守性生成 SIMD。
         protected override void TranslateForStatement(ForStatementSyntax forStmt)
         {
             AppendIndent();
-            _builder.AppendLine("#pragma loop(ivdep)");
             base.TranslateForStatement(forStmt);
         }
 

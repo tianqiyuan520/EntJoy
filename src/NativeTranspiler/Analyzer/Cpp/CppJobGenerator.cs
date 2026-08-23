@@ -226,9 +226,6 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 回退标量路径
-            sb.AppendLine($"    #pragma loop(ivdep)");
-            sb.AppendLine($"    #pragma loop(vector)");
-            sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
             sb.Append(scalarBody);
@@ -274,9 +271,6 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 标量回退
-            sb.AppendLine($"    #pragma loop(ivdep)");
-            sb.AppendLine($"    #pragma loop(vector)");
-            sb.AppendLine($"    #pragma loop(unroll(4))");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
             sb.Append(bodyCode);
@@ -579,9 +573,6 @@ namespace NativeTranspiler.Analyzer
             // 实体循环
             sb.AppendLine();
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-            sb.AppendLine("    #pragma loop(ivdep)");
-            sb.AppendLine("    #pragma loop(vector)");
-            sb.AppendLine("    #pragma unroll(4)");
             sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("    {");
             foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
@@ -876,9 +867,6 @@ namespace NativeTranspiler.Analyzer
             {
                 // Scalar entity loop
                 sb.AppendLine("        int __entity_count = __batchData->entityCount;");
-                sb.AppendLine("        #pragma loop(ivdep)");
-                sb.AppendLine("        #pragma loop(vector)");
-                sb.AppendLine("        #pragma unroll(4)");
                 sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
                 sb.AppendLine("        {");
                 foreach (var line in adaptedBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))

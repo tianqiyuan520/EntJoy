@@ -347,8 +347,6 @@ namespace NativeTranspiler.Analyzer
             }
             AppendLine($"simd_value<int> v_count{sid} = simd_end_{ivName} - simd_{ivName};");
             AppendLine($"int maxIter{sid} = hmax(v_count{sid});");
-            // ivdep: ignore loop-carried dependencies so MSVC can auto-vectorize/reduction-fold
-            AppendLine($"#pragma loop(ivdep)");
             AppendLine($"for (int iter{sid} = 0; iter{sid} < maxIter{sid}; iter{sid}++)");
             AppendLine("{");
             _indent++;

@@ -121,7 +121,17 @@ namespace NativeTranspiler.Tasks
             bool cmakeCacheExists = File.Exists(Path.Combine(buildDir, "CMakeCache.txt"));
             bool cmakeBuildSystemExists = HasGeneratedBuildSystem(buildDir);
 
-            if (cmakeCacheExists && cmakeBuildSystemExists && cmakeListsUnchanged)
+            // 工具集选择：默认优先 ClangCL（LLVM 后端），比 MSVC 多出循环代数简化/强度削减等优化，
+            // 已实测 S5 重计算场景 0.647ms → 0.050ms（与 Burst 打平）。
+            // 仅当 vswhere 检测到 VS 且装有 LLVM 组件时用 -T ClangCL；否则回退默认工具集（MSVC）。
+            string clangClPath = DetectClangClPath();
+            bool useClangCl = clangClPath != null;
+
+            // cache 里记录的工具集与期望不一致时，必须清空 build 目录重新配置，
+            // 否则 CMake 会因 generator toolset 不匹配直接失败。
+            bool cacheToolsetMatches = !useClangCl || GetCacheToolset(buildDir) == "ClangCL";
+
+            if (cmakeCacheExists && cmakeBuildSystemExists && cmakeListsUnchanged && cacheToolsetMatches)
             {
                 Log.LogMessage(MessageImportance.High, "CMakeLists.txt unchanged, cache valid. Skipping configure, running build only.");
             }
@@ -144,6 +154,22 @@ namespace NativeTranspiler.Tasks
                     "-S", NativeCodeGenDir,
                     "-B", buildDir
                 };
+                if (useClangCl)
+                {
+                    configureArgs.Add("-T");
+                    configureArgs.Add("ClangCL");
+                    string version = GetClangVersion(clangClPath);
+                    Log.LogMessage(MessageImportance.High,
+                        $"★ Native toolchain: ClangCL (LLVM backend) {version} — {clangClPath}");
+                }
+                else
+                {
+                    Log.LogMessage(MessageImportance.High,
+                        "⚠ Native toolchain: ClangCL 未检测到，回退默认工具集 (MSVC)。" +
+                        "提示：安装 Visual Studio 的 “C++ Clang tools for Windows (VC.Llvm.Clang)” 组件后，" +
+                        "可获得 LLVM 的循环代数简化/强度削减优化（重计算场景可提升 10 倍以上）。");
+                }
+
                 Log.LogMessage(MessageImportance.High, $"Running CMake configure: cmake {string.Join(" ", configureArgs)}");
                 var configureResult = RunProcessWithTimeout("cmake", configureArgs.ToArray(), NativeCodeGenDir, 120000,
                     cleanseDotnetMSBuildEnv: true);
@@ -165,8 +191,13 @@ namespace NativeTranspiler.Tasks
                 // while deleting Visual Studio's generated project files. Repair the
                 // generated build system once before reporting a hard failure.
                 Log.LogWarning($"CMake build failed. Reconfiguring once before retry.\nOutput: {buildResult.Output}\nError: {buildResult.Error}");
-                var repairArgs = new[] { "-S", NativeCodeGenDir, "-B", buildDir };
-                var repairResult = RunProcessWithTimeout("cmake", repairArgs, NativeCodeGenDir, 120000,
+                var repairArgs = new List<string> { "-S", NativeCodeGenDir, "-B", buildDir };
+                if (useClangCl)
+                {
+                    repairArgs.Add("-T");
+                    repairArgs.Add("ClangCL");
+                }
+                var repairResult = RunProcessWithTimeout("cmake", repairArgs.ToArray(), NativeCodeGenDir, 120000,
                     cleanseDotnetMSBuildEnv: true);
                 if (repairResult.ExitCode != 0)
                 {
@@ -185,7 +216,89 @@ namespace NativeTranspiler.Tasks
 
             SaveHashManifest(dependencies, hashFile);
             Log.LogMessage(MessageImportance.High, "Native compilation succeeded.");
+
+            // 最终确认实际使用的编译器（读 CMakeCache 记录）
+            Log.LogMessage(MessageImportance.High, $"★ Native build toolchain confirmed: {GetConfiguredToolchain(buildDir)}");
             return true;
+        }
+
+        /// <summary>运行 clang-cl --version 获取版本号（如 "19.1.5"）；失败返回空串。</summary>
+        private static string GetClangVersion(string clangClPath)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(clangClPath, "--version")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string outText = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(3000)) { try { p.Kill(); } catch { } return ""; }
+                    // 首行形如 "clang version 19.1.5 (5)" 或 "Apple clang version 15.0.0"
+                    var firstLine = outText.Split('\n').FirstOrDefault();
+                    if (firstLine == null) return "";
+                    int idx = firstLine.IndexOf("version", StringComparison.OrdinalIgnoreCase);
+                    return idx >= 0 ? firstLine.Substring(idx + 7).Trim() : firstLine.Trim();
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        /// <summary>从 CMake 缓存文件读出最终使用的编译器身份（ClangCL/Clang 或 MSVC + 版本）。</summary>
+        private static string GetConfiguredToolchain(string buildDir)
+        {
+            // 优先读 CMakeFiles/CMakeCXXCompiler.cmake（含 CMAKE_CXX_COMPILER_ID / VERSION）
+            var compilerFile = Directory.GetFiles(buildDir, "CMakeCXXCompiler.cmake", SearchOption.AllDirectories)
+                .FirstOrDefault();
+            if (compilerFile != null)
+            {
+                string id = "";
+                string version = "";
+                foreach (var line in File.ReadAllLines(compilerFile))
+                {
+                    if (line.StartsWith("set(CMAKE_CXX_COMPILER_ID ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int q1 = line.IndexOf('"');
+                        int q2 = q1 >= 0 ? line.IndexOf('"', q1 + 1) : -1;
+                        if (q1 >= 0 && q2 > q1) id = line.Substring(q1 + 1, q2 - q1 - 1);
+                    }
+                    else if (line.StartsWith("set(CMAKE_CXX_COMPILER_VERSION ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int q1 = line.IndexOf('"');
+                        int q2 = q1 >= 0 ? line.IndexOf('"', q1 + 1) : -1;
+                        if (q1 >= 0 && q2 > q1) version = line.Substring(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+                if (!string.IsNullOrEmpty(id))
+                {
+                    string label = id == "Clang" ? "ClangCL (LLVM)" : id;
+                    return string.IsNullOrEmpty(version) ? label : $"{label} {version}";
+                }
+            }
+
+            // 兜底：读 CMakeCache.txt 的 generator toolset
+            var cache = Path.Combine(buildDir, "CMakeCache.txt");
+            if (File.Exists(cache))
+            {
+                foreach (var line in File.ReadAllLines(cache))
+                {
+                    if (line.StartsWith("CMAKE_GENERATOR_TOOLSET", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int idx = line.IndexOf('=');
+                        string toolset = idx >= 0 ? line.Substring(idx + 1).Trim() : "";
+                        if (!string.IsNullOrEmpty(toolset))
+                            return toolset == "ClangCL" ? "ClangCL (LLVM)" : toolset;
+                    }
+                }
+            }
+            return "unknown";
         }
 
         private static string ComputeTextHash(string value)
@@ -216,6 +329,62 @@ namespace NativeTranspiler.Tasks
                 return File.Exists(Path.Combine(buildDir, "ALL_BUILD.vcxproj"));
 
             return false;
+        }
+
+        /// <summary>
+        /// 探测 Visual Studio 内置 ClangCL 工具链（VC.Llvm.Clang 组件）。
+        /// 用 vswhere 查安装路径并验证 clang-cl.exe 存在；找不到返回 null（回退 MSVC）。
+        /// </summary>
+        private static string DetectClangClPath()
+        {
+            if (Path.DirectorySeparatorChar != '\\')
+                return null;
+
+            string programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            string vswhere = Path.Combine(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
+            if (!File.Exists(vswhere))
+                return null;
+
+            try
+            {
+                var psi = new ProcessStartInfo(vswhere,
+                    "-latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string vsPath = p.StandardOutput.ReadToEnd().Trim();
+                    if (!p.WaitForExit(5000)) { try { p.Kill(); } catch { } return null; }
+                    if (string.IsNullOrEmpty(vsPath))
+                        return null;
+                    var clang = Path.Combine(vsPath, "VC", "Tools", "Llvm", "x64", "bin", "clang-cl.exe");
+                    return File.Exists(clang) ? clang : null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>读取 CMakeCache.txt 中记录的 generator toolset（如 "ClangCL"）；无缓存/无记录返回 null。</summary>
+        private static string GetCacheToolset(string buildDir)
+        {
+            var cache = Path.Combine(buildDir, "CMakeCache.txt");
+            if (!File.Exists(cache))
+                return null;
+            foreach (var line in File.ReadAllLines(cache))
+            {
+                if (line.StartsWith("CMAKE_GENERATOR_TOOLSET", StringComparison.OrdinalIgnoreCase))
+                {
+                    int idx = line.IndexOf('=');
+                    return idx >= 0 ? line.Substring(idx + 1).Trim() : null;
+                }
+            }
+            return null;
         }
 
         /// <summary>从哈希清单中读取指定文件的已保存哈希</summary>
