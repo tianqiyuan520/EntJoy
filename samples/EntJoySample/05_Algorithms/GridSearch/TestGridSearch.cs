@@ -76,6 +76,7 @@ public class TestGridSearch
     {
         NativeJobScheduler.Initialize();
         NativeJobScheduler.PrewakeWorkersOnce();
+        NativeJobScheduler.JobCostCacheEnabled = true;
 
         int tilesPerWorker = NativeJobScheduler.TilesPerWorker > 0 ? NativeJobScheduler.TilesPerWorker : 16;
 

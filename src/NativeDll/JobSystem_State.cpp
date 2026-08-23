@@ -294,10 +294,15 @@ namespace JobSystem
             if (perElemNs > 0)
             {
                 const double totalUs = length * perElemNs / 1000.0;
-                // 目标每 tile 150μs（调度 ~16μs → 占比 ~10%）
+                // perElem 是「并行 wall 稀释」成本（退役时 wall = 整批墙钟，÷N）。
+                // 直接用它算 tiles 会把中间量级 job（wall ~0.1-5ms）塌成 4-15 个
+                // 巨型 tile → 并行度损失 wc/tiles 倍（GridSearch 实测 2-3x 退化）。
+                // 还原为「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
+                const double serialUs = totalUs * wc;
+                // 目标每 tile 150μs 串行量（调度 ~16μs → 占比 ~10%）
                 constexpr double kTargetTileUs = 150.0;
                 constexpr int kMaxAdaptiveTpw = 16;     // tiles 上限 = workers×16
-                double targetTilesD = std::clamp(totalUs / kTargetTileUs, 1.0,
+                double targetTilesD = std::clamp(serialUs / kTargetTileUs, 1.0,
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
@@ -311,8 +316,8 @@ namespace JobSystem
                 if (targetTiles < floorTiles) targetTiles = floorTiles;
                 int chunk = std::max(1, (length + targetTiles - 1) / targetTiles);
                 if (g_jobCostCacheVerbose)
-                    std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
-                        length, perElemNs, totalUs, (int)(totalUs / kTargetTileUs),
+                    std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
+                        length, perElemNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
                         floorTiles, chunk, (length + chunk - 1) / chunk);
                 return chunk;
             }
