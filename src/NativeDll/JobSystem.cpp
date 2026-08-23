@@ -49,7 +49,6 @@ namespace JobSystem
 
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
-    std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
     std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
     int g_numThreads = 0;
 
@@ -57,6 +56,17 @@ namespace JobSystem
     // GridSearch A/B 定标：可变代价 job 最优 ~26 tiles/worker；默认 16 为
     // 可变代价(job 受益) 与均匀代价(job 少付 claim 开销) 的折中。env 可覆盖。
     int g_configuredTilesPerWorker = kDefaultTilesPerWorker;
+
+    // JobCostCache export flag（JobSystem_State.cpp 的 ResolveChunkSize 读取，
+    // JobSystem_Tiles.cpp 的退役路径读取）。默认 false → 不记录、不使用。
+    std::atomic<bool> g_jobCostCacheEnabled{ false };
+
+    // 诊断开关（进程启动时读 env 一次，之后只读）：ENTJOY_JCC_VERBOSE=1
+    // 打印 per-job 自动 batch 的决策与学习快照。
+    bool g_jobCostCacheVerbose = []() -> bool {
+        const char* v = std::getenv("ENTJOY_JCC_VERBOSE");
+        return v != nullptr && v[0] == '1';
+    }();
 
     // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。
     // 0=off（uniform 现状）；>0=on。on 时 chunk = max(floor, ceil(remaining/(W*k)))，
@@ -126,7 +136,6 @@ namespace JobSystem
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
-    bool g_useWorkStealing{ true };  // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
     // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式，
     // Unity 式）：实测关闭时 p99 0.83-0.97ms 与开启相当，且释放主线程参与竞争。
     // 可靠性兜底场景（慢 worker 被 OS 抢占导致的尾延迟）可运行时 SetMainThreadAssistEnabled(true)。
@@ -525,18 +534,9 @@ namespace JobSystem
         stats->workerExecutedRanges = g_workerExecutedRanges.load(std::memory_order_relaxed);
         stats->mainExecutedRanges = g_mainExecutedRanges.load(std::memory_order_relaxed);
         stats->stealCount = g_stealCount.load(std::memory_order_relaxed);
-        if (g_nativeWorkerPool)
-        {
-            uint64_t parkWake = 0, hotSpin = 0;
-            g_nativeWorkerPool->GetCounters(&parkWake, &hotSpin);
-            stats->parkWakeCount = parkWake;
-            stats->hotSpinHits = hotSpin;
-        }
-        else
-        {
-            stats->parkWakeCount = g_parkWakeCount.load(std::memory_order_relaxed);
-            stats->hotSpinHits = 0;
-        }
+        // parkWake/hotSpin 由 Chase-Lev（g_parkWakeCount）统计。
+        stats->parkWakeCount = g_parkWakeCount.load(std::memory_order_relaxed);
+        stats->hotSpinHits = 0;
         stats->publishedJobs = g_publishedJobs.load(std::memory_order_relaxed);
         stats->waitFallbacks = g_waitFallbacks.load(std::memory_order_relaxed);
         stats->notifiedWorkers = g_notifiedWorkers.load(std::memory_order_relaxed);
@@ -628,8 +628,6 @@ namespace JobSystem
         g_mainExecutedRanges.store(0, std::memory_order_relaxed);
         g_stealCount.store(0, std::memory_order_relaxed);
         g_parkWakeCount.store(0, std::memory_order_relaxed);
-        if (g_nativeWorkerPool)
-            g_nativeWorkerPool->ResetCounters();
         g_publishedJobs.store(0, std::memory_order_relaxed);
         g_waitFallbacks.store(0, std::memory_order_relaxed);
         g_notifiedWorkers.store(0, std::memory_order_relaxed);

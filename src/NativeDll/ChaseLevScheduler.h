@@ -62,8 +62,7 @@ namespace JobSystem
         void SubmitBatch(BatchState* batch) noexcept;
 
         // 提交一个通用 work 任务（无 batch，独立完成链由调用方负责）。
-        // 用于 SubmitBackendAsync 等"异步执行任意函数"通道（Chase-Lev 下 NativeWorkerPool 未 Start，
-        // 原 fallback 同步执行会阻塞调用线程——嵌套 Complete 等场景卡死）。
+        // 用于 SubmitBackendAsync 等"异步执行任意函数"通道。
         // 投 Injector 由 worker 执行：workFn(ctx) → workCleanup(ctx) → Release。
         void SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
 
@@ -117,6 +116,14 @@ namespace JobSystem
         static constexpr uint32_t kDequeCapacity = 4096;
         // 每次认领的 tile 数（预切分粒度）
         static constexpr uint32_t kClaimBatchSize = 4;
+
+        // ── 自适应自旋参数（WorkerLoop park 段）──
+        // 执行任务后拉满 → 连续调度零唤醒；空转退火 → 空闲快速让出 CPU；
+        // activeTasks>0 时用更大窗口（下一个任务即将被认领）。
+        static constexpr uint32_t kSpinBase = 256;
+        static constexpr uint32_t kSpinMax = 4096;
+        static constexpr uint32_t kSpinBusy = 8192;
+        static constexpr uint32_t kSpinMin = 64;
         // workerCap 令牌标记：firstTile==UINT32_MAX 的 task 是"参与令牌"，
         // 执行体原子认领 batch->nextTile（实际并行度 ≤ 令牌数 = workerCap）。
         static constexpr uint32_t kClaimTokenMarker = UINT32_MAX;

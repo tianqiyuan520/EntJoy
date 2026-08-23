@@ -13,8 +13,8 @@
 #include "JobSystem.h"
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
+#include "JobCostCache.h"
 #include "JobProfiler.h"
-#include "NativeWorkerPool.h"
 #include "SparseTileDeque.h"
 
 #include <array>
@@ -41,15 +41,6 @@ namespace JobSystem
     // per-thread state 缓存上限。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
     // state 单 owner（refCount==0 才回池），跨线程迁移只发生在共享池锁内，无 ABA。
     inline constexpr size_t kStateCacheCap = 64;
-
-    // AssistDependencyChain 连续零工作的墙钟预算。零工作不代表链卡死
-    // （workers 可能正在执行祖先、即将提交下一环），所以用有界回访覆盖祖先
-    // completion→下一环 submit 的交接窗口；仅在持续零工作超过该预算后交还
-    // 调用方的 spin/futex。以墙钟而非 pass 数计：pass 上限与循环内 yield 的
-    // 时长耦合，量级太小会过早 park（V-A 退化 / V-D 残余空等）。
-    // 预算内每 pass 带 yield 降频，覆盖亚毫秒~毫秒级的交接窗口绰绰有余；
-    // 链持续推进时预算随 worked 重置，不会误伤正常链。
-    inline constexpr uint64_t kAssistStallBudgetNs = 10'000'000; // 10ms
 
     inline constexpr uint64_t kLongBatchBarrierNs = 800'000;
 
@@ -91,15 +82,20 @@ namespace JobSystem
     // ---- base 模块（JobSystem.cpp）定义的全局 ----
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
-    extern std::unique_ptr<NativeWorkerPool> g_nativeWorkerPool;
     extern std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
     extern int g_numThreads;
     extern int g_configuredTilesPerWorker;
     extern int g_guidedEnabled;
     extern int g_guidedK;
     extern int g_guidedFloor;
-    extern bool g_useWorkStealing;   // ENTJOY_USE_WORKSTEALING=0 可关闭 tile 级窃取
     extern bool g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
+    // JobCostCache export flag：默认 false（不记录、不使用）→ 纯 tpw=4 行为。
+    // 用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，worker 按 per-job
+    // 每元素成本 EWMA 自动求解最优 tile 数。热路径 relaxed 读取足够（延迟生效无害）。
+    extern std::atomic<bool> g_jobCostCacheEnabled;
+    // 诊断：ENTJOY_JCC_VERBOSE=1 时打印 ResolveChunkSize 决策 + 退役学习快照。
+    // 只在 flag 开启时读取；进程启动时从 env 初始化一次，之后只读 → 无竞态。
+    extern bool g_jobCostCacheVerbose;
     extern thread_local ThreadStateCache t_stateCache;
 
     // 统计计数器（base 定义；Tiles 递增 / base GetStatsSnapshot 读取）。
@@ -271,6 +267,14 @@ namespace JobSystem
         std::exception_ptr firstException;
 
         uint64_t diagnosticId{ 0 };
+
+        // ---- JobCostCache：per-job 自动 batch ----
+        // funcHash：Schedule 入口设置（GeneralBatchContext 传递），退役时按此更新
+        // per-job 每元素成本 EWMA。0 = 未标记（不参与自动 batch）。
+        uint32_t funcHash{ 0 };
+        // totalElements：Schedule 入口设置（IJobParallelFor 的 length）。
+        // 退役时 perElemNs = (topologyDoneAt - publishedAt) / totalElements。
+        uint32_t totalElements{ 0 };
     };
 
     struct BatchStorage
@@ -301,6 +305,8 @@ namespace JobSystem
         void (*batchFunc)(void*, int, int);
         void* originalContext;
         void (*originalCleanup)(void*);
+        // JobCostCache：Schedule 入口设置的 funcPtr hash（0 = 未标记）。
+        uint32_t funcHash{ 0 };
     };
 
     // ---- base 模块助手（定义在 JobSystem.cpp） ----
@@ -444,6 +450,9 @@ namespace JobSystem
     void RegisterLongBatchBarrier(HandleState* state) noexcept;
     void SubmitBackendAsync(std::function<void()> work);
     int ResolveChunkSize(int length, int requestedChunk);
+    // 带 funcHash 的重载：flag 开启且有 per-job 成本数据时按 perElem EWMA 自动
+    // 求解最优 tile 数；否则走 tpw=4 兜底。funcHash=0 等价于两参版本。
+    int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash);
 
     // ---- 实体数衡 tile（定义在 JobSystem_Tiles.cpp） ----
     int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept;

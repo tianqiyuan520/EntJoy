@@ -3,7 +3,6 @@
 #include "JobSystemInternal.h"
 #include "ChaseLevScheduler.h"
 #include "ThreadAffinity.h"
-#include "NativeWorkerPool.h"
 #include "ChunkJobData.h"
 #include "EntityBatchData.h"
 #include "JobProfiler.h"
@@ -78,6 +77,11 @@ extern "C"
     void JobSystem_ConfigureGuided(int enabled, int k, int floor)
     {
         JobSystem::Scheduler::ConfigureGuided(enabled, k, floor);
+    }
+
+    void JobSystem_SetJobCostCacheEnabled(int enabled)
+    {
+        JobSystem::g_jobCostCacheEnabled.store(enabled != 0, std::memory_order_release);
     }
 
     void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free)

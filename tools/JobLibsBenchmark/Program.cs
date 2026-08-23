@@ -292,6 +292,15 @@ namespace JobLibsBenchmark
             // Part B：关闭每 tile 的 timing 诊断（跳过 MonotonicNowNs/CPU/cycle/core 探测 + slowRangeLock 争用）
             NativeJobScheduler.SetTimingDiagnosticsEnabled(false);
 
+            // JobCostCache（per-job 自动 batch）：ENTJOY_JOB_COST_CACHE=1 开启。
+            // 开启后 worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数。
+            var costCacheEnv = Environment.GetEnvironmentVariable("ENTJOY_JOB_COST_CACHE");
+            if (int.TryParse(costCacheEnv, out var cce) && cce > 0)
+            {
+                NativeJobScheduler.JobCostCacheEnabled = true;
+                Console.WriteLine($"JobCostCache=ON (per-job auto batch)");
+            }
+
             // TPL(TPool/ParFor) 走全局 ThreadPool，压到同一上限保证同为 wc 线程
             //（ManagedJobScheduler 用自有 Thread[]，不受此影响）
             ThreadPool.GetMinThreads(out int tpMinW, out int tpMinIo);

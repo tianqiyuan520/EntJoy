@@ -1,5 +1,5 @@
 #pragma once
-// CPU pause hint — used by ChaseLevScheduler, JobSystem_State, NativeWorkerPool
+// CPU pause hint — used by ChaseLevScheduler / JobSystem_State
 // Extracted to header to avoid ODR violations in unity build
 static inline void CpuPause() noexcept
 {

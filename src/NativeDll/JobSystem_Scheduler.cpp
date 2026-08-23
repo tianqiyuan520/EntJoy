@@ -157,33 +157,11 @@ namespace JobSystem
                 (envWorkers > 0 ? envWorkers :
                     std::max(1, static_cast<int>(
                         std::thread::hardware_concurrency()) - 1));
-            if (g_nativeWorkerPool && g_nativeWorkerPool->IsRunning())
+            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning())
                 return;
             g_numThreads = resolved;
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
-
-            // 读取 ENTJOY_USE_WORKSTEALING 环境变量：开启 tile 级 Chase-Lev 工作窃取。
-            // 默认关闭（走旧 WorkerAtomicRangeLoop）；=1 开启新路径。
-            {
-                std::string value;
-#if defined(_WIN32)
-                char* raw = nullptr;
-                std::size_t rawLength = 0;
-                if (_dupenv_s(&raw, &rawLength, "ENTJOY_USE_WORKSTEALING") == 0 && raw)
-                {
-                    value.assign(raw);
-                    std::free(raw);
-                }
-#else
-                if (const char* raw = std::getenv("ENTJOY_USE_WORKSTEALING"))
-                    value.assign(raw);
-#endif
-                std::transform(value.begin(), value.end(), value.begin(),
-                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                // 默认 true（新路径）；显式 "0"/"false"/"off" 关闭。
-                g_useWorkStealing = (value != "0" && value != "false" && value != "off");
-            }
 
             // 主线程 assist 默认关闭（g_mainThreadAssistEnabled = false，纯 worker 模式）。
             // 运行时可通过 JobSystem_SetMainThreadAssist(int) 开启（兜底慢 worker 尾延迟）。
@@ -194,25 +172,13 @@ namespace JobSystem
             if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
                 BindCurrentThreadToLogicalProcessor(0);
 
-            g_nativeWorkerPool = std::make_unique<NativeWorkerPool>();
-            if (!g_useWorkStealing)
-            {
-                // 旧路径：启动 NativeWorkerPool（batch 级 work-item + WorkerAtomicRangeLoop）
-                g_nativeWorkerPool->Start(
-                    static_cast<uint32_t>(resolved),
-                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
-            }
-
-            // Chase-Lev 调度器：新路径的 worker 线程 + 持久 deque
-            if (g_useWorkStealing)
-            {
-                g_chaseLevScheduler = std::make_unique<ChaseLevScheduler>();
-                g_chaseLevScheduler->Start(
-                    static_cast<uint32_t>(resolved),
-                    &ChaseLevExecuteTile,
-                    &ChaseLevTaskDone,
-                    g_workerAffinityEnabled.load(std::memory_order_relaxed));
-            }
+            // Chase-Lev 调度器（唯一路径）：持久 worker 线程 + per-worker deque + MPMC Injector
+            g_chaseLevScheduler = std::make_unique<ChaseLevScheduler>();
+            g_chaseLevScheduler->Start(
+                static_cast<uint32_t>(resolved),
+                &ChaseLevExecuteTile,
+                &ChaseLevTaskDone,
+                g_workerAffinityEnabled.load(std::memory_order_relaxed));
 
             // 若设置了 ENTJOY_DEBUG=1，启动 Dear ImGui 调试窗口
             JobDebuggerGUI::TryLaunch();
@@ -222,22 +188,19 @@ namespace JobSystem
     void Scheduler::Shutdown()
     {
         g_shuttingDown.store(true, std::memory_order_release);
-        std::unique_ptr<NativeWorkerPool> nativePool;
         {
             std::lock_guard<std::mutex> lock(g_schedulerMutex);
-            nativePool = std::move(g_nativeWorkerPool);
             g_numThreads = 0;
         }
-        if (nativePool) nativePool->Stop();
         if (g_chaseLevScheduler) { g_chaseLevScheduler->Stop(); g_chaseLevScheduler.reset(); }
         ConsumeLongBatchBarriers();
         // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
-        // worker 已由 nativePool->Stop() join，其 thread_local 缓存已在退出时交还。
+        // worker 已由 chaseLevScheduler->Stop() join，其 thread_local 缓存已在退出时交还。
         FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
         // 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
-        // worker 线程已由 nativePool->Stop() join，其 thread_local 缓存已在
-        // 退出时交还，故此处清空覆盖全部 state。
+        // worker 线程已由 Stop() join，其 thread_local 缓存已在退出时交还，
+        // 故此处清空覆盖全部 state。
         FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
     }
@@ -245,7 +208,7 @@ namespace JobSystem
     void Scheduler::PrewakeWorkers()
     {
         // C# 初始化经 GetProcAddress 解析此导出，保留为 no-op。
-        // NativeWorkerPool 的 worker 常驻 spin/futex，无需显式唤醒。
+        // Chase-Lev worker 常驻 spin/futex，无需显式唤醒。
     }
 
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
@@ -338,13 +301,18 @@ namespace JobSystem
             if (cleanup) cleanup(context);
             return JobHandle(st);
         }
-        int cs = ResolveChunkSize(length, batchSize);
+        // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
+        // FastPath（rc<=1）不学成本（已收敛为 1 tile）；batch 路径退役时学到。
+        const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
+            ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
+        int cs = ResolveChunkSize(length, batchSize, funcHash);
         int rc = (length + cs - 1) / cs;
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
+        bc->funcHash = funcHash;
         // General 路径默认走"等量 tile"（而非 guided 大前小后）：配合批量认领既均衡又低争用。
         // （requires: ENTJOY_GUIDED=1/ConfigureGuided(1) 仍可显式启用 guided，供可变代价 job 使用；
         //  这里保持 g_guidedEnabled 读取，默认环境若开启则在其 5. 场景下按需 —— 见下方注释）
@@ -358,6 +326,8 @@ namespace JobSystem
         auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
+        batch->funcHash = funcHash;
+        batch->totalElements = static_cast<uint32_t>(length);
         batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
@@ -409,7 +379,11 @@ namespace JobSystem
             if (cleanup) cleanup(context);
             return JobHandle(st);
         }
-        int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0));
+        // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
+        // 显式 batchSize（reqBatch>0）时用户意图优先，不参与自动 batch。
+        const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
+            ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
+        int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash));
         int rc = (length + cs - 1) / cs;
         if (!forceAsync && depOk && rc <= 1)
         {
@@ -428,6 +402,7 @@ namespace JobSystem
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
+        bc->funcHash = funcHash;
         // General 路径：guided 按工作量切 tile（可变代价 job 负载均衡）。
         const bool guided = g_guidedEnabled != 0;
         const int tileCount = guided
@@ -438,6 +413,8 @@ namespace JobSystem
         auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
+        batch->funcHash = funcHash;
+        batch->totalElements = static_cast<uint32_t>(length);
         batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->nextTile.store(0, std::memory_order_relaxed);
         batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);

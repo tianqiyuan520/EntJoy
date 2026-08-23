@@ -61,7 +61,6 @@ add_library(NativeDll SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../src/NativeDll/JobSystem_State.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../src/NativeDll/JobSystem_Tiles.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../src/NativeDll/Native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../src/NativeDll/NativeWorkerPool.cpp"
 )
 
 # Generated job wrappers + ISPC runtime (NativeTranspiled.dll)
