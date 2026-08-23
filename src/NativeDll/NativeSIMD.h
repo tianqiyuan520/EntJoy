@@ -295,6 +295,95 @@ static inline n_int n_sub_epi32(n_int a, n_int b) {
 #endif
 }
 
+// Full-Width SIMD: xor int (AutoSIMD bitwise XOR)
+static inline n_int n_xor_epi32(n_int a, n_int b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_xor_si256(a, b);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_xor_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
+    __m128i hi = _mm_xor_si128(_mm256_extractf128_si256(a, 1), _mm256_extractf128_si256(b, 1));
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_xor_si128(a, b);
+#elif defined(NSIMD_NEON)
+    return veorq_s32(a, b);
+#else
+    return a ^ b;
+#endif
+}
+
+// Full-Width SIMD: and int (AutoSIMD bitwise AND)
+static inline n_int n_and_epi32(n_int a, n_int b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_and_si256(a, b);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_and_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
+    __m128i hi = _mm_and_si128(_mm256_extractf128_si256(a, 1), _mm256_extractf128_si256(b, 1));
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_and_si128(a, b);
+#elif defined(NSIMD_NEON)
+    return vandq_s32(a, b);
+#else
+    return a & b;
+#endif
+}
+
+// Full-Width SIMD: or int (AutoSIMD bitwise OR)
+static inline n_int n_or_epi32(n_int a, n_int b) {
+#if defined(NSIMD_AVX2)
+    return _mm256_or_si256(a, b);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_or_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
+    __m128i hi = _mm_or_si128(_mm256_extractf128_si256(a, 1), _mm256_extractf128_si256(b, 1));
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_or_si128(a, b);
+#elif defined(NSIMD_NEON)
+    return vorrq_s32(a, b);
+#else
+    return a | b;
+#endif
+}
+
+// Full-Width SIMD: shift right logical int by immediate
+static inline n_int n_srli_epi32(n_int a, int shift) {
+#if defined(NSIMD_AVX2)
+    return _mm256_srli_epi32(a, shift);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_srli_epi32(_mm256_castsi256_si128(a), shift);
+    __m128i hi = _mm_srli_epi32(_mm256_extractf128_si256(a, 1), shift);
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_srli_epi32(a, shift);
+#elif defined(NSIMD_NEON)
+    return vshlq_n_s32(vreinterpretq_s32_u32(vreinterpretq_u32_s32(a)), shift);
+#else
+    int la[NSIMD_WIDTH]; n_store_epi32(la, a);
+    for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = (unsigned)la[i] >> shift;
+    return n_load_epi32(la);
+#endif
+}
+
+// Full-Width SIMD: shift left int by immediate
+static inline n_int n_slli_epi32(n_int a, int shift) {
+#if defined(NSIMD_AVX2)
+    return _mm256_slli_epi32(a, shift);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_slli_epi32(_mm256_castsi256_si128(a), shift);
+    __m128i hi = _mm_slli_epi32(_mm256_extractf128_si256(a, 1), shift);
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_slli_epi32(a, shift);
+#elif defined(NSIMD_NEON)
+    return vshlq_n_s32(a, shift);
+#else
+    int la[NSIMD_WIDTH]; n_store_epi32(la, a);
+    for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = la[i] << shift;
+    return n_load_epi32(la);
+#endif
+}
+
 static inline n_int n_mullo_epi32(n_int a, n_int b) {
 #if defined(NSIMD_AVX2)
     return _mm256_mullo_epi32(a, b);

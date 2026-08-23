@@ -174,6 +174,16 @@ struct simd_value<int> {
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ n_mullo_epi32(a.v, b.v) }; }
     friend simd_value operator*(simd_value a, int b) { return simd_value{ n_mullo_epi32(a.v, n_set1_epi32(b)) }; }
     friend simd_value operator*(int a, simd_value b) { return simd_value{ n_mullo_epi32(n_set1_epi32(a), b.v) }; }
+    // unsigned int overloads（AutoSIMD 生成 2654435761u 等无符号字面量时需要）
+    friend simd_value operator*(simd_value a, unsigned int b) { return simd_value{ n_mullo_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
+    friend simd_value operator+(simd_value a, unsigned int b) { return simd_value{ n_add_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
+    friend simd_value operator-(simd_value a, unsigned int b) { return simd_value{ n_sub_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
+    friend simd_value operator%(simd_value a, unsigned int b) {
+        int la[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(la, a.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] % static_cast<int>(b);
+        return simd_value{ n_load_epi32(lr) };
+    }
 
     // Mixed int×float → float promotion (ISPC-style type promotion)
     friend simd_value<float> operator*(simd_value a, float b) {
@@ -220,6 +230,37 @@ struct simd_value<int> {
         for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = a / lb[i];
         return simd_value{ n_load_epi32(lr) };
     }
+
+    // compound assignments（AutoSIMD 生成 v_sum += / ^= 时需要）
+    simd_value& operator+=(simd_value other) { v = n_add_epi32(v, other.v); return *this; }
+    simd_value& operator-=(simd_value other) { v = n_sub_epi32(v, other.v); return *this; }
+    simd_value& operator^=(simd_value other) { v = n_xor_epi32(v, other.v); return *this; }
+
+    // Bitwise: & / | / ^（AutoSIMD 分支条件用）
+    friend simd_value operator&(simd_value a, simd_value b) { return simd_value{ n_and_epi32(a.v, b.v) }; }
+    friend simd_value operator|(simd_value a, simd_value b) { return simd_value{ n_or_epi32(a.v, b.v) }; }
+    friend simd_value operator^(simd_value a, simd_value b) { return simd_value{ n_xor_epi32(a.v, b.v) }; }
+
+    // Shift: >> / <<（AutoSIMD LCG 迭代用）
+    friend simd_value operator>>(simd_value a, int shift) { return simd_value{ n_srli_epi32(a.v, shift) }; }
+    friend simd_value operator<<(simd_value a, int shift) { return simd_value{ n_slli_epi32(a.v, shift) }; }
+
+    // Modulo（per-lane 标量回退，无 SIMD 指令）
+    friend simd_value operator%(simd_value a, simd_value b) {
+        int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(la, a.v); n_store_epi32(lb, b.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] % lb[i];
+        return simd_value{ n_load_epi32(lr) };
+    }
+    friend simd_value operator%(simd_value a, int b) {
+        int la[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+        n_store_epi32(la, a.v);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] % b;
+        return simd_value{ n_load_epi32(lr) };
+    }
+
+    // convert(int) 重载：AutoSIMD 生成 simd_value<int>::convert(simd_value<int>) 时需要
+    static simd_value convert(simd_value<int> i) { return i; }
 
     // Full-Width SIMD: min/max (vectorized int)
     friend simd_value min(simd_value a, simd_value b) { return simd_value{ n_min_epi32(a.v, b.v) }; }

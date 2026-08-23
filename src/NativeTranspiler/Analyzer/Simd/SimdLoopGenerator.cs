@@ -112,6 +112,10 @@ namespace NativeTranspiler.Analyzer
                     AppendLine($"simd_value<int> simd_{ivName};");
                     // simd_end_{ivName} not needed — uniform loops never compare against end in SIMD
                     string preLoopMask2 = _currentMask;
+                    // Save mask to variable so if-bodies inside the loop get a non-all_true mask
+                    string loopSavedMask = $"__saved_{_maskCounter++}";
+                    AppendLine($"simd_mask {loopSavedMask} = {_currentMask};");
+                    _currentMask = loopSavedMask;
                     AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
                     AppendLine("{");
                     _indent++;

@@ -646,10 +646,17 @@ namespace NativeTranspiler.Analyzer
                         }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
+                    string branchMask = _currentMask;
                     if (!bodyEmpty && HasControlFlowGoto(current.Statement))
                         AppendLine($"if ({trueMask}.any_true())");
                     if (!bodyEmpty)
+                    {
+                        if (branchMask != "simd_mask::all_true()")
+                            EmitSaveVaryingVars();
                         GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                        if (branchMask != "simd_mask::all_true()")
+                            EmitBlendVaryingVars(branchMask);
+                    }
                 }
 
                 if (current.Else == null) break;
@@ -675,10 +682,17 @@ namespace NativeTranspiler.Analyzer
                 // else: dead-false — _currentMask unchanged, use directly
                 string elseMask = _currentMask;
                 bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
+                string elseBranchMask = _currentMask;
                 if (!elseBodyEmpty && HasControlFlowGoto(elseBody))
                     AppendLine($"if ({elseMask}.any_true())");
                 if (!elseBodyEmpty)
+                {
+                    if (elseBranchMask != "simd_mask::all_true()")
+                        EmitSaveVaryingVars();
                     GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
+                    if (elseBranchMask != "simd_mask::all_true()")
+                        EmitBlendVaryingVars(elseBranchMask);
+                }
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
@@ -986,6 +1000,51 @@ namespace NativeTranspiler.Analyzer
             {
                 return Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt);
             }
+        }
+
+        // ===== Save-modify-blend for varying if-bodies =====
+        private int _saveBlendCounter = 0;
+
+        private void EmitSaveVaryingVars()
+        {
+            try
+            {
+                int idx = _saveBlendCounter++;
+                foreach (var kvp in _variables)
+                {
+                    if (kvp.Value == null) continue;
+                    string name = kvp.Key;
+                    if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
+                    if (_forLoopVars.Contains(name)) continue;
+                    if (kvp.Value.Kind >= VarKind.Varying)
+                    {
+                        string simdName = $"v_{name}";
+                        AppendLine($"simd_value<int> __save_{idx}_{simdName} = {simdName};");
+                    }
+                }
+            }
+            catch { /* swallow — non-critical optimization */ }
+        }
+
+        private void EmitBlendVaryingVars(string mask)
+        {
+            try
+            {
+                int idx = _saveBlendCounter - 1;
+                foreach (var kvp in _variables)
+                {
+                    if (kvp.Value == null) continue;
+                    string name = kvp.Key;
+                    if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
+                    if (_forLoopVars.Contains(name)) continue;
+                    if (kvp.Value.Kind >= VarKind.Varying)
+                    {
+                        string simdName = $"v_{name}";
+                        AppendLine($"{simdName} = blend(__save_{idx}_{simdName}, {simdName}, {mask});");
+                    }
+                }
+            }
+            catch { /* swallow — non-critical optimization */ }
         }
     }
 }

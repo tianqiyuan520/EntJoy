@@ -136,7 +136,13 @@ namespace NativeTranspiler.Analyzer
             if (_variables.TryGetValue(name, out var info))
             {
                 if (info.Kind == VarKind.Uniform)
+                {
+                    // In SIMD context: uniform variables in SIMD loops should use v_ prefix
+                    // (e.g., `uint r = x % 13u` → r is UNIFORM but v_r is simd_value<int>)
+                    if (_isUniformScalarLoop)
+                        return $"v_{name}";
                     return name; // scalar
+                }
 
                 // Varying or Reduction
                 if (IsFloat2Type(info.CppType))
@@ -929,6 +935,12 @@ namespace NativeTranspiler.Analyzer
                 "-" => "-",
                 "*" => "*",
                 "/" => "/",
+                ">>" => ">>",
+                "<<" => "<<",
+                "&" => "&",
+                "|" => "|",
+                "^" => "^",
+                "%" => "%",
                 _ => "+"
             };
 
