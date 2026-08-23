@@ -50,11 +50,11 @@ namespace NativeTranspiler.Analyzer
 
                 var sb = new StringBuilder();
                 sb.AppendLine("    // --- Universal Full-SIMD (ISPC-style) ---");
-                sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / NSIMD_WIDTH) * NSIMD_WIDTH;");
+                sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / g_simdWidthInt) * g_simdWidthInt;");
                 sb.AppendLine("    if (simd_end_ > __startIndex)");
                 sb.AppendLine("    {");
-                sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0);");
-                sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += NSIMD_WIDTH)");
+                sb.AppendLine("        simd_value<int> v_base = simd_value<int>::sequence(0, g_simdWidthInt);");
+                sb.AppendLine("        for (int si = __startIndex; si < simd_end_; si += g_simdWidthInt)");
                 sb.AppendLine("        {");
                 sb.AppendLine("            simd_value<int> v_i = v_base + si;");
 
@@ -72,7 +72,13 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);
-                simdBody = RemovePerLaneWrites(simdBody);
+                // ★ RemovePerLaneWrites only applies to the sentinel "unified write" pattern
+                //   (ExtractResultWritePattern). It strips per-lane scatters that are replaced
+                //   by the unified write loop. For plain conditionals with narrowed masks the
+                //   masked per-lane scatter is REQUIRED and must be kept — stripping it empties
+                //   branch bodies and leaves dangling __cond_N references.
+                if (writePattern != null)
+                    simdBody = RemovePerLaneWrites(simdBody);
                 simdBody = CleanupDeadIfBodies(simdBody);
 
                 foreach (var line in simdBody.Split('\n'))
@@ -82,7 +88,7 @@ namespace NativeTranspiler.Analyzer
                 if (writePattern != null)
                 {
                     sb.AppendLine("            // Unified write");
-                    sb.AppendLine("            for (int lane = 0; lane < NSIMD_WIDTH; lane++) {");
+                    sb.AppendLine("            for (int lane = 0; lane < g_simdWidthInt; lane++) {");
                     sb.AppendLine($"                int {writePattern.IndexVar}_lane = n_extract_lane_epi32(v_{writePattern.IndexVar}.v, lane);");
                     sb.AppendLine($"                if ({writePattern.IndexVar}_lane != {writePattern.Sentinel})");
                     sb.AppendLine($"                    {writePattern.WriteExpr};");
@@ -181,11 +187,11 @@ namespace NativeTranspiler.Analyzer
             bool hr = body.Contains("return;");
             var sb = new StringBuilder();
             sb.AppendLine("    // --- Outer SIMD: per-lane ---");
-            sb.AppendLine("    int simd_end_=__startIndex+((__count)/NSIMD_WIDTH)*NSIMD_WIDTH;");
+            sb.AppendLine("    int simd_end_=__startIndex+((__count)/g_simdWidthInt)*g_simdWidthInt;");
             sb.AppendLine("    if(simd_end_>__startIndex){");
             sb.AppendLine("        simd_value<int> v_base=simd_value<int>::sequence(0);");
-            sb.AppendLine("        for(int si=__startIndex;si<simd_end_;si+=NSIMD_WIDTH){");
-            sb.AppendLine("            for(int lane=0;lane<NSIMD_WIDTH;lane++){");
+            sb.AppendLine("        for(int si=__startIndex;si<simd_end_;si+=g_simdWidthInt){");
+            sb.AppendLine("            for(int lane=0;lane<g_simdWidthInt;lane++){");
             sb.AppendLine("                int index=si+lane;");
             if (hr) sb.AppendLine("                do{");
             foreach (var line in body.Split('\n'))

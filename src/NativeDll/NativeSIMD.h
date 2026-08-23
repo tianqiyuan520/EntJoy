@@ -32,6 +32,58 @@
 #endif
 
 // ============================================================
+// Runtime SIMD width detection
+// ============================================================
+enum class SimdWidth : int { Scalar = 1, SSE2 = 4, AVX2 = 8, AVX512 = 16 };
+
+/// <summary>
+/// Detect SIMD width at runtime based on CPU features.
+/// Called once at startup, result cached in g_simdWidth.
+/// </summary>
+inline SimdWidth DetectSimdWidth() {
+    SimdWidth result = SimdWidth::Scalar;
+#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
+    #if defined(_M_X64) || defined(__x86_64__) || defined(__i386__)
+        int cpuInfo[4] = {0};
+        __cpuid(cpuInfo, 1);
+        bool sse2 = (cpuInfo[3] & (1 << 26)) != 0;
+        bool avx = (cpuInfo[2] & (1 << 28)) != 0;
+        bool fma = (cpuInfo[2] & (1 << 12)) != 0;
+
+        int cpuInfo7[4] = {0};
+        __cpuidex(cpuInfo7, 7, 0);
+        bool avx2 = (cpuInfo7[1] & (1 << 5)) != 0;
+        bool avx512f = (cpuInfo7[1] & (1 << 16)) != 0;
+
+        if (avx512f) result = SimdWidth::AVX512;
+        else if (avx && fma && avx2) result = SimdWidth::AVX2;
+        else if (sse2) result = SimdWidth::SSE2;
+        else result = SimdWidth::Scalar;
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+        result = SimdWidth::SSE2;  // NEON is 128-bit, equivalent to SSE2 width
+    #endif
+#endif
+    // Runtime width must never exceed the compile-time register width:
+    // lanes beyond NSIMD_WIDTH read garbage (registers are sized at compile time).
+    constexpr int maxWidth = NSIMD_WIDTH;
+    if ((int)result > maxWidth)
+        result = static_cast<SimdWidth>(maxWidth);
+    return result;
+}
+
+/// <summary>Global SIMD width (detected once at startup).</summary>
+inline SimdWidth g_simdWidth = DetectSimdWidth();
+
+/// <summary>Integer SIMD width for generated code (runtime value).</summary>
+inline int g_simdWidthInt = static_cast<int>(g_simdWidth);
+
+/// <summary>
+/// Get maximum SIMD width supported at compile time.
+/// Used for type definitions and buffer sizing.
+/// </summary>
+constexpr int kMaxSimdWidth = NSIMD_WIDTH;
+
+// ============================================================
 // Type definitions
 // ============================================================
 #if defined(NSIMD_AVX2)
@@ -402,6 +454,21 @@ static inline n_int n_mullo_epi32(n_int a, n_int b) {
 #else
     return a * b;
 #endif
+}
+
+/// <summary>
+/// Unsigned 32-bit multiply: result = a * b (unsigned)
+/// Returns low 32 bits of unsigned 64-bit product.
+/// </summary>
+static inline n_int n_mullo_epu32(n_int a, n_int b) {
+    // Scalar unsigned multiply per lane (correct on all widths; can be
+    // vectorized later). NSIMD_WIDTH adapts to the compile-time width.
+    int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+    n_store_epi32(la, a);
+    n_store_epi32(lb, b);
+    for (int i = 0; i < NSIMD_WIDTH; i++)
+        lr[i] = (int)((unsigned int)la[i] * (unsigned int)lb[i]);
+    return n_load_epi32(lr);
 }
 
 // ============================================================

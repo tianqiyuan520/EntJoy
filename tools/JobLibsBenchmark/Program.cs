@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using System.Collections.Concurrent;
 using EntJoy.JobSystem;
 using EntJoy.JobSystem.Managed;
+using EntJoy.Collections;
 using Schedulers;
 using JobsMP = Misaki.HighPerformance.Jobs;
 using PowerThreadPool;
@@ -357,6 +358,12 @@ namespace JobLibsBenchmark
                 summary.Add(RunScenario(sc.name, sc.label, sc.managed, sc.native, sc.cpp, sc.ispc, sc.autoSIMD, sc.zeroAlloc, sc.misaki, sc.ptp, sc.tpool, sc.parFor, sc.cBag, sc.channel, sc.ntdls));
             }
             PrintSummaryTable(summary);
+
+            // AutoSIMD 结果验证（S1/S3/S5/S6）
+            if (filter == null || filter.StartsWith("S", StringComparison.OrdinalIgnoreCase))
+            {
+                VerifyAutoSIMD();
+            }
 
             _ptp.Dispose();
             _misakiScheduler.Dispose();
@@ -1464,5 +1471,106 @@ namespace JobLibsBenchmark
             var j = new NativeCtrlAutoSIMD { Results = _nativeAutoSIMDResults };
             j.Schedule(HighContentionCount, 0).Complete();
         });
+
+        // AutoSIMD 结果验证：对比每个场景的 AutoSIMD 实现与对应的 Cpp 标量实现
+        private static void VerifyAutoSIMD()
+        {
+            Console.WriteLine("\n=== AutoSIMD Results Verification ===");
+
+            // 通用对比：给定输入，分别跑 Cpp 与 AutoSIMD，逐元素必须一致
+            bool allPass = true;
+
+            // ── S1: 分片加法 Values[i] = Values[i] + 1 ──
+            {
+                int n = Math.Min(10000, ArrayLength);
+                var inputCpp = new NativeArray<int>(n, Allocator.TempJob);
+                var inputAuto = new NativeArray<int>(n, Allocator.TempJob);
+                for (int i = 0; i < n; i++) { int v = (i * 31) % 100000 - 50000; inputCpp[i] = v; inputAuto[i] = v; }
+
+                new NativeAddCpp { Values = inputCpp }.Schedule(n, 0).Complete();
+                new NativeAddAutoSIMD { Values = inputAuto }.Schedule(n, 0).Complete();
+                int errs = 0, first = -1;
+                for (int i = 0; i < n; i++) if (inputCpp[i] != inputAuto[i]) { errs++; if (first < 0) first = i; }
+                Console.WriteLine($"S1 Add        : {(errs == 0 ? "✅ PASS" : $"❌ FAIL ({errs} errors, first@{first}: cpp={inputCpp[first]} auto={inputAuto[first]})")}");
+                allPass &= errs == 0;
+                // 校验 Cpp 本身正确（标量参考）
+                for (int i = 0; i < n; i++)
+                {
+                    int v = (i * 31) % 100000 - 50000;
+                    if (inputCpp[i] != v + 1) { Console.WriteLine($"  ⚠ S1 Cpp oracle broken @{i}"); allPass = false; break; }
+                }
+                inputCpp.Dispose(); inputAuto.Dispose();
+            }
+
+            // ── S3: 依赖链 +1 → ×2 → -3 ──
+            {
+                int n = Math.Min(10000, ArrayLength);
+                var cv = new NativeArray<int>(n, Allocator.TempJob);
+                var av = new NativeArray<int>(n, Allocator.TempJob);
+                for (int i = 0; i < n; i++) { int v = (i * 17) % 200000 - 100000; cv[i] = v; av[i] = v; }
+
+                var h1 = new NativeChainCpp1 { Values = cv }.Schedule(n, 0);
+                var h2 = new NativeChainCpp2 { Values = cv }.Schedule(n, 0, h1);
+                new NativeChainCpp3 { Values = cv }.Schedule(n, 0, h2).Complete();
+
+                var a1 = new NativeChainAutoSIMD1 { Values = av }.Schedule(n, 0);
+                var a2 = new NativeChainAutoSIMD2 { Values = av }.Schedule(n, 0, a1);
+                new NativeChainAutoSIMD3 { Values = av }.Schedule(n, 0, a2).Complete();
+
+                int errs = 0, first = -1;
+                for (int i = 0; i < n; i++) if (cv[i] != av[i]) { errs++; if (first < 0) first = i; }
+                Console.WriteLine($"S3 Chain      : {(errs == 0 ? "✅ PASS" : $"❌ FAIL ({errs} errors, first@{first}: cpp={cv[first]} auto={av[first]})")}");
+                allPass &= errs == 0;
+                cv.Dispose(); av.Dispose();
+            }
+
+            // ── S5: 高竞争 sum += index * j (1000 次) ──
+            {
+                int n = Math.Min(1000, HighContentionCount);
+                var cr = new NativeArray<int>(n, Allocator.TempJob);
+                var ar = new NativeArray<int>(n, Allocator.TempJob);
+                new NativeHeavyCpp { Results = cr }.Schedule(n, 0).Complete();
+                new NativeHeavyAutoSIMD { Results = ar }.Schedule(n, 0).Complete();
+                int errs = 0, first = -1;
+                for (int i = 0; i < n; i++) if (cr[i] != ar[i]) { errs++; if (first < 0) first = i; }
+                Console.WriteLine($"S5 Heavy      : {(errs == 0 ? "✅ PASS" : $"❌ FAIL ({errs} errors, first@{first}: cpp={cr[first]} auto={ar[first]})")}");
+                allPass &= errs == 0;
+                cr.Dispose(); ar.Dispose();
+            }
+
+            // ── S6: 控制流 LCG + 分支 ──
+            {
+                int n = Math.Min(1000, HighContentionCount);
+                var cr = new NativeArray<int>(n, Allocator.TempJob);
+                var ar = new NativeArray<int>(n, Allocator.TempJob);
+                var ir = new NativeArray<int>(n, Allocator.TempJob);
+                new NativeCtrlCpp { Results = cr }.Schedule(n, 0).Complete();
+                new NativeCtrlAutoSIMD { Results = ar }.Schedule(n, 0).Complete();
+                new NativeCtrlIspc { Results = ir }.Schedule(n, 0).Complete();
+
+                // 托管标量参考
+                int errsAuto = 0, errsCpp = 0, errsIspc = 0, firstAuto = -1;
+                for (int i = 0; i < n; i++)
+                {
+                    int sum = 0; uint x = (uint)(i * 2654435761u) + 1u;
+                    for (int j = 0; j < 1000; j++)
+                    {
+                        x = x * 1664525u + 1013904223u; uint r = x % 13u;
+                        if (r < 4u) sum += (int)x; else if (r < 8u) sum ^= (int)x; else sum -= (int)(x >> 3);
+                        if ((x & 7u) == 0u) sum += j;
+                    }
+                    if (sum != ar[i]) { errsAuto++; if (firstAuto < 0) firstAuto = i; }
+                    if (sum != cr[i]) errsCpp++;
+                    if (sum != ir[i]) errsIspc++;
+                }
+                Console.WriteLine($"S6 Ctrl       : AutoSIMD {(errsAuto == 0 ? "✅ PASS" : $"❌ FAIL ({errsAuto} errors, first@{firstAuto})")} | Cpp {(errsCpp == 0 ? "✅" : "❌")} | ISPC {(errsIspc == 0 ? "✅" : "❌")}");
+                allPass &= errsAuto == 0 && errsCpp == 0 && errsIspc == 0;
+                cr.Dispose(); ar.Dispose(); ir.Dispose();
+            }
+
+            Console.WriteLine(allPass
+                ? "\n✅ ALL AutoSIMD scenarios produce CORRECT results (match Cpp/scalar)."
+                : "\n❌ AutoSIMD has FAILING scenarios — see above.");
+        }
     }
 }

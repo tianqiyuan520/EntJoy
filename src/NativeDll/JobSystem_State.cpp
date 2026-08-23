@@ -1,5 +1,6 @@
 #include "JobSystemInternal.h"
 #include "ChaseLevScheduler.h"
+#include "CpuPause.h"
 
 #include <algorithm>
 #include <chrono>
@@ -330,12 +331,7 @@ namespace JobSystem
             RecycleState(state);
     }
 
-    static inline void CpuPause() noexcept
-    {
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
-        _mm_pause();
-#endif
-    }
+    // CpuPause() defined in CpuPause.h (unity build safe)
 
     // 协助单个 state —— 认领并执行其 tile 直到无工作或已完成。
     // 调用方被计为该 state 的一个 assistReader（生命周期与 Complete 一致）。

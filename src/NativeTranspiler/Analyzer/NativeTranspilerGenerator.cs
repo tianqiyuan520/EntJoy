@@ -754,6 +754,11 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("set(CMAKE_CXX_STANDARD 20)");
             sb.AppendLine("set(CMAKE_CXX_STANDARD_REQUIRED ON)");
             sb.AppendLine();
+            // Unity Build: merge multiple .cpp into 1 TU → ClangCL startup ~20x → 1x
+            sb.AppendLine("set(CMAKE_UNITY_BUILD ON)");
+            sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 0)");
+            sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
+            sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
             sb.AppendLine($"include_directories(\"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}\")");
             sb.AppendLine();

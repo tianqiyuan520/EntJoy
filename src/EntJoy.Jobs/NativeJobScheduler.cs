@@ -153,8 +153,9 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 配置 ========================
     /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时原生 ResolveChunkSize 按此值个 tile/worker 切分。
+    /// tpw=4 平衡 light/heavy 场景性能，与 ECS kTargetTilesPerWorker=4 一致。
     /// </summary>
-    public static int TilesPerWorker = 26;
+    public static int TilesPerWorker = 4;
 
     /// <summary>Guided（chunk ∝ 剩余工作量）tile 调度。默认关闭（uniform 更通用）。</summary>
     public static bool GuidedEnabled = false;

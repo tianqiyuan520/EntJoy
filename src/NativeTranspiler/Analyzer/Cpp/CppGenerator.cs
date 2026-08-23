@@ -278,7 +278,7 @@ namespace NativeTranspiler.Analyzer
             if (vars.TryGetValue(idx, out var ii)) ii.Kind = VarKind.Varying;
             else vars[idx] = new SimdVariableInfo { Name = idx, Kind = VarKind.Varying, CppType = "int" };
             var sg = new SimdControlFlowGenerator(semanticModel, null, vars, va2,
-                indexParamName: idx, simdIndexVar: "v_i", batchOffsetVar: "0",
+                indexParamName: idx, simdIndexVar: "v_i", batchOffsetVar: "si",
                 simdMathPrecision: NativeTranspiler.SimdMathPrecision.Fastest,
                 nativeArrayParams: nap, batchLoopVar: "si");
             sb.AppendLine(string.Format("    int vec_count = (({0}) / NSIMD_WIDTH) * NSIMD_WIDTH;", lim));
@@ -347,7 +347,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(string.Format("    for (int {0} = 0; {0} < {1}; {0}++) {{", ov, ol));
             sb.AppendLine(string.Format("        n_float v_best = n_set1_ps({0});", initVal));
             sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
-            sb.AppendLine(string.Format("        for (int {0} = 0; {0} < {1}; {0} += NSIMD_WIDTH) {{", iv, il));
+            // ★ Align the SIMD loop bound to NSIMD_WIDTH — otherwise the last
+            //   n_load_ps reads past the row end (il is often not a multiple of
+            //   NSIMD_WIDTH), producing garbage min/max or OOB memory access.
+            sb.AppendLine(string.Format("        int __aligned = ({0} / NSIMD_WIDTH) * NSIMD_WIDTH;", il));
+            sb.AppendLine(string.Format("        for (int {0} = 0; {0} < __aligned; {0} += NSIMD_WIDTH) {{", iv));
             foreach (var arr in ias)
             {
                 string elemType = nap.TryGetValue(arr, out var t) ? t : "float";
@@ -361,6 +365,16 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("        float h = lane[0];");
             sb.AppendLine("        for (int i = 1; i < NSIMD_WIDTH; i++)");
             sb.AppendLine(string.Format("            if (lane[i] {0} h) h = lane[i];", cmpOp));
+            // ★ Tail: reduce the remaining [__aligned, il) elements scalar
+            sb.AppendLine(string.Format("        for (int {0} = __aligned; {0} < {1}; {0}++) {{", iv, il));
+            foreach (var arr in ias)
+            {
+                string elemType = nap.TryGetValue(arr, out var t2) ? t2 : "float";
+                string cast = elemType == "int" ? "(float)" : "";
+                sb.AppendLine(string.Format("            float __v_{0} = {1}_ptr[base + {2}];", arr, arr, iv));
+                sb.AppendLine(string.Format("            if ({0}__v_{1} {2} h) h = __v_{1};", cast, arr, cmpOp));
+            }
+            sb.AppendLine("        }");
             if (ra != null)
                 sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", ra, ov));
             sb.AppendLine("    }");

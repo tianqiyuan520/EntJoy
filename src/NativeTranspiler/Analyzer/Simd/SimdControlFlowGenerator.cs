@@ -97,6 +97,11 @@ namespace NativeTranspiler.Analyzer
         // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
         private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr)> _structVaryingLocals = new();
 
+        // ★ Scope-aware variable tracking: stack-based scope management
+        // Each scope frame tracks which variables were declared in that scope
+        private readonly Stack<HashSet<string>> _scopeStack = new();
+        private int _scopeDepth = 0;
+
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
             INamedTypeSymbol jobStruct,
@@ -279,7 +284,7 @@ namespace NativeTranspiler.Analyzer
             if (hasReturn)
                 scalarBody = scalarBody.Replace("return;", "break;");
 
-            AppendLine("for (int lane = 0; lane < NSIMD_WIDTH; lane++)");
+            AppendLine("for (int lane = 0; lane < g_simdWidthInt; lane++)");
             AppendLine("{");
             _indent++;
             AppendLine($"int {_indexParamName} = si + lane;");
@@ -396,6 +401,40 @@ namespace NativeTranspiler.Analyzer
         }
 
         // ================================================================
+        // Scope Management
+        // ================================================================
+
+        /// <summary>Push a new scope frame.</summary>
+        private int PushScope()
+        {
+            _scopeStack.Push(new HashSet<string>());
+            return _scopeDepth++;
+        }
+
+        /// <summary>Pop a scope frame and remove its variables from _variables.</summary>
+        private void PopScope()
+        {
+            if (_scopeStack.Count == 0) return;
+            var frame = _scopeStack.Pop();
+            _scopeDepth--;
+
+            foreach (string varName in frame)
+            {
+                _variables.Remove(varName);
+                _simdVaryingVarNames.Remove(varName);
+                _simdVaryingCppType.Remove(varName);
+                _varDeclEmitted.Remove(varName);
+            }
+        }
+
+        /// <summary>Register a variable as declared in the current scope.</summary>
+        private void RegisterScopedVariable(string name)
+        {
+            if (_scopeStack.Count > 0)
+                _scopeStack.Peek().Add(name);
+        }
+
+        // ================================================================
         // Statement Generators
         // ================================================================
 
@@ -480,12 +519,30 @@ namespace NativeTranspiler.Analyzer
 
         private void GenerateIfStatement(IfStatementSyntax stmt)
         {
-            // Collect all conditions and bodies (if / else-if chain)
             var conditions = new List<string>();
             var current = stmt;
             StatementSyntax? elseBody = null;
             string savedMask = "";
             bool savedMaskEmitted = false;
+
+            // Save-blend needed when the chain has an else clause OR writes a varying variable.
+            // A single if without else that modifies a varying variable must still blend,
+            // otherwise inactive lanes get the branch body applied unconditionally.
+            bool hasElseClause = HasElseClause(stmt);
+            HashSet<string> modifiedVars = AnalyzeModifiedVars(stmt);
+            bool needsSaveBlend = hasElseClause || modifiedVars.Count > 0;
+            int saveIdx = -1;
+            List<string> savedVarNames = new();
+            if (needsSaveBlend)
+            {
+                // ★ Pre-declare branch-written varying variables at the outer scope.
+                //   The "declare at first assignment" rule would put the declaration
+                //   inside the first branch block, making it invisible to later
+                //   branches (e.g. float v; if (a>40) v=...; else if ... v=...;).
+                foreach (var name in modifiedVars)
+                    PredeclareBranchVar(name);
+                saveIdx = EmitSaveVaryingVars(modifiedVars, savedVarNames);
+            }
 
             while (true)
             {
@@ -537,6 +594,8 @@ namespace NativeTranspiler.Analyzer
                     string entryMask = _currentMask;
                     _currentMask = cm;
                     GenerateBlock(EnsureBlock(current.Else.Statement), skipBraces: false);
+                    if (needsSaveBlend)
+                        EmitBlendVaryingVars(saveIdx, savedVarNames, cm);
                     _currentMask = entryMask;
                     return;
                 }
@@ -551,8 +610,15 @@ namespace NativeTranspiler.Analyzer
                         .Replace("n_cmp_ge_", "n_cmp_lt_")
                         .Replace("n_cmp_gt_", "n_cmp_le_")
                         .Replace("n_cmp_le_", "n_cmp_gt_")
-                        .Replace("n_cmp_eq_", "n_cmp_ne_")
+                        .Replace("n_cmp_eq_", "##EQ##")
                         .Replace("n_cmp_ne_", "n_cmp_eq_")
+                        .Replace("##EQ##", "n_cmp_ne_")
+                        // ★ De Morgan: !(A && B) = !A || !B. The old code flipped the
+                        //   comparisons but kept AND — `if (dx==0 && dy==0) continue`
+                        //   became `dx!=0 && dy!=0`, dropping the axis neighbours.
+                        .Replace("n_and_mask(", "##OR##(")
+                        .Replace("n_or_mask(", "n_and_mask(")
+                        .Replace("##OR##(", "n_or_mask(")
                         .Replace("##TMP##", "n_cmp_ge_");
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
@@ -599,7 +665,20 @@ namespace NativeTranspiler.Analyzer
                     string trueMask;
                     if (isAllTrue)
                     {
-                        trueMask = "simd_mask::all_true()";
+                        // All lanes active on entry: the branch mask is JUST the condition
+                        // (no savedMask AND needed). The condition MUST still be emitted —
+                        // otherwise conditions list stays empty, later branches get no
+                        // exclusion chain and the final else mask becomes all_true → all
+                        // branches execute unconditionally and overwrite each other.
+                        // Saved mask = all_true (entry state), so later else-if branches
+                        // combine as all_true & !c0 & c1 (not c0 & !c0 & c1 = false).
+                        savedMask = "simd_mask::all_true()";
+                        savedMaskEmitted = true;
+                        string condVar = $"__cond_{_maskCounter++}";
+                        AppendLine($"simd_mask {condVar} = {condExpr};");
+                        trueMask = condVar;
+                        conditions.Add(condVar);
+                        _currentMask = trueMask;
                     }
                     else if (conditions.Count == 0 && simpleCmp && savedMask.Contains("v_act"))
                     {
@@ -646,17 +725,18 @@ namespace NativeTranspiler.Analyzer
                         }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
-                    string branchMask = _currentMask;
-                    if (!bodyEmpty && HasControlFlowGoto(current.Statement))
+                    bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement);
+                    if (bodyHasGoto)
                         AppendLine($"if ({trueMask}.any_true())");
+                    // ★ Capture the branch mask BEFORE generating the body — nested loops/ifs
+                    //   mutate _currentMask; blending with the post-body value would reference
+                    //   loop-local mask variables out of scope.
+                    string branchMask = _currentMask;
                     if (!bodyEmpty)
-                    {
-                        if (branchMask != "simd_mask::all_true()")
-                            EmitSaveVaryingVars();
                         GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                        if (branchMask != "simd_mask::all_true()")
-                            EmitBlendVaryingVars(branchMask);
-                    }
+                    // Save-blend: restore non-active lanes after branch body
+                    if (needsSaveBlend && !bodyEmpty && !bodyHasGoto)
+                        EmitBlendVaryingVars(saveIdx, savedVarNames, branchMask);
                 }
 
                 if (current.Else == null) break;
@@ -672,27 +752,30 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // Final else: saved & ~all_conds
+            // Final else: precompute else mask and emit as variable
             if (elseBody != null)
             {
+                string elseMaskExpr;
                 if (savedMaskEmitted)
-                    _currentMask = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
+                    elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {BuildNotChain(conditions)}.m) }}";
                 else if (savedMask == "simd_mask::all_true()")
-                    _currentMask = BuildNotChain(conditions); // all_true AND X → just X
-                // else: dead-false — _currentMask unchanged, use directly
-                string elseMask = _currentMask;
+                    elseMaskExpr = BuildNotChain(conditions);
+                else
+                    elseMaskExpr = _currentMask;
+
+                // Precompute else mask as a variable (avoids repeated inline computation)
+                string elseMaskVar = $"__else_mask_{_maskCounter++}";
+                AppendLine($"simd_mask {elseMaskVar} = {elseMaskExpr};");
+                _currentMask = elseMaskVar;
+
                 bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
-                string elseBranchMask = _currentMask;
-                if (!elseBodyEmpty && HasControlFlowGoto(elseBody))
-                    AppendLine($"if ({elseMask}.any_true())");
+                bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody);
+                if (elseHasGoto)
+                    AppendLine($"if ({elseMaskVar}.any_true())");
                 if (!elseBodyEmpty)
-                {
-                    if (elseBranchMask != "simd_mask::all_true()")
-                        EmitSaveVaryingVars();
                     GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
-                    if (elseBranchMask != "simd_mask::all_true()")
-                        EmitBlendVaryingVars(elseBranchMask);
-                }
+                if (hasElseClause && !elseBodyEmpty && !elseHasGoto)
+                    EmitBlendVaryingVars(saveIdx, savedVarNames, elseMaskVar);
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
@@ -734,6 +817,20 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
+        /// <summary>Check if an if-statement has an else clause (else-if or plain else).</summary>
+        private static bool HasElseClause(IfStatementSyntax stmt)
+        {
+            var current = stmt;
+            while (true)
+            {
+                if (current.Else == null) return false;
+                if (current.Else.Statement is IfStatementSyntax nextIf)
+                    current = nextIf;
+                else
+                    return true;
+            }
+        }
+
         /// <summary>
         /// Detect if this if-statement is a simple reduction pattern like if(d<best) best=d
         /// that can be folded to n_min_ps/n_max_ps instead of mask+blend.
@@ -750,8 +847,14 @@ namespace NativeTranspiler.Analyzer
             // Body must be a block with single statement that is an assignment
             var stmts = body is BlockSyntax blk ? blk.Statements : new SyntaxList<StatementSyntax>(body);
             if (stmts.Count != 1) return false;
-            if (!(stmts[0] is ExpressionStatementSyntax ess) || !(ess.Expression is AssignmentExpressionSyntax))
+            if (!(stmts[0] is ExpressionStatementSyntax ess) || !(ess.Expression is AssignmentExpressionSyntax assign))
                 return false;
+            // ★ Reduction recognition: the assignment target must be one of the compared
+            //   operands — if (d < best) { best = d; }. A plain conditional write such as
+            //   if (v < t) { r[i] = v; } (target r is not in the condition) must NOT be
+            //   folded to min/max; it is a masked store.
+            if (!(assign.Left is IdentifierNameSyntax lhsId)) return false;
+            if (!condExpr.Contains($"v_{lhsId.Identifier.Text}")) return false;
             return true;
         }
 
@@ -811,8 +914,27 @@ namespace NativeTranspiler.Analyzer
             }
             var frame = _loopStack.Peek();
             _gotoTargets.Add(frame.ExitLabel);
-            AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & ~{frame.IterActiveVar};");
-            AppendLine($"goto {frame.ExitLabel};");
+            if (string.IsNullOrEmpty(frame.TrackerVar))
+            {
+                // Uniform scalar for-loop: all lanes share the loop counter, so a
+                // break is a plain goto to the exit label (no per-lane tracker to kill).
+                // The old code emitted "<empty> = <empty> & ~<empty>;" here.
+                AppendLine($"goto {frame.ExitLabel};");
+            }
+            else if (string.IsNullOrEmpty(frame.IterActiveVar))
+            {
+                // Uniform-count loop with a per-lane (varying) break condition:
+                // kill the matching lanes from the tracker; only when NO lane is left
+                // active do we exit the loop. Otherwise unmatched lanes must keep
+                // iterating (e.g. "find first j where A>50; break").
+                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                AppendLine($"if (!({frame.TrackerVar}).any_true()) {{ goto {frame.ExitLabel}; }}");
+            }
+            else
+            {
+                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & ~{frame.IterActiveVar};");
+                AppendLine($"goto {frame.ExitLabel};");
+            }
         }
 
         private void GenerateContinueStatement()
@@ -1002,49 +1124,104 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        // ===== Save-modify-blend for varying if-bodies =====
+        // ================================================================
+        // Save-blend: precise variable modification analysis
+        // ================================================================
+
         private int _saveBlendCounter = 0;
 
-        private void EmitSaveVaryingVars()
+        /// <summary>
+        /// Analyze an if-else chain and collect all variables that are written in any branch.
+        /// </summary>
+        private HashSet<string> AnalyzeModifiedVars(IfStatementSyntax ifStmt)
         {
-            try
+            var modified = new HashSet<string>();
+            var current = ifStmt;
+
+            while (true)
             {
-                int idx = _saveBlendCounter++;
-                foreach (var kvp in _variables)
+                CollectWrites(current.Statement, modified);
+                if (current.Else == null) break;
+                if (current.Else.Statement is IfStatementSyntax nextIf)
+                    current = nextIf;
+                else
                 {
-                    if (kvp.Value == null) continue;
-                    string name = kvp.Key;
-                    if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
-                    if (_forLoopVars.Contains(name)) continue;
-                    if (kvp.Value.Kind >= VarKind.Varying)
-                    {
-                        string simdName = $"v_{name}";
-                        AppendLine($"simd_value<int> __save_{idx}_{simdName} = {simdName};");
-                    }
+                    CollectWrites(current.Else.Statement, modified);
+                    break;
                 }
             }
-            catch { /* swallow — non-critical optimization */ }
+            return modified;
         }
 
-        private void EmitBlendVaryingVars(string mask)
+        /// <summary>
+        /// Recursively collect variable write targets from a statement.
+        /// Handles: assignments (a = ..., a += ..., a ^= ...), ++/--, ref parameters (conservative).
+        /// </summary>
+        private static void CollectWrites(StatementSyntax stmt, HashSet<string> vars)
         {
-            try
+            foreach (var node in stmt.DescendantNodesAndSelf())
             {
-                int idx = _saveBlendCounter - 1;
-                foreach (var kvp in _variables)
+                if (node is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax id)
+                    vars.Add(id.Identifier.Text);
+                else if (node is PostfixUnaryExpressionSyntax postfix && postfix.Operand is IdentifierNameSyntax id2)
+                    vars.Add(id2.Identifier.Text);
+                else if (node is PrefixUnaryExpressionSyntax prefix && prefix.Operand is IdentifierNameSyntax id3)
+                    vars.Add(id3.Identifier.Text);
+            }
+        }
+
+        /// <summary>
+        /// Save only the variables that are actually modified in the if-else chain.
+        /// Supports int/uint AND float accumulators (float needs save-blend too for
+        /// interleaved += / -= branch accumulation — e.g. loop + parity branches).
+        /// Returns the save index for this if-chain; saved names are appended to
+        /// <paramref name="savedNames"/> (caller-owned, so nested ifs stay isolated
+        /// — the global counter/state approach corrupted nested chains).
+        /// </summary>
+        private int EmitSaveVaryingVars(HashSet<string> modifiedVars, List<string> savedNames)
+        {
+            int idx = _saveBlendCounter++;
+            savedNames.Clear();
+
+            foreach (var kvp in _variables)
+            {
+                if (kvp.Value == null) continue;
+                string name = kvp.Key;
+                if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
+                if (_forLoopVars.Contains(name)) continue;
+                if (!modifiedVars.Contains(name)) continue;
+                if (kvp.Value.Kind >= VarKind.Varying)
                 {
-                    if (kvp.Value == null) continue;
-                    string name = kvp.Key;
-                    if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
-                    if (_forLoopVars.Contains(name)) continue;
-                    if (kvp.Value.Kind >= VarKind.Varying)
-                    {
-                        string simdName = $"v_{name}";
-                        AppendLine($"{simdName} = blend(__save_{idx}_{simdName}, {simdName}, {mask});");
-                    }
+                    string elem = kvp.Value.CppType == "float" ? "float" : "int";
+                    string simdName = $"v_{name}";
+                    AppendLine($"simd_value<{elem}> __save_{idx}_{simdName} = {simdName};");
+                    savedNames.Add(simdName);
                 }
             }
-            catch { /* swallow — non-critical optimization */ }
+            return idx;
+        }
+
+        /// <summary>Pre-declare a branch-written varying var at the outer scope.</summary>
+        private void PredeclareBranchVar(string name)
+        {
+            if (name == _indexParamName || _forLoopVars.Contains(name)) return;
+            if (!_variables.TryGetValue(name, out var mInfo)) return;
+            if (mInfo.Kind < VarKind.Varying || _varDeclEmitted.Contains(name)) return;
+            string vType = GetSIMDTypeString(mInfo.CppType);
+            if (vType == null) return;
+            AppendLine($"{vType} v_{name};");
+            _varDeclEmitted.Add(name);
+            _simdVaryingVarNames.Add(name);
+            _simdVaryingCppType[name] = mInfo.CppType;
+        }
+
+        private void EmitBlendVaryingVars(int idx, List<string> savedNames, string mask)
+        {
+            foreach (var name in savedNames)
+            {
+                AppendLine($"{name} = blend(__save_{idx}_{name}, {name}, {mask});");
+                AppendLine($"__save_{idx}_{name} = {name};");
+            }
         }
     }
 }

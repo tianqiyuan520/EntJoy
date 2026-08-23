@@ -9,6 +9,18 @@
 #include "NativeSIMD_ext.h"
 #include "NativeMath.h"
 
+// Common utility: CPU pause hint (avoid ODR violations in unity build)
+static inline void CpuPause() noexcept
+{
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+    _mm_pause();
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+    __asm__ __volatile__("pause");
+#else
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+}
+
 // Forward declarations
 template<typename T> struct simd_value;
 struct simd_mask;
@@ -44,6 +56,12 @@ struct simd_value<float> {
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ n_sub_ps(a.v, b.v) }; }
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ n_mul_ps(a.v, b.v) }; }
     friend simd_value operator/(simd_value a, simd_value b) { return simd_value{ n_div_ps(a.v, b.v) }; }
+    // Unary minus
+    friend simd_value operator-(simd_value a) { return simd_value{ n_sub_ps(n_set1_ps(0.0f), a.v) }; }
+    // Compound assignment (scalar operands convert via the non-explicit ctor)
+    friend simd_value& operator+=(simd_value& a, simd_value b) { a.v = n_add_ps(a.v, b.v); return a; }
+    friend simd_value& operator-=(simd_value& a, simd_value b) { a.v = n_sub_ps(a.v, b.v); return a; }
+    friend simd_value& operator*=(simd_value& a, simd_value b) { a.v = n_mul_ps(a.v, b.v); return a; }
     // scalar float
     friend simd_value operator+(simd_value a, float b) { return simd_value{ n_add_ps(a.v, n_set1_ps(b)) }; }
     friend simd_value operator-(simd_value a, float b) { return simd_value{ n_sub_ps(a.v, n_set1_ps(b)) }; }
@@ -156,7 +174,16 @@ struct simd_value<int> {
 
     static simd_value broadcast(int s) { return simd_value{ n_set1_epi32(s) }; }
     static simd_value sequence(int base) {
-        return simd_value{ n_set_epi32(base+7, base+6, base+5, base+4, base+3, base+2, base+1, base) };
+        // Use runtime width for sequence generation
+        int tmp[kMaxSimdWidth];
+        for (int i = 0; i < kMaxSimdWidth; i++) tmp[i] = base + i;
+        return load(tmp);
+    }
+    static simd_value sequence(int base, int width) {
+        // Runtime-width sequence: only fill 'width' lanes, rest zero
+        int tmp[kMaxSimdWidth] = {0};
+        for (int i = 0; i < width && i < kMaxSimdWidth; i++) tmp[i] = base + i;
+        return load(tmp);
     }
     static simd_value load(const int* p) { return simd_value{ n_load_epi32(p) }; }
     void store(int* p) const { n_store_epi32(p, v); }
@@ -171,17 +198,25 @@ struct simd_value<int> {
     friend simd_value operator-(simd_value a, simd_value b) { return simd_value{ n_sub_epi32(a.v, b.v) }; }
     friend simd_value operator-(simd_value a, int b) { return simd_value{ n_sub_epi32(a.v, n_set1_epi32(b)) }; }
     friend simd_value operator-(int a, simd_value b) { return simd_value{ n_sub_epi32(n_set1_epi32(a), b.v) }; }
+    // Unary minus
+    friend simd_value operator-(simd_value a) { return simd_value{ n_sub_epi32(n_set1_epi32(0), a.v) }; }
+    // Compound assignment: += / -= / ^= are member operators; only add &= / |=
+    // (the member ^= would otherwise make a friend ^= ambiguous).
+    friend simd_value& operator&=(simd_value& a, simd_value b) { a.v = n_and_epi32(a.v, b.v); return a; }
+    friend simd_value& operator|=(simd_value& a, simd_value b) { a.v = n_or_epi32(a.v, b.v); return a; }
     friend simd_value operator*(simd_value a, simd_value b) { return simd_value{ n_mullo_epi32(a.v, b.v) }; }
     friend simd_value operator*(simd_value a, int b) { return simd_value{ n_mullo_epi32(a.v, n_set1_epi32(b)) }; }
     friend simd_value operator*(int a, simd_value b) { return simd_value{ n_mullo_epi32(n_set1_epi32(a), b.v) }; }
     // unsigned int overloads（AutoSIMD 生成 2654435761u 等无符号字面量时需要）
-    friend simd_value operator*(simd_value a, unsigned int b) { return simd_value{ n_mullo_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
+    friend simd_value operator*(simd_value a, unsigned int b) {
+        return simd_value{ n_mullo_epu32(a.v, n_set1_epi32(static_cast<int>(b))) };
+    }
     friend simd_value operator+(simd_value a, unsigned int b) { return simd_value{ n_add_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
     friend simd_value operator-(simd_value a, unsigned int b) { return simd_value{ n_sub_epi32(a.v, n_set1_epi32(static_cast<int>(b))) }; }
     friend simd_value operator%(simd_value a, unsigned int b) {
         int la[NSIMD_WIDTH], lr[NSIMD_WIDTH];
         n_store_epi32(la, a.v);
-        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = la[i] % static_cast<int>(b);
+        for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = (int)((unsigned int)la[i] % b);
         return simd_value{ n_load_epi32(lr) };
     }
 
@@ -291,6 +326,64 @@ struct simd_value<int> {
     simd_mask operator==(simd_value a) const { return simd_mask{ n_cmp_eq_epi32(v, a.v) }; }
     simd_mask operator!=(simd_value a) const { return simd_mask{ n_not_mask((*this == a).m) }; }
 };
+
+// ============================================================
+// Type-specific SIMD operations: unsigned integer modulo
+// ============================================================
+
+/// <summary>
+/// SIMD unsigned integer modulo with constant divisor.
+/// For power-of-2 divisors, uses bit mask. Otherwise uses unsigned modulo.
+/// </summary>
+inline simd_value<int> simd_mod_u32(simd_value<int> x, unsigned int d) {
+    if (d == 1) return simd_value<int>(0);
+    if ((d & (d - 1)) == 0)
+        return x & (int)(d - 1);  // Power of 2: x % (2^n) = x & (2^n - 1)
+    
+    // General case: unsigned modulo
+    // Extract lanes, compute unsigned modulo, pack back
+    int tmp[NSIMD_WIDTH];
+    x.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++)
+        tmp[i] = (int)((unsigned int)tmp[i] % d);
+    return simd_value<int>::load(tmp);
+}
+
+// ============================================================
+// Runtime width helpers
+// ============================================================
+
+/// <summary>
+/// Create a mask that is active only for the first 'width' lanes.
+/// Used when runtime width < compile-time width.
+/// </summary>
+inline simd_mask n_active_mask_for_width(int width) {
+    // Create mask: all true for lanes < width, false for lanes >= width
+#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    // AVX2: 8 lanes
+    const __m256i indices = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+    const __m256i widthVec = _mm256_set1_epi32(width);
+    return simd_mask{ _mm256_castsi256_ps(_mm256_cmpgt_epi32(widthVec, indices)) };
+#elif defined(NSIMD_SSE4)
+    // SSE4: 4 lanes
+    const __m128i indices = _mm_set_epi32(3, 2, 1, 0);
+    const __m128i widthVec = _mm_set1_epi32(width);
+    return simd_mask{ _mm_castsi128_ps(_mm_cmpgt_epi32(widthVec, indices)) };
+#else
+    return simd_mask{ true };
+#endif
+}
+
+/// <summary>
+/// Get the active lane count for store operations.
+/// When runtime width < kMaxSimdWidth, only store 'width' lanes.
+/// </summary>
+inline void simd_store_active(int* dst, simd_value<int> src, int width) {
+    int tmp[kMaxSimdWidth];
+    src.store(tmp);
+    for (int i = 0; i < width && i < kMaxSimdWidth; i++)
+        dst[i] = tmp[i];
+}
 
 // ============================================================
 // simd_value<EntJoy::Mathematics::float2>
