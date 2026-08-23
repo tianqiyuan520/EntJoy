@@ -62,7 +62,8 @@ namespace NativeTranspiler.Analyzer
                     _semanticModel, _jobStruct, variables, varAnalyzer,
                     indexParamName: _idx, simdIndexVar: "v_i",
                     boolFields: _boolFields,
-                    simdMathPrecision: _simdMathPrecision);
+                    simdMathPrecision: _simdMathPrecision,
+                    batchLoopVar: "si");   // ★ P1-1: 启用连续 load/store 优化（v_i → ptr+si）
 
                 var writePattern = ExtractResultWritePattern(scalarBody);
                 if (writePattern != null)
