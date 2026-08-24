@@ -1,4 +1,4 @@
-//using EntJoy.JobSystem;
+﻿//using EntJoy.JobSystem;
 
 //namespace EntJoySample.IJobChunkMoveCompareTest
 //{
