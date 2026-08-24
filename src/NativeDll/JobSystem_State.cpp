@@ -306,14 +306,6 @@ namespace JobSystem
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
-                // Floor：JCC tile 数不低于 tpw 兜底值，防止快 job 退化。
-                // 按 job 长度动态计算 tpw 兜底的 tile 数（非固定 wc×tpw），
-                // 这样小 job（100 元素 → 6 tile）和大 job（100k → 60 tile）都正确。
-                {
-                    int chunk_tpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
-                    int minTiles = std::max(1, length / chunk_tpw4);
-                    if (targetTiles < minTiles) targetTiles = minTiles;
-                }
                 // 安全护栏：单 tile 元素数上限（kMaxAutoChunk）。
                 // perElem 是"并行墙钟稀释"成本：大 job 塌缩成 1-2 个巨型 tile 会
                 // 退化为串行执行（实测 S3 依赖链 1M 元素 0.074→0.164ms 回归）。
@@ -323,6 +315,18 @@ namespace JobSystem
                 if (floorTiles > wc) floorTiles = wc;
                 if (targetTiles < floorTiles) targetTiles = floorTiles;
                 int chunk = std::max(1, (length + targetTiles - 1) / targetTiles);
+                // Floor：chunk 不比 tpw 兜底更粗，防止快 job 退化。
+                // 但当调度开销主导（tileTime << 16μs）且 JCC 仍能产出 ≥wc 个 tile
+                //（基本负载均衡够用）时，放松 floor 让 JCC 用更粗的 chunk 减少调度开销。
+                int chunk_tpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+                constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
+                double tileTimeNs = perElemNs * chunk_tpw4;
+                bool schedulingDominated = (tileTimeNs < kSchedulingOverheadNs);
+                double jccTiles = length * perElemNs * wc / (kTargetTileUs * 1000.0);
+                bool loadBalancingOK = (jccTiles >= wc);
+                if (!schedulingDominated || !loadBalancingOK) {
+                    chunk = std::min(chunk, chunk_tpw4);
+                }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
                         length, perElemNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
