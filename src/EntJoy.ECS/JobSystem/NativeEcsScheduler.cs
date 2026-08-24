@@ -180,9 +180,9 @@ public static unsafe class NativeEcsScheduler
     private delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
 
     // ======================== Job 名登记 / 实体跟踪 ========================
-    private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle)
+    private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle, Archetype[]? matchingArchetypes = null, ComponentType[]? writtenComponents = null)
     {
-        entityManager?.RegisterActiveJob(handle);
+        entityManager?.TrackEntityJob(handle, matchingArchetypes, writtenComponents);
         return handle;
     }
 
@@ -253,13 +253,13 @@ public static unsafe class NativeEcsScheduler
     }
 
     // ======================== IJobChunk 调度 ========================
-    public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null)
+    public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
         where T : struct, IJobChunk
-        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn);
+        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, writtenComponents: writtenComponents);
 
-    public static NativeJobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null)
+    public static NativeJobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
         where T : struct, IJobChunk
-        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap);
+        => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap, writtenComponents: writtenComponents);
 
     public static NativeJobHandle ScheduleChunkRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
         where T : struct, IJobChunk
@@ -315,7 +315,7 @@ public static unsafe class NativeEcsScheduler
         NativeJobScheduler.Complete(ref handle);
     }
 
-    private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0)
+    private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
         where T : struct, IJobChunk
     {
         var allEnabledTypes = query.AllEnabled;
@@ -333,7 +333,7 @@ public static unsafe class NativeEcsScheduler
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                 IntPtr h1268 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
                 NativeJobCore.RegisterScheduledJobName(h1268, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(h1268));
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1268), rawCache.MatchingArchetypes, writtenComponents);
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
@@ -352,7 +352,7 @@ public static unsafe class NativeEcsScheduler
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                 IntPtr h1285 = JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, csharpRawContextBlock, _chunkCleanupPtr, csharpRawCache.ChunksPtr, csharpRawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
                 NativeJobCore.RegisterScheduledJobName(h1285, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(h1285));
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1285), csharpRawCache.MatchingArchetypes, writtenComponents);
             }
             catch { ChunkCleanup(csharpRawContextBlock); throw; }
         }
@@ -370,7 +370,7 @@ public static unsafe class NativeEcsScheduler
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                 IntPtr h1301 = NativeJobCore.JobSystem_ScheduleParallelForBatch(cache.FuncPtr, managedContextBlock, jobHasManagedReferences ? NativeJobCore.ManagedCleanupPtr : _rawChunkBatchCleanupPtr, managedCache.Chunks.Length, -1, dependencyLease.Handle);
                 NativeJobCore.RegisterScheduledJobName(h1301, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(h1301));
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1301), managedCache.MatchingArchetypes, writtenComponents);
             }
             catch
             {
@@ -381,11 +381,13 @@ public static unsafe class NativeEcsScheduler
         }
 
         var chunkList = new List<Chunk>(128);
+        var fallbackMatchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
+                fallbackMatchingArchetypes.Add(arch);
                 foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
@@ -483,7 +485,7 @@ public static unsafe class NativeEcsScheduler
             using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
             IntPtr h1415 = JobSystem_ScheduleChunkJobEx(callbackPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
             NativeJobCore.RegisterScheduledJobName(h1415, typeof(T).Name);
-            return TrackEntityJob(entityManager, new NativeJobHandle(h1415));
+            return TrackEntityJob(entityManager, new NativeJobHandle(h1415), fallbackMatchingArchetypes.ToArray());
         }
         catch
         {
@@ -532,17 +534,19 @@ public static unsafe class NativeEcsScheduler
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                 IntPtr h1465 = JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
                 NativeJobCore.RegisterScheduledJobName(h1465, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(h1465));
+                return TrackEntityJob(entityManager, new NativeJobHandle(h1465), rawCache.MatchingArchetypes);
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
 
         var chunkList = new List<Chunk>(128);
+        var fallbackMatchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
+                fallbackMatchingArchetypes.Add(arch);
                 foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
@@ -617,7 +621,7 @@ public static unsafe class NativeEcsScheduler
             using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
             IntPtr h1549 = JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
             NativeJobCore.RegisterScheduledJobName(h1549, typeof(T).Name);
-            return TrackEntityJob(entityManager, new NativeJobHandle(h1549));
+            return TrackEntityJob(entityManager, new NativeJobHandle(h1549), fallbackMatchingArchetypes.ToArray());
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -638,17 +642,19 @@ public static unsafe class NativeEcsScheduler
             try
             {
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+                return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, _chunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)), rawCache.MatchingArchetypes);
             }
             catch { ChunkCleanup(rawContextBlock); throw; }
         }
 
         var chunkList = new List<Chunk>(128);
+        var fallbackMatchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var arch = entityManager.Archetypes[i];
             if (arch != null && arch.IsMatch(query))
             {
+                fallbackMatchingArchetypes.Add(arch);
                 foreach (var c in arch.ChunkSpan)
                     if (c.EntityCount > 0) chunkList.Add(c);
             }
@@ -721,7 +727,7 @@ public static unsafe class NativeEcsScheduler
         try
         {
             using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
-            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)));
+            return TrackEntityJob(entityManager, new NativeJobHandle(JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, _chunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize)), fallbackMatchingArchetypes.ToArray());
         }
         catch { ChunkCleanup(contextBlock); throw; }
     }
@@ -994,11 +1000,13 @@ public static unsafe class NativeEcsScheduler
     private static ManagedChunkScheduleCache BuildManagedChunkArrayCache(EntityManager entityManager, QueryBuilder query)
     {
         var chunkList = new List<Chunk>(128);
+        var matchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
+                matchingArchetypes.Add(archetype);
                 foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
@@ -1009,17 +1017,19 @@ public static unsafe class NativeEcsScheduler
             }
         }
 
-        return new ManagedChunkScheduleCache(entityManager.StructuralVersion, chunkList.ToArray());
+        return new ManagedChunkScheduleCache(entityManager.StructuralVersion, chunkList.ToArray(), matchingArchetypes: matchingArchetypes.ToArray());
     }
 
     private static RawChunkScheduleCache BuildRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds)
     {
         var chunkList = new List<Chunk>(128);
+        var matchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
+                matchingArchetypes.Add(archetype);
                 foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
@@ -1091,17 +1101,19 @@ public static unsafe class NativeEcsScheduler
             };
         }
 
-        return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount);
+        return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, matchingArchetypes: matchingArchetypes.ToArray());
     }
 
     private static RawChunkScheduleCache BuildManagedChunkScheduleCache(EntityManager entityManager, QueryBuilder query)
     {
         var chunkList = new List<Chunk>(128);
+        var matchingArchetypes = new List<Archetype>(8);
         for (int i = 0; i < entityManager.ArchetypeCount; i++)
         {
             var archetype = entityManager.Archetypes[i];
             if (archetype != null && archetype.IsMatch(query))
             {
+                matchingArchetypes.Add(archetype);
                 foreach (var chunk in archetype.ChunkSpan)
                 {
                     if (chunk.EntityCount > 0)
@@ -1153,7 +1165,7 @@ public static unsafe class NativeEcsScheduler
             };
         }
 
-        return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, true);
+        return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, true, matchingArchetypes: matchingArchetypes.ToArray());
     }
 
     private static int GetQueryHash(QueryBuilder query)
@@ -1239,16 +1251,18 @@ public static unsafe class NativeEcsScheduler
         public readonly ChunkJobData* ChunksPtr;
         public readonly int ChunkCount;
         public readonly bool OwnsChunkHandles;
+        public readonly Archetype[]? MatchingArchetypes;
         private int _leaseCount;
         private int _retired;
         private int _disposed;
 
-        public RawChunkScheduleCache(int structuralVersion, ChunkJobData* chunksPtr, int chunkCount, bool ownsChunkHandles = false)
+        public RawChunkScheduleCache(int structuralVersion, ChunkJobData* chunksPtr, int chunkCount, bool ownsChunkHandles = false, Archetype[]? matchingArchetypes = null)
         {
             StructuralVersion = structuralVersion;
             ChunksPtr = chunksPtr;
             ChunkCount = chunkCount;
             OwnsChunkHandles = ownsChunkHandles;
+            MatchingArchetypes = matchingArchetypes;
         }
 
         ~RawChunkScheduleCache()
@@ -1342,11 +1356,13 @@ public static unsafe class NativeEcsScheduler
     {
         public readonly int StructuralVersion;
         public readonly Chunk[] Chunks;
+        public readonly Archetype[]? MatchingArchetypes;
 
-        public ManagedChunkScheduleCache(int structuralVersion, Chunk[] chunks)
+        public ManagedChunkScheduleCache(int structuralVersion, Chunk[] chunks, Archetype[]? matchingArchetypes = null)
         {
             StructuralVersion = structuralVersion;
             Chunks = chunks;
+            MatchingArchetypes = matchingArchetypes;
         }
     }
 

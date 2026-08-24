@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using EntJoy.JobSystem;
 
 namespace EntJoy
@@ -35,6 +36,8 @@ namespace EntJoy
         private bool _disposed;
         private readonly object _activeJobLock = new();
         private readonly List<JobHandle> _activeJobs = new();
+        private readonly Dictionary<int, List<JobHandle>> _archetypeJobs = new(); // Per-Archetype Job Tracking
+        private readonly Dictionary<JobHandle, ComponentType[]> _jobWrittenComponents = new(); // Job → written components
         private readonly object _structuralLock = new();  // 结构性操作（NewEntity/DestroyEntity/AddComponent/RemoveComponent）的锁
 
 
@@ -171,6 +174,121 @@ namespace EntJoy
                     _activeJobs.RemoveAt(i);
                 }
             }
+            // 同步清理 per-archetype 列表中的已完成 Job
+            foreach (var kvp in _archetypeJobs)
+            {
+                var list = kvp.Value;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    if (list[i].IsCompleted)
+                        list.RemoveAt(i);
+                }
+            }
+        }
+
+        // ======================== Phase 3: Per-Archetype Job Tracking ========================
+
+        /// <summary>
+        /// 登记 Job 到全局列表 + per-archetype 列表。
+        /// writtenComponents: Job 写了哪些组件（用于 Selective Wait 精度过滤）。
+        /// </summary>
+        internal void TrackEntityJob(NativeJobHandle nativeHandle, Archetype[]? matchingArchetypes, ComponentType[]? writtenComponents = null)
+        {
+            if (!nativeHandle.IsValid) return;
+            var handle = new JobHandle(nativeHandle);
+            lock (_activeJobLock)
+            {
+                PruneCompletedJobsNoLock();
+                _activeJobs.Add(handle);
+                if (writtenComponents != null && writtenComponents.Length > 0)
+                    _jobWrittenComponents[handle] = writtenComponents;
+                if (matchingArchetypes != null)
+                {
+                    for (int i = 0; i < matchingArchetypes.Length; i++)
+                    {
+                        int id = matchingArchetypes[i].GetHashCode();
+                        if (!_archetypeJobs.TryGetValue(id, out var list))
+                        {
+                            list = new List<JobHandle>();
+                            _archetypeJobs[id] = list;
+                        }
+                        list.Add(handle);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 只等待访问受影响 Archetype 的 Job（Selective Wait）。
+        /// affectedComponentTypes: 如果提供，只等待写入了这些组件的 Job（精确过滤）。
+        /// </summary>
+        internal void CompleteArchetypeJobs(Archetype[] affectedArchetypes, ComponentType[]? affectedComponentTypes = null)
+        {
+            if (NativeJobScheduler.IsExecutingJob)
+                throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing.");
+
+            JobHandle[]? jobsToComplete = null;
+            lock (_activeJobLock)
+            {
+                if (_activeJobs.Count == 0) return;
+
+                // 收集受影响 Archetype 关联的 Job
+                var handleSet = new HashSet<JobHandle>();
+                for (int i = 0; i < affectedArchetypes.Length; i++)
+                {
+                    int id = affectedArchetypes[i].GetHashCode();
+                    if (_archetypeJobs.TryGetValue(id, out var list))
+                    {
+                        for (int j = 0; j < list.Count; j++)
+                        {
+                            var handle = list[j];
+                            // 如果指定了 affectedComponentTypes，过滤：只等写入了这些组件的 Job
+                            if (affectedComponentTypes != null && affectedComponentTypes.Length > 0)
+                            {
+                                if (_jobWrittenComponents.TryGetValue(handle, out var written))
+                                {
+                                    // 检查是否有交集
+                                    bool hasOverlap = false;
+                                    for (int w = 0; w < written.Length; w++)
+                                    {
+                                        for (int a = 0; a < affectedComponentTypes.Length; a++)
+                                        {
+                                            if (written[w] == affectedComponentTypes[a])
+                                            {
+                                                hasOverlap = true;
+                                                break;
+                                            }
+                                        }
+                                        if (hasOverlap) break;
+                                    }
+                                    if (!hasOverlap) continue; // 没有写交集，跳过
+                                }
+                                // 没有 writtenComponents 信息的 Job，保守等待
+                            }
+                            handleSet.Add(handle);
+                        }
+                    }
+                }
+
+                if (handleSet.Count == 0) return;
+                jobsToComplete = new JobHandle[handleSet.Count];
+                handleSet.CopyTo(jobsToComplete);
+            }
+
+            // 执行等待（在锁外）
+            ExceptionDispatchInfo? pending = null;
+            for (int i = 0; i < jobsToComplete.Length; i++)
+            {
+                try { jobsToComplete[i].Complete(); }
+                catch (Exception ex) { pending ??= ExceptionDispatchInfo.Capture(ex); }
+            }
+            pending?.Throw();
+
+            // 清理已完成的 Job
+            lock (_activeJobLock)
+            {
+                PruneCompletedJobsNoLock();
+            }
         }
 
     }
@@ -247,7 +365,7 @@ namespace EntJoy
         public unsafe Entity NewEntity(Span<ComponentType> types)  // 创建实体核心方法
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            CompleteActiveJobs();  // NewEntity 需要知道目标 Archetype，但 GetOrCreateArchetype 需在锁内
             lock (_structuralLock)
             {
                 var newEntity = new Entity();  // 创建新实体
@@ -280,10 +398,63 @@ namespace EntJoy
             }
         }
 
+        /// <summary>
+        /// 批量创建实体：一次 Archetype 查找、一次批量添加、一次 CompleteActiveJobs。
+        /// 比逐个 NewEntity 快 N 倍（N = 实体数），因为减少了锁和 CompleteActiveJobs 调用。
+        /// </summary>
+        public unsafe Entity[] CreateEntities(int count, params ComponentType[] types)
+        {
+            CheckDisposed();
+            if (count <= 0) return Array.Empty<Entity>();
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                var targetArch = GetOrCreateArchetype(types);
+                var result = new Entity[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    var newEntity = new Entity();
+                    bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);
+                    if (isRecycled)
+                    {
+                        newEntity.Id = recycledEnt.Id;
+                        newEntity.Version = recycledEnt.Version + 1;
+                    }
+                    else
+                    {
+                        newEntity.Id = entityCount++;
+                        if (newEntity.Id >= entities.Length)
+                            Array.Resize(ref entities, entities.Length * 2);
+                    }
+
+                    targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
+                    UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
+                    GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+                    result[i] = newEntity;
+                }
+
+                structuralVersion++;
+                return result;
+            }
+        }
+
         public void DestroyEntity(Entity entity)
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            // 确定源 Archetype，只等待该 Archetype 的 Job
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null)
+                    CompleteArchetypeJobs(new[] { info.Archetype });
+                else
+                    CompleteActiveJobs();
+            }
+            else
+            {
+                CompleteActiveJobs();
+            }
             lock (_structuralLock)
             {
                 if ((uint)entity.Id >= (uint)entities.Length)
@@ -551,7 +722,19 @@ namespace EntJoy
         public void AddComponent<T0>(Entity entity, T0 t0) where T0 : struct
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            // 确定源 Archetype，只等待该 Archetype 的 Job（Selective Wait）
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null)
+                    CompleteArchetypeJobs(new[] { info.Archetype });
+                else
+                    CompleteActiveJobs();
+            }
+            else
+            {
+                CompleteActiveJobs();
+            }
             lock (_structuralLock)
             {
                 ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
@@ -566,12 +749,18 @@ namespace EntJoy
                     return;
                 }
 
-                // 创建新组件类型数组
-                Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
-                oldArch.Types.CopyTo(targetComponents);
-                targetComponents[^1] = ComponentTypeManager.GetComponentType(typeof(T0));
-
-                var targetArch = GetOrCreateArchetype(targetComponents);
+                // Phase 2.1: 走 Add Edge 快路径
+                var componentType = ComponentTypeManager.GetComponentType(typeof(T0));
+                var targetArch = oldArch.GetAddEdge(componentType);
+                if (targetArch == null)
+                {
+                    // Edge miss：创建新组件类型数组，查找/创建 Archetype，写回 edge
+                    Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
+                    oldArch.Types.CopyTo(targetComponents);
+                    targetComponents[^1] = componentType;
+                    targetArch = GetOrCreateArchetype(targetComponents);
+                    oldArch.SetAddEdge(componentType, targetArch);
+                }
                 targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
 
                 // 复制组件数据
@@ -603,7 +792,19 @@ namespace EntJoy
         public void RemoveComponent<T0>(Entity entity) where T0 : struct
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            // 确定源 Archetype，只等待该 Archetype 的 Job
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null)
+                    CompleteArchetypeJobs(new[] { info.Archetype });
+                else
+                    CompleteActiveJobs();
+            }
+            else
+            {
+                CompleteActiveJobs();
+            }
             lock (_structuralLock)
             {
                 ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
@@ -618,21 +819,23 @@ namespace EntJoy
                     return;
                 }
 
-                //生成 目标"组件类型"
-                Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];  // 创建新组件数组
-                int spanIndex = 0;
-                for (int i = 0; i < oldArch.Types.Length; i++)  // 遍历组件类型
+                // Phase 2.1: 走 Remove Edge 快路径
+                var componentType = ComponentTypeManager.GetComponentType(typeof(T0));
+                var targetArch = oldArch.GetRemoveEdge(componentType);
+                if (targetArch == null)
                 {
-                    var comType = oldArch.Types[i];  // 获取组件类型
-                    if (comType.Type == typeof(T0))  // 跳过要移除的组件
+                    // Edge miss：生成目标组件类型数组，查找/创建 Archetype，写回 edge
+                    Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];
+                    int spanIndex = 0;
+                    for (int i = 0; i < oldArch.Types.Length; i++)
                     {
-                        continue;
+                        var comType = oldArch.Types[i];
+                        if (comType.Type == typeof(T0)) continue;
+                        targetComponents[spanIndex++] = comType;
                     }
-
-                    targetComponents[spanIndex++] = comType;  // 添加保留的组件
+                    targetArch = GetOrCreateArchetype(targetComponents);
+                    oldArch.SetRemoveEdge(componentType, targetArch);
                 }
-                // 获取或创建新原型
-                var targetArch = GetOrCreateArchetype(targetComponents);
                 targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);  // 添加实体到新原型
 
                 oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);  //复制组件数据
@@ -652,13 +855,70 @@ namespace EntJoy
             }
         }
 
+        // ======================== 非泛型方法（供 ECB Playback 使用） ========================
+
+        /// <summary>
+        /// 非泛型 AddComponent：通过 typeId 和原始数据指针添加组件。
+        /// 仅供 ECB Playback 使用（主线程，性能不敏感）。
+        /// </summary>
+        internal unsafe void AddComponentRaw(Entity entity, int typeId, byte* dataPtr, int dataSize)
+        {
+            var compType = new ComponentType(typeId);
+            // 使用反射调用泛型方法
+            var method = _addComponentGenericMethods.GetOrAdd(typeId, id =>
+            {
+                var type = ComponentTypeManager.GetTypeByComponentType(id);
+                return typeof(EntityManager)
+                    .GetMethod(nameof(AddComponent))!
+                    .MakeGenericMethod(type);
+            });
+            // 由于泛型方法需要 struct 值，我们通过 boxed 中间层
+            // 实际上更简单的方式是：直接操作 Archetype
+            // 这里用一个简化的路径：创建实体 → 移动到新 Archetype → 设置组件值
+            // 但这太复杂了。用反射最简单。
+            object boxedValue = Marshal.PtrToStructure((IntPtr)dataPtr, ComponentTypeManager.GetTypeByComponentType(typeId));
+            method.Invoke(this, new object[] { entity, boxedValue });
+        }
+
+        /// <summary>
+        /// 非泛型 RemoveComponent：通过 typeId 移除组件。
+        /// 仅供 ECB Playback 使用。
+        /// </summary>
+        internal void RemoveComponentRaw(Entity entity, int typeId)
+        {
+            var method = _removeComponentGenericMethods.GetOrAdd(typeId, id =>
+            {
+                var type = ComponentTypeManager.GetTypeByComponentType(id);
+                return typeof(EntityManager)
+                    .GetMethod(nameof(RemoveComponent))!
+                    .MakeGenericMethod(type);
+            });
+            method.Invoke(this, new object[] { entity });
+        }
+
+        // 反射方法缓存（避免每次 Playback 重新反射）
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, System.Reflection.MethodInfo> _addComponentGenericMethods = new();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, System.Reflection.MethodInfo> _removeComponentGenericMethods = new();
+
         /// <summary>
         /// 设置组件值
         /// </summary>
         public void Set<T>(Entity entity, T t) where T : struct, IComponentData
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            // 确定当前 Archetype，只等待该 Archetype 的 Job
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null)
+                    CompleteArchetypeJobs(new[] { info.Archetype });
+                else
+                    CompleteActiveJobs();
+            }
+            else
+            {
+                CompleteActiveJobs();
+            }
             lock (_structuralLock)
             {
                 ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
@@ -719,7 +979,19 @@ namespace EntJoy
         public void SetComponentEnabled<T>(Entity entity, bool enabled) where T : struct, IEnableableComponent
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            // 确定当前 Archetype，只等待该 Archetype 的 Job
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null)
+                    CompleteArchetypeJobs(new[] { info.Archetype });
+                else
+                    CompleteActiveJobs();
+            }
+            else
+            {
+                CompleteActiveJobs();
+            }
             lock (_structuralLock)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);

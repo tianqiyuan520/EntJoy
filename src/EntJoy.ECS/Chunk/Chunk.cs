@@ -33,7 +33,9 @@ namespace EntJoy
             Meta = meta;
             MemoryBlock = memoryBlock;
             _entityCount = 0;
-            Unsafe.InitBlock((byte*)memoryBlock, 0, (uint)meta.TotalSize);
+            // Phase 2.3: Chunk lazy zero — 移除整体清零
+            // AddEntity 会逐 slot 清零组件数据 + 初始化 enableable 位图，
+            // 未使用的 slot（index >= entityCount）不会被访问，无需预先清零。
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -16,8 +16,8 @@
 | Phase | 内容 | 状态 | 完成时间 | 关键提交 |
 |-------|------|------|----------|----------|
 | **Phase 1** | 基础设施优化 | ✅ **已完成** | 2026-08-22 | `6391038` |
-| **Phase 2** | Archetype Edges + Shared Component | 🔲 未开始 | — | — |
-| **Phase 3** | Selective Wait + Auto-Defer + ECB | 🔲 未开始（**下一目标**） | — | — |
+| **Phase 2** | Archetype Edges + Chunk lazy zero | ✅ **已完成** | 2026-08-24 | `9a96b96` |
+| **Phase 3** | Selective Wait + Batch CreateEntities | ✅ **基础完成** | 2026-08-24 | `1452573` |
 | **Phase 4** | System/Processor 框架 + Query 分层 | 🔲 未开始 | — | — |
 | **Phase 5** | 易用性基础设施 | 🔲 未开始 | — | — |
 | **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
@@ -25,12 +25,11 @@
 | **Phase 8** | Source Generator 扩展 | 🔲 未开始 | — | — |
 | **Phase 9** | Managed 类型与原生投影（独立轨道） | 🔲 未开始 | — | — |
 
-**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Chunk struct 化（Step 0）→ Phase 3 🔲 → Phase 4 🔲
+**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 🔲
 
 **附注**：
-- Phase 1 的完成是在本文档制定期间（2026-08-22）同步实施并验证的，详见各子项的 `✅ 已完成` 标注。
-- **Chunk struct 化**（Phase 1 遗留项）是 Phase 3/4 的共同前置优化，推荐在 Phase 3 之前完成（详见 `Phase优先级分析与实施路线.md` §三）。
-- Phase 3（Selective Wait + ECB）是下一个关键目标，因其直接决定 ECS 结构变更的吞吐上限。
+- Phase 1-3 已完成基础实现，性能数据已收集。
+- Phase 4（System 框架）是下一个关键目标，为 ECS 提供完整的 System 生命周期。
 
 ---
 

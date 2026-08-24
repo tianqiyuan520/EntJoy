@@ -13,22 +13,24 @@ public static class ChunkJobExtensions
 {
     /// <summary>调度 IJobChunk</summary>
     public static JobHandle Schedule<T>(this T job, QueryBuilder query,
-        JobHandle dependsOn = default) where T : struct, IJobChunk
+        JobHandle dependsOn = default,
+        ComponentType[]? writtenComponents = null) where T : struct, IJobChunk
     {
         var world = World.DefaultWorld;
         if (world == null) throw new InvalidOperationException("No active World found.");
         NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep));
+        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep, writtenComponents: writtenComponents));
     }
 
     /// <summary>调度 IJobChunk（带 workerCap）</summary>
     public static JobHandle ScheduleWithWorkerCap<T>(this T job, QueryBuilder query, int workerCap,
-        JobHandle dependsOn = default) where T : struct, IJobChunk
+        JobHandle dependsOn = default,
+        ComponentType[]? writtenComponents = null) where T : struct, IJobChunk
     {
         var world = World.DefaultWorld;
         if (world == null) throw new InvalidOperationException("No active World found.");
         NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep));
+        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep, writtenComponents: writtenComponents));
     }
 
     /// <summary>Run IJobChunk（调度并等待完成）</summary>

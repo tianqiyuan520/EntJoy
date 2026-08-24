@@ -16,6 +16,10 @@ namespace EntJoy
         public int ComponentCount { get; private set; }
         public int EntityCount { get; private set; }
 
+        // Phase 2.1: Archetype Edges — 缓存 Add/Remove 目标 Archetype
+        private readonly Dictionary<ComponentType, Archetype> _addEdges = new();
+        private readonly Dictionary<ComponentType, Archetype> _removeEdges = new();
+
         public Archetype(ComponentType[] ts)
         {
             types = ts;
@@ -332,6 +336,57 @@ namespace EntJoy
         public int GetComponentTypeIndex(ComponentType componentType)
         {
             return componentTypeRecorder[componentType];
+        }
+
+        // ======================== Phase 2.1: Archetype Edges ========================
+
+        /// <summary>
+        /// 获取 Add edge：从当前 Archetype 添加 componentType 后的目标 Archetype。
+        /// 返回 null 表示未缓存（miss）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public Archetype? GetAddEdge(ComponentType componentType)
+        {
+            _addEdges.TryGetValue(componentType, out var target);
+            return target;
+        }
+
+        /// <summary>
+        /// 写入 Add edge 缓存。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetAddEdge(ComponentType componentType, Archetype target)
+        {
+            _addEdges[componentType] = target;
+        }
+
+        /// <summary>
+        /// 获取 Remove edge：从当前 Archetype 移除 componentType 后的目标 Archetype。
+        /// 返回 null 表示未缓存（miss）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public Archetype? GetRemoveEdge(ComponentType componentType)
+        {
+            _removeEdges.TryGetValue(componentType, out var target);
+            return target;
+        }
+
+        /// <summary>
+        /// 写入 Remove edge 缓存。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetRemoveEdge(ComponentType componentType, Archetype target)
+        {
+            _removeEdges[componentType] = target;
+        }
+
+        /// <summary>
+        /// 检查当前 Archetype 是否包含指定组件。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool HasComponent(ComponentType componentType)
+        {
+            return componentTypeRecorder.ContainsKey(componentType);
         }
 
         public void Dispose()

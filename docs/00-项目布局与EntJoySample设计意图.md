@@ -61,7 +61,7 @@ EntJoy/
 | 目录 | 能力域 | 验证什么 |
 |---|---|---|
 | `01_JobSystem/` | JobSystem 基础 | context 路径（unmanaged raw-copy vs managed GCHandle）、调度固定开销、重负载、Profiler |
-| `02_IJobChunkECS/` | ECS + Chunk Job | 最小 IJobChunk、百万实体 C#/C++/ISPC 对比、持续运动场景 |
+| `02_IJobChunkECS/` | ECS + Chunk Job | 最小 IJobChunk、百万实体 C#/C++/ISPC 对比、持续运动场景、**Phase 3 ECS 基线测试** |
 | `03_NativeTranspiler/` | 转译与 SIMD | C#→C++/ISPC 正确性、静态方法、ISPC 多线程、Auto-SIMD |
 | `04_NativeCollections/` | 原生容器 | NativeList、容器作字段、原子操作 |
 | `05_Algorithms/` | 算法基准 | GridSearch（最近点/范围查询） |

@@ -22,6 +22,8 @@ namespace EntJoy
                 throw new InvalidOperationException("ArchetypeChunk is not initialized (default constructed or chunk was disposed).");
         }
 
+        // ======================== Span 访问（原有） ========================
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe Span<T> GetComponentDataSpan<T>() where T : struct
         {
@@ -48,6 +50,8 @@ namespace EntJoy
             return (T*)((byte*)_chunk.MemoryBlock + _chunk.GetComponentOffset(idx));
         }
 
+        // ======================== Entity 访问 ========================
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe Span<Entity> GetEntitySpan()
         {
@@ -55,6 +59,8 @@ namespace EntJoy
             Entity* ptr = (Entity*)_chunk.MemoryBlock;
             return new Span<Entity>(ptr, Count);
         }
+
+        // ======================== Enableable 访问 ========================
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe BitMask GetEnabledMask<T>() where T : struct, IEnableableComponent

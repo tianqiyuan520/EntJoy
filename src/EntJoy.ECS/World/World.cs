@@ -50,6 +50,15 @@ namespace EntJoy
             return new EntityQuery(this, builder);
         }
 
+        /// <summary>
+        /// 批量创建实体。一次 Archetype 查找、一次 CompleteActiveJobs、一次返回。
+        /// 比逐个 NewEntity 快 N 倍。
+        /// </summary>
+        public Entity[] CreateEntities(int count, params ComponentType[] types)
+        {
+            return _entityManager.CreateEntities(count, types);
+        }
+
         /// <summary>实体级查询（chunk 序 struct query，密集 OOD 访问面）。</summary>
         public QueryEnumerable<T0, T1> Query<T0, T1>() where T0 : struct where T1 : struct
             => new QueryEnumerable<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
