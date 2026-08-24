@@ -6,8 +6,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
-		<BaseOutputPath>..\..\..\bin</BaseOutputPath>
-		<OutputPath>..\..\..\bin</OutputPath>
+		<BaseOutputPath>..\..\bin</BaseOutputPath>
+		<OutputPath>..\..\bin</OutputPath>
 
 		<!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
