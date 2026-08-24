@@ -403,8 +403,12 @@ namespace NativeTranspiler.Analyzer
             }
                     var relativeNativeDllDir = CodeGenIo.GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
                     bool hasFastMath = fastMathCppFiles.Count > 0;
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath);
                     string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
+                    // 增量友好排序：保留上一次 CMakeLists.txt 中已有的源文件顺序，新增文件追加到末尾。
+                    // 配合 CMake Unity Build（批大小 8），新增 job/method 不会打乱既有批的成员，
+                    // 从而 native 侧只需重编新 TU + 末尾批，而不是把所有批重编一遍。
+                    var existingCppOrder = ReadExistingCppSourceOrder(cmakePath);
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder);
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
                     {
@@ -744,7 +748,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
         }
 
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
-                                  string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath)
+                                  string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
+                                  List<string>? existingCppOrder = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
@@ -834,7 +839,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("#   同 DLL：ISPC .obj 以普通符号引用 ISPCLaunch 等，MSVC 无法从另一 DLL");
             sb.AppendLine("#   自动导入普通符号（非 __imp_），故 tasksys + ISPC objects + 生成代码要同库。");
             sb.AppendLine("add_library(NativeTranspiled SHARED");
-            foreach (var file in cppFiles.OrderBy(x => x))
+            foreach (var file in OrderCppSourcesStable(cppFiles, existingCppOrder))
                 sb.AppendLine($"    {file}");
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
@@ -1026,6 +1031,65 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
             sb.AppendLine(")");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 读取上一次生成的 CMakeLists.txt 中 add_library(NativeTranspiled ...) 块内的源文件列表
+        ///（保留原有顺序）。文件不存在或解析失败返回 null → 调用方回退到字典序。
+        /// </summary>
+        private static List<string>? ReadExistingCppSourceOrder(string cmakePath)
+        {
+            if (!File.Exists(cmakePath))
+                return null;
+            try
+            {
+                var order = new List<string>();
+                bool inNativeTranspiled = false;
+                foreach (var rawLine in File.ReadAllLines(cmakePath))
+                {
+                    var line = rawLine.Trim();
+                    if (inNativeTranspiled)
+                    {
+                        if (line == ")") break;
+                        // 形如 "    SharpNative_Job_xxx_Execute.cpp"，排除 ${TASKSYS_SRC} 等变量
+                        if (line.EndsWith(".cpp", StringComparison.OrdinalIgnoreCase) && !line.Contains("${"))
+                            order.Add(line);
+                    }
+                    else if (line.StartsWith("add_library(NativeTranspiled", StringComparison.OrdinalIgnoreCase))
+                    {
+                        inNativeTranspiled = true;
+                    }
+                }
+                return order.Count > 0 ? order : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 增量友好的源列表排序：保留 existingOrder（上一次 CMakeLists 的顺序）中仍存在于
+        /// cppFiles 的文件，新文件按字典序追加到末尾，绝不打乱既有文件的相对顺序。
+        /// 这样 Unity Build 的既有批成员不变，新增 job/method 只让最后一个批变化，
+        /// native 侧只需重编新 TU + 末尾批。
+        /// </summary>
+        private static List<string> OrderCppSourcesStable(List<string> cppFiles, List<string>? existingCppOrder)
+        {
+            if (existingCppOrder == null || existingCppOrder.Count == 0)
+                return cppFiles.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+
+            var ordered = new List<string>();
+            var remaining = new HashSet<string>(cppFiles, StringComparer.OrdinalIgnoreCase);
+            foreach (var prev in existingCppOrder)
+            {
+                if (remaining.Remove(prev))
+                    ordered.Add(prev);
+            }
+            // 新增文件（之前不存在）追加到末尾，避免插入中间打乱既有 Unity 批
+            if (remaining.Count > 0)
+                ordered.AddRange(remaining.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+            return ordered;
         }
     }
 }

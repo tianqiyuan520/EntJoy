@@ -129,7 +129,16 @@ namespace NativeTranspiler.Tasks
 
             // cache 里记录的工具集与期望不一致时，必须清空 build 目录重新配置，
             // 否则 CMake 会因 generator toolset 不匹配直接失败。
-            bool cacheToolsetMatches = !useClangCl || GetCacheToolset(buildDir) == "ClangCL";
+            string cachedToolset = GetCacheToolset(buildDir);
+            bool cacheToolsetMatches = cachedToolset == null || ((cachedToolset == "ClangCL") == useClangCl);
+
+            // 若 CMakeCache.txt 记录的源目录（CMAKE_HOME_DIRECTORY）与当前生成目录不一致
+            //（例如整个工程被移动/复制过），原地 reconfigure 会沿用旧绝对路径，必须重建缓存。
+            // 注意比较前要规范化路径：CMakeCache 存的是正斜杠且无末尾分隔符，
+            // 而 NativeCodeGenDir 可能带尾部反斜杠。
+            string cachedHome = GetCacheHomeDirectory(buildDir);
+            bool cmakeHomeMatches = cachedHome == null ||
+                string.Equals(NormalizeDirPath(cachedHome), NormalizeDirPath(NativeCodeGenDir), StringComparison.OrdinalIgnoreCase);
 
             if (cmakeCacheExists && cmakeBuildSystemExists && cmakeListsUnchanged && cacheToolsetMatches)
             {
@@ -137,16 +146,35 @@ namespace NativeTranspiler.Tasks
             }
             else
             {
-                if (cmakeCacheExists && !cmakeBuildSystemExists)
-                    Log.LogMessage(MessageImportance.High, "CMake cache exists but generated build files are missing. Reconfiguring.");
-
-                // 清理旧的 build 目录（无论 cache 是否存在），避免路径缓存冲突
-                if (Directory.Exists(buildDir))
+                // 只在缓存/工程文件缺失、工具集不匹配或源目录变化时才清空 build 目录（全量重编）。
+                // 若只是 CMakeLists.txt 内容变化（新增/重命名/删除 job 或 method 导致源列表变化），
+                // 原地 reconfigure 即可：CMake 更新工程文件后，--build 仍能按 obj 缓存增量只重编
+                // 新增的 TU 与受影响的 Unity 批，避免每次结构调整都触发 ~30s 全量重编。
+                bool cacheInvalid = !cmakeCacheExists || !cmakeBuildSystemExists || !cacheToolsetMatches || !cmakeHomeMatches;
+                if (cacheInvalid)
                 {
-                    Log.LogMessage(MessageImportance.High, "Cleaning build directory for fresh configure...");
-                    Directory.Delete(buildDir, true);
+                    if (cmakeCacheExists && !cmakeBuildSystemExists)
+                        Log.LogMessage(MessageImportance.High, "CMake cache exists but generated build files are missing. Reconfiguring.");
+                    else if (!cmakeHomeMatches)
+                        Log.LogMessage(MessageImportance.High, "CMake cache points to a different source directory.");
+                    else if (!cacheToolsetMatches)
+                        Log.LogMessage(MessageImportance.High, "Native toolset changed.");
+
+                    // 清理旧的 build 目录（无论 cache 是否存在），避免路径缓存冲突
+                    if (Directory.Exists(buildDir))
+                    {
+                        Log.LogMessage(MessageImportance.High, "Cleaning build directory for fresh configure...");
+                        Directory.Delete(buildDir, true);
+                    }
+                    Directory.CreateDirectory(buildDir);
                 }
-                Directory.CreateDirectory(buildDir);
+                else
+                {
+                    // CMakeLists.txt 变了但缓存还有效：不清目录，直接在原 cache 上 reconfigure。
+                    // 注意此时不要 Delete(buildDir)，否则上一步的全量编译成果全部作废。
+                    Log.LogMessage(MessageImportance.High,
+                        "CMakeLists.txt changed but cache is valid — reconfiguring in place (incremental obj cache preserved).");
+                }
 
                 // ---- CMake 配置 ----
                 var configureArgs = new List<string>
@@ -386,6 +414,29 @@ namespace NativeTranspiler.Tasks
                 }
             }
             return null;
+        }
+
+        /// <summary>读取 CMakeCache.txt 中记录的源目录（CMAKE_HOME_DIRECTORY）；无缓存/无记录返回 null。</summary>
+        private static string GetCacheHomeDirectory(string buildDir)
+        {
+            var cache = Path.Combine(buildDir, "CMakeCache.txt");
+            if (!File.Exists(cache))
+                return null;
+            foreach (var line in File.ReadAllLines(cache))
+            {
+                if (line.StartsWith("CMAKE_HOME_DIRECTORY:INTERNAL=", StringComparison.OrdinalIgnoreCase))
+                {
+                    int idx = line.IndexOf('=');
+                    return idx >= 0 ? line.Substring(idx + 1).Trim() : null;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>规范化目录路径：绝对化、统一分隔符、去掉末尾分隔符，用于跨格式比较。</summary>
+        private static string NormalizeDirPath(string path)
+        {
+            return Path.GetFullPath(path).Replace('/', '\\').TrimEnd('\\');
         }
 
         /// <summary>从哈希清单中读取指定文件的已保存哈希</summary>
