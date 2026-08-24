@@ -2,9 +2,35 @@
 
 > 版本：v3  
 > 日期：2026-08-13  
+> 最后更新：2026-08-24  
 > 前置文档：`docs/ecs-evolution-plan-v2.md`  
 > 定位：本文档不是 v2 的增量补丁，而是基于当前源码核对后的决策完整修订版。  
 > 实施时以本文档为准；v2 继续保留，仅作为设计背景和早期思路。
+
+---
+
+## 进度追踪（2026-08-24 更新）
+
+> 本节为实施进度的实时快照，每次 Phase 完成后更新。
+
+| Phase | 内容 | 状态 | 完成时间 | 关键提交 |
+|-------|------|------|----------|----------|
+| **Phase 1** | 基础设施优化 | ✅ **已完成** | 2026-08-22 | `6391038` |
+| **Phase 2** | Archetype Edges + Shared Component | 🔲 未开始 | — | — |
+| **Phase 3** | Selective Wait + Auto-Defer + ECB | 🔲 未开始（**下一目标**） | — | — |
+| **Phase 4** | System/Processor 框架 + Query 分层 | 🔲 未开始 | — | — |
+| **Phase 5** | 易用性基础设施 | 🔲 未开始 | — | — |
+| **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
+| **Phase 7** | Shared Component 落地 + Subsystem Query | 🔲 未开始 | — | — |
+| **Phase 8** | Source Generator 扩展 | 🔲 未开始 | — | — |
+| **Phase 9** | Managed 类型与原生投影（独立轨道） | 🔲 未开始 | — | — |
+
+**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Chunk struct 化（Step 0）→ Phase 3 🔲 → Phase 4 🔲
+
+**附注**：
+- Phase 1 的完成是在本文档制定期间（2026-08-22）同步实施并验证的，详见各子项的 `✅ 已完成` 标注。
+- **Chunk struct 化**（Phase 1 遗留项）是 Phase 3/4 的共同前置优化，推荐在 Phase 3 之前完成（详见 `Phase优先级分析与实施路线.md` §三）。
+- Phase 3（Selective Wait + ECB）是下一个关键目标，因其直接决定 ECS 结构变更的吞吐上限。
 
 ---
 
@@ -158,7 +184,7 @@ Phase 9 之前必须建立组件生命周期协议，至少包含：
 
 > 2026-08-22 实施：完整 per-thread 栈暂缓（收益/风险比低），改为 **1.1a 去全局锁**——
 > `_active` ConcurrentDictionary + `_resetLock` → per-thread `ThreadEntry`（gate 锁，owner 无争用）；
-> Alloc/Free 快路径无全局锁；Reset 逐线程收集。GridSearch 回归通过。
+> Alloc/Free 快路径无全局锁；Reset 逐线程收集。EntJoySample 编译通过 + IJobChunkMoveCompareTest 回归。
 
 **目标形态：**
 
@@ -182,7 +208,7 @@ Phase 9 之前必须建立组件生命周期协议，至少包含：
 #### 1.2 ChunkPool：保留对齐的池化 ✅ 已完成
 
 > 2026-08-22 实现：`ChunkMemoryPool.cs`（64KB 块池化器），Archetype AllocateFromSlab/Dispose
-> 改用池。GridSearch 全栈回归通过。
+> 改用池。EntJoySample 编译通过 + IJobChunkMoveCompareTest 回归。
 
 **目标形态：**
 
@@ -291,6 +317,38 @@ All = ComponentTypes<T>.Share;
 
 - ChunkPool 是最容易破坏对齐和局部性的部分，应单独验证。
 - 外部暴露 `ChunkList` 会增加并发修改风险，需要明确 API 边界。
+
+#### 1.6 Chunk struct 化（元数据连续化）🔲 推荐下一步（Step 0）
+
+> 2026-08-24 分析：Phase 1 主体已完成，Chunk struct 化是遗留项，推荐在 Phase 3 之前完成。
+> 详见 `Phase优先级分析与实施路线.md` §三。
+
+**目标形态：**
+
+- `Chunk` 从 `sealed unsafe class : IDisposable` 改为 `struct`（blittable，只含 `IntPtr`/`int` 等值类型字段）。
+- `Archetype._chunkList` 从 `List<Chunk>` 改为 `NativeList<Chunk>`（连续内存遍历）。
+- 64KB 数据块保持独立（不合并），Chunk struct 只是"指向数据块的元数据句柄"。
+- `Chunk.Dispose` 语义由 `ChunkMemoryPool.Return` 管理（struct 无 Dispose）。
+
+**收益：**
+
+- 300×40B=12KB 连续元数据进 L1 缓存，遍历零指针跳转。
+- 消除 300 个 class 对象头（~16B/对象 = 4.8KB）+ GC 根扫描。
+- `ArchetypeChunk`（对外句柄）已经是 struct，用户 API 零影响。
+- 为 Phase 3（ECB staging 遍历）和 Phase 4（QueryEnumerator 遍历）提供连续内存基础设施。
+
+**关键约束：**
+
+- Chunk 不能包含任何托管引用（必须 blittable）。
+- 修改 `EntityCount` 等字段时注意值拷贝（通过索引 + `ref` 访问）。
+- `NativeList<Chunk>` 的 Capacity 扩容时指针失效——调度期间不扩容（快照语义）。
+
+**验收：**
+
+- Chunk 遍历性能提升 10-20%（连续内存 vs 指针跳转）。
+- GC 根数量减少（300 个 class 对象 → 1 个 NativeList 数组对象）。
+- IJobChunkMoveCompareTest 性能不退化（C#/C++/ISPC 全路径）。
+- `ArchetypeChunk` 用户 API 无变化。
 
 ---
 
@@ -781,10 +839,12 @@ Phase 9: Managed 类型与原生投影
 
 ## 9. 文件变更建议
 
-本阶段只新增：
+已新增：
 
 ```text
-docs/ecs-evolution-plan-v3.md
+docs/ecs-evolution-plan-v3.md              ← 本文档（v3 进化方案）
+docs/项目现状总览.md                        ← 综合状态文档（记录各模块完成状态、性能基线、已知问题）
+docs/Phase优先级分析与实施路线.md            ← 全部待办项优先级排序、依赖关系图、工时估算（2026-08-24 新增）
 ```
 
 后续源码实施时再按 Phase 拆分 PR。

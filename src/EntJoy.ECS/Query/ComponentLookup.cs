@@ -29,7 +29,7 @@ namespace EntJoy
             _archetype = null;
             _componentIndex = -1;
             _stride = Unsafe.SizeOf<T>();
-            _chunk = null;
+            _chunk = default;
             _base = null;
             _version = int.MinValue;
         }
@@ -41,7 +41,7 @@ namespace EntJoy
             if (_version != _em.StructuralVersion)
             {
                 _archetype = null;
-                _chunk = null;
+                _chunk = default;
                 _version = _em.StructuralVersion;
             }
 
@@ -53,7 +53,7 @@ namespace EntJoy
             }
 
             var chunk = arch.ChunkList[chunkIndex];
-            if (chunk != _chunk)
+            if (chunk.MemoryBlock != _chunk.MemoryBlock)
             {
                 _chunk = chunk;
                 _base = (byte*)chunk.GetComponentArrayPointer(_componentIndex);

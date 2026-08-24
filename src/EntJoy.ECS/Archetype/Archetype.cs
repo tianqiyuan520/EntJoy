@@ -26,6 +26,7 @@ namespace EntJoy
                 componentTypeRecorder.Add(types[i], i);
             }
             _chunkCapacity = CalculateOptimalChunkCapacity(types);
+            _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types);
         }
 
         /// <summary>
@@ -112,6 +113,7 @@ namespace EntJoy
     {
         private readonly List<Chunk> _chunkList = new();
         private readonly int _chunkCapacity;
+        private readonly ChunkMetadata _sharedMetadata;
         private const int _chunkHeaderSize = 64;
 
         // Contiguous memory slab: 64 KB per slab. Multiple chunks are carved
@@ -174,28 +176,26 @@ namespace EntJoy
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
         {
-            Chunk targetChunk = null;
             if (ChunkCount > 0)
             {
-                var chunk = _chunkList[^1];
-                if (chunk != null && chunk.EntityCount < chunk.Capacity)
+                var span = CollectionsMarshal.AsSpan(_chunkList);
+                ref var lastChunk = ref span[^1];
+                if (lastChunk.EntityCount < lastChunk.Capacity)
                 {
-                    targetChunk = chunk;
+                    slotInChunk = lastChunk.EntityCount;
+                    lastChunk.AddEntity(entity);
+                    chunkIndex = _chunkList.Count - 1;
+                    EntityCount++;
+                    return;
                 }
             }
 
-            if (targetChunk == null)
-            {
-                nint chunkMem = AllocateFromSlab();
-                targetChunk = new Chunk(_chunkCapacity, types, this, chunkMem);
-                _chunkList.Add(targetChunk);
-            }
-
-            slotInChunk = targetChunk.EntityCount;
-            targetChunk.AddEntity(entity);
-            // targetChunk 只可能是：①现有最后一块（ChunkCount>0 且未满时取的 _chunkList[^1]），
-            // 或 ②本方法内新建并追加到末尾的块。故其下标恒等于 Count-1——
-            // 用 IndexOf(targetChunk) 是每实体新增 O(chunkCount) 的线性扫描（v3 Phase 1.3 消除）。
+            // 需要新建 chunk
+            nint chunkMem = AllocateFromSlab();
+            var newChunk = new Chunk(_sharedMetadata, chunkMem);
+            newChunk.AddEntity(entity);
+            _chunkList.Add(newChunk);
+            slotInChunk = newChunk.EntityCount - 1;
             chunkIndex = _chunkList.Count - 1;
             EntityCount++;
         }
@@ -245,15 +245,17 @@ namespace EntJoy
         public void Remove(int chunkIndex, int slotInChunk, out int movedEntityId, out int movedEntitySlot, out int compactedChunkIndex)
         {
             compactedChunkIndex = -1;
-            var chunk = _chunkList[chunkIndex];
+            var span = CollectionsMarshal.AsSpan(_chunkList);
+            ref var chunk = ref span[chunkIndex];
 
             if (chunk.EntityCount == 1)
             {
                 movedEntityId = -1;
                 movedEntitySlot = -1;
                 chunk.RemoveEntity(slotInChunk);
-                if (chunk.EntityCount == 0)
+                if (chunk.EntityCount == 0 && _chunkList.Count > 1)
                 {
+                    // 至少保留 1 个 chunk，避免边界场景频繁创建/销毁抖动
                     int lastChunkIndex = _chunkList.Count - 1;
                     if (chunkIndex != lastChunkIndex)
                     {
@@ -261,7 +263,6 @@ namespace EntJoy
                         compactedChunkIndex = chunkIndex;
                     }
                     _chunkList.RemoveAt(lastChunkIndex);
-                    chunk.Dispose();
                 }
             }
             else
@@ -371,7 +372,6 @@ namespace EntJoy
             int chunkCounter = 0;
             foreach (var chunk in _chunkList)
             {
-                if (chunk == null) continue;
                 chunkCounter++;
                 sb.AppendLine($"Chunk: {chunkCounter}/{ChunkCount}");
                 sb.AppendLine($"实体数: {chunk.EntityCount}, 组件数: {ComponentCount}");

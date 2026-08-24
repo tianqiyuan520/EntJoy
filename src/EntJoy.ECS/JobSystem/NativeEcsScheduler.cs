@@ -87,6 +87,14 @@ internal enum NativeEcsJobKind
 }
 
 /// <summary>
+/// 轻量级包装类，用于 GCHandle.Alloc 存储 Chunk struct（GCHandle 不能接受值类型）。
+/// </summary>
+internal sealed class ChunkRef
+{
+    public Chunk Value;
+}
+
+/// <summary>
 /// <see cref="NativeJobScheduler"/> 的 ECS 扩展（独立类）。
 /// 包含所有依赖 Chunk/ComponentType/EntityManager/QueryBuilder 的调度方法。
 /// 共享的可变状态（委托缓存、上下文池、异常、纯 P/Invoke 指针）由
@@ -394,7 +402,7 @@ public static unsafe class NativeEcsScheduler
         if (!nativeCallback)
         {
             for (int ci = 0; ci < chunkCount; ci++)
-                gcHandles![ci] = GCHandle.Alloc(chunkList[ci], GCHandleType.WeakTrackResurrection);
+                gcHandles![ci] = GCHandle.Alloc(new ChunkRef { Value = chunkList[ci] }, GCHandleType.WeakTrackResurrection);
             lock (_chunkGCHandlesLock)
             {
                 gcHandleStartIndex = _chunkGCHandles.Count;
@@ -1120,7 +1128,7 @@ public static unsafe class NativeEcsScheduler
             var componentSizes = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
             var enableBitMaps = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
             var componentTypeIndices = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
-            var chunkHandle = GCHandle.Alloc(chunk, GCHandleType.Normal);
+            var chunkHandle = GCHandle.Alloc(new ChunkRef { Value = chunk }, GCHandleType.Normal);
 
             for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
             {
@@ -1586,17 +1594,17 @@ public static unsafe class NativeEcsScheduler
                 ref var job = ref Unsafe.AsRef<T>(jobPtr);
 
                 var chunkHandle = cd->chunkHandle;
-                Chunk chunk = null;
+                Chunk chunk = default;
                 if (chunkHandle != IntPtr.Zero)
                 {
                     try
                     {
                         var gch = GCHandle.FromIntPtr(chunkHandle);
-                        if (gch.IsAllocated && gch.Target is Chunk c) chunk = c;
+                        if (gch.IsAllocated && gch.Target is ChunkRef cr) chunk = cr.Value;
                     }
                     catch { }
                 }
-                if (chunk == null) return;
+                if (chunk.MemoryBlock == nint.Zero) return;
 
                 if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
                 {
@@ -1663,7 +1671,7 @@ public static unsafe class NativeEcsScheduler
                     {
                         var cd = chunks + index;
                         var chunk = ResolveChunk(cd->chunkHandle);
-                        if (chunk != null)
+                        if (chunk.MemoryBlock != nint.Zero)
                             job.Execute(new ArchetypeChunk(chunk), default);
                     }
                 }
@@ -1689,14 +1697,14 @@ public static unsafe class NativeEcsScheduler
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Chunk ResolveChunk(IntPtr chunkHandle)
     {
-        if (chunkHandle == IntPtr.Zero) return null;
+        if (chunkHandle == IntPtr.Zero) return default;
         try
         {
             var gch = GCHandle.FromIntPtr(chunkHandle);
-            if (gch.IsAllocated && gch.Target is Chunk c) return c;
+            if (gch.IsAllocated && gch.Target is ChunkRef cr) return cr.Value;
         }
         catch { }
-        return null;
+        return default;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1704,17 +1712,17 @@ public static unsafe class NativeEcsScheduler
         where T : struct, IJobChunk
     {
         var chunkHandle = cd->chunkHandle;
-        Chunk chunk = null;
+        Chunk chunk = default;
         if (chunkHandle != IntPtr.Zero)
         {
             try
             {
                 var gch = GCHandle.FromIntPtr(chunkHandle);
-                if (gch.IsAllocated && gch.Target is Chunk c) chunk = c;
+                if (gch.IsAllocated && gch.Target is ChunkRef cr) chunk = cr.Value;
             }
             catch { }
         }
-        if (chunk == null) return;
+        if (chunk.MemoryBlock == nint.Zero) return;
 
         if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
         {
@@ -1786,7 +1794,7 @@ public static unsafe class NativeEcsScheduler
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private unsafe static void ExecuteManagedChunk<T>(ref T job, Chunk chunk, ComponentType[] allEnabledTypes) where T : struct, IJobChunk
     {
-        if (chunk == null) return;
+        if (chunk.MemoryBlock == nint.Zero) return;
         if (allEnabledTypes != null && allEnabledTypes.Length > 0)
         {
             int ulongCount = (chunk.EntityCount + 63) / 64;

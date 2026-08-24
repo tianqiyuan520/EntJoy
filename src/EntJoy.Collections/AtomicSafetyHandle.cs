@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -34,6 +34,13 @@ namespace EntJoy.Collections
         private static int[] _states = new int[MaxHandles];
         private static ConcurrentQueue<int> _freeIndices = new ConcurrentQueue<int>();
         private static int _nextIndex = 0;
+
+        /// <summary>
+        /// 运行时安全检查开关。默认开启（Debug + Release 均检查）。
+        /// 设为 false 可跳过所有 CheckReadAndThrow/CheckWriteAndThrow，
+        /// 消除每次 NativeArray 索引的原子读 + 分支开销（~1-2ns/次）。
+        /// </summary>
+        public static volatile bool SafetyChecksEnabled = true;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static AtomicSafetyHandle Allocate()
@@ -84,6 +91,7 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckReadAndThrow(AtomicSafetyHandle handle)
         {
+            if (!SafetyChecksEnabled) return;
             int index = handle.Index;
             if (index < 0 || index >= _states.Length)
                 throw new InvalidOperationException("Invalid handle index.");
@@ -94,6 +102,7 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckReadAndAllowInvalid(AtomicSafetyHandle handle)
         {
+            if (!SafetyChecksEnabled) return;
             int index = handle.Index;
             if (index < 0) return; // 已释放的容器，允许不抛异常
             if (index >= _states.Length)
@@ -105,6 +114,7 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckWriteAndThrow(AtomicSafetyHandle handle)
         {
+            if (!SafetyChecksEnabled) return;
             if (handle.IsReadOnly)
                 throw new InvalidOperationException("Cannot write to a read-only NativeContainer.");
             CheckReadAndThrow(handle);
@@ -113,6 +123,7 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckExistsAndThrow(AtomicSafetyHandle handle)
         {
+            if (!SafetyChecksEnabled) return;
             CheckReadAndThrow(handle);
         }
 

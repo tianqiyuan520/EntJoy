@@ -1,4 +1,4 @@
-# AutoSIMD 实现与验证报告（2026-08-23 持续更新）
+# AutoSIMD 实现与验证报告（2026-08-24 持续更新）
 
 > 本文档记录 NativeTranspiler AutoSIMD 后端的架构、修复历史、验证体系与剩余盲区。
 > 对应代码：`src/NativeTranspiler/Analyzer/Simd/`、`src/NativeDll/`（SimdValue.h / NativeSIMD.h / NativeSIMD_math.h）、
@@ -314,3 +314,66 @@ dotnet run --project tools\JobLibsBenchmark\JobLibsBenchmark.csproj -c Release -
 | E11 | SLEEF 对 -Inf 输入 | EC1 `log/sqrt` 域：`-Inf` → NaN（cs=FF800000 simd=FFC00000） | 中（5.1 已预警 log(≤0)，实测确认） |
 
 **结论**：EdgeCase 套件首次运行即挖出 11 类真实缺陷/限制（其中 E1/E2/E3/E9 为编译期或结构性错误，E5/E6/E7 为控制流语义错）。这正是对抗性验证的价值——现有 23 项测试无法覆盖上述组合。后续修复优先级按 E1→E9→E5→E7/E6 推进。
+
+---
+
+## 八、当前状态总结（2026-08-24 更新）
+
+### 8.1 功能状态
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| 基本 SIMD 向量化 | ✅ | AVX2/SSE/标量，运行时宽度自适应 |
+| 控制流（if-else/break/continue） | ✅ | save-blend + scope-aware 变量追踪 |
+| for 循环（uniform/reduction） | ✅ | 常量界 unroll ≤64 次 |
+| while 循环 | ❌ 编译期阻塞 | E9：`PostIncrementExpression` 不支持，已用 for 覆盖 |
+| 数学函数（sin/cos/log） | ✅ | SLEEF 多项式 ~3.5 ULP |
+| int/float 混合比较 | ❌ 类型推断错 | E1：uniform int 条件生成 `n_cmp_*_epi32` 但参数为 float |
+| ECS 调度（IJobChunk/IJobEntity） | ❌ 不参与 | 用户需手动标后端 |
+| long/int64 | ❌ 不支持 | 重算必须用 int/uint |
+| 用户自定义函数调用 | ⚠️ 部分 | MathF 系已验证，外部静态方法未测 |
+
+### 8.2 性能状态
+
+| 场景 | AutoSIMD | ISPC | 倍率 | 说明 |
+|------|----------|------|------|------|
+| S6 控制流（LCG+分支） | **3.18ms** | 5.39ms | **1.71x** | 唯一公平重计算场景 |
+| S5 高竞争（sum=i*j） | 0.56ms | 0.53ms | 1.05x | 无分支，SIMD 无优势 |
+| S3 依赖链 | 0.174ms | 0.181ms | 1.04x | 三个顺序 batch 各自向量化 |
+
+### 8.3 修复优先级路线
+
+| 优先级 | 缺陷 | 预估工作量 | 说明 |
+|--------|------|-----------|------|
+| **P0** | E1：int/float 混合比较类型推断 | 3-5 天 | 高频触发，修正 `SimdVariableAnalyzer` 类型推导 |
+| **P0** | E9：while 循环路径 | 1 周 | 需重写 while 生成路径（PostIncrementExpression） |
+| **P1** | E7：嵌套循环 return | 1 周 | 标号/恢复路径的嵌套处理 |
+| **P1** | E5：NaN 载荷分支掩码 | 3-5 天 | 验证 SLEEF 对 NaN 的行为 + 分支掩码处理 |
+| **P2** | E2：unchecked 表达式 | 2-3 天 | 添加 UncheckedExpression 翻译 |
+| **P2** | E3：int.MinValue/MaxValue | 1-2 天 | 类型映射修正 |
+| **P2** | E4：未初始化 varying 变量 | 1 天 | 添加防御性零初始化 |
+| **P3** | E8：非常量循环边界 | 3-5 天 | 边界计算修正 |
+| **P3** | E10：long/float cast | 1 周 | 添加类型转换支持 |
+| **P3** | E11：SLEEF log(-Inf) | 1-2 天 | 域检查 + 特殊值处理 |
+
+### 8.4 与竞品对比定位
+
+| 维度 | AutoSIMD | ISPC | Unity Burst |
+|------|----------|------|-------------|
+| 控制流支持 | ✅ if-else/break/continue | ⚠️ 有限 | ✅ 完整 |
+| SIMD 宽度 | AVX2=8 / SSE=4 / 标量=1 | 编译时固定 | 运行时自适应 |
+| S6 控制流 | **3.18ms** 🏆 | 5.39ms | 38.3ms |
+| S5 高竞争 | 0.56ms | 0.53ms | 0.016ms⚠ |
+| ECS 调度 | ❌ | ✅ | ✅ |
+| long 支持 | ❌ | ✅ | ✅ |
+| 编译器依赖 | ClangCL | ISPC 编译器 | Burst 编译器 |
+
+> ⚠ S5 Unity Burst = 0.016ms 是 Clang 代数简化（`imul eax, ecx, 499500`），非公平对比。
+
+### 8.5 与 v3 进化方案的关系
+
+AutoSIMD 属于**深度路径（IJobChunk + NativeTranspiler）**的执行引擎层，不直接受 v3 Phase 1-8 进度影响。但以下 Phase 完成后可扩展 AutoSIMD 的使用范围：
+
+- **Phase 3（Selective Wait + ECB）**：ECB 提供安全的结构变更，AutoSIMD 可更自由地参与 ECS 调度
+- **Phase 4（System 框架）**：SystemBase 的 `Entities.ForEach` 可由 AutoSIMD 展开
+- **Phase 8（Source Generator）**：可将 AutoSIMD 标记集成到 SourceGenerator 中
