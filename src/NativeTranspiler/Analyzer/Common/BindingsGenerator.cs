@@ -103,15 +103,21 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // 5. Job 鎵╁睍鏂规硶锛圫chedule 鍜?Run锛?
-            sb.AppendLine("public static partial class JobExtensions");
-            sb.AppendLine("{");
-            foreach (var jobStruct in nativeJobs)
+            // 5. Job 扩展方法（Schedule 和 Run）
+            // 注意：IJobEntity 的 JobExtensions 由 ECS 生成器生成（路由到原生/托管路径）
+            // 这里只为 IJobChunk/IJobParallelFor/IJobFor/IJob 生成
+            var nonEntityJobs = nativeJobs.Where(j => !CppJobGenerator.IsEntityJob(j)).ToList();
+            if (nonEntityJobs.Count > 0)
             {
-                GenerateJobExtensionMethod(sb, jobStruct);
-                GenerateJobRunMethod(sb, jobStruct, compilation);
+                sb.AppendLine("public static partial class JobExtensions");
+                sb.AppendLine("{");
+                foreach (var jobStruct in nonEntityJobs)
+                {
+                    GenerateJobExtensionMethod(sb, jobStruct);
+                    GenerateJobRunMethod(sb, jobStruct, compilation);
+                }
+                sb.AppendLine("}");
             }
-            sb.AppendLine("}");
 
             return sb.ToString();
         }
@@ -1187,6 +1193,73 @@ namespace NativeTranspiler.Analyzer
                 Marshal.FreeHGlobal(native);
             };
         }";
+        }
+
+        /// <summary>
+        /// 为 IJobEntity 生成 C# IJobChunk 适配器，内部调用原生 Execute 函数。
+        /// 该适配器会被 ECS 源生成器检测并使用（通过命名约定）。
+        /// </summary>
+        private static void GenerateNativeIJobChunkAdapter(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            string jobTypeName = jobStruct.ToDisplayString();
+            string adapterName = $"__NativeTranspiler_IJobChunkAdapter_{jobStruct.Name}";
+
+            // 生成 Execute 方法的 DllImport（从原生代码调用）
+            string executeFuncName = CppJobGenerator.GetCppJobFunctionName(jobStruct, isBatch: false);
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
+            var execParams = new List<string>();
+            execParams.Add("IntPtr jobPtr");
+            execParams.Add("ChunkJobData* chunkData");
+            sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{executeFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
+            sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Native({string.Join(", ", execParams)});");
+            sb.AppendLine();
+
+            // 生成 IJobChunk 适配器结构体
+            sb.AppendLine($"    /// <summary>");
+            sb.AppendLine($"    /// NativeTranspiler 生成的 IJobChunk 适配器，用于 {jobTypeName}。");
+            sb.AppendLine($"    /// 该适配器调用原生 Execute 函数，实现高性能执行。");
+            sb.AppendLine($"    /// </summary>");
+            sb.AppendLine($"    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]");
+            sb.AppendLine($"    public struct {adapterName} : IJobChunk");
+            sb.AppendLine($"    {{");
+            sb.AppendLine($"        public {jobTypeName} Job;");
+            sb.AppendLine();
+            sb.AppendLine($"        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            unsafe");
+            sb.AppendLine($"            {{");
+            sb.AppendLine($"                fixed ({jobTypeName}* jobPtr = &Job)");
+            sb.AppendLine($"                {{");
+            sb.AppendLine($"                    // 调用原生 Execute 函数");
+            sb.AppendLine($"                    {jobStruct.Name}_Execute_Native((IntPtr)jobPtr, null);");
+            sb.AppendLine($"                }}");
+            sb.AppendLine($"            }}");
+            sb.AppendLine($"        }}");
+            sb.AppendLine($"    }}");
+            sb.AppendLine();
+
+            // 生成 JobExtensions 适配器（调用原生 Schedule）
+            sb.AppendLine($"    /// <summary>");
+            sb.AppendLine($"    /// 为 {jobTypeName} 生成的 JobExtensions，调用原生调度路径。");
+            sb.AppendLine($"    /// </summary>");
+            sb.AppendLine($"    public static partial class NativeJobExtensions_{jobStruct.Name}");
+            sb.AppendLine($"    {{");
+            sb.AppendLine($"        public static JobHandle Schedule(this {jobTypeName} job, QueryBuilder query, JobHandle dependsOn = default)");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            return NativeExports.Schedule_{jobStruct.Name}(ref job, query, dependsOn);");
+            sb.AppendLine($"        }}");
+            sb.AppendLine();
+            sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap(this {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            return NativeExports.ScheduleWithWorkerCap_{jobStruct.Name}(ref job, query, workerCap, dependsOn);");
+            sb.AppendLine($"        }}");
+            sb.AppendLine();
+            sb.AppendLine($"        public static void Run(this {jobTypeName} job, QueryBuilder query)");
+            sb.AppendLine($"        {{");
+            sb.AppendLine($"            NativeExports.Schedule_{jobStruct.Name}(ref job, query, default).Complete();");
+            sb.AppendLine($"        }}");
+            sb.AppendLine($"    }}");
+            sb.AppendLine();
         }
 
     }

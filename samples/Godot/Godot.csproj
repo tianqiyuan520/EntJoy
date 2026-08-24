@@ -1,9 +1,14 @@
-﻿<Project Sdk="Godot.NET.Sdk/4.4.1">
+<Project Sdk="Godot.NET.Sdk/4.4.1">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
     <BaseOutputPath>$(GodotProjectDir).godot\mono\temp\bin\</BaseOutputPath>
+
+    <!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +21,7 @@
     <ProjectReference Include="..\..\src\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
     <ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <!-- 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
     <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
 
@@ -27,6 +33,8 @@
     <CompilerVisibleProperty Include="EntJoyNativeDllDir" />
   </ItemGroup>
 
+  <!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检查
+       NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编译 -->
   <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
 
   <Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
@@ -45,11 +53,26 @@
     <RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
   </Target>
 
-  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
+  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="'$(EnableNativeCompile)' != 'false' And Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
     <Message Importance="high" Text="Starting Godot native compilation for generated C++/ISPC code..." />
-    <NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" />
+    <NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" NativeDllDir="$(EntJoyNativeDllDir)" />
   </Target>
 
+  <Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
+    <ItemGroup>
+      <NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll')" />
+      <!-- DLL 分离：生成代码独DLL，一并复制到输出 -->
+      <NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="@(NativeDll) != ''" />
+  </Target>
+
+  <Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
+    <!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
+    <Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
+  </Target>
+
+  <!-- Godot 特有：额外复制 DLL 到输出目录（兼容旧逻辑） -->
   <PropertyGroup>
     <_GodotGeneratedNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll</_GodotGeneratedNativeDllPath>
     <_GodotGeneratedCoreNativeDllPath>$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll</_GodotGeneratedCoreNativeDllPath>
