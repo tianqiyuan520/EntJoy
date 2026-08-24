@@ -1,4 +1,4 @@
-using EntJoy;
+﻿using EntJoy;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
@@ -55,7 +55,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
     public struct MoveJobChunkCppFast : IJobChunk
     {
         public float DeltaTime;
@@ -214,7 +214,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp, CppMathLib = NativeTranspiler.CppMathLib.fast)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
     public struct HeavyJobChunkCppFast : IJobChunk
     {
         public float DeltaTime;
