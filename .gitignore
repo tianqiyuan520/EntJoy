@@ -58,7 +58,9 @@ src/NativeTranspiler.Tests/
 imgui.ini
 
 # Benchmarks & tooling (local-only; not part of library sources)
-/tools/
+/tools/*
+!/tools/JobSystemStressTest/
+!/tools/JobSystemStressTest.CSharp/
 
 # Local offline NuGet package-source config (machine-specific)
 NuGet.Offline.config

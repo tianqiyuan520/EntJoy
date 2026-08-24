@@ -127,11 +127,13 @@ namespace JobSystem
                 RunWorkTask(task);   // 通用 work：直接执行（内部 Release）
                 return true;
             }
+            // 先保存 tileCount（ExecuteAndRelease 释放 task 回池后该指针悬垂）
+            const uint32_t stolenTileCount = task->tileCount;
             ExecuteAndRelease(task, workerIndex);
             // 主线程 assist 计数
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            g_assistTiles.fetch_add(task->tileCount, std::memory_order_relaxed);
+            g_assistTiles.fetch_add(stolenTileCount, std::memory_order_relaxed);
             return true;
         }
 
