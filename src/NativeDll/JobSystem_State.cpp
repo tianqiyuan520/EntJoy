@@ -306,6 +306,14 @@ namespace JobSystem
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
+                // Floor：JCC tile 数不低于 tpw 兜底值，防止快 job 退化。
+                // 按 job 长度动态计算 tpw 兜底的 tile 数（非固定 wc×tpw），
+                // 这样小 job（100 元素 → 6 tile）和大 job（100k → 60 tile）都正确。
+                {
+                    int chunk_tpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+                    int minTiles = std::max(1, length / chunk_tpw4);
+                    if (targetTiles < minTiles) targetTiles = minTiles;
+                }
                 // 安全护栏：单 tile 元素数上限（kMaxAutoChunk）。
                 // perElem 是"并行墙钟稀释"成本：大 job 塌缩成 1-2 个巨型 tile 会
                 // 退化为串行执行（实测 S3 依赖链 1M 元素 0.074→0.164ms 回归）。
