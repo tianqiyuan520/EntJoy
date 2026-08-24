@@ -10,7 +10,7 @@ namespace EntJoy
 
         internal ArchetypeChunk(Chunk chunk) => _chunk = chunk;
 
-        public int Count => _chunk != null ? _chunk.EntityCount : 0;
+        public int Count => _chunk.MemoryBlock != nint.Zero ? _chunk.EntityCount : 0;
 
         // 安全句柄在应用域生命周期内持续有效，无需显式释放
         private static readonly AtomicSafetyHandle s_chunkViewSafety = SafetyHandleManager.Allocate();
@@ -18,7 +18,7 @@ namespace EntJoy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ThrowIfNull()
         {
-            if (_chunk == null)
+            if (_chunk.MemoryBlock == nint.Zero)
                 throw new InvalidOperationException("ArchetypeChunk is not initialized (default constructed or chunk was disposed).");
         }
 

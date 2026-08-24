@@ -36,7 +36,7 @@ namespace EntJoy
             _archIndex = 0;
             _chunkIndex = 0;
             _currentArch = null;
-            _currentChunk = null;
+            _currentChunk = default;
             _t0Idx = -1;
             _t1Idx = -1;
         }
@@ -72,7 +72,7 @@ namespace EntJoy
                     return true;
                 }
             }
-            _currentChunk = null;
+            _currentChunk = default;
             return MoveNextArchetype();
         }
 
@@ -97,7 +97,7 @@ namespace EntJoy
         {
             get
             {
-                if (_currentChunk == null) throw new InvalidOperationException();
+                if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
                 return new ChunkResult<T0, T1>(_currentChunk, _t0Idx, _t1Idx);
             }
         }

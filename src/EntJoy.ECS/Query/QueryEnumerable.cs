@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 using EntJoy.JobSystem;
 
@@ -48,7 +48,7 @@ namespace EntJoy
             _slotIndex = 0;
             _count = 0;
             _currentArch = null;
-            _currentChunk = null;
+            _currentChunk = default;
             _t0Idx = -1;
             _t1Idx = -1;
             _t0Base = null;
@@ -93,19 +93,19 @@ namespace EntJoy
                     return true;
                 }
             }
-            _currentChunk = null;
+            _currentChunk = default;
             return MoveNextArchetype();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext()
         {
-            if (_currentChunk == null)
+            if (_currentChunk.MemoryBlock == nint.Zero)
                 return MoveNextArchetype();
             _slotIndex++;
             if (_slotIndex < _count)
                 return true;
-            _currentChunk = null;
+            _currentChunk = default;
             return MoveNextChunk();
         }
 
@@ -114,7 +114,7 @@ namespace EntJoy
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                if (_currentChunk == null) throw new InvalidOperationException();
+                if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
                 return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex);
             }
         }
