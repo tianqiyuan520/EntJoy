@@ -32,7 +32,7 @@ namespace EntJoy.ECS.SourceGenerator
                 foreach (var job in jobs)
                 {
                     if (job == null) continue;
-                    string source = Generate(job.JobType, job.Execute);
+                    string source = Generate(job.JobType, job.Execute, job.IsNativeTranspiled);
                     spc.AddSource(
                         $"{Sanitize(job.JobType.ToDisplayString())}{JobAdapterSuffix}",
                         SourceText.From(source, Encoding.UTF8));
@@ -60,15 +60,23 @@ namespace EntJoy.ECS.SourceGenerator
                                                 i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoy))
                 return null;
 
+            // [NativeTranspile] 的 IJobEntity 路由到原生路径（NativeExports.Schedule_*）
+            // 非 [NativeTranspile] 的 IJobEntity 走托管路径（IJobChunk 适配器）
+            // 不再跳过任何 IJobEntity，统一由本生成器处理
+            var nativeTranspileAttr = jobType.GetAttributes().FirstOrDefault(a =>
+                a.AttributeClass?.Name == "NativeTranspileAttribute" &&
+                a.AttributeClass?.ContainingNamespace?.ToDisplayString() == "NativeTranspiler");
+            bool isNativeTranspiled = nativeTranspileAttr != null;
+
             var execute = jobType.GetMembers().OfType<IMethodSymbol>()
                 .FirstOrDefault(m => m.Name == Config.Execute && m.Parameters.Length > 0 && m.ReturnsVoid);
             if (execute == null)
                 return null;
 
-            return new JobCandidate(jobType, execute);
+            return new JobCandidate(jobType, execute, isNativeTranspiled);
         }
 
-        private static string Generate(INamedTypeSymbol jobType, IMethodSymbol execute)
+        private static string Generate(INamedTypeSymbol jobType, IMethodSymbol execute, bool isNativeTranspiled)
         {
             string jobFullName = jobType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             string adapterName = $"__EntJoy_IJobEntityAdapter_{Sanitize(jobType.ToDisplayString())}";
@@ -90,40 +98,69 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"namespace {namespaceName}");
                 sb.AppendLine("{");
             }
+
+            // 生成 JobExtensions（统一入口）
             sb.AppendLine("public static partial class JobExtensions");
             sb.AppendLine("{");
-            sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
-            sb.AppendLine("    {");
-            sb.AppendLine($"        return ChunkJobExtensions.Schedule(new {adapterName} {{ Job = job }}, query, dependsOn);");
-            sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
-            sb.AppendLine("    {");
-            sb.AppendLine($"        return ChunkJobExtensions.ScheduleWithWorkerCap(new {adapterName} {{ Job = job }}, query, workerCap, dependsOn);");
-            sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
-            sb.AppendLine("    {");
-            sb.AppendLine($"        ChunkJobExtensions.Run(new {adapterName} {{ Job = job }}, query);");
-            sb.AppendLine("    }");
+            if (isNativeTranspiled)
+            {
+                // [NativeTranspile]：路由到原生路径
+                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobType.Name}(ref job, query, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCap_{jobType.Name}(ref job, query, workerCap, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.Schedule_{jobType.Name}(ref job, query, default).Complete();");
+                sb.AppendLine("    }");
+            }
+            else
+            {
+                // 非 [NativeTranspile]：生成 IJobChunk 适配器 + 托管路径
+                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return ChunkJobExtensions.Schedule(new {adapterName} {{ Job = job }}, query, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return ChunkJobExtensions.ScheduleWithWorkerCap(new {adapterName} {{ Job = job }}, query, workerCap, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
+                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        ChunkJobExtensions.Run(new {adapterName} {{ Job = job }}, query);");
+                sb.AppendLine("    }");
+            }
             sb.AppendLine("}");
             sb.AppendLine();
-            sb.AppendLine($"internal struct {adapterName} : IJobChunk");
-            sb.AppendLine("{");
-            sb.AppendLine($"    public {jobFullName} Job;");
-            sb.AppendLine();
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]");
-            sb.AppendLine("    public void Execute(ArchetypeChunk __chunk, in ChunkEnabledMask __enabledMask)");
-            sb.AppendLine("    {");
-            sb.AppendLine(componentDecls);
-            sb.AppendLine("        int __count = __chunk.Count;");
-            sb.AppendLine("        for (int __idx = 0; __idx < __count; __idx++)");
-            sb.AppendLine("        {");
-            if (!string.IsNullOrEmpty(inlinedBody))
-                sb.Append(inlinedBody);
-            sb.AppendLine("        }");
-            sb.AppendLine("    }");
-            sb.AppendLine("}");
+
+            // 只为非 NativeTranspiled 生成 IJobChunk 适配器
+            if (!isNativeTranspiled)
+            {
+                sb.AppendLine($"internal struct {adapterName} : IJobChunk");
+                sb.AppendLine("{");
+                sb.AppendLine($"    public {jobFullName} Job;");
+                sb.AppendLine();
+                sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]");
+                sb.AppendLine("    public void Execute(ArchetypeChunk __chunk, in ChunkEnabledMask __enabledMask)");
+                sb.AppendLine("    {");
+                sb.AppendLine(componentDecls);
+                sb.AppendLine("        int __count = __chunk.Count;");
+                sb.AppendLine("        for (int __idx = 0; __idx < __count; __idx++)");
+                sb.AppendLine("        {");
+                if (!string.IsNullOrEmpty(inlinedBody))
+                    sb.Append(inlinedBody);
+                sb.AppendLine("        }");
+                sb.AppendLine("    }");
+                sb.AppendLine("}");
+            }
             if (!string.IsNullOrEmpty(namespaceName))
             {
                 sb.AppendLine("}");
@@ -229,14 +266,16 @@ namespace EntJoy.ECS.SourceGenerator
         }
         private sealed class JobCandidate
         {
-            public JobCandidate(INamedTypeSymbol jobType, IMethodSymbol execute)
+            public JobCandidate(INamedTypeSymbol jobType, IMethodSymbol execute, bool isNativeTranspiled)
             {
                 JobType = jobType;
                 Execute = execute;
+                IsNativeTranspiled = isNativeTranspiled;
             }
 
             public INamedTypeSymbol JobType { get; }
             public IMethodSymbol Execute { get; }
+            public bool IsNativeTranspiled { get; }
         }
     }
 }
