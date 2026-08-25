@@ -26,7 +26,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("using System;");
             sb.AppendLine("using System.Runtime.InteropServices;");
             sb.AppendLine("using System.Runtime.CompilerServices;");
-            sb.AppendLine("using EntJoy;");
+            sb.AppendLine("using EntJoy.ECS;");
+            sb.AppendLine("using EntJoy.ECS.JobSystem;");
             sb.AppendLine("using EntJoy.Collections;");
             sb.AppendLine("using EntJoy.JobSystem;");
             sb.AppendLine();

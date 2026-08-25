@@ -1,7 +1,7 @@
 ﻿//using System;
 //using System.Diagnostics;
 //using System.Runtime.CompilerServices;
-//using EntJoy;
+//using EntJoy.ECS;
 //using EntJoy.Mathematics;
 
 //namespace EntJoySample.EntityRandomAccess

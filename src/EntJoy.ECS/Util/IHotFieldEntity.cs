@@ -1,6 +1,6 @@
-using System;
+﻿using System;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// HotField 实体标记接口：生成器产出的 HotField 实体（class 稀疏句柄 / struct 密集句柄）都会实现它。

@@ -1,10 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 64KB 对齐块池化器：为 Archetype 的 chunk 数据块提供池化分配，

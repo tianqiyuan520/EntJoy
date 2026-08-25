@@ -1,4 +1,5 @@
-﻿//namespace EntJoySample.IJobChunkScheduleOverheadTest
+﻿using EntJoy.ECS;
+//namespace EntJoySample.IJobChunkScheduleOverheadTest
 //{
 //    public static class Program
 //    {

@@ -17,6 +17,9 @@
 **/bin/
 **/obj/
 
+# Scripts (local-only tooling, not part of library sources)
+/scripts/
+
 # Native/CMake/MSVC artifacts
 **/build/
 **/build-*/
@@ -50,9 +53,13 @@ compile_commands.json
 *.g.cs
 nul
 
-# Native test suites (local-only; build/test artifacts + sources, not part of library)
+# Native test suites (local-only; not part of library sources)
 src/NativeDll.Tests/
 src/NativeTranspiler.Tests/
+
+# Test results / temp
+test-results/
+TestResults/
 
 # ImGui runtime config
 imgui.ini

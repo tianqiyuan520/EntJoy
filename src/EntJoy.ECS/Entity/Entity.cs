@@ -1,5 +1,5 @@
-
-namespace EntJoy
+﻿
+namespace EntJoy.ECS
 {
     public struct Entity
     {

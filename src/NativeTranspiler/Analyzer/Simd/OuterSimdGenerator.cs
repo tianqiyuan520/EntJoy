@@ -229,15 +229,21 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
             bool hr = substituted.Contains("return;");
-            if (hr) { sb.AppendLine("    do {"); }
+            string doneLabel = $"__scalar_returned_{_idx}";
             foreach (var line in substituted.Split('\n'))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var l = line.TrimEnd();
-                l = l.Replace("return;", "break;");
+                // ★ Fix: use goto to exit the j-loop and skip the default store,
+                //   instead of break which only exits the k-loop (EC5/FZ4 bug:
+                //   break exits k-loop → j-loop continues → default store overwrites).
+                l = l.Replace("return;", $"goto {doneLabel};");
                 sb.Append("    ").AppendLine(l);
             }
-            if (hr) sb.AppendLine("    } while(false);");
+            if (hr)
+            {
+                sb.AppendLine($"    {doneLabel}: ;");
+            }
             sb.AppendLine("    }");
             return sb.ToString();
         }

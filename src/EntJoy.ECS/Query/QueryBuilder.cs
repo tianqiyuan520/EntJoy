@@ -1,9 +1,9 @@
-
+﻿
 
 using System;
 using System.Collections.Generic;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 查询构建器

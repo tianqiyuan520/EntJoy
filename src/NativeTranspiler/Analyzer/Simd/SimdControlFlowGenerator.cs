@@ -91,6 +91,21 @@ namespace NativeTranspiler.Analyzer
         private string _foldReduceFn = null;
         // Variables whose last value came from a clamped gather — skip redundant clamp
         private readonly HashSet<string> _clampedVars = new();
+        // ★ Per-batch return mask: when a lane executes `return` (exit-Execute for that lane),
+        //   we record it here and kill it from active. After the body, only lanes NOT in
+        //   this mask get the "default" store (e.g. R[i] = 777 after a search loop).
+        //   Avoids the old bug: one lane hits return → goto __simd_exit → all lanes skip
+        //   the default store → non-returning lanes output 0 instead of 777 (EC5/FZ4 E7).
+        private string _returnedMaskVar = "";
+
+        // ★ E7 helpers: check C# expression type via SemanticModel.
+        //   Used to detect int expressions being stored into float arrays.
+        private bool IsInt32Type(ExpressionSyntax expr)
+        {
+            try { var t = _semanticModel.GetTypeInfo(expr).Type; return t != null && (t.SpecialType == SpecialType.System_Int32 || t.SpecialType == SpecialType.System_UInt32); }
+            catch { return false; }
+        }
+        private bool IsInt32Expr(ExpressionSyntax expr) => IsInt32Type(expr);
         // Struct varying locals: localName → (arrayName, elemCppType, indexExpr)
         // These are struct-typed locals initialized from array[idx] where array is a struct-typed NativeArray.
         // Instead of creating a SIMD register for the whole struct, field accesses (temp.Field) are
@@ -174,6 +189,14 @@ namespace NativeTranspiler.Analyzer
             if (HasVaryingNonReductionLoop(body))
                 GeneratePerLaneFullBody(body);
             else {
+                // ★ E7 pre-scan: if body contains `return`, allocate a per-batch exit mask.
+                //   After all loops, lanes that DID NOT return get the default store.
+                _returnedMaskVar = "";
+                if (body.DescendantNodes().OfType<ReturnStatementSyntax>().Any())
+                {
+                    _returnedMaskVar = $"__returned_{_labelCounter++}";
+                    AppendLine($"simd_mask {_returnedMaskVar} = {{}};");
+                }
                 GenerateVariableDeclarations();
                 // ★ Pre-scan and emit hoisted uniform broadcasts (GridDimensions.x/y etc.)
                 PreScanUniformHoists(body);
@@ -618,21 +641,27 @@ namespace NativeTranspiler.Analyzer
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
                     // Dead conditions already handled above — condition is always non-trivial here
+                    // ★ De Morgan negation: flip comparisons AND swap AND/OR.
+                    //   Use separate placeholders for ALL six comparison operators
+                    //   to prevent self-canceling (old code: gt→le→gt because step 4
+                    //   replaced the le created by step 3).
                     string goodExpr = condExpr
-                        .Replace("n_cmp_lt_", "##TMP##")
-                        .Replace("n_cmp_ge_", "n_cmp_lt_")
-                        .Replace("n_cmp_gt_", "n_cmp_le_")
-                        .Replace("n_cmp_le_", "n_cmp_gt_")
-                        .Replace("n_cmp_eq_", "##EQ##")
-                        .Replace("n_cmp_ne_", "n_cmp_eq_")
-                        .Replace("##EQ##", "n_cmp_ne_")
-                        // ★ De Morgan: !(A && B) = !A || !B. The old code flipped the
-                        //   comparisons but kept AND — `if (dx==0 && dy==0) continue`
-                        //   became `dx!=0 && dy!=0`, dropping the axis neighbours.
+                        .Replace("n_cmp_lt_", "##T_LT##")
+                        .Replace("n_cmp_ge_", "##T_GE##")
+                        .Replace("n_cmp_gt_", "##T_GT##")
+                        .Replace("n_cmp_le_", "##T_LE##")
+                        .Replace("n_cmp_eq_", "##T_EQ##")
+                        .Replace("n_cmp_ne_", "##T_NE##")
+                        .Replace("##T_LT##", "n_cmp_ge_")
+                        .Replace("##T_GE##", "n_cmp_lt_")
+                        .Replace("##T_GT##", "n_cmp_le_")
+                        .Replace("##T_LE##", "n_cmp_gt_")
+                        .Replace("##T_EQ##", "n_cmp_ne_")
+                        .Replace("##T_NE##", "n_cmp_eq_")
+                        // ★ De Morgan: !(A && B) = !A || !B
                         .Replace("n_and_mask(", "##OR##(")
                         .Replace("n_or_mask(", "n_and_mask(")
-                        .Replace("##OR##(", "n_or_mask(")
-                        .Replace("##TMP##", "n_cmp_ge_");
+                        .Replace("##OR##(", "n_or_mask(");
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
                     // ★ Combine with previous mask to narrow unfound lanes
@@ -643,7 +672,21 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"{goodName} = {combined};");
                     }
                     _currentMask = goodName;
-                    AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
+                    // ★ E6 fix: inside an UNROLLED loop there is no real C++ loop, so a
+                    //   `continue;` would jump to the outermost batch loop (for si), skipping
+                    //   the remaining unrolled iterations AND the final store — output all zeros.
+                    //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
+                    //   real scalar-for frames carry a non-empty saved-mask tracker.
+                    if (_loopStack.Count > 0 && string.IsNullOrEmpty(_loopStack.Peek().TrackerVar))
+                    {
+                        string contTarget = _loopStack.Peek().ContinueLabel;
+                        _gotoTargets.Add(contTarget);
+                        AppendLine($"if (!{_currentMask}.any_true()) {{ goto {contTarget}; }}");
+                    }
+                    else
+                    {
+                        AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
+                    }
                     savedMask = goodName;
                 }
                 else
@@ -700,6 +743,13 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"simd_mask {cm} = simd_mask{{ n_and_mask({savedMask}.m, {condExpr}.m) }};");
                         trueMask = cm;
                         _currentMask = cm;
+                        // ★ Register the raw condition for NOT chain computation by subsequent
+                        //   branches. Without this, conditions stays empty and the else/elif
+                        //   mask generates NOT(all_true) = all_true — losing the exclusion of
+                        //   this condition (EC6 bug: else mask = v_active AND all_true).
+                        string inlineCondVar = $"__cond_{_maskCounter++}";
+                        AppendLine($"simd_mask {inlineCondVar} = {condExpr};");
+                        conditions.Add(inlineCondVar);
                     }
                     else
                     {
@@ -929,12 +979,22 @@ namespace NativeTranspiler.Analyzer
             if (stmts.Count != 1) return false;
             if (!(stmts[0] is ExpressionStatementSyntax ess) || !(ess.Expression is AssignmentExpressionSyntax assign))
                 return false;
-            // ★ Reduction recognition: the assignment target must be one of the compared
-            //   operands — if (d < best) { best = d; }. A plain conditional write such as
-            //   if (v < t) { r[i] = v; } (target r is not in the condition) must NOT be
-            //   folded to min/max; it is a masked store.
-            if (!(assign.Left is IdentifierNameSyntax lhsId)) return false;
-            if (!condExpr.Contains($"v_{lhsId.Identifier.Text}")) return false;
+            // ★ Reduction recognition: only fold `if (x < y) x = y` or `if (x > y) x = y`
+            //   (and mirror patterns where target is the RHS of the condition).
+            //   Requires ALL of:
+            //   1. Simple assignment (=), not compound (+=, -=, etc.)
+            //   2. Both condition operands are identifiers (not literals)
+            //   3. Assignment target matches one condition operand, RHS matches the other
+            //   WITHOUT these checks, `if (acc > 1000) acc -= 5` would be wrongly folded
+            //   to n_max_ps(acc, 1000) — producing completely wrong results (EC9 regression).
+            if (!assign.IsKind(SyntaxKind.SimpleAssignmentExpression)) return false;
+            if (!(assign.Left is IdentifierNameSyntax assignTarget)) return false;
+            string assignTargetV = $"v_{assignTarget.Identifier.Text}";
+            if (!condExpr.Contains(assignTargetV)) return false;
+            if (!(assign.Right is IdentifierNameSyntax rhsId)) return false;
+            string rhsV = $"v_{rhsId.Identifier.Text}";
+            if (rhsV == assignTargetV) return false;
+            if (!condExpr.Contains(rhsV)) return false;
             return true;
         }
 
@@ -1045,8 +1105,16 @@ namespace NativeTranspiler.Analyzer
 
         private void GenerateReturnStatement(ReturnStatementSyntax stmt)
         {
-            // return → goto __simd_func_exit (exit current batch)
-            AppendLine("goto __simd_exit;");
+            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            {
+                // ★ E7 fix: mark this lane as returned and kill from active mask.
+                AppendLine($"{_returnedMaskVar} = simd_mask{{ n_or_mask({_returnedMaskVar}.m, {_currentMask}.m) }};");
+                AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
+            }
+            else
+            {
+                AppendLine("goto __simd_exit;");
+            }
         }
 
         // ================================================================

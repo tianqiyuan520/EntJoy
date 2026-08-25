@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using EntJoy.Collections;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public struct ArchetypeChunk
     {

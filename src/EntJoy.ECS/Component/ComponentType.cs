@@ -1,6 +1,6 @@
-using System;
+﻿using System;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 组件类型

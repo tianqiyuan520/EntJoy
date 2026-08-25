@@ -12,7 +12,8 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>Job 执行方法名。</summary>
         public const string Execute = "Execute";
 
-        /// <summary>IJobEntity 声明所在命名空间（src/EntJoy.ECS/IJobEntity.cs，与 IJobChunk 同 `EntJoy`），防同名接口误判。</summary>
+        /// <summary>IJobEntity 声明所在命名空间（src/EntJoy.ECS/IJobEntity.cs，与 IJobChunk 同 `EntJoy.ECS`），防同名接口误判。</summary>
         public const string NamespaceEntJoy = "EntJoy";
+        public const string NamespaceEntJoyECS = "EntJoy.ECS";
     }
 }

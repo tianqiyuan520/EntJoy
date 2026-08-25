@@ -2,7 +2,7 @@ using System.Threading;
 using EntJoy.Collections;
 using EntJoy.JobSystem;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public partial class World : System.IDisposable
     {
@@ -15,6 +15,7 @@ namespace EntJoy
         }
 
         public string Name { get; private set; }
+        public long CurrentFrame { get; set; }
         public EntityManager _entityManager;
         public ref EntityManager EntityManager => ref _entityManager;
 

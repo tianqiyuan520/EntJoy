@@ -1,4 +1,5 @@
-﻿//using EntJoy.Collections;
+﻿using EntJoy.ECS;
+//using EntJoy.Collections;
 
 //namespace EntJoySample.SimpleIJobChunkTest;
 

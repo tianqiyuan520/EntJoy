@@ -1,4 +1,5 @@
-﻿//using EntJoySample.SpritesRandomMove;
+﻿using EntJoy.ECS;
+//using EntJoySample.SpritesRandomMove;
 
 //namespace EntJoySample;
 

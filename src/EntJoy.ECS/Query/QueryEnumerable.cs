@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using EntJoy.JobSystem;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public unsafe ref struct QueryEnumerable<T0, T1> where T0 : struct where T1 : struct
     {

@@ -364,75 +364,192 @@ World.CreateEntities(1000, typeof(Position), typeof(Velocity));
 
 ---
 
-## Phase 4: Processor/System 框架（4 天）
+## Phase 4: System 调度与能力增强（重设计 2026-08）
 
-### 4.1 双轨 System API
+### 背景：旧方案的问题
 
-**深度路径（高性能）：**
+旧 Phase 4 计划了 Processor（Unreal Mass 风格）、SystemBase（Unity DOTS 风格）和 SystemGraph，但经审视发现：
+
+- **Processor** 本质是 IJobEntity 换名（ConfigureQueries + 自动 Schedule），没有新增能力
+- **SystemBase** 只是加了 OnCreate/OnUpdate/OnDestroy 生命周期，ISystem 已有
+- **SystemGraph** 如果只做注册+排序，用户手动管理也够用
+
+**真正缺失的能力**是：自动并行化、声明式开发、变更追踪。
+
+### 4.1 Schedule Graph — 自动并行化（参考 Bevy Schedule）
+
+**核心价值**：用户不再手动 Schedule/Complete，框架自动分析冲突、并行执行。
+
 ```csharp
-struct MovementJob : IJobChunk { public void Execute(ArchetypeChunk chunk, ...); }
+// 注册 System + 声明读写
+world.AddSystem<MovementSystem>(
+    reads: typeof(Velocity),
+    writes: typeof(Position)
+);
+world.AddSystem<RenderingSystem>(
+    reads: typeof(Position), typeof(Sprite)
+);
+world.AddSystem<CollisionSystem>(
+    reads: typeof(Position),
+    writes: typeof(Damage)
+);
 
-class MovementProcessor : Processor {
-    public override void ConfigureQueries() {
-        Require<Position>(Access.ReadWrite);
-        Require<Velocity>(Access.Read);
+// 世界更新时：自动分析冲突 → 构建执行计划 → 并行执行
+world.Update();
+// 内部执行计划：
+//   Batch 1: [MovementSystem ‖ RenderingSystem]  ← 无冲突，并行
+//   SyncPoint
+//   Batch 2: [CollisionSystem]                    ← 需要 Position Read 完成
+```
+
+**实现要点**：
+
+```csharp
+// System 注册时声明读写集
+class SystemDescriptor {
+    public Type SystemType;
+    public HashSet<Type> Reads;   // 读取的组件类型
+    public HashSet<Type> Writes;  // 写入的组件类型
+}
+
+// 调度器构建 DAG
+// 两个 System 冲突条件：一方 Writes ∩ 另一方 (Reads ∪ Writes) ≠ ∅
+// 无冲突 → 同 Batch 并行；有冲突 → 拆到不同 Batch + SyncPoint
+```
+
+**对比手动管理**：
+
+| 维度 | 手动 Schedule | Schedule Graph |
+|------|-------------|----------------|
+| 并行度 | 用户控制（容易错） | 框架自动最大化 |
+| 依赖管理 | 手动 Complete | 自动 SyncPoint |
+| 新增 System | 需要调整调度顺序 | 只需注册，自动融入 |
+| 正确性 | 容易漏 Complete 导致竞态 | 框架保证 |
+
+### 4.2 Entity Builder — 实体构造器（消灭样板代码）
+
+**核心价值**：从 poll-based（每帧遍历所有实体）到 push-based（变化时触发）。
+
+```csharp
+// Flecs 风格：组件变化时触发回调
+world.Observe<DamageEvent>(
+    OnAdd: (entity, ref DamageEvent dmg) => {
+        Console.WriteLine($"Entity {entity} took {dmg.Amount} damage");
+    }
+);
+
+// 观察组件值变化
+world.Observe<Health>(
+    OnChanged: (entity, ref Health h) => {
+        if (h.Value <= 0)
+            world.DestroyEntity(entity);
+    }
+);
+
+// 观察组件移除
+world.Observe<Buff>(
+    OnRemove: (entity, ref Buff buff) => {
+        Console.WriteLine($"Buff {buff.Type} expired on entity {entity}");
+    }
+);
+```
+
+**使用场景**：
+
+| 场景 | Poll（当前） | Observer（新增） |
+|------|------------|----------------|
+| Buff 施加触发效果 | 每帧遍历所有有 Buff 的实体 | Buff Add 时触发一次 |
+| 状态机转换 | 每帧检查状态组件 | 状态组件变化时触发 |
+|成就/任务条件 | 每帧检查进度 | 进度组件变化时触发 |
+| UI 更新 | 每帧刷新 | 数据变化时触发刷新 |
+
+**实现要点**：
+
+```csharp
+// Observer 注册表：按组件类型索引
+class ObserverRegistry {
+    // componentTypeId → Observer 列表
+    Dictionary<int, List<ComponentObserver>> _observers;
+
+    // EntityManager 在 Add/Remove/SetValue 时调用
+    void NotifyComponentAdded(Entity e, int componentTypeId, void* data);
+    void NotifyComponentRemoved(Entity e, int componentTypeId);
+    void NotifyComponentChanged(Entity e, int componentTypeId, void* data);
+}
+
+// Observer 定义
+struct ComponentObserver {
+    public int ComponentTypeId;
+    public ObserverEvent Events;  // flags: OnAdd | OnRemove | OnChanged
+    public Delegate Callback;
+}
+```
+
+### 4.3 Declarative Components — 声明式组件（消灭样板代码）
+
+**核心价值**：组件自动帧末清理，天然的事件机制。
+
+```csharp
+// 添加帧事件组件
+entity.AddOneFrame(new DamageEvent { Amount = 10 });
+
+// 所有 System 都能看到这帧发生了什么
+foreach (var (e, dmg) in world.Query<DamageEvent>()) {
+    Console.WriteLine($"Entity {e} took {dmg.Amount}");
+}
+
+// 帧末自动清理，不需要手动 Remove
+```
+
+**与 Observer 的区别**：
+
+| 维度 | Observer | One-Frame Component |
+|------|---------|-------------------|
+| 触发时机 | 变化瞬间 | 帧末统一清理 |
+| 持续时间 | 无（回调即消失） | 整帧有效 |
+| 多 System 消费 | 每个 Observer 独立触发 | 所有 Query 都能看到 |
+| 典型用途 | 即时反应（UI 刷新） | 帧内传递（伤害数字、特效触发） |
+
+**实现要点**：
+
+```csharp
+// World 维护 OneFrame 组件类型集合
+HashSet<int> _oneFrameTypes;
+
+// 帧末清理（在 World.Update 末尾）
+void CleanupOneFrameComponents() {
+    foreach (var arch in allArchetypes) {
+        foreach (var chunk in arch.Chunks) {
+            foreach (var type in _oneFrameTypes) {
+                if (arch.HasComponent(type))
+                    chunk.RemoveComponent(type);  // 批量移除，不触发结构变更
+            }
+        }
     }
 }
 ```
 
-**易用路径（SystemBase）：**
-```csharp
-class MovementSystem : SystemBase {
-    protected override void OnUpdate() {
-        Entities.ForEach((ref Position pos, in Velocity vel) => {
-            pos.Value += vel.Value * DeltaTime;
-        }).Schedule();
-    }
-}
-```
+### 4.4 变更追踪 — ChangedThisFrame（高性能刚需）
 
-**最易路径（function-as-system，Bevy 风格）：**
-```csharp
-[UpdateInPhase(Phase.OnUpdate)]
-static void Movement(SystemState state) {
-    foreach (var (pos, vel) in state.Query<Position, Velocity>())
-        pos.Value += vel.Value * state.DeltaTime;
-}
-```
+| 已有 | 用途 | Phase 4 是否需要新建 |
+|------|------|-------------------|
+| `ISystem` (OnCreate/OnUpdate/OnDestroy) | 生命周期 | ❌ 已有，直接用 |
+| `SystemAPI.Query<T0,T1>()` | 查询入口 | ❌ 已有 |
+| `QueryEnumerable<T0,T1>` | foreach 遍历 | ✅ 已实现（S6） |
+| `IJobEntity` / `IJobChunk` | Job 执行 | ❌ 已有 |
+| `DeferredCommandBuffer` | 帧末 Playback | ❌ Phase 3 已有 |
 
-### 4.2 查询 API 分层
+### 文件变更
 
-```csharp
-// Level 1: Struct query（最快）
-var q = World.Query<Position, Velocity>();
-foreach (var (pos, vel) in q.Chunks()) { }
+**新建：**
+- `ScheduleGraph.cs` — DAG 构建 + Batch 分组 + SyncPoint 插入
+- `SystemDescriptor.cs` — System 元数据（读写集、依赖）
+- `ObserverRegistry.cs` — Observer 注册 + 触发
+- `OneFrameCleanup.cs` — 帧末清理
 
-// Level 2: Lambda callback（Arch 等价）
-World.Query((ref Position pos, ref Velocity vel) => { });
-
-// Level 3: Entity-aware（Entitas Group 等价）
-World.Query((Entity e, ref Position pos, ref Velocity vel) => { });
-```
-
-### 4.3 Pipeline Phases（Flecs 风格）
-
-```csharp
-enum Phase { PreUpdate, OnUpdate, PostUpdate, FrameEnd }
-
-// Phase 内：read-write 冲突分析 → 分层并行
-// Phase 间：严格串行
-```
-
-### 4.4 执行 Flags（Unreal Mass）
-
-```csharp
-[ExecuteIn(ExecuteIn.Editor | ExecuteIn.Player)]
-[RequireGameThread]
-class DebugRenderSystem : SystemBase { ... }
-```
-
-**文件（新建）：** `SystemBase.cs`、`SystemFn.cs`、`Processor.cs`、`SystemGraph.cs`、`Phase.cs`、`Query.cs`、`SystemState.cs`
-**修改：** `World.cs`（大改：AddSystem + Update）
+**修改：**
+- `World.cs` — 新增 `AddSystem` / `Update`（调用 ScheduleGraph）/ `Observe` / `AddOneFrame`
+- `EntityManager.cs` — Add/Remove/SetValue 时通知 ObserverRegistry
 
 ---
 
@@ -553,6 +670,12 @@ partial class DebugLogSystem : SystemBase {
 ---
 
 ## Phase 9: 组件 Managed 类型与原生内存投影
+
+> **更新（2026-08）**：本节为 v2 原始设计。详细的托管类型支持分析（GCHandle.Pinned、托管回调、分层 Pin、GCHandlePool、NativeTranspiler 偏移量分析）见：
+> - `ecs-evolution-plan-v3.md` §Phase 9
+> - `Phase优先级分析与实施路线.md` §九、十
+> 
+> **关键结论**：GCHandle.Pinned 仅适用于单个对象调试，批量执行不可接受（20ms/100K + 堆碎片化）。推荐方案：批量 Pin + 指针数组 + GCHandlePool。
 
 ### 核心问题：组件能不能放 string/List/Dictionary？
 

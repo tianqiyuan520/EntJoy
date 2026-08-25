@@ -1,5 +1,6 @@
-﻿//using System.Diagnostics;
-//using EntJoy;
+﻿using EntJoy.ECS.JobSystem;
+//using System.Diagnostics;
+//using EntJoy.ECS;
 //using EntJoy.Collections;
 
 //namespace EntJoySample.CSharpJobManagedContextTest

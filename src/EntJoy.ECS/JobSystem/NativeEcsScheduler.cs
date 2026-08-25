@@ -5,9 +5,10 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using EntJoy;
+using EntJoy.ECS;
+using EntJoy.JobSystem;
 
-namespace EntJoy.JobSystem
+namespace EntJoy.ECS.JobSystem
 {
 
 // ======================== Chunk 任务数据结构（与 C++ 一一对应） ========================

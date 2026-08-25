@@ -1,4 +1,5 @@
-﻿//using EntJoy.JobSystem;
+﻿using EntJoy.ECS.JobSystem;
+//using EntJoy.JobSystem;
 //using System.Diagnostics;
 //using Environment = System.Environment;
 

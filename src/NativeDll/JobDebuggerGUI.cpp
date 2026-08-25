@@ -686,11 +686,12 @@ namespace JobSystem
                     ImGui::Text("slots used: %d / %d (collision → re-learn)", occupied, kJobCostSlots);
                     ImGui::Spacing();
 
-                    if (ImGui::BeginTable("jcc", 5,
+                    if (ImGui::BeginTable("jcc", 6,
                         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
                     {
                         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 40);
                         ImGui::TableSetupColumn("FuncHash", ImGuiTableColumnFlags_WidthFixed, 80);
+                        ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 70);
                         ImGui::TableSetupColumn("perElem (ns)", ImGuiTableColumnFlags_WidthStretch, 1);
                         ImGui::TableSetupColumn("total @100k (us)", ImGuiTableColumnFlags_WidthStretch, 1);
                         ImGui::TableSetupColumn("auto tiles @100k", ImGuiTableColumnFlags_WidthStretch, 1);
@@ -701,6 +702,10 @@ namespace JobSystem
                             const uint32_t h = g_jobCostCache.slotHash[s].load(std::memory_order_relaxed);
                             if (h == 0) continue;
                             const double perElem = g_jobCostCache.GetPerElemCost(h);
+                            const JobSystem::SlotMode mode = g_jobCostCache.GetMode(h);
+                            const char* modeStr = mode == JobSystem::kModeMemBound ? "MEM-BOUND"
+                                                : mode == JobSystem::kModeParallel ? "parallel"
+                                                : "learn";
                             const double totalUs = perElem * kRefLen / 1000.0;
                             // 与 ResolveChunkSize 同公式（含 floor），估算参考 tiles
                             const int wc = std::max(1, CurrentWorkerCount());
@@ -713,9 +718,13 @@ namespace JobSystem
                             ImGui::TableNextRow();
                             ImGui::TableSetColumnIndex(0); ImGui::Text("%d", s);
                             ImGui::TableSetColumnIndex(1); ImGui::Text("0x%08X", h);
-                            ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f", perElem);
-                            ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", totalUs);
-                            ImGui::TableSetColumnIndex(4); ImGui::Text("%d", tiles);
+                            ImGui::TableSetColumnIndex(2);
+                            if (mode == JobSystem::kModeMemBound) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "%s", modeStr);
+                            else if (mode == JobSystem::kModeParallel) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "%s", modeStr);
+                            else ImGui::Text("%s", modeStr);
+                            ImGui::TableSetColumnIndex(3); ImGui::Text("%.3f", perElem);
+                            ImGui::TableSetColumnIndex(4); ImGui::Text("%.1f", totalUs);
+                            ImGui::TableSetColumnIndex(5); ImGui::Text("%d", tiles);
                         }
                         ImGui::EndTable();
                     }

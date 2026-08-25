@@ -97,6 +97,10 @@ namespace NativeTranspiler.Analyzer
 
                 var cppFiles = new List<string>();
                 var fastMathCppFiles = new HashSet<string>();
+                // AutoSIMD 生成单元：需要 IEEE-754 精确浮点语义（454229d EC2/EC8/E5/E8/E11），
+                // 全局 NativeTranspiled 恢复 fast-math 提速，但这些文件编译进独立 precise 静态库
+                //（无 fast-math），再链回 NativeTranspiled.dll。
+                var autoSimdCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
                 var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
 
@@ -194,6 +198,8 @@ namespace NativeTranspiler.Analyzer
                         }
                         var cppFile = baseName + ".cpp";
                         cppFiles.Add(cppFile);
+                        if (methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                            autoSimdCppFiles.Add(cppFile);
                         if (HasFastCppMathLib(method, attrSymbol) || methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                             fastMathCppFiles.Add(cppFile);
                     }
@@ -283,6 +289,8 @@ namespace NativeTranspiler.Analyzer
                         var cppFile = plainBase + ".cpp";
                         cppFiles.Add(cppFile);
                         var jobAutoSIMD = AttributeHelper.GetAutoSIMD(job, attrSymbol);
+                        if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                            autoSimdCppFiles.Add(cppFile);
                         if (HasFastCppMathLib(job, attrSymbol) || jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                             fastMathCppFiles.Add(cppFile);
                     }
@@ -408,7 +416,7 @@ namespace NativeTranspiler.Analyzer
                     // 配合 CMake Unity Build（批大小 8），新增 job/method 不会打乱既有批的成员，
                     // 从而 native 侧只需重编新 TU + 末尾批，而不是把所有批重编一遍。
                     var existingCppOrder = ReadExistingCppSourceOrder(cmakePath);
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder);
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, autoSimdCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder);
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
                     {
@@ -747,7 +755,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
 ";
         }
 
-        private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles,
+        private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
                                   string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
                                   List<string>? existingCppOrder = null)
         {
@@ -840,11 +848,47 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("#   自动导入普通符号（非 __imp_），故 tasksys + ISPC objects + 生成代码要同库。");
             sb.AppendLine("add_library(NativeTranspiled SHARED");
             foreach (var file in OrderCppSourcesStable(cppFiles, existingCppOrder))
+            {
+                // AutoSIMD 单元改由 NativeTranspiledPrecise 静态库编译（无 fast-math），
+                // 此处必须排除，避免同一符号在 fast-math 与 precise 两处重复定义（LNK2005）。
+                if (autoSimdCppFiles.Contains(file)) continue;
                 sb.AppendLine($"    {file}");
+            }
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
             sb.AppendLine("target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
             sb.AppendLine();
+
+            // ============================================================
+            // AutoSIMD precise 静态库（fast-math OFF — IEEE-754 NaN/±0）
+            //   454229d EC2/EC8/E5/E8/E11：AutoSIMD batch 控制流依赖 NaN/±0 精确语义，
+            //   全局 /fp:fast / -ffast-math 会破坏它。global NativeTranspiled 恢复
+            //   fast-math 提速（GridSearch 构建/查询热路径），这里把这些文件单独编进
+            //   无 fast-math 的静态库，再链回同一个 NativeTranspiled.dll，使 AutoSIMD
+            //   导出符号仍从该 DLL 导出、被托管绑定 P/Invoke。
+            //   Unity Build 无法按源文件区分编译 flag，故独立静态库是可靠做法。
+            //   precise 库同样继承 CMAKE_UNITY_BUILD（批 8），与主库同构，
+            //   改一个 AutoSIMD 文件只重编其所在批 → 增量编译友好。
+            // ============================================================
+            if (autoSimdCppFiles.Count > 0)
+            {
+                // 确定性排序：precise 库的 unity 批成员稳定，改一个 AutoSIMD 文件只重编其所在批。
+                var autoSimdSorted = autoSimdCppFiles.OrderBy(f => f, StringComparer.Ordinal).ToList();
+                sb.AppendLine("# --- AutoSIMD precise static lib (fast-math OFF) ---");
+                sb.AppendLine("set(AUTOSIMD_SOURCES");
+                foreach (var file in autoSimdSorted)
+                    sb.AppendLine($"    {file}");
+                sb.AppendLine(")");
+                sb.AppendLine("add_library(NativeTranspiledPrecise STATIC ${AUTOSIMD_SOURCES})");
+                sb.AppendLine("target_compile_options(NativeTranspiledPrecise PRIVATE");
+                sb.AppendLine("    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");      // MSVC default, no /fp:fast
+                sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");     // ClangCL, no /fp:fast
+                sb.AppendLine("    $<$<NOT:$<CXX_COMPILER_ID:MSVC,Clang>>:-O3 -march=native -mtune=native -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer>");
+                sb.AppendLine(")");
+                sb.AppendLine("target_compile_definitions(NativeTranspiledPrecise PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");
+                sb.AppendLine("target_link_libraries(NativeTranspiled PRIVATE NativeTranspiledPrecise)");
+                sb.AppendLine();
+            }
 
             // ---- 调试面板：Dear ImGui 集成（Windows + D3D11 后端） ----
             // 源码位于 NativeDll/thirdParty/imgui。Windows 上编译 imgui 核心 + Win32 + D3D11。
@@ -874,7 +918,10 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# ============================================================");
             sb.AppendLine("# SIMD arch flags + defines（NativeDll + NativeTranspiled 一致）");
             sb.AppendLine("# ============================================================");
-            sb.AppendLine("foreach(SIMD_TGT NativeDll NativeTranspiled)");
+            string simdTgtList = autoSimdCppFiles.Count > 0
+                ? "NativeDll NativeTranspiled NativeTranspiledPrecise"
+                : "NativeDll NativeTranspiled";
+            sb.AppendLine($"foreach(SIMD_TGT {simdTgtList})");
             sb.AppendLine("    if(NATIVE_SIMD_LEVEL STREQUAL \"AVX2\")");
             sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8)");
             sb.AppendLine("        if(MSVC)");
@@ -919,6 +966,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("if(ENTJOY_ENABLE_SENTINEL)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_ENABLE_SENTINEL)");
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE ENTJOY_ENABLE_SENTINEL)");
+            if (autoSimdCppFiles.Count > 0)
+                sb.AppendLine("    target_compile_definitions(NativeTranspiledPrecise PRIVATE ENTJOY_ENABLE_SENTINEL)");
             sb.AppendLine("    message(STATUS \"NativeDll/NativeTranspiled: ENTJOY_ENABLE_SENTINEL ON (NativeArray=40B / NativeList=32B)\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
@@ -989,6 +1038,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("        # /MP：Unity Build 拆批后同 project 内的多个 TU 并行编译");
             sb.AppendLine("        #（--parallel 只并行 project 间；缺 /MP 时拆批反而串行更慢）");
             sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
+            // NativeTranspiled keeps /fp:fast for performance (gridsearch build/query hot paths).
+            // AutoSIMD files are compiled separately WITHOUT /fp:fast in NativeTranspiledPrecise
+            // (see above), preserving 454229d's IEEE-754 NaN/±0 semantics (EC2/EC8/E5/E8/E11).
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
@@ -1000,6 +1052,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");
             sb.AppendLine("else()");
             sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
+            // NativeTranspiled keeps -ffast-math for performance; AutoSIMD precise lib (above)
+            // compiles without -ffast-math to preserve 454229d's IEEE-754 semantics.
             sb.AppendLine("    target_compile_options(NativeTranspiled PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");

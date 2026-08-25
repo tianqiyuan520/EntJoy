@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public unsafe ref struct ChunkEnumerable<T0, T1> where T0 : struct where T1 : struct
     {

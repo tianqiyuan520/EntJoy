@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -281,7 +281,7 @@ namespace NativeTranspiler.Analyzer
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
-                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ECS.ArchetypeChunk" &&
                     (method.Name == Config.GetComponentDataNativeArray || method.Name == Config.GetComponentDataSpan))
                     return true;
                 return false;
@@ -319,7 +319,7 @@ namespace NativeTranspiler.Analyzer
 
         private static bool IsDisallowedChunkDataAccess(IMethodSymbol method)
         {
-            if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk")
+            if (method.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk")
                 return false;
             return method.Name == Config.GetComponentDataPtr;
         }
@@ -336,7 +336,7 @@ namespace NativeTranspiler.Analyzer
                     return false;
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
                     return false;
-                if (method.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" || method.Name != Config.GetComponentDataSpan)
+                if (method.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" || method.Name != Config.GetComponentDataSpan)
                     return false;
             }
 

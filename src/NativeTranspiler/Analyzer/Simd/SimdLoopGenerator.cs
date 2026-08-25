@@ -173,10 +173,39 @@ namespace NativeTranspiler.Analyzer
 
             for (int i = start; i < start + count; i++)
             {
-                string contLabel = $"__unr_cont_{_labelCounter}_{i}";
+                // ★ Negative iteration values would produce labels like "__unr_cont_1_-2",
+                //   which is not a valid C++ identifier ('-2' parses as subtraction).
+                //   Encode-the-sign into the suffix: -2 → "m2", 3 → "3".
+                string iSuffix = i < 0 ? "m" + (-i).ToString() : i.ToString();
+                string contLabel = $"__unr_cont_{_labelCounter}_{iSuffix}";
 
                 // Reset mask for each iteration
                 _currentMask = savedMask;
+                // ★ E7 fix: kill lanes that have already returned (e.g. found their match
+                //   in a previous unrolled j iteration and wrote R[i]=result).
+                //   Without this, the next j iteration would overwrite the returned lane's
+                //   result because its mask is restored to all_true by savedMask.
+                if (!string.IsNullOrEmpty(_returnedMaskVar))
+                {
+                    // If savedMask is the all_true literal (not a named variable), we can't
+                    // assign to it. Introduce a named variable first.
+                    if (savedMask == "simd_mask::all_true()")
+                    {
+                        string namedMask = $"__init_mask_{_labelCounter++}";
+                        AppendLine($"simd_mask {namedMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
+                        _currentMask = namedMask;
+                    }
+                    else
+                    {
+                        AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
+                    }
+                    // Jump to the unrolled loop's exit label when all lanes have returned.
+                    //   We jump to __simd_exit (the outer batch loop's final exit), NOT
+                    //   exitLabel (which would skip the post_mask init above → UB).
+                    //   __simd_exit is always emitted by the batch loop generator.
+                    _gotoTargets.Add("__simd_exit");
+                    AppendLine($"if (!{_currentMask}.any_true()) {{ goto __simd_exit; }}");
+                }
 
                 // Broadcast the iteration value
                 AppendLine($"simd_{ivName} = simd_value<int>::broadcast({i});");
@@ -216,7 +245,34 @@ namespace NativeTranspiler.Analyzer
             }
 
             _currentMask = savedMask;
+            // ★ E7 fix: compute the post-loop mask for the default store.
+            //   - ALL lanes returned → no lane needs default → skip store entirely (goto exitLabel)
+            //   - SOME lanes returned → default store writes 777 only for non-returned lanes (post_mask)
+            //   - NO lanes returned → default store writes 777 for all lanes (post_mask = all lanes)
+            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            {
+                // Compute non-returned lanes mask (for the default store)
+                if (savedMask == "simd_mask::all_true()")
+                {
+                    string postMaskVar = $"__post_mask_{_labelCounter++}";
+                    AppendLine($"simd_mask {postMaskVar} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
+                    _currentMask = postMaskVar;
+                }
+                else
+                {
+                    AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
+                }
+                // ★ Skip default store ONLY when ALL lanes returned (post_mask is empty).
+                //   The goto is from AFTER post_mask init, so no UB.
+                //   `__returned_0.any_true()` = at least one lane returned;
+                //   when the k-loop exits and post_mask is all-false, ALL lanes returned.
+                //   (If post_mask has lanes → some didn't return → they need the default store.)
+                _gotoTargets.Add(exitLabel);
+                AppendLine($"if ({_returnedMaskVar}.any_true() && !{_currentMask}.any_true()) {{ goto {exitLabel}; }}");
+            }
             if (hasBreak)
+                AppendLine($"{exitLabel}: ;");
+            else if (!string.IsNullOrEmpty(_returnedMaskVar))
                 AppendLine($"{exitLabel}: ;");
         }
 
@@ -373,6 +429,11 @@ namespace NativeTranspiler.Analyzer
             _indent++;
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
+            // ★ E7 fix: kill lanes that have already returned before using as active mask.
+            //   Without this, returned lanes would re-activate each count-loop iteration
+            //   (v_active is recomputed fresh each iter) and overwrite their result.
+            if (!string.IsNullOrEmpty(_returnedMaskVar))
+                AppendLine($"v_active{sid} = simd_mask{{ n_and_mask(v_active{sid}.m, n_not_mask({_returnedMaskVar}.m)) }};");
 
             // Use v_active directly — dead lanes have v_active=false due to clamp above
             _currentMask = $"v_active{sid}";

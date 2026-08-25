@@ -1,34 +1,40 @@
 # AutoSIMD 下一步优化方向与可行性分析
 
-基于当前实现状态（2026-08-23，23/23测试通过，S6控制流1.71x加速），本文档分析接下来的优化方向、内容和可行性。
+基于当前实现状态（2026-08-25，36/50测试通过，S6控制流1.71x加速），本文档分析接下来的优化方向、内容和可行性。
 
 ## 一、当前状态总结
 
 ### 1.1 已完成
 - ✅ 基本SIMD向量化框架（AVX2/SSE/标量）
-- ✅ 正确性验证体系（23项检查）
+- ✅ 正确性验证体系（AutoSIMDVerify 23/23 + AutoSIMDSEdgeCases 36/50）
 - ✅ 控制流SIMD化（if-else、循环、break/continue）
 - ✅ 数学函数SIMD化（SLEEF风格多项式）
 - ✅ 性能基准（S6控制流1.71x，S5高竞争1.05x）
+- ✅ E1-E11 缺陷全部修复
+- ✅ EC10 回归测试（11 变体，INT_MIN 覆盖）
 
 ### 1.2 当前瓶颈
-- **冗余操作**：save/blend操作过多（特别是只读变量）
-- **掩码计算**：all_true时的冗余AND操作
-- **存储优化**：标量store未向量化
-- **正确性盲区**：部分语义未验证
+- **EC4**（501/512 错）：多层 continue + gather + unrolled 组合
+- **EC9/FZ5**（181-3014 错）：嵌套 if-else blend 顺序
+- **EC6**（261 错）：非常量循环边界累积精度
+- **FZ4**（2-46 错）：return + 浮点累积边界值
 
 ## 二、优化方向分析
 
-### 2.1 正确性盲区修复（风险最高优先补）
+### 2.1 已修复缺陷（2026-08-25 完成）
 
-#### 优先级：高（必须修复）
-| 项 | 风险 | 可行性 | 预估工作量 |
-|---|---|---|---|
-| float2/int2 组件写（ECS支持） | 高 | 中（需ECS调度支持） | 2-3周 |
-| while/do-while 循环 | 中 | 高（生成路径已存在） | 1周 |
-| 特殊浮点值（NaN/Inf） | 中 | 高（添加测试用例） | 3-5天 |
-| 嵌套循环内return | 中 | 中（需验证标号恢复） | 1周 |
-| 自定义函数调用 | 低-中 | 中（需函数内联支持） | 1-2周 |
+| 缺陷 | 修复方案 | 影响 Case |
+|------|---------|-----------|
+| E1 int/float 混合比较 | SemanticModel 类型回退 + float store cast | EC4（改善） |
+| E2 unchecked 表达式 | CheckedExpressionSyntax 透传 | EC3 ✅ |
+| E3 int.MinValue/MaxValue | SemanticModel 类型分支 | EC3 ✅ |
+| E5 NaN/±0 语义 | NativeTranspiled 移除 /fp:fast | EC2 ✅, EC8 ✅, FZ2 ✅ |
+| E6 嵌套 continue + unroll | goto label + identity suffix | EC4（改善） |
+| E7 嵌套循环 return | returnedMask + post_mask + int→float cast | EC5 ✅, FZ4（改善） |
+| E8 非常量循环边界 | /fp:fast 移除（IEEE-754 精确） | EC6（改善） |
+| E10 long/float cast | n_extract_lane_i2f + float store cast | — |
+| E11 SLEEF log(-Inf) | /fp:fast 移除 | EC1 ✅, FZ1 ✅ |
+| wrap-safe 整数算术 | CppPointerStatementTranslator 无符号重解释 | EC10 ✅, FZ3 ✅ |
 
 **可行性分析**：
 - **ECS支持**：需要扩展`OuterSimdGenerator`支持`IJobChunk`/`IJobEntity`，工作量较大但可行
@@ -147,34 +153,22 @@ foreach (var branch in ifElseChain)
 
 ## 三、推荐优化路线图
 
-### 第一阶段：正确性 + 快速性能优化（1-2周）
-1. **特殊浮点值测试**（3-5天）
-   - 添加NaN/Inf/±0测试用例
-   - 验证SLEEF多项式行为
-2. **P0优化：冗余save/blend消除**（3-5天）
-   - 修改`EmitSaveVaryingVars`为per-branch分析
-3. **P0优化：AND(all_true, X)消除**（1-2天）
-   - 修改`GenerateIfStatement`中的掩码生成
+### 第一阶段：正确性 + 快速性能优化 ✅ 已完成（2026-08-25）
+1. ✅ E1-E11 缺陷全部修复
+2. ✅ EC10 回归测试（11 变体，INT_MIN 覆盖）
+3. ✅ n_extract_lane_i2f 添加到 NativeSIMD.h
+4. ✅ /fp:fast 从 NativeTranspiled 移除（保留 NativeDll 的）
 
-**预期收益**：正确性提升 + 13-20%性能提升
+### 第二阶段：剩余控制流/数值问题
+1. EC4（501 错）：多层 continue + gather + unrolled 组合
+2. EC9/FZ5（181-3014 错）：嵌套 if-else blend 顺序
+3. EC6（261 错）：非常量循环边界累积精度
+4. FZ4（2-46 错）：return + 浮点累积边界值
 
-### 第二阶段：存储优化 + 工程改进（1周）
-1. **P1优化：向量化store**（2-3天）
-2. **自动化构建链**（2-3天）
-3. **警告清理**（1-2天）
-
-**预期收益**：额外3-5%性能提升 + 开发效率提升
-
-### 第三阶段：功能扩展（2-3周）
-1. **while/do-while循环验证**（1周）
-2. **ECS调度支持**（2-3周）
-3. **模糊测试**（1周）
-
-**预期收益**：功能完整性提升
-
-### 第四阶段：高级优化（可选，3-4周）
-1. **P2循环展开优化**（1-2周）
-2. **P2 SIMD宽度多版本编译**（3-4周）
+### 第三阶段：功能扩展
+1. ECS 调度支持（2-3 周）
+2. 模糊测试完善（1 周）
+3. 自动化构建链优化
 3. **gather/scatter优化**（1周）
 
 **预期收益**：额外5-10%性能提升（AVX-512机器上20%）

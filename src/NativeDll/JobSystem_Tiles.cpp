@@ -704,11 +704,18 @@ namespace JobSystem
                 {
                     const double totalNs = static_cast<double>(completed - published);
                     const double perElemNs = totalNs / static_cast<double>(batch->totalElements);
-                    g_jobCostCache.UpdatePerElemCost(batch->funcHash, perElemNs);
+                    // 判定本次 batch 是否为粗粒度（tpw）分块：实际 tile 数 ≤ tpw 基准 tile 数。
+                    // 粗粒度用于记忆带宽/延迟绑定检测参考（细粒度加 tile 无增益 → memory-bound）。
+                    // tpw 基准 tile 数 = workers × tilesPerWorker（默认 15×4=60）；
+                    // 「>」= JCC 公式选得更细 → 归为细粒度学习样本。
+                    const int wc = std::max(1, g_numThreads);
+                    const uint32_t coarseTileCount = static_cast<uint32_t>(wc) * g_configuredTilesPerWorker;
+                    const bool targetCoarse = (batch->tileCount <= coarseTileCount);
+                    g_jobCostCache.UpdatePerElemCost(batch->funcHash, perElemNs, targetCoarse);
                     if (g_jobCostCacheVerbose)
-                        std::printf("[JCC] L hash=%08x tiles=%u N=%u wallUs=%.1f perElem=%.2fns\n",
+                        std::printf("[JCC] L hash=%08x tiles=%u N=%u wallUs=%.1f perElem=%.2fns coarse=%d\n",
                             batch->funcHash, batch->tileCount, batch->totalElements,
-                            totalNs / 1000.0, perElemNs);
+                            totalNs / 1000.0, perElemNs, targetCoarse ? 1 : 0);
                 }
             }
             // 标准 Chase-Lev：不需要 UnregisterBatch（无共享注册表）

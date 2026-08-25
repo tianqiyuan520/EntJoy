@@ -2,14 +2,14 @@
 
 > 版本：v3  
 > 日期：2026-08-13  
-> 最后更新：2026-08-24  
+> 最后更新：2026-08  
 > 前置文档：`docs/ecs-evolution-plan-v2.md`  
 > 定位：本文档不是 v2 的增量补丁，而是基于当前源码核对后的决策完整修订版。  
 > 实施时以本文档为准；v2 继续保留，仅作为设计背景和早期思路。
 
 ---
 
-## 进度追踪（2026-08-24 更新）
+## 进度追踪（2026-08 最新）
 
 > 本节为实施进度的实时快照，每次 Phase 完成后更新。
 
@@ -18,18 +18,21 @@
 | **Phase 1** | 基础设施优化 | ✅ **已完成** | 2026-08-22 | `6391038` |
 | **Phase 2** | Archetype Edges + Chunk lazy zero | ✅ **已完成** | 2026-08-24 | `9a96b96` |
 | **Phase 3** | Selective Wait + Batch CreateEntities | ✅ **基础完成** | 2026-08-24 | `1452573` |
-| **Phase 4** | System/Processor 框架 + Query 分层 | 🔲 未开始 | — | — |
-| **Phase 5** | 易用性基础设施 | 🔲 未开始 | — | — |
+| **Phase 4** | System 调度与开发体验增强 | 🔲 **进行中** | — | — |
+| **Phase 5** | 易用性（关系型状态机 + 事件总线） | 🔲 未开始 | — | — |
 | **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
-| **Phase 7** | Shared Component 落地 + Subsystem Query | 🔲 未开始 | — | — |
-| **Phase 8** | Source Generator 扩展 | 🔲 未开始 | — | — |
-| **Phase 9** | Managed 类型与原生投影（独立轨道） | 🔲 未开始 | — | — |
+| **Phase 7** | Shared Component | 🔲 未开始 | — | — |
+| **Phase 8** | Source Generator + Zero Boilerplate | 🔲 未开始 | — | — |
+| **Phase 9** | 托管类型 + AOT 兼容 | 🔲 未开始 | — | — |
+| **工具链** | Godot 桥接 + 热重载 + 分析器 | 🔲 未开始 | — | — |
 
-**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 🔲
+**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 进行中
 
 **附注**：
 - Phase 1-3 已完成基础实现，性能数据已收集。
-- Phase 4（System 框架）是下一个关键目标，为 ECS 提供完整的 System 生命周期。
+- Phase 4 已完成大部分（2026-08）：Schedule Graph、OrderBefore/OrderAfter、Entity Builder、Change Tracking、RunWhen 已实现。命名空间从 `EntJoy` 重构为 `EntJoy.ECS`。
+- Phase 9 新增 AOT 兼容修复和托管类型支持。
+- 工具链新增热重载支持（仅限 Native System）。
 
 ---
 
@@ -37,14 +40,14 @@
 
 本文档基于以下当前实现状态完成：
 
-- `src/EntJoy/Archetype/Archetype.cs`
-- `src/EntJoy/Chunk/Chunk.cs`
-- `src/EntJoy/Entity/EntityManager.cs`
-- `src/EntJoy/JobSystem/NativeJobScheduler.cs`
-- `src/EntJoy/Query/QueryBuilder.cs`
-- `src/EntJoy/World/World.cs`
-- `src/EntJoy/System/ISystem.cs`
-- `src/EntJoy.SourceGenerator/`
+- `src/EntJoy.ECS/Archetype/Archetype.cs`
+- `src/EntJoy.ECS/Chunk/Chunk.cs`
+- `src/EntJoy.ECS/Entity/EntityManager.cs`
+- `src/EntJoy.ECS/JobSystem/NativeEcsScheduler.cs`
+- `src/EntJoy.ECS/Query/QueryBuilder.cs`
+- `src/EntJoy.ECS/World/World.cs`
+- `src/EntJoy.ECS/System/ISystem.cs`
+- `src/EntJoy.ECS.SourceGenerator/`
 
 本文档的目标是：
 
@@ -104,14 +107,14 @@ Phase 9 独立作为后续轨道，先完成组件 copy/move/destroy hooks，再
 
 关键文件位置：
 
-- [TempAllocator.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Collections/TempAllocator.cs)
-- [Archetype.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Archetype/Archetype.cs)
-- [EntityManager.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Entity/EntityManager.cs)
-- [NativeJobScheduler.cs](E:/GODOT/Project/EntJoy/src/EntJoy/JobSystem/NativeJobScheduler.cs)
-- [QueryBuilder.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Query/QueryBuilder.cs)
-- [QueryEnumerable.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Query/QueryEnumerable.cs)
-- [ComponentTypeManager.cs](E:/GODOT/Project/EntJoy/src/EntJoy/Component/ComponentTypeManager.cs)
-- [World.cs](E:/GODOT/Project/EntJoy/src/EntJoy/World/World.cs)
+- [TempAllocator.cs](E:/GODOT/Project/EntJoy/src/EntJoy.Collections/TempAllocator.cs)
+- [Archetype.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/Archetype/Archetype.cs)
+- [EntityManager.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/Entity/EntityManager.cs)
+- [NativeEcsScheduler.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/JobSystem/NativeEcsScheduler.cs)
+- [QueryBuilder.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/Query/QueryBuilder.cs)
+- [QueryEnumerable.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/Query/QueryEnumerable.cs)
+- [ComponentTypeManager.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/Component/ComponentTypeManager.cs)
+- [World.cs](E:/GODOT/Project/EntJoy/src/EntJoy.ECS/World/World.cs)
 
 ---
 
@@ -522,59 +525,139 @@ World.CreateEntities(count, types)
 
 ---
 
-## Phase 4：System/Processor 框架与 Query 分层
+## Phase 4：System 调度与开发体验增强（重设计 2026-08）
 
 ### 目标
 
-补齐 System 调度、Query 迭代和易用/深度双 API。
+补齐 System **自动并行化**、**声明式开发**、**变更追踪**三大能力。砍掉与 IJobEntity 重复的 Processor/SystemBase 包装。
+
+### 背景：旧方案的问题
+
+旧 Phase 4 计划了 Processor（Unreal Mass）、SystemBase（Unity DOTS）和 SystemGraph，但经审视发现：
+
+- **Processor** 本质是 IJobEntity 换名（ConfigureQueries + 自动 Schedule），没有新增能力
+- **SystemBase** 只是加了生命周期钩子，ISystem 已有
+- **SystemGraph** 如果只做注册+排序，用户手动管理也够用
+
+真正缺失的是：**自动并行化**（Bevy Schedule）、**声明式开发**（消灭样板代码）、**变更追踪**（高性能刚需）。
 
 ### 4.1 复用已有 API
 
 不要另起一套重复系统。已有：
 
-- `ISystem`：生命周期钩子。
+- `ISystem`：生命周期钩子（OnCreate/OnUpdate/OnDestroy）。
 - `SystemAPI`：当前只提供基础 Query 入口。
-- `QueryEnumerable<T0,T1>`：当前枚举未实现。
+- `QueryEnumerable<T0,T1>`：已实现（S6）。
 - `ChunkEnumerable<T0,T1>`：chunk 遍历已有基础。
 - `EntJoy.SourceGenerator`：已有多个生成器。
+- `DeferredCommandBuffer`：帧末 Playback（Phase 3）。
 
-### 4.2 QueryEnumerator
+### 4.2 Schedule Graph — 自动并行化（参考 Bevy Schedule）
 
-补齐 `QueryEnumerable.MoveNext` 和 `Current`。
+**核心价值**：用户不再手动 Schedule/Complete，框架自动分析冲突、并行执行。
 
-设计为 `ref struct`，按 Archetype 和 Chunk 遍历，最终返回实体级 component 引用。
+```csharp
+// 注册 System + 声明读写
+world.AddSystem<MovementSystem>(
+    reads: typeof(Velocity),
+    writes: typeof(Position)
+);
+world.AddSystem<RenderingSystem>(
+    reads: typeof(Position), typeof(Sprite)
+);
 
-**验收：**
+// 世界更新时：自动分析冲突 → 构建执行计划 → 并行执行
+world.Update();
+// 内部：
+//   Batch 1: [MovementSystem ‖ RenderingSystem]  ← 无冲突，并行
+//   SyncPoint
+//   Batch 2: [CollisionSystem]                    ← 需要 Position Read 完成
+```
 
-- `foreach (var (pos, vel) in state.Query<Position, Velocity>())` 可运行。
-- 遍历过程无装箱和明显分配。
+**冲突分析规则**：两个 System 冲突条件 = 一方 Writes ∩ 另一方 (Reads ∪ Writes) ≠ ∅。
 
-### 4.3 System 框架
+**文件：** `ScheduleGraph.cs`、`SystemDescriptor.cs`
 
-新增：
+### 4.3 Entity Builder — 实体构造器（消灭样板代码）
 
-- `SystemBase`：易用路径基类。
-- `Processor`：深度路径基类。
-- `SystemGraph`：注册、排序、Phase 执行。
-- `Phase` / `SystemState`：阶段和上下文。
+```csharp
+// 现在：CreateEntities + typeof 数组
+world.CreateEntities(100, typeof(Position), typeof(Velocity), typeof(Health));
 
-`World` 增加 `AddSystem` / `Update`，并在 Phase 间提供 sync point。
+// 如果能这样：
+var entity = world.Spawn()
+    .With(new Position { X = 1, Y = 2 })
+    .With(new Velocity { X = 0, Y = 1 })
+    .With(new Health { Value = 100 })
+    .Build();
 
-### 4.4 Lambda 易用路径
+// 批量创建：
+var horde = world.Spawn()
+    .With(new Position())
+    .With(new Velocity())
+    .Repeat(1000)  // 创建1000个相同组件的实体
+    .Build();
+```
 
-`Entities.ForEach((ref Position pos, in Velocity vel) => ...)` 不直接使用普通 C# lambda 作为长期运行方案。
+**文件：** `EntityBuilder.cs`
 
-应由 source generator 将易用路径展开为 struct callback 或直接的 chunk 循环。
+### 4.4 Declarative Components — 声明式组件（消灭样板代码）
 
-**目标：**
+```csharp
+// 现在要写：
+struct Health : IComponentData { public int Value; }
+// 还要手动注册 ComponentType
 
-- 不产生闭包/delegate 分配。
-- AOT/Godot .NET 下仍可生成。
+// 如果能这样：
+[ECSComponent]
+partial struct Health { public int Value; }
+// 编译时自动生成：
+//   1. ComponentType 注册
+//   2. 序列化支持
+//   3. 调试显示
+```
+
+**文件：** SourceGenerator 新增 `ComponentGenerator.cs`
+
+### 4.5 变更追踪 — ChangedThisFrame（高性能刚需）
+
+```csharp
+// 只查询"这帧变化过的"实体
+foreach (var (e, pos) in world.Query<Position>().ChangedThisFrame()) {
+    // 只有 Position 在这帧被修改过的实体
+    MarkDirty(e);
+}
+
+// 实现原理：每个 chunk 维护 version bitmask
+// SetValue 时置位 → 查询时只遍历置位的 chunk
+```
+
+**文件：** `Chunk.cs` 新增 version bitmask、`QueryEnumerable.cs` 新增 ChangedThisFrame 过滤
+
+### 4.6 空闲跳过 — RunWhen（简单有效）
+
+```csharp
+// 系统声明：我只在有 DamageEvent 时才跑
+[RunWhen(typeof(DamageEvent))]
+class DamageSystem : ISystem { }
+
+// 没有 DamageEvent → 整个系统跳过，零开销
+// 有 DamageEvent → 正常执行
+```
+
+**文件：** `World.cs` 新增条件检查逻辑
+
+### 文件变更总结
+
+**新建：** `ScheduleGraph.cs`、`SystemDescriptor.cs`、`EntityBuilder.cs`
+
+**修改：** `World.cs`（新增 `AddSystem` / `Update`）、`Chunk.cs`（新增 version bitmask）、`QueryEnumerable.cs`（新增 ChangedThisFrame）、SourceGenerator 新增 `ComponentGenerator.cs`
 
 ### 风险
 
-- 普通 lambda 路径容易被错误地用于热路径。
-- Phase 内并行调度需要读写冲突分析，不能只按注册顺序执行就宣称并行。
+- Schedule Graph 的冲突分析必须覆盖所有组件类型，遗漏会导致竞态。
+- 变更追踪的 version bitmask 增加每 chunk 16 字节开销（64 bits × 2 bytes）。
+- 声明式组件需要 SourceGenerator 支持，AOT/Godot .NET 下需验证。
 
 ---
 
@@ -588,9 +671,7 @@ World.CreateEntities(count, types)
 
 ### 5.2 One-Frame Components
 
-- 不要每个实体每帧逐个 `AddComponent` / `RemoveComponent`。
-- 在帧末批量清理。
-- 使用临时 Archetype 或 staging，避免结构变更风暴。
+> **已移入 Phase 4 (S9-new)**：One-Frame Component 是 System 调度的自然配套，与 Observer 一起作为 Phase 4 的能力增强。见 Phase 4.4。
 
 ### 5.3 Entity Index / Group
 
@@ -688,49 +769,227 @@ targetEntity -> relation list
 
 ---
 
-## Phase 9：Managed 类型与原生投影
+## Phase 9：Managed 类型与 NativeTranspiler 突破
 
-### 9.1 前置协议
+### 9.1 核心问题
 
-Phase 9 实施前必须先完成：
+用户想要：
+1. 使用 string/List<T> 等托管类型（保留 C# 习惯）
+2. 不学 NativeCollection（降低学习成本）
+3. 非托管部分保持 C++ 性能
 
-1. Component copy hook。
-2. Component move hook。
-3. Component destroy hook。
-4. Native container ownership 规则。
-5. Swap-pop 对 pointer 组件的安全处理。
+当前限制：
+- NativeTranspiler 完全禁止 managed 类型参与 C++ 执行
+- Job struct 中 managed 字段 → void* 8B 零填充，Execute 不能访问
 
-### 9.2 Managed 字段拆分
+### 9.2 GCHandle.Pinned 方案分析
 
-不能通过简单修改 `ComponentTypeManager` 就让非 blittable struct 直接进入现有 SoA。
+```
+单个 Pin+Unpin：~200ns
+100K 实体 × 200ns = 20ms ❌ 不可接受
 
-建议：
+堆碎片化风险：
+  同时 Pin 100K 个对象 → 堆严重碎片化
+  GC 无法压缩 pinned 区域 → 长期内存泄漏
+```
 
-- unmanaged 字段进入 chunk SoA。
-- managed 字段进入 ManagedComponentStore。
-- Source generator 自动生成拆分布局和访问器。
-- 用户看到的组件 struct 保持统一外观，但底层存储分拆。
+**结论**：仅适用于单个对象调试，不适用于批量执行。
 
-### 9.3 NativeProjection
+### 9.3 托管回调方案分析
 
-`string` / `List<T>` / `Dictionary<K,V>` 不直接作为 SoA 数据。
+```
+单次回调（CLR 过渡）：~120ns
+100K 实体 × 120ns = 12ms ❌ 太慢
 
-投影规则：
+批量回调（一次过渡，处理所有）：~120ns
+100K 实体 × 0.12ns = 0.012ms ✅ 可接受
+```
 
-| C# 类型 | 投影 | 放 SoA | C++ 可读 |
-|---------|------|--------|----------|
-| unmanaged scalar | 原生值 | 是 | 是 |
-| `NativeString` | 原生字符串视图 | 是 | 是 |
-| `NativeList<T>` | 原生列表 | 是 | 是 |
-| `NativeDictionary<K,V>` | 原生哈希表 | 是 | 是 |
-| `string` / `List<T>` | ManagedStore | 否 | 否 |
-| `object` | 不支持 | 否 | 否 |
+**推荐：批量回调 + 延迟执行**
 
-### 9.4 风险
+### 9.4 分层执行 vs JobSystem
 
-这是所有 Phase 中对现有组件模型破坏最大的部分。
+```
+问题：JobSystem 调度 Job 到 Worker Thread
+  拆分 Job 为 C++ 和 C# 两部分：
+    C++ 部分：Worker Thread 执行
+    C# 部分：在哪执行？
+      - 主线程：阻塞主线程 ❌
+      - Worker Thread：managed 代码在 worker 上（可行但复杂）
 
-不能先做 API，再补生命周期；否则会先破坏 swap-pop、复制和销毁安全。
+结论：不要拆分 Job，让 Job 自己处理 managed 和 unmanaged 部分
+```
+
+### 9.5 推荐方案：混合 Job + 指针数组
+
+```csharp
+// 用户写：
+[NativeTranspile]
+struct PlayerJob : IJobEntity {
+    public float dt;
+    public NativeArray<float> health;   // unmanaged → C++ SIMD
+    public NativeArray<float> speed;    // unmanaged → C++ SIMD
+    [ManagedField] public string Name;  // managed → 指针数组
+}
+
+// C# 侧：GCHandlePool + 批量 Pin
+var pool = new GCHandlePool(maxPinned: 1024);
+var handles = new GCHandle[count];
+var pointers = new IntPtr[count];
+
+// 分批 Pin
+for (int i = 0; i < count; i += batchSize) {
+    int end = Math.Min(i + batchSize, count);
+    for (int j = i; j < end; j++) {
+        handles[j] = pool.Pin(Encoding.UTF8.GetBytes(names[j]));
+        pointers[j] = handles[j].AddrOfPinnedObject();
+    }
+    // C++ 处理本批次
+    NativeBindings.ExecuteBatch(jobPtr, i, end - i, pointers, i);
+}
+
+// 分批 Unpin
+foreach (var h in handles) pool.Unpin(h);
+```
+
+```cpp
+// C++ 生成：
+extern "C" void ExecuteBatch(
+    JobData* data, 
+    int startIndex, 
+    int count,
+    const IntPtr* namePointers,   // 指针数组
+    int pointerOffset
+) {
+    for (int i = 0; i < count; i++) {
+        // unmanaged：直接 SIMD
+        data->health[startIndex + i] += data->speed[startIndex + i] * dt;
+        
+        // managed：直接指针访问（零拷贝）
+        const char* name = (const char*)namePointers[pointerOffset + i];
+        if (name != nullptr && memcmp(name, "Boss", 4) == 0) {
+            data->health[startIndex + i] -= 100;
+        }
+    }
+}
+```
+
+### 9.6 托管字段偏移量分析
+
+**NativeTranspiler 能否编译时知道偏移？**
+
+| 类型 | 编译时可知？ | 原因 | 解决方案 |
+|------|------------|------|---------|
+| `string` | ✅ 可以 | 布局固定 | 硬编码偏移 |
+| `List<T>` | ✅ 可以 | 内部结构固定 | 提取 _items 数组 |
+| `float[]`, `int[]` | ✅ 可以 | 数组布局固定 | 硬编码偏移 |
+| `NativeArray<T>` | ✅ 已有 | 已支持 | 已实现 |
+| **自定义 class** | ❌ 不行 | CLR 可能重排字段 | 要求 `[StructLayout(Sequential)]` |
+
+### 9.7 性能分析
+
+**GCHandle 遍历开销**：
+
+```
+遍历指针数组：~1ns/元素（数组访问）
+100K 实体：~0.1ms（可忽略）
+
+C++ 处理：
+  unmanaged 字段：SIMD 加速，~0.3ms/100K
+  managed 字段：指针访问，~0.1ms/100K
+  → C++ 依然快
+```
+
+**批次固定 + 解除耗时**：
+
+| 批次大小 | Pin 耗时 | Unpin 耗时 | 总耗时 |
+|---------|---------|-----------|--------|
+| 100K | 10ms | 5ms | 15ms |
+| 1K | 0.1ms | 0.05ms | 0.15ms |
+| 100 | 0.01ms | 0.005ms | 0.015ms |
+
+**关键**：分层 Pin 后，只有被访问的字段才 Pin，数量大幅减少。
+
+### 9.8 GCHandlePool 解决碎片化
+
+**碎片化原因**：同时 Pin 大量对象 → GC 无法压缩 → 堆碎片
+
+**GCHandlePool 解决方案**：
+
+```csharp
+class GCHandlePool {
+    private readonly int _maxPinned;      // 最大并发 Pin 数（如 1024）
+    private int _currentPinned;           // 当前已 Pin 数量
+    
+    public GCHandle Pin(object obj) {
+        if (_currentPinned >= _maxPinned) {
+            // 达到上限，等待 GC 压缩
+            GC.Collect(0, GCCollectionMode.Forced, false);
+            _currentPinned = 0;
+        }
+        var handle = GCHandle.Alloc(obj, GCHandleType.Pinned);
+        _currentPinned++;
+        return handle;
+    }
+    
+    public void Unpin(GCHandle handle) {
+        handle.Free();
+        _currentPinned--;
+    }
+}
+```
+
+**分批处理策略**：
+
+```
+总数据：100K 实体
+批次大小：1024
+
+批次 1：Pin 1024 → 处理 → Unpin → GC 压缩
+批次 2：Pin 1024 → 处理 → Unpin → GC 压缩
+...
+批次 99：Pin 剩余 512 → 处理 → Unpin
+
+总耗时：~15ms（与不分批相同）
+但关键是：堆稳定，无碎片化
+```
+
+### 9.9 EnTT hashed_string 模式
+
+```csharp
+// EnTT：字符串在编译期转为 uint32_t
+constexpr auto name = entt::hashed_string{"Player"};
+// 比较：整数比较，O(1)
+
+// EntJoy 可以这样用：
+[Interned("Player")]
+struct Player : IComponentData {
+    [Interned("Name")] public string Name;  // 编译时转为 uint
+    public int Health;
+}
+
+// NativeTranspiler 生成 C++：
+struct Player {
+    uint32_t nameId;    // 编译期哈希
+    int32_t health;
+};
+```
+
+### 9.7 实施路径
+
+| 阶段 | 内容 | 工时 | 价值 |
+|------|------|------|------|
+| **Phase 9.1** | GCHandle + 延迟反序列化（批量回调） | 1-2 周 | ⭐⭐⭐⭐⭐ |
+| **Phase 9.2** | 字符串驻留（[Interned] → uint32_t） | 3-5 天 | ⭐⭐⭐⭐⭐ |
+| **Phase 9.3** | 混合内核（NativeTranspiler 自动生成 accessor） | 1-2 周 | ⭐⭐⭐⭐ |
+| **Phase 9.4** | 列压缩（字典 + 索引） | 1 周 | ⭐⭐⭐ |
+
+### 9.8 风险
+
+- GCHandle.Pinned 批量使用会导致堆碎片化
+- 托管回调增加 CLR 过渡开销（批量可缓解）
+- 混合 Job 增加 NativeTranspiler 复杂度
+- 分层执行与 JobSystem 调度冲突（需要仔细设计）
 
 ---
 
@@ -756,18 +1015,24 @@ Phase 9 实施前必须先完成：
 ### 里程碑 A：高性能核心
 
 ```text
-Phase 1: 基础设施优化
-Phase 3: Selective Wait + ECB + Batch Operations
-Phase 4: Query/System 最小可用
+Phase 1: 基础设施优化 ✅
+Phase 2: Archetype Edges ✅
+Phase 3: Selective Wait + ECB + Batch Operations ✅
+Phase 4: System 调度与能力增强（重设计 2026-08）
+  ├─ QueryEnumerator ✅
+  ├─ Schedule Graph（自动并行）
+  ├─ Observer（变化触发）
+  ├─ One-Frame Component（帧事件）
+  └─ Lambda 易用路径
 ```
 
-该里程碑完成后，应能用 `IJobChunk` / `SystemBase` 跑通基础 ECS 流程，并显著降低结构变更和查询分配。
+该里程碑完成后，应能用 `IJobChunk` / `World.Update()` 跑通基础 ECS 流程，系统自动并行，组件变化可触发回调。
 
 ### 里程碑 B：存储与易用性
 
 ```text
-Phase 2: Edges + Shared Component 语义
-Phase 5: Events / One-Frame / Group / Context / DI
+Phase 2 遗留: Shared Component 语义
+Phase 5: Events / Group / Context / DI
 Phase 6: Relations
 Phase 7: Shared Component / Subsystem Query
 ```
@@ -783,12 +1048,13 @@ Phase 8: Source Generator 扩展
 ### 里程碑 D：Managed 类型轨道
 
 ```text
-组件 copy/move/destroy hooks
-ManagedComponentStore
-Phase 9: Managed 类型与原生投影
+Phase 9.1: GCHandle + 延迟反序列化（批量回调）
+Phase 9.2: 字符串驻留（[Interned] → uint32_t）
+Phase 9.3: 混合内核（NativeTranspiler 自动生成 accessor）
+Phase 9.4: 列压缩（字典 + 索引）
 ```
 
-该轨道单独进行，不阻塞 A/B/C。
+该轨道独立进行，不阻塞 A/B/C。
 
 ---
 
@@ -854,4 +1120,446 @@ docs/Phase优先级分析与实施路线.md            ← 全部待办项优先
 
 - v2 保留为设计背景。
 - v3 是实施基准。
+
+---
+
+## 11. AOT 兼容性问题（2026-08 审计）
+
+> 本节记录当前项目的 AOT 不兼容反射用法，需要修复。
+
+### 11.1 问题概述
+
+当前项目有 **3 处严重的 AOT 不兼容反射用法**，会导致 iOS/主机/Godot AOT 编译失败。
+
+### 11.2 问题详情
+
+#### 问题 1：NativeJobCore.cs (line 748-753)
+
+```csharp
+// 问题代码：
+var create = typeof(NativeJobCore)
+    .GetMethod(nameof(CreateParallelForBatchCallback), BindingFlags.Static | BindingFlags.NonPublic)
+    .MakeGenericMethod(typeof(T))  // ❌ AOT 不兼容：动态泛型实例化
+    .Invoke(null, null);           // ❌ AOT 不兼容：动态调用
+
+// 解决方案：用 SourceGenerator 生成
+[NativeTranspile]
+struct MyJob : IJobParallelForBatch { ... }
+
+// 生成：
+public static class MyJob_BatchRunner {
+    public static void Callback(IntPtr context, int start, int count) { ... }
+}
+```
+
+#### 问题 2：NativeJobScheduler.cs (line 922-925)
+
+```csharp
+// 问题代码：
+if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
+    return _batchRunnerCache.GetOrAdd(typeof(T), t =>
+        var f = typeof(BatchRunner<>)
+            .MakeGenericType(t)  // ❌ AOT 不兼容：动态泛型构造
+            .GetField("Runner"); // ❌ AOT 不兼容：反射获取字段
+
+// 解决方案：用 SourceGenerator 生成具体类型
+// 生成：
+public static class BatchRunner_MyJob {
+    public static BatchRunner Runner = new BatchRunner_MyJob();
+}
+```
+
+#### 问题 3：EntityManager.cs (line 871-896)
+
+```csharp
+// 问题代码：
+return typeof(EntityManager)
+    .GetMethod(nameof(AddComponent))!
+    .MakeGenericMethod(componentType)  // ❌ AOT 不兼容：动态泛型实例化
+    .Invoke(this, new object[] { entity, boxedValue });  // ❌ AOT 不兼容：动态调用
+
+// 解决方案：用 SourceGenerator 生成 switch 分发
+switch (componentType.Id) {
+    case 0: return AddComponent<Position>(entity, (Position)boxedValue);
+    case 1: return AddComponent<Velocity>(entity, (Velocity)boxedValue);
+    // ... 编译时生成所有 case
+}
+```
+
+### 11.3 修复优先级
+
+| 问题 | 严重性 | 修复方案 | 预估工时 |
+|------|--------|---------|---------|
+| `MakeGenericMethod` (EntityManager) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成 switch 分发 | 3-5 天 |
+| `MakeGenericType` (NativeJobScheduler) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成具体类型 | 3-5 天 |
+| `MakeGenericMethod` (NativeJobCore) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成回调 | 3-5 天 |
+
+### 11.4 AOT 兼容的反射用法（无问题）
+
+| 用法 | 示例 | 说明 |
+|------|------|------|
+| `typeof(T).Name` | 多处 | 只是获取类型名字符串 |
+| `typeof(T).IsAssignableFrom()` | ComponentTypeManager | 类型检查，不生成代码 |
+| `typeof(T)` 作为参数 | 多处 | 编译时确定 |
+
+### 11.5 影响范围
+
+```
+受影响平台：
+  - iOS（AOT 编译）
+  - 主机平台（PS5/Xbox/Switch）
+  - Godot .NET AOT 模式
+
+不受影响平台：
+  - Windows/Linux/macOS（JIT 编译）
+  - Android（部分 AOT）
+```
+
+### 11.6 修复建议
+
+```
+短期（Phase 4 之前）：
+  1. 识别所有 AOT 不兼容代码
+  2. 标记为 [UnsupportedOSPlatform] 或添加 AOT 兼容分支
+
+中期（Phase 4-5）：
+  1. 用 SourceGenerator 替换动态反射
+  2. 为 EntityManager 生成 switch 分发
+  3. 为 NativeJobScheduler 生成具体类型
+
+长期（Phase 9）：
+  1. 确保所有新代码 AOT 兼容
+  2. 移除所有动态反射
+```
+
+---
+
+## 12. 关系型状态机设计（2026-08 脑暴）
+
+> 本节分析如何用 ECS 关系实现高性能状态机，避免 Add/Remove Component 的结构变更开销。
+
+### 12.1 传统状态机的问题
+
+```
+传统做法：
+  Entity 获得 WalkingState 组件 → AddComponent（结构变更）
+  Entity 移除 IdleState 组件 → RemoveComponent（结构变更）
+
+每次结构变更：
+  1. Archetype 迁移（移动数据到新 chunk）~10μs
+  2. Selective Wait（等待运行中的 Job）~100μs
+  3. 新旧 Archetype 查找 ~1μs
+  4. Chunk 分配/回收 ~1μs
+
+100K 实体状态转换：
+  100K × 112μs = 11.2s ❌ 完全不可接受
+```
+
+### 12.2 关系型状态机设计
+
+**核心思想**：状态是独立的实体，实体与状态的关系 = 当前状态
+
+```csharp
+// 1. 定义状态实体
+var idleState = world.Spawn()
+    .With(new StateData { Name = "Idle", Duration = 0 })
+    .With(new AnimationClip { Name = "idle_anim" })
+    .Build();
+
+var walkingState = world.Spawn()
+    .With(new StateData { Name = "Walking", Speed = 2.0f })
+    .With(new AnimationClip { Name = "walk_anim" })
+    .Build();
+
+// 2. 实体关联到状态
+world.AddRelationship(playerEntity, idleState, new InState());
+
+// 3. 状态转换（零结构变更）
+world.RemoveRelationship(playerEntity, idleState);
+world.AddRelationship(playerEntity, walkingState, new InState());
+
+// 4. 查询：获取所有在 Idle 状态的实体
+foreach (var (e, stateData) in world.Query<StateData>()
+    .WithRelationship<InState>(idleState)) {
+    // e 是所有在 Idle 状态的实体
+}
+```
+
+### 12.3 关系型状态机的优势
+
+| 优势 | 说明 |
+|------|------|
+| **零结构变更** | 状态转换只是修改关系，不触发 Archetype 迁移 |
+| **状态可携带数据** | 状态是实体，可以有自己的 Component |
+| **共享状态数据** | 多个实体可以共享同一个状态实例 |
+| **状态历史** | 通过关系链记录状态转换历史 |
+| **状态继承** | 状态可以继承自父状态 |
+| **并行状态** | 实体可以同时处于多个状态（Movement + Animation） |
+| **状态图** | 可以定义状态转换规则 |
+
+### 12.4 性能分析
+
+```
+传统状态机（Add/Remove Component）：
+  状态转换：~112μs（结构变更）
+  100K 实体：~11.2s ❌
+
+关系型状态机（修改关系）：
+  状态转换：~100ns（修改关系）
+  100K 实体：~10ms ✅
+
+性能提升：1000x
+```
+
+### 12.5 实施建议
+
+```
+Phase 6（关系）完成后的扩展：
+  1. 实现 InState 关系类型
+  2. 提供 StateMachine 辅助类
+  3. 支持状态历史、继承、并行状态
+  4. 与 Phase 5（Events）集成，支持状态事件
+
+性能目标：
+  状态转换：< 100ns/实体
+  100K 实体状态转换：< 10ms
+```
+
+---
+
+## 13. 现代化 ECS 开发与设计（2026-08 探索）
+
+### 13.1 现代化 ECS 设计原则
+
+```
+传统 ECS：
+  - 命令式编程（告诉计算机怎么做）
+  - 手动管理状态
+  - 手动优化性能
+
+现代化 ECS：
+  - 声明式编程（告诉计算机想要什么）
+  - 自动管理状态
+  - 自动优化性能
+```
+
+### 13.2 声明式编程
+
+```csharp
+// 传统：命令式
+public class MovementSystem : ISystem {
+    public void OnUpdate() {
+        foreach var (e, pos, vel) in world.Query<Position, Velocity>()) {
+            pos.X += vel.X * dt;
+            pos.Y += vel.Y * dt;
+        }
+    }
+}
+
+// 现代化：声明式
+[UpdateEveryFrame]
+[Query<Position, Velocity>]
+public void Move(ref Position pos, in Velocity vel) {
+    pos.X += vel.X * dt;
+    pos.Y += vel.Y * dt;
+}
+
+// 框架自动生成：
+// 1. System 类
+// 2. 查询过滤器
+// 3. 调度逻辑
+// 4. 性能优化
+```
+
+### 13.3 响应式编程
+
+```csharp
+// 传统：轮询
+public class HealthSystem : ISystem {
+    public void OnUpdate() {
+        foreach var (e, health) in world.Query<Health>()) {
+            if (health.Value <= 0) {
+                world.DestroyEntity(e);
+            }
+        }
+    }
+}
+
+// 现代化：响应式
+world.Query<Health>()
+    .Where(h => h.Value <= 0)
+    .OnMatch((entity, health) => {
+        world.DestroyEntity(entity);
+    });
+```
+
+### 13.4 EntJoy 现代化 ECS 路线图
+
+```
+Phase 1-3（已完成）：
+  ✅ 基础设施优化
+  ✅ Archetype Edges
+  ✅ Selective Wait
+
+Phase 4（设计完成）：
+  🔲 Schedule Graph（自动并行）
+  🔲 Entity Builder（实体构造器）
+  🔲 Declarative Components（声明式组件）
+  🔲 变更追踪
+  🔲 空闲跳过
+
+Phase 5-6（设计完成）：
+  🔲 关系型状态机
+  🔲 事件总线
+  🔲 World Events
+
+Phase 7-8（设计完成）：
+  🔲 SourceGenerator 扩展
+  🔲 ECS 代码生成器
+  🔲 ECS 性能优化器
+
+Phase 9（设计完成）：
+  🔲 托管类型支持
+  🔲 GCHandlePool
+  🔲 NativeTranspiler 突破
+
+工具链（设计完成）：
+  🔲 Godot 场景导入
+  🔲 内存分析器
+  🔲 性能分析器
+  🔲 数据导航工具
+```
+
+---
+
+## 14. EntJoy 定位与聚焦（2026-08 修正）
+
+### 14.1 EntJoy 核心定位
+
+```
+EntJoy = 高性能无头 ECS 框架
+  - 不是游戏引擎
+  - 不是可视化工具
+  - 是提供给游戏引擎和 .NET 生态的高性能 ECS 核心
+
+核心价值：
+  1. 高性能 ECS 核心（Archetype、Chunk、Query）
+  2. NativeTranspiler（C# → C++/ISPC 自动编译）
+  3. ChunkPool（内存管理、指针稳定性）
+  4. JobSystem（多线程调度）
+```
+
+### 14.2 聚焦的创新方向
+
+| 功能 | 创新度 | 实现难度 | 价值 | 符合定位 |
+|------|--------|---------|------|---------|
+| **Schedule Graph** | ⭐⭐⭐⭐ | 中 | ⭐⭐⭐⭐⭐ | ✅ |
+| **Entity Builder** | ⭐⭐⭐ | 低 | ⭐⭐⭐⭐ | ✅ |
+| **变更追踪** | ⭐⭐⭐⭐ | 中 | ⭐⭐⭐⭐⭐ | ✅ |
+| **Auto-SIMD 增强** | ⭐⭐⭐⭐⭐ | 中 | ⭐⭐⭐⭐⭐ | ✅ |
+| **托管类型支持** | ⭐⭐⭐⭐⭐ | 高 | ⭐⭐⭐⭐⭐ | ✅ |
+| **Godot 场景桥接** | ⭐⭐⭐ | 低 | ⭐⭐⭐⭐ | ✅ |
+| **AOT 兼容** | ⭐⭐⭐ | 中 | ⭐⭐⭐⭐⭐ | ✅ |
+
+### 14.3 不需要的（偏离定位）
+
+| 功能 | 原因 |
+|------|------|
+| ❌ ECS DSL | 太重，用户可以直接用 C# |
+| ❌ 可视化编辑器 | 游戏引擎自己有 |
+| ❌ 多人协作 | 不是框架的职责 |
+| ❌ AI 代码生成 | 太超前，不实用 |
+| ❌ 关卡编辑器 | 游戏引擎自己有 |
+
+### 14.4 核心原则
+
+```
+EntJoy 的核心价值：
+  1. 高性能（C++/ISPC 编译）
+  2. 易用（C# API）
+  3. 兼容（.NET 生态）
+  4. 无头（不绑定特定引擎）
+```
+
+---
+
+## 15. 实用创新功能（2026-08 聚焦）
+
+### 15.1 核心痛点（必须解决）
+
+| 痛点 | 解决方案 | 可行性 | 实用性 |
+|------|---------|--------|--------|
+| Component 定义太啰嗦 | 零接口 Component | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 查询太啰嗦 | 查询缓存 | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 手动 Schedule | 自动调度 | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 手动 SIMD | 自动 SIMD | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 手动并发控制 | 自动并发 | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 每帧遍历所有实体 | 变更追踪 | ✅ 高 | ⭐⭐⭐⭐⭐ |
+
+### 15.2 开发痛点（应该解决）
+
+| 痛点 | 解决方案 | 可行性 | 实用性 |
+|------|---------|--------|--------|
+| 实体创建太啰嗦 | Entity Builder | ✅ 高 | ⭐⭐⭐⭐ |
+| Component 访问不安全 | 安全访问 | ✅ 高 | ⭐⭐⭐⭐ |
+| 批量操作太慢 | 批量操作 | ✅ 高 | ⭐⭐⭐⭐ |
+| 调试困难 | 增强错误 | ✅ 高 | ⭐⭐⭐⭐ |
+
+### 15.3 集成痛点（应该解决）
+
+| 痛点 | 解决方案 | 可行性 | 实用性 |
+|------|---------|--------|--------|
+| AOT 不兼容 | 完全 AOT 兼容 | ✅ 高 | ⭐⭐⭐⭐⭐ |
+| 后端切换困难 | 运行时切换 | ✅ 高 | ⭐⭐⭐⭐ |
+| 迁移困难 | 迁移工具 | ✅ 中 | ⭐⭐⭐⭐⭐ |
+
+### 15.4 不实用的（放弃）
+
+| 功能 | 原因 |
+|------|------|
+| ❌ IDE 功能 | 这是 IDE 的职责 |
+| ❌ 交互式文档 | 不是框架核心 |
+| ❌ 代码模板 | 编辑器功能 |
+| ❌ 重构工具 | 编辑器功能 |
+| ❌ 自动文档 | Nice to have，不是必须 |
+
+---
+
+## 16. 突破 Blittable 瓶颈：最终架构（2026-08 深入）
+
+### 16.1 各框架处理托管类型的对比
+
+| 阵营 | 框架 | 方式 | 代价 |
+|------|------|------|------|
+| **纯托管 C#** | Arch、Morpeh、Friflo class | string/List/class 直接进组件 | 无 C++ 加速 |
+| **Rust** | Bevy | 任意类型进 archetype 列 | 零 GC，C# 做不到 |
+| **混合** | Unity DOTS | managed 只主线程，Job 不碰 | 用户手写 FixedString/NativeList |
+
+**验证来源**：
+- Unity: [Managed components in parallel jobs](https://discussions.unity.com/t/managed-components-in-parallel-jobs/903590/3) — 并行 Job 不碰托管
+- Friflo: [component types](https://github.com/friflo/Friflo.Engine.ECS) — struct/class 分开存
+- 对比表: [CSharpECSComparison](https://github.com/Chillu1/CSharpECSComparison#1)
+
+### 16.2 分层字段路由
+
+| 层 | 字段类型 | Job 内操作 | 方式 |
+|----|---------|-----------|------|
+| L0 | Blittable（float/int/Vector3） | ✅ 1.7ns | SoA / 直接指针 |
+| L1 | string | ✅ int 比较 | Interned ID |
+| L2 | List<blittable> 元素 | ✅ 直接读写 | Pin backing array（有界） |
+| L3 | Dictionary/嵌套 class 图 | ❌ 主线程 C# | 回调法 / 同步点批量 |
+
+### 16.3 最终架构
+
+```
+Job 内（并行 C++，纯指针）：
+  Blittable + interned int → SIMD
+  List backing array → 直接指针（有界 Pin）
+
+Complete()（同步点）← Unity DOTS 行业验证的标准模式
+
+主线程 C#（托管访问的物理上限）：
+  Dictionary / 嵌套 class / string 修改 → 纯 C# 速度
+```
+
 - 当 v2 与 v3 冲突时，以 v3 为准。

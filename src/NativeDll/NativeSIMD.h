@@ -417,6 +417,28 @@ static inline n_int n_srli_epi32(n_int a, int shift) {
 #endif
 }
 
+// Full-Width SIMD: arithmetic shift right int by immediate (C# `>>` on signed int).
+//   The old code only had the LOGICAL shift (n_srli_epi32), so `x >> 1` on a negative
+//   int produced (unsigned)x >> 1 — the top bit was zero-filled instead of sign-extended
+//   (verified: EC3 x>>1 on INT_MIN-adjacent values, sign-bit flip 0x80682567 vs 0x682567).
+static inline n_int n_srai_epi32(n_int a, int shift) {
+#if defined(NSIMD_AVX2)
+    return _mm256_srai_epi32(a, shift);
+#elif defined(NSIMD_AVX)
+    __m128i lo = _mm_srai_epi32(_mm256_castsi256_si128(a), shift);
+    __m128i hi = _mm_srai_epi32(_mm256_extractf128_si256(a, 1), shift);
+    return _mm256_set_m128i(hi, lo);
+#elif defined(NSIMD_SSE4)
+    return _mm_srai_epi32(a, shift);
+#elif defined(NSIMD_NEON)
+    return vshrq_n_s32(a, shift);
+#else
+    int la[NSIMD_WIDTH]; n_store_epi32(la, a);
+    for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = la[i] >> shift;
+    return n_load_epi32(la);
+#endif
+}
+
 // Full-Width SIMD: shift left int by immediate
 static inline n_int n_slli_epi32(n_int a, int shift) {
 #if defined(NSIMD_AVX2)
@@ -1168,6 +1190,15 @@ static inline int n_extract_lane_epi32(n_int v, int lane) {
     (void)lane;
     return v;
 #endif
+}
+
+// ============================================================
+// Int→float lane extraction: extract int lane, convert to float
+// (numeric conversion, not bit reinterpretation).
+// Used when storing int expressions into float arrays (E7/int-overflow fix).
+// ============================================================
+static inline float n_extract_lane_i2f(n_int v, int lane) {
+    return (float)n_extract_lane_epi32(v, lane);
 }
 
 // ============================================================

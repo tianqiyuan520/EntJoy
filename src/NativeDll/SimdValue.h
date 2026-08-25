@@ -277,7 +277,14 @@ struct simd_value<int> {
     friend simd_value operator^(simd_value a, simd_value b) { return simd_value{ n_xor_epi32(a.v, b.v) }; }
 
     // Shift: >> / <<（AutoSIMD LCG 迭代用）
-    friend simd_value operator>>(simd_value a, int shift) { return simd_value{ n_srli_epi32(a.v, shift) }; }
+    // ★ Arithmetic shift right (sign-extends) to match C# `>>` on signed int.
+    //   n_srli_epi32 (logical) zero-fills the top bits — wrong for negative values (EC3).
+    friend simd_value operator>>(simd_value a, int shift) { return simd_value{ n_srai_epi32(a.v, shift) }; }
+    // ★ Logical (unsigned) shift right: zero-fills top bits, matches C# `uint >> n`.
+    //   C# `uint x >> 3` is logical shift; `int x >> 3` is arithmetic shift.
+    //   Without this overload, `v_x >> 3` uses arithmetic shift even when v_x holds uint
+    //   values, producing wrong results for large uint values (S6 LCG verification bug).
+    friend simd_value operator>>(simd_value a, unsigned int shift) { return simd_value{ n_srli_epi32(a.v, shift) }; }
     friend simd_value operator<<(simd_value a, int shift) { return simd_value{ n_slli_epi32(a.v, shift) }; }
 
     // Modulo（per-lane 标量回退，无 SIMD 指令）

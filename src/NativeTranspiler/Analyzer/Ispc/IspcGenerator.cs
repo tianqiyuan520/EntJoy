@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // IspcGenerator.cs — 统一 ISPC 代码生成器
 //   合并了原 IspcMethodGenerator.cs + IspcJobGenerator.cs 的功能，
 //   共享 NativeList 上下文结构、类型转换、回调生成等逻辑。
@@ -1201,7 +1201,7 @@ namespace NativeTranspiler.Analyzer.Common
                         continue;
                     if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                         continue;
-                    if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" ||
+                    if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
                         methodSymbol.Name != Config.GetComponentDataNativeArray ||
                         methodSymbol.TypeArguments.Length == 0 ||
                         methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)

@@ -1,4 +1,4 @@
-namespace EntJoy
+﻿namespace EntJoy.ECS
 {
     public static class SystemAPI
     {

@@ -1,4 +1,5 @@
-﻿//using EntJoy.MovementTest;
+﻿using EntJoy.ECS;
+//using EntJoy.MovementTest;
 
 ///// <summary>
 ///// EntJoySample 入口点

@@ -58,7 +58,7 @@ namespace NativeTranspiler.Analyzer
                         string inner = TranslateExpression(prefix.Operand);
                         return $"({inner} ^ -1)";
                     }
-                    return $"-{TranslateExpression(prefix.Operand)}";
+                    return $"(0 - ({TranslateExpression(prefix.Operand)}))";
 
                 case ParenthesizedExpressionSyntax paren:
                     return $"({TranslateExpression(paren.Expression)})";
@@ -68,6 +68,11 @@ namespace NativeTranspiler.Analyzer
 
                 case AssignmentExpressionSyntax assign:
                     return TranslateAssignment(assign);
+
+                case CheckedExpressionSyntax checkedExpr:
+                    // ★ E2 fix: `unchecked(x + y)` / `checked(x + y)` → translate the inner expr.
+                    //   EntJoy arithmetic is always unchecked (wraps), so the flag is a no-op.
+                    return TranslateExpression(checkedExpr.Expression);
 
                 case ConditionalExpressionSyntax ternary:
                     return TranslateTernary(ternary);
@@ -219,11 +224,34 @@ namespace NativeTranspiler.Analyzer
             string objName = memberAccess.Expression is IdentifierNameSyntax id ? id.Identifier.Text : null;
             bool isVaryingFloat2 = objName != null && _float2VaryingVars.Contains(objName);
 
-            // .MaxValue / .MinValue on float → numeric_limits
+            // .MaxValue / .MinValue — pick the numeric_limits TYPE from the receiver
+            // (int.MaxValue → numeric_limits<int>::max(), float.MinValue → numeric_limits<float>::lowest()).
+            // The old code always emitted float limits, so `x == int.MaxValue` compared against
+            // FLT_MAX garbage (E3).
             if (memberName == "MaxValue" || memberName == "MinValue")
             {
-                string sign = memberName == "MaxValue" ? "max" : "lowest";
-                return $"std::numeric_limits<float>::{sign}()";
+                bool isInt = true;
+                string recv = memberAccess.Expression.ToString();
+                if (recv.Contains("float") || recv.Contains("double") || recv.Contains("Single") || recv.Contains("Double"))
+                    isInt = false;
+                // SemanticModel fallback: resolve the receiver's type when it's not a literal keyword
+                if (recv != "int" && recv != "float" && recv != "double" && recv != "long")
+                {
+                    try
+                    {
+                        var t = _semanticModel.GetTypeInfo(memberAccess.Expression).Type;
+                        if (t != null && (t.SpecialType == SpecialType.System_Single || t.SpecialType == SpecialType.System_Double))
+                            isInt = false;
+                    }
+                    catch { }
+                }
+                if (isInt)
+                {
+                    string sign = memberName == "MaxValue" ? "max" : "min";
+                    return $"std::numeric_limits<int>::{sign}()";
+                }
+                string fsign = memberName == "MaxValue" ? "max" : "lowest";
+                return $"std::numeric_limits<float>::{fsign}()";
             }
 
             // .zero on int2/float2 → constructor
@@ -869,6 +897,26 @@ namespace NativeTranspiler.Analyzer
                     if (side is LiteralExpressionSyntax litExpr && litExpr.Token.Text.EndsWith("u"))
                         cmpIsUint = true;
                 }
+                // ★ E1 fix: fallback to SemanticModel for int type detection.
+                //   The above pattern matching only catches direct variable refs and bitwise ops,
+                //   but misses computed int expressions like `dx * dy`, `i % 3`, `i & 1`.
+                //   Use Roslyn GetTypeInfo to get the actual result type of each comparison operand.
+                if (!cmpIsInt && !cmpIsUint)
+                {
+                    try
+                    {
+                        var leftType = _semanticModel.GetTypeInfo(binary.Left).Type;
+                        var rightType = _semanticModel.GetTypeInfo(binary.Right).Type;
+                        bool leftIsInt = leftType != null && (leftType.SpecialType == SpecialType.System_Int32 || leftType.SpecialType == SpecialType.System_UInt32);
+                        bool rightIsInt = rightType != null && (rightType.SpecialType == SpecialType.System_Int32 || rightType.SpecialType == SpecialType.System_UInt32);
+                        if (leftIsInt || rightIsInt)
+                            cmpIsInt = true;
+                        // Check for uint semantics on either side
+                        if (leftType != null && leftType.SpecialType == SpecialType.System_UInt32) cmpIsUint = true;
+                        if (rightType != null && rightType.SpecialType == SpecialType.System_UInt32) cmpIsUint = true;
+                    }
+                    catch { /* SemanticModel may fail on synthetic AST nodes */ }
+                }
                 // Any explicit uint operand (u-literal or (uint) cast) makes the compare unsigned —
 // the variable may be recorded as int but its value is uint semantics.
 bool useUnsignedCmp = cmpIsUint;
@@ -1009,6 +1057,40 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 _ => "+"
             };
 
+            // ★ uint right shift: C# `uint >> n` is logical (zero-extended), but C++
+            //   `int >> n` is arithmetic (sign-extended). Detect uint left operand and
+            //   generate n_srli_epi32 (logical shift) instead of `>>` (arithmetic shift).
+            //   Without this, large uint values (> INT_MAX) produce wrong results (S6 bug).
+            //   Note: SemanticModel returns Int32 for uint locals in source generator context,
+            //   so we use the variable analyzer's CSharpType field instead.
+            if (op == ">>" && anyVarying)
+            {
+                bool leftIsUint = false;
+                // Check variable analyzer's CSharpType for the left operand
+                if (binary.Left is IdentifierNameSyntax id && _variables.TryGetValue(id.Identifier.Text, out var varInfo))
+                {
+                    if (varInfo.CSharpType == "uint")
+                        leftIsUint = true;
+                }
+                // Fallback: check SemanticModel
+                if (!leftIsUint)
+                {
+                    try
+                    {
+                        var leftTypeInfo = _semanticModel.GetTypeInfo(binary.Left);
+                        if (leftTypeInfo.Type != null && leftTypeInfo.Type.SpecialType == SpecialType.System_UInt32)
+                            leftIsUint = true;
+                    }
+                    catch { }
+                }
+
+                if (leftIsUint)
+                {
+                    string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : left;
+                    return $"simd_value<int>{{ n_srli_epi32({leftV}, {right}) }}";
+                }
+            }
+
             return $"({left} {simdOp} {right})";
         }
 
@@ -1106,7 +1188,12 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                                 rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                             else
                                 rhsSimdExpr = rhsExpr;
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsSimdExpr}.v,__l);}}}}}}";
+                            // ★ E7 int→float store fix: use n_extract_lane_i2f for numeric conversion
+                            //   (extract int lane, convert to float — not bit reinterpretation)
+                            string extractExpr = (elemType == "float" && IsInt32Expr(assign.Right))
+                                ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)"
+                                : $"{extractFn}({rhsSimdExpr}.v,__l)";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
                         }
                         if (rhsKind < VarKind.Varying)
                         {
@@ -1130,12 +1217,24 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                             }
                             if (contBase != null)
                             {
+                                // ★ E7 fix: when _returnedMaskVar is set (batch body has `return`), use per-lane
+                                //   masked store to avoid overwriting lanes that already returned with their result.
+                                //   Only write to non-returned lanes (complement of _returnedMaskVar).
+                                if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
+                                {
+                                    string rhsSimdExpr;
+                                    if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                                        rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
+                                    else
+                                        rhsSimdExpr = rhsExpr;
+                                    return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
+                                }
                                 string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
                                 string off = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
                                 return $"{storeFn}({baseName}_ptr + {off}, {rhsExpr}.v)";
                             }
                         }
-                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={extractFn}({rhsExpr}.v,__l);}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{baseName}_ptr[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
                     }
 
                     // uniform idx + varying rhs -> extract lane 0

@@ -1,8 +1,8 @@
-//using Godot;
+﻿//using Godot;
 //using System;
 //using System.Linq;
 
-//namespace EntJoy
+//namespace EntJoy.ECS
 //{
 //    //专门输出原型等的信息
 //    public partial class World
