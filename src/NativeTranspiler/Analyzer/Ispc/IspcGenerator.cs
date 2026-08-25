@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // IspcGenerator.cs — 统一 ISPC 代码生成器
 //   合并了原 IspcMethodGenerator.cs + IspcJobGenerator.cs 的功能，
 //   共享 NativeList 上下文结构、类型转换、回调生成等逻辑。
@@ -675,8 +675,11 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    int gcHandleStartIndex;");
             sb.AppendLine("    void* chunksPtr;");
             sb.AppendLine("    int cleanupInProgress;");
+            sb.AppendLine("    int ownsChunkData;");
             sb.AppendLine("    void* requiredComponentTypeIds;");
             sb.AppendLine("    int requiredComponentTypeIdCount;");
+            sb.AppendLine("    int jobIsBoxed;");
+            sb.AppendLine("    void* chunkArrayHandle;");
             sb.AppendLine("};");
             sb.AppendLine("#endif");
             sb.AppendLine();
@@ -803,8 +806,11 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    int gcHandleStartIndex;");
             sb.AppendLine("    void* chunksPtr;");
             sb.AppendLine("    int cleanupInProgress;");
+            sb.AppendLine("    int ownsChunkData;");
             sb.AppendLine("    void* requiredComponentTypeIds;");
             sb.AppendLine("    int requiredComponentTypeIdCount;");
+            sb.AppendLine("    int jobIsBoxed;");
+            sb.AppendLine("    void* chunkArrayHandle;");
             sb.AppendLine("};");
             sb.AppendLine("#endif");
             sb.AppendLine();

@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 using System;
@@ -22,7 +22,7 @@ public static class ChunkJobExtensions
         var world = World.DefaultWorld;
         if (world == null) throw new InvalidOperationException("No active World found.");
         NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-        return new JobHandle(NativeEcsScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep, writtenComponents: writtenComponents));
+        return new JobHandle(ChunkJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep, writtenComponents: writtenComponents));
     }
 
     /// <summary>调度 IJobChunk（带 workerCap）</summary>
@@ -33,25 +33,17 @@ public static class ChunkJobExtensions
         var world = World.DefaultWorld;
         if (world == null) throw new InvalidOperationException("No active World found.");
         NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-        return new JobHandle(NativeEcsScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep, writtenComponents: writtenComponents));
+        return new JobHandle(ChunkJobScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep, writtenComponents: writtenComponents));
     }
 
-    /// <summary>
-    /// Run IJobChunk：同步执行（无调度开销），由 ECS 侧 ChunkExecution 直接遍历执行。
-    /// 单 AllEnabled 组件零拷贝、多组件走 Archetype 组合位图缓存。
-    /// 输出请通过共享内存（NativeArray/指针字段），勿依赖值类型字段回读。
-    /// </summary>
-    public static unsafe void Run<T>(this T job, QueryBuilder query) where T : struct, IJobChunk
-    {
-        var world = World.DefaultWorld;
-        if (world == null) throw new InvalidOperationException("No active World found.");
-        var entityManager = world.EntityManager;
-
-        // 先完成并行 Job，防止与 Execute 的数据竞争
-        entityManager.CompleteActiveJobs();
-
-        ChunkExecution.ExecuteOnQuery(ref job, entityManager, query);
-    }
+    /// <summary>Run IJobChunk：同步执行（无调度开销），由 ChunkJobScheduler 直接遍历执行。</summary>
+        public static unsafe void Run<T>(this T job, QueryBuilder query) where T : struct, IJobChunk
+        {
+            var world = World.DefaultWorld;
+            if (world == null) throw new InvalidOperationException("No active World found.");
+            world.EntityManager.CompleteActiveJobs();
+            ChunkJobScheduler.ExecuteOnQuery(ref job, world.EntityManager, query);
+        }
 
 }
 }

@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -962,8 +962,11 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int gcHandleStartIndex;");
                 sb.AppendLine("    void* chunksPtr;");
                 sb.AppendLine("    int cleanupInProgress;");
+                sb.AppendLine("    int ownsChunkData;");
                 sb.AppendLine("    void* requiredComponentTypeIds;");
                 sb.AppendLine("    int requiredComponentTypeIdCount;");
+                sb.AppendLine("    int jobIsBoxed;");
+                sb.AppendLine("    void* chunkArrayHandle;");
                 sb.AppendLine("};");
                 sb.AppendLine("#endif");
                 sb.AppendLine();

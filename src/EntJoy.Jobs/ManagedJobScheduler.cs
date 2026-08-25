@@ -883,13 +883,6 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        private static class BatchRunner<T> where T : struct, IJobParallelForBatch
-        {
-            public static readonly JobRunner Runner = Run;
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            private static void Run(object boxed, int start, int count) => ((T)boxed).Execute(start, count);
-        }
-
         /// <summary>
         /// 共享游标认领执行器（对齐 Misaki ExecuteParallelFor / C++ WorkerAtomicRangeLoop）：worker 拿到一个参与名额后，
         /// 在共享 Current 上游标紧循环认领分片执行直到耗尽。执行期只碰 shared Current 一个原子。用于重计算（S5）。
@@ -915,20 +908,8 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        private static readonly ConcurrentDictionary<Type, JobRunner> _batchRunnerCache = new ConcurrentDictionary<Type, JobRunner>();
-
         private static JobRunner SelectRunner<T>() where T : struct, IJobParallelFor
-        {
-            if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
-                return _batchRunnerCache.GetOrAdd(typeof(T), t =>
-                {
-                    var f = typeof(BatchRunner<>).MakeGenericType(t).GetField("Runner");
-                    return (JobRunner)f.GetValue(null);
-                });
-            return ParallelCache<T>.Runner;
-        }
-
-        // ──────────────────── 任务/区间结构 ────────────────────
+            => ParallelCache<T>.Runner;
 
         private struct ManagedTask
         {
