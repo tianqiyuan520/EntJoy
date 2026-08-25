@@ -35,9 +35,9 @@ namespace NativeTranspiler.Analyzer
         {
             if (interfaceSymbol.Name != name) return false;
             var ns = interfaceSymbol.ContainingNamespace?.ToDisplayString();
-            // IJobChunk / IJobEntity 定义在 EntJoy 命名空间，其余 Job 接口在 EntJoy.JobSystem
+            // IJobChunk / IJobEntity 定义在 EntJoy.ECS 命名空间，其余 Job 接口在 EntJoy.JobSystem
             if (name == Config.IJobChunk || name == Config.IJobEntity)
-                return ns == Config.NamespaceEntJoy;
+                return ns == Config.NamespaceEntJoyECS;
             return ns == Config.NamespaceEntJoyJobSystem;
         }
 

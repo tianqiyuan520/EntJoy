@@ -1,6 +1,6 @@
-using System;
+﻿using System;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public static partial class Utils
     {

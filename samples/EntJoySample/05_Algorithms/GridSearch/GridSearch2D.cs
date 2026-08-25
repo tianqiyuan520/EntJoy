@@ -1,4 +1,5 @@
-﻿using EntJoy.Collections;
+﻿using EntJoy.ECS.JobSystem;
+using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;

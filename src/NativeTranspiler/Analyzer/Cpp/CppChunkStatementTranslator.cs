@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
 using System.Collections.Generic;
@@ -128,7 +128,7 @@ namespace NativeTranspiler.Analyzer
             var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
             if (symbolInfo.Symbol is not IMethodSymbol methodSymbol)
                 return false;
-            if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk")
+            if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk")
                 return false;
             if (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan)
                 return false;

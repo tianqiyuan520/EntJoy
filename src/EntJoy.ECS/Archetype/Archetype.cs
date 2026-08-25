@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     // Archetype 主要
     public sealed partial class Archetype
@@ -300,6 +300,33 @@ namespace EntJoy
         {
             var componentIndex = componentTypeRecorder[typeof(T)];
             _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex) = value;
+        }
+
+        /// <summary>
+        /// 设置组件值（非泛型版本，避免反射）
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void SetRaw(int chunkIndex, int slotInChunk, Type componentType, object value)
+        {
+            var componentIndex = componentTypeRecorder[componentType];
+            var chunk = _chunkList[chunkIndex];
+            
+            // 使用 ComponentTypeManager 获取组件大小
+            var compType = ComponentTypeManager.GetComponentType(componentType);
+            var compSize = compType.Size;
+            var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
+            
+            // 使用 GCHandle.Pinned 固定对象，获取指针后复制数据
+            var handle = System.Runtime.InteropServices.GCHandle.Alloc(value, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                var srcPtr = handle.AddrOfPinnedObject();
+                Unsafe.CopyBlock(compPtr, (void*)srcPtr, (uint)compSize);
+            }
+            finally
+            {
+                handle.Free();
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

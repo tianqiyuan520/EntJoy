@@ -1,12 +1,13 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public unsafe partial class EntityManager : IDisposable
     {
@@ -717,12 +718,30 @@ namespace EntJoy
     public unsafe partial class EntityManager
     {
         /// <summary>
-        /// 添加组件
+        /// 添加组件（泛型版本，调用 AddComponentRaw）
         /// </summary>
         public void AddComponent<T0>(Entity entity, T0 t0) where T0 : struct
         {
+            AddComponentRaw(entity, typeof(T0), t0);
+        }
+
+
+        /// <summary>
+        /// 移除组件（泛型版本，调用 RemoveComponentRaw）
+        /// </summary>
+        public void RemoveComponent<T0>(Entity entity) where T0 : struct
+        {
+            RemoveComponentRaw(entity, typeof(T0));
+        }
+
+        // ======================== 非泛型方法（供 ECB Playback 使用） ========================
+
+        /// <summary>
+        /// 添加组件（非泛型版本，核心实现）
+        /// </summary>
+        public unsafe void AddComponentRaw(Entity entity, Type componentType, object value)
+        {
             CheckDisposed();
-            // 确定源 Archetype，只等待该 Archetype 的 Job（Selective Wait）
             if ((uint)entity.Id < (uint)entities.Length)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
@@ -743,23 +762,22 @@ namespace EntJoy
                 if (entityInfoRef.Version != entity.Version)
                     throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
                 var oldArch = entityInfoRef.Archetype;
-                if (oldArch.Has(typeof(T0)))
+                if (oldArch.Has(componentType))
                 {
-                    oldArch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t0);
+                    oldArch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
                     return;
                 }
 
                 // Phase 2.1: 走 Add Edge 快路径
-                var componentType = ComponentTypeManager.GetComponentType(typeof(T0));
-                var targetArch = oldArch.GetAddEdge(componentType);
+                var compType = ComponentTypeManager.GetComponentType(componentType);
+                var targetArch = oldArch.GetAddEdge(compType);
                 if (targetArch == null)
                 {
-                    // Edge miss：创建新组件类型数组，查找/创建 Archetype，写回 edge
                     Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
                     oldArch.Types.CopyTo(targetComponents);
-                    targetComponents[^1] = componentType;
+                    targetComponents[^1] = compType;
                     targetArch = GetOrCreateArchetype(targetComponents);
-                    oldArch.SetAddEdge(componentType, targetArch);
+                    oldArch.SetAddEdge(compType, targetArch);
                 }
                 targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
 
@@ -770,29 +788,23 @@ namespace EntJoy
                 oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);
 
                 if (movedEntityID >= 0)
-                {
                     UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
-                }
 
                 if (compactedChunkIndex >= 0)
-                {
                     RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
-                }
 
-                // 刷新索引（关键修复）
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
-
-                // 设置新组件值
-                targetArch.Set(chunkIndex, slotInChunk, t0);
+                targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
                 structuralVersion++;
             }
         }
 
-
-        public void RemoveComponent<T0>(Entity entity) where T0 : struct
+        /// <summary>
+        /// 移除组件（非泛型版本，核心实现）
+        /// </summary>
+        public void RemoveComponentRaw(Entity entity, Type componentType)
         {
             CheckDisposed();
-            // 确定源 Archetype，只等待该 Archetype 的 Job
             if ((uint)entity.Id < (uint)entities.Length)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
@@ -813,100 +825,56 @@ namespace EntJoy
                 if (entityInfoRef.Version != entity.Version)
                     throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
                 var oldArch = entityInfoRef.Archetype;
-                //若旧原型中无该类型，则直接返回
-                if (!oldArch.Has(typeof(T0)))
-                {
+                if (!oldArch.Has(componentType))
                     return;
-                }
 
                 // Phase 2.1: 走 Remove Edge 快路径
-                var componentType = ComponentTypeManager.GetComponentType(typeof(T0));
-                var targetArch = oldArch.GetRemoveEdge(componentType);
+                var compType = ComponentTypeManager.GetComponentType(componentType);
+                var targetArch = oldArch.GetRemoveEdge(compType);
                 if (targetArch == null)
                 {
-                    // Edge miss：生成目标组件类型数组，查找/创建 Archetype，写回 edge
                     Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];
-                    int spanIndex = 0;
-                    for (int i = 0; i < oldArch.Types.Length; i++)
+                    int idx = 0;
+                    foreach (var t in oldArch.Types)
                     {
-                        var comType = oldArch.Types[i];
-                        if (comType.Type == typeof(T0)) continue;
-                        targetComponents[spanIndex++] = comType;
+                        if (t.Id != compType.Id)
+                            targetComponents[idx++] = t;
                     }
                     targetArch = GetOrCreateArchetype(targetComponents);
-                    oldArch.SetRemoveEdge(componentType, targetArch);
+                    oldArch.SetRemoveEdge(compType, targetArch);
                 }
-                targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);  // 添加实体到新原型
+                targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
 
-                oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);  //复制组件数据
-                oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);  // 从旧原型移除
-                if (movedEntityID >= 0)  // 处理被移动的实体
-                {
+                oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
+                oldArch.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityID, out var movedEntitySlotInChunk, out var compactedChunkIndex);
+
+                if (movedEntityID >= 0)
                     UpdateEntityLocation(movedEntityID, oldArch, entityInfoRef.ChunkIndex, movedEntitySlotInChunk);
-                }
 
                 if (compactedChunkIndex >= 0)
-                {
                     RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
-                }
-                //刷新索引
+
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
                 structuralVersion++;
             }
         }
 
-        // ======================== 非泛型方法（供 ECB Playback 使用） ========================
-
         /// <summary>
-        /// 非泛型 AddComponent：通过 typeId 和原始数据指针添加组件。
-        /// 仅供 ECB Playback 使用（主线程，性能不敏感）。
+        /// 设置组件值（泛型版本，调用 SetRaw）
         /// </summary>
-        internal unsafe void AddComponentRaw(Entity entity, int typeId, byte* dataPtr, int dataSize)
-        {
-            var compType = new ComponentType(typeId);
-            // 使用反射调用泛型方法
-            var method = _addComponentGenericMethods.GetOrAdd(typeId, id =>
-            {
-                var type = ComponentTypeManager.GetTypeByComponentType(id);
-                return typeof(EntityManager)
-                    .GetMethod(nameof(AddComponent))!
-                    .MakeGenericMethod(type);
-            });
-            // 由于泛型方法需要 struct 值，我们通过 boxed 中间层
-            // 实际上更简单的方式是：直接操作 Archetype
-            // 这里用一个简化的路径：创建实体 → 移动到新 Archetype → 设置组件值
-            // 但这太复杂了。用反射最简单。
-            object boxedValue = Marshal.PtrToStructure((IntPtr)dataPtr, ComponentTypeManager.GetTypeByComponentType(typeId));
-            method.Invoke(this, new object[] { entity, boxedValue });
-        }
-
-        /// <summary>
-        /// 非泛型 RemoveComponent：通过 typeId 移除组件。
-        /// 仅供 ECB Playback 使用。
-        /// </summary>
-        internal void RemoveComponentRaw(Entity entity, int typeId)
-        {
-            var method = _removeComponentGenericMethods.GetOrAdd(typeId, id =>
-            {
-                var type = ComponentTypeManager.GetTypeByComponentType(id);
-                return typeof(EntityManager)
-                    .GetMethod(nameof(RemoveComponent))!
-                    .MakeGenericMethod(type);
-            });
-            method.Invoke(this, new object[] { entity });
-        }
-
-        // 反射方法缓存（避免每次 Playback 重新反射）
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, System.Reflection.MethodInfo> _addComponentGenericMethods = new();
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, System.Reflection.MethodInfo> _removeComponentGenericMethods = new();
-
-        /// <summary>
-        /// 设置组件值
-        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Set<T>(Entity entity, T t) where T : struct, IComponentData
         {
+            SetRaw(entity, typeof(T), t);
+        }
+
+        /// <summary>
+        /// 设置组件值（非泛型版本，核心实现）
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void SetRaw(Entity entity, Type componentType, object value)
+        {
             CheckDisposed();
-            // 确定当前 Archetype，只等待该 Archetype 的 Job
             if ((uint)entity.Id < (uint)entities.Length)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
@@ -926,8 +894,8 @@ namespace EntJoy
                     throw new InvalidOperationException($"Entity {entity} has been destroyed.");
                 if (entityInfoRef.Version != entity.Version)
                     throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
-                var arch = entityInfoRef.Archetype;  // 获取对应的原型
-                arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
+                var arch = entityInfoRef.Archetype;
+                arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
             }
         }
 

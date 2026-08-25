@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 轻量级 Chunk 句柄（struct）：持有指向 64KB 非托管内存块的指针和共享元数据引用。

@@ -1,7 +1,8 @@
-// AutoSIMDEdgeCases — 特殊浮点值 + 对抗性边界语义验证。
-// 以 C# 托管基线为 oracle，逐元素（位精确）对比 AutoSIMD native 输出。
-// 覆盖：±Inf / NaN / ±0 / 次正规数 / FLT_MAX / INT_MIN-MAX 溢出 / 多层 && || /
-//       嵌套 return / while 循环 / 非常量循环边界，以及大规模随机 fuzz（含特殊值注入）。
+// AutoSIMDEdgeCases — special floats + adversarial boundary verification.
+// C# managed baseline as oracle, element-wise (bit-exact) comparison with AutoSIMD native output.
+// Coverage: ±Inf / NaN / ±0 / subnormal / FLT_MAX / INT_MIN-MAX overflow /
+//           multi-level && || mixed continue / nested return / while loop / non-constant loop bound,
+//           plus large-scale random fuzz (with special value injection).
 // 用法：dotnet run --project tools/AutoSIMDEdgeCases -c Release [--fast]
 //       需先构建 EntJoySample 并把 NativeTranspiled.dll / NativeDll.dll 放到 bin/。
 using EntJoy.Collections;
@@ -26,6 +27,42 @@ namespace AutoSIMDEdgeCases
             RunEdgeCases(ref passed, ref failed);
             RunFuzz(ref passed, ref failed);
 
+            // ★ Diagnostic: direct extension method call for EC5 (same as normal path)
+            Console.WriteLine("  --- Direct batch call diagnostic ---");
+            try
+            {
+                Console.Error.WriteLine("  [DIAG] Starting EC5 diagnostic...");
+                int n = 512;
+                var src = SeedFatalFloats(n, 1);
+                Console.Error.WriteLine($"  [DIAG] src created: length={src.Length}, IsCreated={src.IsCreated}");
+                var rc = new NativeArray<float>(n, Allocator.Persistent);
+                var rs = new NativeArray<float>(n, Allocator.Persistent);
+                Console.Error.WriteLine($"  [DIAG] rc/rs created: {rc.Length}/{rs.Length}");
+                Console.Error.WriteLine($"  [DIAG] Creating C# job...");
+                var j = new EdgeCase5_CSharp_For { A = src, R = rc };
+                Console.Error.WriteLine($"  [DIAG] C# job created, running loop...");
+                for (int i = 0; i < 3; i++) { j.Execute(i); Console.Error.WriteLine($"  [DIAG] i={i} done"); }
+                var simdJob = new EdgeCase5_SIMD_For { A = src, R = rs };
+                Console.Error.WriteLine($"  [DIAG] About to Schedule...");
+                simdJob.Schedule(n, 64).Complete(); // try with explicit batch size
+                Console.Error.WriteLine($"  [DIAG] Schedule complete, rs[0]={rs[0]:G6}");
+                // Dump first 16 elements to see pattern
+                for (int k = 0; k < 16; k++)
+                    Console.Error.WriteLine($"  [DIAG] rs[{k}]={rs[k]:G6} (cs={rc[k]:G6})");
+                int bad = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    if (rc[i] != rs[i])
+                    {
+                        bad++;
+                        if (bad <= 3) Console.WriteLine($"    @{i}: A={src[i]:G6} cs={rc[i]:G6} simd={rs[i]:G6}");
+                    }
+                }
+                Console.WriteLine($"  EC5-diag: {n - bad}/{n} correct, {bad} wrong");
+                src.Dispose(); rc.Dispose(); rs.Dispose();
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"  [DIAG] EXCEPTION: {ex.Message}\n{ex.StackTrace}"); }
+
             Console.WriteLine($"\n=  PASS {passed} / {passed + failed}");
             if (failed == 0) Console.WriteLine("✅ ALL EdgeCase + Fuzz tests correct.");
             else Console.WriteLine($"❌ {failed} FAILURES — see above.");
@@ -34,7 +71,7 @@ namespace AutoSIMDEdgeCases
         }
 
         // ════════════════════════════════════════════════════════════════
-        // 特殊值注入输入集
+        // Special value injection input sets
         // ════════════════════════════════════════════════════════════════
         private static readonly float[] FatalFloats =
         {
@@ -68,7 +105,7 @@ namespace AutoSIMDEdgeCases
                 NSOdd, (seed) => SeedFatalFloats(NSOdd, seed), (a, r, n) => pc1(a, r, n), (a, r, n) => sc1(a, r, n),
                 ref passed, ref failed, maxUlps: 8);
 
-            // EC2: 任意位模式（NaN/Inf/-0/符号零语义）— harness 构造位模式输入（job 外 BitConverter）
+            // EC2: Arbitrary bit patterns (NaN/Inf/-0/sign-zero semantics) — bit-pattern input constructed externally via BitConverter
             RunPair("EC2 bit-pattern NaN/±0 compare semantics",
                 NS, (seed) => SeedFatalBitsAsFloats(NS, seed), (a, r, n) => pc2(a, r, n), (a, r, n) => sc2(a, r, n),
                 ref passed, ref failed);
@@ -108,10 +145,43 @@ namespace AutoSIMDEdgeCases
             RunPair("EC9 nested if/else multi-branch acc",
                 NS, (seed) => SeedFatalFloats(NS, seed), (a, r, n) => pc9(a, r, n), (a, r, n) => sc9(a, r, n),
                 ref passed, ref failed);
+
+            // EC10: Focused regression — all-INT_MIN input for unchecked(-x) branch
+            //   N is multiple of 8 + non-8 remainder, covering all lane positions + scalar fallback.
+            foreach (var ec10n in new[] { 8, 9, 16, 17, 63, 64, 65, 1000, 4096, 4097 })
+            {
+                RunPairIntInt($"EC10 INT_MIN -x (n={ec10n})",
+                    ec10n, (seed) => SeedAllMinInt(ec10n), (a, b, r, n) => pc10(a, r, n), (a, b, r, n) => sc10(a, r, n),
+                    ref passed, ref failed);
+            }
+
+            // ★ EC8 diagnostic: simple NaN test
+            Console.WriteLine("  --- EC8 NaN test ---");
+            {
+                int n = 8;
+                float[] hostA = new float[n];
+                for (int i = 0; i < n; i++) hostA[i] = float.NaN;
+                var src = new NativeArray<float>(hostA, Allocator.Persistent);
+                var rs = new NativeArray<float>(n, Allocator.Persistent);
+                new EdgeCase8_SIMD_For { A = src, R = rs }.Schedule(n, 0).Complete();
+                Console.WriteLine($"    All NaN → rs[0]={rs[0]:G6} (expect 0.5)");
+
+                float[] hostB = new float[8] {0.5f, -0.5f, 0.0f, -0.0f, 1e-45f, 0.3f, float.NaN, 0.0f};
+                var src2 = new NativeArray<float>(hostB, Allocator.Persistent);
+                var rs2 = new NativeArray<float>(8, Allocator.Persistent);
+                new EdgeCase8_SIMD_For { A = src2, R = rs2 }.Schedule(8, 0).Complete();
+                Console.WriteLine($"    Mixed: rs0={rs2[0]:G6} rs1={rs2[1]:G6} rs4={rs2[4]:G6} rs6={rs2[6]:G6}");
+
+                // Direct batch call via adapter using the generated Schedule internals
+                // Use NativeJobScheduler directly to call the batch fn
+                Console.WriteLine($"    [probe] src2[6]={src2[6]:G6} src[0]={src[0]:G6}");
+                src.Dispose(); rs.Dispose(); src2.Dispose(); rs2.Dispose();
+            }
+
         }
 
         // ════════════════════════════════════════════════════════════════
-        // 随机 fuzz：多 seed，随机数据 + 随机特殊值注入
+        // Random fuzz: multiple seeds, random data + random special value injection
         // ════════════════════════════════════════════════════════════════
         private static void RunFuzz(ref int passed, ref int failed)
         {
@@ -127,7 +197,7 @@ namespace AutoSIMDEdgeCases
         private static void RunFuzzOne(int seed, int n, ref int passed, ref int failed)
         {
             var rnd = new Random(seed * 7919);
-            // 构造随机 + 特殊值混合输入
+            // Construct random + special value mixed input
             var fa = new NativeArray<float>(n, Allocator.Persistent);
             var fb = new NativeArray<float>(n, Allocator.Persistent);
             var ia = new NativeArray<int>(n, Allocator.Persistent);
@@ -179,7 +249,7 @@ namespace AutoSIMDEdgeCases
         }
 
         // ════════════════════════════════════════════════════════════════
-        // 对比基础设施（float 位精确 / int 精确 / float ULP 容差）
+        // Comparison infrastructure (float bit-exact / int exact / float ULP tolerance)
         // ════════════════════════════════════════════════════════════════
         // ULP 容差：SLEEF 多项式 vs C# libm 允许一定 ULP 差（报告 5.2：~3.5 ULP）。
         // 通过把两个 float 转 int 位模式后比较整数差（忽略符号位误区：需按带符号 ULP 差处理）。
@@ -232,11 +302,18 @@ namespace AutoSIMDEdgeCases
         private static bool CompareInts(string label, NativeArray<int> c, NativeArray<int> s, int n, out string detail)
         {
             int firstBad = -1; int badCount = 0;
+            var details = new List<string>();
             for (int i = 0; i < n; i++)
             {
-                if (c[i] != s[i]) { if (firstBad < 0) firstBad = i; badCount++; }
+                if (c[i] != s[i])
+                {
+                    if (firstBad < 0) firstBad = i;
+                    badCount++;
+                    if (details.Count < 4)
+                        details.Add($"@{i}: cs={c[i]} simd={s[i]}");
+                }
             }
-            detail = badCount == 0 ? "" : $"first@{firstBad} cs={c[firstBad]} simd={s[firstBad]} nbad={badCount}";
+            detail = badCount == 0 ? "" : $"first@{firstBad} cs={c[firstBad]} simd={s[firstBad]} nbad={badCount} | {string.Join(" ", details)}";
             return badCount == 0;
         }
 
@@ -304,12 +381,31 @@ namespace AutoSIMDEdgeCases
             var srcB = seedIn(n);
             var rc = new NativeArray<int>(n, Allocator.Persistent);
             var rs = new NativeArray<int>(n, Allocator.Persistent);
+            // ★ Sentinel-fill SIMD output: distinguishes "lane never written" (retains sentinel)
+            //   from "written but wrong value". Persistent allocator memory may be zeroed,
+            //   so a skipped write looks identical to a real 0 without this.
+            for (int i = 0; i < n; i++) rs[i] = unchecked((int)0x5A5A5A5A);
             try
             {
                 cSharp(srcA, srcB, rc, n);
                 simd(srcA, srcB, rs, n);
                 if (CompareInts(label, rc, rs, n, out var detail)) { Pass(label); passed++; }
-                else { Fail(label + " | " + detail); failed++; }
+                else
+                {
+                    // ★ Debug: dump the first few mismatches with their INPUTS (A/B).
+                    string dbg = "";
+                    int shown = 0;
+                    for (int k = 0; k < n && shown < 5; k++)
+                    {
+                        if (rc[k] != rs[k])
+                        {
+                            dbg += $" @{k}:A={srcA[k]},B={srcB[k]},cs={rc[k]},simd={rs[k]}";
+                            shown++;
+                        }
+                    }
+                    Fail(label + " | " + detail + dbg);
+                    failed++;
+                }
             }
             catch (Exception ex) { Fail(label + " | EXCEPTION: " + ex.Message); failed++; }
             finally
@@ -348,7 +444,7 @@ namespace AutoSIMDEdgeCases
         private static void Fail(string label) => Console.WriteLine($"  {label,-70}: ❌");
 
         // ════════════════════════════════════════════════════════════════
-        // 输入生成器
+        // Input generators
         // ════════════════════════════════════════════════════════════════
         private static NativeArray<float> SeedFatalFloats(int n, int seed)
         {
@@ -401,9 +497,15 @@ namespace AutoSIMDEdgeCases
             for (int i = 0; i < n; i++) arr[i] = rnd.Next(0, 64);
             return arr;
         }
+        private static NativeArray<int> SeedAllMinInt(int n)
+        {
+            var arr = new NativeArray<int>(n, Allocator.Persistent);
+            for (int i = 0; i < n; i++) arr[i] = int.MinValue;
+            return arr;
+        }
 
         // ════════════════════════════════════════════════════════════════
-        // Case 执行包装（C# 基线 / SIMD）
+        // Case execution wrapper (C# baseline / SIMD)
         // ════════════════════════════════════════════════════════════════
         static void pc1(NativeArray<float> a, NativeArray<float> r, int n)
         { var j = new EdgeCase1_CSharp_For { A = a, R = r }; for (int i = 0; i < n; i++) j.Execute(i); }
@@ -449,5 +551,10 @@ namespace AutoSIMDEdgeCases
         { var j = new EdgeCase9_CSharp_For { A = a, R = r }; for (int i = 0; i < n; i++) j.Execute(i); }
         static void sc9(NativeArray<float> a, NativeArray<float> r, int n)
         { new EdgeCase9_SIMD_For { A = a, R = r }.Schedule(n, 0).Complete(); }
+
+        static void pc10(NativeArray<int> a, NativeArray<int> r, int n)
+        { var j = new EdgeCase10_CSharp_For { A = a, R = r }; for (int i = 0; i < n; i++) j.Execute(i); }
+        static void sc10(NativeArray<int> a, NativeArray<int> r, int n)
+        { new EdgeCase10_SIMD_For { A = a, R = r }.Schedule(n, 0).Complete(); }
     }
 }

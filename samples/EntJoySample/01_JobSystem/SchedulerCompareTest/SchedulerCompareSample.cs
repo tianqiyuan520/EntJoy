@@ -1,7 +1,8 @@
-﻿using System.Collections.Concurrent;
+﻿using EntJoy.ECS.JobSystem;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
-using EntJoy;
+using EntJoy.ECS;
 using EntJoy.Collections;
 using EntJoy.JobSystem;
 using EntJoy.JobSystem.Managed;

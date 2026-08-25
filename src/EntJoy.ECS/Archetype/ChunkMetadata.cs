@@ -1,6 +1,6 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// Chunk 元数据：每个 Archetype 构造时创建一份，所有该 Archetype 的 Chunk 共享。

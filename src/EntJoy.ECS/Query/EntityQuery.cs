@@ -1,9 +1,9 @@
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public sealed unsafe class EntityQuery
     {

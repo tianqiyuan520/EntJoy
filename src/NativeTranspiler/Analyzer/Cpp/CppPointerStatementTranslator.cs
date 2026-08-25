@@ -1,4 +1,5 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
@@ -287,6 +288,60 @@ namespace NativeTranspiler.Analyzer
                 }
             }
             _builder.Append(')');
+        }
+
+        // ================================================================
+        // ★ Wrap-safe int arithmetic (C# unchecked semantics)
+        //   C# `int` ops wrap on overflow (unchecked by default); naive C++ `a*b`
+        //   is signed-overflow UB — clang -O2 folds `x*2` / `-x` on INT_MIN to 0
+        //   (EC10/FZ3 remainder path). Emit unsigned arithmetic (well-defined wrap)
+        //   for int * + - and unary minus. Reinterpretation back to int is
+        //   implementation-defined but bit-preserving on all supported compilers.
+        //   ISPC subclasses disable this (ISPC has no `(unsigned)` cast).
+        // ================================================================
+        protected virtual bool EnableWrapSafeIntArithmetic => true;
+
+        private bool IsInt32Type(ExpressionSyntax expr)
+        {
+            try
+            {
+                var t = _semanticModel.GetTypeInfo(expr).Type;
+                return t != null && (t.SpecialType == SpecialType.System_Int32 || t.SpecialType == SpecialType.System_UInt32);
+            }
+            catch { return false; }
+        }
+
+        protected override void TranslateExpression(ExpressionSyntax expr)
+        {
+            // Unary minus on int → (int)(0u - (unsigned)x) — wrap-safe.
+            if (EnableWrapSafeIntArithmetic
+                && expr is PrefixUnaryExpressionSyntax pre
+                && pre.IsKind(SyntaxKind.UnaryMinusExpression)
+                && IsInt32Type(pre.Operand))
+            {
+                _builder.Append("(int)(0u - (unsigned)(");
+                TranslateExpression(pre.Operand);
+                _builder.Append("))");
+                return;
+            }
+            base.TranslateExpression(expr);
+        }
+
+        protected override void TranslateBinaryExpression(BinaryExpressionSyntax binary)
+        {
+            string op = binary.OperatorToken.Text;
+            if (EnableWrapSafeIntArithmetic
+                && (op == "*" || op == "+" || op == "-")
+                && IsInt32Type(binary.Left) && IsInt32Type(binary.Right))
+            {
+                _builder.Append("(int)((unsigned)(");
+                TranslateExpression(binary.Left);
+                _builder.Append(") ").Append(op).Append(" (unsigned)(");
+                TranslateExpression(binary.Right);
+                _builder.Append("))");
+                return;
+            }
+            base.TranslateBinaryExpression(binary);
         }
     }
 }

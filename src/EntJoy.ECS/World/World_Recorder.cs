@@ -1,6 +1,6 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     public static class World_Recorder
     {

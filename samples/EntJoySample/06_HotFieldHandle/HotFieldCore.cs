@@ -3,7 +3,7 @@
 //using System.Runtime.CompilerServices;
 //using System.Runtime.InteropServices;
 //using System.Threading.Tasks;
-//using EntJoy;
+//using EntJoy.ECS;
 //using EntJoy.Mathematics;
 
 //namespace EntJoySample.HotFieldHandle

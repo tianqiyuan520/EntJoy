@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 稀疏随机访问句柄（对齐 Unity <c>ComponentLookup</c> / <c>EntityStorageInfoLookup</c>）。

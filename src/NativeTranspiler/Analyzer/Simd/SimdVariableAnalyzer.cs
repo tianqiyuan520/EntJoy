@@ -34,6 +34,10 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         public string CppType { get; set; } = "";
 
+        /// <summary>原始 C# 类型（uint/int/float 等）。SemanticModel 在源生成器上下文中
+        /// 不能可靠区分 uint 和 int，需要此字段来判断 uint 右移应使用逻辑移位。</summary>
+        public string? CSharpType { get; set; }
+
         /// <summary>SIMD 变量的初始值表达式（如 "simd_value&lt;float&gt;::broadcast(0.0f)"）</summary>
         public string? InitSIMDExpr { get; set; }
 
@@ -151,14 +155,15 @@ namespace NativeTranspiler.Analyzer
         // 内部实现
         // ================================================================
 
-        private void AddVariable(string name, string cppType, VarKind kind, string? initExpr)
+        private void AddVariable(string name, string cppType, VarKind kind, string? initExpr, string? csharpType = null)
         {
             _variables[name] = new SimdVariableInfo
             {
                 Name = name,
                 Kind = kind,
                 CppType = cppType,
-                InitSIMDExpr = initExpr
+                InitSIMDExpr = initExpr,
+                CSharpType = csharpType
             };
         }
 
@@ -181,7 +186,7 @@ namespace NativeTranspiler.Analyzer
                     else if (typeText.Contains("int2")) cppType = "EntJoy::Mathematics::int2";
                     else if (typeText == "float") cppType = "float";
                     else if (typeText == "bool") cppType = "bool";
-                    AddVariable(name, cppType, VarKind.Uniform, null);
+                    AddVariable(name, cppType, VarKind.Uniform, null, csharpType: typeText);
                 }
             }
 
@@ -365,6 +370,11 @@ namespace NativeTranspiler.Analyzer
                 case AssignmentExpressionSyntax assign:
                     // 处理链式赋值 a = b = c
                     return ClassifyExpressionInternal(assign.Right, visiting);
+
+                case CheckedExpressionSyntax checkedExpr:
+                    // ★ E2 fix: `unchecked(x + y)` / `checked(x + y)` — classification flows
+                    //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
+                    return ClassifyExpressionInternal(checkedExpr.Expression, visiting);
 
                 case ObjectCreationExpressionSyntax _:
                     // new float2(x, y) — 看参数

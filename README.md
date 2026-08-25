@@ -47,7 +47,7 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 
 | 目录 | 作用 |
 | --- | --- |
-| [`src/EntJoy`](src/EntJoy) | ECS、Query、JobSystem、Native Collections 和基础运行时 |
+| [`src/EntJoy.ECS`](src/EntJoy.ECS) | ECS、Query、JobSystem、Native Collections 和基础运行时 |
 | [`src/EntJoy.SourceGenerator`](src/EntJoy.SourceGenerator) | ECS Job 的 C# Source Generator |
 | [`src/NativeTranspiler`](src/NativeTranspiler) | C# 到 C++/ISPC/WGSL/CUDA 的生成器与分析器 |
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | 从 MSBuild 调用 CMake 的自定义任务 |
@@ -624,7 +624,7 @@ EntJoy combines a convenient managed API with native execution backends:
 
 | Directory | Purpose |
 | --- | --- |
-| [`src/EntJoy`](src/EntJoy) | ECS, queries, JobSystem, Native Collections, and managed runtime |
+| [`src/EntJoy.ECS`](src/EntJoy.ECS) | ECS, queries, JobSystem, Native Collections, and managed runtime |
 | [`src/EntJoy.SourceGenerator`](src/EntJoy.SourceGenerator) | C# source generator for ECS jobs |
 | [`src/NativeTranspiler`](src/NativeTranspiler) | C#-to-C++/ISPC generator and analyzer |
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | Custom MSBuild task that invokes CMake |

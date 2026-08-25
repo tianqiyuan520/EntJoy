@@ -2,7 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 手动延迟命令缓冲区（ECB）。
@@ -129,7 +129,7 @@ namespace EntJoy
         /// <summary>
         /// 主线程回放所有命令。无需注册，直接调用 EntityManager 的非泛型方法。
         /// </summary>
-        public void Playback(EntityManager entityManager)
+        public unsafe void Playback(EntityManager entityManager)
         {
             int offset = 0;
             while (offset < _stagingOffset)
@@ -168,7 +168,12 @@ namespace EntJoy
                         offset += sizeof(int);
                         int compSize = *(int*)(_staging + offset);
                         offset += sizeof(int);
-                        entityManager.AddComponentRaw(entity, typeId, _staging + offset, compSize);
+                        
+                        // 获取组件类型并从指针还原值
+                        var compType = ComponentTypeManager.GetTypeByComponentType(typeId);
+                        var value = Marshal.PtrToStructure((IntPtr)(_staging + offset), compType);
+                        entityManager.AddComponentRaw(entity, compType, value);
+                        
                         offset += compSize;
                         break;
                     }
@@ -178,7 +183,10 @@ namespace EntJoy
                         offset += sizeof(Entity);
                         int typeId = *(int*)(_staging + offset);
                         offset += sizeof(int);
-                        entityManager.RemoveComponentRaw(entity, typeId);
+                        
+                        // 获取组件类型
+                        var compType = ComponentTypeManager.GetTypeByComponentType(typeId);
+                        entityManager.RemoveComponentRaw(entity, compType);
                         break;
                     }
                 }

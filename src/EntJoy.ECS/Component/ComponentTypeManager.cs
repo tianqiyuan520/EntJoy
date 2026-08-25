@@ -1,9 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace EntJoy
+namespace EntJoy.ECS
 {
     /// <summary>
     /// 组件类型管理器

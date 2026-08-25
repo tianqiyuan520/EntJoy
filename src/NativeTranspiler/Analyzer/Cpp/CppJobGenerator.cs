@@ -699,7 +699,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                     continue;
-                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ArchetypeChunk" ||
+                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
                     (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan))
                     continue;
                 if (methodSymbol.TypeArguments.Length == 0 || methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)
@@ -1470,7 +1470,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         var symbol = semanticModel.GetSymbolInfo(inv).Symbol as IMethodSymbol;
                         if (symbol != null &&
-                            symbol.ContainingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                            symbol.ContainingType?.ToDisplayString() == "EntJoy.ECS.ArchetypeChunk" &&
                             (symbol.Name == Config.GetComponentDataNativeArray || symbol.Name == Config.GetComponentDataSpan) &&
                             symbol.TypeArguments.Length > 0)
                         {

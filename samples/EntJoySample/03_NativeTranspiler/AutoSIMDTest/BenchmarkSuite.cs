@@ -1,5 +1,5 @@
 ﻿//using System.Diagnostics;
-//using EntJoy;
+//using EntJoy.ECS;
 //using EntJoy.Collections;
 //using EntJoy.Mathematics;
 //using EntJoy.JobSystem;

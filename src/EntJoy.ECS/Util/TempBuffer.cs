@@ -1,6 +1,8 @@
 using System;
+using EntJoy.JobSystem;
 using System.Runtime.InteropServices;
-namespace EntJoy.JobSystem
+
+namespace EntJoy.ECS.JobSystem
 {
 
 internal static class TempBuffer

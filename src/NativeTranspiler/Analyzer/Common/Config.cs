@@ -40,6 +40,7 @@ namespace NativeTranspiler.Analyzer.Common
         // ============ 命名空间名 ============
         public const string NamespaceSystem = "System";
         public const string NamespaceEntJoy = "EntJoy";
+        public const string NamespaceEntJoyECS = "EntJoy.ECS";
         public const string NamespaceEntJoyJobSystem = "EntJoy.JobSystem";
         public const string NamespaceEntJoyCollections = "EntJoy.Collections";
         public const string NamespaceEntJoyMathematics = "EntJoy.Mathematics";

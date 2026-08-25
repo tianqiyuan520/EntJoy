@@ -1,5 +1,6 @@
-﻿//// Auto-SIMD — Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
-//using EntJoy;
+﻿using EntJoy.ECS.JobSystem;
+//// Auto-SIMD — Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
+//using EntJoy.ECS;
 //using EntJoy.Collections;
 //using EntJoy.Mathematics;
 //using EntJoySample.AutoSIMDTest;

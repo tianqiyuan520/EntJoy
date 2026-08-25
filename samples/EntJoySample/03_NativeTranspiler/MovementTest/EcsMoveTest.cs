@@ -1,4 +1,6 @@
-﻿//using EntJoy.Collections;
+﻿using EntJoy.ECS.JobSystem;
+using EntJoy.ECS;
+//using EntJoy.Collections;
 //using EntJoy.Mathematics;
 //using System.Diagnostics;
 

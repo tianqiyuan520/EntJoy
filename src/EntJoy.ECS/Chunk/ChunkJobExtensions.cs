@@ -1,7 +1,8 @@
-using EntJoy;
+using EntJoy.ECS;
+using EntJoy.JobSystem;
 using System;
 
-namespace EntJoy.JobSystem
+namespace EntJoy.ECS.JobSystem
 {
 
 /// <summary>

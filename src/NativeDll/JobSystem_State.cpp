@@ -290,10 +290,35 @@ namespace JobSystem
         // 热路径开销 <3ns（GetPerElemCost 一次 AND + 一次数组读）。
         if (funcHash != 0 && g_jobCostCacheEnabled.load(std::memory_order_relaxed))
         {
-            const double perElemNs = g_jobCostCache.GetPerElemCost(funcHash);
-            if (perElemNs > 0)
+            // ---- 带宽/延迟绑定自适应 ----
+            // memory-bound job（GridSearch Query 空间哈希 gather）总耗时由共享
+            // DRAM 带宽主导，加 tile 不线性提速，按每元素成本推 tile 数会错标。
+            // 粗/细粒度对比学习后判为 mem-bound → 直接固定 tpw 分块（并发够用、
+            // 调度开销最小）；compute-bound 走下方原公式。
+            // 学习期两阶段：
+            //   1) 先采 kCoarseProbeSamples 个粗粒度（tpw）样本作参考（此时细 EWMA=0，
+            //      perElemNs==0 自然走 tpw 兜底，粗样本在退役侧自动积累）；
+            //   2) 粗样本齐后，用粗成本作代理跑公式 → 产出细粒度分块 → 采集细样本，
+            //      细样本满足阈值后 TryClassify 定 mode（mem-bound / parallel）。
+            const auto mode = g_jobCostCache.GetMode(funcHash);
+            if (mode == JobSystem::kModeMemBound)
             {
-                const double totalUs = length * perElemNs / 1000.0;
+                if (g_jobCostCacheVerbose)
+                    std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
+                return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+            }
+            const double perElemNs = g_jobCostCache.GetPerElemCost(funcHash);
+            if (mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
+            {
+                // 阶段 1：粗样本未齐 → tpw（perElemNs 通常为 0，本分支与兜底一致）
+                return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+            }
+            // 阶段 2（或 parallel 稳态）：细成本优先，缺省用粗成本代理（学习中/冷启动）
+            double costNs = perElemNs;
+            if (costNs <= 0.0) costNs = g_jobCostCache.GetCoarseCost(funcHash);
+            if (costNs > 0.0)
+            {
+                const double totalUs = length * costNs / 1000.0;
                 // perElem 是「并行 wall 稀释」成本（退役时 wall = 整批墙钟，÷N）。
                 // 直接用它算 tiles 会把中间量级 job（wall ~0.1-5ms）塌成 4-15 个
                 // 巨型 tile → 并行度损失 wc/tiles 倍（GridSearch 实测 2-3x 退化）。
@@ -320,16 +345,16 @@ namespace JobSystem
                 //（基本负载均衡够用）时，放松 floor 让 JCC 用更粗的 chunk 减少调度开销。
                 int chunk_tpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
                 constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
-                double tileTimeNs = perElemNs * chunk_tpw4;
+                double tileTimeNs = costNs * chunk_tpw4;
                 bool schedulingDominated = (tileTimeNs < kSchedulingOverheadNs);
-                double jccTiles = length * perElemNs * wc / (kTargetTileUs * 1000.0);
+                double jccTiles = length * costNs * wc / (kTargetTileUs * 1000.0);
                 bool loadBalancingOK = (jccTiles >= wc);
                 if (!schedulingDominated || !loadBalancingOK) {
                     chunk = std::min(chunk, chunk_tpw4);
                 }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
-                        length, perElemNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
+                        length, costNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
                         floorTiles, chunk, (length + chunk - 1) / chunk);
                 return chunk;
             }

@@ -9,6 +9,11 @@ namespace NativeTranspiler.Analyzer
 {
     public class IspcStatementTranslator : CppPointerStatementTranslator
     {
+        // ISPC 语言不支持 C 的 (unsigned) 重解释转换，禁用 wrap-safe 整数算术。
+        // ISPC 对 signed overflow 的行为虽也是 UB，但实际没有像 clang -O2 那样
+        // 激进地优化 -INT_MIN → 0（ISPC 使用 LLVM 但不同优化 pass）。
+        protected override bool EnableWrapSafeIntArithmetic => false;
+
         private readonly Dictionary<string, bool> _constBoolFields = new();
         private readonly bool _useUniformVars;
 

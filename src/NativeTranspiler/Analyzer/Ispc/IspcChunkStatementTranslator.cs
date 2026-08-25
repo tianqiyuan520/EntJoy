@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -302,7 +302,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             return _semanticModel.GetSymbolInfo(invocation).Symbol is IMethodSymbol methodSymbol &&
-                   methodSymbol.ContainingType?.ToDisplayString() == "EntJoy.ArchetypeChunk" &&
+                   methodSymbol.ContainingType?.ToDisplayString() == "EntJoy.ECS.ArchetypeChunk" &&
                    methodSymbol.Name == Config.GetComponentDataNativeArray;
         }
 
