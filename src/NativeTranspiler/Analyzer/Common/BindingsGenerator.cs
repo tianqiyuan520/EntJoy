@@ -541,7 +541,7 @@ namespace NativeTranspiler.Analyzer
                         extraArgs = $", 0, 0";
                     }
                 }
-                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeEcsScheduler.{scheduleMethod}(");
+                sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{scheduleMethod}(");
                 sb.AppendLine($"                ref job, world.EntityManager, query, {funcPtrName}, s_{jobStruct.Name}_RequiredComponentTypeIds{extraArgs}, dependsOn._nativeHandle);");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
@@ -600,7 +600,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeEcsScheduler.{ispcScheduleMethod}(");
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{ispcScheduleMethod}(");
                     sb.AppendLine(isEntityJob
                         ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle);"
                         : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1" : "workerCap")}, dependsOn._nativeHandle);");
@@ -613,7 +613,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeEcsScheduler.{ispcScheduleMethod2}(");
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{ispcScheduleMethod2}(");
                     sb.AppendLine(isEntityJob
                         ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle);"
                         : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1, int.MaxValue" : "workerCap, rangeSize")}, dependsOn._nativeHandle);");
@@ -633,7 +633,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeEcsScheduler.{capMethod}(");
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{capMethod}(");
                     sb.AppendLine($"                ref job, world.EntityManager, query, {capFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, 0, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
@@ -642,7 +642,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCapAndRangeSize_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
                     sb.AppendLine("        {");
                     sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
-                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeEcsScheduler.{capMethod}(");
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{capMethod}(");
                     sb.AppendLine($"                ref job, world.EntityManager, query, {capFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, rangeSize, dependsOn._nativeHandle);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
@@ -654,11 +654,11 @@ namespace NativeTranspiler.Analyzer
                 // ImmediateNative：主线程同步执行，零 worker 唤醒、无 handle 往返
                 sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
                 if (isIspcCap)
-                    sb.AppendLine($"            NativeEcsScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                    sb.AppendLine($"            ChunkJobScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
                 else if (CppJobGenerator.IsEntityJob(jobStruct))
-                    sb.AppendLine($"            NativeEcsScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                    sb.AppendLine($"            ChunkJobScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
                 else
-                    sb.AppendLine($"            NativeEcsScheduler.RunChunkImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkEntityBatchFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                    sb.AppendLine($"            ChunkJobScheduler.RunChunkImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkEntityBatchFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
                 sb.AppendLine("        }");
                 sb.AppendLine();
             }

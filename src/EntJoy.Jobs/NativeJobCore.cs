@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -741,20 +741,8 @@ namespace EntJoy.JobSystem
         private static class AutoParallelForCallback<T>
             where T : struct, IJobParallelFor
         {
-            public static readonly DelegateCache Cache = Build();
-
-            private static DelegateCache Build()
-            {
-                if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
-                {
-                    var create = typeof(NativeJobCore)
-                        .GetMethod(nameof(CreateParallelForBatchCallback), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
-                        .MakeGenericMethod(typeof(T))
-                        .Invoke(null, null);
-                    return new DelegateCache((BatchJobFunc)create!);
-                }
-                return GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
-            }
+            public static readonly DelegateCache Cache =
+                GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
 
             public static DelegateCache GetCache() => Cache;
         }

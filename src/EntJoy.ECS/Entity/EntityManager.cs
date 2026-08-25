@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -110,7 +110,7 @@ namespace EntJoy.ECS
 
             archetypeMap.Clear();
             recycleEntities.Clear();
-            NativeEcsScheduler.ClearRawChunkScheduleCaches(this);
+            ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();

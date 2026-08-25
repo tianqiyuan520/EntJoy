@@ -1,14 +1,10 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 
 namespace EntJoySample.ECS
 {
-    /// <summary>
-    /// 统一工作负载 = 读取每个（满足条件的）实体的 Position.X 并累加。
-    /// 所有方案做等量的实体级内存访问，公平对比遍历机制本身。
-    /// </summary>
     /// <summary>
     /// 统一工作负载 = 读取每个（满足条件的）实体的 Position.X 并累加。
     /// 所有方案做等量的实体级内存访问，公平对比遍历机制本身。
@@ -31,7 +27,6 @@ namespace EntJoySample.ECS
         }
     }
 
-    /// <summary>无过滤：遍历 Chunk 全部实体，同样读取 X 累加（与过滤方案同工作量）。</summary>
     /// <summary>无过滤：遍历 Chunk 全部实体，同样读取 X 累加（与过滤方案同工作量）。</summary>
     public unsafe struct SumAllJob : IJobChunk
     {
