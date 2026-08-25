@@ -68,6 +68,18 @@ namespace EntJoy.ECS
         public QueryEnumerable<T0, T1> Query<T0, T1>(QueryBuilder builder) where T0 : struct where T1 : struct
             => new QueryEnumerable<T0, T1>(_entityManager, builder);
 
+        /// <summary>单组件查询选择器，支持链式附加过滤条件。</summary>
+        /// <example>
+        /// <code>
+        /// foreach (var result in world.Query&lt;Position&gt;().WithEnabled&lt;ActiveComponent&gt;())
+        /// {
+        ///     // 只处理启用 ActiveComponent 的实体
+        /// }
+        /// </code>
+        /// </example>
+        public QuerySelection<T0> Query<T0>() where T0 : struct
+            => new QuerySelection<T0>(_entityManager);
+
         public void Dispose()
         {
             _entityManager?.Dispose();

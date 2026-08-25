@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace EntJoy.ECS
 {
@@ -14,6 +15,8 @@ namespace EntJoy.ECS
         public readonly ChunkMetadata Meta;
         public readonly nint MemoryBlock;
         private int _entityCount;
+        private int _version;        // 组件数据修改次数（变更追踪）
+        private int _enableVersion;  // 实体增删/启用状态变化次数（位图缓存失效依据）
 
         private const int ENTITY_ARRAY_OFFSET = 0;
 
@@ -22,6 +25,26 @@ namespace EntJoy.ECS
         public int Capacity => Meta.EntityCapacity;
         public int TotalSize => Meta.TotalSize;
         public int ComponentCount => Meta.ComponentCount;
+
+        /// <summary>组件数据修改版本号，用于变更追踪的 Chunk 级快速过滤。</summary>
+        public int Version => _version;
+
+        /// <summary>位图版本号：实体增删、启用状态变化时递增，用于组合位图缓存失效判断。</summary>
+        public int EnableVersion => _enableVersion;
+
+        /// <summary>本 Chunk 是否在指定版本号之后有组件数据变更。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool HasChangesSince(int version)
+        {
+            return _version > version;
+        }
+
+        /// <summary>递增组件数据修改版本号。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void IncrementVersion()
+        {
+            Interlocked.Increment(ref _version);
+        }
 
         /// <summary>
         /// Construct a chunk using pre-computed shared metadata and a pre-allocated slab pointer.
@@ -33,9 +56,7 @@ namespace EntJoy.ECS
             Meta = meta;
             MemoryBlock = memoryBlock;
             _entityCount = 0;
-            // Phase 2.3: Chunk lazy zero — 移除整体清零
-            // AddEntity 会逐 slot 清零组件数据 + 初始化 enableable 位图，
-            // 未使用的 slot（index >= entityCount）不会被访问，无需预先清零。
+            // 延迟清零：AddEntity 逐 slot 初始化组件与 enableable 位，未使用 slot 不被访问。
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -68,6 +89,7 @@ namespace EntJoy.ECS
             }
 
             _entityCount++;
+            _enableVersion++;  // 位图布局变化，递增使缓存失效
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -128,6 +150,7 @@ namespace EntJoy.ECS
             }
 
             _entityCount--;
+            _enableVersion++;  // swap-pop 使位图内容变化，递增使缓存失效
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -193,6 +216,64 @@ namespace EntJoy.ECS
                 bitMapPtr[ulongIndex] |= 1UL << bitOffset;
             else
                 bitMapPtr[ulongIndex] &= ~(1UL << bitOffset);
+            _enableVersion++;
+        }
+
+        // ======================== 变更追踪 ========================
+
+        /// <summary>获取变更位掩码指针。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ulong* GetChangedBitMaskPointer()
+        {
+            if (Meta.ChangedBitMaskOffset == -1) return null;
+            return (ulong*)((byte*)MemoryBlock + Meta.ChangedBitMaskOffset);
+        }
+
+        /// <summary>检查指定实体是否在本帧被修改。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool IsEntityChanged(int entityIndex)
+        {
+            ulong* bitMapPtr = GetChangedBitMaskPointer();
+            if (bitMapPtr == null) return false;
+            int ulongIndex = entityIndex >> 6;
+            int bitOffset = entityIndex & 63;
+            return (bitMapPtr[ulongIndex] & 1UL << bitOffset) != 0;
+        }
+
+        /// <summary>标记指定实体为已修改。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void MarkEntityChanged(int entityIndex)
+        {
+            ulong* bitMapPtr = GetChangedBitMaskPointer();
+            if (bitMapPtr == null) return;
+            int ulongIndex = entityIndex >> 6;
+            int bitOffset = entityIndex & 63;
+            bitMapPtr[ulongIndex] |= 1UL << bitOffset;
+        }
+
+        /// <summary>清除所有实体的变更标记（帧末调用）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void ClearChangedBitMask()
+        {
+            ulong* bitMapPtr = GetChangedBitMaskPointer();
+            if (bitMapPtr == null) return;
+            int ulongCount = (Meta.EntityCapacity + 63) / 64;
+            for (int i = 0; i < ulongCount; i++)
+                bitMapPtr[i] = 0;
+        }
+
+        /// <summary>Chunk 中是否有任何实体被修改过。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool HasAnyEntityChanged()
+        {
+            ulong* bitMapPtr = GetChangedBitMaskPointer();
+            if (bitMapPtr == null) return false;
+            int ulongCount = (_entityCount + 63) / 64;
+            for (int i = 0; i < ulongCount; i++)
+            {
+                if (bitMapPtr[i] != 0) return true;
+            }
+            return false;
         }
     }
 }

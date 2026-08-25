@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace EntJoy.ECS
 {
@@ -19,6 +20,13 @@ namespace EntJoy.ECS
         // Phase 2.1: Archetype Edges — 缓存 Add/Remove 目标 Archetype
         private readonly Dictionary<ComponentType, Archetype> _addEdges = new();
         private readonly Dictionary<ComponentType, Archetype> _removeEdges = new();
+
+        // 全局变更版本号（组件修改/结构变更时递增）
+        private int _globalVersion;
+        public int GlobalVersion => _globalVersion;
+
+        // AllEnabled 组合位图缓存（按 chunk enableVersion 失效）
+        private readonly Dictionary<int, CombinedMaskCache> _maskCache = new();
 
         public Archetype(ComponentType[] ts)
         {
@@ -300,6 +308,7 @@ namespace EntJoy.ECS
         {
             var componentIndex = componentTypeRecorder[typeof(T)];
             _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex) = value;
+            NotifyComponentChanged(chunkIndex, slotInChunk);
         }
 
         /// <summary>
@@ -310,13 +319,9 @@ namespace EntJoy.ECS
         {
             var componentIndex = componentTypeRecorder[componentType];
             var chunk = _chunkList[chunkIndex];
-            
-            // 使用 ComponentTypeManager 获取组件大小
-            var compType = ComponentTypeManager.GetComponentType(componentType);
-            var compSize = compType.Size;
+            var compSize = ComponentTypeManager.GetComponentType(componentType).Size;
             var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
-            
-            // 使用 GCHandle.Pinned 固定对象，获取指针后复制数据
+
             var handle = System.Runtime.InteropServices.GCHandle.Alloc(value, System.Runtime.InteropServices.GCHandleType.Pinned);
             try
             {
@@ -327,6 +332,16 @@ namespace EntJoy.ECS
             {
                 handle.Free();
             }
+            NotifyComponentChanged(chunkIndex, slotInChunk);
+        }
+
+        /// <summary>组件写入后维护变更追踪（递增版本号并标记实体）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void NotifyComponentChanged(int chunkIndex, int slotInChunk)
+        {
+            _chunkList[chunkIndex].IncrementVersion();
+            _chunkList[chunkIndex].MarkEntityChanged(slotInChunk);
+            Interlocked.Increment(ref _globalVersion);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -416,8 +431,215 @@ namespace EntJoy.ECS
             return componentTypeRecorder.ContainsKey(componentType);
         }
 
+        // ======================== 变更追踪 ========================
+
+        /// <summary>递增全局版本号（结构变更或组件修改时调用）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void IncrementGlobalVersion()
+        {
+            Interlocked.Increment(ref _globalVersion);
+        }
+
+        /// <summary>递增所有 Chunk 的组件修改版本号（结构变更时调用）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void IncrementChunkVersions()
+        {
+            foreach (var chunk in _chunkList)
+            {
+                chunk.IncrementVersion();
+            }
+        }
+
+        /// <summary>清除所有 Chunk 的实体变更标记（帧末调用）。</summary>
+        public void ClearAllChangedBitMasks()
+        {
+            foreach (var chunk in _chunkList)
+            {
+                chunk.ClearChangedBitMask();
+            }
+        }
+
+        // ======================== 组合位图缓存 ========================
+
+        /// <summary>
+        /// 单组 AllEnabled 组合的位图缓存（pinned 托管数组，指针稳定）。
+        /// 结构与 _chunkList 索引一一对应；chunk 增删时整体重建。
+        /// </summary>
+        private sealed unsafe class CombinedMaskCache : IDisposable
+        {
+            public int ChunkCount;
+            public int[] ChunkEnableVersions = Array.Empty<int>();
+            public nint[] Ptrs = Array.Empty<nint>();      // ulong* 以 nint 存储
+            public GCHandle[] Handles = Array.Empty<GCHandle>();
+
+            public unsafe ulong* GetPtr(int chunkIndex)
+                => Ptrs[chunkIndex] == 0 ? null : (ulong*)Ptrs[chunkIndex];
+
+            public void Dispose()
+            {
+                foreach (var h in Handles)
+                {
+                    if (h.IsAllocated) h.Free();
+                }
+                Handles = Array.Empty<GCHandle>();
+                Ptrs = Array.Empty<nint>();
+            }
+        }
+
+        /// <summary>计算 AllEnabled 组合的哈希键。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ComputeAllEnabledHash(ComponentType[] allEnabledTypes)
+        {
+            if (allEnabledTypes == null || allEnabledTypes.Length == 0)
+                return 0;
+
+            int hash = 17;
+            foreach (var type in allEnabledTypes)
+            {
+                hash = hash * 31 + type.Id;
+            }
+            return hash;
+        }
+
+        /// <summary>
+        /// 获取指定 Chunk 的组合位图（惰性计算 + 按 enableVersion 缓存）。
+        /// 返回 null 表示无交集（没有实体同时启用所有 AllEnabled 组件）。
+        /// 仅主线程使用（IJobChunk.Run 同步执行路径），并行调度路径由 ExecuteManagedChunk 独立计算。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe ulong* GetOrComputeCombinedMask(ComponentType[] allEnabledTypes, int chunkIndex, Chunk chunk)
+        {
+            if (allEnabledTypes == null || allEnabledTypes.Length == 0)
+                return null;
+            if (chunkIndex < 0 || chunkIndex >= _chunkList.Count)
+                return null;
+
+            int key = ComputeAllEnabledHash(allEnabledTypes);
+
+            // 缓存缺失或 chunk 数量变化（结构变更）→ 重建整套缓存
+            if (!_maskCache.TryGetValue(key, out var cache) || cache.ChunkCount != _chunkList.Count)
+            {
+                cache = BuildMaskCache(allEnabledTypes, key);
+                _maskCache[key] = cache;
+            }
+
+            // chunk 实体/启用状态变化 → 只重算当前 chunk
+            if (cache.ChunkEnableVersions[chunkIndex] != chunk.EnableVersion)
+                RecomputeChunkMask(cache, allEnabledTypes, chunkIndex, chunk);
+
+            return cache.GetPtr(chunkIndex);
+        }
+
+        private unsafe CombinedMaskCache BuildMaskCache(ComponentType[] allEnabledTypes, int key)
+        {
+            // 释放旧缓存（存在时）
+            if (_maskCache.TryGetValue(key, out var old))
+                old.Dispose();
+
+            int count = _chunkList.Count;
+            var cache = new CombinedMaskCache
+            {
+                ChunkCount = count,
+                ChunkEnableVersions = new int[count],
+                Ptrs = new nint[count],
+                Handles = new GCHandle[count],
+            };
+
+            for (int chunkIdx = 0; chunkIdx < count; chunkIdx++)
+            {
+                var chunk = _chunkList[chunkIdx];
+                if (chunk.EntityCount == 0) continue;
+                var full = ComputeForChunk(allEnabledTypes, chunk);
+                cache.Ptrs[chunkIdx] = (nint)Pin(full, out cache.Handles[chunkIdx]);
+                cache.ChunkEnableVersions[chunkIdx] = chunk.EnableVersion;
+            }
+            return cache;
+        }
+
+        private unsafe void RecomputeChunkMask(CombinedMaskCache cache, ComponentType[] allEnabledTypes, int chunkIndex, Chunk chunk)
+        {
+            if (cache.Handles[chunkIndex].IsAllocated)
+                cache.Handles[chunkIndex].Free();
+
+            if (chunk.EntityCount == 0)
+            {
+                cache.Ptrs[chunkIndex] = 0;
+                cache.ChunkEnableVersions[chunkIndex] = chunk.EnableVersion;
+                return;
+            }
+
+            var full = ComputeForChunk(allEnabledTypes, chunk);
+            cache.Ptrs[chunkIndex] = (nint)Pin(full, out cache.Handles[chunkIndex]);
+            cache.ChunkEnableVersions[chunkIndex] = chunk.EnableVersion;
+        }
+
+        /// <summary>计算单 chunk 的组合位图；无交集返回 null。</summary>
+        private unsafe ulong[]? ComputeForChunk(ComponentType[] allEnabledTypes, Chunk chunk)
+        {
+            int entityCount = chunk.EntityCount;
+            int ulongCount = (entityCount + 63) / 64;
+            var combinedMask = new ulong[ulongCount];
+
+            bool first = true;
+            foreach (var type in allEnabledTypes)
+            {
+                if (!componentTypeRecorder.TryGetValue(type, out int compIdx))
+                    continue;
+
+                ulong* bitmap = chunk.GetEnableBitMapPointer(compIdx);
+                if (bitmap == null) continue;
+
+                if (first)
+                {
+                    for (int i = 0; i < ulongCount; i++)
+                        combinedMask[i] = bitmap[i];
+                    first = false;
+                }
+                else
+                {
+                    bool hasAny = false;
+                    for (int i = 0; i < ulongCount; i++)
+                    {
+                        combinedMask[i] &= bitmap[i];
+                        if (combinedMask[i] != 0) hasAny = true;
+                    }
+                    if (!hasAny) return null;  // 交集为空，提前退出
+                }
+            }
+
+            if (first) return null;  // 没有任何 AllEnabled 组件在该 archetype 中
+
+            // 最终校验（单组件场景：第一个组件可能全 0）
+            bool any = false;
+            for (int i = 0; i < ulongCount; i++)
+            {
+                if (combinedMask[i] != 0) { any = true; break; }
+            }
+            return any ? combinedMask : null;
+        }
+
+        private static unsafe ulong* Pin(ulong[]? mask, out GCHandle handle)
+        {
+            if (mask == null)
+            {
+                handle = default;
+                return null;
+            }
+            handle = GCHandle.Alloc(mask, GCHandleType.Pinned);
+            return (ulong*)handle.AddrOfPinnedObject();
+        }
+
+        /// <summary>释放所有位图缓存（Archetype 销毁时调用）。</summary>
+        public void InvalidateMaskCache()
+        {
+            foreach (var cache in _maskCache.Values)
+                cache.Dispose();
+            _maskCache.Clear();
+        }
+
         public void Dispose()
         {
+            InvalidateMaskCache();
             foreach (var raw in _slabs)
                 ChunkMemoryPool.Free(raw);
             _slabs.Clear();

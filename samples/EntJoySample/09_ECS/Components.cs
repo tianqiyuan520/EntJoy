@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
@@ -21,4 +21,10 @@ namespace EntJoySample.ECS
     }
 
     public struct DamageEvent : IComponentData { }
+
+    /// <summary>可启用组件，用于测试 EnabledComponent 过滤。</summary>
+    public struct ActiveComponent : IComponentData, IEnableableComponent
+    {
+        public bool IsActive;
+    }
 }

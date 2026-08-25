@@ -1,5 +1,9 @@
-﻿using System;
+using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 
 namespace EntJoy.ECS
@@ -22,12 +26,14 @@ namespace EntJoy.ECS
 
     // 实体级迭代：archetype → chunk → slot。每 chunk 提升组件基址一次（等价 IJobChunk 循环形态），
     // 循环内逐 slot 产出 ref 组件对，密集 OOD 访问零间接、与 class 持平。
+    // 支持 AllEnabled 过滤（.WithEnabled<T1>()）：构建时计算组合位图，MoveNext 跳过禁用 slot。
     public unsafe ref struct QueryEnumerator<T0, T1>
         where T0 : struct
         where T1 : struct
     {
         private readonly EntityManager _entityManager;
         private readonly QueryBuilder _builder;
+        private readonly ComponentType[] _allEnabledTypes;
         private int _archIndex;
         private int _chunkIndex;
         private int _slotIndex;
@@ -39,10 +45,15 @@ namespace EntJoy.ECS
         private T0* _t0Base;
         private T1* _t1Base;
 
+        // AllEnabled 组合位图（无过滤时为 null）
+        private ulong* _combinedMask;
+        private int _ulongCount;
+
         internal QueryEnumerator(EntityManager entityManager, QueryBuilder builder)
         {
             _entityManager = entityManager;
             _builder = builder;
+            _allEnabledTypes = builder.AllEnabled;
             _archIndex = 0;
             _chunkIndex = 0;
             _slotIndex = 0;
@@ -53,6 +64,8 @@ namespace EntJoy.ECS
             _t1Idx = -1;
             _t0Base = null;
             _t1Base = null;
+            _combinedMask = null;
+            _ulongCount = 0;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -90,6 +103,21 @@ namespace EntJoy.ECS
                     _t0Base = (T0*)chunk.GetComponentArrayPointer(_t0Idx);
                     _t1Base = (T1*)chunk.GetComponentArrayPointer(_t1Idx);
                     _slotIndex = 0;
+
+                    // 有 AllEnabled 过滤：计算组合位图；无交集则跳过此 Chunk
+                    if (_allEnabledTypes != null && _allEnabledTypes.Length > 0)
+                    {
+                        if (!ComputeCombinedMask(chunk))
+                        {
+                            _combinedMask = null;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        _combinedMask = null;
+                    }
+
                     return true;
                 }
             }
@@ -97,16 +125,151 @@ namespace EntJoy.ECS
             return MoveNextArchetype();
         }
 
+        /// <summary>
+        /// 计算 AllEnabled 组合位图（SIMD AND + 提前退出）。
+        /// 返回 false 表示无交集（Chunk 中没有任何实体同时启用所有 AllEnabled 组件）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool ComputeCombinedMask(Chunk chunk)
+        {
+            _ulongCount = (chunk.EntityCount + 63) / 64;
+            ulong* combinedMask = TempBuffer.GetBuffer(_ulongCount);
+            _combinedMask = combinedMask;
+            for (int i = 0; i < _ulongCount; i++) combinedMask[i] = 0;
+
+            bool firstFound = false;
+            var archetype = chunk.Archetype;
+            foreach (var type in _allEnabledTypes)
+            {
+                int componentIndex = archetype.GetComponentTypeIndex(type);
+                if (componentIndex < 0) continue;
+                ulong* bitmap = chunk.GetEnableBitMapPointer(componentIndex);
+                if (bitmap == null) continue;
+
+                if (!firstFound)
+                {
+                    for (int i = 0; i < _ulongCount; i++)
+                        combinedMask[i] = bitmap[i];
+                    firstFound = true;
+                }
+                else
+                {
+                    // SIMD 批量 AND + 提前退出
+                    if (Avx2.IsSupported && _ulongCount >= 4)
+                    {
+                        int i = 0;
+                        var orResult = Vector256<ulong>.Zero;
+
+                        for (; i <= _ulongCount - 4; i += 4)
+                        {
+                            var a = Avx.LoadVector256(combinedMask + i);
+                            var b = Avx.LoadVector256(bitmap + i);
+                            var andResult = Avx2.And(a, b);
+                            orResult = Avx2.Or(orResult, andResult);
+                        }
+
+                        bool hasIntersection = !Avx.TestZ(orResult, orResult);
+
+                        for (; i < _ulongCount && !hasIntersection; i++)
+                        {
+                            combinedMask[i] &= bitmap[i];
+                            hasIntersection = combinedMask[i] != 0;
+                        }
+
+                        if (hasIntersection)
+                        {
+                            for (; i < _ulongCount; i++)
+                                combinedMask[i] &= bitmap[i];
+                        }
+                        else
+                        {
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        bool hasAny = false;
+                        for (int i = 0; i < _ulongCount; i++)
+                        {
+                            combinedMask[i] &= bitmap[i];
+                            if (combinedMask[i] != 0) hasAny = true;
+                        }
+                        if (!hasAny) return false;
+                    }
+                }
+            }
+
+            return firstFound;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext()
         {
-            if (_currentChunk.MemoryBlock == nint.Zero)
-                return MoveNextArchetype();
-            _slotIndex++;
-            if (_slotIndex < _count)
-                return true;
-            _currentChunk = default;
-            return MoveNextChunk();
+            // 已有当前 Chunk：从 slot+1 继续；否则从位置 0 开始
+            if (_currentChunk.MemoryBlock != nint.Zero)
+                _slotIndex++;
+
+            return Advance();
+        }
+
+        /// <summary>
+        /// 从当前 _slotIndex 起查找下一个满足条件的实体；跨 Chunk/Archetype 自动推进。
+        /// 有 AllEnabled 过滤时每个 Chunk 的 slot 0 都经过位图检查（无漏查）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool Advance()
+        {
+            while (true)
+            {
+                // 定位到有效 Chunk
+                if (_currentArch == null)
+                {
+                    if (!MoveNextArchetype())
+                        return false;
+                }
+                else if (_currentChunk.MemoryBlock == nint.Zero)
+                {
+                    if (!MoveNextChunk())
+                        return false;
+                }
+
+                if (_combinedMask != null)
+                {
+                    // 启用过滤：位图遍历
+                    while (_slotIndex < _count)
+                    {
+                        int ulongIdx = _slotIndex >> 6;
+                        if (ulongIdx >= _ulongCount)
+                        {
+                            _slotIndex = _count;
+                            break;
+                        }
+
+                        int bitOffset = _slotIndex & 63;
+                        ulong mask = _combinedMask[ulongIdx] >> bitOffset;
+
+                        if (mask != 0)
+                        {
+                            int bitIndex = BitOperations.TrailingZeroCount(mask);
+                            _slotIndex += bitIndex;
+                            if (_slotIndex < _count)
+                                return true;
+                            break;
+                        }
+
+                        _slotIndex = (ulongIdx + 1) << 6;
+                    }
+                }
+                else
+                {
+                    // 无过滤：普通遍历
+                    if (_slotIndex < _count)
+                        return true;
+                }
+
+                // 当前 Chunk 耗尽 → 下一 Chunk（MoveNextChunk 重置 _slotIndex=0 并重新检查）
+                _currentChunk = default;
+            }
         }
 
         public EntityQueryResult<T0, T1> Current

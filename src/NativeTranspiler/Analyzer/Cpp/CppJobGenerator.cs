@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -1526,7 +1526,7 @@ namespace NativeTranspiler.Analyzer
             // 4. Decompose struct read-modify-write pattern (ISPC-style: eliminate intermediate struct locals)
             //    Detects: StructType temp = array[idx]; temp.Field += ...; array[idx] = temp;
             //    Rewrites to: array[idx].Field += ...;
-            var decomposedBody = DecomposeStructLocals(afterFirstPass, chunkArrayNames, entityLoopIv);
+            var decomposedBody = DecomposeStructLocals(afterFirstPass!, chunkArrayNames, entityLoopIv);
 
             return (chunkArrays, entityLoopIv, decomposedBody);
         }
@@ -1852,7 +1852,7 @@ namespace NativeTranspiler.Analyzer
             // 7. Scalar remainder loop
             GenerateChunkFunctionRemainder(jobStruct, compilation, sb, useFastMath, chunkArrays, entityLoopIv);
             }
-            catch (Exception ex)
+            catch
             {
                 // Catch block: gracefully close the function with scalar body
                 try

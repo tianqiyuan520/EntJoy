@@ -9,6 +9,9 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>IJobEntity 接口名（语义匹配 + 语法谓词 Contains 均使用）。</summary>
         public const string IJobEntity = "IJobEntity";
 
+        /// <summary>IJobChunk 接口名（[NativeTranspile] 时同样由本生成器产出扩展方法）。</summary>
+        public const string IJobChunk = "IJobChunk";
+
         /// <summary>Job 执行方法名。</summary>
         public const string Execute = "Execute";
 
