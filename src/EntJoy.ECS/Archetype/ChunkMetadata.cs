@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 
 namespace EntJoy.ECS
 {
@@ -21,6 +21,10 @@ namespace EntJoy.ECS
         public readonly int[] EnableBitOffsets;
         public readonly int[] EnableStrideBytes;
 
+        // 实体级变更位掩码在块内的偏移与字节数（-1/0 表示不启用变更追踪）
+        public readonly int ChangedBitMaskOffset;
+        public readonly int ChangedBitMaskSize;
+
         public ChunkMetadata(
             Archetype archetype,
             int entityCapacity,
@@ -28,7 +32,9 @@ namespace EntJoy.ECS
             int[] componentOffsets,
             int[] componentSizes,
             int[] enableBitOffsets,
-            int[] enableStrideBytes)
+            int[] enableStrideBytes,
+            int changedBitMaskOffset = -1,
+            int changedBitMaskSize = 0)
         {
             Archetype = archetype;
             EntityCapacity = entityCapacity;
@@ -38,13 +44,14 @@ namespace EntJoy.ECS
             ComponentSizes = componentSizes;
             EnableBitOffsets = enableBitOffsets;
             EnableStrideBytes = enableStrideBytes;
+            ChangedBitMaskOffset = changedBitMaskOffset;
+            ChangedBitMaskSize = changedBitMaskSize;
         }
 
         /// <summary>
-        /// 计算 Chunk 内存布局并创建元数据。
-        /// 从原 Chunk.CalculateMemoryLayout 提取，每个 Archetype 只调用一次。
+        /// 计算 Chunk 内存布局并创建元数据。每个 Archetype 只调用一次。
         /// </summary>
-        public static ChunkMetadata Create(Archetype archetype, int entityCapacity, ComponentType[] componentTypes)
+        public static ChunkMetadata Create(Archetype archetype, int entityCapacity, ComponentType[] componentTypes, bool enableChangeTracking = true)
         {
             const int cacheLineSize = 64;
 
@@ -84,6 +91,18 @@ namespace EntJoy.ECS
                 }
             }
 
+            // 实体级变更位掩码（每实体 1 bit）
+            int changedBitMaskOffset = -1;
+            int changedBitMaskSize = 0;
+            if (enableChangeTracking)
+            {
+                offset = (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
+                changedBitMaskOffset = offset;
+                int ulongCount = (entityCapacity + 63) / 64;
+                changedBitMaskSize = ulongCount * 8;
+                offset += changedBitMaskSize;
+            }
+
             return new ChunkMetadata(
                 archetype,
                 entityCapacity,
@@ -91,7 +110,9 @@ namespace EntJoy.ECS
                 componentOffsets,
                 componentSizes,
                 enableBitOffsets,
-                enableStrideBytes);
+                enableStrideBytes,
+                changedBitMaskOffset,
+                changedBitMaskSize);
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -18,6 +18,19 @@ namespace EntJoy.ECS
         }
 
         public int Length => _length;
+
+        /// <summary>组合位图 ulong 数量（实体数按 64 向上取整）。</summary>
+        public int UlongCount => _ulongCount;
+
+        /// <summary>
+        /// 组合位图指针（每 bit 一个实体，位 0 = 实体 0）。
+        /// 供生成代码/用户内联 BitOperations 遍历；无过滤时为 null（Length 为 0，应遍历全部实体）。
+        /// </summary>
+        public ulong* Bits
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _bits;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryGetNextRange(ref int start, out int rangeStart, out int rangeEnd)

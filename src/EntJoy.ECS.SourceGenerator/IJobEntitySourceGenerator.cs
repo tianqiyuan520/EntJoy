@@ -44,7 +44,9 @@ namespace EntJoy.ECS.SourceGenerator
         {
             return node is StructDeclarationSyntax s &&
                    s.BaseList != null &&
-                   s.BaseList.Types.Any(t => t.Type.ToString().Contains(Config.IJobEntity));
+                   s.BaseList.Types.Any(t =>
+                       t.Type.ToString().Contains(Config.IJobEntity) ||
+                       t.Type.ToString().Contains(Config.IJobChunk));
         }
 
         private static JobCandidate? GetJob(GeneratorSyntaxContext context, CancellationToken ct)
@@ -56,17 +58,22 @@ namespace EntJoy.ECS.SourceGenerator
             if (model.GetDeclaredSymbol(candidate, ct) is not INamedTypeSymbol jobType)
                 return null;
 
-            if (!jobType.AllInterfaces.Any(i => i.Name == Config.IJobEntity &&
-                                                i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS))
+            bool isEntity = jobType.AllInterfaces.Any(i =>
+                i.Name == Config.IJobEntity && i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS);
+            bool isChunk = jobType.AllInterfaces.Any(i =>
+                i.Name == Config.IJobChunk && i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS);
+            if (!isEntity && !isChunk)
                 return null;
 
-            // [NativeTranspile] 的 IJobEntity 路由到原生路径（NativeExports.Schedule_*）
-            // 非 [NativeTranspile] 的 IJobEntity 走托管路径（IJobChunk 适配器）
-            // 不再跳过任何 IJobEntity，统一由本生成器处理
+            // [NativeTranspile] 的 Job 路由到原生路径（NativeExports.Schedule_* / RunImmediate_*）
+            // 非 [NativeTranspile] 的 IJobEntity 走托管路径（IJobChunk 适配器）；
+            // 非 [NativeTranspile] 的 IJobChunk 无需生成（ChunkJobExtensions 直接可用）。
             var nativeTranspileAttr = jobType.GetAttributes().FirstOrDefault(a =>
                 a.AttributeClass?.Name == "NativeTranspileAttribute" &&
                 a.AttributeClass?.ContainingNamespace?.ToDisplayString() == "NativeTranspiler");
             bool isNativeTranspiled = nativeTranspileAttr != null;
+            if (isChunk && !isNativeTranspiled)
+                return null;
 
             var execute = jobType.GetMembers().OfType<IMethodSymbol>()
                 .FirstOrDefault(m => m.Name == Config.Execute && m.Parameters.Length > 0 && m.ReturnsVoid);
@@ -118,7 +125,8 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine();
                 sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.Schedule_{jobType.Name}(ref job, query, default).Complete();");
+                // RunImmediate_*：C++ ImmediateNative 主线程直接执行（零 worker 唤醒、无 handle 往返）
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.RunImmediate_{jobType.Name}(ref job, query);");
                 sb.AppendLine("    }");
             }
             else
@@ -145,7 +153,7 @@ namespace EntJoy.ECS.SourceGenerator
             // 只为非 NativeTranspiled 生成 IJobChunk 适配器
             if (!isNativeTranspiled)
             {
-                sb.AppendLine($"internal struct {adapterName} : IJobChunk");
+                sb.AppendLine($"internal unsafe struct {adapterName} : IJobChunk");
                 sb.AppendLine("{");
                 sb.AppendLine($"    public {jobFullName} Job;");
                 sb.AppendLine();
@@ -154,10 +162,31 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("    {");
                 sb.AppendLine(componentDecls);
                 sb.AppendLine("        int __count = __chunk.Count;");
-                sb.AppendLine("        for (int __idx = 0; __idx < __count; __idx++)");
+                // 无过滤（enabledMask.Length == 0）：遍历全部实体
+                sb.AppendLine("        if (__enabledMask.Length == 0)");
                 sb.AppendLine("        {");
+                sb.AppendLine("            for (int __idx = 0; __idx < __count; __idx++)");
+                sb.AppendLine("            {");
                 if (!string.IsNullOrEmpty(inlinedBody))
                     sb.Append(inlinedBody);
+                sb.AppendLine("            }");
+                sb.AppendLine("        }");
+                // 有过滤：BitOperations 内联位图跳转（与 Query 同路径，避免 TryGetNextRange 调用开销）
+                sb.AppendLine("        else");
+                sb.AppendLine("        {");
+                sb.AppendLine("            ulong* __bits = __enabledMask.Bits;");
+                sb.AppendLine("            int __idx = 0;");
+                sb.AppendLine("            while (__idx < __count)");
+                sb.AppendLine("            {");
+                sb.AppendLine("                int __u = __idx >> 6;");
+                sb.AppendLine("                ulong __m = __bits[__u] >> (__idx & 63);");
+                sb.AppendLine("                if (__m == 0) { __idx = (__u + 1) << 6; continue; }");
+                sb.AppendLine("                __idx += System.Numerics.BitOperations.TrailingZeroCount(__m);");
+                sb.AppendLine("                if (__idx >= __count) break;");
+                if (!string.IsNullOrEmpty(inlinedBody))
+                    sb.Append(inlinedBody);
+                sb.AppendLine("                __idx++;");
+                sb.AppendLine("            }");
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
                 sb.AppendLine("}");

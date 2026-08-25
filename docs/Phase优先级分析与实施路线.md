@@ -1,5 +1,8 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-25 增量：Change Tracking 核心实现、EnabledComponent 过滤优化、Run 直执/ImmediateNative、
+> SourceGenerator 统一（IJobEntity/IJobChunk）——详见 `docs/20260825-ChangeTracking与Enabled优化记录.md`。
+
 > **目的**：将 v3 进化方案的 Phase 计划、设计决策遗留项、AutoSIMD 修复、以及工程改进
 > 统一按优先级排序，给出明确的实施顺序建议。
 > **前置文档**：`ecs-evolution-plan-v3.md`、`项目现状总览.md`、`20260822-设计决策记录-AI聊天讨论沉淀.md`
@@ -29,10 +32,12 @@ Phase 4 (System 调度与开发体验增强) ✅ 进行中
   └─ Schedule Graph        ✅ — DAG 拓扑排序 + PrintSchedule 输出
   └─ OrderBefore/OrderAfter ✅ — 手动指定 System 执行顺序
   └─ Entity Builder        ✅ — 实体构造器，使用 SetRaw 无反射
-  └─ Change Tracking       ⏸ — 接口已定义，核心逻辑待实现
+  └─ Change Tracking       ✅ — 核心实现（Chunk 版本号 + 实体位掩码），见 20260825 记录；swap-pop 位掩码待修
   └─ RunWhen               ✅ — 条件执行，空闲跳过
   └─ 非泛型方法             ✅ — SetRaw/AddComponentRaw/RemoveComponentRaw 无反射
   └─ 命名空间重构           ✅ — EntJoy → EntJoy.ECS
+  └─ EnabledComponent 过滤   ✅ — 链式 `Query<T0>().WithEnabled<T1>()`，SIMD 位图 + enableVersion 缓存
+  └─ Run 直执 / ImmediateNative ✅ — ECS 侧直接执行；Native 版 Run 零 worker 唤醒（2026-08-25）
 
 Phase 5 (易用性)            🔲 未开始
   └─ 关系型状态机

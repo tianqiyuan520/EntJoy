@@ -105,14 +105,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
 
             // 5. Job 扩展方法（Schedule 和 Run）
-            // 注意：IJobEntity 的 JobExtensions 由 ECS 生成器生成（路由到原生/托管路径）
-            // 这里只为 IJobChunk/IJobParallelFor/IJobFor/IJob 生成
-            var nonEntityJobs = nativeJobs.Where(j => !CppJobGenerator.IsEntityJob(j)).ToList();
-            if (nonEntityJobs.Count > 0)
+            // 注意：IJobChunk / IJobEntity 的扩展方法由 ECS 生成器生成（job 所在命名空间，与
+            // 用户代码同域），不在此生成。这里只保留 IJob/IJobParallelFor/IJobFor。
+            var nonChunkJobs = nativeJobs.Where(j => !CppJobGenerator.IsChunkScheduledJob(j)).ToList();
+            if (nonChunkJobs.Count > 0)
             {
                 sb.AppendLine("public static partial class JobExtensions");
                 sb.AppendLine("{");
-                foreach (var jobStruct in nonEntityJobs)
+                foreach (var jobStruct in nonChunkJobs)
                 {
                     GenerateJobExtensionMethod(sb, jobStruct);
                     GenerateJobRunMethod(sb, jobStruct, compilation);
@@ -651,7 +651,14 @@ namespace NativeTranspiler.Analyzer
 
                 sb.AppendLine($"        public static void RunImmediate_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query)");
                 sb.AppendLine("        {");
-                sb.AppendLine($"            Schedule_{jobStruct.Name}(ref job, query, default).Complete();");
+                // ImmediateNative：主线程同步执行，零 worker 唤醒、无 handle 往返
+                sb.AppendLine("            var world = World.DefaultWorld ?? throw new InvalidOperationException(\"No active World found.\");");
+                if (isIspcCap)
+                    sb.AppendLine($"            NativeEcsScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                else if (CppJobGenerator.IsEntityJob(jobStruct))
+                    sb.AppendLine($"            NativeEcsScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                else
+                    sb.AppendLine($"            NativeEcsScheduler.RunChunkImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkEntityBatchFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
                 sb.AppendLine("        }");
                 sb.AppendLine();
             }
@@ -1084,7 +1091,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    {");
             if (isChunk)
             {
-                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, query, default).Complete();");
+                // ImmediateNative：主线程同步执行，零 worker 唤醒、无 handle 往返
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.RunImmediate_{jobStruct.Name}(ref job, query);");
             }
             else if (isParallelFor || isFor)
             {

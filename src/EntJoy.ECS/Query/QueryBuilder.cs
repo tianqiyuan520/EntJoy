@@ -1,4 +1,4 @@
-﻿
+
 
 using System;
 using System.Collections.Generic;
@@ -16,10 +16,16 @@ namespace EntJoy.ECS
         public ComponentType[] None;
         public ComponentType[] AllEnabled;   // 必须存在且启用的组件
 
+        // 变更追踪过滤
+        public ComponentType[] ChangedComponents;  // 需要检查变更的组件类型
+        public int MinChangedVersion;              // 最小版本号（用于帧级过滤）
+
         public QueryBuilder()
         {
             LimitCount = -1;
             AllEnabled = [];
+            ChangedComponents = null;
+            MinChangedVersion = -1;
         }
 
         public QueryBuilder SetLimit(int count)
@@ -77,6 +83,30 @@ namespace EntJoy.ECS
         public QueryBuilder WithNone<T>() where T : struct
         {
             None = ComponentTypes<T>.Share;
+            return this;
+        }
+
+        // ======================== 变更追踪过滤 ========================
+
+        /// <summary>只返回指定组件被修改过的实体。</summary>
+        public QueryBuilder WithChanged<T>() where T : struct
+        {
+            var compType = ComponentTypeManager.GetComponentType(typeof(T));
+            if (ChangedComponents == null || ChangedComponents.Length == 0)
+            {
+                ChangedComponents = new ComponentType[] { compType };
+            }
+            else
+            {
+                ChangedComponents = Merge(ChangedComponents, new ComponentType[] { compType });
+            }
+            return this;
+        }
+
+        /// <summary>只返回在指定版本号之后被修改过的实体。</summary>
+        public QueryBuilder ChangedSince(int version)
+        {
+            MinChangedVersion = version;
             return this;
         }
 

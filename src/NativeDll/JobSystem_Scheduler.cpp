@@ -454,7 +454,7 @@ namespace JobSystem
         void* context, void (*cleanup)(void*),
         const ChunkJobData* chunks, const EntityBatchData* batches,
         int itemCount, const JobHandle& dependency,
-        ChunkScheduleMode, int workerCap, int rangeSize, EcsJobKind jobKind)
+        ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
@@ -473,8 +473,10 @@ namespace JobSystem
         // useFineRanges deliberately disabled: it doubled tile count without benefit.
         int rc = (itemCount + rs - 1) / rs;
 
-        // Inline for trivial work（依赖已完成/无依赖时；依赖未完成走异步提交）
-        if (depOk && rc <= 1 && workerCap <= 1)
+        // Inline for sync / trivial work（依赖已完成/无依赖时；依赖未完成走异步提交）：
+        // — ImmediateNative：主线程同步执行，零 worker 唤醒（Run 场景）
+        // — rc<=1 && workerCap<=1：单批次小任务顺带同步执行
+        if (depOk && (mode == ChunkScheduleMode::ImmediateNative || (rc <= 1 && workerCap <= 1)))
         {
             auto* st = CreateState(true);
             const uint64_t diagId = AssignStateDiagnosticId(st);
