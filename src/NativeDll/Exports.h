@@ -78,8 +78,30 @@ extern "C" {
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
 
+    // ── 显式批提交（BatchScope.Submit 用）：一次 P/Invoke 提交一组 job，句柄回写 outHandles ──
+    // kind: 0=IJob(JobFunc) 1=IJobFor(IndexJobFunc, length) 2=IJobParallelFor(BatchJobFunc, length+batchSize)
+    // 内部 deferNotify 窗口：全部 submit 后统一唤醒一次（依赖未完成路径由 continuation 照常执行）。
+    // 失败槽位 outHandles[i]=nullptr；返回成功提交数。
+    typedef struct JobBatchDesc
+    {
+        unsigned char kind;
+        unsigned char reserved[3];
+        void* func;
+        void* context;
+        ContextCleanupFunc cleanup;
+        void* dependency;
+        int length;
+        int batchSize;
+    } JobBatchDesc;
+    JOB_API int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles);
+
     JOB_API void JobSystem_Complete(void* handle);
-    JOB_API void JobSystem_CompleteAndRelease(void* handle);
+    JOB_API uint64_t JobSystem_CompleteAndRelease(void* handle);
+
+    // ── 提交窗口延迟唤醒（deferNotify）：批提交期 Bump 打开 defer（SubmitBatch 跳过逐批
+    //    notify），Flush 关闭并统一唤醒一次。支持嵌套（深度计数）；Flush 在归零时广播。 ──
+    JOB_API void JobSystem_SubmitDeferBump(void);
+    JOB_API void JobSystem_SubmitDeferFlush(void);
     JOB_API void JobSystem_RetainHandle(void* handle);
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);

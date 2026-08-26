@@ -318,17 +318,26 @@ namespace JobSystem
 
         const uint32_t tileCount = batch->tileCount;
 
-        // ── workerCap 令牌模式 ──
-        // workerCount（=ResolveWorkerTarget(workerCap,..)）< 全局线程数 → 限制实际并行：
-        // 投 min(workerCount, tileCount) 个令牌，令牌内原子认领 nextTile（实际参与 ≤ 令牌数）。
-        if (batch->workerCount > 0 &&
-            static_cast<uint32_t>(batch->workerCount) < wc)
+        // ── token（令牌）提交（唯一路径）──
+        // 只投 O(workers) 个令牌，令牌内 nextTile.fetch_add 细粒度认领——
+        // 注入器流量从 O(tiles) 降到 O(workers)，消除任务洪泛背压。
+        // workerCap 限制并行时 tokenTarget=workerCount（实际参与 ≤ 令牌数）。
+        const bool capMode = batch->workerCount > 0 &&
+            static_cast<uint32_t>(batch->workerCount) < wc;
+        const uint32_t tokenTarget = capMode
+            ? static_cast<uint32_t>(batch->workerCount) : wc;
+        const uint32_t tokenCount = std::min(tokenTarget, tileCount);
+        if (tokenCount == 0) return;
+        batch->pendingTasks.store(tokenCount, std::memory_order_release);
+        activeTasks.fetch_add(static_cast<int64_t>(tokenCount), std::memory_order_acq_rel);
+
+        // PushMany：批量创建 token 任务 + 一次 CAS 批量入队注入器
+        constexpr uint32_t kMaxBulkTokens = 64;   // 栈数组上限（worker 数实际 ≤ 64）
+        RangeTask* bulk[kMaxBulkTokens];
+        for (uint32_t base = 0; base < tokenCount; base += kMaxBulkTokens)
         {
-            const uint32_t tokenCount = std::min(
-                static_cast<uint32_t>(batch->workerCount), tileCount);
-            batch->pendingTasks.store(tokenCount, std::memory_order_release);
-            activeTasks.fetch_add(static_cast<int64_t>(tokenCount), std::memory_order_acq_rel);
-            for (uint32_t i = 0; i < tokenCount; ++i)
+            const uint32_t n = std::min(kMaxBulkTokens, tokenCount - base);
+            for (uint32_t i = 0; i < n; ++i)
             {
                 RangeTask* task = s_taskPool_.Acquire();
                 if (!task)
@@ -339,53 +348,23 @@ namespace JobSystem
                 task->batch = batch;
                 task->firstTile = kClaimTokenMarker;
                 task->tileCount = 1;
-                PushTaskBackoff(task);
+                bulk[i] = task;
             }
-            totalTasksPushed.fetch_add(tokenCount, std::memory_order_relaxed);
+            uint32_t pushed = injector_.PushMany(bulk, n);
+            while (pushed < n)
+            {
+                // 注入器容量不足：剩余项逐个退避入队（不丢任务）
+                PushTaskBackoff(bulk[pushed]);
+                ++pushed;
+            }
+        }
+        totalTasksPushed.fetch_add(tokenCount, std::memory_order_relaxed);
+        // deferNotify：提交窗口内跳过逐批唤醒，由窗口结束的 Flush 统一广播
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) == 0)
+        {
             wakeEpoch.fetch_add(1, std::memory_order_release);
             wakeEpoch.notify_all();
-            return;
         }
-
-        // ── 默认：全 worker 并行（预切分 ≈wc×16 任务，平衡预切分开销与负载均衡）──
-        uint32_t claimBatch = std::max(1u, (tileCount + wc * 16 - 1) / (wc * 16));
-
-        // 池容量保险：taskCount ≤ 池容量/2，防止游标回绕复用未释放任务
-        if (tileCount / claimBatch >= RangeTaskPool::kPoolSize / 2)
-        {
-            while (claimBatch < tileCount &&
-                   (tileCount + claimBatch - 1) / claimBatch >=
-                       RangeTaskPool::kPoolSize / 2)
-                claimBatch *= 2;
-        }
-        const uint32_t taskCount = (tileCount + claimBatch - 1) / claimBatch;
-
-        batch->pendingTasks.store(taskCount, std::memory_order_release);
-        activeTasks.fetch_add(static_cast<int64_t>(taskCount), std::memory_order_acq_rel);
-
-        for (uint32_t i = 0; i < taskCount; ++i)
-        {
-            // 池耗尽兜底：堆分配（poolIndex=UINT32_MAX，Release 时 delete）。不可跳过任务——
-            // pendingTasks 预设 taskCount，跳过会导致永不到 0。
-            RangeTask* task = s_taskPool_.Acquire();
-            if (!task)
-            {
-                task = new RangeTask();
-                task->poolIndex = UINT32_MAX;
-            }
-
-            task->batch = batch;
-            task->firstTile = i * claimBatch;
-            task->tileCount = std::min(claimBatch, tileCount - task->firstTile);
-
-            PushTaskBackoff(task);
-        }
-
-        totalTasksPushed.fetch_add(taskCount, std::memory_order_relaxed);
-
-        // 单 epoch 广播唤醒全部 worker（1 次 futex）。保持 wake-all——选择性唤醒有 35ms 尖峰教训。
-        wakeEpoch.fetch_add(1, std::memory_order_release);
-        wakeEpoch.notify_all();
     }
 
     // ============================================================
@@ -403,13 +382,21 @@ namespace JobSystem
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
         const uint32_t end = batch->tileCount;
+        // 认领粒度随批次规模收缩：tileCount/workerCount 较小时降到 1，
+        // 保证小批次的 tile 可被不同执行者独立认领——阻塞型回调（worker 在回调内
+        // 等待外部事件）时与 slice 语义等价：每个 tile 都是一个可认领的并行单位。
+        // 大批次维持 kClaimBatchSize=4。实测认领窗口放大（16）无端到端收益——
+        // fetch_add 发生在 tile 执行的间隙，被 µs 级执行完全吸收。
+        const uint32_t step = std::clamp(
+            batch->tileCount / std::max(1u, workerCount_),
+            1u, kClaimBatchSize);
         uint32_t executed = 0;
         while (true)
         {
             const uint32_t start = batch->nextTile.fetch_add(
-                kClaimBatchSize, std::memory_order_relaxed);
+                step, std::memory_order_relaxed);
             if (start >= end) break;
-            const uint32_t last = std::min(end, start + kClaimBatchSize);
+            const uint32_t last = std::min(end, start + step);
             for (uint32_t t = start; t < last; ++t)
             {
                 executor_(batch, t);
@@ -457,6 +444,14 @@ namespace JobSystem
 
         PushTaskBackoff(task);
 
+        wakeEpoch.fetch_add(1, std::memory_order_release);
+        wakeEpoch.notify_all();
+    }
+
+    // 提交窗口统一唤醒（deferNotify 的 Flush）：一次 bump + notify_all。
+    // defer 期 SubmitBatch 跳过 per-batch 唤醒；本方法在窗口关闭时执行唯一一次广播。
+    void ChaseLevScheduler::WakePending() noexcept
+    {
         wakeEpoch.fetch_add(1, std::memory_order_release);
         wakeEpoch.notify_all();
     }

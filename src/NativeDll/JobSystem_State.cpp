@@ -142,6 +142,8 @@ namespace JobSystem
         g_longBatchBarriers.push_back(state);
     }
 
+    static void WaitBackendRetired(HandleState* state) noexcept;   // 定义见 Complete 段（含兜底唤醒看门狗）
+
     void ConsumeLongBatchBarriers() noexcept
     {
         std::vector<HandleState*> barriers;
@@ -157,8 +159,7 @@ namespace JobSystem
                 deferred.push_back(state);
                 continue;
             }
-            while (!state->backendRetired.load(std::memory_order_acquire))
-                state->backendRetired.wait(false, std::memory_order_relaxed);
+            WaitBackendRetired(state);   // 复用兜底唤醒看门狗（条件触发 + 超时兜底）
             ReleaseState(state);
         }
         if (!deferred.empty())
@@ -397,11 +398,34 @@ namespace JobSystem
     // Chase-Lev 退役是异步的（completed 由最后 tile 设置，退役由最后 taskDone 触发）。
     // Complete() 返回前等 backendRetired，保证"Complete 后 batch 已完全退役"
     // （cleanup/存储回收已完成）——测试与用户代码依赖这一契约。
+    // 兜底唤醒看门狗：把"notify 错位型死锁"降级为可观测毛刺——
+    //   ① 条件档：存在未关闭的 deferNotify 窗口（g_submitDeferDepth>0，最近的提交可能被吞唤醒）
+    //      → 立即补一次广播再正常等待；正常路径 depth==0，零触发零开销；
+    //   ② 超时档：等待 >5s 无进展 → 补广播 + 警告（兜住未知错位/遗漏路径，防永久挂）。
     static void WaitBackendRetired(HandleState* state) noexcept
     {
         if (!state) return;
+        if (state->backendRetired.load(std::memory_order_acquire))
+            return;
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) > 0 &&
+            g_chaseLevScheduler)
+        {
+            g_chaseLevScheduler->WakePending();
+        }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!state->backendRetired.load(std::memory_order_acquire))
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                std::fprintf(stderr,
+                    "[JobSystem] WARN: backendRetired wait >5s (batch=%llu), forcing wake\n",
+                    (unsigned long long)state->diagnosticBatchId.load(std::memory_order_relaxed));
+                if (g_chaseLevScheduler)
+                    g_chaseLevScheduler->WakePending();
+                deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            }
             state->backendRetired.wait(false, std::memory_order_relaxed);
+        }
     }
 
     // C++ 异常协议：Complete 的每个退出点在等退役后调用——batch 上的异常已

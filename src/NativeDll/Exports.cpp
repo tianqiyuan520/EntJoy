@@ -169,6 +169,47 @@ extern "C"
         return toHandle(handle);
     }
 
+    int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles)
+    {
+        if (!descs || count <= 0 || !outHandles) return 0;
+        // deferNotify 窗口：本批所有 submit 结束后统一唤醒一次（省 per-batch notify/唤醒）
+        JobSystem::g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed);
+        int ok = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            outHandles[i] = nullptr;
+            const JobBatchDesc& d = descs[i];
+            if (!d.func) continue;
+            JobSystem::JobHandle dep;
+            if (d.dependency)
+                dep = JobSystem::JobHandle(fromHandle(d.dependency), true);
+            JobSystem::JobHandle handle;
+            switch (d.kind)
+            {
+            case 0: // IJob
+                handle = JobSystem::Scheduler::Schedule(
+                    reinterpret_cast<JobFunc>(d.func), d.context, d.cleanup, dep);
+                break;
+            case 1: // IJobFor
+                handle = JobSystem::Scheduler::ScheduleFor(
+                    reinterpret_cast<IndexJobFunc>(d.func), d.context, d.length, d.cleanup, dep);
+                break;
+            case 2: // IJobParallelFor（auto-batch 语义：batchFunc(ctx,start,count)）
+                handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                    reinterpret_cast<BatchJobFunc>(d.func), d.context, d.length, d.batchSize, d.cleanup, dep);
+                break;
+            default:
+                continue;
+            }
+            outHandles[i] = toHandle(handle);
+            ++ok;
+        }
+        JobSystem::g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
+        if (JobSystem::g_chaseLevScheduler)
+            JobSystem::g_chaseLevScheduler->WakePending();   // 统一唤醒一次
+        return ok;
+    }
+
     void JobSystem_Complete(void* handle)
     {
         // 仅等待任务完成，不改变引用计数
@@ -201,14 +242,32 @@ extern "C"
         return count;
     }
 
-    void JobSystem_CompleteAndRelease(void* handle)
+    uint64_t JobSystem_CompleteAndRelease(void* handle)
     {
-        // 接管调用方持有的引用，等待完成后自动释放
-        if (handle)
+        // 接管调用方持有的引用：等待完成后读 diagnosticBatchId 并返回，
+        // handle 引用在析构时自动释放 —— C# Complete 的
+        // Complete + GetDiagnosticBatchId + ReleaseHandle 三合一（省 2 次 P/Invoke）。
+        if (!handle) return 0;
+        JobSystem::HandleState* state = fromHandle(handle);
+        JobSystem::JobHandle jobHandle(fromHandle(handle), false); // 不增加引用
+        jobHandle.Complete();
+        uint64_t id = state ? state->diagnosticBatchId.load(std::memory_order_acquire) : 0;
+        return id; // jobHandle 析构 → Release(state)
+    }
+
+    void JobSystem_SubmitDeferBump()
+    {
+        JobSystem::g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void JobSystem_SubmitDeferFlush()
+    {
+        const int d = JobSystem::g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
+        if (d <= 1)   // 归零：统一唤醒一次（嵌套失衡时也兜底广播，不丢唤醒）
         {
-            JobSystem::JobHandle jobHandle(fromHandle(handle), false); // 不增加引用
-            jobHandle.Complete();
-        } // 析构时 Release(state)
+            if (JobSystem::g_chaseLevScheduler)
+                JobSystem::g_chaseLevScheduler->WakePending();
+        }
     }
 
     void JobSystem_RetainHandle(void* handle)

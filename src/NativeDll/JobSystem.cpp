@@ -63,6 +63,9 @@ namespace JobSystem
     // 同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
     std::atomic<bool> g_jobCostCacheEnabled{ true };
 
+    // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
+    std::atomic<int> g_submitDeferDepth{ 0 };
+
     // 诊断开关（进程启动时读 env 一次，之后只读）：ENTJOY_JCC_VERBOSE=1
     // 打印 per-job 自动 batch 的决策与学习快照。
     bool g_jobCostCacheVerbose = []() -> bool {

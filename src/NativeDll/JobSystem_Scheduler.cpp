@@ -331,7 +331,10 @@ namespace JobSystem
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         bool depOk = !dependency.State() || dependency.IsCompleted();
-        // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
+        // 依赖未完成时绝不 inline —— 必须先等依赖。阈值仅在 depOk（无依赖或依赖已完成）下生效。
+        // 注意：大长度不得 inline 主线程——主线程逐元素 C# 回调 ~20ns/次 vs worker ~1ns/次，
+        // 长 for 主线程执行慢 ~20 倍（实测 IJobFor·100K：98.7µs → 705µs）。单线程语义 =
+        // 单 worker 执行，不是主线程 inline。
         if (depOk && (length <= kSyncWithCompletedDepThreshold))
         {
             auto* st = CreateState(true);
@@ -640,7 +643,7 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch, workerCap); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
         else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
         return JobHandle(state);
     }

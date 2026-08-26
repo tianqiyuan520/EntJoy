@@ -295,7 +295,7 @@ public static unsafe partial class NativeJobScheduler
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.JobFunc>(() => NativeJobCore.CreateJobCallback<T>());
+            var cache = NativeJobCore.JobDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, dependsOn);
             cleanupByCpp = true;
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
@@ -321,7 +321,7 @@ public static unsafe partial class NativeJobScheduler
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.IndexJobFunc>(() => NativeJobCore.CreateForCallback<T>());
+            var cache = NativeJobCore.ForDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleForRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, dependsOn);
             cleanupByCpp = true;
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
@@ -373,7 +373,7 @@ public static unsafe partial class NativeJobScheduler
         bool cleanupByCpp = false;
         try
         {
-            var cache = NativeJobCore.GetOrCreateDelegateCache<T, NativeJobCore.BatchJobFunc>(() => NativeJobCore.CreateParallelForBatchCallback<T>());
+            var cache = NativeJobCore.ParallelForBatchDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn);
             cleanupByCpp = true;
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
@@ -394,25 +394,20 @@ public static unsafe partial class NativeJobScheduler
     public static void Complete(ref NativeJobHandle h)
     {
         if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
+        // 隐式批：Complete 前先 flush 当前批（Unity ScheduleBatchedJobs 同语义：Complete 隐式刷新）
+        ImplicitBatch.FlushForComplete();
         IntPtr handle = h.Detach();
         if (handle == IntPtr.Zero) return;
 
-        ulong batchId = 0;
-        try
-        {
-            NativeJobCore.JobSystem_Complete(handle);
-            batchId = NativeJobCore.JobSystem_GetDiagnosticBatchId(handle);
-        }
-        finally
-        {
-            NativeJobCore.JobSystem_ReleaseHandle(handle);
-        }
+        // 三合一：native 侧 Complete + 取 diagnosticBatchId + 释放句柄引用（1 次 P/Invoke）。
+        ulong batchId = NativeJobCore.JobSystem_CompleteAndRelease(handle);
         NativeJobCore.ThrowRecordedJobExceptions(batchId);
     }
 
     public static bool IsCompleted(NativeJobHandle h)
     {
         if (UseFallback) return true; // 托管路径由 ManagedJobHandle 单独处理
+        ImplicitBatch.FlushForComplete();   // 隐式批：查询前 flush，防误报未完成
         if (!h.IsValid) return true;
         using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
         return handleLease.Handle == IntPtr.Zero || NativeJobCore.JobSystem_IsCompleted(handleLease.Handle) != 0;
@@ -470,6 +465,17 @@ public static unsafe partial class NativeJobScheduler
     /// <summary>运行时开关主线程 assist（第 N+1 个执行者）。默认关闭。</summary>
     public static void SetMainThreadAssistEnabled(bool enabled) =>
         NativeJobCore.JobSystem_SetMainThreadAssist(enabled);
+
+    /// <summary>隐式批：开启后 Add/AddFor/AddParallelFor 纯 C# 收集（零 P/Invoke），
+    /// EndFrame() 一次 ScheduleBatch 提交（P/Invoke 200→1）；Complete 前自动 flush。
+    /// 仅 Native 后端；Managed 回退后端不支持批（Add 抛 NotSupportedException）。</summary>
+    public static void SetImplicitBatchEnabled(bool enabled) => ImplicitBatch.SetEnabled(enabled);
+
+    /// <summary>隐式批 force point：提交当前批 + 统一唤醒（帧末调用）。</summary>
+    public static void FlushPendingSubmits() => ImplicitBatch.EndFrame();
+
+    /// <summary>帧末别名（无头框架推荐：每个 tick 末尾调用一次）。</summary>
+    public static void EndFrame() => ImplicitBatch.EndFrame();
 
     /// <summary>运行时开关 worker CPU 亲和性。默认关闭（OS 自由调度）。</summary>
     public static void SetWorkerAffinityEnabled(bool enabled) =>

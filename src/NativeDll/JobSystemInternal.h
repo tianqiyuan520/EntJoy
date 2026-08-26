@@ -93,6 +93,12 @@ namespace JobSystem
     // 用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，worker 按 per-job
     // 每元素成本 EWMA 自动求解最优 tile 数。热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
+    // 提交期"延迟唤醒"深度（deferNotify）：>0 时 SubmitBatch 跳过末尾 wakeEpoch.notify_all，
+    // 由显式 Flush（JobSystem_SubmitDeferFlush）在提交窗口结束时统一唤醒一次。
+    // 安全：任务已入注入器，worker 自旋时会自己取；全 park 时由 Flush 的 notify_all 唤醒。
+    extern std::atomic<int> g_submitDeferDepth;
+    // （隐式批已统一收归 C# 侧 ImplicitBatch：收集→EndFrame 一次 ScheduleBatch；
+    //  native 不再维护 pending 列表。）
     // 诊断：ENTJOY_JCC_VERBOSE=1 时打印 ResolveChunkSize 决策 + 退役学习快照。
     // 只在 flag 开启时读取；进程启动时从 env 初始化一次，之后只读 → 无竞态。
     extern bool g_jobCostCacheVerbose;

@@ -28,6 +28,21 @@ namespace EntJoy.JobSystem
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate void CleanupFunc(IntPtr context);
 
+        // 显式批描述符（Exports.h JobBatchDesc 一一对应，Sequential 布局）
+        // kind: 0=IJob 1=IJobFor 2=IJobParallelFor
+        [StructLayout(LayoutKind.Sequential)]
+        internal unsafe struct NativeJobBatchDesc
+        {
+            public byte Kind;
+            public byte R0, R1, R2;
+            public IntPtr Func;
+            public IntPtr Context;
+            public IntPtr Cleanup;
+            public IntPtr Dependency;
+            public int Length;
+            public int BatchSize;
+        }
+
         // ======================== 委托缓存 ========================
         internal static readonly ConcurrentDictionary<Type, DelegateCache> _delegateCache = new();
         internal sealed class DelegateCache { public readonly Delegate Delegate; public readonly IntPtr FuncPtr; public DelegateCache(Delegate del) { Delegate = del; FuncPtr = Marshal.GetFunctionPointerForDelegate(del); } }
@@ -100,6 +115,10 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
+        private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_CompleteAndRelease;
+        private static delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int> _jobSystem_ScheduleBatch;
+        private static delegate* unmanaged[Cdecl]<void> _jobSystem_SubmitDeferBump;
+        private static delegate* unmanaged[Cdecl]<void> _jobSystem_SubmitDeferFlush;
         private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_GetDiagnosticBatchId;
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void> _jobSystem_RegisterCurrentBatchId;
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, byte*, int, int>, delegate* unmanaged[Cdecl]<void>, void> _jobSystem_RegisterNameResolver;
@@ -306,6 +325,14 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleFor");
             _jobSystem_Complete = (delegate* unmanaged[Cdecl]<IntPtr, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Complete");
+            _jobSystem_CompleteAndRelease = (delegate* unmanaged[Cdecl]<IntPtr, ulong>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
+            _jobSystem_ScheduleBatch = (delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleBatch");
+            _jobSystem_SubmitDeferBump = (delegate* unmanaged[Cdecl]<void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SubmitDeferBump");
+            _jobSystem_SubmitDeferFlush = (delegate* unmanaged[Cdecl]<void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SubmitDeferFlush");
             _jobSystem_GetDiagnosticBatchId = (delegate* unmanaged[Cdecl]<IntPtr, ulong>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetDiagnosticBatchId");
             _jobSystem_RegisterCurrentBatchId = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<ulong, void>, void>)
@@ -499,6 +526,36 @@ namespace EntJoy.JobSystem
         {
             EnsureNativeLoaded();
             _jobSystem_Complete(handle);
+        }
+
+        /// <summary>Complete + 读 diagnosticBatchId + 释放句柄引用（三合一，native 侧一次完成）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static ulong JobSystem_CompleteAndRelease(IntPtr handle)
+        {
+            EnsureNativeLoaded();
+            return _jobSystem_CompleteAndRelease(handle);
+        }
+
+        /// <summary>显式批：一次 P/Invoke 提交 count 个 job 描述符，句柄写回 outHandles（内部 defer+统一唤醒）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static unsafe int JobSystem_ScheduleBatch(NativeJobBatchDesc* descs, int count, IntPtr* outHandles)
+        {
+            EnsureNativeLoaded();
+            return _jobSystem_ScheduleBatch(descs, count, outHandles);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void JobSystem_SubmitDeferBump()
+        {
+            EnsureNativeLoaded();
+            _jobSystem_SubmitDeferBump();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static void JobSystem_SubmitDeferFlush()
+        {
+            EnsureNativeLoaded();
+            _jobSystem_SubmitDeferFlush();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -728,9 +785,29 @@ namespace EntJoy.JobSystem
         }
 
         // ======================== 辅助方法 ========================
+        // 泛型委托缓存：供 EntJoy.ECS 的 ChunkJobScheduler 等跨程序集路径使用（per-Type 字典）。
+        // 本程序集热路径已用静态泛型缓存（JobDelegateCacheFor 等，零字典查找）；此处保留
+        // 供持有自定义委托类型参数的调用方。
         internal static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
         {
             return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
+        }
+
+        // 静态泛型委托缓存：per (T) 一个静态字段，调度热路径零字典查找、零首次 JIT 抖动
+        // （static ctor 只执行一次）。按 job 接口约束分开三个 holder（各回调工厂约束不同）。
+        internal static class JobDelegateCacheFor<T> where T : struct, IJob
+        {
+            public static readonly DelegateCache Cache = new(CreateJobCallback<T>());
+        }
+
+        internal static class ForDelegateCacheFor<T> where T : struct, IJobFor
+        {
+            public static readonly DelegateCache Cache = new(CreateForCallback<T>());
+        }
+
+        internal static class ParallelForBatchDelegateCacheFor<T> where T : struct, IJobParallelForBatch
+        {
+            public static readonly DelegateCache Cache = new(CreateParallelForBatchCallback<T>());
         }
 
         /// <summary>
@@ -740,8 +817,7 @@ namespace EntJoy.JobSystem
         private static class AutoParallelForCallback<T>
             where T : struct, IJobParallelFor
         {
-            public static readonly DelegateCache Cache =
-                GetOrCreateDelegateCache<T, BatchJobFunc>(() => CreateParallelForIndexCallback<T>());
+            public static readonly DelegateCache Cache = new(CreateParallelForIndexCallback<T>());
 
             public static DelegateCache GetCache() => Cache;
         }
@@ -754,6 +830,9 @@ namespace EntJoy.JobSystem
         private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();
         private const int MaxRecordedJobExceptionsPerBatch = 16;
         private static int _droppedJobExceptionCount;
+        // 快速门控：>0 表示字典里有未取出的异常。Complete/Flush 先读它跳过空锁路径
+        //（异常是罕见路径，避免每 Complete 都 lock+查字典）。
+        private static int _pendingJobExceptionCount;
 
         internal static void RecordJobException(ulong batchId, Exception exception)
         {
@@ -770,6 +849,7 @@ namespace EntJoy.JobSystem
                     return;
                 }
                 list.Add(ExceptionDispatchInfo.Capture(exception));
+                Interlocked.Increment(ref _pendingJobExceptionCount);
             }
         }
 
@@ -790,6 +870,7 @@ namespace EntJoy.JobSystem
         /// <summary>抛出所有已记录的 Job 异常（跨所有 batch，含未归属的 batch 0）。</summary>
         internal static void FlushRecordedExceptions()
         {
+            if (Volatile.Read(ref _pendingJobExceptionCount) == 0) return;
             List<ExceptionDispatchInfo> all = new();
             int dropped;
             lock (_exceptionLock)
@@ -797,6 +878,7 @@ namespace EntJoy.JobSystem
                 foreach (var list in _recordedJobExceptions.Values)
                     all.AddRange(list);
                 _recordedJobExceptions.Clear();
+                Interlocked.Exchange(ref _pendingJobExceptionCount, 0);
                 dropped = _droppedJobExceptionCount;
                 _droppedJobExceptionCount = 0;
             }
@@ -807,13 +889,21 @@ namespace EntJoy.JobSystem
 
         internal static void ThrowRecordedJobExceptions(ulong batchId)
         {
+            if (Volatile.Read(ref _pendingJobExceptionCount) == 0) return;
             List<ExceptionDispatchInfo> captured;
             int dropped;
             lock (_exceptionLock)
             {
                 if (!_recordedJobExceptions.TryGetValue(batchId, out captured))
+                {
+                    // 本 batch 无异常；仅当字典已清空时才关闭门控（其他 batch 的异常仍在等待被取走）
+                    if (_recordedJobExceptions.Count == 0)
+                        Interlocked.Exchange(ref _pendingJobExceptionCount, 0);
                     return;
+                }
                 _recordedJobExceptions.Remove(batchId);
+                if (_recordedJobExceptions.Count == 0)
+                    Interlocked.Exchange(ref _pendingJobExceptionCount, 0);
                 dropped = _droppedJobExceptionCount;
                 _droppedJobExceptionCount = 0;
             }
