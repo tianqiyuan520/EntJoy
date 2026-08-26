@@ -67,11 +67,11 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // ======================== IJobChunk 调度 ========================
-        public static NativeJobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
+        public static JobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
             where T : struct, IJobChunk
             => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, writtenComponents: writtenComponents);
 
-        public static NativeJobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
+        public static JobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
             where T : struct, IJobChunk
             => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap, writtenComponents: writtenComponents);
 
@@ -83,11 +83,11 @@ namespace EntJoy.ECS.JobSystem
 
         public static NativeJobHandle ScheduleChunkRawWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, NativeJobHandle? dependsOn = null)
             where T : struct, IJobChunk
-            => ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap);
+            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap);
 
         public static NativeJobHandle ScheduleChunkRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
             where T : struct, IJobChunk
-            => ScheduleChunkCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap, rangeSize: rangeSize);
+            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap, rangeSize: rangeSize);
 
         public static NativeJobHandle ScheduleEntityRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
             where T : struct
@@ -101,7 +101,19 @@ namespace EntJoy.ECS.JobSystem
             where T : struct, IJobChunk
             => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, jobKind: NativeEcsJobKind.Chunk);
 
-        private static NativeJobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
+        private static JobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
+            where T : struct, IJobChunk
+        {
+            // ─── Managed fallback（NativeDll 不可用时）：纯 C# 路径，无回调 ───
+            if (NativeJobScheduler.UseFallback)
+                return ScheduleChunkManagedFallback(ref job, entityManager, query, writtenComponents);
+
+            // ─── C++ 路径 ───
+            var result = ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, forcedMode, workerCap, rangeSize, writtenComponents);
+            return new JobHandle(result);
+        }
+
+        private static NativeJobHandle ScheduleChunkNativeCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
             where T : struct, IJobChunk
         {
             var allEnabledTypes = query.AllEnabled;
@@ -1057,6 +1069,50 @@ namespace EntJoy.ECS.JobSystem
             }
 
             return block;
+        }
+
+        // ======================== Managed fallback（NativeDll 不可用时） ========================
+        /// <summary>
+        /// Managed fallback：收集 chunks → ManagedChunkParallelJob<T> → ManagedJobScheduler.ScheduleParallelFor。
+        /// 纯 C# 路径，无 P/Invoke、无 ChunkJobCallbacks、无 ContextBlock。
+        /// </summary>
+        private static JobHandle ScheduleChunkManagedFallback<T>(ref T job, EntityManager entityManager,
+            QueryBuilder query, ComponentType[]? writtenComponents)
+            where T : struct, IJobChunk
+        {
+            var allEnabledTypes = query.AllEnabled;
+            ChunkJobCollector.CollectAndBuildManaged(entityManager, query, fillBitmaps: true, hasEnabledFilter: true,
+                out var ptr, out var chunkArray, out var chunkCount, out var archetypes);
+            if (chunkCount == 0) return default;
+
+            var parallelJob = new ManagedChunkParallelJob<T>
+            {
+                Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes
+            };
+            var mhandle = JobScheduler.ScheduleParallelFor(ref parallelJob, chunkCount, innerBatchCount: 1);
+            // 托管路径不走 TrackEntityJob（ManagedJobScheduler 完成于主线程，无需 per-archetype 跟踪）
+            return mhandle;
+        }
+
+        /// <summary>托管调度 payload：直接在 ManagedWorker 上执行，无 P/Invoke 回调。实现 IJobParallelFor。</summary>
+        internal unsafe struct ManagedChunkParallelJob<T> : IJobParallelFor where T : struct, IJobChunk
+        {
+            public T Job;
+            public Chunk[] Chunks;
+            public int ChunkCount;
+            public ComponentType[]? AllEnabledTypes;
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public void Execute(int index)
+            {
+                if ((uint)index >= (uint)ChunkCount) return;
+                var chunk = Chunks[index];
+                if (chunk.EntityCount == 0) return;
+                var mask = (AllEnabledTypes?.Length > 0)
+                    ? ChunkJobScheduler.ComputeChunkMask(chunk, AllEnabledTypes)
+                    : default;
+                Job.Execute(new ArchetypeChunk(chunk), mask);
+            }
         }
 
         // ======================== Run 路径（主线程同步执行） ========================

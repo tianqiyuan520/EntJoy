@@ -3,8 +3,8 @@ namespace EntJoy.JobSystem
 
 /// <summary>
 /// 纯 IJob 族（IJob / IJobParallelFor / IJobFor / IJobParallelForBatch）调度扩展。
-/// 仅依赖 Jobs/Collections，可在【无 EntJoy.ECS】时单独调度普通作业。
-/// IJobChunk（依赖 ECS）调度见 EntJoy.ECS 的 ChunkJobExtensions。
+/// 仅依赖 Jobs/Collections，可单独调度普通作业。
+/// 通过 JobScheduler 统一调度，自动选择 Native / Managed 后端。
 /// </summary>
 public static class JobExtensions
 {
@@ -12,49 +12,32 @@ public static class JobExtensions
 
     /// <summary>调度 IJob（无依赖）</summary>
     public static JobHandle Schedule<T>(this T job) where T : struct, IJob
-    {
-        return new JobHandle(NativeJobScheduler.Schedule(ref job));
-    }
+        => JobScheduler.Schedule(ref job);
 
     /// <summary>调度 IJob（带依赖）</summary>
     public static JobHandle Schedule<T>(this T job, JobHandle dependsOn) where T : struct, IJob
-    {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(NativeJobScheduler.Schedule(ref job, nativeDep));
-    }
+        => JobScheduler.Schedule(ref job, dependsOn);
 
     // ======================== IJobParallelFor 调度 ========================
 
     /// <summary>调度 IJobParallelFor</summary>
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
         JobHandle dependsOn = default) where T : struct, IJobParallelFor
-    {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(
-            NativeJobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, nativeDep));
-    }
+        => JobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, dependsOn);
 
     // ======================== IJobFor 调度 ========================
 
     /// <summary>调度 IJobFor（串行 for 循环）</summary>
     public static JobHandle Schedule<T>(this T job, int arrayLength,
         JobHandle dependsOn = default) where T : struct, IJobFor
-    {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(
-            NativeJobScheduler.ScheduleFor(ref job, arrayLength, nativeDep));
-    }
+        => JobScheduler.ScheduleFor(ref job, arrayLength, dependsOn);
 
     // ======================== IJobParallelForBatch 调度 ========================
 
     /// <summary>调度 IJobParallelForBatch</summary>
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
         JobHandle dependsOn = default) where T : struct, IJobParallelForBatch
-    {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(
-            NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
-    }
+        => JobScheduler.ScheduleBatch(ref job, arrayLength, batchSize, dependsOn);
 
     // ======================== ThreadCounter 重载 ========================
 

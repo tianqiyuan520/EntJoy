@@ -143,17 +143,18 @@ public struct NativeTraceEvent
 }
 
 /// <summary>
-/// 原生调度器门面（Jobs 程序集内的薄门面）。零 ECS 依赖，不持有任何被共享的可变状态——
+/// 原生调度器门面（P/Invoke → C++ Chase-Lev）。零跨层依赖。
 /// 所有共享状态（委托缓存、上下文池、异常、ThreadStatic、纯 P/Invoke 指针）由
-/// <see cref="NativeJobCore"/> 独占持有。ECS 的 chunk 调度（NativeEcsScheduler）
-/// 与本文共用同一个引擎。
+/// <see cref="NativeJobCore"/> 独占持有；上层 chunk 调度层与本文共用。
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
     // ======================== 配置 ========================
+        /// <summary>当 NativeDll 不可用时自动回退到 ManagedJobScheduler。</summary>
+        internal static bool UseFallback { get; private set; }
     /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时原生 ResolveChunkSize 按此值个 tile/worker 切分。
-    /// tpw=4 平衡 light/heavy 场景性能，与 ECS kTargetTilesPerWorker=4 一致。
+    /// tpw=4 平衡 light/heavy 场景性能。
     /// </summary>
     public static int TilesPerWorker = 4;
 
@@ -203,22 +204,31 @@ public static unsafe partial class NativeJobScheduler
     // ======================== 生命周期 ========================
     public static void Initialize(int numThreads = 0)
     {
-        // ENTJOY_JOB_WORKERS 环境变量可覆盖 worker 数（0=自动 PC-1）
         if (numThreads == 0)
         {
             string? env = Environment.GetEnvironmentVariable("ENTJOY_JOB_WORKERS");
             if (int.TryParse(env, out int w) && w >= 0)
                 numThreads = w;
         }
-        NativeJobCore.JobSystem_Initialize(numThreads);
-        RegisterPersistentAllocator();
-        NativeJobCore.ValidateStatsLayout(); // 布局防御：C#/C++ 统计结构字节数一致
-        NativeJobCore.RegisterCurrentBatchIdCallback();
-        if (TilesPerWorker > 0)
-            NativeJobCore.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
-        // 强制同步 JobCostCache 默认（默认开启；防 DLL 重载后 native 与托管不一致）
-        NativeJobCore.JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled ? 1 : 0);
-        ConfigureGuidedFromEnv();
+        try
+        {
+            NativeJobCore.JobSystem_Initialize(numThreads);
+            UseFallback = false;
+            RegisterPersistentAllocator();
+            NativeJobCore.ValidateStatsLayout();
+            NativeJobCore.RegisterCurrentBatchIdCallback();
+            if (TilesPerWorker > 0)
+                NativeJobCore.JobSystem_ConfigureTilesPerWorker(TilesPerWorker);
+            NativeJobCore.JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled ? 1 : 0);
+            ConfigureGuidedFromEnv();
+        }
+        catch
+        {
+            // C++ 调度器不可用 → 自动回退到纯 C# ManagedJobScheduler
+            UseFallback = true;
+            global::EntJoy.JobSystem.Managed.ManagedJobScheduler.Initialize(
+                numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
+        }
     }
 
     public static int JobWorkerCount
@@ -226,7 +236,7 @@ public static unsafe partial class NativeJobScheduler
         get => NativeJobCore.JobSystem_GetWorkerCount();
     }
 
-    public static void Shutdown() => NativeJobCore.SafeShutdown();
+    public static void Shutdown() { if (UseFallback) { Managed.ManagedJobScheduler.Shutdown(); return; } NativeJobCore.SafeShutdown(); }
     public static void PrewakeWorkersOnce() => NativeJobCore.JobSystem_PrewakeWorkers();
 
     public static void LaunchDebuggerGUI()
@@ -242,7 +252,7 @@ public static unsafe partial class NativeJobScheduler
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void PersistentFreeUnmanaged(void* ptr) => PersistentAllocator.Free(ptr);
 
-    private static void RegisterPersistentAllocator()
+    internal static void RegisterPersistentAllocator()
     {
         NativeJobCore.JobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
     }
@@ -383,6 +393,7 @@ public static unsafe partial class NativeJobScheduler
     // ======================== Complete / IsCompleted / Release ========================
     public static void Complete(ref NativeJobHandle h)
     {
+        if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
         IntPtr handle = h.Detach();
         if (handle == IntPtr.Zero) return;
 
@@ -401,6 +412,8 @@ public static unsafe partial class NativeJobScheduler
 
     public static bool IsCompleted(NativeJobHandle h)
     {
+        if (UseFallback) return true; // 托管路径由 ManagedJobHandle 单独处理
+        if (!h.IsValid) return true;
         using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
         return handleLease.Handle == IntPtr.Zero || NativeJobCore.JobSystem_IsCompleted(handleLease.Handle) != 0;
     }
@@ -496,11 +509,11 @@ public static unsafe partial class NativeJobScheduler
     /// <summary>抛出所有已记录的 Job 异常（跨所有 batch）。</summary>
     public static void FlushRecordedExceptions() => NativeJobCore.FlushRecordedExceptions();
 
-    // ======================== 句柄辅助（内部，供 ECS/句柄使用） ========================
+    // ======================== 句柄辅助（内部，供 JobHandle 使用） ========================
     internal static void RetainRawHandleForUse(IntPtr handle) => NativeJobCore.RetainRawHandleForUse(handle);
     internal static void ReleaseRawHandleForFinalizer(IntPtr handle) => NativeJobCore.ReleaseRawHandleForFinalizer(handle);
 
-    // ======================== Job 字段写入器注册表（为 IJobChunk 非 blittable 结构） ========================
+    // ======================== Job 字段写入器注册表（为非 blittable 结构） ========================
     public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
     internal static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
 

@@ -13,8 +13,7 @@ using System.Threading;
 namespace EntJoy.JobSystem
 {
     /// <summary>
-    /// 零 ECS 依赖的原生调度执行引擎。Jobs 的 <see cref="NativeJobScheduler"/>（门面）
-    /// 与 ECS 的 <c>NativeEcsScheduler</c>（chunk 调度）共用。所有被两者共享的可变状态
+    /// 零依赖的原生调度执行引擎。NativeJobScheduler 和 ChunkJobScheduler 共用。
     /// （委托缓存、上下文池、异常、ThreadStatic、纯 P/Invoke 函数指针）必须独占于此。
     /// </summary>
     internal static unsafe class NativeJobCore
