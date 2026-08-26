@@ -193,10 +193,9 @@ namespace EntJoy.ECS
         /// 登记 Job 到全局列表 + per-archetype 列表。
         /// writtenComponents: Job 写了哪些组件（用于 Selective Wait 精度过滤）。
         /// </summary>
-        internal void TrackEntityJob(NativeJobHandle nativeHandle, Archetype[]? matchingArchetypes, ComponentType[]? writtenComponents = null)
+        internal void TrackEntityJob(JobHandle handle, Archetype[]? matchingArchetypes, ComponentType[]? writtenComponents = null)
         {
-            if (!nativeHandle.IsValid) return;
-            var handle = new JobHandle(nativeHandle);
+            if (!handle._nativeHandle.IsValid && handle._managedHandle.Completion == null) return;
             lock (_activeJobLock)
             {
                 PruneCompletedJobsNoLock();

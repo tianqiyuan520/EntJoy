@@ -354,6 +354,53 @@ P/Invoke 指针加载、调度缓存/租赁、chunk 打包、托管回调工厂�
 
 ---
 
+## 四、额外完成项（方案外的架构改进）
+
+> 以下改进在 A-D Phase 之外完成，提升了架构质量和可维护性。
+
+### 4.1 TrackEntityJob 双后端支持
+
+`TrackEntityJob` 参数从 `NativeJobHandle` 改为 `JobHandle`（兼容 Native/Managed）。
+- `EntityManager.TrackEntityJob` 接受 `JobHandle`，内部按 `_nativeHandle`/`_managedHandle` 判断
+- Managed fallback 调用 `TrackEntityJob` → 结构变更时只等影响该 archetype 的 job（Selective Wait）
+- C++ 路径仍返回 `NativeJobHandle`（通过 `FromNative()` 辅助）
+
+### 4.2 JobScheduler 统一调度器
+
+`EntJoy.Jobs/JobScheduler.cs`：自动选择 Native/Managed。
+- `Initialize()` try-catch C++ 初始化 → UseFallback → ManagedJobScheduler
+- `Schedule/ScheduleParallelFor/ScheduleFor/ScheduleBatch` 根据 UseNative 路由
+- Managed fallback 的 `IJobFor`/`IJobParallelForBatch`：顺序包装器（`SequentialForJob<T>`/`SequentialBatchJob<T>`），避免泛型约束冲突
+- `JobExtensions.Schedule*` 改调 `JobScheduler`（不再直接碰 NativeJobScheduler/ManagedJobScheduler）
+
+### 4.3 Native fallback
+
+`ChunkJobScheduler.ScheduleChunkManagedFallback`：
+- `ChunkJobCollector.CollectAndBuildManaged` → `ManagedChunkParallelJob<T>` → `JobScheduler.ScheduleParallelFor`
+- 纯 C# 路径：无 ChunkContextHeader、无 ChunkArrayTable、无 ChunkJobCallbacks
+- `JobHandle` 双后端：`_nativeHandle`（C++）或 `_managedHandle`（Managed），`Complete()` 自动路由
+
+### 4.4 EntJoy.Jobs 零 ECS 字眼 + 文件夹分类
+
+```
+EntJoy.Jobs/
+├── Native/       ← C++ 后端（NativeJobScheduler + NativeJobCore）
+├── Managed/      ← 纯 C# 后端（ManagedJobScheduler + 所有辅助类）
+└── (根目录)      ← 共享/公共（JobScheduler + JobHandle + JobExtensions + JobInterface + NativeJobHandle）
+```
+
+所有注释/文档中移除 "ECS" 字眼（`AssemblyInfo.InternalsVisibleTo` 保留，跨项目必要）。
+
+### 4.5 struct 内存安全性确认
+
+- 热路径 `new` 均为 struct（值类型）→ 栈构造，零 GC
+- `ManagedChunkParallelJob<T>` 的 `Chunk[]` 引用字段通过 struct boxing（GCHandle）保活 → 执行期 safe
+- C++ 路径：`Unsafe.CopyBlockUnaligned` 将 job 拷贝到 HGlobal（非托管内存）→ 副本完全独立于栈原件
+- GCHandle 唯一不可省略处：managed-reference job 的 boxing（防止 GC 回收正在执行的 job）
+- 所有 blittable job 整条调度链路零 GCHandle
+
+---
+
 ## 附录：参考资料
 
 - [Unity.Entities/IJobChunk.cs（master）](https://github.com/needle-mirror/com.unity.entities/blob/master/Unity.Entities/IJobChunk.cs) —— `JobChunkWrapper<T>`、`ScheduleInternal`（L280-336）、`JobChunkProducer<T>.ExecuteInternal`（L367-460）

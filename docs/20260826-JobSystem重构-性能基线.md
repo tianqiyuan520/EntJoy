@@ -36,7 +36,7 @@
 
 | **Phase B（无缓存 v2，thread-static 缓冲）** | ~0.166 | ~0.186 | 0.082-0.091 | 0.133-0.139 | 0.27-0.32 | 0.067/0.106 | **86.2-89.8 μs**（4 次，中位 ~89.6） | ✅ PASS；🔴 +34%：无缓存每调度 collect+HGlobal+cleanup 固有成本；thread-static 消除了 GC 淡香；`__EntJoyChunkContextHeader` 镜像同步补齐（ownsChunkData/jobIsBoxed/chunkArrayHandle），sumX 正确性恢复 |
 | **Phase D+A+B'（缓存恢复 + 零反射 + ChunkArrayTable）** | ~0.166 | ~0.186 | 0.082-0.091 | 0.133-0.139 | 0.27-0.39 | 0.067/0.115 | **62.2-70.9 μs**（4 次，中位 ~67.6） | ✅ PASS；缓存恢复 + ChunkArrayTable（零 GCHandle，零泄漏）+ Phase C ComputeChunkMask + Phase D 零反射 |
-| **Phase D（AOT 反射消除 + 缓存恢复 + ChunkArrayTable）** | ~0.166 | ~0.186 | 0.082-0.091 | 0.133-0.139 | 0.27-0.39 | 0.067/0.115 | **62.2-70.9 μs**（4 次，中位 ~67.6） | ✅ PASS；A.1 缓存恢复 + Phase C mask 合并 + Phase D 零反射 + ChunkArrayTable（零 GCHandle）；性能回基线 |
+| **最终状态（JobScheduler + TrackEntityJob + 文件夹重组）** | ~0.166 | ~0.186 | 0.082-0.091 | 0.133-0.139 | 0.27-0.39 | 0.067/0.115 | **66.47 μs** | ✅ PASS；JobScheduler 统一前端 + TrackEntityJob 双后端 + EntJoy.Jobs 零 ECS 字眼 + 文件夹 Native/Managed 分类 |
 
 ## 变更日志
 
@@ -48,3 +48,5 @@
 | 2026-08-26 | Phase B（🔴 用户确认继续） | 删 raw/managed chunk 缓存 → 每调度轻量收集（thread-static Chunk[] + archetype 重用）；托管跨边界只 {entityCount, componentCount, enableBitMaps, chunkHandle=chunkId} + 单 GCHandle 保活 Chunk[]；组件指针表仅 native；实体批缓存保留。修 2 实现缺陷（单 GCHandle + C++ 镜像错位），正确性恢复 PASS。+34% = 无缓存固有成本 | 86.2-89.8 vs 67.77（+34%） | 🔴 超红线；用户确认继续 |
 | 2026-08-26 | Phase C | 单一 mask 迭代器：`ComputeChunkMask` 共享方法（单组件零拷贝 + 多组件 AND）+ `ResolveEnabledTypes`（hash→ComponentType[]）；ChunkJobCallbacks 删 `ResolveCombinedMask`/`ExecuteRawChunk`，改用共享工具；ChunkExecution 删内联 AND，统一调用 `ComputeChunkMask`；签名不变 | 91.5-97.9 vs 89.6（B 噪声带内） | 无回归 |
 | 2026-08-26 | Phase D | AOT 反射消除：NativeJobCore `AutoParallelForCallback<T>`（MakeGenericMethod）和 ManagedJobScheduler `SelectRunner<T>`（MakeGenericType）→ 移除 dual-interface 反射分支，统一用 index 回调；删除 `BatchRunner<T>`、`_batchRunnerCache`；EntJoy.Jobs 零反射 | 87.5-92.3 vs ~91（噪声带内） | 无回归 |
+| 2026-08-26 | JobScheduler 统一前端 | `JobScheduler` 统一调度器（自动选择 Native/Managed）；`JobExtensions` 改调 `JobScheduler`；`JobHandle` 双后端支持；Native fallback（ManagedChunkParallelJob<T>）；文件夹重分类（Native/Managed/根目录）；EntJoy.Jobs 零 ECS 字眼 | 66.47 vs 67.77 | 无回归 |
+| 2026-08-26 | TrackEntityJob 双后端 | `TrackEntityJob` 改为接受 `JobHandle`（兼容 Native/Managed）；EntityManager 同步；managed fallback 调用 TrackEntityJob（Selective Wait 生效）；注释修正 | 66.47 vs 67.77 | 无回归 |
