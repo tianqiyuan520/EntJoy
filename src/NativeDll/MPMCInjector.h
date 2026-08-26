@@ -78,6 +78,42 @@ namespace JobSystem
             return true;
         }
 
+        // 批量入队：一次 CAS 抢占 count 个连续槽，按槽序顺序填充（release）。
+        // 与 Push 的 seq 协议完全一致：消费者仍按 dequeuePos 顺序消费；多生产者
+        // 抢占的区间互不相交，各自的填充顺序独立，无乱序问题。
+        // 返回实际入队数（容量不足时 < count；调用方把剩余项逐个 Push 或再 PushMany）。
+        uint32_t PushMany(const T* values, uint32_t count) noexcept
+        {
+            if (count == 0) return 0;
+            for (;;)
+            {
+                uint64_t pos = enqueuePos.load(std::memory_order_relaxed);
+                // 从 pos 起探测连续可用槽数（≤ count，遇到 seq 不匹配即截止）
+                uint32_t avail = 0;
+                while (avail < count)
+                {
+                    Cell& cell = cells[(pos + avail) & (Capacity - 1)];
+                    const uint64_t seq = cell.seq.load(std::memory_order_acquire);
+                    if (static_cast<int64_t>(seq) - static_cast<int64_t>(pos + avail) != 0)
+                        break;
+                    ++avail;
+                }
+                if (avail == 0) return 0; // 满
+                if (enqueuePos.compare_exchange_weak(
+                        pos, pos + avail, std::memory_order_relaxed))
+                {
+                    for (uint32_t i = 0; i < avail; ++i)
+                    {
+                        cells[(pos + i) & (Capacity - 1)].data = values[i];
+                        cells[(pos + i) & (Capacity - 1)].seq.store(
+                            pos + i + 1, std::memory_order_release);
+                    }
+                    return avail;
+                }
+                // CAS 失败：重读尾部重试
+            }
+        }
+
         // 消费者/stealer：弹出一个值。空时返回 false。
         // 无竞争时仅一次 CAS（dequeuePos relaxed fetch_add）。
         bool Pop(T& value) noexcept

@@ -66,6 +66,10 @@ namespace JobSystem
         // 投 Injector 由 worker 执行：workFn(ctx) → workCleanup(ctx) → Release。
         void SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
 
+        // 提交窗口统一唤醒（deferNotify 的 Flush）：bump epoch + notify_all 一次。
+        // 供 JobSystem_SubmitDeferFlush 调用；defer 期 SubmitBatch 跳过 per-batch 唤醒。
+        void WakePending() noexcept;
+
         // 主线程协助执行：从 Injector 或其他 worker deque 窃取一个任务并执行。
         // 返回是否执行了任务。
         bool TryAssistOne() noexcept;
@@ -114,7 +118,7 @@ namespace JobSystem
 
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
-        // 每次认领的 tile 数（预切分粒度）
+        // 每次认领的 tile 数（预切分粒度；实测放大窗口无端到端收益——fetch_add 被 tile 执行吸收）
         static constexpr uint32_t kClaimBatchSize = 4;
 
         // ── 自适应自旋参数（WorkerLoop park 段）──

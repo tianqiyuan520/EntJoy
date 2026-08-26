@@ -33,6 +33,8 @@ namespace EntJoy.JobSystem
                 if (NativeJobScheduler.TilesPerWorker > 0)
                     NativeJobCore.JobSystem_ConfigureTilesPerWorker(NativeJobScheduler.TilesPerWorker);
                 NativeJobCore.JobSystem_SetJobCostCacheEnabled(NativeJobScheduler.JobCostCacheEnabled ? 1 : 0);
+                // 隐式批默认关闭：需要时由用户显式 NativeJobScheduler.SetImplicitBatchEnabled(true)
+                //（配合每帧 EndFrame() / 依赖 Complete 兜底）。
             }
             catch
             {

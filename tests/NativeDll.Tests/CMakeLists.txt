@@ -6,35 +6,35 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(JobSystemTests
     JobSystemTests.cpp
-    ../NativeDll/JobSystem.cpp
-    ../NativeDll/JobSystem_State.cpp
-    ../NativeDll/JobSystem_Tiles.cpp
-    ../NativeDll/JobSystem_Scheduler.cpp
-    ../NativeDll/JobProfiler.cpp
-    ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/ChaseLevScheduler.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
 )
 
 add_executable(AssistLifetimeTests
     AssistLifetimeTests.cpp
-    ../NativeDll/JobSystem.cpp
-    ../NativeDll/JobSystem_State.cpp
-    ../NativeDll/JobSystem_Tiles.cpp
-    ../NativeDll/JobSystem_Scheduler.cpp
-    ../NativeDll/JobProfiler.cpp
-    ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/ChaseLevScheduler.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
 )
 
 add_executable(ChaseLevIntegrationTests
     ChaseLevIntegrationTests.cpp
-    ../NativeDll/JobSystem.cpp
-    ../NativeDll/JobSystem_State.cpp
-    ../NativeDll/JobSystem_Tiles.cpp
-    ../NativeDll/JobSystem_Scheduler.cpp
-    ../NativeDll/JobProfiler.cpp
-    ../NativeDll/JobDebuggerGUI.cpp
-    ../NativeDll/ChaseLevScheduler.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
 )
 
 add_executable(SparseTileDequeTests
@@ -54,31 +54,31 @@ add_executable(MPMCInjectorTests
 )
 
 target_include_directories(JobSystemTests PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(AssistLifetimeTests PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(ChaseLevIntegrationTests PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(SparseTileDequeTests PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(SparseTileDequeSmoketest PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(SparseTileDequeTrace PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 target_include_directories(MPMCInjectorTests PRIVATE
-    ../NativeDll
+    ../../src/NativeDll
 )
 
 if(MSVC)
