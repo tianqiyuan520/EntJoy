@@ -57,7 +57,7 @@ static class NativeStressTests
     public static void RunAll(int timeoutSec, bool longMode)
     {
         _timeoutSec = timeoutSec;
-        NativeJobScheduler.Initialize(0);
+        JobScheduler.Initialize(0);
         RunWithTimeout("N1. MassiveScheduleComplete (50K)", Test_MassiveScheduleComplete);
         RunWithTimeout("N2. DeepDependencyChain (500)", Test_DependencyChain);
         RunWithTimeout("N3. ConcurrentSchedule (8 threads)", Test_ConcurrentSchedule);

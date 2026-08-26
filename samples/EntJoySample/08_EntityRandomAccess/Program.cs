@@ -1,10 +1,10 @@
-﻿//namespace EntJoySample.EntityRandomAccess
+//namespace EntJoySample.EntityRandomAccess
 //{
 //    public static class Program
 //    {
 //         public static void Main()
 //        {
-//            NativeJobScheduler.Initialize();
+//            JobScheduler.Initialize();
 //            NativeJobScheduler.PrewakeWorkersOnce();
 //            using var sample = new TestEntityRandomAccess();
 //            sample.Run();

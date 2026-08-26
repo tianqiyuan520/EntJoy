@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 //using EntJoy.Collections;
 
 //namespace EntJoySample.SimpleIJobChunkTest;
@@ -7,7 +7,7 @@
 //{
 //    public static void Main()
 //    {
-//        NativeJobScheduler.Initialize();
+//        JobScheduler.Initialize();
 
 //        using var sample = new SimpleIJobChunkSample();
 //        sample.Run();

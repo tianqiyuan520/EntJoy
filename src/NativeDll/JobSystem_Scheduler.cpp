@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 #include <windows.h>
@@ -21,6 +23,84 @@ namespace JobSystem
     // ============================================================
     // Schedule helpers
     // ============================================================
+    // ── tile 布局缓存：同 (unitsPtr, itemCount, workerCap, rangeSize, unitGeneration) 下
+    //    实体数衡 tile 划分完全确定 → 跨 job 共享（同 query 多 job 只扫一次）。
+    //    只存值（tile 边界拷贝），不持有指针 → 无悬垂。
+    namespace {
+        struct TileLayoutEntry
+        {
+            const void* unitsPtr = nullptr;
+            int itemCount = 0;
+            int workerCap = 0;
+            int rangeSize = 0;
+            uint32_t unitGeneration = 0; // C# cache StructuralVersion：重建必变 → 防指针地址复用误命中
+            long totalEntities = 0;      // 实体总量（JCC 前置判重成本估算用）
+            uint32_t tileCount = 0;
+            std::vector<uint32_t> bounds; // 长度 tileCount+1：tile i 覆盖 [bounds[i], bounds[i+1])
+        };
+        struct TileLayoutCache
+        {
+            std::mutex mtx;
+            TileLayoutEntry entries[16];
+            int count = 0;
+        };
+        TileLayoutCache g_tileLayoutCache;
+
+        bool TileLayoutTryGet(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
+            uint32_t unitGeneration, uint32_t& outTileCount, long& outTotalEntities,
+            std::vector<uint32_t>& outBounds)
+        {
+            // unitGeneration==0 = 调用方无缓存身份（fallback 路径）→ 不参与缓存（避免指针复用误命中）。
+            if (!unitsPtr || unitGeneration == 0) return false;
+            std::lock_guard<std::mutex> lock(g_tileLayoutCache.mtx);
+            for (int i = 0; i < g_tileLayoutCache.count; ++i)
+            {
+                const auto& e = g_tileLayoutCache.entries[i];
+                if (e.unitsPtr == unitsPtr && e.itemCount == itemCount &&
+                    e.workerCap == workerCap && e.rangeSize == rangeSize &&
+                    e.unitGeneration == unitGeneration)
+                {
+                    outTileCount = e.tileCount;
+                    outTotalEntities = e.totalEntities;
+                    outBounds = e.bounds;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void TileLayoutStore(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
+            uint32_t unitGeneration, long totalEntities, uint32_t tileCount,
+            const std::vector<uint32_t>& bounds)
+        {
+            if (unitGeneration == 0) return;
+            std::lock_guard<std::mutex> lock(g_tileLayoutCache.mtx);
+            // 覆盖同 key（重算）或插入；满则简单覆盖 index 0（LRU 近似，8+ 不同 key 罕见）。
+            for (int i = 0; i < g_tileLayoutCache.count; ++i)
+            {
+                auto& e = g_tileLayoutCache.entries[i];
+                if (e.unitsPtr == unitsPtr && e.itemCount == itemCount &&
+                    e.workerCap == workerCap && e.rangeSize == rangeSize &&
+                    e.unitGeneration == unitGeneration)
+                {
+                    e.totalEntities = totalEntities;
+                    e.tileCount = tileCount;
+                    e.bounds = bounds;
+                    return;
+                }
+            }
+            int slot = g_tileLayoutCache.count < 16 ? g_tileLayoutCache.count++ : 0;
+            auto& e = g_tileLayoutCache.entries[slot];
+            e.unitsPtr = unitsPtr;
+            e.itemCount = itemCount;
+            e.workerCap = workerCap;
+            e.rangeSize = rangeSize;
+            e.unitGeneration = unitGeneration;
+            e.totalEntities = totalEntities;
+            e.tileCount = tileCount;
+            e.bounds = bounds;
+        }
+    }
     template <typename WorkBuilder>
     JobHandle ScheduleWithDependency(const JobHandle& dep, WorkBuilder&& builder)
     {
@@ -454,7 +534,8 @@ namespace JobSystem
         void* context, void (*cleanup)(void*),
         const ChunkJobData* chunks, const EntityBatchData* batches,
         int itemCount, const JobHandle& dependency,
-        ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind)
+        ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind,
+        uint32_t unitGeneration)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
@@ -499,11 +580,40 @@ namespace JobSystem
             ? TileKind::ChunkCallbacks
             : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
         const int targetWorkers = ResolveWorkerTarget(workerCap, rc);
+        // ── tile 布局缓存：同 (unitsPtr, itemCount, workerCap, rangeSize, unitGeneration) 下
+        //    实体数衡 tile 划分确定不变 → 跨 job 共享（同 query 多 job 只扫一次）。
+        //    未命中才扫描构建并入缓存（含 totalEntities 供 JCC 判重）。
+        const void* tileKeyPtr = chunks != nullptr ? static_cast<const void*>(chunks)
+                                                   : static_cast<const void*>(batches);
+        uint32_t tileCount = 0;
         long totalEntities = 0;
-        for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
-        const int targetEnt = ResolveEcsEntityTileTarget(static_cast<int>(totalEntities), targetWorkers);
-        const uint32_t tileCount = static_cast<uint32_t>(
-            BuildEntityBalancedTiles(nullptr, cc, tileKind, itemCount, targetEnt));
+        std::vector<uint32_t> tileBounds;
+        const bool tileHit = tileKeyPtr != nullptr &&
+            TileLayoutTryGet(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
+                tileCount, totalEntities, tileBounds);
+        if (!tileHit)
+        {
+            for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
+            const int targetEnt = ResolveEcsEntityTileTarget(static_cast<int>(totalEntities), targetWorkers);
+            tileCount = static_cast<uint32_t>(
+                BuildEntityBalancedTiles(nullptr, cc, tileKind, itemCount, targetEnt));
+            tileBounds.assign(tileCount + 1, static_cast<uint32_t>(itemCount));
+            tileBounds[0] = 0;
+            long acc2 = 0;
+            int bi = 1;
+            for (int u = 0; u < itemCount && bi <= (int)tileCount; ++u)
+            {
+                acc2 += UnitEntityCount(cc, tileKind, u);
+                if (acc2 >= targetEnt || u + 1 == itemCount)
+                {
+                    tileBounds[bi++] = static_cast<uint32_t>(u + 1);
+                    acc2 = 0;
+                }
+            }
+            if (tileKeyPtr)
+                TileLayoutStore(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
+                    totalEntities, tileCount, tileBounds);
+        }
 
         auto* storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
@@ -513,7 +623,12 @@ namespace JobSystem
 
         {
             auto* tiles = storage->tileBuffer;
-            BuildEntityBalancedTiles(tiles, cc, tileKind, itemCount, targetEnt);
+            for (uint32_t i = 0; i < tileCount; ++i)
+            {
+                tiles[i].kind = tileKind;
+                tiles[i].firstItem = tileBounds[i];
+                tiles[i].itemCount = tileBounds[i + 1] - tileBounds[i];
+            }
             batch->executeTile = &ChunkExecuteTile;
             batch->tiles = tiles;
             batch->tileCount = tileCount;
@@ -531,16 +646,16 @@ namespace JobSystem
     }
 
     JobHandle Scheduler::ScheduleChunks(void (*f)(void*, const ChunkJobData*), void* ctx, void (*cl)(void*),
-        const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs)
-    { return ScheduleChunkBatchCore(f, nullptr, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk); }
+        const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs, uint32_t unitGeneration)
+    { return ScheduleChunkBatchCore(f, nullptr, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk, unitGeneration); }
 
     JobHandle Scheduler::ScheduleChunkRanges(void (*f)(void*, const ChunkJobData*, int, int), void* ctx, void (*cl)(void*),
-        const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs)
-    { return ScheduleChunkBatchCore(nullptr, f, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk); }
+        const ChunkJobData* chunks, int cc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs, uint32_t unitGeneration)
+    { return ScheduleChunkBatchCore(nullptr, f, nullptr, ctx, cl, chunks, nullptr, cc, dep, mode, wc, rs, EcsJobKind::Chunk, unitGeneration); }
 
     JobHandle Scheduler::ScheduleEntityBatches(void (*f)(void*, const EntityBatchData*, int, int), void* ctx, void (*cl)(void*),
-        const EntityBatchData* batches, int bc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs, EcsJobKind jobKind)
-    { return ScheduleChunkBatchCore(nullptr, nullptr, f, ctx, cl, nullptr, batches, bc, dep, mode, wc, rs, jobKind); }
+        const EntityBatchData* batches, int bc, const JobHandle& dep, ChunkScheduleMode mode, int wc, int rs, EcsJobKind jobKind, uint32_t unitGeneration)
+    { return ScheduleChunkBatchCore(nullptr, nullptr, f, ctx, cl, nullptr, batches, bc, dep, mode, wc, rs, jobKind, unitGeneration); }
 
 
 } // namespace JobSystem

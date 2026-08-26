@@ -123,6 +123,14 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCap_{jobType.Name}(ref job, query, workerCap, dependsOn);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
+                // ScheduleWithWorkerCapAndRangeSize：原生后端（Cpp/Ispc）均已在 NativeExports 生成
+                // ScheduleWithWorkerCapAndRangeSize_{Name}，此处补齐用户域扩展方法（见 docs EntJoy20260820-ai聊天.md：
+                // workerCap + rangeSize 手动指定调度粒度）。
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCapAndRangeSize(this {jobFullName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCapAndRangeSize_{jobType.Name}(ref job, query, workerCap, rangeSize, dependsOn);");
+                sb.AppendLine("    }");
+                sb.AppendLine();
                 sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
                 sb.AppendLine("    {");
                 // RunImmediate_*：C++ ImmediateNative 主线程直接执行（零 worker 唤醒、无 handle 往返）

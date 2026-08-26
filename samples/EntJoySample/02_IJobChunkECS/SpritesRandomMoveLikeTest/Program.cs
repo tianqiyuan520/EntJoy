@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 //using EntJoySample.SpritesRandomMove;
 
 //namespace EntJoySample;
@@ -7,7 +7,7 @@
 //{
 //    public static void Main(string[] args)
 //    {
-//        NativeJobScheduler.Initialize();
+//        JobScheduler.Initialize();
 
 //        using var sample = new SpritesRandomMoveLikeTest();
         
