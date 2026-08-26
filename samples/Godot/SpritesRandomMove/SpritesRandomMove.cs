@@ -84,8 +84,8 @@ public partial class SpritesRandomMove : Node2D
 
 	public override void _Ready()
 	{
-        NativeJobScheduler.Initialize();
-        NativeJobScheduler.LaunchDebuggerGUI();
+        JobScheduler.Initialize();
+		JobScheduler.LaunchDebuggerGUI();
         GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateWorld").Pressed += CreateWorld;
 		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("CreateEntity").Pressed += NewEntity;
 		GetNode("CanvasLayer/HBoxContainer").GetNode<Button>("PrintEntity").Pressed += Display;
@@ -231,7 +231,7 @@ public partial class SpritesRandomMove : Node2D
 				handle = new MoveSystemJobCSharp { dt = dt }.Schedule(_moveQuery);
 				break;
 			case 1:
-				handle = new MoveSystemJobCpp { dt = dt }.ScheduleWithWorkerCapAndRangeSize(_moveQuery, 0, 64);
+				handle = new MoveSystemJobCpp { dt = dt }.Schedule(_moveQuery);
 				break;
 			case 2:
 				handle = new MoveSystemJobIspc { dt = dt }.Schedule(_moveQuery);
