@@ -100,5 +100,11 @@ namespace EntJoy.JobSystem
         // ─── 状态查询 ───
         public static int WorkerCount => UseNative ? NativeJobScheduler.JobWorkerCount : Environment.ProcessorCount - 1;
         public static void PrewakeWorkersOnce() { if (UseNative) NativeJobScheduler.PrewakeWorkersOnce(); }
+
+        /// <summary>当前是否为 Native 后端（C++ Chase-Lev）。</summary>
+        public static bool IsNative => UseNative;
+
+        /// <summary>启动原生调试 GUI（仅 Native 后端可用，Managed 后端 no-op）。</summary>
+        public static void LaunchDebuggerGUI() { if (UseNative) NativeJobScheduler.LaunchDebuggerGUI(); }
     }
 }
