@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 //using EntJoy.MovementTest;
 
 ///// <summary>
@@ -9,7 +9,7 @@
 //{
 //    public static void Main()
 //    {
-//        NativeJobScheduler.Initialize();
+//        JobScheduler.Initialize();
 
 //        //Console.WriteLine("EntJoySample - 100w 实体位移性能测试");
 //        //Console.WriteLine("=====================================\n");

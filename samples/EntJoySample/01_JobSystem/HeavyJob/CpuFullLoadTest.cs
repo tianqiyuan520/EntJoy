@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS.JobSystem;
+using EntJoy.ECS.JobSystem;
 //using EntJoy.JobSystem;
 //using System.Diagnostics;
 //using Environment = System.Environment;
@@ -34,7 +34,7 @@
 
 //    public static void Main()
 //    {
-//        NativeJobScheduler.Initialize();
+//        JobScheduler.Initialize();
 //        NativeJobScheduler.LaunchDebuggerGUI();
 //        NativeJobScheduler.SetMainThreadAssistEnabled(true);
 //        try

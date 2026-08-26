@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS.JobSystem;
+using EntJoy.ECS.JobSystem;
 //// Auto-SIMD — Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
 //using EntJoy.ECS;
 //using EntJoy.Collections;
@@ -13,7 +13,7 @@
 //    {
 //        public static void Main()
 //        {
-//            NativeJobScheduler.Initialize();
+//            JobScheduler.Initialize();
 //            int N = 100000, W = 3, I = 100, H = 10;
 //            var rnd = new Random(42);
 //            var rd = GF(N * 100, rnd);

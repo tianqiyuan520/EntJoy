@@ -1,4 +1,4 @@
-﻿//using EntJoy.JobSystem;
+//using EntJoy.JobSystem;
 
 //namespace EntJoySample.ECS
 //{
@@ -10,7 +10,7 @@
 //            try
 //            {
 //                // ECS 基准需要原生 worker（C++ Chase-Lev 调度器）；缺失时 Schedule 路径无 worker 可执行
-//                NativeJobScheduler.Initialize();
+//                JobScheduler.Initialize();
 //                Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
 //                // 原有示例

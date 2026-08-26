@@ -1,4 +1,4 @@
-﻿//using EntJoy.JobSystem;
+//using EntJoy.JobSystem;
 //using System.Diagnostics;
 //using Vector3 = System.Numerics.Vector3;
 //using EntJoy.Collections;
@@ -72,7 +72,7 @@
 
 //    public static void Main()
 //    {
-//        NativeJobScheduler.Initialize();
+//        JobScheduler.Initialize();
 //        NativeJobScheduler.PrewakeWorkersOnce();
 //        NativeJobScheduler.JobCostCacheEnabled = true;
 

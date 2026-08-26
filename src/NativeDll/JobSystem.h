@@ -265,7 +265,8 @@ namespace JobSystem {
             const JobHandle& dependency = {},
             ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
             int workerCap = 0,
-            int rangeSize = 0);
+            int rangeSize = 0,
+            uint32_t unitGeneration = 0);
 
         static JobHandle ScheduleChunkRanges(
             void (*func)(void*, const struct ChunkJobData*, int, int), void* context,
@@ -275,7 +276,8 @@ namespace JobSystem {
             const JobHandle& dependency = {},
             ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
             int workerCap = 0,
-            int rangeSize = 0);
+            int rangeSize = 0,
+            uint32_t unitGeneration = 0);
 
         static JobHandle ScheduleEntityBatches(
             void (*func)(void*, const struct EntityBatchData*, int, int), void* context,
@@ -286,7 +288,8 @@ namespace JobSystem {
             ChunkScheduleMode mode = ChunkScheduleMode::PublishAssist,
             int workerCap = 0,
             int rangeSize = 0,
-            EcsJobKind jobKind = EcsJobKind::Entity);
+            EcsJobKind jobKind = EcsJobKind::Entity,
+            uint32_t unitGeneration = 0);
     };
 
 } // namespace JobSystem

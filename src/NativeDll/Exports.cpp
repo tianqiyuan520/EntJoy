@@ -269,7 +269,8 @@ extern "C"
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize)
+        int rangeSize,
+        uint32_t unitGeneration)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -285,7 +286,7 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublish;
         else if (scheduleMode == 5)
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
         return toHandle(handle);
     }
 
@@ -298,7 +299,8 @@ extern "C"
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize)
+        int rangeSize,
+        uint32_t unitGeneration)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -314,7 +316,7 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublish;
         else if (scheduleMode == 5)
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize);
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
         return toHandle(handle);
     }
 
@@ -328,7 +330,8 @@ extern "C"
         int scheduleMode,
         int workerCap,
         int rangeSize,
-        int jobKind)
+        int jobKind,
+        uint32_t unitGeneration)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -347,7 +350,7 @@ extern "C"
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk
             : JobSystem::EcsJobKind::Entity;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
         return toHandle(handle);
     }
 
@@ -361,7 +364,8 @@ extern "C"
         int scheduleMode,
         int workerCap,
         int rangeSize,
-        int jobKind)
+        int jobKind,
+        uint32_t unitGeneration)
     {
         JobSystem::JobHandle dep;
         if (dependency)
@@ -382,7 +386,7 @@ extern "C"
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk
             : JobSystem::EcsJobKind::Entity;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind);
+        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
         handle.Complete();
         return toHandle(handle);
     }

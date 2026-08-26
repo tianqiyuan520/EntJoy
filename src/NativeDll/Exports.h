@@ -97,7 +97,7 @@ extern "C" {
     JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
         EntityBatchRangeJobFunc func, void* context, ContextCleanupFunc cleanup,
         const struct EntityBatchData* batches, int batchCount, void* dependency,
-        int scheduleMode, int workerCap, int rangeSize, int jobKind);
+        int scheduleMode, int workerCap, int rangeSize, int jobKind, uint32_t unitGeneration);
     
     typedef struct JobSystemTuningNative {
         int spinBeforeWait;
@@ -251,7 +251,8 @@ extern "C" {
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize);
+        int rangeSize,
+        uint32_t unitGeneration);
 
     JOB_API void* JobSystem_ScheduleChunkRangeJobEx(
         ChunkRangeJobFunc func,
@@ -262,7 +263,8 @@ extern "C" {
         void* dependency,
         int scheduleMode,
         int workerCap,
-        int rangeSize);
+        int rangeSize,
+        uint32_t unitGeneration);
 
     JOB_API void* JobSystem_ScheduleEntityBatchJobEx(
         EntityBatchRangeJobFunc func,
@@ -274,7 +276,8 @@ extern "C" {
         int scheduleMode,
         int workerCap,
         int rangeSize,
-        int jobKind);
+        int jobKind,
+        uint32_t unitGeneration);
 
     // ======================== Profiler API ========================
     // 启用/禁用 Profiler

@@ -1,11 +1,11 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 //namespace EntJoySample.IJobChunkScheduleOverheadTest
 //{
 //    public static class Program
 //    {
 //        public static void Main()
 //        {
-//            NativeJobScheduler.Initialize();
+//            JobScheduler.Initialize();
 //
 //            using var sample = new IJobChunkScheduleOverheadSample();
 //            sample.Run();

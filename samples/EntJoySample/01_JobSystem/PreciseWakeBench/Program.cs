@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS.JobSystem;
+using EntJoy.ECS.JobSystem;
 //using EntJoy.JobSystem;
 
 //using System.Diagnostics;
@@ -86,7 +86,7 @@
 
 //        public static void Main()
 //        {
-//            NativeJobScheduler.Initialize();
+//            JobScheduler.Initialize();
 //            NativeJobScheduler.PrewakeWorkersOnce();
 
 //            // 读取环境变量设置 assist / guided（可选，也可直接用 API）

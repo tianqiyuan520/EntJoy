@@ -1,4 +1,4 @@
-﻿//using EntJoy.JobSystem;
+//using EntJoy.JobSystem;
 //using EntJoySample.ECS;
 
 //namespace EntJoySample.EcsPhase3Test
@@ -7,7 +7,7 @@
 //    {
 //        public static void Main()
 //        {
-//            NativeJobScheduler.Initialize();
+//            JobScheduler.Initialize();
 //            NativeJobScheduler.PrewakeWorkersOnce();
 
 //            using var test = new EcsPhase3Test();

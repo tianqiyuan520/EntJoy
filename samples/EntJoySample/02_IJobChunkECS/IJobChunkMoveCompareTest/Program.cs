@@ -1,4 +1,4 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
 
 namespace EntJoySample.IJobChunkMoveCompareTest
 {
@@ -6,7 +6,7 @@ namespace EntJoySample.IJobChunkMoveCompareTest
     {
         public static void Main()
         {
-            NativeJobScheduler.Initialize();
+            JobScheduler.Initialize();
 
             using var sample = new IJobChunkMoveCompareSample();
             sample.Run();
