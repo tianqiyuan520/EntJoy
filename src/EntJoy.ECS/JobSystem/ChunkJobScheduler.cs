@@ -14,10 +14,13 @@ namespace EntJoy.ECS.JobSystem
 
 
         // ======================== Job 名登记 / 实体跟踪 ========================
-        private static NativeJobHandle TrackEntityJob(EntityManager entityManager, NativeJobHandle handle, Archetype[]? matchingArchetypes = null, ComponentType[]? writtenComponents = null)
+        /// <summary>从 C++ 返回的 IntPtr 构造 JobHandle。</summary>
+        private static JobHandle FromNative(IntPtr handle) => new JobHandle(new NativeJobHandle(handle));
+
+        private static NativeJobHandle TrackEntityJob(EntityManager entityManager, JobHandle handle, Archetype[]? matchingArchetypes = null, ComponentType[]? writtenComponents = null)
         {
             entityManager?.TrackEntityJob(handle, matchingArchetypes, writtenComponents);
-            return handle;
+            return handle._nativeHandle;
         }
 
         // ======================== Chunk 调度缓存（归属 ECS，与 engine 解耦） ========================
@@ -131,7 +134,7 @@ namespace EntJoy.ECS.JobSystem
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize);
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, new NativeJobHandle(handle), rawCache.MatchingArchetypes, writtenComponents);
+                    return TrackEntityJob(entityManager, FromNative(handle), rawCache.MatchingArchetypes, writtenComponents);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
@@ -150,7 +153,7 @@ namespace EntJoy.ECS.JobSystem
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, managedContextBlock, NativeChunkJobs.ChunkCleanupPtr, managedCache.ChunksPtr, managedCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, new NativeJobHandle(handle), managedCache.MatchingArchetypes, writtenComponents);
+                    return TrackEntityJob(entityManager, FromNative(handle), managedCache.MatchingArchetypes, writtenComponents);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(managedContextBlock); throw; }
             }
@@ -176,7 +179,7 @@ namespace EntJoy.ECS.JobSystem
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, new NativeJobHandle(handle), rawCache.MatchingArchetypes);
+                    return TrackEntityJob(entityManager, FromNative(handle), rawCache.MatchingArchetypes);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
@@ -199,7 +202,7 @@ namespace EntJoy.ECS.JobSystem
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                 IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize);
                 NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(handle), fallbackMatchingArchetypes.ToArray());
+                return TrackEntityJob(entityManager, FromNative(handle), fallbackMatchingArchetypes.ToArray());
             }
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
         }
@@ -300,7 +303,7 @@ namespace EntJoy.ECS.JobSystem
                 try
                 {
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
-                    return TrackEntityJob(entityManager, new NativeJobHandle(NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)), rawCache.MatchingArchetypes);
+                    return TrackEntityJob(entityManager, FromNative(NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)), rawCache.MatchingArchetypes);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
@@ -321,7 +324,7 @@ namespace EntJoy.ECS.JobSystem
             try
             {
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
-                return TrackEntityJob(entityManager, new NativeJobHandle(NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)), fallbackMatchingArchetypes.ToArray());
+                return TrackEntityJob(entityManager, FromNative(NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, chunksPtr, chunkCount, dependencyLease.Handle, mode, workerCap, rangeSize)), fallbackMatchingArchetypes.ToArray());
             }
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
         }
@@ -350,7 +353,7 @@ namespace EntJoy.ECS.JobSystem
                     ? NativeChunkJobs.JobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, mode, workerCap, rangeSize, jobKind)
                     : NativeChunkJobs.JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, mode, workerCap, rangeSize, jobKind);
                 NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                return TrackEntityJob(entityManager, new NativeJobHandle(handle));
+                return TrackEntityJob(entityManager, FromNative(handle));
             }
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
         }
@@ -1090,7 +1093,8 @@ namespace EntJoy.ECS.JobSystem
                 Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes
             };
             var mhandle = JobScheduler.ScheduleParallelFor(ref parallelJob, chunkCount, innerBatchCount: 1);
-            // 托管路径不走 TrackEntityJob（ManagedJobScheduler 完成于主线程，无需 per-archetype 跟踪）
+            // 托管路径也需要 TrackEntityJob：用于 Selective Wait（结构变更时只等影响该 archetype 的 job）
+            TrackEntityJob(entityManager, mhandle, archetypes, writtenComponents);
             return mhandle;
         }
 
