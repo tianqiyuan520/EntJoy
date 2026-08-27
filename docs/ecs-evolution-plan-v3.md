@@ -31,6 +31,7 @@
 **附注**：
 - Phase 1-3 已完成基础实现，性能数据已收集。
 - Phase 4 已完成大部分（2026-08）：Schedule Graph、OrderBefore/OrderAfter、Entity Builder、Change Tracking、RunWhen 已实现。命名空间从 `EntJoy` 重构为 `EntJoy.ECS`。
+- Event Channel（S18 World Events）已完成（2026-08-27）：双缓冲 EventStream + Managed/NativeTranspile SendEvent + C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain。详见 `docs/20260827-EventChannel实现记录.md`。One-Frame Component（S19）废弃，由 Event Channel 替代。
 - Phase 9 新增 AOT 兼容修复和托管类型支持。
 - 工具链新增热重载支持（仅限 Native System）。
 

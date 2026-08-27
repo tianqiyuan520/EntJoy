@@ -22,6 +22,13 @@ namespace NativeTranspiler.Analyzer
         private readonly HashSet<string> _chunkArrayLocalNames = new();
         private readonly Dictionary<string, NativeArrayElementAlias> _nativeArrayElementAliases = new();
 
+        // ─── SendEvent 支持 ───
+        /// <summary>Execute 中发现的 SendEvent 事件类型（有序，index 对应 eventBufferHeaders 数组）。</summary>
+        public List<INamedTypeSymbol> EventTypes { get; } = new();
+
+        /// <summary>托管事件类型错误（编译时报错）。</summary>
+        public List<(INamedTypeSymbol eventType, InvocationExpressionSyntax invocation)> ManagedEventErrors { get; } = new();
+
         public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false)
             : base(semanticModel, jobStruct, useFastMath)
         {
@@ -55,6 +62,11 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
         {
             if (exprStmt.Expression is AssignmentExpressionSyntax assignment && IsNativeArrayAliasWriteBack(assignment))
+                return;
+
+            // ─── SendEvent 拦截 ───
+            if (exprStmt.Expression is InvocationExpressionSyntax invocation
+                && TryTranslateSendEvent(invocation))
                 return;
 
             base.TranslateExpressionStatement(exprStmt);
@@ -130,7 +142,7 @@ namespace NativeTranspiler.Analyzer
             var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
             if (symbolInfo.Symbol is not IMethodSymbol methodSymbol)
                 return false;
-            if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk")
+            if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk)
                 return false;
 
             // ======================== SharedComponent：GetSharedComponent<T>() → 单值指针 ========================
@@ -400,5 +412,131 @@ namespace NativeTranspiler.Analyzer
 
         private static string NormalizeExpression(ExpressionSyntax expression)
             => expression.NormalizeWhitespace().ToFullString();
+
+        // ─── SendEvent 翻译 ───
+
+        /// <summary>
+        /// 检测 world.SendEvent&lt;T&gt;(new T { ... }) 调用，生成 C++ EventBuffer 写入代码。
+        /// 返回 true 表示已翻译（调用方应 return）。
+        /// </summary>
+        private bool TryTranslateSendEvent(InvocationExpressionSyntax invocation)
+        {
+            // 情况 1：裸调用 SendEvent<T>(...) — Expression 直接是 IdentifierName
+            if (invocation.Expression is IdentifierNameSyntax bareName
+                && bareName.Identifier.Text == Config.SendEvent)
+            {
+                // 通过泛型实参推断事件类型（裸调用必须用显式类型参数 SendEvent<T>）
+                if (invocation.ArgumentList?.Arguments.Count == 1)
+                {
+                    var typeInfo = _semanticModel.GetTypeInfo(bareName);
+                    if (typeInfo.Type is INamedTypeSymbol evtType && evtType.IsUnmanagedType)
+                        return GenerateSendEventCpp(invocation, evtType, typeInfo.Type.ToDisplayString());
+                }
+            }
+
+            // 情况 2：xxx.SendEvent<T>(...) — MemberAccess 链（ECS.SendEvent / World.SendEvent）
+            if (invocation.Expression is MemberAccessExpressionSyntax mac
+                && mac.Name is GenericNameSyntax genericName
+                && genericName.Identifier.Text == Config.SendEvent
+                && genericName.TypeArgumentList?.Arguments.Count == 1)
+            {
+                var typeArg = genericName.TypeArgumentList.Arguments[0];
+                var typeInfo = _semanticModel.GetTypeInfo(typeArg);
+                if (typeInfo.Type is INamedTypeSymbol evtType && evtType.IsUnmanagedType)
+                    return GenerateSendEventCpp(invocation, evtType, typeInfo.Type.ToDisplayString());
+                if (typeInfo.Type is INamedTypeSymbol managedEvtType && !managedEvtType.IsUnmanagedType)
+                {
+                    ManagedEventErrors.Add((managedEvtType, invocation));
+                    return false;
+                }
+            }
+
+            // 情况 3：GetSymbolInfo 回退
+            var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
+            if (symbolInfo.Symbol is IMethodSymbol method
+                && method.Name == Config.SendEvent && method.IsGenericMethod)
+            {
+                var eventType = method.TypeArguments[0] as INamedTypeSymbol;
+                if (eventType != null && eventType.IsUnmanagedType)
+                    return GenerateSendEventCpp(invocation, eventType, eventType.ToDisplayString());
+                if (eventType != null && !eventType.IsUnmanagedType)
+                {
+                    ManagedEventErrors.Add((eventType, invocation));
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>生成 SendEvent 的 C++ EventBuffer 写入代码。</summary>
+        private bool GenerateSendEventCpp(InvocationExpressionSyntax invocation, INamedTypeSymbol eventType, string cppTypeName)
+        {
+            // 记录事件类型（去重）
+            int typeIndex = -1;
+            for (int i = 0; i < EventTypes.Count; i++)
+            {
+                if (SymbolEqualityComparer.Default.Equals(EventTypes[i], eventType))
+                {
+                    typeIndex = i;
+                    break;
+                }
+            }
+            if (typeIndex < 0)
+            {
+                typeIndex = EventTypes.Count;
+                EventTypes.Add(eventType);
+            }
+
+            string cppEventType = NativeTranspiler.MapCSharpTypeToCpp(eventType);
+            string tempVar = $"__evt_{eventType.Name}_{typeIndex}";
+
+            _builder.AppendLine("{");
+            if (false) // EnableSendEventDiag
+            {
+                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP] header=%p evtHeaders=%p count=%d\\n\", (void*)__header, __header ? __header->eventBufferHeaders : 0, __header ? __header->eventBufferCount : 0);");
+            }
+            _builder.AppendLine($"    if (__header != nullptr && __header->eventBufferHeaders != nullptr) {{");
+            _builder.AppendLine($"    auto* {tempVar}_buf = ((__EntJoyEventBuffer**)__header->eventBufferHeaders)[{typeIndex}];");
+            if (false) // EnableSendEventDiag
+            {
+                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP2] buf=%p data=%p countPtr=%p capacity=%d\\n\", (void*){tempVar}_buf, {tempVar}_buf ? {tempVar}_buf->data : 0, {tempVar}_buf ? (void*){tempVar}_buf->count : 0, {tempVar}_buf ? {tempVar}_buf->capacity : 0);");
+            }
+            _builder.AppendLine($"    if ({tempVar}_buf != nullptr) {{");
+            _builder.AppendLine($"    int {tempVar}_idx = INTERLOCKED_ADD_AND_FETCH32({tempVar}_buf->count, 1) - 1;");
+            _builder.AppendLine($"    if ({tempVar}_idx < {tempVar}_buf->capacity) {{");
+
+            // 翻译事件对象初始化
+            if (invocation.ArgumentList.Arguments.Count > 0)
+            {
+                var argExpr = invocation.ArgumentList.Arguments[0].Expression;
+                if (argExpr is ObjectCreationExpressionSyntax objCreate)
+                {
+                    _builder.Append($"       (({cppEventType}*){tempVar}_buf->data)[{tempVar}_idx] = {{ ");
+                    bool first = true;
+                    foreach (var init in objCreate.Initializer?.Expressions ?? Enumerable.Empty<ExpressionSyntax>())
+                    {
+                        if (!first) _builder.Append(", ");
+                        first = false;
+                        if (init is AssignmentExpressionSyntax assign)
+                            TranslateExpression(assign.Right);
+                    }
+                    _builder.AppendLine(" };");
+                }
+                else
+                {
+                    _builder.AppendLine($"        auto {tempVar}_evt = ");
+                    TranslateExpression(argExpr);
+                    _builder.AppendLine(";");
+                    _builder.AppendLine($"        (({cppEventType}*){tempVar}_buf->data)[{tempVar}_idx] = {tempVar}_evt;");
+                }
+            }
+
+            _builder.AppendLine("    }");
+            _builder.AppendLine("    }");
+            _builder.AppendLine("    }");
+            _builder.AppendLine("}");
+            return true;
+        }
     }
 }

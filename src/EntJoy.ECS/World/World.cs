@@ -1,10 +1,11 @@
-using System.Threading;
 using EntJoy.Collections;
 using EntJoy.JobSystem;
+using System;
+using System.Collections.Generic;
 
 namespace EntJoy.ECS
 {
-    public partial class World : System.IDisposable
+    public partial class World : IDisposable
     {
         private static readonly object _defaultLock = new();
         private static volatile World _defaultWorld;
@@ -18,6 +19,9 @@ namespace EntJoy.ECS
         public long CurrentFrame { get; set; }
         public EntityManager _entityManager;
         public ref EntityManager EntityManager => ref _entityManager;
+
+        // ─── Event Channel ───
+        private readonly Dictionary<Type, object> _eventStreams = new();
 
 
         public World(string worldName = "Default")
@@ -80,8 +84,85 @@ namespace EntJoy.ECS
         public QuerySelection<T0> Query<T0>() where T0 : struct
             => new QuerySelection<T0>(_entityManager);
 
+        // ─── Event Channel API ───
+
+        /// <summary>
+        /// 注册事件类型。World 初始化时调用，每种事件类型调用一次。
+        /// </summary>
+        public void RegisterEvent<T>() where T : unmanaged
+        {
+            var type = typeof(T);
+            if (!_eventStreams.ContainsKey(type))
+                _eventStreams[type] = new EventStream<T>();
+        }
+
+        /// <summary>
+        /// 生产者：发送事件（零结构变更，写入双缓冲）。
+        /// </summary>
+        public void SendEvent<T>(in T evt) where T : unmanaged
+        {
+            if (!_eventStreams.TryGetValue(typeof(T), out var obj))
+            {
+                RegisterEvent<T>();
+                obj = _eventStreams[typeof(T)];
+            }
+            ((EventStream<T>)obj).SendEvent(evt);
+        }
+
+        /// <summary>
+        /// 消费者：获取事件流，调用 ReadBuffer() 读取上一帧的所有事件。
+        /// </summary>
+        public EventStream<T> GetEventStream<T>() where T : unmanaged
+        {
+            if (!_eventStreams.TryGetValue(typeof(T), out var obj))
+            {
+                RegisterEvent<T>();
+                obj = _eventStreams[typeof(T)];
+            }
+            return (EventStream<T>)obj;
+        }
+
+        /// <summary>非泛型版本：通过 Type 获取事件流（供 drain 路径使用）。</summary>
+        internal IEventStream? GetEventStream(Type eventType)
+        {
+            if (_eventStreams.TryGetValue(eventType, out var obj))
+                return (IEventStream)obj;
+            return null;
+        }
+
+        /// <summary>
+        /// 帧末：交换所有事件流的双缓冲区（SystemRunner.Update 调用）。
+        /// </summary>
+        public void NextFrameEvents()
+        {
+            foreach (var kv in _eventStreams)
+                ((IEventStream)kv.Value).NextFrame();
+        }
+
+        /// <summary>
+        /// Drain Native EventBuffer → EventStream（Run/Complete 后调用）。
+        /// </summary>
+        /// <summary>
+        /// 完成所有 pending 的 Native 事件 buffer drain（异步 Schedule 后必须调用）。
+        /// 等价于内部的 EntityManager.CompleteActiveJobs()。
+        /// </summary>
+        public void CompletePendingNativeEvents()
+        {
+            _entityManager.CompleteActiveJobs();
+        }
+
+        public void DrainNativeEvents(Type jobType, IntPtr contextPtr)
+        {
+            JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, this, jobType);
+        }
+
         public void Dispose()
         {
+            foreach (var kv in _eventStreams)
+            {
+                if (kv.Value is IDisposable d) d.Dispose();
+            }
+            _eventStreams.Clear();
             _entityManager?.Dispose();
             lock (_defaultLock)
             {

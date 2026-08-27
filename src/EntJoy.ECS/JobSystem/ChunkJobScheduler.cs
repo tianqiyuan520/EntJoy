@@ -11,7 +11,19 @@ namespace EntJoy.ECS.JobSystem
 
     public static unsafe class ChunkJobScheduler
     {
+        // ─── Event Buffer 元数据缓存（Job 类型 → 查询结果） ───
+        public struct EventBufferMeta
+        {
+            public int Count;                  // 事件类型数
+            public Type[] EventTypes;          // 事件类型数组（与 adapter index 一一对应）
+        }
+        public static readonly ConcurrentDictionary<Type, EventBufferMeta> EventMetaCache = new();
 
+        // ─── 活跃 EventBuffer 实例（context 指针 → buffer 列表，Complete 后 drain + free） ───
+        internal static readonly ConcurrentDictionary<IntPtr, List<EventBufferHeader>> LiveEventBuffers = new();
+        internal static readonly ConcurrentDictionary<IntPtr, List<IDisposable>> LiveEventBufferDisposables = new();
+        // 事件类型数组（context 指针 → 该 job 的事件类型列表，drain 时需要按类型写回 EventStream）
+        internal static readonly ConcurrentDictionary<IntPtr, Type[]> LiveEventBufferTypes = new();
 
         // ======================== Job 名登�?/ 实体跟踪 ========================
         /// <summary>�?C++ 返回�?IntPtr 构�?JobHandle�?/summary>
@@ -78,33 +90,33 @@ namespace EntJoy.ECS.JobSystem
             where T : struct, IJobChunk
             => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap, writtenComponents: writtenComponents);
 
-        public static NativeJobHandle ScheduleChunkRangeRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr rangeFuncPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleChunkRangeRaw<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr rangeFuncPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct
             => ScheduleNativeChunkRangeRawCore(
                 ref job, entityManager, query, rangeFuncPtr,
-                requiredComponentTypeIds, dependsOn, workerCap: 0, rangeSize: 0);
+                requiredComponentTypeIds, dependsOn, workerCap: 0, rangeSize: 0, world: world);
 
-        public static NativeJobHandle ScheduleChunkRawWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleChunkRawWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct, IJobChunk
-            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap);
+            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap, world: world);
 
-        public static NativeJobHandle ScheduleChunkRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleChunkRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct, IJobChunk
-            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap, rangeSize: rangeSize);
+            => ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap: workerCap, rangeSize: rangeSize, world: world);
 
-        public static NativeJobHandle ScheduleEntityRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleEntityRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct
-            => ScheduleNativeChunkRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+            => ScheduleNativeChunkRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, world: world);
 
-        public static NativeJobHandle ScheduleEntityRangeRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleEntityRangeRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct
-            => ScheduleNativeChunkRangeRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize);
+            => ScheduleNativeChunkRangeRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, world: world);
 
-        public static NativeJobHandle ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null)
+        public static NativeJobHandle ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, int workerCap, int rangeSize, NativeJobHandle? dependsOn = null, World world = null)
             where T : struct, IJobChunk
-            => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, jobKind: NativeEcsJobKind.Chunk);
+            => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, jobKind: NativeEcsJobKind.Chunk, world: world);
 
-        private static JobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
+        private static JobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null, World world = null)
             where T : struct, IJobChunk
         {
             // ─── Managed fallback（NativeDll 不可用时）：�?C# 路径，无回调 ───
@@ -112,13 +124,24 @@ namespace EntJoy.ECS.JobSystem
                 return ScheduleChunkManagedFallback(ref job, entityManager, query, writtenComponents);
 
             // ─── C++ 路径 ───
-            var result = ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, forcedMode, workerCap, rangeSize, writtenComponents);
+            var result = ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, forcedMode, workerCap, rangeSize, writtenComponents, world);
             return new JobHandle(result);
         }
 
-        private static NativeJobHandle ScheduleChunkNativeCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null)
+        private static NativeJobHandle ScheduleChunkNativeCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null, World world = null)
             where T : struct, IJobChunk
         {
+            // 多 World 支持：绑定本次调度的 World
+            world ??= World.DefaultWorld;
+            // ─── Event Buffer: 按需分配 ───
+            Type jobType = typeof(T);
+            List<EventBufferHeader>? evtHeaders = null;
+            List<IDisposable>? evtDisposables = null;
+            if (EventMetaCache.TryGetValue(jobType, out var evtMeta) && evtMeta.Count > 0)
+            {
+                (evtHeaders, evtDisposables) = AllocateEventBuffers(jobType);
+            }
+
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
             bool canUseRawCache = funcPtr != IntPtr.Zero &&
@@ -128,7 +151,9 @@ namespace EntJoy.ECS.JobSystem
                 rawCache.ChunkCount > 0)
             {
                 var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
-                var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
+                var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease, eventBufferHeaders: evtHeaders, world: world);
+                if (evtHeaders != null) StoreLiveEventBuffers(rawContextBlock, evtHeaders, evtDisposables,
+                    EventMetaCache.TryGetValue(jobType, out var rawMeta) ? rawMeta.EventTypes : null);
                 try
                 {
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
@@ -161,7 +186,7 @@ namespace EntJoy.ECS.JobSystem
             return default;
         }
 
-        private static NativeJobHandle ScheduleNativeChunkRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize)
+        private static NativeJobHandle ScheduleNativeChunkRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, World world = null)
             where T : struct
         {
             if (funcPtr == IntPtr.Zero)
@@ -319,7 +344,7 @@ namespace EntJoy.ECS.JobSystem
             return ptrs;
         }
 
-        private static NativeJobHandle ScheduleNativeChunkRangeRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, ChunkScheduleMode? forcedMode = null)
+        private static NativeJobHandle ScheduleNativeChunkRangeRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, ChunkScheduleMode? forcedMode = null, World world = null)
             where T : struct
         {
             if (funcPtr == IntPtr.Zero)
@@ -362,11 +387,14 @@ namespace EntJoy.ECS.JobSystem
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
         }
 
-        private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, bool useScheduleAndComplete = false, ChunkScheduleMode? forcedMode = null, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity)
+        private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, bool useScheduleAndComplete = false, ChunkScheduleMode? forcedMode = null, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity, World world = null)
             where T : struct
         {
             if (funcPtr == IntPtr.Zero)
                 throw new ArgumentException("Native entity batch raw scheduling requires a function pointer.", nameof(funcPtr));
+
+            // 多 World 支持：绑定本次调度的 World（drain 写回正确 EventStream）
+            world ??= World.DefaultWorld;
 
             // ── 临时诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：C# 调度侧四段细分计�?──
             bool cDiag = s_csharpPhaseDiag;
@@ -383,7 +411,16 @@ namespace EntJoy.ECS.JobSystem
                 return default;
             d1 = cDiag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
-            var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease);
+            // ─── Event Buffer: 按需分配 ───
+            Type evtJobType = typeof(T);
+            List<EventBufferHeader>? evtHeaders = null;
+            List<IDisposable>? evtDisposables = null;
+            if (EventMetaCache.TryGetValue(evtJobType, out var evtMeta) && evtMeta.Count > 0)
+                (evtHeaders, evtDisposables) = AllocateEventBuffers(evtJobType);
+
+            var contextBlock = CreateChunkContextBlock(ref job, null, cache.BatchCount, false, null, -1, false, requiredComponentTypeIds, cacheLease, eventBufferHeaders: evtHeaders, world: world);
+            if (evtHeaders != null) StoreLiveEventBuffers(contextBlock, evtHeaders, evtDisposables,
+                    EventMetaCache.TryGetValue(evtJobType, out var batchMeta) ? batchMeta.EventTypes : null);
             d2 = cDiag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try
             {
@@ -394,6 +431,17 @@ namespace EntJoy.ECS.JobSystem
                     : NativeChunkJobs.JobSystem_ScheduleEntityBatchJobEx(funcPtr, contextBlock, NativeChunkJobs.ChunkCleanupPtr, cache.BatchesPtr, cache.BatchCount, dependencyLease.Handle, mode, workerCap, rangeSize, jobKind, (uint)cache.StructuralVersion);
                 d3 = cDiag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
+                // ─── Event Buffer Drain ───
+                if (useScheduleAndComplete && evtHeaders != null)
+                {
+                    // 同步路径：执行完成后立即 drain
+                    DrainAndFreeEventBuffers(contextBlock, world, evtJobType);
+                }
+                else if (evtHeaders != null)
+                {
+                    // 异步路径：注册到本 World 的 EntityManager，Complete 时统一 drain
+                    entityManager._pendingNativeEvents.Add((contextBlock, evtJobType));
+                }
                 var ret = TrackEntityJob(entityManager, FromNative(handle));
                 if (cDiag && s_csharpPhaseCount++ < 24)
                     Console.WriteLine($"[CPHS] cache+hash={us(d1 - d0):F1} us  contextBlock={us(d2 - d1):F1} us  PInvoke={us(d3 - d2):F1} us  track+return={us(System.Diagnostics.Stopwatch.GetTimestamp() - d3):F1} us");
@@ -412,26 +460,26 @@ namespace EntJoy.ECS.JobSystem
         /// 同步执行 [NativeTranspile] IJobChunk：以 ImmediateNative 模式提交（C++ 侧主线程直接执行�?
         /// �?worker 唤醒），并一步完成（无需显式 Complete）。等价于 Run 的零调度开销版本�?
         /// </summary>
-        public static void RunChunkImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
+        public static void RunChunkImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, World world = null)
             where T : struct
         {
             ScheduleNativeEntityBatchRawCore(
                 ref job, entityManager, query, funcPtr, requiredComponentTypeIds,
                 null, workerCap: 0, rangeSize: 0,
                 useScheduleAndComplete: true, forcedMode: ChunkScheduleMode.ImmediateNative,
-                jobKind: NativeEcsJobKind.Chunk);
+                jobKind: NativeEcsJobKind.Chunk, world: world);
         }
 
         /// <summary>
         /// 同步执行 [NativeTranspile] IJobChunk（ISPC 后端）：�?ChunkRange 路径�?ImmediateNative 提交�?
         /// </summary>
-        public static void RunChunkRangeImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds)
+        public static void RunChunkRangeImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, World world = null)
             where T : struct
         {
             ScheduleNativeChunkRangeRawCore(
                 ref job, entityManager, query, funcPtr, requiredComponentTypeIds,
                 null, workerCap: 0, rangeSize: 0,
-                forcedMode: ChunkScheduleMode.ImmediateNative);
+                forcedMode: ChunkScheduleMode.ImmediateNative, world: world);
         }
 
         // ======================== 调度缓存 ========================
@@ -1060,8 +1108,154 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
+        // ======================== Event Buffer 注册 / 分配 / Drain ========================
+
+        /// <summary>
+        /// 注册 NativeTranspile Job 的事件类型元数据（由 BindingsGenerator 在启动时调用）。
+        /// </summary>
+        public static void RegisterEventBufferMeta(Type jobType, Type[] eventTypes)
+        {
+            EventMetaCache[jobType] = new EventBufferMeta { Count = eventTypes.Length, EventTypes = eventTypes };
+        }
+
+        /// <summary>
+        /// 从 NativeTranspiler 生成的 NativeEventTypes 类读取元数据并注册。
+        /// 使用反射避免编译时依赖（NativeTranspilerGenerated 是另一个程序集的源码）。
+        /// </summary>
+        public static void RegisterEventBufferMetaFromGenerated(Type jobType)
+        {
+            if (EventMetaCache.ContainsKey(jobType)) return;
+            try
+            {
+                var generatedAssembly = jobType.Assembly; // 同程序集
+                var evtTypesClass = generatedAssembly.GetType("NativeTranspiler.Generated.NativeEventTypes");
+                if (evtTypesClass == null) return;
+                var typesField = evtTypesClass.GetField("Types");
+                if (typesField == null) return;
+                var typesDict = typesField.GetValue(null) as System.Collections.Generic.Dictionary<string, Type[]>;
+                if (typesDict != null && typesDict.TryGetValue(jobType.FullName!, out var eventTypes))
+                {
+                    RegisterEventBufferMeta(jobType, eventTypes);
+                }
+            }
+            catch { /* NativeEventTypes 不存在时静默跳过 */ }
+        }
+
+        /// <summary>
+        /// 为指定 Job 类型分配 EventBuffer 并返回 headers 列表。
+        /// </summary>
+        internal static (List<EventBufferHeader> headers, List<IDisposable> disposables) AllocateEventBuffers(Type jobType)
+        {
+            var headers = new List<EventBufferHeader>();
+            var disposables = new List<IDisposable>();
+            if (!EventMetaCache.TryGetValue(jobType, out var meta) || meta.Count == 0)
+                return (headers, disposables);
+
+            for (int i = 0; i < meta.Count; i++)
+            {
+                int elemSize = System.Runtime.InteropServices.Marshal.SizeOf(meta.EventTypes[i]);
+                var dataPtr = Marshal.AllocHGlobal(1024 * elemSize);
+                var countPtr = Marshal.AllocHGlobal(sizeof(int));
+                *(int*)countPtr = 0;
+                headers.Add(new EventBufferHeader
+                {
+                    dataPtr = dataPtr,
+                    countPtr = countPtr,
+                    capacity = 1024,
+                    elementSize = elemSize
+                });
+            }
+            return (headers, disposables);
+        }
+
+        /// <summary>
+        /// Drain EventBuffer → EventStream，然后释放非托管内存。
+        /// </summary>
+        internal static void DrainAndFreeEventBuffers(IntPtr contextPtr, World world, Type jobType)
+        {
+            LiveEventBufferDisposables.TryRemove(contextPtr, out var _);
+            if (!LiveEventBuffers.TryRemove(contextPtr, out var headers)) return;
+            if (!EventMetaCache.TryGetValue(jobType, out var meta)) return;
+
+            // world 由参数传入（调度时用户显式指定，或 DefaultWorld）
+            if (world == null) world = World.DefaultWorld;
+            if (world == null) return;
+
+            // 释放独立分配的指针数组（eventBufferHeaders → __EntJoyEventBuffer*[]）
+            unsafe
+            {
+                var ctxHeader = (ChunkContextHeader*)contextPtr;
+                if (ctxHeader->eventBufferHeaders != IntPtr.Zero)
+                {
+                    var ptrArr = (IntPtr*)ctxHeader->eventBufferHeaders;
+                    int bufCount = ctxHeader->eventBufferCount;
+                    for (int i = 0; i < bufCount; i++)
+                    {
+                        if (ptrArr[i] != IntPtr.Zero) Marshal.FreeHGlobal(ptrArr[i]);
+                    }
+                    Marshal.FreeHGlobal(ctxHeader->eventBufferHeaders);
+                    ctxHeader->eventBufferHeaders = IntPtr.Zero;
+                }
+                // 释放 World GCHandle 并清除，避免 ChunkCleanup 二次 drain/释放
+                if (ctxHeader->eventWorldHandle != IntPtr.Zero)
+                {
+                    try { GCHandle.FromIntPtr(ctxHeader->eventWorldHandle).Free(); } catch { }
+                    ctxHeader->eventWorldHandle = IntPtr.Zero;
+                }
+            }
+
+            for (int i = 0; i < headers.Count && i < meta.Count; i++)
+            {
+                var hdr = headers[i];
+                int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
+                if (count > 0 && meta.EventTypes[i] != null)
+                {
+                    var stream = world.GetEventStream(meta.EventTypes[i]);
+                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count);
+                }
+                if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
+                if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
+            }
+        }
+
+        /// <summary>存储活跃 EventBuffer（调度后、Complete 前，供 drain 释放）。</summary>
+        internal static void StoreLiveEventBuffers(IntPtr contextPtr, List<EventBufferHeader>? headers, List<IDisposable>? disposables, Type[]? eventTypes = null)
+        {
+            if (headers != null && headers.Count > 0)
+            {
+                LiveEventBuffers[contextPtr] = headers;
+                if (eventTypes != null) LiveEventBufferTypes[contextPtr] = eventTypes;
+            }
+            if (disposables != null && disposables.Count > 0)
+                LiveEventBufferDisposables[contextPtr] = disposables;
+        }
+
+        /// <summary>
+        /// ChunkCleanup 回调调用的自动 drain：C++ 执行完自动回读事件。
+        /// 从 LiveEventBufferTypes 取事件类型 → drain 到 World.EventStream → 释放 buffer 内存。
+        /// </summary>
+        internal static void DrainEventBuffersFromCleanup(IntPtr contextPtr, World world)
+        {
+            LiveEventBufferDisposables.TryRemove(contextPtr, out var _);
+            if (!LiveEventBuffers.TryRemove(contextPtr, out var headers)) return;
+            if (!LiveEventBufferTypes.TryRemove(contextPtr, out var eventTypes)) return;
+
+            for (int i = 0; i < headers.Count && i < eventTypes.Length; i++)
+            {
+                var hdr = headers[i];
+                int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
+                if (count > 0 && eventTypes[i] != null)
+                {
+                    var stream = world.GetEventStream(eventTypes[i]);
+                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count);
+                }
+                if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
+                if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
+            }
+        }
+
         // ======================== 上下文块创建 / 清理 ========================
-        private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null, bool jobBoxed = false, Chunk[]? chunkArray = null) where T : struct
+        private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null, bool jobBoxed = false, Chunk[]? chunkArray = null, List<EventBufferHeader>? eventBufferHeaders = null, World world = null) where T : struct
         {
             int jobSize = jobBoxed ? sizeof(IntPtr) : Unsafe.SizeOf<T>();
             int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
@@ -1107,6 +1301,34 @@ namespace EntJoy.ECS.JobSystem
                 header->requiredComponentTypeIds = (IntPtr)requiredTypePtr;
             }
             else { header->requiredComponentTypeIdCount = 0; header->requiredComponentTypeIds = IntPtr.Zero; }
+            // ─── Event Buffer Headers ───
+            if (eventBufferHeaders != null && eventBufferHeaders.Count > 0)
+            {
+                // C++ 侧期望 eventBufferHeaders 是 __EntJoyEventBuffer*[]（指针数组），
+                // 每个元素指向独立的 EventBufferHeader（新分配，避免结构数组布局歧义）。
+                int ptrArraySize = eventBufferHeaders.Count * sizeof(IntPtr);
+                var ptrArrayBlock = Marshal.AllocHGlobal(ptrArraySize);
+                var ptrArr = (IntPtr*)ptrArrayBlock;
+                for (int i = 0; i < eventBufferHeaders.Count; i++)
+                {
+                    var hdrPtr = Marshal.AllocHGlobal(sizeof(EventBufferHeader));
+                    *(EventBufferHeader*)hdrPtr = eventBufferHeaders[i];
+                    ptrArr[i] = hdrPtr;
+                }
+                header->eventBufferCount = eventBufferHeaders.Count;
+                header->eventBufferHeaders = ptrArrayBlock;
+                // 绑定 World GCHandle：cleanup 时自动 drain 到正确的 EventStream
+                if (world != null)
+                    header->eventWorldHandle = GCHandle.ToIntPtr(GCHandle.Alloc(world, GCHandleType.Normal));
+                else
+                    header->eventWorldHandle = IntPtr.Zero;
+            }
+            else
+            {
+                header->eventBufferCount = 0;
+                header->eventBufferHeaders = IntPtr.Zero;
+                header->eventWorldHandle = IntPtr.Zero;
+            }
             byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
             if (jobBoxed)
             {

@@ -1,5 +1,9 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-27 增量：Event Channel 完整实现（双缓冲 EventStream + Managed/NativeTranspile SendEvent +
+> C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain）——详见 `docs/20260827-EventChannel实现记录.md`。
+> 事件总线（S18）完成并移入 Phase 4；One-Frame Component（S19）废弃，由 Event Channel 替代。
+>
 > 2026-08-25 增量：Change Tracking 核心实现、EnabledComponent 过滤优化、Run 直执/ImmediateNative、
 > SourceGenerator 统一（IJobEntity/IJobChunk）——详见 `docs/20260825-ChangeTracking与Enabled优化记录.md`。
 
@@ -38,11 +42,12 @@ Phase 4 (System 调度与开发体验增强) ✅ 进行中
   └─ 命名空间重构           ✅ — EntJoy → EntJoy.ECS
   └─ EnabledComponent 过滤   ✅ — 链式 `Query<T0>().WithEnabled<T1>()`，SIMD 位图 + enableVersion 缓存
   └─ Run 直执 / ImmediateNative ✅ — ECS 侧直接执行；Native 版 Run 零 worker 唤醒（2026-08-25）
+  └─ Event Channel         ✅ — 双缓冲事件流 + Managed/Native SendEvent（2026-08-27，详见 docs/20260827-EventChannel实现记录.md）
 
 Phase 5 (易用性)            🔲 未开始
   └─ 关系型状态机
-  └─ 事件总线
-  └─ One-Frame Component
+  └─ ~~事件总线~~             ✅ — Event Channel 已实现（S18 World Events 完成，移到 Phase 4）
+  └─ ~~One-Frame Component~~ ❌ — 已废弃：Event Channel 替代（零结构变更）
 
 Phase 6 (实体关系)          🔲 未开始
   └─ Non-Fragmenting 关系
@@ -124,8 +129,8 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 | **S16** | Shared Component 存储（per-chunk） | Phase 2 | ✅ 已完成（2026-08-27） | S14 | per-chunk 双类型：blittable 内联 chunk 内存块 + managed 扁平数组索引 + 43/43 测试 + 6/6 Demo 通过 |
 | **S16b** | NativeTranspiler 支持 blittable SharedComponent | Phase 2 | ✅ 已完成（2026-08-27） | S16 | IJobChunk `GetSharedComponent<T>` → C++ 指针解引用 + ABI 扩展 + NT014 拦截 managed + EntityBatchAdapter 跳过 |
 | **S17** | Chunk lazy zero | Phase 2 | 0-0.5 天 | 无 | ✅ 已验证完成：chunk 构造无整体 InitBlock，AddEntity 逐 slot 清零 |
-| **S18** | World Events | Phase 5 | 3-5 天 | S7 | typed event channel，struct 避免装箱 |
-| **S19** | One-Frame Components | Phase 5 | 3-5 天 | S18 | 帧末批量清理 |
+| **S18** | World Events | Phase 4 | ✅ 已完成（2026-08-27） | — | Event Channel：双缓冲 EventStream + Managed/Native SendEvent，详见 20260827-EventChannel实现记录.md |
+| ~~S19~~ | ~~One-Frame Components~~ | ~~Phase 5~~ | ❌ 废弃 | — | 由 Event Channel 替代（零结构变更，非每帧 add/remove 组件） |
 | **S20** | Entity Index / Group | Phase 5 | 5-7 天 | S7 | delta 更新，O(1) 索引查询 |
 | **S21** | AutoSIMD P2 循环展开 | AutoSIMD | 1-2 周 | — | 预期 5-10% 性能提升 |
 | **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |

@@ -20,7 +20,20 @@ namespace EntJoySample.ECS
         public float Max;
     }
 
-    public struct DamageEvent : IComponentData { }
+    /// <summary>碰撞事件（Event Channel 测试用，blittable）。</summary>
+    public struct CollisionEvent
+    {
+        public Entity A;
+        public Entity B;
+        public float Force;
+    }
+
+    /// <summary>伤害事件（Event Channel 测试用，blittable）。</summary>
+    public struct DamageEvent
+    {
+        public Entity Target;
+        public int Amount;
+    }
 
     /// <summary>可启用组件，用于测试 EnabledComponent 过滤。</summary>
     public struct ActiveComponent : IComponentData, IEnableableComponent

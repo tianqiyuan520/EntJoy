@@ -1,0 +1,110 @@
+using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
+
+namespace EntJoy.ECS
+{
+    /// <summary>非泛型事件流接口：用于 World 统一管理，避免反射调用。</summary>
+    internal interface IEventStream
+    {
+        void NextFrame();
+        unsafe int DrainFromBuffer(void* dataPtr, int count);
+    }
+
+    /// <summary>
+    /// 双缓冲事件流：零结构变更的系统间消息传递。
+    ///
+    /// 生命周期：
+    ///   帧 N：SendEvent 写 buffer[0]（writeBuffer），writeCount++
+    ///   帧末：NextFrame swap，writeCount → readCount，writeCount = 0
+    ///   帧 N+1：ReadBuffer 读 buffer[1]（readBuffer），取 readCount 条
+    /// </summary>
+    public sealed class EventStream<T> : IEventStream, IDisposable where T : unmanaged
+    {
+        private readonly T[][] _buffers = new T[2][];
+        private int _writeCount;   // 本帧已写入数
+        private int _readCount;    // 上一帧写入数（swap 后可读）
+        private uint _generation;
+        private readonly int _capacity;
+
+        public uint Generation => _generation;
+        public int Capacity => _capacity;
+
+        public EventStream(int capacity = 1024)
+        {
+            _capacity = capacity;
+            _buffers[0] = new T[capacity];
+            _buffers[1] = new T[capacity];
+        }
+
+        /// <summary>
+        /// 生产者：写入当前帧事件（线程安全，Interlocked 原子计数）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool SendEvent(in T evt)
+        {
+            var idx = Interlocked.Increment(ref _writeCount) - 1;
+            if (idx >= _capacity)
+            {
+                Interlocked.Decrement(ref _writeCount);
+                return false;
+            }
+            _buffers[0][idx] = evt;
+            return true;
+        }
+
+        /// <summary>
+        /// 消费者：读取上一帧的事件缓冲区（只读 Span）。
+        /// 必须在 NextFrame 之后调用才有数据。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ReadOnlySpan<T> ReadBuffer()
+        {
+            int count = Volatile.Read(ref _readCount);
+            if (count > _capacity) count = _capacity;
+            return new ReadOnlySpan<T>(_buffers[1], 0, count);
+        }
+
+        /// <summary>
+        /// 帧末：交换缓冲区，将 writeCount 转为 readCount，清零 writeCount。
+        /// </summary>
+        public void NextFrame()
+        {
+            // swap buffers
+            var tmp = _buffers[0];
+            _buffers[0] = _buffers[1];
+            _buffers[1] = tmp;
+
+            // 本帧写入数 → 下帧可读数
+            _readCount = Volatile.Read(ref _writeCount);
+            _writeCount = 0;
+            _generation++;
+        }
+
+        /// <summary>
+        /// 从 Native EventBuffer drain：将 count 个 T 从 dataPtr 复制到写入缓冲区。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe int DrainFromBuffer(void* dataPtr, int count)
+        {
+            if (count <= 0) return 0;
+            int toWrite = Math.Min(count, _capacity);
+            var src = new ReadOnlySpan<T>(dataPtr, toWrite);
+            int startIdx = Interlocked.Add(ref _writeCount, toWrite) - toWrite;
+            if (startIdx >= _capacity)
+            {
+                Interlocked.Add(ref _writeCount, -toWrite);
+                return 0;
+            }
+            int actual = Math.Min(toWrite, _capacity - startIdx);
+            src.Slice(0, actual).CopyTo(new Span<T>(_buffers[0], startIdx, actual));
+            return actual;
+        }
+
+        public void Dispose()
+        {
+            _buffers[0] = Array.Empty<T>();
+            _buffers[1] = Array.Empty<T>();
+        }
+    }
+}

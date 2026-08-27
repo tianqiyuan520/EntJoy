@@ -49,9 +49,8 @@
 	</Target>
 
 	<Target Name="CleanStaleNativeTranspilerBindings" BeforeTargets="CoreCompile">
-		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler" ContinueOnError="true" />
+		<!-- 清理 source generator 中间缓存（不影响已生成的 C++ 文件） -->
 		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
-		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler" ContinueOnError="true" />
 		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
 	</Target>
 

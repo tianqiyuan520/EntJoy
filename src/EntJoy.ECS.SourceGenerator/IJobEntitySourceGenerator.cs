@@ -112,47 +112,47 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             if (isNativeTranspiled)
             {
-                // [NativeTranspile]：路由到原生路径
-                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
+                // [NativeTranspile]：路由到原生路径（world 默认 DefaultWorld，多 World 可显式传入）
+                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, World world = null, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobType.Name}(ref job, query, dependsOn);");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobType.Name}(ref job, query, dependsOn, world);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
-                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, World world = null, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCap_{jobType.Name}(ref job, query, workerCap, dependsOn);");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCap_{jobType.Name}(ref job, query, workerCap, dependsOn, world);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
                 // ScheduleWithWorkerCapAndRangeSize：原生后端（Cpp/Ispc）均已在 NativeExports 生成
                 // ScheduleWithWorkerCapAndRangeSize_{Name}，此处补齐用户域扩展方法（见 docs EntJoy20260820-ai聊天.md：
                 // workerCap + rangeSize 手动指定调度粒度）。
-                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCapAndRangeSize(this {jobFullName} job, QueryBuilder query, int workerCap, int rangeSize, JobHandle dependsOn = default)");
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCapAndRangeSize(this {jobFullName} job, QueryBuilder query, int workerCap, int rangeSize, World world = null, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCapAndRangeSize_{jobType.Name}(ref job, query, workerCap, rangeSize, dependsOn);");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.ScheduleWithWorkerCapAndRangeSize_{jobType.Name}(ref job, query, workerCap, rangeSize, dependsOn, world);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
-                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
+                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query, World world = null)");
                 sb.AppendLine("    {");
                 // RunImmediate_*：C++ ImmediateNative 主线程直接执行（零 worker 唤醒、无 handle 往返）
-                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.RunImmediate_{jobType.Name}(ref job, query);");
+                sb.AppendLine($"        NativeTranspiler.Bindings.NativeExports.RunImmediate_{jobType.Name}(ref job, query, world);");
                 sb.AppendLine("    }");
             }
             else
             {
-                // 非 [NativeTranspile]：生成 IJobChunk 适配器 + 托管路径
-                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, JobHandle dependsOn = default)");
+                // 非 [NativeTranspile]：生成 IJobChunk 适配器 + 托管路径（world 默认 DefaultWorld）
+                sb.AppendLine($"    public static JobHandle Schedule(this {jobFullName} job, QueryBuilder query, World world = null, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return ChunkJobExtensions.Schedule(new {adapterName} {{ Job = job }}, query, dependsOn);");
+                sb.AppendLine($"        return ChunkJobExtensions.Schedule(new {adapterName} {{ Job = job }}, query, world, dependsOn);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
-                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
+                sb.AppendLine($"    public static JobHandle ScheduleWithWorkerCap(this {jobFullName} job, QueryBuilder query, int workerCap, World world = null, JobHandle dependsOn = default)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return ChunkJobExtensions.ScheduleWithWorkerCap(new {adapterName} {{ Job = job }}, query, workerCap, dependsOn);");
+                sb.AppendLine($"        return ChunkJobExtensions.ScheduleWithWorkerCap(new {adapterName} {{ Job = job }}, query, workerCap, world, dependsOn);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
-                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query)");
+                sb.AppendLine($"    public static void Run(this {jobFullName} job, QueryBuilder query, World world = null)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        ChunkJobExtensions.Run(new {adapterName} {{ Job = job }}, query);");
+                sb.AppendLine($"        ChunkJobExtensions.Run(new {adapterName} {{ Job = job }}, query, world);");
                 sb.AppendLine("    }");
             }
             sb.AppendLine("}");

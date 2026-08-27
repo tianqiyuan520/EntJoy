@@ -1,4 +1,4 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
 
 namespace EntJoySample.ECS
 {
@@ -20,8 +20,17 @@ namespace EntJoySample.ECS
                 // Shared Component per-chunk 存储测试
                 //SharedComponentDemo.Run();
 
+                // Event Channel 测试
+                EventChannelDemo.Run();
+
+                // Event Channel + Managed Job 测试
+                EventChannelJobTest.Run();
+
+                // Native Event Job 测试（NativeTranspile SendEvent）
+                NativeEventJobTest.Run();
+
                 // Change Tracking 测试
-                ChangeTrackingDemo.Run();
+                //ChangeTrackingDemo.Run();
 
                 // EnabledComponent 三种方案性能对比
                 //EnabledComparisonBenchmark.Run();

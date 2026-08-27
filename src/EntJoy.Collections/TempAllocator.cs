@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -12,7 +12,7 @@ namespace EntJoy.Collections
     /// 的 100k int results 每帧 AllocHGlobal 400KB + 首触 100 页 = Query tail 根因）。
     /// 小块直通（碎块无收益）。对齐 PersistentAllocator 的 free-list 范式。
     ///
-    /// 2026-08-22（v3 Phase 1.1a）：分配/释放快路径**不再取全局锁**——
+    /// 分配/释放快路径**不再取全局锁**——
     /// 存活登记从全局 ConcurrentDictionary + `_resetLock`（Alloc/Free/Reset 全抢同一把锁）
     /// 改为 **per-thread pending 列表**（每线程一把私有无争用 gate；帧末 Reset 依次收集）。
     /// 全局 `_resetLock` 仅由 Reset 与跨线程 Free 慢路径获取。
