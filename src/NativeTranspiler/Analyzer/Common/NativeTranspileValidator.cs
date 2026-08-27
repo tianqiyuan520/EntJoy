@@ -22,6 +22,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -126,7 +127,12 @@ namespace NativeTranspiler.Analyzer
                         if (idSymbolInfo.Symbol is ITypeSymbol || idSymbolInfo.Symbol is IMethodSymbol)
                             break;
                         if (typeInfo.Type != null && typeInfo.Type.IsReferenceType && typeInfo.Type.SpecialType != SpecialType.System_String)
+                        {
+                            // SendEvent 链中的任何标识符都特放（World.DefaultWorld.SendEvent 等）
+                            if (IsInSendEventChain(identifier))
+                                break;
                             diagnostics.Add(Diagnostic.Create(ReferenceTypeUsageError, identifier.GetLocation(), method.Name, typeInfo.Type.ToDisplayString()));
+                        }
                         break;
                 }
             }
@@ -284,13 +290,27 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private static bool IsAllowedMethodCall(IMethodSymbol method, Compilation compilation, bool allowChunkMethods = false)
         {
+            // 0. SendEvent<T> 特放：NativeTranspiler 翻译为 C++ EventBuffer 写入
+            if (method.Name == Config.SendEvent && method.IsGenericMethod)
+            {
+                var containingType = method.ContainingType;
+                if (containingType != null)
+                {
+                    // 允许：World.SendEvent / EntityManager.SendEvent / EventBus.SendEvent
+                    if (SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeWorld)) ||
+                        SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeEntityManager)) ||
+                        SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeEventBus)))
+                        return true;
+                }
+            }
+
             // 1. 允许对容器类型的实例方法调用 (NativeList, NativeArray)
             if (!method.IsStatic)
             {
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
-                if (allowChunkMethods && containingType?.ToDisplayString() == "EntJoy.ECS.ArchetypeChunk" &&
+                if (allowChunkMethods && SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeArchetypeChunk)) &&
                     (method.Name == Config.GetComponentDataNativeArray || method.Name == Config.GetComponentDataSpan))
                     return true;
                 return false;
@@ -328,7 +348,7 @@ namespace NativeTranspiler.Analyzer
 
         private static bool IsDisallowedChunkDataAccess(IMethodSymbol method)
         {
-            if (method.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk")
+            if (method.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk)
                 return false;
             return method.Name == Config.GetComponentDataPtr;
         }
@@ -345,7 +365,7 @@ namespace NativeTranspiler.Analyzer
                     return false;
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
                     return false;
-                if (method.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" || method.Name != Config.GetComponentDataSpan)
+                if (method.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk || method.Name != Config.GetComponentDataSpan)
                     return false;
             }
 
@@ -412,6 +432,28 @@ namespace NativeTranspiler.Analyzer
                     (binary.IsKind(SyntaxKind.LogicalAndExpression) || binary.IsKind(SyntaxKind.LogicalOrExpression)))
                     return true;
                 parent = parent.Parent;
+            }
+            return false;
+        }
+
+        /// <summary>检查标识符是否在 SendEvent 调用链中（如 World.DefaultWorld.SendEvent / 裸 SendEvent）。</summary>
+        private static bool IsInSendEventChain(IdentifierNameSyntax identifier)
+        {
+            // 情况 1：裸调用 SendEvent(...) — identifier 本身就是被调用的方法名
+            if (identifier.Identifier.Text == Config.SendEvent)
+            {
+                if (identifier.Parent is InvocationExpressionSyntax inv && inv.Expression == identifier)
+                    return true;
+            }
+
+            // 情况 2：MemberAccess 链（World.DefaultWorld.SendEvent / ECS.SendEvent）
+            SyntaxNode? current = identifier;
+            while (current != null)
+            {
+                if (current is MemberAccessExpressionSyntax mac
+                    && mac.Name.Identifier.Text == Config.SendEvent)
+                    return true;
+                current = current.Parent;
             }
             return false;
         }

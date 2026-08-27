@@ -40,6 +40,8 @@ namespace EntJoy.ECS
         private readonly Dictionary<int, List<JobHandle>> _archetypeJobs = new(); // Per-Archetype Job Tracking
         private readonly Dictionary<JobHandle, ComponentType[]> _jobWrittenComponents = new(); // Job → written components
         private readonly object _structuralLock = new();  // 结构性操作（NewEntity/DestroyEntity/AddComponent/RemoveComponent）的锁
+        // Native SendEvent 异步 drain 待处理列表（contextPtr, jobType）——Complete 后按本 World 的 EventStream 落盘
+        internal readonly List<(IntPtr contextPtr, Type jobType)> _pendingNativeEvents = new();
 
 
         public EntityManager()
@@ -141,6 +143,8 @@ namespace EntJoy.ECS
                 throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing. Complete the job before modifying entities or components.");
             }
 
+            DrainPendingNativeEvents();
+
             JobHandle[] jobs;
             lock (_activeJobLock)
             {
@@ -164,6 +168,15 @@ namespace EntJoy.ECS
                 }
             }
             pending?.Throw();
+        }
+
+        /// <summary>drain 本 World 的 Native SendEvent buffers（job 完成后事件落盘）。</summary>
+        private void DrainPendingNativeEvents()
+        {
+            if (_pendingNativeEvents.Count == 0) return;
+            foreach (var (contextPtr, jobType) in _pendingNativeEvents)
+                JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, World.DefaultWorld, jobType);
+            _pendingNativeEvents.Clear();
         }
 
         private void PruneCompletedJobsNoLock()

@@ -41,6 +41,7 @@ namespace EntJoy.ECS
                     ExecuteSystem(slot);
                 }
             }
+            _world.NextFrameEvents();  // 帧末交换事件双缓冲
             _eventCounter.Reset();
         }
 

@@ -25,6 +25,7 @@ namespace NativeTranspiler.Analyzer.Common
 
         // ============ 方法名 ============
         public const string Execute = "Execute";
+        public const string SendEvent = "SendEvent";
         public const string Resize = "Resize";
         public const string Add = "Add";
         public const string Exchange = "Exchange";
@@ -45,6 +46,12 @@ namespace NativeTranspiler.Analyzer.Common
         public const string NamespaceEntJoyJobSystem = "EntJoy.JobSystem";
         public const string NamespaceEntJoyCollections = "EntJoy.Collections";
         public const string NamespaceEntJoyMathematics = "EntJoy.Mathematics";
+
+        // ============ 类型全名（MetadataName，用于 Compilation.GetTypeByMetadataName） ============
+        public const string TypeWorld = "EntJoy.ECS.World";
+        public const string TypeEntityManager = "EntJoy.ECS.EntityManager";
+        public const string TypeEventBus = "EntJoy.ECS.EventBus";
+        public const string TypeArchetypeChunk = "EntJoy.ECS.ArchetypeChunk";
 
         // ============ Attribute 名 ============
         public const string NativeTranspileAttribute = "NativeTranspileAttribute";

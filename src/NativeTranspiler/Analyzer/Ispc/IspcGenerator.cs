@@ -1207,7 +1207,7 @@ namespace NativeTranspiler.Analyzer.Common
                         continue;
                     if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                         continue;
-                    if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
+                    if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
                         methodSymbol.Name != Config.GetComponentDataNativeArray ||
                         methodSymbol.TypeArguments.Length == 0 ||
                         methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)

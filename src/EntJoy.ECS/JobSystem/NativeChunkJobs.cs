@@ -74,6 +74,10 @@ namespace EntJoy.ECS.JobSystem
         public int requiredComponentTypeIdCount; // 所需组件类型 ID 数量
         public int jobIsBoxed;               // job 区域存的是 GCHandle(ManagedJobBox) 而非裸字节（托管引用 job）
         public IntPtr chunkArrayHandle;      // 单 GCHandle 保活收集期 Chunk[]（托管回调路径按 chunkId 索引）
+        // ─── Event Buffer ───
+        public int eventBufferCount;         // 事件类型数（0 = 无事件）
+        public IntPtr eventBufferHeaders;    // EventBufferHeader[] 指针（每个元素 = 一个事件类型的 buffer 描述）
+        public IntPtr eventWorldHandle;      // GCHandle → World（cleanup 时自动 drain 到正确的 EventStream）
     }
 
     internal enum ChunkScheduleMode
@@ -201,6 +205,23 @@ namespace EntJoy.ECS.JobSystem
 
             try
             {
+                // ─── Event Buffer: 自动 drain 到 World.EventStream ───
+                if (header->eventBufferCount > 0 && header->eventWorldHandle != IntPtr.Zero)
+                {
+                    var world = (World)GCHandle.FromIntPtr(header->eventWorldHandle).Target!;
+                    ChunkJobScheduler.DrainEventBuffersFromCleanup(contextBlock, world);
+                    // 释放 eventBufferHeaders 指针数组
+                    if (header->eventBufferHeaders != IntPtr.Zero)
+                    {
+                        var ptrArr = (IntPtr*)header->eventBufferHeaders;
+                        for (int ei = 0; ei < header->eventBufferCount; ei++)
+                            if (ptrArr[ei] != IntPtr.Zero) Marshal.FreeHGlobal(ptrArr[ei]);
+                        Marshal.FreeHGlobal(header->eventBufferHeaders);
+                    }
+                    // 释放 World GCHandle
+                    GCHandle.FromIntPtr(header->eventWorldHandle).Free();
+                }
+
                 if (chunksPtr != null && gcHandleStartIndex >= 0)
                 {
                     lock (ChunkGCHandlesLock)

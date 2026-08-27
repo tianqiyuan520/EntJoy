@@ -111,6 +111,9 @@ namespace NativeTranspiler.Analyzer
                 // 收集用户自定义结构体（用于生成 ISPC 头文件）
                 var userStructs = CollectUserStructTypes(validMarkedMethods, validJobs, ctx.Compilation);
 
+                // ─── SendEvent 元数据：Job 全名 → 事件类型全名列表 ───
+                var allJobEventTypes = new Dictionary<string, List<string>>();
+
                 bool anyIspc = ctx.MethodSymbols.Any(m => m != null && GetBackendTarget(m, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
                              || ctx.JobStructSymbols.Any(j => j != null && GetBackendTarget(j, attrSymbol) == NativeTranspiler.BackendTarget.Ispc);
 
@@ -301,7 +304,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         // 为 NativeTranspile Job 生成适配函数（消除 C# 委托桥接）。
                         // ISPC IJobChunk 的 adapter 由 ISPC wrapper 生成，否则会重复导出同名符号。
-                        var adapterCode = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
+                        var (adapterCode, evtTypes) = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
                         string adapterPath = Path.Combine(outputDir, $"{plainBase}_Adapter.cpp");
                         bool adapterDisabledAutoRefresh = GetDisableAutoRefresh(job, attrSymbol);
                         bool adapterFileExists = File.Exists(adapterPath);
@@ -310,6 +313,13 @@ namespace NativeTranspiler.Analyzer
                             CodeGenIo.WriteAllTextWithRetry(adapterPath, adapterCode);
                         }
                         cppFiles.Add($"{plainBase}_Adapter.cpp");
+
+                        // ─── SendEvent: 收集事件类型元数据 ───
+                        if (evtTypes.Count > 0)
+                        {
+                            string jobFullName = job.ToDisplayString();
+                            allJobEventTypes[jobFullName] = evtTypes;
+                        }
                     }
                 }
 
@@ -453,6 +463,33 @@ namespace NativeTranspiler.Analyzer
 
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
                 spc.AddSource("NativeTranspiler.Bindings.g.cs", bindingsCode);
+
+                // ─── SendEvent 元数据：供 BindingsGenerator 注册到 ChunkJobScheduler ───
+                if (allJobEventTypes.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine("using System;");
+                    sb.AppendLine("using System.Collections.Generic;");
+                    sb.AppendLine("namespace NativeTranspiler.Generated {");
+                    sb.AppendLine("    internal static class NativeEventTypes {");
+                    sb.AppendLine("        public static readonly Dictionary<string, Type[]> Types = new();");
+                    sb.AppendLine("        static NativeEventTypes() {");
+                    foreach (var kv in allJobEventTypes)
+                    {
+                        sb.Append($"            Types[\"{kv.Key}\"] = new Type[] {{ ");
+                        for (int i = 0; i < kv.Value.Count; i++)
+                        {
+                            if (i > 0) sb.Append(", ");
+                            sb.Append($"typeof({kv.Value[i]})");
+                        }
+                        sb.AppendLine(" };");
+                    }
+                    sb.AppendLine("        }");
+                    sb.AppendLine("    }");
+                    sb.AppendLine("}");
+                    spc.AddSource("NativeTranspiler.EventTypes.g.cs", sb.ToString());
+                }
+
                 spc.AddSource("NativeTranspiler_GeneratedMarker.g.cs",
                     $"// Generated at {DateTime.UtcNow}\n// {validMarkedMethods.Count()} methods, {methodsToGenerate.Count - validMarkedMethods.Count()} deps, {validJobs.Count()} jobs transpiled.");
             });
@@ -554,6 +591,42 @@ namespace NativeTranspiler.Analyzer
                             var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
                             if (localType != null)
                                 CollectFromType(localType, structs);
+                        }
+
+                        // ─── SendEvent 事件类型收集 ───
+                        foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                        {
+                            // 判断是否 SendEvent 调用：
+                            // 1) xxx.SendEvent<T>(...)：MemberAccess + GenericName
+                            // 2) SendEvent(...)：裸调用（using static）
+                            bool isSendEvent = false;
+                            if (invocation.Expression is MemberAccessExpressionSyntax macSend
+                                && macSend.Name.Identifier.Text == Config.SendEvent)
+                                isSendEvent = true;
+                            if (invocation.Expression is IdentifierNameSyntax idSend
+                                && idSend.Identifier.Text == Config.SendEvent)
+                                isSendEvent = true;
+                            if (!isSendEvent) continue;
+
+                            // 收集泛型参数类型 SendEvent<T>
+                            if (invocation.Expression is MemberAccessExpressionSyntax mac2
+                                && mac2.Name is GenericNameSyntax gn2)
+                            {
+                                foreach (var typeArg in gn2.TypeArgumentList.Arguments)
+                                {
+                                    var taType = semanticModel.GetTypeInfo(typeArg).Type;
+                                    if (taType != null) CollectFromType(taType, structs);
+                                }
+                            }
+                            // 收集参数中的 new 表达式类型 SendEvent(new XEvent {...})
+                            foreach (var arg in invocation.ArgumentList.Arguments)
+                            {
+                                if (arg.Expression is ObjectCreationExpressionSyntax objCreate)
+                                {
+                                    var createdType = semanticModel.GetTypeInfo(objCreate.Type).Type;
+                                    if (createdType != null) CollectFromType(createdType, structs);
+                                }
+                            }
                         }
 
                         foreach (var chunkComponentType in CppJobGenerator.CollectChunkNativeArrayTypes(job, compilation))

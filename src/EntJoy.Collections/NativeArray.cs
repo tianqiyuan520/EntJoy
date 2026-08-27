@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.Collections
@@ -13,7 +13,6 @@ namespace EntJoy.Collections
         private bool _isOwner;
 
 #if DEBUG
-        // 泄漏检测 sentinel 存静态表（key = safety index），不嵌入 struct → 保持 blittable（2026-08-27）
         private int _sentinelRegistered;   // 0 = 未注册，1 = 已注册（仅 owner）
 #endif
 

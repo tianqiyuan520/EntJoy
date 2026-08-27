@@ -1,11 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Threading;
 
 /// <summary>
 /// 泄漏检测（Debug 构建专用）。
 ///
-/// 设计要点（2026-08-27）：
+/// 
 /// - 不能作为 NativeArray/NativeList 的托管引用字段——那会使容器 struct 含托管引用，
 ///   Debug 下破坏 `unmanaged` 约束（含容器的 Job 无法进 Batch/JobSystem 的 blittable 快路径）。
 /// - 因此 sentinel 存于**静态表**（key = 容器的 safety handle index，blittable int），

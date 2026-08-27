@@ -150,7 +150,7 @@ namespace EntJoy.ECS
             get
             {
                 // .NET 10+ 签名：CollectionsMarshal.AsSpan(List<T>?) 为无 ref 重载
-                //（本机 SDK 10 下旧 ref 重载解析为 CS1615，见 2026-08-22 排查）。
+                //（旧 ref 重载在本机 SDK 10 下解析为 CS1615）。
                 // 返回 List 底层数组的零拷贝视图（List<T> 为引用类型，别名零拷贝）。
                 return CollectionsMarshal.AsSpan(_chunkList);
             }

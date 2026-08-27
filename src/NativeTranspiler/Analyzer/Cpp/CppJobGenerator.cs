@@ -69,12 +69,18 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateAtomicMacros());
+            // ─── SendEvent: __EntJoyChunkContextHeader 前向声明（指针参数） ───
+            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_FWD");
+            sb.AppendLine("#define __EntJoyChunkContextHeader_FWD");
+            sb.AppendLine("struct __EntJoyChunkContextHeader;");
+            sb.AppendLine("#endif");
             sb.AppendLine();
 
             // IJobEntity: 无独立 Execute 函数，循环体内联到 Adapter 中
             if (IsChunkJob(jobStruct))
             {
-                var chunkParams = BuildChunkJobParameters(jobStruct);
+                bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
+                var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
                 sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
@@ -115,7 +121,46 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <cstdio>");
             sb.AppendLine("#include \"NativeSIMD.h\"");
             sb.AppendLine("#include \"SimdValue.h\"");
+
+            // ─── Event Buffer POD struct（SendEvent 生成的代码依赖） ───
+            sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
+            sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
+            sb.AppendLine("struct __EntJoyEventBuffer {");
+            sb.AppendLine("    void* data;");
+            sb.AppendLine("    int* count;");
+            sb.AppendLine("    int capacity;");
+            sb.AppendLine("    int elementSize;");
+            sb.AppendLine("};");
+            sb.AppendLine("#endif");
             sb.AppendLine();
+
+            // ─── ChunkContextHeader 完整定义（SendEvent 需要解引用 __header->eventBufferHeaders） ───
+            if (JobUsesSendEvent(jobStruct, compilation))
+            {
+                sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
+                sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
+                sb.AppendLine("struct __EntJoyChunkContextHeader");
+                sb.AppendLine("{");
+                sb.AppendLine("    int chunkCount;");
+                sb.AppendLine("    int hasEnabledFilter;");
+                sb.AppendLine("    void* queryAllEnabledTypes;");
+                sb.AppendLine("    int allEnabledCount;");
+                sb.AppendLine("    int gcHandleStartIndex;");
+                sb.AppendLine("    void* chunksPtr;");
+                sb.AppendLine("    int cleanupInProgress;");
+                sb.AppendLine("    int ownsChunkData;");
+                sb.AppendLine("    void* requiredComponentTypeIds;");
+                sb.AppendLine("    int requiredComponentTypeIdCount;");
+                sb.AppendLine("    int jobIsBoxed;");
+                sb.AppendLine("    void* chunkArrayHandle;");
+                sb.AppendLine("    // ─── Event Buffer ───");
+                sb.AppendLine("    int eventBufferCount;");
+                sb.AppendLine("    void* eventBufferHeaders;");
+                sb.AppendLine("    void* eventWorldHandle;");
+                sb.AppendLine("};");
+                sb.AppendLine("#endif");
+                sb.AppendLine();
+            }
 
             // IJobChunk: 生成独立 Execute 函数
             if (IsChunkJob(jobStruct))
@@ -326,7 +371,8 @@ namespace NativeTranspiler.Analyzer
 
         private static void GenerateChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -352,7 +398,8 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateChunkFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             // Generate auto-vectorizable scalar loop — Clang generates @llvm.sin.v8f32 / cos.v8f32
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -620,7 +667,7 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", parameters);
         }
 
-        private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct, bool includeTypeIds = true)
+        private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct, bool includeTypeIds = true, bool includeHeader = false)
         {
             // includeTypeIds=false → 轻量 ChunkData 路径（IJobEntity/Chunk 无需类型匹配）
             // includeTypeIds=true  → 完整 ChunkJobData 路径（需要 __requiredComponentTypeIds）
@@ -628,6 +675,8 @@ namespace NativeTranspiler.Analyzer
             var parameters = new List<string> { $"const {chunkType}* __chunkData" };
             if (includeTypeIds)
                 parameters.Add("const int* __requiredComponentTypeIds");
+            if (includeHeader)
+                parameters.Add("const __EntJoyChunkContextHeader* __header");
             AppendFieldParameters(jobStruct, parameters);
             return string.Join(", ", parameters);
         }
@@ -701,7 +750,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                     continue;
-                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
+                if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
                     (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan))
                     continue;
                 if (methodSymbol.TypeArguments.Length == 0 || methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)
@@ -716,6 +765,26 @@ namespace NativeTranspiler.Analyzer
         /// 收集 IJobChunk Execute 中 ArchetypeChunk.GetSharedComponent&lt;T&gt;() 调用的 shared 类型。
         /// 仅限 blittable（managed shared 不允许在 NativeTranspile job 中访问，由 validator 拦截）。
         /// </summary>
+        /// <summary>检测 Job 的 Execute 是否调用 SendEvent（决定是否生成 __header 参数）。</summary>
+        public static bool JobUsesSendEvent(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
+            var methodSyntax = executeMethod == null ? null : SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return false;
+
+            foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                // xxx.SendEvent / 裸 SendEvent
+                if (invocation.Expression is MemberAccessExpressionSyntax mac
+                    && mac.Name.Identifier.Text == Config.SendEvent)
+                    return true;
+                if (invocation.Expression is IdentifierNameSyntax idn
+                    && idn.Identifier.Text == Config.SendEvent)
+                    return true;
+            }
+            return false;
+        }
+
         public static List<INamedTypeSymbol> CollectSharedComponentTypes(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var result = new List<INamedTypeSymbol>();
@@ -730,7 +799,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                     continue;
-                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
+                if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
                     methodSymbol.Name != Config.GetSharedComponent ||
                     methodSymbol.TypeArguments.Length != 1)
                     continue;
@@ -773,8 +842,53 @@ namespace NativeTranspiler.Analyzer
             // SharedComponent 类型头文件（blittable，GetSharedComponent<T>() 用）
             foreach (var type in CollectSharedComponentTypes(jobStruct, compilation))
                 AddType(type);
+            // ─── SendEvent 事件类型头文件 ───
+            foreach (var type in CollectSendEventTypes(jobStruct, compilation))
+                AddType(type);
 
             return includes.OrderBy(x => x).ToList();
+        }
+
+        /// <summary>收集 Execute 中 SendEvent 用到的事件类型。</summary>
+        public static List<INamedTypeSymbol> CollectSendEventTypes(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var result = new List<INamedTypeSymbol>();
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
+            var methodSyntax = executeMethod == null ? null : SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return result;
+
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+            foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                // 判断是否 SendEvent
+                bool isSendEvent = invocation.Expression is MemberAccessExpressionSyntax macS && macS.Name.Identifier.Text == Config.SendEvent;
+                if (!isSendEvent && invocation.Expression is IdentifierNameSyntax idS && idS.Identifier.Text == Config.SendEvent)
+                    isSendEvent = true;
+                if (!isSendEvent) continue;
+
+                // 显式泛型参数 SendEvent<T>
+                if (invocation.Expression is MemberAccessExpressionSyntax mac2 && mac2.Name is GenericNameSyntax gn)
+                {
+                    foreach (var typeArg in gn.TypeArgumentList.Arguments)
+                    {
+                        var taType = semanticModel.GetTypeInfo(typeArg).Type;
+                        if (taType is INamedTypeSymbol named && named.IsUnmanagedType)
+                            result.Add(named);
+                    }
+                }
+                // new 表达式参数 SendEvent(new XEvent {...})
+                foreach (var arg in invocation.ArgumentList.Arguments)
+                {
+                    if (arg.Expression is ObjectCreationExpressionSyntax objCreate)
+                    {
+                        var createdType = semanticModel.GetTypeInfo(objCreate.Type).Type;
+                        if (createdType is INamedTypeSymbol named2 && named2.IsUnmanagedType)
+                            result.Add(named2);
+                    }
+                }
+            }
+            var distinct = new HashSet<INamedTypeSymbol>(result, SymbolEqualityComparer.Default);
+            return distinct.ToList();
         }
 
         // ===================================================================
@@ -925,9 +1039,10 @@ namespace NativeTranspiler.Analyzer
         /// 适配函数签名匹配 BatchJobFunc(void* context, int startIndex, int count)，
         /// 内部从 context 中按偏移量读取字段，调用实际的 Batch 函数。
         /// </summary>
-        public static string GenerateJobAdapter(INamedTypeSymbol jobStruct, Compilation compilation)
+        public static (string code, List<string> eventTypes) GenerateJobAdapter(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var sb = new StringBuilder();
+            var discoveredEventTypes = new List<string>();
             var baseFuncName = GetCppJobFunctionName(jobStruct);
             var adapterFuncName = baseFuncName + "_Adapter";
 
@@ -1002,6 +1117,20 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int requiredComponentTypeIdCount;");
                 sb.AppendLine("    int jobIsBoxed;");
                 sb.AppendLine("    void* chunkArrayHandle;");
+                sb.AppendLine("    // ─── Event Buffer ───");
+                sb.AppendLine("    int eventBufferCount;");
+                sb.AppendLine("    void* eventBufferHeaders;");
+                sb.AppendLine("    void* eventWorldHandle;");
+                sb.AppendLine("};");
+                sb.AppendLine("#endif");
+                sb.AppendLine();
+                sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
+                sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
+                sb.AppendLine("struct __EntJoyEventBuffer {");
+                sb.AppendLine("    void* data;");
+                sb.AppendLine("    int* count;");
+                sb.AppendLine("    int capacity;");
+                sb.AppendLine("    int elementSize;");
                 sb.AppendLine("};");
                 sb.AppendLine("#endif");
                 sb.AppendLine();
@@ -1093,9 +1222,10 @@ namespace NativeTranspiler.Analyzer
                     if (isEntityJob || autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
+                        bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
                         string callArgs = isEntityJob
-                            ? BuildLiteChunkExecuteCallArgs(jobStruct)
-                            : BuildChunkExecuteCallArgs(jobStruct);
+                            ? BuildLiteChunkExecuteCallArgs(jobStruct, includeHeader: usesSendEvent)
+                            : BuildChunkExecuteCallArgs(jobStruct, includeHeader: usesSendEvent);
                         sb.AppendLine($"    {funcName}({callArgs});");
                     }
                     else
@@ -1108,10 +1238,49 @@ namespace NativeTranspiler.Analyzer
                             var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
                             var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                             var bodyCode = translator.Translate(methodSyntax.Body);
+
                             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                             {
                                 if (line.Length == 0) continue;
                                 sb.Append("    ").AppendLine(line);
+                            }
+
+                            // ─── SendEvent: 生成 EventBuffer 变量声明（在 __header 作用域内） ───
+                            if (translator.EventTypes.Count > 0)
+                            {
+                                sb.AppendLine($"    // Event Buffer declarations ({translator.EventTypes.Count} types)");
+                                for (int ei = 0; ei < translator.EventTypes.Count; ei++)
+                                {
+                                    string evtName = translator.EventTypes[ei].Name;
+                                    sb.AppendLine($"    auto* __evtBuf_{evtName}_{ei} = ((__EntJoyEventBuffer**)__header->eventBufferHeaders)[{ei}];");
+                                }
+                            }
+
+                            // 收集 SendEvent 发现的事件类型
+                            foreach (var evtType in translator.EventTypes)
+                                discoveredEventTypes.Add(evtType.ToDisplayString());
+
+                            // 托管事件类型错误：报告编译器诊断
+                            if (translator.ManagedEventErrors.Count > 0)
+                            {
+                                foreach (var (evtSym, invoc) in translator.ManagedEventErrors)
+                                {
+                                    var diag = Diagnostic.Create(
+                                        new DiagnosticDescriptor(
+                                            "NT015",
+                                            "SendEvent requires unmanaged type",
+                                            $"SendEvent<{evtSym.Name}>: event type must be unmanaged (blittable). " +
+                                            $"Managed types (string, class, Dictionary) are not supported. " +
+                                            $"Use a blittable signal struct.",
+                                            "NativeTranspiler",
+                                            DiagnosticSeverity.Error,
+                                            isEnabledByDefault: true),
+                                        invoc.GetLocation());
+                                    // 通过 Compilation 添加诊断
+                                    // 注意：此处无法直接修改 compilation，诊断在后续验证阶段统一报告
+                                }
+                                // 标记有错误，不生成 SendEvent 代码
+                                discoveredEventTypes.Clear();
                             }
                         }
                     }
@@ -1477,9 +1646,31 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
+
+                // ─── SendEvent: 事件类型查询导出函数 ───
+                if (discoveredEventTypes.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"// Event Buffer metadata ({discoveredEventTypes.Count} types)");
+                    sb.AppendLine($"GENERATED_API int CALLINGCONVENTION Get_{baseFuncName}_EventBufferCount()");
+                    sb.AppendLine("{");
+                    sb.AppendLine($"    return {discoveredEventTypes.Count};");
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+                    sb.AppendLine($"GENERATED_API int CALLINGCONVENTION Get_{baseFuncName}_EventBufferElementSize(int index)");
+                    sb.AppendLine("{");
+                    for (int ei = 0; ei < discoveredEventTypes.Count; ei++)
+                    {
+                        string cppType = NativeTranspiler.MapCSharpTypeToCpp(
+                            compilation.GetTypeByMetadataName(discoveredEventTypes[ei]));
+                        sb.AppendLine($"    if (index == {ei}) return sizeof({cppType});");
+                    }
+                    sb.AppendLine("    return 0;");
+                    sb.AppendLine("}");
+                }
             }
 
-            return sb.ToString();
+            return (sb.ToString(), discoveredEventTypes);
         }
 
         // ===================================================================
@@ -1514,7 +1705,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         var symbol = semanticModel.GetSymbolInfo(inv).Symbol as IMethodSymbol;
                         if (symbol != null &&
-                            symbol.ContainingType?.ToDisplayString() == "EntJoy.ECS.ArchetypeChunk" &&
+                            symbol.ContainingType?.ToDisplayString() == Config.TypeArchetypeChunk &&
                             (symbol.Name == Config.GetComponentDataNativeArray || symbol.Name == Config.GetComponentDataSpan) &&
                             symbol.TypeArguments.Length > 0)
                         {
@@ -1820,7 +2011,8 @@ namespace NativeTranspiler.Analyzer
             bool useFastMath, NativeTranspiler.SimdMathPrecision simdMathPrecision)
         {
             // Output function signature (same as GenerateChunkFunctionStandard)
-            var chunkParams = BuildChunkJobParameters(jobStruct);
+            bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
+            var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
@@ -2016,33 +2208,39 @@ namespace NativeTranspiler.Analyzer
         /// 生成调用独立 IJobChunk Execute 函数的实参列表。
         /// 用于适配器中替代内联 Execute 体。
         /// </summary>
-        private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct, bool includeTypeIds = true)
+        private static string BuildChunkExecuteCallArgs(INamedTypeSymbol jobStruct, bool includeTypeIds = true, bool includeHeader = false)
         {
             var fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+            var parts = new List<string>();
             if (includeTypeIds)
             {
-                if (string.IsNullOrEmpty(fieldArgs))
-                    return $"__chunkData, __requiredComponentTypeIds";
-                return $"__chunkData, __requiredComponentTypeIds, {fieldArgs}";
+                parts.Add("__chunkData");
+                parts.Add("__requiredComponentTypeIds");
             }
             else
             {
-                if (string.IsNullOrEmpty(fieldArgs))
-                    return $"__chunkData";
-                return $"__chunkData, {fieldArgs}";
+                parts.Add("__chunkData");
             }
+            if (includeHeader)
+                parts.Add("__header");
+            if (!string.IsNullOrEmpty(fieldArgs))
+                parts.Add(fieldArgs);
+            return string.Join(", ", parts);
         }
 
         /// <summary>
         /// 为 IJobEntity 生成轻量 ChunkData 调用的实参列表。
         /// 用 &amp;__chunkDataLite 替代 __chunkData（ChunkJobData* → ChunkData*），不含 __requiredComponentTypeIds。
         /// </summary>
-        private static string BuildLiteChunkExecuteCallArgs(INamedTypeSymbol jobStruct)
+        private static string BuildLiteChunkExecuteCallArgs(INamedTypeSymbol jobStruct, bool includeHeader = false)
         {
             var fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
-            if (string.IsNullOrEmpty(fieldArgs))
-                return $"&__chunkDataLite";
-            return $"&__chunkDataLite, {fieldArgs}";
+            var parts = new List<string> { "&__chunkDataLite" };
+            if (includeHeader)
+                parts.Add("__header");
+            if (!string.IsNullOrEmpty(fieldArgs))
+                parts.Add(fieldArgs);
+            return string.Join(", ", parts);
         }
 
         /// <summary>
