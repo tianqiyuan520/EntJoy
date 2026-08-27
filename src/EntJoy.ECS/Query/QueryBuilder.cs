@@ -20,12 +20,18 @@ namespace EntJoy.ECS
         public ComponentType[] ChangedComponents;  // 需要检查变更的组件类型
         public int MinChangedVersion;              // 最小版本号（用于帧级过滤）
 
+        // Shared Component 过滤
+        public ComponentType SharedFilterType;     // 要过滤的 shared 组件类型（default = 无过滤）
+        public object SharedFilterValue;           // 目标 shared 值（boxed）
+        public bool HasSharedFilter;
+
         public QueryBuilder()
         {
             LimitCount = -1;
             AllEnabled = [];
             ChangedComponents = null;
             MinChangedVersion = -1;
+            HasSharedFilter = false;
         }
 
         public QueryBuilder SetLimit(int count)
@@ -103,10 +109,24 @@ namespace EntJoy.ECS
             return this;
         }
 
-        /// <summary>只返回在指定版本号之后被修改过的实体。</summary>
+        /// <summary>只返回指定版本号之后被修改过的实体。</summary>
         public QueryBuilder ChangedSince(int version)
         {
             MinChangedVersion = version;
+            return this;
+        }
+
+        // ======================== Shared Component 过滤 ========================
+
+        /// <summary>
+        /// 只处理持有指定 SharedComponent 值的 Chunk（对齐 Unity WithSharedComponentFilter）。
+        /// 过滤发生在 chunk 收集阶段（C# 侧），与 NativeTranspiler 无交互。
+        /// </summary>
+        public QueryBuilder WithShared<T>(T filterValue) where T : ISharedComponentData
+        {
+            SharedFilterType = ComponentTypeManager.GetComponentType(typeof(T));
+            SharedFilterValue = filterValue;
+            HasSharedFilter = true;
             return this;
         }
 

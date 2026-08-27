@@ -558,6 +558,9 @@ namespace NativeTranspiler.Analyzer
 
                         foreach (var chunkComponentType in CppJobGenerator.CollectChunkNativeArrayTypes(job, compilation))
                             CollectFromType(chunkComponentType, structs);
+                        // 也收集 SharedComponent 类型（blittable，GetSharedComponent<T>() 用）
+                        foreach (var sharedType in CppJobGenerator.CollectSharedComponentTypes(job, compilation))
+                            CollectFromType(sharedType, structs);
                     }
                 }
             }

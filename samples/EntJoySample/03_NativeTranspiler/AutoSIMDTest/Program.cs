@@ -1,10 +1,9 @@
-using EntJoy.ECS.JobSystem;
-//// Auto-SIMD — Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
+﻿using EntJoy.ECS.JobSystem;
+//// Auto-SIMD 鈥?Static | IJob | IJobFor | IJobPF  x  C# | C++ | SIMD | ISPC = 16 variants
 //using EntJoy.ECS;
 //using EntJoy.Collections;
 //using EntJoy.Mathematics;
 //using EntJoySample.AutoSIMDTest;
-//using NativeTranspiler.Bindings;
 //using System.Diagnostics;
 
 //namespace EntJoySample.AutoSIMDTest
@@ -36,9 +35,9 @@ using EntJoy.ECS.JobSystem;
 //            var eq = "".PadRight(totalW, '=');
 
 //            Console.WriteLine(eq);
-//            Console.WriteLine($"  {"",-9} Static─         IJob──          IJobFor─         IJobPF──");
+//            Console.WriteLine($"  {"",-9} Static鈹€         IJob鈹€鈹€          IJobFor鈹€         IJobPF鈹€鈹€");
 //            Console.WriteLine($"  {"Case",-9} C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC   C#     C++    SIMD   ISPC");
-//            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ───── ─────");
+//            Console.WriteLine($"  {"鈹€鈹€鈹€鈹€",-9} 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€");
 
 //            // Static helper
 //            static double St(System.Action fn, int w, int t)
@@ -60,7 +59,7 @@ using EntJoy.ECS.JobSystem;
 //                Console.WriteLine();
 //            }
 
-//            // ═══════════ Case 1: SimpleArith ═══════════
+//            // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Case 1: SimpleArith 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 //            T("SimpleArith", I,
 //                // Static
 //                () => St(() => SimpleArith_StaticFuncs.SimpleArith_Stc_CSharp(nA, nB, nC, p0, N), W, I),
@@ -83,7 +82,7 @@ using EntJoy.ECS.JobSystem;
 //                () => Pf(new SimpleArith_SIMD_PF { A = nA, B = nB, C = nC, Result = p5 }, N, W, I),
 //                () => Pf(new SimpleArith_ISPC_PF { A = nA, B = nB, C = nC, Result = p0 }, N, W, I));
 
-//            // ═══════════ Case 2: MathFuncs ═══════════
+//            // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Case 2: MathFuncs 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 //            T("MathFuncs", I,
 //                // Static
 //                () => St(() => MathFuncs_StaticFuncs.MathFuncs_Stc_CSharp(nA, p0, N), W, I),
@@ -106,7 +105,7 @@ using EntJoy.ECS.JobSystem;
 //                () => Pf(new MathFuncs_SIMD_PF { A = nA, Result = p5 }, N, W, I),
 //                () => Pf(new MathFuncs_ISPC_PF { A = nA, Result = p0 }, N, W, I));
 
-//            // ═══════════ Case 3: Reduce ═══════════
+//            // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Case 3: Reduce 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 //            T("Reduce", H,
 //                // Static
 //                () => St(() => SimpleReduce_StaticFuncs.SimpleReduce_Stc_CSharp(nR, p0, N), W, H),
@@ -129,7 +128,7 @@ using EntJoy.ECS.JobSystem;
 //                () => Pf(new SimpleReduce_SIMD_PF { A = nR, Result = p5 }, N, W, H),
 //                () => Pf(new SimpleReduce_ISPC_PF { A = nR, Result = p0 }, N, W, H));
 
-//            // ═══════════ Case 4: ComplexFlow ═══════════
+//            // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Case 4: ComplexFlow 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 //            T("ComplexFlow", I,
 //                // Static
 //                () => St(() => ComplexFlow_StaticFuncs.ComplexFlow_Stc_CSharp(nA, nB, p0, 50, N), W, I),
@@ -152,7 +151,7 @@ using EntJoy.ECS.JobSystem;
 //                () => Pf(new ComplexFlow_SIMD_PF { A = nA, B = nB, Result = p5, Threshold = 50 }, N, W, I),
 //                () => Pf(new ComplexFlow_ISPC_PF { A = nA, B = nB, Result = p0, Threshold = 50 }, N, W, I));
 
-//            // ═══════════ Case 5: GatherReduce ═══════════
+//            // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Case 5: GatherReduce 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 //            T("GatherReduce", H,
 //                // Static
 //                () => St(() => GatherReduce_StaticFuncs.GatherReduce_Stc_CSharp(nQx, nQy, nDx, nDy, nIx, p0, N), W, H),
@@ -179,9 +178,9 @@ using EntJoy.ECS.JobSystem;
 //            Console.WriteLine("  Stc=Static(direct call) | Job=Execute | For=Schedule | PF=Schedule(64)");
 //            Console.WriteLine();
 
-//            // ─────────────────────────────────────────────────────────────────────
+//            // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 //            // IJobChunk / IJobEntity benchmarks (ECS World-based, 100w entities)
-//            // ─────────────────────────────────────────────────────────────────────
+//            // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 //            const int ChunkN = 1000000;
 //            var query = new QueryBuilder().WithAll<MovePosition, MoveVelocity>();
 //            float dt = 1.0f / 60.0f;
@@ -209,9 +208,9 @@ using EntJoy.ECS.JobSystem;
 
 //            Console.WriteLine();
 //            Console.WriteLine(eq);
-//            Console.WriteLine($"  {"",-9} IJobChunk───                 IJobEntity───");
+//            Console.WriteLine($"  {"",-9} IJobChunk鈹€鈹€鈹€                 IJobEntity鈹€鈹€鈹€");
 //            Console.WriteLine($"  {"Case",-9} C++    SIMD   VZ     ISPC   C++    SIMD   VZ     ISPC");
-//            Console.WriteLine($"  {"────",-9} ───── ───── ───── ───── ───── ───── ───── ─────");
+//            Console.WriteLine($"  {"鈹€鈹€鈹€鈹€",-9} 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€ 鈹€鈹€鈹€鈹€鈹€");
 
 //            double LChCpp = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_Cpp { DeltaTime = dt }.Schedule(query).Complete(); });
 //            double LChSD = ChRun(() => { World.DefaultWorld = lightWorld; new MoveJobChunk_SIMD { DeltaTime = dt }.Schedule(query).Complete(); });

@@ -1,169 +1,110 @@
 using System;
-using System.Diagnostics;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
     /// <summary>
-    /// Change Tracking 测试案例。
-    /// 测试 Chunk 级版本号和实体级变更追踪。
+    /// Change Tracking 测试：Set 自动标记 + WithChanged 查询 + ClearAll。
+    ///
+    /// 演示：
+    /// 1. Set&lt;T&gt; 后 changed bit 自动标记
+    /// 2. ClearAllChangedBitMasks 清零
+    /// 3. Set 部分实体后只有被修改的被标记
     /// </summary>
     public static class ChangeTrackingDemo
     {
+        private static World _world;
+
         public static void Run()
         {
             Console.WriteLine("=== Change Tracking Demo ===\n");
 
-            var world = new World();
-            var entityManager = world.EntityManager;
+            _world = new World("ChangeTrackingDemo");
+            var em = _world.EntityManager;
 
-            // 创建测试实体
-            Console.WriteLine("Creating test entities...");
-            const int entityCount = 1000;
-            var entities = new Entity[entityCount];
+            TestSetMarksChanged(em);
+            TestClearAll(em);
+            TestPartialSet(em);
 
-            for (int i = 0; i < entityCount; i++)
-            {
-                entities[i] = entityManager.NewEntity(
-                    new ComponentType[] { typeof(Position), typeof(Velocity) });
-                entityManager.Set(entities[i], new Position { X = i, Y = i * 2 });
-                entityManager.Set(entities[i], new Velocity { X = 1, Y = 1 });
-            }
-
-            Console.WriteLine($"Created {entityCount} entities.\n");
-
-            // 测试 1: Chunk 级版本号
-            TestChunkVersion(entityManager, entities);
-
-            // 测试 2: 实体级变更追踪
-            TestEntityLevelChangeTracking(entityManager, entities);
-
-            // 测试 3: 帧级变更查询
-            TestFrameLevelQuery(entityManager, entities);
-
+            _world.Dispose();
             Console.WriteLine("\n=== Change Tracking Demo Complete ===\n");
         }
 
-        /// <summary>
-        /// 测试 Chunk 级版本号。
-        /// </summary>
-        private static void TestChunkVersion(EntityManager entityManager, Entity[] entities)
+        /// <summary>测试 1：Set 后 changed bit 自动标记。</summary>
+        private static void TestSetMarksChanged(EntityManager em)
         {
-            Console.WriteLine("--- Test 1: Chunk Version ---");
+            Console.WriteLine("--- Test 1: Set Marks Changed ---");
 
-            // 获取初始版本号
-            int initialVersion = entityManager.Archetypes[0].GlobalVersion;
-            Console.WriteLine($"Initial global version: {initialVersion}");
+            var types = new ComponentType[] { typeof(Position), typeof(Velocity) };
+            var e1 = em.NewEntity(types);
+            var e2 = em.NewEntity(types);
+            em.Set(e1, new Position { X = 0, Y = 0 });
+            em.Set(e2, new Position { X = 1, Y = 1 });
 
-            // 修改一些实体
-            Console.WriteLine("Modifying 100 entities...");
-            for (int i = 0; i < 100; i++)
-            {
-                entityManager.Set(entities[i], new Position { X = i * 10, Y = i * 20 });
-            }
+            var info1 = em.GetEntityInfoRef(e1.Id);
+            var info2 = em.GetEntityInfoRef(e2.Id);
+            var chunk1 = info1.Archetype.ChunkList[info1.ChunkIndex];
+            bool e1Changed = chunk1.IsEntityChanged(info1.SlotInChunk);
+            bool e2Changed = chunk1.IsEntityChanged(info2.SlotInChunk);
 
-            // 检查版本号是否递增
-            int newVersion = entityManager.Archetypes[0].GlobalVersion;
-            Console.WriteLine($"Global version after modifications: {newVersion}");
-            Console.WriteLine($"Version incremented: {newVersion > initialVersion}");
-
-            // 检查 Chunk 版本号
-            var archetype = entityManager.Archetypes[0];
-            bool anyChunkChanged = false;
-            foreach (var chunk in archetype.ChunkSpan)
-            {
-                if (chunk.HasChangesSince(initialVersion))
-                {
-                    anyChunkChanged = true;
-                    Console.WriteLine($"Chunk version: {chunk.Version} (changed since {initialVersion})");
-                    break;
-                }
-            }
-            Console.WriteLine($"Any chunk changed: {anyChunkChanged}\n");
+            Console.WriteLine($"  e1 after Set: changed={e1Changed} (expected True)");
+            Console.WriteLine($"  e2 after Set: changed={e2Changed} (expected True)");
+            bool ok = e1Changed && e2Changed;
+            Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
+            Console.WriteLine();
         }
 
-        /// <summary>
-        /// 测试实体级变更追踪。
-        /// </summary>
-        private static void TestEntityLevelChangeTracking(EntityManager entityManager, Entity[] entities)
+        /// <summary>测试 2：ClearAllChangedBitMasks 后 changed bit 清零。</summary>
+        private static void TestClearAll(EntityManager em)
         {
-            Console.WriteLine("--- Test 2: Entity Level Change Tracking ---");
+            Console.WriteLine("--- Test 2: ClearAllChangedBitMasks ---");
 
-            // 获取 Archetype
-            var archetype = entityManager.Archetypes[0];
-            var chunks = archetype.ChunkSpan;
+            var types = new ComponentType[] { typeof(Position), typeof(Velocity) };
+            var e = em.NewEntity(types);
+            em.Set(e, new Position { X = 0, Y = 0 });
 
-            // 清除所有变更标记
-            archetype.ClearAllChangedBitMasks();
-            Console.WriteLine("Cleared all change masks.");
+            var info = em.GetEntityInfoRef(e.Id);
+            var chunk = info.Archetype.ChunkList[info.ChunkIndex];
 
-            // 标记一些实体为已修改
-            Console.WriteLine("Marking 50 entities as changed...");
-            for (int i = 0; i < 50; i++)
-            {
-                // 获取实体信息
-                ref var info = ref entityManager.GetEntityInfoRef(entities[i].Id);
-                if (info.Archetype != null)
-                {
-                    var chunkList = info.Archetype.ChunkSpan;
-                    if (info.ChunkIndex >= 0 && info.ChunkIndex < chunkList.Length)
-                    {
-                        var chunk = chunkList[info.ChunkIndex];
-                        chunk.MarkEntityChanged(info.SlotInChunk);
-                    }
-                }
-            }
+            bool before = chunk.IsEntityChanged(info.SlotInChunk);
+            Console.WriteLine($"  After Set: changed={before} (expected True)");
 
-            // 检查变更标记
+            em.ClearAllChangedBitMasks();
+            bool after = chunk.IsEntityChanged(info.SlotInChunk);
+            Console.WriteLine($"  After Clear: changed={after} (expected False)");
+
+            bool ok = before && !after;
+            Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
+            Console.WriteLine();
+        }
+
+        /// <summary>测试 3：Clear 后只 Set 部分实体，只有被 Set 的被标记。</summary>
+        private static void TestPartialSet(EntityManager em)
+        {
+            Console.WriteLine("--- Test 3: Partial Set ---");
+
+            var types = new ComponentType[] { typeof(Position), typeof(Velocity) };
+            var entities = new Entity[5];
+            for (int i = 0; i < 5; i++)
+                entities[i] = em.NewEntity(types);
+
+            // Clear 后只修改 e[1] 和 e[3]
+            em.ClearAllChangedBitMasks();
+            em.Set(entities[1], new Position { X = 10, Y = 10 });
+            em.Set(entities[3], new Position { X = 30, Y = 30 });
+
             int changedCount = 0;
-            foreach (var chunk in chunks)
+            foreach (var e in entities)
             {
-                for (int i = 0; i < chunk.EntityCount; i++)
-                {
-                    if (chunk.IsEntityChanged(i))
-                    {
-                        changedCount++;
-                    }
-                }
+                var info = em.GetEntityInfoRef(e.Id);
+                var chunk = info.Archetype.ChunkList[info.ChunkIndex];
+                if (chunk.IsEntityChanged(info.SlotInChunk))
+                    changedCount++;
             }
-            Console.WriteLine($"Entities marked as changed: {changedCount}");
-            Console.WriteLine($"Expected: 50\n");
-        }
-
-        /// <summary>
-        /// 测试帧级变更查询。
-        /// </summary>
-        private static void TestFrameLevelQuery(EntityManager entityManager, Entity[] entities)
-        {
-            Console.WriteLine("--- Test 3: Frame Level Query ---");
-
-            // 记录初始帧版本
-            int frameStartVersion = entityManager.Archetypes[0].GlobalVersion;
-            Console.WriteLine($"Frame start version: {frameStartVersion}");
-
-            // 模拟一帧：修改一些实体
-            Console.WriteLine("Simulating frame: modifying 200 entities...");
-            for (int i = 0; i < 200; i++)
-            {
-                entityManager.Set(entities[i], new Position { X = i * 100, Y = i * 200 });
-            }
-
-            int frameEndVersion = entityManager.Archetypes[0].GlobalVersion;
-            Console.WriteLine($"Frame end version: {frameEndVersion}");
-
-            // 查询本帧修改过的实体
-            int queriedCount = 0;
-            var archetype = entityManager.Archetypes[0];
-            foreach (var chunk in archetype.ChunkSpan)
-            {
-                if (!chunk.HasChangesSince(frameStartVersion))
-                    continue;
-
-                // Chunk 有变更，计入实体数
-                queriedCount += chunk.EntityCount;
-            }
-            Console.WriteLine($"Chunks with changes queried: contains {queriedCount} entities");
-            Console.WriteLine($"(Chunk-level filtering: only chunks modified since frame start are included)\n");
+            Console.WriteLine($"  Changed entities: {changedCount} (expected 2)");
+            bool ok = changedCount == 2;
+            Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
+            Console.WriteLine();
         }
     }
 }

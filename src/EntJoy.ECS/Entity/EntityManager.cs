@@ -439,6 +439,13 @@ namespace EntJoy.ECS
             }
         }
 
+        /// <summary>清除所有 archetype 所有 chunk 的变更标记（帧末调用）。</summary>
+        public void ClearAllChangedBitMasks()
+        {
+            for (int i = 0; i < archetypeCount; i++)
+                allArchetypes[i]?.ClearAllChangedBitMasks();
+        }
+
         public void DestroyEntity(Entity entity)
         {
             CheckDisposed();
@@ -854,6 +861,7 @@ namespace EntJoy.ECS
                     RefreshChunkEntityIndices(oldArch, compactedChunkIndex);
 
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
+                targetArch.ChunkList[chunkIndex].MarkEntityChanged(slotInChunk);
                 structuralVersion++;
             }
         }

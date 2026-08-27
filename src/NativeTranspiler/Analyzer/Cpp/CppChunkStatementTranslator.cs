@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
 using System.Collections.Generic;
@@ -18,13 +18,15 @@ namespace NativeTranspiler.Analyzer
         }
 
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
+        private readonly List<INamedTypeSymbol> _requiredSharedTypes;  // SharedComponent 类型（blittable，per-chunk 值指针）
         private readonly HashSet<string> _chunkArrayLocalNames = new();
         private readonly Dictionary<string, NativeArrayElementAlias> _nativeArrayElementAliases = new();
 
-        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, bool useFastMath = false)
+        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false)
             : base(semanticModel, jobStruct, useFastMath)
         {
             _requiredComponentTypes = requiredComponentTypes;
+            _requiredSharedTypes = requiredSharedTypes ?? new List<INamedTypeSymbol>();
         }
 
         protected override void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
@@ -130,6 +132,28 @@ namespace NativeTranspiler.Analyzer
                 return false;
             if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk")
                 return false;
+
+            // ======================== SharedComponent：GetSharedComponent<T>() → 单值指针 ========================
+            // 返回 per-chunk 共享值（blittable，内联于 chunk 内存块 Shared values 区）。
+            // 翻译为 `reinterpret_cast<T*>(__chunkData->sharedValuePtrs[sharedIndex])`。
+            if (methodSymbol.Name == Config.GetSharedComponent && methodSymbol.TypeArguments.Length == 1)
+            {
+                var sharedType = methodSymbol.TypeArguments[0];
+                int sharedIndex = _requiredSharedTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, sharedType));
+                if (sharedIndex < 0)
+                {
+                    throw new InvalidOperationException(
+                        $"SharedComponent type {sharedType.ToDisplayString()} used in chunk job body but " +
+                        "was not found in requiredSharedTypes. Fix CollectSharedComponentTypes " +
+                        "to include this type.");
+                }
+                cppType = NativeTranspiler.MapCSharpTypeToCpp(sharedType);
+                // 解引用指针：GetSharedComponent<T>() 返回值，C++ 侧需 *reinterpret_cast<T*>(...)
+                expression = $"*reinterpret_cast<{cppType}*>(__chunkData->sharedValuePtrs[{sharedIndex}])";
+                return true;
+            }
+
+            // ======================== 原有：GetComponentDataNativeArray / GetComponentDataSpan → 数组指针 ========================
             if (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan)
                 return false;
             if (methodSymbol.TypeArguments.Length == 0)

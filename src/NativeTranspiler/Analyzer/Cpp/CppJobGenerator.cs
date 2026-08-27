@@ -337,7 +337,8 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
+                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode);
             }
@@ -362,8 +363,9 @@ namespace NativeTranspiler.Analyzer
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
+                var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
                 // Use same chunk translator as standard mode — produces scalar ptr[index].field
-                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 // Insert auto-vectorize pragma before the entity for-loop
                 string pragma = "#ifdef __clang__\n#pragma clang loop vectorize(enable) interleave(enable)\n#endif\n";
@@ -710,6 +712,36 @@ namespace NativeTranspiler.Analyzer
             return result;
         }
 
+        /// <summary>
+        /// 收集 IJobChunk Execute 中 ArchetypeChunk.GetSharedComponent&lt;T&gt;() 调用的 shared 类型。
+        /// 仅限 blittable（managed shared 不允许在 NativeTranspile job 中访问，由 validator 拦截）。
+        /// </summary>
+        public static List<INamedTypeSymbol> CollectSharedComponentTypes(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var result = new List<INamedTypeSymbol>();
+            if (IsEntityJob(jobStruct)) return result;  // IJobEntity 不通过 chunk 参数读 shared（走 job 字段）
+
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
+            var methodSyntax = executeMethod == null ? null : SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return result;
+
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+            foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
+                    continue;
+                if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.ECS.ArchetypeChunk" ||
+                    methodSymbol.Name != Config.GetSharedComponent ||
+                    methodSymbol.TypeArguments.Length != 1)
+                    continue;
+                if (methodSymbol.TypeArguments[0] is not INamedTypeSymbol sharedType)
+                    continue;
+                if (!result.Any(t => SymbolEqualityComparer.Default.Equals(t, sharedType)))
+                    result.Add(sharedType);
+            }
+            return result;
+        }
+
         private static List<string> CollectJobStructIncludes(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var includes = new HashSet<string>();
@@ -737,6 +769,9 @@ namespace NativeTranspiler.Analyzer
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
                 AddType(field.Type);
             foreach (var type in CollectChunkNativeArrayTypes(jobStruct, compilation))
+                AddType(type);
+            // SharedComponent 类型头文件（blittable，GetSharedComponent<T>() 用）
+            foreach (var type in CollectSharedComponentTypes(jobStruct, compilation))
                 AddType(type);
 
             return includes.OrderBy(x => x).ToList();
@@ -1070,7 +1105,8 @@ namespace NativeTranspiler.Analyzer
                         {
                             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                             var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                            var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
+                            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                             var bodyCode = translator.Translate(methodSyntax.Body);
                             foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                             {
@@ -1175,7 +1211,8 @@ namespace NativeTranspiler.Analyzer
                         {
                             var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                             var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                            var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                            var st = CollectSharedComponentTypes(jobStruct, compilation);
+                            var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
                             foreach (var l in tr.Translate(methodSyntax.Body).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                                 if (l.Length > 0) sb.Append("        ").AppendLine(l);
                         }
@@ -1190,7 +1227,10 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("}");
 
                 // ★ Unity 风格 EntityBatch 适配器（IJobChunk 专用，IJobEntity 已走 ChunkRangeRaw）
-                if (!isEntityJob)
+                // EntityBatchAdapter 无法支持 shared components（shared 值是 per-chunk 的，
+                // batch 层无法访问），因此有 shared 组件时跳过生成。
+                var sharedTypesForBatch = CollectSharedComponentTypes(jobStruct, compilation);
+                if (!isEntityJob && sharedTypesForBatch.Count == 0)
                 {
                 // 接收 EntityBatchData* 而非 ChunkJobData*，消除 requiredComponentArrays 指针追访
                 // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
@@ -1250,7 +1290,8 @@ namespace NativeTranspiler.Analyzer
                 {
                     var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                     var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                    var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                    var st = CollectSharedComponentTypes(jobStruct, compilation);
+                    var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
                     var bodyCode = tr.Translate(methodSyntax.Body);
                     bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
@@ -1800,7 +1841,8 @@ namespace NativeTranspiler.Analyzer
                 {
                     // Fallback: use scalar translator
                     var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                    var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+                    var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
+                    var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                     sb.Append(translator.Translate(methodSyntax.Body));
                     return;
                 }
@@ -1869,7 +1911,8 @@ namespace NativeTranspiler.Analyzer
                     {
                         var sm = compilation.GetSemanticModel(ms.SyntaxTree);
                         var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                        var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, useFastMath);
+                        var st = CollectSharedComponentTypes(jobStruct, compilation);
+                        var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
                         string scalarBody = tr.Translate(ms.Body);
                         // Remove duplicate pointer/length declarations
                         try { scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", ""); } catch { }
@@ -1903,7 +1946,8 @@ namespace NativeTranspiler.Analyzer
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
 
             var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, useFastMath);
+            var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
+            var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
             string scalarBody = translator.Translate(methodSyntax.Body);
 
             // Remove prelude declarations (already emitted by SIMD generator)

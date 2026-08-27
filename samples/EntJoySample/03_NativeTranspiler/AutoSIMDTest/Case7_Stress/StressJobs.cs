@@ -1,17 +1,17 @@
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using EntJoy.JobSystem;
 
 namespace EntJoySample.AutoSIMDTest
 {
     // =====================================================================
-    // 对抗性压力测试（嵌套 × 分支 × 循环 × 多变量）
-    // 每个 Case：CSharp 基线 + AutoSIMD 变体，输出必须逐元素一致。
-    // 覆盖：深层分支链 / 多变量分支写 / 循环内分支 / 分支内循环 /
-    //       reduction+分支 / 嵌套循环+分支 / break 控制流 / uint 混合 /
-    //       gather+分支 / 多数组 merge。
+    // 瀵规姉鎬у帇鍔涙祴璇曪紙宓屽 脳 鍒嗘敮 脳 寰幆 脳 澶氬彉閲忥級
+    // 姣忎釜 Case锛欳Sharp 鍩虹嚎 + AutoSIMD 鍙樹綋锛岃緭鍑哄繀椤婚€愬厓绱犱竴鑷淬€?
+    // 瑕嗙洊锛氭繁灞傚垎鏀摼 / 澶氬彉閲忓垎鏀啓 / 寰幆鍐呭垎鏀?/ 鍒嗘敮鍐呭惊鐜?/
+    //       reduction+鍒嗘敮 / 宓屽寰幆+鍒嗘敮 / break 鎺у埗娴?/ uint 娣峰悎 /
+    //       gather+鍒嗘敮 / 澶氭暟缁?merge銆?
     // =====================================================================
 
-    // ── ST1: 深层 if-else-if 链（5 分支）──
+    // 鈹€鈹€ ST1: 娣卞眰 if-else-if 閾撅紙5 鍒嗘敮锛夆攢鈹€
     public struct Stress1_CSharp_For : IJobFor
     {
         public NativeArray<float> A, R;
@@ -45,7 +45,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST2: 分支修改多个 varying 变量 ──
+    // 鈹€鈹€ ST2: 鍒嗘敮淇敼澶氫釜 varying 鍙橀噺 鈹€鈹€
     public struct Stress2_CSharp_For : IJobFor
     {
         public NativeArray<float> A, B, R;
@@ -75,7 +75,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST3: 内层循环 + 分支（parity accumulate）──
+    // 鈹€鈹€ ST3: 鍐呭眰寰幆 + 鍒嗘敮锛坧arity accumulate锛夆攢鈹€
     public struct Stress3_CSharp_For : IJobFor
     {
         public NativeArray<float> A, R;
@@ -109,7 +109,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST4: 分支内 reduction + 外部分支 ──
+    // 鈹€鈹€ ST4: 鍒嗘敮鍐?reduction + 澶栭儴鍒嗘敮 鈹€鈹€
     public struct Stress4_CSharp_For : IJobFor
     {
         public NativeArray<float> A, R;
@@ -145,7 +145,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST5: 嵌套循环 + 嵌套分支（3x3 邻域）──
+    // 鈹€鈹€ ST5: 宓屽寰幆 + 宓屽鍒嗘敮锛?x3 閭诲煙锛夆攢鈹€
     public struct Stress5_CSharp_For : IJobFor
     {
         public NativeArray<float> A, R;
@@ -197,7 +197,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST6: 多 int 变量 if-else 链 + 位运算 ──
+    // 鈹€鈹€ ST6: 澶?int 鍙橀噺 if-else 閾?+ 浣嶈繍绠?鈹€鈹€
     public struct Stress6_CSharp_For : IJobFor
     {
         public NativeArray<int> A, B, R;
@@ -229,7 +229,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST7: reduction 双累积（min + max 多变量）+ 分支 ──
+    // 鈹€鈹€ ST7: reduction 鍙岀疮绉紙min + max 澶氬彉閲忥級+ 鍒嗘敮 鈹€鈹€
     public struct Stress7_CSharp_For : IJobFor
     {
         public NativeArray<float> A, R;
@@ -269,7 +269,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST8: 提前 break + 分支 ──
+    // 鈹€鈹€ ST8: 鎻愬墠 break + 鍒嗘敮 鈹€鈹€
     public struct Stress8_CSharp_For : IJobFor
     {
         public NativeArray<float> A;
@@ -301,7 +301,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST9: uint 混合比较 + 移位 + 分支 ──
+    // 鈹€鈹€ ST9: uint 娣峰悎姣旇緝 + 绉讳綅 + 鍒嗘敮 鈹€鈹€
     public struct Stress9_CSharp_For : IJobFor
     {
         public NativeArray<int> A, R;
@@ -331,7 +331,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ST10: gather + 分支累加（多数组索引）──
+    // 鈹€鈹€ ST10: gather + 鍒嗘敮绱姞锛堝鏁扮粍绱㈠紩锛夆攢鈹€
     public struct Stress10_CSharp_For : IJobFor
     {
         public NativeArray<float> Q, D, R;

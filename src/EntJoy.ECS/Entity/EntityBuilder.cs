@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
@@ -18,12 +18,14 @@ namespace EntJoy.ECS
         private readonly EntityManager _entityManager;
         private readonly List<ComponentType> _types;
         private readonly List<ComponentSetter> _setters;
+        private readonly List<(Type type, object value)> _sharedValues;
 
         internal EntityBuilder(EntityManager entityManager)
         {
             _entityManager = entityManager;
             _types = new List<ComponentType>();
             _setters = new List<ComponentSetter>();
+            _sharedValues = new List<(Type, object)>();
         }
 
         /// <summary>
@@ -49,11 +51,31 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
+        /// 添加共享组件。blittable shared 内联存于 chunk；managed shared 存 EntityManager 哈希桶（chunk 槽位存索引）。
+        /// 同一值组合的实体进入同一 chunk。
+        /// </summary>
+        public EntityBuilder WithShared<T>(T value) where T : ISharedComponentData
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(T));
+            _types.Add(type);
+            _sharedValues.Add((typeof(T), value));
+            return this;
+        }
+
+        /// <summary>
         /// 构建实体
         /// </summary>
         public Entity Build()
         {
-            var entity = _entityManager.NewEntity(_types.ToArray());
+            Entity entity;
+            if (_sharedValues.Count > 0)
+            {
+                entity = _entityManager.NewEntity(_types.ToArray(), _sharedValues.ToArray());
+            }
+            else
+            {
+                entity = _entityManager.NewEntity(_types.ToArray());
+            }
             foreach (var setter in _setters)
             {
                 _entityManager.SetRaw(entity, setter.Type, setter.Value);

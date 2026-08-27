@@ -2,7 +2,6 @@
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using EntJoy.JobSystem;
-using NativeTranspiler.Bindings;
 
 namespace EntJoySample.AutoSIMDTest
 {

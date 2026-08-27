@@ -1,4 +1,4 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -281,9 +281,42 @@ namespace EntJoy.ECS.JobSystem
                     componentTypeIndices = typeIndices,
                     chunkHandle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero,
                     requiredComponentArrays = requiredArrays,
-                    requiredComponentCount = requiredCount
+                    requiredComponentCount = requiredCount,
+                    sharedValuePtrs = FillSharedValuePtrs(chunk, arch, compCount),
+                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(arch, compCount) : 0
                 };
             }
+        }
+
+        // ======================== Shared values 支持（per-chunk） ========================
+
+        /// <summary>统计 arch 中 blittable shared 组件数量（managed shared 不传指针到 C++ 侧）。</summary>
+        private static int CountBlittableShared(Archetype arch, int compCount)
+        {
+            int count = 0;
+            for (int c = 0; c < compCount; c++)
+                if (arch.Types[c].IsShared && !arch.Types[c].IsManagedShared)
+                    count++;
+            return count;
+        }
+
+        /// <summary>
+        /// 收集 blittable shared 组件的 chunk 内联值指针（per-chunk，非 per-entity）。
+        /// 返回非 null 的 void** 数组（调用方不负责释放——跟随 ChunkJobData 生命周期由 NativeChunkJobs 释放）。
+        /// </summary>
+        private static unsafe void** FillSharedValuePtrs(Chunk chunk, Archetype arch, int compCount)
+        {
+            if (!chunk.HasSharedValues) return null;
+            int sharedCount = CountBlittableShared(arch, compCount);
+            if (sharedCount == 0) return null;
+            var ptrs = (void**)Marshal.AllocHGlobal(sharedCount * sizeof(void*));
+            int si = 0;
+            for (int c = 0; c < compCount; c++)
+            {
+                if (!arch.Types[c].IsShared || arch.Types[c].IsManagedShared) continue;
+                ptrs[si++] = (void*)chunk.GetSharedValuePointer(c);
+            }
+            return ptrs;
         }
 
         private static NativeJobHandle ScheduleNativeChunkRangeRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, ChunkScheduleMode? forcedMode = null)
@@ -674,7 +707,9 @@ namespace EntJoy.ECS.JobSystem
                     componentTypeIndices = componentTypeIndices,
                     chunkHandle = IntPtr.Zero,
                     requiredComponentArrays = requiredArrays,
-                    requiredComponentCount = requiredCount
+                    requiredComponentCount = requiredCount,
+                    sharedValuePtrs = FillSharedValuePtrs(chunk, archetype, componentCount),
+                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(archetype, componentCount) : 0
                 };
             }
 
@@ -730,7 +765,9 @@ namespace EntJoy.ECS.JobSystem
                     componentTypeIndices = null,
                     chunkHandle = (IntPtr)ci,  // chunkId
                     requiredComponentArrays = null,
-                    requiredComponentCount = 0
+                    requiredComponentCount = 0,
+                    sharedValuePtrs = FillSharedValuePtrs(chunk, chunk.Archetype, componentCount),
+                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(chunk.Archetype, componentCount) : 0
                 };
             }
 

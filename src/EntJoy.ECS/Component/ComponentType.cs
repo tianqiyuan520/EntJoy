@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace EntJoy.ECS
 {
@@ -12,6 +12,14 @@ namespace EntJoy.ECS
 
         public Type Type => ComponentTypeManager.GetTypeByComponentType(Id);  // 通过查询获取组件类型
         public bool IsEnableable => ComponentTypeManager.GetIsEnableable(Id);
+        public bool IsShared => ComponentTypeManager.GetIsShared(Id);
+
+        /// <summary>
+        /// 是否为 managed shared 组件（ISharedComponentData 且含引用字段/class）。
+        /// managed shared 不内联存于 chunk 内存块，chunk 槽位只存 int 索引；
+        /// NativeTranspiler 不处理，validator 编译期拦截。
+        /// </summary>
+        public bool IsManagedShared => IsShared && !ComponentTypeManager.IsBlittable(Type);
 
 
         public ComponentType(int id, int size = 0)

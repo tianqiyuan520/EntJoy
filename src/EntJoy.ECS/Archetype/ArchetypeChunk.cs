@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 using EntJoy.Collections;
 
@@ -58,6 +58,32 @@ namespace EntJoy.ECS
             ThrowIfNull();
             Entity* ptr = (Entity*)_chunk.MemoryBlock;
             return new Span<Entity>(ptr, Count);
+        }
+
+        // ======================== Shared Component 访问 ========================
+
+        /// <summary>
+        /// 读取该 chunk 的 blittable SharedComponent 值（per-chunk 共享，非 per-entity）。
+        /// 翻译器（CppChunkStatementTranslator）会将此调用转换为 C++ 的
+        ///   reinterpret_cast&lt;T*&gt;(__chunkData->sharedValuePtrs[sharedIdx])
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe T GetSharedComponent<T>() where T : unmanaged
+        {
+            ThrowIfNull();
+            int compIdx = _chunk.Archetype.GetComponentTypeIndex<T>();
+            var ct = _chunk.Archetype.Types[compIdx];
+            if (!ct.IsShared)
+                throw new InvalidOperationException($"Component {typeof(T).Name} is not a shared component.");
+            if (ct.IsManagedShared)
+                throw new InvalidOperationException(
+                    $"Shared component {typeof(T).Name} is managed. " +
+                    "Managed shared components cannot be read from ArchetypeChunk. " +
+                    "Use EntityManager.GetSharedComponent<T>(entity) instead.");
+            var ptr = _chunk.GetSharedValuePointer(compIdx);
+            if (ptr == nint.Zero)
+                throw new InvalidOperationException($"Shared values area not initialized for this chunk.");
+            return Unsafe.AsRef<T>((void*)ptr);
         }
 
         // ======================== Enableable 访问 ========================

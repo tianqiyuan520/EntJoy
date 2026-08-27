@@ -215,6 +215,10 @@ namespace NativeTranspiler.Analyzer
                 var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
                 string requiredIds = BuildRequiredComponentTypeIdsInitializer(requiredTypes);
                 sb.AppendLine($"        private static readonly int[] s_{jobStruct.Name}_RequiredComponentTypeIds = {requiredIds};");
+                // SharedComponent 类型 ID 数组（per-chunk 值指针，blittable only）
+                var sharedTypes = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation);
+                string sharedIds = BuildRequiredComponentTypeIdsInitializer(sharedTypes);
+                sb.AppendLine($"        private static readonly int[] s_{jobStruct.Name}_RequiredSharedTypeIds = {sharedIds};");
             }
             else if (isParallelFor || isFor)
             {
@@ -273,7 +277,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
                     var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
-                    if (!isIspc2)
+                    // EntityBatchAdapter 不支持 shared components（shared 值 per-chunk，batch 层无访问）
+                    bool hasShared = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    if (!isIspc2 && !hasShared)
                         sb.AppendLine($"            s_{jobStruct.Name}_ChunkEntityBatchFuncPtr = Get_{jobStruct.Name}_ChunkEntityBatchAdapterPtr();");
                 }
             }
@@ -658,7 +664,14 @@ namespace NativeTranspiler.Analyzer
                 else if (CppJobGenerator.IsEntityJob(jobStruct))
                     sb.AppendLine($"            ChunkJobScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
                 else
-                    sb.AppendLine($"            ChunkJobScheduler.RunChunkImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkEntityBatchFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                {
+                    // 有 shared 组件时 EntityBatchAdapter 不存在（shared 值 per-chunk），走 ChunkRange 回退
+                    bool hasShared = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    if (hasShared)
+                        sb.AppendLine($"            ChunkJobScheduler.RunChunkRangeImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkRangeFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                    else
+                        sb.AppendLine($"            ChunkJobScheduler.RunChunkImmediate(ref job, world.EntityManager, query, s_{jobStruct.Name}_ChunkEntityBatchFuncPtr, s_{jobStruct.Name}_RequiredComponentTypeIds);");
+                }
                 sb.AppendLine("        }");
                 sb.AppendLine();
             }

@@ -219,9 +219,66 @@ namespace EntJoy.ECS
             _enableVersion++;
         }
 
-        // ======================== 变更追踪 ========================
+        // ======================== Shared values 区 ========================
+        // blittable shared 内联存值；managed shared 槽位只存 int 索引（指向 EntityManager 哈希桶数组）。
+        // 同一 Chunk 所有实体共享相同的 shared 值组合（不变式）。
 
-        /// <summary>获取变更位掩码指针。</summary>
+        /// <summary>Shared values 区是否启用（该 Archetype 含 shared 组件）。</summary>
+        public bool HasSharedValues => Meta.SharedValuesOffset != -1;
+
+        /// <summary>Shared values 区起始字节指针（-1 时返回 null）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public byte* GetSharedValuesPointer()
+        {
+            if (Meta.SharedValuesOffset == -1) return null;
+            return (byte*)MemoryBlock + Meta.SharedValuesOffset;
+        }
+
+        /// <summary>读取 blittable shared 值（chunk 内存块内联）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public T GetSharedValue<T>(int componentIndex) where T : struct
+        {
+            if (Meta.SharedValueOffsets[componentIndex] == -1)
+                throw new InvalidOperationException($"Component index {componentIndex} is not a shared component.");
+            return Unsafe.AsRef<T>((byte*)MemoryBlock + Meta.SharedValueOffsets[componentIndex]);
+        }
+
+        /// <summary>写入 blittable shared 值（chunk 内存块内联）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetSharedValue<T>(int componentIndex, in T value) where T : struct
+        {
+            if (Meta.SharedValueOffsets[componentIndex] == -1)
+                throw new InvalidOperationException($"Component index {componentIndex} is not a shared component.");
+            Unsafe.AsRef<T>((byte*)MemoryBlock + Meta.SharedValueOffsets[componentIndex]) = value;
+        }
+
+        /// <summary>读取 managed shared 索引（指向 EntityManager 哈希桶值数组）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int GetSharedValueIndex(int componentIndex)
+        {
+            if (Meta.SharedValueOffsets[componentIndex] == -1)
+                throw new InvalidOperationException($"Component index {componentIndex} is not a shared component.");
+            return *(int*)((byte*)MemoryBlock + Meta.SharedValueOffsets[componentIndex]);
+        }
+
+        /// <summary>写入 managed shared 索引（指向 EntityManager 哈希桶值数组）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetSharedValueIndex(int componentIndex, int index)
+        {
+            if (Meta.SharedValueOffsets[componentIndex] == -1)
+                throw new InvalidOperationException($"Component index {componentIndex} is not a shared component.");
+            *(int*)((byte*)MemoryBlock + Meta.SharedValueOffsets[componentIndex]) = index;
+        }
+
+        /// <summary>shared 组件在 chunk 内的槽位指针（NativeTranspiler ABI 用：blittable 或 int 索引）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public nint GetSharedValuePointer(int componentIndex)
+        {
+            if (Meta.SharedValueOffsets[componentIndex] == -1) return nint.Zero;
+            return MemoryBlock + Meta.SharedValueOffsets[componentIndex];
+        }
+
+        // ======================== 变更追踪 ========================
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ulong* GetChangedBitMaskPointer()
         {
