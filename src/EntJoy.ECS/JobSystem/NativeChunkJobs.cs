@@ -28,6 +28,8 @@ namespace EntJoy.ECS.JobSystem
         public IntPtr chunkHandle;          // GCHandle IntPtr，用于在回调中恢复 Chunk 对象
         public void** requiredComponentArrays; // NativeTranspile IJobChunk 所需组件数组指针
         public int requiredComponentCount;     // requiredComponentArrays 数量
+        public void** sharedValuePtrs;          // SharedComponent blittable 值指针 [sharedValueCount]
+        public int sharedValueCount;            // sharedValuePtrs 数量，0 = 无 shared 组件
     }
 
     /// <summary>
@@ -41,6 +43,8 @@ namespace EntJoy.ECS.JobSystem
         public int requiredComponentCount;  // 组件数组数量
         public void** enableBitMaps;        // enable 位图 [enableCount]，无过滤时为 null（预留）
         public int enableBitmapCount;       // enable 位图数量，0 表示无过滤（预留）
+        public void** sharedValuePtrs;      // SharedComponent blittable 值指针 [sharedValueCount]
+        public int sharedValueCount;        // sharedValuePtrs 数量，0 = 无 shared 组件
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -225,6 +229,7 @@ namespace EntJoy.ECS.JobSystem
                             if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
                             if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
                             if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                            if (cd.sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)cd.sharedValuePtrs);
                         }
                     }
                 }

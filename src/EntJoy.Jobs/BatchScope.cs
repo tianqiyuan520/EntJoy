@@ -50,6 +50,8 @@ namespace EntJoy.JobSystem
         public int Count => IsManaged ? (_managedHandles?.Count ?? 0) : _count;
 
         // ── 入队：IJob / IJobFor / IJobParallelFor（泛型约束 unmanaged = 编译期拒绝托管 job） ──
+        // 注意：Debug 构建下 EntJoy.Collections 容器保持 blittable（DisposeSentinel 用静态表 + int 句柄，
+        // 不嵌入 struct 字段），故含容器的 unmanaged job 在 Debug 下同样满足约束。
 
         public void Add<T>(ref T job, JobHandle dependsOn = default)
             where T : unmanaged, IJob

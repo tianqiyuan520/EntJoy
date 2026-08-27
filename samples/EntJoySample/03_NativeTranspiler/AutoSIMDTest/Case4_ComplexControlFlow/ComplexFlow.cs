@@ -1,6 +1,5 @@
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using EntJoy.JobSystem;
-using NativeTranspiler.Bindings;
 
 namespace EntJoySample.AutoSIMDTest
 {
@@ -128,7 +127,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── Static function variants ──
+    // 鈹€鈹€ Static function variants 鈹€鈹€
     public static class ComplexFlow_StaticFuncs
     {
         public static void ComplexFlow_Stc_CSharp(

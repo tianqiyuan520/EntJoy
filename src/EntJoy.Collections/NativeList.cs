@@ -18,7 +18,8 @@ namespace EntJoy.Collections
         private AtomicSafetyHandle _safety;
 
 #if DEBUG
-        private DisposeSentinel _sentinel;
+        // 泄漏检测 sentinel 存静态表（key = safety index），不嵌入 struct → 保持 blittable（2026-08-27）
+        private int _sentinelRegistered;   // 0 = 未注册，1 = 已注册
 #endif
 
         public int Length => _listData != null ? _listData->Length : 0;
@@ -41,7 +42,8 @@ namespace EntJoy.Collections
             *_listData = new UnsafeList<T>(initialCapacity, allocator);
 
 #if DEBUG
-            _sentinel = new DisposeSentinel();
+            DisposeSentinel.Register(_safety.Index, Environment.StackTrace ?? "");
+            _sentinelRegistered = 1;
 #endif
         }
 
@@ -165,8 +167,11 @@ namespace EntJoy.Collections
             _listData = null;
 
 #if DEBUG
-            _sentinel?.Dispose();
-            _sentinel = null;
+            if (_sentinelRegistered == 1)
+            {
+                DisposeSentinel.Unregister(_safety.Index);
+                _sentinelRegistered = 0;
+            }
 #endif
         }
 

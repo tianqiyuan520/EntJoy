@@ -212,6 +212,35 @@ namespace EntJoy.ECS
             EntityCount++;
         }
 
+        // ======================== Shared values 支持 ========================
+
+        /// <summary>
+        /// chunk 被回收（空 chunk 从列表移除）时的回调。EntityManager 用它释放
+        /// 该 chunk 槽位引用的 managed shared 值（refcount 递减）。无 shared 时恒为 null。
+        /// </summary>
+        /// <summary>SharedChunkRetired callback removed — managed shared values are never released during World lifetime (World.Dispose clears all).</summary>
+
+        /// <summary>创建新 chunk（不添加实体），返回其索引。Shared values 区由调用方写入。</summary>
+        public int CreateChunk()
+        {
+            nint chunkMem = AllocateFromSlab();
+            var newChunk = new Chunk(_sharedMetadata, chunkMem);
+            _chunkList.Add(newChunk);
+            return _chunkList.Count - 1;
+        }
+
+        /// <summary>将实体添加到指定 chunk（SharedComponent 路径：目标 chunk 已按 shared 值选定）。</summary>
+        public void AddEntityToChunk(Entity entity, int chunkIndex)
+        {
+            if ((uint)chunkIndex >= (uint)_chunkList.Count)
+                throw new IndexOutOfRangeException($"Chunk index {chunkIndex} out of range (count={_chunkList.Count}).");
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            if (chunk.EntityCount >= chunk.Capacity)
+                throw new InvalidOperationException("Chunk is full");
+            chunk.AddEntity(entity);
+            EntityCount++;
+        }
+
         private int ComputeChunkStride()
         {
             int entitySize = Marshal.SizeOf<Entity>();

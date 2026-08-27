@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -21,6 +21,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -200,6 +201,14 @@ namespace NativeTranspiler.Analyzer
                             {
                                 if (isChunkJob && IsDisallowedChunkDataAccess(calledMethod))
                                     diagnostics.Add(Diagnostic.Create(DisallowedChunkDataAccessError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
+                                else if (isChunkJob && calledMethod.Name == Config.GetSharedComponent && calledMethod.TypeArguments.Length == 1)
+                                {
+                                    // Managed shared component 在 NativeTranspile job 中不允许访问（validator 编译期拦截）
+                                    var sharedType = calledMethod.TypeArguments[0];
+                                    bool isManagedShared = sharedType.IsReferenceType || (sharedType.TypeKind == TypeKind.Struct && !IsUnmanagedType(sharedType));
+                                    if (isManagedShared)
+                                        diagnostics.Add(Diagnostic.Create(ManagedSharedComponentError, invocation.GetLocation(), sharedType.ToDisplayString()));
+                                }
                                 else if (!IsAllowedMethodCall(calledMethod, compilation, isChunkJob))
                                     diagnostics.Add(Diagnostic.Create(DisallowedMethodCallError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
                             }

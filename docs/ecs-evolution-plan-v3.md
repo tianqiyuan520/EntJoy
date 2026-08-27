@@ -16,12 +16,12 @@
 | Phase | 内容 | 状态 | 完成时间 | 关键提交 |
 |-------|------|------|----------|----------|
 | **Phase 1** | 基础设施优化 | ✅ **已完成** | 2026-08-22 | `6391038` |
-| **Phase 2** | Archetype Edges + Chunk lazy zero | ✅ **已完成** | 2026-08-24 | `9a96b96` |
+| **Phase 2** | Archetype Edges + Chunk lazy zero + Shared Component | ✅ **已完成** | 2026-08-27 | `8b9f0c2` |
 | **Phase 3** | Selective Wait + Batch CreateEntities | ✅ **基础完成** | 2026-08-24 | `1452573` |
 | **Phase 4** | System 调度与开发体验增强 | 🔲 **进行中** | — | — |
 | **Phase 5** | 易用性（关系型状态机 + 事件总线） | 🔲 未开始 | — | — |
 | **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
-| **Phase 7** | Shared Component | 🔲 未开始 | — | — |
+| **Phase 7** | Shared Component | ✅ **已完成** | 2026-08-27 | `8b9f0c2` | per-chunk 双类型 + ABI + NativeTranspiler |
 | **Phase 8** | Source Generator + Zero Boilerplate | 🔲 未开始 | — | — |
 | **Phase 9** | 托管类型 + AOT 兼容 | 🔲 未开始 | — | — |
 | **工具链** | Godot 桥接 + 热重载 + 分析器 | 🔲 未开始 | — | — |
@@ -72,7 +72,7 @@
 ### 1.2 必须纠正或补强的方向
 
 - `ChunkPool` 不能简单使用普通 `Marshal.AllocHGlobal` 替代 slab，否则会破坏 64B 对齐和 chunk 地址稳定假设。
-- `Shared Component` 不能实现为“每个 Archetype 一个可变 `Dictionary<int, object>`”。
+- `Shared Component` 不能实现为“每个 Archetype 一个可变 `Dictionary<int, object>`”；采用 per-chunk 存储（blittable 内联 + managed 索引引用，见 §2.2）。
 - `Selective Wait` 必须修改调度契约，否则无法可靠地只等待受影响 Archetype。
 - `QueryBuilder` 的零分配优化不能直接用静态数组覆盖追加语义。
 - `Managed Component / NativeProjection` 必须先引入组件生命周期协议，不能先直接把 `NativeString`、`NativeDictionary` 塞进 SoA。
@@ -380,23 +380,34 @@ remove edge: typeId -> targetArchetype
 - 同一 Archetype 的重复 Add/Remove 不重复排序和查找。
 - 相同组件集合最终指向同一 Archetype。
 
-### 2.2 Shared Components
+### 2.2 Shared Components（2026-08-26 修订：per-chunk 方案，对齐 Unity DOTS）
 
 **修订结论：**
 
 Shared Component 不能实现为“同一 Archetype 的实体共享一个可变 `Dictionary<int, object>`”。
 
-正确语义二选一：
+**新语义（per-chunk 存储）**：共享值是 **Chunk 级数据**，不是 Archetype 签名的一部分。同一 Archetype + 同一共享值 → 同一 Chunk；值不同 → 同 Archetype 内不同 Chunk。改变共享值 → 实体在 **Archetype 内部**移动到持有目标值的 Chunk（无 Archetype 变更，不触发结构迁移）。
 
-1. 将 Shared Component 作为 Archetype 的键组成部分，值不同则拆成不同 Archetype。
-2. 将 Shared Component 作为 per-entity 数据，但存储在独立的 sparse/compact 结构中。
+**双类型存储策略**：
 
-推荐先采用选项 1，因为它与现有 Archetype/SoA 模型最兼容，语义也最清晰。
+| 类型 | 存储 | NativeTranspiler |
+|------|------|------------------|
+| **blittable**（struct 无引用字段） | Chunk 内存块尾部 Shared values 区，值内联 | ✅ 可读（IJobChunk `GetSharedComponent<T>` / IJobEntity job 字段） |
+| **managed**（string/class 等） | EntityManager 值数组 + **哈希桶**（值→索引查找，自动扩容）；Chunk 槽位只存 int 索引引用 | ❌ 不处理（validator 编译期拦截） |
+
+**managed 生命周期**：值只增不减——同一 `(type, value)` 去重后永久存在于 EntityManager 扁平数组；World.Dispose 时整体清空 → GC 回收。（值种类通常 <200，引用 8 字节/个，总开销 ~1.6KB，无需自动回收。后续 S25 可按需加 refcount。）
+
+**参考（Unity DOTS）**：
+- [Entities 0.50 Shared components](https://docs.unity3d.com/Packages/com.unity.entities@0.50/manual/shared_component_data.html)：same archetype + same shared values → same chunk
+- [ArchetypeChunk.GetSharedComponentIndex](https://docs.unity.cn/Packages/com.unity.entities@1.1/api/Unity.Entities.ArchetypeChunk.GetSharedComponentIndex.html)：chunk 存共享值索引，值本体在数据管理器仓库（数组 + hash map）
+- [SetSharedComponentManaged](https://docs.unity3d.com/Packages/com.unity.entities@1.2/api/Unity.Entities.EntityManager.SetSharedComponentManaged.html)：托管 shared 支持，仅主线程/数据层访问（job 不能读）
 
 **验收：**
 
-- 两个实体拥有不同 shared value 时，不再处于同一 Archetype。
-- 查询 Shared Component 时不会误读其他实体的值。
+- 两个实体拥有不同 shared value 时，处于同一 Archetype 的不同 Chunk。
+- 查询带 `WithShared(filter)` 时只遍历匹配的 Chunk（快速跳过不匹配 Chunk）。
+- `SetSharedComponent` 不引发 Archetype 变更，只在 Archetype 内做 Chunk 间移动。
+- managed shared 值去重存储于 EntityManager 扁平数组（`Dictionary<object,int>` per type），World.Dispose 时整体清空。
 
 ### 2.3 Chunk lazy zero
 
@@ -416,7 +427,8 @@ Shared Component 不能实现为“同一 Archetype 的实体共享一个可变 
 
 ### 风险
 
-- Shared Component 若继续保留 v2 的模糊写法，会产生隐蔽错误。
+- Shared Component 的 managed 值去重依赖用户类型实现 `IEquatable<T>`/`GetHashCode`，缺省回退引用相等（需文档约定）。
+- Shared Component 的 managed 值去重依赖用户类型实现 `IEquatable<T>`/`GetHashCode`，缺省回退引用相等（需文档约定）。
 - Edges 若 key 只使用 typeId 而未绑定当前 Archetype，可能返回错误目标。
 
 ---
@@ -619,14 +631,14 @@ partial struct Health { public int Value; }
 
 **文件：** SourceGenerator 新增 `ComponentGenerator.cs`
 
-### 4.5 变更追踪 — ChangedThisFrame（高性能刚需）
+### 4.5 变更追踪 — WithChanged<T>（已完成）
 
 ```csharp
 // 只查询"这帧变化过的"实体
-foreach (var (e, pos) in world.Query<Position>().ChangedThisFrame()) {
-    // 只有 Position 在这帧被修改过的实体
-    MarkDirty(e);
-}
+var query = new QueryBuilder().WithAll<Position>().WithChanged<Position>();
+// ChunkJobCollector.MatchChangedFilter 检查 chunk.HasAnyEntityChanged()
+// Set<T>/SetRaw/SetSharedComponent/RemoveComponent 自动标记 changed bit
+// 帧末调用 EntityManager.ClearAllChangedBitMasks() 清零
 
 // 实现原理：每个 chunk 维护 version bitmask
 // SetValue 时置位 → 查询时只遍历置位的 chunk
@@ -729,9 +741,9 @@ targetEntity -> relation list
 
 ### 7.1 Shared Component
 
-- 明确采用值不同则拆 Archetype 的模型。
-- 改变 shared value 时执行结构移动。
-- 如果后续需要 per-entity 共享值但不拆 Archetype，再单独设计 compact store。
+- 采用 **per-chunk 存储模型**（2026-08-26 修订，取代早先"值不同则拆 Archetype"）：同一 Archetype + 同一共享值 → 同一 Chunk。
+- 改变 shared value 时在 **Archetype 内部**做 Chunk 间移动（不改变 Archetype 签名，不触发结构迁移）。
+- 双类型：blittable 存 Chunk 内存块（NativeTranspiler 可读）；managed 存 EntityManager 扁平数组（`Dictionary<object,int>` per type）、Chunk 存 int 索引（值只增不减，World 清空）。详见 §2.2。
 
 ### 7.2 Subsystem Query
 

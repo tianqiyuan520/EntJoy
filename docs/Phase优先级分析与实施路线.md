@@ -32,7 +32,7 @@ Phase 4 (System 调度与开发体验增强) ✅ 进行中
   └─ Schedule Graph        ✅ — DAG 拓扑排序 + PrintSchedule 输出
   └─ OrderBefore/OrderAfter ✅ — 手动指定 System 执行顺序
   └─ Entity Builder        ✅ — 实体构造器，使用 SetRaw 无反射
-  └─ Change Tracking       ✅ — 核心实现（Chunk 版本号 + 实体位掩码），见 20260825 记录；swap-pop 位掩码待修
+  └─ Change Tracking       ✅ — WithChanged<T> 查询过滤 + Set 自动标记 + ClearAllChangedBitMasks + MatchChangedFilter 接入 ChunkJobCollector
   └─ RunWhen               ✅ — 条件执行，空闲跳过
   └─ 非泛型方法             ✅ — SetRaw/AddComponentRaw/RemoveComponentRaw 无反射
   └─ 命名空间重构           ✅ — EntJoy → EntJoy.ECS
@@ -121,8 +121,9 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 
 | # | 项 | 所属 Phase | 预估工时 | 依赖 | 说明 |
 |---|---|-----------|---------|------|------|
-| **S16** | Shared Component 语义修正 | Phase 2 | 3-5 天 | S14 | 值不同则拆 Archetype（v3 修正 v2） |
-| **S17** | Chunk lazy zero | Phase 2 | 1-2 天 | 无 | 移除构造时整体 InitBlock |
+| **S16** | Shared Component 存储（per-chunk） | Phase 2 | ✅ 已完成（2026-08-27） | S14 | per-chunk 双类型：blittable 内联 chunk 内存块 + managed 扁平数组索引 + 43/43 测试 + 6/6 Demo 通过 |
+| **S16b** | NativeTranspiler 支持 blittable SharedComponent | Phase 2 | ✅ 已完成（2026-08-27） | S16 | IJobChunk `GetSharedComponent<T>` → C++ 指针解引用 + ABI 扩展 + NT014 拦截 managed + EntityBatchAdapter 跳过 |
+| **S17** | Chunk lazy zero | Phase 2 | 0-0.5 天 | 无 | ✅ 已验证完成：chunk 构造无整体 InitBlock，AddEntity 逐 slot 清零 |
 | **S18** | World Events | Phase 5 | 3-5 天 | S7 | typed event channel，struct 避免装箱 |
 | **S19** | One-Frame Components | Phase 5 | 3-5 天 | S18 | 帧末批量清理 |
 | **S20** | Entity Index / Group | Phase 5 | 5-7 天 | S7 | delta 更新，O(1) 索引查询 |
@@ -130,7 +131,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 | **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |
 | **S23** | Relation SoA 编码 | Phase 6 | 1 周 | S7 | 含 target version/epoch 防 ID 回收 |
 | **S24** | 级联删除 + target index | Phase 6 | 1 周 | S23 | 索引加速 |
-| **S25** | Shared Component 落地 | Phase 7 | 1 周 | S16 | 改变 shared value 执行结构移动 |
+| **S25** | Shared Component 落地扩展 | Phase 7 | 1 周 | S16 | 复用 S16 per-chunk 存储：按共享值排序/分组 chunk、`WithShared` 查询进阶、与 Change Tracking/Job Tracking 联动 |
 | **S26** | Component 存取生成 | Phase 8 | 3-5 天 | S7 | 自动生成 Get/Set 访问器 |
 | **S27** | System 注册生成 | Phase 8 | 3-5 天 | S9 | 自动收集 system + 注入 |
 
@@ -255,7 +256,7 @@ Phase 9 (Managed 类型，独立轨道)
 | 里程碑 | 包含 Phase | 状态 | 预估总工时 |
 |--------|-----------|------|-----------|
 | **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4（重设计） | 进行中 | ~4-6 周 |
-| **里程碑 B：存储与易用性** | Phase 2 遗留 + Phase 5 + Phase 6 + Phase 7 | 未开始 | ~8-12 周 |
+| **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | 进行中（Phase 7 已完成 2026-08-27） | ~8-12 周 |
 | **里程碑 C：生成器扩展** | Phase 8 | 未开始 | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
 | **AutoSIMD 修复** | 与里程碑并行 | 进行中 | ~2-3 周 |
@@ -306,6 +307,23 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 - 但 Phase 1-8 的完成会影响 Phase 9 的 API 设计（如 System 框架决定组件生命周期边界）
 - 因此排在最后，先完成 hooks 协议，再引入非 blittable 组件
 
+### 6.4 Shared Component 为何从"拆 Archetype"改为 per-chunk（2026-08-26）
+
+**问题**：v3 原方案"值不同则拆 Archetype"在共享值种类多时 Archetype 爆炸，且高频改值会频繁触发结构迁移（换 Archetype = 全量结构变更）。
+
+**决策**：改为 **per-chunk 存储**（对齐 Unity DOTS）：同一 Archetype + 同一共享值 → 同一 Chunk；改值 → Archetype **内部** Chunk 间移动（无 Archetype 变更）。
+
+**双类型策略**：
+- **blittable**（struct 无引用）→ chunk 内存块 Shared values 区内联 → NativeTranspiler 可读（IJobChunk `GetSharedComponent<T>` / IJobEntity job 字段）
+- **managed**（string/class）→ EntityManager 扁平值数组 + `Dictionary<object,int>` per type（去重查找 O(1)）+ chunk 槽位存 int 索引；值只增不减，World.Dispose 清空；NativeTranspiler 不处理（validator 编译期拦截）
+
+**参考**：[Unity Entities Shared components](https://docs.unity3d.com/Packages/com.unity.entities@0.50/manual/shared_component_data.html)、[GetSharedComponentIndex](https://docs.unity.cn/Packages/com.unity.entities@1.1/api/Unity.Entities.ArchetypeChunk.GetSharedComponentIndex.html)、[SetSharedComponentManaged](https://docs.unity3d.com/Packages/com.unity.entities@1.2/api/Unity.Entities.EntityManager.SetSharedComponentManaged.html)
+
+**影响**：
+- S16 重新定义为"Shared Component 存储（per-chunk）"，S16b 新增"NativeTranspiler 支持 blittable SharedComponent"
+- S25（落地扩展）依赖 S16 而非"结构移动"语义
+- 完整设计见 `docs/20260826-SharedComponent-perChunk设计.md`
+
 ---
 
 ## 七、工时估算汇总
@@ -319,7 +337,8 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 | S9-new | One-Frame Component | 3-5 天 | ~3-4 周 |
 | S15 | Lambda 易用路径 | 3-5 天 | ~4-5 周 |
 | S4-S5, S10-S11 | AutoSIMD 关键修复 | 2-3 周 | 并行 |
-| S16-S17 | Phase 2 遗留 | 1-2 周 | ~5-7 周 |
+| S16 + S16b | Shared Component：per-chunk 存储 + NativeTranspiler blittable 支持 | S16 3-5 天 + S16b 3-5 天 | ~5-7 周 |
+| S17 | Chunk lazy zero | ✅ 已完成（已验证） | — |
 | S18-S20 | Phase 5 核心 | 2-3 周 | ~7-10 周 |
 | S23-S24 | Phase 6 核心 | 2 周 | ~9-12 周 |
 | S25 | Phase 7 | 1 周 | ~10-13 周 |

@@ -13,7 +13,8 @@ namespace EntJoy.Collections
         private bool _isOwner;
 
 #if DEBUG
-        private DisposeSentinel _sentinel;
+        // 泄漏检测 sentinel 存静态表（key = safety index），不嵌入 struct → 保持 blittable（2026-08-27）
+        private int _sentinelRegistered;   // 0 = 未注册，1 = 已注册（仅 owner）
 #endif
 
         public int Length => _length;
@@ -71,7 +72,11 @@ namespace EntJoy.Collections
 
             _isOwner = true;
 #if DEBUG
-            _sentinel = new DisposeSentinel();
+            if (_isOwner)
+            {
+                DisposeSentinel.Register(_safety.Index, Environment.StackTrace ?? "");
+                _sentinelRegistered = 1;
+            }
 #endif
         }
 
@@ -92,7 +97,8 @@ namespace EntJoy.Collections
             _safety = safety;
             _isOwner = isOwner;
 #if DEBUG
-            //_sentinel = null;
+            // 视图不注册 sentinel（不拥有内存，无泄漏责任）
+            _sentinelRegistered = 0;
 #endif
         }
 
@@ -123,8 +129,11 @@ namespace EntJoy.Collections
             // 注意：不设置 _safety = default — Release() 已将其设为 (-1, false)
             // 避免索引 0 被回收后 use-after-free
 #if DEBUG
-            _sentinel?.Dispose();
-            _sentinel = null;
+            if (_sentinelRegistered == 1)
+            {
+                DisposeSentinel.Unregister(_safety.Index);
+                _sentinelRegistered = 0;
+            }
 #endif
         }
 

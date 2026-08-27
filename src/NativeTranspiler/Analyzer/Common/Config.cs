@@ -36,6 +36,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string GetComponentDataNativeArray = "GetComponentDataNativeArray";
         public const string GetComponentDataSpan = "GetComponentDataSpan";
         public const string GetComponentDataPtr = "GetComponentDataPtr";
+        public const string GetSharedComponent = "GetSharedComponent";
 
         // ============ 命名空间名 ============
         public const string NamespaceSystem = "System";

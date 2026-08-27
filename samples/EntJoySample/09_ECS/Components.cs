@@ -27,4 +27,6 @@ namespace EntJoySample.ECS
     {
         public bool IsActive;
     }
+
+    // Shared Component 类型已移至 SharedComponentDemo.cs（独立声明避免跨文件类型冲突）
 }

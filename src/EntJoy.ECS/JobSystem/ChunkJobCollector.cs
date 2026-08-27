@@ -31,7 +31,7 @@ namespace EntJoy.ECS.JobSystem
                 {
                     matchingArchetypes.Add(arch);
                     foreach (var c in arch.ChunkSpan)
-                        if (c.EntityCount > 0)
+                        if (c.EntityCount > 0 && MatchSharedFilter(entityManager, query, c) && MatchChangedFilter(query, c))
                         {
                             if (count >= s_chunkBuffer.Length)
                                 Array.Resize(ref s_chunkBuffer, s_chunkBuffer.Length * 2);
@@ -40,6 +40,30 @@ namespace EntJoy.ECS.JobSystem
                 }
             }
             return count;
+        }
+
+        /// <summary>变更追踪过滤：无 ChangedComponents 返回 true；否则 chunk 内任何实体被标记即通过。</summary>
+        private static bool MatchChangedFilter(QueryBuilder query, Chunk chunk)
+        {
+            if (query.ChangedComponents == null || query.ChangedComponents.Length == 0) return true;
+            return chunk.HasAnyEntityChanged();
+        }
+
+        /// <summary>SharedComponent 过滤：无过滤器返回 true；否则 chunk 槽位值与过滤值相等才通过。</summary>
+        private static bool MatchSharedFilter(EntityManager entityManager, QueryBuilder query, Chunk chunk)
+        {
+            if (!query.HasSharedFilter) return true;
+            var arch = chunk.Archetype;
+            int compIdx = arch.GetComponentTypeIndex(query.SharedFilterType);
+            var ct = arch.Types[compIdx];
+            if (ct.IsManagedShared)
+            {
+                int idx = chunk.GetSharedValueIndex(compIdx);
+                if (idx < 0) return false;
+                object value = entityManager.GetManagedSharedValueById(ct.Id, idx);
+                return value != null && Equals(value, query.SharedFilterValue);
+            }
+            return Equals(entityManager.ReadBlittableShared(chunk, compIdx, ct.Type), query.SharedFilterValue);
         }
 
         // ─── 托管路径：轻量 payload（entityCount + componentCount + enableBitMaps + chunkId） ───
@@ -106,6 +130,25 @@ namespace EntJoy.ECS.JobSystem
                             if (typeIndices[c] == reqId) { reqArrays[r] = compPtrs[c]; break; }
                     }
                 }
+                // SharedComponent blittable 值指针（per-chunk，非 per-entity）
+                int sharedCount = 0;
+                void** sharedPtrs = null;
+                if (chunk.HasSharedValues)
+                {
+                    for (int c = 0; c < compCount; c++)
+                        if (arch.Types[c].IsShared && !arch.Types[c].IsManagedShared)
+                            sharedCount++;
+                    if (sharedCount > 0)
+                    {
+                        sharedPtrs = (void**)Marshal.AllocHGlobal(sharedCount * sizeof(void*));
+                        int si = 0;
+                        for (int c = 0; c < compCount; c++)
+                        {
+                            if (!arch.Types[c].IsShared || arch.Types[c].IsManagedShared) continue;
+                            sharedPtrs[si++] = (void*)chunk.GetSharedValuePointer(c);
+                        }
+                    }
+                }
                 tablePtr[ci] = new ChunkJobData
                 {
                     entityArray = (void*)chunk.GetEntityPointer(),
@@ -113,7 +156,8 @@ namespace EntJoy.ECS.JobSystem
                     componentArrays = compPtrs, componentSizes = compSizes,
                     enableBitMaps = bitmaps, componentTypeIndices = typeIndices,
                     chunkHandle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero,
-                    requiredComponentArrays = reqArrays, requiredComponentCount = reqCount
+                    requiredComponentArrays = reqArrays, requiredComponentCount = reqCount,
+                    sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
                 };
             }
             return tablePtr;
