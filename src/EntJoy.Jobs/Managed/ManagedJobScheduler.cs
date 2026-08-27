@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -11,33 +10,28 @@ namespace EntJoy.JobSystem.Managed
     /// 关键架构：
     ///   - Chase-Lev 工作窃取（标准 crossbeam 模型）：per-worker 持久 deque + 全局 MPMC Injector。
     ///   - worker parking：空闲 worker 有界自旋后阻塞在 SemaphoreSlim，任务发布按需唤醒。
-    ///   - **混合执行并行 for**：预切分为 ManagedTileTask 推入 Injector，worker 从 Injector
+    ///   - 混合执行并行 for：预切分为 ManagedTileTask 推入 Injector，worker 从 Injector
     ///     拉取推入自己 deque（owner-only PushBottom），空闲时从其他 worker steal。
     ///   - 同步内联覆盖小任务（零调度开销）。
     ///   - completion 槽位池（预分配数组）+ 单槽 per-类型 job 盒池 → 热路径零分配。
     ///   - 依赖链中间 completion 完成后自动归还（防泄漏）；槽位带 generation 代际，防旧 handle 复用误操作（防 ABA）。
     ///   - 依赖回调原子累积（OnCompleted 用 CAS 循环）。
-    ///   - ENTJOY_MANAGED_WORKSTEALING=0 可回退旧 MPMC 路径。
     ///
     /// 【约束】依赖图必须是无环 DAG：循环依赖（A→B→A）会导致依赖链
     /// 回调永远无法触发、Complete() 永久阻塞。运行时不做环检测，调用方负责保证。
     /// </summary>
     public static class ManagedJobScheduler
     {
-        // ───── 旧 MPMC 路径 ─────
-        private static ManagedMPMCQueue<ManagedTask>? _globalQueue;
         private static Thread[]? _workers;
         private static int _workerCount;
         private static volatile bool _shutdown;
         private static bool _isInitialized;
         private static readonly object _stateLock = new object();
-        private static readonly object _workMonitor = new object();
 
         private const int QueueCapacity = 1 << 16;
         private const int SyncInlineThreshold = 1024;
 
         // ───── Chase-Lev 路径 ─────
-        private static bool _useWorkStealing;
         private static ManagedMPMCQueue<ManagedTileTask>? _injector;   // 全局 Injector（跨线程提交入口）
         private static ManagedWorkStealingDeque[]? _deques;            // per-worker 持久 deque
         private static ManagedTileTaskPool? _tileTaskPool;             // 全局任务池
@@ -46,7 +40,7 @@ namespace EntJoy.JobSystem.Managed
 
         /// <summary>
         /// Complete 的周期协助间隔（对齐 Native Complete 的 wait_for(1ms) + 依赖链回访）：
-        /// 等待期间以此间隔周期苏醒并协助认领全局队列任务推进链；completion 完成时 _done 立即唤醒，
+        /// 等待期间以此间隔周期苏醒并协助认领 Injector 任务推进链；completion 完成时 _done 立即唤醒，
         /// 该间隔只是"空闲复查"频率。无墙钟超时 —— 合法长任务（worker 活跃/队列有活）绝不误报死锁。
         /// </summary>
         private static readonly TimeSpan CompleteAssistInterval = TimeSpan.FromMilliseconds(8);
@@ -60,10 +54,6 @@ namespace EntJoy.JobSystem.Managed
                 if (_isInitialized) return;
                 _workerCount = workerCount <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : workerCount;
 
-                // 读取路径开关
-                string? env = Environment.GetEnvironmentVariable("ENTJOY_MANAGED_WORKSTEALING");
-                _useWorkStealing = env != "0" && env != "false" && env != "off";
-
                 _shutdown = false;
                 _isInitialized = true;
 
@@ -76,30 +66,19 @@ namespace EntJoy.JobSystem.Managed
                 }
                 _completionFreeHead = 0;
 
-                if (_useWorkStealing)
-                {
-                    // Chase-Lev 路径
-                    _injector = new ManagedMPMCQueue<ManagedTileTask>(QueueCapacity);
-                    _deques = new ManagedWorkStealingDeque[_workerCount];
-                    for (int i = 0; i < _workerCount; i++)
-                        _deques[i] = new ManagedWorkStealingDeque();
-                    _tileTaskPool = new ManagedTileTaskPool();
-                    _wakeSignal = new SemaphoreSlim(0); // 无上限（对齐 Native wakeStamp + notify_all）
-                }
-                else
-                {
-                    // 旧 MPMC 路径
-                    _globalQueue = new ManagedMPMCQueue<ManagedTask>(QueueCapacity);
-                }
+                // Chase-Lev 路径
+                _injector = new ManagedMPMCQueue<ManagedTileTask>(QueueCapacity);
+                _deques = new ManagedWorkStealingDeque[_workerCount];
+                for (int i = 0; i < _workerCount; i++)
+                    _deques[i] = new ManagedWorkStealingDeque();
+                _tileTaskPool = new ManagedTileTaskPool();
+                _wakeSignal = new SemaphoreSlim(0); // 无上限（对齐 Native wakeStamp + notify_all）
 
                 _workers = new Thread[_workerCount];
                 for (int i = 0; i < _workerCount; i++)
                 {
                     int wi = i;
-                    ThreadStart start = _useWorkStealing
-                        ? () => WorkerLoopChaseLev(wi)
-                        : (ThreadStart)(() => WorkerLoop(wi));
-                    var t = new Thread(start) { IsBackground = true, Name = $"ManagedJobWorker-{i}" };
+                    var t = new Thread(() => WorkerLoopChaseLev(wi)) { IsBackground = true, Name = $"ManagedJobWorker-{i}" };
                     _workers[i] = t;
                     t.Start();
                 }
@@ -114,26 +93,13 @@ namespace EntJoy.JobSystem.Managed
                 _shutdown = true;
                 _isInitialized = false;
 
-                if (_useWorkStealing)
-                {
-                    // Chase-Lev：释放所有 SemaphoreSlim 信号让 worker 退出
-                    _wakeSignal?.Release(_workerCount);
-                }
-                else
-                {
-                    lock (_workMonitor) Monitor.PulseAll(_workMonitor);
-                }
+                // 释放所有 SemaphoreSlim 信号让 worker 退出
+                _wakeSignal?.Release(_workerCount);
             }
             if (_workers == null) return;
             foreach (var w in _workers)
                 if (w != null && w.IsAlive) w.Join();
             _workers = null;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void Publish()
-        {
-            lock (_workMonitor) Monitor.PulseAll(_workMonitor);
         }
 
         // ──────────────────── completion 对象池（预分配数组，无 ConcurrentStack Node 分配） ────────────────────
@@ -188,10 +154,10 @@ namespace EntJoy.JobSystem.Managed
         private static void ReturnCompletionCore(ManagedCompletion c)
         {
             // 归还时**不** Reset：保留完成态（Remaining=0、_done=Set），完整 Reset 推迟到 RentCompletion 分配时执行。
-            // 这使“已完成但要被并发注册依赖”的 completion 始终被读为已完成的正确状态，
+            // 这使"已完成但要被并发注册依赖"的 completion 始终被读为已完成的正确状态，
             // 避免 Signal 的自动归还把 Remaining 改回 1 而让 ChainAfter/OnCompleted 误判未完成、把回调永久挂死在已回收槽位。
-            // 归还即代际 +1：任何仍持有本 completion 的旧 handle 立即可判“过期”。
-            // 这是防止“已自动归还/已重置的槽位被误等待”的关键——否则还原后的 Remaining=1 会让
+            // 归还即代际 +1：任何仍持有本 completion 的旧 handle 立即可判"过期"。
+            // 这是防止"已自动归还/已重置的槽位被误等待"的关键——否则还原后的 Remaining=1 会让
             // 释放方之外的用户 Complete() 误以为未完成而永久等待（曾导致零长度并行 for 挂死）。
             Interlocked.Increment(ref c.Generation);
             int idx = c.SlotIndex;
@@ -221,31 +187,19 @@ namespace EntJoy.JobSystem.Managed
         public static ManagedJobHandle Schedule<T>(ref T job) where T : struct, IJob
         {
             EnsureInitialized();
-            if (_useWorkStealing) return ScheduleChaseLevSingle<T>(ref job);
-            var completion = ManagedJobScheduler.RentCompletion();
-            Interlocked.Exchange(ref completion.Remaining, 1);
-            var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
-            EnqueueGlobal(task);
-            return new ManagedJobHandle(completion);
+            return ScheduleChaseLevSingle<T>(ref job);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static ManagedJobHandle Schedule<T>(ref T job, ManagedJobHandle dependsOn) where T : struct, IJob
         {
             EnsureInitialized();
-            if (_useWorkStealing) return ScheduleChaseLevSingle<T>(ref job, dependsOn);
-            var completion = ManagedJobScheduler.RentCompletion();
-            Interlocked.Exchange(ref completion.Remaining, 1);
-            var task = new ManagedTask { Job = SingleCache<T>.Box(job), Runner = SingleCache<T>.Runner, Release = SingleCache<T>.ReleaseBox, Start = 0, Count = 1, Completion = completion };
-            EnqueueAfterGlobal(task, dependsOn);
-            return new ManagedJobHandle(completion);
+            return ScheduleChaseLevSingle<T>(ref job, dependsOn);
         }
 
         /// <summary>
-        /// 调度 IJobParallelFor：混合执行。
-        /// - innerBatchCount &gt; 0 → 共享游标细粒度认领（重计算，动态负载均衡）。
-        /// - innerBatchCount == 0 → 静态大分片（轻任务，少 dequeue/Signal 开销，无共享游标竞争）。
-        /// 同步内联（小任务）两者通用。依赖通过 completion 计数保证顺序。
+        /// 调度 IJobParallelFor：Chase-Lev 工作窃取。
+        /// 同步内联覆盖小任务（零调度开销）。依赖通过 completion 计数保证顺序。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static ManagedJobHandle Schedule<T>(ref T job, int arrayLength, int innerBatchCount, ManagedJobHandle dependsOn = default)
@@ -255,7 +209,7 @@ namespace EntJoy.JobSystem.Managed
             if (arrayLength <= 0)
             {
                 // 零长度并行 for：无任何分片会执行，立即完成并自动归还。必须在 Signal（触发自动归还，代际+1）
-                // **之前**构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出“已归还”
+                // **之前**构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出"已归还"
                 // 已被复用的槽位，用户 Complete() 会误等一个 Remaining 已被重置=1 的槽位而永久挂死。
                 var zero = ManagedJobScheduler.RentCompletion();
                 Interlocked.Exchange(ref zero.Remaining, 1);
@@ -276,111 +230,7 @@ namespace EntJoy.JobSystem.Managed
             }
 
             // Chase-Lev 路径：预切分为 ManagedTileTask 推入 Injector
-            if (_useWorkStealing)
-                return ScheduleChaseLevParallelFor<T>(ref job, arrayLength, innerBatchCount, dependsOn);
-
-            // 旧 MPMC 路径
-            if (innerBatchCount > 0)
-                return ScheduleSharedRange<T>(ref job, arrayLength, innerBatchCount, dependsOn);
-            {
-                int workers = Math.Max(1, _workerCount);
-                int autoBatch = Math.Max(16,
-                    (arrayLength + workers * 16 - 1) / (workers * 16));
-                return ScheduleSharedRange<T>(ref job, arrayLength, autoBatch, dependsOn);
-            }
-        }
-
-        /// <summary>静态粗分片执行：并行 for 拆 ~worker 个固定大 chunk 入全局队列，一次性唤醒；无共享游标竞争。
-        /// 每 worker 一块连续执行（极轻任务 S2 少 dequeue/Signal 开销，对齐 TPool/静态分片）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static ManagedJobHandle ScheduleStaticSlices<T>(ref T job, int arrayLength, ManagedJobHandle dependsOn)
-            where T : struct, IJobParallelFor
-        {
-            var completion = RentCompletion();
-            int workers = Math.Max(1, _workerCount);
-            int targetSlice = Math.Max(1, (arrayLength + workers - 1) / workers);
-            int n = (arrayLength + targetSlice - 1) / targetSlice;
-            Interlocked.Exchange(ref completion.Remaining, n);
-
-            var box = ParallelCache<T>.Box(job);
-            completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
-
-            void EnqueueSlices()
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    int s = i * targetSlice;
-                    int e = Math.Min(s + targetSlice, arrayLength);
-                    var t = new ManagedTask
-                    {
-                        Job = box,
-                        Runner = ParallelCache<T>.Runner,
-                        Start = s,
-                        Count = e - s,
-                        Completion = completion,
-                        Release = null,
-                    };
-                    while (!_globalQueue.TryEnqueue(in t))
-                    {
-                        if (_globalQueue.TryDequeue(out var other)) ExecuteTask(other);
-                        Thread.Yield();
-                    }
-                }
-                Publish();
-            }
-
-            ChainAfter(dependsOn.Completion, dependsOn.Gen, completion, EnqueueSlices);
-            return new ManagedJobHandle(completion);
-        }
-
-        /// <summary>共享游标细粒度认领执行：建共享 range，向全局队列投入 participants 个参与名额，一次性唤醒；
-        /// worker 拿名额后紧循环 Interlocked.Add 认领分片（重计算 S5 动态负载均衡）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static ManagedJobHandle ScheduleSharedRange<T>(ref T job, int arrayLength, int batchSize, ManagedJobHandle dependsOn)
-            where T : struct, IJobParallelFor
-        {
-            var completion = RentCompletion();
-            int workers = Math.Max(1, _workerCount);
-            int batch = Math.Max(1, batchSize);
-            int totalBatches = (arrayLength + batch - 1) / batch;
-            int participants = Math.Max(1, Math.Min(totalBatches, workers));
-            Interlocked.Exchange(ref completion.Remaining, participants);
-
-            var box = ParallelCache<T>.Box(job);
-            completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
-
-            var range = new ManagedRange
-            {
-                Job = box,
-                Length = arrayLength,
-                Batch = batch,
-                Current = 0,
-            };
-            var claimer = new ManagedTask
-            {
-                Job = range,
-                Runner = SharedRangeClaimRunner<T>.Runner,
-                Start = 0,
-                Count = 1,
-                Completion = completion,
-                Release = null,
-            };
-
-            void EnqueueClaimers()
-            {
-                for (int i = 0; i < participants; i++)
-                {
-                    while (!_globalQueue.TryEnqueue(in claimer))
-                    {
-                        if (_globalQueue.TryDequeue(out var other)) ExecuteTask(other);
-                        Thread.Yield();
-                    }
-                }
-                Publish();
-            }
-
-            ChainAfter(dependsOn.Completion, dependsOn.Gen, completion, EnqueueClaimers);
-            return new ManagedJobHandle(completion);
+            return ScheduleChaseLevParallelFor<T>(ref job, arrayLength, innerBatchCount, dependsOn);
         }
 
         /// <summary>
@@ -428,117 +278,18 @@ namespace EntJoy.JobSystem.Managed
             const int CooperativeIdleBudget = 2048;
             int idle = 0;
 
-            if (_useWorkStealing)
+            // Chase-Lev 路径：主线程 assist（对齐 C++ TryAssistOne）
+            while (!completion.IsCompleted)
             {
-                // Chase-Lev 路径：主线程 assist（对齐 C++ TryAssistOne）
-                while (!completion.IsCompleted)
-                {
-                    if (TryAssistOne()) { idle = 0; continue; }
-                    if (++idle >= CooperativeIdleBudget) break;
-                    Thread.Yield();
-                }
-                while (!completion.IsCompleted)
-                {
-                    if (completion.Wait(CompleteAssistInterval)) break;
-                    TryAssistOne();
-                }
-            }
-            else
-            {
-                // 旧 MPMC 路径
-                while (!completion.IsCompleted)
-                {
-                    if (TryExecuteAnyTask()) { idle = 0; continue; }
-                    if (++idle >= CooperativeIdleBudget) break;
-                    Thread.Yield();
-                }
-                while (!completion.IsCompleted)
-                {
-                    if (completion.Wait(CompleteAssistInterval)) break;
-                    TryExecuteAnyTask();
-                }
-            }
-        }
-
-        /// <summary>主线程协作：从全局队列取任务执行。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool TryExecuteAnyTask()
-        {
-            if (_globalQueue.TryDequeue(out var g)) { ExecuteTask(g); return true; }
-            return false;
-        }
-
-        // ──────────────────── 内部队列 ────────────────────
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void EnqueueGlobal(ManagedTask task)
-        {
-            while (!_globalQueue.TryEnqueue(in task))
-            {
-                if (_globalQueue.TryDequeue(out var other)) ExecuteTask(other);
+                if (TryAssistOne()) { idle = 0; continue; }
+                if (++idle >= CooperativeIdleBudget) break;
                 Thread.Yield();
             }
-            Publish();
-        }
-
-        private static void EnqueueAfterGlobal(ManagedTask task, ManagedJobHandle dependsOn)
-        {
-            if (dependsOn.Completion == null) { EnqueueGlobal(task); return; }
-            var dep = dependsOn.Completion;
-            // 代际守卫：依赖槽位已换代（原依赖完成/过期）→ 本 job 视为已就绪立即入队，不把续体挂到被复用的对象上。
-            if (Volatile.Read(ref dep.Generation) != dependsOn.Gen) { EnqueueGlobal(task); return; }
-            // 依赖 completion：完成后自动归还（中间 handle 调用方不主动 Complete，防 completion 槽位/闭包泄漏），
-            // 并把依赖异常传播到本 job 的 completion（供末端 Complete() 抛出）。
-            Volatile.Write(ref dep._autoReturn, 1);
-            void Propagate()
+            while (!completion.IsCompleted)
             {
-                var ex = dep.ReadException();
-                if (ex != null) task.Completion?.RecordException(ex);
-                EnqueueGlobal(task);
+                if (completion.Wait(CompleteAssistInterval)) break;
+                TryAssistOne();
             }
-            if (dep.IsCompleted)
-            {
-                Propagate();
-                ManagedJobScheduler.AutoReturnCompletion(dep); // 已在调度前完成：当场归还，防泄漏
-            }
-            else
-            {
-                dep.OnCompleted(Propagate);
-            }
-        }
-
-        // ──────────────────── Worker 循环 ────────────────────
-
-        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static void WorkerLoop(int workerIndex)
-        {
-            while (!_shutdown)
-            {
-                if (_globalQueue.TryDequeue(out var g)) { ExecuteTask(g); continue; }
-                if (!ParkIdle()) break;
-            }
-        }
-
-        private static bool ParkIdle()
-        {
-            var spin = new SpinWait();
-            for (int i = 0; i < 5000; i++)
-            {
-                if (_shutdown) return false;
-                if (_globalQueue.TryDequeue(out var g)) { ExecuteTask(g); return true; }
-                spin.SpinOnce();
-            }
-            lock (_workMonitor)
-            {
-                while (!_shutdown)
-                {
-                    if (_globalQueue.TryDequeue(out var g)) { ExecuteTask(g); return true; }
-                    // 锁内条件变量：检查和 Wait 在同一把锁内原子衔接；入队后必有 Publish 持同一把锁
-                    // PulseAll → 无 lost-wakeup 空窗（对齐 Native 的 futex 原子 check+wait，无需超时兜底）。
-                    Monitor.Wait(_workMonitor);
-                }
-            }
-            return false;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -562,7 +313,7 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        // ──────────────────── Chase-Lev 路径 ────────────────────
+        // ──────────────────── Chase-Lev Worker 循环 ────────────────────
 
         /// <summary>
         /// 标准 Chase-Lev Worker 循环（crossbeam 模型）：
@@ -736,7 +487,6 @@ namespace EntJoy.JobSystem.Managed
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void PublishChaseLev(int taskCount)
         {
-            // 唤醒 min(workerCount, taskCount) 个 worker
             // 全唤醒：释放 workerCount 个信号，确保所有 worker 都有机会认领
             _wakeSignal?.Release(_workerCount);
         }
@@ -883,31 +633,6 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        /// <summary>
-        /// 共享游标认领执行器（对齐 Misaki ExecuteParallelFor / C++ WorkerAtomicRangeLoop）：worker 拿到一个参与名额后，
-        /// 在共享 Current 上游标紧循环认领分片执行直到耗尽。执行期只碰 shared Current 一个原子。用于重计算（S5）。
-        /// </summary>
-        private static class SharedRangeClaimRunner<T> where T : struct, IJobParallelFor
-        {
-            public static readonly JobRunner Runner = Run;
-
-            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-            private static void Run(object boxed, int start, int count)
-            {
-                var range = (ManagedRange)boxed;
-                var job = (T)range.Job;
-                while (true)
-                {
-                    int claimed = Interlocked.Add(ref range.Current, range.Batch) - range.Batch;
-                    if (claimed >= range.Length) break;
-                    int end = Math.Min(claimed + range.Batch, range.Length);
-                    for (int i = claimed; i < end; i++) job.Execute(i);
-                }
-                // 注意：这里**不**再自行 Signal —— 完成信号统一由 ExecuteTask 的 finally 发出，
-                // 否则与 ExecuteTask 的 Signal 重复，会提前触发 completion（导致提前完成 + job 盒提前归还）。
-            }
-        }
-
         private static JobRunner SelectRunner<T>() where T : struct, IJobParallelFor
             => ParallelCache<T>.Runner;
 
@@ -919,15 +644,6 @@ namespace EntJoy.JobSystem.Managed
             public int Start;
             public int Count;
             public ManagedCompletion Completion;
-        }
-
-        /// <summary>并行 for 共享游标状态（对齐 C++ BatchState.nextTile / Misaki JobRanges）。</summary>
-        private sealed class ManagedRange
-        {
-            public object Job;           // 盒装 job（整段一份）
-            public int Length;
-            public int Batch;            // 认领粒度
-            public int Current;          // 共享游标（Interlocked.Add 认领）
         }
     }
 }
