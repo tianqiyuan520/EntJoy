@@ -116,6 +116,17 @@ struct float2 { float x; float y; };
 struct int2   { int x; int y; };
 struct uint2  { unsigned int x; unsigned int y; };
 
+// ---------- EventBuffer POD（SendEvent 生成的 ISPC 代码依赖） ----------
+// 注意：ISPC 中 uniform void* 非法（void 不能带 uniform 限定），data 用 uniform int*（uniform→uniform cast 合法，
+// 且 varying→uniform 指针 cast 被禁止，裸 void* 是 varying 指针无法 cast 到 uniform T*）。
+// count 保持 uniform int*（atomic 需要 uniform 指针）。
+struct __EntJoyEventBuffer {
+    uniform int* data;
+    uniform int* count;
+    uniform int capacity;
+    uniform int elementSize;
+};
+
 // ---------- helpers (static to avoid duplicate symbols) ----------
 static struct float2 make_float2(float x, float y) {
     struct float2 r; r.x = x; r.y = y; return r;

@@ -198,10 +198,13 @@ namespace NativeTranspiler.Analyzer
                 return false;
             }
 
+            // 注：SendEvent 场景保持 foreach_tiled（SIMD）。
+            // ISPC atomic_add_global 是 fetch-add，对 uniform 地址 + varying 值每个 active lane 独立原子，
+            // 返回各自唯一旧值 → SIMD 下 per-lane 槽位分配正确（实测 PASS），无需退化为标量。
             AppendIndent();
-            string startName = _foreachStartName ?? "0";
-            string endName = _foreachEndName ?? "__entity_count";
-            _builder.Append("foreach_tiled (").Append(indexName).Append(" = ").Append(startName).Append(" ... ").Append(endName).Append(") ");
+            string startName2 = _foreachStartName ?? "0";
+            string endName2 = _foreachEndName ?? "__entity_count";
+            _builder.Append("foreach_tiled (").Append(indexName).Append(" = ").Append(startName2).Append(" ... ").Append(endName2).Append(") ");
             var savedForeach = _insideForeach;
             _insideForeach = true;
             if (forStmt.Statement is BlockSyntax block)

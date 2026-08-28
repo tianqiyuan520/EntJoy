@@ -872,7 +872,8 @@ namespace NativeTranspiler.Analyzer
                     foreach (var typeArg in gn.TypeArgumentList.Arguments)
                     {
                         var taType = semanticModel.GetTypeInfo(typeArg).Type;
-                        if (taType is INamedTypeSymbol named && named.IsUnmanagedType)
+                        // 用 IsStructBlittable 替代 IsUnmanagedType：对嵌套 struct 也正确判断
+                        if (taType is INamedTypeSymbol named && IsStructBlittable(named))
                             result.Add(named);
                     }
                 }
@@ -881,14 +882,98 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (arg.Expression is ObjectCreationExpressionSyntax objCreate)
                     {
-                        var createdType = semanticModel.GetTypeInfo(objCreate.Type).Type;
-                        if (createdType is INamedTypeSymbol named2 && named2.IsUnmanagedType)
+                        // 注意：不能只查 GetTypeInfo(objCreate.Type)。VS/MSBuild 的 Roslyn 对
+                        // object-initializer 的 .Type（QualifiedNameSyntax/IdentifierNameSyntax）
+                        // 在嵌套类型场景下会返回 null，而对整个 new 表达式 GetTypeInfo(objCreate)
+                        // 始终返回表达式类型（两种引擎都可靠）。dotnet CLI 两者都行，VS 只有后者行。
+                        var createdType = semanticModel.GetTypeInfo(objCreate).Type
+                                       ?? semanticModel.GetTypeInfo(objCreate.Type).Type;
+                        // 用 IsStructBlittable 代替 IsUnmanagedType：后者对嵌套 struct 会返回 false
+                        // （Roslyn known issue：ContainingType 是 class 时内部 struct 即使全 unmanaged 也判 false）
+                        if (createdType is INamedTypeSymbol named2 && IsStructBlittable(named2))
                             result.Add(named2);
                     }
                 }
             }
             var distinct = new HashSet<INamedTypeSymbol>(result, SymbolEqualityComparer.Default);
             return distinct.ToList();
+        }
+
+        /// <summary>
+        /// 手动递归检查 struct 是否 blittable（所有字段都是 unmanaged 类型）。
+        /// 替代 IsUnmanagedType：对嵌套 struct 也能正确判断（Roslyn IsUnmanagedType 对嵌套类型会返回 false）。
+        /// </summary>
+        private static bool IsStructBlittable(INamedTypeSymbol type)
+        {
+            return IsStructBlittable(type, new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
+        }
+
+        private static bool IsStructBlittable(INamedTypeSymbol type, HashSet<INamedTypeSymbol> visited)
+        {
+            // 排除引用类型
+            if (type.IsReferenceType) return false;
+            // 必须有 layout 信息的 struct
+            if (type.TypeKind != TypeKind.Struct) return false;
+
+            // 简单快速路径：如果 Roslyn 自身判定为 unmanaged，直接通过
+            if (type.IsUnmanagedType) return true;
+
+            // 防止自递归 / 循环引用
+            if (!visited.Add(type)) return true; // 已访问过，认为 blittable（结构体自身引用只可能通过指针）
+
+            // 兜底：递归检查所有字段都是 blittable
+            foreach (var field in type.GetMembers().OfType<IFieldSymbol>())
+            {
+                if (field.IsStatic) continue;
+                if (!IsTypeBlittable(field.Type, visited)) return false;
+            }
+            return true;
+        }
+
+        private static bool IsTypeBlittable(ITypeSymbol type)
+        {
+            return IsTypeBlittable(type, new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
+        }
+
+        private static bool IsTypeBlittable(ITypeSymbol type, HashSet<INamedTypeSymbol> visited)
+        {
+            if (type.IsReferenceType) return false;
+            if (type.TypeKind == TypeKind.Pointer) return true;
+            if (type is IArrayTypeSymbol) return false;
+            if (type.TypeKind == TypeKind.Enum) return true; // enum 的 underlying type 必须 unmanaged
+            if (type is INamedTypeSymbol named)
+            {
+                if (named.IsGenericType) return false; // 泛型可能含引用类型
+                if (named.TypeKind == TypeKind.Struct) return IsStructBlittable(named, visited);
+                // 基本数值类型都是 blittable
+                switch (named.SpecialType)
+                {
+                    case SpecialType.System_Boolean:
+                    case SpecialType.System_Byte:
+                    case SpecialType.System_SByte:
+                    case SpecialType.System_Int16:
+                    case SpecialType.System_UInt16:
+                    case SpecialType.System_Int32:
+                    case SpecialType.System_UInt32:
+                    case SpecialType.System_Int64:
+                    case SpecialType.System_UInt64:
+                    case SpecialType.System_Single:
+                    case SpecialType.System_Double:
+                    case SpecialType.System_Char:
+                    case SpecialType.System_IntPtr:
+                    case SpecialType.System_UIntPtr:
+                        return true;
+                }
+                // EntJoy 自己的 unmanaged 类型
+                if (named.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS &&
+                    named.Name == "Entity")
+                    return true;
+                // EntJoy.Mathematics.* 下所有 blittable 数学类型（float2/int2/uint2 等）
+                if (named.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyMathematics &&
+                    named.IsValueType)
+                    return true;
+            }
+            return false;
         }
 
         // ===================================================================
@@ -1369,9 +1454,12 @@ namespace NativeTranspiler.Analyzer
                     {
                         string funcName = GetCppJobFunctionName(jobStruct);
                         string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
+                        // usesSendEvent：Execute 签名多一个 __header 参数（SendEvent 需要）
+                        bool rangeUsesSendEvent = JobUsesSendEvent(jobStruct, compilation);
+                        string headerArg = rangeUsesSendEvent ? ", __header" : "";
                         string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)
-                            ? $"&__chunks[__chunkIndex], __requiredComponentTypeIds"
-                            : $"&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs}";
+                            ? $"&__chunks[__chunkIndex], __requiredComponentTypeIds{headerArg}"
+                            : $"&__chunks[__chunkIndex], __requiredComponentTypeIds, {fieldArgs}{headerArg}";
                         sb.AppendLine($"        {funcName}({rangeCallArgs});");
                     }
                     else
@@ -2029,13 +2117,17 @@ namespace NativeTranspiler.Analyzer
                 var (chunkArrays, entityLoopIv, modifiedBody) =
                     PreprocessIJobChunkAST(methodSyntax, semanticModel, jobStruct, compilation);
 
-                if (string.IsNullOrEmpty(entityLoopIv) || chunkArrays.Count == 0)
+                if (string.IsNullOrEmpty(entityLoopIv) || chunkArrays.Count == 0 || usesSendEvent)
                 {
                     // Fallback: use scalar translator
+                    // （usesSendEvent：SendEvent 无法在 SimdControlFlowGenerator 中翻译，
+                    //   必须用 CppChunkStatementTranslator 标量路径，它完整支持 SendEvent 拦截）
                     var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
                     var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
                     var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                     sb.Append(translator.Translate(methodSyntax.Body));
+                    // 闭合函数体（fallback 提前 return，需手动补结尾括号）
+                    sb.AppendLine("}");
                     return;
                 }
 

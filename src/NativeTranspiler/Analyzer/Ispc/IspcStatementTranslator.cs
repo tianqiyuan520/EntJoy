@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NativeTranspiler.Analyzer.Common;
@@ -18,6 +19,22 @@ namespace NativeTranspiler.Analyzer
         private readonly bool _useUniformVars;
 
         protected readonly HashSet<string> _entityRefParamNames = new();
+
+        // ─── SendEvent 支持（ISPC EventBuffer 写入） ───
+        /// <summary>ISPC 函数中 EventBuffer 指针数组的参数名（null = 未启用 SendEvent）。</summary>
+        private string? _eventBufferParamName;
+
+        /// <summary>Execute 中发现的 SendEvent 事件类型（有序，index 对应 eventBufferHeaders 数组）。</summary>
+        public List<INamedTypeSymbol> EventTypes { get; } = new();
+
+        /// <summary>托管事件类型错误（编译时报错）。</summary>
+        public List<(INamedTypeSymbol eventType, InvocationExpressionSyntax invocation)> ManagedEventErrors { get; } = new();
+
+        /// <summary>设置 EventBuffer 参数名（由外部生成器在检测到 Job 使用 SendEvent 后调用）。</summary>
+        public void SetEventBufferParamName(string name) => _eventBufferParamName = name;
+
+        /// <summary>是否启用 SendEvent 翻译（有 EventBuffer 参数）。</summary>
+        public bool HasEventBufferSupport => _eventBufferParamName != null;
 
         /// <summary>是否在 foreach 体内部（内层循环变量需加 uniform 修饰）</summary>
         protected bool _insideForeach;
@@ -280,8 +297,9 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)
         {
-            var typeInfo = _semanticModel.GetTypeInfo(objectCreation.Type);
-            var type = typeInfo.Type;
+            // GetTypeInfo(objCreation) 优先（同 C++ 侧：VS/MSBuild Roslyn 对嵌套类型 .Type 返回 null）
+            var typeInfo = _semanticModel.GetTypeInfo(objectCreation);
+            var type = typeInfo.Type ?? _semanticModel.GetTypeInfo(objectCreation.Type).Type;
             string cppType = type != null ? NativeTranspiler.MapCSharpTypeToCpp(type) : objectCreation.Type.ToString();
             string ispcType = ToIspcType(cppType);
 
@@ -635,6 +653,11 @@ namespace NativeTranspiler.Analyzer
             var args = invocation.ArgumentList.Arguments;
             if (args.Count == 0) return;
 
+            // ISPC 原子是 fetch-add/sub（返回旧值），而 C# Interlocked.Add/Increment/Decrement 返回新值（add-fetch）。
+            // 翻译后需补回增量使返回值语义与 C# 一致：
+            //   Increment → atomic_add_global(ptr, 1) + 1
+            //   Add       → atomic_add_global(ptr, val) + val
+            //   Decrement → atomic_subtract_global(ptr, 1) - 1
             string ispcFunc = method.Name switch
             {
                 "Increment" => "atomic_add_global",
@@ -649,6 +672,16 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
 
+            // 是否需要补回增量（Add/Increment/Decrement 返回新值）
+            string? returnCompensation = method.Name switch
+            {
+                "Increment" => " + 1",
+                "Decrement" => " - 1",
+                Config.Add => null,  // 动态值，见下方
+                _ => null
+            };
+
+            _builder.Append('(');
             _builder.Append(ispcFunc).Append('(');
 
             var targetExpr = args[0].Expression;
@@ -707,15 +740,27 @@ namespace NativeTranspiler.Analyzer
                 TranslateExpression(targetExpr);
             }
 
+            string? addValueText = null;
             if (method.Name == Config.Add && args.Count >= 2)
             {
                 _builder.Append(", ");
-                TranslateExpression(args[1].Expression);
+                addValueText = CaptureExpressionText(args[1].Expression);
+                _builder.Append(addValueText);
             }
             else
             {
                 _builder.Append(", 1");
             }
+            _builder.Append(')');
+
+            // 补回增量使返回值语义与 C# 一致（ISPC fetch-add 返回旧值，C# 返回新值）
+            if (method.Name == "Increment")
+                _builder.Append(" + 1");
+            else if (method.Name == "Decrement")
+                _builder.Append(" - 1");
+            else if (method.Name == Config.Add && addValueText != null)
+                _builder.Append(" + ").Append(addValueText);
+
             _builder.Append(')');
         }
 
@@ -1002,6 +1047,14 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
         {
+            // ─── SendEvent 拦截（ISPC EventBuffer 写入） ───
+            if (_eventBufferParamName != null &&
+                exprStmt.Expression is InvocationExpressionSyntax invocation &&
+                TryTranslateSendEvent(invocation))
+            {
+                return;
+            }
+
             if (_insideUniformFor && exprStmt.Expression is AssignmentExpressionSyntax assign &&
                 assign.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
                 assign.Right is IdentifierNameSyntax rightId &&
@@ -1038,6 +1091,194 @@ namespace NativeTranspiler.Analyzer
             {
                 base.TranslateWhileStatement(whileStmt);
             }
+        }
+
+        // ─── SendEvent 翻译（ISPC EventBuffer 写入） ───
+
+        /// <summary>
+        /// 检测 world.SendEvent&lt;T&gt;(new T { ... }) 调用，生成 ISPC EventBuffer 写入代码。
+        /// 返回 true 表示已翻译（调用方应 return）。
+        /// </summary>
+        private bool TryTranslateSendEvent(InvocationExpressionSyntax invocation)
+        {
+            // 情况 1：裸调用 SendEvent<T>(...) — Expression 直接是 IdentifierName
+            if (invocation.Expression is IdentifierNameSyntax bareName
+                && bareName.Identifier.Text == Config.SendEvent)
+            {
+                if (invocation.ArgumentList?.Arguments.Count == 1)
+                {
+                    var typeInfo = _semanticModel.GetTypeInfo(bareName);
+                    if (typeInfo.Type is INamedTypeSymbol evtType && NativeTranspileValidator.IsUnmanagedType(evtType))
+                        return GenerateSendEventIspc(invocation, evtType, typeInfo.Type.ToDisplayString());
+                }
+            }
+
+            // 情况 2：xxx.SendEvent<T>(...) — MemberAccess 链（EventBus.SendEvent / World.SendEvent）
+            if (invocation.Expression is MemberAccessExpressionSyntax mac
+                && mac.Name is GenericNameSyntax genericName
+                && genericName.Identifier.Text == Config.SendEvent
+                && genericName.TypeArgumentList?.Arguments.Count == 1)
+            {
+                var typeArg = genericName.TypeArgumentList.Arguments[0];
+                var typeInfo = _semanticModel.GetTypeInfo(typeArg);
+                if (typeInfo.Type is INamedTypeSymbol evtType && NativeTranspileValidator.IsUnmanagedType(evtType))
+                    return GenerateSendEventIspc(invocation, evtType, typeInfo.Type.ToDisplayString());
+                if (typeInfo.Type is INamedTypeSymbol managedEvtType && !NativeTranspileValidator.IsUnmanagedType(managedEvtType))
+                {
+                    ManagedEventErrors.Add((managedEvtType, invocation));
+                    return false;
+                }
+            }
+
+            // 情况 3：GetSymbolInfo 回退
+            var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
+            if (symbolInfo.Symbol is IMethodSymbol method
+                && method.Name == Config.SendEvent && method.IsGenericMethod)
+            {
+                var eventType = method.TypeArguments[0] as INamedTypeSymbol;
+                if (eventType != null && NativeTranspileValidator.IsUnmanagedType(eventType))
+                    return GenerateSendEventIspc(invocation, eventType, eventType.ToDisplayString());
+                if (eventType != null && !NativeTranspileValidator.IsUnmanagedType(eventType))
+                {
+                    ManagedEventErrors.Add((eventType, invocation));
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>生成 SendEvent 的 ISPC EventBuffer 写入代码（per-lane 原子槽分配）。</summary>
+        private bool GenerateSendEventIspc(InvocationExpressionSyntax invocation, INamedTypeSymbol eventType, string cppTypeName)
+        {
+            // 记录事件类型（去重）
+            int typeIndex = -1;
+            for (int i = 0; i < EventTypes.Count; i++)
+            {
+                if (SymbolEqualityComparer.Default.Equals(EventTypes[i], eventType))
+                {
+                    typeIndex = i;
+                    break;
+                }
+            }
+            if (typeIndex < 0)
+            {
+                typeIndex = EventTypes.Count;
+                EventTypes.Add(eventType);
+            }
+
+            string cppEventType = NativeTranspiler.MapCSharpTypeToCpp(eventType);
+            string ispcEventType = ToIspcType(cppEventType);
+            string tempVar = $"__evt_{eventType.Name}_{typeIndex}";
+            string bufVar = _eventBufferParamName!;
+            // 事件 buffer 访问表达式（内联，避免在 divergent 块内声明 uniform 局部变量 —— ISPC 禁止）
+            string bufExpr = $"((uniform __EntJoyEventBuffer* uniform*){bufVar})[{typeIndex}]";
+
+            // ISPC SendEvent 正确性要点（实测验证）：
+            //  1) 原子槽分配用 atomic_add_global —— ISPC 的 atomic_add_global 是 fetch-add 语义，
+            //     直接返回旧值（= 槽位索引）。⚠ 不要像 C++ 宏 INTERLOCKED_ADD_AND_FETCH32 那样减 1！
+            //     C++ 宏是 add-fetch（返回新值）需减 1 得旧值；ISPC 返回旧值，减 1 会导致 idx=-1 越界写。
+            //  2) SIMD foreach 下 atomic_add_global(uniform ptr, varying val) 对每个 active lane 独立原子，
+            //     返回各自唯一旧值 → 每个 lane 拿唯一槽位（实测 PASS）。
+            //  3) 写入必须用 uniform int* + 显式 int 偏移（AoS 布局）：
+            //     varying struct 指针是 SoA 布局（sizeof = lanes×元素），会越界写坏内存 → 禁止。
+            //  4) uniform 局部变量不能声明在 divergent（varying 条件）块内 → SendEvent 代码全部内联表达式。
+            AppendIndent();
+            _builder.AppendLine($"varying int {tempVar}_idx = atomic_add_global({bufExpr}->count, (varying int)1);");
+            AppendIndent();
+
+            // 翻译事件对象初始化
+            if (invocation.ArgumentList.Arguments.Count > 0)
+            {
+                var argExpr = invocation.ArgumentList.Arguments[0].Expression;
+                if (argExpr is ObjectCreationExpressionSyntax objCreate)
+                {
+                    string dataPtr = $"((uniform int*){bufExpr}->data)";
+                    // 事件类型字段 → C# 布局字节偏移（紧凑 Sequential，无 padding；4 字节标量 / 8 字节 Entity）
+                    int stride = ComputeUnmanagedSize(eventType);
+                    int fieldOffset = 0;
+                    foreach (var init in objCreate.Initializer?.Expressions ?? Enumerable.Empty<ExpressionSyntax>())
+                    {
+                        if (init is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax fieldName)
+                        {
+                            // 找字段符号确定类型（Entity → 拆 Id/Version 两个 int）
+                            var fieldSym = eventType.GetMembers(fieldName.Identifier.Text)
+                                .OfType<IFieldSymbol>().FirstOrDefault();
+                            int fieldSize = fieldSym != null ? ComputeUnmanagedSize(fieldSym.Type) : 4;
+                            if (fieldSym != null && IsEntityLike(fieldSym.Type))
+                            {
+                                // Entity { int Id; int Version; } → 2 个 int
+                                string rhs = CaptureExpressionText(assign.Right);
+                                AppendIndent();
+                                _builder.AppendLine($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4 + 0}] = {rhs}.Id;");
+                                AppendIndent();
+                                _builder.AppendLine($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4 + 1}] = {rhs}.Version;");
+                            }
+                            else
+                            {
+                                AppendIndent();
+                                _builder.Append($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4}] = ");
+                                TranslateExpression(assign.Right);
+                                _builder.AppendLine(";");
+                            }
+                            fieldOffset += fieldSize;
+                        }
+                    }
+                }
+                else
+                {
+                    // 非对象创建参数：无法逐字段写（字段名未知），不支持。
+                    _builder.AppendLine($"// ISPC SendEvent: non-object-creation argument not supported; use new T {{ ... }}.");
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>计算 unmanaged 类型的 C# 布局大小（紧凑 Sequential，无 padding）。</summary>
+        private static int ComputeUnmanagedSize(ITypeSymbol type)
+        {
+            if (type is IPointerTypeSymbol) return IntPtr.Size;
+            if (type is INamedTypeSymbol named)
+            {
+                string fullName = named.ToDisplayString();
+                switch (fullName)
+                {
+                    case "int": case "float": case "uint": case "bool": case "System.Int32":
+                    case "System.Single": case "System.UInt32": case "System.Boolean":
+                        return 4;
+                    case "long": case "ulong": case "double": case "System.Int64":
+                    case "System.UInt64": case "System.Double":
+                        return 8;
+                }
+                if (IsEntityLike(named))
+                    return 8;
+                // 自定义 struct：递归累加字段（紧凑布局，无 padding）
+                int total = 0;
+                foreach (var f in named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    total += ComputeUnmanagedSize(f.Type);
+                return total;
+            }
+            return 4;
+        }
+
+        /// <summary>是否为 Entity 类型（含 int Id + int Version 两个 int 字段）。</summary>
+        private static bool IsEntityLike(ITypeSymbol type)
+        {
+            if (type is not INamedTypeSymbol named) return false;
+            var fields = named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();
+            return fields.Count == 2 &&
+                   fields.All(f => f.Type.ToDisplayString() is "int" or "System.Int32");
+        }
+
+        /// <summary>将表达式翻译为 ISPC 文本并返回，不影响 _builder 的当前状态。</summary>
+        private string CaptureExpressionText(ExpressionSyntax expr)
+        {
+            int savedLen = _builder.Length;
+            TranslateExpression(expr);
+            string text = _builder.ToString(savedLen, _builder.Length - savedLen);
+            _builder.Length = savedLen;
+            return text;
         }
     }
 }

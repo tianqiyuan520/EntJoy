@@ -387,6 +387,9 @@ namespace NativeTranspiler.Analyzer.Common
                 foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
                     includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
             }
+            // ─── SendEvent: 事件类型 include（ISPC 侧 SendEvent 生成的代码引用事件类型结构） ───
+            foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
+                includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
@@ -578,6 +581,9 @@ namespace NativeTranspiler.Analyzer.Common
                 : CollectChunkNativeArrayLocals(jobStruct, compilation);
             foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
+            // ─── SendEvent: 事件类型 include ───
+            foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
+                includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
@@ -585,6 +591,11 @@ namespace NativeTranspiler.Analyzer.Common
             if (methodSyntax?.Body == null) return "// Error: no Execute body";
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
+            // ─── SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent） ───
+            bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
+            if (usesSendEvent)
+                // 注意：ISPC 中 "uniform void*" 非法（void 不能带 uniform 限定），必须用 "void* uniform"（指针 uniform）
+                paramsList += ", void* uniform __eventBufferHeaders, uniform int __eventBufferCount";
             string entityCountExpr = "__entity_count";
             string taskParams = paramsList;
 
@@ -596,6 +607,8 @@ namespace NativeTranspiler.Analyzer.Common
             AppendUniformVariableDeclarations(sb, jobStruct);
 
             var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct, "__task_start", "__task_end");
+            if (usesSendEvent)
+                translator.SetEventBufferParamName("__eventBufferHeaders");
             sb.Append(translator.Translate(methodSyntax.Body));
             sb.AppendLine("}");
             sb.AppendLine();
@@ -604,6 +617,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
             string callArgs = $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
+            if (usesSendEvent)
+                callArgs += ", __eventBufferHeaders, __eventBufferCount";
             sb.AppendLine($"{Indent}launch[numTasks] {baseName}_task({callArgs});");
             sb.AppendLine($"{Indent}sync;");
             sb.AppendLine("}");
@@ -811,6 +826,20 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("    int jobIsBoxed;");
             sb.AppendLine("    void* chunkArrayHandle;");
+            sb.AppendLine("    // ─── Event Buffer（与 C# ChunkContextHeader 对齐，SendEvent 需要） ───");
+            sb.AppendLine("    int eventBufferCount;");
+            sb.AppendLine("    void* eventBufferHeaders;");
+            sb.AppendLine("    void* eventWorldHandle;");
+            sb.AppendLine("};");
+            sb.AppendLine("#endif");
+            sb.AppendLine();
+            sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
+            sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
+            sb.AppendLine("struct __EntJoyEventBuffer {");
+            sb.AppendLine("    int* data;");
+            sb.AppendLine("    int* count;");
+            sb.AppendLine("    int capacity;");
+            sb.AppendLine("    int elementSize;");
             sb.AppendLine("};");
             sb.AppendLine("#endif");
             sb.AppendLine();
@@ -913,6 +942,13 @@ namespace NativeTranspiler.Analyzer.Common
             // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
             if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
                 callArgs.Add("std::thread::hardware_concurrency()");
+            // ─── SendEvent: 传递 EventBuffer 元数据（无事件时传 0/null，非 event job 零开销） ───
+            bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
+            if (usesSendEvent)
+            {
+                callArgs.Add("(void*)__header->eventBufferHeaders");
+                callArgs.Add("__header->eventBufferCount");
+            }
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
 
             foreach (var field in fields)
@@ -1110,6 +1146,12 @@ namespace NativeTranspiler.Analyzer.Common
             var fields = GetFieldsFromJob(jobStruct);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
 
+            // ─── SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent） ───
+            bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
+            if (usesSendEvent)
+                // 注意：ISPC 中 "uniform void*" 非法（void 不能带 uniform 限定），必须用 "void* uniform"（指针 uniform）
+                paramsList += ", void* uniform __eventBufferHeaders, uniform int __eventBufferCount";
+
             sb.AppendLine($"export void {functionName}({paramsList})");
             sb.AppendLine("{");
             AppendUniformVariableDeclarations(sb, jobStruct);
@@ -1122,6 +1164,9 @@ namespace NativeTranspiler.Analyzer.Common
                 foreach (var parameter in executeMethod.Parameters)
                     entityTranslator.AddEntityRefParam(parameter.Name);
                 entityTranslator.SetInsideForeach(true);
+                // SendEvent 需要 EventBuffer 参数名（ISPC 侧用 __eventBufferHeaders 直接访问）
+                if (usesSendEvent)
+                    entityTranslator.SetEventBufferParamName("__eventBufferHeaders");
                 var bodyCode = entityTranslator.Translate(methodSyntax.Body);
                 sb.AppendLine("    foreach_tiled (__entity_index = 0 ... __entity_count) {");
                 foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
@@ -1135,6 +1180,8 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 // IJobChunk: use IspcChunkStatementTranslator
                 var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
+                if (usesSendEvent)
+                    translator.SetEventBufferParamName("__eventBufferHeaders");
                 var bodyCode2 = translator.Translate(methodSyntax.Body);
                 sb.Append(bodyCode2);
             }
