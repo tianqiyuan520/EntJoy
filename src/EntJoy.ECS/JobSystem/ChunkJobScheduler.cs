@@ -1168,6 +1168,14 @@ namespace EntJoy.ECS.JobSystem
             for (int i = 0; i < meta.Count; i++)
             {
                 int elemSize = System.Runtime.InteropServices.Marshal.SizeOf(meta.EventTypes[i]);
+                // ISPC 后端以 int 槽位（4B 对齐）写事件 buffer（stride = sizeof(uniform T)，C ABI 对齐，
+                // 与 C# Sequential 一致）。非 4B 对齐的字段（double/bool/long）会破坏 int 槽位前提 →
+                // 编译期/运行时立即失败，而不是静默错位。
+                if ((elemSize & 3) != 0)
+                    throw new InvalidOperationException(
+                        $"Event type {meta.EventTypes[i].FullName} has Marshal.SizeOf {elemSize}, " +
+                        $"not divisible by 4. ISPC EventBuffer requires 4-byte-aligned blittable layout " +
+                        $"(no double/bool/long fields).");
                 var dataPtr = Marshal.AllocHGlobal(1024 * elemSize);
                 var countPtr = Marshal.AllocHGlobal(sizeof(int));
                 *(int*)countPtr = 0;
@@ -1225,7 +1233,7 @@ namespace EntJoy.ECS.JobSystem
                 if (count > 0 && meta.EventTypes[i] != null)
                 {
                     var stream = world.GetEventStream(meta.EventTypes[i]);
-                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count);
+                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
                 }
                 if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
                 if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
@@ -1261,7 +1269,7 @@ namespace EntJoy.ECS.JobSystem
                 if (count > 0 && eventTypes[i] != null)
                 {
                     var stream = world.GetEventStream(eventTypes[i]);
-                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count);
+                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
                 }
                 if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
                 if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);

@@ -225,6 +225,33 @@ namespace NativeTranspiler.Analyzer
         public static string GenerateIspcStructDefinition(INamedTypeSymbol structSymbol)
         {
             var sb = new StringBuilder();
+            // Include guard：ISPC #include 是文本包含，struct 定义文件可能被多个 job .ispc 重复包含
+            // （如 DamageSignal.ispc include Entity.ispc，job .ispc 又直接 include Entity.ispc）。
+            // 无 guard 会 "Ignoring redefinition of type" 报错。
+            string guard = $"__ENTJOY_ISPC_{structSymbol.Name.ToUpperInvariant()}_DEFINED";
+            sb.AppendLine($"#ifndef {guard}");
+            sb.AppendLine($"#define {guard}");
+            sb.AppendLine();
+
+            // 嵌套值类型字段（自定义 struct）的 include：ISPC include 是文本包含，
+            // 本文件被 job .ispc include 后，嵌套类型定义必须可见（DamageSignal → Coord）。
+            var nestedIncludes = new SortedSet<string>();
+            foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                if (f.Type is INamedTypeSymbol nested &&
+                    nested.TypeKind == TypeKind.Struct &&
+                    !IsBuiltinUnmanaged(nested) &&
+                    !IsEntJoyPredefinedType(nested) &&
+                    !SymbolEqualityComparer.Default.Equals(nested, structSymbol))
+                {
+                    nestedIncludes.Add(GetStructHeaderFileName(nested));
+                }
+            }
+            foreach (var inc in nestedIncludes)
+                sb.AppendLine($"#include \"{inc}.ispc\"");
+            if (nestedIncludes.Count > 0)
+                sb.AppendLine();
+
             // 前置声明（用于自引用指针）
             sb.AppendLine($"struct {structSymbol.Name};");
             sb.AppendLine($"struct {structSymbol.Name} {{");
@@ -235,6 +262,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    {ispcType} {f.Name};");
             }
             sb.AppendLine("};");
+            sb.AppendLine();
+            sb.AppendLine($"#endif // {guard}");
             return sb.ToString();
         }
 
