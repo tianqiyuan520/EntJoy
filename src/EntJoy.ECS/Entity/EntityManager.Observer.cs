@@ -7,7 +7,8 @@ namespace EntJoy.ECS
     /// <summary>
     /// Observer 注册表 + 主线程结构变更挂钩（single funnel）。
     /// 零订阅者 fast path：<see cref="_observerCount"/> 为 0 时所有挂钩点零额外分支。
-    /// 回调统一在主线程执行（结构变更本就在主线程）；回调内结构变更请走 ECB（<see cref="s_observerDepth"/> 检测）。
+    /// 回调统一在主线程执行（立即或 ECB Playback 派发）；回调内结构变更请走 ECB（<see cref="s_observerDepth"/> 检测）。
+    /// 批量语义：同一结构变更 API 调用内对同一 observer 的连续触发 → 一次回调（ReadOnlySpan）。
     /// </summary>
     public unsafe partial class EntityManager
     {
@@ -24,8 +25,9 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。
+        /// 批量签名：一次回调拿整批实体 + 组件值（零拷贝 span）。事件位由注册桶决定。
         /// </summary>
-        public ObserverHandle AddObserver<TComponent>(ObserverEvents events, Action<ComponentEvent<TComponent>> callback)
+        public ObserverHandle AddObserver<TComponent>(ObserverEvents events, ObserverCallback<TComponent> callback)
             where TComponent : unmanaged
         {
             CheckDisposed();
@@ -89,7 +91,7 @@ namespace EntJoy.ECS
             return false;
         }
 
-        // ======================== 派发工具 ========================
+        // ======================== 派发工具（批量，锁外调用） ========================
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal bool HasObservers(int typeId)
@@ -98,17 +100,42 @@ namespace EntJoy.ECS
             return _observers != null && _observers.ContainsKey(typeId);
         }
 
+        /// <summary>
+        /// 批量派发 Added/Set（新值语义）：对注册表快照逐 observer 调用，值指针零拷贝转 span。
+        /// 调用方保证在主线程、锁外（回调内结构变更需走 ECB）。
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal void Dispatch(List<IComponentObserver> list, Action<IComponentObserver> dispatch)
+        internal void DispatchAdded(List<IComponentObserver> list, Entity* entities, void* valuesPtr, int count)
         {
-            // 快照列表（回调可能 Unsubscribe/AddObserver）
             var snapshot = list.ToArray();
             s_observerDepth++;
             try
             {
                 for (int i = 0; i < snapshot.Length; i++)
                 {
-                    try { dispatch(snapshot[i]); }
+                    try { snapshot[i].DispatchAdded(entities, valuesPtr, count); }
+                    catch (Exception ex) { RecordObserverException(ex); }
+                }
+            }
+            finally
+            {
+                s_observerDepth--;
+            }
+        }
+
+        /// <summary>
+        /// 批量派发 Removed（旧值快照语义）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void DispatchRemoved(List<IComponentObserver> list, Entity* entities, void* oldValuesPtr, int count)
+        {
+            var snapshot = list.ToArray();
+            s_observerDepth++;
+            try
+            {
+                for (int i = 0; i < snapshot.Length; i++)
+                {
+                    try { snapshot[i].DispatchRemoved(entities, oldValuesPtr, count); }
                     catch (Exception ex) { RecordObserverException(ex); }
                 }
             }
