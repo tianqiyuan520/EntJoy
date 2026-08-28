@@ -1,4 +1,4 @@
-using EntJoy.Collections;
+﻿using EntJoy.Collections;
 using EntJoy.JobSystem;
 using System;
 using System.Collections.Generic;
@@ -156,6 +156,24 @@ namespace EntJoy.ECS
             JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, this, jobType);
         }
 
+        // ─── Observer 门面（注册表在 EntityManager，见 EntityManager.Observer.cs） ───
+
+        /// <summary>注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。</summary>
+        public ObserverHandle AddObserver<TComponent>(ObserverEvents events, Action<ComponentEvent<TComponent>> callback)
+            where TComponent : unmanaged
+            => _entityManager.AddObserver(events, callback);
+
+        /// <summary>移除指定句柄的 observer。</summary>
+        public void RemoveObserver<TComponent>(ObserverHandle handle) where TComponent : unmanaged
+            => _entityManager.RemoveObserver<TComponent>(handle);
+
+        /// <summary>清空某组件类型的所有 observer。</summary>
+        public void ClearObservers<TComponent>() where TComponent : unmanaged
+            => _entityManager.ClearObservers<TComponent>();
+
+        /// <summary>当前是否正在派发 observer 回调（供结构变更 API 做 reentrancy 检测）。</summary>
+        internal bool IsInObserverCallback => EntityManager.ObserverDepth > 0;
+
         public void Dispose()
         {
             foreach (var kv in _eventStreams)
@@ -163,7 +181,7 @@ namespace EntJoy.ECS
                 if (kv.Value is IDisposable d) d.Dispose();
             }
             _eventStreams.Clear();
-            _entityManager?.Dispose();
+            _entityManager?.Dispose();   // Dispose 内清空 observer 注册表
             lock (_defaultLock)
             {
                 if (ReferenceEquals(DefaultWorld, this))

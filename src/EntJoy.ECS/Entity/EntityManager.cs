@@ -113,6 +113,8 @@ namespace EntJoy.ECS
             archetypeMap.Clear();
             recycleEntities.Clear();
             ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
+            _observers?.Clear();
+            _observerCount = 0;
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             allArchetypes = Array.Empty<Archetype>();
@@ -141,6 +143,13 @@ namespace EntJoy.ECS
             if (NativeJobScheduler.IsExecutingJob)
             {
                 throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing. Complete the job before modifying entities or components.");
+            }
+
+            // Observer 重入保护：回调内再结构变更会死锁（_structuralLock 内 CompleteActiveJobs 等 job）。
+            // 约定：回调内结构变更请走 DeferredCommandBuffer。
+            if (s_observerDepth > 0)
+            {
+                throw new InvalidOperationException("Structural changes are not allowed inside an observer callback. Use DeferredCommandBuffer to defer structural changes.");
             }
 
             DrainPendingNativeEvents();
@@ -407,6 +416,21 @@ namespace EntJoy.ECS
                 // 存储实体版本号用于悬垂引用检测
                 GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
 
+                // Observer：Added（单实体 NewEntity；新组件槽为初始零值）
+                if (_observerCount > 0 && _observers != null)
+                {
+                    foreach (var t in types)
+                    {
+                        if (_observers.TryGetValue(t.Id, out var reg) && reg.Added.Count > 0)
+                        {
+                            int compIdx = targetArch.GetComponentTypeIndex(t);
+                            var chunk = targetArch.ChunkList[chunkIndex];
+                            void* valPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + slotInChunk * t.Size);
+                            Dispatch(reg.Added, o => o.DispatchAdded(newEntity, valPtr));
+                        }
+                    }
+                }
+
                 return newEntity;  // 返回新实体
             }
         }
@@ -445,6 +469,21 @@ namespace EntJoy.ECS
                     UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
                     GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
                     result[i] = newEntity;
+
+                    // Observer：Added（v1 实体级，新组件槽为初始零值）
+                    if (_observerCount > 0 && _observers != null)
+                    {
+                        foreach (var t in types)
+                        {
+                            if (_observers.TryGetValue(t.Id, out var reg) && reg.Added.Count > 0)
+                            {
+                                int compIdx = targetArch.GetComponentTypeIndex(t);
+                                var chunk = targetArch.ChunkList[chunkIndex];
+                                void* valPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + slotInChunk * t.Size);
+                                Dispatch(reg.Added, o => o.DispatchAdded(newEntity, valPtr));
+                            }
+                        }
+                    }
                 }
 
                 structuralVersion++;
@@ -490,6 +529,27 @@ namespace EntJoy.ECS
                 }
 
                 int oldChunkIndex = entityInfoRef.ChunkIndex;
+                var oldArchetype = archetype;
+
+                // Observer：Destroyed（销毁前快照已订阅组件值；派发在销毁后，实体仍可解析）
+                List<(int typeId, IntPtr snapshotPtr)>? destroyedSnapshots = null;
+                if (_observerCount > 0 && _observers != null && oldArchetype != null)
+                {
+                    destroyedSnapshots = new List<(int, IntPtr)>();
+                    foreach (var t in oldArchetype.Types)
+                    {
+                        if (_observers.TryGetValue(t.Id, out var reg) && reg.Removed.Count > 0)
+                        {
+                            int compIdx = oldArchetype.GetComponentTypeIndex(t);
+                            var chunk = oldArchetype.ChunkList[oldChunkIndex];
+                            void* srcPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + entityInfoRef.SlotInChunk * t.Size);
+                            var snapshot = (byte*)System.Runtime.InteropServices.Marshal.AllocHGlobal(t.Size);
+                            System.Runtime.CompilerServices.Unsafe.CopyBlock(snapshot, srcPtr, (uint)t.Size);
+                            destroyedSnapshots.Add((t.Id, (IntPtr)snapshot));
+                        }
+                    }
+                }
+
                 archetype.Remove(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, out var movedEntityId, out var movedEntitySlotInChunk, out var compactedChunkIndex);
 
                 if (movedEntityId >= 0)
@@ -507,6 +567,23 @@ namespace EntJoy.ECS
                 entityInfoRef.SlotInChunk = -1;
                 recycleEntities.Enqueue(entity);
                 structuralVersion++;
+
+                // Observer：派发 Destroyed（销毁后派发，实体仍可解析；用销毁前快照）
+                if (destroyedSnapshots != null)
+                {
+                    foreach (var (typeId, snapshotPtr) in destroyedSnapshots)
+                    {
+                        try
+                        {
+                            if (_observers!.TryGetValue(typeId, out var reg) && reg.Removed.Count > 0)
+                                Dispatch(reg.Removed, o => o.DispatchRemoved(entity, (void*)snapshotPtr));
+                        }
+                        finally
+                        {
+                            System.Runtime.InteropServices.Marshal.FreeHGlobal(snapshotPtr);
+                        }
+                    }
+                }
             }
         }
 
@@ -815,6 +892,15 @@ namespace EntJoy.ECS
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
                 targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
                 structuralVersion++;
+
+                // Observer：Added（迁移完成后派发，回调内实体可查、新组件已存在）
+                if (_observerCount > 0 && _observers != null &&
+                    _observers.TryGetValue(compType.Id, out var reg) && reg.Added.Count > 0)
+                {
+                    int compIdx = targetArch.GetComponentTypeIndex(compType);
+                    void* valPtr = (void*)(targetArch.ChunkList[chunkIndex].GetComponentArrayPointer(compIdx) + slotInChunk * compType.Size);
+                    Dispatch(reg.Added, o => o.DispatchAdded(entity, valPtr));
+                }
             }
         }
 
@@ -847,6 +933,22 @@ namespace EntJoy.ECS
                 if (!oldArch.Has(componentType))
                     return;
 
+                // Observer：Removed（迁移前快照旧值；派发在迁移完成后，回调内实体仍可查）
+                byte* oldValueSnapshot = null;
+                if (_observerCount > 0 && _observers != null)
+                {
+                    var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
+                    if (_observers.TryGetValue(compTypeForObs.Id, out var reg) &&
+                        (reg.Removed.Count > 0))
+                    {
+                        int compIdx = oldArch.GetComponentTypeIndex(compTypeForObs);
+                        var chunk = oldArch.ChunkList[entityInfoRef.ChunkIndex];
+                        void* srcPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + entityInfoRef.SlotInChunk * compTypeForObs.Size);
+                        oldValueSnapshot = (byte*)Marshal.AllocHGlobal(compTypeForObs.Size);
+                        Unsafe.CopyBlock(oldValueSnapshot, srcPtr, (uint)compTypeForObs.Size);
+                    }
+                }
+
                 // Phase 2.1: 走 Remove Edge 快路径
                 var compType = ComponentTypeManager.GetComponentType(componentType);
                 var targetArch = oldArch.GetRemoveEdge(compType);
@@ -876,6 +978,21 @@ namespace EntJoy.ECS
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
                 targetArch.ChunkList[chunkIndex].MarkEntityChanged(slotInChunk);
                 structuralVersion++;
+
+                // Observer：Removed 派发（迁移完成后，回调内实体在目标 archetype 可查）
+                if (oldValueSnapshot != null)
+                {
+                    try
+                    {
+                        var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
+                        if (_observers!.TryGetValue(compTypeForObs.Id, out var reg) && reg.Removed.Count > 0)
+                            Dispatch(reg.Removed, o => o.DispatchRemoved(entity, oldValueSnapshot));
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal((IntPtr)oldValueSnapshot);
+                    }
+                }
             }
         }
 
@@ -916,6 +1033,24 @@ namespace EntJoy.ECS
                     throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
                 var arch = entityInfoRef.Archetype;
                 arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
+
+                // Observer：Set（写入后派发，NewValue 用写入值；v1 不提供 OldValue）
+                if (_observerCount > 0 && _observers != null)
+                {
+                    var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
+                    if (_observers.TryGetValue(compTypeForObs.Id, out var reg) && reg.Set.Count > 0)
+                    {
+                        var valueHandle = GCHandle.Alloc(value, GCHandleType.Pinned);
+                        try
+                        {
+                            Dispatch(reg.Set, o => o.DispatchSet(entity, (void*)valueHandle.AddrOfPinnedObject()));
+                        }
+                        finally
+                        {
+                            valueHandle.Free();
+                        }
+                    }
+                }
             }
         }
 
