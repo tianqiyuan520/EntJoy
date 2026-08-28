@@ -19,6 +19,10 @@
 - DllImport（line 406-409）：同上
 - Schedule 主路径（line 557-565）：AutoSIMD 走 `ScheduleChunkRangeRaw` + `ChunkRangeFuncPtr`
 
+> **后续演进（2026-08-28，提交 `112f1e5`）**：EntityBatch adapter 已支持 AutoSIMD 真 SIMD
+> （`SimdControlFlowGenerator`），路由改回 **AutoSIMD → EntityBatch**（`!isIspc && !hasShared`）。
+> 上述「走 ChunkRange」的修复是过渡方案；现在 EntityBatch 与 ChunkRange 均能生成真 SIMD 代码。
+
 ### 修复 2：SimdExpressionTranslator float2 双通道 + 复合赋值
 
 **文件：** `src/NativeTranspiler/Analyzer/Simd/SimdExpressionTranslator.cs`
@@ -91,9 +95,15 @@ Heavy IJobEntity (16x sin/cos iterations)
 
 `struct A { B b; int x; }` 的 `a[i].b.field = v`。`TranslateAssignment` 的 struct-local 分支只处理一层展开。子字段（`.b.field`）需特殊处理。**当前活跃 AutoSIMD job struct 字段都是基本类型（`float2 Value`），不触发。**
 
-### 4. EntityBatch 路径仍是伪向量化
+### 4. EntityBatch 路径 AutoSIMD 已支持（2026-08-28 重构完成）
 
-`AppendEntityBatchAdapter` 的 AutoSIMD 分支（lane-loop）现在是死代码（所有 AutoSIMD job 改走 ChunkRange），但保留——防止未来 non-AutoSIMD + EntityBatch 路径误用。**未来优化**：EntityBatch adapter 也调用独立 SIMD 函数。
+~~`AppendEntityBatchAdapter` 的 AutoSIMD 分支（lane-loop）现在是死代码（所有 AutoSIMD job 改走 ChunkRange），但保留——防止未来 non-AutoSIMD + EntityBatch 路径误用。**未来优化**：EntityBatch adapter 也调用独立 SIMD 函数。~~
+
+**已重构完成**（提交 `112f1e5`）：
+- EntityBatch adapter 的 AutoSIMD 分支改用 `SimdControlFlowGenerator` 生成真 SIMD（`PreprocessIJobChunkAST` + `DecomposeStructLocals` + SIMD batch loop + 余量循环）
+- 死代码 `AppendEntityBatchAdapter` 已删除
+- BindingsGenerator 路由：AutoSIMD → EntityBatch（`!isIspc && !hasShared`），ISPC/shared → ChunkRange
+- 验证：8 PASS / 0 FAIL（AutoSIMD Light 零误差、CPP Light 1 ULP 内、Heavy 全通过）
 
 ## Precise 库
 
