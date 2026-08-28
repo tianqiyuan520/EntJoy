@@ -1167,6 +1167,21 @@ namespace NativeTranspiler.Analyzer
                 EventTypes.Add(eventType);
             }
 
+            // 编译期 fail-fast：ISPC 事件 struct 必须 4B 对齐（C ABI，与 C# Sequential 一致）。
+            // 含 double(8B)/bool(1B)/long 字段的类型会破坏 ISPC int 槽位写入的 stride 一致性 →
+            // 生成一个必然编译失败的未定义符号引用（ispc 报 "Undeclared symbol" Error，exit≠0），
+            // 让构建在编译期报错并定位到具体类型，而不是静默错位。
+            // ⚠ 不要用 1/0：ispc 只报 Warning（"Division by zero is undefined"），不会失败。
+            if (!IsIspcEventLayoutSafe(eventType))
+            {
+                AppendIndent();
+                _builder.AppendLine($"// ERROR: event type {eventType.Name} contains non-4B-aligned field(s) " +
+                    $"(double/bool/byte/short/long). ISPC EventBuffer requires 4-byte-aligned blittable layout.");
+                AppendIndent();
+                _builder.AppendLine($"uniform int __ENTJOY_UNALIGNED_EVENT_TYPE_{eventType.Name}_ = __ENTJOY_UNALIGNED_EVENT_TYPE_{eventType.Name}_;");
+                return true;
+            }
+
             string cppEventType = NativeTranspiler.MapCSharpTypeToCpp(eventType);
             string ispcEventType = ToIspcType(cppEventType);
             string tempVar = $"__evt_{eventType.Name}_{typeIndex}";
@@ -1180,12 +1195,15 @@ namespace NativeTranspiler.Analyzer
             //     C++ 宏是 add-fetch（返回新值）需减 1 得旧值；ISPC 返回旧值，减 1 会导致 idx=-1 越界写。
             //  2) SIMD foreach 下 atomic_add_global(uniform ptr, varying val) 对每个 active lane 独立原子，
             //     返回各自唯一旧值 → 每个 lane 拿唯一槽位（实测 PASS）。
-            //  3) 写入必须用 uniform int* + 显式 int 偏移（AoS 布局）：
-            //     varying struct 指针是 SoA 布局（sizeof = lanes×元素），会越界写坏内存 → 禁止。
+            //  3) 写入必须用 uniform struct 指针 + 命名字段（AoS 布局）：
+            //     uniform T* 的索引步长 = sizeof(uniform T)，由 ISPC 编译器按 struct 定义自动计算
+            //     （含嵌套 struct 对齐）—— 与 C# Marshal.SizeOf<T>() 的 Sequential 布局一致。
+            //     ⚠ 不要用 varying struct 指针（SoA 布局，sizeof = lanes×元素）会越界写坏内存；
+            //     ⚠ 不要手写 int 槽位偏移（stride/4 + fieldOffset/4）——那依赖"事件类型全 4B 字段"
+            //        + "Entity 恰好两 int"两个脆弱假设，加 double/bool/long 字段即错位。
             //  4) uniform 局部变量不能声明在 divergent（varying 条件）块内 → SendEvent 代码全部内联表达式。
             AppendIndent();
             _builder.AppendLine($"varying int {tempVar}_idx = atomic_add_global({bufExpr}->count, (varying int)1);");
-            AppendIndent();
 
             // 翻译事件对象初始化
             if (invocation.ArgumentList.Arguments.Count > 0)
@@ -1193,35 +1211,20 @@ namespace NativeTranspiler.Analyzer
                 var argExpr = invocation.ArgumentList.Arguments[0].Expression;
                 if (argExpr is ObjectCreationExpressionSyntax objCreate)
                 {
-                    string dataPtr = $"((uniform int*){bufExpr}->data)";
-                    // 事件类型字段 → C# 布局字节偏移（紧凑 Sequential，无 padding；4 字节标量 / 8 字节 Entity）
-                    int stride = ComputeUnmanagedSize(eventType);
-                    int fieldOffset = 0;
+                    // uniform struct 指针：索引步长 = sizeof(uniform T)，编译器按 struct 定义计算对齐。
+                    // ISPC 中 "uniform T*" 可从 "uniform __EntJoyEventBuffer*" 的 data（int*）cast 得到。
+                    string bufPtr = $"((uniform {ispcEventType}*){bufExpr}->data)";
                     foreach (var init in objCreate.Initializer?.Expressions ?? Enumerable.Empty<ExpressionSyntax>())
                     {
                         if (init is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax fieldName)
                         {
-                            // 找字段符号确定类型（Entity → 拆 Id/Version 两个 int）
-                            var fieldSym = eventType.GetMembers(fieldName.Identifier.Text)
-                                .OfType<IFieldSymbol>().FirstOrDefault();
-                            int fieldSize = fieldSym != null ? ComputeUnmanagedSize(fieldSym.Type) : 4;
-                            if (fieldSym != null && IsEntityLike(fieldSym.Type))
-                            {
-                                // Entity { int Id; int Version; } → 2 个 int
-                                string rhs = CaptureExpressionText(assign.Right);
-                                AppendIndent();
-                                _builder.AppendLine($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4 + 0}] = {rhs}.Id;");
-                                AppendIndent();
-                                _builder.AppendLine($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4 + 1}] = {rhs}.Version;");
-                            }
-                            else
-                            {
-                                AppendIndent();
-                                _builder.Append($"{dataPtr}[{tempVar}_idx * {stride / 4} + {fieldOffset / 4}] = ");
-                                TranslateExpression(assign.Right);
-                                _builder.AppendLine(";");
-                            }
-                            fieldOffset += fieldSize;
+                            // 用真实 struct 字段名写：buf[idx].Field = rhs;
+                            // ISPC 编译器自动处理嵌套 struct（Entity Target → buf[idx].Target.Id / .Version）。
+                            // ⚠ 嵌套 struct 字段值（new Inner {...}）不能走 CaptureExpressionText：
+                            //   base.TranslateObjectCreation 生成 C++ 风格 "Type()" 构造函数调用，
+                            //   ISPC 没有构造函数，也没有 C99 designated initializer / compound literal。
+                            //   → 递归展开为逐字段赋值：buf[idx].Field.SubField = value。
+                            TranslateIspcNestedFieldWrite(bufPtr, $"{tempVar}_idx", fieldName.Identifier.Text, assign.Right);
                         }
                     }
                 }
@@ -1235,40 +1238,78 @@ namespace NativeTranspiler.Analyzer
             return true;
         }
 
-        /// <summary>计算 unmanaged 类型的 C# 布局大小（紧凑 Sequential，无 padding）。</summary>
-        private static int ComputeUnmanagedSize(ITypeSymbol type)
+        /// <summary>
+        /// 检查事件类型是否为 ISPC 可安全表示的布局：所有字段大小都是 4B 的倍数
+        /// （int/float/uint/Entity/嵌套全 4B struct）。
+        /// ISPC uniform struct 的对齐与 C# Sequential 一致（都遵循 C ABI），但
+        /// double(8B)/bool(1B)/byte/short/long 字段会使 stride 计算与 int 槽位假设
+        /// 产生不一致风险 → 编译期拒绝（见 GenerateSendEventIspc 的 fail-fast）。
+        /// </summary>
+        private static bool IsIspcEventLayoutSafe(ITypeSymbol type)
         {
-            if (type is IPointerTypeSymbol) return IntPtr.Size;
             if (type is INamedTypeSymbol named)
             {
-                string fullName = named.ToDisplayString();
-                switch (fullName)
+                // 显式放行 4B 类型（int/uint/float）
+                switch (named.SpecialType)
                 {
-                    case "int": case "float": case "uint": case "bool": case "System.Int32":
-                    case "System.Single": case "System.UInt32": case "System.Boolean":
-                        return 4;
-                    case "long": case "ulong": case "double": case "System.Int64":
-                    case "System.UInt64": case "System.Double":
-                        return 8;
+                    case SpecialType.System_Int32:
+                    case SpecialType.System_UInt32:
+                    case SpecialType.System_Single:
+                        return true;
+                    // 显式拒绝非 4B primitive（防止被当作"空 struct"放行）
+                    case SpecialType.System_Boolean:
+                    case SpecialType.System_Byte:
+                    case SpecialType.System_SByte:
+                    case SpecialType.System_Int16:
+                    case SpecialType.System_UInt16:
+                    case SpecialType.System_Char:
+                    case SpecialType.System_Int64:
+                    case SpecialType.System_UInt64:
+                    case SpecialType.System_Double:
+                        return false;
                 }
-                if (IsEntityLike(named))
-                    return 8;
-                // 自定义 struct：递归累加字段（紧凑布局，无 padding）
-                int total = 0;
-                foreach (var f in named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-                    total += ComputeUnmanagedSize(f.Type);
-                return total;
+                string fullName = named.ToDisplayString();
+                if (fullName == "EntJoy.Mathematics.float2" ||
+                    fullName == "EntJoy.Mathematics.int2" ||
+                    fullName == "EntJoy.Mathematics.uint2")
+                    return true;
+                if (named.TypeKind == TypeKind.Struct)
+                {
+                    foreach (var f in named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    {
+                        if (!IsIspcEventLayoutSafe(f.Type))
+                            return false;
+                    }
+                    return true;
+                }
+                // enum（底层 int）安全
+                if (named.TypeKind == TypeKind.Enum)
+                    return true;
             }
-            return 4;
+            return false;
         }
 
-        /// <summary>是否为 Entity 类型（含 int Id + int Version 两个 int 字段）。</summary>
-        private static bool IsEntityLike(ITypeSymbol type)
+        /// <summary>
+        /// 将 SendEvent 字段赋值右侧翻译为 ISPC 逐字段写入（支持嵌套 struct 对象创建）。
+        /// 顶层：buf[idx].Field = rhs
+        /// 嵌套：new Inner { a = v1, b = v2 } → buf[idx].Field.a = v1; buf[idx].Field.b = v2;
+        /// 原因：ISPC 没有构造函数，不支持 C99 designated initializer（{ f = v }）和
+        /// compound literal（(T){ ... }）在赋值 RHS 的写法；逐字段赋值是唯一确定正确的形式。
+        /// </summary>
+        private void TranslateIspcNestedFieldWrite(string bufPtr, string idxVar, string fieldPath, ExpressionSyntax expr)
         {
-            if (type is not INamedTypeSymbol named) return false;
-            var fields = named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToList();
-            return fields.Count == 2 &&
-                   fields.All(f => f.Type.ToDisplayString() is "int" or "System.Int32");
+            if (expr is ObjectCreationExpressionSyntax nestedCreate)
+            {
+                foreach (var init in nestedCreate.Initializer?.Expressions ?? Enumerable.Empty<ExpressionSyntax>())
+                {
+                    if (init is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax nestedField)
+                        TranslateIspcNestedFieldWrite(bufPtr, idxVar, $"{fieldPath}.{nestedField.Identifier.Text}", assign.Right);
+                }
+                return;
+            }
+            string rhs = CaptureExpressionText(expr);
+            AppendIndent();
+            _builder.AppendLine($"{bufPtr}[{idxVar}].{fieldPath} = {rhs};");
         }
 
         /// <summary>将表达式翻译为 ISPC 文本并返回，不影响 _builder 的当前状态。</summary>

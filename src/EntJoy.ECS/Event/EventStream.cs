@@ -8,7 +8,7 @@ namespace EntJoy.ECS
     internal interface IEventStream
     {
         void NextFrame();
-        unsafe int DrainFromBuffer(void* dataPtr, int count);
+        unsafe int DrainFromBuffer(void* dataPtr, int count, int expectedElementSize);
     }
 
     /// <summary>
@@ -83,11 +83,20 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 从 Native EventBuffer drain：将 count 个 T 从 dataPtr 复制到写入缓冲区。
+        /// expectedElementSize：C# 分配 buffer 时记录的 Marshal.SizeOf&lt;T&gt;()。
+        /// 若与 T 的真实步长（Unsafe.SizeOf&lt;T&gt;()）不一致，说明 native 侧写的 stride 与 C# 布局
+        /// 错位（ISPC uniform struct 对齐 vs C# Sequential），立即失败而不是静默读到错位数据。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public unsafe int DrainFromBuffer(void* dataPtr, int count)
+        public unsafe int DrainFromBuffer(void* dataPtr, int count, int expectedElementSize)
         {
             if (count <= 0) return 0;
+            int realElementSize = Unsafe.SizeOf<T>();
+            if (expectedElementSize != realElementSize)
+                throw new InvalidOperationException(
+                    $"EventStream<{typeof(T).Name}> element size mismatch: buffer allocated with " +
+                    $"{expectedElementSize} bytes, T requires {realElementSize} bytes. " +
+                    $"Native event writer stride disagrees with C# layout (ISPC vs Sequential ABI).");
             int toWrite = Math.Min(count, _capacity);
             var src = new ReadOnlySpan<T>(dataPtr, toWrite);
             int startIdx = Interlocked.Add(ref _writeCount, toWrite) - toWrite;
