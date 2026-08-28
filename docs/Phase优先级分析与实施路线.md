@@ -1,5 +1,10 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-28 增量 4：**查询缓存共享 + N 元组查询生成器** —— EntityQuery 共享注册表（QueryKey 指纹 + 排序归一 + 增量刷新）、
+> Entity Group 反向索引（Entity→匹配查询集合，惰性构建）、`world.Query<T0..Tn>()` N≥3 强类型枚举器按需生成（SourceGenerator），
+> **SystemAPI 移除**（Query/QueryChunks 并入 World）。S20（Entity Index/Group）查询缓存部分完成。
+> 详见 `docs/20260828-查询缓存与N元组生成.md`。
+>
 > 2026-08-28 增量：**Observer（S8-new）完成**——组件生命周期事件 push 回调（Added/Removed/Set/Destroyed），
 > 主线程立即 + ECB Playback 自然触发 + 批量 span 合并（CreateEntities 10000→1 回调）。**Phase 4 全部完成，里程碑 A（高性能核心）达成**。
 > 详见 `docs/20260828-Observer设计.md`。Job 内 Set 事件（per-comp 位图 + adapter 置位）延后，记录于设计文档 §11。
@@ -143,7 +148,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S17** | Chunk lazy zero | Phase 2 | 0-0.5 天 | 无 | ✅ 已验证完成：chunk 构造无整体 InitBlock，AddEntity 逐 slot 清零 |
 | **S18** | World Events | Phase 4 | ✅ 已完成（2026-08-27） | — | Event Channel：双缓冲 EventStream + Managed/Native SendEvent，详见 20260827-EventChannel实现记录.md |
 | ~~S19~~ | ~~One-Frame Components~~ | ~~Phase 5~~ | ❌ 废弃 | — | 由 Event Channel 替代（零结构变更，非每帧 add/remove 组件） |
-| **S20** | Entity Index / Group | Phase 5 | 5-7 天 | S7 | delta 更新，O(1) 索引查询 |
+| **S20** | Entity Index / Group | Phase 5 | ✅ 已完成（2026-08-28） | S7 | 查询缓存共享注册表（QueryKey 指纹 + 排序归一 + 增量刷新）+ Entity Group 反向索引（Entity→匹配查询集合，惰性构建）。基准：共享 4x+ 提速，GetGroupsOf 0.08us。详见 20260828-查询缓存与N元组生成.md |
 | **S21** | ~~AutoSIMD P2 循环展开~~ | ~~AutoSIMD~~ | 已跳过 | — | 🔲 已跳过：常量界小循环（≤64次）已由 SimdLoopGenerator 全展开；非常量界中等循环 Clang/MSVC `-funroll-loops` 已自动处理，手动额外半展开收益不确定且增加生成代码体积 |
 | **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |
 | **S23** | Relation SoA 编码 | Phase 6 | 1 周 | S7 | 含 target version/epoch 防 ID 回收 |

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
@@ -11,7 +11,7 @@ namespace EntJoySample.ECS
     {
         public void OnUpdate()
         {
-            foreach (var result in SystemAPI.Query<Position, Velocity>())
+            foreach (var result in World.DefaultWorld.Query<Position, Velocity>())
             {
                 result.Comp0.X += result.Comp1.X * 0.016f;
                 result.Comp0.Y += result.Comp1.Y * 0.016f;
@@ -26,7 +26,7 @@ namespace EntJoySample.ECS
     {
         public void OnUpdate()
         {
-            foreach (var result in SystemAPI.Query<Position, Health>())
+            foreach (var result in World.DefaultWorld.Query<Position, Health>())
             {
                 result.Comp1.Current -= 0.1f;
                 if (result.Comp1.Current < 0)
@@ -45,7 +45,7 @@ namespace EntJoySample.ECS
         public void OnUpdate()
         {
             Console.WriteLine("  [RegenSystem] Regen triggered by DamageEvent");
-            foreach (var result in SystemAPI.Query<Position, Health>())
+            foreach (var result in World.DefaultWorld.Query<Position, Health>())
             {
                 result.Comp1.Current += 5f;
                 if (result.Comp1.Current > 100f)

@@ -221,7 +221,7 @@ namespace EntJoy.JobSystem.Managed
 
             bool depOk = dependsOn.Completion == null || dependsOn.IsCompleted;
 
-            // [同步内联] 小并行 for 且依赖满足 → 调用线程同步执行，零调度开销（S4 调度延迟命门）
+            // [同步内联] 小并行 for 且依赖满足 → 调用线程同步执行，零调度开销
             if (depOk && arrayLength <= SyncInlineThreshold)
             {
                 var c = RentCompletion(); Interlocked.Exchange(ref c.Remaining, 1);

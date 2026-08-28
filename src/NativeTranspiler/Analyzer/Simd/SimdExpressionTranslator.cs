@@ -1066,7 +1066,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             // ★ uint right shift: C# `uint >> n` is logical (zero-extended), but C++
             //   `int >> n` is arithmetic (sign-extended). Detect uint left operand and
             //   generate n_srli_epi32 (logical shift) instead of `>>` (arithmetic shift).
-            //   Without this, large uint values (> INT_MAX) produce wrong results (S6 bug).
+            //   Without this, large uint values (> INT_MAX) produce wrong results.
             //   Note: SemanticModel returns Int32 for uint locals in source generator context,
             //   so we use the variable analyzer's CSharpType field instead.
             if (op == ">>" && anyVarying)

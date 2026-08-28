@@ -23,6 +23,9 @@ namespace EntJoy.ECS
         // ─── Event Channel ───
         private readonly Dictionary<Type, object> _eventStreams = new();
 
+        // ─── EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新 ───
+        private readonly Dictionary<QueryKey, EntityQuery> _queryCache = new();
+
 
         public World(string worldName = "Default")
         {
@@ -56,6 +59,28 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
+        /// 获取（或创建）共享查询：相同规则指纹返回同一实例，跨调用复用匹配集合，
+        /// 避免重复构造 + 全量重扫。刷新为惰性（访问时版本检查），结构变更后
+        /// <see cref="EntityQuery.EnsureUpToDate"/> 自动增量刷新。
+        /// 注意：返回实例被 World 持有，World.Dispose 时释放。
+        /// </summary>
+        public EntityQuery GetOrCreateEntityQuery(QueryBuilder builder)
+        {
+            var key = new QueryKey(builder);
+            if (_queryCache.TryGetValue(key, out var cached))
+            {
+                cached.EnsureUpToDate();
+                return cached;
+            }
+            var query = new EntityQuery(this, builder);
+            _queryCache[key] = query;
+            return query;
+        }
+
+        /// <summary>当前注册的共享查询数量（诊断用）。</summary>
+        public int QueryCacheCount => _queryCache.Count;
+
+        /// <summary>
         /// 批量创建实体。一次 Archetype 查找、一次 CompleteActiveJobs、一次返回。
         /// 比逐个 NewEntity 快 N 倍。
         /// </summary>
@@ -83,6 +108,10 @@ namespace EntJoy.ECS
         /// </example>
         public QuerySelection<T0> Query<T0>() where T0 : struct
             => new QuerySelection<T0>(_entityManager);
+
+        /// <summary>Chunk 级查询（chunk 遍历面，等价原 SystemAPI.QueryChunks）。</summary>
+        public ChunkEnumerable<T0, T1> QueryChunks<T0, T1>() where T0 : struct where T1 : struct
+            => new ChunkEnumerable<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
 
         // ─── Event Channel API ───
 
@@ -179,6 +208,7 @@ namespace EntJoy.ECS
 
         public void Dispose()
         {
+            _queryCache.Clear();
             foreach (var kv in _eventStreams)
             {
                 if (kv.Value is IDisposable d) d.Dispose();

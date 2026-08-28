@@ -122,7 +122,7 @@ namespace NativeTranspiler.Tasks
             bool cmakeBuildSystemExists = HasGeneratedBuildSystem(buildDir);
 
             // 工具集选择：默认优先 ClangCL（LLVM 后端），比 MSVC 多出循环代数简化/强度削减等优化，
-            // 已实测 S5 重计算场景 0.647ms → 0.050ms（与 Burst 打平）。
+            // 已实测重计算场景 0.647ms → 0.050ms（与 Burst 打平）。
             // 仅当 vswhere 检测到 VS 且装有 LLVM 组件时用 -T ClangCL；否则回退默认工具集（MSVC）。
             string clangClPath = DetectClangClPath();
             bool useClangCl = clangClPath != null;
