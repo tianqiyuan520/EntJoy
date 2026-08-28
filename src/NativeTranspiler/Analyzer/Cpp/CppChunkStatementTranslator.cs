@@ -29,8 +29,8 @@ namespace NativeTranspiler.Analyzer
         /// <summary>托管事件类型错误（编译时报错）。</summary>
         public List<(INamedTypeSymbol eventType, InvocationExpressionSyntax invocation)> ManagedEventErrors { get; } = new();
 
-        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false)
-            : base(semanticModel, jobStruct, useFastMath)
+        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false, bool enableAutoSIMD = false)
+            : base(semanticModel, jobStruct, useFastMath, enableAutoSIMD)
         {
             _requiredComponentTypes = requiredComponentTypes;
             _requiredSharedTypes = requiredSharedTypes ?? new List<INamedTypeSymbol>();

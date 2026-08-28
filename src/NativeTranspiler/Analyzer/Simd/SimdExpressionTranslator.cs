@@ -273,6 +273,12 @@ namespace NativeTranspiler.Analyzer
                 return $"{objExpr}.{memberName}";
             }
 
+            // ★ simd_value<float2> 整体（双通道 gather）→ .x/.y 直接取成员
+            if ((memberName == "x" || memberName == "y") && objExpr.StartsWith("simd_value<EntJoy::Mathematics::float2>"))
+            {
+                return $"{objExpr}.{memberName}";
+            }
+
             // ★ Struct field gather result: n_gather_ps already returns the component value.
             //   For .x on a float2 field gather, just return the gather (it's already x).
             //   For .y, we need the gather at offset+1 (y is at +4 bytes).
@@ -1264,17 +1270,45 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                     if (ea2.ArgumentList?.Arguments.Count > 0)
                         idxKind2 = _varAnalyzer.ClassifyExpression(ea2.ArgumentList?.Arguments[0]?.Expression);
                     VarKind rhsKind2 = _varAnalyzer.ClassifyExpression(assign.Right);
-
+                    // 判断该字段是否为 float2（如 MovePosition.Value）→ 需要 x/y 双通道 scatter
+                    bool fieldIsFloat2 = IsStructFieldFloat2(saElemType, fieldName2);
+                    string op2 = assign.OperatorToken.Text;
+                    bool isCompound2 = op2 != "=";
+                    // 复合赋值 RHS：float2 字段 → 旧值（gather x/y）OP rhs 的分量；标量字段 → 单通道
+                    // 标量复合（float += rhs）：旧值 = arr[lane].field，用 OP= 保留语义
                     if (idxKind2 >= VarKind.Varying)
                     {
-                        // Per-lane scatter for struct field write (SIMD context)
+                        if (fieldIsFloat2)
+                        {
+                            // float2 字段复合赋值：逐 lane 读旧 x/y + 运算 + 写回
+                            // rhs 若是 simd_value<float2>（velocities[i].Value * dt），需取 x/y 分量
+                            string rhsX2 = $"n_extract_lane_f32(({rhsExpr2}).x.v,__l)";
+                            string rhsY2 = $"n_extract_lane_f32(({rhsExpr2}).y.v,__l)";
+                            string lane2 = $"n_extract_lane_epi32({idxExpr2}.v,__l)";
+                            string lhsX2 = $"{id2.Identifier.Text}_ptr[{lane2}].{fieldName2}.x()";
+                            string lhsY2 = $"{id2.Identifier.Text}_ptr[{lane2}].{fieldName2}.y()";
+                            string newX2 = isCompound2 ? $"({lhsX2} {op2.Replace("=", "")} {rhsX2})" : rhsX2;
+                            string newY2 = isCompound2 ? $"({lhsY2} {op2.Replace("=", "")} {rhsY2})" : rhsY2;
+                            string body2 = $"{lhsX2}={newX2};{lhsY2}={newY2};";
+                            if (_currentMask != "simd_mask::all_true()")
+                                return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{body2}}}}}}}";
+                            return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{body2}}}}}";
+                        }
+                        // 标量字段：复合赋值读旧值 + 运算 + 写回
+                        string rhsLane2 = $"n_extract_lane_f32({rhsExpr2}.v,__l)";
+                        string lhsLane2 = $"{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}";
+                        string combineRhs2 = isCompound2
+                            ? $"({lhsLane2} {op2} {rhsLane2})"
+                            : rhsLane2;
                         if (_currentMask != "simd_mask::all_true()")
                         {
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}={combineRhs2};}}}}}}";
                         }
-                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}=n_extract_lane_f32({rhsExpr2}.v,__l);}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id2.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr2}.v,__l)].{fieldName2}={combineRhs2};}}}}";
                     }
-                    // Uniform index: scalar field assignment
+                    // Uniform index: scalar field assignment（复合赋值原样保留）
+                    if (isCompound2)
+                        return $"{id2.Identifier.Text}_ptr[{idxExpr2}].{fieldName2} {op2} {rhsExpr2}";
                     return $"{id2.Identifier.Text}_ptr[{idxExpr2}].{fieldName2} = {rhsExpr2}";
                 }
             }
@@ -1459,6 +1493,30 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
         /// Translate field access on struct NativeArray with direct element access.
         /// Handles: structArray[idx].fieldName
         /// </summary>
+        /// <summary>
+        /// 判断 struct 类型的某字段是否为 float2（如 MovePosition.Value）。
+        /// saElemType 是 C++ 类型名（如 EntJoySample::...::MovePosition），
+        /// 通过语义模型解析对应 C# 类型后查字段类型。
+        /// </summary>
+        private bool IsStructFieldFloat2(string structCppType, string fieldName)
+        {
+            // 从 C++ 类型名提取 C# 类型：EntJoySample::NS::MovePosition → EntJoySample.NS.MovePosition
+            string csTypeName = structCppType.Replace("::", ".");
+            try
+            {
+                var csType = _semanticModel.Compilation.GetTypeByMetadataName(csTypeName);
+                if (csType != null)
+                {
+                    var field = csType.GetMembers(fieldName).OfType<IFieldSymbol>().FirstOrDefault();
+                    if (field != null)
+                        return field.Type.ToDisplayString().Contains("float2");
+                }
+            }
+            catch { }
+            // 兜底：字段名常见 float2 命名启发（Value/Position/Velocity 常为 float2）
+            return false;
+        }
+
         private string TranslateStructArrayFieldAccess(string arrName, string structElemType, string fieldName, ExpressionSyntax? indexExpr)
         {
             if (indexExpr == null)
@@ -1474,6 +1532,11 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 string safeIdx = _currentMask != "simd_mask::all_true()"
                     ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
                     : idxExpr;
+                // float2 字段 → simd_value<float2>（x/y 双通道）
+                if (IsStructFieldFloat2(structElemType, fieldName))
+                {
+                    return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}, simd_value<float>{{ n_gather_ps<sizeof({structElemType})>(((const float*)(&{arrName}_ptr[0].{fieldName})) + 1, {safeIdx}.v) }} }}";
+                }
                 return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
             }
             return $"{arrName}_ptr[{idxExpr}].{fieldName}";
@@ -1495,6 +1558,11 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 string safeIdx = _currentMask != "simd_mask::all_true()"
                     ? $"simd_min(simd_max({idxExpr}, simd_value<int>(0)), simd_value<int>::broadcast({arrName}_length - 1))"
                     : idxExpr;
+                // float2 字段（如 MovePosition.Value）→ 返回 simd_value<float2>（x/y 双通道）
+                if (IsStructFieldFloat2(structElemType, fieldName))
+                {
+                    return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}, simd_value<float>{{ n_gather_ps<sizeof({structElemType})>(((const float*)(&{arrName}_ptr[0].{fieldName})) + 1, {safeIdx}.v) }} }}";
+                }
                 return $"simd_value<float>{{ n_gather_ps<sizeof({structElemType})>((const float*)(&{arrName}_ptr[0].{fieldName}), {safeIdx}.v) }}";
             }
             return $"{arrName}_ptr[{idxExpr}].{fieldName}";

@@ -99,7 +99,7 @@ EntJoySample + GridSearch CMake   ✅
 ### 5.1 正确性盲区（未验证的语义，风险最高优先补）
 | 项 | 说明 | 风险 |
 |---|---|---|
-| float2/int2 组件写 | IJobChunk/IJobEntity（MoveJob 类）——AutoSIMD 暂不支持 ECS 调度，`SimpleArith_SIMD_Entity` 仅编译通过、结果未对比 | 高（最常见的 ECS 形态） |
+| float2/int2 组件写 | ✅ 已支持（2026-08-28） | IJobChunk/IJobEntity + AutoSIMD 走真 SIMD，float2 双通道 gather/scatter + 复合赋值已验证（`AutoSIMD-EntityBatch-待优化.md` 8 PASS） |
 | while / do-while 循环 | 生成路径存在但未做输出对比 | 中 |
 | 特殊浮点值 | NaN / ±Inf / ±0 / 次正规数（输入范围 [-100,100] 未覆盖；SLEEF 多项式对这些值的行为未验证，log(≤0) 尤其可疑） | 中 |
 | 嵌套循环内 return | 只测了单层 break + goto 路径，嵌套 return 的标号/恢复未验 | 中 |
@@ -115,7 +115,7 @@ EntJoySample + GridSearch CMake   ✅
 | 表达式体 `Execute => ...` | 源生成器要求块体 `{ ... }` |
 | 非托管字段约束 | job 字段必须非托管类型（NativeArray<T>、标量、结构体等），不能用 int[] |
 | 无法调 `Console` 等托管 API | [NativeTranspile] 方法体内不可调用非托管签名之外的方法 |
-| ECS 调度（IJobChunk/IJobEntity） | AutoSIMD 当前不参与（用户明示暂不支持，后续启用时需补验证） |
+| ECS 调度（IJobChunk/IJobEntity） | ✅ 已支持（2026-08-28） | IJobChunk + AutoSIMD → EntityBatch 真 SIMD；IJobEntity + AutoSIMD → ChunkRange。见 `AutoSIMD-EntityBatch-待优化.md` |
 | 自研浮点数学精度 | AVX2 下 SLEEF 多项式 ~3.5 ULP（非 IEEE），对追求精确结果的场景需要 SIMD_MATH_PRECISION=2 回退 |
 
 ### 5.3 性能优化方向（基于实际生成代码分析）
@@ -333,7 +333,7 @@ dotnet run --project tools\JobLibsBenchmark\JobLibsBenchmark.csproj -c Release -
 | while 循环 | ✅ 已用 for 覆盖 | E9：`PostIncrementExpression` 不支持，已改用 for 语义 |
 | 数学函数（sin/cos/log） | ✅ | SLEEF 多项式 ~3.5 ULP |
 | int/float 混合比较 | ✅ 已修复 | E1：SemanticModel 类型回退 + float store cast |
-| ECS 调度（IJobChunk/IJobEntity） | ❌ 不参与 | 用户需手动标后端 |
+| ECS 调度（IJobChunk/IJobEntity） | ✅ 已支持 | IJobChunk + AutoSIMD → EntityBatch 真 SIMD；IJobEntity + AutoSIMD → ChunkRange（2026-08-28） |
 | long/int64 | ❌ 不支持 | 重算必须用 int/uint |
 | 用户自定义函数调用 | ⚠️ 部分 | MathF 系已验证，外部静态方法未测 |
 | NaN/±0 语义 | ✅ 已修复 | NativeTranspiled 移除 `/fp:fast`，/fp:precise 恢复 IEEE-754 |
@@ -387,7 +387,7 @@ dotnet run --project tools\JobLibsBenchmark\JobLibsBenchmark.csproj -c Release -
 | SIMD 宽度 | AVX2=8 / SSE=4 / 标量=1 | 编译时固定 | 运行时自适应 |
 | S6 控制流 | **3.13ms** 🏆 | 5.20ms | 38.3ms |
 | S5 高竞争 | 0.56ms | 0.53ms | 0.016ms⚠ |
-| ECS 调度 | ❌ | ✅ | ✅ |
+| ECS 调度 | ✅（2026-08-28） | ✅ | ✅ |
 | long 支持 | ❌ | ✅ | ✅ |
 | 编译器依赖 | ClangCL | ISPC 编译器 | Burst 编译器 |
 
