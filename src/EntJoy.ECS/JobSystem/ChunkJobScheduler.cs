@@ -1,4 +1,4 @@
-using EntJoy.JobSystem;
+﻿using EntJoy.JobSystem;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -1130,29 +1130,6 @@ namespace EntJoy.ECS.JobSystem
         public static void RegisterEventBufferMeta(Type jobType, Type[] eventTypes)
         {
             EventMetaCache[jobType] = new EventBufferMeta { Count = eventTypes.Length, EventTypes = eventTypes };
-        }
-
-        /// <summary>
-        /// 从 NativeTranspiler 生成的 NativeEventTypes 类读取元数据并注册。
-        /// 使用反射避免编译时依赖（NativeTranspilerGenerated 是另一个程序集的源码）。
-        /// </summary>
-        public static void RegisterEventBufferMetaFromGenerated(Type jobType)
-        {
-            if (EventMetaCache.ContainsKey(jobType)) return;
-            try
-            {
-                var generatedAssembly = jobType.Assembly; // 同程序集
-                var evtTypesClass = generatedAssembly.GetType("NativeTranspiler.Generated.NativeEventTypes");
-                if (evtTypesClass == null) return;
-                var typesField = evtTypesClass.GetField("Types");
-                if (typesField == null) return;
-                var typesDict = typesField.GetValue(null) as System.Collections.Generic.Dictionary<string, Type[]>;
-                if (typesDict != null && typesDict.TryGetValue(jobType.FullName!, out var eventTypes))
-                {
-                    RegisterEventBufferMeta(jobType, eventTypes);
-                }
-            }
-            catch { /* NativeEventTypes 不存在时静默跳过 */ }
         }
 
         /// <summary>

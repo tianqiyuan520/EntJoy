@@ -499,7 +499,7 @@ public partial class SpritesRandomMove : Node2D
 		_naVelocities = new NativeArray<float2>(EntityCount, Allocator.Persistent);
 
 		int idx = 0;
-		foreach (var chunk in SystemAPI.QueryChunks<Position, Vel>())
+		foreach (var chunk in myWorld.QueryChunks<Position, Vel>())
 		{
 			var positions = chunk.GetSpan0();
 			var velocities = chunk.GetSpan1();
@@ -679,7 +679,7 @@ public partial class SpritesRandomMove : Node2D
 		if (_useECS)
 		{
 			int index = 0;
-			foreach (var chunk in SystemAPI.QueryChunks<Position, Vel>())
+			foreach (var chunk in myWorld.QueryChunks<Position, Vel>())
 			{
 				var positions = chunk.GetSpan0();
 				int length = chunk.Length;

@@ -14,7 +14,7 @@ namespace EntJoySample.ECS
                 Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
                 // Observer 测试（组件生命周期事件 push 回调）
-                ObserverDemo.Run();
+                //ObserverDemo.Run();
 
                 // Shared Component per-chunk 存储测试
                 //SharedComponentDemo.Run();
@@ -45,6 +45,12 @@ namespace EntJoySample.ECS
 
                 // ECS JobSystem 重构回归标尺：schedule-only 微基准
                 //ScheduleOverheadBenchmark.Run();
+
+                // 查询缓存基准：共享注册表 + 增量刷新收益
+                EntityQueryCacheBenchmark.Run();
+
+                // N 元组查询示例：world.Query<T0, T1, T2>()（SourceGenerator 生成）
+                QueryTupleDemo.Run();
             }
             catch (Exception ex)
             {

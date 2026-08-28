@@ -5,7 +5,11 @@ using System.Runtime.InteropServices;
 namespace EntJoy.ECS.JobSystem
 {
 
-internal static class TempBuffer
+/// <summary>
+/// 线程静态临时缓冲（ulong 位图等）。生成器生成的 N 元组枚举器（用户程序集）也使用，
+/// 故为 public。
+/// </summary>
+public static class TempBuffer
 {
     [ThreadStatic]
     private static ulong[] _threadBuffer;
