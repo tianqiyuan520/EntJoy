@@ -18,7 +18,7 @@
 | **Phase 1** | 基础设施优化 | ✅ **已完成** | 2026-08-22 | `6391038` |
 | **Phase 2** | Archetype Edges + Chunk lazy zero + Shared Component | ✅ **已完成** | 2026-08-27 | `8b9f0c2` |
 | **Phase 3** | Selective Wait + Batch CreateEntities | ✅ **基础完成** | 2026-08-24 | `1452573` |
-| **Phase 4** | System 调度与开发体验增强 | 🔲 **进行中** | — | — |
+| **Phase 4** | System 调度与开发体验增强 | ✅ **已完成** | 2026-08-28 | `d601982` | Observer 收尾（主线程立即 + ECB Playback + 批量 span 合并） |
 | **Phase 5** | 易用性（关系型状态机 + 事件总线） | 🔲 未开始 | — | — |
 | **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
 | **Phase 7** | Shared Component | ✅ **已完成** | 2026-08-27 | `8b9f0c2` | per-chunk 双类型 + ABI + NativeTranspiler |
@@ -26,12 +26,12 @@
 | **Phase 9** | 托管类型 + AOT 兼容 | 🔲 未开始 | — | — |
 | **工具链** | Godot 桥接 + 热重载 + 分析器 | 🔲 未开始 | — | — |
 
-**当前里程碑**：里程碑 A（高性能核心）—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 进行中
+**当前里程碑**：**里程碑 A（高性能核心）已完成（2026-08-28）**—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅
 
 **附注**：
-- Phase 1-3 已完成基础实现，性能数据已收集。
-- Phase 4 已完成大部分（2026-08）：Schedule Graph、OrderBefore/OrderAfter、Entity Builder、Change Tracking、RunWhen 已实现。命名空间从 `EntJoy` 重构为 `EntJoy.ECS`。
-- Event Channel（S18 World Events）已完成（2026-08-27）：双缓冲 EventStream + Managed/NativeTranspile SendEvent + C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain。详见 `docs/20260827-EventChannel实现记录.md`。One-Frame Component（S19）废弃，由 Event Channel 替代。
+- Phase 1-4 全部完成，里程碑 A（高性能核心）达成。Phase 4 最后一项 Observer（S8-new）2026-08-28 收尾：组件生命周期事件 push 回调（Added/Removed/Set/Destroyed），主线程立即 + ECB Playback 自然触发 + 批量 span 合并（CreateEntities 10000→1 回调），详见 `docs/20260828-Observer设计.md`。
+- Phase 4 已实现：Schedule Graph、OrderBefore/OrderAfter、Entity Builder、Change Tracking、RunWhen、Event Channel、ISPC SendEvent、Observer。命名空间从 `EntJoy` 重构为 `EntJoy.ECS`。
+- Event Channel（S18 World Events）已完成（2026-08-27）：双缓冲 EventStream + Managed/NativeTranspile SendEvent + C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain。One-Frame Component（S19）废弃，由 Event Channel 替代。
 - Phase 9 新增 AOT 兼容修复和托管类型支持。
 - 工具链新增热重载支持（仅限 Native System）。
 
@@ -1025,22 +1025,23 @@ struct Player {
 
 ## 6. 实施顺序与里程碑
 
-### 里程碑 A：高性能核心
+### 里程碑 A：高性能核心 ✅ 已完成（2026-08-28）
 
 ```text
 Phase 1: 基础设施优化 ✅
 Phase 2: Archetype Edges ✅
 Phase 3: Selective Wait + ECB + Batch Operations ✅
-Phase 4: System 调度与能力增强（重设计 2026-08）
+Phase 4: System 调度与能力增强（重设计 2026-08）✅
   ├─ QueryEnumerator ✅
   ├─ Schedule Graph（自动并行）✅
-  ├─ Observer（变化触发）🔲 — push-based 回调，与 Change Tracking pull-based 互补
+  ├─ Observer（变化触发）✅ — push-based 回调，与 Change Tracking pull-based 互补（2026-08-28，见 docs/20260828-Observer设计.md）
+  ├─ Event Channel / ISPC SendEvent ✅
   └─ ~~One-Frame Component（帧事件）~~❌ — 由 Event Channel（S18）替代
 ```
 
 > Lambda 易用路径已移除（用户明确不需要）：QueryEnumerable foreach 已够用。
 
-该里程碑完成后，应能用 `IJobChunk` / `World.Update()` 跑通基础 ECS 流程，系统自动并行，组件变化可触发回调。
+该里程碑已达成：`IJobChunk` / `World.Update()` 跑通基础 ECS 流程，系统自动并行，组件变化可触发回调（Observer）。
 
 ### 里程碑 B：存储与易用性
 
@@ -1410,17 +1411,16 @@ world.Query<Health>()
 ### 13.4 EntJoy 现代化 ECS 路线图
 
 ```
-Phase 1-3（已完成）：
+Phase 1-4（已完成）：
   ✅ 基础设施优化
   ✅ Archetype Edges
   ✅ Selective Wait
-
-Phase 4（设计完成）：
-  🔲 Schedule Graph（自动并行）
-  🔲 Entity Builder（实体构造器）
-  🔲 Declarative Components（声明式组件）
-  🔲 变更追踪
-  🔲 空闲跳过
+  ✅ Schedule Graph（自动并行）
+  ✅ Entity Builder（实体构造器）
+  ✅ 变更追踪
+  ✅ 空闲跳过
+  ✅ Event Channel / ISPC SendEvent
+  ✅ Observer（S8-new，2026-08-28）
 
 Phase 5-6（设计完成）：
   🔲 关系型状态机

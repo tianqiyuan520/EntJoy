@@ -1,5 +1,9 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-28 增量：**Observer（S8-new）完成**——组件生命周期事件 push 回调（Added/Removed/Set/Destroyed），
+> 主线程立即 + ECB Playback 自然触发 + 批量 span 合并（CreateEntities 10000→1 回调）。**Phase 4 全部完成，里程碑 A（高性能核心）达成**。
+> 详见 `docs/20260828-Observer设计.md`。Job 内 Set 事件（per-comp 位图 + adapter 置位）延后，记录于设计文档 §11。
+>
 > 2026-08-27 增量：Event Channel 完整实现（双缓冲 EventStream + Managed/NativeTranspile SendEvent +
 > C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain）——详见 `docs/20260827-EventChannel实现记录.md`。
 > 事件总线（S18）完成并移入 Phase 4；One-Frame Component（S19）废弃，由 Event Channel 替代。
@@ -8,8 +12,7 @@
 > （SIMD foreach_tiled + fetch-add 原子槽分配 + AoS 布局写）+ **AutoSIMD=Enabled fallback 支持 SendEvent** +
 > **C#→ISPC 原子返回值语义修复**（fetch-add 补回增量 = C# add-fetch 新值）——详见 `docs/20260827-ISpcEvent-实现记录.md`。
 >
-> 2026-08-27 增量 3：**Lambda 易用路径已移除**（用户明确不需要），Observer（S8）为 Phase 4 核心待办、
-> AutoSIMD P2 循环展开已跳过（Clang/MSVC `-funroll-loops` 已自动处理）。
+> 2026-08-27 增量 3：**Lambda 易用路径已移除**（用户明确不需要），AutoSIMD P2 循环展开已跳过（Clang/MSVC `-funroll-loops` 已自动处理）。
 
 > 2026-08-25 增量：Change Tracking 核心实现、EnabledComponent 过滤优化、Run 直执/ImmediateNative、
 > SourceGenerator 统一（IJobEntity/IJobChunk）——详见 `docs/20260825-ChangeTracking与Enabled优化记录.md`。
@@ -38,7 +41,7 @@ Phase 3 (Selective Wait)   ✅ 基础完成
   └─ Batch CreateEntities   ✅ — 100 万实体 = 69.5 ms
   └─ DeferredCommandBuffer  ✅ — 基础框架
 
-Phase 4 (System 调度与开发体验增强) ✅ 进行中（Observer 为下一个核心待办）
+Phase 4 (System 调度与开发体验增强) ✅ 已完成（2026-08-28，Observer 收尾）
   └─ QueryEnumerator       ✅ — foreach 遍历已实现
   └─ Schedule Graph        ✅ — DAG 拓扑排序 + PrintSchedule 输出
   └─ OrderBefore/OrderAfter ✅ — 手动指定 System 执行顺序
@@ -51,6 +54,7 @@ Phase 4 (System 调度与开发体验增强) ✅ 进行中（Observer 为下一�
   └─ Run 直执 / ImmediateNative ✅ — ECS 侧直接执行；Native 版 Run 零 worker 唤醒（2026-08-25）
   └─ Event Channel         ✅ — 双缓冲事件流 + Managed/Native SendEvent（2026-08-27，详见 docs/20260827-EventChannel实现记录.md）
   └─ ISPC SendEvent        ✅ — ISPC 后端 SendEvent + AutoSIMD fallback 支持 + C#→ISPC 原子语义修复（2026-08-27，详见 docs/20260827-ISpcEvent-实现记录.md）
+  └─ Observer (S8-new)     ✅ — 组件生命周期事件 push 回调：主线程立即 + ECB Playback 自然触发 + 批量 span 合并（2026-08-28，详见 docs/20260828-Observer设计.md）
 
 Phase 5 (易用性)            🔲 未开始
   └─ 关系型状态机
@@ -120,7 +124,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S6** | QueryEnumerator 实现 | Phase 4 | 3-5 天 | S3 | ✅ 已完成 |
 | **S7-new** | **Schedule Graph** — System 自动并行 | Phase 4 | 1-2 周 | 无 | ✅ 已完成 — DAG 拓扑排序 + `[Read]`/`[Write]`/`[Order]` 属性 + `PrintSchedule` |
 | **S7b** | **ISPC SendEvent** | Phase 4 | ✅ 已完成（2026-08-27） | — | ISPC 后端 SIMD + fetch-add 原子事件写入 + AutoSIMD fallback + C#→ISPC 原子语义修复（详见 `docs/20260827-ISpcEvent-实现记录.md`） |
-| **S8-new** | **Observer** — 组件变化触发 | Phase 4 | 1 周 | 无 | 🔲 Phase 4 待办。**Push-based**回调（区别于 Change Tracking 的 pull-based）。组件增/删/改时自动触发注册回调，无需每帧轮询。跨 System 解耦联动。参考 Flecs Observer |
+| **S8-new** | **Observer** — 组件变化触发 | Phase 4 | ✅ 已完成（2026-08-28） | 无 | **Push-based**回调（区别于 Change Tracking 的 pull-based）。组件增/删/改自动触发注册回调。主线程立即 + ECB Playback 自然触发 + 批量 span 合并（详见 `docs/20260828-Observer设计.md`） |
 | **S9-new** | **One-Frame Component** — 帧事件 | Phase 4 | 3-5 天 | 无 | ❌ 已废弃：由 Event Channel（S18）替代 |
 | **S10** | AutoSIMD E7 修复 | AutoSIMD | 1 周 | 无 | ✅ 已完成（returnedMask + post_mask + int→float cast） |
 | **S11** | AutoSIMD E5 修复 | AutoSIMD | 3-5 天 | 无 | ✅ 已完成（NativeTranspiled 移除 /fp:fast） |
@@ -238,11 +242,13 @@ Phase 3 (选择性等待) ✅
   ├─ Batch Structural Changes ✅
   └─ Auto-Defer (S13) ◄── 未完成
        │
-Phase 4 (System 调度与能力增强) ◄── 进行中（Observer 为下一个核心待办）
+Phase 4 (System 调度与能力增强) ✅ 已完成（2026-08-28）
   ├─ QueryEnumerator (S6) ✅
   ├─ Schedule Graph (S7-new) ✅ — 自动并行，参考 Bevy Schedule
-   ├─ Observer (S8-new) ◄── 🔲 下一个核心待办：组件变化触发，参考 Flecs Observer
-   ├─ One-Frame Component (S9-new) ❌ — 已废弃：由 Event Channel（S18）替代
+   ├─ Observer (S8-new) ✅ — 组件变化触发，参考 Flecs Observer（2026-08-28，批量 span 合并）
+   ├─ Event Channel (S18) ✅ — 双缓冲事件流 + Managed/Native SendEvent
+   ├─ ISPC SendEvent (S7b) ✅ — ISPC 后端 + AutoSIMD fallback
+   └─ One-Frame Component (S9-new) ❌ — 已废弃：由 Event Channel（S18）替代
 
        │
        ├──────────────────┬──────────────────┐
@@ -267,7 +273,7 @@ Phase 9 (Managed 类型，独立轨道)
 
 | 里程碑 | 包含 Phase | 状态 | 预估总工时 |
 |--------|-----------|------|-----------|
-| **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4（重设计） | 进行中 | ~4-6 周 |
+| **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅（含 Observer 收尾 2026-08-28） | ✅ **已完成**（2026-08-28） | ~4-6 周 |
 | **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | 进行中（Phase 7 已完成 2026-08-27） | ~8-12 周 |
 | **里程碑 C：生成器扩展** | Phase 8 | 未开始 | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
@@ -344,8 +350,9 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 |------|------|------|------|
 | S0-S3 | Phase 1-3 全部 | ✅ 已完成 | — |
 | S6 | QueryEnumerator | ✅ 已完成 | — |
-| S7-new | Schedule Graph（自动并行） | 1-2 周 | 1-2 周 |
-| S8-new | Observer（变化触发） | 1 周 | 2-3 周 |
+| S7-new | Schedule Graph（自动并行） | ✅ 已完成 | — |
+| S8-new | Observer（变化触发） | ✅ 已完成（2026-08-28） | — |
+| S7b | ISPC SendEvent | ✅ 已完成（2026-08-27） | — |
 | S4-S5, S10-S11 | AutoSIMD 关键修复 | 2-3 周 | 并行 |
 | S16 + S16b | Shared Component：per-chunk 存储 + NativeTranspiler blittable 支持 | S16 3-5 天 + S16b 3-5 天 | ~5-7 周 |
 | S17 | Chunk lazy zero | ✅ 已完成（已验证） | — |
@@ -355,7 +362,7 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 | S26-S27 | Phase 8 核心 | 1-2 周 | ~11-15 周 |
 | S35-S37 | Phase 9 | 5-8 周 | 独立轨道 |
 
-**里程碑 A（高性能核心）预估**：4-6 周（Phase 1-3 ✅ + Phase 4 重设计）
+**里程碑 A（高性能核心）✅ 已完成（2026-08-28）**：Phase 1-4 全部落地（含 Observer 收尾）。
 
 ---
 
