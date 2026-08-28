@@ -1,17 +1,18 @@
-﻿using System;
+using System;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
     /// <summary>
-    /// Observer 测试：组件生命周期事件的 push-based 回调。
+    /// Observer 测试：组件生命周期事件的 push-based 回调（批量 span 签名）。
     ///
     /// v1 覆盖：
     ///   - 主线程立即回调：AddComponent / Set / RemoveComponent / DestroyEntity
     ///   - NewEntity / CreateEntities 带组件 → Added
     ///   - ECB Playback（主线程手动）→ 内部调用主入口 → 事件照常触发
     ///   - 多 World 隔离
-    ///   - 零订阅者 fast path（无 observer 时结构变更零额外分支）
+    ///   - RemoveObserver
+    ///   - 批量合并：CreateEntities 大数量 → 一次回调（ReadOnlySpan）
     /// </summary>
     public static class ObserverDemo
     {
@@ -30,6 +31,7 @@ namespace EntJoySample.ECS
             TestEcbPlaybackTriggersEvents();
             TestMultiWorldIsolation();
             TestRemoveObserver();
+            TestBatchCreateMerge();
 
             _world.Dispose();
             Console.WriteLine("\n=== Observer Demo Complete ===\n");
@@ -43,11 +45,11 @@ namespace EntJoySample.ECS
             Entity observed = default;
             float observedValue = 0;
 
-            _world.AddObserver<Health>(ObserverEvents.Added, evt =>
+            _world.AddObserver<Health>(ObserverEvents.Added, (entities, values) =>
             {
-                addedCount++;
-                observed = evt.Entity;
-                observedValue = evt.NewValue.Current;
+                addedCount += entities.Length;
+                observed = entities[0];
+                observedValue = values[0].Current;
             });
 
             var e = _world.CreateEntities(1, typeof(Position))[0]; // 先创建（无 Health，不触发 Added）
@@ -64,18 +66,19 @@ namespace EntJoySample.ECS
             _world.ClearObservers<Health>();
         }
 
-        /// <summary>测试 2：Set → Set 立即回调（NewValue 正确）。</summary>
+        /// <summary>测试 2：Set → Set 立即回调（值正确）。</summary>
         private static void TestSetOnValueChange()
         {
             Console.WriteLine("--- Test 2: Set → Set ---");
             int setCount = 0;
             float lastValue = 0;
 
-            _world.AddObserver<Health>(ObserverEvents.Set, evt =>
+            var handle = _world.AddObserver<Health>(ObserverEvents.Set, (entities, values) =>
             {
-                setCount++;
-                lastValue = evt.NewValue.Current;
+                setCount += entities.Length;
+                lastValue = values[0].Current;
             });
+            Console.WriteLine($"  registered handle valid: {handle.IsValid}, id={handle.Id}");
 
             var e = _world.CreateEntities(1, typeof(Health))[0];
             _world.EntityManager.Set(e, new Health { Current = 75, Max = 100 });
@@ -96,12 +99,12 @@ namespace EntJoySample.ECS
             float oldValue = 0;
             bool entityResolvable = false;
 
-            _world.AddObserver<Health>(ObserverEvents.Removed, evt =>
+            _world.AddObserver<Health>(ObserverEvents.Removed, (entities, values) =>
             {
-                removedCount++;
-                oldValue = evt.OldValue.Current;
+                removedCount += entities.Length;
+                oldValue = values[0].Current;
                 // 回调内实体应仍可解析（已迁移到目标 archetype，无 Health 但实体有效）
-                entityResolvable = _world.EntityManager.GetEntityInfoRef(evt.Entity.Id).Archetype != null;
+                entityResolvable = _world.EntityManager.GetEntityInfoRef(entities[0].Id).Archetype != null;
             });
 
             var e = _world.CreateEntities(1, typeof(Position), typeof(Health))[0];
@@ -124,10 +127,10 @@ namespace EntJoySample.ECS
             int destroyedCount = 0;
             float oldValue = 0;
 
-            _world.AddObserver<Health>(ObserverEvents.Removed, evt =>
+            _world.AddObserver<Health>(ObserverEvents.Removed, (entities, values) =>
             {
-                destroyedCount++;
-                oldValue = evt.OldValue.Current;
+                destroyedCount += entities.Length;
+                oldValue = values[0].Current;
             });
 
             var e = _world.CreateEntities(1, typeof(Position), typeof(Health))[0];
@@ -148,7 +151,7 @@ namespace EntJoySample.ECS
             Console.WriteLine("--- Test 5: NewEntity → Added ---");
             int addedCount = 0;
 
-            _world.AddObserver<Health>(ObserverEvents.Added, _ => addedCount++);
+            _world.AddObserver<Health>(ObserverEvents.Added, (entities, _) => addedCount += entities.Length);
 
             var e = _world.EntityManager.NewEntity(typeof(Health));
             var e2 = _world.EntityManager.NewEntity(typeof(Position), typeof(Health));
@@ -167,11 +170,8 @@ namespace EntJoySample.ECS
             int addedCount = 0;
             int removedCount = 0;
 
-            _world.AddObserver<Health>(ObserverEvents.Added | ObserverEvents.Removed, evt =>
-            {
-                if ((evt.Flags & ObserverEvents.Added) != 0) addedCount++;
-                if ((evt.Flags & ObserverEvents.Removed) != 0) removedCount++;
-            });
+            _world.AddObserver<Health>(ObserverEvents.Added, (entities, _) => addedCount += entities.Length);
+            _world.AddObserver<Health>(ObserverEvents.Removed, (entities, _) => removedCount += entities.Length);
 
             var e = _world.CreateEntities(1, typeof(Position))[0];
 
@@ -199,8 +199,8 @@ namespace EntJoySample.ECS
             using (var w1 = new World("W1"))
             using (var w2 = new World("W2"))
             {
-                w1.AddObserver<Health>(ObserverEvents.Added, _ => world1Count++);
-                w2.AddObserver<Health>(ObserverEvents.Added, _ => world2Count++);
+                w1.AddObserver<Health>(ObserverEvents.Added, (entities, _) => world1Count += entities.Length);
+                w2.AddObserver<Health>(ObserverEvents.Added, (entities, _) => world2Count += entities.Length);
 
                 w1.EntityManager.NewEntity(typeof(Health));
                 w1.EntityManager.NewEntity(typeof(Health));
@@ -221,7 +221,7 @@ namespace EntJoySample.ECS
             int addedCount = 0;
 
             using var w = new World("T8");
-            var handle = w.AddObserver<Health>(ObserverEvents.Added, _ => addedCount++);
+            var handle = w.AddObserver<Health>(ObserverEvents.Added, (entities, _) => addedCount += entities.Length);
             Console.WriteLine($"  handle valid: {handle.IsValid}, id={handle.Id}");
             w.EntityManager.NewEntity(typeof(Health));
             Console.WriteLine($"  after first NewEntity: {addedCount} (expected 1)");
@@ -231,6 +231,34 @@ namespace EntJoySample.ECS
             Console.WriteLine($"  Added count after remove: {addedCount} (expected 1)");
             bool ok = addedCount == 1;
             Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}\n");
+        }
+
+        /// <summary>测试 9：批量合并——CreateEntities(10000) → 1 次回调（Span 长度 10000）。</summary>
+        private static void TestBatchCreateMerge()
+        {
+            Console.WriteLine("--- Test 9: Batch Create Merge ---");
+            int callbackCount = 0;
+            int totalEntities = 0;
+            float firstValue = 0;
+            float lastValue = 0;
+
+            _world.AddObserver<Health>(ObserverEvents.Added, (entities, values) =>
+            {
+                callbackCount++;
+                totalEntities += entities.Length;
+                if (entities.Length > 0) { firstValue = values[0].Current; lastValue = values[entities.Length - 1].Current; }
+            });
+
+            var created = _world.CreateEntities(10000, typeof(Health));
+
+            Console.WriteLine($"  callback count: {callbackCount} (expected 1)");
+            Console.WriteLine($"  total entities: {totalEntities} (expected 10000)");
+            Console.WriteLine($"  span length: {totalEntities} (expected 10000)");
+            Console.WriteLine($"  first/last value: {firstValue}/{lastValue} (expected 0/0, 新组件零值)");
+            bool ok = callbackCount == 1 && totalEntities == 10000 && created.Length == 10000;
+            Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}\n");
+
+            _world.ClearObservers<Health>();
         }
     }
 }

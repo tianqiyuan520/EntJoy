@@ -416,7 +416,7 @@ namespace EntJoy.ECS
                 // 存储实体版本号用于悬垂引用检测
                 GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
 
-                // Observer：Added（单实体 NewEntity；新组件槽为初始零值）
+                // Observer：Added（单实体 NewEntity；新组件槽为初始零值；count=1 批量派发）
                 if (_observerCount > 0 && _observers != null)
                 {
                     foreach (var t in types)
@@ -426,7 +426,7 @@ namespace EntJoy.ECS
                             int compIdx = targetArch.GetComponentTypeIndex(t);
                             var chunk = targetArch.ChunkList[chunkIndex];
                             void* valPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + slotInChunk * t.Size);
-                            Dispatch(reg.Added, o => o.DispatchAdded(newEntity, valPtr));
+                            DispatchAdded(reg.Added, &newEntity, valPtr, 1);
                         }
                     }
                 }
@@ -469,25 +469,69 @@ namespace EntJoy.ECS
                     UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
                     GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
                     result[i] = newEntity;
-
-                    // Observer：Added（v1 实体级，新组件槽为初始零值）
-                    if (_observerCount > 0 && _observers != null)
-                    {
-                        foreach (var t in types)
-                        {
-                            if (_observers.TryGetValue(t.Id, out var reg) && reg.Added.Count > 0)
-                            {
-                                int compIdx = targetArch.GetComponentTypeIndex(t);
-                                var chunk = targetArch.ChunkList[chunkIndex];
-                                void* valPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + slotInChunk * t.Size);
-                                Dispatch(reg.Added, o => o.DispatchAdded(newEntity, valPtr));
-                            }
-                        }
-                    }
                 }
 
                 structuralVersion++;
+
+                // Observer：Added（批量合并——循环内收集，锁外一次派发）
+                if (_observerCount > 0 && _observers != null)
+                {
+                    DispatchCreateEntitiesAdded(targetArch, types, result, count);
+                }
                 return result;
+            }
+        }
+
+        /// <summary>
+        /// CreateEntities 批量 Added 派发：按组件类型分桶，每类型一次回调（ReadOnlySpan）。
+        /// 调用方保证在主线程、锁外（回调内结构变更需走 ECB）。
+        /// </summary>
+        private unsafe void DispatchCreateEntitiesAdded(Archetype targetArch, ComponentType[] types, Entity[] result, int count)
+        {
+            foreach (var t in types)
+            {
+                if (!_observers!.TryGetValue(t.Id, out var reg) || reg.Added.Count == 0) continue;
+
+                int compIdx = targetArch.GetComponentTypeIndex(t);
+                int compSize = t.Size;
+
+                // 值不连续（实体跨 chunk），拷贝到连续缓冲
+                byte* valuesPtr = null;
+                var pooled = Array.Empty<byte>();
+                int totalBytes = count * compSize;
+                if (totalBytes <= 4096)
+                {
+                    byte* stackBuf = stackalloc byte[totalBytes == 0 ? 1 : totalBytes];
+                    valuesPtr = stackBuf;
+                }
+                else
+                {
+                    pooled = System.Buffers.ArrayPool<byte>.Shared.Rent(totalBytes);
+                    fixed (byte* p = pooled)
+                        valuesPtr = p;
+                }
+
+                try
+                {
+                    int write = 0;
+                    for (int i = 0; i < count; i++)
+                    {
+                        var e = result[i];
+                        var loc = GetEntityInfoRef(e.Id);
+                        var chunk = loc.Archetype!.ChunkList[loc.ChunkIndex];
+                        void* srcPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + loc.SlotInChunk * compSize);
+                        Unsafe.CopyBlock(valuesPtr + write, srcPtr, (uint)compSize);
+                        write += compSize;
+                    }
+
+                    fixed (Entity* entitiesPtr = result)
+                        DispatchAdded(reg.Added, entitiesPtr, valuesPtr, count);
+                }
+                finally
+                {
+                    if (pooled.Length > 0)
+                        System.Buffers.ArrayPool<byte>.Shared.Return(pooled);
+                }
             }
         }
 
@@ -576,7 +620,7 @@ namespace EntJoy.ECS
                         try
                         {
                             if (_observers!.TryGetValue(typeId, out var reg) && reg.Removed.Count > 0)
-                                Dispatch(reg.Removed, o => o.DispatchRemoved(entity, (void*)snapshotPtr));
+                                DispatchRemoved(reg.Removed, &entity, (void*)snapshotPtr, 1);
                         }
                         finally
                         {
@@ -893,13 +937,13 @@ namespace EntJoy.ECS
                 targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
                 structuralVersion++;
 
-                // Observer：Added（迁移完成后派发，回调内实体可查、新组件已存在）
+                // Observer：Added（迁移完成后派发，回调内实体可查、新组件已存在；count=1）
                 if (_observerCount > 0 && _observers != null &&
                     _observers.TryGetValue(compType.Id, out var reg) && reg.Added.Count > 0)
                 {
                     int compIdx = targetArch.GetComponentTypeIndex(compType);
                     void* valPtr = (void*)(targetArch.ChunkList[chunkIndex].GetComponentArrayPointer(compIdx) + slotInChunk * compType.Size);
-                    Dispatch(reg.Added, o => o.DispatchAdded(entity, valPtr));
+                    DispatchAdded(reg.Added, &entity, valPtr, 1);
                 }
             }
         }
@@ -979,14 +1023,14 @@ namespace EntJoy.ECS
                 targetArch.ChunkList[chunkIndex].MarkEntityChanged(slotInChunk);
                 structuralVersion++;
 
-                // Observer：Removed 派发（迁移完成后，回调内实体在目标 archetype 可查）
+                // Observer：Removed 派发（迁移完成后，回调内实体在目标 archetype 可查；count=1）
                 if (oldValueSnapshot != null)
                 {
                     try
                     {
                         var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
                         if (_observers!.TryGetValue(compTypeForObs.Id, out var reg) && reg.Removed.Count > 0)
-                            Dispatch(reg.Removed, o => o.DispatchRemoved(entity, oldValueSnapshot));
+                            DispatchRemoved(reg.Removed, &entity, oldValueSnapshot, 1);
                     }
                     finally
                     {
@@ -1034,7 +1078,7 @@ namespace EntJoy.ECS
                 var arch = entityInfoRef.Archetype;
                 arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
 
-                // Observer：Set（写入后派发，NewValue 用写入值；v1 不提供 OldValue）
+                // Observer：Set（写入后派发，NewValue 用写入值；v1 不提供 OldValue；count=1）
                 if (_observerCount > 0 && _observers != null)
                 {
                     var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
@@ -1043,7 +1087,8 @@ namespace EntJoy.ECS
                         var valueHandle = GCHandle.Alloc(value, GCHandleType.Pinned);
                         try
                         {
-                            Dispatch(reg.Set, o => o.DispatchSet(entity, (void*)valueHandle.AddrOfPinnedObject()));
+                            // Set 桶复用 DispatchAdded（新值语义）
+                            DispatchAdded(reg.Set, &entity, (void*)valueHandle.AddrOfPinnedObject(), 1);
                         }
                         finally
                         {

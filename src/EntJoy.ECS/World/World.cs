@@ -1,4 +1,4 @@
-﻿using EntJoy.Collections;
+using EntJoy.Collections;
 using EntJoy.JobSystem;
 using System;
 using System.Collections.Generic;
@@ -158,8 +158,11 @@ namespace EntJoy.ECS
 
         // ─── Observer 门面（注册表在 EntityManager，见 EntityManager.Observer.cs） ───
 
-        /// <summary>注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。</summary>
-        public ObserverHandle AddObserver<TComponent>(ObserverEvents events, Action<ComponentEvent<TComponent>> callback)
+        /// <summary>
+        /// 注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。
+        /// 批量签名：一次回调拿整批实体 + 组件值（零拷贝 span）；同一结构变更调用内自动合并。
+        /// </summary>
+        public ObserverHandle AddObserver<TComponent>(ObserverEvents events, ObserverCallback<TComponent> callback)
             where TComponent : unmanaged
             => _entityManager.AddObserver(events, callback);
 
