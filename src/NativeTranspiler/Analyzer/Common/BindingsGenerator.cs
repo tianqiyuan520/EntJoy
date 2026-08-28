@@ -209,7 +209,10 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
                     var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
-                    if (!isIspc2)
+                    // EntityBatch 指针仅对无 shared 的 C++ job 声明（shared 时 adapter 不生成，
+                    // 与初始化/调度分流一致）
+                    bool hasShared2 = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    if (!isIspc2 && !hasShared2)
                         sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkEntityBatchFuncPtr;");
                 }
                 var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
@@ -395,7 +398,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
                     var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
-                    if (!isIspc2)
+                    // 与声明/初始化一致：shared job 无 EntityBatch adapter，不生成 extern
+                    bool hasShared2 = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    if (!isIspc2 && !hasShared2)
                     {
                         sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{entityBatchGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
                         sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkEntityBatchAdapterPtr();");
@@ -545,7 +550,11 @@ namespace NativeTranspiler.Analyzer
                 {
                     var attrSym3 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc3 = attrSym3 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym3) == NativeTranspiler.BackendTarget.Ispc;
-                    if (isIspc3)
+                    // ISPC 走 ChunkRange；AutoSIMD 和普通 C++ 走 EntityBatch（AutoSIMD adapter 已支持
+                    // SimdControlFlowGenerator 真 SIMD，不再需要回退 ChunkRange）。
+                    // 有 shared 组件时 EntityBatchAdapter 不存在（shared 值 per-chunk），走 ChunkRange 回退。
+                    bool hasShared3 = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    if (isIspc3 || hasShared3)
                     {
                         scheduleMethod = "ScheduleChunkRangeRaw";
                         funcPtrName = $"s_{jobStruct.Name}_ChunkRangeFuncPtr";
@@ -642,12 +651,19 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    string capFuncPtr = CppJobGenerator.IsEntityJob(jobStruct)
-                        ? $"s_{jobStruct.Name}_ChunkRangeFuncPtr"
+                    // AutoSIMD/普通 C++：无 shared → EntityBatch；有 shared → ChunkRaw 回退
+                    // （与 ISPC chunk 分支一致用 ChunkFuncPtr + ScheduleChunkRawWithWorkerCap*，
+                    //   EntityBatch 指针在 shared 时不生成，避免传 IntPtr.Zero）
+                    bool hasSharedCap = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
+                    bool isEntityJobCap = CppJobGenerator.IsEntityJob(jobStruct);
+                    string capFuncPtr = (isEntityJobCap || hasSharedCap)
+                        ? (isEntityJobCap ? $"s_{jobStruct.Name}_ChunkRangeFuncPtr" : $"s_{jobStruct.Name}_ChunkFuncPtr")
                         : $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr";
-                    string capMethod = CppJobGenerator.IsEntityJob(jobStruct)
+                    string capMethod = isEntityJobCap
                         ? "ScheduleEntityRangeRawWithWorkerCapAndRangeSize"
-                        : "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
+                        : hasSharedCap
+                            ? "ScheduleChunkRawWithWorkerCapAndRangeSize"
+                            : "ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize";
 
                     sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap_{jobStruct.Name}(ref {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default, World world = null)");
                     sb.AppendLine("        {");
