@@ -429,7 +429,9 @@ namespace NativeTranspiler.Analyzer
                 if (invocation.ArgumentList?.Arguments.Count == 1)
                 {
                     var typeInfo = _semanticModel.GetTypeInfo(bareName);
-                    if (typeInfo.Type is INamedTypeSymbol evtType && evtType.IsUnmanagedType)
+                    // 用 NativeTranspileValidator.IsUnmanagedType（递归实现）：Roslyn 原生
+                    // IsUnmanagedType 对嵌套 struct 可能返回 false（VS/MSBuild 下尤其不稳）
+                    if (typeInfo.Type is INamedTypeSymbol evtType && NativeTranspileValidator.IsUnmanagedType(evtType))
                         return GenerateSendEventCpp(invocation, evtType, typeInfo.Type.ToDisplayString());
                 }
             }
@@ -442,9 +444,9 @@ namespace NativeTranspiler.Analyzer
             {
                 var typeArg = genericName.TypeArgumentList.Arguments[0];
                 var typeInfo = _semanticModel.GetTypeInfo(typeArg);
-                if (typeInfo.Type is INamedTypeSymbol evtType && evtType.IsUnmanagedType)
+                if (typeInfo.Type is INamedTypeSymbol evtType && NativeTranspileValidator.IsUnmanagedType(evtType))
                     return GenerateSendEventCpp(invocation, evtType, typeInfo.Type.ToDisplayString());
-                if (typeInfo.Type is INamedTypeSymbol managedEvtType && !managedEvtType.IsUnmanagedType)
+                if (typeInfo.Type is INamedTypeSymbol managedEvtType && !NativeTranspileValidator.IsUnmanagedType(managedEvtType))
                 {
                     ManagedEventErrors.Add((managedEvtType, invocation));
                     return false;
@@ -457,9 +459,9 @@ namespace NativeTranspiler.Analyzer
                 && method.Name == Config.SendEvent && method.IsGenericMethod)
             {
                 var eventType = method.TypeArguments[0] as INamedTypeSymbol;
-                if (eventType != null && eventType.IsUnmanagedType)
+                if (eventType != null && NativeTranspileValidator.IsUnmanagedType(eventType))
                     return GenerateSendEventCpp(invocation, eventType, eventType.ToDisplayString());
-                if (eventType != null && !eventType.IsUnmanagedType)
+                if (eventType != null && !NativeTranspileValidator.IsUnmanagedType(eventType))
                 {
                     ManagedEventErrors.Add((eventType, invocation));
                     return false;

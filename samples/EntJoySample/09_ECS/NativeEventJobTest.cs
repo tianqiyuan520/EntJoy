@@ -1,8 +1,7 @@
-using System;
+﻿using System;
 using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using EntJoy.Collections;
-using NativeTranspiler;
 using static EntJoy.ECS.EventBus;
 
 namespace EntJoySample.ECS
@@ -34,7 +33,7 @@ namespace EntJoySample.ECS
         ///   0 &lt; Health &lt; 50 → DamageSignal
         /// 验证多事件类型分别写入独立的 EventBuffer。
         /// </summary>
-        [NativeTranspile(Target = BackendTarget.Cpp)]
+        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
         public struct NativeDeathDetectJob : IJobChunk
         {
             public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)

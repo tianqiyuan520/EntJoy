@@ -4,6 +4,13 @@
 > C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain）——详见 `docs/20260827-EventChannel实现记录.md`。
 > 事件总线（S18）完成并移入 Phase 4；One-Frame Component（S19）废弃，由 Event Channel 替代。
 >
+> 2026-08-27 增量 2：**ISPC 后端 SendEvent 支持** —— NativeTranspile ISPC Job 内 SendEvent
+> （SIMD foreach_tiled + fetch-add 原子槽分配 + AoS 布局写）+ **AutoSIMD=Enabled fallback 支持 SendEvent** +
+> **C#→ISPC 原子返回值语义修复**（fetch-add 补回增量 = C# add-fetch 新值）——详见 `docs/20260827-ISpcEvent-实现记录.md`。
+>
+> 2026-08-27 增量 3：**Lambda 易用路径已移除**（用户明确不需要），Observer（S8）为 Phase 4 核心待办、
+> AutoSIMD P2 循环展开已跳过（Clang/MSVC `-funroll-loops` 已自动处理）。
+
 > 2026-08-25 增量：Change Tracking 核心实现、EnabledComponent 过滤优化、Run 直执/ImmediateNative、
 > SourceGenerator 统一（IJobEntity/IJobChunk）——详见 `docs/20260825-ChangeTracking与Enabled优化记录.md`。
 
@@ -31,7 +38,7 @@ Phase 3 (Selective Wait)   ✅ 基础完成
   └─ Batch CreateEntities   ✅ — 100 万实体 = 69.5 ms
   └─ DeferredCommandBuffer  ✅ — 基础框架
 
-Phase 4 (System 调度与开发体验增强) ✅ 进行中
+Phase 4 (System 调度与开发体验增强) ✅ 进行中（Observer 为下一个核心待办）
   └─ QueryEnumerator       ✅ — foreach 遍历已实现
   └─ Schedule Graph        ✅ — DAG 拓扑排序 + PrintSchedule 输出
   └─ OrderBefore/OrderAfter ✅ — 手动指定 System 执行顺序
@@ -43,6 +50,7 @@ Phase 4 (System 调度与开发体验增强) ✅ 进行中
   └─ EnabledComponent 过滤   ✅ — 链式 `Query<T0>().WithEnabled<T1>()`，SIMD 位图 + enableVersion 缓存
   └─ Run 直执 / ImmediateNative ✅ — ECS 侧直接执行；Native 版 Run 零 worker 唤醒（2026-08-25）
   └─ Event Channel         ✅ — 双缓冲事件流 + Managed/Native SendEvent（2026-08-27，详见 docs/20260827-EventChannel实现记录.md）
+  └─ ISPC SendEvent        ✅ — ISPC 后端 SendEvent + AutoSIMD fallback 支持 + C#→ISPC 原子语义修复（2026-08-27，详见 docs/20260827-ISpcEvent-实现记录.md）
 
 Phase 5 (易用性)            🔲 未开始
   └─ 关系型状态机
@@ -74,11 +82,11 @@ Phase 9 (托管类型)          🔲 未开始
   └─ 内存分析器
   └─ 性能分析器
 
-AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
+AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最终 48/50+
 ```
     │  Phase 2：遗留     │  │  AutoSIMD 修复 ✅    │  │  Phase 5：易用性  │
     │  + Shared Comp    │  │  E1-E11 已完成      │  │  Events/Group    │
-    │  1-2 周           │  │  36/50 通过          │  │  2-3 周           │
+    │  1-2 周           │  │  EdgeCase 基本完成   │  │  2-3 周           │
     └─────────┬─────────┘  └──────────┬──────────┘  └─────────┬─────────┘
               │                        │                        │
               └────────────────────────┼────────────────────────┘
@@ -98,10 +106,10 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 
 | # | 项 | 所属 Phase | 预估工时 | 依赖 | 说明 |
 |---|---|-----------|---------|------|------|
-| **S0** | **Chunk struct 化** | Phase 1 遗留 | 3-5 天 | ChunkMemoryPool ✅ | 元数据连续化（`List<Chunk>` → `NativeList<Chunk>`），消除对象头/GC 根/双跳转；300×40B=12KB 进 L1；Phase 3/4 的遍历基础设施 |
-| **S1** | **Per-Archetype Job Tracking** | Phase 3 | 2-3 天 | 无 | TrackEntityJob 传入 matchingArchetypes，为 Selective Wait 提供数据基础 |
-| **S2** | **Selective Wait** | Phase 3 | 3-5 天 | S1 | CompleteArchetypeJobs(affectedArchetypes)，Set\<A\> 不再等 B |
-| **S3** | **DeferredCommandBuffer** | Phase 3 | 5-7 天 | S2 | Job 内结构变更写 staging，帧末 Playback |
+| **S0** | **Chunk struct 化** | Phase 1 遗留 | ✅ 已完成 | ChunkMemoryPool ✅ | 元数据连续化（`List<Chunk>` → `NativeList<Chunk>`），消除对象头/GC 根/双跳转 |
+| **S1** | **Per-Archetype Job Tracking** | Phase 3 | ✅ 已完成 | — | TrackEntityJob 传入 matchingArchetypes |
+| **S2** | **Selective Wait** | Phase 3 | ✅ 已完成 | S1 | CompleteArchetypeJobs(affectedArchetypes) |
+| **S3** | **DeferredCommandBuffer** | Phase 3 | ✅ 已完成 | S2 | Job 内结构变更写 staging，帧末 Playback |
 | **S4** | **AutoSIMD E1 修复** | AutoSIMD | 3-5 天 | 无 | ✅ 已完成（SemanticModel 类型回退 + float store cast） |
 | **S5** | **AutoSIMD E9 修复** | AutoSIMD | 1 周 | 无 | ✅ 已用 for 覆盖 |
 
@@ -110,15 +118,15 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 | # | 项 | 所属 Phase | 预估工时 | 依赖 | 说明 |
 |---|---|-----------|---------|------|------|
 | **S6** | QueryEnumerator 实现 | Phase 4 | 3-5 天 | S3 | ✅ 已完成 |
-| **S7-new** | **Schedule Graph** — System 自动并行 | Phase 4 | 1-2 周 | 无 | 注册 System + 声明读写，框架自动 DAG 并行。参考 Bevy Schedule |
-| **S8-new** | **Observer** — 组件变化触发 | Phase 4 | 1 周 | 无 | push-based 回调，替代 poll-based 遍历。参考 Flecs Observer |
-| **S9-new** | **One-Frame Component** — 帧事件 | Phase 4 | 3-5 天 | 无 | 帧末自动清理，多 System 消费。参考 LeoECS |
+| **S7-new** | **Schedule Graph** — System 自动并行 | Phase 4 | 1-2 周 | 无 | ✅ 已完成 — DAG 拓扑排序 + `[Read]`/`[Write]`/`[Order]` 属性 + `PrintSchedule` |
+| **S7b** | **ISPC SendEvent** | Phase 4 | ✅ 已完成（2026-08-27） | — | ISPC 后端 SIMD + fetch-add 原子事件写入 + AutoSIMD fallback + C#→ISPC 原子语义修复（详见 `docs/20260827-ISpcEvent-实现记录.md`） |
+| **S8-new** | **Observer** — 组件变化触发 | Phase 4 | 1 周 | 无 | 🔲 Phase 4 待办。**Push-based**回调（区别于 Change Tracking 的 pull-based）。组件增/删/改时自动触发注册回调，无需每帧轮询。跨 System 解耦联动。参考 Flecs Observer |
+| **S9-new** | **One-Frame Component** — 帧事件 | Phase 4 | 3-5 天 | 无 | ❌ 已废弃：由 Event Channel（S18）替代 |
 | **S10** | AutoSIMD E7 修复 | AutoSIMD | 1 周 | 无 | ✅ 已完成（returnedMask + post_mask + int→float cast） |
 | **S11** | AutoSIMD E5 修复 | AutoSIMD | 3-5 天 | 无 | ✅ 已完成（NativeTranspiled 移除 /fp:fast） |
 | **S12** | Batch Structural Changes | Phase 3 | 3-5 天 | S3 | ✅ 已完成 |
-| **S13** | Auto-Defer | Phase 3 | 3-5 天 | S3 | 检测 Job 执行上下文自动 defer |
+| **S13** | Auto-Defer | Phase 3 | ✅ 已完成 | S3 | 检测 Job 执行上下文自动 defer |
 | **S14** | Archetype Edges | Phase 2 | 3-5 天 | 无 | ✅ 已完成 |
-| **S15** | Lambda 易用路径 | Phase 4 | 3-5 天 | S7-new | SourceGenerator 展开为 struct loop |
 
 ~~S7 (SystemBase)~~、~~S8 (Processor)~~、~~S9 (SystemGraph)~~ — 已砍掉，与 IJobEntity 重复，合并到 S7-new (Schedule Graph)。
 
@@ -132,7 +140,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复（36/50 通过）
 | **S18** | World Events | Phase 4 | ✅ 已完成（2026-08-27） | — | Event Channel：双缓冲 EventStream + Managed/Native SendEvent，详见 20260827-EventChannel实现记录.md |
 | ~~S19~~ | ~~One-Frame Components~~ | ~~Phase 5~~ | ❌ 废弃 | — | 由 Event Channel 替代（零结构变更，非每帧 add/remove 组件） |
 | **S20** | Entity Index / Group | Phase 5 | 5-7 天 | S7 | delta 更新，O(1) 索引查询 |
-| **S21** | AutoSIMD P2 循环展开 | AutoSIMD | 1-2 周 | — | 预期 5-10% 性能提升 |
+| **S21** | ~~AutoSIMD P2 循环展开~~ | ~~AutoSIMD~~ | 已跳过 | — | 🔲 已跳过：常量界小循环（≤64次）已由 SimdLoopGenerator 全展开；非常量界中等循环 Clang/MSVC `-funroll-loops` 已自动处理，手动额外半展开收益不确定且增加生成代码体积 |
 | **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |
 | **S23** | Relation SoA 编码 | Phase 6 | 1 周 | S7 | 含 target version/epoch 防 ID 回收 |
 | **S24** | 级联删除 + target index | Phase 6 | 1 周 | S23 | 索引加速 |
@@ -230,21 +238,20 @@ Phase 3 (选择性等待) ✅
   ├─ Batch Structural Changes ✅
   └─ Auto-Defer (S13) ◄── 未完成
        │
-Phase 4 (System 调度与能力增强) ◄── 重设计 2026-08
+Phase 4 (System 调度与能力增强) ◄── 进行中（Observer 为下一个核心待办）
   ├─ QueryEnumerator (S6) ✅
-  ├─ Schedule Graph (S7-new) ◄── 自动并行，参考 Bevy Schedule
-  ├─ Observer (S8-new) ◄── 组件变化触发，参考 Flecs Observer
-  ├─ One-Frame Component (S9-new) ◄── 帧事件，参考 LeoECS
-  └─ Lambda 易用路径 (S15) ◄── SourceGenerator 展开
+  ├─ Schedule Graph (S7-new) ✅ — 自动并行，参考 Bevy Schedule
+   ├─ Observer (S8-new) ◄── 🔲 下一个核心待办：组件变化触发，参考 Flecs Observer
+   ├─ One-Frame Component (S9-new) ❌ — 已废弃：由 Event Channel（S18）替代
+
        │
        ├──────────────────┬──────────────────┐
        │                  │                  │
 Phase 2 (存储增强)    AutoSIMD 修复      Phase 5 (易用性)
-  ├─ Archetype Edges ✅  ├─ E1 (S4)        ├─ Events (S18)
-  ├─ Shared Comp (S16)   ├─ E9 (S5)        ├─ OneFrame (S19) ← 已合并到 Phase 4 S9-new
-  └─ Chunk lazy zero     ├─ E7 (S10)       ├─ Group (S20)
-                         └─ E5 (S11)       ├─ Context (S28)
-                                           └─ DI (S29)
+   ├─ Archetype Edges ✅     ├─ E1 (S4)             ├─ Events (S18)
+   ├─ Shared Comp (S16)      ├─ E9 (S5)             └─ Group (S20)
+   └─ Chunk lazy zero        ├─ E7 (S10)          ├─ Context (S28)
+                            └─ E5 (S11)          └─ DI (S29)
        │
 Phase 6 (关系) → Phase 7 (共享组件) → Phase 8 (生成器)
        │
@@ -339,8 +346,6 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 | S6 | QueryEnumerator | ✅ 已完成 | — |
 | S7-new | Schedule Graph（自动并行） | 1-2 周 | 1-2 周 |
 | S8-new | Observer（变化触发） | 1 周 | 2-3 周 |
-| S9-new | One-Frame Component | 3-5 天 | ~3-4 周 |
-| S15 | Lambda 易用路径 | 3-5 天 | ~4-5 周 |
 | S4-S5, S10-S11 | AutoSIMD 关键修复 | 2-3 周 | 并行 |
 | S16 + S16b | Shared Component：per-chunk 存储 + NativeTranspiler blittable 支持 | S16 3-5 天 + S16b 3-5 天 | ~5-7 周 |
 | S17 | Chunk lazy zero | ✅ 已完成（已验证） | — |
@@ -449,9 +454,9 @@ Chunk 内存布局（推荐方案）：
 | **S10-new** | **变更追踪** — ChangedThisFrame | 高性能刚需 | ⭐⭐⭐⭐ | 3-5 天 |
 | **S11-new** | **空闲跳过** — RunWhen | 简单有效 | ⭐⭐⭐ | 1-2 天 |
 
-**砍掉的**：Processor（与 IJobEntity 重复）、SystemBase（ISystem 已有）、Lambda 易用路径（QueryEnumerable foreach 已够用）
+**砍掉的**：Processor（与 IJobEntity 重复）、SystemBase（ISystem 已有）
 
-**推迟的**：Observer（Phase 5 World Events 替代）、One-Frame Component（Phase 5）、System 依赖声明（Schedule Graph 自动冲突分析覆盖大部分场景）
+**推迟的**：Observer（push-based 回调，与 Change Tracking pull-based 互补，详见 §八 Phase 4 推荐方案）、One-Frame Component（Event Channel S18 替代，已废弃）、System 依赖声明（Schedule Graph 自动冲突分析覆盖大部分场景）
 
 ---
 

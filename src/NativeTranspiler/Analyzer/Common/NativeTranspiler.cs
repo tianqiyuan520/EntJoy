@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using NativeTranspiler.Analyzer.Common;
@@ -118,7 +119,17 @@ namespace NativeTranspiler.Analyzer
             };
             if (mapped != null) return mapped;
 
-            return string.IsNullOrEmpty(ns) ? type.Name : $"{ns.Replace(".", "::")}::{type.Name}";
+            // 嵌套类型（如 NativeEventJobTest.DeathSignal）需要包含外部类作用域
+            // 构建完整 C++ 限定名：EntJoySample::ECS::NativeEventJobTest::DeathSignal
+            var containerParts = new Stack<string>();
+            var containingType = type is INamedTypeSymbol namedType ? namedType.ContainingType : null;
+            while (containingType != null)
+            {
+                containerParts.Push(containingType.Name);
+                containingType = containingType.ContainingType;
+            }
+            var containerScope = containerParts.Count > 0 ? $"{string.Join("::", containerParts)}::" : "";
+            return string.IsNullOrEmpty(ns) ? $"{containerScope}{type.Name}" : $"{ns.Replace(".", "::")}::{containerScope}{type.Name}";
         }
 
         private static string GetNamespace(ITypeSymbol type)
@@ -245,6 +256,18 @@ namespace NativeTranspiler.Analyzer
             bool hasNs = !string.IsNullOrEmpty(ns) && ns != "<global namespace>";
             if (hasNs)
                 sb.AppendLine($"namespace {ns.Replace(".", "::")} {{");
+
+            // 嵌套类型需要额外的外层类作用域 namespace（如 NativeEventJobTest）
+            var containerParts = new Stack<string>();
+            var containingType = structSymbol.ContainingType;
+            while (containingType != null)
+            {
+                containerParts.Push(containingType.Name);
+                containingType = containingType.ContainingType;
+            }
+            foreach (var part in containerParts)
+                sb.AppendLine($"namespace {part} {{");
+
             sb.AppendLine($"struct {structSymbol.Name} {{");
             foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>()
                 .Where(f => !f.IsStatic))
@@ -255,6 +278,10 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("};");
             // static_assert 确保 C++ 布局与 C# 计算大小一致
             sb.AppendLine($"static_assert(sizeof({structSymbol.Name}) == {totalSize}, \"Size mismatch for {structSymbol.Name}: check struct layout\");");
+
+            // 关闭嵌套类 namespace
+            foreach (var part in containerParts)
+                sb.AppendLine("}");
             if (hasNs)
                 sb.AppendLine("}");
             return sb.ToString();

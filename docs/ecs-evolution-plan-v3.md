@@ -1033,11 +1033,12 @@ Phase 2: Archetype Edges ✅
 Phase 3: Selective Wait + ECB + Batch Operations ✅
 Phase 4: System 调度与能力增强（重设计 2026-08）
   ├─ QueryEnumerator ✅
-  ├─ Schedule Graph（自动并行）
-  ├─ Observer（变化触发）
-  ├─ One-Frame Component（帧事件）
-  └─ Lambda 易用路径
+  ├─ Schedule Graph（自动并行）✅
+  ├─ Observer（变化触发）🔲 — push-based 回调，与 Change Tracking pull-based 互补
+  └─ ~~One-Frame Component（帧事件）~~❌ — 由 Event Channel（S18）替代
 ```
+
+> Lambda 易用路径已移除（用户明确不需要）：QueryEnumerable foreach 已够用。
 
 该里程碑完成后，应能用 `IJobChunk` / `World.Update()` 跑通基础 ECS 流程，系统自动并行，组件变化可触发回调。
 

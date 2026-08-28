@@ -116,7 +116,11 @@ namespace NativeTranspiler.Analyzer
                         break;
 
                     case ObjectCreationExpressionSyntax objCreation:
-                        var createdType = semanticModel.GetTypeInfo(objCreation.Type).Type;
+                        // GetTypeInfo(objCreation) 优先：VS/MSBuild 的 Roslyn 对嵌套类型
+                        // （如 NativeEventJobTest.DeathSignal）+ object-initializer 的 .Type
+                        // 解析会返回 null，导致漏检 managed 类型；对整个表达式取类型两种引擎都可靠。
+                        var createdType = semanticModel.GetTypeInfo(objCreation).Type
+                                       ?? semanticModel.GetTypeInfo(objCreation.Type).Type;
                         if (createdType != null && !IsUnmanagedType(createdType))
                             diagnostics.Add(Diagnostic.Create(ManagedObjectCreationError, objCreation.GetLocation(), method.Name, createdType.ToDisplayString()));
                         break;
@@ -221,7 +225,9 @@ namespace NativeTranspiler.Analyzer
                             break;
 
                         case ObjectCreationExpressionSyntax objCreation:
-                            var createdType = semanticModel.GetTypeInfo(objCreation.Type).Type;
+                            // GetTypeInfo(objCreation) 优先（同 ValidateMethod 的注释）
+                            var createdType = semanticModel.GetTypeInfo(objCreation).Type
+                                           ?? semanticModel.GetTypeInfo(objCreation.Type).Type;
                             if (createdType != null && !IsUnmanagedType(createdType))
                                 diagnostics.Add(Diagnostic.Create(ManagedObjectCreationError, objCreation.GetLocation(), executeMethod.Name, createdType.ToDisplayString()));
                             break;

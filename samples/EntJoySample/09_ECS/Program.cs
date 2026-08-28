@@ -1,4 +1,4 @@
-using EntJoy.JobSystem;
+﻿using EntJoy.JobSystem;
 
 namespace EntJoySample.ECS
 {
@@ -28,6 +28,9 @@ namespace EntJoySample.ECS
 
                 // Native Event Job 测试（NativeTranspile SendEvent）
                 NativeEventJobTest.Run();
+
+                // ISPC Event Job 测试（NativeTranspile ISPC SendEvent）
+                ISpcEventJobTest.Run();
 
                 // Change Tracking 测试
                 //ChangeTrackingDemo.Run();

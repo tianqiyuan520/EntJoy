@@ -350,6 +350,16 @@ namespace EntJoy.ECS.JobSystem
             if (funcPtr == IntPtr.Zero)
                 throw new ArgumentException("Native chunk range raw scheduling requires a function pointer.", nameof(funcPtr));
 
+            // 多 World 支持：绑定本次调度的 World（drain 写回正确 EventStream）
+            world ??= World.DefaultWorld;
+
+            // ─── Event Buffer: 按需分配（ISPC IJobChunk SendEvent 路径） ───
+            Type evtJobType = typeof(T);
+            List<EventBufferHeader>? evtHeaders = null;
+            List<IDisposable>? evtDisposables = null;
+            if (EventMetaCache.TryGetValue(evtJobType, out var evtMeta) && evtMeta.Count > 0)
+                (evtHeaders, evtDisposables) = AllocateEventBuffers(evtJobType);
+
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
             var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
@@ -357,7 +367,9 @@ namespace EntJoy.ECS.JobSystem
                 TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
                 rawCache.ChunkCount > 0)
             {
-                var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
+                var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease, eventBufferHeaders: evtHeaders, world: world);
+                if (evtHeaders != null) StoreLiveEventBuffers(rawContextBlock, evtHeaders, evtDisposables,
+                    EventMetaCache.TryGetValue(evtJobType, out var rawMeta) ? rawMeta.EventTypes : null);
                 try
                 {
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
@@ -378,7 +390,9 @@ namespace EntJoy.ECS.JobSystem
 
             FillChunkJobDataList(chunksPtr, chunkList, requiredComponentTypeIds, gcHandles: null);
 
-            var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
+            var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds, eventBufferHeaders: evtHeaders, world: world);
+            if (evtHeaders != null) StoreLiveEventBuffers(contextBlock, evtHeaders, evtDisposables,
+                EventMetaCache.TryGetValue(evtJobType, out var fbMeta) ? fbMeta.EventTypes : null);
             try
             {
                 using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);

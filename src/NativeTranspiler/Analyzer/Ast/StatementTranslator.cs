@@ -760,8 +760,10 @@ namespace NativeTranspiler.Analyzer
 
         protected virtual void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)
         {
-            var typeInfo = _semanticModel.GetTypeInfo(objectCreation.Type);
-            var type = typeInfo.Type;
+            // GetTypeInfo(objCreation) 优先：VS/MSBuild 的 Roslyn 对嵌套类型 + object-initializer
+            // 的 .Type 会返回 null，导致 fallback 输出无命名空间的 C++ 名；整个表达式两种引擎都可靠。
+            var typeInfo = _semanticModel.GetTypeInfo(objectCreation);
+            var type = typeInfo.Type ?? _semanticModel.GetTypeInfo(objectCreation.Type).Type;
             string cppType;
 
             if (type != null)
