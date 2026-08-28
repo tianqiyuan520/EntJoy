@@ -17,6 +17,9 @@ namespace EntJoy.ECS
     ///   // ... Job 完成后 ...
     ///   ecb.Playback(world.EntityManager);
     ///   ecb.Dispose();
+    ///
+    /// Observer 集成：Playback 内部调用 EntityManager 主入口（NewEntity/DestroyEntity/AddComponentRaw/
+    /// RemoveComponentRaw），主线程结构变更入口统一挂 observer 派发 → ECB Playback 天然触发事件，无需额外扩展。
     /// </summary>
     public unsafe class DeferredCommandBuffer : IDisposable
     {
