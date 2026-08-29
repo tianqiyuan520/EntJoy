@@ -1,4 +1,4 @@
-using EntJoy.JobSystem;
+﻿using EntJoy.JobSystem;
 
 namespace EntJoySample.ECS
 {
@@ -17,7 +17,7 @@ namespace EntJoySample.ECS
                 //ObserverDemo.Run();
 
                 // Shared Component per-chunk 存储测试（分组/Set/查询过滤/流式 API/变更追踪）
-                SharedComponentDemo.Run();
+                //SharedComponentDemo.Run();
 
                 // Event Channel 测试
                 //EventChannelDemo.Run();
@@ -52,17 +52,26 @@ namespace EntJoySample.ECS
                 // N 元组查询示例：world.Query<T0, T1, T2>()（SourceGenerator 生成）
                 //QueryTupleDemo.Run();
 
-                // 关系基准：Add/Get/Has/WithRelationship 性能基线
-                RelationBenchmark.Run();
+                //关系基准：Add/Get/ Has / WithRelationship 性能基线
+                //RelationBenchmark.Run();
 
                 // IJobEntity 访问关系列验证（步长一致性）
-                RelationBenchmark.VerifyIJobEntityRelationAccess();
+                //RelationBenchmark.VerifyIJobEntityRelationAccess();
 
                 // IJobChunk 访问关系列验证（步长一致性）
-                RelationBenchmark.VerifyIJobChunkRelationAccess();
+                //RelationBenchmark.VerifyIJobChunkRelationAccess();
 
                 // NativeTranspiler 关系访问验证（[NativeTranspile] IJobChunk/IJobEntity）
-                RelationNativeJobTest.Run();
+                //RelationNativeJobTest.Run();
+
+                // [ECSComponent] 标记组件示例（不写 : IComponentData，源生成器自动补齐接口）
+                //ECSComponentDemo.Run();
+
+                // System 注册生成示例（SystemRegistry.RegisterAll 一行注册本程序集所有 ISystem）
+                //SystemRegistrationDemo.Run();
+
+                // Reactive 处理器示例（[Reactive] 自动注册 Observer，组件事件 push 回调）
+                ReactiveDemo.Run();
             }
             catch (Exception ex)
             {

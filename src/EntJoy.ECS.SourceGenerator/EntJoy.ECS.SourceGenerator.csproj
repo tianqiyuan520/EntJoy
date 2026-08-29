@@ -16,6 +16,9 @@
 	  <!-- Package the generator in the analyzer directory of the nuget package -->
 	  <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
 
+    <!-- 诊断规则发布跟踪（消除 RS2008） -->
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
   </ItemGroup>
 
 

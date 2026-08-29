@@ -15,5 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />
     <ProjectReference Include="..\EntJoy.Jobs\EntJoy.Jobs.csproj" />
+    <!-- 源生成器以 Analyzer 引用，使引用 EntJoy.ECS 的用户自动获得生成能力 -->
+    <ProjectReference Include="..\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>

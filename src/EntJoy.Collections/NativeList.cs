@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.Collections
@@ -51,9 +51,12 @@ namespace EntJoy.Collections
             [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
             get
             {
+                // 句柄检查在 SafetyHandleManager 方法体内按 ENTJOY_SAFETY 裁剪
                 SafetyHandleManager.CheckReadAndThrow(_safety);
+#if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
                 if (index < 0 || (uint)index >= (uint)_listData->Length)
                     throw new IndexOutOfRangeException();
+#endif
                 //return _listData->Ptr[index];
                 return UnsafeUtility.ReadArrayElement<T>(_listData->Ptr, index);
             }
@@ -61,8 +64,10 @@ namespace EntJoy.Collections
             set
             {
                 SafetyHandleManager.CheckWriteAndThrow(_safety);
+#if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
                 if (index < 0 || (uint)index >= (uint)_listData->Length)
                     throw new IndexOutOfRangeException();
+#endif
                 //_listData->Ptr[index] = value;
                 UnsafeUtility.WriteArrayElement(_listData->Ptr, index, value);
             }

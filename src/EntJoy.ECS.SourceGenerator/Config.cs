@@ -38,5 +38,26 @@ namespace EntJoy.ECS.SourceGenerator
 
         /// <summary>最小元组数量：2 元组库内已有，生成器只处理 N ≥ 3。</summary>
         public const int MinTupleArity = 3;
+
+        // ─── ECSComponentSourceGenerator（[ECSComponent] 补接口） ───
+
+        /// <summary>ECSComponent 特性类名（语义匹配；用户写 [ECSComponent]，AttributeClass.Name 恒为完整类名）。</summary>
+        public const string ECSComponentAttribute = "ECSComponentAttribute";
+
+        // ─── SystemRegistrationSourceGenerator（自动收集 ISystem） ───
+
+        /// <summary>ISystem 接口名（System 自动收集的语义匹配目标）。</summary>
+        public const string ISystem = "ISystem";
+
+        /// <summary>DisableAutoCreation 特性类名（带此特性的 System 跳过自动收集）。</summary>
+        public const string DisableAutoCreation = "DisableAutoCreationAttribute";
+
+        // ─── ReactiveSystemSourceGenerator（[Reactive] Observer 订阅） ───
+
+        /// <summary>Reactive 特性类名（语义匹配）。</summary>
+        public const string ReactiveAttribute = "ReactiveAttribute";
+
+        /// <summary>ReadOnlySpan 类型名（Execute 参数推导组件类型的载体）。</summary>
+        public const string ReadOnlySpan = "ReadOnlySpan";
     }
 }

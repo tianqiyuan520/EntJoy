@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.Collections
@@ -27,8 +27,9 @@ namespace EntJoy.Collections
             {
                 unchecked
                 {
-#if ENTJOY_SAFETY
+                    // 句柄检查在 SafetyHandleManager 方法体内按 ENTJOY_SAFETY 裁剪
                     SafetyHandleManager.CheckReadAndThrow(_safety);
+#if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
                     if (index < 0 || index >= _length)
                         throw new IndexOutOfRangeException();
 #endif
@@ -40,8 +41,8 @@ namespace EntJoy.Collections
             {
                 unchecked
                 {
-#if ENTJOY_SAFETY
                     SafetyHandleManager.CheckWriteAndThrow(_safety);
+#if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
                     if (index < 0 || index >= _length)
                         throw new IndexOutOfRangeException();
 #endif
@@ -244,8 +245,10 @@ namespace EntJoy.Collections
                 get
                 {
                     SafetyHandleManager.CheckReadAndThrow(_safety);
+#if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
                     if ((uint)index >= (uint)_length)
                         throw new IndexOutOfRangeException();
+#endif
                     return ((T*)_bufferRO)[index];
                 }
             }
