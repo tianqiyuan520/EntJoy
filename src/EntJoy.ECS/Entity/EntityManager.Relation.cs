@@ -14,6 +14,16 @@ namespace EntJoy.ECS
     /// </summary>
     public unsafe partial class EntityManager
     {
+        // ======================== P1：遍历 API 分配消除（2026-08-29 后） ========================
+        // 复用容器（实例字段）：消除 GetAncestors/GetDescendants/GetSiblings/GetRelationsOfAll
+        // 每次调用的 List/HashSet 分配。约束：主线程单线程使用、不可重入（遍历中不得再调用
+        // 遍历 API——当前 API 无回调，天然满足）；返回值数组独立 new，调用方可安全持有。
+
+        private readonly List<Entity> _relBufferA = new();   // 结果暂存（GetAncestors/Siblings/RelationsOfAll）
+        private readonly List<Entity> _relBufferB = new();   // BFS frontier
+        private readonly List<Entity> _relBufferC = new();   // BFS next（与 B 交换）
+        private readonly HashSet<int> _relVisited = new();   // 防环（存 Id）
+
         /// <summary>
         /// 建立关系：entity --TRel--> target。
         /// 首次（实体无 TRel 列）触发结构变更（AddComponentRaw）；已有关系直接覆盖（SetRaw，零结构变更）。
@@ -189,14 +199,16 @@ namespace EntJoy.ECS
             return result;
         }
 
-        /// <summary>获取所有指向 target 的关系源（跨所有关系类型）。O(1) 索引查表。</summary>
+        /// <summary>获取所有指向 target 的关系源（跨所有关系类型）。O(1) 索引查表。
+        /// 复用容器（P1）：结果 List 复用，返回值数组独立 new。</summary>
         public Entity[] GetRelationsOfAll(Entity target)
         {
             CheckDisposed();
             if (!_relationIndex.TryGetSources(target.Id, out var byType))
                 return Array.Empty<Entity>();
 
-            var result = new List<Entity>();
+            var result = _relBufferA;
+            result.Clear();
             foreach (var set in byType.Values)
             {
                 foreach (var source in set)
@@ -252,13 +264,17 @@ namespace EntJoy.ECS
         /// 获取 entity 的全部祖先（沿 TRel 链向上）：最近的祖先在前，根在后。
         /// 单实例语义（每实体每关系类型最多 1 target），链式向上；visited 防环（含起始实体）。
         /// 空数组 = entity 无 TRel 关系或无祖先。
+        /// 复用容器（P1）：内部 List/HashSet 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetAncestors<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            var result = new List<Entity>();
-            var visited = new HashSet<int> { entity.Id };  // 含起始实体：环闭合时立即终止
+            var result = _relBufferA;
+            result.Clear();
+            var visited = _relVisited;
+            visited.Clear();
+            visited.Add(entity.Id);  // 含起始实体：环闭合时立即终止
 
             var current = entity;
             while (IsAlive(current))
@@ -275,19 +291,29 @@ namespace EntJoy.ECS
         /// 获取 entity 的全部后代（沿 TRel 链向下，BFS 广度优先）：直接子在前，孙层次随深度。
         /// 走反向索引 O(1) 逐层查 sources，不扫描 chunk；visited 防环（含起始实体）。
         /// 不包含 entity 自身。
+        /// 复用容器（P1）：frontier/next 双缓冲 + visited 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetDescendants<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            var result = new List<Entity>();
-            var visited = new HashSet<int> { entity.Id };  // 含起始实体：环闭合时立即终止
-            var frontier = new List<Entity> { entity };
+            var result = _relBufferA;
+            result.Clear();
+            var visited = _relVisited;
+            visited.Clear();
+            visited.Add(entity.Id);  // 含起始实体：环闭合时立即终止
+
+            var frontier = _relBufferB;
+            frontier.Clear();
+            frontier.Add(entity);
+
+            var relTypeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
 
             while (frontier.Count > 0)
             {
-                var next = new List<Entity>();
-                var relTypeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
+                // 双缓冲交换：next = 非当前 frontier 的缓冲（清空后作为新 frontier 的写入面）
+                var next = frontier == _relBufferB ? _relBufferC : _relBufferB;
+                next.Clear();
                 foreach (var node in frontier)
                 {
                     // 查反向索引：所有 --TRel--> node 的 sources（直接子）
@@ -311,6 +337,7 @@ namespace EntJoy.ECS
         /// <summary>
         /// 获取 entity 的全部兄弟：与 entity 共享同一 TRel target 的其他实体（不含自身）。
         /// entity 无 TRel 关系 → 空数组。
+        /// 复用容器（P1）：结果 List 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetSiblings<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
@@ -325,7 +352,8 @@ namespace EntJoy.ECS
                 !byType.TryGetValue(relTypeId, out var set))
                 return Array.Empty<Entity>();
 
-            var result = new List<Entity>();
+            var result = _relBufferA;
+            result.Clear();
             foreach (var source in set)
             {
                 if (source.Id == entity.Id) continue;    // 排除自身

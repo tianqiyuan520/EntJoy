@@ -1495,20 +1495,20 @@ namespace NativeTranspiler.Analyzer
                     }
                     catch
                     {
-                        // SIMD 生成失败 → 回退 per-lane 标量（simdSb 丢弃，无半截残留）
+                        // SIMD 生成失败 → 回退 per-lane 标量（simdSb 丢弃，无半截残留）。
+                        // 注意：fbBody 是完整 Execute body，**已包含实体循环**（用户代码 for(i<entities.Length)），
+                        // 此处直接输出即可，**不得再包外层 __entity_index 循环**——否则双重循环，
+                        // 每个实体的副作用（如 SendEvent）被执行 entity_count 次
+                        // （2026-08-29 修复：AutoSimdDeathDetectJob Test 5 收到 25=5×5 事件）。
                         var fbTr = new CppChunkStatementTranslator(sm, jobStruct,
                             CollectChunkNativeArrayTypes(jobStruct, compilation),
                             CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
                         string fbBody = fbTr.Translate(methodSyntax.Body);
                         fbBody = fbBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                         fbBody = fbBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                        sb.AppendLine("        int __entity_count = __batchData->entityCount;");
-                        sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-                        sb.AppendLine("        {");
                         foreach (var l in fbBody.Split('\n'))
                             if (!string.IsNullOrWhiteSpace(l))
-                                sb.AppendLine($"            {l.TrimEnd()}");
-                        sb.AppendLine("        }");
+                                sb.AppendLine($"        {l.TrimEnd()}");
                     }
                 }
                 else if (methodSyntax?.Body != null)

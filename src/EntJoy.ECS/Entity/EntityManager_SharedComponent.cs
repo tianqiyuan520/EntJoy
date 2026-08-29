@@ -28,6 +28,15 @@ namespace EntJoy.ECS
         /// <summary>per-type 查找表：typeId → (value → globalIndex)。Dictionary 简洁可靠，值种类通常 &lt;200。</summary>
         private readonly Dictionary<int, Dictionary<object, int>> _managedLookup = new();
 
+        /// <summary>
+        /// per-value 最近使用缓存：shared 值 → 最近一次命中的 chunk 索引（Archetype 内）。
+        /// key = (Archetype, 组件索引, 值)。managed 的值为全局 index（int box）；blittable 为 boxed 值。
+        /// 目的：SetSharedComponent 移动 / NewEntity 带 shared 的高频路径避免 O(chunks) 全量扫描。
+        /// 失效策略：lazy 验证 —— 命中后验证 chunk 未满且值仍匹配；chunk 被回收（swap-pop）/就地改值
+        /// 导致验证失败时移除条目并回退全扫描。删除路径零维护。
+        /// </summary>
+        private readonly Dictionary<(Archetype, int, object), int> _lastChunkPerSharedValue = new();
+
         /// <summary>查找或添加 managed shared 值（O(1)，去重）。index 只增不减。</summary>
         private int FindOrAddManagedValue(int typeId, object value)
         {
@@ -136,28 +145,67 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>在 Archetype 内查找持有指定 managed index 的未满 chunk；无返回 -1。</summary>
+        /// <summary>在 Archetype 内查找持有指定 managed index 的未满 chunk；无返回 -1。
+        /// 缓存优先（O(1) 期望），lazy 验证失败回退全扫描。</summary>
         private int FindChunkWithManagedValue(Archetype arch, int compIdx, int index)
         {
             var list = arch.ChunkList;
+            var key = (arch, compIdx, (object)index);
+
+            // 缓存命中路径：验证 chunk 仍存在、未满、值匹配。
+            // 越界（chunk 被回收收缩）或验证失败均移除条目，避免残留导致永久失去缓存命中。
+            if (_lastChunkPerSharedValue.TryGetValue(key, out int cached))
+            {
+                if (cached < list.Count)
+                {
+                    var cachedChunk = list[cached];
+                    if (cachedChunk.EntityCount < cachedChunk.Capacity && cachedChunk.GetSharedValueIndex(compIdx) == index)
+                        return cached;
+                }
+                _lastChunkPerSharedValue.Remove(key);
+            }
+
             for (int i = 0; i < list.Count; i++)
             {
                 if (list[i].EntityCount < list[i].Capacity && list[i].GetSharedValueIndex(compIdx) == index)
+                {
+                    _lastChunkPerSharedValue[key] = i;
                     return i;
+                }
             }
             return -1;
         }
 
-        /// <summary>在 Archetype 内查找持有指定 boxed blittable 值的未满 chunk；无返回 -1。</summary>
+        /// <summary>在 Archetype 内查找持有指定 boxed blittable 值的未满 chunk；无返回 -1。
+        /// 缓存优先（O(1) 期望），lazy 验证失败回退全扫描。</summary>
         private int FindChunkWithBlittableBoxed(Archetype arch, int compIdx, object value, Type compType)
         {
             var list = arch.ChunkList;
+            var key = (arch, compIdx, value);
+
+            // 缓存命中路径：验证 chunk 仍存在、未满、值匹配。
+            // 越界（chunk 被回收收缩）或验证失败均移除条目，避免残留导致永久失去缓存命中。
+            if (_lastChunkPerSharedValue.TryGetValue(key, out int cached))
+            {
+                if (cached < list.Count)
+                {
+                    var cachedChunk = list[cached];
+                    if (cachedChunk.EntityCount < cachedChunk.Capacity &&
+                        EqualityComparer<object>.Default.Equals(ReadBlittableSharedBoxed(cachedChunk, compIdx, compType), value))
+                        return cached;
+                }
+                _lastChunkPerSharedValue.Remove(key);
+            }
+
             for (int i = 0; i < list.Count; i++)
             {
                 if (list[i].EntityCount >= list[i].Capacity) continue;
                 object existing = ReadBlittableSharedBoxed(list[i], compIdx, compType);
                 if (EqualityComparer<object>.Default.Equals(existing, value))
+                {
+                    _lastChunkPerSharedValue[key] = i;
                     return i;
+                }
             }
             return -1;
         }
@@ -279,9 +327,30 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>查找所有 slotSet 槽位与目标值匹配的未满 chunk；无返回 -1。</summary>
+        /// <summary>查找所有 slotSet 槽位与目标值匹配的未满 chunk；无返回 -1。
+        /// 单 shared 列走缓存路径（复用 FindChunkWithManagedValue/BlittableBoxed，O(1) 期望）；
+        /// 多列组合保持线性扫描（组合 key 无法复用单值缓存，且场景低频）。</summary>
         private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object[] slotValue)
         {
+            // 统计已设置的 shared 列数；单列时走缓存路径
+            int setCount = 0, singleIdx = -1;
+            for (int c = 0; c < arch.ComponentCount; c++)
+            {
+                if (slotSet[c])
+                {
+                    setCount++;
+                    singleIdx = c;
+                }
+            }
+
+            if (setCount == 1)
+            {
+                var singleCt = arch.Types[singleIdx];
+                return singleCt.IsManagedShared
+                    ? FindChunkWithManagedValue(arch, singleIdx, managedIdx[singleIdx])
+                    : FindChunkWithBlittableBoxed(arch, singleIdx, slotValue[singleIdx], singleCt.Type);
+            }
+
             var list = arch.ChunkList;
             for (int i = 0; i < list.Count; i++)
             {
