@@ -91,17 +91,20 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckReadAndThrow(AtomicSafetyHandle handle)
         {
+#if ENTJOY_SAFETY
             if (!SafetyChecksEnabled) return;
             int index = handle.Index;
             if (index < 0 || index >= _states.Length)
                 throw new InvalidOperationException("Invalid handle index.");
             if (Volatile.Read(ref _states[index]) == ReleasedFlag)
                 throw new ObjectDisposedException("NativeContainer has been disposed.");
+#endif
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckReadAndAllowInvalid(AtomicSafetyHandle handle)
         {
+#if ENTJOY_SAFETY
             if (!SafetyChecksEnabled) return;
             int index = handle.Index;
             if (index < 0) return; // 已释放的容器，允许不抛异常
@@ -109,22 +112,27 @@ namespace EntJoy.Collections
                 throw new InvalidOperationException("Invalid handle index.");
             if (Volatile.Read(ref _states[index]) == ReleasedFlag)
                 throw new ObjectDisposedException("NativeContainer has been disposed.");
+#endif
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckWriteAndThrow(AtomicSafetyHandle handle)
         {
+#if ENTJOY_SAFETY
             if (!SafetyChecksEnabled) return;
             if (handle.IsReadOnly)
                 throw new InvalidOperationException("Cannot write to a read-only NativeContainer.");
             CheckReadAndThrow(handle);
+#endif
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static void CheckExistsAndThrow(AtomicSafetyHandle handle)
         {
+#if ENTJOY_SAFETY
             if (!SafetyChecksEnabled) return;
             CheckReadAndThrow(handle);
+#endif
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]

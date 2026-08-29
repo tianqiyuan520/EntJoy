@@ -1,4 +1,4 @@
-using EntJoy.ECS;
+﻿using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using System;
 using System.Diagnostics;

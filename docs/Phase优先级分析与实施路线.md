@@ -1,5 +1,19 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-29 增量 7：**S22 安全检查宏分层完成** —— `ENTJOY_SAFETY`（Debug 默认：句柄+边界）与
+> `ENTJOY_SAFETY_BOUNDS`（Release 默认：仅边界，裁剪句柄原子读 ~1-2ns/次）双档；
+> 句柄检查的 `#if` 下沉到 `SafetyHandleManager.Check*` 方法体内（一处裁剪，NativeArray/NativeList
+> ~35 处调用点自动生效）；边界检查在 3 处索引器分层；全关 `-p:DefineConstants=` 覆盖。
+> Debug/Release/全关三档编译通过，Debug + Release 全量测试 116/116。
+>
+> 2026-08-29 增量 6：**Phase 8 完成，里程碑 C 达成** —— `[ECSComponent]` 组件生成（partial struct
+> 免写 IComponentData，生成器自动补接口 + EJ2001/2002/2003 诊断：非 partial/非 blittable/泛型）、
+> System 自动收集（`SystemRegistry.RegisterAll` 一行注册同程序集所有 ISystem + `[DisableAutoCreation]`
+> opt-out 对齐 Unity DOTS）、Reactive 处理器（`[Reactive(ObserverEvents)]` + 静态
+> `Execute(in ReadOnlySpan&lt;Entity&gt;, in ReadOnlySpan&lt;T&gt;)` 签名推导组件类型 →
+> `ReactiveSystemRegistry.RegisterAll` 自动注册 Observer，EJ2011/2012 诊断）。
+> 详见 `docs/20260829-Phase8-SourceGenerator设计.md`。
+>
 > 2026-08-29 增量 5：**N 元组补齐 + 警告清理** —— `QueryBuilder.WithAll<T0..Tn>()`（新生成器，
 > 替代 3+ 组件链式调用）、`World.QueryChunks<T0..Tn>()`（chunk 级 N 元组遍历，chunk 三件套 +
 > 扩展方法）、QueryTuple 生成器重构为按 arity 泛型模板（修复固定类名 CS0101 冲突）、
@@ -39,7 +53,7 @@
 ```
 Phase 1 (基础设施优化)     ✅ 已完成
   └─ Chunk struct 化       ✅ — C# IJobChunk -38%，Sleep 路径 -9%
-  └─ ENTJOY_SAFETY 开关    ✅ — 运行时可关闭安全检查
+  └─ ENTJOY_SAFETY 开关    ✅ — 宏分层（S22）：Debug 完整检查 / Release 仅边界 / 全关可覆盖
   └─ 空 chunk 延迟移除      ✅ — 避免边界抖动
 
 Phase 2 (Archetype Edges)  ✅ 已完成
@@ -82,10 +96,10 @@ Phase 6 (实体关系)          ✅ 全部完成（2026-08-29）
 Phase 7 (共享组件)          ✅ S25 收口（b/c ✅ 2026-08-29；a ⏸ 已评估暂不实现）
   └─ Shared Component 落地  ✅ — S25：WithShared 查询 ✅ + Change Tracking ✅ + 排序分组 ⏸ 已评估暂不实现（决策见 SharedComponent 设计 §5.1）
 
-Phase 8 (Source Generator)  🔲 未开始
-  └─ Component 存取生成
-  └─ System 注册生成
-  └─ Zero Boilerplate
+Phase 8 (Source Generator)  ✅ 已完成（2026-08-29，里程碑 C 达成）
+  └─ Component 存取生成    ✅ — [ECSComponent] partial struct 免写 IComponentData（生成器补接口 + EJ 诊断）
+  └─ System 注册生成       ✅ — SystemRegistry.RegisterAll 自动收集 + [DisableAutoCreation] opt-out
+  └─ Reactive System 生成  ✅ — [Reactive] 声明式 Observer 订阅（Execute 签名推导组件类型）
 
 Phase 9 (托管类型)          🔲 未开始
   └─ GCHandle + 指针数组
@@ -158,14 +172,14 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | ~~S19~~ | ~~One-Frame Components~~ | ~~Phase 5~~ | ❌ 废弃 | — | 由 Event Channel 替代（零结构变更，非每帧 add/remove 组件） |
 | **S20** | Entity Index / Group | Phase 5 | ✅ 已完成（2026-08-28） | S7 | 查询缓存共享注册表（QueryKey 指纹 + 排序归一 + 增量刷新）+ Entity Group 反向索引（Entity→匹配查询集合，惰性构建）。基准：共享 4x+ 提速，GetGroupsOf 0.08us。详见 20260828-查询缓存与N元组生成.md |
 | **S21** | ~~AutoSIMD P2 循环展开~~ | ~~AutoSIMD~~ | 已跳过 | — | 🔲 已跳过：常量界小循环（≤64次）已由 SimdLoopGenerator 全展开；非常量界中等循环 Clang/MSVC `-funroll-loops` 已自动处理，手动额外半展开收益不确定且增加生成代码体积 |
-| **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |
+| **S22** | 安全检查宏分层 | Phase 1 遗留 | ✅ 已完成（2026-08-29） | — | ENTJOY_SAFETY（Debug：句柄+边界）/ ENTJOY_SAFETY_BOUNDS（Release：仅边界）双档 + 句柄检查 #if 下沉 Check* 方法体（~35 调用点一处裁剪）+ 索引器边界分层。全关 -p:DefineConstants= 覆盖。Debug/Release/全关三档编译通过 + 测试 116/116 |
 | **S23** | Relation SoA 编码 | Phase 6 | ✅ 已完成（2026-08-29） | S7 | RelationSlot 8B 列（target+version 防 ID 回收）+ IRelationComponent + Add/Remove/Get/HasRelationship + WithRelationship 查询过滤（QueryKey 指纹化）。11/11 测试 + 全量 77/77。详见 docs/20260829-RelationSoA设计.md |
 | **S24** | 级联删除 + target index | Phase 6 | ✅ 已完成（2026-08-29） | S23 | RelationIndex 反向索引（target→HashSet，O(1)）+ DestroyEntityCascade 递归防环 + 索引一致性（Add/Remove/标准 Destroy 同步）。7/7 级联测试 + 全量 84/84 |
 | **S23b** | 关系查询进阶 + Job 访问 | Phase 6 | ✅ 已完成（2026-08-29） | S23 | GetRelationsOf<TRel>/GetRelationsOfAll（O(1) 反向查询）+ QuerySelection<T0,T1> 链式 WithRelationship + IJobChunk/IJobEntity/NativeTranspiler(C++/ISPC) 六路径访问验证。修复 3 个 NativeTranspiler 通用 bug（嵌套 include + ISPC 类型映射） |
 | **S23c** | 关系遍历 API | Phase 6 | ✅ 已完成（2026-08-29） | S23/S24 | GetAncestors/GetDescendants(BFS)/GetSiblings（借鉴 Bevy iter_*，利用 RelationIndex O(1)，visited 防环含起始实体）。12/12 测试 + 全量 96/97（唯一 FAIL = S25 缺口判据）。基准：深链 10000 祖先 4.46ms、宽树 10000 后代 2.21ms。修复 default(Entity) Id=0 陷阱（新增 TryGetRelationshipTarget） |
 | **S25** | Shared Component 落地扩展 | Phase 7 | ✅ 收口（2026-08-29：b/c ✅，a 已评估暂不实现；2026-08-29 后落地 per-value 最近使用缓存） | S16 | 三项：a) 按共享值排序/分组 chunk ⏸ 已评估暂不实现——现状已保证同值实体入同值 chunk（例外：SetSharedComponent 单实体就地改值不合并，同值可多 chunk，详见 SharedComponent 设计 §5.2）+ 空 chunk 回收，缺口仅为物理相邻；跨值排序不可行（boxed 无全序）、换位需同步 EntityInfo.ChunkIndex、Remove swap-pop 打乱分组、cap 768 下收益存疑（决策详见 SharedComponent 设计 §5.1/5.2）；2026-08-29 后：`FindChunkWith*` 全量扫描改 per-value 最近使用缓存（方案 B，O(1) 期望 + lazy 验证，4 测试，全量 108/108，详见 §5.2）；b) `WithShared` 查询修复 ✅——修复链见 SharedComponent 设计 §5.1（MatchesSharedFilter 统一三路径 + QueryKey 指纹补 value + IsMatch 共享列校验 + **chunk stride 布局 bug**：stride 漏算位掩码/共享值区致下一 chunk Entity 数组压在本 chunk 位掩码上 + 新 chunk 位掩码清零 + WithChanged 查询每次访问重评；SharedQueryTests 8/8）；c) Change Tracking 联动 ✅ 验证为既有能力（SetSharedComponent 就地/移动路径均已有 MarkEntityChanged），Job 安全由 CompleteActiveJobs 保证 |
-| **S26** | Component 存取生成 | Phase 8 | 3-5 天 | S7 | 自动生成 Get/Set 访问器 |
-| **S27** | System 注册生成 | Phase 8 | 3-5 天 | S9 | 自动收集 system + 注入 |
+| **S26** | Component 存取生成 | Phase 8 | ✅ 已完成（2026-08-29） | S7 ✅ | [ECSComponent] partial struct → 生成器自动补齐 IComponentData（免写接口标记）+ EJ2001/2002/2003 诊断（非 partial/非 blittable/泛型）。详见 docs/20260829-Phase8-SourceGenerator设计.md |
+| **S27** | System 注册生成 | Phase 8 | ✅ 已完成（2026-08-29） | 标注 S9 已砍，实为 S7-new ✅ | SystemRegistry.RegisterAll 自动收集同程序集所有 struct : ISystem 一行注册（按全名排序）+ [DisableAutoCreation] opt-out（对齐 Unity DOTS）。详见 docs/20260829-Phase8-SourceGenerator设计.md |
 
 ### ⭐ 低优先级（3 月+ / 独立轨道）
 
@@ -175,7 +189,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S29** | DI | Phase 5 | 3-5 天 | — | 启动期反射，运行期零反射 |
 | **S30** | Prefab / IsA | Phase 6 | 1-2 周 | S24 | 可选能力 |
 | **S31** | Subsystem Query | Phase 7 | 3-5 天 | S7 | 系统依赖注入 |
-| **S32** | Reactive System 生成 | Phase 8 | 1 周 | S26 | [Reactive(EventType.Added)] |
+| **S32** | Reactive System 生成 | Phase 8 | ✅ 已完成（2026-08-29） | S26 | [Reactive(ObserverEvents)] 声明式 Observer 订阅：静态 Execute(in ReadOnlySpan&lt;Entity&gt;, in ReadOnlySpan&lt;T&gt;) 签名推导组件类型 → ReactiveSystemRegistry.RegisterAll 自动注册（事件位组合支持）+ EJ2011/2012 诊断。详见 docs/20260829-Phase8-SourceGenerator设计.md |
 | **S33** | Chunk 合并/碎片整理 | Phase 1 遗留 | 1 周 | S0 | 瘦 Chunk 合并（利用率 <30%） |
 | **S34** | AutoSIMD E2/E3/E4/E6/E8 | AutoSIMD | 1-2 周 | — | 其余 edge case |
 | **S35** | 组件 copy/move/destroy hooks | Phase 9 | 2-3 周 | — | **Phase 9 前置条件** |
@@ -295,7 +309,7 @@ Phase 9 (Managed 类型，独立轨道)
 |--------|-----------|------|-----------|
 | **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅（含 Observer 收尾 2026-08-28） | ✅ **已完成**（2026-08-28） | ~4-6 周 |
 | **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | **主体完成**（Phase 6 ✅ 2026-08-29；Phase 7 ✅ S25 收口 2026-08-29；Phase 5 关系型状态机 ❌ 已决策不做，剩余仅 S28/S29 低优先级） | ~8-12 周 |
-| **里程碑 C：生成器扩展** | Phase 8 | 未开始 | ~2-3 周 |
+| **里程碑 C：生成器扩展** | Phase 8 | ✅ **已完成**（2026-08-29：S26/S27/S32） | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
 | **AutoSIMD 修复** | 与里程碑并行 | 进行中 | ~2-3 周 |
 
@@ -379,10 +393,11 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 | S18-S20 | Phase 5 核心 | 2-3 周 | ~7-10 周 |
 | S23-S24 | Phase 6 核心 | 2 周 | ~9-12 周 |
 | S25 | Phase 7 | ✅ 已完成（2026-08-29 收口） | ~10-13 周 |
-| S26-S27 | Phase 8 核心 | 1-2 周 | ~11-15 周 |
+| S26-S27-S32 | Phase 8 | ✅ 已完成（2026-08-29，里程碑 C 达成） | ~11-15 周 |
 | S35-S37 | Phase 9 | 5-8 周 | 独立轨道 |
 
 **里程碑 A（高性能核心）✅ 已完成（2026-08-28）**：Phase 1-4 全部落地（含 Observer 收尾）。
+**里程碑 C（生成器扩展）✅ 已完成（2026-08-29）**：Phase 8 全部落地（S26/S27/S32）。
 
 ---
 

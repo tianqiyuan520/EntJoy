@@ -4,14 +4,23 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.Collections</AssemblyName>
-    <!-- ENTJOY_SAFETY：默认开启安全检查（边界+句柄）。
-         极致性能场景可通过删除此行或传入 -p:DefineConstants=ENTJOY_SAFETY_DISABLED 关闭。 -->
-    <DefineConstants>$(DefineConstants);ENTJOY_SAFETY</DefineConstants>
     <!-- CS8632: ? 注解在无 #nullable 上下文为代码风格告警（库 API 保持 oblivious） -->
     <NoWarn>$(NoWarn);8632</NoWarn>
     <!-- CS0169: DisposeSentinel.s_lastCallSite 为诊断保留字段（当前未读） -->
     <NoWarn>$(NoWarn);0169</NoWarn>
   </PropertyGroup>
+
+  <!-- 安全检查宏分层（S22）：
+       Debug   → ENTJOY_SAFETY          完整检查（句柄 + 边界）
+       Release → ENTJOY_SAFETY_BOUNDS   仅边界检查（裁剪句柄原子读 ~1-2ns/次）
+       全关    → -p:DefineConstants=（覆盖清空）；完整 → -p:DefineConstants=ENTJOY_SAFETY -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);ENTJOY_SAFETY</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DefineConstants>$(DefineConstants);ENTJOY_SAFETY_BOUNDS</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Mathematics\EntJoy.Mathematics.csproj" />
   </ItemGroup>

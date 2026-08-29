@@ -66,9 +66,8 @@ namespace EntJoySample.ECS
             world.CreateEntities(1000, types);
 
             var runner = new SystemRunner(world);
-            runner.RegisterSystem<MovementSystem>();
-            runner.RegisterSystem<DamageSystem>();
-            runner.RegisterSystem<RegenSystem>();
+            // 一行注册本程序集所有 ISystem（替代逐个 RegisterSystem<T>()，由 SystemRegistrationSourceGenerator 生成）
+            SystemRegistry.RegisterAll(runner);
 
             runner.PrintSchedule();
 
