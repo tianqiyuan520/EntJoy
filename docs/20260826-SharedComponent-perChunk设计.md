@@ -173,11 +173,19 @@ EntityBuilder WithShared<T>(T value);        // Spawn().WithShared(...)
 
 ## 五、阶段拆分与工时
 
-| 阶段 | 内容 | 工时 |
+| 阶段 | 内容 | 工时 | 状态 |
+|------|------|------|------|
+| **阶段一（S16）** | Shared Component 核心存储：接口/类型判定、ChunkMetadata 布局、EntityManager 哈希桶 + refcount、Archetype 定位、Get/Set/create、WithShared、EntityBuilder、单测 | 3-5 天 | ✅ 已完成（2026-08-27） |
+| **阶段二（S16b）** | NativeTranspiler blittable 支持：ABI、Collector 填充、IJobChunk 翻译、BindingsGenerator、ISPC、Validator、NativeDll 重编译、冒烟测试 | 3-5 天 | ✅ 已完成（2026-08-27） |
+| **阶段三（S25，后续）** | 落地扩展：按共享值排序/分组 chunk、`WithShared` 进阶、与 Change Tracking / Job Tracking 联动 | 1 周 | ✅ 收口（b ✅ 2026-08-29、c ✅ 验证、a ⏸ 已评估暂不实现，见 §5.1） |
+
+### 5.1 S25 缺口实证与修复记录（2026-08-29 源码核实 + 测试）
+
+| 子项 | 内容 | 实证 / 修复 |
 |------|------|------|
-| **阶段一（S16）** | Shared Component 核心存储：接口/类型判定、ChunkMetadata 布局、EntityManager 哈希桶 + refcount、Archetype 定位、Get/Set/create、WithShared、EntityBuilder、单测 | 3-5 天 |
-| **阶段二（S16b）** | NativeTranspiler blittable 支持：ABI、Collector 填充、IJobChunk 翻译、BindingsGenerator、ISPC、Validator、NativeDll 重编译、冒烟测试 | 3-5 天 |
-| **阶段三（S25，后续）** | 落地扩展：按共享值排序/分组 chunk、`WithShared` 进阶、与 Change Tracking / Job Tracking 联动 | 1 周 |
+| **S25b** | `WithShared` 托管查询面过滤 | ✅ 已修复（2026-08-29）。缺陷清单（4 个查询面 + 1 个**基础设施布局 bug** + 2 个基础修复）：① `EntityQuery.Refresh`/`RefreshIncremental` 收集 chunk 时忽略 WithShared → 统一走 `EntityManager.MatchesSharedFilter`（单一真值来源，Job 面 `ChunkJobCollector` 同源）；② `QueryKey` 指纹缺 SharedFilterValue → `Material(2)`/`Material(3)` 误共享实例 → 指纹补 value + hash；③ `WithChanged` 同类缺陷：`Refresh` 不过滤变更位 → 新增 `MatchesChangedFilter` 并入三路径；④ 流式/查询路径对"不含共享列的 archetype"字典 miss 抛异常 → `Archetype.IsMatch` 补 SharedFilterType 列校验（与 S23 关系列同策略）；⑤ **chunk stride 布局 bug（最严重）**：`ComputeChunkStride` 只算 Entity + 组件数组（15360B），漏了变更位掩码 + 共享值区（布局尾 15552B）→ **下一 chunk 的 Entity 数组起点压在本 chunk 的位掩码/共享值区上**：写入新 chunk 的实体 Id 直接污染上一 chunk 的变更位掩码（WithChanged 假阳性，幽灵位=新实体 Id），共享值写入损坏下一 chunk 的 Entity 数组（实体引用错乱）→ 修复：stride 直接取 `ChunkMetadata.Create` 的 TotalSize 对齐（单一布局真值来源）。基础修复：新 chunk 变更位掩码未清零（slab 池复用残留）→ Chunk 构造时 InitBlock；`EnsureUpToDate` 仅按结构版本刷新，帧级变更位不触发 → 带 WithChanged 的查询每次访问重评。测试：`SharedQueryTests` 8/8（含新增 `WithShared_IgnoresArchetypesWithoutSharedColumn`），全量 104/104 |
+| **S25a** | 按共享值排序/分组 chunk | ⏸ 已评估，暂不实现（2026-08-29 决策）。**现状已具备**：同值实体必同 chunk（`NewEntity`/`SetSharedComponent` 均"找/建目标值 chunk"）+ 空 chunk swap-pop 回收；唯一缺口是 ChunkList 中同值 chunk **物理相邻**。**关键约束**：跨值"排序"不可行——shared 值是 boxed 任意类型（managed class 无比较键、blittable 无 IComparable 契约），无全序，只能"同值分组"；物理换位须同步更新 `EntityInfo.ChunkIndex`（存于每个实体，插入中间为 O(N)），最小成本方案是"空新 chunk 与同值组尾 chunk 交换列表位置"（O(cap)），且 `Remove` 的 swap-pop 会打乱分组、维持不变量需额外逻辑。**收益存疑**：cap=768 大 chunk 下同值分散需 768+ 实体才出现。若日后需要，采用最小方案"新建目标值 chunk 时归入同值组尾" |
+| **S25c** | 与 Change Tracking 联动 | ✅ 验证为既有能力（2026-08-29）：`SetSharedComponent` 就地改值路径（103/126 行）与移动路径（115/134 行）均已调用 `MarkEntityChanged`；Job 安全由入口 `CompleteActiveJobs()` 保证。补测试锁定语义：创建不标记变更（AddEntity 不打标）→ 帧末 `ClearAllChangedBitMasks` 归零 → 就地改值/移动后 WithChanged 查询可见 |
 
 ---
 

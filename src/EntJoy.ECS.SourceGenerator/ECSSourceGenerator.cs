@@ -15,6 +15,8 @@ namespace EntJoy.ECS.SourceGenerator
             // 登记并调度各 ECS 子生成器
             new IJobEntitySourceGenerator().Initialize(context);
             new QueryTupleSourceGenerator().Initialize(context);
+            new ChunkQueryTupleSourceGenerator().Initialize(context);
+            new QueryBuilderTupleSourceGenerator().Initialize(context);
         }
     }
 }

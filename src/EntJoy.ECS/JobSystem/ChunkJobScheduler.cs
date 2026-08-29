@@ -1,4 +1,4 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -836,8 +836,6 @@ namespace EntJoy.ECS.JobSystem
             var cache = new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, false, matchingArchetypes.ToArray());
             cache.ManagedChunkArray = chunkArray;  // 直接持有引用（无 GCHandle�?
             return cache;
-
-            return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, true, matchingArchetypes: matchingArchetypes.ToArray());
         }
 
         private static int GetQueryHash(QueryBuilder query)

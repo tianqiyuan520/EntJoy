@@ -277,7 +277,10 @@ P/Invoke 指针加载、调度缓存/租赁、chunk 打包、托管回调工厂�
 
 ---
 
-## Phase D：AOT 反射消灭（低优先，现状勘误）
+## Phase D：AOT 反射消灭（✅ 已完成 2026-08-26，落地 91a3875）
+
+> **落地记录**：91a3875 移除 dual-interface 反射分支（`AutoParallelForCallback<T>` 统一用 index 回调、`SelectRunner<T>` 删除），`MakeGenericMethod/MakeGenericType` 全库归零。
+> 复核（2026-08-29）：`src/` 全库动态反射零命中，AOT 部署路径安全。详见 `Phase优先级分析与实施路线.md` §十。
 
 ### D.1 现状勘误
 

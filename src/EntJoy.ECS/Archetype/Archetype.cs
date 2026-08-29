@@ -69,6 +69,20 @@ namespace EntJoy.ECS
                         return false;
                 }
             }
+            // 关系过滤要求拥有 TRel 列（不拆 Archetype，仅过滤）
+            if (builder.HasRelationshipFilter)
+            {
+                if (!componentTypeRecorder.ContainsKey(builder.RelationshipFilterType))
+                    return false;
+            }
+            // 共享值过滤要求拥有 SharedFilterType 列（与关系列同策略）。
+            // 缺失时 MatchesSharedFilter 的 GetComponentTypeIndex 会字典 miss——三个收集路径
+            // （EntityQuery.Refresh / ChunkJobCollector / QueryEnumerator）都依赖此处先行排除。
+            if (builder.HasSharedFilter)
+            {
+                if (!componentTypeRecorder.ContainsKey(builder.SharedFilterType))
+                    return false;
+            }
             return true;
         }
     }
@@ -243,22 +257,14 @@ namespace EntJoy.ECS
 
         private int ComputeChunkStride()
         {
-            int entitySize = Marshal.SizeOf<Entity>();
-            int offset = _chunkCapacity * entitySize;
-            const int cacheLineSize = 64;
-
-            for (int i = 0; i < types.Length; i++)
-            {
-                offset = (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
-                offset += _chunkCapacity * types[i].Size;
-                if (types[i].IsEnableable)
-                {
-                    int bitmapBytes = ((_chunkCapacity + 63) / 64) * 8;
-                    offset += bitmapBytes;
-                }
-            }
-            // Align the stride to 64 bytes for clean slab slicing
-            return (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
+            // 单一真值来源：ChunkMetadata.Create 计算 Entity + 组件数组 + enableable 位图 +
+            // 变更位掩码 + Shared values 区的完整布局，stride 必须覆盖 TotalSize（64 对齐）。
+            // 此前手算只含 Entity + 组件数组，漏了变更位掩码与共享值区（约 128~192B）→
+            // 下一个 chunk 的 Entity 数组起点压在本 chunk 的位掩码/共享值区上：
+            //   写入新 chunk 的实体 Id 污染上一 chunk 的变更位掩码（WithChanged 假阳性），
+            //   共享值写入损坏下一 chunk 的 Entity 数组（实体引用错乱）。
+            var meta = ChunkMetadata.Create(this, _chunkCapacity, types);
+            return (meta.TotalSize + 63) & ~63;
         }
 
         private nint AllocateFromSlab()

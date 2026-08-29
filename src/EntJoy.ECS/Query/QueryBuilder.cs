@@ -25,6 +25,11 @@ namespace EntJoy.ECS
         public object SharedFilterValue;           // 目标 shared 值（boxed）
         public bool HasSharedFilter;
 
+        // Relation 过滤（WithRelationship<T>(target)）
+        public ComponentType RelationshipFilterType;   // 关系组件类型（default = 无过滤）
+        public RelationSlot RelationshipFilterTarget;  // 目标 RelationSlot（含 target.Id + target.Version）
+        public bool HasRelationshipFilter;
+
         public QueryBuilder()
         {
             LimitCount = -1;
@@ -32,6 +37,7 @@ namespace EntJoy.ECS
             ChangedComponents = null;
             MinChangedVersion = -1;
             HasSharedFilter = false;
+            HasRelationshipFilter = false;
         }
 
         public QueryBuilder SetLimit(int count)
@@ -127,6 +133,21 @@ namespace EntJoy.ECS
             SharedFilterType = ComponentTypeManager.GetComponentType(typeof(T));
             SharedFilterValue = filterValue;
             HasSharedFilter = true;
+            return this;
+        }
+
+        // ======================== Relation 过滤 ========================
+
+        /// <summary>
+        /// 只处理持有 <typeparamref name="T"/> 关系且 target == <paramref name="target"/> 的实体。
+        /// 关系过滤：Archetype 匹配要求拥有 TRel 列（不拆 Archetype），
+        /// chunk 收集期逐槽校验 RelationSlot.Matches（Id + Version 双匹配）。
+        /// </summary>
+        public QueryBuilder WithRelationship<T>(Entity target) where T : struct, IRelationComponent
+        {
+            RelationshipFilterType = ComponentTypeManager.GetComponentType(typeof(T));
+            RelationshipFilterTarget = RelationSlot.From(target);
+            HasRelationshipFilter = true;
             return this;
         }
 

@@ -89,13 +89,21 @@ namespace EntJoy.ECS
             return _entityManager.CreateEntities(count, types);
         }
 
-        /// <summary>实体级查询（chunk 序 struct query，密集 OOD 访问面）。</summary>
-        public QueryEnumerable<T0, T1> Query<T0, T1>() where T0 : struct where T1 : struct
-            => new QueryEnumerable<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
+        /// <summary>实体级查询选择器（双组件），支持链式附加过滤条件（WithRelationship/WithEnabled）。</summary>
+        /// <example>
+        /// <code>
+        /// foreach (var r in world.Query&lt;Position, Velocity&gt;().WithRelationship&lt;ChildOf&gt;(parent))
+        /// {
+        ///     ref var pos = ref r.Comp0;   // Position
+        /// }
+        /// </code>
+        /// </example>
+        public QuerySelection<T0, T1> Query<T0, T1>() where T0 : struct where T1 : struct
+            => new QuerySelection<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
 
         /// <summary>实体级查询（复用已构建的 <see cref="QueryBuilder"/>，避免热路径分配）。</summary>
-        public QueryEnumerable<T0, T1> Query<T0, T1>(QueryBuilder builder) where T0 : struct where T1 : struct
-            => new QueryEnumerable<T0, T1>(_entityManager, builder);
+        public QuerySelection<T0, T1> Query<T0, T1>(QueryBuilder builder) where T0 : struct where T1 : struct
+            => new QuerySelection<T0, T1>(_entityManager, builder);
 
         /// <summary>单组件查询选择器，支持链式附加过滤条件。</summary>
         /// <example>

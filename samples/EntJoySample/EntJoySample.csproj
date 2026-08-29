@@ -11,6 +11,8 @@
 
 		<!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<!-- CS8500: 源生成器生成的 N 元组查询对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
+		<NoWarn>$(NoWarn);8500</NoWarn>
 	</PropertyGroup>
 
 	<ItemGroup>

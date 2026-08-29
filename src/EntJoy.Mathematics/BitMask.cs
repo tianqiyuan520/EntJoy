@@ -8,7 +8,9 @@ namespace EntJoy
         private readonly ulong* _bits;      // 指向 ulong 位图数组的指针
         private readonly int _length;        // 实体数量
 
-        internal BitMask(ulong* bits, int length)
+        // 公开构造：生成代码（ChunkResult<T0..Tn> 等编译进调用方程序集）需要从 chunk
+        // 位图指针构造 BitMask；原 internal 仅 EntJoy.ECS 可访问，放宽为 public 无行为变化。
+        public BitMask(ulong* bits, int length)
         {
             _bits = bits;
             _length = length;

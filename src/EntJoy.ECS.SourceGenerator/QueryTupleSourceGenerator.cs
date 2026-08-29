@@ -13,44 +13,43 @@ namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
     /// N 元组查询生成器：扫描 <c>world.Query&lt;T0..Tn&gt;()</c> 调用点（接收者符号类型必须是
-    /// <see cref="Config.WorldFullName"/>），为出现的每个 N 元组组件组合生成强类型
-    /// <c>QueryEnumerable</c>/<c>QueryEnumerator</c>/<c>EntityQueryResult</c> 及
-    /// <c>World.Query</c> 扩展方法。运行时零反射。
+    /// <see cref="Config.WorldFullName"/>），为出现的每个 N 元组 **arity**（N ≥ 3）生成一份
+    /// 泛型模板：强类型 <c>QueryEnumerable</c>/<c>QueryEnumerator</c>/<c>EntityQueryResult</c>
+    /// 及 <c>World.Query</c> 扩展方法（body 内 <c>typeof(T0..Tn)</c> 泛型化，非具体组合）。
+    /// 运行时零反射。
+    /// 
+    /// 注意：按 arity 去重而非按具体类型组合去重——同 arity 不同组件组合共用同一份泛型定义，
+    /// 避免重复生成同名泛型类型（CS0101）。扩展类名带 arity 后缀防同名冲突。
     /// </summary>
     internal sealed class QueryTupleSourceGenerator : IIncrementalGenerator
     {
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            var tupleProvider = context.SyntaxProvider
+            var arityProvider = context.SyntaxProvider
                 .CreateSyntaxProvider(
                     predicate: static (node, _) => IsCandidate(node),
-                    transform: static (ctx, ct) => GetTuples(ctx, ct))
-                .Where(static t => t != null && t.Count > 0);
+                    transform: static (ctx, ct) => GetArity(ctx, ct))
+                .Where(static n => n > 0);
 
-            var collected = tupleProvider.Collect();
+            var collected = arityProvider.Collect();
 
-            context.RegisterSourceOutput(collected, static (spc, tuples) =>
+            context.RegisterSourceOutput(collected, static (spc, arities) =>
             {
-                var unique = new Dictionary<string, List<string>>();
-                foreach (var tuple in tuples)
-                {
-                    if (tuple == null) continue;
-                    string key = string.Join(",", tuple);
-                    if (!unique.ContainsKey(key))
-                        unique[key] = tuple;
-                }
+                var unique = new SortedSet<int>();
+                foreach (var n in arities)
+                    if (n > 0) unique.Add(n);
 
-                foreach (var kv in unique)
+                foreach (var n in unique)
                 {
-                    string source = GenerateTuple(kv.Value);
-                    spc.AddSource($"QueryTuple_{kv.Value.Count}_{Sanitize(kv.Key)}.g.cs", SourceText.From(source, Encoding.UTF8));
+                    string source = GenerateTuple(n);
+                    spc.AddSource($"QueryTuple_{n}.g.cs", SourceText.From(source, Encoding.UTF8));
                 }
             });
         }
 
         private static bool IsCandidate(SyntaxNode node)
         {
-            // 语法预筛：形如 <expr>.Query<T0, T1, ...>() 的调用（语义确认在 GetTuples 做）
+            // 语法预筛：形如 <expr>.Query<T0, T1, ...>() 的调用（语义确认在 GetArity 做）
             return node is InvocationExpressionSyntax inv &&
                    inv.Expression is MemberAccessExpressionSyntax ma &&
                    ma.Name is GenericNameSyntax gen &&
@@ -59,18 +58,18 @@ namespace EntJoy.ECS.SourceGenerator
                    ma.Expression is ExpressionSyntax;
         }
 
-        private static List<string>? GetTuples(GeneratorSyntaxContext context, CancellationToken ct)
+        private static int GetArity(GeneratorSyntaxContext context, CancellationToken ct)
         {
             if (context.Node is not InvocationExpressionSyntax inv)
-                return null;
+                return -1;
             if (inv.Expression is not MemberAccessExpressionSyntax ma)
-                return null;
+                return -1;
             if (ma.Name is not GenericNameSyntax genName)
-                return null;
+                return -1;
 
             var typeArgs = genName.TypeArgumentList.Arguments;
             if (typeArgs.Count < Config.MinTupleArity)
-                return null;
+                return -1;
 
             var model = context.SemanticModel;
 
@@ -82,27 +81,17 @@ namespace EntJoy.ECS.SourceGenerator
             if (receiverFullName.StartsWith("global::", StringComparison.Ordinal))
                 receiverFullName = receiverFullName.Substring("global::".Length);
             if (receiverFullName != Config.WorldFullName)
-                return null;
+                return -1;
 
-            var tuple = new List<string>(typeArgs.Count);
-            foreach (var arg in typeArgs)
-            {
-                // 语义模型解析具体类型（组件类型是已有类型，可解析）
-                var typeInfo = model.GetTypeInfo(arg, ct);
-                string typeName = typeInfo.Type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (string.IsNullOrEmpty(typeName))
-                    return null;
-                tuple.Add(typeName);
-            }
-            return tuple;
+            return typeArgs.Count;
         }
 
-        private static string GenerateTuple(List<string> types)
+        private static string GenerateTuple(int n)
         {
-            int n = types.Count;
             var genParams = Enumerable.Range(0, n).Select(i => $"T{i}").ToList();
             string genList = string.Join(", ", genParams);
             string whereClause = string.Join(" ", genParams.Select(g => $"where {g} : struct"));
+            string typeOfArgs = string.Join(", ", genParams.Select(g => $"typeof({g})"));
 
             var sb = new StringBuilder();
             sb.AppendLine("// <auto-generated/>");
@@ -364,8 +353,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        get");
             sb.AppendLine("        {");
             sb.AppendLine("            if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();");
-            sb.AppendLine($"            return new EntityQueryResult<{genList}>(");
-            sb.Append("                ");
+            sb.Append($"            return new EntityQueryResult<{genList}>(");
             for (int i = 0; i < n; i++)
             {
                 if (i > 0) sb.Append(", ");
@@ -402,28 +390,19 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine();
 
             // ===== World.Query<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World） =====
-            sb.AppendLine($"public static class QueryTupleWorldExtensions");
+            // 类名带 arity 后缀：同程序集内不同 arity 生成不同类，防 CS0101 同名冲突。
+            sb.AppendLine($"public static class QueryTupleWorldExtensions{n}");
             sb.AppendLine("{");
             sb.AppendLine($"    public static QueryEnumerable<{genList}> Query<{genList}>(this World world)");
             sb.AppendLine($"        {whereClause}");
             sb.AppendLine("    {");
             sb.AppendLine("        var builder = new QueryBuilder();");
-            sb.AppendLine($"        builder.All = new ComponentType[] {{ {string.Join(", ", types.Select(t => $"typeof({t})"))} }};");
+            sb.AppendLine($"        builder.All = new ComponentType[] {{ {typeOfArgs} }};");
             sb.AppendLine($"        return new QueryEnumerable<{genList}>(world._entityManager, builder);");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // N 元组查询统一走 world.Query<T0..Tn>()（SystemAPI 已移除）。
-
-            return sb.ToString();
-        }
-
-        private static string Sanitize(string value)
-        {
-            var sb = new StringBuilder(value.Length);
-            foreach (char c in value)
-                if (char.IsLetterOrDigit(c)) sb.Append(c);
             return sb.ToString();
         }
     }

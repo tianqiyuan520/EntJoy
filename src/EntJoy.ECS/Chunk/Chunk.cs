@@ -56,7 +56,13 @@ namespace EntJoy.ECS
             Meta = meta;
             MemoryBlock = memoryBlock;
             _entityCount = 0;
-            // 延迟清零：AddEntity 逐 slot 初始化组件与 enableable 位，未使用 slot 不被访问。
+            // 变更位掩码必须清零：slab 内存来自池（跨 World 复用），残留旧标记会让
+            // HasAnyEntityChanged 假阳性 → WithChanged 查询误匹配。组件数据仍按
+            // "延迟清零"（AddEntity 逐 slot InitBlock），未使用 slot 不被访问。
+            if (meta.ChangedBitMaskOffset != -1 && meta.ChangedBitMaskSize > 0)
+            {
+                Unsafe.InitBlock((byte*)memoryBlock + meta.ChangedBitMaskOffset, 0, (uint)meta.ChangedBitMaskSize);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -29,5 +29,25 @@ namespace EntJoy.ECS
             => new QueryEnumerable<T0, T1>(
                 _entityManager,
                 new QueryBuilder().WithAll<T0>().WithEnabled<T1>());
+
+        /// <summary>
+        /// 附加关系过滤：只遍历持有 T1 关系且 target == <paramref name="target"/> 的实体。
+        /// T1 是关系组件（IRelationComponent），遍历结果中 Comp1 为该关系槽位值（一般无需读取）。
+        /// </summary>
+        public QueryEnumerable<T0, T1> WithRelationship<T1>(Entity target)
+            where T1 : struct, IRelationComponent
+            => new QueryEnumerable<T0, T1>(
+                _entityManager,
+                new QueryBuilder().WithAll<T0>().WithRelationship<T1>(target));
+
+        /// <summary>
+        /// 附加 SharedComponent 过滤：只遍历持有指定 shared 值的 chunk。
+        /// chunk 级过滤（per-chunk 共享值），EntityQuery/Job/枚举三路径统一。
+        /// </summary>
+        public QueryEnumerable<T0, T1> WithShared<T1>(T1 filterValue)
+            where T1 : struct, ISharedComponentData
+            => new QueryEnumerable<T0, T1>(
+                _entityManager,
+                new QueryBuilder().WithAll<T0>().WithShared(filterValue));
     }
 }

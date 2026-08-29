@@ -11,13 +11,13 @@ namespace EntJoySample.ECS
             {
                 // ECS 基准需要原生 worker（C++ Chase-Lev 调度器）；缺失时 Schedule 路径无 worker 可执行
                 JobScheduler.Initialize();
-                Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
+                //Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
                 // Observer 测试（组件生命周期事件 push 回调）
                 //ObserverDemo.Run();
 
-                // Shared Component per-chunk 存储测试
-                //SharedComponentDemo.Run();
+                // Shared Component per-chunk 存储测试（分组/Set/查询过滤/流式 API/变更追踪）
+                SharedComponentDemo.Run();
 
                 // Event Channel 测试
                 //EventChannelDemo.Run();
@@ -47,10 +47,22 @@ namespace EntJoySample.ECS
                 //ScheduleOverheadBenchmark.Run();
 
                 // 查询缓存基准：共享注册表 + 增量刷新收益
-                EntityQueryCacheBenchmark.Run();
+                //EntityQueryCacheBenchmark.Run();
 
                 // N 元组查询示例：world.Query<T0, T1, T2>()（SourceGenerator 生成）
-                QueryTupleDemo.Run();
+                //QueryTupleDemo.Run();
+
+                // 关系基准：Add/Get/Has/WithRelationship 性能基线
+                RelationBenchmark.Run();
+
+                // IJobEntity 访问关系列验证（步长一致性）
+                RelationBenchmark.VerifyIJobEntityRelationAccess();
+
+                // IJobChunk 访问关系列验证（步长一致性）
+                RelationBenchmark.VerifyIJobChunkRelationAccess();
+
+                // NativeTranspiler 关系访问验证（[NativeTranspile] IJobChunk/IJobEntity）
+                RelationNativeJobTest.Run();
             }
             catch (Exception ex)
             {

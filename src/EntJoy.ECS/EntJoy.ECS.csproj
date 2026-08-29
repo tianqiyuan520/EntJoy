@@ -4,6 +4,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.ECS</AssemblyName>
+    <!-- CS8632: 代码中的 ? 注解（无 #nullable 上下文）为代码风格告警，库 API 保持 oblivious 以避免
+         影响 nullable-enable 消费者的可空性分析（启用 annotations 会转嫁 CS8600 系列新警告） -->
+    <NoWarn>$(NoWarn);8632</NoWarn>
+    <!-- CS8500: 对泛型组件指针取址是 ECS 固有模式（组件约束为 struct，运行时不取托管指针） -->
+    <NoWarn>$(NoWarn);8500</NoWarn>
+    <!-- CA2014: stackalloc 在 <=4096 字节分支内（有界），属 ECS 值拷贝热路径惯用法，非真实栈溢出风险 -->
+    <NoWarn>$(NoWarn);CA2014</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />

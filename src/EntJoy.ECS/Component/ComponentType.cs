@@ -13,6 +13,7 @@ namespace EntJoy.ECS
         public Type Type => ComponentTypeManager.GetTypeByComponentType(Id);  // 通过查询获取组件类型
         public bool IsEnableable => ComponentTypeManager.GetIsEnableable(Id);
         public bool IsShared => ComponentTypeManager.GetIsShared(Id);
+        public bool IsRelation => ComponentTypeManager.GetIsRelation(Id);
 
         /// <summary>
         /// 是否为 managed shared 组件（ISharedComponentData 且含引用字段/class）。

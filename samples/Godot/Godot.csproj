@@ -9,6 +9,11 @@
 
     <!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- NU1900: 包漏洞数据需要联网拉取，离线/受限网络时静默失败，不阻塞还原 -->
+    <NuGetAudit>false</NuGetAudit>
+    <!-- CS8500: 源生成器生成的 N 元组查询对组件指针取址是 ECS 固有模式 -->
+    <NoWarn>$(NoWarn);8500</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

@@ -23,7 +23,7 @@
 | **Phase 6** | 实体关系 | 🔲 未开始 | — | — |
 | **Phase 7** | Shared Component | ✅ **已完成** | 2026-08-27 | `8b9f0c2` | per-chunk 双类型 + ABI + NativeTranspiler |
 | **Phase 8** | Source Generator + Zero Boilerplate | 🔲 未开始 | — | — |
-| **Phase 9** | 托管类型 + AOT 兼容 | 🔲 未开始 | — | — |
+| **Phase 9** | 托管类型 + AOT 兼容 | 🔲 未开始（AOT 兼容子项 ✅ 已完成 2026-08-26） | — | — | AOT 动态反射已全消除（见 §11） |
 | **工具链** | Godot 桥接 + 热重载 + 分析器 | 🔲 未开始 | — | — |
 
 **当前里程碑**：**里程碑 A（高性能核心）已完成（2026-08-28）**—— Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅
@@ -32,7 +32,7 @@
 - Phase 1-4 全部完成，里程碑 A（高性能核心）达成。Phase 4 最后一项 Observer（S8-new）2026-08-28 收尾：组件生命周期事件 push 回调（Added/Removed/Set/Destroyed），主线程立即 + ECB Playback 自然触发 + 批量 span 合并（CreateEntities 10000→1 回调），详见 `docs/20260828-Observer设计.md`。
 - Phase 4 已实现：Schedule Graph、OrderBefore/OrderAfter、Entity Builder、Change Tracking、RunWhen、Event Channel、ISPC SendEvent、Observer。命名空间从 `EntJoy` 重构为 `EntJoy.ECS`。
 - Event Channel（S18 World Events）已完成（2026-08-27）：双缓冲 EventStream + Managed/NativeTranspile SendEvent + C++ EventBuffer 自动翻译 + 多 World + 异步自动 drain。One-Frame Component（S19）废弃，由 Event Channel 替代。
-- Phase 9 新增 AOT 兼容修复和托管类型支持。
+- Phase 9 新增 AOT 兼容修复和托管类型支持。AOT 兼容子项已于 2026-08-26 完成（动态反射全消除，见 §11）；托管类型支持仍未开始。
 - 工具链新增热重载支持（仅限 Native System）。
 
 ---
@@ -1138,76 +1138,67 @@ docs/Phase优先级分析与实施路线.md            ← 全部待办项优先
 
 ---
 
-## 11. AOT 兼容性问题（2026-08 审计）
+## 11. AOT 兼容性问题（2026-08 审计 → ✅ 已修复）
 
-> 本节记录当前项目的 AOT 不兼容反射用法，需要修复。
+> 2026-08 审计发现 3 处 AOT 不兼容反射用法，**2026-08-26 已全部修复**（详见 `docs/Phase优先级分析与实施路线.md` §十 修复明细）。
+> 复核（2026-08-29）：`src/` 全库 `MakeGenericMethod|MakeGenericType|.GetMethod(|.GetField(|Activator.` 零命中。
 
-### 11.1 问题概述
+### 11.1 问题概述（已解决）
 
-当前项目有 **3 处严重的 AOT 不兼容反射用法**，会导致 iOS/主机/Godot AOT 编译失败。
+2026-08 审计发现 **3 处严重的 AOT 不兼容反射用法**，会导致 iOS/主机/Godot AOT 编译失败。全部已在 2026-08-26 消除，修复方式为**非泛型指针路径 + 静态泛型委托缓存**（不需要 SourceGenerator 介入）。
 
-### 11.2 问题详情
+### 11.2 问题详情（问题 → 修复）
 
-#### 问题 1：NativeJobCore.cs (line 748-753)
+#### 问题 1：NativeJobCore.cs `CreateParallelForBatchCallback` 反射调用 → ✅ 已修复
 
 ```csharp
-// 问题代码：
+// 修复前（AOT 不兼容）：
 var create = typeof(NativeJobCore)
     .GetMethod(nameof(CreateParallelForBatchCallback), BindingFlags.Static | BindingFlags.NonPublic)
     .MakeGenericMethod(typeof(T))  // ❌ AOT 不兼容：动态泛型实例化
     .Invoke(null, null);           // ❌ AOT 不兼容：动态调用
 
-// 解决方案：用 SourceGenerator 生成
-[NativeTranspile]
-struct MyJob : IJobParallelForBatch { ... }
-
-// 生成：
-public static class MyJob_BatchRunner {
-    public static void Callback(IntPtr context, int start, int count) { ... }
+// 修复后：静态泛型委托缓存，NativeJobCore.cs:798-811
+internal static class ParallelForBatchDelegateCacheFor<T> where T : struct, IJobParallelForBatch
+{
+    public static readonly DelegateCache Cache = new(CreateParallelForBatchCallback<T>());
 }
 ```
 
-#### 问题 2：NativeJobScheduler.cs (line 922-925)
+#### 问题 2：NativeJobScheduler.cs `BatchRunner<T>` MakeGenericType → ✅ 已修复
 
 ```csharp
-// 问题代码：
-if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
-    return _batchRunnerCache.GetOrAdd(typeof(T), t =>
-        var f = typeof(BatchRunner<>)
-            .MakeGenericType(t)  // ❌ AOT 不兼容：动态泛型构造
-            .GetField("Runner"); // ❌ AOT 不兼容：反射获取字段
+// 修复前（AOT 不兼容）：
+return _batchRunnerCache.GetOrAdd(typeof(T), t =>
+    var f = typeof(BatchRunner<>)
+        .MakeGenericType(t)  // ❌ AOT 不兼容：动态泛型构造
+        .GetField("Runner"); // ❌ AOT 不兼容：反射获取字段
 
-// 解决方案：用 SourceGenerator 生成具体类型
-// 生成：
-public static class BatchRunner_MyJob {
-    public static BatchRunner Runner = new BatchRunner_MyJob();
-}
+// 修复后：BatchRunner<T> / _batchRunnerCache 已删除（bc6509c），
+// 统一走 NativeJobCore 静态泛型缓存 + index 回调，NativeJobScheduler.cs 零反射
 ```
 
-#### 问题 3：EntityManager.cs (line 871-896)
+#### 问题 3：EntityManager.cs `AddComponent` MakeGenericMethod → ✅ 已修复
 
 ```csharp
-// 问题代码：
+// 修复前（AOT 不兼容）：
 return typeof(EntityManager)
     .GetMethod(nameof(AddComponent))!
     .MakeGenericMethod(componentType)  // ❌ AOT 不兼容：动态泛型实例化
     .Invoke(this, new object[] { entity, boxedValue });  // ❌ AOT 不兼容：动态调用
 
-// 解决方案：用 SourceGenerator 生成 switch 分发
-switch (componentType.Id) {
-    case 0: return AddComponent<Position>(entity, (Position)boxedValue);
-    case 1: return AddComponent<Velocity>(entity, (Velocity)boxedValue);
-    // ... 编译时生成所有 case
-}
+// 修复后：非泛型指针路径，EntityManager.cs:882
+public unsafe void AddComponentRaw(Entity entity, Type componentType, object value)
+// 泛型 AddComponent<T> 直接转发；ECB Playback 走 AddComponentRaw
 ```
 
-### 11.3 修复优先级
+### 11.3 修复结果
 
-| 问题 | 严重性 | 修复方案 | 预估工时 |
-|------|--------|---------|---------|
-| `MakeGenericMethod` (EntityManager) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成 switch 分发 | 3-5 天 |
-| `MakeGenericType` (NativeJobScheduler) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成具体类型 | 3-5 天 |
-| `MakeGenericMethod` (NativeJobCore) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成回调 | 3-5 天 |
+| 问题 | 修复方式 | 落地提交 | 状态 |
+|------|---------|---------|------|
+| `MakeGenericMethod` (NativeJobCore) | 静态泛型委托缓存 `ParallelForBatchDelegateCacheFor<T>` | 91a3875 + dc3e63d | ✅ 已修复 |
+| `MakeGenericType` (NativeJobScheduler) | 删除 `BatchRunner<T>`/`_batchRunnerCache`，统一 index 回调 | bc6509c + 91a3875 | ✅ 已修复 |
+| `MakeGenericMethod` (EntityManager) | 非泛型 `AddComponentRaw`/`SetRaw`/`RemoveComponentRaw` 指针路径 | cec84b2 + 01f162e | ✅ 已修复 |
 
 ### 11.4 AOT 兼容的反射用法（无问题）
 
@@ -1216,35 +1207,22 @@ switch (componentType.Id) {
 | `typeof(T).Name` | 多处 | 只是获取类型名字符串 |
 | `typeof(T).IsAssignableFrom()` | ComponentTypeManager | 类型检查，不生成代码 |
 | `typeof(T)` 作为参数 | 多处 | 编译时确定 |
+| `GetCustomAttribute` | SystemRunner.cs / ScheduleGraph.cs | 特性元数据读取（编译期已知） |
+| `Assembly.Location` | NativeJobCore.cs | DLL 路径读取，不生成代码 |
 
 ### 11.5 影响范围
 
 ```
-受影响平台：
-  - iOS（AOT 编译）
-  - 主机平台（PS5/Xbox/Switch）
-  - Godot .NET AOT 模式
-
-不受影响平台：
-  - Windows/Linux/macOS（JIT 编译）
-  - Android（部分 AOT）
+原受影响平台：iOS / 主机（PS5/Xbox/Switch）/ Godot .NET AOT
+修复后：全部消除动态反射，AOT 部署路径安全
 ```
 
-### 11.6 修复建议
+### 11.6 后续原则（长期）
 
 ```
-短期（Phase 4 之前）：
-  1. 识别所有 AOT 不兼容代码
-  2. 标记为 [UnsupportedOSPlatform] 或添加 AOT 兼容分支
-
-中期（Phase 4-5）：
-  1. 用 SourceGenerator 替换动态反射
-  2. 为 EntityManager 生成 switch 分发
-  3. 为 NativeJobScheduler 生成具体类型
-
-长期（Phase 9）：
-  1. 确保所有新代码 AOT 兼容
-  2. 移除所有动态反射
+1. 新代码禁止引入 MakeGenericMethod/MakeGenericType 动态反射（评审门禁）
+2. 组件存取一律走非泛型指针路径（AddComponentRaw/SetRaw）或静态泛型缓存
+3. 反射仅限编译期可确定的元数据读取（特性、类型名、类型检查）
 ```
 
 ---

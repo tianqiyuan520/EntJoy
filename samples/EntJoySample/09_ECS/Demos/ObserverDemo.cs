@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
@@ -16,7 +16,7 @@ namespace EntJoySample.ECS
     /// </summary>
     public static class ObserverDemo
     {
-        private static World _world;
+        private static World _world = null!;
 
         public static void Run()
         {

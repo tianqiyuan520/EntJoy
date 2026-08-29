@@ -17,6 +17,7 @@ namespace EntJoy.ECS
 
         private static bool[] ComponentIsEnableable = new bool[100]; // 记录组件是否为 enableable
         private static bool[] ComponentIsShared = new bool[100];     // 记录组件是否为 ISharedComponentData
+        private static bool[] ComponentIsRelation = new bool[100];   // 记录组件是否为 IRelationComponent
 
         // 用于保护所有静态状态的锁。Component 注册是稀有操作，锁开销可忽略。
         private static readonly object _typeLock = new();
@@ -43,7 +44,7 @@ namespace EntJoy.ECS
                 int size;
                 try
                 {
-                    size = isShared ? ComputeSharedSize(type) : Marshal.SizeOf(type);
+                    size = isShared ? ComputeSharedSize(type) : ComputeComponentSize(type);
                 }
                 catch (ArgumentException ex)
                 {
@@ -58,11 +59,14 @@ namespace EntJoy.ECS
                     Array.Resize(ref ComponentDataSize, ComponentDataSize.Length * 2);
                     Array.Resize(ref ComponentIsEnableable, ComponentIsEnableable.Length * 2);
                     Array.Resize(ref ComponentIsShared, ComponentIsShared.Length * 2);
+                    Array.Resize(ref ComponentIsRelation, ComponentIsRelation.Length * 2);
                 }
                 // 判断是否为 IEnableableComponent
                 ComponentIsEnableable[id] = typeof(IEnableableComponent).IsAssignableFrom(type);
                 // 判断是否为 ISharedComponentData
                 ComponentIsShared[id] = isShared;
+                // 判断是否为 IRelationComponent
+                ComponentIsRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type);
 
                 ComponentDataSize[id] = newComponentType.Size;
 
@@ -71,6 +75,21 @@ namespace EntJoy.ECS
                 idAllocator = id + 1;
                 return newComponentType;
             }
+        }
+
+        /// <summary>
+        /// 计算组件类型的大小：
+        /// 关系组件（IRelationComponent）→ 强制 sizeof(RelationSlot)（8B，列值存 target+version）。
+        /// 关系类型必须含 RelationSlot Target 字段（Unsafe.SizeOf&lt;TRel&gt; == 8B），
+        /// 使 GetComponentDataSpan&lt;TRel&gt;()/IJobEntity 指针步长与列宽一致；
+        /// 强制 8B 兜底防御空 struct 误用（防空 struct 注册成 1B 列导致越界）。
+        /// 普通 blittable struct → Marshal.SizeOf。
+        /// </summary>
+        private static int ComputeComponentSize(Type type)
+        {
+            if (typeof(IRelationComponent).IsAssignableFrom(type))
+                return System.Runtime.InteropServices.Marshal.SizeOf<RelationSlot>();
+            return Marshal.SizeOf(type);
         }
 
         /// <summary>
@@ -105,6 +124,9 @@ namespace EntJoy.ECS
 
         /// <summary>该组件类型是否为 Shared（ISharedComponentData）。</summary>
         public static bool GetIsShared(int id) => ComponentIsShared[id];
+
+        /// <summary>该组件类型是否为关系组件（IRelationComponent）。</summary>
+        public static bool GetIsRelation(int id) => ComponentIsRelation[id];
 
         /// <summary>
         /// 通过该组件类型的ID获取对应的类型

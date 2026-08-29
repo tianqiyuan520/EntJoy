@@ -41,5 +41,7 @@ namespace EntJoySample.ECS
         public bool IsActive;
     }
 
-    // Shared Component 类型已移至 SharedComponentDemo.cs（独立声明避免跨文件类型冲突）
+    /// <summary>关系组件：父子关系，列值 = RelationSlot（target + version），8B。</summary>
+    public struct ChildOf : IRelationComponent { public RelationSlot Target; }
+
 }

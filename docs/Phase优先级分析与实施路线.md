@@ -1,5 +1,11 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-29 增量 5：**N 元组补齐 + 警告清理** —— `QueryBuilder.WithAll<T0..Tn>()`（新生成器，
+> 替代 3+ 组件链式调用）、`World.QueryChunks<T0..Tn>()`（chunk 级 N 元组遍历，chunk 三件套 +
+> 扩展方法）、QueryTuple 生成器重构为按 arity 泛型模板（修复固定类名 CS0101 冲突）、
+> 构建警告清理（NoWarn 8500/8632/8981/CA2014/CA2255、删不可达代码、字段可空化）。
+> 详见 `docs/20260828-查询缓存与N元组生成.md` §八。
+>
 > 2026-08-28 增量 4：**查询缓存共享 + N 元组查询生成器** —— EntityQuery 共享注册表（QueryKey 指纹 + 排序归一 + 增量刷新）、
 > Entity Group 反向索引（Entity→匹配查询集合，惰性构建）、`world.Query<T0..Tn>()` N≥3 强类型枚举器按需生成（SourceGenerator），
 > **SystemAPI 移除**（Query/QueryChunks 并入 World）。S20（Entity Index/Group）查询缓存部分完成。
@@ -66,13 +72,15 @@ Phase 5 (易用性)            🔲 未开始
   └─ ~~事件总线~~             ✅ — Event Channel 已实现（S18 World Events 完成，移到 Phase 4）
   └─ ~~One-Frame Component~~ ❌ — 已废弃：Event Channel 替代（零结构变更）
 
-Phase 6 (实体关系)          🔲 未开始
-  └─ Non-Fragmenting 关系
-  └─ 级联删除
-  └─ 关系查询
+Phase 6 (实体关系)          ✅ 全部完成（2026-08-29）
+  └─ Non-Fragmenting 关系   ✅ — S23 RelationSlot 8B 列，不拆 Archetype
+  └─ 级联删除              ✅ — S24 RelationIndex + DestroyEntityCascade 递归防环
+  └─ 关系查询              ✅ — WithRelationship 过滤 + GetRelationsOf 反向查询（O(1)）
+  └─ Job/原生访问          ✅ — IJobChunk/IJobEntity/NativeTranspiler(C++/ISPC) 六路径验证
+  └─ 关系遍历 API          ✅ — S23c GetAncestors/GetDescendants/GetSiblings（借鉴 Bevy/Flecs）
 
-Phase 7 (共享组件)          🔲 未开始
-  └─ Shared Component 落地
+Phase 7 (共享组件)          ✅ S25 收口（b/c ✅ 2026-08-29；a ⏸ 已评估暂不实现）
+  └─ Shared Component 落地  ✅ — S25：WithShared 查询 ✅ + Change Tracking ✅ + 排序分组 ⏸ 已评估暂不实现（决策见 SharedComponent 设计 §5.1）
 
 Phase 8 (Source Generator)  🔲 未开始
   └─ Component 存取生成
@@ -83,7 +91,7 @@ Phase 9 (托管类型)          🔲 未开始
   └─ GCHandle + 指针数组
   └─ 字符串驻留
   └─ NativeTranspiler 突破
-  └─ AOT 兼容修复
+  └─ AOT 兼容修复          ✅ 已完成（2026-08-26，详见 §十）
 
 工具链                       🔲 未开始
   └─ Godot 场景桥接
@@ -151,9 +159,11 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S20** | Entity Index / Group | Phase 5 | ✅ 已完成（2026-08-28） | S7 | 查询缓存共享注册表（QueryKey 指纹 + 排序归一 + 增量刷新）+ Entity Group 反向索引（Entity→匹配查询集合，惰性构建）。基准：共享 4x+ 提速，GetGroupsOf 0.08us。详见 20260828-查询缓存与N元组生成.md |
 | **S21** | ~~AutoSIMD P2 循环展开~~ | ~~AutoSIMD~~ | 已跳过 | — | 🔲 已跳过：常量界小循环（≤64次）已由 SimdLoopGenerator 全展开；非常量界中等循环 Clang/MSVC `-funroll-loops` 已自动处理，手动额外半展开收益不确定且增加生成代码体积 |
 | **S22** | 安全检查宏分层 | Phase 1 遗留 | 2-3 天 | — | ENTJOY_SAFETY 裁剪 Release 开销 |
-| **S23** | Relation SoA 编码 | Phase 6 | 1 周 | S7 | 含 target version/epoch 防 ID 回收 |
-| **S24** | 级联删除 + target index | Phase 6 | 1 周 | S23 | 索引加速 |
-| **S25** | Shared Component 落地扩展 | Phase 7 | 1 周 | S16 | 复用 S16 per-chunk 存储：按共享值排序/分组 chunk、`WithShared` 查询进阶、与 Change Tracking/Job Tracking 联动 |
+| **S23** | Relation SoA 编码 | Phase 6 | ✅ 已完成（2026-08-29） | S7 | RelationSlot 8B 列（target+version 防 ID 回收）+ IRelationComponent + Add/Remove/Get/HasRelationship + WithRelationship 查询过滤（QueryKey 指纹化）。11/11 测试 + 全量 77/77。详见 docs/20260829-RelationSoA设计.md |
+| **S24** | 级联删除 + target index | Phase 6 | ✅ 已完成（2026-08-29） | S23 | RelationIndex 反向索引（target→HashSet，O(1)）+ DestroyEntityCascade 递归防环 + 索引一致性（Add/Remove/标准 Destroy 同步）。7/7 级联测试 + 全量 84/84 |
+| **S23b** | 关系查询进阶 + Job 访问 | Phase 6 | ✅ 已完成（2026-08-29） | S23 | GetRelationsOf<TRel>/GetRelationsOfAll（O(1) 反向查询）+ QuerySelection<T0,T1> 链式 WithRelationship + IJobChunk/IJobEntity/NativeTranspiler(C++/ISPC) 六路径访问验证。修复 3 个 NativeTranspiler 通用 bug（嵌套 include + ISPC 类型映射） |
+| **S23c** | 关系遍历 API | Phase 6 | ✅ 已完成（2026-08-29） | S23/S24 | GetAncestors/GetDescendants(BFS)/GetSiblings（借鉴 Bevy iter_*，利用 RelationIndex O(1)，visited 防环含起始实体）。12/12 测试 + 全量 96/97（唯一 FAIL = S25 缺口判据）。基准：深链 10000 祖先 4.46ms、宽树 10000 后代 2.21ms。修复 default(Entity) Id=0 陷阱（新增 TryGetRelationshipTarget） |
+| **S25** | Shared Component 落地扩展 | Phase 7 | ✅ 收口（2026-08-29：b/c ✅，a 已评估暂不实现） | S16 | 三项：a) 按共享值排序/分组 chunk ⏸ 已评估暂不实现——现状已保证同值实体同 chunk + 空 chunk 回收，缺口仅为物理相邻；跨值排序不可行（boxed 无全序）、换位需同步 EntityInfo.ChunkIndex、Remove swap-pop 打乱分组、cap 768 下收益存疑（决策详见 SharedComponent 设计 §5.1）；b) `WithShared` 查询修复 ✅——修复链见 SharedComponent 设计 §5.1（MatchesSharedFilter 统一三路径 + QueryKey 指纹补 value + IsMatch 共享列校验 + **chunk stride 布局 bug**：stride 漏算位掩码/共享值区致下一 chunk Entity 数组压在本 chunk 位掩码上 + 新 chunk 位掩码清零 + WithChanged 查询每次访问重评；SharedQueryTests 8/8）；c) Change Tracking 联动 ✅ 验证为既有能力（SetSharedComponent 就地/移动路径均已有 MarkEntityChanged），Job 安全由 CompleteActiveJobs 保证 |
 | **S26** | Component 存取生成 | Phase 8 | 3-5 天 | S7 | 自动生成 Get/Set 访问器 |
 | **S27** | System 注册生成 | Phase 8 | 3-5 天 | S9 | 自动收集 system + 注入 |
 
@@ -263,8 +273,13 @@ Phase 2 (存储增强)    AutoSIMD 修复      Phase 5 (易用性)
    ├─ Shared Comp (S16)      ├─ E9 (S5)             └─ Group (S20)
    └─ Chunk lazy zero        ├─ E7 (S10)          ├─ Context (S28)
                             └─ E5 (S11)          └─ DI (S29)
+       │                                          └─ 关系型状态机 (S23c 后)
        │
-Phase 6 (关系) → Phase 7 (共享组件) → Phase 8 (生成器)
+Phase 6 (关系) ✅ 主体完成 → Phase 7 (共享组件) → Phase 8 (生成器)
+   ├─ S23 RelationSlot 列 ✅
+   ├─ S24 级联删除 ✅
+   ├─ S23b 查询进阶 + Job 访问 ✅
+   └─ S23c 关系遍历 API 🔲 ← 下一步
        │
 Phase 9 (Managed 类型，独立轨道)
   ├─ copy/move/destroy hooks (S35) ← 前置
@@ -279,7 +294,7 @@ Phase 9 (Managed 类型，独立轨道)
 | 里程碑 | 包含 Phase | 状态 | 预估总工时 |
 |--------|-----------|------|-----------|
 | **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅（含 Observer 收尾 2026-08-28） | ✅ **已完成**（2026-08-28） | ~4-6 周 |
-| **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | 进行中（Phase 7 已完成 2026-08-27） | ~8-12 周 |
+| **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | **进行中**（Phase 6 ✅ 主体完成 2026-08-29；Phase 7 ✅ S25 收口 2026-08-29；剩 Phase 5 关系状态机） | ~8-12 周 |
 | **里程碑 C：生成器扩展** | Phase 8 | 未开始 | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
 | **AutoSIMD 修复** | 与里程碑并行 | 进行中 | ~2-3 周 |
@@ -363,7 +378,7 @@ Phase 9（Managed 类型）的前置条件是组件 copy/move/destroy hooks，�
 | S17 | Chunk lazy zero | ✅ 已完成（已验证） | — |
 | S18-S20 | Phase 5 核心 | 2-3 周 | ~7-10 周 |
 | S23-S24 | Phase 6 核心 | 2 周 | ~9-12 周 |
-| S25 | Phase 7 | 1 周 | ~10-13 周 |
+| S25 | Phase 7 | ✅ 已完成（2026-08-29 收口） | ~10-13 周 |
 | S26-S27 | Phase 8 核心 | 1-2 周 | ~11-15 周 |
 | S35-S37 | Phase 9 | 5-8 周 | 独立轨道 |
 
@@ -750,113 +765,95 @@ NativeTranspiler 编译时：
 
 ---
 
-## 十、AOT 兼容性问题（2026-08 审计）
+## 十、AOT 兼容性（2026-08 审计 → ✅ 已完成）
 
-> 本节记录当前项目的 AOT 不兼容反射用法，需要修复。
+> 2026-08 审计发现 3 处 AOT 不兼容反射用法，**2026-08-26 已全部修复**。
+> 修复记录：`docs/20260826-重构ECS-JobSystem方案.md`（Phase D）+ `docs/20260826-JobSystem重构-性能基线.md`（Phase D 无回归）。
+> 2026-08-29 复核：`src/` 全库 grep `MakeGenericMethod|MakeGenericType|.GetMethod(|.GetField(|Activator.` **零命中**。
 
-### 10.1 问题概述
+### 10.1 问题概述（已解决）
 
-当前项目有 **3 处严重的 AOT 不兼容反射用法**，会导致 iOS/主机/Godot AOT 编译失败。
+2026-08 审计发现 **3 处严重 AOT 不兼容反射用法**（动态泛型实例化 + 反射调用），会导致 iOS/主机/Godot AOT 编译失败。全部已在 2026-08-26 的 JobSystem 重构中消除，不需要 SourceGenerator 介入（改用非泛型指针路径 + 静态泛型委托缓存）。
 
-### 10.2 问题详情
+### 10.2 修复明细（问题 → 修复 → 当前代码）
 
-#### 问题 1：NativeJobCore.cs (line 748-753)
+#### 问题 1：NativeJobCore.cs `CreateParallelForBatchCallback` 反射调用 → ✅ 已修复
 
 ```csharp
-// 问题代码：
+// 修复前（AOT 不兼容）：
 var create = typeof(NativeJobCore)
     .GetMethod(nameof(CreateParallelForBatchCallback), BindingFlags.Static | BindingFlags.NonPublic)
-    .MakeGenericMethod(typeof(T))  // ❌ AOT 不兼容：动态泛型实例化
-    .Invoke(null, null);           // ❌ AOT 不兼容：动态调用
+    .MakeGenericMethod(typeof(T))  // ❌ AOT 不兼容
+    .Invoke(null, null);           // ❌ AOT 不兼容
 
-// 解决方案：用 SourceGenerator 生成
-[NativeTranspile]
-struct MyJob : IJobParallelForBatch { ... }
-
-// 生成：
-public static class MyJob_BatchRunner {
-    public static void Callback(IntPtr context, int start, int count) { ... }
+// 修复后：静态泛型委托缓存（零字典查找、零反射），当前 NativeJobCore.cs:798-811
+internal static class ParallelForBatchDelegateCacheFor<T> where T : struct, IJobParallelForBatch
+{
+    public static readonly DelegateCache Cache = new(CreateParallelForBatchCallback<T>());
 }
+// 调度点 NativeJobScheduler.cs:376 直接取 Cache.FuncPtr，AOT 安全
 ```
 
-#### 问题 2：NativeJobScheduler.cs (line 922-925)
+#### 问题 2：NativeJobScheduler.cs `BatchRunner<T>` MakeGenericType → ✅ 已修复
 
 ```csharp
-// 问题代码：
-if (typeof(IJobParallelForBatch).IsAssignableFrom(typeof(T)))
-    return _batchRunnerCache.GetOrAdd(typeof(T), t =>
-        var f = typeof(BatchRunner<>)
-            .MakeGenericType(t)  // ❌ AOT 不兼容：动态泛型构造
-            .GetField("Runner"); // ❌ AOT 不兼容：反射获取字段
+// 修复前（AOT 不兼容）：
+return _batchRunnerCache.GetOrAdd(typeof(T), t =>
+    var f = typeof(BatchRunner<>)
+        .MakeGenericType(t)  // ❌ AOT 不兼容
+        .GetField("Runner"); // ❌ AOT 不兼容
 
-// 解决方案：用 SourceGenerator 生成具体类型
-// 生成：
-public static class BatchRunner_MyJob {
-    public static BatchRunner Runner = new BatchRunner_MyJob();
-}
+// 修复后：BatchRunner<T> / _batchRunnerCache 已删除（bc6509c 死代码清理），
+// 统一走 NativeJobCore 静态泛型缓存 + index 回调（AutoParallelForCallback<T>），
+// 当前 NativeJobScheduler.cs 零反射
 ```
 
-#### 问题 3：EntityManager.cs (line 871-896)
+#### 问题 3：EntityManager.cs `AddComponent` MakeGenericMethod → ✅ 已修复
 
 ```csharp
-// 问题代码：
+// 修复前（AOT 不兼容）：
 return typeof(EntityManager)
     .GetMethod(nameof(AddComponent))!
-    .MakeGenericMethod(componentType)  // ❌ AOT 不兼容：动态泛型实例化
-    .Invoke(this, new object[] { entity, boxedValue });  // ❌ AOT 不兼容：动态调用
+    .MakeGenericMethod(componentType)  // ❌ AOT 不兼容
+    .Invoke(this, new object[] { entity, boxedValue });  // ❌ AOT 不兼容
 
-// 解决方案：用 SourceGenerator 生成 switch 分发
-switch (componentType.Id) {
-    case 0: return AddComponent<Position>(entity, (Position)boxedValue);
-    case 1: return AddComponent<Velocity>(entity, (Velocity)boxedValue);
-    // ... 编译时生成所有 case
-}
+// 修复后：非泛型指针路径（零反射、零 GCHandle 装箱拷贝），
+// 当前 EntityManager.cs:882 AddComponentRaw(entity, Type, object) + SetRaw 同构
+// 泛型版本 AddComponent<T> 直接转发，ECB Playback 走 AddComponentRaw
 ```
 
-### 10.3 修复优先级
+### 10.3 修复结果
 
-| 问题 | 严重性 | 修复方案 | 预估工时 |
-|------|--------|---------|---------|
-| `MakeGenericMethod` (EntityManager) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成 switch 分发 | 3-5 天 |
-| `MakeGenericType` (NativeJobScheduler) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成具体类型 | 3-5 天 |
-| `MakeGenericMethod` (NativeJobCore) | ⭐⭐⭐⭐⭐ | SourceGenerator 生成回调 | 3-5 天 |
+| 问题 | 修复方式 | 落地提交 | 状态 |
+|------|---------|---------|------|
+| `MakeGenericMethod` (NativeJobCore) | 静态泛型委托缓存 `ParallelForBatchDelegateCacheFor<T>` | 91a3875 + dc3e63d | ✅ 已修复 |
+| `MakeGenericType` (NativeJobScheduler) | 删除 `BatchRunner<T>`/`_batchRunnerCache`，统一 index 回调 | bc6509c + 91a3875 | ✅ 已修复 |
+| `MakeGenericMethod` (EntityManager) | 非泛型 `AddComponentRaw`/`SetRaw`/`RemoveComponentRaw` 指针路径 | cec84b2 + 01f162e | ✅ 已修复 |
 
-### 10.4 AOT 兼容的反射用法（无问题）
+**复核**（2026-08-29）：`src/` 全库 `grep MakeGenericMethod|MakeGenericType|.GetMethod(|.GetField(|Activator.` = **零命中**；`EntJoy.Jobs` 仅剩 `Assembly.Location`（读取 DLL 路径，AOT 安全）。
 
-| 用法 | 示例 | 说明 |
+### 10.4 残留的反射用法（AOT 安全）
+
+| 用法 | 位置 | 说明 |
 |------|------|------|
-| `typeof(T).Name` | 多处 | 只是获取类型名字符串 |
-| `typeof(T).IsAssignableFrom()` | ComponentTypeManager | 类型检查，不生成代码 |
-| `typeof(T)` 作为参数 | 多处 | 编译时确定 |
+| `GetCustomAttribute` | SystemRunner.cs / ScheduleGraph.cs | 读取特性元数据（编译期已知），AOT 安全 |
+| `typeof(T).Name` / `typeof(T).Assembly.Location` | 多处 | 字符串/路径，不生成代码 |
+| `RuntimeHelpers.IsReferenceOrContainsReferences<T>()` | NativeJobScheduler.cs | 静态泛型检查，AOT 安全 |
 
 ### 10.5 影响范围
 
 ```
-受影响平台：
-  - iOS（AOT 编译）
-  - 主机平台（PS5/Xbox/Switch）
-  - Godot .NET AOT 模式
-
-不受影响平台：
-  - Windows/Linux/macOS（JIT 编译）
-  - Android（部分 AOT）
+原受影响平台：iOS / 主机（PS5/Xbox/Switch）/ Godot .NET AOT
+修复后：全部消除动态反射，AOT 部署路径安全
+（20260823-Unity集成基准.md 已记录：IL2CPP 兼容修复完成，待 Windows Standalone IL2CPP 构建最终验证）
 ```
 
-### 10.6 修复建议
+### 10.6 后续原则（长期）
 
 ```
-短期（Phase 4 之前）：
-  1. 识别所有 AOT 不兼容代码
-  2. 标记为 [UnsupportedOSPlatform] 或添加 AOT 兼容分支
-
-中期（Phase 4-5）：
-  1. 用 SourceGenerator 替换动态反射
-  2. 为 EntityManager 生成 switch 分发
-  3. 为 NativeJobScheduler 生成具体类型
-
-长期（Phase 9）：
-  1. 确保所有新代码 AOT 兼容
-  2. 移除所有动态反射
+1. 新代码禁止引入 MakeGenericMethod/MakeGenericType 动态反射（评审门禁）
+2. 组件存取一律走非泛型指针路径（AddComponentRaw/SetRaw）或静态泛型缓存
+3. 反射仅限编译期可确定的元数据读取（特性、类型名、类型检查）
 ```
 
 ---
@@ -2110,7 +2107,7 @@ EntJoy = 高性能无头 ECS 框架
 | **易用 API** | ⭐⭐⭐⭐ | 🔲 SourceGenerator |
 | **Godot 集成** | ⭐⭐⭐⭐ | 🔲 场景桥接 |
 | **.NET 兼容** | ⭐⭐⭐⭐⭐ | ✅ 已有 |
-| **AOT 兼容** | ⭐⭐⭐⭐⭐ | 🔲 待修复 |
+| **AOT 兼容** | ⭐⭐⭐⭐⭐ | ✅ 已完成（2026-08-26，动态反射全消除） |
 
 ### 22.3 不需要的（偏离定位）
 
@@ -2389,18 +2386,17 @@ world.AddComponents<Health>(entities, e => new Health { Value = 100 });
 
 ### 23.4 集成痛点（应该解决）
 
-#### 痛点 11：AOT 不兼容
+#### 痛点 11：AOT 不兼容 ✅ 已解决（2026-08-26）
 
 ```csharp
-// 当前：有 AOT 不兼容代码
-typeof(T).MakeGenericMethod(...);  // ❌ AOT 不兼容
-
-// 改进：完全 AOT 兼容
-// 用 SourceGenerator 替代所有动态反射
+// 现状：动态反射已全消除
+// 旧问题：typeof(T).MakeGenericMethod(...);  // ❌ AOT 不兼容
+// 方案：非泛型指针路径（AddComponentRaw/SetRaw）+ 静态泛型委托缓存（ParallelForBatchDelegateCacheFor<T>）
+// 复核（2026-08-29）：src/ 全库动态反射零命中
 ```
 
-**可行性**：✅ 高（SourceGenerator 替代）
-**实用性**：⭐⭐⭐⭐⭐（iOS/主机必须）
+**可行性**：✅ 已完成（非泛型指针路径 + 静态泛型缓存，未用 SourceGenerator）
+**实用性**：⭐⭐⭐⭐⭐（iOS/主机/Godot AOT 路径安全）
 
 #### 痛点 12：后端切换困难
 

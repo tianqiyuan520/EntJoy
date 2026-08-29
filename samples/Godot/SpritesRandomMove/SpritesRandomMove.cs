@@ -21,9 +21,9 @@ public struct Vel : IComponentData
 public partial class SpritesRandomMove : Node2D
 {
 	[Export]
-	Node MultiMeshgroup;
+	Node? MultiMeshgroup;
 
-	public World myWorld;
+	public World myWorld = null!;
 
 	public int EntityCount = 1_000_000;
 	public bool isPaused = false;
@@ -56,7 +56,7 @@ public partial class SpritesRandomMove : Node2D
 	private readonly double[] _ecsFrameBenchmarkNotifiedWorkers = new double[EcsFrameBenchmarkMeasureFrames];
 
 	private bool _useECS = true;
-	private Label _modeLabel;
+	private Label? _modeLabel;
 
 	private QueryBuilder _moveQuery = new QueryBuilder().WithAll<Position, Vel>();
 	private int _ecsJobType = 0;

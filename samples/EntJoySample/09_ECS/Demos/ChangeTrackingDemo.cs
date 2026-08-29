@@ -13,7 +13,7 @@ namespace EntJoySample.ECS
     /// </summary>
     public static class ChangeTrackingDemo
     {
-        private static World _world;
+        private static World _world = null!;
 
         public static void Run()
         {
