@@ -67,8 +67,8 @@ Phase 4 (System 调度与开发体验增强) ✅ 已完成（2026-08-28，Observ
   └─ ISPC SendEvent        ✅ — ISPC 后端 SendEvent + AutoSIMD fallback 支持 + C#→ISPC 原子语义修复（2026-08-27，详见 docs/20260827-ISpcEvent-实现记录.md）
   └─ Observer (S8-new)     ✅ — 组件生命周期事件 push 回调：主线程立即 + ECB Playback 自然触发 + 批量 span 合并（2026-08-28，详见 docs/20260828-Observer设计.md）
 
-Phase 5 (易用性)            🔲 未开始
-  └─ 关系型状态机
+Phase 5 (易用性)            🔲 仅剩低优先级项（S28 Context / S29 DI）
+  └─ 关系型状态机            ❌ — 已决策不做（2026-08-29 后复核：业务逻辑由用户在引擎层实现，符合 §22.6 核心原则）
   └─ ~~事件总线~~             ✅ — Event Channel 已实现（S18 World Events 完成，移到 Phase 4）
   └─ ~~One-Frame Component~~ ❌ — 已废弃：Event Channel 替代（零结构变更）
 
@@ -163,7 +163,7 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S24** | 级联删除 + target index | Phase 6 | ✅ 已完成（2026-08-29） | S23 | RelationIndex 反向索引（target→HashSet，O(1)）+ DestroyEntityCascade 递归防环 + 索引一致性（Add/Remove/标准 Destroy 同步）。7/7 级联测试 + 全量 84/84 |
 | **S23b** | 关系查询进阶 + Job 访问 | Phase 6 | ✅ 已完成（2026-08-29） | S23 | GetRelationsOf<TRel>/GetRelationsOfAll（O(1) 反向查询）+ QuerySelection<T0,T1> 链式 WithRelationship + IJobChunk/IJobEntity/NativeTranspiler(C++/ISPC) 六路径访问验证。修复 3 个 NativeTranspiler 通用 bug（嵌套 include + ISPC 类型映射） |
 | **S23c** | 关系遍历 API | Phase 6 | ✅ 已完成（2026-08-29） | S23/S24 | GetAncestors/GetDescendants(BFS)/GetSiblings（借鉴 Bevy iter_*，利用 RelationIndex O(1)，visited 防环含起始实体）。12/12 测试 + 全量 96/97（唯一 FAIL = S25 缺口判据）。基准：深链 10000 祖先 4.46ms、宽树 10000 后代 2.21ms。修复 default(Entity) Id=0 陷阱（新增 TryGetRelationshipTarget） |
-| **S25** | Shared Component 落地扩展 | Phase 7 | ✅ 收口（2026-08-29：b/c ✅，a 已评估暂不实现） | S16 | 三项：a) 按共享值排序/分组 chunk ⏸ 已评估暂不实现——现状已保证同值实体同 chunk + 空 chunk 回收，缺口仅为物理相邻；跨值排序不可行（boxed 无全序）、换位需同步 EntityInfo.ChunkIndex、Remove swap-pop 打乱分组、cap 768 下收益存疑（决策详见 SharedComponent 设计 §5.1）；b) `WithShared` 查询修复 ✅——修复链见 SharedComponent 设计 §5.1（MatchesSharedFilter 统一三路径 + QueryKey 指纹补 value + IsMatch 共享列校验 + **chunk stride 布局 bug**：stride 漏算位掩码/共享值区致下一 chunk Entity 数组压在本 chunk 位掩码上 + 新 chunk 位掩码清零 + WithChanged 查询每次访问重评；SharedQueryTests 8/8）；c) Change Tracking 联动 ✅ 验证为既有能力（SetSharedComponent 就地/移动路径均已有 MarkEntityChanged），Job 安全由 CompleteActiveJobs 保证 |
+| **S25** | Shared Component 落地扩展 | Phase 7 | ✅ 收口（2026-08-29：b/c ✅，a 已评估暂不实现；2026-08-29 后落地 per-value 最近使用缓存） | S16 | 三项：a) 按共享值排序/分组 chunk ⏸ 已评估暂不实现——现状已保证同值实体入同值 chunk（例外：SetSharedComponent 单实体就地改值不合并，同值可多 chunk，详见 SharedComponent 设计 §5.2）+ 空 chunk 回收，缺口仅为物理相邻；跨值排序不可行（boxed 无全序）、换位需同步 EntityInfo.ChunkIndex、Remove swap-pop 打乱分组、cap 768 下收益存疑（决策详见 SharedComponent 设计 §5.1/5.2）；2026-08-29 后：`FindChunkWith*` 全量扫描改 per-value 最近使用缓存（方案 B，O(1) 期望 + lazy 验证，4 测试，全量 108/108，详见 §5.2）；b) `WithShared` 查询修复 ✅——修复链见 SharedComponent 设计 §5.1（MatchesSharedFilter 统一三路径 + QueryKey 指纹补 value + IsMatch 共享列校验 + **chunk stride 布局 bug**：stride 漏算位掩码/共享值区致下一 chunk Entity 数组压在本 chunk 位掩码上 + 新 chunk 位掩码清零 + WithChanged 查询每次访问重评；SharedQueryTests 8/8）；c) Change Tracking 联动 ✅ 验证为既有能力（SetSharedComponent 就地/移动路径均已有 MarkEntityChanged），Job 安全由 CompleteActiveJobs 保证 |
 | **S26** | Component 存取生成 | Phase 8 | 3-5 天 | S7 | 自动生成 Get/Set 访问器 |
 | **S27** | System 注册生成 | Phase 8 | 3-5 天 | S9 | 自动收集 system + 注入 |
 
@@ -273,7 +273,7 @@ Phase 2 (存储增强)    AutoSIMD 修复      Phase 5 (易用性)
    ├─ Shared Comp (S16)      ├─ E9 (S5)             └─ Group (S20)
    └─ Chunk lazy zero        ├─ E7 (S10)          ├─ Context (S28)
                             └─ E5 (S11)          └─ DI (S29)
-       │                                          └─ 关系型状态机 (S23c 后)
+       │                                          └─ ~~关系型状态机~~ ❌ 已决策不做
        │
 Phase 6 (关系) ✅ 主体完成 → Phase 7 (共享组件) → Phase 8 (生成器)
    ├─ S23 RelationSlot 列 ✅
@@ -294,7 +294,7 @@ Phase 9 (Managed 类型，独立轨道)
 | 里程碑 | 包含 Phase | 状态 | 预估总工时 |
 |--------|-----------|------|-----------|
 | **里程碑 A：高性能核心** | Phase 1 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 4 ✅（含 Observer 收尾 2026-08-28） | ✅ **已完成**（2026-08-28） | ~4-6 周 |
-| **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | **进行中**（Phase 6 ✅ 主体完成 2026-08-29；Phase 7 ✅ S25 收口 2026-08-29；剩 Phase 5 关系状态机） | ~8-12 周 |
+| **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | **主体完成**（Phase 6 ✅ 2026-08-29；Phase 7 ✅ S25 收口 2026-08-29；Phase 5 关系型状态机 ❌ 已决策不做，剩余仅 S28/S29 低优先级） | ~8-12 周 |
 | **里程碑 C：生成器扩展** | Phase 8 | 未开始 | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
 | **AutoSIMD 修复** | 与里程碑并行 | 进行中 | ~2-3 周 |
@@ -859,6 +859,9 @@ return typeof(EntityManager)
 ---
 
 ## 十一、关系型状态机设计（2026-08 脑暴）
+
+> **决策（2026-08-29 后复核）**：本节方案 **已决策不实施**。理由：状态机属于业务逻辑（§22.6 核心原则明确"业务逻辑由用户在引擎层实现"）；
+> 所需基础设施（关系 SoA 列 + 反向索引 + 级联删除 + 遍历 API）已全部就绪，用户可在引擎层用现有 API 自行构建。
 
 > 本节分析如何用 ECS 关系实现高性能状态机，避免 Add/Remove Component 的结构变更开销。
 
@@ -1493,7 +1496,7 @@ Phase 4（设计完成）：
   🔲 空闲跳过
 
 Phase 5-6（设计完成）：
-  🔲 关系型状态机
+  ~~🔲 关系型状态机~~ ❌ 已决策不做（2026-08-29 后复核）
   🔲 事件总线
   🔲 World Events
 

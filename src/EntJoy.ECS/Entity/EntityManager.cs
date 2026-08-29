@@ -115,6 +115,7 @@ namespace EntJoy.ECS
 
             archetypeMap.Clear();
             recycleEntities.Clear();
+            _lastChunkPerSharedValue.Clear();
             ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
             _observers?.Clear();
             _observerCount = 0;

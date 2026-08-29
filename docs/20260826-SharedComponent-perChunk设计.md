@@ -187,6 +187,13 @@ EntityBuilder WithShared<T>(T value);        // Spawn().WithShared(...)
 | **S25a** | 按共享值排序/分组 chunk | ⏸ 已评估，暂不实现（2026-08-29 决策）。**现状已具备**：同值实体必同 chunk（`NewEntity`/`SetSharedComponent` 均"找/建目标值 chunk"）+ 空 chunk swap-pop 回收；唯一缺口是 ChunkList 中同值 chunk **物理相邻**。**关键约束**：跨值"排序"不可行——shared 值是 boxed 任意类型（managed class 无比较键、blittable 无 IComparable 契约），无全序，只能"同值分组"；物理换位须同步更新 `EntityInfo.ChunkIndex`（存于每个实体，插入中间为 O(N)），最小成本方案是"空新 chunk 与同值组尾 chunk 交换列表位置"（O(cap)），且 `Remove` 的 swap-pop 会打乱分组、维持不变量需额外逻辑。**收益存疑**：cap=768 大 chunk 下同值分散需 768+ 实体才出现。若日后需要，采用最小方案"新建目标值 chunk 时归入同值组尾" |
 | **S25c** | 与 Change Tracking 联动 | ✅ 验证为既有能力（2026-08-29）：`SetSharedComponent` 就地改值路径（103/126 行）与移动路径（115/134 行）均已调用 `MarkEntityChanged`；Job 安全由入口 `CompleteActiveJobs()` 保证。补测试锁定语义：创建不标记变更（AddEntity 不打标）→ 帧末 `ClearAllChangedBitMasks` 归零 → 就地改值/移动后 WithChanged 查询可见 |
 
+### 5.2 S25a 决策复核 + per-value 缓存（2026-08-29 后）
+
+**决策维持**：S25a（按共享值排序/分组 chunk）仍暂不实现。复核补充两点：
+
+1. **"同值实体必同 chunk"表述不准确（实证）**：仅 `NewEntity`/`SetSharedComponent` **多实体移动**路径找/建目标值 chunk；`SetSharedComponent` **单实体 chunk 就地改值**路径（`EntityManager_SharedComponent.cs` 就地改值分支）直接覆写不合并 → **同值可多 chunk 并存**。对 S25a 评估无影响（唯一缺口仍是物理相邻），但文档原表述需修正。
+2. **per-value 最近使用缓存（方案 B）落地**：`FindChunkWithManagedValue`/`FindChunkWithBlittableBoxed` 原为 O(chunks) 全量扫描（SetSharedComponent 移动 / NewEntity 带 shared 高频路径），现改为缓存优先 + lazy 验证（验证 chunk 仍存在、未满、值匹配，失败回退扫描）。key = `(Archetype, compIdx, value)`（managed 值 = 全局 index box；blittable = boxed 值）。删除路径零维护（swap-pop / 就地改值后缓存自然失效）。`FindExistingChunkForShared` 单 shared 列复用缓存路径，多列保持扫描。Dispose 清空。新增 4 测试（缓存命中一致 / chunk 回收后失效 / 就地改值后失效 / managed 路径），全量 108/108。
+
 ---
 
 ## 六、风险与缓解

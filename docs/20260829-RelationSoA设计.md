@@ -288,8 +288,28 @@ public QueryBuilder WithRelationship<T>(Entity target) where T : struct, IRelati
 | WithRelationship 查询（10 父 × 1000 子） | 1.06 ms/query | 10000 匹配精确命中 |
 | DestroyEntityCascade（100 父 × 1000 子） | 66.20 ms | 0.66 ms/父（含 1000 子销毁） |
 
-> 注意：Get/Has 均含 target 存活 + version 校验（`GetEntityInfoRef` 间接层）。Release 构建预计再降 2-4x。
+> 注意：Get/Has 均含 target 存活 + version 校验（`GetEntityInfoRef` 间接层）。~~Release 构建预计再降 2-4x~~（**已修正，见下**）。
 > Add 从 S23 的 0.362us 升至 0.714us = S24 主动索引维护成本（覆盖检查 + HashSet 增删），见 §5.5 权衡。
+
+### 9.1b Release 实测对比与预测修正（2026-08-29 后，EntJoySample Release 构建）
+
+| 操作 | Debug | Release | 提升 |
+|------|-------|---------|------|
+| CreateEntities 100000（带 ChildOf 列） | 52.55 ms | 44.81 ms | 1.17x |
+| AddRelationship x100000 | 0.649 us/op | 0.601 us/op | 1.08x |
+| GetRelationship x100000 | 0.126 us/op | 0.121 us/op | 1.04x |
+| HasRelationship x100000 | 0.130 us/op | 0.115 us/op | 1.13x |
+| WithRelationship query（10 父 × 1000 子） | 0.85 ms/query | 0.88 ms/query | ~1.0x |
+| DestroyEntityCascade（100 父 × 1000 子） | 51.54 ms | 47.04 ms | 1.10x |
+| GetRelationsOf x10000/iter | 50.2 us/iter | 50.6 us/iter | ~1.0x |
+| GetAncestors（深链 10000） | 4.653 ms | 3.541 ms | 1.31x |
+| GetDescendants（宽 10000） | 2.247 ms | 2.047 ms | 1.10x |
+| GetSiblings（hub 10000 子，1000 次） | 111.1 us/op | 81.5 us/op | 1.36x |
+
+**结论（修正 §9.1 预测）**：Release 相比 Debug 仅提升 **1.04~1.36x**，远低于此前预估的 2-4x。
+**瓶颈定位**：提升最大的恰是分配最重的两项（GetSiblings 1.36x / GetAncestors 1.31x，均输出大数组 + List/HashSet 容器）；
+提升最小的纯容器/结构变更主导项（GetRelationsOf / WithRelationship 查询 ~1.0x，AddRelationship 1.08x）。
+→ **瓶颈是托管分配与 Dictionary/HashSet 容器开销，而非 JIT 差异**。优化应优先消除分配（见 §十三 P1）。
 
 ### 9.2 实现中发现并修复的问题
 
@@ -454,3 +474,33 @@ public Entity[] GetSiblings<TRel>(Entity entity);      // 同 target 的兄弟�
 | GetAncestors（深链） | 深度 10000 | 4.46 ms |
 | GetDescendants（BFS） | 宽度 10000 | 2.21 ms |
 | GetSiblings | 1000 次（hub 10000 子） | 116.5 us/op（结果集 10000 元素场景；兄弟数量小的真实场景开销小得多） |
+
+---
+
+## 十三、优化排序与框架完善方向（2026-08-29 后评估）
+
+> 依据：EntJoySample Release 实测（§9.1b）+ 框架调研（`20260829-其他框架关系实现调研.md`）。
+
+### 13.1 优化排序（可行性 × 收益）
+
+| 优先级 | 优化项 | 收益（实测依据） | 可行性/风险 | 工作量 |
+|--------|--------|------------------|-------------|--------|
+| P0 | 先跑 Release 基准 | 现状量化（已做，见 §9.1b） | 零风险 | ✅ 已完成 |
+| **P1** | **遍历 API 分配消除**：`GetAncestors/Descendants/Siblings/RelationsOf/RelationsOfAll` 每次 `new List/HashSet/数组`，复用 `Util/TempBuffer.cs` + 输出到调用方 span 重载 | 高：GetSiblings 81.5us（Release）中 9999 元素数组分配占大头；GetAncestors 3.54ms 中容器分配显著 | 高（纯 C# 改造，不动存储，语义不变） | ✅ **已完成**（2026-08-29 后）：实例级复用容器 + BFS 双缓冲；Release 实测 GetSiblings 81.5→63.0us/op（-23%），GetAncestors/Descendants 分配占比小、改善被噪声淹没 |
+| P2 | RelationIndex 存储：`HashSet<Entity>`（struct 哈希+桶）换 packed long（Id<<32\|Version）或 per-target 小列表 | 中：Add 0.60us 中索引维护 ~0.35us | 高（RelationIndex 独立类，6 处调用点） | 0.5-1 天 |
+| P3 | 级联删除批量：`DestroyEntityCascade` 逐实体 `DestroyEntityInternal`（各含 swap-pop+索引+Observer），按 archetype 分组一次批量移除 | 中：470us/父（Release），2-4x | 中（需保持 Observer 逐实体语义） | 1-2 天 |
+| P4 | 批量 AddRelationship：首次加列 = 结构变更；复用 Phase 3 batch 模式 | 场景性：仅"首次批量建关系"受益 | 中 | 1-2 天 |
+
+**不做**：Get/Has 微优化（0.115-0.121us 已含版本校验链 + AggressiveInlining，Release 已确认瓶颈不在计算）。
+
+### 13.2 框架完善方向（参考 Bevy 0.16 / Flecs / Unity）
+
+| 优先级 | 完善项 | 参考框架 | 可行性 | 说明 |
+|--------|--------|---------|--------|------|
+| 高 | **声明式级联策略**：`[OnTargetDeleted(Delete\|Keep)]` 特性或注册 API，`DestroyEntity` 自动级联（现在必须显式调 `DestroyEntityCascade`） | Flecs `(ChildOf, OnDeleteTarget, EcsDelete)` | 中（hook 进 `DestroyEntityCore`，不破坏旧语义） | 防漏调、API 更安全 |
+| 高（零成本） | **关系数据能力文档化 + 测试**：`TRel` struct 可带任意字段（`struct Owns : IRelationComponent { public RelationSlot Target; public int Count; }`），Q2 修复后已天然支持但无测试锁定 | Flecs pair 关联组件 / Bevy Relationship 组件 | 极高 | 补测试即落地 |
+| 中 | **小工具补全**：`GetRoot<TRel>`（链顶）、`(Rel,*)` 语义（`WithAll<TRel>` 可表达，补 World 入口检查） | Bevy `root_ancestor` / Flecs 通配符 | 高 | 各半天 |
+| 低（大工程） | **路径 B 多实例（outgoing 1:N）**：Flecs EcsUnion switch 列 / Unity buffer 有参考；需 RelationTable 新存储面（§6 已预留） | Flecs `EcsUnion` / Unity Buffer | 低 | 关系存储重构，按需再做 |
+| 视需求 | **克隆联动**：克隆父递归克隆子 | Bevy `linked_cloning` | 中 | EntJoy 无克隆 API，需先有克隆 |
+
+**已无差距**：不拆 archetype（对齐 Bevy，优于 Flecs 默认）、反向索引 O(1)（`GetRelationsOf` ~5ns）、遍历 API（`GetAncestors/Descendants/Siblings`）、级联防环。
