@@ -214,9 +214,16 @@ namespace NativeTranspiler.Analyzer
             {
                 SpecialType.System_Int32 => "int",
                 SpecialType.System_UInt32 => "unsigned int",
+                SpecialType.System_Int64 => "int64",
+                SpecialType.System_UInt64 => "unsigned int64",
                 SpecialType.System_Single => "float",
                 SpecialType.System_Double => "double",
                 SpecialType.System_Boolean => "bool",
+                SpecialType.System_Byte => "unsigned int8",
+                SpecialType.System_SByte => "int8",
+                SpecialType.System_Int16 => "int16",
+                SpecialType.System_UInt16 => "unsigned int16",
+                SpecialType.System_Char => "unsigned int16",  // C# char=16bit
                 SpecialType.System_Void => "void",
                 _ => type.Name
             };
@@ -235,18 +242,35 @@ namespace NativeTranspiler.Analyzer
 
             // 嵌套值类型字段（自定义 struct）的 include：ISPC include 是文本包含，
             // 本文件被 job .ispc include 后，嵌套类型定义必须可见（DamageSignal → Coord）。
+            // 递归收集（与 C++ 侧 CollectNestedFieldIncludes 一致），防止深层嵌套缺定义。
             var nestedIncludes = new SortedSet<string>();
-            foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            var visited = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            void AddNested(ITypeSymbol type)
             {
-                if (f.Type is INamedTypeSymbol nested &&
+                if (type is IPointerTypeSymbol ptr)
+                {
+                    AddNested(ptr.PointedAtType);
+                    return;
+                }
+                if (type is INamedTypeSymbol named && named.IsGenericType && IsEntJoyNativeContainerType(type))
+                {
+                    AddNested(named.TypeArguments[0]);
+                    return;
+                }
+                if (type is INamedTypeSymbol nested &&
                     nested.TypeKind == TypeKind.Struct &&
                     !IsBuiltinUnmanaged(nested) &&
                     !IsEntJoyPredefinedType(nested) &&
-                    !SymbolEqualityComparer.Default.Equals(nested, structSymbol))
+                    !SymbolEqualityComparer.Default.Equals(nested, structSymbol) &&
+                    visited.Add(nested))
                 {
                     nestedIncludes.Add(GetStructHeaderFileName(nested));
+                    foreach (var sub in nested.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                        AddNested(sub.Type);
                 }
             }
+            foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                AddNested(f.Type);
             foreach (var inc in nestedIncludes)
                 sb.AppendLine($"#include \"{inc}.ispc\"");
             if (nestedIncludes.Count > 0)
@@ -275,6 +299,12 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include <cstddef>");
+
+            // 收集嵌套字段类型的头文件 include（如 ChildOf.Target: RelationSlot → EntJoy_ECS_RelationSlot.h）。
+            // 字段类型可能是用户 struct 或框架 struct（Entity/RelationSlot），均需前置定义。
+            foreach (var include in CollectNestedFieldIncludes(structSymbol))
+                sb.AppendLine($"#include \"{include}.h\"");
+
             sb.AppendLine();
 
             // 自动计算结构体总大小并生成 static_assert 验证，
@@ -314,6 +344,47 @@ namespace NativeTranspiler.Analyzer
             if (hasNs)
                 sb.AppendLine("}");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 递归收集 struct 字段引用的值类型头文件（不含自身、内建、预定义）。
+        /// 用于组件 struct 定义的前置 include：字段类型（Entity/RelationSlot/嵌套用户 struct）
+        /// 必须在该组件头文件之前定义。
+        /// </summary>
+        private static IEnumerable<string> CollectNestedFieldIncludes(INamedTypeSymbol structSymbol)
+        {
+            var includes = new SortedSet<string>();
+            var visited = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+
+            void AddType(ITypeSymbol type)
+            {
+                if (type is IPointerTypeSymbol ptr)
+                {
+                    AddType(ptr.PointedAtType);
+                    return;
+                }
+                if (type is INamedTypeSymbol named && named.IsGenericType && IsEntJoyNativeContainerType(type))
+                {
+                    AddType(named.TypeArguments[0]);
+                    return;
+                }
+                if (type is INamedTypeSymbol namedType &&
+                    type.TypeKind == TypeKind.Struct &&
+                    !IsBuiltinUnmanaged(type) &&
+                    !IsEntJoyPredefinedType(type) &&
+                    !SymbolEqualityComparer.Default.Equals(namedType, structSymbol) &&
+                    visited.Add(namedType))
+                {
+                    includes.Add(GetStructHeaderFileName(namedType));
+                    // 递归：嵌套 struct 的字段也可能引用其他 struct
+                    foreach (var field in namedType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                        AddType(field.Type);
+                }
+            }
+
+            foreach (var field in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                AddType(field.Type);
+            return includes;
         }
 
         /// <summary>

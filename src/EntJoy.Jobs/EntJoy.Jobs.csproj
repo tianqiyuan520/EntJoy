@@ -4,6 +4,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.Jobs</AssemblyName>
+    <!-- CS8632: ? 注解在无 #nullable 上下文为代码风格告警（库 API 保持 oblivious） -->
+    <NoWarn>$(NoWarn);8632</NoWarn>
+    <!-- CA2255: ModuleInitializer 用于 JobSystem 主动初始化（应用代码用法），非库误用 -->
+    <NoWarn>$(NoWarn);CA2255</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />

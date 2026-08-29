@@ -18,6 +18,14 @@ namespace EntJoy.ECS
         private readonly int[] _allEnabledIds;
         private readonly int _sharedTypeId;
         private readonly bool _hasSharedFilter;
+        // SharedFilterValue 参与指纹——同类型不同值（Material(2) vs Material(3)）是不同查询
+        private readonly object _sharedFilterValue;
+        private readonly int _sharedFilterValueHash;
+        // 关系过滤（TRel.Id + target.Id + target.Version）
+        private readonly int _relTypeId;
+        private readonly int _relTargetId;
+        private readonly int _relTargetVersion;
+        private readonly bool _hasRelationshipFilter;
         private readonly int _hash;
 
         public QueryKey(QueryBuilder builder)
@@ -28,6 +36,12 @@ namespace EntJoy.ECS
             _allEnabledIds = ExtractIds(builder.AllEnabled);
             _sharedTypeId = builder.SharedFilterType.Id;
             _hasSharedFilter = builder.HasSharedFilter;
+            _sharedFilterValue = builder.SharedFilterValue;
+            _sharedFilterValueHash = builder.SharedFilterValue?.GetHashCode() ?? 0;
+            _relTypeId = builder.RelationshipFilterType.Id;
+            _relTargetId = builder.RelationshipFilterTarget.TargetId;
+            _relTargetVersion = builder.RelationshipFilterTarget.TargetVersion;
+            _hasRelationshipFilter = builder.HasRelationshipFilter;
 
             unchecked
             {
@@ -38,6 +52,11 @@ namespace EntJoy.ECS
                 hash = hash * 31 + HashIds(_allEnabledIds);
                 hash = hash * 31 + _sharedTypeId;
                 hash = hash * 31 + (_hasSharedFilter ? 1 : 0);
+                hash = hash * 31 + _sharedFilterValueHash;
+                hash = hash * 31 + _relTypeId;
+                hash = hash * 31 + _relTargetId;
+                hash = hash * 31 + _relTargetVersion;
+                hash = hash * 31 + (_hasRelationshipFilter ? 1 : 0);
                 _hash = hash;
             }
         }
@@ -75,10 +94,15 @@ namespace EntJoy.ECS
         {
             return _hasSharedFilter == other._hasSharedFilter
                 && _sharedTypeId == other._sharedTypeId
+                && (_hasSharedFilter ? Equals(_sharedFilterValue, other._sharedFilterValue) : true)
                 && SequenceEquals(_allIds, other._allIds)
                 && SequenceEquals(_anyIds, other._anyIds)
                 && SequenceEquals(_noneIds, other._noneIds)
-                && SequenceEquals(_allEnabledIds, other._allEnabledIds);
+                && SequenceEquals(_allEnabledIds, other._allEnabledIds)
+                && _hasRelationshipFilter == other._hasRelationshipFilter
+                && _relTypeId == other._relTypeId
+                && _relTargetId == other._relTargetId
+                && _relTargetVersion == other._relTargetVersion;
         }
 
         public override bool Equals(object obj) => obj is QueryKey other && Equals(other);
@@ -163,7 +187,9 @@ namespace EntJoy.ECS
                 _matchingArchetypes.Add(archetype);
                 foreach (var chunk in archetype.ChunkSpan)
                 {
-                    if (chunk.EntityCount > 0)
+                    if (chunk.EntityCount > 0
+                        && entityManager.MatchesSharedFilter(_builder, chunk)
+                        && entityManager.MatchesChangedFilter(_builder, chunk))
                     {
                         _chunks.Add(chunk);
                     }
@@ -192,7 +218,9 @@ namespace EntJoy.ECS
                     var archetype = _matchingArchetypes[i];
                     foreach (var chunk in archetype.ChunkSpan)
                     {
-                        if (chunk.EntityCount > 0)
+                        if (chunk.EntityCount > 0
+                            && entityManager.MatchesSharedFilter(_builder, chunk)
+                            && entityManager.MatchesChangedFilter(_builder, chunk))
                         {
                             _chunks.Add(chunk);
                         }
@@ -211,7 +239,11 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void EnsureUpToDate()
         {
-            if (_cachedStructuralVersion != _world.EntityManager.StructuralVersion)
+            // 带变更过滤（WithChanged）的查询必须每次访问都重评 chunk 过滤：
+            // 变更位是帧级数据态（Set/SetSharedComponent 就地改值、ClearAllChangedBitMasks
+            // 都不 bump 结构版本），仅靠结构版本检查会导致结果陈旧。
+            if (_cachedStructuralVersion != _world.EntityManager.StructuralVersion
+                || (_builder.ChangedComponents != null && _builder.ChangedComponents.Length > 0))
             {
                 RefreshIncremental();
             }

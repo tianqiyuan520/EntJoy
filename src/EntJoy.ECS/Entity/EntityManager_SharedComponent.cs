@@ -345,6 +345,38 @@ namespace EntJoy.ECS
             return null;
         }
 
+        /// <summary>
+        /// SharedComponent chunk 级过滤（单一真值来源）：
+        /// 无过滤器恒 true；有则 chunk 的 shared 值与过滤值相等才通过。
+        /// EntityQuery（托管查询）与 ChunkJobCollector（Job 收集）共用。
+        /// </summary>
+        internal bool MatchesSharedFilter(QueryBuilder query, Chunk chunk)
+        {
+            if (!query.HasSharedFilter) return true;
+            var arch = chunk.Archetype;
+            int compIdx = arch.GetComponentTypeIndex(query.SharedFilterType);
+            var ct = arch.Types[compIdx];
+            if (ct.IsManagedShared)
+            {
+                int idx = chunk.GetSharedValueIndex(compIdx);
+                if (idx < 0) return false;
+                object value = GetManagedSharedValueById(ct.Id, idx);
+                return value != null && Equals(value, query.SharedFilterValue);
+            }
+            return Equals(ReadBlittableShared(chunk, compIdx, ct.Type), query.SharedFilterValue);
+        }
+
+        /// <summary>
+        /// Change Tracking chunk 级过滤（单一真值来源）：
+        /// 无 ChangedComponents 恒 true；有则 chunk 内任何实体被标记即通过。
+        /// EntityQuery（托管查询）与 ChunkJobCollector（Job 收集）共用。
+        /// </summary>
+        internal bool MatchesChangedFilter(QueryBuilder query, Chunk chunk)
+        {
+            if (query.ChangedComponents == null || query.ChangedComponents.Length == 0) return true;
+            return chunk.HasAnyEntityChanged();
+        }
+
         /// <summary>分配实体 id（复用回收队列或递增）。</summary>
         private Entity AllocateEntityId()
         {

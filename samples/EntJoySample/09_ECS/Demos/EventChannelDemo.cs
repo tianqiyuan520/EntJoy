@@ -11,7 +11,7 @@ namespace EntJoySample.ECS
     /// </summary>
     public static class EventChannelDemo
     {
-        private static World _world;
+        private static World _world = null!;
 
         public static void Run()
         {

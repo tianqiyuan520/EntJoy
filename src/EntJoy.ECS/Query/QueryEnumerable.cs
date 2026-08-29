@@ -49,6 +49,14 @@ namespace EntJoy.ECS
         private ulong* _combinedMask;
         private int _ulongCount;
 
+        // 关系过滤（WithRelationship<T>(target)）——逐 slot 校验 RelationSlot.Matches
+        private readonly bool _hasRelFilter;
+        private readonly RelationSlot _relTarget;
+        private readonly ComponentType _relType;
+        private RelationSlot* _relBase;   // 关系列基址（仅 _hasRelFilter 时使用）
+        private bool _relTargetAlive;     // 过滤目标存活校验结果（进入首个 Archetype 时计算一次）
+        private bool _relTargetAliveChecked;
+
         internal QueryEnumerator(EntityManager entityManager, QueryBuilder builder)
         {
             _entityManager = entityManager;
@@ -66,6 +74,21 @@ namespace EntJoy.ECS
             _t1Base = null;
             _combinedMask = null;
             _ulongCount = 0;
+            _hasRelFilter = builder.HasRelationshipFilter;
+            _relTarget = builder.RelationshipFilterTarget;
+            _relType = builder.RelationshipFilterType;
+            _relTargetAlive = true;
+            _relTargetAliveChecked = false;
+        }
+
+        /// <summary>校验过滤目标实体是否仍存活（Id 范围内且 Archetype 非空）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool IsRelTargetAlive()
+        {
+            var em = _entityManager;
+            if ((uint)_relTarget.TargetId >= (uint)em.EntityCount) return false;
+            var info = em.GetEntityInfoRef(_relTarget.TargetId);
+            return info.Archetype != null;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -77,6 +100,12 @@ namespace EntJoy.ECS
                 _archIndex++;
                 if (arch != null && arch.IsMatch(_builder))
                 {
+                    // 首次进入匹配 Archetype 时做一次过滤目标存活校验（此后不变）
+                    if (_hasRelFilter && !_relTargetAliveChecked)
+                    {
+                        _relTargetAlive = IsRelTargetAlive();
+                        _relTargetAliveChecked = true;
+                    }
                     _currentArch = arch;
                     _t0Idx = arch.GetComponentTypeIndex<T0>();
                     _t1Idx = arch.GetComponentTypeIndex<T1>();
@@ -98,10 +127,26 @@ namespace EntJoy.ECS
                 _chunkIndex++;
                 if (chunk.EntityCount > 0)
                 {
+                    // SharedComponent chunk 级过滤——不匹配则跳过整个 chunk
+                    if (_builder.HasSharedFilter && !_entityManager.MatchesSharedFilter(_builder, chunk))
+                        continue;
+
                     _currentChunk = chunk;
                     _count = chunk.EntityCount;
                     _t0Base = (T0*)chunk.GetComponentArrayPointer(_t0Idx);
                     _t1Base = (T1*)chunk.GetComponentArrayPointer(_t1Idx);
+
+                    // 关系过滤——解析关系列基址（RelationSlot*，8B/槽）
+                    if (_hasRelFilter)
+                    {
+                        int relIdx = _currentArch.GetComponentTypeIndex(_relType);
+                        _relBase = (RelationSlot*)chunk.GetComponentArrayPointer(relIdx);
+                    }
+                    else
+                    {
+                        _relBase = null;
+                    }
+
                     _slotIndex = 0;
 
                     // 有 AllEnabled 过滤：计算组合位图；无交集则跳过此 Chunk
@@ -253,7 +298,13 @@ namespace EntJoy.ECS
                             int bitIndex = BitOperations.TrailingZeroCount(mask);
                             _slotIndex += bitIndex;
                             if (_slotIndex < _count)
-                                return true;
+                            {
+                                // 位图命中后仍需通过关系过滤（链式过滤：WithEnabled + WithRelationship）
+                                if (PassesRelationFilter())
+                                    return true;
+                                _slotIndex++;
+                                continue;
+                            }
                             break;
                         }
 
@@ -264,12 +315,30 @@ namespace EntJoy.ECS
                 {
                     // 无过滤：普通遍历
                     if (_slotIndex < _count)
-                        return true;
+                    {
+                        if (PassesRelationFilter())
+                            return true;
+                        _slotIndex++;
+                        continue;
+                    }
                 }
 
                 // 当前 Chunk 耗尽 → 下一 Chunk（MoveNextChunk 重置 _slotIndex=0 并重新检查）
                 _currentChunk = default;
             }
+        }
+
+        /// <summary>
+        /// 关系过滤校验：无过滤恒 true；有过滤时先校验过滤目标存活
+        /// （一次，目标销毁后整个查询为空），再逐 slot 校验槽位匹配。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool PassesRelationFilter()
+        {
+            if (!_hasRelFilter) return true;
+            if (!_relTargetAlive) return false;
+            if (_relBase == null) return false;
+            return _relBase[_slotIndex].Matches(_relTarget);
         }
 
         public EntityQueryResult<T0, T1> Current
@@ -278,8 +347,7 @@ namespace EntJoy.ECS
             get
             {
                 if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
-                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex);
-            }
+                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex);            }
         }
     }
 

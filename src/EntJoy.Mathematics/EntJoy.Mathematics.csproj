@@ -1,8 +1,10 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
     <AssemblyName>EntJoy.Mathematics</AssemblyName>
+    <!-- CS8981: math 类对标 Unity Mathematics 的 API 命名（全小写是刻意设计），静音保留 -->
+    <NoWarn>$(NoWarn);8981</NoWarn>
   </PropertyGroup>
 </Project>

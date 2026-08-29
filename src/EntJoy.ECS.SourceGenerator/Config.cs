@@ -24,11 +24,17 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>查询方法名（world.Query&lt;T0..Tn&gt;()）。</summary>
         public const string QueryMethod = "Query";
 
+        /// <summary>Chunk 级查询方法名（world.QueryChunks&lt;T0..Tn&gt;()）。</summary>
+        public const string QueryChunksMethod = "QueryChunks";
+
+        /// <summary>QueryBuilder.WithAll&lt;T0..Tn&gt;() 方法名。</summary>
+        public const string WithAllMethod = "WithAll";
+
         /// <summary>World 类型全名（语义匹配目标：只处理 World 上的 Query 调用）。</summary>
         public const string WorldFullName = "EntJoy.ECS.World";
 
-        /// <summary>World 类型名（语法谓词：接收者变量名匹配，与 WorldFullName 双保险）。</summary>
-        public const string WorldTypeName = "World";
+        /// <summary>QueryBuilder 类型全名（语义匹配目标：WithAll N 元组扩展方法的接收者）。</summary>
+        public const string QueryBuilderFullName = "EntJoy.ECS.QueryBuilder";
 
         /// <summary>最小元组数量：2 元组库内已有，生成器只处理 N ≥ 3。</summary>
         public const int MinTupleArity = 3;
