@@ -466,16 +466,47 @@ public static unsafe partial class NativeJobScheduler
     public static void SetMainThreadAssistEnabled(bool enabled) =>
         NativeJobCore.JobSystem_SetMainThreadAssist(enabled);
 
-    /// <summary>隐式批：开启后 Add/AddFor/AddParallelFor 纯 C# 收集（零 P/Invoke），
-    /// EndFrame() 一次 ScheduleBatch 提交（P/Invoke 200→1）；Complete 前自动 flush。
-    /// 仅 Native 后端；Managed 回退后端不支持批（Add 抛 NotSupportedException）。</summary>
-    public static void SetImplicitBatchEnabled(bool enabled) => ImplicitBatch.SetEnabled(enabled);
+    /// <summary>
+    /// 隐式批收集层互斥切换：
+    /// - true  = Native 收集（透明拦截 Schedule* 的 tile 路径 job，EndFrame/Complete 统一提交 + 单次唤醒）；
+    ///           切换前先关闭 C# 层（排空其积压）。NativeDll 不可用时自动回退 C# ImplicitBatch 收集。
+    /// - false = 关闭 Native 收集（内部 flush 排空积压），转接启用 C# ImplicitBatch 收集（显式 Add 路径）。
+    /// </summary>
+    public static void SetImplicitBatchEnabled(bool enabled)
+    {
+        if (enabled)
+        {
+            if (NativeJobCore.NativeDllHandle != IntPtr.Zero)
+            {
+                ImplicitBatch.SetEnabled(false);   // 切走 C# 层（先排空积压）
+                NativeJobCore.JobSystem_SetImplicitBatchEnabled(1);
+            }
+            else
+            {
+                // native 不可用：回退 C# 隐式收集层
+                ImplicitBatch.SetEnabled(true);
+            }
+        }
+        else
+        {
+            NativeJobCore.JobSystem_SetImplicitBatchEnabled(0);   // native 关闭（内部排空积压）
+            ImplicitBatch.SetEnabled(true);                        // 转接 C# 收集层
+        }
+    }
 
-    /// <summary>隐式批 force point：提交当前批 + 统一唤醒（帧末调用）。</summary>
-    public static void FlushPendingSubmits() => ImplicitBatch.EndFrame();
+    /// <summary>隐式批 force point：提交当前收集层（Native pending + C# 批）并统一唤醒（帧末调用）。</summary>
+    public static void FlushPendingSubmits()
+    {
+        NativeJobCore.JobSystem_FlushPendingSubmits();
+        ImplicitBatch.EndFrame();
+    }
 
     /// <summary>帧末别名（无头框架推荐：每个 tick 末尾调用一次）。</summary>
-    public static void EndFrame() => ImplicitBatch.EndFrame();
+    public static void EndFrame()
+    {
+        NativeJobCore.JobSystem_FlushPendingSubmits();
+        ImplicitBatch.EndFrame();
+    }
 
     /// <summary>运行时开关 worker CPU 亲和性。默认关闭（OS 自由调度）。</summary>
     public static void SetWorkerAffinityEnabled(bool enabled) =>

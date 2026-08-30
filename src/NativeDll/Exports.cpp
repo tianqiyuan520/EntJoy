@@ -210,8 +210,27 @@ extern "C"
         return ok;
     }
 
+    void JobSystem_SetImplicitBatchEnabled(int enabled)
+    {
+        if (enabled)
+        {
+            JobSystem::g_implicitBatchEnabled.store(true, std::memory_order_relaxed);
+            return;
+        }
+        // 关闭前排空积压（防悬挂/泄漏），再置 false
+        JobSystem::FlushPendingSubmits();
+        JobSystem::g_implicitBatchEnabled.store(false, std::memory_order_relaxed);
+    }
+
+    void JobSystem_FlushPendingSubmits()
+    {
+        JobSystem::FlushPendingSubmits();
+    }
+
     void JobSystem_Complete(void* handle)
     {
+        // 隐式批：Complete 前先提交 pending（Unity ScheduleBatchedJobs 同语义，防死等）
+        JobSystem::FlushPendingSubmits();
         // 仅等待任务完成，不改变引用计数
         if (handle)
             JobSystem::JobHandle(fromHandle(handle), true).Complete();
@@ -244,6 +263,8 @@ extern "C"
 
     uint64_t JobSystem_CompleteAndRelease(void* handle)
     {
+        // 隐式批：Complete 前先提交 pending（Unity ScheduleBatchedJobs 同语义，防死等）
+        JobSystem::FlushPendingSubmits();
         // 接管调用方持有的引用：等待完成后读 diagnosticBatchId 并返回，
         // handle 引用在析构时自动释放 —— C# Complete 的
         // Complete + GetDiagnosticBatchId + ReleaseHandle 三合一（省 2 次 P/Invoke）。
@@ -278,6 +299,8 @@ extern "C"
 
     int JobSystem_IsCompleted(void* handle)
     {
+        // 隐式批：查询前先提交 pending，防误报未完成
+        JobSystem::FlushPendingSubmits();
         if (!handle) return 1;
         return fromHandle(handle)->completed.load(std::memory_order_acquire) ? 1 : 0;
     }

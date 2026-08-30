@@ -19,6 +19,8 @@
 		<Compile Remove="NativeTranspiler_Generated\**" />
 		<EmbeddedResource Remove="NativeTranspiler_Generated\**" />
 		<None Remove="NativeTranspiler_Generated\**" />
+		<!-- 10_SIMD 已排除编译；恢复时删除本行并取消 09_ECS/Program.cs 的引用注释 -->
+		<Compile Remove="10_SIMD\**" />
 	</ItemGroup>
 
 	<ItemGroup>

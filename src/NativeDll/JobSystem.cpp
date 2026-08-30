@@ -66,6 +66,13 @@ namespace JobSystem
     // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
     std::atomic<int> g_submitDeferDepth{ 0 };
 
+    // 隐式批（native 收集）开关 + pending 列表（extern 声明见 JobSystemInternal.h）。
+    // 默认关闭：Schedule* 直接提交（现状）。开启后主线程直接提交的 tile 路径 job
+    // 挂入 pending，由 FlushPendingSubmits 统一提交 + 单次唤醒（JobSystem_Tiles.cpp）。
+    std::atomic<bool> g_implicitBatchEnabled{ false };
+    std::mutex g_pendingBatchesMutex;
+    std::vector<BatchState*> g_pendingBatches;
+
     // 诊断开关（进程启动时读 env 一次，之后只读）：ENTJOY_JCC_VERBOSE=1
     // 打印 per-job 自动 batch 的决策与学习快照。
     bool g_jobCostCacheVerbose = []() -> bool {

@@ -281,8 +281,10 @@ namespace JobSystem
         return ResolveChunkSize(length, requestedChunk, 0);
     }
 
-    int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash)
+    int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash,
+        bool* outJccFine)
     {
+        if (outJccFine) *outJccFine = false;
         if (length <= 0) return 1;
         if (requestedChunk > 0) return requestedChunk;
         int wc = std::max(1, g_numThreads);
@@ -319,39 +321,66 @@ namespace JobSystem
             if (costNs <= 0.0) costNs = g_jobCostCache.GetCoarseCost(funcHash);
             if (costNs > 0.0)
             {
+                constexpr double kTargetTileUs = 150.0;     // 目标每 tile 串行量
+                constexpr int kMaxAdaptiveTpw = 16;         // tiles 上限 = workers×16
+                constexpr int kMaxAutoChunk = 32768;        // 单 tile 最多 32k 元素
+                constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
+                const int chunkTpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+
+                // ── 两因子（C_fixed 每 tile 固定 + C_elem 每元素）优先 ──
+                const double cfixed = g_jobCostCache.GetPerTileCost(funcHash);
+                const double celem = perElemNs > 0.0 ? perElemNs : costNs;
+                if (cfixed > 0.0 && celem > 0.0)
+                {
+                    // 空体/超轻：tpw 粒度单 tile 执行 << 调度开销 → 执行≈0，总成本被
+                    // 调度/唤醒/worker 抖动主导，任何执行成本模型都无解 → tpw 兜底
+                    //（64K/1M 达 docs；8K 空体 ~6µs 为已知局限——C_fixed×tiles 主导，
+                    //  旧口径靠唤醒虚高（∝1/N）碰巧缓解，见 docs 20260830）。
+                    const double tileTimeTpw =
+                        cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker)) * celem;
+                    if (tileTimeTpw < kSchedulingOverheadNs)
+                    {
+                        // 空体/超轻 → tpw 兜底。仍按"公式产出"登记细样本（perElem 值有效），
+                        // 使细/粗比值≈1 → mem-bound 分类 → 后续稳态固定 tpw（性能同兜底），
+                        // 且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
+                        if (outJccFine) *outJccFine = true;
+                        return chunkTpw4;
+                    }
+                    // 执行主导：目标每 tile ≈150µs，tileSize = (target − C_fixed)/C_elem，
+                    // 下限 256 元素/tile 防 C_fixed 占比过高。
+                    if (outJccFine) *outJccFine = true;
+                    double tileSize = (kTargetTileUs * 1000.0 - cfixed) / celem;
+                    if (tileSize < 256.0) tileSize = 256.0;
+                    int targetTiles = static_cast<int>(length / tileSize + 0.9999);
+                    if (targetTiles < wc) targetTiles = wc;
+                    if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
+                    return std::max(1, (length + targetTiles - 1) / targetTiles);
+                }
+
+                // ── 单因子回退（冷启动，C_fixed 未学）：既有公式 ──
+                if (outJccFine) *outJccFine = true;   // JCC 公式产出（细粒度学习样本）
                 const double totalUs = length * costNs / 1000.0;
                 // perElem 是「并行 wall 稀释」成本（退役时 wall = 整批墙钟，÷N）。
                 // 直接用它算 tiles 会把中间量级 job（wall ~0.1-5ms）塌成 4-15 个
                 // 巨型 tile → 并行度损失 wc/tiles 倍（GridSearch 实测 2-3x 退化）。
                 // 还原为「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
                 const double serialUs = totalUs * wc;
-                // 目标每 tile 150μs 串行量（调度 ~16μs → 占比 ~10%）
-                constexpr double kTargetTileUs = 150.0;
-                constexpr int kMaxAdaptiveTpw = 16;     // tiles 上限 = workers×16
                 double targetTilesD = std::clamp(serialUs / kTargetTileUs, 1.0,
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
                 // 安全护栏：单 tile 元素数上限（kMaxAutoChunk）。
-                // perElem 是"并行墙钟稀释"成本：大 job 塌缩成 1-2 个巨型 tile 会
-                // 退化为串行执行（实测 S3 依赖链 1M 元素 0.074→0.164ms 回归）。
-                // floorTiles 保证 tile 粒度不粗于 length/kMaxAutoChunk（≤ wc）。
-                constexpr int kMaxAutoChunk = 32768;    // 单 tile 最多 32k 元素
                 int floorTiles = (length + kMaxAutoChunk - 1) / kMaxAutoChunk;
                 if (floorTiles > wc) floorTiles = wc;
                 if (targetTiles < floorTiles) targetTiles = floorTiles;
                 int chunk = std::max(1, (length + targetTiles - 1) / targetTiles);
-                // Floor：chunk 不比 tpw 兜底更粗，防止快 job 退化。
-                // 但当调度开销主导（tileTime << 16μs）且 JCC 仍能产出 ≥wc 个 tile
-                //（基本负载均衡够用）时，放松 floor 让 JCC 用更粗的 chunk 减少调度开销。
-                int chunk_tpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
-                constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
-                double tileTimeNs = costNs * chunk_tpw4;
+                // Floor：chunk 不比 tpw 兜底更粗，防止快 job 退化（tpw 冗余吸收 worker 抖动）。
+                double tileTimeNs = costNs * chunkTpw4;
                 bool schedulingDominated = (tileTimeNs < kSchedulingOverheadNs);
                 double jccTiles = length * costNs * wc / (kTargetTileUs * 1000.0);
                 bool loadBalancingOK = (jccTiles >= wc);
                 if (!schedulingDominated || !loadBalancingOK) {
-                    chunk = std::min(chunk, chunk_tpw4);
+                    chunk = std::min(chunk, chunkTpw4);
                 }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",

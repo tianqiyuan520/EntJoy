@@ -97,8 +97,14 @@ namespace JobSystem
     // 由显式 Flush（JobSystem_SubmitDeferFlush）在提交窗口结束时统一唤醒一次。
     // 安全：任务已入注入器，worker 自旋时会自己取；全 park 时由 Flush 的 notify_all 唤醒。
     extern std::atomic<int> g_submitDeferDepth;
-    // （隐式批已统一收归 C# 侧 ImplicitBatch：收集→EndFrame 一次 ScheduleBatch；
-    //  native 不再维护 pending 列表。）
+    // 隐式批（native 收集）：开关开启时，主线程直接提交的 tile 路径 job
+    // （ParallelFor / ParallelForBatch / Chunk/Entity）挂入 pending，由
+    // FlushPendingSubmits（EndFrame / Complete 自动触发）统一提交 + 单次唤醒；
+    // 依赖未完成路径（continuation）不受 pending 影响，照常立即提交。
+    // 全局与实现见 JobSystem.cpp / JobSystem_Tiles.cpp。
+    extern std::atomic<bool> g_implicitBatchEnabled;
+    extern std::mutex g_pendingBatchesMutex;
+    extern std::vector<BatchState*> g_pendingBatches;
     // 诊断：ENTJOY_JCC_VERBOSE=1 时打印 ResolveChunkSize 决策 + 退役学习快照。
     // 只在 flag 开启时读取；进程启动时从 env 初始化一次，之后只读 → 无竞态。
     extern bool g_jobCostCacheVerbose;
@@ -278,6 +284,9 @@ namespace JobSystem
         // funcHash：Schedule 入口设置（GeneralBatchContext 传递），退役时按此更新
         // per-job 每元素成本 EWMA。0 = 未标记（不参与自动 batch）。
         uint32_t funcHash{ 0 };
+        // jccFine：本次分块是否由 JCC 公式（细粒度）产出（ResolveChunkSize 设置）。
+        // 退役时据此把学习样本归为细/粗（粗 = tpw 兜底/mem-bound/显式 batchSize）。
+        bool jccFine{ false };
         // totalElements：Schedule 入口设置（IJobParallelFor 的 length）。
         // 退役时 perElemNs = (topologyDoneAt - publishedAt) / totalElements。
         uint32_t totalElements{ 0 };
@@ -458,7 +467,10 @@ namespace JobSystem
     int ResolveChunkSize(int length, int requestedChunk);
     // 带 funcHash 的重载：flag 开启且有 per-job 成本数据时按 perElem EWMA 自动
     // 求解最优 tile 数；否则走 tpw=4 兜底。funcHash=0 等价于两参版本。
-    int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash);
+    // outJccFine（可空）：本次分块是否由 JCC 公式（细粒度）产出——退役时据此判定
+    // 学习样本为细/粗（perElem 修正后公式可能产出 < tpw 的 tiles，tile 数比较会误判）。
+    int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash,
+        bool* outJccFine = nullptr);
 
     // ---- 实体数衡 tile（定义在 JobSystem_Tiles.cpp） ----
     int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept;
@@ -496,6 +508,10 @@ namespace JobSystem
     void ClearBatchStoragePool() noexcept;
     void FlushBatchStorageCacheToSharedPool();
     void SubmitBatch(BatchState* batch, int workerCap = 0);
+    // 隐式批（native 收集）入口：开关开 → 挂 pending（持 state 引用防悬垂）；否则直接 SubmitBatch。
+    void SubmitOrPending(BatchState* batch);
+    // 隐式批 force point：defer 窗口内提交全部 pending + 单次唤醒（EndFrame / Complete 自动触发）。
+    void FlushPendingSubmits();
     bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept;
     void CleanupChunkContext(void* ctx) noexcept;
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile) noexcept;

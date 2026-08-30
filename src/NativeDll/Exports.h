@@ -95,6 +95,12 @@ extern "C" {
     } JobBatchDesc;
     JOB_API int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles);
 
+    // ── 隐式批（native 收集）开关：1=启用（主线程直接提交的 tile 路径 job 挂 pending，
+    //    EndFrame/Complete 统一提交 + 单次唤醒）；0=关闭并先排空积压。 ──
+    JOB_API void JobSystem_SetImplicitBatchEnabled(int enabled);
+    // 显式 force point（帧末 EndFrame）：提交全部 pending + 单次唤醒。
+    JOB_API void JobSystem_FlushPendingSubmits();
+
     JOB_API void JobSystem_Complete(void* handle);
     JOB_API uint64_t JobSystem_CompleteAndRelease(void* handle);
 

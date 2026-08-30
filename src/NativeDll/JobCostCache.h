@@ -40,7 +40,11 @@ namespace JobSystem
     constexpr int kCoarseProbeSamples = 3;
     constexpr int kMinFineSamples = 2;
     // 细/粗成本比 > 此值 → 判 memory-bound（细粒度没带来提速）。
-    constexpr double kMemBoundRatio = 0.85;
+    // 阈值 >1.0：perElem 改为纯执行口径后，compute-bound job 的细/粗分块
+    // perElem 比值天然 ≈1（总执行量相同），0.85 会把 light/medium job 全误判为
+    // mem-bound（tiles 固定 tpw，JCC 自适应失效）。1.15 = 细比粗慢 15% 才判带宽受限
+    //（真 memory-bound 如 GridSearch 空间哈希 gather，多 tile 争带宽 ratio 远大于此）。
+    constexpr double kMemBoundRatio = 1.15;
 
     // 每槽分类模式
     enum SlotMode : uint8_t
@@ -56,6 +60,12 @@ namespace JobSystem
         std::atomic<uint64_t> perElemEwmaNs[kJobCostSlots];
         // 每元素执行时间（Q22 定点，单位 ns）—— 粗粒度（tpw chunk）参考
         std::atomic<uint64_t> perElemCoarseNs[kJobCostSlots];
+        // 每 tile 固定开销（Q22 定点，单位 ns）—— 两因子模型第二因子：
+        // 单 tile 执行时间 ≈ C_fixed + tileSize×C_elem。退役时从
+        // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem 反解，EWMA 学习。
+        // 空体/超轻 job 的 C_elem≈0、C_fixed 主导 → 单因子 perElem 模型失效，
+        // 必须显式建模 C_fixed（ManyJobsBench 8K/64K/1M 最优 tiles 各异的原因）。
+        std::atomic<uint64_t> perTileEwmaNs[kJobCostSlots];
         // funcPtr hash 校验（碰撞时复用 → 重学）
         std::atomic<uint32_t> slotHash[kJobCostSlots];
         // 分类模式（学习期 / parallel / memory-bound）
@@ -72,6 +82,7 @@ namespace JobSystem
             {
                 perElemEwmaNs[i].store(0, std::memory_order_relaxed);
                 perElemCoarseNs[i].store(0, std::memory_order_relaxed);
+                perTileEwmaNs[i].store(0, std::memory_order_relaxed);
                 slotHash[i].store(0, std::memory_order_relaxed);
                 slotMode[i].store(kModeUnknown, std::memory_order_relaxed);
                 coarseSamples[i].store(0, std::memory_order_relaxed);
@@ -101,6 +112,19 @@ namespace JobSystem
             {
                 return static_cast<double>(
                     perElemCoarseNs[slot].load(std::memory_order_relaxed))
+                    / static_cast<double>(kJobCostQ22);
+            }
+            return 0.0;
+        }
+
+        // 每 tile 固定开销（C_fixed）读取：两因子决策用。0 = 未学习。
+        double GetPerTileCost(uint32_t funcHash) const noexcept
+        {
+            const int slot = funcHash & (kJobCostSlots - 1);
+            if (slotHash[slot].load(std::memory_order_relaxed) == funcHash)
+            {
+                return static_cast<double>(
+                    perTileEwmaNs[slot].load(std::memory_order_relaxed))
                     / static_cast<double>(kJobCostQ22);
             }
             return 0.0;
@@ -163,6 +187,17 @@ namespace JobSystem
                            std::memory_order_relaxed, std::memory_order_relaxed)) {}
                 TryClassify(slot);
             }
+        }
+
+        // 更新每 tile 固定开销（C_fixed）EWMA（α=0.75，与 perElem 同策略）。
+        // 退役侧反解后调用；无细/粗之分（固定开销与分块粒度无关）。
+        void UpdatePerTileCost(uint32_t funcHash, double perTileNs) noexcept
+        {
+            if (perTileNs <= 0.0) return;
+            const int slot = funcHash & (kJobCostSlots - 1);
+            slotHash[slot].store(funcHash, std::memory_order_relaxed);
+            const uint64_t sample = static_cast<uint64_t>(perTileNs * static_cast<double>(kJobCostQ22));
+            BlendedUpdate(perTileEwmaNs[slot], sample);
         }
 
     private:
