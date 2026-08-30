@@ -19,11 +19,11 @@
 // Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
 // Other platforms fall through to per-lane scalar fallbacks below.
 // ================================================================
-#if defined(NSIMD_AVX2)
-
 // Constants from sleef/src/libm/sleefsimdsp.c: PI_A2/PI_B2/PI_C2 = π/2 in 3-parts
 #define _N_PIO2_A 1.57079637e+00f
 #define _N_PIO2_B -4.37113883e-08f
+
+#if defined(NSIMD_AVX2)
 
 static N_FORCEINLINE n_float _n_sin_avx2(n_float d) {
   // SLEEF-style sin: q = round(d*2/π), r = d - q*π/2 (r ∈ [-π/4, π/4]).
@@ -131,6 +131,90 @@ static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
 
 #endif // NSIMD_AVX2
 
+// ================================================================
+// AVX512 16-wide SLEEF-style polynomials (translated from _n_sin_avx2 etc.)
+// ================================================================
+#if defined(NSIMD_AVX512)
+
+static N_FORCEINLINE n_float _n_sin_avx512(n_float d) {
+  n_float qf = n_round_ps(_mm512_mul_ps(d, _mm512_set1_ps(0.636619772f))); // 2/π
+  n_int qi = _mm512_cvtps_epi32(qf);
+  d = _mm512_sub_ps(d, _mm512_mul_ps(qf, _mm512_set1_ps(_N_PIO2_A)));
+  d = _mm512_sub_ps(d, _mm512_mul_ps(qf, _mm512_set1_ps(_N_PIO2_B)));
+
+  n_float s = _mm512_mul_ps(d, d);
+  n_float s_poly = _mm512_set1_ps(2.6083159809786593541503e-06f);
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(-0.0001981069071916863322258f));
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(0.00833307858556509017944336f));
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(-0.166666597127914428710938f));
+  n_float u_sin = _mm512_add_ps(d, _mm512_mul_ps(_mm512_mul_ps(s, s_poly), d));
+  n_float c_poly = _mm512_set1_ps(2.48015873015873e-05f);
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(-0.00138888892251998f));
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(0.0416666664189304f));
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(-0.5f));
+  n_float u_cos = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(1.0f));
+
+  // even q → u_sin (AVX512: mask blend, mask=1 selects b)
+  __mmask16 odd = _mm512_cmpeq_epi32_mask(_mm512_and_epi32(qi, _mm512_set1_epi32(1)), _mm512_setzero_si512());
+  n_float u = _mm512_mask_blend_ps(odd, u_cos, u_sin);
+
+  n_int flip = _mm512_and_epi32(qi, _mm512_set1_epi32(2));
+  n_int sign = _mm512_slli_epi32(flip, 30);
+  return _mm512_xor_ps(u, _mm512_castsi512_ps(sign));
+}
+
+static N_FORCEINLINE n_float _n_cos_avx512(n_float d) {
+  n_float qf = n_round_ps(_mm512_mul_ps(d, _mm512_set1_ps(0.636619772f))); // 2/π
+  n_int qi = _mm512_cvtps_epi32(qf);
+  d = _mm512_sub_ps(d, _mm512_mul_ps(qf, _mm512_set1_ps(_N_PIO2_A)));
+  d = _mm512_sub_ps(d, _mm512_mul_ps(qf, _mm512_set1_ps(_N_PIO2_B)));
+
+  n_float s = _mm512_mul_ps(d, d);
+  n_float s_poly = _mm512_set1_ps(2.6083159809786593541503e-06f);
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(-0.0001981069071916863322258f));
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(0.00833307858556509017944336f));
+  s_poly = _mm512_fmadd_ps(s_poly, s, _mm512_set1_ps(-0.166666597127914428710938f));
+  n_float u_sin = _mm512_add_ps(d, _mm512_mul_ps(_mm512_mul_ps(s, s_poly), d));
+  n_float c_poly = _mm512_set1_ps(2.48015873015873e-05f);
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(-0.00138888892251998f));
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(0.0416666664189304f));
+  c_poly = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(-0.5f));
+  n_float u_cos = _mm512_fmadd_ps(c_poly, s, _mm512_set1_ps(1.0f));
+
+  // cos: even q → u_cos
+  __mmask16 odd = _mm512_cmpeq_epi32_mask(_mm512_and_epi32(qi, _mm512_set1_epi32(1)), _mm512_setzero_si512());
+  n_float u = _mm512_mask_blend_ps(odd, u_sin, u_cos);
+
+  n_int flip = _mm512_and_epi32(_mm512_add_epi32(qi, _mm512_set1_epi32(1)), _mm512_set1_epi32(2));
+  n_int sign = _mm512_slli_epi32(flip, 30);
+  return _mm512_xor_ps(u, _mm512_castsi512_ps(sign));
+}
+
+static N_FORCEINLINE n_float _n_log_avx512(n_float d) {
+  n_float dpos = _mm512_and_ps(d, _mm512_castsi512_ps(_mm512_set1_epi32(0x7fffffff)));  // |d|
+  n_int emm0 = _mm512_srli_epi32(_mm512_castps_si512(dpos), 23);
+  n_int e = _mm512_sub_epi32(emm0, _mm512_set1_epi32(127));
+
+  n_int mant = _mm512_and_epi32(_mm512_castps_si512(d), _mm512_set1_epi32(0x807fffff));
+  mant = _mm512_or_epi32(mant, _mm512_set1_epi32(0x3f800000));
+  n_float m = _mm512_castsi512_ps(mant);
+
+  n_float x = _mm512_div_ps(_mm512_sub_ps(m, _mm512_set1_ps(1.0f)),
+                             _mm512_add_ps(m, _mm512_set1_ps(1.0f)));
+  n_float x2 = _mm512_mul_ps(x, x);
+
+  n_float t = _mm512_set1_ps(0.2392828464508056640625f);
+  t = _mm512_fmadd_ps(t, x2, _mm512_set1_ps(0.28518211841583251953125f));
+  t = _mm512_fmadd_ps(t, x2, _mm512_set1_ps(0.400005877017974853515625f));
+  t = _mm512_fmadd_ps(t, x2, _mm512_set1_ps(0.666666686534881591796875f));
+  t = _mm512_fmadd_ps(t, x2, _mm512_set1_ps(2.0f));
+
+  return _mm512_add_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(e), _mm512_set1_ps(0.693147180559945286226764f)),
+                        _mm512_mul_ps(x, t));
+}
+
+#endif // NSIMD_AVX512
+
 
 // ================================================================
 // Precision selection: dispatch to inline → per-lane scalar
@@ -145,8 +229,12 @@ static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
 // ===== Fastest (~3.5 ULP) =====
 #if SIMD_MATH_PRECISION == 1
 
-  // Inline AVX2 polynomial (fastest, zero function-call overhead)
-  #if defined(NSIMD_AVX2)
+  // Inline AVX512 (16-wide) / AVX2 (8-wide) polynomial (fastest, zero function-call overhead)
+  #if defined(NSIMD_AVX512)
+    #define N_SIN(a)     _n_sin_avx512(a)
+    #define N_COS(a)     _n_cos_avx512(a)
+    #define N_LOG(a)     _n_log_avx512(a)
+  #elif defined(NSIMD_AVX2)
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
     #define N_LOG(a)     _n_log_avx2(a)
@@ -444,6 +532,23 @@ static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
 }
 #define N_SIN_PD(a) _n_sin_avx2_pd(a)
 #define N_COS_PD(a) _n_sin_avx2_pd(_mm256_add_pd(a, _mm256_set1_pd(1.5707963267948966)))
+
+#elif defined(NSIMD_AVX512)
+// AVX512 double sin/cos：逐 lane 标量（正确性优先，避免重写 8-wide 多项式）
+static N_FORCEINLINE n_double _n_sin_pd_avx512(n_double a) {
+    double lane[8]; int w = 8;
+    n_store_pd(lane, a);
+    for (int i = 0; i < w; i++) lane[i] = sin(lane[i]);
+    return n_load_pd(lane);
+}
+static N_FORCEINLINE n_double _n_cos_pd_avx512(n_double a) {
+    double lane[8]; int w = 8;
+    n_store_pd(lane, a);
+    for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
+    return n_load_pd(lane);
+}
+#define N_SIN_PD(a) _n_sin_pd_avx512(a)
+#define N_COS_PD(a) _n_cos_pd_avx512(a)
 
 #elif defined(NSIMD_SSE4) && defined(__aarch64__)
 // SSE4: use scalar per-lane for each double lane (only 2-wide anyway, scalar is fine)

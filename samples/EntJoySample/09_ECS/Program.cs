@@ -1,4 +1,5 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
+using EntJoySample.SIMD;
 
 namespace EntJoySample.ECS
 {
@@ -12,6 +13,9 @@ namespace EntJoySample.ECS
                 // ECS 基准需要原生 worker（C++ Chase-Lev 调度器）；缺失时 Schedule 路径无 worker 可执行
                 JobScheduler.Initialize();
                 //Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
+
+                // 10_SIMD: ISPC vs AutoSIMD vs Cpp 对比 + 压力测试（对照 C# oracle 找翻译 bug）
+                SimdCompareTest.Run();
 
                 // Observer 测试（组件生命周期事件 push 回调）
                 //ObserverDemo.Run();
@@ -29,7 +33,7 @@ namespace EntJoySample.ECS
                 //NativeEventJobTest.Run();
 
                 // ISPC Event Job 测试（NativeTranspile ISPC SendEvent）
-                //ISpcEventJobTest.Run();
+                ISpcEventJobTest.Run();
 
                 // Change Tracking 测试
                 //ChangeTrackingDemo.Run();

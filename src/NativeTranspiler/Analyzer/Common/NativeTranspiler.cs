@@ -229,6 +229,43 @@ namespace NativeTranspiler.Analyzer
             };
         }
 
+        /// <summary>
+        /// 检查 struct 的显式布局是否无法在 ISPC 中复现（ISPC 不支持 #pragma pack，实测
+        /// ispc 1.30 报 "unknown pragma ignored"）：
+        /// 1) LayoutKind.Explicit（FieldOffset 布局无法映射）
+        /// 2) Pack 显式 &lt; 8（字段被压缩对齐，ISPC 自然对齐会错位，NativeArray&lt;T&gt; 指针步长不同）
+        /// C# Sequential 默认（Pack=0/8）与 ISPC 自然对齐一致，视为安全。
+        /// </summary>
+        public static bool HasUnsupportedIspcLayout(INamedTypeSymbol structSymbol, out string reason)
+        {
+            reason = "";
+            int kind = 0; // LayoutKind.Sequential = 0, Explicit = 2, Auto = 3
+            int pack = 0;
+            foreach (var attr in structSymbol.GetAttributes())
+            {
+                var attrName = attr.AttributeClass?.Name;
+                if (attrName != null && attrName.Contains("StructLayout"))
+                {
+                    if (attr.ConstructorArguments.Length > 0 && attr.ConstructorArguments[0].Value is int k)
+                        kind = k;
+                    foreach (var na in attr.NamedArguments)
+                        if (na.Key == "Pack" && na.Value.Value is int p)
+                            pack = p;
+                }
+            }
+            if (kind == 2) // LayoutKind.Explicit
+            {
+                reason = "LayoutKind.Explicit (FieldOffset)";
+                return true;
+            }
+            if (pack > 0 && pack < 8)
+            {
+                reason = $"Pack={pack}";
+                return true;
+            }
+            return false;
+        }
+
         public static string GenerateIspcStructDefinition(INamedTypeSymbol structSymbol)
         {
             var sb = new StringBuilder();

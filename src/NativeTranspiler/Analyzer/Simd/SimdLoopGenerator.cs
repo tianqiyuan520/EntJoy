@@ -19,6 +19,15 @@ namespace NativeTranspiler.Analyzer
         // ForStatement → for(iter) count-loop
         // ================================================================
 
+        /// <summary>用 Roslyn 求表达式的 int 常量值（识别 -1、常量折叠等，比 int.TryParse 强）。</summary>
+        private int? TryGetIntConst(ExpressionSyntax? expr)
+        {
+            if (expr == null) return null;
+            var cv = _semanticModel.GetConstantValue(expr);
+            if (cv.HasValue && cv.Value is int iv) return iv;
+            return null;
+        }
+
         private void GenerateForStatement(ForStatementSyntax stmt)
         {
             // For now, only handle: for (int i = start; i < end; i++)
@@ -76,34 +85,34 @@ namespace NativeTranspiler.Analyzer
 
             bool isReduction = IsReductionLoop(stmt);
 
-            // Dispatch: uniform → scalar for, varying reduction → count-loop, other → while-true
-            if (isUniformBounds && isReduction)
+            // ★ 通解：常量界小循环（≤64 迭代）无论是否 reduction 都优先全展开。
+            //   min/max/sum 归约展开后语义不变（顺序一致），且消除循环开销 + 让编译器
+            //   CSE 循环不变量（如 C06 的 A[i]/B[i] 不再每轮重载）。
+            bool unrollInclusive = stmt.Condition is BinaryExpressionSyntax unrollCond
+                && unrollCond.IsKind(SyntaxKind.LessThanOrEqualExpression);
+            int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
+            // ★ 用 Roslyn 常量求值识别负常量：-1 被 TranslateExpression 译成 "(0 - (1))"，
+            //   int.TryParse 会失败，导致嵌套 dx/dy 循环无法 unroll（C04 慢 ~2x 的根因）。
+            int? constStart = TryGetIntConst(decl.Initializer?.Value);
+            int? constEnd = TryGetIntConst((stmt.Condition as BinaryExpressionSyntax)?.Right);
+            bool canUnroll = isUniformBounds
+                && constStart.HasValue && constEnd.HasValue
+                && (unrollStart = constStart.Value) <= (unrollEnd = constEnd.Value)
+                && unrollEnd > unrollStart
+                && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
+
+            // Dispatch: unroll → uniform reduction → varying reduction → scalar-for → while-true
+            if (canUnroll)
+            {
+                // Full unroll for small uniform-bound loops（含 min/max/sum 归约）。
+                GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
+            }
+            else if (isUniformBounds && isReduction)
                 GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
             else if (!isUniformBounds && isReduction)
                 GenerateVaryingReductionLoop(ivName, startExpr, endExpr, stmt);
             else if (isUniformBounds && !isReduction)
             {
-                // Detect small-constant uniform-bound loops for unrolling.
-                // Parse start/end as integer constants: "0" .. "16", "start" .. "endValue", etc.
-                // ★ The bound may be inclusive (i <= end) or exclusive (i < end):
-                //   iteration count = end - start + (inclusive ? 1 : 0).
-                //   The old code always used end - start, dropping the last iteration
-                //   of inclusive loops (ST5: for (dx = -1; dx <= 1; dx++) only ran 2 of 3).
-                bool unrollInclusive = stmt.Condition is BinaryExpressionSyntax unrollCond
-                    && unrollCond.IsKind(SyntaxKind.LessThanOrEqualExpression);
-                int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
-                bool canUnroll = int.TryParse(startExpr, out unrollStart)
-                    && int.TryParse(endExpr, out unrollEnd)
-                    && unrollEnd > unrollStart
-                    && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
-
-                if (canUnroll)
-                {
-                    // Full unroll for small uniform-bound loops (HeavyMove 16-iteration sin/cos).
-                    GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
-                }
-                else
-                {
                     // Docs-style: scalar for() with mask-narrowed body (dx/dy loops)
                     //   for(int dx) {
                     //     v_active = cmp_ult(v_nx, dims);
@@ -144,7 +153,6 @@ namespace NativeTranspiler.Analyzer
                     _currentMask = preLoopMask2;
                     if (_gotoTargets.Contains(exitL))
                     AppendLine($"{exitL}: ;");
-                }
             }
             else
                 GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
@@ -712,33 +720,77 @@ namespace NativeTranspiler.Analyzer
         // WhileStatement → for(iter) where possible, else while(any_true)
         // ================================================================
 
-        private void GenerateWhileStatement(WhileStatementSyntax stmt)
+        /// <summary>
+        /// 方向2：识别 while 条件里的「uniform 子条件 && varying 子条件」结构（如
+        /// `while (energy &gt; 1 && frames &lt; 16)`，frames 是同步递增的 uniform 计数器），
+        /// 生成「标量 while + varying tracker」，消除 uniform 标量广播成 SIMD mask 的格式转换。
+        /// 返回 true 表示已按此模式生成。
+        /// </summary>
+        private bool TryGenerateUniformBoundedWhile(WhileStatementSyntax stmt)
         {
-            // For general while, use while(true) + mask check pattern
+            ExpressionSyntax? uniformCond = null;
+            ExpressionSyntax? varyingCond = null;
+
+            if (stmt.Condition is BinaryExpressionSyntax cond && cond.IsKind(SyntaxKind.LogicalAndExpression))
+            {
+                var left = cond.Left;
+                var right = cond.Right;
+                VarKind leftKind = _varAnalyzer.ClassifyExpression(left);
+                VarKind rightKind = _varAnalyzer.ClassifyExpression(right);
+                if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
+                { uniformCond = left; varyingCond = right; }
+                else if (rightKind < VarKind.Varying && leftKind >= VarKind.Varying)
+                { uniformCond = right; varyingCond = left; }
+                else
+                    return false;
+            }
+            else
+            {
+                // 单条件：纯 uniform（如 while(k<16)）→ 标量化；纯 varying → 旧路径
+                if (_varAnalyzer.ClassifyExpression(stmt.Condition) < VarKind.Varying)
+                    uniformCond = stmt.Condition;
+                else
+                    return false;
+            }
+
+            // uniform 条件必须是纯标量表达式（翻译后不含 simd_value/n_cmp/v_）
+            string uniformExpr = TranslateExpression(uniformCond!);
+            if (uniformExpr.Contains("simd_value") || uniformExpr.Contains("n_cmp") || uniformExpr.Contains("v_"))
+                return false;
+
             string tracker = $"__while_tracker_{_maskCounter++}";
             string exitLabel = $"__while_exit_{_labelCounter++}";
             string continueLabel = $"__while_continue_{_labelCounter++}";
+            string savedMask = $"__mask_{_maskCounter++}";
+            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
 
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
-            AppendLine("while (true)");
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+
+            // 标量 while：uniform 条件（标量）&& tracker 有 active lane
+            AppendLine($"while (({uniformExpr}) && {tracker}.any_true())");
             AppendLine("{");
             _indent++;
 
-            string condExpr = TranslateCondition(stmt.Condition);
-            string condVar = $"__wcond_{_maskCounter++}";
-            AppendLine($"simd_mask {condVar} = {condExpr};");
-
-            string savedMask = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {savedMask} = {_currentMask};");
-            _currentMask = $"{_currentMask} & {condVar} & {tracker}";
-            AppendLine($"if (!{_currentMask}.any_true()) {{ {_currentMask} = {savedMask}; break; }}");
+            // varying 条件 → SIMD mask（纯 uniform 时无 varying 子条件）
+            string? condVar = null;
+            if (varyingCond != null)
+            {
+                string condExpr = TranslateCondition(varyingCond);
+                condVar = $"__wcond_{_maskCounter++}";
+                AppendLine($"simd_mask {condVar} = {condExpr};");
+                // tracker 更新：不满足 varying 条件的 lane 退出
+                AppendLine($"{tracker} = simd_mask{{ n_and_mask({tracker}.m, {condVar}.m) }};");
+            }
+            _currentMask = tracker;
 
             _loopStack.Push(new LoopFrame
             {
                 TrackerVar = tracker,
-                IterActiveVar = condVar,
+                IterActiveVar = condVar ?? "",
                 ExitLabel = exitLabel,
-                ContinueLabel = continueLabel
+                ContinueLabel = continueLabel,
+                BodyMaskVar = tracker
             });
 
             GenerateBlock(EnsureBlock(stmt.Statement), skipBraces: false);
@@ -747,7 +799,71 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMask;
+            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
+            AppendLine("}");
+            _indent--;
+            if (_gotoTargets.Contains(exitLabel))
+                AppendLine($"{exitLabel}: ;");
+
+            return true;
+        }
+
+        private void GenerateWhileStatement(WhileStatementSyntax stmt)
+        {
+            // ★ 方向2：uniform 子条件标量化（标量 while + varying tracker）
+            if (TryGenerateUniformBoundedWhile(stmt))
+                return;
+
+            // For general while, use while(true) + mask check pattern
+            string tracker = $"__while_tracker_{_maskCounter++}";
+            string exitLabel = $"__while_exit_{_labelCounter++}";
+            string continueLabel = $"__while_continue_{_labelCounter++}";
+
+            AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
+
+            // savedMask 必须在 while 之前声明：循环结束后的结果 store 会引用它
+            //（`_currentMask` 在循环后被恢复为 savedMask），放循环体内会越作用域。
+            string savedMask = $"__mask_{_maskCounter++}";
+            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+
+            AppendLine("while (true)");
+            AppendLine("{");
+            _indent++;
+
+            string condExpr = TranslateCondition(stmt.Condition);
+            string condVar = $"__wcond_{_maskCounter++}";
+            AppendLine($"simd_mask {condVar} = {condExpr};");
+
+            // ★ 把组合掩码（current & cond & tracker）物化到单个变量，再赋给 _currentMask。
+            //   否则 _currentMask 是 "a & b & c" 复合字符串，`.any_true()`/`.m` 会因运算符
+            //   优先级错绑（`!a & b & c.any_true()`、`a & b & c.m`）→ 非法 C++。
+            string combined = $"__wm_{_maskCounter++}";
+            if (_currentMask == "simd_mask::all_true()")
+                AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({condVar}.m, {tracker}.m) }};");
+            else
+                AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask(n_and_mask({_currentMask}.m, {condVar}.m), {tracker}.m) }};");
+            _currentMask = combined;
+            AppendLine($"if (!{_currentMask}.any_true()) {{ {_currentMask} = {savedMask}; break; }}");
+
+            _loopStack.Push(new LoopFrame
+            {
+                TrackerVar = tracker,
+                IterActiveVar = condVar,
+                ExitLabel = exitLabel,
+                ContinueLabel = continueLabel,
+                BodyMaskVar = combined
+            });
+
+            GenerateBlock(EnsureBlock(stmt.Statement), skipBraces: false);
+
+            _loopStack.Pop();
+
+            if (_gotoTargets.Contains(continueLabel))
+                AppendLine($"{continueLabel}: ;");
+            // ★ 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
+            //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter（C12 根因）。
+            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
             AppendLine("}");
             _indent--;
             if (_gotoTargets.Contains(exitLabel))
@@ -765,20 +881,32 @@ namespace NativeTranspiler.Analyzer
             string continueLabel = $"__do_continue_{_labelCounter++}";
 
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
+
+            // savedMask 必须在 do 之前声明：`} while(...)` 条件在 do 块之后引用它（越作用域）。
+            string savedMask = $"__mask_{_maskCounter++}";
+            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
+            AppendLine($"simd_mask {savedMask} = {_currentMask};");
+
             AppendLine("do");
             AppendLine("{");
             _indent++;
 
-            string savedMask = $"__mask_{_maskCounter++}";
-            AppendLine($"simd_mask {savedMask} = {_currentMask};");
-            _currentMask = $"{_currentMask} & {tracker}";
+            // ★ 物化组合掩码（current & tracker），避免 _currentMask 变成 "a & b" 复合串
+            //   （嵌套 if 里的 `.m`/`.any_true()` 会优先级错绑）。
+            string combined = $"__dm_{_maskCounter++}";
+            if (_currentMask == "simd_mask::all_true()")
+                AppendLine($"simd_mask {combined} = {tracker};");
+            else
+                AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({_currentMask}.m, {tracker}.m) }};");
+            _currentMask = combined;
 
             _loopStack.Push(new LoopFrame
             {
                 TrackerVar = tracker,
                 IterActiveVar = savedMask,
                 ExitLabel = exitLabel,
-                ContinueLabel = continueLabel
+                ContinueLabel = continueLabel,
+                BodyMaskVar = combined
             });
 
             GenerateBlock(EnsureBlock(stmt.Statement), skipBraces: false);
@@ -787,12 +915,12 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMask;
+            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
 
             string condExpr = TranslateCondition(stmt.Condition);
             string condVar = $"__dcond_{_maskCounter++}";
             AppendLine($"simd_mask {condVar} = {condExpr};");
-            AppendLine($"}} while(({_currentMask} & {condVar} & {tracker}).any_true());");
+            AppendLine($"}} while(({savedMask} & {condVar} & {tracker}).any_true());");
             if (_gotoTargets.Contains(exitLabel))
                 AppendLine($"{exitLabel}: ;");
             _indent--;

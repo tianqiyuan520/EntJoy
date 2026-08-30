@@ -127,6 +127,19 @@ namespace NativeTranspiler.Analyzer
 
                 if (anyIspc)
                 {
+                    // ★ ISPC 布局加固（2026-08-30）：Explicit 布局 / Pack<8 的 struct 无法在 ISPC 复现
+                    // C# 布局（ISPC 不支持 #pragma pack，实测 ispc 1.30 报 "unknown pragma ignored"），
+                    // NativeArray<T> 指针步长会错位 → fail-fast 拒绝生成（NT016）。
+                    foreach (var userStruct in userStructs)
+                    {
+                        if (NativeTranspiler.HasUnsupportedIspcLayout(userStruct, out string reason))
+                        {
+                            spc.ReportDiagnostic(Diagnostic.Create(NativeTranspileValidator.UnsupportedStructLayoutError,
+                                userStruct.Locations.FirstOrDefault(), userStruct.Name, reason));
+                            return;
+                        }
+                    }
+
                     var commonIspcPath = Path.Combine(outputDir, "EntJoyCommon.ispc");
                     CodeGenIo.WriteAllTextWithRetry(commonIspcPath, GenerateCommonIspcHeader());
 
@@ -973,7 +986,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("add_library(NativeTranspiledPrecise STATIC ${AUTOSIMD_SOURCES})");
                 sb.AppendLine("target_compile_options(NativeTranspiledPrecise PRIVATE");
                 sb.AppendLine("    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");      // MSVC default, no /fp:fast
-                sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");     // ClangCL, no /fp:fast
+                sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP -ffp-contract=fast>"); // ClangCL: 允许 FMA 融合（IEEE 兼容，对齐 ISPC 的 FMA 性能，仅 ~1 ULP 舍入）
                 sb.AppendLine("    $<$<NOT:$<CXX_COMPILER_ID:MSVC,Clang>>:-O3 -march=native -mtune=native -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer>");
                 sb.AppendLine(")");
                 sb.AppendLine("target_compile_definitions(NativeTranspiledPrecise PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");

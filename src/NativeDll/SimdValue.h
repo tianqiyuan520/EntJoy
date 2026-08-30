@@ -130,7 +130,9 @@ struct simd_mask {
     simd_mask() = default;
     explicit simd_mask(n_mask val) : m(val) {}
     static simd_mask all_true() {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+        return simd_mask{ (n_mask)0xFFFF };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
         return simd_mask{ _mm256_castsi256_ps(_mm256_set1_epi32(-1)) };
 #elif defined(NSIMD_SSE4)
         return simd_mask{ _mm_castsi128_ps(_mm_set1_epi32(-1)) };
@@ -246,6 +248,11 @@ struct simd_value<int> {
         return simd_value<float>{ n_div_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
     }
 
+    // ★ 隐式 int→float 提升（通解）：AutoSIMD 把 uniform int 循环变量 broadcast 成
+    //   simd_value<int>，再与 simd_value<float> 混合（A[i]*dx、dx+C[i]、dx<A[i] 等）。
+    //   一条隐式转换覆盖所有混合算术/比较，优于逐个运算符重载。
+    operator simd_value<float>() const { return simd_value<float>{ n_cvtepi32_ps(v) }; }
+
     // Integer division (no native SIMD instruction, per-lane fallback)
     friend simd_value operator/(simd_value a, simd_value b) {
         int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
@@ -351,6 +358,9 @@ inline simd_value<int> simd_mod_u32(simd_value<int> x, unsigned int d) {
     // Extract lanes, compute unsigned modulo, pack back
     int tmp[NSIMD_WIDTH];
     x.store(tmp);
+    // ★ 禁向量化：clang 会把这段标量取模循环向量化回 SIMD（uint 取模模拟超长），
+    //   在 16-wide (AVX512) 下导致优化爆炸（C08 编译 3 分钟+）。
+    #pragma clang loop vectorize(disable)
     for (int i = 0; i < NSIMD_WIDTH; i++)
         tmp[i] = (int)((unsigned int)tmp[i] % d);
     return simd_value<int>::load(tmp);

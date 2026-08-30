@@ -114,6 +114,11 @@ namespace NativeTranspiler.Analyzer
                 // 遍历所有赋值，传播 classification
                 PropagateAssignments(method.Body);
 
+                // === Step 2.5: 控制流敏感传播（向 ISPC 靠拢：变量默认 varying 语义）===
+                // 标量若在 varying 条件的 if/while 分支体中被赋值 → 提升为 varying，
+                // 否则所有 lane 共享一份标量，产生错误（C12 的 j/found 被判成 uniform）。
+                PropagateControlFlowVarying(method.Body);
+
                 // === Step 3: Reduction 模式检测 ===
                 // 检测 if (val &lt; best) { best = val; } 规约模式
                 DetectReductionPatterns(method.Body);
@@ -226,6 +231,51 @@ namespace NativeTranspiler.Analyzer
                         ProcessLocalInitializer(name, varDecl.Initializer.Value);
                 }
             }
+        }
+
+        /// <summary>
+        /// 控制流敏感传播（向 ISPC 靠拢：变量默认 varying 语义）。
+        /// 标量若在 varying 条件的 if/while 分支体中被赋值 → 提升为 varying，
+        /// 否则所有 lane 共享一份标量（uniform），产生错误（C12：j/found 在
+        /// varying 条件里被改却判成 uniform，R 全 lane 写同一个值）。
+        /// 迭代直到收敛：变量提升为 varying 后，引用它的条件/表达式也变 varying，
+        /// 进而可能再提升其他变量。
+        /// </summary>
+        private void PropagateControlFlowVarying(SyntaxNode node)
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var ifStmt in node.DescendantNodes().OfType<IfStatementSyntax>())
+                {
+                    if (ClassifyExpressionInternal(ifStmt.Condition, new HashSet<string>()) < VarKind.Varying)
+                        continue;
+                    if (PromoteWritesInVaryingCtx(ifStmt.Statement)) changed = true;
+                    if (ifStmt.Else != null && PromoteWritesInVaryingCtx(ifStmt.Else.Statement)) changed = true;
+                }
+                // ★ 不提升 while 循环体里的无条件赋值（如 C11 的 `frames++`）：这类计数器
+                //   对所有 lane 同步 +1（事实 uniform），配合 while 条件标量化（uniform 子条件
+                //   用标量循环），可避免「uniform 标量 → SIMD mask broadcast」的格式转换。
+                //   嵌套 if 里的赋值已由上面的 if 分支处理（C12 的 j/found 正确提升）。
+            }
+        }
+
+        /// <summary>把语句树里被赋值的变量提升为 varying（在 varying 控制流上下文中）。</summary>
+        private bool PromoteWritesInVaryingCtx(StatementSyntax stmt)
+        {
+            bool changed = false;
+            foreach (var assign in stmt.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>())
+            {
+                string? lhs = GetLHSVariableName(assign.Left);
+                if (lhs == null || !_variables.TryGetValue(lhs, out var info)) continue;
+                if (info.Kind < VarKind.Varying)
+                {
+                    info.Kind = VarKind.Varying;
+                    changed = true;
+                }
+            }
+            return changed;
         }
 
         private void ProcessLocalInitializer(string varName, ExpressionSyntax initValue)

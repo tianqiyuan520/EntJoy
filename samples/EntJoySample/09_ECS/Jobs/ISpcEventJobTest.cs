@@ -2,6 +2,7 @@ using System;
 using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using EntJoy.Collections;
+using EntJoy.Mathematics;
 using NativeTranspiler;
 using static EntJoy.ECS.EventBus;
 
@@ -79,6 +80,37 @@ namespace EntJoySample.ECS
             }
         }
 
+        /// <summary>带 float2 字段的事件（验证 SendEvent 嵌套带参构造 new float2(x,y) 翻译，2026-08-30 Fix 2）。</summary>
+        public struct Float2Signal
+        {
+            public Entity Target;
+            public float2 Pos;
+        }
+
+        /// <summary>
+        /// ISPC Job：每个实体发 Float2Signal，Pos = new float2(Current, Max)（带参构造）。
+        /// 修复前 TranslateIspcNestedFieldWrite 对无 Initializer 的对象创建静默 return → Pos 永不写入（0,0）；
+        /// 修复后走 make_float2(x,y)，事件圆回传的 Pos 应与期望一致。
+        /// </summary>
+        [NativeTranspile(Target = BackendTarget.Ispc)]
+        public struct IspcFloat2EventJob : IJobChunk
+        {
+            public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
+            {
+                NativeArray<Entity> entities = chunk.GetComponentDataNativeArray<Entity>();
+                NativeArray<Health> healths = chunk.GetComponentDataNativeArray<Health>();
+
+                for (int i = 0; i < entities.Length; i++)
+                {
+                    SendEvent(new Float2Signal
+                    {
+                        Target = entities[i],
+                        Pos = new float2(healths[i].Current, healths[i].Max)
+                    });
+                }
+            }
+        }
+
         public static void Run()
         {
             Console.WriteLine("=== ISPC Event Job Test ===\n");
@@ -87,6 +119,7 @@ namespace EntJoySample.ECS
             TestMultiWorld();
             TestFieldValues();
             TestAutoSimdSendEvent();
+            TestFloat2ArgEvent();
             Console.WriteLine("\n=== ISPC Event Job Test Complete ===\n");
         }
 
@@ -313,6 +346,62 @@ namespace EntJoySample.ECS
 
             Console.WriteLine($"  DeathSignal received: {count} (expected 5)");
             bool ok = count == 5;
+            Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
+            world.Dispose();
+            Console.WriteLine();
+        }
+
+        /// <summary>测试 6：float2 带参构造事件（Fix 2 覆盖：new float2(x,y) 嵌套写 → make_float2）。</summary>
+        private static void TestFloat2ArgEvent()
+        {
+            Console.WriteLine("--- Test 6: float2 arg-constructor event (Fix 2: new float2(x,y) nested write) ---");
+
+            var world = new World("IspcFloat2EventTest");
+            World.DefaultWorld = world;
+            var em = world.EntityManager;
+
+            world.RegisterEvent<Float2Signal>();
+
+            const int count = 3;
+            var types = new ComponentType[] { typeof(Entity), typeof(Health) };
+            for (int i = 0; i < count; i++)
+            {
+                var e = em.NewEntity(types);
+                em.Set(e, new Health { Current = 10f + i, Max = 100f });
+            }
+
+            var job = new IspcFloat2EventJob();
+            var query = new QueryBuilder().WithAll<Health>();
+
+            try
+            {
+                job.Schedule(query).Complete();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Schedule failed: {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine($"  Result: FAIL");
+                world.Dispose();
+                Console.WriteLine();
+                return;
+            }
+
+            world.NextFrameEvents();
+            var events = world.GetEventStream<Float2Signal>().ReadBuffer();
+            Console.WriteLine($"  Float2Signal received: {events.Length} (expected {count})");
+            bool ok = events.Length == count;
+            if (ok)
+            {
+                // 事件按 chunk/实体顺序写入：events[i] 对应实体 i（Current=10+i, Max=100）
+                for (int i = 0; i < events.Length; i++)
+                {
+                    var evt = events[i];
+                    float ex = 10f + i, ey = 100f;
+                    bool posOk = MathF.Abs(evt.Pos.x - ex) <= 1e-3f && MathF.Abs(evt.Pos.y - ey) <= 1e-3f;
+                    Console.WriteLine($"    Pos=({evt.Pos.x:F1},{evt.Pos.y:F1}) expect ({ex:F1},{ey:F1}) {(posOk ? "✓" : "✗")}");
+                    if (!posOk) ok = false;
+                }
+            }
             Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
             world.Dispose();
             Console.WriteLine();

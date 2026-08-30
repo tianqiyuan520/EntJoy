@@ -55,6 +55,7 @@ namespace NativeTranspiler.Analyzer
             public string IterActiveVar;  // iter_active variable name
             public string ExitLabel;      // goto label for break
             public string ContinueLabel;  // goto label for continue
+            public string BodyMaskVar;    // 循环体当前 mask 变量（break 需窄化它，见 GenerateBreakStatement）
         }
         private readonly Stack<LoopFrame> _loopStack = new();
 
@@ -554,15 +555,13 @@ namespace NativeTranspiler.Analyzer
             // excludedCount = excludedMaskVar 已包含的条件个数（= conditions.Count 在上一分支时的值）
             int excludedCount = 0;
 
-            // Save-blend needed when the chain has an else clause OR writes a varying variable.
-            // A single if without else that modifies a varying variable must still blend,
-            // otherwise inactive lanes get the branch body applied unconditionally.
+            // Pre-declaration needed when the chain writes a varying variable (regardless of
+            // else). 赋值的掩码已由 TranslateAssignment 完成（纯赋值与复合赋值都 blend），
+            // 无需再 save-blend——那会叠加一次冗余 blend + save。
             bool hasElseClause = HasElseClause(stmt);
             HashSet<string> modifiedVars = AnalyzeModifiedVars(stmt);
-            bool needsSaveBlend = hasElseClause || modifiedVars.Count > 0;
-            int saveIdx = -1;
-            List<string> savedVarNames = new();
-            if (needsSaveBlend)
+            bool needsPredeclare = hasElseClause || modifiedVars.Count > 0;
+            if (needsPredeclare)
             {
                 // ★ Pre-declare branch-written varying variables at the outer scope.
                 //   The "declare at first assignment" rule would put the declaration
@@ -570,7 +569,6 @@ namespace NativeTranspiler.Analyzer
                 //   branches (e.g. float v; if (a>40) v=...; else if ... v=...;).
                 foreach (var name in modifiedVars)
                     PredeclareBranchVar(name);
-                saveIdx = EmitSaveVaryingVars(modifiedVars, savedVarNames);
             }
 
             while (true)
@@ -622,16 +620,7 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"simd_mask {cm} = {negCond};");
                     string entryMask = _currentMask;
                     _currentMask = cm;
-                    // ★ Per-branch write analysis for else body (empty if →反转条件→直接走else)
-                    HashSet<string> elseWrites2 = new();
-                    CollectWrites(current.Else.Statement, elseWrites2);
                     GenerateBlock(EnsureBlock(current.Else.Statement), skipBraces: false);
-                    if (needsSaveBlend && elseWrites2.Count > 0)
-                    {
-                        var elseSavedNames2 = savedVarNames.Where(name => elseWrites2.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
-                        if (elseSavedNames2.Count > 0)
-                            EmitBlendVaryingVars(saveIdx, elseSavedNames2, cm);
-                    }
                     _currentMask = entryMask;
                     return;
                 }
@@ -730,6 +719,16 @@ namespace NativeTranspiler.Analyzer
                         // combine as all_true & !c0 & c1 (not c0 & !c0 & c1 = false).
                         savedMask = "simd_mask::all_true()";
                         savedMaskEmitted = true;
+                        // ★ 通解：全活跃 lane 时也折叠归约（if (v<best) best=v → n_min_ps），
+                        //   否则 unroll 后的归约循环会退化成 cmp+blend（每轮多 1 次比较）。
+                        if (TryFoldReduction(condExpr, current.Statement, out var foldFnAllTrue))
+                        {
+                            _foldReduceFn = foldFnAllTrue;
+                            GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
+                            _foldReduceFn = null;
+                            current = null;
+                            break; // skip mask push/pop
+                        }
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
                         trueMask = condVar;
@@ -796,24 +795,9 @@ namespace NativeTranspiler.Analyzer
                     bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement);
                     if (bodyHasGoto)
                         AppendLine($"if ({trueMask}.any_true())");
-                    // ★ Capture the branch mask BEFORE generating the body — nested loops/ifs
-                    //   mutate _currentMask; blending with the post-body value would reference
-                    //   loop-local mask variables out of scope.
-                    string branchMask = _currentMask;
-                    // ★ Per-branch write analysis: only blend variables actually modified in this branch
-                    HashSet<string> branchWrites = new();
                     if (!bodyEmpty)
                     {
-                        CollectWrites(current.Statement, branchWrites);
                         GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                    }
-                    // Save-blend: restore non-active lanes after branch body (only for vars written in this branch)
-                    if (needsSaveBlend && !bodyEmpty && !bodyHasGoto && branchWrites.Count > 0)
-                    {
-                        // Filter savedVarNames to only include variables written in this branch
-                        var branchSavedNames = savedVarNames.Where(name => branchWrites.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
-                        if (branchSavedNames.Count > 0)
-                            EmitBlendVaryingVars(saveIdx, branchSavedNames, branchMask);
                     }
                 }
 
@@ -860,19 +844,9 @@ namespace NativeTranspiler.Analyzer
                 bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody);
                 if (elseHasGoto)
                     AppendLine($"if ({elseMaskVar}.any_true())");
-                // ★ Per-branch write analysis for else body
-                HashSet<string> elseWrites = new();
                 if (!elseBodyEmpty)
                 {
-                    CollectWrites(elseBody, elseWrites);
                     GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
-                }
-                // Save-blend: restore non-active lanes after else body (only for vars written in else)
-                if (hasElseClause && !elseBodyEmpty && !elseHasGoto && elseWrites.Count > 0)
-                {
-                    var elseSavedNames = savedVarNames.Where(name => elseWrites.Contains(name.Substring(2))).ToList(); // Remove "v_" prefix
-                    if (elseSavedNames.Count > 0)
-                        EmitBlendVaryingVars(saveIdx, elseSavedNames, elseMaskVar);
                 }
             }
 
@@ -1072,8 +1046,15 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & ~{frame.IterActiveVar};");
-                AppendLine($"goto {frame.ExitLabel};");
+                // While-true / do-while 循环（有 tracker 与 body mask）：varying break。
+                // 剔除命中 break 的 lane（用 _currentMask，即 break 条件的掩码），并窄化循环体
+                // mask（BodyMaskVar），使后续语句跳过已 break 的 lane；仅当所有 lane 都退出才
+                // 离开循环。旧的 `& ~IterActiveVar` 用错了掩码，`goto exit` 又会让单条 lane
+                // 触发即整组退出。
+                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                if (!string.IsNullOrEmpty(frame.BodyMaskVar))
+                    AppendLine($"{frame.BodyMaskVar} = {frame.BodyMaskVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                AppendLine($"if (!({frame.TrackerVar}).any_true()) {{ goto {frame.ExitLabel}; }}");
             }
         }
 
@@ -1097,8 +1078,9 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // While-true mask loop: kill current lanes from tracker before goto
-                AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                // While-true mask loop：continue 只跳过本次迭代剩余语句，lane 仍保留在
+                // 循环中（下一轮继续）。不能剔除 tracker——那是 break 的语义；否则命中
+                // continue 的 lane 会被永久移出循环，后续迭代不再参与（C12 Bug D）。
                 AppendLine($"goto {frame.ContinueLabel};");
             }
         }
@@ -1276,8 +1258,6 @@ namespace NativeTranspiler.Analyzer
         // Save-blend: precise variable modification analysis
         // ================================================================
 
-        private int _saveBlendCounter = 0;
-
         /// <summary>
         /// Analyze an if-else chain and collect all variables that are written in any branch.
         /// </summary>
@@ -1324,37 +1304,6 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        /// <summary>
-        /// Save only the variables that are actually modified in the if-else chain.
-        /// Supports int/uint AND float accumulators (float needs save-blend too for
-        /// interleaved += / -= branch accumulation — e.g. loop + parity branches).
-        /// Returns the save index for this if-chain; saved names are appended to
-        /// <paramref name="savedNames"/> (caller-owned, so nested ifs stay isolated
-        /// — the global counter/state approach corrupted nested chains).
-        /// </summary>
-        private int EmitSaveVaryingVars(HashSet<string> modifiedVars, List<string> savedNames)
-        {
-            int idx = _saveBlendCounter++;
-            savedNames.Clear();
-
-            foreach (var kvp in _variables)
-            {
-                if (kvp.Value == null) continue;
-                string name = kvp.Key;
-                if (string.IsNullOrEmpty(name) || name == _indexParamName) continue;
-                if (_forLoopVars.Contains(name)) continue;
-                if (!modifiedVars.Contains(name)) continue;
-                if (kvp.Value.Kind >= VarKind.Varying)
-                {
-                    string elem = kvp.Value.CppType == "float" ? "float" : "int";
-                    string simdName = $"v_{name}";
-                    AppendLine($"simd_value<{elem}> __save_{idx}_{simdName} = {simdName};");
-                    savedNames.Add(simdName);
-                }
-            }
-            return idx;
-        }
-
         /// <summary>Pre-declare a branch-written varying var at the outer scope.</summary>
         private void PredeclareBranchVar(string name)
         {
@@ -1363,19 +1312,12 @@ namespace NativeTranspiler.Analyzer
             if (mInfo.Kind < VarKind.Varying || _varDeclEmitted.Contains(name)) return;
             string vType = GetSIMDTypeString(mInfo.CppType);
             if (vType == null) return;
-            AppendLine($"{vType} v_{name};");
+            // ★ 初始化为 broadcast(0)：移除 save-blend 后，首个分支的 blend 会读旧值；
+            //   未初始化的 varying 局部变量（float r; 由 if/else 定值）需先归零避免读垃圾。
+            AppendLine($"{vType} v_{name} = {(mInfo.CppType == "float" ? "0.0f" : "0")};");
             _varDeclEmitted.Add(name);
             _simdVaryingVarNames.Add(name);
             _simdVaryingCppType[name] = mInfo.CppType;
-        }
-
-        private void EmitBlendVaryingVars(int idx, List<string> savedNames, string mask)
-        {
-            foreach (var name in savedNames)
-            {
-                AppendLine($"{name} = blend(__save_{idx}_{name}, {name}, {mask});");
-                AppendLine($"__save_{idx}_{name} = {name};");
-            }
         }
     }
 }
