@@ -1,5 +1,6 @@
 using EntJoy.JobSystem;
-using EntJoySample.SIMD;
+// 10_SIMD 已从编译排除（见 EntJoySample.csproj）；恢复时取消本注释与下方 Run() 调用
+//using EntJoySample.SIMD;
 
 namespace EntJoySample.ECS
 {
@@ -15,7 +16,7 @@ namespace EntJoySample.ECS
                 //Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
                 // 10_SIMD: ISPC vs AutoSIMD vs Cpp 对比 + 压力测试（对照 C# oracle 找翻译 bug）
-                SimdCompareTest.Run();
+                //SimdCompareTest.Run();
 
                 // Observer 测试（组件生命周期事件 push 回调）
                 //ObserverDemo.Run();

@@ -117,6 +117,8 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
         private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_CompleteAndRelease;
         private static delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int> _jobSystem_ScheduleBatch;
+        private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetImplicitBatchEnabled;
+        private static delegate* unmanaged[Cdecl]<void> _jobSystem_FlushPendingSubmits;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_SubmitDeferBump;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_SubmitDeferFlush;
         private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_GetDiagnosticBatchId;
@@ -329,6 +331,10 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
             _jobSystem_ScheduleBatch = (delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleBatch");
+            _jobSystem_SetImplicitBatchEnabled = (delegate* unmanaged[Cdecl]<int, void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_SetImplicitBatchEnabled");
+            _jobSystem_FlushPendingSubmits = (delegate* unmanaged[Cdecl]<void>)
+                NativeLibrary.GetExport(dllHandle, "JobSystem_FlushPendingSubmits");
             _jobSystem_SubmitDeferBump = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_SubmitDeferBump");
             _jobSystem_SubmitDeferFlush = (delegate* unmanaged[Cdecl]<void>)
@@ -542,6 +548,20 @@ namespace EntJoy.JobSystem
         {
             EnsureNativeLoaded();
             return _jobSystem_ScheduleBatch(descs, count, outHandles);
+        }
+
+        /// <summary>隐式批（native 收集）开关：1=启用（Schedule* 透明挂 pending）；0=关闭并排空积压。</summary>
+        internal static void JobSystem_SetImplicitBatchEnabled(int enabled)
+        {
+            if (_nativeDll == IntPtr.Zero || _jobSystem_SetImplicitBatchEnabled == null) return;
+            _jobSystem_SetImplicitBatchEnabled(enabled);
+        }
+
+        /// <summary>隐式批 force point：提交全部 pending + 单次唤醒（帧末 EndFrame / Complete 自动触发）。</summary>
+        internal static void JobSystem_FlushPendingSubmits()
+        {
+            if (_nativeDll == IntPtr.Zero || _jobSystem_FlushPendingSubmits == null) return;
+            _jobSystem_FlushPendingSubmits();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

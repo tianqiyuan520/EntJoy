@@ -356,11 +356,14 @@ namespace JobSystem
             ? CurrentThreadCyclesForDiagnostics() : 0;
         const int rangeStartLogicalCore = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
-        if (timingEnabled)
+        // 无条件记录 firstTileAt（JCC perElem 纯执行口径 + execSpan 诊断共用）。
+        // load 快速路径：首个 tile 之后仅 1 次 relaxed load（~1ns/tile），零 MonotonicNowNs 重复调用。
+        if (batch->firstTileAt.load(std::memory_order_relaxed) == 0)
         {
             uint64_t empty = 0;
             batch->firstTileAt.compare_exchange_strong(
-                empty, rangeStartedAt, std::memory_order_release, std::memory_order_relaxed);
+                empty, timingEnabled ? rangeStartedAt : MonotonicNowNs(),
+                std::memory_order_release, std::memory_order_relaxed);
         }
 
         // Prefetch the next tile's data (delegated to a helper below that
@@ -569,6 +572,50 @@ namespace JobSystem
         g_chaseLevScheduler->SubmitBatch(batch);
     }
 
+    // ============================================================
+    // 隐式批（native 收集）：开关开启时挂 pending，EndFrame/Complete 统一提交
+    // ============================================================
+
+    // 收集点：主线程直接提交的 tile 路径 job（ParallelFor/ParallelForBatch/Chunk/Entity）。
+    // 开关开启 → 挂 pending（持有 state 引用，防 C# 丢弃 handle 导致 state 被回收后悬垂）；
+    // 否则保持现状直接提交。依赖未完成路径（continuation 内）不经过本函数，照常立即提交。
+    void SubmitOrPending(BatchState* batch)
+    {
+        if (!batch) return;
+        if (g_implicitBatchEnabled.load(std::memory_order_relaxed))
+        {
+            AcquireState(batch->handle);
+            std::lock_guard<std::mutex> lock(g_pendingBatchesMutex);
+            g_pendingBatches.push_back(batch);
+        }
+        else
+        {
+            SubmitBatch(batch);
+        }
+    }
+
+    // force point：swap 出全部 pending → deferNotify 窗口内逐个 SubmitBatch →
+    // 统一 WakePending 一次。SubmitBatch 内部已 AcquireState（在飞引用），
+    // 这里 ReleaseState 释放 pending 持有的引用。
+    void FlushPendingSubmits()
+    {
+        std::vector<BatchState*> local;
+        {
+            std::lock_guard<std::mutex> lock(g_pendingBatchesMutex);
+            local.swap(g_pendingBatches);
+        }
+        if (local.empty()) return;
+        g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed);
+        for (auto* b : local)
+        {
+            SubmitBatch(b);
+            ReleaseState(b->handle);
+        }
+        g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
+        if (g_chaseLevScheduler)
+            g_chaseLevScheduler->WakePending();
+    }
+
     // ---------- Chunk/Entity adaptors ----------
     // ChunkBatchContext / GeneralBatchContext 定义见 JobSystemInternal.h。
 
@@ -696,24 +743,45 @@ namespace JobSystem
             if (g_jobCostCacheEnabled.load(std::memory_order_relaxed) &&
                 batch->funcHash != 0 && batch->totalElements > 0)
             {
-                const uint64_t published =
-                    batch->publishedAt.load(std::memory_order_relaxed);
-                const uint64_t completed =
-                    batch->topologyDoneAt.load(std::memory_order_relaxed);
-                if (completed > published)
+                // perElem 用纯执行口径：首 tile 开始 → 末 tile 完成。
+                // 旧口径 (topologyDoneAt - publishedAt) 含唤醒/排队（submit2first ~300µs），
+                // 空体/超轻 job 虚高 20-100x → tiles 决策过多 → 认领/回调开销拖慢
+                //（ManyJobsBench 64K x100 20µs vs JCC OFF 3.8µs 归因）。
+                const uint64_t firstTile =
+                    batch->firstTileAt.load(std::memory_order_relaxed);
+                const uint64_t lastTile =
+                    batch->lastTileAt.load(std::memory_order_relaxed);
+                if (lastTile > firstTile)
                 {
-                    const double totalNs = static_cast<double>(completed - published);
+                    const double totalNs = static_cast<double>(lastTile - firstTile);
                     const double perElemNs = totalNs / static_cast<double>(batch->totalElements);
                     // 判定本次 batch 是否为粗粒度（tpw）分块：实际 tile 数 ≤ tpw 基准 tile 数。
                     // 粗粒度用于记忆带宽/延迟绑定检测参考（细粒度加 tile 无增益 → memory-bound）。
                     // tpw 基准 tile 数 = workers × tilesPerWorker（默认 15×4=60）；
                     // 「>」= JCC 公式选得更细 → 归为细粒度学习样本。
-                    const int wc = std::max(1, g_numThreads);
-                    const uint32_t coarseTileCount = static_cast<uint32_t>(wc) * g_configuredTilesPerWorker;
-                    const bool targetCoarse = (batch->tileCount <= coarseTileCount);
+                    // 细/粗样本归属：JCC 公式产出（jccFine）= 细；tpw 兜底 / mem-bound /
+                    // 显式 batchSize = 粗。perElem 修正后公式可能产出 < tpw 的 tiles，
+                    // 旧 tile 数比较（≤ wc×tpw 判粗）会把公式样本误判为粗 → 细 EWMA 永不更新。
+                    const bool targetCoarse = !batch->jccFine;
+                    // 两因子：反解每 tile 固定开销 C_fixed。
+                    // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem
+                    // → C_fixed = (wc×execSpan − N×C_elem)/tiles（C_elem 用当前细 EWMA，
+                    //   冷启动用本批 perElem 近似）。固定开销与分块粒度无关，粗/细批都学习。
+                    const int wcNow = std::max(1, g_numThreads);
+                    if (batch->tileCount > 0)
+                    {
+                        double celemRef = g_jobCostCache.GetPerElemCost(batch->funcHash);
+                        if (celemRef <= 0.0) celemRef = perElemNs;
+                        const double perTileNs =
+                            (static_cast<double>(wcNow) * totalNs -
+                             static_cast<double>(batch->totalElements) * celemRef)
+                            / static_cast<double>(batch->tileCount);
+                        if (perTileNs > 0.0)
+                            g_jobCostCache.UpdatePerTileCost(batch->funcHash, perTileNs);
+                    }
                     g_jobCostCache.UpdatePerElemCost(batch->funcHash, perElemNs, targetCoarse);
                     if (g_jobCostCacheVerbose)
-                        std::printf("[JCC] L hash=%08x tiles=%u N=%u wallUs=%.1f perElem=%.2fns coarse=%d\n",
+                        std::printf("[JCC] L hash=%08x tiles=%u N=%u execSpanUs=%.1f perElem=%.2fns coarse=%d\n",
                             batch->funcHash, batch->tileCount, batch->totalElements,
                             totalNs / 1000.0, perElemNs, targetCoarse ? 1 : 0);
                 }

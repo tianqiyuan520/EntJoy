@@ -272,6 +272,9 @@ namespace JobSystem
             std::lock_guard<std::mutex> lock(g_schedulerMutex);
             g_numThreads = 0;
         }
+        // 隐式批排空：提交 pending 中尚未发布的 job（worker 尚在运行，可正常执行/退役；
+        // 未及执行者按现有 in-flight 泄漏兜底，不产生 UAF）。
+        FlushPendingSubmits();
         if (g_chaseLevScheduler) { g_chaseLevScheduler->Stop(); g_chaseLevScheduler.reset(); }
         ConsumeLongBatchBarriers();
         // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
@@ -388,7 +391,8 @@ namespace JobSystem
         // FastPath（rc<=1）不学成本（已收敛为 1 tile）；batch 路径退役时学到。
         const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
             ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
-        int cs = ResolveChunkSize(length, batchSize, funcHash);
+        bool jccFine = false;
+        int cs = ResolveChunkSize(length, batchSize, funcHash, &jccFine);
         int rc = (length + cs - 1) / cs;
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
@@ -410,6 +414,7 @@ namespace JobSystem
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->funcHash = funcHash;
+        batch->jccFine = jccFine;
         batch->totalElements = static_cast<uint32_t>(length);
         batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->nextTile.store(0, std::memory_order_relaxed);
@@ -438,7 +443,7 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
         else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
@@ -466,7 +471,8 @@ namespace JobSystem
         // 显式 batchSize（reqBatch>0）时用户意图优先，不参与自动 batch。
         const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
             ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
-        int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash));
+        bool jccFine = false;
+        int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash, &jccFine));
         int rc = (length + cs - 1) / cs;
         if (!forceAsync && depOk && rc <= 1)
         {
@@ -497,6 +503,7 @@ namespace JobSystem
         batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
         batch->executeTile = &GeneralExecuteTile;
         batch->funcHash = funcHash;
+        batch->jccFine = jccFine;
         batch->totalElements = static_cast<uint32_t>(length);
         batch->tileCount = static_cast<uint32_t>(tileCount);
         batch->nextTile.store(0, std::memory_order_relaxed);
@@ -525,7 +532,7 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
         else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
         return JobHandle(state);
     }
@@ -643,7 +650,7 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitBatch(batch); }
+        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
         else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
         return JobHandle(state);
     }

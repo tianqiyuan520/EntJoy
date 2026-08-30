@@ -53,6 +53,17 @@ add_executable(MPMCInjectorTests
     MPMCInjectorTests.cpp
 )
 
+add_executable(ImplicitBatchTests
+    ImplicitBatchTests.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
+)
+
 target_include_directories(JobSystemTests PRIVATE
     ../../src/NativeDll
 )
@@ -81,7 +92,14 @@ target_include_directories(MPMCInjectorTests PRIVATE
     ../../src/NativeDll
 )
 
+target_include_directories(ImplicitBatchTests PRIVATE
+    ../../src/NativeDll
+)
+
 if(MSVC)
+    # MSVC SDL 会把 CRT deprecated 警告（C4996，如 getenv）升级为 error；
+    # _CRT_SECURE_NO_WARNINGS 统一抑制（Clang 不识别该宏，无副作用）。
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
     # 源文件为 UTF-8 无 BOM（含中文注释）。不加 /utf-8 时 MSVC 按本地代码页
     # (936) 解析，多字节注释破坏行结构，报出大量与磁盘内容对不上的伪错误。
     target_compile_options(JobSystemTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
@@ -104,4 +122,7 @@ if(MSVC)
 
     target_compile_options(MPMCInjectorTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
     target_compile_definitions(MPMCInjectorTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(ImplicitBatchTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(ImplicitBatchTests PRIVATE NDEBUG NOMINMAX)
 endif()
