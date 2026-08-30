@@ -29,7 +29,6 @@ namespace EntJoy.JobSystem.Managed
         private static readonly object _stateLock = new object();
 
         private const int QueueCapacity = 1 << 16;
-        private const int SyncInlineThreshold = 1024;
 
         // ───── Chase-Lev 路径 ─────
         private static ManagedMPMCQueue<ManagedTileTask>? _injector;   // 全局 Injector（跨线程提交入口）
@@ -198,8 +197,8 @@ namespace EntJoy.JobSystem.Managed
         }
 
         /// <summary>
-        /// 调度 IJobParallelFor：Chase-Lev 工作窃取。
-        /// 同步内联覆盖小任务（零调度开销）。依赖通过 completion 计数保证顺序。
+        /// 调度 IJobParallelFor：Chase-Lev 工作窃取（Schedule 一律异步提交）。
+        /// 依赖通过 completion 计数保证顺序。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public static ManagedJobHandle Schedule<T>(ref T job, int arrayLength, int innerBatchCount, ManagedJobHandle dependsOn = default)
@@ -219,17 +218,9 @@ namespace EntJoy.JobSystem.Managed
                 return h;
             }
 
-            bool depOk = dependsOn.Completion == null || dependsOn.IsCompleted;
-
-            // [同步内联] 小并行 for 且依赖满足 → 调用线程同步执行，零调度开销
-            if (depOk && arrayLength <= SyncInlineThreshold)
-            {
-                var c = RentCompletion(); Interlocked.Exchange(ref c.Remaining, 1);
-                ExecuteTask(new ManagedTask { Job = ParallelCache<T>.Box(job), Runner = SelectRunner<T>(), Release = ParallelCache<T>.ReleaseBox, Start = 0, Count = arrayLength, Completion = c });
-                return new ManagedJobHandle(c);
-            }
-
             // Chase-Lev 路径：预切分为 ManagedTileTask 推入 Injector
+            // （移除 ≤SyncInlineThreshold 的调用线程同步内联——小并行 for 同样可能
+            //  承载大工作量阻塞调用线程，Schedule 一律异步，对齐 IJob 族）
             return ScheduleChaseLevParallelFor<T>(ref job, arrayLength, innerBatchCount, dependsOn);
         }
 

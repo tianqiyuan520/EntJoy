@@ -70,7 +70,7 @@ namespace NativeTranspiler.Analyzer
                     return TranslateAssignment(assign);
 
                 case CheckedExpressionSyntax checkedExpr:
-                    // ★ E2 fix: `unchecked(x + y)` / `checked(x + y)` → translate the inner expr.
+                    // ★ `unchecked(x + y)` / `checked(x + y)` → translate the inner expr.
                     //   EntJoy arithmetic is always unchecked (wraps), so the flag is a no-op.
                     return TranslateExpression(checkedExpr.Expression);
 
@@ -903,7 +903,7 @@ namespace NativeTranspiler.Analyzer
                     if (side is LiteralExpressionSyntax litExpr && litExpr.Token.Text.EndsWith("u"))
                         cmpIsUint = true;
                 }
-                // ★ E1 fix: fallback to SemanticModel for int type detection.
+                // ★ fallback to SemanticModel for int type detection.
                 //   The above pattern matching only catches direct variable refs and bitwise ops,
                 //   but misses computed int expressions like `dx * dy`, `i % 3`, `i & 1`.
                 //   Use Roslyn GetTypeInfo to get the actual result type of each comparison operand.
@@ -1238,7 +1238,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                             }
                             if (contBase != null)
                             {
-                                // ★ E7 fix: when _returnedMaskVar is set (batch body has `return`), use per-lane
+                                // ★ when _returnedMaskVar is set (batch body has `return`), use per-lane
                                 //   masked store to avoid overwriting lanes that already returned with their result.
                                 //   Only write to non-returned lanes (complement of _returnedMaskVar).
                                 if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
@@ -1252,7 +1252,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                                 }
                                 string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
                                 string off = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
-                                // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter，C12 根因）
+                                // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
                                 if (elemType == "float" && IsInt32Expr(assign.Right))
                                     return $"{storeFn}({baseName}_ptr + {off}, n_cvtepi32_ps({rhsExpr}.v))";
                                 return $"{storeFn}({baseName}_ptr + {off}, {rhsExpr}.v)";

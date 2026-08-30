@@ -422,7 +422,7 @@ namespace NativeTranspiler.Analyzer
                     return ClassifyExpressionInternal(assign.Right, visiting);
 
                 case CheckedExpressionSyntax checkedExpr:
-                    // ★ E2 fix: `unchecked(x + y)` / `checked(x + y)` — classification flows
+                    // ★ `unchecked(x + y)` / `checked(x + y)` — classification flows
                     //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
                     return ClassifyExpressionInternal(checkedExpr.Expression, visiting);
 
