@@ -27,6 +27,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace JobSystem
@@ -149,6 +150,9 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_perRangeExecEwmaNs;
     extern std::atomic<uint64_t> g_nextDiagnosticBatchId;
     extern std::atomic<bool> g_shuttingDown;
+    // 主线程 id：Initialize 时记录，Shutdown 校验——worker 线程调用 shutdown 会
+    // join 自身导致死锁，故非主线程调用直接拒绝（返回，不执行）。
+    extern std::thread::id g_mainThreadId;
     extern std::atomic<bool> g_timingDiagnosticsEnabled;
     extern std::atomic<void (*)(uint64_t)> g_currentBatchIdCallback;
     extern std::atomic<uint32_t> g_backendBatchesOutstanding;
@@ -476,6 +480,13 @@ namespace JobSystem
     int ResolveEcsEntityTileTarget(int totalEntities, int workerCount) noexcept;
     int BuildEntityBalancedTiles(ExecutionTile* tiles, const ChunkBatchContext* cc,
         TileKind kind, int itemCount, int targetEntities) noexcept;
+
+    // ---- shutdown 残留 batch 强制退役（定义在 JobSystem_Tiles.cpp） ----
+    // ChaseLevScheduler::Stop 排空残留 task 后，Shutdown 对每个未退役 batch 调用：
+    // cleanup(context) + ReleaseBatch + backendRetired + ReleaseState（等价正常退役的
+    // finalized 块，但不检查 tilesRemaining/pendingTasks——shutdown 时 worker 已 join，
+    // 单线程安全）。context 已清理（正常退役）或 finalized 已置位时幂等跳过。
+    void ForceFinalizeBatch(BatchState* batch) noexcept;
 
     // ---- ISPC MT 任务挂钩（tasksys.cpp 调用，事件驱动显示每个参与 worker 的耗时）----
     // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（在 W/M 之后）。

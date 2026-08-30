@@ -820,4 +820,29 @@ namespace JobSystem
             TryFinalizeChaseLevBatch(batch);
     }
 
+    // shutdown 残留 batch 强制退役（对齐 TryFinalizeChaseLevBatch 的 finalized 块，
+    // 但不检查 tilesRemaining/pendingTasks——shutdown 时 worker 已 join，单线程安全）。
+    // 幂等：normal 退役已置 finalized 且 cleanup 已清 context；重复调用跳过。
+    // ★ 不调 ReleaseState：用户仍可能持有 JobHandle 调用 IsCompleted/Complete，
+    //    state 必须存活（原泄漏兜底，HandleState 为池化小对象）——本函数只消除
+    //    context 主泄漏（GeneralBatchContext/ChunkBatchContext 含用户回调数据）。
+    void ForceFinalizeBatch(BatchState* batch) noexcept
+    {
+        if (!batch || !batch->handle) return;
+        if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
+        {
+            auto* state = batch->handle;
+            if (batch->cleanup && batch->context)
+            {
+                batch->cleanup(batch->context);
+                batch->context = nullptr;
+            }
+            ReleaseBatch(batch);
+            state->backendRetired.store(true, std::memory_order_release);
+            state->backendRetired.notify_all();
+            g_backendBatchesOutstanding.fetch_sub(1, std::memory_order_acq_rel);
+            g_backendBatchesOutstanding.notify_all();
+        }
+    }
+
 } // namespace JobSystem

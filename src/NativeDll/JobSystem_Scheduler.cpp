@@ -195,6 +195,7 @@ namespace JobSystem
     void Scheduler::Initialize(int numThreads)
     {
         g_shuttingDown.store(false, std::memory_order_release);
+        g_mainThreadId = std::this_thread::get_id();
 #if defined(_WIN32)
         // Raise this process above typical background load so worker threads
         // are deprioritized less when competing with the OS and other processes.
@@ -267,6 +268,16 @@ namespace JobSystem
 
     void Scheduler::Shutdown()
     {
+        // 线程防护：worker 线程调用 shutdown 会走到 ChaseLevScheduler::Stop 的 join 自身
+        // → 永不返回死锁。非主线程调用直接拒绝（打印并返回，不执行）。
+        if (g_mainThreadId != std::thread::id{} &&
+            std::this_thread::get_id() != g_mainThreadId)
+        {
+            std::fprintf(stderr,
+                "[JobSystem] Shutdown() called from non-main thread — rejected (would self-join deadlock).\n");
+            return;
+        }
+
         g_shuttingDown.store(true, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(g_schedulerMutex);
@@ -275,7 +286,15 @@ namespace JobSystem
         // 隐式批排空：提交 pending 中尚未发布的 job（worker 尚在运行，可正常执行/退役；
         // 未及执行者按现有 in-flight 泄漏兜底，不产生 UAF）。
         FlushPendingSubmits();
-        if (g_chaseLevScheduler) { g_chaseLevScheduler->Stop(); g_chaseLevScheduler.reset(); }
+        if (g_chaseLevScheduler)
+        {
+            g_chaseLevScheduler->Stop();
+            // 释放 Stop 排空出的未退役 batch（cleanup + ReleaseBatch + ReleaseState），
+            // 消除 shutdown 未完成 job 的 context 泄漏。
+            for (auto* batch : g_chaseLevScheduler->drainedBatches)
+                ForceFinalizeBatch(batch);
+            g_chaseLevScheduler.reset();
+        }
         ConsumeLongBatchBarriers();
         // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
         // worker 已由 chaseLevScheduler->Stop() join，其 thread_local 缓存已在退出时交还。

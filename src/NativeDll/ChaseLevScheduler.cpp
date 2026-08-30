@@ -287,7 +287,49 @@ namespace JobSystem
             if (ctx->thread.joinable())
                 ctx->thread.join();
         }
+
+        // 排空残留 task（Injector + deque），收集未退役 batch 到 drainedBatches
+        // ——消除 shutdown 未完成 job 的 context 泄漏（worker 已 join，单线程安全）。
+        DrainRemaining();
+
         workers_.clear();
+    }
+
+    // 排空 Injector 与各 worker deque 的残留 task（仅 Stop 内 join 后调用）。
+    void ChaseLevScheduler::DrainRemaining() noexcept
+    {
+        drainedBatches.clear();
+
+        // 1. Injector 残留（RangeTask：tile 令牌或通用 work）
+        RangeTask* task = nullptr;
+        while (injector_.Pop(task))
+        {
+            if (!task) continue;
+            if (task->batch == nullptr)
+            {
+                // 通用 work 任务（SubmitBackendAsync）：执行 cleanup 释放上下文
+                if (task->workCleanup) task->workCleanup(task->workCtx);
+            }
+            else
+            {
+                if (std::find(drainedBatches.begin(), drainedBatches.end(), task->batch)
+                        == drainedBatches.end())
+                    drainedBatches.push_back(task->batch);
+            }
+            s_taskPool_.Release(task);
+        }
+
+        // 2. worker deque 残留（TileTask）
+        for (auto& ctx : workers_)
+        {
+            TileTask t;
+            while (ctx->deque->StealTop(t))
+            {
+                if (t.batch && std::find(drainedBatches.begin(), drainedBatches.end(), t.batch)
+                        == drainedBatches.end())
+                    drainedBatches.push_back(t.batch);
+            }
+        }
     }
 
     // ============================================================

@@ -592,6 +592,30 @@ namespace
         JobSystem::Scheduler::Initialize();
     }
 
+    void TestShutdownRejectedFromWorkerThread()
+    {
+        // worker（job 回调）线程调 Shutdown：应被拒绝（非主线程打印错误并返回），
+        // 绝不 join 自身死锁；且系统仍可继续调度。
+        std::atomic<int> executed{ 0 };
+        std::atomic<int> attempted{ 0 };
+        auto h = JobSystem::Scheduler::Schedule([](void* raw) {
+            auto* e = static_cast<std::atomic<int>*>(raw);
+            e->fetch_add(1, std::memory_order_relaxed);
+            JobSystem::Scheduler::Shutdown();   // 非主线程 → 拒绝 + return（不死锁）
+            e->fetch_add(100, std::memory_order_relaxed);
+        }, &executed);
+        h.Complete();
+        Require(executed.load() == 101, "worker shutdown call not rejected (job hung or skipped)");
+        Require(attempted.load() == 0, "unexpected");
+        // 系统仍可用：主线程再调度 + Complete
+        std::atomic<int> executed2{ 0 };
+        auto h2 = JobSystem::Scheduler::Schedule([](void* raw) {
+            static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+        }, &executed2);
+        h2.Complete();
+        Require(executed2.load() == 1, "system broken after worker-thread shutdown attempt");
+    }
+
     void TestConcurrentChunkComplete()
     {
         // 规模上限由 trace per-thread 缓冲（kMaxTraceEventsPerThread=4096）决定：
@@ -2379,6 +2403,8 @@ int main()
         std::cout << "PASS NestedCompleteResolvesWithoutWorkerExhaustion\n";
         TestShutdownWithOutstandingWork();
         std::cout << "PASS ShutdownWithOutstandingWork\n";
+        TestShutdownRejectedFromWorkerThread();
+        std::cout << "PASS ShutdownRejectedFromWorkerThread\n";
         TestWorkerCapParameterized();
         std::cout << "PASS WorkerCapParameterized\n";
 
