@@ -1,4 +1,4 @@
-// NativeSIMD.h - cross-platform SIMD abstraction layer
+﻿// NativeSIMD.h - cross-platform SIMD abstraction layer
 // Provides AVX2 / SSE4 / NEON / scalar fallback via unified interface
 // All loads use unaligned access (loadu), no alignment guarantees needed
 #pragma once
@@ -10,7 +10,11 @@
 // ============================================================
 // Platform detection (priority: x86 > ARM > scalar)
 // ============================================================
-#if defined(__AVX2__)
+#if defined(__AVX512F__)
+    #define NSIMD_AVX512 1
+    #define NSIMD_WIDTH 16
+    #include <immintrin.h>
+#elif defined(__AVX2__)
     #define NSIMD_AVX2 1
     #define NSIMD_WIDTH 8
     #include <immintrin.h>
@@ -86,7 +90,12 @@ constexpr int kMaxSimdWidth = NSIMD_WIDTH;
 // ============================================================
 // Type definitions
 // ============================================================
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    typedef __m512   n_float;
+    typedef __m512i  n_int;
+    typedef __mmask16 n_mask;
+    typedef __m512d  n_double;
+#elif defined(NSIMD_AVX2)
     typedef __m256  n_float;
     typedef __m256i n_int;
     typedef __m256  n_mask;
@@ -122,7 +131,9 @@ constexpr int kMaxSimdWidth = NSIMD_WIDTH;
 // Load / Store (all unaligned)
 // ============================================================
 static inline n_float n_load_ps(const float* p) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_loadu_ps(p);
+#elif defined(NSIMD_AVX2)
     return _mm256_loadu_ps(p);
 #elif defined(NSIMD_AVX)
 return _mm256_loadu_ps(p);
@@ -136,7 +147,9 @@ return _mm256_loadu_ps(p);
 }
 
 static inline void n_store_ps(float* p, n_float v) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    _mm512_storeu_ps(p, v);
+#elif defined(NSIMD_AVX2)
     _mm256_storeu_ps(p, v);
 #elif defined(NSIMD_AVX)
 _mm256_storeu_ps(p, v);
@@ -150,7 +163,9 @@ _mm256_storeu_ps(p, v);
 }
 
 static inline n_int n_load_epi32(const int* p) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_loadu_si512((const __m512i*)p);
+#elif defined(NSIMD_AVX2)
     return _mm256_loadu_si256((const __m256i*)p);
 #elif defined(NSIMD_AVX)
     return _mm256_loadu_si256((const __m256i*)p);
@@ -164,7 +179,9 @@ static inline n_int n_load_epi32(const int* p) {
 }
 
 static inline void n_store_epi32(int* p, n_int v) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    _mm512_storeu_si512((__m512i*)p, v);
+#elif defined(NSIMD_AVX2)
     _mm256_storeu_si256((__m256i*)p, v);
 #elif defined(NSIMD_AVX)
     _mm256_storeu_si256((__m256i*)p, v);
@@ -181,7 +198,9 @@ static inline void n_store_epi32(int* p, n_int v) {
 // Broadcast (scalar -> vector)
 // ============================================================
 static inline n_float n_set1_ps(float s) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_set1_ps(s);
+#elif defined(NSIMD_AVX2)
     return _mm256_set1_ps(s);
 #elif defined(NSIMD_AVX)
     return _mm256_set1_ps(s);
@@ -195,7 +214,9 @@ static inline n_float n_set1_ps(float s) {
 }
 
 static inline n_int n_set1_epi32(int s) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_set1_epi32(s);
+#elif defined(NSIMD_AVX2)
     return _mm256_set1_epi32(s);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_set1_epi32(s);
@@ -211,7 +232,9 @@ static inline n_int n_set1_epi32(int s) {
 
 static inline n_int n_set_epi32(int i7, int i6, int i5, int i4,
                                 int i3, int i2, int i1, int i0) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_set_epi32(i7, i6, i5, i4, i3, i2, i1, i0, 0, 0, 0, 0, 0, 0, 0, 0);
+#elif defined(NSIMD_AVX2)
     return _mm256_set_epi32(i7, i6, i5, i4, i3, i2, i1, i0);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_set_epi32(i3, i2, i1, i0);
@@ -236,7 +259,9 @@ static inline n_int n_set_epi32(int i7, int i6, int i5, int i4,
 // Arithmetic
 // ============================================================
 static inline n_float n_add_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_add_ps(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_add_ps(a, b);
 #elif defined(NSIMD_AVX)
 return _mm256_add_ps(a, b);
@@ -250,7 +275,9 @@ return _mm256_add_ps(a, b);
 }
 
 static inline n_float n_sub_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_sub_ps(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_sub_ps(a, b);
 #elif defined(NSIMD_AVX)
 return _mm256_sub_ps(a, b);
@@ -278,7 +305,9 @@ static inline n_float n_div_ps(n_float a, n_float b) {
 #endif
 }
 static inline n_float n_mul_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_mul_ps(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_mul_ps(a, b);
 #elif defined(NSIMD_AVX)
 return _mm256_mul_ps(a, b);
@@ -292,7 +321,9 @@ return _mm256_mul_ps(a, b);
 }
 
 static inline n_float n_fmadd_ps(n_float a, n_float b, n_float c) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_fmadd_ps(a, b, c);
+#elif defined(NSIMD_AVX2)
     return _mm256_fmadd_ps(a, b, c);
 #elif defined(NSIMD_AVX) && defined(__FMA__)
     return _mm256_fmadd_ps(a, b, c);
@@ -308,7 +339,9 @@ static inline n_float n_fmadd_ps(n_float a, n_float b, n_float c) {
 }
 
 static inline n_int n_add_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_add_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_add_epi32(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -328,7 +361,9 @@ static inline n_int n_add_epi32(n_int a, n_int b) {
 }
 
 static inline n_int n_sub_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_sub_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_sub_epi32(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -349,7 +384,9 @@ static inline n_int n_sub_epi32(n_int a, n_int b) {
 
 // Full-Width SIMD: xor int (AutoSIMD bitwise XOR)
 static inline n_int n_xor_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_xor_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_xor_si256(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_xor_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
@@ -366,7 +403,9 @@ static inline n_int n_xor_epi32(n_int a, n_int b) {
 
 // Full-Width SIMD: and int (AutoSIMD bitwise AND)
 static inline n_int n_and_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_and_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_and_si256(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_and_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
@@ -383,7 +422,9 @@ static inline n_int n_and_epi32(n_int a, n_int b) {
 
 // Full-Width SIMD: or int (AutoSIMD bitwise OR)
 static inline n_int n_or_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_or_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_or_si256(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_or_si128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(b));
@@ -400,7 +441,9 @@ static inline n_int n_or_epi32(n_int a, n_int b) {
 
 // Full-Width SIMD: shift right logical int by immediate
 static inline n_int n_srli_epi32(n_int a, int shift) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_srli_epi32(a, shift);
+#elif defined(NSIMD_AVX2)
     return _mm256_srli_epi32(a, shift);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_srli_epi32(_mm256_castsi256_si128(a), shift);
@@ -422,7 +465,9 @@ static inline n_int n_srli_epi32(n_int a, int shift) {
 //   int produced (unsigned)x >> 1 — the top bit was zero-filled instead of sign-extended
 //   (verified: EC3 x>>1 on INT_MIN-adjacent values, sign-bit flip 0x80682567 vs 0x682567).
 static inline n_int n_srai_epi32(n_int a, int shift) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_srai_epi32(a, shift);
+#elif defined(NSIMD_AVX2)
     return _mm256_srai_epi32(a, shift);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_srai_epi32(_mm256_castsi256_si128(a), shift);
@@ -441,7 +486,9 @@ static inline n_int n_srai_epi32(n_int a, int shift) {
 
 // Full-Width SIMD: shift left int by immediate
 static inline n_int n_slli_epi32(n_int a, int shift) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_slli_epi32(a, shift);
+#elif defined(NSIMD_AVX2)
     return _mm256_slli_epi32(a, shift);
 #elif defined(NSIMD_AVX)
     __m128i lo = _mm_slli_epi32(_mm256_castsi256_si128(a), shift);
@@ -459,7 +506,9 @@ static inline n_int n_slli_epi32(n_int a, int shift) {
 }
 
 static inline n_int n_mullo_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_mullo_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_mullo_epi32(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -497,7 +546,9 @@ static inline n_int n_mullo_epu32(n_int a, n_int b) {
 // Min / Max
 // ============================================================
 static inline n_float n_min_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_min_ps(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_min_ps(a, b);
 #elif defined(NSIMD_AVX)
 return _mm256_min_ps(a, b);
@@ -511,7 +562,9 @@ return _mm256_min_ps(a, b);
 }
 
 static inline n_float n_max_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_max_ps(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_max_ps(a, b);
 #elif defined(NSIMD_AVX)
 return _mm256_max_ps(a, b);
@@ -528,7 +581,9 @@ return _mm256_max_ps(a, b);
 // Absolute value & negation (cross-platform)
 // ============================================================
 static inline n_float n_fabs_ps(n_float a) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_andnot_ps(_mm512_set1_ps(-0.0f), a);
+#elif defined(NSIMD_AVX2)
     return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
 #elif defined(NSIMD_AVX)
     return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
@@ -542,7 +597,9 @@ static inline n_float n_fabs_ps(n_float a) {
 }
 
 static inline n_float n_neg_ps(n_float a) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_xor_ps(a, _mm512_set1_ps(-0.0f));
+#elif defined(NSIMD_AVX2)
     return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000)));
 #elif defined(NSIMD_AVX)
     return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000)));
@@ -559,7 +616,9 @@ static inline n_float n_neg_ps(n_float a) {
 // Comparison -> mask
 // ============================================================
 static inline n_mask n_cmp_lt_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_LT_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_LT_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_LT_OS);
@@ -573,7 +632,9 @@ static inline n_mask n_cmp_lt_ps(n_float a, n_float b) {
 }
 
 static inline n_mask n_cmp_gt_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_GT_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_GT_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_GT_OS);
@@ -588,7 +649,9 @@ static inline n_mask n_cmp_gt_ps(n_float a, n_float b) {
 
 // Float a == b
 static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_EQ_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_EQ_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_EQ_OS);
@@ -603,7 +666,9 @@ static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
 
 // Float a != b
 static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_NEQ_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_NEQ_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_NEQ_OS);
@@ -619,7 +684,9 @@ static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
 
 // Float a >= b
 static inline n_mask n_cmp_ge_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_GE_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_GE_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_GE_OS);
@@ -634,7 +701,9 @@ static inline n_mask n_cmp_ge_ps(n_float a, n_float b) {
 
 // Float a <= b
 static inline n_mask n_cmp_le_ps(n_float a, n_float b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, b, _CMP_LE_OS);
+#elif defined(NSIMD_AVX2)
     return _mm256_cmp_ps(a, b, _CMP_LE_OS);
 #elif defined(NSIMD_AVX)
     return _mm256_cmp_ps(a, b, _CMP_LE_OS);
@@ -651,7 +720,9 @@ static inline n_mask n_cmp_le_ps(n_float a, n_float b) {
 // Mask inversion + logic
 // ============================================================
 static inline n_mask n_not_mask(n_mask m) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return (n_mask)((~m) & 0xFFFF);
+#elif defined(NSIMD_AVX2)
     return _mm256_xor_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(-1)));
 #elif defined(NSIMD_AVX)
     __m128i all_ones = _mm_set1_epi32(-1);
@@ -669,7 +740,9 @@ static inline n_mask n_not_mask(n_mask m) {
 // Blend: mask ? b : a (cross-platform)
 // ============================================================
 static inline n_float n_blendv_ps(n_float a, n_float b, n_mask mask) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_mask_blend_ps(mask, a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_blendv_ps(a, b, mask);
 #elif defined(NSIMD_SSE4)
     return _mm_blendv_ps(a, b, mask);
@@ -686,7 +759,9 @@ static inline n_float n_blendv_ps(n_float a, n_float b, n_mask mask) {
 
 // Signed int a < b
 static inline n_mask n_cmp_lt_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_epi32_mask(a, b, _MM_CMPINT_LT);
+#elif defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(b, a));  // a < b  →  b > a
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -707,7 +782,9 @@ static inline n_mask n_cmp_lt_epi32(n_int a, n_int b) {
 
 // Signed int a > b
 static inline n_mask n_cmp_gt_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_epi32_mask(a, b, _MM_CMPINT_GT);
+#elif defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(a, b));
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -728,7 +805,9 @@ static inline n_mask n_cmp_gt_epi32(n_int a, n_int b) {
 
 // Unsigned int a < b
 static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_epu32_mask(a, b, _MM_CMPINT_LT);
+#elif defined(NSIMD_AVX2)
     n_int sign = _mm256_set1_epi32(0x80000000);
     return _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_xor_si256(b, sign), _mm256_xor_si256(a, sign)));
 #elif defined(NSIMD_AVX)
@@ -755,7 +834,9 @@ static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
 
 // Signed int a == b
 static inline n_mask n_cmp_eq_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_epi32_mask(a, b, _MM_CMPINT_EQ);
+#elif defined(NSIMD_AVX2)
     return _mm256_castsi256_ps(_mm256_cmpeq_epi32(a, b));
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -793,7 +874,9 @@ static inline n_mask n_cmp_le_epi32(n_int a, n_int b) {
 // Integer min / max
 // ============================================================
 static inline n_int n_min_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_min_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_min_epi32(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -813,7 +896,9 @@ static inline n_int n_min_epi32(n_int a, n_int b) {
 }
 
 static inline n_int n_max_epi32(n_int a, n_int b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_max_epi32(a, b);
+#elif defined(NSIMD_AVX2)
     return _mm256_max_epi32(a, b);
 #elif defined(NSIMD_AVX)
     __m128i lo_a = _mm256_castsi256_si128(a);
@@ -836,7 +921,9 @@ static inline n_int n_max_epi32(n_int a, n_int b) {
 // Float floor (Full-Width SIMD cell computation)
 // ============================================================
 static inline n_float n_floor_ps(n_float a) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_floor_ps(a);
+#elif defined(NSIMD_AVX2)
     return _mm256_floor_ps(a);
 #elif defined(NSIMD_AVX)
     return _mm256_floor_ps(a);
@@ -858,7 +945,9 @@ static inline n_float n_floor_ps(n_float a) {
 // ============================================================
 // Float sqrt (macro — zero function call boundary)
 // ============================================================
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    #define n_sqrt_ps(a) _mm512_sqrt_ps(a)
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     #define n_sqrt_ps(a) _mm256_sqrt_ps(a)
 #elif defined(NSIMD_SSE4)
     #define n_sqrt_ps(a) _mm_sqrt_ps(a)
@@ -873,7 +962,9 @@ static inline n_float n_floor_ps(n_float a) {
 // ============================================================
 
 static inline n_float n_ceil_ps(n_float a) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_ceil_ps(a);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_ceil_ps(a);
 #elif defined(NSIMD_SSE4)
     return _mm_ceil_ps(a);
@@ -886,7 +977,9 @@ static inline n_float n_ceil_ps(n_float a) {
 }
 
 static inline n_float n_round_ps(n_float a) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_roundscale_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_round_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 #elif defined(NSIMD_SSE4)
     return _mm_round_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -899,7 +992,9 @@ static inline n_float n_round_ps(n_float a) {
 }
 
 static inline n_float n_trunc_ps(n_float a) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_roundscale_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
 #elif defined(NSIMD_SSE4)
     return _mm_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
@@ -915,7 +1010,9 @@ static inline n_float n_trunc_ps(n_float a) {
 // Float -> int truncation (toward zero)
 // ============================================================
 static inline n_float n_cvtepi32_ps(n_int a) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_cvtepi32_ps(a);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_cvtepi32_ps(a);
 #elif defined(NSIMD_SSE4)
     return _mm_cvtepi32_ps(a);
@@ -927,7 +1024,9 @@ static inline n_float n_cvtepi32_ps(n_int a) {
 }
 
 static inline n_int n_cvttps_epi32(n_float a) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_cvttps_epi32(a);
+#elif defined(NSIMD_AVX2)
     return _mm256_cvttps_epi32(a);
 #elif defined(NSIMD_AVX)
     return _mm256_cvttps_epi32(a);
@@ -944,7 +1043,9 @@ static inline n_int n_cvttps_epi32(n_float a) {
 // Mask logic
 // ============================================================
 static inline n_mask n_and_mask(n_mask a, n_mask b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return (n_mask)(a & b);
+#elif defined(NSIMD_AVX2)
     return _mm256_and_ps(a, b);
 #elif defined(NSIMD_AVX)
     return _mm256_and_ps(a, b);
@@ -958,7 +1059,9 @@ static inline n_mask n_and_mask(n_mask a, n_mask b) {
 }
 
 static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return (n_mask)(a & (~b & 0xFFFF));
+#elif defined(NSIMD_AVX2)
     return _mm256_andnot_ps(a, b);
 #elif defined(NSIMD_AVX)
     return _mm256_andnot_ps(a, b);
@@ -974,7 +1077,9 @@ static inline n_mask n_andnot_mask(n_mask a, n_mask b) {
 
 // Mask OR
 static inline n_mask n_or_mask(n_mask a, n_mask b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return (n_mask)(a | b);
+#elif defined(NSIMD_AVX2)
     return _mm256_or_ps(a, b);
 #elif defined(NSIMD_AVX)
     return _mm256_or_ps(a, b);
@@ -989,7 +1094,9 @@ static inline n_mask n_or_mask(n_mask a, n_mask b) {
 
 // Mask XOR
 static inline n_mask n_xor_mask(n_mask a, n_mask b) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return (n_mask)(a ^ b);
+#elif defined(NSIMD_AVX2)
     return _mm256_xor_ps(a, b);
 #elif defined(NSIMD_AVX)
     return _mm256_xor_ps(a, b);
@@ -1006,7 +1113,9 @@ static inline n_mask n_xor_mask(n_mask a, n_mask b) {
 // Blend (conditional select)
 // ============================================================
 static inline n_float n_blend_ps(n_float v_false, n_float v_true, n_mask mask) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_mask_blend_ps(mask, v_false, v_true);
+#elif defined(NSIMD_AVX2)
     return _mm256_blendv_ps(v_false, v_true, mask);
 #elif defined(NSIMD_AVX)
     return _mm256_blendv_ps(v_false, v_true, mask);
@@ -1020,7 +1129,9 @@ static inline n_float n_blend_ps(n_float v_false, n_float v_true, n_mask mask) {
 }
 
 static inline n_int n_blend_epi32(n_int v_false, n_int v_true, n_mask mask) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_mask_blend_epi32(mask, v_false, v_true);
+#elif defined(NSIMD_AVX2)
     return _mm256_castps_si256(
         _mm256_blendv_ps(_mm256_castsi256_ps(v_false), _mm256_castsi256_ps(v_true), mask));
 #elif defined(NSIMD_AVX)
@@ -1041,7 +1152,9 @@ static inline n_int n_blend_epi32(n_int v_false, n_int v_true, n_mask mask) {
 // ============================================================
 template<int stride>
 static inline n_float n_gather_ps(const float* base, n_int indices) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_i32gather_ps(indices, base, stride);
+#elif defined(NSIMD_AVX2)
     return _mm256_i32gather_ps(base, indices, stride);
 #else
     int w = NSIMD_WIDTH;
@@ -1057,7 +1170,9 @@ static inline n_float n_gather_ps(const float* base, n_int indices) {
 
 template<int stride = 4>
 static inline n_int n_gather_epi32(const int* base, n_int indices) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    return _mm512_i32gather_epi32(indices, base, stride);
+#elif defined(NSIMD_AVX2)
     return _mm256_i32gather_epi32(base, indices, stride);
 #else
     int w = NSIMD_WIDTH;
@@ -1076,7 +1191,10 @@ static inline n_int n_gather_epi32(const int* base, n_int indices) {
 // ============================================================
 template<int stride>
 static inline n_float n_gather_masked_ps(const float* base, n_int indices, n_mask mask) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    n_float src = _mm512_setzero_ps();
+    return _mm512_mask_i32gather_ps(src, mask, indices, base, stride);
+#elif defined(NSIMD_AVX2)
     // AVX2: _mm256_mask_i32gather_ps takes __m256 mask (n_mask = __m256), pass directly
     n_float src = _mm256_setzero_ps();
     return _mm256_mask_i32gather_ps(src, base, indices, mask, stride);
@@ -1109,7 +1227,10 @@ static inline n_float n_gather_masked_ps(const float* base, n_int indices, n_mas
 
 template<int stride = 8>
 static inline n_int n_gather_masked_epi32(const int* base, n_int indices, n_mask mask) {
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    n_int src = _mm512_setzero_si512();
+    return _mm512_mask_i32gather_epi32(src, mask, indices, base, stride);
+#elif defined(NSIMD_AVX2)
     n_int src = _mm256_setzero_si256();
     return _mm256_mask_i32gather_epi32(src, base, indices, _mm256_castps_si256(mask), stride);
 #elif defined(NSIMD_NEON)
@@ -1143,7 +1264,11 @@ static inline n_int n_gather_masked_epi32(const int* base, n_int indices, n_mask
 static inline float n_extract_lane_f32(n_float v, int lane) {
     // M2: clamp lane to valid range to prevent buffer overrun
     lane = lane & (NSIMD_WIDTH - 1);
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    alignas(64) float buf16[16];
+    _mm512_storeu_ps(buf16, v);
+    return buf16[lane];
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     // AVX2: extract the right 128-bit half then store+index
     // (store approach avoids _MM_SHUFFLE's compile-time constant requirement)
     __m128 lo = _mm256_castps256_ps128(v);
@@ -1168,7 +1293,11 @@ static inline float n_extract_lane_f32(n_float v, int lane) {
 static inline int n_extract_lane_epi32(n_int v, int lane) {
     // M2: clamp lane to valid range to prevent buffer overrun
     lane = lane & (NSIMD_WIDTH - 1);
-#if defined(NSIMD_AVX2)
+#if defined(NSIMD_AVX512)
+    alignas(64) int buf16[16];
+    _mm512_storeu_si512((__m512i*)buf16, v);
+    return buf16[lane];
+#elif defined(NSIMD_AVX2)
     __m128i lo = _mm256_castsi256_si128(v);
     __m128i hi = _mm256_extractf128_si256(v, 1);
     __m128i sel = lane < 4 ? lo : hi;
@@ -1205,7 +1334,9 @@ static inline float n_extract_lane_i2f(n_int v, int lane) {
 // All-zero test
 // ============================================================
 static inline int n_all_zero(n_mask mask) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return (mask == 0);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_testz_ps(mask, mask);
 #elif defined(NSIMD_SSE4)
     return _mm_testz_ps(mask, mask);
@@ -1226,7 +1357,9 @@ static inline int n_any_true(n_mask mask) { return !n_all_zero(mask); }
 // Used for per-lane scatter guards: each bit = 1 means lane is active
 // ============================================================
 static inline int n_mask_to_bitmask(n_mask mask) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return (int)mask;
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_movemask_ps(mask);
 #elif defined(NSIMD_SSE4)
     return _mm_movemask_ps(mask);
@@ -1247,7 +1380,9 @@ static inline int n_mask_to_bitmask(n_mask mask) {
 // ============================================================
 
 static inline float n_hmin_ps(n_float v) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_reduce_min_ps(v);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 m = _mm_min_ps(lo, hi);
@@ -1271,7 +1406,9 @@ static inline float n_hmin_ps(n_float v) {
 }
 
 static inline float n_hmax_ps(n_float v) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_reduce_max_ps(v);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 m = _mm_max_ps(lo, hi);
@@ -1295,7 +1432,9 @@ static inline float n_hmax_ps(n_float v) {
 }
 
 static inline float n_hsum_ps(n_float v) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_reduce_add_ps(v);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 s = _mm_add_ps(lo, hi);
@@ -1367,7 +1506,9 @@ static inline int n_hmin_idx(n_float v_val, n_int v_idx) {
 // ============================================================
 
 static inline n_double n_set1_pd(double s) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_set1_pd(s);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_set1_pd(s);
 #elif defined(NSIMD_SSE4)
     return _mm_set1_pd(s);
@@ -1379,7 +1520,9 @@ static inline n_double n_set1_pd(double s) {
 }
 
 static inline n_double n_load_pd(const double* p) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_loadu_pd(p);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_loadu_pd(p);
 #elif defined(NSIMD_SSE4)
     return _mm_loadu_pd(p);
@@ -1391,7 +1534,9 @@ static inline n_double n_load_pd(const double* p) {
 }
 
 static inline void n_store_pd(double* p, n_double v) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    _mm512_storeu_pd(p, v);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     _mm256_storeu_pd(p, v);
 #elif defined(NSIMD_SSE4)
     _mm_storeu_pd(p, v);
@@ -1403,7 +1548,9 @@ static inline void n_store_pd(double* p, n_double v) {
 }
 
 static inline n_double n_add_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_add_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_add_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_add_pd(a, b);
@@ -1415,7 +1562,9 @@ static inline n_double n_add_pd(n_double a, n_double b) {
 }
 
 static inline n_double n_sub_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_sub_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_sub_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_sub_pd(a, b);
@@ -1427,7 +1576,9 @@ static inline n_double n_sub_pd(n_double a, n_double b) {
 }
 
 static inline n_double n_mul_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_mul_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_mul_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_mul_pd(a, b);
@@ -1439,7 +1590,9 @@ static inline n_double n_mul_pd(n_double a, n_double b) {
 }
 
 static inline n_double n_div_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_div_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_div_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_div_pd(a, b);
@@ -1451,7 +1604,9 @@ static inline n_double n_div_pd(n_double a, n_double b) {
 }
 
 static inline n_double n_sqrt_pd(n_double a) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_sqrt_pd(a);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_sqrt_pd(a);
 #elif defined(NSIMD_SSE4)
     return _mm_sqrt_pd(a);
@@ -1464,7 +1619,9 @@ static inline n_double n_sqrt_pd(n_double a) {
 
 // Double FMA
 static inline n_double n_fmadd_pd(n_double a, n_double b, n_double c) {
-#if defined(NSIMD_AVX2) && defined(__FMA__)
+#if defined(NSIMD_AVX512)
+    return _mm512_fmadd_pd(a, b, c);
+#elif defined(NSIMD_AVX2) && defined(__FMA__)
     return _mm256_fmadd_pd(a, b, c);
 #elif defined(NSIMD_SSE4) && defined(__FMA__)
     return _mm_fmadd_pd(a, b, c);
@@ -1475,7 +1632,9 @@ static inline n_double n_fmadd_pd(n_double a, n_double b, n_double c) {
 
 // Double min/max
 static inline n_double n_min_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_min_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_min_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_min_pd(a, b);
@@ -1487,7 +1646,9 @@ static inline n_double n_min_pd(n_double a, n_double b) {
 }
 
 static inline n_double n_max_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_max_pd(a, b);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_max_pd(a, b);
 #elif defined(NSIMD_SSE4)
     return _mm_max_pd(a, b);
@@ -1500,7 +1661,9 @@ static inline n_double n_max_pd(n_double a, n_double b) {
 
 // Double comparison → mask (cast between __m256d and __m256 for n_mask)
 static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_pd_mask(a, b, _CMP_LT_OS);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_LT_OS));
 #elif defined(NSIMD_SSE4)
     return _mm_castpd_ps(_mm_cmplt_pd(a, b));
@@ -1512,7 +1675,9 @@ static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
 }
 
 static inline n_mask n_cmp_eq_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_pd_mask(a, b, _CMP_EQ_OS);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_EQ_OS));
 #elif defined(NSIMD_SSE4)
     return _mm_castpd_ps(_mm_cmpeq_pd(a, b));
@@ -1525,7 +1690,9 @@ static inline n_mask n_cmp_eq_pd(n_double a, n_double b) {
 
 // Double blend (cast n_mask→__m256d)
 static inline n_double n_blend_pd(n_double f, n_double t, n_mask m) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_mask_blend_pd(m, f, t);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_blendv_pd(f, t, _mm256_castps_pd(m));
 #elif defined(NSIMD_SSE4)
     return _mm_blendv_pd(f, t, _mm_castps_pd(m));
@@ -1538,7 +1705,9 @@ static inline n_double n_blend_pd(n_double f, n_double t, n_mask m) {
 
 // Double horizontal operations
 static inline double n_hmin_pd(n_double v) {
-#if defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+#if defined(NSIMD_AVX512)
+    return _mm512_reduce_min_pd(v);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
     __m128d m = _mm_min_pd(lo, hi);

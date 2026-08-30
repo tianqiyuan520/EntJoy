@@ -1021,18 +1021,16 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 return $"({left} {op} {right})";
             }
 
-            // ★ FMA detection: a*a + b*b → n_fmadd_ps(a, a, n_mul_ps(b, b))
+            // ★ FMA detection: float a*b + c → n_fmadd_ps(a, b, c)
+            //   显式生成 FMA 融合，回收 clang 因 int→float 转换（n_cvtepi32_ps）而
+            //   未收缩 mul+add 的那条指令（C12 acc*(j+1)+B[i] 等模式）。
             if (anyVarying && op == "+" && binary.Left is BinaryExpressionSyntax lmul
-                && lmul.OperatorToken.Text == "*"
-                && binary.Right is BinaryExpressionSyntax rmul
-                && rmul.OperatorToken.Text == "*")
+                && lmul.OperatorToken.Text == "*" && !IsInt32Type(lmul))
             {
-                string la = TranslateExpression(lmul.Left);
-                string lb = TranslateExpression(lmul.Right);
-                string ra = TranslateExpression(rmul.Left);
-                string rb = TranslateExpression(rmul.Right);
-                if (la == lb && ra == rb)
-                    return $"simd_value<float>{{ n_fmadd_ps({la}.v, {la}.v, n_mul_ps({ra}.v, {ra}.v)) }}";
+                string fa = ToFloatVec(TranslateExpression(lmul.Left), lmul.Left);
+                string fb = ToFloatVec(TranslateExpression(lmul.Right), lmul.Right);
+                string fc = ToFloatVec(TranslateExpression(binary.Right), binary.Right);
+                return $"simd_value<float>{{ n_fmadd_ps({fa}, {fb}, {fc}) }}";
             }
 
             // At least one varying — SIMD arithmetic
@@ -1098,6 +1096,23 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             }
 
             return $"({left} {simdOp} {right})";
+        }
+
+        /// <summary>
+        /// 将算术操作数转成 n_float 向量表达式（供 n_fmadd_ps 使用）。
+        /// 处理 varying/uniform 广播、int→float 转换（n_cvtepi32_ps）、
+        /// 以及已 hoist 的广播（__uni_ 前缀）。
+        /// </summary>
+        private string ToFloatVec(string translated, ExpressionSyntax expr)
+        {
+            bool isInt = IsInt32Type(expr);
+            if (translated.StartsWith("__uni_"))
+                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+            VarKind kind;
+            try { kind = _varAnalyzer.ClassifyExpression(expr); } catch { kind = VarKind.Varying; }
+            if (kind >= VarKind.Varying)
+                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+            return isInt ? $"n_cvtepi32_ps(n_set1_epi32({translated}))" : $"n_set1_ps({translated})";
         }
 
         private string TranslateCast(CastExpressionSyntax cast)
@@ -1237,6 +1252,9 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                                 }
                                 string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
                                 string off = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
+                                // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter，C12 根因）
+                                if (elemType == "float" && IsInt32Expr(assign.Right))
+                                    return $"{storeFn}({baseName}_ptr + {off}, n_cvtepi32_ps({rhsExpr}.v))";
                                 return $"{storeFn}({baseName}_ptr + {off}, {rhsExpr}.v)";
                             }
                         }
@@ -1457,15 +1475,24 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             }
 
             // ★ CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
-            //   variable must use blend() to preserve inactive lanes.
-            //   Without this, ALL lanes overwrite = lanes where condition is false lose their data.
-            //   Affects reduction patterns: if(distSq < bestDistSq) { bestDistSq = distSq; bestIdx = i; }
-            if (op == "=" && _currentMask != "simd_mask::all_true()")
+            //   variable must use blend() to preserve inactive lanes. 通解：纯赋值（=）与复合
+            //   赋值（+= -= *= /= %= &= |= ^= <<= >>=）都要掩码——否则复合赋值会对所有 lane
+            //   无条件执行，破坏 if/else 的 lane 隔离。
+            if (_currentMask != "simd_mask::all_true()")
             {
                 string? lhsVar = assign.Left is IdentifierNameSyntax lhsId ? lhsId.Identifier.Text : null;
                 if (lhsVar != null && _variables.TryGetValue(lhsVar, out var blInfo) && blInfo.Kind >= VarKind.Varying)
                 {
-                    return $"{lhs} = blend({lhs}, {rhs}, {_currentMask})";
+                    if (op == "=")
+                    {
+                        return $"{lhs} = blend({lhs}, {rhs}, {_currentMask})";
+                    }
+                    if (op.Length > 1 && op[op.Length - 1] == '=')
+                    {
+                        // 复合赋值 lhs op= rhs ⟺ lhs = lhs <base-op> rhs（再按掩码 blend）
+                        string baseOp = op.Substring(0, op.Length - 1);
+                        return $"{lhs} = blend({lhs}, {lhs} {baseOp} {rhs}, {_currentMask})";
+                    }
                 }
             }
 

@@ -256,7 +256,7 @@ namespace JobLibsBenchmark
         private static EntJoy.Collections.NativeArray<int> _nativeAutoSIMDResults; // S5/S6 AutoSIMD
 
         // ZeroAlloc scheduler 实例
-        private static JobScheduler? _zeroAllocScheduler;
+        private static Schedulers.JobScheduler? _zeroAllocScheduler;
 
         // ZeroAlloc：池化 class job 实例（README 要求尽量复用，避免每次 new 触发 GC）
         private static ZeroAllocAddJob? _zaAdd;
@@ -308,7 +308,7 @@ namespace JobLibsBenchmark
             if (!ThreadPool.SetMaxThreads(wc, Environment.ProcessorCount))
                 Console.WriteLine("Warning: 无法将 ThreadPool 上限设为统一 worker 数");
 
-            _zeroAllocScheduler = new JobScheduler(new JobScheduler.Config
+            _zeroAllocScheduler = new Schedulers.JobScheduler(new Schedulers.JobScheduler.Config
             {
                 ThreadPrefixName = "ZeroAlloc",
                 ThreadCount = wc,

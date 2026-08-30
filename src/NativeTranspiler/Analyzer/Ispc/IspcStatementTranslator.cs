@@ -658,11 +658,13 @@ namespace NativeTranspiler.Analyzer
             //   Increment → atomic_add_global(ptr, 1) + 1
             //   Add       → atomic_add_global(ptr, val) + val
             //   Decrement → atomic_subtract_global(ptr, 1) - 1
+            //   CompareExchange → atomic_compare_exchange_global(ptr, comparand, value)（返回旧值，与 C# 一致）
             string ispcFunc = method.Name switch
             {
                 "Increment" => "atomic_add_global",
                 "Decrement" => "atomic_subtract_global",
                 Config.Add => "atomic_add_global",
+                Config.CompareExchange => "atomic_compare_exchange_global",
                 _ => null
             };
 
@@ -741,7 +743,24 @@ namespace NativeTranspiler.Analyzer
             }
 
             string? addValueText = null;
-            if (method.Name == Config.Add && args.Count >= 2)
+            if (method.Name == Config.CompareExchange)
+            {
+                // C#: CompareExchange(ref loc, value, comparand) → 返回旧值
+                // ISPC: atomic_compare_exchange_global(ptr, oldval, newval) → 返回旧值（语义一致，无需补回）
+                // 参数序：comparand 在前（=ISPC oldval），value 在后（=ISPC newval）
+                if (args.Count >= 3)
+                {
+                    _builder.Append(", ");
+                    TranslateExpression(args[2].Expression); // comparand（期望旧值）
+                    _builder.Append(", ");
+                    TranslateExpression(args[1].Expression); // value（新值）
+                }
+                else
+                {
+                    _builder.Append(", 0, 0");
+                }
+            }
+            else if (method.Name == Config.Add && args.Count >= 2)
             {
                 _builder.Append(", ");
                 addValueText = CaptureExpressionText(args[1].Expression);
@@ -1295,12 +1314,16 @@ namespace NativeTranspiler.Analyzer
         /// 嵌套：new Inner { a = v1, b = v2 } → buf[idx].Field.a = v1; buf[idx].Field.b = v2;
         /// 原因：ISPC 没有构造函数，不支持 C99 designated initializer（{ f = v }）和
         /// compound literal（(T){ ... }）在赋值 RHS 的写法；逐字段赋值是唯一确定正确的形式。
+        /// 带参构造（new float2(1,2)，无 Initializer）→ 落到 CaptureExpressionText 走
+        /// TranslateObjectCreation 的 make_float2/make_int2/make_uint2 辅助函数。
         /// </summary>
         private void TranslateIspcNestedFieldWrite(string bufPtr, string idxVar, string fieldPath, ExpressionSyntax expr)
         {
-            if (expr is ObjectCreationExpressionSyntax nestedCreate)
+            if (expr is ObjectCreationExpressionSyntax nestedCreate
+                && nestedCreate.Initializer != null
+                && nestedCreate.Initializer.Expressions.Count > 0)
             {
-                foreach (var init in nestedCreate.Initializer?.Expressions ?? Enumerable.Empty<ExpressionSyntax>())
+                foreach (var init in nestedCreate.Initializer.Expressions)
                 {
                     if (init is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax nestedField)
                         TranslateIspcNestedFieldWrite(bufPtr, idxVar, $"{fieldPath}.{nestedField.Identifier.Text}", assign.Right);

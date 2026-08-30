@@ -101,10 +101,10 @@
 
 //            // 纯 C# 验证（不依赖 NativeTranspiler 管道）
 //            Console.WriteLine("--- Pure C# ---");
-//            RunCase("PureCSharpLikely(5)",    PureCSharpLikely(5)   == 10);
-//            RunCase("PureCSharpLikely(-1)",   PureCSharpLikely(-1)  == 1);
+//            RunCase("PureCSharpLikely(5)", PureCSharpLikely(5) == 10);
+//            RunCase("PureCSharpLikely(-1)", PureCSharpLikely(-1) == 1);
 //            RunCase("PureCSharpUnlikely(-1)", PureCSharpUnlikely(-1) == -1);
-//            RunCase("PureCSharpUnlikely(5)",  PureCSharpUnlikely(5)  == 5);
+//            RunCase("PureCSharpUnlikely(5)", PureCSharpUnlikely(5) == 5);
 
 //            // 原生转译版本（通过 DllImport 调用生成的 C++/ISPC）
 //            // 注意：下面调用需要 NativeDll.dll 已由 NativeCompileTask 编译完成
@@ -116,10 +116,10 @@
 //                int r3 = HintNativeExports.TestUnlikelyCpp(-1);
 //                int r4 = HintNativeExports.TestUnlikelyCpp(5);
 
-//                RunCase("TestLikelyCpp(5)",    r1 == 10);
-//                RunCase("TestLikelyCpp(-1)",   r2 == 1);
+//                RunCase("TestLikelyCpp(5)", r1 == 10);
+//                RunCase("TestLikelyCpp(-1)", r2 == 1);
 //                RunCase("TestUnlikelyCpp(-1)", r3 == -1);
-//                RunCase("TestUnlikelyCpp(5)",  r4 == 5);
+//                RunCase("TestUnlikelyCpp(5)", r4 == 5);
 
 //#if true
 //                // ISPC 绑定测试（需要 ISPC SDK 编译环境就绪）
@@ -128,10 +128,10 @@
 //                int r7 = HintNativeExports.TestUnlikelyIspc(-1);
 //                int r8 = HintNativeExports.TestUnlikelyIspc(5);
 
-//                RunCase("TestLikelyIspc(5)",    r5 == 10);
-//                RunCase("TestLikelyIspc(-1)",   r6 == 1);
+//                RunCase("TestLikelyIspc(5)", r5 == 10);
+//                RunCase("TestLikelyIspc(-1)", r6 == 1);
 //                RunCase("TestUnlikelyIspc(-1)", r7 == -1);
-//                RunCase("TestUnlikelyIspc(5)",  r8 == 5);
+//                RunCase("TestUnlikelyIspc(5)", r8 == 5);
 //#endif
 //            }
 //            catch (EntryPointNotFoundException ex)
