@@ -147,6 +147,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
+    std::thread::id g_mainThreadId{};
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
     // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式，
     // Unity 式）：实测关闭时 p99 0.83-0.97ms 与开启相当，且释放主线程参与竞争。

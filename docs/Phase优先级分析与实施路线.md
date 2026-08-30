@@ -1,5 +1,17 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-30 增量 11：**JobSystem 安全审计修复** —— worker 线程调 `Shutdown()` 死锁
+> （双后端）：Native（C++ `g_mainThreadId`，`Scheduler::Initialize` 记录 / `Shutdown` 校验拒绝，
+> 避免 `ChaseLevScheduler::Stop` join 自身）+ Managed（`_mainThreadId`，`w.Join()` 同类死锁）。
+> shutdown 残留泄漏：**核实 `WorkerLoop` 已有协作排空**（drain_quit，quit 后执行完 Injector+deque
+> 全部残留任务才退出，正常 shutdown 无泄漏）；补防御层 `DrainRemaining` + `ForceFinalizeBatch`
+> （cleanup context + ReleaseBatch + backendRetired，**不 ReleaseState**——用户可能仍持有 JobHandle，
+> state 必须存活防 handle UAF）。新增 `TestShutdownRejectedFromWorkerThread`（job 回调内调 Shutdown
+> 被拒绝、不死锁）。**审计结论**：已知风险点（inline 阻塞 / shutdown 死锁 / 残留泄漏）已覆盖；
+> 剩余为文档约束——依赖环（DAG，运行时无环检测，`JobSystem.h` 明示）、worker 内嵌套 complete
+> 依赖自己 deque 未 pop 任务（低概率，Chase-Lev 固有）、BatchScope/ImplicitBatch 非线程安全
+> （单线程收集约束）。回归：原生 6 套件 + C# 116/116。
+>
 > 2026-08-30 增量 10：**IJob / IJobFor Schedule 全异步**（对齐 Unity JobSystem：调用线程只提交、不执行）——
 > 移除 C++ 侧两处 inline：IJob 无依赖时 `RunSyncJob` 主线程直跑；IJobFor 依赖满足且 `length ≤ 4096`
 > 主线程 inline。动因：inline 按长度/依赖判断、不看工作量，数量少但单次工作大的 job 会同步阻塞主线程

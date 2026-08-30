@@ -116,6 +116,10 @@ namespace JobSystem
         // 全局 RangeTask 池
         static RangeTaskPool s_taskPool_;
 
+        // Stop() 排空残留 task 后收集的未退役 batch（供 Shutdown 调 ForceFinalizeBatch
+        // 释放 context，消除 shutdown 未完成 job 的泄漏）。Stop 内部填充，Stop 后读取。
+        std::vector<BatchState*> drainedBatches;
+
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
         // 每次认领的 tile 数（预切分粒度；实测放大窗口无端到端收益——fetch_add 被 tile 执行吸收）
@@ -150,6 +154,11 @@ namespace JobSystem
 
         // 从 Injector 或其他 worker 窃取一个任务并执行（TryAssistOne 内部）
         bool StealAndExecute(uint32_t workerIndex) noexcept;
+
+        // 排空 Injector + 各 worker deque 的残留 task：通用 work 调 workCleanup，
+        // tile task 收集其 batch 到 drainedBatches，RangeTask 释放回池。
+        // 仅 Stop() 内 join 后（单线程、worker 已退出）调用。
+        void DrainRemaining() noexcept;
 
         void WorkerLoop(uint32_t workerIndex, WorkerContext& ctx) noexcept;
 

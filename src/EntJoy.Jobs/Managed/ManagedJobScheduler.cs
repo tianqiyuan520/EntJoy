@@ -29,6 +29,9 @@ namespace EntJoy.JobSystem.Managed
         private static readonly object _stateLock = new object();
 
         private const int QueueCapacity = 1 << 16;
+        // 主线程 id：Initialize 时记录，Shutdown 校验——worker 线程调用 Shutdown 会
+        // Join 自身（w.Join()）死锁，非主线程调用直接拒绝（警告并返回）。
+        private static int _mainThreadId;
 
         // ───── Chase-Lev 路径 ─────
         private static ManagedMPMCQueue<ManagedTileTask>? _injector;   // 全局 Injector（跨线程提交入口）
@@ -51,6 +54,7 @@ namespace EntJoy.JobSystem.Managed
             lock (_stateLock)
             {
                 if (_isInitialized) return;
+                _mainThreadId = Environment.CurrentManagedThreadId;
                 _workerCount = workerCount <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : workerCount;
 
                 _shutdown = false;
@@ -86,6 +90,14 @@ namespace EntJoy.JobSystem.Managed
 
         public static void Shutdown()
         {
+            // 线程防护：worker 线程调用 Shutdown 会 Join 自身（下方 w.Join()）永不返回死锁。
+            // 非主线程调用拒绝（警告并返回），对齐 Native 后端 C++ 侧行为。
+            if (_mainThreadId != 0 && Environment.CurrentManagedThreadId != _mainThreadId)
+            {
+                Console.Error.WriteLine(
+                    "[ManagedJobScheduler] Shutdown() called from non-main thread — rejected (would self-join deadlock).");
+                return;
+            }
             lock (_stateLock)
             {
                 if (!_isInitialized) return;
