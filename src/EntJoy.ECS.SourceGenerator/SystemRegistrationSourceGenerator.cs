@@ -11,7 +11,7 @@ using System.Threading;
 namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
-    /// System 注册生成器（S27 方案 A）：扫描同程序集所有 <c>struct : ISystem</c>，
+    /// System 注册生成器（方案 A）：扫描同程序集所有 <c>struct : ISystem</c>，
     /// 生成 <c>SystemRegistry.RegisterAll(SystemRunner)</c> 一行注册全部，
     /// 消除逐个手写 <c>runner.RegisterSystem&lt;T&gt;()</c> 的样板。
     /// 依赖声明（[Read]/[Write]）保持现状，由 ScheduleGraph 反射读取。

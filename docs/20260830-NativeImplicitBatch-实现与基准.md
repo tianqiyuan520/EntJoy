@@ -12,7 +12,8 @@
 
 - 开关（`JobSystem_SetImplicitBatchEnabled(int)`）开启后，**SubmitBatch 批路径**的 job
   （IJobParallelFor / IJobParallelForBatch / IJobChunk / IJobEntity）在主线程直接提交时挂入 pending，
-  **不立即提交、不唤醒**；IJob / IJobFor（inline 或 SubmitWork 池任务）不收集，inline 现状保持。
+  **不立即提交、不唤醒**；IJob / IJobFor 不收集（SubmitWork 池任务 / 单 worker 异步任务），
+  Schedule 一律异步（2026-08-30 改动，见 Phase 优先级文档增量 10）。
 - force point 二选一：
   - `Complete()` / `IsCompleted()` —— 自动 flush 再等（防死等/误报未完成）；
   - 显式 `EndFrame()` / `FlushPendingSubmits()` —— 帧末统一提交 + 单次唤醒。
@@ -139,3 +140,43 @@ JCC 学习轨迹（临时复现实验）显示 8K 空体收敛 mem-bound（tpw �
   总成本与 C# 隐式层相当。
 - 64K 空体的 ~15µs 为 C# 委托回调的真实执行成本（非 JCC 决策缺陷）；JCC 两因子改善真实负载决策，
   空体保持 tpw 兜底不劣化。8K/1M/Chunk/批路径均落在 docs 范围。
+
+---
+
+## 三、2026-08-30 晚：inline 全移除后复测（ManyJobsBench 新基线）
+
+> 背景：同日晚移除全部 Schedule 主线程 inline（IJob/IJobFor/IJobParallelFor/IJobParallelForBatch/
+> IJobChunk + Managed ≤1024），本表为 `ManyJobsBenchTest` 复测结果（同机 15 workers，100 帧测量）。
+> 详见 Phase 优先级文档增量 10。
+
+| case | inline 时代基线 | 新基线（全异步） | 变化 | 归因 |
+|---|---|---|---|---|
+| IJob x200 | 0.4µs/job | **0.7µs/job** | +75%（+0.3µs） | 池任务提交成本（原 inline 零调度） |
+| IJobFor·1K x100 | p50 0.75~0.83ms | **p50 1.21ms** | +60% | **非批**独立单任务：complete 逐个等 worker + 任务间隙 worker 休眠唤醒（waitFallbacks=126/frame） |
+| IJobFor·100K x100 | 98~101µs/job | **119µs/job** | +21% | 同上（唤醒占比小） |
+| IJobParFor·8K x100 | 4.2µs/job | **5.1µs/job** | +21% | complete 等 worker（waitFallbacks=28） |
+| IJobParFor·8K x400 | 4.2~4.5µs/job | **4.4µs/job** | 持平 | 连续提交 worker 保持活跃 |
+| IJobParFor·64K / 1M | 17.9~20 / 32.3~33.8µs/job | **15.2 / 187.1µs/job** | 波动 | 1M 单次运行噪声大（max 离群） |
+| IJobChunk·16K / 1M | 3.1~3.5 / 7.2~7.7µs/job | **3.1 / 7.0µs/job** | 持平 | 本就走 tile 批路径 |
+| **Batch·IJobFor·1K** | p50 0.83ms | **p50 0.14ms** | **-83%** | 批单次提交 + worker 并行；原 inline 主线程串行 100×1K 空元素 |
+| **Batch·Mixed(100+50+50)** | 3.2µs/job | **1.3µs/job** | **-59%** | 50 个 IJobFor 不再占主线程 |
+| **Implicit·Mixed** | 3.3µs/job | **1.3µs/job** | **-61%** | 同上 |
+| **NativeImplicit·Mixed** | 3.5µs/job | **1.6µs/job** | **-54%** | 同上（50 parFor 挂 pending + EndFrame 单次唤醒，waitFallbacks=3） |
+
+**结论**：inline 移除的净效果分场景——
+- **代价**：**非批**独立小任务单 job 调度（IJob +0.3µs/job、IJobFor·1K +60%——complete 逐个等 worker +
+  任务间隙 worker 休眠唤醒延迟 ~5-10µs）；
+- **收益**：批路径（Batch/Implicit/NativeImplicit）Mixed 场景 -54~61%——50 个 IJobFor 不再主线程串行占住，
+  且批/隐式批**仅 1 次提交/唤醒**（waitFallbacks 2~4 vs 非批 126）；
+- **净影响**：对"每帧几十~几百 job + 批收集"的典型帧负载为**净收益**；对"每帧几百个独立 IJob/IJobFor 且不批"为**净损失**（任务间隙唤醒延迟主导）。
+- 注意：唤醒延迟是**非批独立小任务**场景的特有代价，批路径无此问题（Batch 单次提交、NativeImplicit 挂 pending + EndFrame 单次唤醒）；Mixed 密集提交时 worker 保持活跃同样无此问题。
+
+> **用户指引（2026-08-30 晚）**：推荐帧循环内开启隐式批——
+> ```csharp
+> NativeJobScheduler.SetImplicitBatchEnabled(true);   // 一次性开启
+> // ... 每帧照常 job.Schedule(...)（tile 路径 job 自动挂 pending）...
+> NativeJobScheduler.EndFrame();                       // 帧末统一提交 + 单次唤醒
+> ```
+> 批路径仅 1 次提交/唤醒（实测 waitFallbacks 2~4 vs 非批 126），Mixed 200 job/帧 1.3~1.6µs/job；
+> 非批独立小任务（IJobFor·1K 类）的任务间隙唤醒延迟（~5-10µs/次）不在本框架优化范围——用户可
+> 通过批路径规避。依赖未完成的 job 不进 pending（continuation 立即提交，依赖顺序天然保持）。

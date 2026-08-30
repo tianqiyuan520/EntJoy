@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -189,7 +190,7 @@ namespace NativeTranspiler.Analyzer
 
                 // Reset mask for each iteration
                 _currentMask = savedMask;
-                // ★ E7 fix: kill lanes that have already returned (e.g. found their match
+                // ★ kill lanes that have already returned (e.g. found their match
                 //   in a previous unrolled j iteration and wrote R[i]=result).
                 //   Without this, the next j iteration would overwrite the returned lane's
                 //   result because its mask is restored to all_true by savedMask.
@@ -253,7 +254,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             _currentMask = savedMask;
-            // ★ E7 fix: compute the post-loop mask for the default store.
+            // ★ compute the post-loop mask for the default store.
             //   - ALL lanes returned → no lane needs default → skip store entirely (goto exitLabel)
             //   - SOME lanes returned → default store writes 777 only for non-returned lanes (post_mask)
             //   - NO lanes returned → default store writes 777 for all lanes (post_mask = all lanes)
@@ -437,7 +438,7 @@ namespace NativeTranspiler.Analyzer
             _indent++;
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
-            // ★ E7 fix: kill lanes that have already returned before using as active mask.
+            // ★ kill lanes that have already returned before using as active mask.
             //   Without this, returned lanes would re-activate each count-loop iteration
             //   (v_active is recomputed fresh each iter) and overwrite their result.
             if (!string.IsNullOrEmpty(_returnedMaskVar))
@@ -827,11 +828,15 @@ namespace NativeTranspiler.Analyzer
             bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
+            // ★ 循环条件常量提升：`j < 16` 翻译出的 n_set1_epi32(16)/n_set1_ps(常量)
+            //   在循环体内每轮求值，clang 逐轮 vpbroadcastd 重广播（C12 实测）。把字面量 broadcast
+            //   提升到循环外（构造一次、循环内直接复用寄存器），省 ~1 条/轮。
+            string condExpr = HoistConditionBroadcastConstants(TranslateCondition(stmt.Condition));
+
             AppendLine("while (true)");
             AppendLine("{");
             _indent++;
 
-            string condExpr = TranslateCondition(stmt.Condition);
             string condVar = $"__wcond_{_maskCounter++}";
             AppendLine($"simd_mask {condVar} = {condExpr};");
 
@@ -862,7 +867,7 @@ namespace NativeTranspiler.Analyzer
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
             // ★ 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
-            //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter（C12 根因）。
+            //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter。
             _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
             AppendLine("}");
             _indent--;
@@ -873,6 +878,29 @@ namespace NativeTranspiler.Analyzer
         // ================================================================
         // DoStatement
         // ================================================================
+
+        /// <summary>
+        /// 把循环条件表达式中的 n_set1_epi32/ps(字面量) 提升为循环外构造的 simd_value：
+        /// clang 对循环体内的逐轮 broadcast 会重生成 vpbroadcastd（C12 汇编实测每轮一次），
+        /// 提升后循环内直接复用寄存器。提升声明在调用点（循环头之前）即时输出。
+        /// </summary>
+        private string HoistConditionBroadcastConstants(string condExpr)
+        {
+            int count = 0;
+            condExpr = Regex.Replace(condExpr, @"n_set1_epi32\((-?\d+)\)", m =>
+            {
+                string bound = $"__bound_epi32_{count++}";
+                AppendLine($"simd_value<int> {bound}(n_set1_epi32({m.Groups[1].Value}));");
+                return $"{bound}.v";
+            });
+            condExpr = Regex.Replace(condExpr, @"n_set1_ps\((-?[\d.eE+-]+f?)\)", m =>
+            {
+                string bound = $"__bound_ps_{count++}";
+                AppendLine($"simd_value<float> {bound}(n_set1_ps({m.Groups[1].Value}));");
+                return $"{bound}.v";
+            });
+            return condExpr;
+        }
 
         private void GenerateDoStatement(DoStatementSyntax stmt)
         {

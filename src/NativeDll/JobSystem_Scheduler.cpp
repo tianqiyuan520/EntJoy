@@ -311,43 +311,24 @@ namespace JobSystem
     }
 
     // ---------- IJob ----------
+    // Schedule 一律异步提交（对齐 Unity JobSystem 语义：调用线程只提交，不执行）。
+    // 曾经的「无依赖 inline 直跑」已移除——大工作 job 会阻塞调用线程（实测 50ms 忙等
+    // 阻塞主线程 50ms）。需要同步执行请用 Run()。
     JobHandle Scheduler::Schedule(void (*func)(void*), void* context, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (!func) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        if (!dependency.State() || dependency.IsCompleted())
-        {
-            auto* st = CreateState(true);
-            const uint64_t diag = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            RecordPublishedJob(diag, 1);
-            RunSyncJob(st, [func, context]() { func(context); });
-            if (cleanup) cleanup(context);
-            return JobHandle(st);
-        }
         return ScheduleFastPath([func, context]() { func(context); }, context, cleanup, dependency);
     }
 
     // ---------- IJobFor ----------
+    // Schedule 一律异步提交（对齐 Unity JobSystem 语义）。曾经的「依赖满足且 length ≤ 4096
+    // 主线程 inline 直跑」已移除——数量少但每元素工作量大时同样阻塞调用线程（实测 n=100×
+    // 0.5ms/elem 阻塞主线程 50ms）。IJobFor 语义是串行 for，由单个 worker 执行。
     JobHandle Scheduler::ScheduleFor(void (*func)(void*, int), void* context, int length, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        bool depOk = !dependency.State() || dependency.IsCompleted();
-        // 依赖未完成时绝不 inline —— 必须先等依赖。阈值仅在 depOk（无依赖或依赖已完成）下生效。
-        // 注意：大长度不得 inline 主线程——主线程逐元素 C# 回调 ~20ns/次 vs worker ~1ns/次，
-        // 长 for 主线程执行慢 ~20 倍（实测 IJobFor·100K：98.7µs → 705µs）。单线程语义 =
-        // 单 worker 执行，不是主线程 inline。
-        if (depOk && (length <= kSyncWithCompletedDepThreshold))
-        {
-            auto* st = CreateState(true);
-            const uint64_t diag = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            RecordPublishedJob(diag, 1);
-            RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
-            if (cleanup) cleanup(context);
-            return JobHandle(st);
-        }
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
@@ -370,23 +351,12 @@ namespace JobSystem
     }
 
     // ---------- IJobParallelFor ----------
+    // Schedule 一律异步提交（2026-08-30：移除 ≤4096 主线程 inline，对齐 IJob/IJobFor）。
     JobHandle Scheduler::ScheduleParallelFor(void (*func)(void*, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        bool depOk = !dependency.State() || dependency.IsCompleted();
-        // 依赖未完成时绝不 inline —— 必须先等依赖。两条阈值仅在 depOk（无依赖或依赖已完成）下生效。
-        if (depOk && (length <= kSyncWithCompletedDepThreshold))
-        {
-            auto* st = CreateState(true);
-            const uint64_t diag = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            RecordPublishedJob(diag, 1);
-            RunSyncJob(st, [func, context, length]() { for (int i = 0; i < length; i++) func(context, i); });
-            if (cleanup) cleanup(context);
-            return JobHandle(st);
-        }
         // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
         // FastPath（rc<=1）不学成本（已收敛为 1 tile）；batch 路径退役时学到。
         const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
@@ -449,24 +419,15 @@ namespace JobSystem
     }
 
     // ---------- IJobParallelForBatch ----------
+    // Schedule 一律异步提交（2026-08-30：移除 length≤4096 与 rc≤1 两处主线程 inline）。
     JobHandle Scheduler::ScheduleParallelForBatch
     (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
         if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
         ConsumeLongBatchBarriers();
         if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        bool depOk = !dependency.State() || dependency.IsCompleted();
-        bool forceAsync = batchSize < 0; int reqBatch = forceAsync ? -batchSize : batchSize;
-        if (!forceAsync && depOk && (length <= kSyncWithCompletedDepThreshold))
-        {
-            auto* st = CreateState(true);
-            const uint64_t diag = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            RecordPublishedJob(diag, 1);
-            RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
-            if (cleanup) cleanup(context);
-            return JobHandle(st);
-        }
+        // batchSize<0 = 强制异步（历史约定，保留）；reqBatch 取绝对值。
+        int reqBatch = batchSize < 0 ? -batchSize : batchSize;
         // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
         // 显式 batchSize（reqBatch>0）时用户意图优先，不参与自动 batch。
         const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
@@ -474,17 +435,7 @@ namespace JobSystem
         bool jccFine = false;
         int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash, &jccFine));
         int rc = (length + cs - 1) / cs;
-        if (!forceAsync && depOk && rc <= 1)
-        {
-            auto* st = CreateState(true);
-            const uint64_t diag = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
-            RecordPublishedJob(diag, 1);
-            RunSyncJob(st, [func, context, length]() { func(context, 0, length); });
-            if (cleanup) cleanup(context);
-            return JobHandle(st);
-        }
-        // 依赖未完成或强制异步时不得 inline：走 ScheduleFastPath（按依赖排序的池任务）。
+        // 单批次任务：走按依赖排序的池任务（异步）。
         if (rc <= 1)
             return ScheduleFastPath([func, context, length]() { func(context, 0, length); }, context, cleanup, dependency);
 
@@ -564,10 +515,9 @@ namespace JobSystem
         // useFineRanges deliberately disabled: it doubled tile count without benefit.
         int rc = (itemCount + rs - 1) / rs;
 
-        // Inline for sync / trivial work（依赖已完成/无依赖时；依赖未完成走异步提交）：
-        // — ImmediateNative：主线程同步执行，零 worker 唤醒（Run 场景）
-        // — rc<=1 && workerCap<=1：单批次小任务顺带同步执行
-        if (depOk && (mode == ChunkScheduleMode::ImmediateNative || (rc <= 1 && workerCap <= 1)))
+        // ImmediateNative：Run 直执语义——主线程同步执行，零 worker 唤醒（保留）。
+        // rc<=1 小任务的 Schedule inline 已于 2026-08-30 移除（一律异步提交，对齐 IJob 族）。
+        if (depOk && mode == ChunkScheduleMode::ImmediateNative)
         {
             auto* st = CreateState(true);
             const uint64_t diagId = AssignStateDiagnosticId(st);

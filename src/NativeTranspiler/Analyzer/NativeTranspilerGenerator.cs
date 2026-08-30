@@ -127,7 +127,7 @@ namespace NativeTranspiler.Analyzer
 
                 if (anyIspc)
                 {
-                    // ★ ISPC 布局加固（2026-08-30）：Explicit 布局 / Pack<8 的 struct 无法在 ISPC 复现
+                    // ★ ISPC 布局加固：Explicit 布局 / Pack<8 的 struct 无法在 ISPC 复现
                     // C# 布局（ISPC 不支持 #pragma pack，实测 ispc 1.30 报 "unknown pragma ignored"），
                     // NativeArray<T> 指针步长会错位 → fail-fast 拒绝生成（NT016）。
                     foreach (var userStruct in userStructs)
@@ -986,8 +986,12 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("add_library(NativeTranspiledPrecise STATIC ${AUTOSIMD_SOURCES})");
                 sb.AppendLine("target_compile_options(NativeTranspiledPrecise PRIVATE");
                 sb.AppendLine("    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");      // MSVC default, no /fp:fast
-                sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP -ffp-contract=fast>"); // ClangCL: 允许 FMA 融合（IEEE 兼容，对齐 ISPC 的 FMA 性能，仅 ~1 ULP 舍入）
-                sb.AppendLine("    $<$<NOT:$<CXX_COMPILER_ID:MSVC,Clang>>:-O3 -march=native -mtune=native -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer>");
+                // ClangCL: 禁用自动 FMA 融合（/clang: 前缀是 clang-cl 正确语法；裸 -ffp-contract 被忽略）。
+                // 自动融合 a*a-3 → fmsub 单次舍入 vs C# 两次舍入，差异经除法放大可达 13 ULP
+                // （FZ1 实测，ulp_probe 复现 strict=0x3D7A45A2 vs fmsub=0x3D7A45AF）→ 禁自动融合保 bit-exact。
+                // 生成器显式 n_fmadd_ps（增量 9）是 intrinsic 调用，不受 fp-contract 影响，性能保留。
+                sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP /clang:-ffp-contract=off>");
+                sb.AppendLine("    $<$<NOT:$<CXX_COMPILER_ID:MSVC,Clang>>:-O3 -march=native -mtune=native -ffp-contract=off -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer>");
                 sb.AppendLine(")");
                 sb.AppendLine("target_compile_definitions(NativeTranspiledPrecise PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");
                 sb.AppendLine("target_link_libraries(NativeTranspiled PRIVATE NativeTranspiledPrecise)");

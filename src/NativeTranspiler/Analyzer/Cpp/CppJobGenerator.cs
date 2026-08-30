@@ -1499,7 +1499,6 @@ namespace NativeTranspiler.Analyzer
                         // 注意：fbBody 是完整 Execute body，**已包含实体循环**（用户代码 for(i<entities.Length)），
                         // 此处直接输出即可，**不得再包外层 __entity_index 循环**——否则双重循环，
                         // 每个实体的副作用（如 SendEvent）被执行 entity_count 次
-                        // （2026-08-29 修复：AutoSimdDeathDetectJob Test 5 收到 25=5×5 事件）。
                         var fbTr = new CppChunkStatementTranslator(sm, jobStruct,
                             CollectChunkNativeArrayTypes(jobStruct, compilation),
                             CollectSharedComponentTypes(jobStruct, compilation), useFastMath);

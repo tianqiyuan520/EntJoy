@@ -661,7 +661,7 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"{goodName} = {combined};");
                     }
                     _currentMask = goodName;
-                    // ★ E6 fix: inside an UNROLLED loop there is no real C++ loop, so a
+                    // ★ inside an UNROLLED loop there is no real C++ loop, so a
                     //   `continue;` would jump to the outermost batch loop (for si), skipping
                     //   the remaining unrolled iterations AND the final store — output all zeros.
                     //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
@@ -792,7 +792,8 @@ namespace NativeTranspiler.Analyzer
                         }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
-                    bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement);
+                    bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                    bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement, maskContinue);
                     if (bodyHasGoto)
                         AppendLine($"if ({trueMask}.any_true())");
                     if (!bodyEmpty)
@@ -841,7 +842,8 @@ namespace NativeTranspiler.Analyzer
                 _currentMask = elseMaskVar;
 
                 bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
-                bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody);
+                bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody, maskContinue);
                 if (elseHasGoto)
                     AppendLine($"if ({elseMaskVar}.any_true())");
                 if (!elseBodyEmpty)
@@ -998,12 +1000,16 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 检查语句中是否包含会翻译为 goto 的控制流（break/continue/return）。
         /// 如果为 false，则 if-body 只包含 blend/赋值操作，any_true() 守卫是冗余的。
+        /// maskContinue=true（while-true 循环内）：continue 已被 mask 化（BodyMaskVar 排除），
+        /// 不产生 goto → 不计入守卫判定（分支收敛：C12 条件1 消除 if 分支）。
         /// </summary>
-        private static bool HasControlFlowGoto(SyntaxNode node)
+        private static bool HasControlFlowGoto(SyntaxNode node, bool maskContinue)
         {
             foreach (var child in node.DescendantNodesAndSelf())
             {
-                if (child is BreakStatementSyntax or ContinueStatementSyntax or ReturnStatementSyntax)
+                if (child is BreakStatementSyntax or ReturnStatementSyntax)
+                    return true;
+                if (child is ContinueStatementSyntax && !maskContinue)
                     return true;
             }
             return false;
@@ -1054,7 +1060,9 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
                 if (!string.IsNullOrEmpty(frame.BodyMaskVar))
                     AppendLine($"{frame.BodyMaskVar} = {frame.BodyMaskVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
-                AppendLine($"if (!({frame.TrackerVar}).any_true()) {{ goto {frame.ExitLabel}; }}");
+                // ★ 分支收敛：删除「tracker 空则立即 goto exit」——tracker 被清空后
+                //   下一轮循环头（`wm = wcond & tracker; if (!wm.any_true()) break`）自然退出，
+                //   语义等价（空 mask 的 blend 无副作用），省每轮 1 次 any_true + 1 分支。
             }
         }
 
@@ -1080,8 +1088,13 @@ namespace NativeTranspiler.Analyzer
             {
                 // While-true mask loop：continue 只跳过本次迭代剩余语句，lane 仍保留在
                 // 循环中（下一轮继续）。不能剔除 tracker——那是 break 的语义；否则命中
-                // continue 的 lane 会被永久移出循环，后续迭代不再参与（C12 Bug D）。
-                AppendLine($"goto {frame.ContinueLabel};");
+                // continue 的 lane 会被永久移出循环，后续迭代不再参与（C12）。
+                // ★ 分支收敛：不再 goto——改为从循环体 mask（BodyMaskVar）排除
+                //   continue lane，后续语句照常执行但 mask 为空（无副作用），消除每轮 1 次
+                //   any_true + 1 分支（C12：3 any_true/4 分支 → 2/2，对齐 ISPC）。
+                //   continue 语句体（如 j+=1）已在 if 块内以 blend 形式执行完毕。
+                AppendLine($"{frame.BodyMaskVar} = {frame.BodyMaskVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
+                _currentMask = frame.BodyMaskVar;
             }
         }
 
@@ -1089,7 +1102,7 @@ namespace NativeTranspiler.Analyzer
         {
             if (!string.IsNullOrEmpty(_returnedMaskVar))
             {
-                // ★ E7 fix: mark this lane as returned and kill from active mask.
+                // ★ mark this lane as returned and kill from active mask.
                 AppendLine($"{_returnedMaskVar} = simd_mask{{ n_or_mask({_returnedMaskVar}.m, {_currentMask}.m) }};");
                 AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
             }

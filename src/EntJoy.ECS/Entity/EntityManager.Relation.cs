@@ -14,7 +14,7 @@ namespace EntJoy.ECS
     /// </summary>
     public unsafe partial class EntityManager
     {
-        // ======================== P1：遍历 API 分配消除（2026-08-29 后） ========================
+        // ======================== P1：遍历 API 分配消除 ========================
         // 复用容器（实例字段）：消除 GetAncestors/GetDescendants/GetSiblings/GetRelationsOfAll
         // 每次调用的 List/HashSet 分配。约束：主线程单线程使用、不可重入（遍历中不得再调用
         // 遍历 API——当前 API 无回调，天然满足）；返回值数组独立 new，调用方可安全持有。

@@ -12,7 +12,7 @@ using System.Threading;
 namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
-    /// Reactive System 生成器（S32）：扫描带 [Reactive(ObserverEvents)] 的 struct，
+    /// Reactive System 生成器：扫描带 [Reactive(ObserverEvents)] 的 struct，
     /// 从静态 Execute(in ReadOnlySpan&lt;Entity&gt;, in ReadOnlySpan&lt;TComponent&gt;) 推导组件类型，
     /// 生成 <c>ReactiveSystemRegistry.RegisterAll(World)</c> 自动注册 Observer 订阅，
     /// 消除手写 world.AddObserver&lt;T&gt;(...) 样板。

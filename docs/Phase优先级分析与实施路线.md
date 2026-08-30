@@ -1,5 +1,48 @@
 # Phase 优先级分析与实施路线（2026-08 更新）
 
+> 2026-08-30 增量 10：**IJob / IJobFor Schedule 全异步**（对齐 Unity JobSystem：调用线程只提交、不执行）——
+> 移除 C++ 侧两处 inline：IJob 无依赖时 `RunSyncJob` 主线程直跑；IJobFor 依赖满足且 `length ≤ 4096`
+> 主线程 inline。动因：inline 按长度/依赖判断、不看工作量，数量少但单次工作大的 job 会同步阻塞主线程
+> （探针实测 IJob 50ms 忙等 → Schedule 阻塞 50.0ms；IJobFor n=100×0.5ms/elem → 阻塞 50.1ms）。
+> 改后探针 5 用例（小/大 × IJob/IJobFor）Schedule 全部 µs 级返回、worker 线程执行、主线程零阻塞；
+> 回归：原生 6 套件（JobSystem/ImplicitBatch/AssistLifetime/ChaseLev/MPMC/SparseTileDeque）全 PASS +
+> C# 116/116。代价：IJob 提交成本由 inline ~0.3µs/job 升至池任务路径（µs 级）；`Run()` 保持同步语义不变。
+> 探针：`samples/EntJoySample/01_JobSystem/IJobInlineProbeTest`。空 job 三模式调度实测（5 轮中位）：
+> S+C（逐次 Complete）最慢——IJobFor n=1000 ×100 慢 58%、IJobParFor n=8192 ×100 慢 44%；
+> 只S 与 ImplicitBatch 相当（IJobParFor 100 job：8.75 vs 8.25ms），空 job 下隐式批单次唤醒收益
+> 不可测（Chase-Lev worker 常驻自旋、唤醒近乎免费，`PrewakeWorkers` 为 no-op）；隐式批价值在
+> worker 休眠唤醒场景。IB 模式 Schedule（仅挂 pending）阶段实测：每 job 0.6~1.7µs
+> （IJob 0.75 / IJobFor 0.64 / IJobParFor n=8192 1.66 / n=1024×1000 0.77 µs），与普通 Schedule
+> 提交成本同量级，IB 的额外开销仅挂 pending 入队（无 SubmitBatch 预切分、无唤醒）。
+> **后续（同日晚）：IJobParallelFor / IJobParallelForBatch / IJobChunk(Schedule)
+> 的 ≤4096 inline（`kSyncWithCompletedDepThreshold`）与 Managed 侧 ≤1024 inline 一并移除**——
+> 常量已删、全部 Schedule 一律异步；保留的唯一同步路径为 `ImmediateNative`（Run 直执语义，用户显式
+> 调用 Run 时主线程同步执行、零 worker 唤醒）。**ManyJobsBench 复测新基线（同日晚，详见
+> `20260830-NativeImplicitBatch-实现与基准.md` §三）**：代价——IJob +0.3µs/job、IJobFor·1K +60%
+> （**非批**独立单任务：complete 逐个等 worker + 任务间隙 worker 休眠唤醒，waitFallbacks=126/frame）、
+> IJobParFor·8K +21%；收益——批路径 Batch/Implicit/NativeImplicit Mixed 场景 -54~61%（50 个 IJobFor
+> 不再主线程串行；批/隐式批仅 1 次提交/唤醒，waitFallbacks 2~4）、Batch·IJobFor·1K -83%。净影响：
+> 批收集帧负载净收益；非批独立小任务净损失（任务间隙唤醒延迟主导，批路径无此问题）。
+> **用户指引**：帧循环推荐开启隐式批——`NativeJobScheduler.SetImplicitBatchEnabled(true)`（一次性）
+> + 每帧照常 Schedule + 帧末 `NativeJobScheduler.EndFrame()`（统一提交 + 单次唤醒，实测
+> waitFallbacks 2~4 vs 非批 126，Mixed 200 job/帧 1.3~1.6µs/job）。非批小任务唤醒延迟不在优化范围。
+>
+> 2026-08-30 增量 9：**AutoSIMD 深度优化 + ISPC 翻译审计 + 基准降噪** —— 4 真实 bug + 1 分类缺陷修复
+> （int 隐式转换 / while 掩码复合串 / varying break / continue 误判 / uniform 误分类）、方向 2 uniform 条件
+> 标量化（C11 反超 ISPC 1.29~1.72x）、FMA 显式融合（`float a*b+c` → `n_fmadd_ps`，C12 循环体 vfmadd213ps
+> 对齐 ISPC）、写回向量化（savedMask all_true 误判修复 3 处循环）、基准降噪（MeasureMs 100ms 批量 +
+> 7 样本中位数，C12 ±4.3%）、新用例 C14 CAS（Interlocked→ISPC atomic_compare_exchange_global）+ 
+> Float2Signal 事件测试、外部 AI 分析 13 条 7 条证伪 + ISPC 4 项修复（CAS / 嵌套带参构造 / 小循环 unroll
+> 证伪跳过 / NT016 布局 fail-fast）、MSVC vs ClangCL（C08 int 3x / C10 分支 8x / C03 2x 领先；
+> C12 0.70x 结构性差距两编译器均存在）、AVX512 探索（~75 函数分支 + 数学多项式，Zen 4 收益 10~70%，
+> fast-isel 误判纠正弃用；**接入决策：保持 AVX2-only**，AVX512 分支代码保留备选）。详见 `docs/20260829-AutoSIMD-优化探索与AVX512分析.md`。
+>
+> 2026-08-30 增量 8：**Native 隐式批收集 + JCC 两因子修复 + MSVC 编译修复** —— native 侧隐式收集
+> （`job.Schedule()` 零改动透明收集，`EndFrame`/`Complete` 统一提交 + 单次唤醒，AcquireState/ReleaseState
+> 防 UAF）、JCC 两因子（perElem 纯执行口径 + C_fixed 固定开销，`tileSize=(150µs−C_fixed)/C_elem`）、
+> MSVC C4996 修复（`_CRT_SECURE_NO_WARNINGS`）、200 混合 job/帧三条批路径实测 0.68~0.71ms。
+> 详见 `docs/20260830-NativeImplicitBatch-实现与基准.md`。
+>
 > 2026-08-29 增量 7：**S22 安全检查宏分层完成** —— `ENTJOY_SAFETY`（Debug 默认：句柄+边界）与
 > `ENTJOY_SAFETY_BOUNDS`（Release 默认：仅边界，裁剪句柄原子读 ~1-2ns/次）双档；
 > 句柄检查的 `#if` 下沉到 `SafetyHandleManager.Check*` 方法体内（一处裁剪，NativeArray/NativeList
@@ -114,6 +157,10 @@ Phase 9 (托管类型)          🔲 未开始
   └─ 性能分析器
 
 AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最终 48/50+
+                             ✅ 2026-08-30 增量 9：4 bug+1 分类缺陷修复、方向2 标量化（C11 反超 ISPC）、
+                               FMA 显式融合、C14 CAS、基准降噪、MSVC/ClangCL 对比；AVX512 已决策保持 AVX2-only
+                             ✅ 2026-08-30 S34b 收尾完成：FZ 容差修正 + fp-contract=off（13 ULP 根治）、
+                               C12 常量提升、C12 分支收敛（-22%）——EdgeCase 140/140 全绿
 ```
     │  Phase 2：遗留     │  │  AutoSIMD 修复 ✅    │  │  Phase 5：易用性  │
     │  + Shared Comp    │  │  E1-E11 已完成      │  │  Events/Group    │
@@ -191,7 +238,8 @@ AutoSIMD 修复                ✅ E1-E11 全部修复 + EdgeCase 44/50 → 最�
 | **S31** | Subsystem Query | Phase 7 | 3-5 天 | S7 | 系统依赖注入 |
 | **S32** | Reactive System 生成 | Phase 8 | ✅ 已完成（2026-08-29） | S26 | [Reactive(ObserverEvents)] 声明式 Observer 订阅：静态 Execute(in ReadOnlySpan&lt;Entity&gt;, in ReadOnlySpan&lt;T&gt;) 签名推导组件类型 → ReactiveSystemRegistry.RegisterAll 自动注册（事件位组合支持）+ EJ2011/2012 诊断。详见 docs/20260829-Phase8-SourceGenerator设计.md |
 | **S33** | Chunk 合并/碎片整理 | Phase 1 遗留 | 1 周 | S0 | 瘦 Chunk 合并（利用率 <30%） |
-| **S34** | AutoSIMD E2/E3/E4/E6/E8 | AutoSIMD | 1-2 周 | — | 其余 edge case |
+| **S34** | AutoSIMD E2/E3/E4/E6/E8 | AutoSIMD | ✅ 全部完成 | — | 其余 edge case（增量 9 + S34b 收尾覆盖，EdgeCase 140/140） |
+| **S34b** | AutoSIMD 收尾（新增，2026-08-30） | AutoSIMD | ✅ 全部完成 | S34 | d) ✅ **已决策：保持 AVX2-only**（2026-08-30，理由：Zen 4 实测收益仅 10~70%、多版本编译/体积代价，详见 20260829-AutoSIMD-优化探索与AVX512分析.md §2.4；AVX512 分支代码保留备选）；a) ✅ 已修正（2026-08-30：FZ5 `maxUlps=0`→1 消除 FMA 1 ULP 误报 + **FZ1 容差 8**——13 ULP 根因（clang-cl fp-contract 自动融合 `(a*a-3)/a` → fmsub 单次舍入 vs C# 两次舍入，ulp_probe 复现）已通过 **`NativeTranspiledPrecise` 加 `/clang:-ffp-contract=off` 根治**：禁自动融合后算术分支 bit-exact（13 ULP 消失），显式 `n_fmadd_ps`（增量 9）为 intrinsic 不受影响、性能无回退（C06 0.93x 持平）；EdgeCase 140/140）；b) ✅ 已完成（2026-08-30：C12 循环上界常量提升——`SimdLoopGenerator` 把 while 条件里的 `n_set1_epi32/ps(字面量)` 提升到循环外构造 `__bound_*`，消除 clang 每轮 `vpbroadcastd` 重广播，省 ~1 条/轮）；c) ✅ **已完成（2026-08-30：C12 分支收敛**——`SimdControlFlowGenerator` 三处：① continue 不再 goto，改为 `BodyMaskVar &= ~cond` 排除（mask 化）；② break 的「tracker 空立即 goto exit」删除（循环头自然退出）；③ `HasControlFlowGoto` 排除 while-true 内已 mask 化的 continue → 条件1 的 if 守卫消除。每轮 3 any_true/3 分支 → **2 any_true/2 分支**（对齐 ISPC 2 vmovmskps/2 je）。实测 C12 AutoSIMD 0.498→**0.388ms（-22%）**、Auto/ISPC 0.74x→**0.88x**。回归：EdgeCase 140/140、AutoSIMDVerify 23/23、10_SIMD 13/13 全过）。**S34b 全部完成** |
 | **S35** | 组件 copy/move/destroy hooks | Phase 9 | 2-3 周 | — | **Phase 9 前置条件** |
 | **S36** | ManagedComponentStore | Phase 9 | 1-2 周 | S35 | 字典存储 managed 字段 |
 | **S37** | NativeProjection | Phase 9 | 2-3 周 | S35 | NativeString/NativeDictionary |
@@ -311,7 +359,7 @@ Phase 9 (Managed 类型，独立轨道)
 | **里程碑 B：存储与易用性** | Phase 7（Shared per-chunk）✅ + Phase 5 + Phase 6 | **主体完成**（Phase 6 ✅ 2026-08-29；Phase 7 ✅ S25 收口 2026-08-29；Phase 5 关系型状态机 ❌ 已决策不做，剩余仅 S28/S29 低优先级） | ~8-12 周 |
 | **里程碑 C：生成器扩展** | Phase 8 | ✅ **已完成**（2026-08-29：S26/S27/S32） | ~2-3 周 |
 | **里程碑 D：Managed 类型** | Phase 9（独立轨道） | 未开始 | ~5-8 周 |
-| **AutoSIMD 修复** | 与里程碑并行 | 进行中 | ~2-3 周 |
+| **AutoSIMD 修复** | 与里程碑并行 | ✅ **全部完成**（E1-E11 + 增量 9 + S34b 收尾：FZ 容差、fp-contract=off、C12 常量提升/分支收敛；EdgeCase 140/140；AVX512 保持 AVX2-only） | ~2-3 周 |
 
 ---
 

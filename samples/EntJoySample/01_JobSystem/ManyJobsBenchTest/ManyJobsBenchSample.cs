@@ -128,18 +128,18 @@ namespace EntJoySample.ManyJobsBenchTest
             var emptyPar = new EmptyParJob();
             var emptyChunk = new EmptyChunkJob();
 
-            // ---- IJob（无依赖 → 主线程 inline 同步路径） ----
-            cases.Add(Case("IJob x50 (inline)", 50, h =>
+            // ---- IJob（2026-08-30 起全异步：Schedule 一律提交 worker，无 inline） ----
+            cases.Add(Case("IJob x50 (async)", 50, h =>
             {
                 for (int i = 0; i < 50; i++) h[i] = emptyJob.Schedule();
             }));
-            cases.Add(Case("IJob x200 (inline)", 200, h =>
+            cases.Add(Case("IJob x200 (async)", 200, h =>
             {
                 for (int i = 0; i < 200; i++) h[i] = emptyJob.Schedule();
             }));
 
-            // ---- IJobFor：小长度 inline；大长度单任务异步 ----
-            cases.Add(Case("IJobFor·1K x100 (inline)", 100, h =>
+            // ---- IJobFor：全异步（≤64 池任务；>64 单 worker 异步任务） ----
+            cases.Add(Case("IJobFor·1K x100 (async)", 100, h =>
             {
                 for (int i = 0; i < 100; i++) h[i] = emptyFor.Schedule(1024);
             }));
@@ -248,7 +248,7 @@ namespace EntJoySample.ManyJobsBenchTest
             }));
 
             // ---- Native 隐式批：透明收集（SetImplicitBatchEnabled(true) + Schedule 照旧 + EndFrame）。
-            //     仅 tile 路径 job（ParallelFor）进 native pending；IJob/IJobFor 仍 inline/即时，不聚合。 ----
+            //     仅 tile 路径 job（ParallelFor）进 native pending；IJob/IJobFor 不收集（即时提交），不聚合。 ----
             cases.Add(Case("NativeImplicit·Mixed(100+50+50) x200", 200, h =>
             {
                 NativeJobScheduler.SetImplicitBatchEnabled(true);
@@ -460,7 +460,7 @@ namespace EntJoySample.ManyJobsBenchTest
             }
             Console.WriteLine($" Workers={NativeJobScheduler.JobWorkerCount}, Warmup={_warmupFrames}, Measure={_measureFrames}");
             Console.WriteLine(" 说明：4 类型空体；每帧 Schedule×N + Complete×N；Pass A 墙钟(timing off)，Pass B 批次分布(timing on)");
-            Console.WriteLine(" 路径：IJob 无依赖=主线程 inline；IJobFor≤4096=inline，>64=单任务异步池；IJobParallelFor=tile 路径；IJobChunk=ECS tile 路径。");
+            Console.WriteLine(" 路径：全部 Schedule 一律异步（2026-08-30 起）；IJob=池任务、IJobFor≤64=池任务/>64=单 worker 异步、IJobParallelFor=tile 路径、IJobChunk=ECS tile 路径；Run 直执(ImmediateNative)为唯一同步路径。");
 
             var cases = BuildCases();
             var results = new List<CaseResult>();
