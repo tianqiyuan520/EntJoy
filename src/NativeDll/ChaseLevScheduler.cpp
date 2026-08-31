@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <new>
 #include <thread>
 
 #if defined(_WIN32)
@@ -59,7 +60,7 @@ namespace JobSystem
         ChaseLevScheduler::s_taskPool_.Release(task);
     }
 
-    void ChaseLevScheduler::ExecuteAndRelease(RangeTask* task, uint32_t workerIndex) noexcept
+    void ChaseLevScheduler::ExecuteAndRelease(RangeTask* task, uint32_t workerIndex, TileAccount account) noexcept
     {
         if (!task) return;
         if (!task->batch)
@@ -69,7 +70,7 @@ namespace JobSystem
         }
         if (task->firstTile == kClaimTokenMarker)
         {
-            ExecuteClaimToken(task->batch, workerIndex);   // workerCap 令牌：原子认领，内部已 taskDone
+            ExecuteClaimToken(task->batch, workerIndex, account);   // workerCap 令牌：原子认领，内部已 taskDone
             s_taskPool_.Release(task);
             return;
         }
@@ -94,11 +95,20 @@ namespace JobSystem
 
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+        SetCurrentBatchId(0);
         DebugEndExec();
 
         // 诊断计数
         if (workerIndex < kMaxTrackedWorkers)
             tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+
+        // tile 计数按执行者口径（local/stolen/assist）
+        switch (account)
+        {
+        case TileAccount::Local:  g_localTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
+        case TileAccount::Stolen: g_stolenTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
+        case TileAccount::Assist: g_assistTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
+        }
 
         // 任务完成：pendingTasks--（可能触发退役）
         if (taskDone_)
@@ -127,23 +137,24 @@ namespace JobSystem
                 RunWorkTask(task);   // 通用 work：直接执行（内部 Release）
                 return true;
             }
-            // 先保存 tileCount（ExecuteAndRelease 释放 task 回池后该指针悬垂）
-            const uint32_t stolenTileCount = task->tileCount;
-            ExecuteAndRelease(task, workerIndex);
+            ExecuteAndRelease(task, workerIndex, TileAccount::Assist);   // 内部按 Assist 口径记 tile
             // 主线程 assist 计数
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-            g_assistTiles.fetch_add(stolenTileCount, std::memory_order_relaxed);
             return true;
         }
 
         // 2. 从其他 worker deque 窃取（FIFO，1 CAS per victim）
+        g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
         for (uint32_t offset = 1; offset < workerCount_; ++offset)
         {
             const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
+            g_victimScans.fetch_add(1, std::memory_order_relaxed);
             TileTask tileTask;
             if (workers_[victimIdx]->deque->StealTop(tileTask))
             {
+                g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
+                g_stealCount.fetch_add(1, std::memory_order_relaxed);
                 if (workerIndex < kMaxTrackedWorkers)
                     dequeStolen[workerIndex].fetch_add(1, std::memory_order_relaxed);
 
@@ -153,7 +164,7 @@ namespace JobSystem
                     // workerCap 令牌：主线程 assist 认领循环执行，内部已 taskDone
                     if (tileTask.firstTile == kClaimTokenMarker)
                     {
-                        ExecuteClaimToken(tileTask.batch, workerIndex);
+                        ExecuteClaimToken(tileTask.batch, workerIndex, TileAccount::Assist);
                         return true;
                     }
                     // 记录 worker 进入批次时间（供 timing 诊断）
@@ -179,6 +190,7 @@ namespace JobSystem
 
                     if (workerIndex < kMaxTrackedWorkers)
                         workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                    SetCurrentBatchId(0);
                     DebugEndExec();
 
                     if (workerIndex < kMaxTrackedWorkers)
@@ -256,7 +268,17 @@ namespace JobSystem
         }
         catch (...)
         {
-            Stop();
+            // 异常回滚：此时已持有 lifecycleMutex_，不能调 Stop()（会二次加锁死锁）。
+            // 直接置 quit + 唤醒 + join 已创建的线程 + clear。
+            quit_.store(true, std::memory_order_release);
+            wakeEpoch.fetch_add(1, std::memory_order_release);
+            wakeEpoch.notify_all();
+            for (auto& ctx : workers_)
+            {
+                if (ctx->thread.joinable())
+                    ctx->thread.join();
+            }
+            workers_.clear();
             throw;
         }
 
@@ -288,8 +310,7 @@ namespace JobSystem
                 ctx->thread.join();
         }
 
-        // 排空残留 task（Injector + deque），收集未退役 batch 到 drainedBatches
-        // ——消除 shutdown 未完成 job 的 context 泄漏（worker 已 join，单线程安全）。
+        // 排空残留 task 并收集未退役 batch 到 drainedBatches，消除 shutdown 泄漏（worker 已 join，单线程安全）。
         DrainRemaining();
 
         workers_.clear();
@@ -307,16 +328,14 @@ namespace JobSystem
             if (!task) continue;
             if (task->batch == nullptr)
             {
-                // 通用 work 任务（SubmitBackendAsync）：执行 cleanup 释放上下文
-                if (task->workCleanup) task->workCleanup(task->workCtx);
+                // Shutdown 默认 Drain：通用异步任务必须执行 work（不只 cleanup），
+                // 否则 state 永不 Complete，调用方在 shutdown 后永久等待。
+                RunWorkTask(task);
+                continue; // RunWorkTask 已将 task 归还池
             }
-            else
-            {
-                if (std::find(drainedBatches.begin(), drainedBatches.end(), task->batch)
-                        == drainedBatches.end())
-                    drainedBatches.push_back(task->batch);
-            }
-            s_taskPool_.Release(task);
+            // Drain 阶段直接执行残余 token/range，让 pendingTasks/tilesRemaining 正常收敛；
+            // 只有无法执行的异常任务才交 Scheduler::ForceFinalizeBatch。
+            ExecuteAndRelease(task, kMaxTrackedWorkers);
         }
 
         // 2. worker deque 残留（TileTask）
@@ -325,9 +344,22 @@ namespace JobSystem
             TileTask t;
             while (ctx->deque->StealTop(t))
             {
-                if (t.batch && std::find(drainedBatches.begin(), drainedBatches.end(), t.batch)
-                        == drainedBatches.end())
-                    drainedBatches.push_back(t.batch);
+                if (!t.batch || t.tileCount == 0) continue;
+                if (t.firstTile == kClaimTokenMarker)
+                {
+                    ExecuteClaimToken(t.batch, kMaxTrackedWorkers);
+                    continue;
+                }
+                // deque 中是轻量 TileTask（无 work 回调）；逐 tile 执行，range 完成后平衡 taskDone。
+                const uint32_t end = std::min(t.firstTile + t.tileCount, t.batch->tileCount);
+                for (uint32_t i = t.firstTile; i < end; ++i)
+                    executor_(t.batch, i);
+                if (taskDone_)
+                {
+                    activeTasks.fetch_sub(1, std::memory_order_acq_rel);
+                    taskDone_(t.batch);
+                    totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -338,11 +370,16 @@ namespace JobSystem
     // ============================================================
 
     // Injector 满：有限退避（yield + pause），避免提交线程 busy-loop
-    void ChaseLevScheduler::PushTaskBackoff(RangeTask* task) noexcept
+    bool ChaseLevScheduler::PushTaskBackoff(RangeTask* task) noexcept
     {
+        if (!task) return false;
         uint32_t backoff = 0;
         while (!injector_.Push(task))
         {
+            // Stop 开始后可能已无消费者：绝不为入队无限自旋（调度器正在排空）。
+            if (quit_.load(std::memory_order_acquire) ||
+                !running_.load(std::memory_order_acquire))
+                return false;
             ++backoff;
             if ((backoff & 15) == 0)
                 std::this_thread::yield();
@@ -350,20 +387,36 @@ namespace JobSystem
                 CpuPause();
             if (backoff > 4096) { std::this_thread::yield(); backoff = 0; }
         }
+        return true;
     }
 
     void ChaseLevScheduler::SubmitBatch(BatchState* batch) noexcept
     {
         if (!batch || batch->tileCount == 0) return;
         const uint32_t wc = workerCount_;
-        if (wc == 0) return;
+        if (wc == 0)
+        {
+            try
+            {
+                AbortUnsubmittedBatch(
+                    batch,
+                    std::make_exception_ptr(std::runtime_error(
+                        "JobSystem has no workers")));
+            }
+            catch (...)
+            {
+                // If constructing the diagnostic exception itself fails,
+                // still publish a terminal state through the no-throw path.
+                AbortUnsubmittedBatch(batch, {});
+            }
+            return;
+        }
 
         const uint32_t tileCount = batch->tileCount;
 
         // ── token（令牌）提交（唯一路径）──
-        // 只投 O(workers) 个令牌，令牌内 nextTile.fetch_add 细粒度认领——
-        // 注入器流量从 O(tiles) 降到 O(workers)，消除任务洪泛背压。
-        // workerCap 限制并行时 tokenTarget=workerCount（实际参与 ≤ 令牌数）。
+        // 只投 O(workers) 个令牌，令牌内 nextTile.fetch_add 细粒度认领（流量 O(tiles)→O(workers)，消除洪泛背压）。
+        // workerCap 限制并行时实际参与 ≤ 令牌数。
         const bool capMode = batch->workerCount > 0 &&
             static_cast<uint32_t>(batch->workerCount) < wc;
         const uint32_t tokenTarget = capMode
@@ -376,33 +429,63 @@ namespace JobSystem
         // PushMany：批量创建 token 任务 + 一次 CAS 批量入队注入器
         constexpr uint32_t kMaxBulkTokens = 64;   // 栈数组上限（worker 数实际 ≤ 64）
         RangeTask* bulk[kMaxBulkTokens];
+        uint32_t directTokens = 0;
+        uint32_t pushedTokens = 0;
         for (uint32_t base = 0; base < tokenCount; base += kMaxBulkTokens)
         {
             const uint32_t n = std::min(kMaxBulkTokens, tokenCount - base);
+            uint32_t allocated = 0;
             for (uint32_t i = 0; i < n; ++i)
             {
                 RangeTask* task = s_taskPool_.Acquire();
                 if (!task)
                 {
-                    task = new RangeTask();   // 池耗尽兜底（poolIndex=UINT32_MAX → Release 时 delete）
+                    task = new (std::nothrow) RangeTask();
+                    if (!task)
+                    {
+                        // Keep the task accounting exact even when the heap is
+                        // exhausted.  An unallocated token is executed by the
+                        // submitting thread below, so no tile is silently lost.
+                        ++directTokens;
+                        continue;
+                    }
+                    // 池耗尽兜底（poolIndex=UINT32_MAX → Release 时 delete）
                     task->poolIndex = UINT32_MAX;
                 }
                 task->batch = batch;
                 task->firstTile = kClaimTokenMarker;
                 task->tileCount = 1;
-                bulk[i] = task;
+                bulk[allocated++] = task;
             }
-            uint32_t pushed = injector_.PushMany(bulk, n);
-            while (pushed < n)
+            uint32_t pushed = injector_.PushMany(bulk, allocated);
+            pushedTokens += pushed;
+            while (pushed < allocated)
             {
                 // 注入器容量不足：剩余项逐个退避入队（不丢任务）
-                PushTaskBackoff(bulk[pushed]);
+                if (!PushTaskBackoff(bulk[pushed]))
+                {
+                    // Stop 竞态：入队循环后在本线程执行等效 token；pendingTasks 已含它，退役不会提前。
+                    s_taskPool_.Release(bulk[pushed]);
+                    ++directTokens;
+                }
+                else
+                {
+                    ++pushedTokens;
+                }
                 ++pushed;
             }
+            // 分配失败时这些逻辑 token 由 directTokens 表示而非队列项。
         }
-        totalTasksPushed.fetch_add(tokenCount, std::memory_order_relaxed);
-        // deferNotify：提交窗口内跳过逐批唤醒，由窗口结束的 Flush 统一广播
-        if (g_submitDeferDepth.load(std::memory_order_relaxed) == 0)
+        totalTasksPushed.fetch_add(pushedTokens, std::memory_order_relaxed);
+
+        // 未入队 token 由本线程同步执行兜底（罕见：OOM/Stop 竞态），保证每个发布 tile 都被执行
+        // 或达终态，pendingTasks 不会永久为正。
+        for (uint32_t i = 0; i < directTokens; ++i)
+            ExecuteClaimToken(batch, kMaxTrackedWorkers);
+
+        // deferNotify：窗口内跳过逐批唤醒，由 Flush 统一广播。depth<=0 才唤醒：
+        // 负值（Flush 下溢）也广播，防止批量任务被永久搁置（下溢使 ==0 永不成立 → 永不唤醒）。
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) <= 0)
         {
             wakeEpoch.fetch_add(1, std::memory_order_release);
             wakeEpoch.notify_all();
@@ -413,7 +496,7 @@ namespace JobSystem
     // ExecuteClaimToken — workerCap 令牌：原子认领 nextTile 直到空
     // ============================================================
 
-    void ChaseLevScheduler::ExecuteClaimToken(BatchState* batch, uint32_t workerIndex) noexcept
+    void ChaseLevScheduler::ExecuteClaimToken(BatchState* batch, uint32_t workerIndex, TileAccount account) noexcept
     {
         if (!batch) return;
         // timing 诊断：记录 worker 进入批次（首/末 worker 时间）
@@ -424,11 +507,8 @@ namespace JobSystem
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
         const uint32_t end = batch->tileCount;
-        // 认领粒度随批次规模收缩：tileCount/workerCount 较小时降到 1，
-        // 保证小批次的 tile 可被不同执行者独立认领——阻塞型回调（worker 在回调内
-        // 等待外部事件）时与 slice 语义等价：每个 tile 都是一个可认领的并行单位。
-        // 大批次维持 kClaimBatchSize=4。实测认领窗口放大（16）无端到端收益——
-        // fetch_add 发生在 tile 执行的间隙，被 µs 级执行完全吸收。
+        // 认领粒度随批次规模收缩（较小时降到 1），保证小批次每个 tile 可被独立认领——
+        // 阻塞型回调（worker 等待外部事件）时与 slice 语义等价；大批次维持 kClaimBatchSize=4。
         const uint32_t step = std::clamp(
             batch->tileCount / std::max(1u, workerCount_),
             1u, kClaimBatchSize);
@@ -445,12 +525,18 @@ namespace JobSystem
                 ++executed;
             }
         }
-        // 令牌认领的 tile 计入本地 tile 统计（tile 口径，与 RangeTask 执行一致）
-        g_localTiles.fetch_add(executed, std::memory_order_relaxed);
+        // 令牌认领的 tile 按执行者口径计数（local/stolen/assist 三态）
+        switch (account)
+        {
+        case TileAccount::Local:  g_localTiles.fetch_add(executed, std::memory_order_relaxed); break;
+        case TileAccount::Stolen: g_stolenTiles.fetch_add(executed, std::memory_order_relaxed); break;
+        case TileAccount::Assist: g_assistTiles.fetch_add(executed, std::memory_order_relaxed); break;
+        }
         g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
 
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+        SetCurrentBatchId(0);
         DebugEndExec();
         if (workerIndex < kMaxTrackedWorkers)
             tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
@@ -468,13 +554,21 @@ namespace JobSystem
     // SubmitWork — 通用 work 任务（无 batch）
     // ============================================================
 
-    void ChaseLevScheduler::SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept
+    bool ChaseLevScheduler::SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept
     {
-        if (!fn) return;
+        if (!fn || !running_.load(std::memory_order_acquire) ||
+            quit_.load(std::memory_order_acquire)) return false;
         RangeTask* task = s_taskPool_.Acquire();
         if (!task)
         {
-            task = new RangeTask();   // 池耗尽兜底（poolIndex=UINT32_MAX → Release 时 delete）
+            try
+            {
+                task = new RangeTask();   // 池耗尽兜底（poolIndex=UINT32_MAX → Release 时 delete）
+            }
+            catch (...)
+            {
+                return false;
+            }
             task->poolIndex = UINT32_MAX;
         }
         task->batch = nullptr;
@@ -484,10 +578,15 @@ namespace JobSystem
         task->workCtx = ctx;
         task->workCleanup = cleanup;
 
-        PushTaskBackoff(task);
+        if (!PushTaskBackoff(task))
+        {
+            s_taskPool_.Release(task);
+            return false;
+        }
 
         wakeEpoch.fetch_add(1, std::memory_order_release);
         wakeEpoch.notify_all();
+        return true;
     }
 
     // 提交窗口统一唤醒（deferNotify 的 Flush）：一次 bump + notify_all。
@@ -568,13 +667,9 @@ namespace JobSystem
         uint64_t seenStamp;  // park epoch（第 5 步赋值后 wait 使用）
 
         // ── 自适应自旋预算 ──
-        // 固定 256 次自旋无法兼顾连续/间歇调度：连续时 workers 停在自旋区（dispatch 3-7μs），
-        // 间歇时 park（dispatch 16-20μs）。策略：
-        //  - 执行过任务的 worker 拉满 kSpinMax → 新批到达时仍在自旋 → 零唤醒
-        //  - 空转耗尽后指数退火（÷2，下限 kSpinMin）→ 空闲期快速让出 CPU
-        //  - 全局仍有在飞任务（activeTasks>0）时用更大窗口（kSpinBusy）：
-        //    本 worker 暂无活，但下一个任务即将被认领，自旋比 park+唤醒更省。
-        // thread_local：每个 worker 线程独立一份，互不影响。
+        // 执行过任务的 worker 拉满 kSpinMax → 新批到达仍自旋，零唤醒；空转指数退火
+        // （下限 kSpinMin）快速让出 CPU；activeTasks>0 用更大窗口（kSpinBusy，下一任务即将被认领）。
+        // thread_local：每 worker 独立一份。
         thread_local uint32_t spinBudget = kSpinBase;
 
         while (true)
@@ -619,6 +714,7 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                SetCurrentBatchId(0);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -636,15 +732,13 @@ namespace JobSystem
             if (injector_.Pop(rangeTask))
             {
                 spinBudget = kSpinMax;   // 有活：拉高自旋预算
-                // 通用 work 任务（batch==nullptr）：直执行（不能 PushBottom 到 deque，
-                // TileTask 无 work 回调，入 deque 会丢失 work）。
+                // 通用 work（batch==nullptr）直接执行：TileTask 无 work 回调，入 deque 会丢失 work。
                 if (rangeTask->batch == nullptr)
                 {
                     RunWorkTask(rangeTask);
                     continue;
                 }
-                // 推入自己 deque（保持可窃取性 + LIFO 本地执行语义）
-                // 标准 Chase-Lev：任务经 Injector → PushBottom → PopBottom 执行
+                // 推入自己 deque（保持可窃取性 + LIFO 本地执行）：Injector → PushBottom → PopBottom
                 myDeque->PushBottom(TileTask{
                     rangeTask->batch,
                     rangeTask->firstTile,
@@ -661,17 +755,23 @@ namespace JobSystem
             }
 
             // ---- 3. 从其他 worker deque 窃取（FIFO，1 CAS per victim）----
+            g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
             for (uint32_t offset = 1; offset < workerCount_; ++offset)
             {
                 const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
+                g_victimScans.fetch_add(1, std::memory_order_relaxed);
                 if (workers_[victimIdx]->deque->StealTop(task))
                 {
                     got = true;
+                    g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
+                    g_stealCount.fetch_add(1, std::memory_order_relaxed);
                     if (workerIndex < kMaxTrackedWorkers)
                         dequeStolen[workerIndex].fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
             }
+            if (!got)
+                g_stealEmptyExits.fetch_add(1, std::memory_order_relaxed);
 
             if (got && task.batch && task.tileCount > 0)
             {
@@ -679,7 +779,7 @@ namespace JobSystem
                 // workerCap 令牌：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
                 {
-                    ExecuteClaimToken(task.batch, workerIndex);
+                    ExecuteClaimToken(task.batch, workerIndex, TileAccount::Stolen);
                     continue;
                 }
                 // 记录 worker 进入批次时间（供 timing 诊断）
@@ -687,7 +787,7 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
-                g_localTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
+                g_stolenTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
                 g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
 
                 uint32_t end = task.firstTile + task.tileCount;
@@ -705,6 +805,7 @@ namespace JobSystem
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                SetCurrentBatchId(0);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -770,9 +871,8 @@ namespace JobSystem
             // ---- 5. Park — 自适应自旋（覆盖新批到达窗口）+ atomic::wait（跨平台 futex）----
             {
                 uint64_t spinStamp = wakeEpoch.load(std::memory_order_acquire);
-                // 全局仍有在飞任务：本 worker 虽暂无活，新任务即将被认领 → 更大自旋窗。
-                // （与 JobCostCache 协同：轻任务塌缩后参与 worker 少，未参与 worker
-                //   靠此窗口停在自旋区，避免每帧重复 park+唤醒。）
+                // activeTasks>0 → 更大自旋窗：与 JobCostCache 协同，轻任务塌缩后未参与
+                // worker 停在自旋区，避免每帧重复 park+唤醒。
                 const bool globalBusy =
                     activeTasks.load(std::memory_order_acquire) > 0;
                 const uint32_t spinCap = globalBusy ? kSpinBusy : spinBudget;
@@ -797,12 +897,14 @@ namespace JobSystem
             }
 
 // ---- 5b. Park — wait(共享 epoch) ----
-            // 所有 worker wait 同一 epoch：SubmitBatch/Stop 一次 notify_all 唤醒全部（1 次 futex）。
-            // park 前必须复查 quit：Stop 的 epoch bump 可能已发生在 seenStamp 捕获之后，
-            // 无复查则 wait 永久挂起（Stop join 死锁）。
+            // 所有 worker wait 同一 epoch：一次 notify_all 唤醒全部（1 次 futex）。
+            // 快照必须早于 quit/队列复查：否则 producer 在「检查空」与「读快照」之间
+            // bump epoch + notify，worker 读到新 epoch 后 wait 会永久睡眠（lost-wakeup）。
+            seenStamp = wakeEpoch.load(std::memory_order_acquire);
             if (quit_.load(std::memory_order_acquire))
                 goto drain_quit;
-            seenStamp = wakeEpoch.load(std::memory_order_acquire);
+            if (!injector_.IsEmpty() || !myDeque->IsEmpty())
+                goto main_loop;
             wakeEpoch.wait(seenStamp, std::memory_order_relaxed);
             continue; // 唤醒后回到主循环
 

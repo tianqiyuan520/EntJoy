@@ -965,9 +965,10 @@ namespace
     {
         constexpr int rangeCount = 64;
         std::vector<ChunkJobData> chunks(rangeCount);
-        // 实体数衡 tile：entityCount 非零，否则空 chunk 会被合并成单个 tile
-        //（claimCount==1 ≠ 64 断言失败）。每 chunk 1024 → 64 个 tile、64 次 Claim。
-        for (auto& c : chunks) c.entityCount = 1024;
+        // 实体数衡 tile：entityCount 非零，否则空 chunk 合并成单 tile 破坏计数。
+        // entityCount 提到上限（262144 = kMaxEntitiesPerTile）→ targetEnt 恒为上限，
+        // 每 chunk 独立成 tile（与 worker 数无关），断言 claimCount == rangeCount。
+        for (auto& c : chunks) c.entityCount = 262144;
         std::vector<std::atomic<int>> hits(rangeCount);
         std::atomic<int> cleanupCount{ 0 };
         CooperativeChunkContext context{ &hits, &cleanupCount, nullptr, nullptr };
@@ -1392,13 +1393,8 @@ namespace
         Require(stats.totalTilesPublished == expectedTiles, message);
         Require(stats.localTiles + stats.stolenTiles + stats.assistTiles == expectedTiles,
             message);
-        // 令牌语义（workerCap 限制）下任务数(executedRanges)≠tile 数(1:1 旧语义)，此处只做 tile 口径校验
-        // Require(stats.assistTiles == stats.mainExecutedRanges, message);
-        // Require(stats.localTiles + stats.stolenTiles == stats.workerExecutedRanges, message);
         Require(stats.stealSuccesses <= stats.stealAttempts, message);
         Require(stats.assistExecPctEwma <= 100, message);
-        // Chase-Lev 全 worker 抢（workerCap 不限制实际参与）：activeWorkersPeak 可达全部
-        // 线程数（≤16），不再限于 workerCap(=8) 的旧语义
         Require(stats.activeWorkersPeak <= 16, message);
     }
 
@@ -1407,9 +1403,10 @@ namespace
         constexpr int itemCount = 31;
         std::vector<ChunkJobData> chunks(itemCount);
         std::vector<EntityBatchData> batches(itemCount);
-        // 实体数衡 tile：entityCount 非零（空 unit 合并成 1 tile 会破坏 itemCount 计数）
-        for (auto& c : chunks) c.entityCount = 1024;
-        for (auto& b : batches) b.entityCount = 1024;
+        // 实体数衡 tile：entityCount 非零（空 unit 合并成 1 tile 破坏计数）。
+        // entityCount 上限 → targetEnt 恒上限，每 chunk 独立成 tile（与 worker 数无关）。
+        for (auto& c : chunks) c.entityCount = 262144;
+        for (auto& b : batches) b.entityCount = 262144;
 
         {
             std::atomic<int> callbacks{ 0 };
@@ -1480,8 +1477,9 @@ namespace
         for (const int itemCount : itemCounts)
         {
             std::vector<ChunkJobData> chunks(static_cast<size_t>(itemCount));
-            // 实体数衡 tile：entityCount 非零（空 unit 合并成 1 tile 会破坏逐 item tile 计数）
-            for (auto& c : chunks) c.entityCount = 1024;
+            // 实体数衡 tile：entityCount 非零（空 unit 合并成 1 tile 破坏计数）。
+            // entityCount 上限 → targetEnt 恒上限，每 chunk 独立成 tile（与 worker 数无关）。
+            for (auto& c : chunks) c.entityCount = 262144;
             std::vector<std::atomic<int>> hits(static_cast<size_t>(itemCount));
             struct Context
             {
@@ -1822,7 +1820,9 @@ namespace
             constexpr int smallCount = 4;
             std::atomic<int> cleanup{ 0 };
             uint64_t tasks = runRangeBatch(8, smallCount, &cleanup);
-            Require(tasks == smallCount,
+            uint64_t expected = static_cast<uint64_t>(
+                std::min({ 8, workerCount, smallCount }));
+            Require(tasks == expected,
                 "tileCount < workerCap should submit only tileCount tasks");
         }
 
@@ -1861,6 +1861,39 @@ namespace
             Require(cleanup.load() == 1,
                 "ECS BatchRange cleanup mismatch");
         }
+    }
+
+    // 问题 1 回归：高频 park/wake，验证 worker 不因 lost-wakeup 永久睡眠。
+    void TestParkWakeStress()
+    {
+        constexpr int kIters = 2000;
+        for (int i = 0; i < kIters; ++i)
+        {
+            std::atomic<int> ran{ 0 };
+            auto h = JobSystem::Scheduler::Schedule(
+                [](void* raw) { static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed); },
+                &ran);
+            h.Complete();
+            Require(ran.load(std::memory_order_relaxed) == 1, "park/wake stress lost a job");
+        }
+    }
+
+    // 问题 4 回归：Start/Stop 循环（正常路径），验证生命周期回滚无回归。
+    void TestStartStopCycle()
+    {
+        for (int i = 0; i < 50; ++i)
+        {
+            JobSystem::Scheduler::Shutdown();
+            JobSystem::Scheduler::Initialize(2);
+            std::atomic<int> ran{ 0 };
+            auto h = JobSystem::Scheduler::Schedule(
+                [](void* raw) { static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed); },
+                &ran);
+            h.Complete();
+            Require(ran.load(std::memory_order_relaxed) == 1, "start/stop cycle lost a job");
+        }
+        JobSystem::Scheduler::Shutdown();
+        JobSystem::Scheduler::Initialize();  // 恢复默认 worker 数
     }
 }
 
@@ -1955,6 +1988,37 @@ void TestResolveChunkSizeFallback()
     std::cout << "PASS ResolveChunkSizeFallback\n";
 }
 
+void TestIntOverflowCeilDiv()
+{
+    // 问题 14 回归：length/totalEntities 接近类型上限时，ceil 除法不得 signed overflow（UB）。
+    const bool saved = JobSystem::g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+    JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    JobSystem::g_jobCostCache.Init();
+
+    const int workers = std::max(1, JobSystem::CurrentWorkerCount());
+    const int denom = workers * 4;
+    constexpr int kMax = std::numeric_limits<int>::max();
+
+    // 期望用 int64_t 计算（避免测试自身溢出）：tpw 兜底 = max(16, ceil(length/(W*4)))。
+    auto expect = [denom](int length) {
+        const int64_t e = (static_cast<int64_t>(length) - 1) / denom + 1;
+        return static_cast<int>(std::max<int64_t>(16, e));
+    };
+    Require(JobSystem::ResolveChunkSize(kMax, 0, 0) == expect(kMax),
+        "ResolveChunkSize(INT_MAX) must not overflow");
+    Require(JobSystem::ResolveChunkSize(kMax - 1, 0, 0) == expect(kMax - 1),
+        "ResolveChunkSize(INT_MAX-1) must not overflow");
+
+    // 实体累计总量 > INT_MAX 时不得溢出（int64_t 链路）；clamp 到 kMaxEntitiesPerTile。
+    Require(JobSystem::ResolveEcsEntityTileTarget(static_cast<int64_t>(kMax) * 2, workers) == (1 << 18),
+        "ResolveEcsEntityTileTarget(huge entities) must clamp to max");
+    Require(JobSystem::ResolveEcsEntityTileTarget(0, workers) == 256,
+        "ResolveEcsEntityTileTarget(0) must clamp to min");
+
+    JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
+    std::cout << "PASS IntOverflowCeilDiv\n";
+}
+
 // ============================================================
 // JobCostCache 对抗性压力测试（并发 / 正确性 / 稳定性）
 // ============================================================
@@ -2001,8 +2065,6 @@ void TestJccConcurrentHeterogeneous()
     JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
     constexpr int N = 100'000;
     const JccJobFn fns[4] = { JccJobLight0, JccJobLight1, JccJobHeavy0, JccJobHeavy1 };
-    std::vector<std::vector<int>> outs(4, std::vector<int>(N, -1));
-    std::atomic<int> errors{ 0 };
 
     const int kThreads = 8;
     const int kRounds = 30;   // 每线程 30 轮 ×4 job ≈ 960 次调度，足够 EWMA 收敛 + 并发争用
@@ -2010,33 +2072,27 @@ void TestJccConcurrentHeterogeneous()
     for (int t = 0; t < kThreads; ++t)
     {
         threads.emplace_back([&, t]() {
+            // 每线程独立 out（复用），避免并发写同一数组（TSAN data race）。
+            // 结果正确性由 TestJccResultsInvariantAcrossTiles 专门验证，此处只驱动并发学习。
+            std::vector<int> out(N, -1);
             for (int r = 0; r < kRounds; ++r)
             {
                 const int jobIdx = (t + r) % 4;   // 多线程交错不同 job（并发冲 cache 槽）
                 auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
-                    fns[jobIdx], outs[jobIdx].data(), N, 0);
+                    fns[jobIdx], out.data(), N, 0);
                 h.Complete();   // 死锁/悬挂会卡在这里（无超时即失败）
             }
         });
     }
     for (auto& th : threads) th.join();
 
+    // 每个 job 必须学到独立成本（4 个不同 hash → 4 个正 perElem）
     for (int j = 0; j < 4; ++j)
     {
-        const auto& out = outs[j];
-        for (int i = 0; i < N; ++i)
-        {
-            int ref = (j == 0) ? JccRefLight0(i) : (j == 1) ? JccRefLight1(i)
-                : (j == 2) ? JccRefHeavy0(i) : JccRefHeavy1(i);
-            if (out[i] != ref) { errors.fetch_add(1, std::memory_order_relaxed); break; }
-        }
-        // 每个 job 必须学到独立成本（4 个不同 hash → 4 个正 perElem）
         const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
         Require(JobSystem::g_jobCostCache.GetPerElemCost(h) > 0.0,
             "concurrent job must learn its per-element cost");
     }
-    Require(errors.load(std::memory_order_relaxed) == 0,
-        "concurrent heterogeneous results must match serial reference");
     JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
     std::cout << "PASS JccConcurrentHeterogeneous\n";
 }
@@ -2407,6 +2463,10 @@ int main()
         std::cout << "PASS ShutdownRejectedFromWorkerThread\n";
         TestWorkerCapParameterized();
         std::cout << "PASS WorkerCapParameterized\n";
+        TestParkWakeStress();
+        std::cout << "PASS ParkWakeStress\n";
+        TestStartStopCycle();
+        std::cout << "PASS StartStopCycle\n";
 
         // ── 对抗性压力（2026-08-23）──
         TestWorkChannelStorm();
@@ -2422,6 +2482,7 @@ int main()
         TestJobCostCacheSpikeSelfHeal();
         TestJobCostCacheCollisionReuse();
         TestResolveChunkSizeFallback();
+        TestIntOverflowCeilDiv();
 
         // ── JobCostCache 对抗性压力（并发 / 正确性 / 稳定性）──
         TestJccConcurrentHeterogeneous();

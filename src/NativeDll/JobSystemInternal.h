@@ -1,10 +1,9 @@
 #pragma once
 
-// EntJoy JobSystem 内部共享头。
-// JobSystem.cpp 已按 State / Tiles / Scheduler 三模块拆分，本头承载跨模块的
-// 类型定义、extern 全局与函数原型，使各 TU 可独立编译。
+// EntJoy JobSystem 内部共享头：承载跨模块的类型定义、extern 全局与函数原型，
+// 使各 TU 可独立编译。
 //
-// 拆分后文件布局：
+// 文件布局：
 //   JobSystem.cpp            —— base：全局定义 + 统计快照 + 时钟/CPU 诊断助手
 //   JobSystem_State.cpp      —— State：HandleState 生命周期 + 依赖链 + JobHandle
 //   JobSystem_Tiles.cpp      —— Tiles：ExecutionTile/BatchState/BatchStorage + 执行循环
@@ -48,10 +47,16 @@ namespace JobSystem
     // tpw=4 平衡 light/heavy 场景性能，与 ECS kTargetTilesPerWorker=4 一致。
     inline constexpr int kDefaultTilesPerWorker = 4;
 
-    // per-thread state 缓存类型。定义在本头使 t_stateCache 可跨 TU extern
-    // （State 模块 RecycleState/CreateState 直接读写）。析构把缓存 state 批量
-    // 交还共享池；全局互斥体在 Shutdown 中始终存活（本对象先于 g_statePoolMutex
-    // 初始化，按标准后销毁），线程退出取锁安全。
+    // ceil(a/b)，a>=0, b>0；用 (a-1)/b+1 避免 a+b-1 在 a 接近类型上限时的 signed overflow（UB）。
+    template <typename T>
+    inline T CeilDiv(T a, T b) noexcept
+    {
+        if (a <= T(0)) return T(0);
+        return (a - T(1)) / b + T(1);
+    }
+
+    // per-thread state 缓存：定义在本头使 t_stateCache 可跨 TU extern（State 模块直接读写）。
+    // 析构时批量交还共享池；g_statePoolMutex 在 Shutdown 中始终存活（本对象先于其初始化，按标准后销毁），线程退出取锁安全。
     extern std::mutex g_statePoolMutex;
     extern std::vector<HandleState*> g_statePool;
     struct ThreadStateCache
@@ -89,19 +94,15 @@ namespace JobSystem
     extern int g_guidedK;
     extern int g_guidedFloor;
     extern bool g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
-    // JobCostCache export flag：默认 false（不记录、不使用）→ 纯 tpw=4 行为。
-    // 用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，worker 按 per-job
-    // 每元素成本 EWMA 自动求解最优 tile 数。热路径 relaxed 读取足够（延迟生效无害）。
+    // JobCostCache export flag：用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，
+    // worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数；热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
-    // 提交期"延迟唤醒"深度（deferNotify）：>0 时 SubmitBatch 跳过末尾 wakeEpoch.notify_all，
-    // 由显式 Flush（JobSystem_SubmitDeferFlush）在提交窗口结束时统一唤醒一次。
-    // 安全：任务已入注入器，worker 自旋时会自己取；全 park 时由 Flush 的 notify_all 唤醒。
+    // 提交期"延迟唤醒"深度：>0 时 SubmitBatch 跳过末尾 notify_all，由显式 Flush 在提交窗口结束时统一唤醒。
+    // 安全：任务已入注入器，worker 自旋自取；全 park 时由 Flush 的 notify_all 唤醒。
     extern std::atomic<int> g_submitDeferDepth;
-    // 隐式批（native 收集）：开关开启时，主线程直接提交的 tile 路径 job
-    // （ParallelFor / ParallelForBatch / Chunk/Entity）挂入 pending，由
-    // FlushPendingSubmits（EndFrame / Complete 自动触发）统一提交 + 单次唤醒；
+    // 隐式批（native 收集）：开启时主线程直接提交的 tile 路径 job 挂入 pending，
+    // 由 FlushPendingSubmits（EndFrame/Complete 自动触发）统一提交 + 单次唤醒；
     // 依赖未完成路径（continuation）不受 pending 影响，照常立即提交。
-    // 全局与实现见 JobSystem.cpp / JobSystem_Tiles.cpp。
     extern std::atomic<bool> g_implicitBatchEnabled;
     extern std::mutex g_pendingBatchesMutex;
     extern std::vector<BatchState*> g_pendingBatches;
@@ -222,7 +223,9 @@ namespace JobSystem
         void* context{ nullptr };
         void (*cleanup)(void*){ nullptr };
 
-        bool (*executeTile)(void* ctx, const ExecutionTile& tile) noexcept{ nullptr };
+        // 勿标 noexcept：用户回调可能抛异常，须经 TryExecuteOneTile 的 try/catch 记录，
+        // 否则 C++ 直接 terminate。
+        bool (*executeTile)(void* ctx, const ExecutionTile& tile){ nullptr };
 
         // Unified lightweight BatchRange path. Physical ECS chunks remain
         // storage boundaries; tiles are contiguous descriptor/index ranges.
@@ -231,17 +234,15 @@ namespace JobSystem
         std::atomic<uint32_t> nextTile{ 0 };
         uint32_t workerCount{ 0 };
         std::atomic<uint32_t> workerSlotsEntered{ 0 };
-        // Logical completion is driven by finished tiles, not by participant
-        // task retirement.  Slow/late worker slots may still be unwinding the
-        // steal loop after the public JobHandle is already complete.
+        // 逻辑完成由 tile 完成驱动，而非任务退役：公共 JobHandle 已完成后，
+        // 慢 worker 槽可能仍在退出窃取循环。
         std::atomic<uint32_t> tilesRemaining{ 0 };
         std::atomic<bool> logicalCompleted{ false };
         // ---- Chase-Lev：在飞任务计数（防 use-after-free）----
-        // SubmitBatch 时 = 任务数；每个任务执行完 fetch_sub(1)。
-        // 退役必须满足 tilesRemaining==0 && pendingTasks==0：
-        // tilesRemaining=0 只代表所有 tile 执行完，但 worker 的 deque 里可能
-        // 还有已 pop 未执行的任务（task.batch 引用本 storage），必须等它们
-        // 全部完成才能 ReleaseBatch。由"最后者"（tile 完成者 或 task 完成者）执行退役。
+        // SubmitBatch 时 = 任务数，每个任务执行完 fetch_sub(1)。
+        // 退役须满足 tilesRemaining==0 && pendingTasks==0：tilesRemaining=0 仅代表 tile 执行完，
+        // deque 中可能仍有已 pop 未执行的任务（task.batch 引用本 storage），须等其全部完成才能 ReleaseBatch。
+        // 由"最后者"（tile 完成者或 task 完成者）执行退役。
         std::atomic<uint32_t> pendingTasks{ 0 };
 
         std::atomic<uint64_t> publishedAt{ 0 };
@@ -266,26 +267,16 @@ namespace JobSystem
         std::atomic<uint64_t> coreMigrations{ 0 };
         std::atomic<uint64_t> batchAssistTiles{ 0 };
 
-        // Physical retirement is deliberately separate from logical
-        // completion because worker slots and Complete() assist readers still
-        // reference the scheduler metadata after the last callback finishes.
+        // 物理退役与逻辑完成刻意分离：最后回调结束后，worker 槽与 Complete() 协助读取者
+        // 仍引用调度器元数据。
+        std::atomic<bool> cleanupStarted{ false };
         std::atomic<bool> finalized{ false };
         std::atomic<bool> workersFinished{ false };
-
-        // ---- C++ 异常协议（对齐 TBB/Taskflow 的异常传播语义）----
-        // 用户 C++ 回调抛出的异常被捕获（TryExecuteOneTile 内 try-catch），
-        // 任务计数正常递减（不悬挂）；第一个异常经 atomic guard 只记录一次
-        //（exceptionRecorded false→true 后写入 firstException），
-        // Complete() 在退役完成后用 std::rethrow_exception 重新抛出给调用方。
-        // 与 C# 路径无关（托管侧在 NativeJobCore.cs 自有 try-catch 记录）。
-        std::atomic<bool> exceptionRecorded{ false };
-        std::exception_ptr firstException;
 
         uint64_t diagnosticId{ 0 };
 
         // ---- JobCostCache：per-job 自动 batch ----
-        // funcHash：Schedule 入口设置（GeneralBatchContext 传递），退役时按此更新
-        // per-job 每元素成本 EWMA。0 = 未标记（不参与自动 batch）。
+        // funcHash：Schedule 入口设置，退役时按此更新 per-job 每元素成本 EWMA；0 = 未标记（不参与自动 batch）。
         uint32_t funcHash{ 0 };
         // jccFine：本次分块是否由 JCC 公式（细粒度）产出（ResolveChunkSize 设置）。
         // 退役时据此把学习样本归为细/粗（粗 = tpw 兜底/mem-bound/显式 batchSize）。
@@ -336,12 +327,9 @@ namespace JobSystem
     uint64_t AssignStateDiagnosticId(HandleState* state) noexcept;
 
     // ---- 调试面板：执行窗口上报（事件驱动，非每帧采样）----
-    // 每次 job 执行（无论 schedule 路径）在入口记录"开始"事件（压栈 + 时间戳），
-    // 在出口记录"结束"事件（把完整窗口 [startMs, endMs] 直接追加进共享时间线历史）。
-    // GUI 每帧只渲染共享历史，不做任何状态迁移检测——Job 的 start/end 发生时即被
-    // 检测并记录，微秒级 Job（两帧之间跑完）也不会丢失，且无需环形握手缓冲。
-    // 有 worker 索引的线程（pool worker，WorkerLoop 预分配）上报到其泳道；无索引的
-    // 调用线程（典型为主线程 inline）上报到预留的 M 泳道（index == CurrentWorkerCount()）。
+    // 入口记录"开始"事件（压栈 + 时间戳），出口把完整窗口 [startMs, endMs] 追加进共享历史；
+    // GUI 只读渲染共享历史，微秒级 Job（两帧之间跑完）也不丢失。
+    // 有 worker 索引的线程上报其泳道；无索引的调用线程（主线程 inline）上报 M 泳道（index == CurrentWorkerCount()）。
     inline int DebugReportLaneId() noexcept
     {
         const int wi = WorkerIndexManager::GetCurrentIndex();
@@ -363,9 +351,10 @@ namespace JobSystem
     struct DebugSegment { int lane; uint64_t batchId; double startMs; double endMs; uint32_t tiles; uint32_t workers; bool isDirect; };
     extern DebugSegment g_debugSegments[kDebugSegmentMax];
     extern std::atomic<unsigned int> g_debugSegHead;    // 槽位分配（写者 fetch_add relaxed）
-    extern std::atomic<unsigned int> g_debugSegVisible; // 已发布的段数（写者 fetch_add release 发布；读者 acquire）
-    // 写者协议：先写槽内容，再 fetch_add(release) 发布计数——保证读者 acquire 读到计数时
-    // 槽内容必已可见（无"计数先行、内容滞后"竞态）。读者用 visible 推算槽下标，回绕安全。
+    extern std::atomic<unsigned int> g_debugSegVisible; // 已发布段数（写者 release 发布；读者 acquire）
+    // 每槽 seqlock 代次：奇=写中、偶=写完。修复并发写者乱序完成时，读者凭 visible
+    // 定位到"已发布但尚未写完"的槽（visible 计数先行、槽内容滞后的撕裂）。
+    extern std::atomic<uint64_t> g_debugSegSeq[kDebugSegmentMax];
 
     // 每个泳道的嵌套执行栈（job 体内再 inline 调度 job）：保存开始时间戳与 id，
     // 结束时弹栈配对。非原子——仅单写者线程访问（M 泳道罕见多写者时仅可能短暂错配）。
@@ -378,10 +367,9 @@ namespace JobSystem
 
     inline void DebugBeginExec(uint64_t id, uint32_t tiles, uint32_t workers, bool isDirect) noexcept
     {
-        // 零开销守门：仅调试面板开启（g_nativeActivityCaptureEnabled）才采集。
-        // 注意：优先级需高于 id==0 判断，确保面板关闭时完全不触碰任何原子。
+        // 零开销守门：面板关闭时不触碰任何原子（此判断须先于 id==0 判断）。
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
-        // 暂停时停止记录新段：不压栈、不写共享历史，环形缓冲不被覆盖、历史得以保留。
+        // 暂停时停止记录新段，环形缓冲不被覆盖、历史得以保留。
         if (g_debugPaused.load(std::memory_order_relaxed)) return;
         const int lane = DebugReportLaneId();
         if (id == 0 || lane < 0) return;
@@ -410,7 +398,10 @@ namespace JobSystem
                 // 结束事件：完整窗口直接追加进共享时间线历史（GUI 只读渲染）。
                 // 先写槽内容，再 fetch_add(release) 发布计数——读者永不读到未写完的槽。
                 const unsigned int h = g_debugSegHead.fetch_add(1, std::memory_order_relaxed);
-                g_debugSegments[h % kDebugSegmentMax] = DebugSegment{ lane, f.id, f.startMs, DebugNowMs(), f.tiles, f.workers, f.isDirect };
+                const unsigned int slot = h % kDebugSegmentMax;
+                g_debugSegSeq[slot].fetch_add(1, std::memory_order_acquire);  // 奇：写中
+                g_debugSegments[slot] = DebugSegment{ lane, f.id, f.startMs, DebugNowMs(), f.tiles, f.workers, f.isDirect };
+                g_debugSegSeq[slot].fetch_add(1, std::memory_order_release);  // 偶：写完
                 g_debugSegVisible.fetch_add(1, std::memory_order_release);
             }
         }
@@ -418,6 +409,16 @@ namespace JobSystem
         g_workerCurrentBatchId[lane].store(0, std::memory_order_release);
         g_workerCurrentTile[lane].store(0, std::memory_order_release);
         g_workerBatchTileCount[lane].store(0, std::memory_order_release);
+    }
+    // 尝试读一个已完成的 debug segment（跳过写中的槽）。seqlock：seq 奇=写中。
+    // 返回 false 表示该槽正在写或读期间被写，调用方应跳过。
+    inline bool DebugTryReadSegment(unsigned int slot, DebugSegment& out) noexcept
+    {
+        const uint64_t s1 = g_debugSegSeq[slot].load(std::memory_order_acquire);
+        if (s1 & 1) return false;
+        out = g_debugSegments[slot];
+        const uint64_t s2 = g_debugSegSeq[slot].load(std::memory_order_acquire);
+        return s1 == s2;
     }
     // 更新当前执行窗口（栈顶）已认领执行的 tile 数（worker 在 batch 执行中累计后调用）。
     // 让 segment.tiles = 该 worker 实际领取的 tile 数，而非整批 tileCount。
@@ -448,8 +449,7 @@ namespace JobSystem
         }
         catch (...)
         {
-            if (state->batchExceptionPtr == nullptr)
-                state->batchExceptionPtr = std::current_exception();
+            RecordStateException(state, std::current_exception());
         }
         SetCurrentBatchId(0);
         DebugEndExec();
@@ -466,33 +466,38 @@ namespace JobSystem
     // ---- State 模块（定义在 JobSystem_State.cpp） ----
     void RetainDependency(HandleState* state, HandleState* dep) noexcept;
     void RegisterLongBatchBarrier(HandleState* state) noexcept;
-    void SubmitBackendAsync(std::function<void()> work);
+    // 提交异步 state-owned 操作：即使操作在正常尾声前抛异常，state 引用也由后端包装器释放。
+    bool SubmitBackendAsync(
+        std::function<void()> work,
+        HandleState* state = nullptr,
+        void (*failureCleanup)(void*) = nullptr,
+        void* failureContext = nullptr) noexcept;
     int ResolveChunkSize(int length, int requestedChunk);
-    // 带 funcHash 的重载：flag 开启且有 per-job 成本数据时按 perElem EWMA 自动
-    // 求解最优 tile 数；否则走 tpw=4 兜底。funcHash=0 等价于两参版本。
-    // outJccFine（可空）：本次分块是否由 JCC 公式（细粒度）产出——退役时据此判定
-    // 学习样本为细/粗（perElem 修正后公式可能产出 < tpw 的 tiles，tile 数比较会误判）。
+    // 带 funcHash 的重载：flag 开启且有 per-job 成本数据时按 perElem EWMA 自动求解最优 tile 数，否则 tpw=4 兜底；funcHash=0 等价两参版本。
+    // outJccFine（可空）：分块是否由 JCC 公式（细粒度）产出，退役时据此归细/粗（公式可能产出 < tpw 的 tiles，tile 数比较会误判）。
     int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash,
         bool* outJccFine = nullptr);
 
     // ---- 实体数衡 tile（定义在 JobSystem_Tiles.cpp） ----
     int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept;
-    int ResolveEcsEntityTileTarget(int totalEntities, int workerCount) noexcept;
+    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount) noexcept;
     int BuildEntityBalancedTiles(ExecutionTile* tiles, const ChunkBatchContext* cc,
         TileKind kind, int itemCount, int targetEntities) noexcept;
 
     // ---- shutdown 残留 batch 强制退役（定义在 JobSystem_Tiles.cpp） ----
-    // ChaseLevScheduler::Stop 排空残留 task 后，Shutdown 对每个未退役 batch 调用：
-    // cleanup(context) + ReleaseBatch + backendRetired + ReleaseState（等价正常退役的
-    // finalized 块，但不检查 tilesRemaining/pendingTasks——shutdown 时 worker 已 join，
-    // 单线程安全）。context 已清理（正常退役）或 finalized 已置位时幂等跳过。
+    // Shutdown 对每个未退役 batch 执行与正常退役 finalized 块等价的
+    // cleanup + ReleaseBatch + backendRetired + ReleaseState，但不检查 tilesRemaining/pendingTasks
+    // ——shutdown 时 worker 已 join，单线程安全。context 已清理或 finalized 已置位时幂等跳过。
     void ForceFinalizeBatch(BatchState* batch) noexcept;
 
+    // 中止从未到达后端的 batch（分配/生命周期/continuation 失败）：持有初始 BatchStorage 引用，
+    // 发布终态 HandleState，不触碰调度器计数器。
+    void AbortUnsubmittedBatch(BatchState* batch, std::exception_ptr exception) noexcept;
+
     // ---- ISPC MT 任务挂钩（tasksys.cpp 调用，事件驱动显示每个参与 worker 的耗时）----
-    // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（在 W/M 之后）。
-    // DLL 分离：tasksys.cpp（含 ISPCAlloc/Launch/Sync 任务系统）移入 NativeTranspiled.dll，
-    // 故 DebugIspcTaskBegin/End 必须从 NativeDll 导出——NativeDll 编译时 JOB_SYSTEM_EXPORT
-    // 已定义→dllexport；NativeTranspiled 编译时未定义→dllimport。
+    // 每个 ISPC 任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道（W/M 之后）。
+    // tasksys.cpp 位于 NativeTranspiled.dll，故本 API 须从 NativeDll 导出：
+    // JOB_SYSTEM_EXPORT 已定义→dllexport；未定义→dllimport。
 #ifdef _WIN32
 #ifdef JOB_SYSTEM_EXPORT
 #define ENTJOY_ISPC_DEBUG_API __declspec(dllexport)
@@ -522,12 +527,12 @@ namespace JobSystem
     void SubmitOrPending(BatchState* batch);
     // 隐式批 force point：defer 窗口内提交全部 pending + 单次唤醒（EndFrame / Complete 自动触发）。
     void FlushPendingSubmits();
-    bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept;
-    void CleanupChunkContext(void* ctx) noexcept;
-    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile) noexcept;
-    void CleanupGeneralContext(void* ctx) noexcept;
+    bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile);
+    void CleanupChunkContext(void* ctx);
+    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile);
+    void CleanupGeneralContext(void* ctx);
 
-    // ---- Chase-Lev tile 级窃取（新路径，定义在 JobSystem_Tiles.cpp） ----
+    // ---- Chase-Lev tile 级窃取（定义在 JobSystem_Tiles.cpp） ----
     // ChaseLevScheduler 回调 trampoline（供 Scheduler::Initialize 传给 ChaseLevScheduler::Start）
     void ChaseLevExecuteTile(BatchState* batch, uint32_t tileIndex) noexcept;
     // ChaseLev 双条件退役：tilesRemaining==0 && pendingTasks==0 时才释放 storage。

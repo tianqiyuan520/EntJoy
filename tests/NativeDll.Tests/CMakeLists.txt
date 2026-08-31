@@ -125,4 +125,8 @@ if(MSVC)
 
     target_compile_options(ImplicitBatchTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
     target_compile_definitions(ImplicitBatchTests PRIVATE NDEBUG NOMINMAX)
+else()
+    # Linux/Clang：std::thread 需要 pthread；sanitizer flags 由 CI 的 CMAKE_CXX_FLAGS 传入。
+    add_compile_options(-pthread)
+    add_link_options(-pthread)
 endif()

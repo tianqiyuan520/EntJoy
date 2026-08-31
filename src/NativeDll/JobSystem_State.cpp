@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -22,7 +23,7 @@ namespace JobSystem
         ContinuationNode* next{ nullptr };
     };
 
-    // 执行并释放一条 continuation 链（含单个节点）。异常吞掉，与旧行为一致。
+    // 执行并释放一条 continuation 链（含单个节点）；异常吞掉。
     static void RunContinuationChain(ContinuationNode* head) noexcept
     {
         while (head)
@@ -58,6 +59,10 @@ namespace JobSystem
         DrainContinuationSlot(state);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
+        {
+            std::lock_guard<std::mutex> lock(state->exceptionMutex);
+            state->batchExceptionPtr = nullptr;
+        }
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
@@ -129,6 +134,38 @@ namespace JobSystem
             RecycleState(state);
     }
 
+    void RecordStateException(HandleState* state, std::exception_ptr exception) noexcept
+    {
+        if (!state || !exception) return;
+        try
+        {
+            std::lock_guard<std::mutex> lock(state->exceptionMutex);
+            if (!state->batchExceptionPtr)
+                state->batchExceptionPtr = std::move(exception);
+        }
+        catch (...)
+        {
+            // Exception recording is best effort if allocation/locking itself
+            // fails.  The worker must still reach its completion protocol.
+        }
+    }
+
+    std::exception_ptr TakeStateException(HandleState* state) noexcept
+    {
+        if (!state) return {};
+        try
+        {
+            std::lock_guard<std::mutex> lock(state->exceptionMutex);
+            auto exception = state->batchExceptionPtr;
+            state->batchExceptionPtr = nullptr;
+            return exception;
+        }
+        catch (...)
+        {
+            return {};
+        }
+    }
+
     std::mutex g_longBatchBarrierMutex;
     std::vector<HandleState*> g_longBatchBarriers;
     thread_local HandleState* g_completingBatchState = nullptr;
@@ -159,7 +196,7 @@ namespace JobSystem
                 deferred.push_back(state);
                 continue;
             }
-            WaitBackendRetired(state);   // 复用兜底唤醒看门狗（条件触发 + 超时兜底）
+            WaitBackendRetired(state);   // defer 窗口补广播 + 等待退役
             ReleaseState(state);
         }
         if (!deferred.empty())
@@ -255,12 +292,28 @@ namespace JobSystem
     struct BackendAsyncContext
     {
         std::function<void()> work;
+        HandleState* state{ nullptr };
     };
 
     static void RunBackendAsync(void* raw) noexcept
     {
         auto* context = static_cast<BackendAsyncContext*>(raw);
-        try { context->work(); } catch (...) {}
+        try
+        {
+            context->work();
+        }
+        catch (...)
+        {
+            // 正常路径由操作自身收尾完成；此为意外异常的兜底边界：保持句柄终结状态
+            // 并释放在飞引用，避免 Complete() 永久阻塞。
+            if (context->state)
+            {
+                RecordStateException(context->state, std::current_exception());
+                try { CompleteState(context->state); } catch (...) {}
+            }
+        }
+        if (context->state)
+            ReleaseState(context->state);
     }
 
     static void CompleteBackendAsync(void* raw) noexcept
@@ -268,12 +321,63 @@ namespace JobSystem
         delete static_cast<BackendAsyncContext*>(raw);
     }
 
-    void SubmitBackendAsync(std::function<void()> work)
+    bool SubmitBackendAsync(
+        std::function<void()> work,
+        HandleState* state,
+        void (*failureCleanup)(void*),
+        void* failureContext) noexcept
     {
-        auto* context = new BackendAsyncContext{ std::move(work) };
-        // 统一走 Chase-Lev SubmitWork：worker 异步执行，不阻塞调用线程。
-        // SubmitWork 内部 PushTaskBackoff 有限退避，injector 满时短暂自旋。
-        g_chaseLevScheduler->SubmitWork(&RunBackendAsync, context, &CompleteBackendAsync);
+        BackendAsyncContext* context = nullptr;
+        try
+        {
+            if (!g_chaseLevScheduler || !g_chaseLevScheduler->IsRunning())
+                throw std::runtime_error("JobSystem backend is not running");
+
+            context = new BackendAsyncContext{ std::move(work), state };
+            // 统一走 Chase-Lev SubmitWork：worker 异步执行，不阻塞调用线程。
+            // SubmitWork 内部 PushTaskBackoff 有限退避，injector 满时短暂自旋。
+            if (!g_chaseLevScheduler->SubmitWork(
+                    &RunBackendAsync, context, &CompleteBackendAsync))
+            {
+                CompleteBackendAsync(context);
+                context = nullptr;
+                throw std::runtime_error("JobSystem backend rejected asynchronous work");
+            }
+            // Ownership of context and the acquired state reference now belongs
+            // to the queued RangeTask/RunBackendAsync wrapper.
+            return true;
+        }
+        catch (...)
+        {
+            if (context)
+                CompleteBackendAsync(context);
+            if (state)
+            {
+                // 调用方在进入前已取得在飞引用，所有失败路径必须消费；清理先于发布
+                // 完成执行，调用方不会观察到句柄已终结而 context 仍存活。
+                RecordStateException(state, std::current_exception());
+                if (failureCleanup)
+                {
+                    try
+                    {
+                        failureCleanup(failureContext);
+                    }
+                    catch (...)
+                    {
+                        RecordStateException(state, std::current_exception());
+                    }
+                }
+                try { CompleteState(state); }
+                catch (...) { RecordStateException(state, std::current_exception()); }
+                ReleaseState(state);
+            }
+            else if (failureCleanup)
+            {
+                try { failureCleanup(failureContext); }
+                catch (...) {}
+            }
+            return false;
+        }
     }
 
     int ResolveChunkSize(int length, int requestedChunk)
@@ -289,32 +393,25 @@ namespace JobSystem
         if (requestedChunk > 0) return requestedChunk;
         int wc = std::max(1, g_numThreads);
 
-        // 自动 batch：仅在 g_jobCostCacheEnabled 且有该 job 的成本数据时。
-        // 热路径开销 <3ns（GetPerElemCost 一次 AND + 一次数组读）。
+        // 自动 batch：仅当成本缓存开启且有该 job 成本数据时（热路径开销极小）。
         if (funcHash != 0 && g_jobCostCacheEnabled.load(std::memory_order_relaxed))
         {
             // ---- 带宽/延迟绑定自适应 ----
-            // memory-bound job（GridSearch Query 空间哈希 gather）总耗时由共享
-            // DRAM 带宽主导，加 tile 不线性提速，按每元素成本推 tile 数会错标。
-            // 粗/细粒度对比学习后判为 mem-bound → 直接固定 tpw 分块（并发够用、
-            // 调度开销最小）；compute-bound 走下方原公式。
-            // 学习期两阶段：
-            //   1) 先采 kCoarseProbeSamples 个粗粒度（tpw）样本作参考（此时细 EWMA=0，
-            //      perElemNs==0 自然走 tpw 兜底，粗样本在退役侧自动积累）；
-            //   2) 粗样本齐后，用粗成本作代理跑公式 → 产出细粒度分块 → 采集细样本，
-            //      细样本满足阈值后 TryClassify 定 mode（mem-bound / parallel）。
+            // memory-bound job 总耗时由共享 DRAM 带宽主导，按元素成本推 tile 数会错标 →
+            // 固定 tpw；compute-bound 走下方公式。两阶段学习：先采粗样本，再以粗成本
+            // 为代理产细样本，TryClassify 定 mode（mem-bound / parallel）。
             const auto mode = g_jobCostCache.GetMode(funcHash);
             if (mode == JobSystem::kModeMemBound)
             {
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
-                return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
             }
             const double perElemNs = g_jobCostCache.GetPerElemCost(funcHash);
             if (mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
             {
                 // 阶段 1：粗样本未齐 → tpw（perElemNs 通常为 0，本分支与兜底一致）
-                return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
             }
             // 阶段 2（或 parallel 稳态）：细成本优先，缺省用粗成本代理（学习中/冷启动）
             double costNs = perElemNs;
@@ -325,24 +422,21 @@ namespace JobSystem
                 constexpr int kMaxAdaptiveTpw = 16;         // tiles 上限 = workers×16
                 constexpr int kMaxAutoChunk = 32768;        // 单 tile 最多 32k 元素
                 constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
-                const int chunkTpw4 = std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+                const int chunkTpw4 = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
 
                 // ── 两因子（C_fixed 每 tile 固定 + C_elem 每元素）优先 ──
                 const double cfixed = g_jobCostCache.GetPerTileCost(funcHash);
                 const double celem = perElemNs > 0.0 ? perElemNs : costNs;
                 if (cfixed > 0.0 && celem > 0.0)
                 {
-                    // 空体/超轻：tpw 粒度单 tile 执行 << 调度开销 → 执行≈0，总成本被
-                    // 调度/唤醒/worker 抖动主导，任何执行成本模型都无解 → tpw 兜底
-                    //（64K/1M 达 docs；8K 空体 ~6µs 为已知局限——C_fixed×tiles 主导，
-                    //  旧口径靠唤醒虚高（∝1/N）碰巧缓解，见 docs 20260830）。
+                    // 空体/超轻：执行≈0，总成本由调度/唤醒/worker 抖动主导，
+                    // 任何执行成本模型都无解 → tpw 兜底。
                     const double tileTimeTpw =
                         cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker)) * celem;
                     if (tileTimeTpw < kSchedulingOverheadNs)
                     {
-                        // 空体/超轻 → tpw 兜底。仍按"公式产出"登记细样本（perElem 值有效），
-                        // 使细/粗比值≈1 → mem-bound 分类 → 后续稳态固定 tpw（性能同兜底），
-                        // 且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
+                        // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
+                        // 稳态固定 tpw，且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
                         if (outJccFine) *outJccFine = true;
                         return chunkTpw4;
                     }
@@ -354,26 +448,24 @@ namespace JobSystem
                     int targetTiles = static_cast<int>(length / tileSize + 0.9999);
                     if (targetTiles < wc) targetTiles = wc;
                     if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
-                    return std::max(1, (length + targetTiles - 1) / targetTiles);
+                    return std::max(1, CeilDiv(length, targetTiles));
                 }
 
                 // ── 单因子回退（冷启动，C_fixed 未学）：既有公式 ──
                 if (outJccFine) *outJccFine = true;   // JCC 公式产出（细粒度学习样本）
                 const double totalUs = length * costNs / 1000.0;
-                // perElem 是「并行 wall 稀释」成本（退役时 wall = 整批墙钟，÷N）。
-                // 直接用它算 tiles 会把中间量级 job（wall ~0.1-5ms）塌成 4-15 个
-                // 巨型 tile → 并行度损失 wc/tiles 倍（GridSearch 实测 2-3x 退化）。
-                // 还原为「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
+                // perElem 是「并行 wall 稀释」成本，直接用它算 tiles 会产出巨型 tile
+                // 损失并行度；还原为「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
                 const double serialUs = totalUs * wc;
                 double targetTilesD = std::clamp(serialUs / kTargetTileUs, 1.0,
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
                 // 安全护栏：单 tile 元素数上限（kMaxAutoChunk）。
-                int floorTiles = (length + kMaxAutoChunk - 1) / kMaxAutoChunk;
+                int floorTiles = CeilDiv(length, kMaxAutoChunk);
                 if (floorTiles > wc) floorTiles = wc;
                 if (targetTiles < floorTiles) targetTiles = floorTiles;
-                int chunk = std::max(1, (length + targetTiles - 1) / targetTiles);
+                int chunk = std::max(1, CeilDiv(length, targetTiles));
                 // Floor：chunk 不比 tpw 兜底更粗，防止快 job 退化（tpw 冗余吸收 worker 抖动）。
                 double tileTimeNs = costNs * chunkTpw4;
                 bool schedulingDominated = (tileTimeNs < kSchedulingOverheadNs);
@@ -385,15 +477,13 @@ namespace JobSystem
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
                         length, costNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
-                        floorTiles, chunk, (length + chunk - 1) / chunk);
+                        floorTiles, chunk, CeilDiv(length, chunk));
                 return chunk;
             }
         }
-        // 冷启动 / flag 关闭 / 无数据 → tpw=4 兜底（现状）
-        // 默认 g_configuredTilesPerWorker 个 tile/worker（可调，默认 4），
-        // 比 Unity 默认 4/worker 更细：可变代价 job 的负载均衡收益 > claim 开销。
-        // batch = N/(W*k) 随 N 自动缩放，无需每 job 标代价。
-        return std::max(16, (length + wc * g_configuredTilesPerWorker - 1) / (wc * g_configuredTilesPerWorker));
+        // 冷启动 / flag 关闭 / 无数据 → tpw 兜底：batch = N/(W×k) 随 N 自动缩放，
+        // 无需每 job 标代价。
+        return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
     }
 
     // ============================================================
@@ -427,10 +517,8 @@ namespace JobSystem
     // Chase-Lev 退役是异步的（completed 由最后 tile 设置，退役由最后 taskDone 触发）。
     // Complete() 返回前等 backendRetired，保证"Complete 后 batch 已完全退役"
     // （cleanup/存储回收已完成）——测试与用户代码依赖这一契约。
-    // 兜底唤醒看门狗：把"notify 错位型死锁"降级为可观测毛刺——
-    //   ① 条件档：存在未关闭的 deferNotify 窗口（g_submitDeferDepth>0，最近的提交可能被吞唤醒）
-    //      → 立即补一次广播再正常等待；正常路径 depth==0，零触发零开销；
-    //   ② 超时档：等待 >5s 无进展 → 补广播 + 警告（兜住未知错位/遗漏路径，防永久挂）。
+    // 存在未关闭 deferNotify 窗口时补广播（C++ Complete 不自动 Flush，
+    // defer 窗口内提交的 job 可能无人唤醒，这里补一次）。
     static void WaitBackendRetired(HandleState* state) noexcept
     {
         if (!state) return;
@@ -441,34 +529,16 @@ namespace JobSystem
         {
             g_chaseLevScheduler->WakePending();
         }
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!state->backendRetired.load(std::memory_order_acquire))
-        {
-            if (std::chrono::steady_clock::now() >= deadline)
-            {
-                std::fprintf(stderr,
-                    "[JobSystem] WARN: backendRetired wait >5s (batch=%llu), forcing wake\n",
-                    (unsigned long long)state->diagnosticBatchId.load(std::memory_order_relaxed));
-                if (g_chaseLevScheduler)
-                    g_chaseLevScheduler->WakePending();
-                deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            }
             state->backendRetired.wait(false, std::memory_order_relaxed);
-        }
     }
 
-    // C++ 异常协议：Complete 的每个退出点在等退役后调用——batch 上的异常已
-    // 转移到 state->batchExceptionPtr（TryFinalizeChaseLevBatch 退役时复制），
-    // 这里 rethrow 给调用方（TBB/Taskflow 语义）。so 只能抛一次：rethrow 后
-    // 置 null，防止同一 state 多次 Complete 重复抛。
+    // C++ 异常协议：Complete 的每个退出点在等退役后调用；异常通过冷路径
+    // mutex 一次性摘取，多个 Complete 调用不会并发读写 exception_ptr。
     static void RethrowBatchException(HandleState* state)
     {
-        if (state && state->batchExceptionPtr)
-        {
-            auto ex = state->batchExceptionPtr;
-            state->batchExceptionPtr = nullptr;
-            std::rethrow_exception(ex);
-        }
+        auto ex = TakeStateException(state);
+        if (ex) std::rethrow_exception(ex);
     }
 
     void JobHandle::Complete() const
@@ -490,10 +560,9 @@ namespace JobSystem
         // Chase-Lev 唯一路径：主线程不参与 tile 级协助计数（tiles 在持久
         // deque），直接进入 spin/wait，由 worker 完成退役并置 completed。
 
-        // Phase 2: dense spin first (never yield before we've given the job a
-        // chance to complete — yield triggers a full OS context switch).
-        // Chase-Lev 模式：主线程在 spin 期间即参与认领执行（第 16 个执行者），
-        // 不等 1ms 超时——消除"慢 worker 被 OS 抢占 + 主线程干等 1ms"的尾延迟。
+        // Phase 2: 先密集 spin（过早 yield 触发完整 OS 上下文切换）。
+        // Chase-Lev：主线程 spin 期间即协助认领执行，消除"慢 worker 被抢占
+        // + 主线程干等"的尾延迟。
         for (int i = 0; i < 2048; i++)
         {
             if (_state->completed.load(std::memory_order_acquire))
@@ -542,16 +611,14 @@ namespace JobSystem
         }
 
         // Phase 3: blocking wait with periodic 主线程协助。
-        // 正常路径：worker 完成 → notify_all → condvar 谓词满足立即唤醒（无额外延迟）。
-        // Chase-Lev 模式：主线程也参与共享认领执行（对齐旧 MPMC 的 assist——
-        // 第 16 个执行者兜底"最后一片被 OS 抢占 worker 握着"的尾延迟）。
+        // 正常路径：worker 完成 → notify_all → 谓词满足立即唤醒；
+        // Chase-Lev：主线程也参与认领执行，兜底"最后一片被 OS 抢占"的尾延迟。
         g_waitFallbacks.fetch_add(1, std::memory_order_relaxed);
         g_completeWaitLoops.fetch_add(1, std::memory_order_relaxed);
         constexpr auto kCompleteRevisit = std::chrono::microseconds(256); // 256µs 回访间隔（更快兜底）
         while (!_state->completed.load(std::memory_order_acquire))
         {
-            // 先 assist 再 wait：主线程持续认领执行（第 16 个执行者），
-            // 避免"干等 256µs 才再干活的停顿窗口"。循环内每轮最多 16 片，
+            // 先 assist 再 wait：避免干等 256µs 的停顿窗口；每轮最多 assist 16 次，
             // 防止链条级联时主线程无限 assist 不回查 completed。
             if (g_mainThreadAssistEnabled && g_chaseLevScheduler)
             {

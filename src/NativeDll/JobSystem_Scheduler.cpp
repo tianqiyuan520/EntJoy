@@ -20,12 +20,30 @@
 
 namespace JobSystem
 {
+    // 无效/关闭中的提交仍执行调用方提供的 cleanup；异常走异步 job 同一冷路径通道，
+    // 避免跨非托管导出边界抛出或终止进程，同时保留调用方持有的 Complete() 语义。
+    static JobHandle MakeCompletedAfterCleanup(void (*cleanup)(void*), void* context)
+    {
+        auto* state = CreateState(true);
+        if (cleanup)
+        {
+            try
+            {
+                cleanup(context);
+            }
+            catch (...)
+            {
+                RecordStateException(state, std::current_exception());
+            }
+        }
+        return JobHandle(state);
+    }
+
     // ============================================================
     // Schedule helpers
     // ============================================================
-    // ── tile 布局缓存：同 (unitsPtr, itemCount, workerCap, rangeSize, unitGeneration) 下
-    //    实体数衡 tile 划分完全确定 → 跨 job 共享（同 query 多 job 只扫一次）。
-    //    只存值（tile 边界拷贝），不持有指针 → 无悬垂。
+    // ── tile 布局缓存：同 key（unitsPtr/itemCount/workerCap/rangeSize/unitGeneration）下划分确定
+    //    → 跨 job 共享（同 query 只扫一次）；只存值拷贝不持指针 → 无悬垂。
     namespace {
         struct TileLayoutEntry
         {
@@ -34,7 +52,7 @@ namespace JobSystem
             int workerCap = 0;
             int rangeSize = 0;
             uint32_t unitGeneration = 0; // C# cache StructuralVersion：重建必变 → 防指针地址复用误命中
-            long totalEntities = 0;      // 实体总量（JCC 前置判重成本估算用）
+            int64_t totalEntities = 0;  // 实体总量（JCC 前置判重成本估算用）
             uint32_t tileCount = 0;
             std::vector<uint32_t> bounds; // 长度 tileCount+1：tile i 覆盖 [bounds[i], bounds[i+1])
         };
@@ -47,7 +65,7 @@ namespace JobSystem
         TileLayoutCache g_tileLayoutCache;
 
         bool TileLayoutTryGet(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
-            uint32_t unitGeneration, uint32_t& outTileCount, long& outTotalEntities,
+            uint32_t unitGeneration, uint32_t& outTileCount, int64_t& outTotalEntities,
             std::vector<uint32_t>& outBounds)
         {
             // unitGeneration==0 = 调用方无缓存身份（fallback 路径）→ 不参与缓存（避免指针复用误命中）。
@@ -70,7 +88,7 @@ namespace JobSystem
         }
 
         void TileLayoutStore(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
-            uint32_t unitGeneration, long totalEntities, uint32_t tileCount,
+            uint32_t unitGeneration, int64_t totalEntities, uint32_t tileCount,
             const std::vector<uint32_t>& bounds)
         {
             if (unitGeneration == 0) return;
@@ -107,13 +125,41 @@ namespace JobSystem
         auto* state = CreateState(false);
         AssignStateDiagnosticId(state);
         auto* ds = dep.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { builder(state); return JobHandle(state); }
+        if (!ds || ds->completed.load(std::memory_order_acquire))
+        {
+            try
+            {
+                builder(state);
+            }
+            catch (...)
+            {
+                CompleteStateAfterException(state, std::current_exception());
+            }
+            return JobHandle(state);
+        }
         AcquireState(state);
         RetainDependency(state, ds);
-        AddContinuationOrRunNow(ds, [state, b = std::forward<WorkBuilder>(builder)]() mutable {
-            b(state);
-            ReleaseState(state);
-        });
+        try
+        {
+            AddContinuationOrRunNow(ds, [state, b = std::forward<WorkBuilder>(builder)]() mutable {
+                try
+                {
+                    b(state);
+                }
+                catch (...)
+                {
+                    CompleteStateAfterException(state, std::current_exception());
+                }
+                // Balance the continuation's in-flight reference even when
+                // the builder or submission path fails.
+                ReleaseState(state);
+            });
+        }
+        catch (...)
+        {
+            CompleteStateAfterException(state, std::current_exception());
+            ReleaseState(state); // continuation reference acquired above
+        }
         return JobHandle(state);
     }
 
@@ -121,27 +167,51 @@ namespace JobSystem
     void FastPath(Work&& work, void* ctx, void (*cleanup)(void*), HandleState* state)
     {
         AcquireState(state);
-        SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
-            // 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
-            // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
-            const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
-            // 调试面板：pool 执行窗口上报到本 worker 泳道（WorkerLoop 已预分配索引）
-            DebugBeginExec(id, 1, 1, false); // 快速路径 Job：单线程执行
-            if (id != 0) SetCurrentBatchId(id);
-            try { work(); }
+        try
+        {
+            const bool accepted = SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
+                // 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
+                // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
+                const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+                // 调试面板：pool 执行窗口上报到本 worker 泳道（WorkerLoop 已预分配索引）
+                DebugBeginExec(id, 1, 1, false); // 快速路径 Job：单线程执行
+                if (id != 0) SetCurrentBatchId(id);
+                try { work(); }
+                catch (...)
+                {
+                    // C++ 异常协议：快速路径（pool 窗口）异常记录到 handle state，Complete() 统一重抛。
+                    RecordStateException(state, std::current_exception());
+                }
+                if (id != 0) SetCurrentBatchId(0);
+                DebugEndExec();
+                try
+                {
+                    if (cleanup) cleanup(ctx);
+                }
+                catch (...)
+                {
+                    RecordStateException(state, std::current_exception());
+                }
+                try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
+            }, state, cleanup, ctx);
+            (void)accepted; // failure path performs cleanup and terminalization
+        }
+        catch (...)
+        {
+            // std::function construction or an unexpected submission failure
+            // happened before ownership reached the backend wrapper.
+            RecordStateException(state, std::current_exception());
+            try
+            {
+                if (cleanup) cleanup(ctx);
+            }
             catch (...)
             {
-                // C++ 异常协议：快速路径（pool 窗口）异常记录到 handle state，
-                // Complete() 统一重抛——不再静默吞掉。
-                if (state->batchExceptionPtr == nullptr)
-                    state->batchExceptionPtr = std::current_exception();
+                RecordStateException(state, std::current_exception());
             }
-            if (id != 0) SetCurrentBatchId(0);
-            DebugEndExec();
-            if (cleanup) cleanup(ctx);
-            CompleteState(state);
+            try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
             ReleaseState(state);
-        });
+        }
     }
 
     template <typename Work>
@@ -157,10 +227,28 @@ namespace JobSystem
         { FastPath(std::forward<Work>(work), ctx, cleanup, state); return JobHandle(state); }
         AcquireState(state);
         RetainDependency(state, ds);
-        AddContinuationOrRunNow(ds, [state, work = std::forward<Work>(work), ctx, cleanup]() mutable {
-            FastPath(std::forward<Work>(work), ctx, cleanup, state);
+        try
+        {
+            AddContinuationOrRunNow(ds, [state, work = std::forward<Work>(work), ctx, cleanup]() mutable {
+                try
+                {
+                    FastPath(std::forward<Work>(work), ctx, cleanup, state);
+                }
+                catch (...)
+                {
+                    CompleteStateAfterException(state, std::current_exception());
+                }
+                ReleaseState(state);
+            });
+        }
+        catch (...)
+        {
+            RecordStateException(state, std::current_exception());
+            try { if (cleanup) cleanup(ctx); }
+            catch (...) { RecordStateException(state, std::current_exception()); }
+            try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
             ReleaseState(state);
-        });
+        }
         return JobHandle(state);
     }
 
@@ -169,10 +257,8 @@ namespace JobSystem
     // ============================================================
     static bool ResolveWorkerAffinityEnabled() noexcept
     {
-        // 默认关闭 CPU 亲和性：worker 由 OS 自由调度（SMT 机器上避免
-        // 每物理核心 2 线程死绑共享执行单元；实测 AMD 8845H 8物理16逻辑
-        // 关闭绑定 p99 0.83ms vs 绑定 1.0-1.2ms）。ENTJOY_WORKER_AFFINITY=1
-        // 可显式开启（无 SMT / 独占机器场景）。
+        // 默认关闭 CPU 亲和性：worker 交 OS 自由调度（避免 SMT 双线程死绑共享执行单元）。
+        // ENTJOY_WORKER_AFFINITY=1 可显式开启（无 SMT / 独占机器场景）。
         std::string value;
 #if defined(_WIN32)
         char* raw = nullptr;
@@ -194,24 +280,19 @@ namespace JobSystem
 
     void Scheduler::Initialize(int numThreads)
     {
+        std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
         g_shuttingDown.store(false, std::memory_order_release);
         g_mainThreadId = std::this_thread::get_id();
 #if defined(_WIN32)
-        // Raise this process above typical background load so worker threads
-        // are deprioritized less when competing with the OS and other processes.
+        // 提升进程优先级，减少 worker 与 OS/其他进程竞争时被降权。
         ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
-        // Raise timer resolution from the default ~15.6 ms to 1 ms so that
-        // semaphore wait/notify and condition-variable timeouts are more
-        // responsive.  The OS-wide effect is negligible for a game process.
+        // 计时器分辨率从默认 ~15.6ms 提到 1ms，提升 semaphore/condition_variable 超时响应；
+        // 对游戏进程整体影响可忽略。
         ::timeBeginPeriod(1);
 #endif
-        {
-            std::lock_guard<std::mutex> lock(g_schedulerMutex);
             int resolved;
             int envWorkers = 0;
-            // 默认 worker 数 = 逻辑核心-1（Unity 式，GridSearch 100K 大任务吞吐最优）。
-            // SMT 竞争由"自适应亲和（SMT→关闭绑定）"消化，无需限制 worker ≤ 物理核心
-            // （实测 7 物理-1 worker p50 0.68 vs 15 worker 0.60，吞吐损失更明显）。
+            // 默认 worker 数 = 逻辑核心-1；SMT 竞争由自适应亲和消化，无需限制 ≤ 物理核心。
             // ENTJOY_JOB_WORKERS>0 显式覆盖。
             {
                     std::string value;
@@ -238,18 +319,17 @@ namespace JobSystem
                 (envWorkers > 0 ? envWorkers :
                     std::max(1, static_cast<int>(
                         std::thread::hardware_concurrency()) - 1));
-            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning())
-                return;
+            // 诊断数组 kMaxTrackedWorkers=64：超出会导致 GetWorkerSnapshots/DumpState
+            // 及 affinity 位运算越界，此处钳制。
+            resolved = std::min(resolved, kMaxTrackedWorkers);
+            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning()) return;
             g_numThreads = resolved;
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
-            // 主线程 assist 默认关闭（g_mainThreadAssistEnabled = false，纯 worker 模式）。
-            // 运行时可通过 JobSystem_SetMainThreadAssist(int) 开启（兜底慢 worker 尾延迟）。
-            // 不再读取 ENTJOY_ASSIST 环境变量（避免空字符串误启用）。
+            // 主线程 assist 默认关闭（纯 worker 模式）；JobSystem_SetMainThreadAssist(int) 可运行时开启。
 
-            // Pin the calling thread (main thread) to logical core 0 so it
-            // is never preempted by a worker that shares its L1/L2 cache.
+            // 主线程钉到逻辑核 0，避免被共享 L1/L2 的 worker 抢占。
             if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
                 BindCurrentThreadToLogicalProcessor(0);
 
@@ -263,7 +343,6 @@ namespace JobSystem
 
             // 若设置了 ENTJOY_DEBUG=1，启动 Dear ImGui 调试窗口
             JobDebuggerGUI::TryLaunch();
-        }
     }
 
     void Scheduler::Shutdown()
@@ -278,13 +357,11 @@ namespace JobSystem
             return;
         }
 
+        std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
+        // Shutdown 幂等；停止/重置期间保持 gate，防止 Initialize 与 teardown 并发发布新一代。
         g_shuttingDown.store(true, std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> lock(g_schedulerMutex);
-            g_numThreads = 0;
-        }
-        // 隐式批排空：提交 pending 中尚未发布的 job（worker 尚在运行，可正常执行/退役；
-        // 未及执行者按现有 in-flight 泄漏兜底，不产生 UAF）。
+        g_numThreads = 0;
+        // 隐式批排空：执行 pending 中未发布的 job（worker 尚在运行）；未及执行者由 in-flight 兜底，不产生 UAF。
         FlushPendingSubmits();
         if (g_chaseLevScheduler)
         {
@@ -296,34 +373,28 @@ namespace JobSystem
             g_chaseLevScheduler.reset();
         }
         ConsumeLongBatchBarriers();
-        // 近无锁：先把 main 线程缓存中的 batch storage 交还共享池，再统一清空。
-        // worker 已由 chaseLevScheduler->Stop() join，其 thread_local 缓存已在退出时交还。
+        // 先把 main 线程缓存的 batch storage 交还共享池再清空；worker 已 join，其 thread_local 缓存已交还。
         FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
-        // 先把当前线程（main）缓存中的 state 交还共享池，再统一清空。
-        // worker 线程已由 Stop() join，其 thread_local 缓存已在退出时交还，
-        // 故此处清空覆盖全部 state。
+        // 先交还 main 缓存中的 state 再清空；worker 已 join 交还，故清空覆盖全部 state。
         FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
     }
 
     void Scheduler::PrewakeWorkers()
     {
-        // C# 初始化经 GetProcAddress 解析此导出，保留为 no-op。
-        // Chase-Lev worker 常驻 spin/futex，无需显式唤醒。
+        // Chase-Lev worker 常驻 spin/futex，无需显式唤醒 → 本导出为 no-op。
     }
 
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
     {
-        // 并行 for 默认粒度（batchSize=0 时 ResolveChunkSize 用）。Initialize 期调用，写后由 job
-        // 提交的 release/acquire 对 worker 可见。默认 16，见 kDefaultTilesPerWorker 注释。
+        // 并行 for 默认粒度（batchSize=0 时用）。Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
         g_configuredTilesPerWorker = std::max(1, tilesPerWorker);
     }
 
     void Scheduler::ConfigureGuided(int enabled, int k, int floor)
     {
-        // guided（chunk ∝ 剩余工作量）tile 调度开关 + 参数。Initialize 期调用，
-        // 写后由 job 提交的 release/acquire 对 worker 可见。0=off（uniform 现状）。
+        // guided（chunk ∝ 剩余工作量）开关+参数；Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
         g_guidedEnabled = enabled != 0 ? 1 : 0;
         g_guidedK = std::max(1, k);
         g_guidedFloor = std::max(1, floor);
@@ -331,67 +402,94 @@ namespace JobSystem
 
     // ---------- IJob ----------
     // Schedule 一律异步提交（对齐 Unity JobSystem 语义：调用线程只提交，不执行）。
-    // 曾经的「无依赖 inline 直跑」已移除——大工作 job 会阻塞调用线程（实测 50ms 忙等
-    // 阻塞主线程 50ms）。需要同步执行请用 Run()。
+    // 需要同步执行请用 Run()。
     JobHandle Scheduler::Schedule(void (*func)(void*), void* context, void (*cleanup)(void*), const JobHandle& dependency)
     {
-        if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        if (!func) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            return MakeCompletedAfterCleanup(cleanup, context);
+        if (!func)
+            return MakeCompletedAfterCleanup(cleanup, context);
         return ScheduleFastPath([func, context]() { func(context); }, context, cleanup, dependency);
     }
 
     // ---------- IJobFor ----------
-    // Schedule 一律异步提交（对齐 Unity JobSystem 语义）。曾经的「依赖满足且 length ≤ 4096
-    // 主线程 inline 直跑」已移除——数量少但每元素工作量大时同样阻塞调用线程（实测 n=100×
-    // 0.5ms/elem 阻塞主线程 50ms）。IJobFor 语义是串行 for，由单个 worker 执行。
+    // Schedule 一律异步提交（对齐 Unity JobSystem 语义）。
+    // IJobFor 语义是串行 for，由单个 worker 执行。
     JobHandle Scheduler::ScheduleFor(void (*func)(void*, int), void* context, int length, void (*cleanup)(void*), const JobHandle& dependency)
     {
-        if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            return MakeCompletedAfterCleanup(cleanup, context);
+        if (!func || length <= 0)
+            return MakeCompletedAfterCleanup(cleanup, context);
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             RecordPublishedJob(id, 1);
             AcquireState(state);
-            SubmitBackendAsync([func, context, length, cleanup, state]() {
-                // state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
-                const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
-                DebugBeginExec(id, 1, 1, false); // ScheduleFor（异步单任务）Job：单线程执行
-                if (id != 0) SetCurrentBatchId(id);
-                for (int i = 0; i < length; i++) func(context, i);
-                if (id != 0) SetCurrentBatchId(0);
-                DebugEndExec();
-                if (cleanup) cleanup(context);
-                CompleteState(state);
+            try
+            {
+                SubmitBackendAsync([func, context, length, cleanup, state]() {
+                    // state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
+                    const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+                    DebugBeginExec(id, 1, 1, false); // ScheduleFor（异步单任务）Job：单线程执行
+                    if (id != 0) SetCurrentBatchId(id);
+                    try
+                    {
+                        for (int i = 0; i < length; i++) func(context, i);
+                    }
+                    catch (...)
+                    {
+                        RecordStateException(state, std::current_exception());
+                    }
+                    if (id != 0) SetCurrentBatchId(0);
+                    DebugEndExec();
+                    try
+                    {
+                        if (cleanup) cleanup(context);
+                    }
+                    catch (...)
+                    {
+                        RecordStateException(state, std::current_exception());
+                    }
+                    try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
+                }, state, cleanup, context);
+            }
+            catch (...)
+            {
+                // Argument construction can fail before SubmitBackendAsync
+                // takes ownership of the acquired reference.
+                RecordStateException(state, std::current_exception());
+                try { if (cleanup) cleanup(context); }
+                catch (...) { RecordStateException(state, std::current_exception()); }
+                try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
                 ReleaseState(state);
-            });
+            }
         });
     }
 
     // ---------- IJobParallelFor ----------
-    // Schedule 一律异步提交（2026-08-30：移除 ≤4096 主线程 inline，对齐 IJob/IJobFor）。
+    // Schedule 一律异步提交（对齐 IJob/IJobFor）。
     JobHandle Scheduler::ScheduleParallelFor(void (*func)(void*, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
-        if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
-        if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
-        // FastPath（rc<=1）不学成本（已收敛为 1 tile）；batch 路径退役时学到。
+        if (!func || length <= 0)
+            return MakeCompletedAfterCleanup(cleanup, context);
+        // JobCostCache：hash 在 ResolveChunkSize 前计算（自适应分支需要）；FastPath 不学成本，batch 路径退役时学。
         const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
             ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
         bool jccFine = false;
         int cs = ResolveChunkSize(length, batchSize, funcHash, &jccFine);
-        int rc = (length + cs - 1) / cs;
+        int rc = CeilDiv(length, cs);
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
         bc->funcHash = funcHash;
-        // General 路径默认走"等量 tile"（而非 guided 大前小后）：配合批量认领既均衡又低争用。
-        // （requires: ENTJOY_GUIDED=1/ConfigureGuided(1) 仍可显式启用 guided，供可变代价 job 使用；
-        //  这里保持 g_guidedEnabled 读取，默认环境若开启则在其 5. 场景下按需 —— 见下方注释）
+        // General 路径默认"等量 tile"（配合批量认领既均衡又低争用）；g_guidedEnabled 开启时走 guided。
         const bool guided = g_guidedEnabled != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
         const int tileCount = guided
             ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
@@ -432,28 +530,50 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
-        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire))
+        {
+            try { SubmitOrPending(batch); }
+            catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+        }
+        else
+        {
+            AcquireState(state);
+            RetainDependency(state, ds);
+            try
+            {
+                AddContinuationOrRunNow(ds, [state, batch]() {
+                    try { SubmitBatch(batch); }
+                    catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                    ReleaseState(state);
+                });
+            }
+            catch (...)
+            {
+                AbortUnsubmittedBatch(batch, std::current_exception());
+                ReleaseState(state);
+            }
+        }
         return JobHandle(state);
     }
 
     // ---------- IJobParallelForBatch ----------
-    // Schedule 一律异步提交（2026-08-30：移除 length≤4096 与 rc≤1 两处主线程 inline）。
+    // Schedule 一律异步提交。
     JobHandle Scheduler::ScheduleParallelForBatch
     (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
-        if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
-        if (!func || length <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
-        // batchSize<0 = 强制异步（历史约定，保留）；reqBatch 取绝对值。
+        if (!func || length <= 0)
+            return MakeCompletedAfterCleanup(cleanup, context);
+        // batchSize<0 = 强制异步；reqBatch 取绝对值。
         int reqBatch = batchSize < 0 ? -batchSize : batchSize;
-        // JobCostCache：funcPtr hash 在 ResolveChunkSize 之前计算（自适应分支需要）。
-        // 显式 batchSize（reqBatch>0）时用户意图优先，不参与自动 batch。
+        // JobCostCache：hash 在 ResolveChunkSize 前算；显式 batchSize（reqBatch>0）时用户意图优先。
         const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
             ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
         bool jccFine = false;
         int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash, &jccFine));
-        int rc = (length + cs - 1) / cs;
+        int rc = CeilDiv(length, cs);
         // 单批次任务：走按依赖排序的池任务（异步）。
         if (rc <= 1)
             return ScheduleFastPath([func, context, length]() { func(context, 0, length); }, context, cleanup, dependency);
@@ -502,8 +622,29 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
-        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch]() { SubmitBatch(batch); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire))
+        {
+            try { SubmitOrPending(batch); }
+            catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+        }
+        else
+        {
+            AcquireState(state);
+            RetainDependency(state, ds);
+            try
+            {
+                AddContinuationOrRunNow(ds, [state, batch]() {
+                    try { SubmitBatch(batch); }
+                    catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                    ReleaseState(state);
+                });
+            }
+            catch (...)
+            {
+                AbortUnsubmittedBatch(batch, std::current_exception());
+                ReleaseState(state);
+            }
+        }
         return JobHandle(state);
     }
 
@@ -517,25 +658,24 @@ namespace JobSystem
         ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind,
         uint32_t unitGeneration)
     {
-        if (g_shuttingDown.load(std::memory_order_acquire)) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
-        if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0) { if (cleanup) cleanup(context); return JobHandle(CreateState(true)); }
+        if ((!func && !rangeFunc && !entityRangeFunc) || itemCount <= 0)
+            return MakeCompletedAfterCleanup(cleanup, context);
         // 依赖未完成时不得 inline —— 小任务也走异步提交（由依赖完成触发）。
         const bool depOk = !dependency.State() || dependency.IsCompleted();
 
-        // Choose the execution range from workload size and worker cohort.
-        // Physical 16 KiB chunks remain storage units only.
+        // 按工作量与 worker 数选执行范围；物理 16KiB chunk 仅是存储单位。
         const int provisionalWorkers = ResolveWorkerTarget(workerCap, itemCount);
         int rs = rangeSize > 0
             ? rangeSize
             : ResolveEcsBatchRangeSize(itemCount, provisionalWorkers);
-        // Native IJobChunk and IJobEntity may both use EntityBatchData. The
-        // explicit kind is intentionally retained here for independent policy.
-        // useFineRanges deliberately disabled: it doubled tile count without benefit.
-        int rc = (itemCount + rs - 1) / rs;
+        // IJobChunk/IJobEntity 共用 EntityBatchData，jobKind 显式保留以支持独立策略；
+        // useFineRanges 刻意禁用。
+        int rc = CeilDiv(itemCount, rs);
 
-        // ImmediateNative：Run 直执语义——主线程同步执行，零 worker 唤醒（保留）。
-        // rc<=1 小任务的 Schedule inline 已于 2026-08-30 移除（一律异步提交，对齐 IJob 族）。
+        // ImmediateNative：Run 直执语义——主线程同步执行，零 worker 唤醒。
         if (depOk && mode == ChunkScheduleMode::ImmediateNative)
         {
             auto* st = CreateState(true);
@@ -545,27 +685,35 @@ namespace JobSystem
             if (func) RunSyncJob(st, [&]() { for (int i = 0; i < itemCount; i++) func(context, &chunks[i]); });
             else if (rangeFunc) RunSyncJob(st, [&]() { rangeFunc(context, chunks, 0, itemCount); });
             else if (entityRangeFunc) RunSyncJob(st, [&]() { entityRangeFunc(context, batches, 0, itemCount); });
-            if (cleanup) cleanup(context);
+            if (cleanup)
+            {
+                try
+                {
+                    cleanup(context);
+                }
+                catch (...)
+                {
+                    RecordStateException(st, std::current_exception());
+                }
+            }
             return JobHandle(st);
         }
 
         auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches };
 
-        // ---- 实体数衡 tile ----：按每个 unit(chunk/batch) 的存活实体数前向扫描切块，让每块
-        // 约含 targetEnt 个实体（而非固定 chunk 数），消除满/半满/空 chunk 混排时的负载失衡。
-        // 先规划 worker 数（用 chunk 数的粗略 rc 即可，只作参与 worker 上限），再实体扫描定 tile。
+        // ── 实体数衡 tile ──：按每 unit(chunk/batch) 存活实体数前向扫描切块（约 targetEnt 实体/块），
+        // 消除满/半满/空 chunk 混排时的负载失衡。
         const TileKind tileKind = func
             ? TileKind::ChunkCallbacks
             : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
         const int targetWorkers = ResolveWorkerTarget(workerCap, rc);
-        // ── tile 布局缓存：同 (unitsPtr, itemCount, workerCap, rangeSize, unitGeneration) 下
-        //    实体数衡 tile 划分确定不变 → 跨 job 共享（同 query 多 job 只扫一次）。
-        //    未命中才扫描构建并入缓存（含 totalEntities 供 JCC 判重）。
+        // ── tile 布局缓存：同 key 下划分确定不变 → 跨 job 共享（同 query 只扫一次）；
+        //    未命中才扫描构建（含 totalEntities 供 JCC 判重）。
         const void* tileKeyPtr = chunks != nullptr ? static_cast<const void*>(chunks)
                                                    : static_cast<const void*>(batches);
         uint32_t tileCount = 0;
-        long totalEntities = 0;
+        int64_t totalEntities = 0;
         std::vector<uint32_t> tileBounds;
         const bool tileHit = tileKeyPtr != nullptr &&
             TileLayoutTryGet(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
@@ -573,7 +721,7 @@ namespace JobSystem
         if (!tileHit)
         {
             for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
-            const int targetEnt = ResolveEcsEntityTileTarget(static_cast<int>(totalEntities), targetWorkers);
+            const int targetEnt = ResolveEcsEntityTileTarget(totalEntities, targetWorkers);
             tileCount = static_cast<uint32_t>(
                 BuildEntityBalancedTiles(nullptr, cc, tileKind, itemCount, targetEnt));
             tileBounds.assign(tileCount + 1, static_cast<uint32_t>(itemCount));
@@ -619,8 +767,29 @@ namespace JobSystem
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
         auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire)) { SubmitOrPending(batch); }
-        else { AcquireState(state); RetainDependency(state, ds); AddContinuationOrRunNow(ds, [state, batch, workerCap]() { SubmitBatch(batch, workerCap); ReleaseState(state); }); }
+        if (!ds || ds->completed.load(std::memory_order_acquire))
+        {
+            try { SubmitOrPending(batch); }
+            catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+        }
+        else
+        {
+            AcquireState(state);
+            RetainDependency(state, ds);
+            try
+            {
+                AddContinuationOrRunNow(ds, [state, batch, workerCap]() {
+                    try { SubmitBatch(batch, workerCap); }
+                    catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                    ReleaseState(state);
+                });
+            }
+            catch (...)
+            {
+                AbortUnsubmittedBatch(batch, std::current_exception());
+                ReleaseState(state);
+            }
+        }
         return JobHandle(state);
     }
 

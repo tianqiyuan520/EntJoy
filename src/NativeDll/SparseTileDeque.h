@@ -56,7 +56,7 @@ namespace JobSystem
 
         SparseTileDeque(SparseTileDeque&& o) noexcept
             : capacity_(o.capacity_), mask_(o.mask_), buffer_(o.buffer_)
-            , top_{ o.top_.load(std::memory_order_relaxed) }, bottom_(o.bottom_)
+            , top_{ o.top_.load(std::memory_order_relaxed) }, bottom_(o.bottom_.load(std::memory_order_relaxed))
         {
             o.buffer_ = nullptr; o.capacity_ = 0; o.mask_ = 0;
         }
@@ -65,19 +65,19 @@ namespace JobSystem
 
         void PushBottom(TileTask task) noexcept
         {
-            const uint64_t b = bottom_;
+            const uint64_t b = bottom_.load(std::memory_order_relaxed);
             Slot& s = Get(b);
             s.data = task;
             s.seq.store(b + 1, std::memory_order_release);
-            bottom_ = b + 1;
+            bottom_.store(b + 1, std::memory_order_release);
         }
 
         bool PopBottom(TileTask& out) noexcept
         {
-            uint64_t b = bottom_ - 1;
-            bottom_ = b;
+            uint64_t b = bottom_.load(std::memory_order_relaxed) - 1;
+            bottom_.store(b, std::memory_order_release);
 
-            // SeqCst fence：阻断 x86 store→load 重排 —— `bottom_ = b` 是普通 store，
+            // SeqCst fence：阻断 x86 store→load 重排 —— `bottom_.store(b)` 是 store，
             // 紧随的 `top_.load` 可能先执行读到陈旧 top_，使 owner 与 thief 双认领
             // 同一槽位（双执行）。对齐 crossbeam 的 back.store; fence(SeqCst); front.load。
             std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -90,7 +90,7 @@ namespace JobSystem
                 // 数据发布校验（owner 自身写入恒通过；防御竞争窗口）
                 if (s.seq.load(std::memory_order_acquire) != b + 1)
                 {
-                    bottom_ = b + 1;
+                    bottom_.store(b + 1, std::memory_order_release);
                     return false;
                 }
                 out = s.data;
@@ -100,14 +100,14 @@ namespace JobSystem
                     if (!top_.compare_exchange_strong(t, t + 1,
                             std::memory_order_acq_rel, std::memory_order_acquire))
                     {
-                        bottom_ = b + 1;
+                        bottom_.store(b + 1, std::memory_order_release);
                         return false;
                     }
-                    bottom_ = t + 1; // Chase-Lev 关键：bottom 同步到 t+1
+                    bottom_.store(t + 1, std::memory_order_release); // Chase-Lev 关键：bottom 同步到 t+1
                 }
                 return true;
             }
-            bottom_ = b + 1;
+            bottom_.store(b + 1, std::memory_order_release);
             return false;
         }
 
@@ -119,7 +119,7 @@ namespace JobSystem
             for (uint32_t attempt = 0; attempt < 4; ++attempt)
             {
                 uint64_t t = top_.load(std::memory_order_acquire);
-                uint64_t b = bottom_;
+                uint64_t b = bottom_.load(std::memory_order_acquire);
                 if (static_cast<int64_t>(t) >= static_cast<int64_t>(b))
                     return false;
 
@@ -142,7 +142,7 @@ namespace JobSystem
 
         bool IsEmpty() const noexcept
         {
-            return top_.load(std::memory_order_acquire) >= bottom_;
+            return top_.load(std::memory_order_acquire) >= bottom_.load(std::memory_order_acquire);
         }
 
         uint32_t Capacity() const noexcept { return capacity_; }
@@ -151,7 +151,7 @@ namespace JobSystem
         uint32_t ApproxSize() const noexcept
         {
             const int64_t t = static_cast<int64_t>(top_.load(std::memory_order_relaxed));
-            const int64_t b = static_cast<int64_t>(bottom_);
+            const int64_t b = static_cast<int64_t>(bottom_.load(std::memory_order_relaxed));
             const int64_t sz = b - t;
             return static_cast<uint32_t>(sz > 0 ? sz : 0);
         }
@@ -167,7 +167,7 @@ namespace JobSystem
         uint32_t mask_{ 0 };
         Slot* buffer_{ nullptr };
         std::atomic<uint64_t> top_{ 0 };
-        uint64_t bottom_{ 0 };
+        std::atomic<uint64_t> bottom_{ 0 };
 
         Slot& Get(uint64_t i) noexcept { return buffer_[i & mask_]; }
 

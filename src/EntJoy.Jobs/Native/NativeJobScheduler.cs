@@ -50,7 +50,7 @@ public struct NativeJobSystemStats
     public ulong PerRangeExecEwmaNs;       // 每个 range 平均执行时间 (ns, EWMA)
     public ulong AssistExecPctEwma;        // assist 有效率 (0~100)
     public ulong CompletionOverheadUs;     // 调度/等待开销 = completionUs - perRangeExecUs
-    // Appended Tile/partition fields; keep order in sync with Exports.h.
+    // Tile/partition fields; keep order in sync with Exports.h.
     public ulong WorkerTargetTotal;
     public ulong TotalTilesPublished;
     public ulong LocalTiles;
@@ -71,7 +71,7 @@ public struct NativeJobSystemStats
     public ulong CompleteWakeToReturnEwmaNs;
     public ulong NativeBatches;
     public ulong InvalidBackendSelections;
-    // Exact per-batch timing distribution appended for ABI compatibility.
+    // Exact per-batch timing distribution; keep order in sync with Exports.h.
     public ulong TimingSampleCount;
     public ulong TimingSamplesDropped;
     public ulong BatchTotalP50Ns;
@@ -153,8 +153,7 @@ public static unsafe partial class NativeJobScheduler
         /// <summary>当 NativeDll 不可用时自动回退到 ManagedJobScheduler。</summary>
         internal static bool UseFallback { get; private set; }
     /// <summary>
-    /// 并行 for 默认 tiles/worker：batchSize=0 时原生 ResolveChunkSize 按此值个 tile/worker 切分。
-    /// tpw=4 平衡 light/heavy 场景性能。
+    /// 并行 for 默认 tiles/worker：batchSize=0 时按此值个 tile/worker 切分。tpw=4 平衡 light/heavy。
     /// </summary>
     public static int TilesPerWorker = 4;
 
@@ -164,11 +163,8 @@ public static unsafe partial class NativeJobScheduler
     public static int GuidedFloor = 16;
 
     /// <summary>
-    /// 启用 per-job 自动 batch（JobCostCache）。默认开启：
-    /// worker 按每 job 的每元素成本 EWMA 自动求解最优 tile 数——
-    /// 轻任务自动减 tiles（→ 减参与 worker → 减唤醒成本），重任务维持并行度。
-    /// 关闭后走纯 tpw=4（冷启动/保守场景）。压测已验证：并发/成本波动/
-    /// 泄漏/ASAN 全绿；冷启动 tpw=4 兜底 + kMaxAutoChunk 护栏无退化。
+    /// 启用 per-job 自动 batch（JobCostCache）。默认开启：按每 job 每元素成本 EWMA
+    /// 自动求解最优 tile 数，轻任务减 tiles（减参与 worker → 减唤醒成本），重任务维持并行度。
     /// </summary>
     public static bool JobCostCacheEnabled
     {
@@ -212,6 +208,8 @@ public static unsafe partial class NativeJobScheduler
         }
         try
         {
+            // Re-arm the idempotent shutdown gate after a previous ProcessExit/DomainUnload callback.
+            NativeJobCore.ResetShutdownGate();
             NativeJobCore.JobSystem_Initialize(numThreads);
             UseFallback = false;
             RegisterPersistentAllocator();
@@ -225,6 +223,7 @@ public static unsafe partial class NativeJobScheduler
         catch
         {
             // C++ 调度器不可用 → 自动回退到纯 C# ManagedJobScheduler
+            NativeJobCore.SafeShutdown();
             UseFallback = true;
             global::EntJoy.JobSystem.Managed.ManagedJobScheduler.Initialize(
                 numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
@@ -396,11 +395,14 @@ public static unsafe partial class NativeJobScheduler
         if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
         // 隐式批：Complete 前先 flush 当前批（Unity ScheduleBatchedJobs 同语义：Complete 隐式刷新）
         ImplicitBatch.FlushForComplete();
-        IntPtr handle = h.Detach();
+        // Complete 不消费句柄（Unity 值语义；拷贝共享 Box，不能在此 detach）。
+        // 等待窗口持 retain，防并发 Release/finalizer 回收正在等待的 state（TOCTOU）。
+        using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
+        IntPtr handle = handleLease.Handle;
         if (handle == IntPtr.Zero) return;
 
-        // 三合一：native 侧 Complete + 取 diagnosticBatchId + 释放句柄引用（1 次 P/Invoke）。
-        ulong batchId = NativeJobCore.JobSystem_CompleteAndRelease(handle);
+        NativeJobCore.JobSystem_Complete(handle);
+        ulong batchId = NativeJobCore.JobSystem_GetDiagnosticBatchId(handle);
         NativeJobCore.ThrowRecordedJobExceptions(batchId);
     }
 

@@ -45,6 +45,9 @@ namespace JobSystem
         // 任务完成回调：范围任务执行完后调用（batch 的 pendingTasks-- 由调用方处理）。
         using TaskDoneFn = void (*)(BatchState* batch) noexcept;
 
+        // tile 计数口径：Local=worker 本地，Stolen=worker 窃取，Assist=主线程 assist。
+        enum class TileAccount : uint8_t { Local = 0, Stolen = 1, Assist = 2 };
+
         ChaseLevScheduler();
         ~ChaseLevScheduler();
 
@@ -56,15 +59,13 @@ namespace JobSystem
             TaskDoneFn taskDone, bool bindThreads = false);
         void Stop() noexcept;
 
-        // 提交一个 batch 的所有 tiles：预切分为 RangeTask 推入 Injector 并唤醒 worker。
-        // 可被任意线程调用（主线程或依赖 continuation 的 worker 线程）。
-        // batch 的完成由 batch->tilesRemaining 归零驱动。
+        // 提交 batch 全部 tiles：预切分推入 Injector 并唤醒 worker；任意线程可调用。
+        // batch 完成由 tilesRemaining 归零驱动。
         void SubmitBatch(BatchState* batch) noexcept;
 
-        // 提交一个通用 work 任务（无 batch，独立完成链由调用方负责）。
-        // 用于 SubmitBackendAsync 等"异步执行任意函数"通道。
-        // 投 Injector 由 worker 执行：workFn(ctx) → workCleanup(ctx) → Release。
-        void SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
+        // 提交通用 work 任务（无 batch，完成链由调用方负责）；执行序：
+        // workFn(ctx) → workCleanup(ctx) → Release。
+        bool SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
 
         // 提交窗口统一唤醒（deferNotify 的 Flush）：bump epoch + notify_all 一次。
         // 供 JobSystem_SubmitDeferFlush 调用；defer 期 SubmitBatch 跳过 per-batch 唤醒。
@@ -98,15 +99,12 @@ namespace JobSystem
         std::atomic<uint64_t> totalTasksPushed{ 0 };
         std::atomic<uint64_t> totalTasksDone{ 0 };
 
-        // 全局在飞任务计数（park 谓词）：
-        // SubmitBatch += taskCount，每个任务 taskDone 后 -= 1。
-        // worker park 前读它：若 >0 说明全局仍有未认领任务，做短自旋再 park。
+        // 全局在飞任务计数（park 谓词）：SubmitBatch +=，taskDone -=；
+        // worker park 前读它：>0 说明仍有未认领任务，短自旋后再 park。
         std::atomic<int64_t> activeTasks{ 0 };
 
-        // 唤醒纪元（C++20 atomic::wait）：单一共享 epoch，所有 worker wait 在同一个原子。
-        // SubmitBatch/Stop 一次 fetch_add + notify_all = 1 次 futex 系统调用唤醒全部 waiter
-        //（替代旧的 15 次 per-worker notify_all，固定唤醒成本降 ~15x）。
-        // 保持 wake-all 语义不变（绝不做选择性唤醒——选择性唤醒有 35ms 滞留尖峰教训）。
+        // 唤醒纪元（C++20 atomic::wait）：单一共享 epoch，一次 fetch_add + notify_all 唤醒全部 waiter。
+        // 保持 wake-all 语义：绝不做选择性唤醒。
         std::atomic<uint64_t> wakeEpoch{ 0 };
 
         // 全局 Injector（标准 Chase-Lev 的任务入口）
@@ -122,26 +120,25 @@ namespace JobSystem
 
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
-        // 每次认领的 tile 数（预切分粒度；实测放大窗口无端到端收益——fetch_add 被 tile 执行吸收）
+        // 每次认领的 tile 数（预切分粒度；放大窗口无端到端收益——fetch_add 被 tile 执行吸收）
         static constexpr uint32_t kClaimBatchSize = 4;
 
         // ── 自适应自旋参数（WorkerLoop park 段）──
-        // 执行任务后拉满 → 连续调度零唤醒；空转退火 → 空闲快速让出 CPU；
-        // activeTasks>0 时用更大窗口（下一个任务即将被认领）。
+        // 执行后拉满 → 连续调度零唤醒；空转退火 → 快速让出 CPU；activeTasks>0 用更大窗口。
         static constexpr uint32_t kSpinBase = 256;
         static constexpr uint32_t kSpinMax = 4096;
         static constexpr uint32_t kSpinBusy = 8192;
         static constexpr uint32_t kSpinMin = 64;
-        // workerCap 令牌标记：firstTile==UINT32_MAX 的 task 是"参与令牌"，
-        // 执行体原子认领 batch->nextTile（实际并行度 ≤ 令牌数 = workerCap）。
+        // workerCap 令牌标记：firstTile==UINT32_MAX 为参与令牌，执行体原子认领 nextTile（并行度 ≤ 令牌数）。
         static constexpr uint32_t kClaimTokenMarker = UINT32_MAX;
 
         // workerCap 令牌执行：原子认领 nextTile 直到空（实际并行受令牌数限制）。
         // 内部处理 taskDone（pendingTasks--）；不 Release（调用方负责）。
-        void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex) noexcept;
+        void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex,
+            TileAccount account = TileAccount::Local) noexcept;
 
         // Injector 满时有限退避入队（yield + pause），供所有提交路径共用。
-        void PushTaskBackoff(RangeTask* task) noexcept;
+        bool PushTaskBackoff(RangeTask* task) noexcept;
 
         struct WorkerContext
         {
@@ -150,14 +147,14 @@ namespace JobSystem
         };
 
         // 执行一个 RangeTask 并释放回池
-        void ExecuteAndRelease(RangeTask* task, uint32_t workerIndex) noexcept;
+        void ExecuteAndRelease(RangeTask* task, uint32_t workerIndex,
+            TileAccount account = TileAccount::Local) noexcept;
 
         // 从 Injector 或其他 worker 窃取一个任务并执行（TryAssistOne 内部）
         bool StealAndExecute(uint32_t workerIndex) noexcept;
 
-        // 排空 Injector + 各 worker deque 的残留 task：通用 work 调 workCleanup，
-        // tile task 收集其 batch 到 drainedBatches，RangeTask 释放回池。
-        // 仅 Stop() 内 join 后（单线程、worker 已退出）调用。
+        // 排空 Injector + 各 worker deque 残留 task：通用 work 调 workCleanup，tile 收集 batch 到
+        // drainedBatches，RangeTask 回池。仅 Stop() join 后调用（单线程、worker 已退出）。
         void DrainRemaining() noexcept;
 
         void WorkerLoop(uint32_t workerIndex, WorkerContext& ctx) noexcept;

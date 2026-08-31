@@ -100,10 +100,12 @@ namespace EntJoy.JobSystem
         // ======================== DLL 函数指针（纯 P/Invoke） ========================
         private static IntPtr _nativeDll = IntPtr.Zero;
         private static int _shutdownRequested;
+        private const uint ExpectedAbiVersion = 1;
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
+        private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetAbiVersion;
         private static delegate* unmanaged[Cdecl]<int> _jobSystem_GetWorkerCount;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
@@ -303,6 +305,25 @@ namespace EntJoy.JobSystem
 
             TryLoadNativeTranspiled(loadedPath);
 
+            // Validate the stable ABI before resolving the rest of the table:
+            // incompatible DLLs must not fail the process; release and fall back to Managed.
+            if (!NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetAbiVersion", out IntPtr abiPtr))
+            {
+                NativeLibrary.Free(dllHandle);
+                _nativeDll = IntPtr.Zero;
+                Console.Error.WriteLine("[NativeJobScheduler] NativeDll ABI export missing; using Managed fallback.");
+                return;
+            }
+            _jobSystem_GetAbiVersion = (delegate* unmanaged[Cdecl]<uint>)abiPtr;
+            if (_jobSystem_GetAbiVersion() != ExpectedAbiVersion)
+            {
+                NativeLibrary.Free(dllHandle);
+                _nativeDll = IntPtr.Zero;
+                _jobSystem_GetAbiVersion = null;
+                Console.Error.WriteLine("[NativeJobScheduler] NativeDll ABI mismatch; using Managed fallback.");
+                return;
+            }
+
             _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
             _jobSystem_GetWorkerCount = (delegate* unmanaged[Cdecl]<int>)
@@ -329,8 +350,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Complete");
             _jobSystem_CompleteAndRelease = (delegate* unmanaged[Cdecl]<IntPtr, ulong>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_CompleteAndRelease");
-            _jobSystem_ScheduleBatch = (delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int>)
-                NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleBatch");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleBatch", out IntPtr scheduleBatchPtr))
+                _jobSystem_ScheduleBatch = (delegate* unmanaged[Cdecl]<NativeJobBatchDesc*, int, IntPtr*, int>)scheduleBatchPtr;
             _jobSystem_SetImplicitBatchEnabled = (delegate* unmanaged[Cdecl]<int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_SetImplicitBatchEnabled");
             _jobSystem_FlushPendingSubmits = (delegate* unmanaged[Cdecl]<void>)
@@ -464,6 +485,8 @@ namespace EntJoy.JobSystem
             _jobSystem_Initialize(numThreads);
         }
 
+        internal static bool SupportsScheduleBatch => _jobSystem_ScheduleBatch != null;
+
         internal static void JobSystem_Shutdown()
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_Shutdown == null) return;
@@ -547,6 +570,8 @@ namespace EntJoy.JobSystem
         internal static unsafe int JobSystem_ScheduleBatch(NativeJobBatchDesc* descs, int count, IntPtr* outHandles)
         {
             EnsureNativeLoaded();
+            if (_jobSystem_ScheduleBatch == null)
+                throw new NotSupportedException("NativeDll does not export JobSystem_ScheduleBatch.");
             return _jobSystem_ScheduleBatch(descs, count, outHandles);
         }
 
@@ -744,6 +769,8 @@ namespace EntJoy.JobSystem
             JobSystem_Shutdown();
         }
 
+        internal static void ResetShutdownGate() => Interlocked.Exchange(ref _shutdownRequested, 0);
+
         private static void DumpTimingDiagnosticsIfRequested()
         {
             if (Environment.GetEnvironmentVariable("ENTJOY_DIAG_TIMING") != "1") return;
@@ -805,16 +832,14 @@ namespace EntJoy.JobSystem
         }
 
         // ======================== 辅助方法 ========================
-        // 泛型委托缓存：供 EntJoy.ECS 的 ChunkJobScheduler 等跨程序集路径使用（per-Type 字典）。
-        // 本程序集热路径已用静态泛型缓存（JobDelegateCacheFor 等，零字典查找）；此处保留
-        // 供持有自定义委托类型参数的调用方。
+        // 泛型委托缓存：供跨程序集路径（EntJoy.ECS ChunkJobScheduler 等）使用；
+        // 本程序集热路径用静态泛型缓存（JobDelegateCacheFor 等），此处服务自定义委托类型参数。
         internal static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
         {
             return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
         }
 
-        // 静态泛型委托缓存：per (T) 一个静态字段，调度热路径零字典查找、零首次 JIT 抖动
-        // （static ctor 只执行一次）。按 job 接口约束分开三个 holder（各回调工厂约束不同）。
+        // 静态泛型委托缓存：per (T) 静态字段，热路径零字典查找、零首次 JIT 抖动。
         internal static class JobDelegateCacheFor<T> where T : struct, IJob
         {
             public static readonly DelegateCache Cache = new(CreateJobCallback<T>());
@@ -831,8 +856,8 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// 自动批处理回调（per 泛型 T 缓存一次）：若 T 同时实现 IJobParallelForBatch，则调度用批回调
-        /// （回调内一次 Execute(start,count)），否则退回逐元素 Execute(i)。减少轻任务上逐元素接口调度开销。
+        /// 自动批处理回调（per 泛型 T 缓存一次）：T 实现 IJobParallelForBatch 时用批回调
+        /// （一次 Execute(start,count)），否则逐元素 Execute(i)，减轻轻任务调度开销。
         /// </summary>
         private static class AutoParallelForCallback<T>
             where T : struct, IJobParallelFor
@@ -850,8 +875,7 @@ namespace EntJoy.JobSystem
         private static Dictionary<ulong, List<ExceptionDispatchInfo>> _recordedJobExceptions = new();
         private const int MaxRecordedJobExceptionsPerBatch = 16;
         private static int _droppedJobExceptionCount;
-        // 快速门控：>0 表示字典里有未取出的异常。Complete/Flush 先读它跳过空锁路径
-        //（异常是罕见路径，避免每 Complete 都 lock+查字典）。
+        // 快速门控：>0 表示有待取异常，避免每次 Complete 都 lock+查字典（异常是罕见路径）。
         private static int _pendingJobExceptionCount;
 
         internal static void RecordJobException(ulong batchId, Exception exception)

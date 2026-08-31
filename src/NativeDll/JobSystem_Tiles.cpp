@@ -2,10 +2,14 @@
 #include "ChaseLevScheduler.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <thread>
+#include <utility>
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 #include <immintrin.h>
+#elif defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
 #endif
 
 namespace JobSystem
@@ -16,9 +20,7 @@ namespace JobSystem
     int ResolveWorkerTarget(int workerCap, int targetCount) noexcept
     {
         if (targetCount <= 0) return 1;
-        // Match Unity-style worker configuration: by default every job can use
-        // the full persistent worker cohort (logical CPU count minus one).
-        // An explicit per-job workerCap remains authoritative.
+        // 默认每个 job 可用全部持久 worker 队（逻辑核数-1）；显式 workerCap 优先。
         const int cap = workerCap > 0 ? workerCap : g_numThreads;
         return std::max(1, std::min({ cap, g_numThreads, targetCount }));
     }
@@ -27,15 +29,14 @@ namespace JobSystem
         int itemCount,
         int workerCount) noexcept
     {
-        // Keep enough independently claimable ranges to absorb worker skew,
-        // without paying one atomic claim/callback for every physical chunk.
+        // 保持足够可独立认领的范围以吸收 worker 倾斜，避免每物理 chunk 一次原子认领/回调。
         constexpr int kTargetTilesPerWorker = 4;
         constexpr int kMinChunksPerTile = 4;
         constexpr int kMaxChunksPerTile = 32;
         const int targetTiles = std::max(
             1, workerCount * kTargetTilesPerWorker);
         const int chunksPerTile =
-            (itemCount + targetTiles - 1) / targetTiles;
+            CeilDiv(itemCount, targetTiles);
         return std::clamp(
             chunksPerTile,
             kMinChunksPerTile,
@@ -43,7 +44,7 @@ namespace JobSystem
     }
 
     // ---- 实体数衡 tile（Entity-Count-Balanced Tile）----
-    // 每个 unit(chunk/batch) 的存活实体数。实体数衡 tile 用它切分，替代"固定 chunk 数"。
+    // 每个 unit(chunk/batch) 的存活实体数，实体数衡 tile 用它切分。
     int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept
     {
         if (kind == TileKind::EntityBatchRange)
@@ -53,17 +54,17 @@ namespace JobSystem
 
     // 实体数衡 tile 目标：每块约 targetTilesPerWorker 个 worker、约 totalEntities/(workerCount*4) 个实体。
     // 钳制上下限：下限防"极度稀疏实体的空块贪块"，上限防"大工作负载下单块过重/失衡"。
-    int ResolveEcsEntityTileTarget(int totalEntities, int workerCount) noexcept
+    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount) noexcept
     {
-        // 保持与旧 chunk 计数路径相当的并行粒度（~16 tiles/worker），同时每块实体数均衡：
-        // 足够多的小块 → 并行填充充分、尾部均衡；实体均衡 → 稀疏/聚集实体不再让单块过重。
+        // 保持足够的并行粒度（~16 tiles/worker）且每块实体数均衡：
+        // 小块多 → 并行填充充分、尾部均衡；实体均衡 → 稀疏/聚集实体不再让单块过重。
         constexpr int kTargetTilesPerWorker = 16;
         constexpr int kMinEntitiesPerTile = 256;      // 防"极度稀疏实体的空块贪块"导致块数爆炸
         constexpr int kMaxEntitiesPerTile = 1 << 18;  // 262144，仅防超大均匀负载单块过粗
-        const int targetTiles = std::max(1, workerCount * kTargetTilesPerWorker);
-        int target = (totalEntities + targetTiles - 1) / targetTiles;
-        target = std::clamp(target, kMinEntitiesPerTile, kMaxEntitiesPerTile);
-        return std::max(1, target);
+        const int64_t targetTiles = std::max<int64_t>(1, static_cast<int64_t>(workerCount) * kTargetTilesPerWorker);
+        int64_t target = CeilDiv(totalEntities, targetTiles);
+        target = std::clamp(target, static_cast<int64_t>(kMinEntitiesPerTile), static_cast<int64_t>(kMaxEntitiesPerTile));
+        return static_cast<int>(std::max<int64_t>(1, target));
     }
 
     // 按实体数前向扫描切 tile：累计实体数达 target 即切一刀。切点恒为整 unit 边界（不拆单块）；
@@ -99,10 +100,8 @@ namespace JobSystem
     // GeneralBatchContext 类型定义在 JobSystemInternal.h（跨模块共享：Scheduler 构造
     // batch 字段、Tiles 消费执行）。
 
-    // Guided（OpenMP schedule(guided) 同族）tile 大小：chunk = ceil(remaining/(W*k))，
-    // 头部大块（Poisson 平滑、非 straggler）、尾部递减到 floor（钳 straggler 上界）。
-    // 总认领数 ~ W*k*ln(N/floor)，少于 uniform k=26 的同时尾部更细。
-    // k/floor 由 JobSystem_ConfigureGuided 配置。返回实际 tile 数。
+    // Guided tile 大小：chunk = ceil(remaining/(W×k))，头部大块、尾部递减到 floor；
+    // 总认领数 ≈ W×k×ln(N/floor)，尾部比 uniform 更细。k/floor 由 ConfigureGuided 配置。
     int GuidedTileCount(int length, int workerCount, int k, int floor) noexcept
     {
         const int denom = std::max(1, workerCount) * std::max(1, k);
@@ -112,7 +111,7 @@ namespace JobSystem
         while (offset < length)
         {
             const int remaining = length - offset;
-            int size = (remaining + denom - 1) / denom;   // ceil(remaining/denom)
+            int size = CeilDiv(remaining, denom);   // ceil(remaining/denom)
             if (size < f) size = f;                        // floor 兜底
             if (size > remaining) size = remaining;
             offset += size;
@@ -131,7 +130,7 @@ namespace JobSystem
         while (offset < length)
         {
             const int remaining = length - offset;
-            int size = (remaining + denom - 1) / denom;   // ceil(remaining/denom)
+            int size = CeilDiv(remaining, denom);   // ceil(remaining/denom)
             if (size < f) size = f;                        // floor 兜底
             if (size > remaining) size = remaining;
             tiles[i] = { static_cast<uint32_t>(offset),
@@ -193,8 +192,7 @@ namespace JobSystem
     }
 
     // 近无锁：batch storage per-thread 缓存。命中零锁；共享池仅在缓存空/满时批量
-    // 迁移（一次锁 / ~8 次 acquire 或 release）。弃用原 O(n) 最佳适配扫描——buffer
-    // 在 AcquireBatchStorage 按需增长，缓存里任何 storage 都可用，扫描纯属全局锁竞争点。
+    // 迁移（一次锁 / ~8 次 acquire 或 release）。
     std::mutex g_batchStoragePoolMutex;
     std::vector<BatchStorage*> g_batchStoragePool;
 
@@ -204,9 +202,8 @@ namespace JobSystem
         std::vector<BatchStorage*> entries;
         ~ThreadBatchStorageCache()
         {
-            // 线程退出（worker join / 进程 teardown）时把缓存 storage 交还共享池或释放
-            // （池满）。全局互斥体在 Shutdown 中始终存活（本对象先于 g_batchStoragePoolMutex
-            // 初始化，按标准后销毁），此处取锁安全。
+            // 线程退出时把缓存 storage 交还共享池或释放（池满）。
+            // 全局互斥体存活期覆盖本对象（后销毁），此处取锁安全。
             if (entries.empty()) return;
             std::lock_guard<std::mutex> lock(g_batchStoragePoolMutex);
             for (auto* s : entries)
@@ -371,21 +368,17 @@ namespace JobSystem
         if (tileIndex + 1 < batch->tileCount)
             PrefetchNextTileData(batch->context, batch->tiles[tileIndex + 1]);
 
-        // C++ 异常协议：捕获用户回调异常 → 记录第一个（原子 guard CAS）→
-        // 计数继续正常递减（任务不悬挂）；Complete() 在退役后 rethrow。
-        // 多次异常只保留第一个（后续忽略但计数正常）；TBB/Taskflow 同语义。
+        // C++ 异常协议：捕获用户回调异常 → 记录第一个 → 计数继续正常递减（任务不悬挂）；
+        // Complete() 在退役后 rethrow；多次异常只保留第一个。
         try
         {
             batch->executeTile(batch->context, batch->tiles[tileIndex]);
         }
         catch (...)
         {
-            bool expected = false;
-            if (batch->exceptionRecorded.compare_exchange_strong(
-                    expected, true, std::memory_order_acq_rel))
-            {
-                batch->firstException = std::current_exception();
-            }
+            // batch 由在飞 token 保持存活；直接在 HandleState 上记录，使并发 tile 与
+            // 并发 Complete 共享同一冷路径同步协议。
+            RecordStateException(batch->handle, std::current_exception());
         }
         const int rangeEndLogicalCore = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
@@ -413,9 +406,7 @@ namespace JobSystem
                 static_cast<int>(tile.firstItem),
                 static_cast<int>(tile.itemCount));
 
-        // Completion follows actual callback completion.  This is the hot-path
-        // atomic that replaces the much more expensive requirement that every
-        // published participant slot must first enter and retire.
+        // 完成计数跟随回调实际完成（热路径原子），无需每个发布槽先进入再退役。
         if (batch->tilesRemaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
             batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
@@ -506,13 +497,62 @@ namespace JobSystem
         ReleaseBatchStorage(batch->storage);
     }
 
+    // Cleanup 属于可观察完成契约：依赖 job 不得在前驱用户上下文释放前启动。
+    // context 只认领一次；失败转入句柄冷路径异常通道，不跨 noexcept worker 边界。
+    static void RunBatchCleanup(BatchState* batch, HandleState* state) noexcept
+    {
+        if (!batch || !state) return;
+        // 先认领再接触非原子 context 指针：逻辑完成线程与物理 finalizer 可能竞争，
+        // 只有赢者可读/清/调用户 cleanup。
+        if (batch->cleanupStarted.exchange(true, std::memory_order_acq_rel))
+            return;
+        if (!batch->cleanup || !batch->context) return;
+        void* context = batch->context;
+        batch->context = nullptr;
+        try
+        {
+            batch->cleanup(context);
+        }
+        catch (...)
+        {
+            RecordStateException(state, std::current_exception());
+        }
+    }
+
+    void AbortUnsubmittedBatch(BatchState* batch, std::exception_ptr exception) noexcept
+    {
+        if (!batch || !batch->handle) return;
+        if (batch->finalized.exchange(true, std::memory_order_acq_rel)) return;
+
+        auto* state = batch->handle;
+        batch->tilesRemaining.store(0, std::memory_order_release);
+        batch->pendingTasks.store(0, std::memory_order_release);
+        batch->logicalCompleted.store(true, std::memory_order_release);
+        if (exception)
+            RecordStateException(state, std::move(exception));
+        RunBatchCleanup(batch, state);
+        try
+        {
+            CompleteState(state);
+        }
+        catch (...)
+        {
+            RecordStateException(state, std::current_exception());
+            state->completed.store(true, std::memory_order_release);
+            state->completed.notify_all();
+            state->completedCv.notify_all();
+        }
+        state->backendRetired.store(true, std::memory_order_release);
+        state->backendRetired.notify_all();
+        // No SubmitBatch in-flight reference/counter exists on this path.
+        ReleaseBatch(batch);
+    }
+
     static void TryCompleteLogicalBatch(BatchState* batch) noexcept
     {
-        // handle is cleared by construct_at in ReleaseBatchStorage, so a null
-        // handle means the batch was already finalized, retired and recycled.
-        // Finalization is single-owned by the last tile executor, but keep this
-        // guard so a stale duplicate call can never touch a recycled batch's
-        // state (would crash on the null-handle dereference below).
+        // null handle 表示 batch 已 finalize/退役/回收（ReleaseBatchStorage 的
+        // construct_at 会清 handle）；finalization 由最后 tile 执行者单所有权，
+        // 此守卫防陈旧重复调用触碰已回收 batch（null 解引用会崩溃）。
         if (!batch || !batch->handle) return;
         if (batch->logicalCompleted.exchange(
             true, std::memory_order_acq_rel)) return;
@@ -525,23 +565,46 @@ namespace JobSystem
             batch->lastTileAt.load(std::memory_order_acquire);
         if (publishedAt != 0 && lastTileAt >= publishedAt + kLongBatchBarrierNs)
             RegisterLongBatchBarrier(state);
+        // Cleanup 必须先于 CompleteState，使依赖 continuation 看到已完全退役的用户上下文；
+        // 剩余 task token 使 BatchStorage 存活到下方物理 finalizer。
+        RunBatchCleanup(batch, state);
         auto* previousCompletingState = g_completingBatchState;
         g_completingBatchState = state;
         PushTraceEvent(TraceEventType::FinalizeBegin,
             batch->diagnosticId, -1, 0, 0);
         PushTraceEvent(TraceEventType::HandleComplete,
             batch->diagnosticId, -1, 0, 0);
-        CompleteState(state);
+        try
+        {
+            CompleteState(state);
+        }
+        catch (...)
+        {
+            // 完成回调通常由 CompleteState 兜住；平台分配/锁失败不得逃出 noexcept tile 边界。
+            RecordStateException(state, std::current_exception());
+            state->completed.store(true, std::memory_order_release);
+            state->completed.notify_all();
+            state->completedCv.notify_all();
+        }
         g_completingBatchState = previousCompletingState;
 
-        // Chase-Lev 唯一路径：退役由双条件驱动（tilesRemaining==0 && pendingTasks==0），
-        // 这里只完成逻辑部分，实际退役交给最后一个完成者（可能不是本线程）。
+        // Chase-Lev 唯一路径：逻辑完成由最后 tile 完成者负责，物理退役由最后 task
+        // 完成者负责；pendingTasks 归零时 tilesRemaining 必已归零（tile 均在 task 内
+        // 执行），故退役单线程执行，消除双完成者并发访问 batch 的 data race。
         RecordTopologyCompletion(batch);
-        TryFinalizeChaseLevBatch(batch);
     }
 
     void SubmitBatch(BatchState* batch, int /*workerCap*/)
     {
+        if (!batch || !batch->handle) return;
+        if (!g_chaseLevScheduler || !g_chaseLevScheduler->IsRunning())
+        {
+            AbortUnsubmittedBatch(
+                batch,
+                std::make_exception_ptr(std::runtime_error(
+                    "JobSystem backend is not running")));
+            return;
+        }
         auto* state = batch->handle;
         const int participantCount = std::max(1, static_cast<int>(batch->workerCount));
 
@@ -582,14 +645,38 @@ namespace JobSystem
     void SubmitOrPending(BatchState* batch)
     {
         if (!batch) return;
-        if (g_implicitBatchEnabled.load(std::memory_order_relaxed))
+        // 快路径：开关关闭直接提交，不取锁。
+        if (!g_implicitBatchEnabled.load(std::memory_order_relaxed))
         {
-            AcquireState(batch->handle);
-            std::lock_guard<std::mutex> lock(g_pendingBatchesMutex);
-            g_pendingBatches.push_back(batch);
+            SubmitBatch(batch);
+            return;
         }
-        else
+        // 开关开启：持 pending 引用后锁内复核。SetEnabled(false) 在锁内置 false
+        // 再 flush，故锁内复核能避免「读 true 后、入队前开关被关闭并 flush 空」
+        // 的竞态把 batch 留在无人 flush 的队列。
+        auto* pendingState = batch->handle;
+        AcquireState(pendingState);
+        bool queued = false;
+        try
         {
+            std::lock_guard<std::mutex> lock(g_pendingBatchesMutex);
+            if (g_implicitBatchEnabled.load(std::memory_order_relaxed))
+            {
+                g_pendingBatches.push_back(batch);
+                queued = true;
+            }
+        }
+        catch (...)
+        {
+            AbortUnsubmittedBatch(batch, std::current_exception());
+            // Keep the pending reference alive until Abort has finished
+            // reading the batch's state and releasing its storage.
+            ReleaseState(pendingState);
+            return;
+        }
+        if (!queued)
+        {
+            ReleaseState(pendingState);
             SubmitBatch(batch);
         }
     }
@@ -608,8 +695,18 @@ namespace JobSystem
         g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed);
         for (auto* b : local)
         {
-            SubmitBatch(b);
-            ReleaseState(b->handle);
+            // SubmitBatch 可能在返回前由 worker 同步完成小 batch：提交前捕获 state，
+            // 提交后绝不解引用 b（storage 可能已被回收）。
+            auto* state = b ? b->handle : nullptr;
+            try
+            {
+                SubmitBatch(b);
+            }
+            catch (...)
+            {
+                AbortUnsubmittedBatch(b, std::current_exception());
+            }
+            ReleaseState(state);
         }
         g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
         if (g_chaseLevScheduler)
@@ -619,9 +716,8 @@ namespace JobSystem
     // ---------- Chunk/Entity adaptors ----------
     // ChunkBatchContext / GeneralBatchContext 定义见 JobSystemInternal.h。
 
-    // Prefetch data for the next tile. Called from TryExecuteOneTile before
-    // executing the current tile, so DRAM reads for the next batch overlap
-    // with computation of the current one.
+    // 预取下一 tile 数据（在 TryExecuteOneTile 执行当前 tile 前调用），
+    // 使下一 batch 的 DRAM 读与当前计算重叠。
     static void PrefetchNextTileData(void* context, const ExecutionTile& nextTile) noexcept
     {
         auto* cc = static_cast<ChunkBatchContext*>(context);
@@ -647,7 +743,7 @@ namespace JobSystem
     }
 
     // Unified Tile executor for Chunk callbacks, Chunk ranges and Entity ranges.
-    bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
+    bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile)
     {
         auto* bc = static_cast<ChunkBatchContext*>(ctx);
         switch (tile.kind)
@@ -670,14 +766,22 @@ namespace JobSystem
         return true;
     }
 
-    void CleanupChunkContext(void* ctx) noexcept
+    void CleanupChunkContext(void* ctx)
     {
         auto* bc = static_cast<ChunkBatchContext*>(ctx);
-        if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
+        try
+        {
+            if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
+        }
+        catch (...)
+        {
+            delete bc;
+            throw;
+        }
         delete bc;
     }
 
-    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile) noexcept
+    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile)
     {
         auto* bc = static_cast<GeneralBatchContext*>(ctx);
         const int start = static_cast<int>(tile.firstItem);
@@ -690,15 +794,23 @@ namespace JobSystem
         return true;
     }
 
-    void CleanupGeneralContext(void* ctx) noexcept
+    void CleanupGeneralContext(void* ctx)
     {
         auto* bc = static_cast<GeneralBatchContext*>(ctx);
-        if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
+        try
+        {
+            if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
+        }
+        catch (...)
+        {
+            delete bc;
+            throw;
+        }
         delete bc;
     }
 
     // ============================================================
-    // Chase-Lev tile-level work stealing (新路径)
+    // Chase-Lev tile-level work stealing
     // 使用持久 per-worker deque（ChaseLevScheduler 持有），无需 per-batch 分配。
     // ============================================================
 
@@ -716,10 +828,8 @@ namespace JobSystem
     }
 
     // Chase-Lev 双条件退役：tilesRemaining==0（所有 tile 执行完）&& pendingTasks==0
-    // （所有任务执行完，无任务再引用本 storage）。由"最后完成者"调用：
-    //   - 最后一个 tile 完成者（TryCompleteLogicalBatch）
-    //   - 最后一个任务完成者（ChaseLevScheduler 任务回调）
-    // 未满足条件时直接返回，等另一个完成者再试。
+    // （所有任务执行完，无任务再引用本 storage）。由"最后完成者"调用（最后 tile
+    // 完成者或最后任务完成者）；未满足条件时返回，等另一个完成者再试。
     void TryFinalizeChaseLevBatch(BatchState* batch) noexcept
     {
         if (!batch || !batch->handle) return;
@@ -735,18 +845,13 @@ namespace JobSystem
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
             // ---- JobCostCache：batch 退役时更新 per-job 每元素成本 EWMA ----
-            // 安全保证：
-            //  - topologyDoneAt 在 TryCompleteLogicalBatch 中设置（所有 tile 已执行完）
-            //  - finalized.exchange 保证单线程执行本块
-            //  - 读取在 ReleaseBatch 之前 → batch 仍存活，无 use-after-free
-            //  - flag 默认关闭 → 跳过（relaxed 读取，零热路径开销）
+            // 安全：finalized.exchange 保证本块单线程；读取均在 ReleaseBatch 之前
+            // （无 use-after-free）；flag 默认关闭 → 零热路径开销。
             if (g_jobCostCacheEnabled.load(std::memory_order_relaxed) &&
                 batch->funcHash != 0 && batch->totalElements > 0)
             {
-                // perElem 用纯执行口径：首 tile 开始 → 末 tile 完成。
-                // 旧口径 (topologyDoneAt - publishedAt) 含唤醒/排队（submit2first ~300µs），
-                // 空体/超轻 job 虚高 20-100x → tiles 决策过多 → 认领/回调开销拖慢
-                //（ManyJobsBench 64K x100 20µs vs JCC OFF 3.8µs 归因）。
+                // perElem 用纯执行口径：首 tile 开始 → 末 tile 完成
+                //（旧口径含唤醒/排队会虚高）。
                 const uint64_t firstTile =
                     batch->firstTileAt.load(std::memory_order_relaxed);
                 const uint64_t lastTile =
@@ -755,13 +860,8 @@ namespace JobSystem
                 {
                     const double totalNs = static_cast<double>(lastTile - firstTile);
                     const double perElemNs = totalNs / static_cast<double>(batch->totalElements);
-                    // 判定本次 batch 是否为粗粒度（tpw）分块：实际 tile 数 ≤ tpw 基准 tile 数。
-                    // 粗粒度用于记忆带宽/延迟绑定检测参考（细粒度加 tile 无增益 → memory-bound）。
-                    // tpw 基准 tile 数 = workers × tilesPerWorker（默认 15×4=60）；
-                    // 「>」= JCC 公式选得更细 → 归为细粒度学习样本。
-                    // 细/粗样本归属：JCC 公式产出（jccFine）= 细；tpw 兜底 / mem-bound /
-                    // 显式 batchSize = 粗。perElem 修正后公式可能产出 < tpw 的 tiles，
-                    // 旧 tile 数比较（≤ wc×tpw 判粗）会把公式样本误判为粗 → 细 EWMA 永不更新。
+                    // targetCoarse = !jccFine：JCC 公式产出=细样本；tpw 兜底 /
+                    // mem-bound / 显式 batchSize=粗样本。粗样本用于 memory-bound 检测参考。
                     const bool targetCoarse = !batch->jccFine;
                     // 两因子：反解每 tile 固定开销 C_fixed。
                     // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem
@@ -788,18 +888,7 @@ namespace JobSystem
             }
             // 标准 Chase-Lev：不需要 UnregisterBatch（无共享注册表）
             // RangeTask 对象在执行后立即释放回池，不持有 batch 引用
-            if (batch->cleanup)
-            {
-                batch->cleanup(batch->context);
-                batch->context = nullptr;
-            }
-            // C++ 异常协议：退役时把 batch 上记录的第一个异常传给 HandleState
-            //（batch 即将 Release 回收，异常必须转移才能被 Complete 重抛）。
-            if (batch->exceptionRecorded.load(std::memory_order_acquire) &&
-                state->batchExceptionPtr == nullptr)
-            {
-                state->batchExceptionPtr = batch->firstException;
-            }
+            RunBatchCleanup(batch, state);
             ReleaseBatch(batch);
             state->backendRetired.store(true, std::memory_order_release);
             state->backendRetired.notify_all();
@@ -820,28 +909,42 @@ namespace JobSystem
             TryFinalizeChaseLevBatch(batch);
     }
 
-    // shutdown 残留 batch 强制退役（对齐 TryFinalizeChaseLevBatch 的 finalized 块，
-    // 但不检查 tilesRemaining/pendingTasks——shutdown 时 worker 已 join，单线程安全）。
-    // 幂等：normal 退役已置 finalized 且 cleanup 已清 context；重复调用跳过。
-    // ★ 不调 ReleaseState：用户仍可能持有 JobHandle 调用 IsCompleted/Complete，
-    //    state 必须存活（原泄漏兜底，HandleState 为池化小对象）——本函数只消除
-    //    context 主泄漏（GeneralBatchContext/ChunkBatchContext 含用户回调数据）。
+    // shutdown 残留 batch 强制退役：对齐 TryFinalizeChaseLevBatch 的 finalized 块，
+    // 但不检查 tilesRemaining/pendingTasks（shutdown 时 worker 已 join，单线程安全）。
+    // 幂等：已 finalized 则跳过。这里平衡 SubmitBatch 的 in-flight 引用（用户句柄引用独立保留）。
     void ForceFinalizeBatch(BatchState* batch) noexcept
     {
         if (!batch || !batch->handle) return;
         if (!batch->finalized.exchange(true, std::memory_order_acq_rel))
         {
             auto* state = batch->handle;
-            if (batch->cleanup && batch->context)
+            // 强制 shutdown 是未排空工作的终结完成点：发布与正常最后 tile 路径相同的
+            // 状态协议，避免 Complete/IsCompleted 观察到 completed=false 且 backendRetired=true。
+            batch->tilesRemaining.store(0, std::memory_order_release);
+            batch->pendingTasks.store(0, std::memory_order_release);
+            RunBatchCleanup(batch, state);
+            if (!batch->logicalCompleted.exchange(true, std::memory_order_acq_rel))
             {
-                batch->cleanup(batch->context);
-                batch->context = nullptr;
+                try
+                {
+                    CompleteState(state);
+                }
+                catch (...)
+                {
+                    RecordStateException(state, std::current_exception());
+                    state->completed.store(true, std::memory_order_release);
+                    state->completed.notify_all();
+                    state->completedCv.notify_all();
+                }
             }
             ReleaseBatch(batch);
             state->backendRetired.store(true, std::memory_order_release);
             state->backendRetired.notify_all();
             g_backendBatchesOutstanding.fetch_sub(1, std::memory_order_acq_rel);
             g_backendBatchesOutstanding.notify_all();
+            // Balance the in-flight reference acquired by SubmitBatch.  The
+            // public handle retains its own state reference independently.
+            ReleaseState(state);
         }
     }
 
