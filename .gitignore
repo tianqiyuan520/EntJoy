@@ -20,6 +20,9 @@
 # Scripts (local-only tooling, not part of library sources)
 /scripts/
 
+# Docs 顶层工作笔记（本地 .md）不入库；archive/gridsearch/research/public 子目录正常跟踪
+/docs/*.md
+
 # Native/CMake/MSVC artifacts
 **/build/
 **/build-*/

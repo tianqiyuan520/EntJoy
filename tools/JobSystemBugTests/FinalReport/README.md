@@ -89,15 +89,25 @@ StressTest wall-time：阶段 0 22.48s、阶段 7 25.54s。两者不是同一次
 P/Invoke（纳秒级）。无显著回退，但完整「吞吐回退 <1%」签字仍待 CI 固定频率、
 多轮中位数 + 分位数归档。
 
-## ASAN / TSAN
+## ASAN / TSAN（CI 已通过）
 
-本 Windows 环境未提供可直接调用的 ASAN/TSAN 构建链，因此没有伪造工具结果。
-CMake Release 压力测试和 Stage6 专项已执行；建议在 CI 的 Clang/GCC job 中补跑：
+`linux-sanitizers` job 已补跑并全绿：
 
-```text
--fsanitize=address,undefined
--fsanitize=thread
-```
+- ASAN+UBSAN：`JobSystemTests` 0 个 UAF / double-free / 越界；
+- TSAN：0 个 data race（修复了 `SparseTileDeque::bottom_` 非原子导致 owner 写 / thief 读的 C++ UB，及 `TestJccConcurrentHeterogeneous` 并发写共享数组的测试 race）。
+
+## CI 覆盖与缺口
+
+`.github/workflows/jobsystem-ci.yml` 当前覆盖：
+
+- ✅ C++ 调度器：直接编译 7 个核心源文件跑 JobSystemTests / ChaseLevIntegrationTests / AssistLifetimeTests / ImplicitBatchTests / Stage6·7·9·10（Windows），以及 ASAN/TSAN（Linux）；
+- ✅ C# 编译：`dotnet build EntJoy.Jobs.csproj`；
+- ✅ C# 旧 ABI fallback：Stage11（缺 ABI export / 版本不匹配 → Managed fallback）。
+
+缺口（尚未覆盖）：
+
+- ❌ C# Managed JobSystem 运行（Stage1_CSharpBridge 的 Managed 测试未入 CI）；
+- ❌ C# 调用 C++ Native 的 P/Invoke 完整路径（CI 未构建 NativeDll.dll，无法验证 Native 侧调度）。
 
 ## 当前未完成/不可宣称的门槛
 
@@ -116,12 +126,13 @@ CMake Release 压力测试和 Stage6 专项已执行；建议在 CI 的 Clang/GC
 
 ## 下一步（按优先级）
 
-1. 旧 DLL ABI fixture 已建立（Stage11，缺 ABI export / 版本不匹配 2/2），剩余
-   是纳入 CI 流水线，并补「缺失核心导出」「初始化中途失败」两个分支。
-2. 在 Linux/Clang CI 补跑 ASAN+UBSAN、TSAN，验证 defer/toggle/退役竞态修复
-   无残留 data race，并记录每项原始日志。
-3. 性能完整签字：CI 固定频率 + 多轮中位数 + 分位数归档（当前为单机 3 次
-   中位数，PerfBench 已建；tile-claim / tasks/sec 独立分位数仍缺）。
+1. CI 已落地：`.github/workflows/jobsystem-ci.yml` 覆盖 Windows 功能回归 +
+   旧 ABI fixture（Stage11）+ C# 构建，以及 Linux/Clang ASAN+UBSAN 与 TSAN。
+   需推送到 GitHub 后验证 Linux 编译与 sanitizer 结果（本机为 Windows，
+   尚未在真实 Linux 环境跑通）。
+2. 旧 ABI fixture 剩余分支：「缺失核心导出」「初始化中途失败」。
+3. 性能完整签字：CI 固定频率 + 多轮中位数 + 分位数归档（PerfBench 已建，
+   tile-claim / tasks/sec 独立分位数仍缺）。
 4. 门槛通过后才规划 Safety Layer、Cancel API 等扩展。
 
 ## 已知非阻塞项

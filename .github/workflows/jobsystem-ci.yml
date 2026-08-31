@@ -1,0 +1,113 @@
+name: JobSystem CI
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'src/NativeDll/**'
+      - 'src/EntJoy.Jobs/**'
+      - 'tests/NativeDll.Tests/**'
+      - 'tools/JobSystemBugTests/**'
+      - 'tools/JobSystemPerfBench/**'
+      - 'tools/NativeDllCore/**'
+  pull_request:
+    branches: [dev]
+
+jobs:
+  # ---- Windows：功能回归 + 旧 ABI fixture + C# 构建 ----
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure C++ tests
+        run: cmake -S tests/NativeDll.Tests -B build -A x64
+      - name: Build C++ tests
+        run: cmake --build build --config Release
+      - name: Run C++ tests
+        run: |
+          set -e
+          ./build/Release/JobSystemTests.exe
+          ./build/Release/ChaseLevIntegrationTests.exe
+          ./build/Release/AssistLifetimeTests.exe
+          ./build/Release/ImplicitBatchTests.exe
+        shell: bash
+
+      - name: Build and run stage regressions
+        run: |
+          set -e
+          for stage in Stage6_CppExceptionSafety Stage7_DeferDepth Stage9_BatchStorageRace Stage10_ImplicitBatchToggle; do
+            cmake -S tools/JobSystemBugTests/$stage -B tools/JobSystemBugTests/$stage/build -A x64
+            cmake --build tools/JobSystemBugTests/$stage/build --config Release
+            tools/JobSystemBugTests/$stage/build/Release/$stage.exe
+          done
+        shell: bash
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build old-ABI fixture stubs
+        run: |
+          cmake -S tools/JobSystemBugTests/Stage11_AbiFixture -B tools/JobSystemBugTests/Stage11_AbiFixture/build -A x64
+          cmake --build tools/JobSystemBugTests/Stage11_AbiFixture/build --config Release
+        shell: bash
+      - name: Run old-ABI fixture
+        run: >
+          dotnet run --project tools/JobSystemBugTests/Stage11_AbiFixture/Stage11_AbiFixture.csproj -c Release --
+          tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_abi.dll
+          tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll
+        shell: bash
+
+      - name: Build C#
+        run: dotnet build src/EntJoy.Jobs/EntJoy.Jobs.csproj -c Release
+
+      - name: Build minimal NativeDll (C# P/Invoke)
+        run: |
+          cmake -S tools/NativeDllCore -B tools/NativeDllCore/build -A x64
+          cmake --build tools/NativeDllCore/build --config Release
+        shell: bash
+
+      - name: Build and run C# bridge (managed + native)
+        run: |
+          dotnet build tools/JobSystemBugTests/Stage1_CSharpBridge/Stage1_CSharpBridge.csproj -c Release
+          cp tools/NativeDllCore/build/Release/NativeDll.dll tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/NativeDll.dll
+          ./tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/Stage1_CSharpBridge.exe
+        shell: bash
+
+  # ---- Linux：Clang ASAN/UBSAN 与 TSAN ----
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Configure ASAN+UBSAN
+        run: >
+          cmake -S tests/NativeDll.Tests -B build-asan
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+        shell: bash
+      - name: Build ASAN+UBSAN
+        run: cmake --build build-asan -j
+      - name: Run ASAN+UBSAN
+        run: ASAN_OPTIONS=detect_leaks=1 ./build-asan/JobSystemTests
+        shell: bash
+
+      - name: Configure TSAN
+        run: >
+          cmake -S tests/NativeDll.Tests -B build-tsan
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+        shell: bash
+      - name: Build TSAN
+        run: cmake --build build-tsan -j
+      - name: Run TSAN
+        run: ./build-tsan/JobSystemTests
+        shell: bash
