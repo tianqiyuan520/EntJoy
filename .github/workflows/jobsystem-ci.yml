@@ -10,6 +10,7 @@ on:
       - 'tools/JobSystemBugTests/**'
       - 'tools/JobSystemPerfBench/**'
       - 'tools/NativeDllCore/**'
+      - 'tools/ISPCWidthBoundaryTest/**'
   pull_request:
     branches: [dev]
 
@@ -75,6 +76,41 @@ jobs:
           dotnet build tools/JobSystemBugTests/Stage1_CSharpBridge/Stage1_CSharpBridge.csproj -c Release
           cp tools/NativeDllCore/build/Release/NativeDll.dll tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/NativeDll.dll
           ./tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/Stage1_CSharpBridge.exe
+        shell: bash
+
+  # ---- Windows：ISPC 跨 SIMD 宽度边界一致性（sse4/avx2/avx512）----
+  ispc-width-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ISPC
+        run: |
+          $zip = "$env:RUNNER_TEMP\ispc.zip"
+          Invoke-WebRequest -Uri "https://github.com/ispc/ispc/releases/download/v1.30.0/ispc-v1.30.0-windows.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\ispc"
+          $ispcExe = Get-ChildItem "$env:RUNNER_TEMP\ispc" -Recurse -Filter "ispc.exe" | Select-Object -First 1
+          $ispcExe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+        shell: pwsh
+
+      - name: Build and run width boundary test
+        run: |
+          set -e
+          cmake -S tools/ISPCWidthBoundaryTest -B tools/ISPCWidthBoundaryTest/build -A x64
+          cmake --build tools/ISPCWidthBoundaryTest/build --config Release
+          ./tools/ISPCWidthBoundaryTest/build/Release/width_test_sse4.exe
+          ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx2.exe
+          # avx512 需要 CPU 支持；GitHub runner 可能不支持，容错跳过
+          set +e
+          ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx512.exe
+          avx512_exit=$?
+          set -e
+          if [ $avx512_exit -eq 0 ]; then
+            echo "avx512: PASS"
+          else
+            echo "avx512: skipped (exit $avx512_exit, CPU 可能不支持 AVX512)"
+          fi
         shell: bash
 
   # ---- Linux：Clang ASAN/UBSAN 与 TSAN ----

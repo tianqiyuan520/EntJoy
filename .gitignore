@@ -71,6 +71,7 @@ imgui.ini
 /tools/*
 !/tools/JobSystemStressTest/
 !/tools/JobSystemStressTest.CSharp/
+!/tools/ISPCWidthBoundaryTest/
 
 # Local offline NuGet package-source config (machine-specific)
 NuGet.Offline.config
