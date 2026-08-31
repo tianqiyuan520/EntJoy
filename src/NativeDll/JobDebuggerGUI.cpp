@@ -221,8 +221,9 @@ namespace JobSystem
             double tLatest = now;
             for (unsigned int i = 0; i < segCount; ++i)
             {
-                const double e = g_debugSegments[(startSlot + i) % kDebugSegmentMax].endMs;
-                if (e > tLatest) tLatest = e;
+                DebugSegment seg;
+                if (!DebugTryReadSegment((startSlot + i) % kDebugSegmentMax, seg)) continue;
+                if (seg.endMs > tLatest) tLatest = seg.endMs;
             }
 
             // ---- 时间窗口 [winStart, winEnd]：实时跟随 now 或暂停固定 ----
@@ -328,7 +329,8 @@ namespace JobSystem
                 {
                     for (unsigned int i = 0; i < segCount; ++i)
                     {
-                        const DebugSegment& seg = g_debugSegments[(startSlot + i) % kDebugSegmentMax];
+                        DebugSegment seg;
+                        if (!DebugTryReadSegment((startSlot + i) % kDebugSegmentMax, seg)) continue;
                         const int row = rowOf(seg.lane);
                         if (row < 0) continue;
                         if (seg.endMs < winStart || seg.startMs > viewRight) continue;
@@ -372,7 +374,8 @@ namespace JobSystem
                 // 彩色作业条（色由耗时决定：越短越绿、越长越暖）
                 for (unsigned int i = 0; i < segCount; ++i)
                 {
-                    const DebugSegment& seg = g_debugSegments[(startSlot + i) % kDebugSegmentMax];
+                    DebugSegment seg;
+                    if (!DebugTryReadSegment((startSlot + i) % kDebugSegmentMax, seg)) continue;
                     const int row = rowOf(seg.lane);
                     if (row < 0) continue;
                     if (seg.endMs < winStart || seg.startMs > viewRight) continue;
@@ -446,8 +449,9 @@ namespace JobSystem
                 double tMin = winStart, tMax = tLatest > now ? tLatest : now;
                 for (unsigned int i = 0; i < segCount; ++i)
                 {
-                    const double s = g_debugSegments[(startSlot + i) % kDebugSegmentMax].startMs;
-                    if (s < tMin) tMin = s;
+                    DebugSegment seg;
+                    if (!DebugTryReadSegment((startSlot + i) % kDebugSegmentMax, seg)) continue;
+                    if (seg.startMs < tMin) tMin = seg.startMs;
                 }
                 if (tMax - tMin < span) tMax = tMin + span;
                 float frac = (float)((winStart - tMin) / (tMax - tMin));
@@ -507,7 +511,8 @@ namespace JobSystem
                     const unsigned int vstartSlot = vseg - vcnt;
                     for (unsigned int i = 0; i < vcnt; ++i)
                     {
-                        const DebugSegment& seg = g_debugSegments[(vstartSlot + i) % kDebugSegmentMax];
+                        DebugSegment seg;
+                        if (!DebugTryReadSegment((vstartSlot + i) % kDebugSegmentMax, seg)) continue;
                         if (seg.batchId != s.batchId) continue;
                         if (seg.startMs < batchStart) batchStart = seg.startMs;
                         if (seg.endMs > batchEnd) batchEnd = seg.endMs;
@@ -634,7 +639,8 @@ namespace JobSystem
                     const int actLanes = CurrentWorkerCount();
                     for (unsigned int i = 0; i < shownSegs; ++i)
                     {
-                        const DebugSegment& seg = g_debugSegments[(segStart + i) % kDebugSegmentMax];
+                        DebugSegment seg;
+                        if (!DebugTryReadSegment((segStart + i) % kDebugSegmentMax, seg)) continue;
                         char lb[16];
                         if (seg.lane >= kIspcLaneBase)
                             snprintf(lb, sizeof(lb), "T%02d", seg.lane - kIspcLaneBase); // ISPC 任务线程

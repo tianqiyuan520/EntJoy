@@ -42,11 +42,27 @@ static void* toHandle(const JobSystem::JobHandle& handle)
     return nullptr;
 }
 
+namespace {
+    // 提交期 defer 窗口的异常安全守卫：异常路径析构也保证 fetch_sub 与 fetch_add 配对，
+    // 防 depth 泄漏导致后续 SubmitBatch 永久跳过唤醒。
+    struct DeferWindow {
+        DeferWindow() noexcept { JobSystem::g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed); }
+        ~DeferWindow() { JobSystem::g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed); }
+    };
+}
+
 extern "C"
 {
+    uint32_t JobSystem_GetAbiVersion()
+    {
+        return 1u;
+    }
+
     void JobSystem_Initialize(int numThreads)
     {
-        JobSystem::Scheduler::Initialize(numThreads);
+        // OOM/线程创建失败：Initialize 内部已有回滚，这里兜底吞异常避免穿透 C ABI → terminate。
+        try { JobSystem::Scheduler::Initialize(numThreads); }
+        catch (...) {}
     }
 
     void JobDebuggerGUI_Launch()
@@ -89,11 +105,8 @@ extern "C"
         EntJoy::Collections::RegisterPersistentAllocator(alloc, free);
     }
 
-    // 托管 Persistent 回调槽的单一存储（唯一归属 NativeDll.dll）。
-    // DLL 分离后，NativeTranspiled.dll 的生成代码经这两个导出访问器读写同一槽，
-    // 避免 inline+static 导致跨 DLL 各持一份副本（回退 malloc/free → 堆损坏）。
-    // 定义显式带 ENTJOY_PERSISTENT_ALLOC_API（NativeDll 编译时=extern "C" dllexport，
-    // 与 NativeContainers.h 声明一致），确保符号进入 NativeDll.dll 导出表。
+    // 托管 Persistent 回调槽单一存储归属 NativeDll.dll：跨 DLL 经这两个导出访问器共享同一槽，
+    // 避免 inline+static 各持副本（回退 malloc/free → 堆损坏）；显式 dllexport 确保进导出表。
     namespace {
         PersistentAllocCallback g_persistentAlloc = nullptr;
         PersistentFreeCallback  g_persistentFree  = nullptr;
@@ -142,71 +155,88 @@ extern "C"
 
     void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency)
     {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::Schedule(func, context, cleanup, dep);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto handle = JobSystem::Scheduler::Schedule(func, context, cleanup, dep);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup,
         int length, void* dependency)
     {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::ScheduleFor(func, context, length, cleanup, dep);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto handle = JobSystem::Scheduler::ScheduleFor(func, context, length, cleanup, dep);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup,
         int length, int batchSize, void* dependency)
     {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length, batchSize, cleanup, dep);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length, batchSize, cleanup, dep);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles)
     {
         if (!descs || count <= 0 || !outHandles) return 0;
-        // deferNotify 窗口：本批所有 submit 结束后统一唤醒一次（省 per-batch notify/唤醒）
-        JobSystem::g_submitDeferDepth.fetch_add(1, std::memory_order_relaxed);
         int ok = 0;
-        for (int i = 0; i < count; ++i)
+        try
         {
-            outHandles[i] = nullptr;
-            const JobBatchDesc& d = descs[i];
-            if (!d.func) continue;
-            JobSystem::JobHandle dep;
-            if (d.dependency)
-                dep = JobSystem::JobHandle(fromHandle(d.dependency), true);
-            JobSystem::JobHandle handle;
-            switch (d.kind)
             {
-            case 0: // IJob
-                handle = JobSystem::Scheduler::Schedule(
-                    reinterpret_cast<JobFunc>(d.func), d.context, d.cleanup, dep);
-                break;
-            case 1: // IJobFor
-                handle = JobSystem::Scheduler::ScheduleFor(
-                    reinterpret_cast<IndexJobFunc>(d.func), d.context, d.length, d.cleanup, dep);
-                break;
-            case 2: // IJobParallelFor（auto-batch 语义：batchFunc(ctx,start,count)）
-                handle = JobSystem::Scheduler::ScheduleParallelForBatch(
-                    reinterpret_cast<BatchJobFunc>(d.func), d.context, d.length, d.batchSize, d.cleanup, dep);
-                break;
-            default:
-                continue;
+                // deferNotify 窗口：本批 submit 结束后统一唤醒一次（异常路径由 DeferWindow 兜底）。
+                DeferWindow deferWindow;
+                for (int i = 0; i < count; ++i)
+                {
+                    outHandles[i] = nullptr;
+                    const JobBatchDesc& d = descs[i];
+                    if (!d.func) continue;
+                    JobSystem::JobHandle dep;
+                    if (d.dependency)
+                        dep = JobSystem::JobHandle(fromHandle(d.dependency), true);
+                    JobSystem::JobHandle handle;
+                    switch (d.kind)
+                    {
+                    case 0: // IJob
+                        handle = JobSystem::Scheduler::Schedule(
+                            reinterpret_cast<JobFunc>(d.func), d.context, d.cleanup, dep);
+                        break;
+                    case 1: // IJobFor
+                        handle = JobSystem::Scheduler::ScheduleFor(
+                            reinterpret_cast<IndexJobFunc>(d.func), d.context, d.length, d.cleanup, dep);
+                        break;
+                    case 2: // IJobParallelFor（auto-batch 语义：batchFunc(ctx,start,count)）
+                        handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                            reinterpret_cast<BatchJobFunc>(d.func), d.context, d.length, d.batchSize, d.cleanup, dep);
+                        break;
+                    default:
+                        continue;
+                    }
+                    outHandles[i] = toHandle(handle);
+                    ++ok;
+                }
             }
-            outHandles[i] = toHandle(handle);
-            ++ok;
+            if (JobSystem::g_chaseLevScheduler)
+                JobSystem::g_chaseLevScheduler->WakePending();   // 统一唤醒一次
         }
-        JobSystem::g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
-        if (JobSystem::g_chaseLevScheduler)
-            JobSystem::g_chaseLevScheduler->WakePending();   // 统一唤醒一次
+        catch (...) {}   // OOM：返回已成功提交的数量，不穿透 C ABI
         return ok;
     }
 
@@ -217,9 +247,12 @@ extern "C"
             JobSystem::g_implicitBatchEnabled.store(true, std::memory_order_relaxed);
             return;
         }
-        // 关闭前排空积压（防悬挂/泄漏），再置 false
+        // 关闭：先锁内置 false（此后不再入队）再排空积压；颠倒顺序会让 flush 后新入队的 batch 滞留。
+        {
+            std::lock_guard<std::mutex> lock(JobSystem::g_pendingBatchesMutex);
+            JobSystem::g_implicitBatchEnabled.store(false, std::memory_order_relaxed);
+        }
         JobSystem::FlushPendingSubmits();
-        JobSystem::g_implicitBatchEnabled.store(false, std::memory_order_relaxed);
     }
 
     void JobSystem_FlushPendingSubmits()
@@ -265,9 +298,8 @@ extern "C"
     {
         // 隐式批：Complete 前先提交 pending（Unity ScheduleBatchedJobs 同语义，防死等）
         JobSystem::FlushPendingSubmits();
-        // 接管调用方持有的引用：等待完成后读 diagnosticBatchId 并返回，
-        // handle 引用在析构时自动释放 —— C# Complete 的
-        // Complete + GetDiagnosticBatchId + ReleaseHandle 三合一（省 2 次 P/Invoke）。
+        // 接管调用方引用：等待完成后读 diagnosticBatchId，引用析构自动释放；
+        // 即 C# 的 Complete+GetDiagnosticBatchId+ReleaseHandle 三合一（省 2 次 P/Invoke）。
         if (!handle) return 0;
         JobSystem::HandleState* state = fromHandle(handle);
         JobSystem::JobHandle jobHandle(fromHandle(handle), false); // 不增加引用
@@ -315,15 +347,19 @@ extern "C"
     {
         if (count <= 0 || !handles)
             return nullptr;
-        std::vector<JobSystem::JobHandle> vec;
-        vec.reserve(count);
-        for (int i = 0; i < count; ++i)
+        try
         {
-            if (handles[i])
-                vec.emplace_back(fromHandle(handles[i]), true);
+            std::vector<JobSystem::JobHandle> vec;
+            vec.reserve(count);
+            for (int i = 0; i < count; ++i)
+            {
+                if (handles[i])
+                    vec.emplace_back(fromHandle(handles[i]), true);
+            }
+            auto combined = JobSystem::JobHandle::CombineDependencies(vec);
+            return toHandle(combined);
         }
-        auto combined = JobSystem::JobHandle::CombineDependencies(vec);
-        return toHandle(combined);
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleChunkJob(
@@ -334,12 +370,15 @@ extern "C"
         int chunkCount,
         void* dependency)
     {
-        // 委托给 JobSystem.cpp 中的完整实现
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, JobSystem::ChunkScheduleMode::PublishAssist, 0, 0);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, JobSystem::ChunkScheduleMode::PublishAssist, 0, 0);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleChunkJobEx(
@@ -354,22 +393,26 @@ extern "C"
         int rangeSize,
         uint32_t unitGeneration)
     {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-        if (scheduleMode == 0)
-            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-        else if (scheduleMode == 2)
-            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-        else if (scheduleMode == 3)
-            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-        else if (scheduleMode == 4)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-        else if (scheduleMode == 5)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+            if (scheduleMode == 0)
+                mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+            else if (scheduleMode == 2)
+                mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+            else if (scheduleMode == 3)
+                mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+            else if (scheduleMode == 4)
+                mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+            else if (scheduleMode == 5)
+                mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+            auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleChunkRangeJobEx(
@@ -384,22 +427,26 @@ extern "C"
         int rangeSize,
         uint32_t unitGeneration)
     {
-        JobSystem::JobHandle dep;
-        if (dependency)
-            dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-        if (scheduleMode == 0)
-            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-        else if (scheduleMode == 2)
-            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-        else if (scheduleMode == 3)
-            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-        else if (scheduleMode == 4)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-        else if (scheduleMode == 5)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
-        return toHandle(handle);
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency)
+                dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
+            if (scheduleMode == 0)
+                mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
+            else if (scheduleMode == 2)
+                mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
+            else if (scheduleMode == 3)
+                mode = JobSystem::ChunkScheduleMode::ImmediateNative;
+            else if (scheduleMode == 4)
+                mode = JobSystem::ChunkScheduleMode::DeferredPublish;
+            else if (scheduleMode == 5)
+                mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+            auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleEntityBatchJobEx(
@@ -432,8 +479,12 @@ extern "C"
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk
             : JobSystem::EcsJobKind::Entity;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
-        return toHandle(handle);
+        try
+        {
+            auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
@@ -463,14 +514,17 @@ extern "C"
             mode = JobSystem::ChunkScheduleMode::DeferredPublish;
         else if (scheduleMode == 5)
             mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
-        // 一步完成 Schedule+Complete，消除 P/Invoke 往返
-        // workers 还在上下文切换中，主线程已经进入 assist
+        // 一步完成 Schedule+Complete，消除 P/Invoke 往返（主线程尽早进入 assist）
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk
             : JobSystem::EcsJobKind::Entity;
-        auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
-        handle.Complete();
-        return toHandle(handle);
+        try
+        {
+            auto handle = JobSystem::Scheduler::ScheduleEntityBatches(func, context, cleanup, batches, batchCount, dep, mode, workerCap, rangeSize, kind, unitGeneration);
+            handle.Complete();
+            return toHandle(handle);
+        }
+        catch (...) { return nullptr; }
     }
 
     uint32_t JobSystem_GetStatsSize()

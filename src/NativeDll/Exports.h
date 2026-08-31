@@ -23,6 +23,9 @@ namespace JobSystem { struct TraceEvent; }
 
 extern "C" {
 
+// Stable C ABI revision. Optional exports may be added without a bump.
+JOB_API uint32_t JobSystem_GetAbiVersion();
+
     typedef void (*JobFunc)(void* context);
     typedef void (*IndexJobFunc)(void* context, int index);
     typedef void (*BatchJobFunc)(void* context, int startIndex, int count);
@@ -120,8 +123,7 @@ extern "C" {
     // 返回实际写入的条目数。WorkerSnapshot 定义在 WorkerSnapshot.h。
     JOB_API int JobSystem_GetWorkerSnapshots(struct WorkerSnapshot* buffer, int maxCount);
 
-    // Combined Schedule+Complete: 调度后立即 inline assist，消除 P/Invoke 往返
-    // 返回已完成的 handle
+    // Combined Schedule+Complete: 调度后立即 inline assist，返回已完成的 handle
     JOB_API void* JobSystem_ScheduleAndCompleteEntityBatchJobEx(
         EntityBatchRangeJobFunc func, void* context, ContextCleanupFunc cleanup,
         const struct EntityBatchData* batches, int batchCount, void* dependency,
@@ -177,7 +179,7 @@ extern "C" {
         unsigned long long perRangeExecEwmaNs;
         unsigned long long assistExecPctEwma;
         unsigned long long completionOverheadUs;
-        // Appended Tile/partition fields; keep order in sync with C#.
+        // Tile/partition fields; keep order in sync with C#.
         unsigned long long workerTargetTotal;
         unsigned long long totalTilesPublished;
         unsigned long long localTiles;
@@ -198,7 +200,7 @@ extern "C" {
         unsigned long long completeWakeToReturnEwmaNs;
         unsigned long long nativeBatches;
         unsigned long long invalidBackendSelections;
-        // Appended exact per-batch timing distribution; keep order in sync with C#.
+        // Exact per-batch timing distribution; keep order in sync with C#.
         unsigned long long timingSampleCount;
         unsigned long long timingSamplesDropped;
         unsigned long long batchTotalP50Ns;
@@ -247,8 +249,7 @@ extern "C" {
     JOB_API void JobSystem_SetMainThreadAssist(int enabled);
     JOB_API void JobSystem_SetWorkerAffinity(int enabled);
 
-    /** 布局防御：返回 C++ JobSystemStatsNative 结构体字节数。
-     *  C# 侧 Marshal.SizeOf&lt;NativeJobSystemStats&gt; 必须与之相等，
+    /** 布局防御：返回 C++ JobSystemStatsNative 字节数，须与 C# 侧 Marshal.SizeOf 相等，
      *  否则 GetStats 会越界写（新增字段未同步 → 堆损坏）。*/
     JOB_API uint32_t JobSystem_GetStatsSize();
 

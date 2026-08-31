@@ -1,3 +1,4 @@
+using System;
 using EntJoy.JobSystem.Managed;
 
 namespace EntJoy.JobSystem
@@ -27,7 +28,7 @@ public struct JobHandle
 
     public void Complete()
     {
-        if (_managedHandle.Completion != null) { ManagedJobScheduler.CompleteSchedule(_managedHandle.Completion); return; }
+        if (_managedHandle.Completion != null) { _managedHandle.Complete(); return; }
         if (!_nativeHandle.IsValid) return;
         NativeJobScheduler.Complete(ref _nativeHandle);
     }
@@ -40,11 +41,16 @@ public struct JobHandle
         // 纯 C++ 后端合并
         var nativeHandles = new NativeJobHandle[handles.Length];
         bool allNative = true;
+        bool hasNative = false;
+        bool hasManaged = false;
         for (int i = 0; i < handles.Length; i++)
         {
             nativeHandles[i] = handles[i]._nativeHandle;
-            if (handles[i]._managedHandle.Completion != null) allNative = false;
+            if (handles[i]._nativeHandle.IsValid) hasNative = true;
+            if (handles[i]._managedHandle.Completion != null) { hasManaged = true; allNative = false; }
         }
+        if (hasNative && hasManaged)
+            throw new InvalidOperationException("Native and Managed job handles cannot be combined.");
         if (allNative) return new JobHandle(NativeJobScheduler.CombineDependencies(nativeHandles));
         // 混合/托管后端：合并所有 Completed 的 handle
         ManagedJobHandle? first = null;

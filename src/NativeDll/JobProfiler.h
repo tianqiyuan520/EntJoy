@@ -72,11 +72,13 @@ public:
     ProfilerRingBuffer() = default;
 
     // 写入一条记录 (多生产者安全)
-    // 使用 memory_order_release 与 Read/ReadAll 的 acquire 配对，
-    // 保证 entries_ 写入在 head_ 更新前对其他线程可见。
+    // seqlock：seq 奇=写中、偶=写完。先写 entries_ 再 release 置偶，消费者
+    // acquire 读到偶数时该槽必已写完（修复"先 head++ 后写槽"的撕裂）。
     void Push(const ProfilerEntry& e) {
-        size_t idx = head_.fetch_add(1, std::memory_order_release) & (kMaxEntries - 1);
+        size_t idx = head_.fetch_add(1, std::memory_order_relaxed) & (kMaxEntries - 1);
+        seq_[idx].fetch_add(1, std::memory_order_acquire);   // 奇：写中
         entries_[idx] = e;
+        seq_[idx].fetch_add(1, std::memory_order_release);   // 偶：写完
     }
 
     // 读取最近的 maxCount 条记录 (消费者)
@@ -86,10 +88,17 @@ public:
         if (avail == 0) return 0;
 
         size_t start = (current - avail) & (kMaxEntries - 1);
+        size_t n = 0;
         for (size_t i = 0; i < avail; ++i) {
-            dst[i] = entries_[(start + i) & (kMaxEntries - 1)];
+            size_t slot = (start + i) & (kMaxEntries - 1);
+            uint64_t s1 = seq_[slot].load(std::memory_order_acquire);
+            if (s1 & 1) continue;                 // 写中，跳过
+            dst[n] = entries_[slot];
+            uint64_t s2 = seq_[slot].load(std::memory_order_acquire);
+            if (s1 != s2) continue;               // 读期间被写，跳过（极少）
+            ++n;
         }
-        return avail;
+        return n;
     }
 
     // 读取并清空 (消费者)
@@ -102,10 +111,17 @@ public:
         if (avail == 0) return 0;
 
         size_t start = (current - avail) & (kMaxEntries - 1);
+        size_t n = 0;
         for (size_t i = 0; i < avail; ++i) {
-            dst[i] = entries_[(start + i) & (kMaxEntries - 1)];
+            size_t slot = (start + i) & (kMaxEntries - 1);
+            uint64_t s1 = seq_[slot].load(std::memory_order_acquire);
+            if (s1 & 1) continue;
+            dst[n] = entries_[slot];
+            uint64_t s2 = seq_[slot].load(std::memory_order_acquire);
+            if (s1 != s2) continue;
+            ++n;
         }
-        return avail;
+        return n;
     }
 
     void Clear() {
@@ -118,6 +134,7 @@ public:
 
 private:
     std::atomic<size_t> head_{ 0 };
+    std::atomic<uint64_t> seq_[kMaxEntries]{};   // 偶=写完，奇=写中
     ProfilerEntry entries_[kMaxEntries];
 };
 

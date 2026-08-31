@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 // Forward declarations for chunk/entity batch data
@@ -30,9 +31,8 @@ namespace JobSystem {
         DeferredPublishNoAssist = 5,
     };
 
-    // EntityBatchData is the shared execution ABI for both native IJobChunk
-    // and IJobEntity. Keep the semantic job kind explicit so scheduling
-    // policy does not have to guess it from the callback representation.
+    // EntityBatchData 是 IJobChunk 与 IJobEntity 共用的执行 ABI。
+    // 语义 job kind 显式化，调度策略无需从回调表示中猜测。
     enum class EcsJobKind : int {
         Chunk = 0,
         Entity = 1,
@@ -48,10 +48,8 @@ namespace JobSystem {
         std::atomic<bool> backendRetired{ true };
         std::atomic<uint64_t> diagnosticBatchId{ 0 };
 
-        // 延续任务相关。无锁快路径：单个 continuation 经 CAS 存进原子槽（堆节点）、
-        // CompleteState 原子摘取执行；多 continuation（同 handle 扇出，罕见）才退化到
-        // mtx + vector。C# HandleStateView 仅读前 8 字节（refCount/completed），
-        // 此布局变化不破坏托管侧 ABI。
+        // 延续任务：单 continuation 走无锁 CAS 快路径（堆节点），多 continuation（罕见）退化到 mtx + vector。
+        // C# HandleStateView 仅读前 8 字节（refCount/completed），此布局不破坏托管侧 ABI。
         std::atomic<ContinuationNode*> continuationSlot{ nullptr };
         std::atomic<bool> hasExtraContinuations{ false };
         std::vector<std::function<void()>> continuations;
@@ -60,18 +58,17 @@ namespace JobSystem {
         // wait_for 期间释放 mtx；notify_all 在 CompleteState 中与 completed 一起发。
         std::condition_variable completedCv;
 
-        // 依赖（经 CombineDependencies 或 Schedule 依赖参数建立）。
-        // 单依赖走 `dependency`（热路径）；合并走 `dependencies` 向量。
-        // 均持有引用（AcquireState），RecycleState 释放，保证 handle 被丢弃后不悬垂。
-        //
-        // 【约束】依赖图必须是无环 DAG：若用户构造循环依赖（A→B→A），
-        // Complete() 永不返回。运行时不做环检测（开销大），调用方必须保证无环。
+        // 异常归属冷路径：worker 转移异常期间多个 handle 副本可能并发 Complete，
+        // 故 exception_ptr 用独立于依赖锁的互斥体保护。
+        std::mutex exceptionMutex;
+
+        // 依赖：单依赖走 `dependency`（热路径），合并走 `dependencies`；均持有引用（AcquireState/RecycleState），防 handle 丢弃后悬垂。
+        // 【约束】依赖图必须无环（循环依赖会使 Complete() 永不返回）；运行时不做环检测，调用方必须保证无环。
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
 
-        // C++ 异常协议：退役时从 BatchState 转移的第一个回调异常；
-        // Complete() 在退役完成后 std::rethrow_exception 抛给调用方（TBB 语义）。
-        // 仅在 C++ 回调路径使用（C# 侧在 NativeJobCore.cs 记录，不走此字段）。
+        // C++ 异常协议：退役时转移的第一个回调异常由 Complete() 重抛（TBB 语义）；
+        // 仅 C++ 回调路径使用（C# 侧在 NativeJobCore.cs 记录）。
         std::exception_ptr batchExceptionPtr;
 
         explicit HandleState(bool initialCompleted = false) noexcept
@@ -107,7 +104,28 @@ namespace JobSystem {
     HandleState* CreateState(bool completed = false);
     void AcquireState(HandleState* state) noexcept;
     void ReleaseState(HandleState* state) noexcept;
+    void RecordStateException(HandleState* state, std::exception_ptr exception) noexcept;
+    std::exception_ptr TakeStateException(HandleState* state) noexcept;
     void CompleteState(HandleState* state);
+    // 异步边界失败/回滚助手：记录异常并发布完成，不让异常逃出 worker 或 continuation 回调。
+    inline void CompleteStateAfterException(
+        HandleState* state, std::exception_ptr exception) noexcept
+    {
+        if (!state) return;
+        RecordStateException(state, std::move(exception));
+        try
+        {
+            CompleteState(state);
+        }
+        catch (...)
+        {
+            // 即使分配/加锁失败逃出该冷路径，也保持 state 可观察/终态。
+            RecordStateException(state, std::current_exception());
+            state->completed.store(true, std::memory_order_release);
+            state->completed.notify_all();
+            state->completedCv.notify_all();
+        }
+    }
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
     int CurrentWorkerCount();
 

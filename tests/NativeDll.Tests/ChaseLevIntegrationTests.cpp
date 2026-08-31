@@ -208,6 +208,42 @@ namespace
         Require(caught, "Complete() did not rethrow the job exception");
         std::cout << "  executed=" << ctx.executed.load() << " (all tiles ran, no hang)" << std::endl;
     }
+    // ============================================================
+    // Test 6: 工作窃取——负载不均时，空闲 worker 从繁忙 worker deque 窃取任务
+    // ============================================================
+    void TestStealOccurs()
+    {
+        std::atomic<int> count{ 0 };
+        constexpr int length = 1'000'000;
+        auto fn = [](void* raw, int i) {
+            // 部分 tile 人为变慢（每 128K 个 sleep 50µs），制造负载不均 → 触发窃取
+            if ((i & 0x1FFFF) == 0)
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+        };
+        auto h = JobSystem::Scheduler::ScheduleParallelFor(fn, &count, length, 0, nullptr, {});
+        h.Complete();
+
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+
+        Require(count.load() == length, "lost work");
+        Require(stats.stealSuccesses <= stats.stealAttempts, "steal stats inconsistent");
+        // tile 账目闭合（按 tile 数，非元素数）
+        Require(stats.localTiles + stats.stolenTiles + stats.assistTiles ==
+                stats.totalTilesPublished, "tile accounting did not reconcile");
+        // 窃取是否发生依赖核数：高核数下负载不均能触发；低核数（CI 2 核）下 token
+        // 独占执行、deque 窗口极窄，窃取可能观察不到。故不作硬断言——账目闭合已
+        // 覆盖窃取 tile 计数的正确性，窃取路径本身由 SparseTileDequeTests 的
+        // TestMultiThreadSteal/TestConcurrentStealRounds 覆盖。
+        if (stats.stealSuccesses > 0)
+            std::cout << "  steal observed: attempts=" << stats.stealAttempts
+                      << " successes=" << stats.stealSuccesses
+                      << " stolenTiles=" << stats.stolenTiles
+                      << " tiles=" << stats.totalTilesPublished << std::endl;
+        else
+            std::cout << "  steal not observed (low core count, expected)" << std::endl;
+    }
 }
 
 int main()
@@ -220,6 +256,7 @@ int main()
         RunWithTimeout("TestDependencyChainComplete", TestDependencyChainComplete);
         RunWithTimeout("TestBatchDependencyChainRepeated", TestBatchDependencyChainRepeated);
         RunWithTimeout("TestExceptionPropagation", TestExceptionPropagation);
+        RunWithTimeout("TestStealOccurs", TestStealOccurs);
         std::cout << "PASS all\n";
         JobSystem::Scheduler::Shutdown();
         return 0;

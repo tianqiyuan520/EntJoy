@@ -44,6 +44,7 @@ namespace JobSystem
     DebugSegment g_debugSegments[kDebugSegmentMax]{};
     std::atomic<unsigned int> g_debugSegHead{ 0 };
     std::atomic<unsigned int> g_debugSegVisible{ 0 };
+    std::atomic<uint64_t> g_debugSegSeq[kDebugSegmentMax]{};
 
     std::atomic<bool> g_workerAffinityEnabled{ false };
 
@@ -53,22 +54,19 @@ namespace JobSystem
     int g_numThreads = 0;
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
-    // GridSearch A/B 定标：可变代价 job 最优 ~26 tiles/worker；默认 16 为
-    // 可变代价(job 受益) 与均匀代价(job 少付 claim 开销) 的折中。env 可覆盖。
+    // 默认 16 为可变代价与均匀代价 job 的折中（GridSearch A/B 定标），env 可覆盖。
     int g_configuredTilesPerWorker = kDefaultTilesPerWorker;
 
-    // JobCostCache export flag（JobSystem_State.cpp 的 ResolveChunkSize 读取，
-    // JobSystem_Tiles.cpp 的退役路径读取）。默认开启：per-job 自动 batch 收益显著
-    //（S2 3.7x/S3 1.6x/S5 3.0x 协同自适应自旋）且压测零回归；C# Initialize 会强制
-    // 同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
+    // JobCostCache export flag（State 模块 ResolveChunkSize 与 Tiles 退役路径读取）。
+    // 默认开启：per-job 自动 batch 收益显著且压测零回归；C# Initialize 强制同步此值
+    //（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
     std::atomic<bool> g_jobCostCacheEnabled{ true };
 
     // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
     std::atomic<int> g_submitDeferDepth{ 0 };
 
     // 隐式批（native 收集）开关 + pending 列表（extern 声明见 JobSystemInternal.h）。
-    // 默认关闭：Schedule* 直接提交（现状）。开启后主线程直接提交的 tile 路径 job
-    // 挂入 pending，由 FlushPendingSubmits 统一提交 + 单次唤醒（JobSystem_Tiles.cpp）。
+    // 默认关闭：Schedule* 直接提交；开启后 tile 路径 job 挂入 pending，由 FlushPendingSubmits 统一提交 + 单次唤醒。
     std::atomic<bool> g_implicitBatchEnabled{ false };
     std::mutex g_pendingBatchesMutex;
     std::vector<BatchState*> g_pendingBatches;
@@ -80,10 +78,8 @@ namespace JobSystem
         return v != nullptr && v[0] == '1';
     }();
 
-    // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。
-    // 0=off（uniform 现状）；>0=on。on 时 chunk = max(floor, ceil(remaining/(W*k)))，
-    // 头部大块（Poisson 平滑、非 straggler）+ 尾部小块（钳 straggler 上界），
-    // 总认领数 ~ W*k*ln(N/floor) 少于 uniform k=26。由 JobSystem_ConfigureGuided 设置。
+    // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。0=off；>0=on。
+    // on 时 chunk = max(floor, ceil(remaining/(W*k)))，头部大块、尾部小块（钳 straggler 上界）。由 JobSystem_ConfigureGuided 设置。
     int g_guidedEnabled = 0;
     int g_guidedK = 2;
     int g_guidedFloor = 16;
@@ -149,9 +145,8 @@ namespace JobSystem
     std::atomic<bool> g_shuttingDown{ false };
     std::thread::id g_mainThreadId{};
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
-    // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式，
-    // Unity 式）：实测关闭时 p99 0.83-0.97ms 与开启相当，且释放主线程参与竞争。
-    // 可靠性兜底场景（慢 worker 被 OS 抢占导致的尾延迟）可运行时 SetMainThreadAssistEnabled(true)。
+    // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式）：
+    // 实测与开启相当，且释放主线程参与竞争；慢 worker 被 OS 抢占导致尾延迟时，可运行时开启兜底。
     bool g_mainThreadAssistEnabled{ false };
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
@@ -214,8 +209,7 @@ namespace JobSystem
 
     void RecordDirectCall(const char* jobName, uint32_t tiles) noexcept
     {
-        // 直调也是一次"发布"：统一计数口径，使 GUI 的 Published Jobs 与 Activity 事件
-        // 一一对应（此前直调只进 Activity 不进 published，造成计数与可见 Job 数不匹配）。
+        // 直调也是一次"发布"：统一计数口径，使 GUI 的 Published Jobs 与 Activity 事件一一对应。
         g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
         const uint64_t id = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -227,9 +221,8 @@ namespace JobSystem
         RecordPublishedJob(id, tiles);
     }
 
-    // ISPC MT 任务挂钩（tasksys.cpp 调用）：每个任务在自己的 ConcRT 线程上执行，
-    // 分配到保留的高位泳道，让 GUI 能看到每个实际参与 worker 的耗时。
-    // 注意：g_ispcLaneNext 必须是文件级共享宿主（函数级 static 会各自独立，导致计数读不到分配）。
+    // ISPC MT 任务挂钩（tasksys.cpp 调用）：每个任务在自己的 ConcRT 线程上执行，分配到保留的高位泳道。
+    // 注意：g_ispcLaneNext 须为文件级共享宿主（函数级 static 会各自独立，导致分配计数读不到）。
     static std::atomic<int> g_ispcLaneNext{ kIspcLaneBase };
 
     uint64_t DebugIspcTaskBegin(const char* name) noexcept
