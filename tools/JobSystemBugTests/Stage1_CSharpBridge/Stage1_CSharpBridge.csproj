@@ -9,9 +9,4 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="..\..\..\bin\NativeDll.dll"
-          Link="NativeDll.dll"
-          CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
 </Project>
