@@ -105,6 +105,14 @@ namespace EntJoy.ECS
                 throw new IndexOutOfRangeException();
 
             int lastIndex = _entityCount - 1;
+            var types = Meta.Archetype.Types;
+
+            // 销毁离开实体的组件（持有原生内存的组件在此释放资源）
+            for (int i = 0; i < Meta.ComponentCount; i++)
+            {
+                byte* ptr = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + index * Meta.ComponentSizes[i];
+                ComponentTypeManager.DestroyComponentValue(types[i], ptr);
+            }
 
             if (lastIndex > index)
             {
@@ -112,7 +120,8 @@ namespace EntJoy.ECS
                 Entity* entityArray = (Entity*)((byte*)MemoryBlock + ENTITY_ARRAY_OFFSET);
                 entityArray[index] = entityArray[lastIndex];
 
-                // 复制所有组件数据
+                // 移动最后一个实体到被移除的位置：纯位拷贝（= move，指针转移，零分配）。
+                // lastIndex 变为死槽，残留的指针副本无害（不会被 Dispose，下次 AddEntity 会清零）。
                 for (int i = 0; i < Meta.ComponentCount; i++)
                 {
                     int compSize = Meta.ComponentSizes[i];

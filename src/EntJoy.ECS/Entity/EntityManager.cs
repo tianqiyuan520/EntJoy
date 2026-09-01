@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -598,6 +598,8 @@ namespace EntJoy.ECS
                 destroyedSnapshots = new List<(int, IntPtr)>();
                 foreach (var t in oldArchetype.Types)
                 {
+                    // IDisposable 组件持有原生内存，销毁后其快照会悬垂（缓冲区已释放），跳过快照
+                    if (t.IsDisposable) continue;
                     if (_observers.TryGetValue(t.Id, out var reg) && reg.Removed.Count > 0)
                     {
                         int compIdx = oldArchetype.GetComponentTypeIndex(t);
@@ -1014,7 +1016,9 @@ namespace EntJoy.ECS
                 if (_observerCount > 0 && _observers != null)
                 {
                     var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
-                    if (_observers.TryGetValue(compTypeForObs.Id, out var reg) &&
+                    // IDisposable 组件持有原生内存，移除后其快照会悬垂（缓冲区已释放），跳过快照
+                    if (!compTypeForObs.IsDisposable &&
+                        _observers.TryGetValue(compTypeForObs.Id, out var reg) &&
                         (reg.Removed.Count > 0))
                     {
                         int compIdx = oldArch.GetComponentTypeIndex(compTypeForObs);

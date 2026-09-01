@@ -354,14 +354,19 @@ namespace EntJoy.ECS
         {
             var componentIndex = componentTypeRecorder[componentType];
             var chunk = _chunkList[chunkIndex];
-            var compSize = ComponentTypeManager.GetComponentType(componentType).Size;
+            var compType = ComponentTypeManager.GetComponentType(componentType);
+            var compSize = compType.Size;
             var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
+
+            // 覆盖写：先销毁旧值（持有原生资源的组件释放旧资源），再转移新值进来。
+            // 非 IDisposable 组件此调用为 no-op。
+            ComponentTypeManager.DestroyComponentValue(compType, compPtr);
 
             var handle = System.Runtime.InteropServices.GCHandle.Alloc(value, System.Runtime.InteropServices.GCHandleType.Pinned);
             try
             {
                 var srcPtr = handle.AddrOfPinnedObject();
-                Unsafe.CopyBlock(compPtr, (void*)srcPtr, (uint)compSize);
+                ComponentTypeManager.MoveComponentValue(compType, (void*)srcPtr, compPtr);
             }
             finally
             {
@@ -392,7 +397,9 @@ namespace EntJoy.ECS
                     int sourceComponentIndex = componentTypeRecorder[type];
                     var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(sourceComponentIndex) + sourceSlot * type.Size;
                     var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
-                    Unsafe.CopyBlock(targetPtr, sourcePtr, (uint)type.Size);
+                    // move 转移所有权：IDisposable 组件拷贝后清空源（避免源随后被 RemoveEntity 销毁时
+                    // 释放掉目标槽位仍在引用的同一块原生内存）；普通组件纯位拷贝。
+                    ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
                 }
             }
         }
@@ -675,10 +682,30 @@ namespace EntJoy.ECS
         public void Dispose()
         {
             InvalidateMaskCache();
+            // 释放所有存活实体的生命周期组件（持有原生内存的组件在 slab 释放前销毁，避免泄漏）
+            DestroyAllEntityComponents();
             foreach (var raw in _slabs)
                 ChunkMemoryPool.Free(raw);
             _slabs.Clear();
             _chunkList.Clear();
+        }
+
+        /// <summary>销毁所有存活实体的生命周期组件（Archetype.Dispose 前调用，无 hook 组件 no-op）。</summary>
+        private unsafe void DestroyAllEntityComponents()
+        {
+            var types = Types;
+            foreach (var chunk in _chunkList)
+            {
+                int count = chunk.EntityCount;
+                for (int slot = 0; slot < count; slot++)
+                {
+                    for (int i = 0; i < ComponentCount; i++)
+                    {
+                        byte* ptr = (byte*)chunk.GetComponentArrayPointer(i) + slot * types[i].Size;
+                        ComponentTypeManager.DestroyComponentValue(types[i], ptr);
+                    }
+                }
+            }
         }
 
         ~Archetype()
