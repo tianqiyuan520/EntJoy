@@ -718,6 +718,14 @@ namespace JobSystem
 
     // 预取下一 tile 数据（在 TryExecuteOneTile 执行当前 tile 前调用），
     // 使下一 batch 的 DRAM 读与当前计算重叠。
+    // Prefetch helper: x86 uses SSE prefetch; other ISAs (ARM/NEON, wasm)
+    // fall back to the compiler builtin (no-op where unsupported).
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define GDJS_PREFETCH_NTA(p) _mm_prefetch(reinterpret_cast<const char*>(p), _MM_HINT_NTA)
+#else
+#define GDJS_PREFETCH_NTA(p) __builtin_prefetch(p)
+#endif
+
     static void PrefetchNextTileData(void* context, const ExecutionTile& nextTile) noexcept
     {
         auto* cc = static_cast<ChunkBatchContext*>(context);
@@ -726,9 +734,7 @@ namespace JobSystem
             const auto* nextBatch = &cc->entityBatches[nextTile.firstItem];
             if (nextBatch->componentArrays)
             {
-                _mm_prefetch(
-                    reinterpret_cast<const char*>(nextBatch->componentArrays[0]),
-                    _MM_HINT_NTA);
+                GDJS_PREFETCH_NTA(nextBatch->componentArrays[0]);
             }
         }
         else if (nextTile.kind == TileKind::ChunkCallbacks ||
@@ -736,9 +742,7 @@ namespace JobSystem
         {
             const auto& nextChunk = cc->chunks[nextTile.firstItem];
             if (nextChunk.entityArray)
-                _mm_prefetch(
-                    reinterpret_cast<const char*>(nextChunk.entityArray),
-                    _MM_HINT_NTA);
+                GDJS_PREFETCH_NTA(nextChunk.entityArray);
         }
     }
 

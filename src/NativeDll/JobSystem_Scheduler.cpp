@@ -12,10 +12,12 @@
 #include <utility>
 #include <vector>
 
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#if defined(_WIN32)
 #include <windows.h>
 #include <timeapi.h>
+#if defined(_MSC_VER)
 #pragma comment(lib, "winmm.lib")
+#endif
 #endif
 
 namespace JobSystem

@@ -10,6 +10,9 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#if !defined(_MSC_VER)
+#include <pthread.h>  // MinGW: pthread_gethandle 把 pthread_t 转成 Win32 HANDLE
+#endif
 #endif
 
 namespace JobSystem
@@ -621,7 +624,13 @@ namespace JobSystem
         {
             auto* ctx = workers_[i].get();
             if (!ctx->thread.joinable()) continue;
+#if defined(_MSC_VER)
             HANDLE handle = ctx->thread.native_handle();
+#else
+            // MinGW 的 std::thread::native_handle() 返回 pthread_t（uintptr_t），
+            // 不是 Win32 HANDLE，需经 pthread_gethandle 转换。
+            HANDLE handle = pthread_gethandle(ctx->thread.native_handle());
+#endif
             if (enabled)
             {
                 // 绑定逻辑核心 1+i（与 WorkerLoop 启动时一致）

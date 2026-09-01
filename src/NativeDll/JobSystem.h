@@ -14,7 +14,10 @@
 struct ChunkJobData;
 struct EntityBatchData;
 
-#ifdef __cpp_lib_hardware_interference_size
+// Android/Web 的 libc++ 声明了特性宏 __cpp_lib_hardware_interference_size
+// 却不提供 std::hardware_destructive_interference_size 符号（已知缺陷），
+// 必须按平台排除，否则 using 语句在编译期直接报错。
+#if defined(__cpp_lib_hardware_interference_size) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
 using std::hardware_destructive_interference_size;
 #else
 constexpr size_t hardware_destructive_interference_size = 64;
