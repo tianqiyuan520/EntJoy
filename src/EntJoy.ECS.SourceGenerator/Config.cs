@@ -59,5 +59,16 @@ namespace EntJoy.ECS.SourceGenerator
 
         /// <summary>ReadOnlySpan 类型名（Execute 参数推导组件类型的载体）。</summary>
         public const string ReadOnlySpan = "ReadOnlySpan";
+
+        // ─── DisposableRegistrationSourceGenerator（自动收集 IDisposable 组件） ───
+
+        /// <summary>IDisposable 接口名（持有原生资源组件的销毁钩子）。</summary>
+        public const string IDisposable = "IDisposable";
+
+        /// <summary>System 命名空间（IDisposable 所在，防同名接口误判）。</summary>
+        public const string NamespaceSystem = "System";
+
+        /// <summary>IComponentData 接口名（ECS 普通组件标记）。</summary>
+        public const string IComponentData = "IComponentData";
     }
 }

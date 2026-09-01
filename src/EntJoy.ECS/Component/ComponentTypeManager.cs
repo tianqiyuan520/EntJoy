@@ -8,7 +8,7 @@ namespace EntJoy.ECS
     /// <summary>
     /// 组件类型管理器
     /// </summary>
-    public class ComponentTypeManager
+    public unsafe class ComponentTypeManager
     {
         private static int idAllocator = 0;
         private static readonly Dictionary<Type, ComponentType> ComponentTypeRegistries = new();  // 组件类型到组件类型映射
@@ -18,9 +18,18 @@ namespace EntJoy.ECS
         private static bool[] ComponentIsEnableable = new bool[100]; // 记录组件是否为 enableable
         private static bool[] ComponentIsShared = new bool[100];     // 记录组件是否为 ISharedComponentData
         private static bool[] ComponentIsRelation = new bool[100];   // 记录组件是否为 IRelationComponent
+        private static bool[] ComponentIsDisposable = new bool[100]; // 记录组件是否实现 IDisposable（持有原生资源）
+        private static delegate*<void*, void>[] ComponentDisposeFn = new delegate*<void*, void>[100]; // Dispose 函数指针（null = 无资源）
 
         // 用于保护所有静态状态的锁。Component 注册是稀有操作，锁开销可忽略。
         private static readonly object _typeLock = new();
+
+        /// <summary>泛型 Dispose 函数指针（AOT 安全：泛型实例化，无反射）。</summary>
+        private static class DisposableHooks<T> where T : unmanaged, IDisposable
+        {
+            public static readonly delegate*<void*, void> Dispose = &DisposeHook;
+            private static void DisposeHook(void* p) => Unsafe.AsRef<T>(p).Dispose();
+        }
 
         /// <summary>
         /// 获取该类型对应的组件
@@ -60,6 +69,11 @@ namespace EntJoy.ECS
                     Array.Resize(ref ComponentIsEnableable, ComponentIsEnableable.Length * 2);
                     Array.Resize(ref ComponentIsShared, ComponentIsShared.Length * 2);
                     Array.Resize(ref ComponentIsRelation, ComponentIsRelation.Length * 2);
+                    Array.Resize(ref ComponentIsDisposable, ComponentIsDisposable.Length * 2);
+                    // 函数指针数组不能用 Array.Resize<T>（函数指针不可作泛型实参），手动扩容
+                    var newDisposeFn = new delegate*<void*, void>[ComponentDisposeFn.Length * 2];
+                    Array.Copy(ComponentDisposeFn, newDisposeFn, ComponentDisposeFn.Length);
+                    ComponentDisposeFn = newDisposeFn;
                 }
                 // 判断是否为 IEnableableComponent
                 ComponentIsEnableable[id] = typeof(IEnableableComponent).IsAssignableFrom(type);
@@ -67,6 +81,8 @@ namespace EntJoy.ECS
                 ComponentIsShared[id] = isShared;
                 // 判断是否为 IRelationComponent
                 ComponentIsRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type);
+                // 判断是否实现 IDisposable（持有原生资源，销毁/移除时需调用 Dispose）
+                ComponentIsDisposable[id] = typeof(IDisposable).IsAssignableFrom(type);
 
                 ComponentDataSize[id] = newComponentType.Size;
 
@@ -128,12 +144,63 @@ namespace EntJoy.ECS
         /// <summary>该组件类型是否为关系组件（IRelationComponent）。</summary>
         public static bool GetIsRelation(int id) => ComponentIsRelation[id];
 
+        /// <summary>该组件类型是否实现 IDisposable（持有原生资源）。</summary>
+        public static bool GetIsDisposable(int id) => ComponentIsDisposable[id];
+
         /// <summary>
         /// 通过该组件类型的ID获取对应的类型
         /// </summary>
         public static Type GetTypeByComponentType(int id) => idToTpyeMap[id];
 
         public static bool GetIsEnableable(int id) => ComponentIsEnableable[id];
+
+        /// <summary>
+        /// 显式注册持有原生资源组件的 Dispose 函数指针（对齐 Flecs <c>ecs_set_hooks</c> 的 dtor）。
+        /// 组件实现 <see cref="IDisposable"/> 后须调用一次；AOT 安全（泛型实例化，无反射）。
+        /// </summary>
+        public static void RegisterDisposable<T>() where T : unmanaged, IDisposable
+        {
+            int id = GetComponentType(typeof(T)).Id;
+            ComponentDisposeFn[id] = DisposableHooks<T>.Dispose;
+        }
+
+        /// <summary>
+        /// 转移组件所有权（move，零分配）：
+        /// IDisposable 组件 → 位拷贝 dst←src 后清空 src（转移指针，避免双所有权/悬垂）；
+        /// 普通 blittable 组件 → 位拷贝（源为死槽，清空无意义，省去）。
+        /// 用于跨 archetype 迁移（CopyComponentsTo）。
+        /// </summary>
+        public static void MoveComponentValue(ComponentType type, void* src, void* dst)
+        {
+            if (ComponentDisposeFn[type.Id] != null)
+            {
+                Unsafe.CopyBlock(dst, src, (uint)type.Size);
+                Unsafe.InitBlock(src, 0, (uint)type.Size);
+            }
+            else
+            {
+                Unsafe.CopyBlock(dst, src, (uint)type.Size);
+            }
+        }
+
+        /// <summary>
+        /// 销毁组件值（释放原生资源）：IDisposable 组件 → 调 Dispose；普通 → no-op。
+        /// 若实现 IDisposable 但未注册 → 抛错（fail-fast，提示补注册）。
+        /// </summary>
+        public static void DestroyComponentValue(ComponentType type, void* ptr)
+        {
+            var fn = ComponentDisposeFn[type.Id];
+            if (fn != null)
+            {
+                fn(ptr);
+            }
+            else if (ComponentIsDisposable[type.Id])
+            {
+                throw new InvalidOperationException(
+                    $"Component '{type.Type.FullName}' implements IDisposable but its Dispose hook is not registered. "
+                    + "Call ComponentTypeManager.RegisterDisposable<T>() before use.");
+            }
+        }
 
         public static int GetComponentDataSize()
         {
