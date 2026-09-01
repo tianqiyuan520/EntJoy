@@ -290,7 +290,9 @@ namespace JobSystem
     {
         if (!storage) return;
         std::destroy_at(&storage->batch);
-        std::construct_at(&storage->batch);
+        // std::construct_at 是 C++20 才进入 <memory> 的，NDK r23c 的 libc++ 尚未实现；
+        // 用等价的 placement new 调用默认构造，语义完全一致且 C++17 即可用。
+        new (&storage->batch) BatchState();
         storage->batch.storage = storage;
         g_batchStorageReturned.fetch_add(1, std::memory_order_relaxed);
 
