@@ -153,6 +153,12 @@ namespace EntJoy.ECS
 
         public int ChunkCount => _chunkList.Count;
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
+
+        /// <summary>本 Archetype 已分配的 slab 数量（内存分析器用）。</summary>
+        public int SlabCount => _slabs.Count;
+
+        /// <summary>本 Archetype 已分配的 slab 总字节数（每 slab 64KB，内存分析器用）。</summary>
+        public long SlabBytes => (long)_slabs.Count * SLAB_SIZE;
         /// <summary>
         /// 内部 _chunkList 的零拷贝只读视图（v3 Phase 1.4：调度/查询热路径遍历
         /// 不再经 GetChunks() 每次 new List&lt;Chunk&gt; 拷贝）。

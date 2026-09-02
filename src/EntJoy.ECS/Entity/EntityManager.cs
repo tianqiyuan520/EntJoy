@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using EntJoy.Collections;
 using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 
@@ -1182,6 +1183,60 @@ namespace EntJoy.ECS
             list.RemoveAt(lastIndex);
             if (chunkIndex < list.Count)
                 RefreshChunkEntityIndices(arch, chunkIndex);
+        }
+
+        // ======================== 内存分析 ========================
+
+        /// <summary>
+        /// 生成内存分析报告（纯观测快照）：原生分配/释放/泄漏、Chunk 数、碎片率、slab 占用。
+        /// </summary>
+        public MemoryReport GetMemoryReport(float thinThresholdPercent = 30f)
+        {
+            var alloc = PersistentAllocator.GetStats();
+            var report = new MemoryReport
+            {
+                NativeAllocs = alloc.Allocs,
+                NativeFrees = alloc.Frees,
+                NativeHits = alloc.Hits,
+                NativeMisses = alloc.Misses,
+                NativeForeign = alloc.Foreign,
+                LeakedContainers = DisposeSentinel.LeakedCount,
+                TotalEntityCount = entityCount,
+                Archetypes = new List<ArchetypeMemoryInfo>(),
+            };
+
+            for (int i = 0; i < archetypeCount; i++)
+            {
+                var arch = allArchetypes[i];
+                if (arch == null) continue;
+
+                report.TotalChunkCount += arch.ChunkCount;
+                report.TotalSlabBytes += arch.SlabBytes;
+
+                // 统计瘦 Chunk（碎片信号）
+                foreach (var chunk in arch.ChunkList)
+                {
+                    if (chunk.EntityCount > 0 && chunk.EntityCount * 100f < chunk.Capacity * thinThresholdPercent)
+                        report.ThinChunkCount++;
+                }
+
+                // Archetype 明细
+                var names = new string[arch.ComponentCount];
+                for (int c = 0; c < arch.ComponentCount; c++)
+                    names[c] = arch.Types[c].Type.Name;
+
+                report.Archetypes.Add(new ArchetypeMemoryInfo
+                {
+                    TypeSignature = string.Join(", ", names),
+                    ChunkCount = arch.ChunkCount,
+                    EntityCount = arch.EntityCount,
+                    Capacity = arch.ChunkCount > 0 ? arch.ChunkList[0].Capacity : 0,
+                    SlabCount = arch.SlabCount,
+                    SlabBytes = arch.SlabBytes,
+                });
+            }
+
+            return report;
         }
 
         /// <summary>

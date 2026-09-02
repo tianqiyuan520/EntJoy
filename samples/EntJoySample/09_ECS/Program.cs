@@ -87,6 +87,9 @@ namespace EntJoySample.ECS
 
                 // Chunk 碎片整理（S33）：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
                 ChunkDefragDemo.Run();
+
+                // 内存分析器示例：MemoryReport 原生分配/泄漏/碎片/slab 统计
+                MemoryProfilerDemo.Run();
             }
             catch (Exception ex)
             {
