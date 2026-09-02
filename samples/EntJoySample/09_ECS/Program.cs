@@ -81,6 +81,12 @@ namespace EntJoySample.ECS
 
                 // 组件持有 NativeCollection 时的内存问题复现（DestroyEntity/RemoveComponent 泄漏）
                 ComponentLifecycleMemoryDemo.Run();
+
+                // 多 World 隔离：两个 World 各自跑 SystemRunner，验证 System 不串扰
+                MultiWorldIsolationDemo.Run();
+
+                // Chunk 碎片整理（S33）：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
+                ChunkDefragDemo.Run();
             }
             catch (Exception ex)
             {
