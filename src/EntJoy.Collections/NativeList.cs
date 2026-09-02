@@ -165,6 +165,9 @@ namespace EntJoy.Collections
         {
             if (_listData == null) return;
 
+#if DEBUG
+            int safetyIndex = _safety.Index;   // 先保存：Release 后 _safety.Index 变 -1，否则 Unregister 注销不到原 index
+#endif
             SafetyHandleManager.Release(ref _safety);
             _listData->Dispose();               // 释放内部缓冲区
             UnsafeUtility.Free(_listData, _allocator); // 释放 UnsafeList 结构体本身
@@ -173,7 +176,7 @@ namespace EntJoy.Collections
 #if DEBUG
             if (_sentinelRegistered == 1)
             {
-                DisposeSentinel.Unregister(_safety.Index);
+                DisposeSentinel.Unregister(safetyIndex);
                 _sentinelRegistered = 0;
             }
 #endif

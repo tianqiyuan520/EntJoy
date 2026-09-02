@@ -89,6 +89,12 @@ namespace EntJoy.ECS
             return _entityManager.CreateEntities(count, types);
         }
 
+        /// <summary>生成内存分析报告（原生分配/释放/泄漏、Chunk 数、碎片率、slab 占用）。</summary>
+        public MemoryReport GetMemoryReport(float thinThresholdPercent = 30f)
+        {
+            return _entityManager.GetMemoryReport(thinThresholdPercent);
+        }
+
         /// <summary>实体级查询选择器（双组件），支持链式附加过滤条件（WithRelationship/WithEnabled）。</summary>
         /// <example>
         /// <code>

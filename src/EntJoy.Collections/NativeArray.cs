@@ -119,6 +119,11 @@ namespace EntJoy.Collections
         public void Dispose()
         {
             if (_buffer == null) return;
+#if DEBUG
+            // 先保存原始 index：Release 会把 _safety 置为 (-1, false)，此时再取 Index 得 -1，
+            // 会导致 DisposeSentinel.Unregister(-1) 注销不到注册时的 index（sentinel 残留）。
+            int safetyIndex = _safety.Index;
+#endif
             if (_isOwner)
             {
                 SafetyHandleManager.Release(ref _safety);
@@ -131,7 +136,7 @@ namespace EntJoy.Collections
 #if DEBUG
             if (_sentinelRegistered == 1)
             {
-                DisposeSentinel.Unregister(_safety.Index);
+                DisposeSentinel.Unregister(safetyIndex);
                 _sentinelRegistered = 0;
             }
 #endif

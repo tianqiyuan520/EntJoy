@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Threading;
 
@@ -17,10 +17,13 @@ using System.Threading;
 /// 语义：safety handle index 在容器生命周期内唯一（Allocate 时不复用直到 Dispose 归还），
 /// 故 (index → sentinel) 映射稳定可靠。
 /// </summary>
-internal class DisposeSentinel
+public class DisposeSentinel
 {
     private static readonly ConcurrentDictionary<int, DisposeSentinel> s_registry = new();
     private static int s_nextId = 0;
+
+    /// <summary>当前未 Dispose 的 NativeContainer 数量（内存分析器用；仅 Debug 注册，Release 恒 0）。</summary>
+    public static int LeakedCount => s_registry.Count;
 
     private readonly int _id;
     private readonly int _safetyIndex;
