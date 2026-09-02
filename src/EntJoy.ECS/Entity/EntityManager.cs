@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -1074,6 +1074,115 @@ namespace EntJoy.ECS
                     }
                 }
             }
+
+        // ======================== Chunk 碎片整理 ========================
+
+        /// <summary>
+        /// 合并所有 Archetype 的瘦 Chunk（利用率 &lt; thresholdPercent）。
+        /// 减少 Chunk 数量，提升查询遍历效率；搬移走 move 语义（零分配，不泄漏、不 double-free）。
+        /// 结构性 API（需持有锁 + 先 CompleteActiveJobs），主线程调用。
+        /// </summary>
+        public void CompactChunks(float thresholdPercent = 30f)
+        {
+            CheckDisposed();
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                for (int i = 0; i < archetypeCount; i++)
+                {
+                    var arch = allArchetypes[i];
+                    if (arch != null && arch.ChunkCount > 1)
+                        CompactArchetype(arch, thresholdPercent);
+                }
+                structuralVersion++;
+            }
+        }
+
+        private unsafe void CompactArchetype(Archetype arch, float thresholdPercent)
+        {
+            var span = CollectionsMarshal.AsSpan(arch.ChunkList);
+
+            // 从后往前遍历：搬移 + 移除空 Chunk 后重新取 span，避免索引失效
+            for (int i = span.Length - 1; i >= 0; i--)
+            {
+                if (span.Length <= 1) break;
+
+                ref var thin = ref span[i];
+                if (thin.EntityCount == 0) continue;
+                // 利用率 < 阈值才算瘦 Chunk
+                if (thin.EntityCount * 100f >= thin.Capacity * thresholdPercent) continue;
+
+                // 找目标：前面第一个未满的 Chunk
+                int targetIdx = -1;
+                for (int j = 0; j < i; j++)
+                {
+                    if (span[j].EntityCount < span[j].Capacity)
+                    {
+                        targetIdx = j;
+                        break;
+                    }
+                }
+                if (targetIdx < 0) continue;
+
+                // 搬移 thin 的所有实体到 target
+                MoveEntitiesTo(arch, span, i, targetIdx);
+
+                // 移除空 Chunk（swap 到末尾 + RemoveAt + 刷新被 swap Chunk 的索引）
+                RemoveEmptyChunkAt(arch, i);
+
+                span = CollectionsMarshal.AsSpan(arch.ChunkList);
+            }
+        }
+
+        private unsafe void MoveEntitiesTo(Archetype arch, Span<Chunk> span, int thinIdx, int startTargetIdx)
+        {
+            ref var thin = ref span[thinIdx];
+            int targetIdx = startTargetIdx;
+
+            while (thin.EntityCount > 0)
+            {
+                // 目标满了就前进到下一个未满 Chunk（限制在 thin 前面，不越过）
+                while (targetIdx < thinIdx && span[targetIdx].EntityCount >= span[targetIdx].Capacity)
+                    targetIdx++;
+                if (targetIdx >= thinIdx)
+                    break;  // 前面没有可用目标，无法继续合并
+
+                ref var target = ref span[targetIdx];
+                int lastSlot = thin.EntityCount - 1;
+                Entity e = thin.GetEntity(lastSlot);
+
+                target.AddEntity(e);
+                int targetSlot = target.EntityCount - 1;
+
+                // move 语义（IDisposable 组件转移所有权，普通组件位拷贝）
+                arch.CopyComponentsTo(thinIdx, lastSlot, arch, targetIdx, targetSlot);
+
+                // 复制 enableable 位（AddEntity 默认设为启用，需还原源实体的 enable 状态）
+                for (int comp = 0; comp < thin.Meta.ComponentCount; comp++)
+                {
+                    if (thin.Meta.EnableBitOffsets[comp] == -1) continue;
+                    target.SetComponentEnabled(comp, targetSlot, thin.GetComponentEnabled(comp, lastSlot));
+                }
+
+                // 移除源（最后一个，无 swap-pop；源组件已被 move 清空，Dispose no-op）
+                thin.RemoveEntity(lastSlot);
+
+                UpdateEntityLocation(e.Id, arch, targetIdx, targetSlot);
+            }
+        }
+
+        private void RemoveEmptyChunkAt(Archetype arch, int chunkIndex)
+        {
+            var list = arch.ChunkList;
+            int lastIndex = list.Count - 1;
+            if (chunkIndex != lastIndex)
+            {
+                list[chunkIndex] = list[lastIndex];
+            }
+            list.RemoveAt(lastIndex);
+            if (chunkIndex < list.Count)
+                RefreshChunkEntityIndices(arch, chunkIndex);
+        }
 
         /// <summary>
         /// 设置组件值（泛型版本，调用 SetRaw）

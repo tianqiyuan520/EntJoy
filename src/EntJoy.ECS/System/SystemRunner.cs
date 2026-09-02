@@ -31,7 +31,7 @@ namespace EntJoy.ECS
         public void Update()
         {
             _currentFrame++;
-            World.DefaultWorld.CurrentFrame = _currentFrame;
+            _world.CurrentFrame = _currentFrame;
 
             var layers = _graph.GetLayers();
             foreach (var layer in layers)
@@ -52,7 +52,19 @@ namespace EntJoy.ECS
                 return;
 
             var system = _systemInstances[slot.SystemType];
-            system.OnUpdate();
+
+            // 多 World 隔离：System 内通过 World.DefaultWorld 访问实体时，临时指向所属 World。
+            // 保存旧值，执行后恢复（支持嵌套 World / 手动切换场景）。
+            var prev = World.DefaultWorld;
+            World.DefaultWorld = _world;
+            try
+            {
+                system.OnUpdate();
+            }
+            finally
+            {
+                World.DefaultWorld = prev;
+            }
         }
     }
 }
