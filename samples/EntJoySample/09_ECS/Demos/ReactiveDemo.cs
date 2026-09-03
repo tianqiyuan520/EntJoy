@@ -3,7 +3,7 @@ using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
-    // ─── S32 Reactive System 生成示例 ───
+    // ─── Reactive System 生成示例 ───
     // [Reactive] 处理器：声明式订阅组件生命周期事件，由 ReactiveSystemRegistry.RegisterAll
     // 自动注册 Observer，无需手写 world.AddObserver<T>(...)。组件类型从 Execute 签名推导。
 

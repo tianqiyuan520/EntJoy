@@ -44,7 +44,7 @@ namespace EntJoySample.ECS
     /// <summary>关系组件：父子关系，列值 = RelationSlot（target + version），8B。</summary>
     public struct ChildOf : IRelationComponent { public RelationSlot Target; }
 
-    // ─── [ECSComponent] 标记组件：不写 : IComponentData，由源生成器自动补齐接口（Phase 8 S26） ───
+    // ─── [ECSComponent] 标记组件：不写 : IComponentData，由源生成器自动补齐接口 ───
 
     [ECSComponent]
     public partial struct GenPosition

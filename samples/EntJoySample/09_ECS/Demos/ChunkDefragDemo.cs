@@ -7,8 +7,8 @@ using EntJoy.ECS;
 namespace EntJoySample.ECS
 {
     /// <summary>
-    /// Chunk 碎片整理（S33）验证：制造碎片（移除 80%，产生多个瘦 Chunk）→ CompactChunks →
-    /// 验证 Chunk 数下降、实体总数不变、查询结果（Id→组件值）完全一致、Disposable 搬移走 move 无泄漏。
+    /// Chunk 碎片整理验证：制造碎片（移除 80%，产生多个瘦 Chunk）→ CompactChunks →
+    /// 验证 Chunk 数下降、实体总数不变、查询结果完全一致、Disposable 搬移走 move 无泄漏。
     /// </summary>
     public static class ChunkDefragDemo
     {
