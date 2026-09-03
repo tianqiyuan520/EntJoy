@@ -65,6 +65,9 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>IDisposable 接口名（持有原生资源组件的销毁钩子）。</summary>
         public const string IDisposable = "IDisposable";
 
+        /// <summary>ICopyable 接口名（复制组件值时的钩子，如 SharedBlob 的 refcount++）。</summary>
+        public const string ICopyable = "ICopyable";
+
         /// <summary>System 命名空间（IDisposable 所在，防同名接口误判）。</summary>
         public const string NamespaceSystem = "System";
 

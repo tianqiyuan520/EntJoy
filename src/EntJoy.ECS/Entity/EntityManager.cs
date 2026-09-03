@@ -1275,11 +1275,11 @@ namespace EntJoy.ECS
                     if (t.Id != prefabType.Id)
                         instanceTypes[idx++] = t;
 
-                // 持有原生资源的组件无法复制（无 copy hook）
+                // 持有原生资源且无复制钩子的组件无法复制（有 ICopyable 钩子的组件走 OnCopy）
                 for (int i = 0; i < instanceTypes.Length; i++)
-                    if (instanceTypes[i].IsDisposable)
+                    if (instanceTypes[i].IsDisposable && !instanceTypes[i].IsCopyable)
                         throw new InvalidOperationException(
-                            $"Prefab 含持有原生资源的组件 '{instanceTypes[i].Type.Name}'，无法复制。");
+                            $"Prefab 含持有原生资源且无复制钩子的组件 '{instanceTypes[i].Type.Name}'，无法复制。");
 
                 var instanceArch = GetOrCreateArchetype(instanceTypes);
 
@@ -1307,7 +1307,7 @@ namespace EntJoy.ECS
                     UpdateEntityLocation(newEntity.Id, instanceArch, chunkIndex, slotInChunk);
                     GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
 
-                    // 复制组件值（位拷贝：prefab 保持，实例得到独立副本）
+                    // 复制组件值（ICopyable 走 OnCopy 如 SharedBlob refcount++；普通走位拷贝）
                     var instanceChunk = instanceArch.ChunkList[chunkIndex];
                     for (int c = 0; c < instanceTypes.Length; c++)
                     {
@@ -1316,7 +1316,7 @@ namespace EntJoy.ECS
                         int instCompIdx = instanceArch.GetComponentTypeIndex(t);
                         byte* src = (byte*)prefabChunk.GetComponentArrayPointer(prefabCompIdx) + prefabSlot * t.Size;
                         byte* dst = (byte*)instanceChunk.GetComponentArrayPointer(instCompIdx) + slotInChunk * t.Size;
-                        Unsafe.CopyBlock(dst, src, (uint)t.Size);
+                        ComponentTypeManager.CopyComponentValue(t, src, dst);
                     }
 
                     result[i] = newEntity;
