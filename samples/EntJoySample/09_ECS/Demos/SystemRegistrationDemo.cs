@@ -1,9 +1,9 @@
-﻿using System;
+using System;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
-    // ─── S27 System 注册生成示例 ───
+    // ─── System 注册生成示例 ───
     // 以下 System 无需逐个 runner.RegisterSystem<T>()，由 SystemRegistrationSourceGenerator
     // 自动收集到 SystemRegistry.RegisterAll（一行注册本程序集所有 struct : ISystem）。
     // OnUpdate 用静态计数器验证执行（不打印、不改数据，避免干扰其他 demo）。

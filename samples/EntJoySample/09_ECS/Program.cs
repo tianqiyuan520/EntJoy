@@ -85,11 +85,14 @@ namespace EntJoySample.ECS
                 // 多 World 隔离：两个 World 各自跑 SystemRunner，验证 System 不串扰
                 MultiWorldIsolationDemo.Run();
 
-                // Chunk 碎片整理（S33）：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
+                // Chunk 碎片整理：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
                 ChunkDefragDemo.Run();
 
                 // 内存分析器示例：MemoryReport 原生分配/泄漏/碎片/slab 统计
                 MemoryProfilerDemo.Run();
+
+                // Prefab 实例化：模板标记 + SpawnFrom 复制 + 默认排除 + 独立副本
+                PrefabDemo.Run();
             }
             catch (Exception ex)
             {

@@ -95,6 +95,12 @@ namespace EntJoy.ECS
             return _entityManager.GetMemoryReport(thinThresholdPercent);
         }
 
+        /// <summary>从 Prefab 模板实体复制创建实例（对齐 Unity Instantiate）。</summary>
+        public Entity[] SpawnFrom(Entity prefabEntity, int count)
+        {
+            return _entityManager.SpawnFrom(prefabEntity, count);
+        }
+
         /// <summary>实体级查询选择器（双组件），支持链式附加过滤条件（WithRelationship/WithEnabled）。</summary>
         /// <example>
         /// <code>

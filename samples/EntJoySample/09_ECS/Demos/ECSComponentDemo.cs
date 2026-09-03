@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using EntJoy.ECS;
 
 namespace EntJoySample.ECS
 {
     /// <summary>
     /// [ECSComponent] 示例：验证标记组件（不写 : IComponentData）可走通
-    /// Set/GetComponent/Query/DCB.AddComponent 全链路（Phase 8 S26 源生成器）。
+    /// Set/GetComponent/Query/DCB.AddComponent 全链路。
     /// 若生成器未补齐 IComponentData，下面 Set/GetComponent/DCB.AddComponent 无法通过编译。
     /// </summary>
     public static class ECSComponentDemo

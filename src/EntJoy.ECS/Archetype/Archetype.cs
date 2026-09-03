@@ -17,6 +17,9 @@ namespace EntJoy.ECS
         public int ComponentCount { get; private set; }
         public int EntityCount { get; private set; }
 
+        // Prefab 标记组件类型（查询默认排除用）
+        private static readonly ComponentType s_prefabType = typeof(Prefab);
+
         // Phase 2.1: Archetype Edges — 缓存 Add/Remove 目标 Archetype
         private readonly Dictionary<ComponentType, Archetype> _addEdges = new();
         private readonly Dictionary<ComponentType, Archetype> _removeEdges = new();
@@ -46,6 +49,19 @@ namespace EntJoy.ECS
         /// </summary>
         public bool IsMatch(QueryBuilder builder)
         {
+            // 默认排除 Prefab 模板实体（对齐 Unity）：除非查询显式 WithAll<Prefab>
+            if (componentTypeRecorder.ContainsKey(s_prefabType))
+            {
+                bool includesPrefab = false;
+                if (builder.All != null)
+                {
+                    for (int i = 0; i < builder.All.Length; i++)
+                        if (builder.All[i].Id == s_prefabType.Id) { includesPrefab = true; break; }
+                }
+                if (!includesPrefab)
+                    return false;
+            }
+
             if (builder.All != null && builder.All.Length > 0)
             {
                 if (!HasAllOf(builder.All.AsSpan()))

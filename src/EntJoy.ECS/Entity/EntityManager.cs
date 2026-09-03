@@ -1239,6 +1239,93 @@ namespace EntJoy.ECS
             return report;
         }
 
+        // ======================== Prefab 实例化 ========================
+
+        /// <summary>
+        /// 从 Prefab 模板实体复制创建 count 个实例（对齐 Unity EntityManager.Instantiate）。
+        /// 复制 blittable 组件值（prefab 与实例为独立副本），实例不含 Prefab 标记；
+        /// 含持有原生资源（IDisposable）的组件无法复制，抛异常。
+        /// </summary>
+        public unsafe Entity[] SpawnFrom(Entity prefabEntity, int count)
+        {
+            CheckDisposed();
+            if (count <= 0) return Array.Empty<Entity>();
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                ref var prefabInfo = ref GetEntityInfoRef(prefabEntity.Id);
+                if (prefabInfo.Archetype == null)
+                    throw new InvalidOperationException($"Entity {prefabEntity} has been destroyed.");
+                if (prefabInfo.Version != prefabEntity.Version)
+                    throw new InvalidOperationException($"Entity {prefabEntity} is a stale reference (version mismatch).");
+                var prefabArch = prefabInfo.Archetype;
+                var prefabType = ComponentTypeManager.GetComponentType(typeof(Prefab));
+                if (!prefabArch.HasComponent(prefabType))
+                    throw new InvalidOperationException($"Entity {prefabEntity} is not a Prefab.");
+
+                // 实例 archetype = prefab 去掉 Prefab 标记
+                var instanceTypes = new ComponentType[prefabArch.ComponentCount - 1];
+                int idx = 0;
+                foreach (var t in prefabArch.Types)
+                    if (t.Id != prefabType.Id)
+                        instanceTypes[idx++] = t;
+
+                // 持有原生资源的组件无法复制（无 copy hook）
+                for (int i = 0; i < instanceTypes.Length; i++)
+                    if (instanceTypes[i].IsDisposable)
+                        throw new InvalidOperationException(
+                            $"Prefab 含持有原生资源的组件 '{instanceTypes[i].Type.Name}'，无法复制。");
+
+                var instanceArch = GetOrCreateArchetype(instanceTypes);
+
+                var prefabChunk = prefabArch.ChunkList[prefabInfo.ChunkIndex];
+                int prefabSlot = prefabInfo.SlotInChunk;
+                var result = new Entity[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    var newEntity = new Entity();
+                    bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);
+                    if (isRecycled)
+                    {
+                        newEntity.Id = recycledEnt.Id;
+                        newEntity.Version = recycledEnt.Version + 1;
+                    }
+                    else
+                    {
+                        newEntity.Id = entityCount++;
+                        if (newEntity.Id >= entities.Length)
+                            Array.Resize(ref entities, entities.Length * 2);
+                    }
+
+                    instanceArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
+                    UpdateEntityLocation(newEntity.Id, instanceArch, chunkIndex, slotInChunk);
+                    GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+
+                    // 复制组件值（位拷贝：prefab 保持，实例得到独立副本）
+                    var instanceChunk = instanceArch.ChunkList[chunkIndex];
+                    for (int c = 0; c < instanceTypes.Length; c++)
+                    {
+                        var t = instanceTypes[c];
+                        int prefabCompIdx = prefabArch.GetComponentTypeIndex(t);
+                        int instCompIdx = instanceArch.GetComponentTypeIndex(t);
+                        byte* src = (byte*)prefabChunk.GetComponentArrayPointer(prefabCompIdx) + prefabSlot * t.Size;
+                        byte* dst = (byte*)instanceChunk.GetComponentArrayPointer(instCompIdx) + slotInChunk * t.Size;
+                        Unsafe.CopyBlock(dst, src, (uint)t.Size);
+                    }
+
+                    result[i] = newEntity;
+                }
+
+                structuralVersion++;
+
+                if (_observerCount > 0 && _observers != null)
+                    DispatchCreateEntitiesAdded(instanceArch, instanceTypes, result, count);
+
+                return result;
+            }
+        }
+
         /// <summary>
         /// 设置组件值（泛型版本，调用 SetRaw）
         /// </summary>
