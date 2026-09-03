@@ -80,25 +80,34 @@ namespace EntJoySample.ECS
                 //ReactiveDemo.Run();
 
                 // 组件持有 NativeCollection 时的内存问题复现（DestroyEntity/RemoveComponent 泄漏）
-                ComponentLifecycleMemoryDemo.Run();
+                //ComponentLifecycleMemoryDemo.Run();
 
                 // 多 World 隔离：两个 World 各自跑 SystemRunner，验证 System 不串扰
-                MultiWorldIsolationDemo.Run();
+                //MultiWorldIsolationDemo.Run();
 
                 // Chunk 碎片整理：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
-                ChunkDefragDemo.Run();
+                //ChunkDefragDemo.Run();
 
                 // 内存分析器示例：MemoryReport 原生分配/泄漏/碎片/slab 统计
-                MemoryProfilerDemo.Run();
+                //MemoryProfilerDemo.Run();
 
                 // Prefab 实例化：模板标记 + SpawnFrom 复制 + 默认排除 + 独立副本
-                PrefabDemo.Run();
+                //PrefabDemo.Run();
 
                 // slab 复用/压缩：销毁回收空 slab + 重建复用空洞
-                SlabRecycleDemo.Run();
+                //SlabRecycleDemo.Run();
 
                 // 性能分析器：System 耗时 + slab 复用 + 内存统计
-                PerformanceProfilerDemo.Run();
+                //PerformanceProfilerDemo.Run();
+
+                // 组件元数据：字段元数据（含嵌套 struct 展开）+ 用元数据打印字段值
+                ComponentMetaDemo.Run();
+
+                // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
+                DataNavigationDemo.Run();
+
+                // World 快照：TakeSnapshot 序列化 → 修改 → Restore 恢复
+                WorldSnapshotDemo.Run();
             }
             catch (Exception ex)
             {

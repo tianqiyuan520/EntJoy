@@ -21,6 +21,7 @@ namespace EntJoy.ECS.SourceGenerator
             new SystemRegistrationSourceGenerator().Initialize(context);
             new ReactiveSystemSourceGenerator().Initialize(context);
             new DisposableRegistrationSourceGenerator().Initialize(context);
+            new ComponentMetaSourceGenerator().Initialize(context);
         }
     }
 }
