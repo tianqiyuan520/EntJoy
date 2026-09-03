@@ -162,10 +162,21 @@ namespace EntJoy.ECS
         // from each slab so their component arrays are physically adjacent.
         private const int SLAB_SIZE = 64 * 1024;
         private const int SLAB_ALIGNMENT = 64 * 1024;
-        private List<nint> _slabs = new();
-        private nint _currentSlab;
+        private List<SlabInfo> _slabs = new();
+        private SlabInfo _currentSlab;
         private int _currentSlabOffset;
         private int _chunkStride;
+        // 已移除 Chunk 的空洞（复用：新 Chunk 优先从这里取，避免 slab 无限增长）
+        private readonly List<nint> _freeChunks = new();
+
+        /// <summary>单个 slab 的追踪信息（复用/压缩用）。</summary>
+        private sealed class SlabInfo
+        {
+            public nint RawPtr;       // ChunkMemoryPool.Free 用（未对齐）
+            public nint AlignedPtr;   // Chunk 地址基准（对齐后）
+            public int ChunkCount;    // 该 slab 已分配的 Chunk 数
+            public int ReleasedCount; // 已释放（移除）的 Chunk 数
+        }
 
         public int ChunkCount => _chunkList.Count;
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
@@ -291,24 +302,74 @@ namespace EntJoy.ECS
 
         private nint AllocateFromSlab()
         {
+            // 复用已移除 Chunk 的空洞，避免 slab 无限增长
+            if (_freeChunks.Count > 0)
+            {
+                int last = _freeChunks.Count - 1;
+                nint reused = _freeChunks[last];
+                _freeChunks.RemoveAt(last);
+                return reused;
+            }
+
             if (_chunkStride == 0) _chunkStride = ComputeChunkStride();
 
             // Ensure slab allocation
-            if (_currentSlab == nint.Zero || _currentSlabOffset + _chunkStride > SLAB_SIZE)
+            if (_currentSlab == null || _currentSlabOffset + _chunkStride > SLAB_SIZE)
             {
                 // ChunkMemoryPool.Allocate 返回 kBlockSize + kOverAlloc（128KB），
                 // 下面的对齐计算保证返回的 _currentSlab 满足 SLAB_ALIGNMENT（64KB）。
                 nint raw = ChunkMemoryPool.Allocate();
                 long addr = raw.ToInt64();
                 long aligned = (addr + SLAB_ALIGNMENT - 1) & ~(SLAB_ALIGNMENT - 1);
-                _currentSlab = new nint(aligned);
+                _currentSlab = new SlabInfo { RawPtr = raw, AlignedPtr = new nint(aligned) };
+                _slabs.Add(_currentSlab);
                 _currentSlabOffset = 0;
-                _slabs.Add(raw); // store raw pointer for freeing
             }
 
-            nint chunkMem = _currentSlab + _currentSlabOffset;
+            nint chunkMem = _currentSlab.AlignedPtr + _currentSlabOffset;
             _currentSlabOffset += _chunkStride;
+            _currentSlab.ChunkCount++;
             return chunkMem;
+        }
+
+        /// <summary>
+        /// 释放 Chunk 内存（复用或压缩）。Chunk 从列表移除时调用。
+        /// 空洞进入复用列表；当某个 slab 的所有 Chunk 都释放时，整个 slab 归还（压缩回收）。
+        /// </summary>
+        internal void ReleaseChunkMemory(nint chunkMem)
+        {
+            long addr = chunkMem.ToInt64();
+            SlabInfo slab = null;
+            for (int i = 0; i < _slabs.Count; i++)
+            {
+                long start = _slabs[i].AlignedPtr.ToInt64();
+                if (addr >= start && addr < start + SLAB_SIZE)
+                {
+                    slab = _slabs[i];
+                    break;
+                }
+            }
+            if (slab == null)
+                return;
+
+            slab.ReleasedCount++;
+            if (slab.ReleasedCount == slab.ChunkCount)
+            {
+                // 该 slab 所有 Chunk 都已释放 → 归还整个 slab（压缩）
+                ChunkMemoryPool.Free(slab.RawPtr);
+                _slabs.Remove(slab);
+                // 从空洞列表移除该 slab 的 Chunk（已随 slab 归还，不能再复用）
+                long start = slab.AlignedPtr.ToInt64();
+                _freeChunks.RemoveAll(c =>
+                {
+                    long a = c.ToInt64();
+                    return a >= start && a < start + SLAB_SIZE;
+                });
+            }
+            else
+            {
+                _freeChunks.Add(chunkMem);
+            }
         }
 
         public void Remove(int chunkIndex, int slotInChunk, out int movedEntityId, out int movedEntitySlot, out int compactedChunkIndex)
@@ -326,12 +387,15 @@ namespace EntJoy.ECS
                 {
                     // 至少保留 1 个 chunk，避免边界场景频繁创建/销毁抖动
                     int lastChunkIndex = _chunkList.Count - 1;
+                    // 空 chunk 的内存块（swap 前记录：swap 后 chunkIndex 位置被 last 覆盖）
+                    nint freedChunk = chunk.MemoryBlock;
                     if (chunkIndex != lastChunkIndex)
                     {
                         _chunkList[chunkIndex] = _chunkList[lastChunkIndex];
                         compactedChunkIndex = chunkIndex;
                     }
                     _chunkList.RemoveAt(lastChunkIndex);
+                    ReleaseChunkMemory(freedChunk);  // 复用空洞 / 归还空 slab
                 }
             }
             else
@@ -706,9 +770,10 @@ namespace EntJoy.ECS
             InvalidateMaskCache();
             // 释放所有存活实体的生命周期组件（持有原生内存的组件在 slab 释放前销毁，避免泄漏）
             DestroyAllEntityComponents();
-            foreach (var raw in _slabs)
-                ChunkMemoryPool.Free(raw);
+            foreach (var slab in _slabs)
+                ChunkMemoryPool.Free(slab.RawPtr);
             _slabs.Clear();
+            _freeChunks.Clear();
             _chunkList.Clear();
         }
 

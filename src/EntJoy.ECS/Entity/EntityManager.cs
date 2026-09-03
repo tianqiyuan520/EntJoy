@@ -1176,11 +1176,14 @@ namespace EntJoy.ECS
         {
             var list = arch.ChunkList;
             int lastIndex = list.Count - 1;
+            // 空 chunk 的内存块（swap 前记录：swap 后 chunkIndex 位置被 last 覆盖）
+            nint freedChunk = list[chunkIndex].MemoryBlock;
             if (chunkIndex != lastIndex)
             {
                 list[chunkIndex] = list[lastIndex];
             }
             list.RemoveAt(lastIndex);
+            arch.ReleaseChunkMemory(freedChunk);  // 复用空洞 / 归还空 slab
             if (chunkIndex < list.Count)
                 RefreshChunkEntityIndices(arch, chunkIndex);
         }

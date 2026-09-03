@@ -93,6 +93,12 @@ namespace EntJoySample.ECS
 
                 // Prefab 实例化：模板标记 + SpawnFrom 复制 + 默认排除 + 独立副本
                 PrefabDemo.Run();
+
+                // slab 复用/压缩：销毁回收空 slab + 重建复用空洞
+                SlabRecycleDemo.Run();
+
+                // 性能分析器：System 耗时 + slab 复用 + 内存统计
+                PerformanceProfilerDemo.Run();
             }
             catch (Exception ex)
             {
