@@ -20,6 +20,8 @@ namespace EntJoy.ECS
         private static bool[] ComponentIsRelation = new bool[100];   // 记录组件是否为 IRelationComponent
         private static bool[] ComponentIsDisposable = new bool[100]; // 记录组件是否实现 IDisposable（持有原生资源）
         private static delegate*<void*, void>[] ComponentDisposeFn = new delegate*<void*, void>[100]; // Dispose 函数指针（null = 无资源）
+        private static bool[] ComponentIsCopyable = new bool[100];  // 记录组件是否实现 ICopyable（复制时需 refcount++ 等）
+        private static delegate*<void*, void*, void>[] ComponentCopyFn = new delegate*<void*, void*, void>[100]; // Copy 函数指针（null = 位拷贝）
 
         // 用于保护所有静态状态的锁。Component 注册是稀有操作，锁开销可忽略。
         private static readonly object _typeLock = new();
@@ -29,6 +31,18 @@ namespace EntJoy.ECS
         {
             public static readonly delegate*<void*, void> Dispose = &DisposeHook;
             private static void DisposeHook(void* p) => Unsafe.AsRef<T>(p).Dispose();
+        }
+
+        /// <summary>泛型 Copy 函数指针（AOT 安全：泛型实例化，无反射）。</summary>
+        private static class CopyableHooks<T> where T : unmanaged, ICopyable<T>
+        {
+            public static readonly delegate*<void*, void*, void> Copy = &CopyHook;
+            private static void CopyHook(void* src, void* dst)
+            {
+                ref T s = ref Unsafe.AsRef<T>(src);
+                ref T d = ref Unsafe.AsRef<T>(dst);
+                d.OnCopy(in s, ref d);
+            }
         }
 
         /// <summary>
@@ -70,10 +84,14 @@ namespace EntJoy.ECS
                     Array.Resize(ref ComponentIsShared, ComponentIsShared.Length * 2);
                     Array.Resize(ref ComponentIsRelation, ComponentIsRelation.Length * 2);
                     Array.Resize(ref ComponentIsDisposable, ComponentIsDisposable.Length * 2);
+                    Array.Resize(ref ComponentIsCopyable, ComponentIsCopyable.Length * 2);
                     // 函数指针数组不能用 Array.Resize<T>（函数指针不可作泛型实参），手动扩容
                     var newDisposeFn = new delegate*<void*, void>[ComponentDisposeFn.Length * 2];
                     Array.Copy(ComponentDisposeFn, newDisposeFn, ComponentDisposeFn.Length);
                     ComponentDisposeFn = newDisposeFn;
+                    var newCopyFn = new delegate*<void*, void*, void>[ComponentCopyFn.Length * 2];
+                    Array.Copy(ComponentCopyFn, newCopyFn, ComponentCopyFn.Length);
+                    ComponentCopyFn = newCopyFn;
                 }
                 // 判断是否为 IEnableableComponent
                 ComponentIsEnableable[id] = typeof(IEnableableComponent).IsAssignableFrom(type);
@@ -83,6 +101,8 @@ namespace EntJoy.ECS
                 ComponentIsRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type);
                 // 判断是否实现 IDisposable（持有原生资源，销毁/移除时需调用 Dispose）
                 ComponentIsDisposable[id] = typeof(IDisposable).IsAssignableFrom(type);
+                // 判断是否实现 ICopyable（复制组件值时需调用 OnCopy，如 SharedBlob 的 refcount++）
+                ComponentIsCopyable[id] = typeof(ICopyable).IsAssignableFrom(type);
 
                 ComponentDataSize[id] = newComponentType.Size;
 
@@ -147,6 +167,9 @@ namespace EntJoy.ECS
         /// <summary>该组件类型是否实现 IDisposable（持有原生资源）。</summary>
         public static bool GetIsDisposable(int id) => ComponentIsDisposable[id];
 
+        /// <summary>该组件类型是否实现 ICopyable（复制时需调用 OnCopy）。</summary>
+        public static bool GetIsCopyable(int id) => ComponentIsCopyable[id];
+
         /// <summary>
         /// 通过该组件类型的ID获取对应的类型
         /// </summary>
@@ -162,6 +185,16 @@ namespace EntJoy.ECS
         {
             int id = GetComponentType(typeof(T)).Id;
             ComponentDisposeFn[id] = DisposableHooks<T>.Dispose;
+        }
+
+        /// <summary>
+        /// 显式注册组件复制钩子的 Copy 函数指针（复制组件值时调用 OnCopy，如 SharedBlob 的 refcount++）。
+        /// 组件实现 <see cref="ICopyable{T}"/> 后须调用一次；AOT 安全（泛型实例化，无反射）。
+        /// </summary>
+        public static void RegisterCopyable<T>() where T : unmanaged, ICopyable<T>
+        {
+            int id = GetComponentType(typeof(T)).Id;
+            ComponentCopyFn[id] = CopyableHooks<T>.Copy;
         }
 
         /// <summary>
@@ -199,6 +232,27 @@ namespace EntJoy.ECS
                 throw new InvalidOperationException(
                     $"Component '{type.Type.FullName}' implements IDisposable but its Dispose hook is not registered. "
                     + "Call ComponentTypeManager.RegisterDisposable<T>() before use.");
+            }
+        }
+
+        /// <summary>
+        /// 复制组件值：ICopyable 组件 → 调 OnCopy（如 SharedBlob 的 refcount++）；普通 → 位拷贝。
+        /// 用于「真复制」场景（SpawnFrom 等），区别于 move（转移所有权）。
+        /// </summary>
+        public static void CopyComponentValue(ComponentType type, void* src, void* dst)
+        {
+            var fn = ComponentCopyFn[type.Id];
+            if (fn != null)
+            {
+                fn(src, dst);
+            }
+            else
+            {
+                if (ComponentIsCopyable[type.Id])
+                    throw new InvalidOperationException(
+                        $"Component '{type.Type.FullName}' implements ICopyable but its Copy hook is not registered. "
+                        + "Call ComponentTypeManager.RegisterCopyable<T>() before use.");
+                Unsafe.CopyBlock(dst, src, (uint)type.Size);
             }
         }
 

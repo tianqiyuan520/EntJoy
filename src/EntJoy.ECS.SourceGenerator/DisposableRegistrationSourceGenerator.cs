@@ -11,11 +11,9 @@ using System.Threading;
 namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
-    /// Disposable 组件注册生成器：扫描同程序集所有持有原生资源的 ECS 组件
-    /// （<c>struct : IComponentData, IDisposable</c> 或 <c>[ECSComponent] partial struct : IDisposable</c>），
-    /// 生成 <c>ComponentDisposableRegistry.RegisterAll()</c> 一行注册全部，消除逐个手写
-    /// <c>ComponentTypeManager.RegisterDisposable&lt;T&gt;()</c> 的样板与漏注册 footgun。
-    /// 对齐 SystemRegistry.RegisterAll 的自动收集模式。
+    /// 组件生命周期钩子注册生成器：扫描持有原生资源 / 需复制钩子的 ECS 组件
+    /// （<c>: IDisposable</c> 或 <c>: ICopyable&lt;T&gt;</c>），生成
+    /// <c>RegisterDisposable</c> + <c>RegisterCopyable</c> 的 [ModuleInitializer] 自动注册。
     /// </summary>
     internal sealed class DisposableRegistrationSourceGenerator : IIncrementalGenerator
     {
@@ -24,34 +22,43 @@ namespace EntJoy.ECS.SourceGenerator
             var provider = context.SyntaxProvider
                 .CreateSyntaxProvider(
                     predicate: static (node, _) => IsCandidate(node),
-                    transform: static (ctx, ct) => GetFullName(ctx, ct))
-                .Where(static name => name != null);
+                    transform: static (ctx, ct) => Transform(ctx, ct))
+                .Where(static info => info != null);
 
             var collected = provider.Collect();
 
-            context.RegisterSourceOutput(collected, static (spc, names) =>
+            context.RegisterSourceOutput(collected, static (spc, infos) =>
             {
-                var sorted = new SortedSet<string>(StringComparer.Ordinal);
-                foreach (var n in names)
-                    if (n != null) sorted.Add(n);
+                var disposables = new SortedSet<string>(StringComparer.Ordinal);
+                var copyables = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (var info in infos)
+                {
+                    if (info is null) continue;
+                    if (info.IsDisposable) disposables.Add(info.FullName);
+                    if (info.IsCopyable) copyables.Add(info.FullName);
+                }
 
-                if (sorted.Count == 0)
+                if (disposables.Count == 0 && copyables.Count == 0)
                     return;
 
-                spc.AddSource("ComponentDisposableRegistry.g.cs", SourceText.From(Generate(sorted), Encoding.UTF8));
+                spc.AddSource("ComponentDisposableRegistry.g.cs",
+                    SourceText.From(Generate(disposables, copyables), Encoding.UTF8));
             });
         }
 
-        /// <summary>语法预筛：struct 声明的基接口列表含 IDisposable。</summary>
+        /// <summary>语法预筛：struct 声明的基接口列表含 IDisposable 或 ICopyable。</summary>
         private static bool IsCandidate(SyntaxNode node)
         {
             return node is StructDeclarationSyntax s &&
                    s.BaseList != null &&
-                   s.BaseList.Types.Any(t => t.Type.ToString().Contains(Config.IDisposable));
+                   s.BaseList.Types.Any(t =>
+                   {
+                       string n = t.Type.ToString();
+                       return n.Contains(Config.IDisposable) || n.Contains(Config.ICopyable);
+                   });
         }
 
-        /// <summary>语义验证：实现 System.IDisposable，且是 ECS 组件（IComponentData 或 [ECSComponent]）。</summary>
-        private static string? GetFullName(GeneratorSyntaxContext context, CancellationToken ct)
+        private static RegistrationInfo? Transform(GeneratorSyntaxContext context, CancellationToken ct)
         {
             if (context.Node is not StructDeclarationSyntax candidate)
                 return null;
@@ -60,13 +67,14 @@ namespace EntJoy.ECS.SourceGenerator
             if (model.GetDeclaredSymbol(candidate, ct) is not INamedTypeSymbol typeSymbol)
                 return null;
 
-            // 必须实现 System.IDisposable（持有原生资源，销毁时需 Dispose）
             bool isDisposable = typeSymbol.AllInterfaces.Any(i =>
                 i.Name == Config.IDisposable && i.ContainingNamespace?.ToDisplayString() == Config.NamespaceSystem);
-            if (!isDisposable)
+            bool isCopyable = typeSymbol.AllInterfaces.Any(i =>
+                i.Name == Config.ICopyable && i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS);
+
+            if (!isDisposable && !isCopyable)
                 return null;
 
-            // 必须是 ECS 组件：实现 IComponentData，或带 [ECSComponent]（由 ECSComponentSourceGenerator 补 IComponentData）
             bool isEcsComponent =
                 typeSymbol.AllInterfaces.Any(i =>
                     i.Name == Config.IComponentData && i.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyECS) ||
@@ -76,10 +84,15 @@ namespace EntJoy.ECS.SourceGenerator
             if (!isEcsComponent)
                 return null;
 
-            return typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            return new RegistrationInfo
+            {
+                FullName = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                IsDisposable = isDisposable,
+                IsCopyable = isCopyable,
+            };
         }
 
-        private static string Generate(IEnumerable<string> fullNames)
+        private static string Generate(SortedSet<string> disposables, SortedSet<string> copyables)
         {
             var sb = new StringBuilder();
             sb.AppendLine("// <auto-generated/>");
@@ -87,19 +100,26 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("using System.Runtime.CompilerServices;");
             sb.AppendLine("using EntJoy.ECS;");
             sb.AppendLine();
-            sb.AppendLine("/// <summary>自动收集并注册 Disposable 组件（由 DisposableRegistrationSourceGenerator 生成，模块加载时自动执行，无需手动调用）。</summary>");
+            sb.AppendLine("/// <summary>自动收集并注册组件生命周期钩子（由 DisposableRegistrationSourceGenerator 生成，模块加载时自动执行）。</summary>");
             sb.AppendLine("internal static class ComponentDisposableRegistry");
             sb.AppendLine("{");
             sb.AppendLine("    [ModuleInitializer]");
             sb.AppendLine("    internal static void Initialize()");
             sb.AppendLine("    {");
-            foreach (var name in fullNames)
-            {
+            foreach (var name in disposables)
                 sb.AppendLine($"        ComponentTypeManager.RegisterDisposable<{name}>();");
-            }
+            foreach (var name in copyables)
+                sb.AppendLine($"        ComponentTypeManager.RegisterCopyable<{name}>();");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             return sb.ToString();
+        }
+
+        private sealed class RegistrationInfo
+        {
+            public string FullName = "";
+            public bool IsDisposable;
+            public bool IsCopyable;
         }
     }
 }

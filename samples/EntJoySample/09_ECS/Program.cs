@@ -108,6 +108,9 @@ namespace EntJoySample.ECS
 
                 // World 快照：TakeSnapshot 序列化 → 修改 → Restore 恢复
                 WorldSnapshotDemo.Run();
+
+                // SharedBlob：不可变共享数据 + 引用计数 + SpawnFrom 复制共享
+                SharedBlobDemo.Run();
             }
             catch (Exception ex)
             {

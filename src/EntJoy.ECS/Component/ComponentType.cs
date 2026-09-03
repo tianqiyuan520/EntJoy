@@ -15,6 +15,7 @@ namespace EntJoy.ECS
         public bool IsShared => ComponentTypeManager.GetIsShared(Id);
         public bool IsRelation => ComponentTypeManager.GetIsRelation(Id);
         public bool IsDisposable => ComponentTypeManager.GetIsDisposable(Id);
+        public bool IsCopyable => ComponentTypeManager.GetIsCopyable(Id);
 
         /// <summary>
         /// 是否为 managed shared 组件（ISharedComponentData 且含引用字段/class）。
