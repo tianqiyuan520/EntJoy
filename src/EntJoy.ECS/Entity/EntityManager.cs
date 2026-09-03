@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using EntJoy.Collections;
 using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
@@ -1327,6 +1329,234 @@ namespace EntJoy.ECS
 
                 return result;
             }
+        }
+
+        // ======================== 数据导航（调试 dump） ========================
+
+        /// <summary>打印单个实体的所有组件字段值（用组件元数据，非反射）。</summary>
+        public unsafe string DumpEntity(Entity entity)
+        {
+            CheckDisposed();
+            ref var info = ref GetEntityInfoRef(entity.Id);
+            if (info.Archetype == null)
+                return "<destroyed entity>";
+            if (info.Version != entity.Version)
+                return "<stale entity>";
+            return DumpEntityInChunk(info.Archetype, info.Archetype.ChunkList[info.ChunkIndex], info.SlotInChunk, entity);
+        }
+
+        /// <summary>打印指定组件签名 Archetype 的所有实体。</summary>
+        public string DumpArchetype(params ComponentType[] types)
+        {
+            CheckDisposed();
+            Archetype? arch = null;
+            for (int i = 0; i < archetypeCount; i++)
+            {
+                var a = allArchetypes[i];
+                if (a != null && a.Types.SequenceEqual(types))
+                {
+                    arch = a;
+                    break;
+                }
+            }
+            if (arch == null)
+                return $"<archetype not found: {string.Join(", ", types.Select(t => t.Type.Name))}>";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Archetype [{string.Join(", ", arch.Types.ToArray().Select(t => t.Type.Name))}] chunk={arch.ChunkCount} 实体={arch.EntityCount}");
+            foreach (var chunk in arch.ChunkList)
+            {
+                for (int slot = 0; slot < chunk.EntityCount; slot++)
+                    sb.Append(DumpEntityInChunk(arch, chunk, slot, chunk.GetEntity(slot)));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>打印所有 Archetype 的概览（组件签名 + 实体数 + chunk 数 + slab）。</summary>
+        public string DumpWorld()
+        {
+            CheckDisposed();
+            var sb = new StringBuilder();
+            sb.AppendLine($"World: {entityCount} 实体, archetype 数={archetypeCount}");
+            for (int i = 0; i < archetypeCount; i++)
+            {
+                var arch = allArchetypes[i];
+                if (arch == null) continue;
+                string sig = string.Join(", ", arch.Types.ToArray().Select(t => t.Type.Name));
+                sb.AppendLine($"  [{sig}] 实体={arch.EntityCount}, chunk={arch.ChunkCount}, slab={arch.SlabBytes / 1024}KB");
+            }
+            return sb.ToString();
+        }
+
+        private unsafe string DumpEntityInChunk(Archetype arch, Chunk chunk, int slot, Entity entity)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"  Entity {entity.Id}:{entity.Version}");
+            for (int i = 0; i < arch.ComponentCount; i++)
+            {
+                var type = arch.Types[i];
+                var meta = ComponentMetaRegistry.Get(type.Id);
+                byte* compPtr = (byte*)chunk.GetComponentArrayPointer(i) + slot * type.Size;
+
+                if (meta.TypeName == null || meta.Fields == null || meta.Fields.Length == 0)
+                {
+                    sb.AppendLine($"    {type.Type.Name}: <无字段元数据>");
+                    continue;
+                }
+
+                sb.Append($"    {meta.TypeName}: ");
+                foreach (var f in meta.Fields)
+                    sb.Append($"{f.Name}={ReadFieldValue(compPtr + f.Offset, f.Kind)} ");
+                sb.AppendLine();
+            }
+            return sb.ToString();
+        }
+
+        private static unsafe string ReadFieldValue(void* ptr, FieldKind kind)
+        {
+            return kind switch
+            {
+                FieldKind.Int8 => (*(sbyte*)ptr).ToString(),
+                FieldKind.Int16 => (*(short*)ptr).ToString(),
+                FieldKind.Int32 => (*(int*)ptr).ToString(),
+                FieldKind.Int64 => (*(long*)ptr).ToString(),
+                FieldKind.UInt8 => (*(byte*)ptr).ToString(),
+                FieldKind.UInt16 => (*(ushort*)ptr).ToString(),
+                FieldKind.UInt32 => (*(uint*)ptr).ToString(),
+                FieldKind.UInt64 => (*(ulong*)ptr).ToString(),
+                FieldKind.Float32 => (*(float*)ptr).ToString(),
+                FieldKind.Float64 => (*(double*)ptr).ToString(),
+                FieldKind.Bool => (*(bool*)ptr).ToString(),
+                FieldKind.Char => (*(char*)ptr).ToString(),
+                FieldKind.Decimal => (*(decimal*)ptr).ToString(),
+                _ => "?",
+            };
+        }
+
+        // ======================== World 快照（零拷贝序列化） ========================
+
+        /// <summary>序列化当前 World 状态为字节快照（组件值零拷贝 memcpy）。</summary>
+        public unsafe WorldSnapshot TakeSnapshot()
+        {
+            CheckDisposed();
+            using var ms = new System.IO.MemoryStream();
+            using var w = new System.IO.BinaryWriter(ms);
+            w.Write("ENTJOY".ToCharArray());  // magic
+
+            // 收集非空 archetype
+            var archetypes = new List<Archetype>();
+            for (int i = 0; i < archetypeCount; i++)
+                if (allArchetypes[i] != null && allArchetypes[i].EntityCount > 0)
+                    archetypes.Add(allArchetypes[i]);
+
+            w.Write(archetypes.Count);
+            foreach (var arch in archetypes)
+            {
+                w.Write(arch.ComponentCount);
+                foreach (var t in arch.Types)
+                {
+                    w.Write(t.Id);
+                    w.Write(t.Size);
+                }
+            }
+
+            int totalEntities = 0;
+            foreach (var arch in archetypes) totalEntities += arch.EntityCount;
+            w.Write(totalEntities);
+
+            for (int archIdx = 0; archIdx < archetypes.Count; archIdx++)
+            {
+                var arch = archetypes[archIdx];
+                foreach (var chunk in arch.ChunkList)
+                {
+                    for (int slot = 0; slot < chunk.EntityCount; slot++)
+                    {
+                        Entity e = chunk.GetEntity(slot);
+                        w.Write(e.Id);
+                        w.Write(e.Version);
+                        w.Write(archIdx);
+                        for (int c = 0; c < arch.ComponentCount; c++)
+                        {
+                            var t = arch.Types[c];
+                            byte* compPtr = (byte*)chunk.GetComponentArrayPointer(c) + slot * t.Size;
+                            w.Write(new ReadOnlySpan<byte>(compPtr, t.Size));
+                        }
+                    }
+                }
+            }
+
+            w.Flush();
+            return new WorldSnapshot(ms.ToArray());
+        }
+
+        /// <summary>从快照恢复 World 状态（清空当前内容后反序列化重建）。</summary>
+        public unsafe void Restore(WorldSnapshot snapshot)
+        {
+            CheckDisposed();
+            using var ms = new System.IO.MemoryStream(snapshot.Data);
+            using var r = new System.IO.BinaryReader(ms);
+
+            char[] magic = r.ReadChars(6);
+
+            ClearWorldInternal();
+
+            int archCount = r.ReadInt32();
+            var signatures = new ComponentType[archCount][];
+            for (int i = 0; i < archCount; i++)
+            {
+                int compCount = r.ReadInt32();
+                var types = new ComponentType[compCount];
+                for (int c = 0; c < compCount; c++)
+                {
+                    int typeId = r.ReadInt32();
+                    int size = r.ReadInt32();
+                    types[c] = new ComponentType(typeId, size);
+                }
+                signatures[i] = types;
+            }
+
+            int entCount = r.ReadInt32();
+            for (int i = 0; i < entCount; i++)
+            {
+                int id = r.ReadInt32();
+                int version = r.ReadInt32();
+                int archIdx = r.ReadInt32();
+
+                var arch = GetOrCreateArchetype(signatures[archIdx]);
+                if (id >= entities.Length)
+                    Array.Resize(ref entities, entities.Length * 2);
+                if (id >= entityCount) entityCount = id + 1;
+
+                var entity = new Entity { Id = id, Version = version };
+                arch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
+                UpdateEntityLocation(id, arch, chunkIndex, slotInChunk);
+                GetEntityInfoRef(id).Version = version;
+
+                for (int c = 0; c < arch.ComponentCount; c++)
+                {
+                    var t = arch.Types[c];
+                    byte* compPtr = (byte*)arch.ChunkList[chunkIndex].GetComponentArrayPointer(c) + slotInChunk * t.Size;
+                    r.Read(new Span<byte>(compPtr, t.Size));
+                }
+            }
+
+            structuralVersion++;
+        }
+
+        private void ClearWorldInternal()
+        {
+            CompleteActiveJobs();
+            for (int i = 0; i < archetypeCount; i++)
+            {
+                allArchetypes[i]?.Dispose();
+                allArchetypes[i] = null;
+            }
+            archetypeMap.Clear();
+            recycleEntities.Clear();
+            entities = new EntityIndexInWorld[Math.Max(256, entities.Length)];
+            archetypeCount = 0;
+            entityCount = 0;
+            structuralVersion++;
         }
 
         /// <summary>
