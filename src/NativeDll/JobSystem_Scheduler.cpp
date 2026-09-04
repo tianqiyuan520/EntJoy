@@ -321,7 +321,7 @@ namespace JobSystem
             // 诊断数组 kMaxTrackedWorkers=64：超出会导致 GetWorkerSnapshots/DumpState
             // 及 affinity 位运算越界，此处钳制。
             resolved = std::min(resolved, kMaxTrackedWorkers);
-            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning()) return true;
+            if (auto scheduler = LoadChaseLevScheduler(); scheduler && scheduler->IsRunning()) return true;
             g_numThreads.store(resolved, std::memory_order_relaxed);
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
@@ -333,18 +333,18 @@ namespace JobSystem
                 BindCurrentThreadToLogicalProcessor(0);
 
             // Chase-Lev 调度器（唯一路径）：持久 worker 线程 + per-worker deque + MPMC Injector
-            g_chaseLevScheduler = std::make_unique<ChaseLevScheduler>();
-            if (!g_chaseLevScheduler->Start(
+            auto scheduler = std::make_shared<ChaseLevScheduler>();
+            if (!scheduler->Start(
                 static_cast<uint32_t>(resolved),
                 &ChaseLevExecuteTile,
                 &ChaseLevTaskDone,
                 g_workerAffinityEnabled.load(std::memory_order_relaxed)))
             {
                 // worker 创建失败：回滚，避免「无 worker 但仍认为 Native 可用」。
-                g_chaseLevScheduler.reset();
                 g_shuttingDown.store(true, std::memory_order_release);
                 return false;
             }
+            std::atomic_store_explicit(&g_chaseLevScheduler, std::move(scheduler), std::memory_order_release);
 
 #if defined(_WIN32)
             // 只在真正创建一代 scheduler 后增加计时器分辨率引用，避免重复 Initialize 泄漏引用。
@@ -380,14 +380,14 @@ namespace JobSystem
         }
         // 隐式批排空：执行 pending 中未发布的 job（worker 尚在运行）；未及执行者由 in-flight 兜底，不产生 UAF。
         FlushPendingSubmits();
-        if (g_chaseLevScheduler)
+        if (auto scheduler = std::atomic_exchange_explicit(
+                &g_chaseLevScheduler, std::shared_ptr<ChaseLevScheduler>{}, std::memory_order_acq_rel))
         {
-            g_chaseLevScheduler->Stop();
+            scheduler->Stop();
             // 释放 Stop 排空出的未退役 batch（cleanup + ReleaseBatch + ReleaseState），
             // 消除 shutdown 未完成 job 的 context 泄漏。
-            for (auto* batch : g_chaseLevScheduler->drainedBatches)
+            for (auto* batch : scheduler->drainedBatches)
                 ForceFinalizeBatch(batch);
-            g_chaseLevScheduler.reset();
         }
         ConsumeLongBatchBarriers();
         // 先把 main 线程缓存的 batch storage 交还共享池再清空；worker 已 join，其 thread_local 缓存已交还。

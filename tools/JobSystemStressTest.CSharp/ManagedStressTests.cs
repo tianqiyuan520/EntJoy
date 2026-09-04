@@ -14,6 +14,13 @@ struct IncJob : IJob
     public void Execute() => Interlocked.Increment(ref Counter[0]);
 }
 
+struct IndexedIncJob : IJob
+{
+    public long[] Counters;
+    public int Index;
+    public void Execute() => Interlocked.Increment(ref Counters[Index]);
+}
+
 struct ParallelForIncJob : IJobParallelFor
 {
     public int[] Hits;
@@ -146,20 +153,34 @@ static class ManagedStressTests
         long[] c = [0]; var j2 = new IncJob { Counter = c };
         ManagedJobScheduler.Schedule(ref j2).Complete();
         Require(c[0] == 1, "M6: broken");
+
+        var failed = new ThrowingJob();
+        var failedHandle = ManagedJobScheduler.Schedule(ref failed);
+        var dependent = new IncJob { Counter = c };
+        var dependentHandle = ManagedJobScheduler.Schedule(ref dependent, failedHandle);
+        try
+        {
+            dependentHandle.Complete();
+            throw new Exception("M6: dependency exception was not propagated");
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     static void Test_DiamondDependency()
     {
         for (int r = 0; r < 200; r++)
         {
-            long[] c = [0];
-            var ja = new IncJob { Counter = c }; var a = ManagedJobScheduler.Schedule(ref ja);
-            var jb = new IncJob { Counter = c }; var b = ManagedJobScheduler.Schedule(ref jb, a);
-            var jc = new IncJob { Counter = c }; var cc = ManagedJobScheduler.Schedule(ref jc, a);
-            var jd = new IncJob { Counter = c };
+            long[] c = [0, 0, 0, 0];
+            var ja = new IndexedIncJob { Counters = c, Index = 0 }; var a = ManagedJobScheduler.Schedule(ref ja);
+            var jb = new IndexedIncJob { Counters = c, Index = 1 }; var b = ManagedJobScheduler.Schedule(ref jb, a);
+            var jc = new IndexedIncJob { Counters = c, Index = 2 }; var cc = ManagedJobScheduler.Schedule(ref jc, a);
+            var jd = new IndexedIncJob { Counters = c, Index = 3 };
             var d = ManagedJobScheduler.Schedule(ref jd, ManagedJobHandle.CombineDependencies([b, cc]));
             d.Complete();
-            Require(c[0] == 4, $"M7: {c[0]}");
+            Require(c[0] == 1 && c[1] == 1 && c[2] == 1 && c[3] == 1,
+                $"M7: [{c[0]}, {c[1]}, {c[2]}, {c[3]}]");
         }
     }
 

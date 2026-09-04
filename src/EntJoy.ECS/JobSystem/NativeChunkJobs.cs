@@ -287,6 +287,7 @@ namespace EntJoy.ECS.JobSystem
                     try { leaseHandle.Free(); } catch { }
                 }
 
+                Interlocked.Exchange(ref header->cleanupInProgress, 0);
                 try
                 {
                     var pooledBlock = contextBlock - IntPtr.Size;
@@ -294,8 +295,6 @@ namespace EntJoy.ECS.JobSystem
                     NativeJobCore.ContextPool.Return(pooledBlock, pooledSize);
                 }
                 catch { }
-
-                Interlocked.Exchange(ref header->cleanupInProgress, 0);
             }
         }
     }

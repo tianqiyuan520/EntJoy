@@ -44,7 +44,9 @@ namespace EntJoy.Collections
         {
             if (Capacity >= min) return;
 
-            int newCapacity = Math.Max(min, Capacity * 2);
+            if (min < 0) throw new ArgumentOutOfRangeException(nameof(min));
+            int doubled = Capacity > int.MaxValue / 2 ? int.MaxValue : Capacity * 2;
+            int newCapacity = Math.Max(min, doubled);
             if (newCapacity < 4) newCapacity = 4;
 
             long newSizeL = (long)newCapacity * sizeof(T);
@@ -64,6 +66,7 @@ namespace EntJoy.Collections
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Add(T value)
         {
+            if (Length == int.MaxValue) throw new OverflowException("UnsafeList length exceeds Int32.MaxValue.");
             EnsureCapacity(Length + 1);
             Ptr[Length++] = value;
         }
@@ -74,6 +77,7 @@ namespace EntJoy.Collections
             if ((uint)index > (uint)Length)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
+            if (Length == int.MaxValue) throw new OverflowException("UnsafeList length exceeds Int32.MaxValue.");
             EnsureCapacity(Length + 1);
             if (index < Length)
             {
@@ -132,7 +136,7 @@ namespace EntJoy.Collections
             {
                 int newElements = newLength - Length;
                 byte* start = (byte*)Ptr + Length * sizeof(T);
-                UnsafeUtility.MemClear(start, newElements * sizeof(T));
+                UnsafeUtility.MemClear(start, (long)newElements * sizeof(T));
             }
 
             Length = newLength;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using EntJoy.ECS;
 
@@ -12,6 +13,13 @@ namespace EntJoy.ECS.JobSystem
     /// </summary>
     internal static unsafe class ChunkJobCollector
     {
+        private static int CheckedBytes(long count, int elementSize)
+        {
+            if (count < 0 || count > int.MaxValue / (long)elementSize)
+                throw new OverflowException("Chunk job payload exceeds Int32.MaxValue.");
+            return (int)(count * elementSize);
+        }
+
         // ─── 共享缓冲 ───
         [ThreadStatic] private static Chunk[] s_chunkBuffer = new Chunk[64];
         [ThreadStatic] private static List<Archetype> s_archetypeBuffer = new();
@@ -50,45 +58,57 @@ namespace EntJoy.ECS.JobSystem
         internal static ChunkJobData* BuildManagedPayload(Chunk[] chunks, int count, bool fillBitmaps, out Chunk[] chunkArray)
         {
             chunkArray = chunks;
-            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(count * sizeof(ChunkJobData));
-            for (int ci = 0; ci < count; ci++)
+            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(ChunkJobData)));
+            Unsafe.InitBlockUnaligned(tablePtr, 0, (uint)CheckedBytes(count, sizeof(ChunkJobData)));
+            try
             {
-                var chunk = chunks[ci];
-                int compCount = chunk.ComponentCount;
-                void** bitmaps = null;
-                if (fillBitmaps)
+                for (int ci = 0; ci < count; ci++)
                 {
-                    bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-                    for (int c = 0; c < compCount; c++)
-                        bitmaps[c] = chunk.GetEnableBitMapPointer(c);
+                    var chunk = chunks[ci];
+                    int compCount = chunk.ComponentCount;
+                    void** bitmaps = null;
+                    if (fillBitmaps)
+                    {
+                        bitmaps = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
+                        for (int c = 0; c < compCount; c++)
+                            bitmaps[c] = chunk.GetEnableBitMapPointer(c);
+                    }
+                    tablePtr[ci] = new ChunkJobData
+                    {
+                        entityArray = null, entityCount = chunk.EntityCount,
+                        componentCount = compCount, componentArrays = null, componentSizes = null,
+                        enableBitMaps = bitmaps, componentTypeIndices = null,
+                        chunkHandle = (IntPtr)ci,
+                        requiredComponentArrays = null, requiredComponentCount = 0
+                    };
                 }
-                tablePtr[ci] = new ChunkJobData
-                {
-                    entityArray = null, entityCount = chunk.EntityCount,
-                    componentCount = compCount, componentArrays = null, componentSizes = null,
-                    enableBitMaps = bitmaps, componentTypeIndices = null,
-                    chunkHandle = (IntPtr)ci,  // chunkId
-                    requiredComponentArrays = null, requiredComponentCount = 0
-                };
+                return tablePtr;
             }
-            return tablePtr;
+            catch
+            {
+                FreeChunkJobDataPayload(tablePtr, count);
+                throw;
+            }
         }
 
         // ─── Native/ISPC 路径：完整 payload（所有组件指针） ───
         internal static ChunkJobData* BuildNativePayload(Chunk[] chunks, int count, int[]? requiredIds, GCHandle[]? gcHandles)
         {
-            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(count * sizeof(ChunkJobData));
-            for (int ci = 0; ci < count; ci++)
+            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(ChunkJobData)));
+            Unsafe.InitBlockUnaligned(tablePtr, 0, (uint)CheckedBytes(count, sizeof(ChunkJobData)));
+            try
             {
-                var chunk = chunks[ci];
+                for (int ci = 0; ci < count; ci++)
+                {
+                    var chunk = chunks[ci];
                 var arch = chunk.Archetype;
                 int compCount = chunk.ComponentCount;
-                var compPtrs = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-                var compSizes = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
-                var bitmaps = (void**)Marshal.AllocHGlobal(compCount * sizeof(void*));
-                var typeIndices = (int*)Marshal.AllocHGlobal(compCount * sizeof(int));
+                var compPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
+                var compSizes = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
+                var bitmaps = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
+                var typeIndices = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
                 int reqCount = requiredIds?.Length ?? 0;
-                void** reqArrays = reqCount > 0 ? (void**)Marshal.AllocHGlobal(reqCount * sizeof(void*)) : null;
+                void** reqArrays = reqCount > 0 ? (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*))) : null;
                 if (reqArrays != null) for (int r = 0; r < reqCount; r++) reqArrays[r] = null;
                 for (int c = 0; c < compCount; c++)
                 {
@@ -116,7 +136,7 @@ namespace EntJoy.ECS.JobSystem
                             sharedCount++;
                     if (sharedCount > 0)
                     {
-                        sharedPtrs = (void**)Marshal.AllocHGlobal(sharedCount * sizeof(void*));
+                        sharedPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(sharedCount, sizeof(void*)));
                         int si = 0;
                         for (int c = 0; c < compCount; c++)
                         {
@@ -125,8 +145,8 @@ namespace EntJoy.ECS.JobSystem
                         }
                     }
                 }
-                tablePtr[ci] = new ChunkJobData
-                {
+                    tablePtr[ci] = new ChunkJobData
+                    {
                     entityArray = (void*)chunk.GetEntityPointer(),
                     entityCount = chunk.EntityCount, componentCount = compCount,
                     componentArrays = compPtrs, componentSizes = compSizes,
@@ -134,9 +154,30 @@ namespace EntJoy.ECS.JobSystem
                     chunkHandle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero,
                     requiredComponentArrays = reqArrays, requiredComponentCount = reqCount,
                     sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
-                };
+                    };
+                }
+                return tablePtr;
             }
-            return tablePtr;
+            catch
+            {
+                FreeChunkJobDataPayload(tablePtr, count);
+                throw;
+            }
+        }
+
+        private static void FreeChunkJobDataPayload(ChunkJobData* tablePtr, int count)
+        {
+            if (tablePtr == null) return;
+            for (int i = 0; i < count; i++)
+            {
+                if (tablePtr[i].componentArrays != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentArrays);
+                if (tablePtr[i].componentSizes != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentSizes);
+                if (tablePtr[i].enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].enableBitMaps);
+                if (tablePtr[i].componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentTypeIndices);
+                if (tablePtr[i].requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].requiredComponentArrays);
+                if (tablePtr[i].sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].sharedValuePtrs);
+            }
+            Marshal.FreeHGlobal((IntPtr)tablePtr);
         }
 
         // ─── Cpp entity batch 路径：EntityBatchData* ───
@@ -147,32 +188,41 @@ namespace EntJoy.ECS.JobSystem
             if (count == 0) { batchesPtr = null; batchCount = 0; compArraysBlock = null; return; }
             batchCount = count;
             int reqCount = requiredIds?.Length ?? 0;
-            batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(count * sizeof(EntityBatchData));
-            compArraysBlock = reqCount > 0 ? (void*)Marshal.AllocHGlobal(count * reqCount * sizeof(void*)) : null;
-            for (int ci = 0; ci < count; ci++)
+            batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(EntityBatchData)));
+            compArraysBlock = null;
+            try
             {
-                var chunk = chunks[ci];
-                var arch = chunk.Archetype;
-                batchesPtr[ci].entityCount = chunk.EntityCount;
-                batchesPtr[ci].componentArrays = null;
-                batchesPtr[ci].enableBitMaps = null;
-                batchesPtr[ci].enableBitmapCount = 0;
-                if (compArraysBlock != null)
+                Unsafe.InitBlockUnaligned(batchesPtr, 0, (uint)CheckedBytes(count, sizeof(EntityBatchData)));
+                compArraysBlock = reqCount > 0 ? (void*)Marshal.AllocHGlobal(CheckedBytes((long)count * reqCount, sizeof(void*))) : null;
+                for (int ci = 0; ci < count; ci++)
                 {
-                    void** arraysBase = (void**)compArraysBlock + ci * reqCount;
-                    for (int r = 0; r < reqCount; r++)
+                    var chunk = chunks[ci];
+                    var arch = chunk.Archetype;
+                    batchesPtr[ci].entityCount = chunk.EntityCount;
+                    if (compArraysBlock != null)
                     {
-                        arraysBase[r] = null;
-                        int reqId = requiredIds![r];
-                        for (int c = 0; c < chunk.ComponentCount; c++)
-                            if (arch.Types[c].Id == reqId)
-                            {
-                                arraysBase[r] = (void*)chunk.GetComponentArrayPointer(c);
-                                break;
-                            }
+                        void** arraysBase = (void**)compArraysBlock + ci * reqCount;
+                        for (int r = 0; r < reqCount; r++)
+                        {
+                            int reqId = requiredIds![r];
+                            for (int c = 0; c < chunk.ComponentCount; c++)
+                                if (arch.Types[c].Id == reqId)
+                                {
+                                    arraysBase[r] = (void*)chunk.GetComponentArrayPointer(c);
+                                    break;
+                                }
+                        }
+                        batchesPtr[ci].componentArrays = arraysBase;
                     }
-                    batchesPtr[ci].componentArrays = arraysBase;
                 }
+            }
+            catch
+            {
+                if (compArraysBlock != null) Marshal.FreeHGlobal((IntPtr)compArraysBlock);
+                Marshal.FreeHGlobal((IntPtr)batchesPtr);
+                batchesPtr = null;
+                batchCount = 0;
+                throw;
             }
         }
 

@@ -14,8 +14,14 @@ namespace EntJoy.JobSystem.Managed
     {
         internal ManagedCompletion Completion;
         internal int Gen; // 分配时的槽位代际快照：槽位被复用（归还后重租）时代际变化，旧 handle 据此判定过期，杜绝 ABA 误操作
+        internal int Epoch;
 
-        internal ManagedJobHandle(ManagedCompletion completion) { Completion = completion; Gen = completion.Generation; }
+        internal ManagedJobHandle(ManagedCompletion completion)
+        {
+            Completion = completion;
+            Gen = completion.Generation;
+            Epoch = ManagedJobScheduler.Epoch;
+        }
 
         /// <summary>是否已完成（Remaining == 0；若槽位已被复用，本 handle 视为已完成/过期）。</summary>
         public bool IsCompleted => IsExpired || Volatile.Read(ref Completion.Remaining) == 0;
@@ -30,12 +36,13 @@ namespace EntJoy.JobSystem.Managed
             // 二次代际校验：若已过期则绝不再归还，杜绝双重释放/误操作新 job（防 ABA 双重归还）。
             if (IsExpired) return;
             var ex = c.ReadException();   // 先在归还前取出异常（ReturnCompletion 的 Reset 会清空）
-            ManagedJobScheduler.ReturnCompletion(c);
+            ManagedJobScheduler.ReturnCompletion(c, Gen);
             if (ex != null) ExceptionDispatchInfo.Capture(ex).Throw();
         }
 
         /// <summary>槽位是否已被复用（代际不匹配）→ 本 handle 过期，不再有效引用原 job。</summary>
-        internal bool IsExpired => Completion == null || Volatile.Read(ref Completion.Generation) != Gen;
+        internal bool IsExpired => Completion == null || Epoch != ManagedJobScheduler.Epoch ||
+            Volatile.Read(ref Completion.Generation) != Gen;
 
         /// <summary>合并多个依赖：返回 vs. 所有输入都完成才算完成。</summary>
         public static ManagedJobHandle CombineDependencies(ManagedJobHandle[] handles)
@@ -51,7 +58,7 @@ namespace EntJoy.JobSystem.Managed
             {
                 // 依赖槽位若已被复用（过期）视为已完成，直接计入；否则挂回调等其完成
                 if (!h.IsExpired && h.Completion != null)
-                    h.Completion.OnCompleted(combined.Signal);
+                    h.Completion.OnCompleted(combined.Signal, h.Gen);
                 else
                     combined.Signal();
             }
@@ -66,8 +73,9 @@ namespace EntJoy.JobSystem.Managed
     {
         // 原子完成计数。正值 = 未完成任务数；归零表示完成。
         internal int Remaining = 1;
-        private Action _onComplete;   // 原子累积（OnCompleted 用 CAS）；完成时快照执行
+        private Action _onComplete;
         private readonly ManualResetEventSlim _done = new ManualResetEventSlim(false);
+        internal readonly object SyncRoot = new object();
 
         // 预分配池管理字段（由 ManagedJobScheduler 管理）
         internal int SlotIndex = -1;   // 在预分配槽位池中的索引（-1 = 池外兜底分配）
@@ -90,6 +98,17 @@ namespace EntJoy.JobSystem.Managed
         /// <summary>读取已记录的异常（无则 null）。</summary>
         internal Exception ReadException() => Volatile.Read(ref _exception);
 
+        internal bool TryMarkAutoReturn(int expectedGeneration)
+        {
+            lock (SyncRoot)
+            {
+                if (Generation != expectedGeneration || _returned != 0)
+                    return false;
+                Volatile.Write(ref _autoReturn, 1);
+                return true;
+            }
+        }
+
         /// <summary>重置为可复用状态。不清 _returned/Geration（归还后保持，直到被新 job Rent 时更新）。</summary>
         internal void Reset()
         {
@@ -100,31 +119,38 @@ namespace EntJoy.JobSystem.Managed
             _autoReturn = 0;
         }
 
-        /// <summary>注册完成回调（原子累积，防菱形依赖并发注册丢回调）。</summary>
-        internal void OnCompleted(Action callback)
+        /// <summary>注册完成回调；完成、回收和重租与注册串行化，防止回调丢失。</summary>
+        internal void OnCompleted(Action callback, int expectedGeneration = -1)
         {
-            while (true)
+            Action invoke = null;
+            lock (SyncRoot)
             {
-                var cur = Volatile.Read(ref _onComplete);
-                var next = cur == null ? callback : (Action)Delegate.Combine(cur, callback);
-                if (Interlocked.CompareExchange(ref _onComplete, next, cur) == cur)
-                    break;
+                if ((expectedGeneration >= 0 && Generation != expectedGeneration) ||
+                    Volatile.Read(ref _returned) != 0 || IsCompleted)
+                {
+                    invoke = callback;
+                }
+                else
+                {
+                    var cur = _onComplete;
+                    _onComplete = cur == null ? callback : (Action)Delegate.Combine(cur, callback);
+                }
             }
-            // 若已完成则竞争派发：与 Signal 共享原子取出，保证回调只派发一次（消除双重执行竞态）。
-            if (IsCompleted) DispatchComplete();
+            invoke?.Invoke();
         }
 
         /// <summary>
-        /// 原子取出并清空完成回调，只派发一次。
-        /// 消除 OnCompleted 的同步回调与 Signal 的完成回调间的双重执行竞态：
-        /// 该竞态会让依赖链的 Propagate 执行两次（EnqueueSlices 二次覆盖 Remaining→计数错乱→依赖链死锁）。
-        /// 也被 ManagedJobScheduler.RentCompletion 用作“回收槽位续体清空兜底”：把并发注册到已回收槽位上
-        /// 的遗留续体派发掉（dep 已完成 → 现在执行正确），经 Exchange 保证至多一次，杜绝续体在重租时被静默丢弃。
+        /// 取出并清空完成回调，只派发一次。
         /// </summary>
         internal void DispatchComplete()
         {
-            var c = Interlocked.Exchange(ref _onComplete, null);
-            if (c != null) c();
+            Action c;
+            lock (SyncRoot)
+            {
+                c = _onComplete;
+                _onComplete = null;
+                c?.Invoke();
+            }
         }
 
         /// <summary>任务片段完成；Remaining 减到 0 时触发完成信号，并（若标记自动归还）回池。</summary>
@@ -132,11 +158,12 @@ namespace EntJoy.JobSystem.Managed
         {
             if (Interlocked.Decrement(ref Remaining) == 0)
             {
+                int completedGeneration = Volatile.Read(ref Generation);
                 _done.Set();
                 DispatchComplete();
                 // 依赖链中间 handle：完成后由完成线程自动归还，避免只等末端 handle 导致的连中部 completion 泄漏。
                 if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0)
-                    ManagedJobScheduler.AutoReturnCompletion(this);
+                    ManagedJobScheduler.AutoReturnCompletion(this, completedGeneration);
             }
         }
 

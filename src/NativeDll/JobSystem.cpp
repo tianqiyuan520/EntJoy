@@ -50,7 +50,7 @@ namespace JobSystem
 
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
-    std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
+    std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
     std::atomic<int> g_numThreads{ 0 };
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。

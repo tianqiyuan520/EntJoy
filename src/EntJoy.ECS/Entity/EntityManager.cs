@@ -46,6 +46,7 @@ namespace EntJoy.ECS
         // Native SendEvent 异步 drain 待处理列表（contextPtr, jobType, world）——记录 world 归属，
         // 避免多 World 下依赖全局 DefaultWorld 导致事件写错 EventStream 或丢失。
         internal readonly List<(IntPtr contextPtr, Type jobType, World world)> _pendingNativeEvents = new();
+        internal readonly object _pendingNativeEventsLock = new();
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
@@ -98,7 +99,9 @@ namespace EntJoy.ECS
         /// </summary>
         public Archetype[] GetAllArchetypes()
         {
-            return allArchetypes;
+            var result = new Archetype[archetypeCount];
+            Array.Copy(allArchetypes, result, archetypeCount);
+            return result;
         }
 
         public void Dispose()
@@ -198,10 +201,20 @@ namespace EntJoy.ECS
         /// <summary>drain 本 World 的 Native SendEvent buffers（job 完成后事件落盘）。</summary>
         private void DrainPendingNativeEvents()
         {
-            if (_pendingNativeEvents.Count == 0) return;
-            foreach (var (contextPtr, jobType, world) in _pendingNativeEvents)
-                JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, world, jobType);
-            _pendingNativeEvents.Clear();
+            List<(IntPtr contextPtr, Type jobType, World world)> pending;
+            lock (_pendingNativeEventsLock)
+            {
+                if (_pendingNativeEvents.Count == 0) return;
+                pending = new List<(IntPtr contextPtr, Type jobType, World world)>(_pendingNativeEvents);
+                _pendingNativeEvents.Clear();
+            }
+            Exception first = null;
+            foreach (var (contextPtr, jobType, world) in pending)
+            {
+                try { JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, world, jobType); }
+                catch (Exception ex) { first ??= ex; }
+            }
+            if (first != null) throw first;
         }
 
         private void PruneCompletedJobsNoLock()

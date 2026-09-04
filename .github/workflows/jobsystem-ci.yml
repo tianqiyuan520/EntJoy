@@ -66,7 +66,7 @@ jobs:
           for stage in Stage2_BatchLifetime Stage3_SchedulerLifecycle Stage6_CppExceptionSafety Stage7_DeferDepth Stage9_BatchStorageRace Stage10_ImplicitBatchToggle; do
             cmake -S tools/JobSystemBugTests/$stage -B tools/JobSystemBugTests/$stage/build -A x64
             cmake --build tools/JobSystemBugTests/$stage/build --config Release
-            tools/JobSystemBugTests/$stage/build/Release/$stage.exe
+            ./tools/JobSystemBugTests/$stage/build/Release/$stage.exe
           done
         shell: bash
 

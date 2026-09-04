@@ -83,9 +83,7 @@ namespace EntJoy.Collections
             // 存活表：区分本分配器块与外来块，杜绝内部指针释放
             if (!s_live.TryRemove(basePtr, out _))
             {
-                // 外来块（原生 UnsafeList 等跨堆分配的块）：按原始指针直接释放。
-                // LocalAlloc 基址 → 正确释放；CRT malloc 块 → LocalFree 静默失败（与改动前一致）。
-                Marshal.FreeHGlobal((IntPtr)payload);
+                // 未登记指针不属于本分配器，不能猜测其 allocator 并释放。
                 Interlocked.Increment(ref s_foreign);
                 return;
             }
