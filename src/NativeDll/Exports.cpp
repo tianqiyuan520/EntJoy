@@ -55,14 +55,18 @@ extern "C"
 {
     uint32_t JobSystem_GetAbiVersion()
     {
-        return 1u;
+        // ABI 2: JobSystem_Initialize returns an int status code.
+        return 2u;
     }
 
-    void JobSystem_Initialize(int numThreads)
+    int JobSystem_Initialize(int numThreads)
     {
-        // OOM/线程创建失败：Initialize 内部已有回滚，这里兜底吞异常避免穿透 C ABI → terminate。
-        try { JobSystem::Scheduler::Initialize(numThreads); }
-        catch (...) {}
+        // 返回 0=成功，非 0=失败；不再静默吞掉初始化失败，让 C# 据此回退 Managed backend。
+        try
+        {
+            return JobSystem::Scheduler::Initialize(numThreads) ? 0 : 1;
+        }
+        catch (...) { return 1; }
     }
 
     void JobDebuggerGUI_Launch()
@@ -236,7 +240,13 @@ extern "C"
             if (JobSystem::g_chaseLevScheduler)
                 JobSystem::g_chaseLevScheduler->WakePending();   // 统一唤醒一次
         }
-        catch (...) {}   // OOM：返回已成功提交的数量，不穿透 C ABI
+        catch (...)
+        {
+            // OOM：返回已成功提交的数量，不穿透 C ABI。defer 窗口已 RAII 关闭但统一
+            // 唤醒被跳过，此处补广播防止已提交批滞留无人唤醒。
+            if (JobSystem::g_chaseLevScheduler)
+                JobSystem::g_chaseLevScheduler->WakePending();
+        }
         return ok;
     }
 
@@ -264,9 +274,14 @@ extern "C"
     {
         // 隐式批：Complete 前先提交 pending（Unity ScheduleBatchedJobs 同语义，防死等）
         JobSystem::FlushPendingSubmits();
-        // 仅等待任务完成，不改变引用计数
-        if (handle)
+        // 仅等待任务完成，不改变引用计数。C++ 异常不穿透 C ABI：C# job 的异常由
+        // 托管侧 ThrowRecordedJobExceptions 抛出，此处仅兜底防 RethrowBatchException 越界。
+        if (!handle) return;
+        try
+        {
             JobSystem::JobHandle(fromHandle(handle), true).Complete();
+        }
+        catch (...) {}
     }
 
     uint64_t JobSystem_GetDiagnosticBatchId(void* handle)
@@ -303,7 +318,11 @@ extern "C"
         if (!handle) return 0;
         JobSystem::HandleState* state = fromHandle(handle);
         JobSystem::JobHandle jobHandle(fromHandle(handle), false); // 不增加引用
-        jobHandle.Complete();
+        try
+        {
+            jobHandle.Complete();
+        }
+        catch (...) {}   // C++ 异常不穿透 C ABI
         uint64_t id = state ? state->diagnosticBatchId.load(std::memory_order_acquire) : 0;
         return id; // jobHandle 析构 → Release(state)
     }
@@ -652,7 +671,7 @@ extern "C"
     // g_mainThreadAssistEnabled 声明于 JobSystemInternal.h（namespace JobSystem 内）
     void JobSystem_SetMainThreadAssist(int enabled)
     {
-        JobSystem::g_mainThreadAssistEnabled = enabled != 0;
+        JobSystem::g_mainThreadAssistEnabled.store(enabled != 0, std::memory_order_relaxed);
     }
 
     // CPU 亲和性运行时开关：立即应用到主线程 + 所有 worker。

@@ -210,6 +210,7 @@ namespace EntJoy.ECS
                             var a = Avx.LoadVector256(combinedMask + i);
                             var b = Avx.LoadVector256(bitmap + i);
                             var andResult = Avx2.And(a, b);
+                            Avx.Store(combinedMask + i, andResult);   // 必须存回 AND 结果，否则 combinedMask 残留首组件位图
                             orResult = Avx2.Or(orResult, andResult);
                         }
 

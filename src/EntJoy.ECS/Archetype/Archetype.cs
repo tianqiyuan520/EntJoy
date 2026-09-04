@@ -358,6 +358,9 @@ namespace EntJoy.ECS
                 // 该 slab 所有 Chunk 都已释放 → 归还整个 slab（压缩）
                 ChunkMemoryPool.Free(slab.RawPtr);
                 _slabs.Remove(slab);
+                // 重置 current slab：否则 _currentSlab 仍指向已归还内存，后续 AllocateFromSlab
+                // 会继续在已释放的 slab 上切 chunk（use-after-free）。
+                if (_currentSlab == slab) { _currentSlab = null; _currentSlabOffset = 0; }
                 // 从空洞列表移除该 slab 的 Chunk（已随 slab 归还，不能再复用）
                 long start = slab.AlignedPtr.ToInt64();
                 _freeChunks.RemoveAll(c =>

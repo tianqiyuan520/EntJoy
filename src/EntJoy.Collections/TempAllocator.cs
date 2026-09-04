@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -118,8 +118,9 @@ namespace EntJoy.Collections
                 {
                     Interlocked.Increment(ref s_allocs);
                     Interlocked.Increment(ref s_misses);
-                    // 直通块也带 header（Free 时按 header 判池归属）
-                    basePtr = Marshal.AllocHGlobal(size + HeaderSize);
+                    // 按 class 上界对齐分配（1 << idx），保证池复用返回的块容量恒 ≥ 该 class 内
+                    // 任意请求，避免同 class 更大请求 pop 出更小块后越界写。
+                    basePtr = Marshal.AllocHGlobal((1 << idx) + HeaderSize);
                     WriteHeader(basePtr, idx);
                     payload = basePtr + HeaderSize;
                 }
@@ -254,7 +255,9 @@ namespace EntJoy.Collections
                     List<Pending> taken;
                     lock (e.gate)
                     {
-                        taken = e.items;
+                        // List 是引用类型：直接 taken = e.items 会让 Clear 清空同一实例，遍历空转。
+                        // 必须快照拷贝，否则帧末回收永不执行 → 每帧泄漏 Temp 内存 + 安全句柄。
+                        taken = new List<Pending>(e.items);
                         e.items.Clear();
                     }
                     foreach (var p in taken)

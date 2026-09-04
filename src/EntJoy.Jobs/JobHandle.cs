@@ -51,6 +51,7 @@ public struct JobHandle
         }
         if (hasNative && hasManaged)
             throw new InvalidOperationException("Native and Managed job handles cannot be combined.");
+        if (!hasNative && !hasManaged) return default;
         if (allNative) return new JobHandle(NativeJobScheduler.CombineDependencies(nativeHandles));
         // 混合/托管后端：合并所有 Completed 的 handle
         ManagedJobHandle? first = null;

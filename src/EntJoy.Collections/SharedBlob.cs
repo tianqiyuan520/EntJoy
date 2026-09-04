@@ -7,6 +7,7 @@ namespace EntJoy.Collections
     internal struct BlobHeader
     {
         public int RefCount;
+        public int Padding;   // 对齐到 8 字节，保证后续 T 数据满足 8 字节对齐
     }
 
     /// <summary>

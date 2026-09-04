@@ -30,7 +30,7 @@ namespace EntJoy.ECS
         /// 同步维护反向索引（覆盖先去旧 target 条目）。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void AddRelationship<TRel>(Entity entity, Entity target)
+        public unsafe void AddRelationship<TRel>(Entity entity, Entity target)
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
@@ -67,7 +67,17 @@ namespace EntJoy.ECS
                     var chunk = arch.ChunkList[entityInfoRef.ChunkIndex];
                     var oldSlot = chunk.GetComponent<RelationSlot>(entityInfoRef.SlotInChunk, compIdx);
                     _relationIndex.RemoveRelTypeId(relTypeId, entity, in oldSlot);
-                    arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, compType.Type, RelationSlot.From(target));
+                    var slotValue = RelationSlot.From(target);
+                    arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, compType.Type, slotValue);
+
+                    // Observer：Set（覆盖写也派发，对齐 EntityManager.SetComponentRaw）
+                    if (_observerCount > 0 && _observers != null &&
+                        _observers.TryGetValue(relTypeId, out var reg) && reg.Set.Count > 0)
+                    {
+                        var handle = System.Runtime.InteropServices.GCHandle.Alloc(slotValue, System.Runtime.InteropServices.GCHandleType.Pinned);
+                        try { DispatchAdded(reg.Set, &entity, (void*)handle.AddrOfPinnedObject(), 1); }
+                        finally { handle.Free(); }
+                    }
                 }
                 else
                 {
@@ -96,6 +106,9 @@ namespace EntJoy.ECS
             var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
             if (!info.Archetype.Has(compType.Type)) return;
 
+            // 结构变更前等待访问该 archetype 的 job（对齐 RemoveComponentRaw 的纪律），
+            // 否则 RemoveComponentRawCore 的 chunk 迁移/释放会与在飞 job 并发读写 → use-after-free。
+            CompleteArchetypeJobs(new[] { info.Archetype });
             lock (_structuralLock)
             {
                 // 二次确认（锁内重读）
@@ -462,13 +475,5 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>内部：实体当前是否有某组件列（无锁读取，仅供同锁上下文使用）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool HasComponentInternal(Entity entity, Type componentType)
-        {
-            if ((uint)entity.Id >= (uint)entities.Length) return false;
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            return info.Archetype != null && info.Archetype.Has(componentType);
-        }
     }
 }

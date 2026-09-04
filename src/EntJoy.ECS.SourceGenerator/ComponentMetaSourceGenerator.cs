@@ -58,25 +58,28 @@ namespace EntJoy.ECS.SourceGenerator
             if (typeSymbol.DeclaredAccessibility != Accessibility.Public)
                 return null;
 
+            // 泛型组件：生成代码无法引用未定义的 T（CS0246），跳过；[ECSComponent] 路径由 EJ2003 诊断
+            if (typeSymbol.TypeParameters.Length > 0)
+                return null;
+
             // 递归收集叶子字段（内置类型 / enum；嵌套 struct 展开）
             var entries = new List<FieldEntry>();
-            CollectFields(typeSymbol, "", entries, new HashSet<string>());
+            CollectFields(typeSymbol, "", entries);
             if (entries.Count == 0)
                 return null;
 
             string fullName = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             return new MetaResult
             {
-                HintName = $"{typeSymbol.Name}_Meta.g.cs",
+                HintName = $"{SanitizeHintName(fullName)}_Meta.g.cs",
                 Source = Generate(typeSymbol, fullName, entries),
             };
         }
 
-        private static void CollectFields(ITypeSymbol type, string prefix, List<FieldEntry> entries, HashSet<string> visited)
+        private static void CollectFields(ITypeSymbol type, string prefix, List<FieldEntry> entries)
         {
-            if (!visited.Add(type.ToDisplayString()))
-                return;  // 防环（C# 值类型禁止循环包含，防御）
-
+            // 无 visited 去重：C# 编译器禁止值类型循环包含（CS0523），不会无限递归；
+            // 全局 visited 按类型名去重会误伤「同一组件含两个同类型嵌套 struct 字段」的场景（第二个字段的叶子项被跳过）。
             foreach (var member in type.GetMembers())
             {
                 if (member is not IFieldSymbol field || field.IsStatic || field.IsConst)
@@ -92,12 +95,13 @@ namespace EntJoy.ECS.SourceGenerator
                 if (field.Type is IPointerTypeSymbol)
                     continue;
 
-                // enum → 底层整数类型
+                // enum → 底层整数类型（TypeKeyword 用枚举全名，Unsafe.As/sizeof 才能与 ref 字段类型匹配；
+                // Kind 仍映射底层类型，保证 FieldKind 语义正确）
                 if (field.Type.TypeKind == TypeKind.Enum)
                 {
                     var underlying = ((INamedTypeSymbol)field.Type).EnumUnderlyingType;
-                    if (TryMap(underlying, out var kind, out var keyword))
-                        entries.Add(new FieldEntry { Path = path, TypeKeyword = keyword, Kind = kind });
+                    if (TryMap(underlying, out var kind, out _))
+                        entries.Add(new FieldEntry { Path = path, TypeKeyword = field.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), Kind = kind });
                     continue;
                 }
 
@@ -111,7 +115,7 @@ namespace EntJoy.ECS.SourceGenerator
                 // 嵌套 struct → 递归展开
                 if (field.Type.TypeKind == TypeKind.Struct)
                 {
-                    CollectFields(field.Type, path, entries, visited);
+                    CollectFields(field.Type, path, entries);
                 }
                 // 其他（class/interface/delegate）→ blittable 校验已拦，跳过
             }
@@ -146,7 +150,8 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("using System.Runtime.CompilerServices;");
             sb.AppendLine("using EntJoy.ECS;");
             sb.AppendLine();
-            sb.AppendLine($"internal static class {typeSymbol.Name}_Meta");
+            // 类型名用全限定名 sanitize，避免跨命名空间同名组件生成同名类 → CS0101
+            sb.AppendLine($"internal static class {SanitizeHintName(fullName)}_Meta");
             sb.AppendLine("{");
             sb.AppendLine("    [ModuleInitializer]");
             sb.AppendLine("    internal static void Register()");
@@ -172,12 +177,21 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        return new ComponentMeta");
             sb.AppendLine("        {");
             sb.AppendLine($"            TypeId = ComponentTypeManager.GetComponentType(typeof({fullName})).Id,");
-            sb.AppendLine($"            TypeName = nameof({fullName}),");
+            sb.AppendLine($"            TypeName = \"{typeSymbol.Name}\",");
             sb.AppendLine($"            Size = Unsafe.SizeOf<{fullName}>(),");
             sb.AppendLine("            Fields = fields,");
             sb.AppendLine("        };");
             sb.AppendLine("    }");
             sb.AppendLine("}");
+            return sb.ToString();
+        }
+
+        /// <summary>把全限定名转成安全的 HintName 片段（非字母数字下划线 → 下划线），消除同名组件跨命名空间的 HintName 冲突。</summary>
+        private static string SanitizeHintName(string fullName)
+        {
+            var sb = new StringBuilder(fullName.Length);
+            foreach (char c in fullName)
+                sb.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
             return sb.ToString();
         }
 

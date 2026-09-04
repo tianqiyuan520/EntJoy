@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.Collections
@@ -19,7 +19,10 @@ namespace EntJoy.Collections
             if (initialCapacity < 0)
                 throw new ArgumentOutOfRangeException(nameof(initialCapacity));
 
-            int size = initialCapacity * sizeof(T);
+            long sizeL = (long)initialCapacity * sizeof(T);
+            if (sizeL > int.MaxValue)
+                throw new OverflowException($"UnsafeList<{typeof(T).Name}> total byte size {sizeL} exceeds int.MaxValue.");
+            int size = (int)sizeL;
             Ptr = (T*)UnsafeUtility.Malloc(size, allocator, -1); // 底层内存不需要安全句柄索引（-1）
             Length = 0;
             Capacity = initialCapacity;
@@ -44,7 +47,10 @@ namespace EntJoy.Collections
             int newCapacity = Math.Max(min, Capacity * 2);
             if (newCapacity < 4) newCapacity = 4;
 
-            int newSize = newCapacity * sizeof(T);
+            long newSizeL = (long)newCapacity * sizeof(T);
+            if (newSizeL > int.MaxValue)
+                throw new OverflowException($"UnsafeList<{typeof(T).Name}> total byte size {newSizeL} exceeds int.MaxValue.");
+            int newSize = (int)newSizeL;
             T* newPtr = (T*)UnsafeUtility.Malloc(newSize, Allocator, -1);
             if (Ptr != null)
             {

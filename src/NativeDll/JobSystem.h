@@ -248,7 +248,7 @@ namespace JobSystem {
 
     class Scheduler {
     public:
-        static void Initialize(int numThreads = 0);
+        static bool Initialize(int numThreads = 0);
         static void Shutdown();
         static void PrewakeWorkers();
         static void ConfigureTilesPerWorker(int tilesPerWorker);

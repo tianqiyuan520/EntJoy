@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -11,8 +12,8 @@ namespace EntJoy.ECS
     public unsafe class ComponentTypeManager
     {
         private static int idAllocator = 0;
-        private static readonly Dictionary<Type, ComponentType> ComponentTypeRegistries = new();  // 组件类型到组件类型映射
-        public static readonly Dictionary<int, Type> idToTpyeMap = new();
+        private static readonly ConcurrentDictionary<Type, ComponentType> ComponentTypeRegistries = new();
+        public static readonly ConcurrentDictionary<int, Type> idToTpyeMap = new();
         private static int[] ComponentDataSize = new int[100];  //该原型对应的组件 大小
 
         private static bool[] ComponentIsEnableable = new bool[100]; // 记录组件是否为 enableable
@@ -106,8 +107,10 @@ namespace EntJoy.ECS
 
                 ComponentDataSize[id] = newComponentType.Size;
 
-                ComponentTypeRegistries.Add(type, newComponentType);
-                idToTpyeMap.Add(id, type);
+                idToTpyeMap[id] = type;
+                // Publish the reverse map before the type registry. A reader that observes
+                // the registry entry must be able to resolve ComponentType.Type immediately.
+                ComponentTypeRegistries[type] = newComponentType;
                 idAllocator = id + 1;
                 return newComponentType;
             }
@@ -256,9 +259,5 @@ namespace EntJoy.ECS
             }
         }
 
-        public static int GetComponentDataSize()
-        {
-            return 0;
-        }
     }
 }

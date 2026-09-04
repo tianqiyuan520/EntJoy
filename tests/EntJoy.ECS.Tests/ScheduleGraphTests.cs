@@ -68,7 +68,7 @@ namespace EntJoy.ECS.Tests
         public void OnUpdate() { }
     }
 
-    [Read(typeof(Armor))]
+    [Read(typeof(Position))]
     [Order(2)]
     [OrderBefore(typeof(HealSystem))]  // 必须在 HealSystem 之前
     public struct CheckSystem : ISystem

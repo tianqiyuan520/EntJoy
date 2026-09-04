@@ -391,7 +391,7 @@ namespace JobSystem
         if (outJccFine) *outJccFine = false;
         if (length <= 0) return 1;
         if (requestedChunk > 0) return requestedChunk;
-        int wc = std::max(1, g_numThreads);
+        int wc = std::max(1, g_numThreads.load(std::memory_order_relaxed));
 
         // 自动 batch：仅当成本缓存开启且有该 job 成本数据时（热路径开销极小）。
         if (funcHash != 0 && g_jobCostCacheEnabled.load(std::memory_order_relaxed))
@@ -405,13 +405,13 @@ namespace JobSystem
             {
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
-                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
+                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
             }
             const double perElemNs = g_jobCostCache.GetPerElemCost(funcHash);
             if (mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
             {
                 // 阶段 1：粗样本未齐 → tpw（perElemNs 通常为 0，本分支与兜底一致）
-                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
+                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
             }
             // 阶段 2（或 parallel 稳态）：细成本优先，缺省用粗成本代理（学习中/冷启动）
             double costNs = perElemNs;
@@ -422,7 +422,7 @@ namespace JobSystem
                 constexpr int kMaxAdaptiveTpw = 16;         // tiles 上限 = workers×16
                 constexpr int kMaxAutoChunk = 32768;        // 单 tile 最多 32k 元素
                 constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
-                const int chunkTpw4 = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
+                const int chunkTpw4 = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
 
                 // ── 两因子（C_fixed 每 tile 固定 + C_elem 每元素）优先 ──
                 const double cfixed = g_jobCostCache.GetPerTileCost(funcHash);
@@ -432,7 +432,7 @@ namespace JobSystem
                     // 空体/超轻：执行≈0，总成本由调度/唤醒/worker 抖动主导，
                     // 任何执行成本模型都无解 → tpw 兜底。
                     const double tileTimeTpw =
-                        cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker)) * celem;
+                        cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))) * celem;
                     if (tileTimeTpw < kSchedulingOverheadNs)
                     {
                         // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
@@ -483,7 +483,7 @@ namespace JobSystem
         }
         // 冷启动 / flag 关闭 / 无数据 → tpw 兜底：batch = N/(W×k) 随 N 自动缩放，
         // 无需每 job 标代价。
-        return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker));
+        return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
     }
 
     // ============================================================
@@ -572,7 +572,7 @@ namespace JobSystem
                 return;
             }
             // Chase-Lev：spin 期间协助认领（每 16 次，更积极兜底慢 worker）
-            if (g_mainThreadAssistEnabled && g_chaseLevScheduler && (i & 15) == 0)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler && (i & 15) == 0)
             {
                 if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领，继续 spin */ }
             }
@@ -597,7 +597,7 @@ namespace JobSystem
             RethrowBatchException(_state);
                 return;
             }
-            if (g_mainThreadAssistEnabled && g_chaseLevScheduler && (i & 15) == 0)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler && (i & 15) == 0)
             {
                 if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领 */ }
             }
@@ -620,7 +620,7 @@ namespace JobSystem
         {
             // 先 assist 再 wait：避免干等 256µs 的停顿窗口；每轮最多 assist 16 次，
             // 防止链条级联时主线程无限 assist 不回查 completed。
-            if (g_mainThreadAssistEnabled && g_chaseLevScheduler)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler)
             {
                 for (int assistN = 0; assistN < 16; ++assistN)
                 {

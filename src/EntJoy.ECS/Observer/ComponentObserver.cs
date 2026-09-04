@@ -65,6 +65,7 @@ namespace EntJoy.ECS
     {
         public List<IComponentObserver> Added = new();
         public List<IComponentObserver> Removed = new();
-        public List<IComponentObserver> Set = new();  // Set 桶复用 DispatchAdded（新值语义）
+        public List<IComponentObserver> Set = new();      // Set 桶复用 DispatchAdded（新值语义）
+        public List<IComponentObserver> Destroyed = new();
     }
 }

@@ -62,7 +62,11 @@ namespace EntJoy.Collections
             _allocator = allocator;
             _safety = SafetyHandleManager.Allocate(); // 先分配安全句柄
 
-            int size = length * sizeof(T);
+            // 用 long 计算避免 int 溢出（大 length 下溢出为 0/小正数 → 底层分配不足 → 堆越界）
+            long sizeL = (long)length * sizeof(T);
+            if (sizeL > int.MaxValue)
+                throw new OverflowException($"NativeArray<{typeof(T).Name}> total byte size {sizeL} exceeds int.MaxValue.");
+            int size = (int)sizeL;
             _buffer = UnsafeUtility.Malloc(size, allocator, _safety.Index); // 分配内存
 
             if ((options & NativeArrayOptions.ClearMemory) == NativeArrayOptions.ClearMemory)
@@ -112,7 +116,9 @@ namespace EntJoy.Collections
         {
             if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
             if (pinned) PinnedMemory.Register(ptr);
-            return new NativeArray<T>(ptr, length, Allocator.None, SafetyHandleManager.Allocate(), isOwner: false);
+            // 外部内存视图：不分配安全句柄（原实现会 Allocate 却因 isOwner=false 永不 Release → 每次泄漏一个句柄）。
+            // 用无效句柄 index=-1，视图不参与安全检查（外部内存生命周期由调用方负责）。
+            return new NativeArray<T>(ptr, length, Allocator.None, new AtomicSafetyHandle(-1, 1, isReadOnly: false), isOwner: false);
         }
 
         // ========== 释放 ==========

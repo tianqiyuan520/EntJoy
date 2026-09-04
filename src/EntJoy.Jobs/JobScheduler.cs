@@ -25,7 +25,8 @@ namespace EntJoy.JobSystem
             }
             try
             {
-                NativeJobCore.JobSystem_Initialize(numThreads);
+                if (NativeJobCore.JobSystem_Initialize(numThreads) != 0)
+                    throw new InvalidOperationException("Native JobSystem failed to initialize (worker creation/OOM).");
                 UseNative = true;
                 NativeJobScheduler.RegisterPersistentAllocator();
                 NativeJobCore.ValidateStatsLayout();
@@ -37,6 +38,7 @@ namespace EntJoy.JobSystem
             }
             catch
             {
+                NativeJobCore.SafeShutdown();
                 UseNative = false;
                 ManagedJobScheduler.Initialize(
                     numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
@@ -127,11 +129,28 @@ namespace EntJoy.JobSystem
         private struct SequentialBatchJob<T> : IJob where T : struct, IJobParallelForBatch
         {
             public T Job; public int Length, BatchSize;
-            public void Execute() { for (int b = 0; b < Length; b += BatchSize) Job.Execute(b, Math.Min(BatchSize, Length - b)); }
+            public void Execute()
+            {
+                int step = NormalizeBatchSize(BatchSize);
+                for (int b = 0; b < Length;)
+                {
+                    int count = Math.Min(step, Length - b);
+                    Job.Execute(b, count);
+                    b += count;
+                }
+            }
+        }
+
+        private static int NormalizeBatchSize(int batchSize)
+        {
+            if (batchSize == int.MinValue) return 1;
+            return Math.Max(1, Math.Abs(batchSize));
         }
 
         // ─── 状态查询 ───
-        public static int WorkerCount => UseNative ? NativeJobScheduler.JobWorkerCount : Environment.ProcessorCount - 1;
+        public static int WorkerCount => UseNative
+            ? NativeJobScheduler.JobWorkerCount
+            : Math.Max(1, Environment.ProcessorCount - 1);
         public static void PrewakeWorkersOnce() { if (UseNative) NativeJobScheduler.PrewakeWorkersOnce(); }
 
         /// <summary>当前是否为 Native 后端（C++ Chase-Lev）。</summary>

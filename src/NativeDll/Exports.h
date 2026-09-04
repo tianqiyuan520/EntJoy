@@ -35,7 +35,7 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     typedef void (*ChunkRangeJobFunc)(void* context, const struct ChunkJobData* chunks, int startIndex, int count);
     typedef void (*EntityBatchRangeJobFunc)(void* context, const struct EntityBatchData* batches, int startIndex, int count);
 
-    JOB_API void JobSystem_Initialize(int numThreads);
+    JOB_API int JobSystem_Initialize(int numThreads);
     // 强制启动 Dear ImGui 调试面板并开始监听（不依赖 ENTJOY_DEBUG 环境变量，幂等）。
     // 由 C# NativeJobScheduler.LaunchDebuggerGUI() 调用。
     JOB_API void JobDebuggerGUI_Launch();

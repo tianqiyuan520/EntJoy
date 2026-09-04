@@ -31,6 +31,9 @@ namespace EntJoy.Collections
         {
             if (initialCapacity < 0)
                 throw new ArgumentOutOfRangeException(nameof(initialCapacity));
+            if (allocator == Allocator.Temp || allocator == Allocator.TempJob)
+                throw new NotSupportedException(
+                    "NativeList does not support Temp/TempJob (UnsafeList has no safety handle). Use Persistent and Dispose explicitly.");
 
             _allocator = allocator;
             _safety = SafetyHandleManager.Allocate();

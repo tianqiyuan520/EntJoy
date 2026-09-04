@@ -40,13 +40,11 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 添加组件（使用默认值）
+        /// 添加组件（使用默认值，NewEntity 已零初始化，无需再写默认 setter）
         /// </summary>
         public EntityBuilder With<T>() where T : struct
         {
-            var type = ComponentTypeManager.GetComponentType(typeof(T));
-            _types.Add(type);
-            _setters.Add(new ComponentSetter { Type = typeof(T), Value = default(T) });
+            _types.Add(ComponentTypeManager.GetComponentType(typeof(T)));
             return this;
         }
 

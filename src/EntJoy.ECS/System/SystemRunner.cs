@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
+using EntJoy.Collections;
 using EntJoy.JobSystem;
 
 namespace EntJoy.ECS
@@ -44,8 +45,12 @@ namespace EntJoy.ECS
                     ExecuteSystem(slot);
                 }
             }
+            // 帧末屏障：先等所有 job 完成（含异步 SendEvent 的生产者），再交换事件双缓冲——
+            // 否则 worker 仍在写 buffer 时 swap 会导致计数与实际数据串帧/并发读写同一数组。
+            _world.CompletePendingNativeEvents();
             _world.NextFrameEvents();  // 帧末交换事件双缓冲
             _eventCounter.Reset();
+            TempAllocator.Reset();     // 帧末回收 Temp 内存（未手动 Free 的块 + 安全句柄）
         }
 
         private void ExecuteSystem(SystemSlot slot)

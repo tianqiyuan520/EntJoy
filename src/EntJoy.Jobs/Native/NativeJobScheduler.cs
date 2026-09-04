@@ -210,7 +210,8 @@ public static unsafe partial class NativeJobScheduler
         {
             // Re-arm the idempotent shutdown gate after a previous ProcessExit/DomainUnload callback.
             NativeJobCore.ResetShutdownGate();
-            NativeJobCore.JobSystem_Initialize(numThreads);
+            if (NativeJobCore.JobSystem_Initialize(numThreads) != 0)
+                throw new InvalidOperationException("Native JobSystem failed to initialize (worker creation/OOM).");
             UseFallback = false;
             RegisterPersistentAllocator();
             NativeJobCore.ValidateStatsLayout();
@@ -291,22 +292,23 @@ public static unsafe partial class NativeJobScheduler
     {
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
-        bool cleanupByCpp = false;
         try
         {
             var cache = NativeJobCore.JobDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, dependsOn);
-            cleanupByCpp = true;
+            if (!handle.IsValid)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+                return default;
+            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (!cleanupByCpp)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-            }
+            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+            else NativeJobCore.Cleanup(ctx);
             throw;
         }
     }
@@ -317,22 +319,23 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
-        bool cleanupByCpp = false;
         try
         {
             var cache = NativeJobCore.ForDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleForRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, dependsOn);
-            cleanupByCpp = true;
+            if (!handle.IsValid)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+                return default;
+            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (!cleanupByCpp)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-            }
+            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+            else NativeJobCore.Cleanup(ctx);
             throw;
         }
     }
@@ -343,22 +346,23 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
-        bool cleanupByCpp = false;
         try
         {
             var cache = NativeJobCore.GetAutoParallelForCache<T>();
             NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn);
-            cleanupByCpp = true;
+            if (!handle.IsValid)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+                return default;
+            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (!cleanupByCpp)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-            }
+            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+            else NativeJobCore.Cleanup(ctx);
             throw;
         }
     }
@@ -369,22 +373,23 @@ public static unsafe partial class NativeJobScheduler
         if (length <= 0) return default;
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
-        bool cleanupByCpp = false;
         try
         {
             var cache = NativeJobCore.ParallelForBatchDelegateCacheFor<T>.Cache;
             NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn);
-            cleanupByCpp = true;
+            if (!handle.IsValid)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+                return default;
+            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (!cleanupByCpp)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-            }
+            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+            else NativeJobCore.Cleanup(ctx);
             throw;
         }
     }

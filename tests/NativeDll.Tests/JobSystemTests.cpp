@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -102,6 +103,46 @@ namespace
         // Chase-Lev 15 worker 可能抢光 100k 元素，主线程 assist 无活可认领（callerExecutions 可 0）。
         // exactly-once + cleanup 是核心断言；assist 竞争性已由 CompleteDrains/StatsClassify 覆盖。
         (void)callerExecutions;
+    }
+
+    // 回归：构造阶段失败时，native 只释放自己的 wrapper，原始 context 仍由调用方拥有。
+    // 这模拟 C# export 返回空 handle 后的 cleanup；修复前 native 已 cleanup 一次，
+    // 调用方再次 cleanup 会得到 2 次回调/重复归还。
+    void TestConstructionFailureTransfersContextOwnershipToCaller()
+    {
+#ifdef ENTJOY_TESTING
+        struct Context
+        {
+            std::atomic<int>* cleanupCount;
+        } context{ nullptr };
+        std::atomic<int> cleanupCount{ 0 };
+        context.cleanupCount = &cleanupCount;
+
+        auto cleanup = [](void* raw)
+        {
+            static_cast<Context*>(raw)->cleanupCount->fetch_add(1, std::memory_order_relaxed);
+        };
+
+        JobSystem::FailNextBatchStorageAcquireForTests(1);
+        bool threw = false;
+        try
+        {
+            // rc > 1 强制走 batch 构造，fault hook 在 AcquireBatchStorage 处抛 bad_alloc。
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                [](void*, int, int) {}, &context, 1024, 1, cleanup);
+            (void)handle;
+        }
+        catch (const std::bad_alloc&)
+        {
+            threw = true;
+        }
+        Require(threw, "fault injection must fail batch construction");
+
+        // C# 在 native 返回空 handle/异常后执行的 caller-owned cleanup。
+        cleanup(&context);
+        Require(cleanupCount.load(std::memory_order_relaxed) == 1,
+            "construction failure must leave original context owned by caller");
+#endif
     }
 
     struct ExactOnceContext
@@ -2425,6 +2466,8 @@ int main()
         std::cout << "PASS BoundaryTimingDiagnostics\n";
         TestParallelForExactOnceAndCallerAssist();
         std::cout << "PASS ParallelForExactOnceAndCallerAssist\n";
+        TestConstructionFailureTransfersContextOwnershipToCaller();
+        std::cout << "PASS ConstructionFailureTransfersContextOwnershipToCaller\n";
         TestExplicitBatchSize(1);
         TestExplicitBatchSize(257);
         TestExplicitBatchSize(100'000);
