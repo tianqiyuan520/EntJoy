@@ -257,6 +257,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("                        var a = Avx.LoadVector256(combinedMask + i);");
             sb.AppendLine("                        var b = Avx.LoadVector256(bitmap + i);");
             sb.AppendLine("                        var andResult = Avx2.And(a, b);");
+            sb.AppendLine("                        Avx.Store(combinedMask + i, andResult);");
             sb.AppendLine("                        orResult = Avx2.Or(orResult, andResult);");
             sb.AppendLine("                    }");
             sb.AppendLine("                    bool hasIntersection = !Avx.TestZ(orResult, orResult);");

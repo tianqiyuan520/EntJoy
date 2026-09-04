@@ -1001,12 +1001,10 @@ namespace NativeTranspiler.Analyzer
             // NativeList：_listData（UnsafeList*，堆上稳定）在偏移 0，C++ 解引用读取。
                         sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.GetListData();");
                     }
-                    else // UnsafeList（值字段）：C++ 取 &blob[off] 作为 UnsafeList* -> 内联读 Ptr/Length/Capacity/Allocator
+                    else // UnsafeList（值字段）：C++ 侧按 ptr+length 读取（与 NativeArray 一致），Capacity/Allocator 不跨边界
                     {
                         sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.Ptr;");
                         sb.AppendLine($"            *((int*)({dstExpr} + {off + 8})) = {srcExpr}.{accessor}.Length;");
-                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 12})) = {srcExpr}.{accessor}.Capacity;");
-                        sb.AppendLine($"            *((int*)({dstExpr} + {off + 16})) = (int){srcExpr}.{accessor}.Allocator;");
                     }
                 }
                 else if (type is IPointerTypeSymbol)
@@ -1016,7 +1014,20 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol enumSym)
                 {
-                    string underlying = enumSym.EnumUnderlyingType.SpecialType == SpecialType.System_UInt32 ? "uint" : "int";
+                    // 按底层类型写满对应字节数（byte/short/int/long…），与 CppJobAbi 的枚举 size=underlying 一致；
+                    // 否则 : long 枚举只写 4 字节，C++ 侧按 8 字节解引用读到垃圾高半部。
+                    string underlying = enumSym.EnumUnderlyingType.SpecialType switch
+                    {
+                        SpecialType.System_Byte => "byte",
+                        SpecialType.System_SByte => "sbyte",
+                        SpecialType.System_Int16 => "short",
+                        SpecialType.System_UInt16 => "ushort",
+                        SpecialType.System_Int32 => "int",
+                        SpecialType.System_UInt32 => "uint",
+                        SpecialType.System_Int64 => "long",
+                        SpecialType.System_UInt64 => "ulong",
+                        _ => "int"
+                    };
                     sb.AppendLine($"            *(({underlying}*)({dstExpr} + {off})) = ({underlying}){srcExpr}.{accessor};");
                 }
                 else if (type.SpecialType == SpecialType.System_Single)

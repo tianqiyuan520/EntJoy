@@ -88,12 +88,12 @@ namespace JobSystem
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
     extern std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
-    extern int g_numThreads;
-    extern int g_configuredTilesPerWorker;
-    extern int g_guidedEnabled;
-    extern int g_guidedK;
-    extern int g_guidedFloor;
-    extern bool g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
+    extern std::atomic<int> g_numThreads;
+    extern std::atomic<int> g_configuredTilesPerWorker;
+    extern std::atomic<int> g_guidedEnabled;
+    extern std::atomic<int> g_guidedK;
+    extern std::atomic<int> g_guidedFloor;
+    extern std::atomic<bool> g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
     // JobCostCache export flag：用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，
     // worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数；热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
@@ -520,6 +520,11 @@ namespace JobSystem
     int BuildGuidedTiles(ExecutionTile* tiles, int length, int workerCount,
         int k, int floor, TileKind kind = TileKind::GeneralRange) noexcept;
     BatchStorage* AcquireBatchStorage(uint32_t tileCapacity);
+    void ReleaseBatchStorage(BatchStorage* storage) noexcept;
+#ifdef ENTJOY_TESTING
+    // Test-only allocation fault injection. Production builds do not expose this hook.
+    void FailNextBatchStorageAcquireForTests(int count) noexcept;
+#endif
     void ClearBatchStoragePool() noexcept;
     void FlushBatchStorageCacheToSharedPool();
     void SubmitBatch(BatchState* batch, int workerCap = 0);
@@ -529,8 +534,10 @@ namespace JobSystem
     void FlushPendingSubmits();
     bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile);
     void CleanupChunkContext(void* ctx);
+    void DestroyChunkContextWithoutCleanup(void* ctx) noexcept;
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile);
     void CleanupGeneralContext(void* ctx);
+    void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept;
 
     // ---- Chase-Lev tile 级窃取（定义在 JobSystem_Tiles.cpp） ----
     // ChaseLevScheduler 回调 trampoline（供 Scheduler::Initialize 传给 ChaseLevScheduler::Start）

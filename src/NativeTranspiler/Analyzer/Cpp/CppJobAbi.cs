@@ -64,6 +64,13 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
+                SpecialType.System_Byte => 1,
+                SpecialType.System_SByte => 1,
+                SpecialType.System_Int16 => 2,
+                SpecialType.System_UInt16 => 2,
+                SpecialType.System_Char => 2,
+                SpecialType.System_IntPtr => 8,
+                SpecialType.System_UIntPtr => 8,
                 // 容器（NativeArray/NativeList/UnsafeList）不再硬编码，改为按真实字段布局递归推导，
                 // 与运行时编译配置自动保持一致（Unity/Burst 的做法）：
                 //   Release（无 sentinel）：NativeArray=32，NativeList=24，UnsafeList=20
@@ -127,6 +134,13 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_Single => 4,
                 SpecialType.System_Double => 8,
                 SpecialType.System_Boolean => 1,
+                SpecialType.System_Byte => 1,
+                SpecialType.System_SByte => 1,
+                SpecialType.System_Int16 => 2,
+                SpecialType.System_UInt16 => 2,
+                SpecialType.System_Char => 2,
+                SpecialType.System_IntPtr => 8,
+                SpecialType.System_UIntPtr => 8,
                 // 容器对齐同样按真实字段布局递归推导（NativeArray/NativeList/UnsafeList 首字段均为指针 → 8）。
                 _ => type is INamedTypeSymbol namedType && namedType.IsValueType
                     ? GetStructAlignmentRecursive(namedType) : 4

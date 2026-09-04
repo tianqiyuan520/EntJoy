@@ -75,9 +75,8 @@ namespace EntJoy.ECS
             _buffers[0] = _buffers[1];
             _buffers[1] = tmp;
 
-            // 本帧写入数 → 下帧可读数
-            _readCount = Volatile.Read(ref _writeCount);
-            _writeCount = 0;
+            // 本帧写入数 → 下帧可读数（Exchange 原子清零，避免与生产者裸写竞态）
+            _readCount = Interlocked.Exchange(ref _writeCount, 0);
             _generation++;
         }
 
@@ -107,6 +106,8 @@ namespace EntJoy.ECS
             }
             int actual = Math.Min(toWrite, _capacity - startIdx);
             src.Slice(0, actual).CopyTo(new Span<T>(_buffers[0], startIdx, actual));
+            if (actual != toWrite)
+                Interlocked.Add(ref _writeCount, -(toWrite - actual));  // 溢出部分回退，保持计数与实际拷贝一致
             return actual;
         }
 

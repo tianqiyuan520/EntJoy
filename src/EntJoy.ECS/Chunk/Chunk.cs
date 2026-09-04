@@ -59,6 +59,16 @@ namespace EntJoy.ECS
             // 变更位掩码必须清零：slab 内存来自池（跨 World 复用），残留旧标记会让
             // HasAnyEntityChanged 假阳性 → WithChanged 查询误匹配。组件数据仍按
             // "延迟清零"（AddEntity 逐 slot InitBlock），未使用 slot 不被访问。
+            // enableable 位图必须清零：slab 内存来自池（复用，不保证清零），AddEntity 用 |= 置位
+            // 不清残留垃圾位 → GetComponentEnabled 假阳性 / ChunkEnabledMask.TryGetNextRange 越界
+            //（返回 count 之上的区间）。ChangedBitMask 同理。
+            for (int i = 0; i < meta.ComponentCount; i++)
+            {
+                if (meta.EnableBitOffsets[i] != -1 && meta.EnableStrideBytes[i] > 0)
+                {
+                    Unsafe.InitBlock((byte*)memoryBlock + meta.EnableBitOffsets[i], 0, (uint)meta.EnableStrideBytes[i]);
+                }
+            }
             if (meta.ChangedBitMaskOffset != -1 && meta.ChangedBitMaskSize > 0)
             {
                 Unsafe.InitBlock((byte*)memoryBlock + meta.ChangedBitMaskOffset, 0, (uint)meta.ChangedBitMaskSize);
@@ -213,6 +223,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool GetComponentEnabled(int componentIndex, int entityIndex)
         {
+            if ((uint)entityIndex >= (uint)_entityCount)
+                throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
             ulong* bitMapPtr = GetEnableBitMapPointer(componentIndex);
             if (bitMapPtr == null) throw new InvalidOperationException("Component is not enableable.");
             int ulongIndex = entityIndex >> 6;
@@ -223,6 +235,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetComponentEnabled(int componentIndex, int entityIndex, bool enabled)
         {
+            if ((uint)entityIndex >= (uint)_entityCount)
+                throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
             ulong* bitMapPtr = GetEnableBitMapPointer(componentIndex);
             if (bitMapPtr == null) throw new InvalidOperationException("Component is not enableable.");
             int ulongIndex = entityIndex >> 6;

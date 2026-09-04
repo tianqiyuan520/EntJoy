@@ -69,25 +69,28 @@ namespace EntJoy.ECS
             var inDegree = new int[n];
             for (int i = 0; i < n; i++) graph[i] = new List<int>();
 
+            // 边去重：OrderBefore 与 OrderAfter 可能对同一对系统重复加边（如 A.OrderBefore[B] 且 B.OrderAfter[A]），
+            // 重复边会使 inDegree 多次递增但出队只减一次 → 误判环。用 HashSet 记录已加边。
+            var edgeSet = new HashSet<(int, int)>();
+
+            void AddEdge(int from, int to)
+            {
+                if (from == to || !edgeSet.Add((from, to))) return;
+                graph[from].Add(to);
+                inDegree[to]++;
+            }
+
             for (int i = 0; i < n; i++)
             {
                 foreach (var targetType in _systems[i].OrderBefore)
                 {
                     int targetIdx = FindSystemIndex(targetType);
-                    if (targetIdx >= 0 && targetIdx != i)
-                    {
-                        graph[i].Add(targetIdx);
-                        inDegree[targetIdx]++;
-                    }
+                    if (targetIdx >= 0) AddEdge(i, targetIdx);
                 }
                 foreach (var targetType in _systems[i].OrderAfter)
                 {
                     int targetIdx = FindSystemIndex(targetType);
-                    if (targetIdx >= 0 && targetIdx != i)
-                    {
-                        graph[targetIdx].Add(i);
-                        inDegree[i]++;
-                    }
+                    if (targetIdx >= 0) AddEdge(targetIdx, i);
                 }
             }
 
@@ -101,11 +104,11 @@ namespace EntJoy.ECS
                         if (_systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents) ||
                             _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents))
                         {
-                            graph[i].Add(j); inDegree[j]++;
+                            AddEdge(i, j);
                         }
                         else
                         {
-                            graph[j].Add(i); inDegree[i]++;
+                            AddEdge(j, i);
                         }
                     }
                 }
@@ -113,10 +116,12 @@ namespace EntJoy.ECS
 
             var queue = new Queue<int>();
             for (int i = 0; i < n; i++) { if (inDegree[i] == 0) queue.Enqueue(i); }
+            int scheduled = 0;
             while (queue.Count > 0)
             {
                 var layer = new List<SystemSlot>();
                 int layerSize = queue.Count;
+                scheduled += layerSize;
                 for (int k = 0; k < layerSize; k++)
                 {
                     int idx = queue.Dequeue();
@@ -127,7 +132,20 @@ namespace EntJoy.ECS
                         if (inDegree[next] == 0) queue.Enqueue(next);
                     }
                 }
+                // 同 layer 内按 Order 优先级排序（Order 越小越先执行）
+                layer.Sort((a, b) => a.Order.CompareTo(b.Order));
                 _layers.Add(layer);
+            }
+
+            // 环检测：Kahn 排序后仍有 inDegree>0 的节点即为循环依赖（OrderBefore/OrderAfter 互指），
+            // 直接抛错而非静默丢弃——否则这些 system 永不执行且无任何提示。
+            if (scheduled != n)
+            {
+                var cyclic = new List<string>();
+                for (int i = 0; i < n; i++)
+                    if (inDegree[i] > 0) cyclic.Add(_systems[i].Name);
+                throw new InvalidOperationException(
+                    $"ScheduleGraph detected a cyclic dependency among systems: {string.Join(", ", cyclic)}.");
             }
         }
 
@@ -157,7 +175,8 @@ namespace EntJoy.ECS
                 var names = string.Join(", ", layer.Select(s => s.Name));
                 var reads = string.Join(", ", layer.SelectMany(s => s.ReadComponents).Select(t => t.Name).Distinct());
                 var writes = string.Join(", ", layer.SelectMany(s => s.WriteComponents).Select(t => t.Name).Distinct());
-                if (layer.Count > 1) Console.WriteLine($"  Layer {i}: [{names}] (parallel)");
+                // 同 layer 系统间无冲突（可并行），但当前 SystemRunner 按 Order 串行执行——标记为 "no-conflict" 避免误读为已并行。
+                if (layer.Count > 1) Console.WriteLine($"  Layer {i}: [{names}] (no-conflict)");
                 else Console.WriteLine($"  Layer {i}: {names}");
                 Console.WriteLine($"    Read:  [{reads}]");
                 Console.WriteLine($"    Write: [{writes}]");

@@ -295,27 +295,6 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        private static void ExecuteTask(ManagedTask task)
-        {
-            // 异常边界：任何 job 抛异常都不得打死 worker 线程（否则依赖它的 completion 永远到不了 0
-            // → Complete() 永久死锁）。捕获并记录到 completion（first-wins，供末端 Complete() 抛出），
-            // 且无论如何都要 Signal 完成并释放 job 盒，保证调度器在不抛异常的路径上继续推进。
-            try
-            {
-                task.Runner(task.Job, task.Start, task.Count);
-            }
-            catch (Exception ex)
-            {
-                task.Completion?.RecordException(ex);
-            }
-            finally
-            {
-                task.Completion?.Signal();
-                task.Release?.Invoke(task.Job);
-            }
-        }
-
         // ──────────────────── Chase-Lev Worker 循环 ────────────────────
 
         /// <summary>
@@ -442,6 +421,9 @@ namespace EntJoy.JobSystem.Managed
         {
             // 空 Runner 也回池（防池槽位泄漏）
             if (task.Runner == null) { _tileTaskPool?.Release(task); return; }
+            // 对齐 Native 回调：设置执行深度，使 EntityManager 的 IsExecutingJob 检测
+            // 在 Managed fallback 下同样生效——否则 job 内结构变更会自等待自 → 死锁。
+            NativeJobCore.EnterJobExecution();
             try
             {
                 task.Runner(task.Job, task.Start, task.Count);
@@ -452,6 +434,7 @@ namespace EntJoy.JobSystem.Managed
             }
             finally
             {
+                NativeJobCore.ExitJobExecution();
                 // completion 信号
                 task.Completion?.Signal();
                 // 释放 job 盒
@@ -636,17 +619,5 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        private static JobRunner SelectRunner<T>() where T : struct, IJobParallelFor
-            => ParallelCache<T>.Runner;
-
-        private struct ManagedTask
-        {
-            public object Job;
-            public JobRunner Runner;
-            public Action<object>? Release;
-            public int Start;
-            public int Count;
-            public ManagedCompletion Completion;
-        }
     }
 }

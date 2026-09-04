@@ -43,8 +43,9 @@ namespace EntJoy.ECS
         private readonly Dictionary<int, List<JobHandle>> _archetypeJobs = new(); // Per-Archetype Job Tracking
         private readonly Dictionary<JobHandle, ComponentType[]> _jobWrittenComponents = new(); // Job → written components
         private readonly object _structuralLock = new();  // 结构性操作（NewEntity/DestroyEntity/AddComponent/RemoveComponent）的锁
-        // Native SendEvent 异步 drain 待处理列表（contextPtr, jobType）——Complete 后按本 World 的 EventStream 落盘
-        internal readonly List<(IntPtr contextPtr, Type jobType)> _pendingNativeEvents = new();
+        // Native SendEvent 异步 drain 待处理列表（contextPtr, jobType, world）——记录 world 归属，
+        // 避免多 World 下依赖全局 DefaultWorld 导致事件写错 EventStream 或丢失。
+        internal readonly List<(IntPtr contextPtr, Type jobType, World world)> _pendingNativeEvents = new();
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
@@ -159,12 +160,15 @@ namespace EntJoy.ECS
                 throw new InvalidOperationException("Structural changes are not allowed inside an observer callback. Use DeferredCommandBuffer to defer structural changes.");
             }
 
-            DrainPendingNativeEvents();
-
             JobHandle[] jobs;
             lock (_activeJobLock)
             {
-                if (_activeJobs.Count == 0) return;
+                if (_activeJobs.Count == 0)
+                {
+                    // 无在飞 Job 时也要 drain 遗留事件（如 schedule 后立即 dispose 的边界）
+                    DrainPendingNativeEvents();
+                    return;
+                }
                 jobs = _activeJobs.ToArray();
                 _activeJobs.Clear();
             }
@@ -183,6 +187,11 @@ namespace EntJoy.ECS
                     pending ??= ExceptionDispatchInfo.Capture(ex);
                 }
             }
+
+            // 关键顺序：先等所有 Job 完成，再 drain/free 事件 buffer——
+            // 否则 worker 仍在写 buffer 时主线程已读计数并释放 dataPtr/countPtr → use-after-free。
+            DrainPendingNativeEvents();
+
             pending?.Throw();
         }
 
@@ -190,8 +199,8 @@ namespace EntJoy.ECS
         private void DrainPendingNativeEvents()
         {
             if (_pendingNativeEvents.Count == 0) return;
-            foreach (var (contextPtr, jobType) in _pendingNativeEvents)
-                JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, World.DefaultWorld, jobType);
+            foreach (var (contextPtr, jobType, world) in _pendingNativeEvents)
+                JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, world, jobType);
             _pendingNativeEvents.Clear();
         }
 
@@ -593,6 +602,8 @@ namespace EntJoy.ECS
 
             // 清理本实体作为 source 的所有关系索引条目（遍历其关系列）
             CleanupSourceRelations(entity, entityInfoRef, oldArchetype);
+            // 清理本实体作为 target 的反向索引条目（否则已销毁 target 的索引残留 → 泄漏 + 失效关系误返回）
+            _relationIndex.ClearTarget(entity.Id);
 
             // Observer：Destroyed（销毁前快照已订阅组件值；派发在销毁后，实体仍可解析）
             List<(int typeId, IntPtr snapshotPtr)>? destroyedSnapshots = null;
@@ -603,7 +614,7 @@ namespace EntJoy.ECS
                 {
                     // IDisposable 组件持有原生内存，销毁后其快照会悬垂（缓冲区已释放），跳过快照
                     if (t.IsDisposable) continue;
-                    if (_observers.TryGetValue(t.Id, out var reg) && reg.Removed.Count > 0)
+                    if (_observers.TryGetValue(t.Id, out var reg) && reg.Destroyed.Count > 0)
                     {
                         int compIdx = oldArchetype.GetComponentTypeIndex(t);
                         var chunk = oldArchetype.ChunkList[oldChunkIndex];
@@ -640,8 +651,8 @@ namespace EntJoy.ECS
                 {
                     try
                     {
-                        if (_observers!.TryGetValue(typeId, out var reg) && reg.Removed.Count > 0)
-                            DispatchRemoved(reg.Removed, &entity, (void*)snapshotPtr, 1);
+                        if (_observers!.TryGetValue(typeId, out var reg) && reg.Destroyed.Count > 0)
+                            DispatchRemoved(reg.Destroyed, &entity, (void*)snapshotPtr, 1);
                     }
                     finally
                     {
@@ -652,227 +663,6 @@ namespace EntJoy.ECS
         }
 
     }
-
-    // Query
-    //public unsafe partial class EntityManager
-    //{
-    //    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    //    public unsafe void Query<T0>(QueryBuilder builder, ISystem<T0> system)
-    //        where T0 : struct
-    //    {
-    //        int entityCounter = 0; // 记录查询到的实体数量
-    //        int limitCount = builder.LimitCount;
-
-    //        for (int i = 0; i < archetypeCount; i++)
-    //        {
-    //            var archetype = allArchetypes[i];
-    //            if (archetype != null && archetype.IsMatch(builder))
-    //            {
-    //                int t0Index = archetype.GetComponentTypeIndex<T0>();
-    //                var chunks = archetype.GetChunks();
-    //                var ArchtypeIndex = i;
-    //                system.InArchetype(ArchtypeIndex);
-    //                for (int j = 0; j < chunks.Count; j++)
-    //                {
-    //                    var chunk = chunks[j];
-    //                    int count = chunk.EntityCount;
-    //                    if (count == 0) continue;
-    //                    var ChunkIndex = j;
-    //                    system.InChunk(ArchtypeIndex, ChunkIndex);
-    //                    Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();
-    //                    T0* components = (T0*)chunk.GetComponentArrayPointer(t0Index).ToPointer();
-    //                    {
-    //                        system._execute(entities, components, count, limitCount - entityCounter, ArchtypeIndex, ChunkIndex);
-    //                    }
-    //                    entityCounter += count;
-    //                    if (limitCount != -1 && entityCounter >= limitCount) break;
-    //                }
-    //            }
-    //        }
-    //    }
-
-    //    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    //    public unsafe void Query<T0, T1>(QueryBuilder builder, ISystem<T0, T1> system)
-    //        where T0 : struct
-    //        where T1 : struct
-    //    {
-    //        int entityCounter = 0; // 记录查询到的实体数量
-    //        int limitCount = builder.LimitCount;
-    //        unchecked
-    //        {
-
-    //            for (int i = 0; i < archetypeCount; i++)
-    //            {
-    //                var archetype = allArchetypes[i];
-    //                if (archetype != null && archetype.IsMatch(builder))
-    //                {
-
-    //                    int t0Index = archetype.GetComponentTypeIndex<T0>();
-    //                    int t1Index = archetype.GetComponentTypeIndex<T1>();
-    //                    var chunks = archetype.GetChunks();
-    //                    var ArchtypeIndex = i;
-    //                    system.InArchetype(ArchtypeIndex);
-    //                    for (int j = 0; j < chunks.Count; j++)
-    //                    {
-    //                        var chunk = chunks[j];
-    //                        int count = chunk.EntityCount;
-    //                        if (count == 0) continue;
-    //                        var ChunkIndex = j;
-    //                        system.InChunk(ArchtypeIndex, ChunkIndex);
-    //                        Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();
-    //                        T0* components0 = (T0*)chunk.GetComponentArrayPointer(t0Index).ToPointer();
-    //                        T1* components1 = (T1*)chunk.GetComponentArrayPointer(t1Index).ToPointer();
-    //                        {
-    //                            system._execute(entities, components0, components1, count, limitCount - entityCounter, ArchtypeIndex, ChunkIndex);
-    //                        }
-
-    //                        entityCounter += count;
-    //                        if (limitCount != -1 && entityCounter >= limitCount) break;
-    //                    }
-    //                }
-    //            }
-
-    //            //allArchetypes[0].Query(system);
-
-    //        }
-
-    //    }
-
-
-
-    //    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    //    public unsafe void MultiQuery<T0>(QueryBuilder builder, ISystem<T0> system)
-    //        where T0 : struct
-    //    {
-    //        static void RunSystem(Chunk chunk, int t0Index, ISystem<T0> system, int LimitCount, int ArchetypeIndex, int ChunkIndex)
-    //        {
-    //            int count = chunk.EntityCount;
-    //            Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();
-    //            T0* components0 = (T0*)chunk.GetComponentArrayPointer(t0Index).ToPointer();
-    //            system._execute(entities, components0, count, LimitCount, ArchetypeIndex, ChunkIndex);
-    //        }
-
-    //        unchecked
-    //        {
-    //            int entityCounter = 0;
-    //            int limitCount = builder.LimitCount;
-
-    //            for (int i = 0; i < archetypeCount; i++)
-    //            {
-    //                var archetype = allArchetypes[i];
-    //                if (archetype != null && archetype.IsMatch(builder))
-    //                {
-    //                    int t0Index = archetype.GetComponentTypeIndex<T0>();
-    //                    List<Task> tasks = new();
-
-    //                    var ArchtypeIndex = i;
-    //                    system.InArchetype(ArchtypeIndex);
-
-    //                    var chunks = archetype.GetChunks();
-    //                    for (int j = 0; j < chunks.Count; j++)
-    //                    {
-    //                        var chunk = chunks[j];
-    //                        int count = chunk.EntityCount;
-    //                        if (count == 0) continue;
-    //                        int spareCount = limitCount - entityCounter;
-    //                        int ChunkIndex = j;
-
-    //                        system.InChunk(ArchtypeIndex, ChunkIndex);
-    //                        Task task = Task.Run(() =>
-    //                        {
-    //                            RunSystem(chunk, t0Index, system, spareCount, ArchtypeIndex, ChunkIndex);
-    //                        }
-    //                        );
-
-    //                        tasks.Add(task);
-    //                        entityCounter += count;
-    //                        if (limitCount != -1 && entityCounter >= limitCount) break;
-
-    //                    }
-    //                    Task.WaitAll(tasks.ToArray());
-    //                }
-    //            }
-    //        }
-    //    }
-    //    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    //    public unsafe void MultiQuery<T0, T1>(QueryBuilder builder, ISystem<T0, T1> system)
-    //        where T0 : struct
-    //        where T1 : struct
-    //    {
-    //        void RunSystem(Chunk chunk, int t0Index, int t1Index, ISystem<T0, T1> system, int LimitCount, int ArchetypeCount, int ChunkIndex)
-    //        {
-    //            int count = chunk.EntityCount;
-
-
-    //            Entity* entities = (Entity*)chunk.GetEntityPointer().ToPointer();
-    //            T0* components0 = (T0*)chunk.GetComponentArrayPointer(t0Index).ToPointer();
-    //            T1* components1 = (T1*)chunk.GetComponentArrayPointer(t1Index).ToPointer();
-    //            system._execute(entities, components0, components1, count, LimitCount, ArchetypeCount, ChunkIndex);
-    //        }
-
-    //        unchecked
-    //        {
-    //            int entityCounter = 0;
-    //            int limitCount = builder.LimitCount;
-
-    //            for (int i = 0; i < archetypeCount; i++)
-    //            {
-    //                var archetype = allArchetypes[i];
-    //                if (archetype != null && archetype.IsMatch(builder))
-    //                {
-    //                    int t0Index = archetype.GetComponentTypeIndex<T0>();
-    //                    int t1Index = archetype.GetComponentTypeIndex<T1>();
-
-    //                    List<Task> tasks = new();
-
-    //                    var ArchtypeIndex = i;
-    //                    system.InArchetype(ArchtypeIndex);
-
-    //                    var chunks = archetype.GetChunks();
-    //                    for (int j = 0; j < chunks.Count; j++)
-    //                    {
-    //                        var chunk = chunks[j];
-    //                        int count = chunk.EntityCount;
-    //                        if (count == 0) continue;
-    //                        int spareCount = limitCount - entityCounter;
-
-    //                        var ChunkIndex = j;
-
-    //                        system.InChunk(ArchtypeIndex, ChunkIndex);
-
-    //                        Task task = Task.Run(() =>
-    //                        {
-    //                            RunSystem(chunk, t0Index, t1Index, system, spareCount, ArchtypeIndex, ChunkIndex);
-    //                        }
-    //                        );
-
-    //                        tasks.Add(task);
-    //                        //task.Start();
-
-    //                        entityCounter += count;
-    //                        if (limitCount != -1 && entityCounter >= limitCount) break;
-
-    //                    }
-    //                    Task.WaitAll(tasks.ToArray());
-    //                    //Task.WhenAll(tasks.Select(t => t.AsTask()));
-    //                }
-    //            }
-    //        }
-    //    }
-
-    //    //[MethodImpl(MethodImplOptions.AggressiveInlining)]
-    //    //private IEnumerable<Archetype> GetMatchingArchetypes(QueryBuilder builder)
-    //    //{
-    //    //    for (int i = 0; i < archetypeCount; i++)
-    //    //    {
-    //    //        var arch = allArchetypes[i];
-    //    //        if (arch != null && arch.IsMatch(builder))
-    //    //        {
-    //    //            yield return arch;
-    //    //        }
-    //    //    }
-    //    //}
-    //}
 
     // Component
     public unsafe partial class EntityManager

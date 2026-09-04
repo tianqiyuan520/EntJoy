@@ -113,15 +113,8 @@ namespace EntJoy.ECS
                         return;
                     }
 
-                    // 多实体：找持有新值的未满 chunk；无则新建
-                    int targetChunk = FindChunkWithManagedValue(arch, compIdx, newIdx);
-                    if (targetChunk < 0)
-                    {
-                        targetChunk = CreateChunkWithSharedIndex(arch, compIdx, newIdx);
-                    }
-                    MoveEntityToChunk(entity, arch, srcChunkIndex, targetChunk);
-                    // 移动后标记新位置变更
-                    arch.ChunkList[targetChunk].MarkEntityChanged(arch.ChunkList[targetChunk].EntityCount - 1);
+                    // 多实体：按完整 shared 组合找/建目标 chunk（否则其他 shared 组件值丢失）
+                    MoveEntityWithShared(arch, entity, srcChunkIndex, compIdx, newIdx, null);
                 }
                 else
                 {
@@ -136,11 +129,7 @@ namespace EntJoy.ECS
                         return;
                     }
 
-                    int targetChunk = FindChunkWithBlittableBoxed(arch, compIdx, value, ct.Type);
-                    if (targetChunk < 0)
-                        targetChunk = CreateChunkWithBlittableBoxed(arch, compIdx, value, ct.Type, ct.Size);
-                    MoveEntityToChunk(entity, arch, srcChunkIndex, targetChunk);
-                    arch.ChunkList[targetChunk].MarkEntityChanged(arch.ChunkList[targetChunk].EntityCount - 1);
+                    MoveEntityWithShared(arch, entity, srcChunkIndex, compIdx, null, value);
                 }
             }
         }
@@ -210,22 +199,6 @@ namespace EntJoy.ECS
             return -1;
         }
 
-        /// <summary>创建持有指定 managed index 的新 chunk。</summary>
-        private int CreateChunkWithSharedIndex(Archetype arch, int compIdx, int index)
-        {
-            int chunkIdx = arch.CreateChunk();
-            arch.ChunkList[chunkIdx].SetSharedValueIndex(compIdx, index);
-            return chunkIdx;
-        }
-
-        /// <summary>创建持有指定 boxed blittable 值的新 chunk。</summary>
-        private int CreateChunkWithBlittableBoxed(Archetype arch, int compIdx, object value, Type compType, int size)
-        {
-            int chunkIdx = arch.CreateChunk();
-            WriteBlittableSharedBoxed(arch.ChunkList[chunkIdx], compIdx, value, size);
-            return chunkIdx;
-        }
-
         /// <summary>
         /// 将实体从 srcChunk 移动到 arch 内的 dstChunk（swap-pop，组件全量复制）。
         /// </summary>
@@ -248,6 +221,44 @@ namespace EntJoy.ECS
 
             UpdateEntityLocation(entity.Id, arch, dstChunkIndex, dstSlot);
             structuralVersion++;
+        }
+
+        /// <summary>按完整 shared 组合移动实体（SetSharedComponent 多实体路径）：收集源实体全部 shared 值，
+        /// 更新单个组件后找/建持有完整组合的目标 chunk，避免其他 shared 组件值丢失。</summary>
+        private void MoveEntityWithShared(Archetype arch, Entity entity, int srcChunkIndex, int compIdx, int? newManagedIdx, object? newBlittableValue)
+        {
+            var types = arch.Types;
+            bool[] slotSet = new bool[arch.ComponentCount];
+            int[] managedIdx = new int[arch.ComponentCount];
+            Array.Fill(managedIdx, -1);
+            object?[] slotValue = new object?[arch.ComponentCount];
+
+            var srcChunk = arch.ChunkList[srcChunkIndex];
+            for (int c = 0; c < arch.ComponentCount; c++)
+            {
+                var t = types[c];
+                if (!t.IsShared) continue;
+                slotSet[c] = true;
+                if (t.IsManagedShared) managedIdx[c] = srcChunk.GetSharedValueIndex(c);
+                else slotValue[c] = ReadBlittableSharedBoxed(srcChunk, c, t.Type);
+            }
+            if (newManagedIdx.HasValue) managedIdx[compIdx] = newManagedIdx.Value;
+            else slotValue[compIdx] = newBlittableValue;
+
+            int targetChunk = FindExistingChunkForShared(arch, slotSet, managedIdx, slotValue);
+            if (targetChunk < 0)
+            {
+                targetChunk = arch.CreateChunk();
+                var newChunk = arch.ChunkList[targetChunk];
+                for (int c = 0; c < arch.ComponentCount; c++)
+                {
+                    if (!slotSet[c]) continue;
+                    if (types[c].IsManagedShared) newChunk.SetSharedValueIndex(c, managedIdx[c]);
+                    else WriteBlittableSharedBoxed(newChunk, c, slotValue[c]!, types[c].Size);
+                }
+            }
+            MoveEntityToChunk(entity, arch, srcChunkIndex, targetChunk);
+            arch.ChunkList[targetChunk].MarkEntityChanged(arch.ChunkList[targetChunk].EntityCount - 1);
         }
 
         // ======================== 创建带初始共享值的实体 ========================
@@ -330,7 +341,7 @@ namespace EntJoy.ECS
         /// <summary>查找所有 slotSet 槽位与目标值匹配的未满 chunk；无返回 -1。
         /// 单 shared 列走缓存路径（复用 FindChunkWithManagedValue/BlittableBoxed，O(1) 期望）；
         /// 多列组合保持线性扫描（组合 key 无法复用单值缓存，且场景低频）。</summary>
-        private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object[] slotValue)
+        private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object?[] slotValue)
         {
             // 统计已设置的 shared 列数；单列时走缓存路径
             int setCount = 0, singleIdx = -1;

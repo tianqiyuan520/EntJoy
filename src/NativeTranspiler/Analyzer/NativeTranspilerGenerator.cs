@@ -117,6 +117,19 @@ namespace NativeTranspiler.Analyzer
                 bool anyIspc = ctx.MethodSymbols.Any(m => m != null && GetBackendTarget(m, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
                              || ctx.JobStructSymbols.Any(j => j != null && GetBackendTarget(j, attrSymbol) == NativeTranspiler.BackendTarget.Ispc);
 
+                // ★ 布局加固（C++ 与 ISPC 共用）：Explicit / Pack<8 的 struct 无法在自然对齐下复现
+                // C# 布局（ISPC 不支持 #pragma pack；C++ 生成器也只用自然对齐），
+                // 字段会错位 → fail-fast 拒绝生成（NT016），避免 static_assert 用自然尺寸静默放行。
+                foreach (var userStruct in userStructs)
+                {
+                    if (NativeTranspiler.HasUnsupportedIspcLayout(userStruct, out string reason))
+                    {
+                        spc.ReportDiagnostic(Diagnostic.Create(NativeTranspileValidator.UnsupportedStructLayoutError,
+                            userStruct.Locations.FirstOrDefault(), userStruct.Name, reason));
+                        return;
+                    }
+                }
+
                 // 为用户自定义结构体生成 C++ 头文件和 ISPC 头文件
                 foreach (var userStruct in userStructs)
                 {
@@ -127,19 +140,6 @@ namespace NativeTranspiler.Analyzer
 
                 if (anyIspc)
                 {
-                    // ★ ISPC 布局加固：Explicit 布局 / Pack<8 的 struct 无法在 ISPC 复现
-                    // C# 布局（ISPC 不支持 #pragma pack，实测 ispc 1.30 报 "unknown pragma ignored"），
-                    // NativeArray<T> 指针步长会错位 → fail-fast 拒绝生成（NT016）。
-                    foreach (var userStruct in userStructs)
-                    {
-                        if (NativeTranspiler.HasUnsupportedIspcLayout(userStruct, out string reason))
-                        {
-                            spc.ReportDiagnostic(Diagnostic.Create(NativeTranspileValidator.UnsupportedStructLayoutError,
-                                userStruct.Locations.FirstOrDefault(), userStruct.Name, reason));
-                            return;
-                        }
-                    }
-
                     var commonIspcPath = Path.Combine(outputDir, "EntJoyCommon.ispc");
                     CodeGenIo.WriteAllTextWithRetry(commonIspcPath, GenerateCommonIspcHeader());
 

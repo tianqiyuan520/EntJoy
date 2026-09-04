@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 
 namespace EntJoy.ECS
@@ -36,15 +37,11 @@ namespace EntJoy.ECS
     /// <summary>组件元数据注册表（序列化 / 数据导航 / 调试共用）。</summary>
     public static class ComponentMetaRegistry
     {
-        private static readonly Dictionary<int, ComponentMeta> _byId = new();
-        private static readonly object _lock = new();
+        private static readonly ConcurrentDictionary<int, ComponentMeta> _byId = new();
 
         public static void Register(ComponentMeta meta)
         {
-            lock (_lock)
-            {
-                _byId[meta.TypeId] = meta;
-            }
+            _byId[meta.TypeId] = meta;
         }
 
         public static ComponentMeta Get(int typeId)

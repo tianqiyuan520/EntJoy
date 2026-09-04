@@ -103,7 +103,7 @@ if(MSVC)
     # 源文件为 UTF-8 无 BOM（含中文注释）。不加 /utf-8 时 MSVC 按本地代码页
     # (936) 解析，多字节注释破坏行结构，报出大量与磁盘内容对不上的伪错误。
     target_compile_options(JobSystemTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
-    target_compile_definitions(JobSystemTests PRIVATE NDEBUG NOMINMAX)
+    target_compile_definitions(JobSystemTests PRIVATE NDEBUG NOMINMAX ENTJOY_TESTING)
 
     target_compile_options(AssistLifetimeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2)
     target_compile_definitions(AssistLifetimeTests PRIVATE NOMINMAX)

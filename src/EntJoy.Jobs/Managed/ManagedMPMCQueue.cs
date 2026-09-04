@@ -15,19 +15,14 @@ namespace EntJoy.JobSystem.Managed
     /// </summary>
     internal sealed class ManagedMPMCQueue<T> where T : struct
     {
-        private const int CacheLineSize = 128;
-
         // 用独立 long 数组存 sequence，避免 struct 字段不可原地写的限制
         private readonly long[] _seq;
         private readonly T[] _data;
         private readonly long _mask;
         private readonly int _capacity;
 
-        // head/tail 用 padding 隔离缓存行，降低伪共享
         private long _enqueuePos;
-        private readonly byte[] _pad1 = new byte[CacheLineSize];
         private long _dequeuePos;
-        private readonly byte[] _pad2 = new byte[CacheLineSize];
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ManagedMPMCQueue(int capacity)

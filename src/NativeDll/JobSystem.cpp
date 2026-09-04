@@ -51,11 +51,11 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
     std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
-    int g_numThreads = 0;
+    std::atomic<int> g_numThreads{ 0 };
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
     // 默认 16 为可变代价与均匀代价 job 的折中（GridSearch A/B 定标），env 可覆盖。
-    int g_configuredTilesPerWorker = kDefaultTilesPerWorker;
+    std::atomic<int> g_configuredTilesPerWorker{ kDefaultTilesPerWorker };
 
     // JobCostCache export flag（State 模块 ResolveChunkSize 与 Tiles 退役路径读取）。
     // 默认开启：per-job 自动 batch 收益显著且压测零回归；C# Initialize 强制同步此值
@@ -80,9 +80,9 @@ namespace JobSystem
 
     // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。0=off；>0=on。
     // on 时 chunk = max(floor, ceil(remaining/(W*k)))，头部大块、尾部小块（钳 straggler 上界）。由 JobSystem_ConfigureGuided 设置。
-    int g_guidedEnabled = 0;
-    int g_guidedK = 2;
-    int g_guidedFloor = 16;
+    std::atomic<int> g_guidedEnabled{ 0 };
+    std::atomic<int> g_guidedK{ 2 };
+    std::atomic<int> g_guidedFloor{ 16 };
 
     std::mutex g_statePoolMutex;
     std::vector<HandleState*> g_statePool;
@@ -147,7 +147,7 @@ namespace JobSystem
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
     // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式）：
     // 实测与开启相当，且释放主线程参与竞争；慢 worker 被 OS 抢占导致尾延迟时，可运行时开启兜底。
-    bool g_mainThreadAssistEnabled{ false };
+    std::atomic<bool> g_mainThreadAssistEnabled{ false };
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
     // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch。
@@ -677,7 +677,7 @@ namespace JobSystem
 
     int CurrentWorkerCount()
     {
-        return std::max(1, g_numThreads);
+        return std::max(1, g_numThreads.load(std::memory_order_relaxed));
     }
 
 } // namespace JobSystem

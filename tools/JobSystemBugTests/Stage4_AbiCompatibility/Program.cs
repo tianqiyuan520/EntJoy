@@ -16,7 +16,7 @@ unsafe static class Program
                 if (!NativeLibrary.TryGetExport(dll, "JobSystem_GetAbiVersion", out var ptr))
                     throw new Exception("ABI export missing");
                 uint version = ((delegate* unmanaged[Cdecl]<uint>)ptr)();
-                if (version != 1) throw new Exception($"ABI version {version}");
+                if (version != 2) throw new Exception($"ABI version {version}");
                 Console.WriteLine("PASS ABI version"); passed++;
             }
             finally { NativeLibrary.Free(dll); }

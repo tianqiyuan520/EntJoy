@@ -31,6 +31,8 @@ namespace EntJoy.ECS
             where TComponent : unmanaged
         {
             CheckDisposed();
+            if (events == ObserverEvents.None)
+                throw new ArgumentException("ObserverEvents must not be None.", nameof(events));
             _observers ??= new Dictionary<int, ObserverRegistry>();
             var compType = ComponentTypeManager.GetComponentType(typeof(TComponent));
             int typeId = compType.Id;
@@ -46,8 +48,9 @@ namespace EntJoy.ECS
                 _observers[typeId] = reg;
             }
             if ((events & ObserverEvents.Added) != 0) reg.Added.Add(entry);
-            if ((events & ObserverEvents.Removed) != 0 || (events & ObserverEvents.Destroyed) != 0) reg.Removed.Add(entry);
+            if ((events & ObserverEvents.Removed) != 0) reg.Removed.Add(entry);
             if ((events & ObserverEvents.Set) != 0) reg.Set.Add(entry);
+            if ((events & ObserverEvents.Destroyed) != 0) reg.Destroyed.Add(entry);
 
             _observerCount++;
             return handle;
@@ -62,7 +65,7 @@ namespace EntJoy.ECS
             var compType = ComponentTypeManager.GetComponentType(typeof(TComponent));
             if (!_observers.TryGetValue(compType.Id, out var reg)) return;
 
-            bool removed = RemoveFromList(reg.Added, handle) | RemoveFromList(reg.Removed, handle) | RemoveFromList(reg.Set, handle);
+            bool removed = RemoveFromList(reg.Added, handle) | RemoveFromList(reg.Removed, handle) | RemoveFromList(reg.Set, handle) | RemoveFromList(reg.Destroyed, handle);
             if (removed) _observerCount--;
         }
 
@@ -74,7 +77,13 @@ namespace EntJoy.ECS
             var compType = ComponentTypeManager.GetComponentType(typeof(TComponent));
             if (!_observers.TryGetValue(compType.Id, out var reg)) return;
 
-            _observerCount -= reg.Added.Count + reg.Removed.Count + reg.Set.Count;
+            // 一个 observer 可订阅多个事件、占多个桶；须按唯一 handle 数扣减，避免 _observerCount 下溢
+            var unique = new HashSet<ObserverHandle>();
+            foreach (var o in reg.Added) unique.Add(o.Handle);
+            foreach (var o in reg.Removed) unique.Add(o.Handle);
+            foreach (var o in reg.Set) unique.Add(o.Handle);
+            foreach (var o in reg.Destroyed) unique.Add(o.Handle);
+            _observerCount -= unique.Count;
             _observers.Remove(compType.Id);
         }
 

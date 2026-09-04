@@ -210,39 +210,5 @@ namespace EntJoy.ECS.JobSystem
             archetypes = s_archetypeBuffer.ToArray();
         }
 
-        private static void CollectAndBuildEntityBatchCore(Chunk[] chunks, int count, int[]? requiredIds,
-            out EntityBatchData* ptr, out int batchCount)
-        {
-            batchCount = count;
-            if (count == 0) { ptr = null; return; }
-            int reqCount = requiredIds?.Length ?? 0;
-            ptr = (EntityBatchData*)Marshal.AllocHGlobal(count * sizeof(EntityBatchData));
-            void* compArraysBlock = reqCount > 0 ? (void*)Marshal.AllocHGlobal(count * reqCount * sizeof(void*)) : null;
-            for (int ci = 0; ci < count; ci++)
-            {
-                var chunk = chunks[ci];
-                var arch = chunk.Archetype;
-                ptr[ci].entityCount = chunk.EntityCount;
-                ptr[ci].componentArrays = null;
-                ptr[ci].enableBitMaps = null;
-                ptr[ci].enableBitmapCount = 0;
-                if (compArraysBlock != null)
-                {
-                    void** arraysBase = (void**)compArraysBlock + ci * reqCount;
-                    for (int r = 0; r < reqCount; r++)
-                    {
-                        arraysBase[r] = null;
-                        int reqId = requiredIds![r];
-                        for (int c = 0; c < chunk.ComponentCount; c++)
-                            if (arch.Types[c].Id == reqId)
-                            {
-                                arraysBase[r] = (void*)chunk.GetComponentArrayPointer(c);
-                                break;
-                            }
-                    }
-                    ptr[ci].componentArrays = arraysBase;
-                }
-            }
-        }
     }
 }

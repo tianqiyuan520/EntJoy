@@ -89,12 +89,14 @@ namespace EntJoy.ECS
         public QueryBuilder WithAny<T>()
             where T : struct
         {
-            Any = ComponentTypes<T>.Share;
+            if (Any == null) { Any = ComponentTypes<T>.Share; return this; }
+            Any = Merge(Any, ComponentTypes<T>.Share);
             return this;
         }
         public QueryBuilder WithNone<T>() where T : struct
         {
-            None = ComponentTypes<T>.Share;
+            if (None == null) { None = ComponentTypes<T>.Share; return this; }
+            None = Merge(None, ComponentTypes<T>.Share);
             return this;
         }
 

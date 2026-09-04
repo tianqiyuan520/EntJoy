@@ -36,6 +36,11 @@ namespace EntJoy.ECS.SourceGenerator
             "[ECSComponent] cannot be applied to generic struct '{0}'",
             "EntJoy.ECS.SourceGenerator", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
+        private static readonly DiagnosticDescriptor EJ2004 = new(
+            "EJ2004", "ECS component cannot be nested",
+            "Component '{0}' cannot be a nested type; declare it at namespace scope",
+            "EntJoy.ECS.SourceGenerator", DiagnosticSeverity.Error, isEnabledByDefault: true);
+
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
             var provider = context.SyntaxProvider
@@ -98,6 +103,13 @@ namespace EntJoy.ECS.SourceGenerator
                 return result;
             }
 
+            // EJ2004：嵌套类型（生成的顶层 partial 无法与嵌套声明合并，会静默漏加接口）
+            if (typeSymbol.ContainingType != null)
+            {
+                result.Diagnostics.Add(Diagnostic.Create(EJ2004, structDecl.Identifier.GetLocation(), typeSymbol.Name));
+                return result;
+            }
+
             // 已实现任一 ECS 组件接口 → 跳过（幂等，不重复补接口）
             if (ImplementsAnyComponentInterface(typeSymbol))
                 return null;
@@ -116,7 +128,7 @@ namespace EntJoy.ECS.SourceGenerator
                 return result;
             }
 
-            result.HintName = $"{typeSymbol.Name}{Suffix}";
+            result.HintName = $"{SanitizeHintName(typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))}{Suffix}";
             result.Source = Generate(typeSymbol);
             return result;
         }
@@ -187,6 +199,15 @@ namespace EntJoy.ECS.SourceGenerator
             // class / interface / delegate / dynamic / error
             offending = type.ToDisplayString();
             return false;
+        }
+
+        /// <summary>把全限定名转成安全的 HintName 片段（非字母数字下划线 → 下划线），消除同名组件跨命名空间的 HintName 冲突。</summary>
+        private static string SanitizeHintName(string fullName)
+        {
+            var sb = new StringBuilder(fullName.Length);
+            foreach (char c in fullName)
+                sb.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
+            return sb.ToString();
         }
 
         private static string Generate(INamedTypeSymbol typeSymbol)

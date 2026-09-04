@@ -2,6 +2,7 @@
 #include "ChaseLevScheduler.h"
 
 #include <algorithm>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -14,6 +15,15 @@
 
 namespace JobSystem
 {
+#ifdef ENTJOY_TESTING
+    static std::atomic<int> g_failBatchStorageAcquireCount{ 0 };
+
+    void FailNextBatchStorageAcquireForTests(int count) noexcept
+    {
+        g_failBatchStorageAcquireCount.store(std::max(0, count), std::memory_order_release);
+    }
+#endif
+
     // ============================================================
     // Unified execution tiles + dynamic atomic range claiming
     // ============================================================
@@ -21,8 +31,8 @@ namespace JobSystem
     {
         if (targetCount <= 0) return 1;
         // 默认每个 job 可用全部持久 worker 队（逻辑核数-1）；显式 workerCap 优先。
-        const int cap = workerCap > 0 ? workerCap : g_numThreads;
-        return std::max(1, std::min({ cap, g_numThreads, targetCount }));
+        const int cap = workerCap > 0 ? workerCap : g_numThreads.load(std::memory_order_relaxed);
+        return std::max(1, std::min({ cap, g_numThreads.load(std::memory_order_relaxed), targetCount }));
     }
 
     int ResolveEcsBatchRangeSize(
@@ -240,6 +250,15 @@ namespace JobSystem
 
     BatchStorage* AcquireBatchStorage(uint32_t tileCapacity)
     {
+#ifdef ENTJOY_TESTING
+        int remaining = g_failBatchStorageAcquireCount.load(std::memory_order_relaxed);
+        while (remaining > 0 &&
+            !g_failBatchStorageAcquireCount.compare_exchange_weak(
+                remaining, remaining - 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {}
+        if (remaining > 0)
+            throw std::bad_alloc();
+#endif
         BatchStorage* storage = nullptr;
         if (!t_batchStorageCache.entries.empty())
         {
@@ -286,7 +305,7 @@ namespace JobSystem
         return storage;
     }
 
-    static void ReleaseBatchStorage(BatchStorage* storage) noexcept
+    void ReleaseBatchStorage(BatchStorage* storage) noexcept
     {
         if (!storage) return;
         std::destroy_at(&storage->batch);
@@ -787,6 +806,11 @@ namespace JobSystem
         delete bc;
     }
 
+    void DestroyChunkContextWithoutCleanup(void* ctx) noexcept
+    {
+        delete static_cast<ChunkBatchContext*>(ctx);
+    }
+
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile)
     {
         auto* bc = static_cast<GeneralBatchContext*>(ctx);
@@ -813,6 +837,11 @@ namespace JobSystem
             throw;
         }
         delete bc;
+    }
+
+    void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept
+    {
+        delete static_cast<GeneralBatchContext*>(ctx);
     }
 
     // ============================================================
@@ -873,7 +902,7 @@ namespace JobSystem
                     // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem
                     // → C_fixed = (wc×execSpan − N×C_elem)/tiles（C_elem 用当前细 EWMA，
                     //   冷启动用本批 perElem 近似）。固定开销与分块粒度无关，粗/细批都学习。
-                    const int wcNow = std::max(1, g_numThreads);
+                    const int wcNow = std::max(1, g_numThreads.load(std::memory_order_relaxed));
                     if (batch->tileCount > 0)
                     {
                         double celemRef = g_jobCostCache.GetPerElemCost(batch->funcHash);

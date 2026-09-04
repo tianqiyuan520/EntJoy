@@ -1,24 +1,50 @@
-name: JobSystem CI
+name: EntJoy Release Gate
 
 on:
   push:
     branches: [dev]
-    paths:
-      - 'src/NativeDll/**'
-      - 'src/EntJoy.Jobs/**'
-      - 'tests/NativeDll.Tests/**'
-      - 'tools/JobSystemBugTests/**'
-      - 'tools/JobSystemPerfBench/**'
-      - 'tools/NativeDllCore/**'
-      - 'tools/ISPCWidthBoundaryTest/**'
+    tags: ['v*']
   pull_request:
     branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ---- Windows：功能回归 + 旧 ABI fixture + C# 构建 ----
+  framework-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build solution
+        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false
+
+      - name: Build ECS tests
+        run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
+
+      - name: Run ECS tests repeatedly
+        shell: pwsh
+        run: |
+          1..5 | ForEach-Object {
+            Write-Host "ECS test pass $_/5"
+            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release --no-build --no-restore
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
   windows-test:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -29,16 +55,15 @@ jobs:
       - name: Run C++ tests
         run: |
           set -e
-          ./build/Release/JobSystemTests.exe
-          ./build/Release/ChaseLevIntegrationTests.exe
-          ./build/Release/AssistLifetimeTests.exe
-          ./build/Release/ImplicitBatchTests.exe
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+            ./build/Release/$test.exe
+          done
         shell: bash
 
       - name: Build and run stage regressions
         run: |
           set -e
-          for stage in Stage6_CppExceptionSafety Stage7_DeferDepth Stage9_BatchStorageRace Stage10_ImplicitBatchToggle; do
+          for stage in Stage2_BatchLifetime Stage3_SchedulerLifecycle Stage6_CppExceptionSafety Stage7_DeferDepth Stage9_BatchStorageRace Stage10_ImplicitBatchToggle; do
             cmake -S tools/JobSystemBugTests/$stage -B tools/JobSystemBugTests/$stage/build -A x64
             cmake --build tools/JobSystemBugTests/$stage/build --config Release
             tools/JobSystemBugTests/$stage/build/Release/$stage.exe
@@ -50,35 +75,45 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build old-ABI fixture stubs
+      - name: Build ABI fixture stubs
         run: |
           cmake -S tools/JobSystemBugTests/Stage11_AbiFixture -B tools/JobSystemBugTests/Stage11_AbiFixture/build -A x64
           cmake --build tools/JobSystemBugTests/Stage11_AbiFixture/build --config Release
         shell: bash
-      - name: Run old-ABI fixture
-        run: >
-          dotnet run --project tools/JobSystemBugTests/Stage11_AbiFixture/Stage11_AbiFixture.csproj -c Release --
-          tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_abi.dll
-          tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll
-        shell: bash
 
-      - name: Build C#
-        run: dotnet build src/EntJoy.Jobs/EntJoy.Jobs.csproj -c Release
-
-      - name: Build minimal NativeDll (C# P/Invoke)
+      - name: Build NativeDll for C# tests
         run: |
           cmake -S tools/NativeDllCore -B tools/NativeDllCore/build -A x64
           cmake --build tools/NativeDllCore/build --config Release
         shell: bash
 
-      - name: Build and run C# bridge (managed + native)
+      - name: Build C# JobSystem regressions
         run: |
           dotnet build tools/JobSystemBugTests/Stage1_CSharpBridge/Stage1_CSharpBridge.csproj -c Release
-          cp tools/NativeDllCore/build/Release/NativeDll.dll tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/NativeDll.dll
-          ./tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/Stage1_CSharpBridge.exe
+          dotnet build tools/JobSystemBugTests/Stage4_AbiCompatibility/Stage4_AbiCompatibility.csproj -c Release
+          dotnet build tools/JobSystemBugTests/Stage8_CompleteRetain/Stage8_CompleteRetain.csproj -c Release
+          dotnet build tools/JobSystemBugTests/Stage11_AbiFixture/Stage11_AbiFixture.csproj -c Release
+          dotnet build tools/JobSystemStressTest.CSharp/JobSystemStressTest.CSharp.csproj -c Release
         shell: bash
 
-  # ---- Windows：ISPC 跨 SIMD 宽度边界一致性（sse4/avx2/avx512）----
+      - name: Run C# JobSystem regressions
+        run: |
+          set -e
+          native=tools/NativeDllCore/build/Release/NativeDll.dll
+          for app in Stage1_CSharpBridge Stage4_AbiCompatibility Stage8_CompleteRetain Stage11_AbiFixture; do
+            cp "$native" "tools/JobSystemBugTests/$app/bin/Release/net8.0/NativeDll.dll"
+          done
+          cp "$native" tools/JobSystemStressTest.CSharp/bin/Release/net8.0/NativeDll.dll
+
+          ./tools/JobSystemBugTests/Stage1_CSharpBridge/bin/Release/net8.0/Stage1_CSharpBridge.exe
+          ./tools/JobSystemBugTests/Stage4_AbiCompatibility/bin/Release/net8.0/Stage4_AbiCompatibility.exe "$native"
+          ./tools/JobSystemBugTests/Stage8_CompleteRetain/bin/Release/net8.0/Stage8_CompleteRetain.exe
+          ./tools/JobSystemBugTests/Stage11_AbiFixture/bin/Release/net8.0/Stage11_AbiFixture.exe \
+            tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_abi.dll \
+            tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll
+          ./tools/JobSystemStressTest.CSharp/bin/Release/net8.0/JobSystemStressTest.CSharp.exe --timeout 60
+        shell: bash
+
   ispc-width-test:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -101,7 +136,6 @@ jobs:
           cmake --build tools/ISPCWidthBoundaryTest/build --config Release
           ./tools/ISPCWidthBoundaryTest/build/Release/width_test_sse4.exe
           ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx2.exe
-          # avx512 需要 CPU 支持；GitHub runner 可能不支持，容错跳过
           set +e
           ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx512.exe
           avx512_exit=$?
@@ -109,11 +143,10 @@ jobs:
           if [ $avx512_exit -eq 0 ]; then
             echo "avx512: PASS"
           else
-            echo "avx512: skipped (exit $avx512_exit, CPU 可能不支持 AVX512)"
+            echo "avx512: skipped (exit $avx512_exit; runner may not support AVX512)"
           fi
         shell: bash
 
-  # ---- Linux：Clang ASAN/UBSAN 与 TSAN ----
   linux-sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -132,7 +165,11 @@ jobs:
       - name: Build ASAN+UBSAN
         run: cmake --build build-asan -j
       - name: Run ASAN+UBSAN
-        run: ASAN_OPTIONS=detect_leaks=1 ./build-asan/JobSystemTests
+        run: |
+          set -e
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build-asan/$test
+          done
         shell: bash
 
       - name: Configure TSAN
@@ -145,5 +182,21 @@ jobs:
       - name: Build TSAN
         run: cmake --build build-tsan -j
       - name: Run TSAN
-        run: ./build-tsan/JobSystemTests
+        run: |
+          set -e
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+            TSAN_OPTIONS=halt_on_error=1 ./build-tsan/$test
+          done
         shell: bash
+
+  release-gate:
+    if: always()
+    needs: [framework-test, windows-test, ispc-width-test, linux-sanitizers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release check
+        run: |
+          test "${{ needs.framework-test.result }}" = "success"
+          test "${{ needs.windows-test.result }}" = "success"
+          test "${{ needs.ispc-width-test.result }}" = "success"
+          test "${{ needs.linux-sanitizers.result }}" = "success"

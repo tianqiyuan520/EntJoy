@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 
 namespace EntJoy.JobSystem
 {
@@ -58,12 +57,12 @@ namespace EntJoy.JobSystem
         {
             if (IsManaged)
             {
-                _managedHandles ??= new List<JobHandle>();
                 EnsureWritable();
+                _managedHandles ??= new List<JobHandle>();
                 _managedHandles.Add(JobScheduler.Schedule(ref job, dependsOn));
                 return;
             }
-            ThrowIfManaged<T>();
+            EnsureWritable();
             var cache = NativeJobCore.JobDelegateCacheFor<T>.Cache;
             AddDesc(0, cache.FuncPtr, NativeJobCore.AllocContext(ref job), NativeJobCore.CleanupPtr, dependsOn);
         }
@@ -73,12 +72,12 @@ namespace EntJoy.JobSystem
         {
             if (IsManaged)
             {
-                _managedHandles ??= new List<JobHandle>();
                 EnsureWritable();
+                _managedHandles ??= new List<JobHandle>();
                 _managedHandles.Add(JobScheduler.ScheduleFor(ref job, length, dependsOn));
                 return;
             }
-            ThrowIfManaged<T>();
+            EnsureWritable();
             var cache = NativeJobCore.ForDelegateCacheFor<T>.Cache;
             AddDesc(1, cache.FuncPtr, NativeJobCore.AllocContext(ref job), NativeJobCore.CleanupPtr,
                 dependsOn, length: length);
@@ -89,29 +88,20 @@ namespace EntJoy.JobSystem
         {
             if (IsManaged)
             {
-                _managedHandles ??= new List<JobHandle>();
                 EnsureWritable();
+                _managedHandles ??= new List<JobHandle>();
                 _managedHandles.Add(JobScheduler.ScheduleParallelFor(ref job, length, innerBatchCount, dependsOn));
                 return;
             }
-            ThrowIfManaged<T>();
+            EnsureWritable();
             var cache = NativeJobCore.GetAutoParallelForCache<T>();
             AddDesc(2, cache.FuncPtr, NativeJobCore.AllocContext(ref job), NativeJobCore.CleanupPtr,
                 dependsOn, length: length, batchSize: innerBatchCount);
         }
 
-        // 运行时兜底：unmanaged 约束已在编译期拒绝托管 job，此处防御绕过约束的路径（如反射/动态调用）
-        private static void ThrowIfManaged<T>() where T : struct
-        {
-            if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
-                throw new NotSupportedException(
-                    $"{typeof(T).Name} 含托管引用字段，批快路径仅支持 unmanaged job；请使用单 job Schedule。");
-        }
-
         private void AddDesc(byte kind, IntPtr func, IntPtr ctx, IntPtr cleanup,
             JobHandle dependsOn, int length = 0, int batchSize = 0)
         {
-            EnsureWritable();
             if (_count == _items.Length)
                 Array.Resize(ref _items, _items.Length * 2);
 
@@ -156,11 +146,6 @@ namespace EntJoy.JobSystem
                 _count = _handles.Length;
                 return _handles;
             }
-            // Batch = Native-only 批快照/合并：NativeDll 缺失时不应到达（IsManaged 已分流）。
-            if (NativeJobCore.NativeDllHandle == IntPtr.Zero)
-                throw new NotSupportedException(
-                    "BatchScope requires the Native Job System (NativeDll.dll); " +
-                    "the managed fallback backend does not support batching — use single job Schedule() instead.");
             _ended = true;
             var handles = new JobHandle[_count];
             if (_count == 0)
@@ -180,7 +165,15 @@ namespace EntJoy.JobSystem
                 for (int i = 0; i < _count; i++)
                 {
                     if (_handleOut[i] != IntPtr.Zero)
+                    {
                         handles[i] = new JobHandle(new NativeJobHandle(_handleOut[i]));
+                    }
+                    else if (_items[i].Context != IntPtr.Zero)
+                    {
+                        // native 未接管该 job（部分失败/非法 descriptor）：此处兜底清理 context，
+                        // 否则其所有权丢失 → 永不释放。
+                        NativeJobCore.Cleanup(_items[i].Context);
+                    }
                 }
             }
             finally
@@ -222,8 +215,21 @@ namespace EntJoy.JobSystem
         {
             if (_disposed) return;
             _disposed = true;
+            if (!_ended)
+            {
+                // 未提交即销毁：回收已入队 job 的 native context（提交后 context 归 C++ 所有，不能重复清理）
+                for (int i = 0; i < _count; i++)
+                {
+                    if (_items[i].Context != IntPtr.Zero)
+                        NativeJobCore.Cleanup(_items[i].Context);
+                }
+                if (_depLeases != null)
+                {
+                    foreach (var lease in _depLeases) lease.Dispose();
+                    _depLeases.Clear();
+                }
+            }
             _items = Array.Empty<NativeJobCore.NativeJobBatchDesc>();
-            _depLeases?.Clear();
             _handles = null;
             _managedHandles = null;
         }

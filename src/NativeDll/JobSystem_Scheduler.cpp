@@ -280,7 +280,7 @@ namespace JobSystem
         return value == "1" || value == "true" || value == "on";
     }
 
-    void Scheduler::Initialize(int numThreads)
+    bool Scheduler::Initialize(int numThreads)
     {
         std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
         g_shuttingDown.store(false, std::memory_order_release);
@@ -288,9 +288,6 @@ namespace JobSystem
 #if defined(_WIN32)
         // 提升进程优先级，减少 worker 与 OS/其他进程竞争时被降权。
         ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
-        // 计时器分辨率从默认 ~15.6ms 提到 1ms，提升 semaphore/condition_variable 超时响应；
-        // 对游戏进程整体影响可忽略。
-        ::timeBeginPeriod(1);
 #endif
             int resolved;
             int envWorkers = 0;
@@ -324,8 +321,8 @@ namespace JobSystem
             // 诊断数组 kMaxTrackedWorkers=64：超出会导致 GetWorkerSnapshots/DumpState
             // 及 affinity 位运算越界，此处钳制。
             resolved = std::min(resolved, kMaxTrackedWorkers);
-            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning()) return;
-            g_numThreads = resolved;
+            if (g_chaseLevScheduler && g_chaseLevScheduler->IsRunning()) return true;
+            g_numThreads.store(resolved, std::memory_order_relaxed);
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
@@ -337,14 +334,26 @@ namespace JobSystem
 
             // Chase-Lev 调度器（唯一路径）：持久 worker 线程 + per-worker deque + MPMC Injector
             g_chaseLevScheduler = std::make_unique<ChaseLevScheduler>();
-            g_chaseLevScheduler->Start(
+            if (!g_chaseLevScheduler->Start(
                 static_cast<uint32_t>(resolved),
                 &ChaseLevExecuteTile,
                 &ChaseLevTaskDone,
-                g_workerAffinityEnabled.load(std::memory_order_relaxed));
+                g_workerAffinityEnabled.load(std::memory_order_relaxed)))
+            {
+                // worker 创建失败：回滚，避免「无 worker 但仍认为 Native 可用」。
+                g_chaseLevScheduler.reset();
+                g_shuttingDown.store(true, std::memory_order_release);
+                return false;
+            }
+
+#if defined(_WIN32)
+            // 只在真正创建一代 scheduler 后增加计时器分辨率引用，避免重复 Initialize 泄漏引用。
+            ::timeBeginPeriod(1);
+#endif
 
             // 若设置了 ENTJOY_DEBUG=1，启动 Dear ImGui 调试窗口
             JobDebuggerGUI::TryLaunch();
+            return true;
     }
 
     void Scheduler::Shutdown()
@@ -362,7 +371,13 @@ namespace JobSystem
         std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
         // Shutdown 幂等；停止/重置期间保持 gate，防止 Initialize 与 teardown 并发发布新一代。
         g_shuttingDown.store(true, std::memory_order_release);
-        g_numThreads = 0;
+        g_numThreads.store(0, std::memory_order_relaxed);
+        // 关键：在 pending 锁内关闭隐式批，再 flush——否则「Schedule 读到 enabled=true → 暂停 →
+        // Shutdown flush 空队列 → 调度线程继续入队」会把 batch 留在无人 flush 的队列，永久悬挂/泄漏。
+        {
+            std::lock_guard<std::mutex> lock(g_pendingBatchesMutex);
+            g_implicitBatchEnabled.store(false, std::memory_order_release);
+        }
         // 隐式批排空：执行 pending 中未发布的 job（worker 尚在运行）；未及执行者由 in-flight 兜底，不产生 UAF。
         FlushPendingSubmits();
         if (g_chaseLevScheduler)
@@ -381,6 +396,10 @@ namespace JobSystem
         // 先交还 main 缓存中的 state 再清空；worker 已 join 交还，故清空覆盖全部 state。
         FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
+#if defined(_WIN32)
+        // 与 Initialize 的 timeBeginPeriod(1) 配对，避免多次 Init/Shutdown 累积系统计时器分辨率引用。
+        ::timeEndPeriod(1);
+#endif
     }
 
     void Scheduler::PrewakeWorkers()
@@ -391,15 +410,15 @@ namespace JobSystem
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
     {
         // 并行 for 默认粒度（batchSize=0 时用）。Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
-        g_configuredTilesPerWorker = std::max(1, tilesPerWorker);
+        g_configuredTilesPerWorker.store(std::max(1, tilesPerWorker), std::memory_order_relaxed);
     }
 
     void Scheduler::ConfigureGuided(int enabled, int k, int floor)
     {
         // guided（chunk ∝ 剩余工作量）开关+参数；Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
-        g_guidedEnabled = enabled != 0 ? 1 : 0;
-        g_guidedK = std::max(1, k);
-        g_guidedFloor = std::max(1, floor);
+        g_guidedEnabled.store(enabled != 0 ? 1 : 0, std::memory_order_relaxed);
+        g_guidedK.store(std::max(1, k), std::memory_order_relaxed);
+        g_guidedFloor.store(std::max(1, floor), std::memory_order_relaxed);
     }
 
     // ---------- IJob ----------
@@ -492,70 +511,97 @@ namespace JobSystem
         auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
         bc->funcHash = funcHash;
         // General 路径默认"等量 tile"（配合批量认领既均衡又低争用）；g_guidedEnabled 开启时走 guided。
-        const bool guided = g_guidedEnabled != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
+        const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
+        const int guidedK = g_guidedK.load(std::memory_order_relaxed);
+        const int guidedFloor = g_guidedFloor.load(std::memory_order_relaxed);
         const int tileCount = guided
-            ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
+            ? GuidedTileCount(length, static_cast<int>(targetWorkers), guidedK, guidedFloor)
             : rc;
-        auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(tileCount));
-        auto* batch = &storage->batch;
-        auto* state = CreateState(false); batch->handle = state;
-        batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
-        batch->executeTile = &GeneralExecuteTile;
-        batch->funcHash = funcHash;
-        batch->jccFine = jccFine;
-        batch->totalElements = static_cast<uint32_t>(length);
-        batch->tileCount = static_cast<uint32_t>(tileCount);
-        batch->nextTile.store(0, std::memory_order_relaxed);
-        batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
-        if (guided)
+        BatchStorage* storage = nullptr;
+        HandleState* state = nullptr;
+        try
         {
-            BuildGuidedTiles(storage->tileBuffer, length,
-                static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor);
-        }
-        else
-        {
-            for (uint32_t i = 0; i < batch->tileCount; ++i)
+            storage = AcquireBatchStorage(static_cast<uint32_t>(tileCount));
+            auto* batch = &storage->batch;
+            state = CreateState(false); batch->handle = state;
+            batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
+            batch->executeTile = &GeneralExecuteTile;
+            batch->funcHash = funcHash;
+            batch->jccFine = jccFine;
+            batch->totalElements = static_cast<uint32_t>(length);
+            batch->tileCount = static_cast<uint32_t>(tileCount);
+            batch->nextTile.store(0, std::memory_order_relaxed);
+            batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
+            if (guided)
             {
-                const uint32_t first = i * static_cast<uint32_t>(cs);
-                storage->tileBuffer[i] = {
-                    first,
-                    std::min(static_cast<uint32_t>(cs),
-                        static_cast<uint32_t>(length) - first),
-                    TileKind::GeneralRange };
+                BuildGuidedTiles(storage->tileBuffer, length,
+                    static_cast<int>(targetWorkers), guidedK, guidedFloor);
             }
-        }
-        batch->tiles = storage->tileBuffer;
-        batch->workerCount = targetWorkers;
-        batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
-
-        PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
-
-        auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire))
-        {
-            try { SubmitOrPending(batch); }
-            catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
-        }
-        else
-        {
-            AcquireState(state);
-            RetainDependency(state, ds);
-            try
+            else
             {
-                AddContinuationOrRunNow(ds, [state, batch]() {
-                    try { SubmitBatch(batch); }
-                    catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                for (uint32_t i = 0; i < batch->tileCount; ++i)
+                {
+                    const uint32_t first = i * static_cast<uint32_t>(cs);
+                    storage->tileBuffer[i] = {
+                        first,
+                        std::min(static_cast<uint32_t>(cs),
+                            static_cast<uint32_t>(length) - first),
+                        TileKind::GeneralRange };
+                }
+            }
+            batch->tiles = storage->tileBuffer;
+            batch->workerCount = targetWorkers;
+            batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
+
+            PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
+
+            auto* ds = dependency.State();
+            if (!ds || ds->completed.load(std::memory_order_acquire))
+            {
+                try { SubmitOrPending(batch); }
+                catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+            }
+            else
+            {
+                AcquireState(state);
+                RetainDependency(state, ds);
+                try
+                {
+                    AddContinuationOrRunNow(ds, [state, batch]() {
+                        try { SubmitBatch(batch); }
+                        catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                        ReleaseState(state);
+                    });
+                }
+                catch (...)
+                {
+                    AbortUnsubmittedBatch(batch, std::current_exception());
                     ReleaseState(state);
-                });
+                }
             }
-            catch (...)
-            {
-                AbortUnsubmittedBatch(batch, std::current_exception());
-                ReleaseState(state);
-            }
+            return JobHandle(state);
         }
-        return JobHandle(state);
+        catch (...)
+        {
+            // 构造失败时 native 不拥有原始 context；只销毁内部 wrapper，
+            // 调用方（C#）负责随后执行一次用户 cleanup。
+            if (storage)
+            {
+                auto* batch = &storage->batch;
+                if (batch->handle)
+                {
+                    batch->context = nullptr;
+                    batch->cleanup = nullptr;
+                    AbortUnsubmittedBatch(batch, std::current_exception());
+                }
+                else
+                    ReleaseBatchStorage(storage);
+            }
+            if (state)
+                ReleaseState(state);
+            DestroyGeneralContextWithoutCleanup(bc);
+            throw;
+        }
     }
 
     // ---------- IJobParallelForBatch ----------
@@ -568,7 +614,9 @@ namespace JobSystem
         ConsumeLongBatchBarriers();
         if (!func || length <= 0)
             return MakeCompletedAfterCleanup(cleanup, context);
-        // batchSize<0 = 强制异步；reqBatch 取绝对值。
+        // batchSize<0 = 强制异步；INT_MIN 没有可表示的 int 绝对值，直接拒绝该输入。
+        if (batchSize == (std::numeric_limits<int>::min)())
+            return MakeCompletedAfterCleanup(cleanup, context);
         int reqBatch = batchSize < 0 ? -batchSize : batchSize;
         // JobCostCache：hash 在 ResolveChunkSize 前算；显式 batchSize（reqBatch>0）时用户意图优先。
         const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
@@ -585,69 +633,99 @@ namespace JobSystem
         auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
         bc->funcHash = funcHash;
         // General 路径：guided 按工作量切 tile（可变代价 job 负载均衡）。
-        const bool guided = g_guidedEnabled != 0;
+        const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;
+        const int guidedK = g_guidedK.load(std::memory_order_relaxed);
+        const int guidedFloor = g_guidedFloor.load(std::memory_order_relaxed);
         const int tileCount = guided
-            ? GuidedTileCount(length, static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor)
+            ? GuidedTileCount(length, static_cast<int>(targetWorkers),
+                guidedK, guidedFloor)
             : rc;
-        auto* storage = AcquireBatchStorage(
-            static_cast<uint32_t>(tileCount));
-        auto* batch = &storage->batch; auto* state = CreateState(false); batch->handle = state;
-        batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
-        batch->executeTile = &GeneralExecuteTile;
-        batch->funcHash = funcHash;
-        batch->jccFine = jccFine;
-        batch->totalElements = static_cast<uint32_t>(length);
-        batch->tileCount = static_cast<uint32_t>(tileCount);
-        batch->nextTile.store(0, std::memory_order_relaxed);
-        batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
-        if (guided)
+        BatchStorage* storage = nullptr;
+        HandleState* state = nullptr;
+        try
         {
-            BuildGuidedTiles(storage->tileBuffer, length,
-                static_cast<int>(targetWorkers), g_guidedK, g_guidedFloor);
-        }
-        else
-        {
-            for (uint32_t i = 0; i < batch->tileCount; ++i)
+            storage = AcquireBatchStorage(static_cast<uint32_t>(tileCount));
+            auto* batch = &storage->batch;
+            state = CreateState(false); batch->handle = state;
+            batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
+            batch->executeTile = &GeneralExecuteTile;
+            batch->funcHash = funcHash;
+            batch->jccFine = jccFine;
+            batch->totalElements = static_cast<uint32_t>(length);
+            batch->tileCount = static_cast<uint32_t>(tileCount);
+            batch->nextTile.store(0, std::memory_order_relaxed);
+            batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
+            if (guided)
             {
-                const uint32_t first = i * static_cast<uint32_t>(cs);
-                storage->tileBuffer[i] = {
-                    first,
-                    std::min(static_cast<uint32_t>(cs),
-                        static_cast<uint32_t>(length) - first),
-                    TileKind::GeneralRange };
+                BuildGuidedTiles(storage->tileBuffer, length,
+                    static_cast<int>(targetWorkers),
+                    guidedK, guidedFloor);
             }
-        }
-        batch->tiles = storage->tileBuffer;
-        batch->workerCount = targetWorkers;
-        batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
-
-        PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
-
-        auto* ds = dependency.State();
-        if (!ds || ds->completed.load(std::memory_order_acquire))
-        {
-            try { SubmitOrPending(batch); }
-            catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
-        }
-        else
-        {
-            AcquireState(state);
-            RetainDependency(state, ds);
-            try
+            else
             {
-                AddContinuationOrRunNow(ds, [state, batch]() {
-                    try { SubmitBatch(batch); }
-                    catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                for (uint32_t i = 0; i < batch->tileCount; ++i)
+                {
+                    const uint32_t first = i * static_cast<uint32_t>(cs);
+                    storage->tileBuffer[i] = {
+                        first,
+                        std::min(static_cast<uint32_t>(cs),
+                            static_cast<uint32_t>(length) - first),
+                        TileKind::GeneralRange };
+                }
+            }
+            batch->tiles = storage->tileBuffer;
+            batch->workerCount = targetWorkers;
+            batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
+
+            PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
+
+            auto* ds = dependency.State();
+            if (!ds || ds->completed.load(std::memory_order_acquire))
+            {
+                try { SubmitOrPending(batch); }
+                catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+            }
+            else
+            {
+                AcquireState(state);
+                RetainDependency(state, ds);
+                try
+                {
+                    AddContinuationOrRunNow(ds, [state, batch]() {
+                        try { SubmitBatch(batch); }
+                        catch (...) { AbortUnsubmittedBatch(batch, std::current_exception()); }
+                        ReleaseState(state);
+                    });
+                }
+                catch (...)
+                {
+                    AbortUnsubmittedBatch(batch, std::current_exception());
                     ReleaseState(state);
-                });
+                }
             }
-            catch (...)
-            {
-                AbortUnsubmittedBatch(batch, std::current_exception());
-                ReleaseState(state);
-            }
+            return JobHandle(state);
         }
-        return JobHandle(state);
+        catch (...)
+        {
+            // RAII 兜底：构造阶段异常只释放 native wrapper/storage/state；原始 context
+            // 仍由调用方拥有，避免 C++ cleanup 后 C# 异常路径再次 cleanup。
+            if (storage)
+            {
+                auto* batch = &storage->batch;
+                if (batch->handle)
+                {
+                    batch->context = nullptr;
+                    batch->cleanup = nullptr;
+                    AbortUnsubmittedBatch(batch, std::current_exception());
+                }
+                else
+                    ReleaseBatchStorage(storage);
+            }
+            if (state)
+                ReleaseState(state);
+            DestroyGeneralContextWithoutCleanup(bc);
+            throw;
+        }
     }
 
     // ---------- ScheduleChunkBatchCore ----------
@@ -701,8 +779,12 @@ namespace JobSystem
             return JobHandle(st);
         }
 
-        auto* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
+        ChunkBatchContext* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
             chunks, batches };
+        BatchStorage* storage = nullptr;
+        HandleState* state = nullptr;
+        try
+        {
 
         // ── 实体数衡 tile ──：按每 unit(chunk/batch) 存活实体数前向扫描切块（约 targetEnt 实体/块），
         // 消除满/半满/空 chunk 混排时的负载失衡。
@@ -744,9 +826,9 @@ namespace JobSystem
                     totalEntities, tileCount, tileBounds);
         }
 
-        auto* storage = AcquireBatchStorage(tileCount);
+        storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
-        auto* state = CreateState(false); batch->handle = state;
+        state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -793,6 +875,28 @@ namespace JobSystem
             }
         }
         return JobHandle(state);
+        }
+        catch (...)
+        {
+            // RAII 兜底：构造阶段异常只释放 native wrapper/storage/state；原始 context
+            // 仍由调用方拥有，避免 C++ cleanup 后 C# 异常路径再次 cleanup。
+            if (storage)
+            {
+                auto* batch = &storage->batch;
+                if (batch->handle)
+                {
+                    batch->context = nullptr;
+                    batch->cleanup = nullptr;
+                    AbortUnsubmittedBatch(batch, std::current_exception());
+                }
+                else
+                    ReleaseBatchStorage(storage);
+            }
+            if (state)
+                ReleaseState(state);
+            DestroyChunkContextWithoutCleanup(cc);
+            throw;
+        }
     }
 
     JobHandle Scheduler::ScheduleChunks(void (*f)(void*, const ChunkJobData*), void* ctx, void (*cl)(void*),

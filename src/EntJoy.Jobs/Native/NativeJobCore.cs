@@ -100,11 +100,12 @@ namespace EntJoy.JobSystem
         // ======================== DLL 函数指针（纯 P/Invoke） ========================
         private static IntPtr _nativeDll = IntPtr.Zero;
         private static int _shutdownRequested;
-        private const uint ExpectedAbiVersion = 1;
+        // ABI 2: JobSystem_Initialize now returns an int status code.
+        private const uint ExpectedAbiVersion = 2;
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
-        private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_Initialize;
+        private static delegate* unmanaged[Cdecl]<int, int> _jobSystem_Initialize;
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetAbiVersion;
         private static delegate* unmanaged[Cdecl]<int> _jobSystem_GetWorkerCount;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
@@ -324,7 +325,7 @@ namespace EntJoy.JobSystem
                 return;
             }
 
-            _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, void>)
+            _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, int>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
             _jobSystem_GetWorkerCount = (delegate* unmanaged[Cdecl]<int>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetWorkerCount");
@@ -479,10 +480,10 @@ namespace EntJoy.JobSystem
             throw new InvalidOperationException("NativeDll.dll is not loaded. Ensure NativeDll.dll is copied next to the executable or Godot output directory.");
         }
 
-        internal static void JobSystem_Initialize(int numThreads)
+        internal static int JobSystem_Initialize(int numThreads)
         {
             EnsureNativeLoaded();
-            _jobSystem_Initialize(numThreads);
+            return _jobSystem_Initialize(numThreads);
         }
 
         internal static bool SupportsScheduleBatch => _jobSystem_ScheduleBatch != null;

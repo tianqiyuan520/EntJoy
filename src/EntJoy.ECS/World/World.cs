@@ -1,6 +1,7 @@
 using EntJoy.Collections;
 using EntJoy.JobSystem;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 
 namespace EntJoy.ECS
@@ -20,8 +21,10 @@ namespace EntJoy.ECS
         public EntityManager _entityManager;
         public ref EntityManager EntityManager => ref _entityManager;
 
+        private bool _disposed;
+
         // ─── Event Channel ───
-        private readonly Dictionary<Type, object> _eventStreams = new();
+        private readonly ConcurrentDictionary<Type, object> _eventStreams = new();
 
         // ─── EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新 ───
         private readonly Dictionary<QueryKey, EntityQuery> _queryCache = new();
@@ -155,9 +158,8 @@ namespace EntJoy.ECS
         /// </summary>
         public void RegisterEvent<T>() where T : unmanaged
         {
-            var type = typeof(T);
-            if (!_eventStreams.ContainsKey(type))
-                _eventStreams[type] = new EventStream<T>();
+            if (_disposed) throw new ObjectDisposedException(nameof(World));
+            _eventStreams.GetOrAdd(typeof(T), _ => new EventStream<T>());
         }
 
         /// <summary>
@@ -165,6 +167,7 @@ namespace EntJoy.ECS
         /// </summary>
         public void SendEvent<T>(in T evt) where T : unmanaged
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(World));
             if (!_eventStreams.TryGetValue(typeof(T), out var obj))
             {
                 RegisterEvent<T>();
@@ -178,6 +181,7 @@ namespace EntJoy.ECS
         /// </summary>
         public EventStream<T> GetEventStream<T>() where T : unmanaged
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(World));
             if (!_eventStreams.TryGetValue(typeof(T), out var obj))
             {
                 RegisterEvent<T>();
@@ -199,6 +203,7 @@ namespace EntJoy.ECS
         /// </summary>
         public void NextFrameEvents()
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(World));
             foreach (var kv in _eventStreams)
                 ((IEventStream)kv.Value).NextFrame();
         }
@@ -243,20 +248,21 @@ namespace EntJoy.ECS
 
         public void Dispose()
         {
+            if (_disposed) return;
+            _disposed = true;
+            // 先解除 DefaultWorld：避免 TempAllocator.Reset 的 OnBeforeReset 回调访问已释放的 World
+            lock (_defaultLock)
+            {
+                if (ReferenceEquals(DefaultWorld, this))
+                    DefaultWorld = null;
+            }
             _queryCache.Clear();
             foreach (var kv in _eventStreams)
             {
                 if (kv.Value is IDisposable d) d.Dispose();
             }
             _eventStreams.Clear();
-            _entityManager?.Dispose();   // Dispose 内清空 observer 注册表
-            lock (_defaultLock)
-            {
-                if (ReferenceEquals(DefaultWorld, this))
-                {
-                    DefaultWorld = null;
-                }
-            }
+            _entityManager?.Dispose();
         }
 
 
