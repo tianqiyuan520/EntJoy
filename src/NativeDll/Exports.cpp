@@ -237,15 +237,15 @@ extern "C"
                     ++ok;
                 }
             }
-            if (JobSystem::g_chaseLevScheduler)
-                JobSystem::g_chaseLevScheduler->WakePending();   // 统一唤醒一次
+            if (auto scheduler = JobSystem::LoadChaseLevScheduler())
+                scheduler->WakePending();   // 统一唤醒一次
         }
         catch (...)
         {
             // OOM：返回已成功提交的数量，不穿透 C ABI。defer 窗口已 RAII 关闭但统一
             // 唤醒被跳过，此处补广播防止已提交批滞留无人唤醒。
-            if (JobSystem::g_chaseLevScheduler)
-                JobSystem::g_chaseLevScheduler->WakePending();
+            if (auto scheduler = JobSystem::LoadChaseLevScheduler())
+                scheduler->WakePending();
         }
         return ok;
     }
@@ -337,8 +337,8 @@ extern "C"
         const int d = JobSystem::g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
         if (d <= 1)   // 归零：统一唤醒一次（嵌套失衡时也兜底广播，不丢唤醒）
         {
-            if (JobSystem::g_chaseLevScheduler)
-                JobSystem::g_chaseLevScheduler->WakePending();
+            if (auto scheduler = JobSystem::LoadChaseLevScheduler())
+                scheduler->WakePending();
         }
     }
 
@@ -680,8 +680,8 @@ extern "C"
         JobSystem::g_workerAffinityEnabled.store(
             enabled != 0, std::memory_order_relaxed);
         // worker：遍历已启动线程设置/清除亲和性
-        if (JobSystem::g_chaseLevScheduler)
-            JobSystem::g_chaseLevScheduler->ApplyAffinity(enabled != 0);
+        if (auto scheduler = JobSystem::LoadChaseLevScheduler())
+            scheduler->ApplyAffinity(enabled != 0);
         // 主线程：绑定核心 0 或清除
 #if defined(_WIN32)
         if (enabled)

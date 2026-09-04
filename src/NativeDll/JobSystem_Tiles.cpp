@@ -618,7 +618,8 @@ namespace JobSystem
     void SubmitBatch(BatchState* batch, int /*workerCap*/)
     {
         if (!batch || !batch->handle) return;
-        if (!g_chaseLevScheduler || !g_chaseLevScheduler->IsRunning())
+        auto scheduler = LoadChaseLevScheduler();
+        if (!scheduler || !scheduler->IsRunning())
         {
             AbortUnsubmittedBatch(
                 batch,
@@ -653,7 +654,7 @@ namespace JobSystem
         batch->publishedAt.store(publishedAt, std::memory_order_release);
         g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
 
-        g_chaseLevScheduler->SubmitBatch(batch);
+        scheduler->SubmitBatch(batch);
     }
 
     // ============================================================
@@ -730,8 +731,8 @@ namespace JobSystem
             ReleaseState(state);
         }
         g_submitDeferDepth.fetch_sub(1, std::memory_order_relaxed);
-        if (g_chaseLevScheduler)
-            g_chaseLevScheduler->WakePending();
+        if (auto scheduler = LoadChaseLevScheduler())
+            scheduler->WakePending();
     }
 
     // ---------- Chunk/Entity adaptors ----------

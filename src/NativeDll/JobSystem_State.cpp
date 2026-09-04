@@ -67,6 +67,14 @@ namespace JobSystem
         state->completed.store(false, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
         state->refCount.store(1, std::memory_order_relaxed);
+        // Handles released after Shutdown cannot be reused by a later scheduler
+        // generation. Destroy them directly instead of repopulating the pool
+        // after Shutdown has already drained it.
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            delete state;
+            return;
+        }
         // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
         if (t_stateCache.entries.size() < kStateCacheCap)
         {
@@ -330,13 +338,14 @@ namespace JobSystem
         BackendAsyncContext* context = nullptr;
         try
         {
-            if (!g_chaseLevScheduler || !g_chaseLevScheduler->IsRunning())
+            auto scheduler = LoadChaseLevScheduler();
+            if (!scheduler || !scheduler->IsRunning())
                 throw std::runtime_error("JobSystem backend is not running");
 
             context = new BackendAsyncContext{ std::move(work), state };
             // 统一走 Chase-Lev SubmitWork：worker 异步执行，不阻塞调用线程。
             // SubmitWork 内部 PushTaskBackoff 有限退避，injector 满时短暂自旋。
-            if (!g_chaseLevScheduler->SubmitWork(
+            if (!scheduler->SubmitWork(
                     &RunBackendAsync, context, &CompleteBackendAsync))
             {
                 CompleteBackendAsync(context);
@@ -524,10 +533,10 @@ namespace JobSystem
         if (!state) return;
         if (state->backendRetired.load(std::memory_order_acquire))
             return;
-        if (g_submitDeferDepth.load(std::memory_order_relaxed) > 0 &&
-            g_chaseLevScheduler)
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) > 0)
         {
-            g_chaseLevScheduler->WakePending();
+            if (auto scheduler = LoadChaseLevScheduler())
+                scheduler->WakePending();
         }
         while (!state->backendRetired.load(std::memory_order_acquire))
             state->backendRetired.wait(false, std::memory_order_relaxed);
@@ -572,9 +581,9 @@ namespace JobSystem
                 return;
             }
             // Chase-Lev：spin 期间协助认领（每 16 次，更积极兜底慢 worker）
-            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler && (i & 15) == 0)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && (i & 15) == 0)
             {
-                if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领，继续 spin */ }
+                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne()) { /* 无可认领，继续 spin */ }
             }
             CpuPause();
         }
@@ -597,9 +606,9 @@ namespace JobSystem
             RethrowBatchException(_state);
                 return;
             }
-            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler && (i & 15) == 0)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && (i & 15) == 0)
             {
-                if (!g_chaseLevScheduler->TryAssistOne()) { /* 无可认领 */ }
+                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne()) { /* 无可认领 */ }
             }
             CpuPause();
         }
@@ -620,12 +629,14 @@ namespace JobSystem
         {
             // 先 assist 再 wait：避免干等 256µs 的停顿窗口；每轮最多 assist 16 次，
             // 防止链条级联时主线程无限 assist 不回查 completed。
-            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && g_chaseLevScheduler)
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed))
             {
+                auto scheduler = LoadChaseLevScheduler();
+                if (!scheduler) continue;
                 for (int assistN = 0; assistN < 16; ++assistN)
                 {
                     if (_state->completed.load(std::memory_order_acquire)) break;
-                    if (!g_chaseLevScheduler->TryAssistOne()) break;
+                    if (!scheduler->TryAssistOne()) break;
                 }
             }
 

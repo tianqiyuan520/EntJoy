@@ -87,7 +87,11 @@ namespace JobSystem
     // ---- base 模块（JobSystem.cpp）定义的全局 ----
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
-    extern std::unique_ptr<ChaseLevScheduler> g_chaseLevScheduler;
+    extern std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
+    inline std::shared_ptr<ChaseLevScheduler> LoadChaseLevScheduler() noexcept
+    {
+        return std::atomic_load_explicit(&g_chaseLevScheduler, std::memory_order_acquire);
+    }
     extern std::atomic<int> g_numThreads;
     extern std::atomic<int> g_configuredTilesPerWorker;
     extern std::atomic<int> g_guidedEnabled;

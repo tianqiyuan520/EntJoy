@@ -37,11 +37,18 @@ namespace EntJoy.Collections
 
             _allocator = allocator;
             _safety = SafetyHandleManager.Allocate();
-
-            // 分配 UnsafeList 结构体本身（在非托管堆上）
-            _listData = (UnsafeList<T>*)UnsafeUtility.Malloc(sizeof(UnsafeList<T>), allocator, _safety.Index);
-            // 使用 placement new 构造 UnsafeList
-            *_listData = new UnsafeList<T>(initialCapacity, allocator);
+            _listData = null;
+            try
+            {
+                _listData = (UnsafeList<T>*)UnsafeUtility.Malloc(sizeof(UnsafeList<T>), allocator, _safety.Index);
+                *_listData = new UnsafeList<T>(initialCapacity, allocator);
+            }
+            catch
+            {
+                if (_listData != null) UnsafeUtility.Free(_listData, allocator);
+                SafetyHandleManager.Release(ref _safety);
+                throw;
+            }
 
 #if DEBUG
             DisposeSentinel.Register(_safety.Index, Environment.StackTrace ?? "");

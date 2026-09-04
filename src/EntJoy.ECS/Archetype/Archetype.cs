@@ -16,6 +16,7 @@ namespace EntJoy.ECS
         private Dictionary<ComponentType, int> componentTypeRecorder;
         public int ComponentCount { get; private set; }
         public int EntityCount { get; private set; }
+        private bool _disposed;
 
         // Prefab 标记组件类型（查询默认排除用）
         private static readonly ComponentType s_prefabType = typeof(Prefab);
@@ -770,18 +771,26 @@ namespace EntJoy.ECS
 
         public void Dispose()
         {
-            InvalidateMaskCache();
-            // 释放所有存活实体的生命周期组件（持有原生内存的组件在 slab 释放前销毁，避免泄漏）
-            DestroyAllEntityComponents();
+            if (_disposed) return;
+            _disposed = true;
+            var errors = new List<Exception>();
+            try { InvalidateMaskCache(); }
+            catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
+            DestroyAllEntityComponents(errors);
             foreach (var slab in _slabs)
-                ChunkMemoryPool.Free(slab.RawPtr);
+            {
+                try { ChunkMemoryPool.Free(slab.RawPtr); }
+                catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
+            }
             _slabs.Clear();
             _freeChunks.Clear();
             _chunkList.Clear();
+            GC.SuppressFinalize(this);
+            if (errors.Count > 0) throw new AggregateException("Archetype disposal failed.", errors);
         }
 
         /// <summary>销毁所有存活实体的生命周期组件（Archetype.Dispose 前调用，无 hook 组件 no-op）。</summary>
-        private unsafe void DestroyAllEntityComponents()
+        private unsafe void DestroyAllEntityComponents(List<Exception> errors = null)
         {
             var types = Types;
             foreach (var chunk in _chunkList)
@@ -792,7 +801,8 @@ namespace EntJoy.ECS
                     for (int i = 0; i < ComponentCount; i++)
                     {
                         byte* ptr = (byte*)chunk.GetComponentArrayPointer(i) + slot * types[i].Size;
-                        ComponentTypeManager.DestroyComponentValue(types[i], ptr);
+                        try { ComponentTypeManager.DestroyComponentValue(types[i], ptr); }
+                        catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
                     }
                 }
             }
@@ -800,7 +810,8 @@ namespace EntJoy.ECS
 
         ~Archetype()
         {
-            Dispose();
+            try { Dispose(); }
+            catch { }
         }
     }
 

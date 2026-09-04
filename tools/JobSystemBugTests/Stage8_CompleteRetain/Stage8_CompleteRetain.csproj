@@ -12,6 +12,7 @@
   <ItemGroup>
     <None Include="..\..\..\bin\NativeDll.dll"
           Link="NativeDll.dll"
-          CopyToOutputDirectory="PreserveNewest" />
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\..\..\bin\NativeDll.dll')" />
   </ItemGroup>
 </Project>

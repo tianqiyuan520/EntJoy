@@ -15,7 +15,7 @@ namespace EntJoy.JobSystem.Managed
     ///   - 同步内联覆盖小任务（零调度开销）。
     ///   - completion 槽位池（预分配数组）+ 单槽 per-类型 job 盒池 → 热路径零分配。
     ///   - 依赖链中间 completion 完成后自动归还（防泄漏）；槽位带 generation 代际，防旧 handle 复用误操作（防 ABA）。
-    ///   - 依赖回调原子累积（OnCompleted 用 CAS 循环）。
+    ///   - 依赖回调注册与完成/回收同步，避免并发丢失续体。
     ///
     /// 【约束】依赖图必须是无环 DAG：循环依赖（A→B→A）会导致依赖链
     /// 回调永远无法触发、Complete() 永久阻塞。运行时不做环检测，调用方负责保证。
@@ -27,6 +27,8 @@ namespace EntJoy.JobSystem.Managed
         private static volatile bool _shutdown;
         private static bool _isInitialized;
         private static readonly object _stateLock = new object();
+        private static int _epoch;
+        internal static int Epoch => Volatile.Read(ref _epoch);
 
         private const int QueueCapacity = 1 << 16;
         // 主线程 id：Initialize 时记录，Shutdown 校验——worker 线程调用 Shutdown 会
@@ -54,6 +56,7 @@ namespace EntJoy.JobSystem.Managed
             lock (_stateLock)
             {
                 if (_isInitialized) return;
+                Interlocked.Increment(ref _epoch);
                 _mainThreadId = Environment.CurrentManagedThreadId;
                 _workerCount = workerCount <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : workerCount;
 
@@ -101,6 +104,7 @@ namespace EntJoy.JobSystem.Managed
             lock (_stateLock)
             {
                 if (!_isInitialized) return;
+                Interlocked.Increment(ref _epoch);
                 _shutdown = true;
                 _isInitialized = false;
 
@@ -135,31 +139,41 @@ namespace EntJoy.JobSystem.Managed
                 if (Interlocked.CompareExchange(ref _completionFreeHead, newHead, head) == head)
                 {
                     var c = _completionSlots[index];
-                    // 回收槽位上可能残留并发注册的续体回调（dep 已完成，属主已换代）。先派发再 Reset：
-                    // DispatchComplete 经 Interlocked.Exchange 保证续体至多执行一次，杜绝续体在重租时被 Reset 静默清空（丢回调死锁）。
-                    Interlocked.Exchange(ref c._returned, 0);
-                    c.DispatchComplete();
-                    c.Reset();
-                    Interlocked.Increment(ref c.Generation);
+                    lock (c.SyncRoot)
+                    {
+                        // 旧代际可能有回调刚完成注册；在重置前完成派发，避免回调被静默丢弃。
+                        c.DispatchComplete();
+                        c.Reset();
+                        Interlocked.Increment(ref c.Generation);
+                        Volatile.Write(ref c._returned, 0);
+                    }
                     return c;
                 }
             }
         }
 
         /// <summary>调用方完成归还（幂等：重复归还/与自动归还并发安全）。</summary>
-        internal static void ReturnCompletion(ManagedCompletion c)
+        internal static void ReturnCompletion(ManagedCompletion c, int expectedGeneration)
         {
             if (c == null) return;
-            if (Interlocked.Exchange(ref c._returned, 1) == 1) return; // 已归还过
-            ReturnCompletionCore(c);
+            lock (c.SyncRoot)
+            {
+                if (c.Generation != expectedGeneration || c._returned != 0) return;
+                c._returned = 1;
+                ReturnCompletionCore(c);
+            }
         }
 
         /// <summary>依赖链中间 completion 完成后的自动归还（幂等防 double）。</summary>
-        internal static void AutoReturnCompletion(ManagedCompletion c)
+        internal static void AutoReturnCompletion(ManagedCompletion c, int expectedGeneration)
         {
             if (c == null) return;
-            if (Interlocked.Exchange(ref c._returned, 1) == 1) return;
-            ReturnCompletionCore(c);
+            lock (c.SyncRoot)
+            {
+                if (c.Generation != expectedGeneration || c._returned != 0) return;
+                c._returned = 1;
+                ReturnCompletionCore(c);
+            }
         }
 
         private static void ReturnCompletionCore(ManagedCompletion c)
@@ -252,7 +266,11 @@ namespace EntJoy.JobSystem.Managed
                 enqueue();
                 return;
             }
-            Volatile.Write(ref dep._autoReturn, 1);
+            if (!dep.TryMarkAutoReturn(depGen))
+            {
+                enqueue();
+                return;
+            }
             void Propagate()
             {
                 var ex = dep.ReadException();
@@ -263,12 +281,12 @@ namespace EntJoy.JobSystem.Managed
             {
                 // 依赖在调度前就已就绪：立即传播 + 启动，并当场归还（Signal 已跑过，不会自动归还，否则泄漏槽位）。
                 Propagate();
-                ManagedJobScheduler.AutoReturnCompletion(dep);
+                ManagedJobScheduler.AutoReturnCompletion(dep, depGen);
             }
             else
             {
                 // 依赖尚未完成：挂回调；完成后 Signal 内部会因 _autoReturn==1 自动归还。
-                dep.OnCompleted(Propagate);
+                dep.OnCompleted(Propagate, depGen);
             }
         }
 
@@ -509,7 +527,7 @@ namespace EntJoy.JobSystem.Managed
                 PublishChaseLev(1);
             }
 
-            if (dependsOn.Completion == null || dependsOn.IsCompleted)
+            if (dependsOn.Completion == null)
                 EnqueueSingle();
             else
                 ChainAfter(dependsOn.Completion, dependsOn.Gen, completion, EnqueueSingle);

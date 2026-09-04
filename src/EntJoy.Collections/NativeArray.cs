@@ -58,16 +58,22 @@ namespace EntJoy.Collections
         public NativeArray(int length, Allocator allocator, NativeArrayOptions options = NativeArrayOptions.ClearMemory)
         {
             if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
-            _length = length;
-            _allocator = allocator;
-            _safety = SafetyHandleManager.Allocate(); // 先分配安全句柄
-
-            // 用 long 计算避免 int 溢出（大 length 下溢出为 0/小正数 → 底层分配不足 → 堆越界）
             long sizeL = (long)length * sizeof(T);
             if (sizeL > int.MaxValue)
                 throw new OverflowException($"NativeArray<{typeof(T).Name}> total byte size {sizeL} exceeds int.MaxValue.");
             int size = (int)sizeL;
-            _buffer = UnsafeUtility.Malloc(size, allocator, _safety.Index); // 分配内存
+            _length = length;
+            _allocator = allocator;
+            _safety = SafetyHandleManager.Allocate();
+            try
+            {
+                _buffer = UnsafeUtility.Malloc(size, allocator, _safety.Index);
+            }
+            catch
+            {
+                SafetyHandleManager.Release(ref _safety);
+                throw;
+            }
 
             if ((options & NativeArrayOptions.ClearMemory) == NativeArrayOptions.ClearMemory)
             {
@@ -206,8 +212,7 @@ namespace EntJoy.Collections
         // ========== 子数组（视图） ==========
         public NativeArray<T> GetSubArray(int start, int length)
         {
-            if (start < 0 || length < 0 || start + length > _length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(start, length, _length);
             void* subBuffer = (byte*)_buffer + start * sizeof(T);
             return new NativeArray<T>(subBuffer, length, _allocator, _safety, isOwner: false);
         }
@@ -298,6 +303,13 @@ namespace EntJoy.Collections
     // ========== 静态 ==========
     public unsafe partial struct NativeArray<T>
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void ValidateRange(int index, int length, int total)
+        {
+            if (index < 0 || index > total || length < 0 || length > total - index)
+                throw new ArgumentOutOfRangeException();
+        }
+
         // 从 NativeArray 到 NativeArray
         public static void Copy(NativeArray<T> src, NativeArray<T> dst)
         {
@@ -312,9 +324,8 @@ namespace EntJoy.Collections
         {
             SafetyHandleManager.CheckReadAndThrow(src._safety);
             SafetyHandleManager.CheckWriteAndThrow(dst._safety);
-            if (srcIndex < 0 || dstIndex < 0 || length < 0 ||
-                srcIndex + length > src.Length || dstIndex + length > dst.Length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(srcIndex, length, src.Length);
+            ValidateRange(dstIndex, length, dst.Length);
             byte* srcPtr = (byte*)src._buffer + srcIndex * sizeof(T);
             byte* dstPtr = (byte*)dst._buffer + dstIndex * sizeof(T);
             UnsafeUtility.MemCpy(dstPtr, srcPtr, length * sizeof(T));
@@ -333,9 +344,8 @@ namespace EntJoy.Collections
         public static void Copy(NativeArray<T> src, int srcIndex, T[] dst, int dstIndex, int length)
         {
             SafetyHandleManager.CheckReadAndThrow(src._safety);
-            if (srcIndex < 0 || dstIndex < 0 || length < 0 ||
-                srcIndex + length > src.Length || dstIndex + length > dst.Length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(srcIndex, length, src.Length);
+            ValidateRange(dstIndex, length, dst.Length);
             fixed (void* dstPtr = dst)
             {
                 byte* srcPtr = (byte*)src._buffer + srcIndex * sizeof(T);
@@ -357,9 +367,8 @@ namespace EntJoy.Collections
         public static void Copy(T[] src, int srcIndex, NativeArray<T> dst, int dstIndex, int length)
         {
             SafetyHandleManager.CheckWriteAndThrow(dst._safety);
-            if (srcIndex < 0 || dstIndex < 0 || length < 0 ||
-                srcIndex + length > src.Length || dstIndex + length > dst.Length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(srcIndex, length, src.Length);
+            ValidateRange(dstIndex, length, dst.Length);
             fixed (void* srcPtr = src)
             {
                 byte* srcPtr2 = (byte*)srcPtr + srcIndex * sizeof(T);
@@ -382,9 +391,8 @@ namespace EntJoy.Collections
         {
             SafetyHandleManager.CheckReadAndThrow(src._safety);
             SafetyHandleManager.CheckWriteAndThrow(dst._safety);
-            if (srcIndex < 0 || dstIndex < 0 || length < 0 ||
-                srcIndex + length > src.Length || dstIndex + length > dst.Length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(srcIndex, length, src.Length);
+            ValidateRange(dstIndex, length, dst.Length);
             byte* srcPtr = (byte*)src._bufferRO + srcIndex * sizeof(T);
             byte* dstPtr = (byte*)dst._buffer + dstIndex * sizeof(T);
             UnsafeUtility.MemCpy(dstPtr, srcPtr, length * sizeof(T));
@@ -403,9 +411,8 @@ namespace EntJoy.Collections
         public static void Copy(ReadOnly src, int srcIndex, T[] dst, int dstIndex, int length)
         {
             SafetyHandleManager.CheckReadAndThrow(src._safety);
-            if (srcIndex < 0 || dstIndex < 0 || length < 0 ||
-                srcIndex + length > src.Length || dstIndex + length > dst.Length)
-                throw new ArgumentOutOfRangeException();
+            ValidateRange(srcIndex, length, src.Length);
+            ValidateRange(dstIndex, length, dst.Length);
             fixed (void* dstPtr = dst)
             {
                 byte* srcPtr = (byte*)src._bufferRO + srcIndex * sizeof(T);

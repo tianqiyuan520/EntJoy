@@ -26,8 +26,9 @@ namespace EntJoy.ECS
         private int _readCount;    // 上一帧写入数（swap 后可读）
         private uint _generation;
         private readonly int _capacity;
+        private readonly object _sync = new object();
 
-        public uint Generation => _generation;
+        public uint Generation => Volatile.Read(ref _generation);
         public int Capacity => _capacity;
 
         public EventStream(int capacity = 1024)
@@ -43,14 +44,12 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool SendEvent(in T evt)
         {
-            var idx = Interlocked.Increment(ref _writeCount) - 1;
-            if (idx >= _capacity)
+            lock (_sync)
             {
-                Interlocked.Decrement(ref _writeCount);
-                return false;
+                if (_writeCount >= _capacity) return false;
+                _buffers[0][_writeCount++] = evt;
+                return true;
             }
-            _buffers[0][idx] = evt;
-            return true;
         }
 
         /// <summary>
@@ -60,9 +59,12 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ReadOnlySpan<T> ReadBuffer()
         {
-            int count = Volatile.Read(ref _readCount);
-            if (count > _capacity) count = _capacity;
-            return new ReadOnlySpan<T>(_buffers[1], 0, count);
+            lock (_sync)
+            {
+                int count = _readCount;
+                if (count > _capacity) count = _capacity;
+                return new ReadOnlySpan<T>(_buffers[1], 0, count);
+            }
         }
 
         /// <summary>
@@ -70,14 +72,15 @@ namespace EntJoy.ECS
         /// </summary>
         public void NextFrame()
         {
-            // swap buffers
-            var tmp = _buffers[0];
-            _buffers[0] = _buffers[1];
-            _buffers[1] = tmp;
-
-            // 本帧写入数 → 下帧可读数（Exchange 原子清零，避免与生产者裸写竞态）
-            _readCount = Interlocked.Exchange(ref _writeCount, 0);
-            _generation++;
+            lock (_sync)
+            {
+                var tmp = _buffers[0];
+                _buffers[0] = _buffers[1];
+                _buffers[1] = tmp;
+                _readCount = _writeCount;
+                _writeCount = 0;
+                _generation++;
+            }
         }
 
         /// <summary>
@@ -96,25 +99,26 @@ namespace EntJoy.ECS
                     $"EventStream<{typeof(T).Name}> element size mismatch: buffer allocated with " +
                     $"{expectedElementSize} bytes, T requires {realElementSize} bytes. " +
                     $"Native event writer stride disagrees with C# layout (ISPC vs Sequential ABI).");
-            int toWrite = Math.Min(count, _capacity);
-            var src = new ReadOnlySpan<T>(dataPtr, toWrite);
-            int startIdx = Interlocked.Add(ref _writeCount, toWrite) - toWrite;
-            if (startIdx >= _capacity)
+            lock (_sync)
             {
-                Interlocked.Add(ref _writeCount, -toWrite);
-                return 0;
+                int toWrite = Math.Min(count, _capacity - _writeCount);
+                if (toWrite <= 0) return 0;
+                var src = new ReadOnlySpan<T>(dataPtr, toWrite);
+                src.CopyTo(new Span<T>(_buffers[0], _writeCount, toWrite));
+                _writeCount += toWrite;
+                return toWrite;
             }
-            int actual = Math.Min(toWrite, _capacity - startIdx);
-            src.Slice(0, actual).CopyTo(new Span<T>(_buffers[0], startIdx, actual));
-            if (actual != toWrite)
-                Interlocked.Add(ref _writeCount, -(toWrite - actual));  // 溢出部分回退，保持计数与实际拷贝一致
-            return actual;
         }
 
         public void Dispose()
         {
-            _buffers[0] = Array.Empty<T>();
-            _buffers[1] = Array.Empty<T>();
+            lock (_sync)
+            {
+                _buffers[0] = Array.Empty<T>();
+                _buffers[1] = Array.Empty<T>();
+                _writeCount = 0;
+                _readCount = 0;
+            }
         }
     }
 }

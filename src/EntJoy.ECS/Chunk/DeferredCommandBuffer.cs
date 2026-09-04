@@ -49,11 +49,18 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCapacity(int additionalBytes)
         {
-            if (_stagingOffset + additionalBytes > _stagingCapacity)
+            if (additionalBytes < 0 || additionalBytes > int.MaxValue - _stagingOffset)
+                throw new OverflowException("DeferredCommandBuffer size exceeds Int32.MaxValue.");
+            int required = _stagingOffset + additionalBytes;
+            if (required > _stagingCapacity)
             {
-                int newCapacity = _stagingCapacity * 2;
-                while (newCapacity < _stagingOffset + additionalBytes)
+                int newCapacity = _stagingCapacity;
+                while (newCapacity < required)
+                {
+                    if (newCapacity > int.MaxValue / 2)
+                        throw new OverflowException("DeferredCommandBuffer size exceeds Int32.MaxValue.");
                     newCapacity *= 2;
+                }
                 var newStaging = (byte*)Marshal.AllocHGlobal(newCapacity);
                 Buffer.MemoryCopy(_staging, newStaging, newCapacity, _stagingOffset);
                 Marshal.FreeHGlobal((IntPtr)_staging);
@@ -62,11 +69,19 @@ namespace EntJoy.ECS
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int CheckedSize(long size)
+        {
+            if (size < 0 || size > int.MaxValue)
+                throw new OverflowException("DeferredCommandBuffer size exceeds Int32.MaxValue.");
+            return (int)size;
+        }
+
         /// <summary>记录 CreateEntity 命令</summary>
         public void CreateEntity(params ComponentType[] componentTypes)
         {
             int typeCount = componentTypes.Length;
-            int totalSize = sizeof(int) + sizeof(int) + typeCount * sizeof(int);
+            int totalSize = CheckedSize((long)sizeof(int) * 2 + (long)typeCount * sizeof(int));
             EnsureCapacity(totalSize);
 
             *(int*)(_staging + _stagingOffset) = OP_CREATE_ENTITY;
@@ -98,7 +113,7 @@ namespace EntJoy.ECS
         public void AddComponent<T>(Entity entity, T value) where T : struct, IComponentData
         {
             int compSize = Unsafe.SizeOf<T>();
-            int totalSize = sizeof(int) + sizeof(Entity) + sizeof(int) + sizeof(int) + compSize;
+            int totalSize = CheckedSize((long)sizeof(int) * 3 + sizeof(Entity) + compSize);
             EnsureCapacity(totalSize);
 
             *(int*)(_staging + _stagingOffset) = OP_ADD_COMPONENT;

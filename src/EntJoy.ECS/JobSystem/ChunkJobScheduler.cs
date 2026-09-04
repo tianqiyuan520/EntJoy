@@ -468,7 +468,8 @@ namespace EntJoy.ECS.JobSystem
                 else if (evtHeaders != null)
                 {
                     // 异步路径：注册到本 World 的 EntityManager，Complete 时统一 drain（记录 world 归属）
-                    entityManager._pendingNativeEvents.Add((contextBlock, evtJobType, world));
+                    lock (entityManager._pendingNativeEventsLock)
+                        entityManager._pendingNativeEvents.Add((contextBlock, evtJobType, world));
                 }
                 var ret = TrackEntityJob(entityManager, FromNative(handle));
                 if (cDiag && s_csharpPhaseCount++ < 24)
@@ -1230,17 +1231,19 @@ namespace EntJoy.ECS.JobSystem
             for (int i = 0; i < headers.Count; i++)
             {
                 var hdr = headers[i];
-                if (canDrain && i < meta.Count)
+                try
                 {
-                    int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
-                    if (count > 0 && meta.EventTypes[i] != null)
+                    if (canDrain && i < meta.Count)
                     {
-                        var stream = world!.GetEventStream(meta.EventTypes[i]);
-                        stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
+                        int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
+                        if (count > 0 && meta.EventTypes[i] != null)
+                        {
+                            var stream = world!.GetEventStream(meta.EventTypes[i]);
+                            stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
+                        }
                     }
                 }
-                if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
-                if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
+                finally { FreeEventBufferHeader(hdr); }
             }
         }
 
@@ -1260,21 +1263,35 @@ namespace EntJoy.ECS.JobSystem
         /// </summary>
         internal static void DrainEventBuffersFromCleanup(IntPtr contextPtr, World world)
         {
+            LiveEventBufferTypes.TryRemove(contextPtr, out var eventTypes);
             if (!LiveEventBuffers.TryRemove(contextPtr, out var headers)) return;
-            if (!LiveEventBufferTypes.TryRemove(contextPtr, out var eventTypes)) return;
 
-            for (int i = 0; i < headers.Count && i < eventTypes.Length; i++)
+            int typedCount = Math.Min(headers.Count, eventTypes?.Length ?? 0);
+            for (int i = 0; i < typedCount; i++)
             {
                 var hdr = headers[i];
-                int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
-                if (count > 0 && eventTypes[i] != null)
+                try
                 {
-                    var stream = world.GetEventStream(eventTypes[i]);
-                    stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
+                    int count = Math.Min(Volatile.Read(ref *(int*)hdr.countPtr), hdr.capacity);
+                    if (world != null && count > 0 && eventTypes[i] != null)
+                    {
+                        var stream = world.GetEventStream(eventTypes[i]);
+                        stream?.DrainFromBuffer((void*)hdr.dataPtr, count, hdr.elementSize);
+                    }
                 }
-                if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
-                if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
+                finally { FreeEventBufferHeader(hdr); }
             }
+            for (int i = typedCount; i < headers.Count; i++)
+            {
+                var hdr = headers[i];
+                FreeEventBufferHeader(hdr);
+            }
+        }
+
+        private static void FreeEventBufferHeader(EventBufferHeader hdr)
+        {
+            if (hdr.dataPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.dataPtr);
+            if (hdr.countPtr != IntPtr.Zero) Marshal.FreeHGlobal(hdr.countPtr);
         }
 
         // ======================== 上下文块创建 / 清理 ========================
