@@ -53,6 +53,8 @@ namespace EntJoy.ECS
         private readonly bool _hasRelFilter;
         private readonly RelationSlot _relTarget;
         private readonly ComponentType _relType;
+        private readonly int _relStride;      // 关系列宽（= TRel 真实大小；>8B 时按列宽步进，防错位）
+        private readonly int _relMaxSlots;    // 定长多槽列槽位数（≥2 时逐槽校验；0/1 = 单槽）
         private RelationSlot* _relBase;   // 关系列基址（仅 _hasRelFilter 时使用）
         private bool _relTargetAlive;     // 过滤目标存活校验结果（进入首个 Archetype 时计算一次）
         private bool _relTargetAliveChecked;
@@ -77,6 +79,8 @@ namespace EntJoy.ECS
             _hasRelFilter = builder.HasRelationshipFilter;
             _relTarget = builder.RelationshipFilterTarget;
             _relType = builder.RelationshipFilterType;
+            _relStride = builder.RelationshipFilterType.Size;   // 列宽（真实 TRel 大小）
+            _relMaxSlots = builder.RelationshipFilterType.MultiRelationMaxSlots;   // 定长多槽列槽位数
             _relTargetAlive = true;
             _relTargetAliveChecked = false;
         }
@@ -339,7 +343,20 @@ namespace EntJoy.ECS
             if (!_hasRelFilter) return true;
             if (!_relTargetAlive) return false;
             if (_relBase == null) return false;
-            return _relBase[_slotIndex].Matches(_relTarget);
+            // 关系列可能宽于 8B（TRel 带数据 / 定长多槽列）：按列宽步进，再重解释槽位。
+            var col = (byte*)_relBase + _slotIndex * _relStride;
+            if (_relMaxSlots >= 2)
+            {
+                // 定长多槽列：任一槽匹配即命中
+                for (int i = 0; i < _relMaxSlots; i++)
+                {
+                    if (((RelationSlot*)(col + i * 8))->Matches(_relTarget))
+                        return true;
+                }
+                return false;
+            }
+            // 单值列（8B / 带数据）：首 8B 即 RelationSlot
+            return ((RelationSlot*)col)->Matches(_relTarget);
         }
 
         public EntityQueryResult<T0, T1> Current

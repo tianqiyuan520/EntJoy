@@ -101,7 +101,10 @@ namespace EntJoySample.ECS
                 //PerformanceProfilerDemo.Run();
 
                 // 组件元数据：字段元数据（含嵌套 struct 展开）+ 用元数据打印字段值
-                ComponentMetaDemo.Run();
+                //ComponentMetaDemo.Run();
+
+                // 关系全场景示例：父子层级 / 索敌 / 技能 M:N / 背包（ExclusiveTarget + 关系数据）
+                RelationScenarioDemo.Run();
 
                 // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
                 DataNavigationDemo.Run();

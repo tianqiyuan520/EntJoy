@@ -50,6 +50,8 @@ namespace EntJoy.ECS
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
+        // 多实例关系（[MultiRelation]）正向存储（source → targets 列表）；反向复用 _relationIndex
+        private readonly RelationListStore _relationListStore = new();
 
 
         public EntityManager()
@@ -574,8 +576,17 @@ namespace EntJoy.ECS
         public void DestroyEntity(Entity entity)
         {
             CheckDisposed();
+            // 声明式级联（[OnTargetDeleted(Cascade=true)]）会销毁其他 archetype 的 sources → 需全量等待 jobs
+            bool hasCascadeSources = (uint)entity.Id < (uint)entities.Length
+                && _relationIndex.TryGetSources(entity.Id, out var cascadeByType)
+                && HasCascadeDeclaredSources(cascadeByType);
+
             // 确定源 Archetype，只等待该 Archetype 的 Job
-            if ((uint)entity.Id < (uint)entities.Length)
+            if (hasCascadeSources)
+            {
+                CompleteActiveJobs();
+            }
+            else if ((uint)entity.Id < (uint)entities.Length)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
                 if (info.Archetype != null)
@@ -589,8 +600,88 @@ namespace EntJoy.ECS
             }
             lock (_structuralLock)
             {
+                // 锁内二次确认后执行声明式级联（target 销毁 → 级联销毁其 sources，递归防环）
+                if (hasCascadeSources &&
+                    _relationIndex.TryGetSources(entity.Id, out var byType) &&
+                    HasCascadeDeclaredSources(byType))
+                {
+                    var visited = new HashSet<int>();
+                    var toDestroy = new List<Entity>();
+                    CollectDeclaredCascade(entity, visited, toDestroy);
+                    foreach (var e in toDestroy)
+                    {
+                        if (e.Id != entity.Id)   // entity 本身由下方 DestroyEntityCore 统一处理
+                            DestroyEntityInternal(e);
+                    }
+                }
                 DestroyEntityCore(entity);
             }
+        }
+
+        /// <summary>是否存在声明了 [OnTargetDeleted(Cascade=true)] 的关系类型指向该实体。</summary>
+        private static bool HasCascadeDeclaredSources(Dictionary<int, HashSet<Entity>> byType)
+        {
+            foreach (var kv in byType)
+            {
+                if (ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>DFS 收集声明级联子树（仅沿 CascadeOnTargetDeleted 关系类型向下，防环）。</summary>
+        private void CollectDeclaredCascade(Entity entity, HashSet<int> visited, List<Entity> toDestroy)
+        {
+            if (!visited.Add(entity.Id)) return;
+            toDestroy.Add(entity);
+            if (!_relationIndex.TryGetSources(entity.Id, out var byType)) return;
+            foreach (var kv in byType)
+            {
+                if (!ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) continue;   // 仅沿声明级联的关系类型
+                foreach (var source in kv.Value)
+                {
+                    if (!IsAlive(source)) continue;
+                    if (!StillPointsToRelation(source, entity, kv.Key)) continue;   // 槽位校验：防索引滞后误伤
+                    CollectDeclaredCascade(source, visited, toDestroy);
+                }
+            }
+        }
+
+        /// <summary>校验 source 是否通过指定关系类型 relTypeId 指向 target（列或多值列表）。</summary>
+        private bool StillPointsToRelation(Entity source, Entity target, int relTypeId)
+        {
+            if ((uint)source.Id >= (uint)entities.Length) return false;
+            ref var info = ref GetEntityInfoRef(source.Id);
+            if (info.Archetype == null || info.Version != source.Version) return false;
+
+            var type = ComponentTypeManager.GetTypeByComponentType(relTypeId);
+            var compType = ComponentTypeManager.GetComponentType(type);
+
+            // 定长多槽列（[MultiRelation(MaxSlots=N)]）：逐槽校验
+            if (compType.MultiRelationMaxSlots >= 2)
+            {
+                if (!info.Archetype.Has(type)) return false;
+                int compIdx = info.Archetype.GetComponentTypeIndex(compType);
+                var chunk = info.Archetype.ChunkList[info.ChunkIndex];
+                var basePtr = (byte*)chunk.GetComponentArrayPointer(compIdx) + info.SlotInChunk * compType.Size;
+                for (int i = 0; i < compType.MultiRelationMaxSlots; i++)
+                {
+                    var slot = ((RelationSlot*)(basePtr + i * 8))[0];
+                    if (slot.TargetId == target.Id && slot.TargetVersion == target.Version)
+                        return true;
+                }
+                return false;
+            }
+
+            // 托管列表模式（[MultiRelation] 无 MaxSlots）：查正向列表
+            if (compType.IsMultiRelation)
+                return _relationListStore.Has(relTypeId, source, RelationSlot.From(target));
+
+            // 单值列关系：校验列槽位
+            if (!info.Archetype.Has(type)) return false;
+            int compIdx1 = info.Archetype.GetComponentTypeIndex(compType);
+            var chunk1 = info.Archetype.ChunkList[info.ChunkIndex];
+            var slot1 = chunk1.GetComponent<RelationSlot>(info.SlotInChunk, compIdx1);
+            return slot1.TargetId == target.Id && slot1.TargetVersion == target.Version;
         }
 
         /// <summary>
@@ -615,6 +706,8 @@ namespace EntJoy.ECS
 
             // 清理本实体作为 source 的所有关系索引条目（遍历其关系列）
             CleanupSourceRelations(entity, entityInfoRef, oldArchetype);
+            // 清理本实体作为 source 的多值关系（[MultiRelation] 正向列表 + 反向索引）
+            CleanupMultiSourceRelations(entity);
             // 清理本实体作为 target 的反向索引条目（否则已销毁 target 的索引残留 → 泄漏 + 失效关系误返回）
             _relationIndex.ClearTarget(entity.Id);
 

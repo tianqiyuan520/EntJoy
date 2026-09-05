@@ -92,6 +92,22 @@ namespace EntJoy.ECS
                 Unsafe.InitBlock(compPtr, 0, (uint)compSize);
             }
 
+            // 定长多槽关系列：槽位必须初始化为 RelationSlot.Default（TargetId = -1），而非 {0,0}——
+            // 否则 FindEmptySlot 的"空槽 = TargetId < 0"判定会把未写入槽误判为占用（{0,0} 也是合法 target id 0）。
+            for (int i = 0; i < Meta.ComponentCount; i++)
+            {
+                var t = Meta.Archetype.Types[i];
+                if (!t.IsRelation || t.MultiRelationMaxSlots < 2) continue;
+                int maxSlots = t.MultiRelationMaxSlots;
+                byte* compPtr = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + _entityCount * Meta.ComponentSizes[i];
+                for (int s = 0; s < maxSlots; s++)
+                {
+                    // 8B RelationSlot：TargetId = -1, TargetVersion = -1
+                    ((int*)compPtr)[s * 2] = -1;
+                    ((int*)compPtr)[s * 2 + 1] = -1;
+                }
+            }
+
             // 初始化所有 enableable 位为"启用"
             for (int i = 0; i < Meta.ComponentCount; i++)
             {

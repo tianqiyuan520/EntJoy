@@ -52,6 +52,8 @@ namespace NativeTranspiler.Analyzer.Common
         public const string TypeEntityManager = "EntJoy.ECS.EntityManager";
         public const string TypeEventBus = "EntJoy.ECS.EventBus";
         public const string TypeArchetypeChunk = "EntJoy.ECS.ArchetypeChunk";
+        public const string TypeIRelationComponent = "EntJoy.ECS.IRelationComponent";
+        public const string TypeMultiRelationAttribute = "EntJoy.ECS.MultiRelationAttribute";
 
         // ============ Attribute 名 ============
         public const string NativeTranspileAttribute = "NativeTranspileAttribute";

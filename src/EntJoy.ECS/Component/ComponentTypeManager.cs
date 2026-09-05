@@ -19,6 +19,11 @@ namespace EntJoy.ECS
         private static bool[] ComponentIsEnableable = new bool[100]; // 记录组件是否为 enableable
         private static bool[] ComponentIsShared = new bool[100];     // 记录组件是否为 ISharedComponentData
         private static bool[] ComponentIsRelation = new bool[100];   // 记录组件是否为 IRelationComponent
+        private static bool[] ComponentIsExclusiveRelation = new bool[100]; // 记录关系组件是否标记 [ExclusiveRelation]（真 1:1）
+        private static bool[] ComponentIsMultiRelation = new bool[100];     // 记录关系组件是否标记 [MultiRelation]（出边多值）
+        private static int[] ComponentMultiRelationMaxSlots = new int[100]; // [MultiRelation(MaxSlots=N)] 的定长槽位数（0 = 托管列表模式）
+        private static bool[] ComponentIsExclusiveTarget = new bool[100];   // 记录多值关系是否标记 [ExclusiveTarget]（入边唯一）
+        private static bool[] ComponentCascadeOnTargetDeleted = new bool[100]; // 记录关系是否标记 [OnTargetDeleted(Cascade=true)]（声明式级联）
         private static bool[] ComponentIsDisposable = new bool[100]; // 记录组件是否实现 IDisposable（持有原生资源）
         private static delegate*<void*, void>[] ComponentDisposeFn = new delegate*<void*, void>[100]; // Dispose 函数指针（null = 无资源）
         private static bool[] ComponentIsCopyable = new bool[100];  // 记录组件是否实现 ICopyable（复制时需 refcount++ 等）
@@ -84,6 +89,11 @@ namespace EntJoy.ECS
                     Array.Resize(ref ComponentIsEnableable, ComponentIsEnableable.Length * 2);
                     Array.Resize(ref ComponentIsShared, ComponentIsShared.Length * 2);
                     Array.Resize(ref ComponentIsRelation, ComponentIsRelation.Length * 2);
+                    Array.Resize(ref ComponentIsExclusiveRelation, ComponentIsExclusiveRelation.Length * 2);
+                    Array.Resize(ref ComponentIsMultiRelation, ComponentIsMultiRelation.Length * 2);
+                    Array.Resize(ref ComponentMultiRelationMaxSlots, ComponentMultiRelationMaxSlots.Length * 2);
+                    Array.Resize(ref ComponentIsExclusiveTarget, ComponentIsExclusiveTarget.Length * 2);
+                    Array.Resize(ref ComponentCascadeOnTargetDeleted, ComponentCascadeOnTargetDeleted.Length * 2);
                     Array.Resize(ref ComponentIsDisposable, ComponentIsDisposable.Length * 2);
                     Array.Resize(ref ComponentIsCopyable, ComponentIsCopyable.Length * 2);
                     // 函数指针数组不能用 Array.Resize<T>（函数指针不可作泛型实参），手动扩容
@@ -100,6 +110,23 @@ namespace EntJoy.ECS
                 ComponentIsShared[id] = isShared;
                 // 判断是否为 IRelationComponent
                 ComponentIsRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type);
+                // 判断是否为独占关系（[ExclusiveRelation]，真 1:1）
+                ComponentIsExclusiveRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type)
+                    && Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute));
+                // 判断是否为多值关系（[MultiRelation]，出边 1:N / M:N）
+                ComponentIsMultiRelation[id] = typeof(IRelationComponent).IsAssignableFrom(type)
+                    && Attribute.IsDefined(type, typeof(MultiRelationAttribute));
+                // 定长槽位数：[MultiRelation(MaxSlots=N)]，N≥2 走定长多槽列；0 = 托管列表模式
+                ComponentMultiRelationMaxSlots[id] = ComponentIsMultiRelation[id]
+                    ? ((MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute)))!.MaxSlots
+                    : 0;
+                // 判断多值关系是否带入边唯一约束（[ExclusiveTarget]，背包场景）
+                ComponentIsExclusiveTarget[id] = ComponentIsMultiRelation[id]
+                    && Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute));
+                // 判断关系是否声明级联（[OnTargetDeleted(Cascade=true)]，target 销毁时级联销毁 sources）
+                ComponentCascadeOnTargetDeleted[id] = typeof(IRelationComponent).IsAssignableFrom(type)
+                    && Attribute.IsDefined(type, typeof(OnTargetDeletedAttribute))
+                    && ((OnTargetDeletedAttribute)Attribute.GetCustomAttribute(type, typeof(OnTargetDeletedAttribute)))!.Cascade;
                 // 判断是否实现 IDisposable（持有原生资源，销毁/移除时需调用 Dispose）
                 ComponentIsDisposable[id] = typeof(IDisposable).IsAssignableFrom(type);
                 // 判断是否实现 ICopyable（复制组件值时需调用 OnCopy，如 SharedBlob 的 refcount++）
@@ -118,16 +145,34 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 计算组件类型的大小：
-        /// 关系组件（IRelationComponent）→ 强制 sizeof(RelationSlot)（8B，列值存 target+version）。
-        /// 关系类型必须含 RelationSlot Target 字段（Unsafe.SizeOf&lt;TRel&gt; == 8B），
-        /// 使 GetComponentDataSpan&lt;TRel&gt;()/IJobEntity 指针步长与列宽一致；
-        /// 强制 8B 兜底防御空 struct 误用（防空 struct 注册成 1B 列导致越界）。
+        /// 关系组件（IRelationComponent）→ Marshal.SizeOf(type)（真实大小，允许携带关系数据）。
+        /// 要求首个字段必须是 RelationSlot Target（偏移 0，LayoutKind.Sequential），
+        /// 使列前 8B 重解释为 RelationSlot 的正确性与 GetComponentDataSpan&lt;TRel&gt; 步长一致。
+        /// 注册时校验；否则抛异常（防空 struct / 缺 Target 字段误用导致越界或步长错位）。
         /// 普通 blittable struct → Marshal.SizeOf。
         /// </summary>
         private static int ComputeComponentSize(Type type)
         {
             if (typeof(IRelationComponent).IsAssignableFrom(type))
-                return System.Runtime.InteropServices.Marshal.SizeOf<RelationSlot>();
+            {
+                // 校验 Target 首字段（偏移 0）。Marshal.OffsetOf 对缺失字段抛 ArgumentException。
+                IntPtr targetOffset;
+                try
+                {
+                    targetOffset = Marshal.OffsetOf(type, "Target");
+                }
+                catch (ArgumentException ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Relation component '{type.FullName}' must contain a field named 'Target' of type RelationSlot as its first field "
+                        + "(e.g. 'public struct ChildOf : IRelationComponent { public RelationSlot Target; }').", ex);
+                }
+                if (targetOffset != IntPtr.Zero)
+                    throw new InvalidOperationException(
+                        $"Relation component '{type.FullName}' must have its RelationSlot 'Target' field at offset 0 "
+                        + $"(currently at {targetOffset}). Use LayoutKind.Sequential and declare Target first.");
+                return Marshal.SizeOf(type);
+            }
             return Marshal.SizeOf(type);
         }
 
@@ -166,6 +211,21 @@ namespace EntJoy.ECS
 
         /// <summary>该组件类型是否为关系组件（IRelationComponent）。</summary>
         public static bool GetIsRelation(int id) => ComponentIsRelation[id];
+
+        /// <summary>该关系组件类型是否标记 [ExclusiveRelation]（真 1:1，入边唯一）。</summary>
+        public static bool GetIsExclusiveRelation(int id) => ComponentIsExclusiveRelation[id];
+
+        /// <summary>该关系组件类型是否标记 [MultiRelation]（出边多值，1:N / M:N）。</summary>
+        public static bool GetIsMultiRelation(int id) => ComponentIsMultiRelation[id];
+
+        /// <summary>[MultiRelation(MaxSlots=N)] 的定长槽位数；0 = 托管列表模式。</summary>
+        public static int GetMultiRelationMaxSlots(int id) => ComponentMultiRelationMaxSlots[id];
+
+        /// <summary>该多值关系是否标记 [ExclusiveTarget]（入边唯一，背包语义）。</summary>
+        public static bool GetIsExclusiveTarget(int id) => ComponentIsExclusiveTarget[id];
+
+        /// <summary>该关系是否声明级联（[OnTargetDeleted(Cascade=true)]，target 销毁时级联销毁 sources）。</summary>
+        public static bool GetCascadeOnTargetDeleted(int id) => ComponentCascadeOnTargetDeleted[id];
 
         /// <summary>该组件类型是否实现 IDisposable（持有原生资源）。</summary>
         public static bool GetIsDisposable(int id) => ComponentIsDisposable[id];
