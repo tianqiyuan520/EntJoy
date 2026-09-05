@@ -55,5 +55,32 @@ namespace EntJoy.ECS
         public Entity[] GetSiblings<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
             => _entityManager.GetSiblings<TRel>(entity);
+
+        // ======================== 多值关系（[MultiRelation]） ========================
+
+        /// <summary>多值关系：移除 entity 指向 target 的条目（无则 no-op）。</summary>
+        public void RemoveRelationship<TRel>(Entity entity, Entity target)
+            where TRel : struct, IRelationComponent
+            => _entityManager.RemoveRelationship<TRel>(entity, target);
+
+        /// <summary>多值关系：entity 是否指向 target。</summary>
+        public bool HasRelationship<TRel>(Entity entity, Entity target)
+            where TRel : struct, IRelationComponent
+            => _entityManager.HasRelationship<TRel>(entity, target);
+
+        /// <summary>多值关系：entity 的全部 targets（存活校验）。</summary>
+        public Entity[] GetRelationships<TRel>(Entity entity)
+            where TRel : struct, IRelationComponent
+            => _entityManager.GetRelationships<TRel>(entity);
+
+        /// <summary>多值关系：entity 的关系条数。</summary>
+        public int GetRelationshipCount<TRel>(Entity entity)
+            where TRel : struct, IRelationComponent
+            => _entityManager.GetRelationshipCount<TRel>(entity);
+
+        /// <summary>多值关系：清空 entity 的全部条目。</summary>
+        public void ClearRelationships<TRel>(Entity entity)
+            where TRel : struct, IRelationComponent
+            => _entityManager.ClearRelationships<TRel>(entity);
     }
 }

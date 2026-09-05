@@ -474,6 +474,14 @@ namespace EntJoy.ECS
             Interlocked.Increment(ref _globalVersion);
         }
 
+        /// <summary>
+        /// 公开变更追踪入口：供直接写列的场景（如定长多槽列槽位更新）调用，
+        /// 与 Set/SetRaw 的变更追踪语义一致（递增 chunk 版本 + 标记实体 + 全局版本）。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void NotifyComponentChangedPublic(int chunkIndex, int slotInChunk)
+            => NotifyComponentChanged(chunkIndex, slotInChunk);
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe void CopyComponentsTo(int sourceChunkIndex, int sourceSlot, Archetype target, int targetChunkIndex, int targetSlot)
         {

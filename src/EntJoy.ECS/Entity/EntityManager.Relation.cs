@@ -34,8 +34,24 @@ namespace EntJoy.ECS
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            // 结构变更路径需 CompleteArchetypeJobs + 锁（与 AddComponentRaw 同纪律）
-            if ((uint)entity.Id < (uint)entities.Length)
+            var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
+            // 多实例关系（[MultiRelation]）：走 RelationListStore（正向列表）+ RelationIndex（反向）
+            if (compType.IsMultiRelation)
+            {
+                CompleteActiveJobs();   // 列表路径也含结构变更（列表在托管侧，但 Observer/级联纪律统一全等待）
+                lock (_structuralLock)
+                {
+                    AddMultiRelationshipCore<TRel>(entity, target, compType.Id);
+                }
+                return;
+            }
+            // 独占关系（[ExclusiveRelation]）可能解绑其他 archetype 上的旧 source → 需等待全部 jobs
+            //（结构变更路径需 CompleteArchetypeJobs + 锁（与 AddComponentRaw 同纪律））
+            if (compType.IsExclusiveRelation)
+            {
+                CompleteActiveJobs();
+            }
+            else if ((uint)entity.Id < (uint)entities.Length)
             {
                 ref var info = ref GetEntityInfoRef(entity.Id);
                 if (info.Archetype != null)
@@ -56,9 +72,22 @@ namespace EntJoy.ECS
                 if (entityInfoRef.Version != entity.Version)
                     throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
 
-                var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
                 int relTypeId = compType.Id;
                 var arch = entityInfoRef.Archetype;
+
+                // 独占语义（[ExclusiveRelation]，真 1:1）：target 已被其他 source 指向时，
+                // 先解绑旧 source（Flecs EcsExclusive 原位替换）。锁内复用移除核心。
+                if (compType.IsExclusiveRelation &&
+                    _relationIndex.TryGetSources(target.Id, out var byTypeEx) &&
+                    byTypeEx.TryGetValue(relTypeId, out var setEx) && setEx.Count > 0)
+                {
+                    foreach (var oldSource in setEx)
+                    {
+                        if (oldSource.Id == entity.Id && oldSource.Version == entity.Version) continue;  // 自身已指向 → 跳过（覆盖路径处理）
+                        if (!IsAlive(oldSource)) continue;
+                        RemoveExclusiveSource<TRel>(oldSource, relTypeId);
+                    }
+                }
 
                 // 覆盖语义：已有关系 → 先移除旧索引条目，再 SetRaw 写新值
                 if (arch.Has(compType.Type))
@@ -68,21 +97,28 @@ namespace EntJoy.ECS
                     var oldSlot = chunk.GetComponent<RelationSlot>(entityInfoRef.SlotInChunk, compIdx);
                     _relationIndex.RemoveRelTypeId(relTypeId, entity, in oldSlot);
                     var slotValue = RelationSlot.From(target);
-                    arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, compType.Type, slotValue);
+                    // 构造完整 TRel 值（Target 首字段偏移 0）：SetRaw 按列宽（真实 SizeOf<TRel>）拷贝，
+                    // 传 8B RelationSlot 会在列宽 >8B（关系带数据）时越界读。
+                    var relValue = default(TRel);
+                    Unsafe.As<TRel, RelationSlot>(ref relValue) = slotValue;
+                    arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, compType.Type, relValue);
 
                     // Observer：Set（覆盖写也派发，对齐 EntityManager.SetComponentRaw）
                     if (_observerCount > 0 && _observers != null &&
                         _observers.TryGetValue(relTypeId, out var reg) && reg.Set.Count > 0)
                     {
-                        var handle = System.Runtime.InteropServices.GCHandle.Alloc(slotValue, System.Runtime.InteropServices.GCHandleType.Pinned);
+                        var handle = System.Runtime.InteropServices.GCHandle.Alloc(relValue, System.Runtime.InteropServices.GCHandleType.Pinned);
                         try { DispatchAdded(reg.Set, &entity, (void*)handle.AddrOfPinnedObject(), 1); }
                         finally { handle.Free(); }
                     }
                 }
                 else
                 {
-                    // 首次：复用组件添加核心（锁内调用，含 edge 快路径 + 迁移 + Observer）
-                    AddComponentRawCore(entity, compType.Type, RelationSlot.From(target));
+                    // 首次：复用组件添加核心（锁内调用，含 edge 快路径 + 迁移 + Observer）。
+                    // 传完整 TRel 值（boxed），列宽 >8B 时 SetRaw 拷贝不越界。
+                    var relValue = default(TRel);
+                    Unsafe.As<TRel, RelationSlot>(ref relValue) = RelationSlot.From(target);
+                    AddComponentRawCore(entity, compType.Type, relValue);
                 }
 
                 // 维护反向索引：source → target
@@ -126,6 +162,27 @@ namespace EntJoy.ECS
                 // 锁内复用移除核心（含 edge 快路径 + 迁移 + Observer）
                 RemoveComponentRawCore(entity, compType.Type);
             }
+        }
+
+        /// <summary>
+        /// 独占关系解绑：移除 oldSource 上的 TRel 关系列 + 反向索引条目。
+        /// 调用方必须已持有 _structuralLock 且已 CompleteArchetypeJobs（AddRelationship 独占路径）
+        /// 或由 RemoveRelationship 的锁纪律覆盖（直接调用独占分支时需自行保证）。
+        /// </summary>
+        private void RemoveExclusiveSource<TRel>(Entity oldSource, int relTypeId)
+            where TRel : struct, IRelationComponent
+        {
+            ref var info = ref GetEntityInfoRef(oldSource.Id);
+            if (info.Archetype == null || info.Version != oldSource.Version) return;
+            var arch = info.Archetype;
+            var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
+            if (!arch.Has(compType.Type)) return;
+
+            int compIdx = arch.GetComponentTypeIndex(compType);
+            var chunk = arch.ChunkList[info.ChunkIndex];
+            var oldSlot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
+            _relationIndex.RemoveRelTypeId(relTypeId, oldSource, in oldSlot);
+            RemoveComponentRawCore(oldSource, compType.Type);
         }
 
         /// <summary>
@@ -444,6 +501,23 @@ namespace EntJoy.ECS
                 if (!t.IsRelation) continue;
                 int compIdx = info.Archetype.GetComponentTypeIndex(t);
                 var chunk = info.Archetype.ChunkList[info.ChunkIndex];
+
+                if (t.MultiRelationMaxSlots >= 2)
+                {
+                    // 定长多槽列：任一槽指向 target 即命中
+                    ref var col = ref chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
+                    // 注意：多槽列宽于 8B，GetComponent<RelationSlot> 只取首槽；改用逐槽指针访问
+                    int stride = t.Size;
+                    var basePtr = (byte*)chunk.GetComponentArrayPointer(compIdx) + info.SlotInChunk * stride;
+                    for (int i = 0; i < t.MultiRelationMaxSlots; i++)
+                    {
+                        if (((RelationSlot*)(basePtr + i * 8))->TargetId == target.Id &&
+                            ((RelationSlot*)(basePtr + i * 8))->TargetVersion == target.Version)
+                            return true;
+                    }
+                    continue;
+                }
+
                 var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
                 if (slot.TargetId == target.Id && slot.TargetVersion == target.Version)
                     return true;
@@ -470,8 +544,23 @@ namespace EntJoy.ECS
                 if (!t.IsRelation) continue;
                 int compIdx = archetype.GetComponentTypeIndex(t);
                 var chunk = archetype.ChunkList[info.ChunkIndex];
-                var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-                _relationIndex.RemoveRelTypeId(t.Id, entity, in slot);
+
+                if (t.MultiRelationMaxSlots >= 2)
+                {
+                    // 定长多槽列：逐槽清理反向索引（每个有效槽都维护了 target→source 条目）
+                    int stride = t.Size;
+                    var basePtr = (byte*)chunk.GetComponentArrayPointer(compIdx) + info.SlotInChunk * stride;
+                    for (int i = 0; i < t.MultiRelationMaxSlots; i++)
+                    {
+                        var slot = ((RelationSlot*)(basePtr + i * 8))[0];
+                        if (slot.IsValid)
+                            _relationIndex.RemoveRelTypeId(t.Id, entity, in slot);
+                    }
+                    continue;
+                }
+
+                var slot0 = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
+                _relationIndex.RemoveRelTypeId(t.Id, entity, in slot0);
             }
         }
 

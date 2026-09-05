@@ -24,6 +24,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UnsupportedStructLayoutError = new("NT016", "Unsupported struct layout for ISPC", "[NativeTranspile] struct '{0}' uses {1} which ISPC cannot represent (ISPC does not support #pragma pack); NativeArray<{0}> layout would misalign. Use Sequential default layout (no Pack < 8, no Explicit).", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor MultiRelationAccessError = new("NT017", "Multi-relation access in native job", "[NativeTranspile] '{0}' cannot access [MultiRelation] relation type '{1}'. Multi-relation data is stored in managed lists on the main thread and is not readable from native jobs. Use C# main-thread code or a single-value relation column instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -184,6 +185,13 @@ namespace NativeTranspiler.Analyzer
                 {
                     diagnostics.Add(Diagnostic.Create(InvalidJobEntityError, executeMethod.Locations.FirstOrDefault(), structSymbol.Name));
                 }
+                // 托管列表模式多值关系（[MultiRelation] 无 MaxSlots）不占 chunk 列 → IJobEntity 无法读取；
+                // 定长多槽列模式（[MultiRelation(MaxSlots=N)]）占列，Job 可读，不拦截。
+                foreach (var p in executeMethod.Parameters)
+                {
+                    if (IsManagedMultiRelationType(p.Type, compilation))
+                        diagnostics.Add(Diagnostic.Create(MultiRelationAccessError, p.Locations.FirstOrDefault(), executeMethod.Name, p.Type.ToDisplayString()));
+                }
             }
             else
             {
@@ -219,6 +227,13 @@ namespace NativeTranspiler.Analyzer
                                     bool isManagedShared = sharedType.IsReferenceType || (sharedType.TypeKind == TypeKind.Struct && !IsUnmanagedType(sharedType));
                                     if (isManagedShared)
                                         diagnostics.Add(Diagnostic.Create(ManagedSharedComponentError, invocation.GetLocation(), sharedType.ToDisplayString()));
+                                }
+                                else if (isChunkJob && calledMethod.IsGenericMethod && calledMethod.TypeArguments.Length == 1 &&
+                                         (calledMethod.Name == Config.GetComponentDataSpan || calledMethod.Name == Config.GetComponentDataNativeArray || calledMethod.Name == Config.GetComponentDataPtr) &&
+                                         IsManagedMultiRelationType(calledMethod.TypeArguments[0], compilation))
+                                {
+                                    // 托管列表模式多值关系不占 chunk 列 → IJobChunk 无法按列读取；定长多槽列模式可读，不拦截
+                                    diagnostics.Add(Diagnostic.Create(MultiRelationAccessError, invocation.GetLocation(), executeMethod.Name, calledMethod.TypeArguments[0].ToDisplayString()));
                                 }
                                 else if (!IsAllowedMethodCall(calledMethod, compilation, isChunkJob))
                                     diagnostics.Add(Diagnostic.Create(DisallowedMethodCallError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
@@ -291,6 +306,38 @@ namespace NativeTranspiler.Analyzer
 
         public static bool IsUnmanagedTypeOrVoid(ITypeSymbol type) =>
             type.SpecialType == SpecialType.System_Void || IsUnmanagedType(type);
+
+        /// <summary>
+        /// 判断类型是否为 [MultiRelation] 关系组件（实现 EntJoy.ECS.IRelationComponent 且标记 MultiRelationAttribute）。
+        /// 分析器不引用 EntJoy.ECS 程序集，通过 MetadataName + 特性名匹配识别。
+        /// </summary>
+        public static bool IsMultiRelationType(ITypeSymbol type, Compilation compilation)
+        {
+            if (type is not INamedTypeSymbol namedType || namedType.TypeKind != TypeKind.Struct) return false;
+            if (!namedType.AllInterfaces.Any(i => i.ToDisplayString() == Config.TypeIRelationComponent)) return false;
+            return namedType.GetAttributes().Any(ad => ad.AttributeClass?.ToDisplayString() == Config.TypeMultiRelationAttribute);
+        }
+
+        /// <summary>
+        /// 判断是否为「托管列表模式」多值关系（[MultiRelation] 且未指定 MaxSlots 或 MaxSlots &lt; 2）。
+        /// 托管模式数据在 EntityManager 托管列表，不进 chunk 列 → Job 不可读，需 NT017 拦截。
+        /// 定长多槽列模式（MaxSlots ≥ 2）占 chunk 列，Job 可读，不拦截。
+        /// </summary>
+        public static bool IsManagedMultiRelationType(ITypeSymbol type, Compilation compilation)
+        {
+            if (!IsMultiRelationType(type, compilation)) return false;
+            foreach (var attr in type.GetAttributes())
+            {
+                if (attr.AttributeClass?.ToDisplayString() != Config.TypeMultiRelationAttribute) continue;
+                foreach (var namedArg in attr.NamedArguments)
+                {
+                    if (namedArg.Key == "MaxSlots" && namedArg.Value.Value is int v && v >= 2)
+                        return false;   // 定长多槽列模式 → Job 可读
+                }
+                return true;   // MaxSlots 缺失或 < 2 → 托管模式
+            }
+            return true;
+        }
 
         /// <summary>
         /// 检查方法调用是否被允许。
