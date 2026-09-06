@@ -24,8 +24,8 @@ namespace EntJoy.ECS.JobSystem
         // 事件类型数组（context 指针 → 该 job 的事件类型列表，drain 时需要按类型写回 EventStream）
         internal static readonly ConcurrentDictionary<IntPtr, Type[]> LiveEventBufferTypes = new();
 
-        // ======================== Job 名登�?/ 实体跟踪 ========================
-        /// <summary>�?C++ 返回�?IntPtr 构�?JobHandle�?/summary>
+        // ======================== Job 名登记 / 实体跟踪 ========================
+        /// <summary>从 C++ 返回的 IntPtr 构造 JobHandle。</summary>
         private static JobHandle FromNative(IntPtr handle) => new JobHandle(new NativeJobHandle(handle));
 
         private static NativeJobHandle TrackEntityJob(EntityManager entityManager, JobHandle handle, Archetype[]? matchingArchetypes = null, ComponentType[]? writtenComponents = null)
@@ -34,12 +34,12 @@ namespace EntJoy.ECS.JobSystem
             return handle._nativeHandle;
         }
 
-        // ======================== Chunk 调度缓存（归�?ECS，与 engine 解耦） ========================
+        // ======================== Chunk 调度缓存（归属 ECS，与 engine 解耦） ========================
         internal static readonly object _rawChunkScheduleCacheLock = new();
         internal static readonly Dictionary<RawChunkScheduleCacheKey, RawChunkScheduleCache> _rawChunkScheduleCaches = new();
         internal static readonly Dictionary<RawChunkScheduleCacheKey, EntityBatchScheduleCache> _entityBatchScheduleCaches = new();
 
-        // 托管回调层的 Chunk[] 引用表：context block 指针 �?Chunk[]（无 GCHandle，无泄漏�?
+        // 托管回调层的 Chunk[] 引用表：context block 指针 → Chunk[]（无 GCHandle，无泄漏）
         internal static readonly ConcurrentDictionary<IntPtr, Chunk[]> ChunkArrayTable = new();
 
         public static void ClearRawChunkScheduleCaches(EntityManager entityManager)
@@ -81,11 +81,11 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // ======================== IJobChunk 调度 ========================
-        public static JobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
+        public static JobHandle ScheduleChunk<T>(ref T job, EntityManager entityManager, QueryBuilder query, JobHandle dependsOn = default, ComponentType[]? writtenComponents = null)
             where T : struct, IJobChunk
             => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, writtenComponents: writtenComponents);
 
-        public static JobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, NativeJobHandle? dependsOn = null, ComponentType[]? writtenComponents = null)
+        public static JobHandle ScheduleChunkWithWorkerCap<T>(ref T job, EntityManager entityManager, QueryBuilder query, int workerCap, JobHandle dependsOn = default, ComponentType[]? writtenComponents = null)
             where T : struct, IJobChunk
             => ScheduleChunkCore(ref job, entityManager, query, IntPtr.Zero, null, dependsOn, workerCap: workerCap, writtenComponents: writtenComponents);
 
@@ -115,15 +115,19 @@ namespace EntJoy.ECS.JobSystem
             where T : struct, IJobChunk
             => ScheduleNativeEntityBatchRawCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, workerCap, rangeSize, jobKind: NativeEcsJobKind.Chunk, world: world);
 
-        private static JobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null, World world = null)
+        private static JobHandle ScheduleChunkCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, JobHandle dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null, World world = null)
             where T : struct, IJobChunk
         {
-            // ─── Managed fallback（NativeDll 不可用时）：�?C# 路径，无回调 ───
+            // ─── Managed fallback（NativeDll 不可用时）：纯 C# 路径，无回调 ───
             if (NativeJobScheduler.UseFallback)
-                return ScheduleChunkManagedFallback(ref job, entityManager, query, writtenComponents);
+            {
+                world ??= World.DefaultWorld;
+                return ScheduleChunkManagedFallback(ref job, entityManager, query, writtenComponents, dependsOn, world);
+            }
 
             // ─── C++ 路径 ───
-            var result = ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, dependsOn, forcedMode, workerCap, rangeSize, writtenComponents, world);
+            var nativeDep = dependsOn._nativeHandle.IsValid ? (NativeJobHandle?)dependsOn._nativeHandle : null;
+            var result = ScheduleChunkNativeCore(ref job, entityManager, query, funcPtr, requiredComponentTypeIds, nativeDep, forcedMode, workerCap, rangeSize, writtenComponents, world);
             return new JobHandle(result);
         }
 
@@ -163,7 +167,7 @@ namespace EntJoy.ECS.JobSystem
 
             bool jobHasManagedReferences = NativeJobCore.JobHasManagedReferences<T>();
 
-            // 托管路径（唯一）：区间回调，blittable �?job blob、托管引�?job �?GCHandle box
+            // 托管路径（唯一）：区间回调，blittable → job blob、托管引用 job → GCHandle box
             if (funcPtr == IntPtr.Zero &&
                 TryGetManagedChunkScheduleCache(entityManager, query, out var managedCache, out var managedCacheLease) &&
                 managedCache.ChunkCount > 0)
@@ -249,9 +253,9 @@ namespace EntJoy.ECS.JobSystem
         }
 
         /// <summary>
-        /// 填充 ChunkJobData 数组：组件指�?大小/位图/类型索引 + requiredComponentTypeIds 对应指针�?
-        /// gcHandles �?null �?chunkHandle �?IntPtr.Zero（纯原生回调）；否则�?GCHandle[] 取句柄（托管回调）�?
-        /// 调用方负责释放各 chunk 分配�?compPtrs/compSizes/bitmaps/typeIndices/requiredArrays�?
+        /// 填充 ChunkJobData 数组：组件指针、大小/位图/类型索引 + requiredComponentTypeIds 对应指针。
+        /// gcHandles 为 null 时 chunkHandle 为 IntPtr.Zero（纯原生回调）；否则从 GCHandle[] 取句柄（托管回调）。
+        /// 调用方负责释放各 chunk 分配的 compPtrs/compSizes/bitmaps/typeIndices/requiredArrays。
         /// </summary>
         private unsafe static void FillChunkJobDataList(ChunkJobData* chunksPtr, List<Chunk> chunkList, int[]? requiredComponentTypeIds, GCHandle[]? gcHandles)
         {
@@ -420,7 +424,7 @@ namespace EntJoy.ECS.JobSystem
             // 多 World 支持：绑定本次调度的 World（drain 写回正确 EventStream）
             world ??= World.DefaultWorld;
 
-            // ── 临时诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：C# 调度侧四段细分计�?──
+            // ── 临时诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：C# 调度侧四段细分计时 ──
             bool cDiag = s_csharpPhaseDiag;
             long d0 = cDiag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             long d1 = 0, d2 = 0, d3 = 0;
@@ -486,8 +490,8 @@ namespace EntJoy.ECS.JobSystem
         private static uint s_csharpPhaseCount = 0;
 
         /// <summary>
-        /// 同步执行 [NativeTranspile] IJobChunk：以 ImmediateNative 模式提交（C++ 侧主线程直接执行�?
-        /// �?worker 唤醒），并一步完成（无需显式 Complete）。等价于 Run 的零调度开销版本�?
+        /// 同步执行 [NativeTranspile] IJobChunk：以 ImmediateNative 模式提交（C++ 侧主线程直接执行，
+        /// 无 worker 唤醒），并一步完成（无需显式 Complete）。等价于 Run 的零调度开销版本。
         /// </summary>
         public static void RunChunkImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, World world = null)
             where T : struct
@@ -500,7 +504,7 @@ namespace EntJoy.ECS.JobSystem
         }
 
         /// <summary>
-        /// 同步执行 [NativeTranspile] IJobChunk（ISPC 后端）：�?ChunkRange 路径�?ImmediateNative 提交�?
+        /// 同步执行 [NativeTranspile] IJobChunk（ISPC 后端）：经 ChunkRange 路径以 ImmediateNative 提交。
         /// </summary>
         public static void RunChunkRangeImmediate<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, World world = null)
             where T : struct
@@ -819,7 +823,7 @@ namespace EntJoy.ECS.JobSystem
                 return new RawChunkScheduleCache(entityManager.StructuralVersion, null, 0, false);
             }
 
-            // 托管路径：chunkId（整数）+ �?GCHandle 保活 Chunk[]，不给每 chunk GCHandle
+            // 托管路径：chunkId（整数）+ 一个 GCHandle 保活 Chunk[]，不给每 chunk GCHandle
             var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
             var chunkArray = chunkList.ToArray();
             var chunkArrayGCHandle = GCHandle.Alloc(chunkArray, GCHandleType.Normal);
@@ -849,7 +853,7 @@ namespace EntJoy.ECS.JobSystem
             }
 
             var cache = new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, false, matchingArchetypes.ToArray());
-            cache.ManagedChunkArray = chunkArray;  // 直接持有引用（无 GCHandle�?
+            cache.ManagedChunkArray = chunkArray;  // 直接持有引用（无 GCHandle）
             return cache;
         }
 
@@ -937,7 +941,7 @@ namespace EntJoy.ECS.JobSystem
             public readonly int ChunkCount;
             public readonly bool OwnsChunkHandles;
             public readonly Archetype[]? MatchingArchetypes;
-            internal Chunk[]? ManagedChunkArray;  // 托管路径：直接持�?Chunk[]（无 GCHandle�?
+            internal Chunk[]? ManagedChunkArray;  // 托管路径：直接持有 Chunk[]（无 GCHandle）
             private int _leaseCount;
             private int _retired;
             private int _disposed;
@@ -1019,7 +1023,7 @@ namespace EntJoy.ECS.JobSystem
                 }
 
                 Marshal.FreeHGlobal((IntPtr)ChunksPtr);
-                // ManagedChunkArray �?GCHandle，由引用计数 GC 管理
+                // ManagedChunkArray 无 GCHandle，由引用计数 GC 管理
             }
 
             internal sealed class CacheLease : IDisposable
@@ -1322,7 +1326,7 @@ namespace EntJoy.ECS.JobSystem
             header->chunksPtr = (IntPtr)chunksPtr;
             header->cleanupInProgress = 0;
             header->jobIsBoxed = jobBoxed ? 1 : 0;
-            // 托管回调�?Chunk[] 通过 ChunkArrayTable 存储（按 context 指针索引，零 GCHandle�?
+            // 托管回调的 Chunk[] 通过 ChunkArrayTable 存储（按 context 指针索引，零 GCHandle）
             header->chunkArrayHandle = IntPtr.Zero;
             if (chunkArray != null) ChunkArrayTable[(IntPtr)block] = chunkArray;
             if (hasEnabledFilter && typeHashes != null)
@@ -1390,13 +1394,13 @@ namespace EntJoy.ECS.JobSystem
             return block;
         }
 
-        // ======================== Managed fallback（NativeDll 不可用时�?========================
+        // ======================== Managed fallback（NativeDll 不可用时）========================
         /// <summary>
-        /// Managed fallback：收�?chunks �?ManagedChunkParallelJob<T> �?ManagedJobScheduler.ScheduleParallelFor�?
-        /// �?C# 路径，无 P/Invoke、无 ChunkJobCallbacks、无 ContextBlock�?
+        /// Managed fallback：收集 chunks 到 ManagedChunkParallelJob 再 ManagedJobScheduler.ScheduleParallelFor。
+        /// 纯 C# 路径，无 P/Invoke、无 ChunkJobCallbacks、无 ContextBlock。
         /// </summary>
         private static JobHandle ScheduleChunkManagedFallback<T>(ref T job, EntityManager entityManager,
-            QueryBuilder query, ComponentType[]? writtenComponents)
+            QueryBuilder query, ComponentType[]? writtenComponents, JobHandle dependsOn, World world)
             where T : struct, IJobChunk
         {
             var allEnabledTypes = query.AllEnabled;
@@ -1406,21 +1410,22 @@ namespace EntJoy.ECS.JobSystem
 
             var parallelJob = new ManagedChunkParallelJob<T>
             {
-                Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes
+                Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes, World = world
             };
-            var mhandle = JobScheduler.ScheduleParallelFor(ref parallelJob, chunkCount, innerBatchCount: 1);
-            // 托管路径也需�?TrackEntityJob：用�?Selective Wait（结构变更时只等影响�?archetype �?job�?
+            var mhandle = JobScheduler.ScheduleParallelFor(ref parallelJob, chunkCount, innerBatchCount: 1, dependsOn);
+            // 托管路径也需 TrackEntityJob：用于 Selective Wait（结构变更时只等影响的 archetype 的 job）
             TrackEntityJob(entityManager, mhandle, archetypes, writtenComponents);
             return mhandle;
         }
 
-        /// <summary>托管调度 payload：直接在 ManagedWorker 上执行，�?P/Invoke 回调。实�?IJobParallelFor�?/summary>
+        /// <summary>托管调度 payload：直接在 ManagedWorker 上执行，无 P/Invoke 回调。实现 IJobParallelFor。</summary>
         internal unsafe struct ManagedChunkParallelJob<T> : IJobParallelFor where T : struct, IJobChunk
         {
             public T Job;
             public Chunk[] Chunks;
             public int ChunkCount;
             public ComponentType[]? AllEnabledTypes;
+            public World World;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Execute(int index)
@@ -1431,11 +1436,21 @@ namespace EntJoy.ECS.JobSystem
                 var mask = (AllEnabledTypes?.Length > 0)
                     ? ChunkJobScheduler.ComputeChunkMask(chunk, AllEnabledTypes)
                     : default;
-                Job.Execute(new ArchetypeChunk(chunk), mask);
+                // 绑定 job 所属 World：worker 线程内 EventBus.SendEvent/DefaultWorld 访问不串写到其他 World
+                var prev = World.DefaultWorld;
+                if (World != null) World.DefaultWorld = World;
+                try
+                {
+                    Job.Execute(new ArchetypeChunk(chunk), mask);
+                }
+                finally
+                {
+                    World.DefaultWorld = prev;
+                }
             }
         }
 
-        // ======================== Run 路径（主线程同步执行�?========================
+        // ======================== Run 路径（主线程同步执行）========================
         internal static unsafe void ExecuteOnQuery<T>(ref T job, EntityManager entityManager, QueryBuilder query)
             where T : struct, IJobChunk
         {
@@ -1456,10 +1471,10 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
-        // ======================== Phase C：共�?mask 工具（单一真值来源） ========================
+        // ======================== Phase C：共享 mask 工具（单一真值来源） ========================
         /// <summary>
-        /// �?chunk �?enabled 组件的位图做 AND，返回组合掩码（null = 全禁用或无过滤）�?
-        /// 单组件零拷贝（直传位图），多组件走�?ulong AND�?
+        /// 对 chunk 的 enabled 组件的位图做 AND，返回组合掩码（null = 全禁用或无过滤）。
+        /// 单组件零拷贝（直传位图），多组件走 ulong AND。
         /// </summary>
         internal static unsafe ChunkEnabledMask ComputeChunkMask(Chunk chunk, ComponentType[] allEnabledTypes)
         {
@@ -1473,9 +1488,9 @@ namespace EntJoy.ECS.JobSystem
                 if (idx < 0) return default;
                 ulong* bitmap = chunk.GetEnableBitMapPointer(idx);
                 if (bitmap == null) return default;
-                return new ChunkEnabledMask(bitmap, entityCount);
+                return new ChunkEnabledMask(new Span<ulong>(bitmap, ulongCount), entityCount);
             }
-            ulong* combined = TempBuffer.GetBuffer(ulongCount);
+            var combined = new ulong[ulongCount];
             bool first = false;
             for (int i = 0; i < allEnabledTypes.Length; i++)
             {
@@ -1483,7 +1498,7 @@ namespace EntJoy.ECS.JobSystem
                 if (idx < 0) continue;
                 ulong* bitmap = chunk.GetEnableBitMapPointer(idx);
                 if (bitmap == null) continue;
-                if (!first) { Buffer.MemoryCopy(bitmap, combined, ulongCount * 8, ulongCount * 8); first = true; }
+                if (!first) { for (int b = 0; b < ulongCount; b++) combined[b] = bitmap[b]; first = true; }
                 else { for (int b = 0; b < ulongCount; b++) combined[b] &= bitmap[b]; }
             }
             return first ? new ChunkEnabledMask(combined, entityCount) : default;

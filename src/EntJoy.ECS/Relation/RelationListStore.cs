@@ -89,6 +89,9 @@ namespace EntJoy.ECS
             => _forward.TryGetValue(relTypeId, out var bySource)
                && bySource.TryGetValue(source.Id, out var list) ? list.Count : 0;
 
+        /// <summary>清空整个 store（World 恢复前调用）。</summary>
+        public void Clear() => _forward.Clear();
+
         /// <summary>
         /// 清空 source 在所有关系类型上的全部条目（实体销毁用）。返回被移除的 (relTypeId, slot) 列表，
         /// 供调用方同步维护反向索引；无则返回空列表（复用入参，避免分配）。

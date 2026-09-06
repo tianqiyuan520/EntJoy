@@ -142,8 +142,10 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    private int _t{i}Idx;");
                 sb.AppendLine($"    private {genParams[i]}* _t{i}Base;");
             }
-            sb.AppendLine("    private ulong* _combinedMask;");
+            sb.AppendLine("    private ulong[] _combinedMask;");
+            sb.AppendLine("    private ulong[] _maskBuffer;");
             sb.AppendLine("    private int _ulongCount;");
+            sb.AppendLine("    private int _startStructuralVersion;");
             sb.AppendLine();
             sb.AppendLine($"    internal QueryEnumerator(EntityManager entityManager, QueryBuilder builder)");
             sb.AppendLine("    {");
@@ -163,6 +165,7 @@ namespace EntJoy.ECS.SourceGenerator
             }
             sb.AppendLine("        _combinedMask = null;");
             sb.AppendLine("        _ulongCount = 0;");
+            sb.AppendLine("        _startStructuralVersion = entityManager.StructuralVersion;");
             sb.AppendLine("    }");
             sb.AppendLine();
 
@@ -229,8 +232,11 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    private bool ComputeCombinedMask(Chunk chunk)");
             sb.AppendLine("    {");
             sb.AppendLine("        _ulongCount = (chunk.EntityCount + 63) / 64;");
-            sb.AppendLine("        ulong* combinedMask = TempBuffer.GetBuffer(_ulongCount);");
-            sb.AppendLine("        _combinedMask = combinedMask;");
+            sb.AppendLine("        if (_maskBuffer == null || _maskBuffer.Length < _ulongCount)");
+            sb.AppendLine("            _maskBuffer = new ulong[_ulongCount];");
+            sb.AppendLine("        _combinedMask = _maskBuffer;");
+            sb.AppendLine("        fixed (ulong* combinedMask = _maskBuffer)");
+            sb.AppendLine("        {");
             sb.AppendLine("        for (int i = 0; i < _ulongCount; i++) combinedMask[i] = 0;");
             sb.AppendLine("        bool firstFound = false;");
             sb.AppendLine("        var archetype = chunk.Archetype;");
@@ -289,6 +295,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("        return firstFound;");
+            sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine();
 
@@ -296,6 +303,8 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
+            sb.AppendLine("        if (_entityManager.StructuralVersion != _startStructuralVersion)");
+            sb.AppendLine("            throw new InvalidOperationException(\"Structural change detected during query iteration.\");");
             sb.AppendLine("        if (_currentChunk.MemoryBlock != nint.Zero)");
             sb.AppendLine("            _slotIndex++;");
             sb.AppendLine("        return Advance();");

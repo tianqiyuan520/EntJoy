@@ -151,7 +151,7 @@ public static unsafe partial class NativeJobScheduler
 {
     // ======================== 配置 ========================
         /// <summary>当 NativeDll 不可用时自动回退到 ManagedJobScheduler。</summary>
-        internal static bool UseFallback { get; private set; }
+        internal static bool UseFallback { get; set; }
     /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时按此值个 tile/worker 切分。tpw=4 平衡 light/heavy。
     /// </summary>

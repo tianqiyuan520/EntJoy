@@ -14,7 +14,8 @@ namespace EntJoy.ECS.JobSystem
     /// </summary>
     public static class ChunkJobExtensions
     {
-        /// <summary>调度 IJobChunk（world 默认 DefaultWorld，多 World 可显式传入）</summary>
+        /// <summary>调度 IJobChunk（world 默认 DefaultWorld，多 World 可显式传入）。
+        /// 未显式传 dependsOn 时自动继承系统执行上下文的 Dependency（DOTS SystemState.Dependency 语义）。</summary>
         public static JobHandle Schedule<T>(this T job, QueryBuilder query,
             World world = null,
             JobHandle dependsOn = default,
@@ -22,11 +23,15 @@ namespace EntJoy.ECS.JobSystem
         {
             world ??= World.DefaultWorld;
             if (world == null) throw new InvalidOperationException("No active World found.");
-            NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-            return ChunkJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, nativeDep, writtenComponents: writtenComponents);
+            if (dependsOn.IsNull && SystemExecutionContext.IsActive)
+                dependsOn = SystemExecutionContext.Dependency;
+            var result = ChunkJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, dependsOn, writtenComponents: writtenComponents);
+            if (SystemExecutionContext.IsActive)
+                SystemExecutionContext.Dependency = result;
+            return result;
         }
 
-        /// <summary>调度 IJobChunk（带 workerCap，world 默认 DefaultWorld）</summary>
+        /// <summary>调度 IJobChunk（带 workerCap，world 默认 DefaultWorld）。依赖注入语义同 <see cref="Schedule{T}"/>。</summary>
         public static JobHandle ScheduleWithWorkerCap<T>(this T job, QueryBuilder query, int workerCap,
             World world = null,
             JobHandle dependsOn = default,
@@ -34,8 +39,12 @@ namespace EntJoy.ECS.JobSystem
         {
             world ??= World.DefaultWorld;
             if (world == null) throw new InvalidOperationException("No active World found.");
-            NativeJobHandle? nativeDep = dependsOn._nativeHandle;
-            return ChunkJobScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, nativeDep, writtenComponents: writtenComponents);
+            if (dependsOn.IsNull && SystemExecutionContext.IsActive)
+                dependsOn = SystemExecutionContext.Dependency;
+            var result = ChunkJobScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, dependsOn, writtenComponents: writtenComponents);
+            if (SystemExecutionContext.IsActive)
+                SystemExecutionContext.Dependency = result;
+            return result;
         }
 
         /// <summary>Run IJobChunk：同步执行（无调度开销），由 ChunkJobScheduler 直接遍历执行。</summary>

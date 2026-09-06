@@ -54,17 +54,18 @@ namespace EntJoySample.ECS
 
             runner.PrintSchedule();
 
-            // 触发一次 DamageEvent：让带 [RunWhen] 的 AutoRegenSystem 只执行第 1 帧
-            runner.EventCounter.Increment<DamageEvent>();
+            // 触发一次 DamageEvent（新接线：SendEvent 在帧末自动计入 EventCounter，下帧 RunWhen 触发）
+            world.SendEvent(new DamageEvent { Target = default, Amount = 0 });
 
-            runner.Update();
-            runner.Update();
+            runner.Update();  // 帧 1：无上一帧事件，AutoRegenSystem 跳过
+            runner.Update();  // 帧 2：上一帧 DamageEvent 计数 1 → 运行
+            runner.Update();  // 帧 3：计数已重置 → 跳过
 
-            Console.WriteLine($"  AutoMoveSystem.Executions   = {AutoMoveSystem.Executions} (expect 2)");
-            Console.WriteLine($"  AutoDamageSystem.Executions = {AutoDamageSystem.Executions} (expect 2)");
-            Console.WriteLine($"  AutoRegenSystem.Executions  = {AutoRegenSystem.Executions} (expect 1, RunWhen 条件)");
-            bool ok = AutoMoveSystem.Executions == 2 &&
-                      AutoDamageSystem.Executions == 2 &&
+            Console.WriteLine($"  AutoMoveSystem.Executions   = {AutoMoveSystem.Executions} (expect 3)");
+            Console.WriteLine($"  AutoDamageSystem.Executions = {AutoDamageSystem.Executions} (expect 3)");
+            Console.WriteLine($"  AutoRegenSystem.Executions  = {AutoRegenSystem.Executions} (expect 1, 帧 2 RunWhen 触发)");
+            bool ok = AutoMoveSystem.Executions == 3 &&
+                      AutoDamageSystem.Executions == 3 &&
                       AutoRegenSystem.Executions == 1;
             Console.WriteLine($"  {(ok ? "OK" : "BAD")}\n");
 

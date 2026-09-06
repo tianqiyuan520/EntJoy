@@ -9,7 +9,7 @@ namespace EntJoy.ECS
     public partial class World : IDisposable
     {
         private static readonly object _defaultLock = new();
-        private static volatile World _defaultWorld;
+        [ThreadStatic] private static World _defaultWorld;   // 每线程独立：双 SystemRunner 并行不互踩
         public static World DefaultWorld
         {
             get => _defaultWorld;
@@ -28,6 +28,7 @@ namespace EntJoy.ECS
 
         // ─── EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新 ───
         private readonly Dictionary<QueryKey, EntityQuery> _queryCache = new();
+        private readonly object _queryCacheLock = new();
 
 
         public World(string worldName = "Default")
@@ -70,14 +71,17 @@ namespace EntJoy.ECS
         public EntityQuery GetOrCreateEntityQuery(QueryBuilder builder)
         {
             var key = new QueryKey(builder);
-            if (_queryCache.TryGetValue(key, out var cached))
+            lock (_queryCacheLock)
             {
-                cached.EnsureUpToDate();
-                return cached;
+                if (_queryCache.TryGetValue(key, out var cached))
+                {
+                    cached.EnsureUpToDate();
+                    return cached;
+                }
+                var query = new EntityQuery(this, builder);
+                _queryCache[key] = query;
+                return query;
             }
-            var query = new EntityQuery(this, builder);
-            _queryCache[key] = query;
-            return query;
         }
 
         /// <summary>当前注册的共享查询数量（诊断用）。</summary>
@@ -164,8 +168,10 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 生产者：发送事件（零结构变更，写入双缓冲）。
+        /// 返回 false 表示事件流已满（容量 <see cref="EventStream{T}.Capacity"/>），事件被丢弃；
+        /// 可通过 <see cref="EventStream{T}.OverflowCount"/> 观察累计丢弃数。
         /// </summary>
-        public void SendEvent<T>(in T evt) where T : unmanaged
+        public bool SendEvent<T>(in T evt) where T : unmanaged
         {
             if (_disposed) throw new ObjectDisposedException(nameof(World));
             if (!_eventStreams.TryGetValue(typeof(T), out var obj))
@@ -173,7 +179,7 @@ namespace EntJoy.ECS
                 RegisterEvent<T>();
                 obj = _eventStreams[typeof(T)];
             }
-            ((EventStream<T>)obj).SendEvent(evt);
+            return ((EventStream<T>)obj).SendEvent(evt);
         }
 
         /// <summary>
@@ -206,6 +212,13 @@ namespace EntJoy.ECS
             if (_disposed) throw new ObjectDisposedException(nameof(World));
             foreach (var kv in _eventStreams)
                 ((IEventStream)kv.Value).NextFrame();
+        }
+
+        /// <summary>把上一帧各事件流的 ReadCount 累加进计数器（SystemRunner 帧末调用，供 RunWhen 门控）。</summary>
+        internal void RefreshEventCounter(EventCounter counter)
+        {
+            foreach (var kv in _eventStreams)
+                counter.Add(kv.Key, ((IEventStream)kv.Value).ReadCount);
         }
 
         /// <summary>

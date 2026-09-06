@@ -182,7 +182,7 @@ namespace EntJoy.ECS.SourceGenerator
                 // 有过滤：BitOperations 内联位图跳转（与 Query 同路径，避免 TryGetNextRange 调用开销）
                 sb.AppendLine("        else");
                 sb.AppendLine("        {");
-                sb.AppendLine("            ulong* __bits = __enabledMask.Bits;");
+                sb.AppendLine("            Span<ulong> __bits = __enabledMask.Bits;");
                 sb.AppendLine("            int __idx = 0;");
                 sb.AppendLine("            while (__idx < __count)");
                 sb.AppendLine("            {");

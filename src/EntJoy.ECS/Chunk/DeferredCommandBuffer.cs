@@ -27,6 +27,7 @@ namespace EntJoy.ECS
         private int _stagingOffset;
         private int _stagingCapacity;
         private bool _disposed;
+        private readonly object _sync = new();   // 记录/回放锁：多 worker 并发写同一 ECB 时保证不覆盖/交错
 
         private const int InitialCapacity = 64 * 1024;
 
@@ -80,68 +81,80 @@ namespace EntJoy.ECS
         /// <summary>记录 CreateEntity 命令</summary>
         public void CreateEntity(params ComponentType[] componentTypes)
         {
-            int typeCount = componentTypes.Length;
-            int totalSize = CheckedSize((long)sizeof(int) * 2 + (long)typeCount * sizeof(int));
-            EnsureCapacity(totalSize);
-
-            *(int*)(_staging + _stagingOffset) = OP_CREATE_ENTITY;
-            _stagingOffset += sizeof(int);
-            *(int*)(_staging + _stagingOffset) = typeCount;
-            _stagingOffset += sizeof(int);
-            for (int i = 0; i < typeCount; i++)
+            lock (_sync)
             {
-                *(int*)(_staging + _stagingOffset) = componentTypes[i].Id;
+                int typeCount = componentTypes.Length;
+                int totalSize = CheckedSize((long)sizeof(int) * 2 + (long)typeCount * sizeof(int));
+                EnsureCapacity(totalSize);
+
+                *(int*)(_staging + _stagingOffset) = OP_CREATE_ENTITY;
                 _stagingOffset += sizeof(int);
+                *(int*)(_staging + _stagingOffset) = typeCount;
+                _stagingOffset += sizeof(int);
+                for (int i = 0; i < typeCount; i++)
+                {
+                    *(int*)(_staging + _stagingOffset) = componentTypes[i].Id;
+                    _stagingOffset += sizeof(int);
+                }
+                CommandCount++;
             }
-            CommandCount++;
         }
 
         /// <summary>记录 DestroyEntity 命令</summary>
         public void DestroyEntity(Entity entity)
         {
-            int totalSize = sizeof(int) + sizeof(Entity);
-            EnsureCapacity(totalSize);
+            lock (_sync)
+            {
+                int totalSize = sizeof(int) + sizeof(Entity);
+                EnsureCapacity(totalSize);
 
-            *(int*)(_staging + _stagingOffset) = OP_DESTROY_ENTITY;
-            _stagingOffset += sizeof(int);
-            *(Entity*)(_staging + _stagingOffset) = entity;
-            _stagingOffset += sizeof(Entity);
-            CommandCount++;
+                *(int*)(_staging + _stagingOffset) = OP_DESTROY_ENTITY;
+                _stagingOffset += sizeof(int);
+                *(Entity*)(_staging + _stagingOffset) = entity;
+                _stagingOffset += sizeof(Entity);
+                CommandCount++;
+            }
         }
 
         /// <summary>记录 AddComponent 命令</summary>
         public void AddComponent<T>(Entity entity, T value) where T : struct, IComponentData
         {
-            int compSize = Unsafe.SizeOf<T>();
-            int totalSize = CheckedSize((long)sizeof(int) * 3 + sizeof(Entity) + compSize);
-            EnsureCapacity(totalSize);
+            lock (_sync)
+            {
+                int compSize = Unsafe.SizeOf<T>();
+                int totalSize = CheckedSize((long)sizeof(int) * 3 + sizeof(Entity) + compSize);
+                EnsureCapacity(totalSize);
 
-            *(int*)(_staging + _stagingOffset) = OP_ADD_COMPONENT;
-            _stagingOffset += sizeof(int);
-            *(Entity*)(_staging + _stagingOffset) = entity;
-            _stagingOffset += sizeof(Entity);
-            *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            _stagingOffset += sizeof(int);
-            *(int*)(_staging + _stagingOffset) = compSize;
-            _stagingOffset += sizeof(int);
-            Unsafe.CopyBlock(_staging + _stagingOffset, &value, (uint)compSize);
-            _stagingOffset += compSize;
-            CommandCount++;
+                *(int*)(_staging + _stagingOffset) = OP_ADD_COMPONENT;
+                _stagingOffset += sizeof(int);
+                *(Entity*)(_staging + _stagingOffset) = entity;
+                _stagingOffset += sizeof(Entity);
+                *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+                _stagingOffset += sizeof(int);
+                *(int*)(_staging + _stagingOffset) = compSize;
+                _stagingOffset += sizeof(int);
+                Unsafe.CopyBlock(_staging + _stagingOffset, &value, (uint)compSize);
+                _stagingOffset += compSize;
+                CommandCount++;
+            }
         }
 
         /// <summary>记录 RemoveComponent 命令</summary>
         public void RemoveComponent<T>(Entity entity) where T : struct
         {
-            int totalSize = sizeof(int) + sizeof(Entity) + sizeof(int);
-            EnsureCapacity(totalSize);
+            lock (_sync)
+            {
+                int totalSize = sizeof(int) + sizeof(Entity) + sizeof(int);
+                EnsureCapacity(totalSize);
 
-            *(int*)(_staging + _stagingOffset) = OP_REMOVE_COMPONENT;
-            _stagingOffset += sizeof(int);
-            *(Entity*)(_staging + _stagingOffset) = entity;
-            _stagingOffset += sizeof(Entity);
-            *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            _stagingOffset += sizeof(int);
-            CommandCount++;
+                *(int*)(_staging + _stagingOffset) = OP_REMOVE_COMPONENT;
+                _stagingOffset += sizeof(int);
+                *(Entity*)(_staging + _stagingOffset) = entity;
+                _stagingOffset += sizeof(Entity);
+                *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+                _stagingOffset += sizeof(int);
+                CommandCount++;
+            }
         }
 
         /// <summary>
@@ -149,9 +162,11 @@ namespace EntJoy.ECS
         /// </summary>
         public unsafe void Playback(EntityManager entityManager)
         {
-            int offset = 0;
-            while (offset < _stagingOffset)
+            lock (_sync)
             {
+                int offset = 0;
+                while (offset < _stagingOffset)
+                {
                 int opCode = *(int*)(_staging + offset);
                 offset += sizeof(int);
 
@@ -212,6 +227,7 @@ namespace EntJoy.ECS
 
             _stagingOffset = 0;
             CommandCount = 0;
+            }
         }
 
         public void Dispose()

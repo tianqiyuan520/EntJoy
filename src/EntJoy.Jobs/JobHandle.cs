@@ -26,6 +26,9 @@ public struct JobHandle
         }
     }
 
+    /// <summary>是否为空句柄（default(JobHandle)，两个后端均无有效依赖）。</summary>
+    public bool IsNull => !_nativeHandle.IsValid && _managedHandle.Completion == null;
+
     public void Complete()
     {
         if (_managedHandle.Completion != null) { _managedHandle.Complete(); return; }

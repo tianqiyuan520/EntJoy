@@ -28,6 +28,7 @@ namespace EntJoy.JobSystem
                 if (NativeJobCore.JobSystem_Initialize(numThreads) != 0)
                     throw new InvalidOperationException("Native JobSystem failed to initialize (worker creation/OOM).");
                 UseNative = true;
+                NativeJobScheduler.UseFallback = false;
                 NativeJobScheduler.RegisterPersistentAllocator();
                 NativeJobCore.ValidateStatsLayout();
                 NativeJobCore.RegisterCurrentBatchIdCallback();
@@ -40,6 +41,7 @@ namespace EntJoy.JobSystem
             {
                 NativeJobCore.SafeShutdown();
                 UseNative = false;
+                NativeJobScheduler.UseFallback = true;
                 ManagedJobScheduler.Initialize(
                     numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
             }
