@@ -29,9 +29,6 @@ namespace EntJoy.ECS
         private int _globalVersion;
         public int GlobalVersion => _globalVersion;
 
-        // AllEnabled 组合位图缓存（按 chunk enableVersion 失效）
-        private readonly Dictionary<int, CombinedMaskCache> _maskCache = new();
-
         public Archetype(ComponentType[] ts)
         {
             types = ts;
@@ -376,16 +373,29 @@ namespace EntJoy.ECS
             }
         }
 
-        public void Remove(int chunkIndex, int slotInChunk, out int movedEntityId, out int movedEntitySlot, out int compactedChunkIndex)
+        /// <summary>实体移除结果：swap-pop 搬移的实体与空 chunk 压缩信息（-1 = 无）。</summary>
+        public readonly struct RemovalResult
         {
-            compactedChunkIndex = -1;
+            public readonly int MovedEntityId;
+            public readonly int MovedEntitySlot;
+            public readonly int CompactedChunkIndex;
+
+            public RemovalResult(int movedEntityId, int movedEntitySlot, int compactedChunkIndex)
+            {
+                MovedEntityId = movedEntityId;
+                MovedEntitySlot = movedEntitySlot;
+                CompactedChunkIndex = compactedChunkIndex;
+            }
+        }
+
+        public RemovalResult Remove(int chunkIndex, int slotInChunk)
+        {
+            int movedEntityId = -1, movedEntitySlot = -1, compactedChunkIndex = -1;
             var span = CollectionsMarshal.AsSpan(_chunkList);
             ref var chunk = ref span[chunkIndex];
 
             if (chunk.EntityCount == 1)
             {
-                movedEntityId = -1;
-                movedEntitySlot = -1;
                 chunk.RemoveEntity(slotInChunk);
                 if (chunk.EntityCount == 0 && _chunkList.Count > 1)
                 {
@@ -405,12 +415,7 @@ namespace EntJoy.ECS
             else
             {
                 int lastEntitySlot = chunk.EntityCount - 1;
-                if (slotInChunk == lastEntitySlot)
-                {
-                    movedEntityId = -1;
-                    movedEntitySlot = -1;
-                }
-                else
+                if (slotInChunk != lastEntitySlot)
                 {
                     movedEntityId = chunk.GetEntity(lastEntitySlot).Id;
                     movedEntitySlot = slotInChunk;
@@ -419,6 +424,7 @@ namespace EntJoy.ECS
             }
 
             EntityCount--;
+            return new RemovalResult(movedEntityId, movedEntitySlot, compactedChunkIndex);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -599,191 +605,11 @@ namespace EntJoy.ECS
             }
         }
 
-        // ======================== 组合位图缓存 ========================
-
-        /// <summary>
-        /// 单组 AllEnabled 组合的位图缓存（pinned 托管数组，指针稳定）。
-        /// 结构与 _chunkList 索引一一对应；chunk 增删时整体重建。
-        /// </summary>
-        private sealed unsafe class CombinedMaskCache : IDisposable
-        {
-            public int ChunkCount;
-            public int[] ChunkEnableVersions = Array.Empty<int>();
-            public nint[] Ptrs = Array.Empty<nint>();      // ulong* 以 nint 存储
-            public GCHandle[] Handles = Array.Empty<GCHandle>();
-
-            public unsafe ulong* GetPtr(int chunkIndex)
-                => Ptrs[chunkIndex] == 0 ? null : (ulong*)Ptrs[chunkIndex];
-
-            public void Dispose()
-            {
-                foreach (var h in Handles)
-                {
-                    if (h.IsAllocated) h.Free();
-                }
-                Handles = Array.Empty<GCHandle>();
-                Ptrs = Array.Empty<nint>();
-            }
-        }
-
-        /// <summary>计算 AllEnabled 组合的哈希键。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int ComputeAllEnabledHash(ComponentType[] allEnabledTypes)
-        {
-            if (allEnabledTypes == null || allEnabledTypes.Length == 0)
-                return 0;
-
-            int hash = 17;
-            foreach (var type in allEnabledTypes)
-            {
-                hash = hash * 31 + type.Id;
-            }
-            return hash;
-        }
-
-        /// <summary>
-        /// 获取指定 Chunk 的组合位图（惰性计算 + 按 enableVersion 缓存）。
-        /// 返回 null 表示无交集（没有实体同时启用所有 AllEnabled 组件）。
-        /// 仅主线程使用（IJobChunk.Run 同步执行路径），并行调度路径由 ExecuteManagedChunk 独立计算。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public unsafe ulong* GetOrComputeCombinedMask(ComponentType[] allEnabledTypes, int chunkIndex, Chunk chunk)
-        {
-            if (allEnabledTypes == null || allEnabledTypes.Length == 0)
-                return null;
-            if (chunkIndex < 0 || chunkIndex >= _chunkList.Count)
-                return null;
-
-            int key = ComputeAllEnabledHash(allEnabledTypes);
-
-            // 缓存缺失或 chunk 数量变化（结构变更）→ 重建整套缓存
-            if (!_maskCache.TryGetValue(key, out var cache) || cache.ChunkCount != _chunkList.Count)
-            {
-                cache = BuildMaskCache(allEnabledTypes, key);
-                _maskCache[key] = cache;
-            }
-
-            // chunk 实体/启用状态变化 → 只重算当前 chunk
-            if (cache.ChunkEnableVersions[chunkIndex] != chunk.EnableVersion)
-                RecomputeChunkMask(cache, allEnabledTypes, chunkIndex, chunk);
-
-            return cache.GetPtr(chunkIndex);
-        }
-
-        private unsafe CombinedMaskCache BuildMaskCache(ComponentType[] allEnabledTypes, int key)
-        {
-            // 释放旧缓存（存在时）
-            if (_maskCache.TryGetValue(key, out var old))
-                old.Dispose();
-
-            int count = _chunkList.Count;
-            var cache = new CombinedMaskCache
-            {
-                ChunkCount = count,
-                ChunkEnableVersions = new int[count],
-                Ptrs = new nint[count],
-                Handles = new GCHandle[count],
-            };
-
-            for (int chunkIdx = 0; chunkIdx < count; chunkIdx++)
-            {
-                var chunk = _chunkList[chunkIdx];
-                if (chunk.EntityCount == 0) continue;
-                var full = ComputeForChunk(allEnabledTypes, chunk);
-                cache.Ptrs[chunkIdx] = (nint)Pin(full, out cache.Handles[chunkIdx]);
-                cache.ChunkEnableVersions[chunkIdx] = chunk.EnableVersion;
-            }
-            return cache;
-        }
-
-        private unsafe void RecomputeChunkMask(CombinedMaskCache cache, ComponentType[] allEnabledTypes, int chunkIndex, Chunk chunk)
-        {
-            if (cache.Handles[chunkIndex].IsAllocated)
-                cache.Handles[chunkIndex].Free();
-
-            if (chunk.EntityCount == 0)
-            {
-                cache.Ptrs[chunkIndex] = 0;
-                cache.ChunkEnableVersions[chunkIndex] = chunk.EnableVersion;
-                return;
-            }
-
-            var full = ComputeForChunk(allEnabledTypes, chunk);
-            cache.Ptrs[chunkIndex] = (nint)Pin(full, out cache.Handles[chunkIndex]);
-            cache.ChunkEnableVersions[chunkIndex] = chunk.EnableVersion;
-        }
-
-        /// <summary>计算单 chunk 的组合位图；无交集返回 null。</summary>
-        private unsafe ulong[]? ComputeForChunk(ComponentType[] allEnabledTypes, Chunk chunk)
-        {
-            int entityCount = chunk.EntityCount;
-            int ulongCount = (entityCount + 63) / 64;
-            var combinedMask = new ulong[ulongCount];
-
-            bool first = true;
-            foreach (var type in allEnabledTypes)
-            {
-                if (!componentTypeRecorder.TryGetValue(type, out int compIdx))
-                    continue;
-
-                ulong* bitmap = chunk.GetEnableBitMapPointer(compIdx);
-                if (bitmap == null) continue;
-
-                if (first)
-                {
-                    for (int i = 0; i < ulongCount; i++)
-                        combinedMask[i] = bitmap[i];
-                    first = false;
-                }
-                else
-                {
-                    bool hasAny = false;
-                    for (int i = 0; i < ulongCount; i++)
-                    {
-                        combinedMask[i] &= bitmap[i];
-                        if (combinedMask[i] != 0) hasAny = true;
-                    }
-                    if (!hasAny) return null;  // 交集为空，提前退出
-                }
-            }
-
-            if (first) return null;  // 没有任何 AllEnabled 组件在该 archetype 中
-
-            // 最终校验（单组件场景：第一个组件可能全 0）
-            bool any = false;
-            for (int i = 0; i < ulongCount; i++)
-            {
-                if (combinedMask[i] != 0) { any = true; break; }
-            }
-            return any ? combinedMask : null;
-        }
-
-        private static unsafe ulong* Pin(ulong[]? mask, out GCHandle handle)
-        {
-            if (mask == null)
-            {
-                handle = default;
-                return null;
-            }
-            handle = GCHandle.Alloc(mask, GCHandleType.Pinned);
-            return (ulong*)handle.AddrOfPinnedObject();
-        }
-
-        /// <summary>释放所有位图缓存（Archetype 销毁时调用）。</summary>
-        public void InvalidateMaskCache()
-        {
-            foreach (var cache in _maskCache.Values)
-                cache.Dispose();
-            _maskCache.Clear();
-        }
-
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             var errors = new List<Exception>();
-            try { InvalidateMaskCache(); }
-            catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
             DestroyAllEntityComponents(errors);
             foreach (var slab in _slabs)
             {

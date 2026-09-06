@@ -50,6 +50,7 @@ namespace EntJoy.ECS
             _world.CompletePendingNativeEvents();
             _world.NextFrameEvents();  // 帧末交换事件双缓冲
             _eventCounter.Reset();
+            _world.RefreshEventCounter(_eventCounter);  // 本帧事件 → 计数器（下帧 RunWhen 门控）
             TempAllocator.Reset();     // 帧末回收 Temp 内存（未手动 Free 的块 + 安全句柄）
         }
 
@@ -59,22 +60,43 @@ namespace EntJoy.ECS
             if (runWhenAttr != null && _eventCounter.GetCount(runWhenAttr.EventType) == 0)
                 return;
 
+            // ISystem 以装箱引用存储：struct 系统的字段修改在 OnUpdate 内写入 box，天然跨帧持久。
             var system = _systemInstances[slot.SystemType];
 
-            // 多 World 隔离：System 内通过 World.DefaultWorld 访问实体时，临时指向所属 World。
-            // 保存旧值，执行后恢复（支持嵌套 World / 手动切换场景）。
-            var prev = World.DefaultWorld;
+            // 入站依赖：按 [Read]/[Write] 查 per-type 表合并冲突依赖（读等写、写等写，读读不冲突）。
+            var incoming = ComputeIncomingDependency(slot);
+            // 每帧重建 SystemState：Dependency 由系统可改写（ISystemWithState），无跨帧字段。
+            var state = new SystemState { Dependency = incoming };
+
+            // 多 World 隔离：临时指向所属 World（ThreadStatic DefaultWorld 每线程独立，执行后恢复）。
+            var prevWorld = World.DefaultWorld;
             World.DefaultWorld = _world;
+            SystemExecutionContext.IsActive = true;
+            SystemExecutionContext.Dependency = incoming;
             long start = Stopwatch.GetTimestamp();
             try
             {
-                system.OnUpdate();
+                if (system is ISystemWithState withState)
+                {
+                    withState.OnUpdate(ref state);
+                    SystemExecutionContext.Dependency = state.Dependency;
+                }
+                else
+                {
+                    system.OnUpdate();
+                }
             }
             finally
             {
-                World.DefaultWorld = prev;
+                SystemExecutionContext.IsActive = false;
+                World.DefaultWorld = prevWorld;
             }
             long end = Stopwatch.GetTimestamp();
+
+            // 出站：按 [Write] 把本系统累积依赖写回 per-type 表（供后续系统合并）
+            var outgoing = SystemExecutionContext.Dependency;
+            foreach (var t in slot.WriteComponents)
+                _world.EntityManager.SetLastWriter(ComponentTypeManager.GetComponentType(t), outgoing);
 
             // 累计 System 耗时（性能分析器）
             double ms = (end - start) * 1000.0 / Stopwatch.Frequency;
@@ -85,6 +107,23 @@ namespace EntJoy.ECS
             if (ms > timing.MaxMs) timing.MaxMs = ms;
             timing.AvgMs = timing.TotalMs / timing.FrameCount;
             _timings[slot.SystemType] = timing;
+        }
+
+        private JobHandle ComputeIncomingDependency(SystemSlot slot)
+        {
+            var deps = new List<JobHandle>();
+            CollectConflictDependencies(slot.ReadComponents, deps);
+            CollectConflictDependencies(slot.WriteComponents, deps);
+            return deps.Count > 0 ? JobHandle.CombineDependencies(deps.ToArray()) : default;
+        }
+
+        private void CollectConflictDependencies(HashSet<Type> componentTypes, List<JobHandle> deps)
+        {
+            foreach (var t in componentTypes)
+            {
+                var h = _world.EntityManager.GetLastWriter(ComponentTypeManager.GetComponentType(t));
+                if (!h.IsNull) deps.Add(h);
+            }
         }
 
         /// <summary>生成性能分析报告（System 耗时 + Job 调度 + slab 复用 + 内存布局）。</summary>

@@ -7,6 +7,7 @@ namespace EntJoy.ECS
     /// <summary>非泛型事件流接口：用于 World 统一管理，避免反射调用。</summary>
     internal interface IEventStream
     {
+        int ReadCount { get; }
         void NextFrame();
         unsafe int DrainFromBuffer(void* dataPtr, int count, int expectedElementSize);
     }
@@ -25,11 +26,18 @@ namespace EntJoy.ECS
         private int _writeCount;   // 本帧已写入数
         private int _readCount;    // 上一帧写入数（swap 后可读）
         private uint _generation;
+        private long _overflowCount; // 累计因容量满而丢弃的事件数
         private readonly int _capacity;
         private readonly object _sync = new object();
 
         public uint Generation => Volatile.Read(ref _generation);
         public int Capacity => _capacity;
+
+        /// <summary>上一帧写入的事件数（NextFrame 后有效，帧末统计 RunWhen 用）。</summary>
+        public int ReadCount => Volatile.Read(ref _readCount);
+
+        /// <summary>累计丢弃的事件数（SendEvent/DrainFromBuffer 满时递增，诊断用）。</summary>
+        public long OverflowCount => Interlocked.Read(ref _overflowCount);
 
         public EventStream(int capacity = 1024)
         {
@@ -46,7 +54,11 @@ namespace EntJoy.ECS
         {
             lock (_sync)
             {
-                if (_writeCount >= _capacity) return false;
+                if (_writeCount >= _capacity)
+                {
+                    Interlocked.Increment(ref _overflowCount);
+                    return false;
+                }
                 _buffers[0][_writeCount++] = evt;
                 return true;
             }
@@ -102,6 +114,8 @@ namespace EntJoy.ECS
             lock (_sync)
             {
                 int toWrite = Math.Min(count, _capacity - _writeCount);
+                int dropped = count - toWrite;
+                if (dropped > 0) Interlocked.Add(ref _overflowCount, dropped);
                 if (toWrite <= 0) return 0;
                 var src = new ReadOnlySpan<T>(dataPtr, toWrite);
                 src.CopyTo(new Span<T>(_buffers[0], _writeCount, toWrite));

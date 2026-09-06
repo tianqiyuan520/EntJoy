@@ -50,26 +50,29 @@ namespace EntJoy.ECS
         /// </summary>
         private void RebuildGroupIndexIfDirty()
         {
-            int currentVersion = ComputeGroupIndexVersion();
-            if (currentVersion == _groupIndexVersion && _archetypeToQueries != null)
-                return;
-
-            var map = new Dictionary<Archetype, List<EntityQuery>>();
-            foreach (var query in _queryCache.Values)
+            lock (_queryCacheLock)
             {
-                query.EnsureUpToDate(); // 确保匹配集合为最新
-                foreach (var arch in query.MatchingArchetypes)
+                int currentVersion = ComputeGroupIndexVersion();
+                if (currentVersion == _groupIndexVersion && _archetypeToQueries != null)
+                    return;
+
+                var map = new Dictionary<Archetype, List<EntityQuery>>();
+                foreach (var query in _queryCache.Values)
                 {
-                    if (!map.TryGetValue(arch, out var list))
+                    query.EnsureUpToDate(); // 确保匹配集合为最新
+                    foreach (var arch in query.MatchingArchetypes)
                     {
-                        list = new List<EntityQuery>();
-                        map[arch] = list;
+                        if (!map.TryGetValue(arch, out var list))
+                        {
+                            list = new List<EntityQuery>();
+                            map[arch] = list;
+                        }
+                        list.Add(query);
                     }
-                    list.Add(query);
                 }
+                _archetypeToQueries = map;
+                _groupIndexVersion = currentVersion;
             }
-            _archetypeToQueries = map;
-            _groupIndexVersion = currentVersion;
         }
 
         /// <summary>

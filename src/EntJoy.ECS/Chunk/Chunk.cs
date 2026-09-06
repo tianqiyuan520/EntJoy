@@ -73,6 +73,12 @@ namespace EntJoy.ECS
             {
                 Unsafe.InitBlock((byte*)memoryBlock + meta.ChangedBitMaskOffset, 0, (uint)meta.ChangedBitMaskSize);
             }
+            // shared 值区清零：slab 复用（跨 World/跨 Archetype 复用）时残留旧值，会让未显式设置的
+            // shared 列（分组查询按值过滤）匹配到脏值 → 不同组实体混入同一 chunk。
+            if (meta.SharedValuesOffset != -1)
+            {
+                Unsafe.InitBlock((byte*)memoryBlock + meta.SharedValuesOffset, 0, (uint)(meta.TotalSize - meta.SharedValuesOffset));
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

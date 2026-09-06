@@ -127,7 +127,8 @@ namespace EntJoySample.ECS
 
             Console.WriteLine($"  Sent: {sent} (expected 5, 3 discarded)");
             Console.WriteLine($"  Buffered after NextFrame: {buffer.Length} (expected 5)");
-            bool ok = sent == 5 && buffer.Length == 5;
+            Console.WriteLine($"  OverflowCount: {smallStream.OverflowCount} (expected 3, 丢弃可观测)");
+            bool ok = sent == 5 && buffer.Length == 5 && smallStream.OverflowCount == 3;
             Console.WriteLine($"  Result: {(ok ? "PASS" : "FAIL")}");
             Console.WriteLine();
         }

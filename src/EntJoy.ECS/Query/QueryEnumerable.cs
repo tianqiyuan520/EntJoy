@@ -44,9 +44,11 @@ namespace EntJoy.ECS
         private int _t1Idx;
         private T0* _t0Base;
         private T1* _t1Base;
+        private int _startStructuralVersion;   // 迭代开始时的结构版本，检测迭代期间结构变更
 
-        // AllEnabled 组合位图（无过滤时为 null）
-        private ulong* _combinedMask;
+        // AllEnabled 组合位图（无过滤时为 null）。用托管数组（GC 追踪 byref），避免嵌套查询互相覆盖。
+        private ulong[] _combinedMask;
+        private ulong[] _maskBuffer;
         private int _ulongCount;
 
         // 关系过滤（WithRelationship<T>(target)）——逐 slot 校验 RelationSlot.Matches
@@ -74,6 +76,7 @@ namespace EntJoy.ECS
             _t1Idx = -1;
             _t0Base = null;
             _t1Base = null;
+            _startStructuralVersion = entityManager.StructuralVersion;
             _combinedMask = null;
             _ulongCount = 0;
             _hasRelFilter = builder.HasRelationshipFilter;
@@ -182,79 +185,88 @@ namespace EntJoy.ECS
         private bool ComputeCombinedMask(Chunk chunk)
         {
             _ulongCount = (chunk.EntityCount + 63) / 64;
-            ulong* combinedMask = TempBuffer.GetBuffer(_ulongCount);
-            _combinedMask = combinedMask;
-            for (int i = 0; i < _ulongCount; i++) combinedMask[i] = 0;
-
-            bool firstFound = false;
-            var archetype = chunk.Archetype;
-            foreach (var type in _allEnabledTypes)
+            if (_maskBuffer == null || _maskBuffer.Length < _ulongCount)
+                _maskBuffer = new ulong[_ulongCount];
+            _combinedMask = _maskBuffer;
+            fixed (ulong* combinedMask = _maskBuffer)
             {
-                int componentIndex = archetype.GetComponentTypeIndex(type);
-                if (componentIndex < 0) continue;
-                ulong* bitmap = chunk.GetEnableBitMapPointer(componentIndex);
-                if (bitmap == null) continue;
+                for (int i = 0; i < _ulongCount; i++) combinedMask[i] = 0;
 
-                if (!firstFound)
+                bool firstFound = false;
+                var archetype = chunk.Archetype;
+                foreach (var type in _allEnabledTypes)
                 {
-                    for (int i = 0; i < _ulongCount; i++)
-                        combinedMask[i] = bitmap[i];
-                    firstFound = true;
-                }
-                else
-                {
-                    // SIMD 批量 AND + 提前退出
-                    if (Avx2.IsSupported && _ulongCount >= 4)
+                    int componentIndex = archetype.GetComponentTypeIndex(type);
+                    if (componentIndex < 0) continue;
+                    ulong* bitmap = chunk.GetEnableBitMapPointer(componentIndex);
+                    if (bitmap == null) continue;
+
+                    if (!firstFound)
                     {
-                        int i = 0;
-                        var orResult = Vector256<ulong>.Zero;
-
-                        for (; i <= _ulongCount - 4; i += 4)
-                        {
-                            var a = Avx.LoadVector256(combinedMask + i);
-                            var b = Avx.LoadVector256(bitmap + i);
-                            var andResult = Avx2.And(a, b);
-                            Avx.Store(combinedMask + i, andResult);   // 必须存回 AND 结果，否则 combinedMask 残留首组件位图
-                            orResult = Avx2.Or(orResult, andResult);
-                        }
-
-                        bool hasIntersection = !Avx.TestZ(orResult, orResult);
-
-                        for (; i < _ulongCount && !hasIntersection; i++)
-                        {
-                            combinedMask[i] &= bitmap[i];
-                            hasIntersection = combinedMask[i] != 0;
-                        }
-
-                        if (hasIntersection)
-                        {
-                            for (; i < _ulongCount; i++)
-                                combinedMask[i] &= bitmap[i];
-                        }
-                        else
-                        {
-                            return false;
-                        }
+                        for (int i = 0; i < _ulongCount; i++)
+                            combinedMask[i] = bitmap[i];
+                        firstFound = true;
                     }
                     else
                     {
-                        bool hasAny = false;
-                        for (int i = 0; i < _ulongCount; i++)
+                        // SIMD 批量 AND + 提前退出
+                        if (Avx2.IsSupported && _ulongCount >= 4)
                         {
-                            combinedMask[i] &= bitmap[i];
-                            if (combinedMask[i] != 0) hasAny = true;
+                            int i = 0;
+                            var orResult = Vector256<ulong>.Zero;
+
+                            for (; i <= _ulongCount - 4; i += 4)
+                            {
+                                var a = Avx.LoadVector256(combinedMask + i);
+                                var b = Avx.LoadVector256(bitmap + i);
+                                var andResult = Avx2.And(a, b);
+                                Avx.Store(combinedMask + i, andResult);   // 必须存回 AND 结果，否则 combinedMask 残留首组件位图
+                                orResult = Avx2.Or(orResult, andResult);
+                            }
+
+                            bool hasIntersection = !Avx.TestZ(orResult, orResult);
+
+                            for (; i < _ulongCount && !hasIntersection; i++)
+                            {
+                                combinedMask[i] &= bitmap[i];
+                                hasIntersection = combinedMask[i] != 0;
+                            }
+
+                            if (hasIntersection)
+                            {
+                                for (; i < _ulongCount; i++)
+                                    combinedMask[i] &= bitmap[i];
+                            }
+                            else
+                            {
+                                return false;
+                            }
                         }
-                        if (!hasAny) return false;
+                        else
+                        {
+                            bool hasAny = false;
+                            for (int i = 0; i < _ulongCount; i++)
+                            {
+                                combinedMask[i] &= bitmap[i];
+                                if (combinedMask[i] != 0) hasAny = true;
+                            }
+                            if (!hasAny) return false;
+                        }
                     }
                 }
-            }
 
-            return firstFound;
+                return firstFound;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext()
         {
+            // 迭代期间结构变更（DestroyEntity/AddComponent 等 swap-pop）会使实体槽位移动，
+            // 静默读死槽/重复处理。对齐 DOTS 的 structural change 检测：版本不一致即抛。
+            if (_entityManager.StructuralVersion != _startStructuralVersion)
+                throw new InvalidOperationException("Structural change detected during query iteration.");
+
             // 已有当前 Chunk：从 slot+1 继续；否则从位置 0 开始
             if (_currentChunk.MemoryBlock != nint.Zero)
                 _slotIndex++;

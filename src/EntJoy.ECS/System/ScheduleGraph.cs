@@ -101,6 +101,9 @@ namespace EntJoy.ECS
                     if (HasManualOrder(i, j)) continue;
                     if (HasConflict(_systems[i], _systems[j]))
                     {
+                        // 已达可达关系（手动顺序的传递闭包，如 First→Middle→Last）时不再加自动边，
+                        // 否则自动冲突边可能与手动顺序形成环（First→Middle→Last→First）误报 cyclic dependency。
+                        if (IsReachable(i, j, graph) || IsReachable(j, i, graph)) continue;
                         if (_systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents) ||
                             _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents))
                         {
@@ -156,6 +159,23 @@ namespace EntJoy.ECS
             if (sj.OrderBefore.Contains(si.SystemType)) return true;
             if (si.OrderAfter.Contains(sj.SystemType)) return true;
             if (sj.OrderAfter.Contains(si.SystemType)) return true;
+            return false;
+        }
+
+        /// <summary>检查 graph 中 from 能否到达 to（DFS）。</summary>
+        private static bool IsReachable(int from, int to, List<int>[] graph)
+        {
+            var visited = new HashSet<int>();
+            var stack = new Stack<int>();
+            stack.Push(from);
+            while (stack.Count > 0)
+            {
+                int cur = stack.Pop();
+                if (cur == to) return true;
+                if (!visited.Add(cur)) continue;
+                foreach (var next in graph[cur])
+                    stack.Push(next);
+            }
             return false;
         }
 

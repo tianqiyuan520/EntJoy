@@ -6,11 +6,11 @@ namespace EntJoy.ECS
 {
     public unsafe ref struct ChunkEnabledMask
     {
-        private readonly ulong* _bits;
+        private readonly Span<ulong> _bits;
         private readonly int _length;
         private readonly int _ulongCount;    // 位图占用的 ulong 数量
 
-        internal ChunkEnabledMask(ulong* bits, int length)
+        internal ChunkEnabledMask(Span<ulong> bits, int length)
         {
             _bits = bits;
             _length = length;
@@ -23,10 +23,10 @@ namespace EntJoy.ECS
         public int UlongCount => _ulongCount;
 
         /// <summary>
-        /// 组合位图指针（每 bit 一个实体，位 0 = 实体 0）。
-        /// 供生成代码/用户内联 BitOperations 遍历；无过滤时为 null（Length 为 0，应遍历全部实体）。
+        /// 组合位图（每 bit 一个实体，位 0 = 实体 0）。
+        /// 供生成代码/用户内联 BitOperations 遍历；无过滤时为 default（Length 为 0，应遍历全部实体）。
         /// </summary>
-        public ulong* Bits
+        public Span<ulong> Bits
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => _bits;

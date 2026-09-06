@@ -70,5 +70,8 @@ namespace EntJoy.ECS
         {
             _index.Remove(targetId);
         }
+
+        /// <summary>清空整个索引（World 恢复/重建前调用）。</summary>
+        public void Clear() => _index.Clear();
     }
 }

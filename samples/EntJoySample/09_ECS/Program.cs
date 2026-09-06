@@ -106,6 +106,9 @@ namespace EntJoySample.ECS
                 // 关系全场景示例：父子层级 / 索敌 / 技能 M:N / 背包（ExclusiveTarget + 关系数据）
                 RelationScenarioDemo.Run();
 
+                // 系统 Job 自动依赖（DOTS SystemState.Dependency：隐式依赖 + ISystemWithState 显式）
+                SystemDependencyDemo.Run();
+
                 // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
                 DataNavigationDemo.Run();
 

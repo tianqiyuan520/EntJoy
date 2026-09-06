@@ -213,11 +213,7 @@ namespace EntJoy.ECS
 
             arch.CopyComponentsTo(srcChunkIndex, srcSlot, arch, dstChunkIndex, dstSlot);
 
-            arch.Remove(srcChunkIndex, srcSlot, out var movedId, out var movedSlot, out var compactedIdx);
-            if (movedId >= 0)
-                UpdateEntityLocation(movedId, arch, srcChunkIndex, movedSlot);
-            if (compactedIdx >= 0)
-                RefreshChunkEntityIndices(arch, compactedIdx);
+            RemoveAndFixup(arch, srcChunkIndex, srcSlot);
 
             UpdateEntityLocation(entity.Id, arch, dstChunkIndex, dstSlot);
             structuralVersion++;

@@ -46,23 +46,10 @@ namespace EntJoy.ECS
                 return;
             }
             // 独占关系（[ExclusiveRelation]）可能解绑其他 archetype 上的旧 source → 需等待全部 jobs
-            //（结构变更路径需 CompleteArchetypeJobs + 锁（与 AddComponentRaw 同纪律））
             if (compType.IsExclusiveRelation)
-            {
                 CompleteActiveJobs();
-            }
-            else if ((uint)entity.Id < (uint)entities.Length)
-            {
-                ref var info = ref GetEntityInfoRef(entity.Id);
-                if (info.Archetype != null)
-                    CompleteArchetypeJobs(new[] { info.Archetype });
-                else
-                    CompleteActiveJobs();
-            }
             else
-            {
-                CompleteActiveJobs();
-            }
+                CompleteEntityJobs(entity);
 
             lock (_structuralLock)
             {
