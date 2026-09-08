@@ -221,11 +221,14 @@ public static unsafe partial class NativeJobScheduler
             NativeJobCore.JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled ? 1 : 0);
             ConfigureGuidedFromEnv();
         }
-        catch
+        catch (Exception ex)
         {
             // C++ 调度器不可用 → 自动回退到纯 C# ManagedJobScheduler
             NativeJobCore.SafeShutdown();
             UseFallback = true;
+            System.Console.Error.WriteLine(
+                $"[EntJoy][WARN] Native JobSystem (NativeDll.dll/C++ Chase-Lev) failed to initialize; " +
+                $"falling back to pure C# ManagedJobScheduler. Native kernels will NOT run. Reason: {ex.GetType().Name}: {ex.Message}");
             global::EntJoy.JobSystem.Managed.ManagedJobScheduler.Initialize(
                 numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
         }

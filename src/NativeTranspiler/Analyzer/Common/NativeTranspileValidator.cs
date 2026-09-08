@@ -35,6 +35,7 @@ namespace NativeTranspiler.Analyzer
             "System.Math.Atan", "System.MathF.Atan",
             "System.Math.Atan2", "System.MathF.Atan2",
             "System.Math.Ceiling", "System.MathF.Ceiling",
+            "System.Math.Clamp", "System.MathF.Clamp",
             "System.Math.Cos", "System.MathF.Cos",
             "System.Math.Cosh", "System.MathF.Cosh",
             "System.Math.Exp", "System.MathF.Exp",
@@ -181,7 +182,7 @@ namespace NativeTranspiler.Analyzer
                 var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
                 if ((target != NativeTranspiler.BackendTarget.Cpp && target != NativeTranspiler.BackendTarget.Ispc) ||
                     executeMethod.Parameters.Length == 0 ||
-                    executeMethod.Parameters.Any(p => (p.RefKind != RefKind.Ref && p.RefKind != RefKind.In) || !IsUnmanagedType(p.Type)))
+                    executeMethod.Parameters.Any(p => IsInvalidEntityParam(p)))
                 {
                     diagnostics.Add(Diagnostic.Create(InvalidJobEntityError, executeMethod.Locations.FirstOrDefault(), structSymbol.Name));
                 }
@@ -261,6 +262,14 @@ namespace NativeTranspiler.Analyzer
             }
 
             return diagnostics.Count == 0;
+        }
+
+        /// <summary>IJobEntity Execute 参数校验：Entity 参数（DOTS 式，按值传）豁免 ref/in 要求。</summary>
+        private static bool IsInvalidEntityParam(IParameterSymbol p)
+        {
+            if (NativeTranspiler.IsEntityType(p.Type))
+                return false;   // Entity 参数按值传合法
+            return (p.RefKind != RefKind.Ref && p.RefKind != RefKind.In) || !IsUnmanagedType(p.Type);
         }
 
         public static bool IsUnmanagedType(ITypeSymbol type)

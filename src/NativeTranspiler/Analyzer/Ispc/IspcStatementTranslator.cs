@@ -142,6 +142,13 @@ namespace NativeTranspiler.Analyzer
             "float" => "float",
             "int" => "int",
             "bool" => "bool",
+            // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
+            "signed char" => "int8",
+            "unsigned char" => "uint8",
+            "short" => "int16",
+            "unsigned short" => "uint16",
+            "long long" => "int64",
+            "unsigned long long" => "uint64",
             _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
             _ => cppType
         };
@@ -293,6 +300,24 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(';');
             }
             _builder.AppendLine();
+        }
+
+        protected override void TranslateReturnStatement(ReturnStatementSyntax returnStmt)
+        {
+            // ISPC 不允许在 foreach 体内 return（见 G645884FA）。void return 语义等价于跳过当前 lane → continue。
+            if (_insideForeach)
+            {
+                if (returnStmt.Expression != null)
+                {
+                    // 带值 return 在 foreach 中无等价表达，降级为 base（会让 ISPC 报错，暴露语义问题而非静默错译）
+                    base.TranslateReturnStatement(returnStmt);
+                    return;
+                }
+                AppendIndent();
+                _builder.AppendLine("continue;");
+                return;
+            }
+            base.TranslateReturnStatement(returnStmt);
         }
 
         protected override void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)
@@ -621,6 +646,7 @@ namespace NativeTranspiler.Analyzer
                 "Exp" => "exp",
                 "Log" => "log",
                 "Abs" => "abs",
+                "Clamp" => "clamp",
                 "Floor" => "floor",
                 "Ceiling" => "ceil",
                 _ => method.Name.ToLower()

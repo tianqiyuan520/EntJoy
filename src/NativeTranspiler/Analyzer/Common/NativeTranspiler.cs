@@ -58,6 +58,15 @@ namespace NativeTranspiler.Analyzer
             Vectorize
         }
 
+        /// <summary>
+        /// 判断类型是否为 EntJoy.ECS.Entity（DOTS 式 IJobEntity Execute 的实体参数）。
+        /// 该参数不是组件列，需在组件数组收集/参数映射中跳过。
+        /// </summary>
+        public static bool IsEntityType(ITypeSymbol type) =>
+            type != null &&
+            type.Name == "Entity" &&
+            type.ContainingNamespace?.ToDisplayString() == "EntJoy.ECS";
+
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
         {
             if (type is IPointerTypeSymbol pointerType)

@@ -37,11 +37,14 @@ namespace EntJoy.JobSystem
                 NativeJobCore.JobSystem_SetJobCostCacheEnabled(NativeJobScheduler.JobCostCacheEnabled ? 1 : 0);
                 // 隐式批默认关闭：需要时显式 NativeJobScheduler.SetImplicitBatchEnabled(true)。
             }
-            catch
+            catch (Exception ex)
             {
                 NativeJobCore.SafeShutdown();
                 UseNative = false;
                 NativeJobScheduler.UseFallback = true;
+                System.Console.Error.WriteLine(
+                    $"[EntJoy][WARN] Native JobSystem (NativeDll.dll/C++ Chase-Lev) failed to initialize; " +
+                    $"falling back to pure C# ManagedJobScheduler. Native kernels will NOT run. Reason: {ex.GetType().Name}: {ex.Message}");
                 ManagedJobScheduler.Initialize(
                     numThreads <= 0 ? Math.Max(1, Environment.ProcessorCount - 1) : numThreads);
             }
