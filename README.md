@@ -489,6 +489,7 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 - [`HeavyJob`](src/EntJoySample/01_JobSystem/HeavyJob)：重计算和 CPU 满负载 Job 实验。
 - [`IJobChunkScheduleOverheadTest`](src/EntJoySample/01_JobSystem/IJobChunkScheduleOverheadTest)：比较 C#、C++、ISPC `IJobChunk` 空任务与极轻任务的固定调度开销。
 - [`JobProfilerTest`](src/EntJoySample/01_JobSystem/JobProfilerTest)：验证 Job Profiler 的采样和统计功能。
+- [`ParallelRwConflictTest`](src/EntJoySample/01_JobSystem/ParallelRwConflictTest)：演示并行读写冲突检测——Job 间交叉写冲突、以及主线程在 Job 活跃期访问原生容器时被拦、`Complete()` 后放行。
 
 ### 02 IJobChunk ECS
 
@@ -1058,6 +1059,7 @@ Working sources:
 - [`HeavyJob`](src/EntJoySample/01_JobSystem/HeavyJob): heavy-compute and full-CPU-load job experiments.
 - [`IJobChunkScheduleOverheadTest`](src/EntJoySample/01_JobSystem/IJobChunkScheduleOverheadTest): compares fixed scheduling overhead for empty and very light C#, C++, and ISPC `IJobChunk` workloads.
 - [`JobProfilerTest`](src/EntJoySample/01_JobSystem/JobProfilerTest): validates Job Profiler sampling and statistics.
+- [`ParallelRwConflictTest`](src/EntJoySample/01_JobSystem/ParallelRwConflictTest): demonstrates parallel read/write conflict detection — cross-job write conflicts, main-thread access blocked while a job references a native container, and release after `Complete()`.
 
 ### 02 IJobChunk ECS
 

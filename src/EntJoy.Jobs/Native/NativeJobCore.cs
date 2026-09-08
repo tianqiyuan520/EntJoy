@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using EntJoy.Collections;
 
 namespace EntJoy.JobSystem
 {
@@ -1032,6 +1033,8 @@ namespace EntJoy.JobSystem
             {
                 EnterJobExecution();
                 RegisterCurrentBatchJobName(name);
+                nint prevCtx = JobIdentity.CurrentContext;
+                JobIdentity.SetCurrentContext(ctx);
                 try
                 {
                     long start = 0;
@@ -1047,6 +1050,9 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
+                    SafetyHandleManager.ReleaseWritesForContext(ctx);
+                    SafetyHandleManager.ReleaseReadsForContext(ctx);
+                    JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
         }
@@ -1061,6 +1067,8 @@ namespace EntJoy.JobSystem
             {
                 EnterJobExecution();
                 RegisterCurrentBatchJobName(name);
+                nint prevCtx = JobIdentity.CurrentContext;
+                JobIdentity.SetCurrentContext(ctx);
                 try
                 {
                     long start = 0;
@@ -1076,6 +1084,9 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
+                    SafetyHandleManager.ReleaseWritesForContext(ctx);
+                    SafetyHandleManager.ReleaseReadsForContext(ctx);
+                    JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
         }
@@ -1090,6 +1101,8 @@ namespace EntJoy.JobSystem
             {
                 EnterJobExecution();
                 RegisterCurrentBatchJobName(name);
+                nint prevCtx = JobIdentity.CurrentContext;
+                JobIdentity.SetCurrentContext(ctx);
                 try
                 {
                     long startTicks = 0;
@@ -1106,6 +1119,9 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
+                    SafetyHandleManager.ReleaseWritesForContext(ctx);
+                    SafetyHandleManager.ReleaseReadsForContext(ctx);
+                    JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
         }
@@ -1120,6 +1136,8 @@ namespace EntJoy.JobSystem
             {
                 EnterJobExecution();
                 RegisterCurrentBatchJobName(name);
+                nint prevCtx = JobIdentity.CurrentContext;
+                JobIdentity.SetCurrentContext(ctx);
                 try
                 {
                     long startTicks = 0;
@@ -1135,6 +1153,9 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
+                    SafetyHandleManager.ReleaseWritesForContext(ctx);
+                    SafetyHandleManager.ReleaseReadsForContext(ctx);
+                    JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
         }
