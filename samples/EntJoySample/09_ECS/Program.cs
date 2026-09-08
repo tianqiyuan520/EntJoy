@@ -118,6 +118,9 @@ namespace EntJoySample.ECS
 
                 // SharedBlob：不可变共享数据 + 引用计数 + SpawnFrom 复制共享
                 //SharedBlobDemo.Run();
+
+                // IJobEntity DOTS 式 Entity 参数（Execute(..., Entity e)，e.Id = 全局实体序号，三后端）
+                //EntityParameterDemo.Run();
             }
             catch (Exception ex)
             {

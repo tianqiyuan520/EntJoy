@@ -24,6 +24,7 @@ struct ChunkJobData {
 // enableBitMaps 预留为将来支持 IEnableComponent 使用。
 // sharedValuePtrs: 每个 blittable SharedComponent 的单值指针（per-chunk，非 per-entity）。
 struct ChunkData {
+    void*   entityArray;        // Entity 数组首地址（IJobEntity 的 Entity 参数需要；无该参数时为 nullptr）
     void**  componentArrays;    // 组件数组指针 [requiredCount]，编译时已知索引
     int     entityCount;        // 实体数量
     int     requiredComponentCount; // 组件数组数量

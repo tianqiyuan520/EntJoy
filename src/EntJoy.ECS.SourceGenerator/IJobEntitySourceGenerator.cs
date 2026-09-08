@@ -90,8 +90,12 @@ namespace EntJoy.ECS.SourceGenerator
             string namespaceName = jobType.ContainingNamespace?.IsGlobalNamespace == false
                 ? jobType.ContainingNamespace.ToDisplayString()
                 : string.Empty;
-            string componentDecls = string.Join("\n", execute.Parameters.Select((p, _) =>
-                $"            var {p.Name} = __chunk.GetComponentDataSpan<{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>();"));
+            var entityParams = execute.Parameters.Where(p => IsEntityParam(p)).ToList();
+            string componentDecls = string.Join("\n", execute.Parameters
+                .Where(p => !IsEntityParam(p))
+                .Select(p => $"            var {p.Name} = __chunk.GetComponentDataSpan<{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>();"));
+            string entityDecls = string.Join("\n", entityParams.Select(p =>
+                $"                var {p.Name} = __chunk.GetEntitySpan()[__idx];"));
             string inlinedBody = BuildInlinedBody(jobType, execute);
 
             var sb = new StringBuilder();
@@ -175,6 +179,8 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("        {");
                 sb.AppendLine("            for (int __idx = 0; __idx < __count; __idx++)");
                 sb.AppendLine("            {");
+                if (!string.IsNullOrEmpty(entityDecls))
+                    sb.AppendLine(entityDecls);
                 if (!string.IsNullOrEmpty(inlinedBody))
                     sb.Append(inlinedBody);
                 sb.AppendLine("            }");
@@ -191,6 +197,8 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("                if (__m == 0) { __idx = (__u + 1) << 6; continue; }");
                 sb.AppendLine("                __idx += System.Numerics.BitOperations.TrailingZeroCount(__m);");
                 sb.AppendLine("                if (__idx >= __count) break;");
+                if (!string.IsNullOrEmpty(entityDecls))
+                    sb.AppendLine(entityDecls);
                 if (!string.IsNullOrEmpty(inlinedBody))
                     sb.Append(inlinedBody);
                 sb.AppendLine("                __idx++;");
@@ -218,7 +226,8 @@ namespace EntJoy.ECS.SourceGenerator
 
             var paramMap = new Dictionary<string, string>();
             for (int i = 0; i < execute.Parameters.Length; i++)
-                paramMap[execute.Parameters[i].Name] = $"{execute.Parameters[i].Name}[__idx]";
+                if (!IsEntityParam(execute.Parameters[i]))
+                    paramMap[execute.Parameters[i].Name] = $"{execute.Parameters[i].Name}[__idx]";
 
             var localNames = new HashSet<string>();
             foreach (var node in ms.Body.DescendantNodes())
@@ -302,6 +311,11 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.Append(char.IsLetterOrDigit(c) ? c : '_');
             return sb.ToString();
         }
+
+        /// <summary>DOTS 式 IJobEntity 的 Entity 参数（按值传，非组件列）。</summary>
+        private static bool IsEntityParam(IParameterSymbol p) =>
+            p.Type.Name == "Entity" &&
+            p.Type.ContainingNamespace?.ToDisplayString() == "EntJoy.ECS";
         private sealed class JobCandidate
         {
             public JobCandidate(INamedTypeSymbol jobType, IMethodSymbol execute, bool isNativeTranspiled)

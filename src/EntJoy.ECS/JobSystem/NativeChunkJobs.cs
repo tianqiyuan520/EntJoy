@@ -38,6 +38,7 @@ namespace EntJoy.ECS.JobSystem
     [StructLayout(LayoutKind.Sequential)]
     public unsafe struct ChunkData
     {
+        public void* entityArray;           // Entity 数组首地址（IJobEntity 的 Entity 参数需要；无该参数时为 null）
         public void** componentArrays;      // 组件数组指针 [requiredCount]
         public int entityCount;             // 实体数量
         public int requiredComponentCount;  // 组件数组数量

@@ -598,14 +598,17 @@ namespace NativeTranspiler.Analyzer
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
-            // 从 __chunkData->componentArrays 提取组件数组指针
+            // 从 __chunkData->componentArrays 提取组件数组指针（Entity 参数不占组件列，需独立计数）
+            int compIdx = 0;
             for (int i = 0; i < executeMethod.Parameters.Length; i++)
             {
                 var param = executeMethod.Parameters[i];
+                if (NativeTranspiler.IsEntityType(param.Type)) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 string constPrefix = param.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{i}]);");
+                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{compIdx}]);");
                 sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+                compIdx++;
             }
 
             // 预翻译标量 body
@@ -619,6 +622,12 @@ namespace NativeTranspiler.Analyzer
 
             bool hasReturn = scalarBody.Contains("return;");
 
+            // Entity 参数：用函数内局部结构体（{ int Id; int Version; } 对齐 C# Entity），
+            // 避免与生成的 EntJoy_ECS_Entity.h 结构头 redefinition（Entity 既可能是框架内置，也可能是用户结构字段）。
+            bool hasEntityParam = executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type));
+            if (hasEntityParam)
+                sb.AppendLine("    struct __EntJoyEntity { int Id; int Version; };");
+
             // 实体循环
             sb.AppendLine();
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
@@ -626,6 +635,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    {");
             foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
             {
+                if (NativeTranspiler.IsEntityType(p.Type))
+                {
+                    sb.AppendLine($"        __EntJoyEntity {p.Name} = ((__EntJoyEntity*)__chunkData->entityArray)[__entity_index];");
+                    continue;
+                }
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
                 string constPrefix = p.RefKind == RefKind.In ? "const " : "";
                 sb.AppendLine($"        {constPrefix}{cppType}& {p.Name} = __entity_param_{i}_ptr[__entity_index];");
@@ -731,6 +745,8 @@ namespace NativeTranspiler.Analyzer
                 {
                     foreach (var parameter in execute.Parameters)
                     {
+                        if (NativeTranspiler.IsEntityType(parameter.Type))
+                            continue;   // Entity 参数不是组件列
                         if (parameter.Type is INamedTypeSymbol componentType &&
                             !result.Any(t => SymbolEqualityComparer.Default.Equals(t, componentType)))
                         {
@@ -1107,6 +1123,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
                     sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;     // 预留 IEnableComponent");
                     sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+                    // 仅当 Execute 声明 Entity 参数时才传实体数组（没有就不传，避免无谓拷贝/解引用）
+                    if (executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type)))
+                        sb.AppendLine("    __chunkDataLite.entityArray = __chunkData->entityArray;");
                 }
 
                 // IJobEntity 和 IJobChunk：解包作业字段到局部变量（指针）
@@ -1300,6 +1319,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("        __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
                     sb.AppendLine("        __chunkDataLite.enableBitMaps = nullptr;");
                     sb.AppendLine("        __chunkDataLite.enableBitmapCount = 0;");
+                    // 仅当 Execute 声明 Entity 参数时才传实体数组
+                    if (executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type)))
+                        sb.AppendLine("        __chunkDataLite.entityArray = __chunkData->entityArray;");
                     string funcName = GetCppJobFunctionName(jobStruct);
                     string fieldArgs = BuildChunkExecuteFieldArgs(jobStruct);
                     string rangeCallArgs = string.IsNullOrEmpty(fieldArgs)

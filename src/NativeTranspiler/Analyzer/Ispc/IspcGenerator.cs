@@ -46,6 +46,13 @@ namespace NativeTranspiler.Analyzer.Common
             "EntJoy::Mathematics::float2" => "float2",
             "EntJoy::Mathematics::int2" => "int2",
             "EntJoy::Mathematics::uint2" => "uint2",
+            // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
+            "signed char" => "int8",
+            "unsigned char" => "uint8",
+            "short" => "int16",
+            "unsigned short" => "uint16",
+            "long long" => "int64",
+            "unsigned long long" => "uint64",
             _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
             _ => cppType
         };
@@ -380,7 +387,8 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 var executeMethodForIncludes = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
                 foreach (var parameter in executeMethodForIncludes.Parameters)
-                    CollectTypeInclude(parameter.Type, includes);
+                    if (!NativeTranspiler.IsEntityType(parameter.Type))
+                        CollectTypeInclude(parameter.Type, includes);
             }
             if (CppJobGenerator.IsChunkJob(jobStruct))
             {
@@ -780,6 +788,7 @@ namespace NativeTranspiler.Analyzer.Common
             // IJobEntity + ISPC: 用 Execute 参数的组件类型构建 component array 列表
             // IJobChunk: 用 ChunkNativeArray locals
             List<(INamedTypeSymbol type, string name)> chunkArrays;
+            var entityParamNames = new List<string>();
             if (CppJobGenerator.IsEntityJob(jobStruct))
             {
                 chunkArrays = new List<(INamedTypeSymbol type, string name)>();
@@ -788,6 +797,11 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     foreach (var param in executeMethod.Parameters)
                     {
+                        if (NativeTranspiler.IsEntityType(param.Type))
+                        {
+                            entityParamNames.Add(param.Name);
+                            continue;
+                        }
                         if (param.Type is INamedTypeSymbol namedType)
                             chunkArrays.Add((namedType, param.Name));
                     }
@@ -860,6 +874,8 @@ namespace NativeTranspiler.Analyzer.Common
                 sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
                 sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;");
                 sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+                if (entityParamNames.Count > 0)
+                    sb.AppendLine("    __chunkDataLite.entityArray = __chunkData->entityArray;");
             }
             sb.AppendLine();
 
@@ -939,6 +955,9 @@ namespace NativeTranspiler.Analyzer.Common
             callArgs.Add(CppJobGenerator.IsEntityJob(jobStruct)
                 ? "__chunkDataLite.entityCount"
                 : "__chunkData->entityCount");
+            // DOTS 式 Entity 参数：实体数组指针（ispc::__EntJoyEntity*，与 ISPC 签名 uniform __EntJoyEntity {name}_ptr[] 对应）
+            foreach (var epName in entityParamNames)
+                callArgs.Add($"reinterpret_cast<ispc::__EntJoyEntity*>(__chunkDataLite.entityArray)");
             // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
             if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
                 callArgs.Add("std::thread::hardware_concurrency()");
@@ -1146,6 +1165,17 @@ namespace NativeTranspiler.Analyzer.Common
             var fields = GetFieldsFromJob(jobStruct);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
 
+            // DOTS 式 Entity 参数：追加 uniform __EntJoyEntity {name}_ptr[]（数组指针，与 entityArray 对应）。
+            // 用局部结构体 __EntJoyEntity 而非全局 Entity，避免与生成的 EntJoy_ECS_Entity.ispc（用户结构字段）redefinition。
+            var entityParams = CppJobGenerator.IsEntityJob(jobStruct)
+                ? jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute)
+                    .Parameters.Where(p => NativeTranspiler.IsEntityType(p.Type)).ToList()
+                : new List<IParameterSymbol>();
+            if (entityParams.Count > 0)
+                sb.AppendLine("struct __EntJoyEntity { int Id; int Version; };");
+            foreach (var ep in entityParams)
+                paramsList += $", uniform __EntJoyEntity {ep.Name}_ptr[]";
+
             // ─── SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent） ───
             bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
             if (usesSendEvent)
@@ -1162,13 +1192,17 @@ namespace NativeTranspiler.Analyzer.Common
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
                 var entityTranslator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
                 foreach (var parameter in executeMethod.Parameters)
-                    entityTranslator.AddEntityRefParam(parameter.Name);
+                    if (!NativeTranspiler.IsEntityType(parameter.Type))
+                        entityTranslator.AddEntityRefParam(parameter.Name);
                 entityTranslator.SetInsideForeach(true);
                 // SendEvent 需要 EventBuffer 参数名（ISPC 侧用 __eventBufferHeaders 直接访问）
                 if (usesSendEvent)
                     entityTranslator.SetEventBufferParamName("__eventBufferHeaders");
                 var bodyCode = entityTranslator.Translate(methodSyntax.Body);
                 sb.AppendLine("    foreach_tiled (__entity_index = 0 ... __entity_count) {");
+                // Entity 参数解引用为局部结构体（body 内通过 entity.Id / entity.Version 访问）
+                foreach (var ep in entityParams)
+                    sb.AppendLine($"{Indent}{Indent}__EntJoyEntity {ep.Name} = {ep.Name}_ptr[__entity_index];");
                 foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                 {
                     if (line.Length == 0) continue;
@@ -1279,8 +1313,12 @@ namespace NativeTranspiler.Analyzer.Common
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
             if (executeMethod == null) return result;
             foreach (var param in executeMethod.Parameters)
+            {
+                if (NativeTranspiler.IsEntityType(param.Type))
+                    continue;   // Entity 参数不是组件列
                 if (param.Type is INamedTypeSymbol namedType)
                     result.Add((namedType, param.Name));
+            }
             return result;
         }
 
