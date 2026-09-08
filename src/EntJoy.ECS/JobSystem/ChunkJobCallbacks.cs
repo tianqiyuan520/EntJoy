@@ -1,7 +1,8 @@
-﻿using EntJoy.JobSystem;
+using EntJoy.JobSystem;
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using EntJoy.Collections;
 
 namespace EntJoy.ECS.JobSystem
 {
@@ -19,6 +20,9 @@ namespace EntJoy.ECS.JobSystem
             {
                 NativeJobCore.EnterJobExecution();
                 NativeJobCore.RegisterCurrentBatchJobName(typeof(T).Name);
+                // 并行写冲突检测 ctx：同一 job 的 chunk range 共享同一 context block（同 ctx 放行）
+                nint prevCtx = JobIdentity.CurrentContext;
+                JobIdentity.SetCurrentContext(ctx);
                 try
                 {
                     var header = (ChunkContextHeader*)ctx;
@@ -51,6 +55,9 @@ namespace EntJoy.ECS.JobSystem
                 finally
                 {
                     NativeJobCore.ExitJobExecution();
+                    SafetyHandleManager.ReleaseWritesForContext(ctx);
+                    SafetyHandleManager.ReleaseReadsForContext(ctx);
+                    JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
         }

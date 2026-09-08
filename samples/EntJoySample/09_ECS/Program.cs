@@ -6,7 +6,8 @@ namespace EntJoySample.ECS
 {
     public static class Program
     {
-        // 当前入口已切换到 01_JobSystem/IJobInlineProbeTest（README 入口约定：仅保留一个非注释 Main）
+        // 当前入口已切换到 01_JobSystem/ParallelRwConflictTest（README 入口约定：仅保留一个非注释 Main）
+        /*
         public static void Main()
         {
             Console.WriteLine("=== EntJoy ECS Test ===\n");
@@ -104,19 +105,19 @@ namespace EntJoySample.ECS
                 //ComponentMetaDemo.Run();
 
                 // 关系全场景示例：父子层级 / 索敌 / 技能 M:N / 背包（ExclusiveTarget + 关系数据）
-                RelationScenarioDemo.Run();
+                //RelationScenarioDemo.Run();
 
                 // 系统 Job 自动依赖（DOTS SystemState.Dependency：隐式依赖 + ISystemWithState 显式）
-                SystemDependencyDemo.Run();
+                //SystemDependencyDemo.Run();
 
                 // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
-                DataNavigationDemo.Run();
+                //DataNavigationDemo.Run();
 
                 // World 快照：TakeSnapshot 序列化 → 修改 → Restore 恢复
-                WorldSnapshotDemo.Run();
+                //WorldSnapshotDemo.Run();
 
                 // SharedBlob：不可变共享数据 + 引用计数 + SpawnFrom 复制共享
-                SharedBlobDemo.Run();
+                //SharedBlobDemo.Run();
             }
             catch (Exception ex)
             {
@@ -125,5 +126,6 @@ namespace EntJoySample.ECS
             }
             Console.WriteLine("\n=== All ECS Demos Complete ===\n");
         }
+        */
     }
 }

@@ -12,8 +12,16 @@ namespace EntJoy.ECS
 
         public int Count => _chunk.MemoryBlock != nint.Zero ? _chunk.EntityCount : 0;
 
-        // 安全句柄在应用域生命周期内持续有效，无需显式释放
-        private static readonly AtomicSafetyHandle s_chunkViewSafety = SafetyHandleManager.Allocate();
+        // 安全句柄在应用域生命周期内持续有效，无需显式释放。
+        // 共享句柄（多 chunk view 复用同一句柄）豁免并行写冲突检测——chunk 并行 tile 写不同 chunk 同列是合法场景。
+        private static readonly AtomicSafetyHandle s_chunkViewSafety = CreateChunkViewSafety();
+
+        private static AtomicSafetyHandle CreateChunkViewSafety()
+        {
+            var h = SafetyHandleManager.Allocate();
+            SafetyHandleManager.ExemptWriteTracking(h.Index);
+            return h;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ThrowIfNull()

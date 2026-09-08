@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using EntJoy.Collections;
 
 namespace EntJoy.JobSystem.Managed
 {
@@ -84,6 +85,7 @@ namespace EntJoy.JobSystem.Managed
         internal int _returned;        // 1=已归还/自动归还（幂等防 double-return）。归还后保持 1，Rent 新 job 时清 0。
         internal int _autoReturn;      // 1=此 job 完成后由调度器自动归还（依赖链中间 handle，防泄漏）；一律经 Volatile.Read/Write 访问
         internal Exception _exception; // 首个 job 异常（first-wins），供异常传播；Reset 时清空
+        internal nint HostCtx;         // 此 job 的并行冲突检测执行上下文（托管 job 用 box 哈希；0=未设置）。Signal 归零时释放其读声明。
 
         internal ManagedCompletion()
         {
@@ -159,6 +161,8 @@ namespace EntJoy.JobSystem.Managed
             if (Interlocked.Decrement(ref Remaining) == 0)
             {
                 int completedGeneration = Volatile.Read(ref Generation);
+                if (HostCtx != 0)
+                    SafetyHandleManager.ReleaseReadsForContext(HostCtx);   // job 完整结束：释放其读声明
                 _done.Set();
                 DispatchComplete();
                 // 依赖链中间 handle：完成后由完成线程自动归还，避免只等末端 handle 导致的连中部 completion 泄漏。

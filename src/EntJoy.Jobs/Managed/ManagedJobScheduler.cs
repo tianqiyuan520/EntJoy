@@ -442,6 +442,10 @@ namespace EntJoy.JobSystem.Managed
             // 对齐 Native 回调：设置执行深度，使 EntityManager 的 IsExecutingJob 检测
             // 在 Managed fallback 下同样生效——否则 job 内结构变更会自等待自 → 死锁。
             NativeJobCore.EnterJobExecution();
+            // 并行写冲突检测 ctx：同一 job 的 boxed 实例唯一（tile 复用同箱 → 同 ctx 放行）
+            nint ctx = RuntimeHelpers.GetHashCode(task.Job);
+            nint prevCtx = EntJoy.Collections.JobIdentity.CurrentContext;
+            EntJoy.Collections.JobIdentity.SetCurrentContext(ctx);
             try
             {
                 task.Runner(task.Job, task.Start, task.Count);
@@ -453,6 +457,8 @@ namespace EntJoy.JobSystem.Managed
             finally
             {
                 NativeJobCore.ExitJobExecution();
+                EntJoy.Collections.SafetyHandleManager.ReleaseWritesForContext(ctx);
+                EntJoy.Collections.JobIdentity.SetCurrentContext(prevCtx);
                 // completion 信号
                 task.Completion?.Signal();
                 // 释放 job 盒
@@ -507,6 +513,8 @@ namespace EntJoy.JobSystem.Managed
 
             // 先 box job（避免 ref 参数在 lambda 中捕获）
             var boxedJob = SingleCache<T>.Box(job);
+            // 托管 job 并行冲突检测 ctx：box 哈希，同一 job 所有 tile 共享（与 ExecuteTileTask 一致）
+            completion.HostCtx = RuntimeHelpers.GetHashCode(boxedJob);
 
             void EnqueueSingle()
             {
@@ -568,6 +576,8 @@ namespace EntJoy.JobSystem.Managed
             Interlocked.Exchange(ref completion.Remaining, taskCount);
 
             var box = ParallelCache<T>.Box(job);
+            // 托管 job 并行冲突检测 ctx：box 哈希，同一 job 所有 tile 共享（与 ExecuteTileTask 一致）
+            completion.HostCtx = RuntimeHelpers.GetHashCode(box);
             completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
 
             void EnqueueTiles()
