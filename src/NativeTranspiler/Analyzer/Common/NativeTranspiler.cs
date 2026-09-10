@@ -333,8 +333,43 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("};");
             sb.AppendLine();
+
+            // 零值构造：C# `default` / `new T()` 的 ISPC 等价物。
+            // ISPC 不支持 `T{}` / `(T){...}` 复合字面量（ispc 1.30 语法错），
+            // 只能逐字段赋零后整体返回。
+            sb.AppendLine($"static struct {structSymbol.Name} make_zero_{structSymbol.Name}() {{");
+            sb.AppendLine($"    struct {structSymbol.Name} r;");
+            foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                sb.AppendLine($"    r.{f.Name} = {ZeroValueExpr(f.Type)};");
+            sb.AppendLine("    return r;");
+            sb.AppendLine("}");
+            sb.AppendLine();
+
             sb.AppendLine($"#endif // {guard}");
             return sb.ToString();
+        }
+
+        /// <summary>构造某个类型的 ISPC 零值表达式（供 struct 零值构造使用）。</summary>
+        private static string ZeroValueExpr(ITypeSymbol type)
+        {
+            if (type is IPointerTypeSymbol) return "0";
+            if (type is INamedTypeSymbol namedType && namedType.IsGenericType) return "0"; // 容器字段不出现在 ISPC struct 中
+
+            if (GetNamespace(type) == Config.NamespaceEntJoyMathematics)
+            {
+                return type.Name switch
+                {
+                    "float2" => "make_float2(0.f, 0.f)",
+                    "int2" => "make_int2(0, 0)",
+                    "uint2" => "make_uint2(0u, 0u)",
+                    _ => "0"
+                };
+            }
+
+            if (type.TypeKind == TypeKind.Struct && !IsBuiltinUnmanaged(type) && !IsEntJoyPredefinedType(type))
+                return $"make_zero_{type.Name}()";
+
+            return type.SpecialType == SpecialType.System_Boolean ? "false" : "0";
         }
 
         public static string GenerateCppStructDefinition(INamedTypeSymbol structSymbol)
