@@ -749,10 +749,17 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);  // 杩斿洖 "int*"
                     parameters.Add($"{cppType} {param.Name}_ptr");
                 }
-                else
+                else if (param.RefKind == RefKind.Ref || param.RefKind == RefKind.Out)
                 {
+                    // ref/out：指针 ABI
                     var csType = param.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                     parameters.Add($"{csType}* {param.Name}_ptr");
+                }
+                else
+                {
+                    // 按值参数：与 C++ 侧一致按值传递（C# 值参数语义即副本）
+                    var csType = param.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                    parameters.Add($"{csType} {param.Name}");
                 }
             }
             return parameters;
@@ -780,10 +787,15 @@ namespace NativeTranspiler.Analyzer
                 {
                     args.Add(param.Name);
                 }
-                else
+                else if (param.RefKind == RefKind.Ref || param.RefKind == RefKind.Out)
                 {
                     var csType = param.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                     args.Add($"({csType}*)Unsafe.AsPointer(ref {param.Name})");
+                }
+                else
+                {
+                    // 按值参数：与 C++ 侧一致直接传值
+                    args.Add(param.Name);
                 }
             }
             return args;

@@ -35,6 +35,10 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include <cstddef>");
+            // 签名中用到的用户自定义结构体（如 out/ref 参数、返回值）必须 include 其定义头，
+            // 否则 unity build 的 include 顺序一旦变化就会报 use of undeclared identifier。
+            foreach (var t in CollectSignatureStructTypes(method))
+                sb.AppendLine($"#include \"{NativeTranspiler.GetStructHeaderFileName(t)}.h\"");
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
@@ -42,6 +46,36 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true) + ";");
             return sb.ToString();
+        }
+
+        /// <summary>收集方法签名（参数/返回值）中出现的用户自定义结构体类型。</summary>
+        internal static IEnumerable<INamedTypeSymbol> CollectSignatureStructTypes(IMethodSymbol method)
+        {
+            var result = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            var queue = new Queue<ITypeSymbol>();
+            foreach (var p in method.Parameters) queue.Enqueue(p.Type);
+            queue.Enqueue(method.ReturnType);
+            while (queue.Count > 0)
+            {
+                var t = queue.Dequeue();
+                if (t is IPointerTypeSymbol ptr) { queue.Enqueue(ptr.PointedAtType); continue; }
+                if (t is IArrayTypeSymbol arr) { queue.Enqueue(arr.ElementType); continue; }
+                if (t is not INamedTypeSymbol named) continue;
+                if (named.IsGenericType)
+                {
+                    foreach (var ta in named.TypeArguments) queue.Enqueue(ta);
+                    continue;
+                }
+                if (named.TypeKind != TypeKind.Struct) continue;
+                if (named.ContainingAssembly == null) continue;
+                // EntJoy 内建数学类型由 NativeMath.h 提供，无需用户结构体头
+                var ns = named.ContainingNamespace?.ToDisplayString();
+                if (ns == "EntJoy.Mathematics") continue;
+                if (NativeTranspiler.IsEntJoyNativeContainerType(named)) continue;
+                if (named.SpecialType != SpecialType.None) continue;
+                if (result.Add(named)) { }
+            }
+            return result;
         }
 
     public static string GenerateImplementation(IMethodSymbol method, Compilation compilation,
@@ -98,11 +132,13 @@ namespace NativeTranspiler.Analyzer
                 // NativeArray: nothing to declare
             }
 
-            // 2. 为普通值类型参数创建局部引用（跳过容器和指针类型），移除 const
+            // 2. 为 ref/out 参数创建局部引用（值参数按值传递，无需前导；
+            //    跳过容器和指针类型），移除 const
             foreach (var param in method.Parameters)
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(param.Type)) continue;
                 if (param.Type is IPointerTypeSymbol) continue;
+                if (param.RefKind != RefKind.Ref && param.RefKind != RefKind.Out) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 sb.AppendLine($"    {cppType}& {param.Name} = *{param.Name}_ptr;");
             }
@@ -124,6 +160,21 @@ namespace NativeTranspiler.Analyzer
                     var bodyCode = translator.Translate(methodSyntax.Body);
                     sb.Append(bodyCode);
                 }
+            }
+            else if (methodSyntax?.ExpressionBody != null)
+            {
+                // 表达式体方法（`=> expr`）没有 BlockSyntax Body —— 旧实现直接落到
+                // "(empty method body)" 分支，非 void 方法因此缺失 return（C++ 未定义行为，
+                // 调用方拿到垃圾值；MSVC 还可能触发 __debugbreak）。此处补 `return expr;`。
+                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                bool useFastMath = AttributeHelper.HasFastCppMathLib(method,
+                    compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute"));
+                var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
+                sb.Append("    ");
+                if (method.ReturnType.SpecialType != SpecialType.System_Void)
+                    sb.Append("return ");
+                sb.Append(translator.TranslateExpressionToString(methodSyntax.ExpressionBody.Expression));
+                sb.AppendLine(";");
             }
             else
             {
@@ -423,10 +474,19 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
                     parameters.Add($"{cppType} RESTRICT {p.Name}_ptr");
                 }
-                else
+                else if (p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out)
                 {
+                    // ref/out：保持指针 ABI（调用方必须传左值地址）
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
                     parameters.Add($"{cppType}* RESTRICT {p.Name}_ptr");
+                }
+                else
+                {
+                    // ★ 按值参数默认按值传递。C# 的值参数语义就是副本，
+                    // 旧实现（T* ptr + T& x = *ptr）实为引用语义，既不符合 C# 语义，
+                    // 又要求调用点提供左值 —— 字面量/临时量（&0、&false、&(a-b)）直接编译失败。
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
+                    parameters.Add($"{cppType} {p.Name}");
                 }
             }
             string paramStr = string.Join(", ", parameters);
@@ -436,7 +496,7 @@ namespace NativeTranspiler.Analyzer
                 return $"{returnType} {funcName}({paramStr})";
         }
 
-        private static IEnumerable<IMethodSymbol> CollectCalledStaticMethods(IMethodSymbol method, Compilation compilation)
+        internal static IEnumerable<IMethodSymbol> CollectCalledStaticMethods(IMethodSymbol method, Compilation compilation)
         {
             var calledMethods = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
