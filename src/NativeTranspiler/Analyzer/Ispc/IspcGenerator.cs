@@ -41,26 +41,40 @@ namespace NativeTranspiler.Analyzer.Common
         // ---------- 类型映射 ----------
 
         /// <summary>将 C++ 类型名映射为 ISPC 类型名（除去命名空间前缀）</summary>
-        private static string ToIspcType(string cppType) => cppType switch
+        private static string ToIspcType(string cppType)
         {
-            "EntJoy::Mathematics::float2" => "float2",
-            "EntJoy::Mathematics::int2" => "int2",
-            "EntJoy::Mathematics::uint2" => "uint2",
-            // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
-            "signed char" => "int8",
-            "unsigned char" => "uint8",
-            "short" => "int16",
-            "unsigned short" => "uint16",
-            "long long" => "int64",
-            "unsigned long long" => "uint64",
-            _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
-            _ => cppType
-        };
+            // 指针后缀先剥离再映射基类型：否则 "unsigned char*" 匹配不到标量规则，
+            // 原样输出 → ISPC 不识别 unsigned char/signed char 拼写，报语法错。
+            if (cppType.EndsWith("*"))
+                return ToIspcType(cppType.Substring(0, cppType.Length - 1).TrimEnd()) + "*";
+
+            return cppType switch
+            {
+                "EntJoy::Mathematics::float2" => "float2",
+                "EntJoy::Mathematics::int2" => "int2",
+                "EntJoy::Mathematics::uint2" => "uint2",
+                // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
+                "signed char" => "int8",
+                "unsigned char" => "uint8",
+                "short" => "int16",
+                "unsigned short" => "uint16",
+                "long long" => "int64",
+                "unsigned long long" => "uint64",
+                _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
+                _ => cppType
+            };
+        }
 
         private static bool IsVectorType(string cppType) =>
             cppType == "EntJoy::Mathematics::float2" ||
             cppType == "EntJoy::Mathematics::int2" ||
             cppType == "EntJoy::Mathematics::uint2";
+
+        /// <summary>用户自定义 struct（非内置、非 EntJoy 预定义容器）。</summary>
+        private static bool IsUserStructType(ITypeSymbol? type) =>
+            type is { TypeKind: TypeKind.Struct } &&
+            !NativeTranspiler.IsBuiltinUnmanaged(type) &&
+            !NativeTranspiler.IsEntJoyPredefinedType(type);
 
         // ---------- 参数列表构建（共享） ----------
 
@@ -200,12 +214,19 @@ namespace NativeTranspiler.Analyzer.Common
                             var ispcType = ToIspcType(cppElem);
                             args.Append($"reinterpret_cast<ispc::{ispcType}*>({name}_ptr), {name}_length");
                         }
+                        else if (IsUserStructType(elemType))
+                            args.Append($"reinterpret_cast<ispc::{elemType.Name}*>({name}_ptr), {name}_length");
                         else
                             args.Append($"{name}_ptr, {name}_length");
                     }
                 }
-                else if (type is IPointerTypeSymbol)
-                    args.Append($"{name}_ptr");
+                else if (type is IPointerTypeSymbol ptrType)
+                {
+                    // 用户 struct 在 ISPC 侧是 ispc::T（与 C++ 的 Namespace::T 同名不同类型），必须 reinterpret_cast
+                    args.Append(IsUserStructType(ptrType.PointedAtType)
+                        ? $"reinterpret_cast<ispc::{ptrType.PointedAtType.Name}*>({name}_ptr)"
+                        : $"{name}_ptr");
+                }
                 else
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
@@ -214,6 +235,8 @@ namespace NativeTranspiler.Analyzer.Common
                         var ispcType = ToIspcType(cppType);
                         args.Append($"reinterpret_cast<ispc::{ispcType}*>({name}_ptr)");
                     }
+                    else if (IsUserStructType(type))
+                        args.Append($"reinterpret_cast<ispc::{type.Name}*>({name}_ptr)");
                     else
                         args.Append($"{name}_ptr");
                 }
@@ -346,6 +369,14 @@ namespace NativeTranspiler.Analyzer.Common
                 CollectTypeInclude(ptr.PointedAtType, includes);
                 return;
             }
+            // NativeArray<T>/NativeList<T> 自身是 EntJoy 预定义类型（无头文件），
+            // 但元素类型 T 是用户结构体，必须递归收集，否则 ISPC 侧 T 未声明。
+            if (NativeTranspiler.IsEntJoyNativeContainerType(type))
+            {
+                foreach (var arg in ((INamedTypeSymbol)type).TypeArguments)
+                    CollectTypeInclude(arg, includes);
+                return;
+            }
             if (NativeTranspiler.IsEntJoyPredefinedType(type)) return;
             if (type.IsValueType && !NativeTranspiler.IsBuiltinUnmanaged(type))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName((INamedTypeSymbol)type));
@@ -398,6 +429,9 @@ namespace NativeTranspiler.Analyzer.Common
             // ─── SendEvent: 事件类型 include（ISPC 侧 SendEvent 生成的代码引用事件类型结构） ───
             foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
+            // ISPC 无法调用外部 C++ 符号：Execute 调用的静态方法必须有同 TU 的 ISPC helper
+            foreach (var helper in CollectIspcHelperClosure(jobStruct, compilation))
+                includes.Add(GetIspcHelperFileName(helper));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
@@ -518,6 +552,9 @@ namespace NativeTranspiler.Analyzer.Common
             var ispcBase = GetIspcBaseName(jobStruct);
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
+            // 形参列表直接写 CPUBattle::OrcaLine* 这类限定名 → 元素类型头文件必须可见
+            foreach (var include in CppJobGenerator.CollectJobStructIncludes(jobStruct, compilation))
+                sb.AppendLine($"#include \"{include}.h\"");
             sb.AppendLine($"#include \"{ispcBase}_ispc.h\"");
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();

@@ -33,6 +33,9 @@ namespace NativeTranspiler.Analyzer.Common
                     if (localType != null) CollectTypeInclude(localType, includes);
                 }
             }
+            // ISPC 无法调用外部 C++ 符号：本方法调用的静态方法也需同 TU 的 ISPC helper
+            foreach (var helper in CollectIspcHelperClosure(method, compilation))
+                includes.Add(GetIspcHelperFileName(helper));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
 
             if (methodSyntax?.Body == null) return "// Error: no method body";

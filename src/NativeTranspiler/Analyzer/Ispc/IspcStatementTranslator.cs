@@ -133,25 +133,33 @@ namespace NativeTranspiler.Analyzer
                    name == "EntJoy.Mathematics.uint2";
         }
 
-        private static string ToIspcType(string cppType) => cppType switch
+        private static string ToIspcType(string cppType)
         {
-            "EntJoy::Mathematics::float2" => "float2",
-            "EntJoy::Mathematics::int2" => "int2",
-            "EntJoy::Mathematics::uint2" => "uint2",
-            "unsigned int" => "unsigned int",
-            "float" => "float",
-            "int" => "int",
-            "bool" => "bool",
-            // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
-            "signed char" => "int8",
-            "unsigned char" => "uint8",
-            "short" => "int16",
-            "unsigned short" => "uint16",
-            "long long" => "int64",
-            "unsigned long long" => "uint64",
-            _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
-            _ => cppType
-        };
+            // 指针后缀先剥离再映射基类型：否则 "unsigned char*" 匹配不到标量规则，
+            // 原样输出 → ISPC 不识别 unsigned char/signed char 拼写，报语法错。
+            if (cppType.EndsWith("*"))
+                return ToIspcType(cppType.Substring(0, cppType.Length - 1).TrimEnd()) + "*";
+
+            return cppType switch
+            {
+                "EntJoy::Mathematics::float2" => "float2",
+                "EntJoy::Mathematics::int2" => "int2",
+                "EntJoy::Mathematics::uint2" => "uint2",
+                "unsigned int" => "unsigned int",
+                "float" => "float",
+                "int" => "int",
+                "bool" => "bool",
+                // C++ 原生类型 → ISPC 原生类型（ISPC 不认识 signed char/unsigned char/short/long long 等 C++ 拼写）
+                "signed char" => "int8",
+                "unsigned char" => "uint8",
+                "short" => "int16",
+                "unsigned short" => "uint16",
+                "long long" => "int64",
+                "unsigned long long" => "uint64",
+                _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
+                _ => cppType
+            };
+        }
 
         private string? GetNativeListElementCppType(ExpressionSyntax expr)
         {
@@ -170,6 +178,39 @@ namespace NativeTranspiler.Analyzer
                 TranslateExpression(expr);
                 _builder.Append("->");
             }
+        }
+
+        /// <summary>
+        /// 翻译 <c>UnsafeUtility.ArrayElementAsRef&lt;T&gt;(ptr, idx)</c>。
+        /// asLvalue=false：作为 ref/out 实参 → 需取址 <c>&amp;((T*)ptr)[idx]</c>；
+        /// asLvalue=true：作为赋值目标 → 直接 <c>((T*)ptr)[idx]</c>（多一个 &amp; 就成了对临时取址，ISPC 类型错）。
+        /// </summary>
+        private bool TranslateArrayElementAsRef(InvocationExpressionSyntax invocation,
+            IMethodSymbol methodSymbol, bool asLvalue)
+        {
+            if (methodSymbol.ContainingType?.ToDisplayString() != "EntJoy.Collections.UnsafeUtility" ||
+                methodSymbol.Name != Config.ArrayElementAsRef)
+                return false;
+
+            var args = invocation.ArgumentList.Arguments;
+            if (args.Count < 2) return false;
+
+            ITypeSymbol? elementType = null;
+            if (methodSymbol.TypeArguments.Length > 0)
+                elementType = methodSymbol.TypeArguments[0];
+            else if (methodSymbol.ReturnType is INamedTypeSymbol namedReturn && namedReturn.TypeArguments.Length > 0)
+                elementType = namedReturn.TypeArguments[0];
+            else
+                elementType = _semanticModel.Compilation.GetSpecialType(SpecialType.System_Int32);
+
+            string ispcElemType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elementType));
+            _builder.Append(asLvalue ? "((" : "&((");
+            _builder.Append(ispcElemType).Append("*)");
+            TranslateExpression(args[0].Expression);
+            _builder.Append(")[");
+            TranslateExpression(args[1].Expression);
+            _builder.Append(']');
+            return true;
         }
 
         protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
@@ -472,8 +513,62 @@ namespace NativeTranspiler.Analyzer
             base.TranslateElementAccess(elementAccess);
         }
 
+        protected override void TranslateExpression(ExpressionSyntax expr)
+        {
+            // `default` / `default(T)`：C++ 生成 T{} 值初始化，ISPC 无该语法（会原样输出
+            // EntJoy::Mathematics::float2{} → 语法错）。向量走 make_*，标量走 0/0.0f，
+            // 用户 struct 走生成头文件里的 make_zero_X()；其余类型不改写（显式报错而非静默错译）。
+            ITypeSymbol? defaultType = null;
+            if (expr is LiteralExpressionSyntax lit && lit.IsKind(SyntaxKind.DefaultLiteralExpression))
+                defaultType = _semanticModel.GetTypeInfo(lit).Type;
+            else if (expr is DefaultExpressionSyntax def)
+                defaultType = _semanticModel.GetTypeInfo(def.Type).Type;
+
+            if (defaultType != null && defaultType.TypeKind != TypeKind.Error)
+            {
+                switch (ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(defaultType)))
+                {
+                    case "float2": _builder.Append("make_float2(0.0f, 0.0f)"); return;
+                    case "int2": _builder.Append("make_int2(0, 0)"); return;
+                    case "uint2": _builder.Append("make_uint2(0u, 0u)"); return;
+                    case "float": _builder.Append("0.0f"); return;
+                    case "double": _builder.Append("0.0"); return;
+                    case "bool": _builder.Append("false"); return;
+                    case "int":
+                    case "unsigned int":
+                    case "int8":
+                    case "uint8":
+                    case "int16":
+                    case "uint16":
+                    case "int64":
+                    case "uint64":
+                        _builder.Append('0'); return;
+                }
+                // 用户 struct：ISPC 无 T{} 字面量 → 用生成的头文件里的零值构造
+                if (defaultType.TypeKind == TypeKind.Struct &&
+                    !NativeTranspiler.IsBuiltinUnmanaged(defaultType) &&
+                    !NativeTranspiler.IsEntJoyPredefinedType(defaultType))
+                {
+                    _builder.Append($"make_zero_{defaultType.Name}()");
+                    return;
+                }
+            }
+
+            base.TranslateExpression(expr);
+        }
+
         protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
         {
+            // ArrayElementAsRef<T>() 作为赋值目标：不能再套取址前缀。
+            if (assignment.Left is InvocationExpressionSyntax lvalueInv &&
+                _semanticModel.GetSymbolInfo(lvalueInv).Symbol is IMethodSymbol lvalueSym &&
+                TranslateArrayElementAsRef(lvalueInv, lvalueSym, asLvalue: true))
+            {
+                _builder.Append(' ').Append(assignment.OperatorToken.Text).Append(' ');
+                TranslateExpression(assignment.Right);
+                return;
+            }
+
             // ISPC structs don't support compound assignment operators (+=, -=, *=, /=)
             // on struct types. Convert to "left = left op right" so that ISPC emits a
             // single struct-level gather + scatter (optimal for AoS data layout):
@@ -528,26 +623,8 @@ namespace NativeTranspiler.Analyzer
                 if (fullTypeName == "EntJoy.Collections.UnsafeUtility" &&
                     methodSymbol.Name == Config.ArrayElementAsRef)
                 {
-                    var args = invocation.ArgumentList.Arguments;
-                    if (args.Count >= 2)
-                    {
-                        _builder.Append("&((");
-                        ITypeSymbol? elementType = null;
-                        if (methodSymbol.TypeArguments.Length > 0)
-                            elementType = methodSymbol.TypeArguments[0];
-                        else if (methodSymbol.ReturnType is INamedTypeSymbol namedReturn && namedReturn.TypeArguments.Length > 0)
-                            elementType = namedReturn.TypeArguments[0];
-                        else
-                            elementType = _semanticModel.Compilation.GetSpecialType(SpecialType.System_Int32);
-
-                        string ispcElemType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elementType));
-                        _builder.Append(ispcElemType).Append("*)");
-                        TranslateExpression(args[0].Expression);
-                        _builder.Append(")[");
-                        TranslateExpression(args[1].Expression);
-                        _builder.Append(']');
+                    if (TranslateArrayElementAsRef(invocation, methodSymbol, asLvalue: false))
                         return;
-                    }
                     base.TranslateInvocation(invocation);
                     return;
                 }
@@ -606,6 +683,14 @@ namespace NativeTranspiler.Analyzer
                     TranslateSystemMathCall(methodSymbol, invocation);
                     return;
                 }
+                // float.IsNaN / double.IsInfinity（ContainingType 是 Single/Double，不是 Math）
+                if ((methodSymbol.Name == "IsNaN" || methodSymbol.Name == "IsInfinity") &&
+                    (methodSymbol.ContainingType?.SpecialType == SpecialType.System_Single ||
+                     methodSymbol.ContainingType?.SpecialType == SpecialType.System_Double))
+                {
+                    TranslateSystemMathCall(methodSymbol, invocation);
+                    return;
+                }
                 if (fullTypeName == "System.Threading.Interlocked")
                 {
                     TranslateInterlockedCall(methodSymbol, invocation);
@@ -649,6 +734,8 @@ namespace NativeTranspiler.Analyzer
                 "Clamp" => "clamp",
                 "Floor" => "floor",
                 "Ceiling" => "ceil",
+                "IsNaN" => "isnan",
+                "IsInfinity" => "isinf",
                 _ => method.Name.ToLower()
             };
             _builder.Append(ispcFunc).Append('(');
@@ -823,6 +910,10 @@ namespace NativeTranspiler.Analyzer
                 forStmt.Declaration.Variables.Count == 1 &&
                 forStmt.Condition is BinaryExpressionSyntax binExpr &&
                 binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
+                // 边界必须保证 uniform：foreach / uniform-for 的结束值不接受 varying，
+                // 否则 ISPC 报 "Can't convert varying int32 to uniform int32 for foreach ending value"。
+                // helper 内边界多为局部变量/值参数（varying）→ 回退普通 for（ISPC 允许 varying 条件）。
+                IsUniformExpr(binExpr.Right) &&
                 forStmt.Incrementors.Count == 1 &&
                 forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
                 postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))
@@ -1053,6 +1144,8 @@ namespace NativeTranspiler.Analyzer
                 forStmt.Declaration.Variables.Count == 1 &&
                 forStmt.Condition is BinaryExpressionSyntax binExpr &&
                 binExpr.OperatorToken.IsKind(SyntaxKind.LessThanToken) &&
+                // 同上：varying 边界不能进 foreach，交给 EmitUniformFor 决定（它会再判一次并回退 base）
+                IsUniformExpr(binExpr.Right) &&
                 forStmt.Incrementors.Count == 1 &&
                 forStmt.Incrementors[0] is PostfixUnaryExpressionSyntax postfix &&
                 postfix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken))

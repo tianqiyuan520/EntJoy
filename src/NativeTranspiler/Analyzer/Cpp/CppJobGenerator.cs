@@ -855,7 +855,7 @@ namespace NativeTranspiler.Analyzer
             return result;
         }
 
-        private static List<string> CollectJobStructIncludes(INamedTypeSymbol jobStruct, Compilation compilation)
+        internal static List<string> CollectJobStructIncludes(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var includes = new HashSet<string>();
             void AddType(ITypeSymbol type)
@@ -1049,9 +1049,11 @@ namespace NativeTranspiler.Analyzer
             {
                 sb.AppendLine("#include \"ChunkJobData.h\"");
                 sb.AppendLine("#include \"EntityBatchData.h\"");
-                foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
-                    sb.AppendLine($"#include \"{include}.h\"");
             }
+            // 字段里 NativeArray<用户结构体> 的元素类型头文件：adapter/wrapper 的形参列表
+            // 直接写 CPUBattle::OrcaLine* 这类限定名，缺头文件就会 use of undeclared identifier。
+            foreach (var include in CollectJobStructIncludes(jobStruct, compilation))
+                sb.AppendLine($"#include \"{include}.h\"");
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
 

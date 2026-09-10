@@ -161,6 +161,32 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
+                // ISPC helper（lane 可调用）：ISPC job/方法体内调用的静态方法在 ISPC 侧
+                // 没有可链接符号，必须在同一翻译单元内提供 ISPC 版本。这些文件只被调用方
+                // .ispc 以 #include 引入，不加入 ispcFiles（不单独编译）。
+                if (anyIspc)
+                {
+                    var ispcHelperSeen = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+                    var ispcHelperMethods = new List<IMethodSymbol>();
+                    void CollectHelpers(IEnumerable<IMethodSymbol> deps)
+                    {
+                        foreach (var dep in deps)
+                            if (ispcHelperSeen.Add(dep)) ispcHelperMethods.Add(dep);
+                    }
+
+                    foreach (var job in ctx.JobStructSymbols)
+                        if (job != null && GetBackendTarget(job, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
+                            CollectHelpers(IspcGenerator.CollectIspcHelperClosure(job, ctx.Compilation));
+                    foreach (var method in ctx.MethodSymbols)
+                        if (method != null && GetBackendTarget(method, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
+                            CollectHelpers(IspcGenerator.CollectIspcHelperClosure(method, ctx.Compilation));
+
+                    foreach (var helper in ispcHelperMethods)
+                        CodeGenIo.WriteAllTextWithRetry(
+                            Path.Combine(outputDir, $"{IspcGenerator.GetIspcHelperFileName(helper)}.ispc"),
+                            IspcGenerator.GenerateIspcHelperSource(helper, ctx.Compilation));
+                }
+
                 // 处理静态方法
                 foreach (var method in methodsToGenerate)
                 {
@@ -743,7 +769,9 @@ namespace NativeTranspiler.Analyzer
 
         private static string GenerateCommonIspcHeader()
         {
-            return @"
+            // include guard：job 的 .ispc 与它 #include 的 helper .ispc 都会引入本文件，
+            // 无 guard 会在同一翻译单元内重复定义 make_*/operator* → ISPC 报重定义。
+            return "#ifndef __ENTJOY_ISPC_COMMON_DEFINED\n#define __ENTJOY_ISPC_COMMON_DEFINED\n" + @"
 // NativeMath.ispc – ISPC compatible math library
 struct float2 { float x; float y; };
 struct int2   { int x; int y; };
@@ -788,6 +816,9 @@ static struct float2 float2_from_int2(struct int2 v) { return make_float2(v.x, v
 static struct int2 int2_from_float2(struct float2 v) { return make_int2((int)v.x, (int)v.y); }
 
 // ---------- float2 operators ----------
+static struct float2 operator-(struct float2 a) {
+    return make_float2(-a.x, -a.y);
+}
 static struct float2 operator+(struct float2 a, struct float2 b) {
     struct float2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -809,6 +840,9 @@ static struct float2 operator/(struct float2 v, float s) {
 }
 
 // ---------- int2 operators ----------
+static struct int2 operator-(struct int2 a) {
+    return make_int2(-a.x, -a.y);
+}
 static struct int2 operator+(struct int2 a, struct int2 b) {
     struct int2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -892,7 +926,7 @@ static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
-";
+" + "\n#endif // __ENTJOY_ISPC_COMMON_DEFINED\n";
         }
 
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
