@@ -59,6 +59,13 @@ namespace NativeTranspiler.Analyzer
             return _builder.ToString();
         }
 
+        /// <summary>把单个表达式转译为 C++ 源码字符串（供表达式体方法 `=> expr` 使用）。</summary>
+        public string TranslateExpressionToString(ExpressionSyntax expr)
+        {
+            TranslateExpression(expr);
+            return _builder.ToString();
+        }
+
         protected void AppendIndent() => _builder.Append(new string(' ', _indentLevel * 4));
 
         protected virtual void TranslateStatement(StatementSyntax statement)
@@ -411,6 +418,18 @@ namespace NativeTranspiler.Analyzer
             switch (expr)
             {
                 case LiteralExpressionSyntax literal:
+                    // `default` 字面量：C# 的全零初始化 → C++ 值初始化 `Type{}`。
+                    // 原实现按 token 文本原样输出 "default"，在 C++ 里只有特殊成员函数可 = default，
+                    // 赋值/局部初始化位置直接编译失败（only special member functions ... may be defaulted）。
+                    if (literal.IsKind(SyntaxKind.DefaultLiteralExpression))
+                    {
+                        var defaultType = _semanticModel.GetTypeInfo(literal).Type;
+                        if (defaultType != null && defaultType.TypeKind != TypeKind.Error)
+                            _builder.Append(NativeTranspiler.MapCSharpTypeToCpp(defaultType)).Append("{}");
+                        else
+                            _builder.Append("{}");
+                        break;
+                    }
                     var token = literal.Token;
                     if (token.Kind() == SyntaxKind.NumericLiteralToken)
                     {
@@ -559,7 +578,9 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            if (exprType?.TypeKind == TypeKind.Enum)
+            // 编译期常量字段（enum 成员、以及 static class 里的 const）一律折叠为字面量。
+            // 原实现只覆盖 enum → `CpuOrca.MaxLines` 这类 static class 常量被原样输出为
+            // 类名限定表达式，C++ 侧无对应类型 → use of undeclared identifier。
             {
                 var symbol = _semanticModel.GetSymbolInfo(memberAccess.Name).Symbol;
                 if (symbol is IFieldSymbol field && field.HasConstantValue)
@@ -619,7 +640,9 @@ namespace NativeTranspiler.Analyzer
                 if (containingType != null && methodSymbol.IsStatic)
                 {
                     var fullTypeName = containingType.ToDisplayString();
-                    if (fullTypeName == "System.Math" || fullTypeName == "System.MathF")
+                    if (fullTypeName == "System.Math" || fullTypeName == "System.MathF" ||
+                        fullTypeName == "System.Single" || fullTypeName == "System.Double" ||
+                        fullTypeName == "float" || fullTypeName == "double")
                     {
                         TranslateMathFunctionCall(methodSymbol, invocation);
                         return;
@@ -713,6 +736,12 @@ namespace NativeTranspiler.Analyzer
             var argType = _semanticModel.GetTypeInfo(argument).Type;
             if (argType is IPointerTypeSymbol)
             {
+                TranslateExpression(argument);
+            }
+            else if (parameter.RefKind != RefKind.Ref && parameter.RefKind != RefKind.Out)
+            {
+                // 按值参数：直接传表达式。旧实现无条件加 & → 对字面量/临时量/二元表达式
+                // （&0、&false、&(a-b)）产生 C++ 编译错误；且与按值语义不符。
                 TranslateExpression(argument);
             }
             else
@@ -872,6 +901,8 @@ namespace NativeTranspiler.Analyzer
                 "Tan" => "::tanf",
                 "Tanh" => "::tanhf",
                 "Truncate" => "::truncf",
+                "IsNaN" => "std::isnan",
+                "IsInfinity" => "std::isinf",
                 _ => null
             } : method.Name switch
             {
@@ -898,6 +929,8 @@ namespace NativeTranspiler.Analyzer
                 "Tan" => "std::tan",
                 "Tanh" => "std::tanh",
                 "Truncate" => "std::trunc",
+                "IsNaN" => "std::isnan",
+                "IsInfinity" => "std::isinf",
                 _ => null
             };
             if (cppFunc == null)

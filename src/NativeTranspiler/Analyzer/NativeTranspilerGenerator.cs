@@ -74,6 +74,15 @@ namespace NativeTranspiler.Analyzer
                     if (method == null) continue;
                     CollectMethodDependencies(method, ctx.Compilation, methodsToGenerate, allErrors);
                 }
+                // Job Execute 内部的同程序集静态方法调用也要收集依赖（生成其 C++ 定义），
+                // 否则调用点引用了不存在的函数（use of undeclared identifier）。
+                // 注意：不能直接对 Execute 调 CollectMethodDependencies —— 该方法对 Execute 有早退
+                // 保护（Execute 自身不作为独立函数生成），故单独遍历 Execute 体内的静态调用。
+                foreach (var job in ctx.JobStructSymbols)
+                {
+                    if (job == null) continue;
+                    CollectJobExecuteDependencies(job, ctx.Compilation, methodsToGenerate, allErrors);
+                }
                 foreach (var method in ctx.MethodSymbols)
                 {
                     if (method == null) continue;
@@ -523,6 +532,33 @@ namespace NativeTranspiler.Analyzer
 
         private static bool GetDisableAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.GetDisableAutoRefresh(symbol, attrSymbol);
+
+        /// <summary>
+        /// 收集 Job Execute 方法体内调用的同程序集静态方法（作为依赖生成其 C++ 定义）。
+        /// 与 CollectMethodDependencies 的区别：Execute 自身不加入 collected（它不是独立函数），
+        /// 只把其调用的静态方法递归收进依赖集。
+        /// </summary>
+        private static void CollectJobExecuteDependencies(
+            INamedTypeSymbol job, Compilation compilation,
+            HashSet<IMethodSymbol> collected, List<Diagnostic> allErrors)
+        {
+            var executeMethod = job.GetMembers().OfType<IMethodSymbol>()
+                .FirstOrDefault(m => m.Name == Config.Execute);
+            if (executeMethod == null) return;
+            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            if (methodSyntax?.Body == null) return;
+
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+            foreach (var node in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                var symbolInfo = semanticModel.GetSymbolInfo(node);
+                if (symbolInfo.Symbol is not IMethodSymbol calledMethod) continue;
+                if (!calledMethod.IsStatic) continue;
+                if (!SymbolEqualityComparer.Default.Equals(calledMethod.ContainingAssembly, compilation.Assembly))
+                    continue;
+                CollectMethodDependencies(calledMethod, compilation, collected, allErrors);
+            }
+        }
 
         private static void CollectMethodDependencies(
             IMethodSymbol method, Compilation compilation,

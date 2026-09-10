@@ -52,6 +52,11 @@ namespace NativeTranspiler.Analyzer
             "System.Math.Tan", "System.MathF.Tan",
             "System.Math.Tanh", "System.MathF.Tanh",
             "System.Math.Truncate", "System.MathF.Truncate",
+            "System.Single.IsNaN", "System.Double.IsNaN",
+            "System.Single.IsInfinity", "System.Double.IsInfinity",
+            // ToDisplayString() 对 C# 关键字别名返回 "float"/"double"（非 System.Single/Double）
+            "float.IsNaN", "double.IsNaN",
+            "float.IsInfinity", "double.IsInfinity",
             "System.Threading.Interlocked.Increment",
             "System.Threading.Interlocked.Decrement",
             "System.Threading.Interlocked.Add",

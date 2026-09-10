@@ -107,6 +107,30 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
+        /// <summary>
+        /// 收集 Job Execute 直接/间接调用的同程序集静态方法（用于生成 #include）。
+        /// 与 CppGenerator.GenerateImplementation 对静态方法的处理对齐（job 侧原先缺失）。
+        /// </summary>
+        private static HashSet<IMethodSymbol> CollectAllCalledStaticMethods(INamedTypeSymbol jobStruct, Compilation compilation)
+        {
+            var result = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>()
+                .FirstOrDefault(m => m.Name == Config.Execute);
+            if (executeMethod == null) return result;
+
+            var queue = new Queue<IMethodSymbol>();
+            foreach (var m in CppGenerator.CollectCalledStaticMethods(executeMethod, compilation))
+                queue.Enqueue(m);
+            while (queue.Count > 0)
+            {
+                var m = queue.Dequeue();
+                if (!result.Add(m)) continue;
+                foreach (var d in CppGenerator.CollectCalledStaticMethods(m, compilation))
+                    queue.Enqueue(d);
+            }
+            return result;
+        }
+
         public static string GenerateJobImplementation(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var sb = new StringBuilder();
@@ -116,6 +140,10 @@ namespace NativeTranspiler.Analyzer
             var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
             var simdMathPrecision = AttributeHelper.GetMathPrecision(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
+            // ─── 依赖的静态方法头文件（Execute 内调用的同程序集静态方法，含传递依赖） ───
+            // 缺失会导致调用点引用未声明的函数（use of undeclared identifier）。
+            foreach (var dep in CollectAllCalledStaticMethods(jobStruct, compilation))
+                sb.AppendLine($"#include \"{CppGenerator.GetCppFunctionName(dep)}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
