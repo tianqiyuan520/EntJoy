@@ -650,8 +650,11 @@ namespace NativeTranspiler.Analyzer
 
             bool hasReturn = scalarBody.Contains("return;");
 
-            // Entity 参数：用函数内局部结构体（{ int Id; int Version; } 对齐 C# Entity），
-            // 避免与生成的 EntJoy_ECS_Entity.h 结构头 redefinition（Entity 既可能是框架内置，也可能是用户结构字段）。
+            // Entity 参数：用函数内局部结构体（{ int Id; int Version; } 对齐 C# Entity）。
+            // 不用 EntJoy.ECS.Entity 结构头：Entity 是 IJobEntity 的注入参数，不是 chunk 组件列，
+            // CollectChunkNativeArrayTypes 已把它跳过（见该函数的 IsEntityType 过滤），
+            // 因此 userStructs 里不含 Entity ⇒ 从未生成 EntJoy_ECS_Entity.h。
+            // 局部结构体让生成的批函数自包含，不依赖该框架类型是否被别的 job 带进 userStructs。
             bool hasEntityParam = executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type));
             if (hasEntityParam)
                 sb.AppendLine("    struct __EntJoyEntity { int Id; int Version; };");
@@ -865,9 +868,11 @@ namespace NativeTranspiler.Analyzer
                     AddType(ptr.PointedAtType);
                     return;
                 }
+                // 容器元素类型递归 + 不 return：容器自身无头文件，但元素 struct（及其嵌套字段）可能有。
                 if (type is INamedTypeSymbol named && named.IsGenericType && NativeTranspiler.IsEntJoyNativeContainerType(type))
                 {
-                    AddType(named.TypeArguments[0]);
+                    foreach (var arg in named.TypeArguments)
+                        AddType(arg);
                     return;
                 }
                 if (type is INamedTypeSymbol namedType &&
