@@ -300,7 +300,8 @@ namespace NativeTranspiler.Analyzer
                 }
                 if (type is INamedTypeSymbol named && named.IsGenericType && IsEntJoyNativeContainerType(type))
                 {
-                    AddNested(named.TypeArguments[0]);
+                    foreach (var arg in named.TypeArguments)
+                        AddNested(arg);
                     return;
                 }
                 if (type is INamedTypeSymbol nested &&
@@ -446,7 +447,8 @@ namespace NativeTranspiler.Analyzer
                 }
                 if (type is INamedTypeSymbol named && named.IsGenericType && IsEntJoyNativeContainerType(type))
                 {
-                    AddType(named.TypeArguments[0]);
+                    foreach (var arg in named.TypeArguments)
+                        AddType(arg);
                     return;
                 }
                 if (type is INamedTypeSymbol namedType &&

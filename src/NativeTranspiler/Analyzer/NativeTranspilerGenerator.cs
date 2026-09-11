@@ -728,7 +728,17 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
 
-            // 过滤预定义的容器类型
+            // 容器的元素类型必须先递归收集：NativeArray<T>/NativeList<T> 自身是 EntJoy 预定义类型
+            // （无头文件，下面那个 IsEntJoyPredefinedType 分支本来也会 return），但 T 是用户结构体，
+            // job 头会 include T 的头（见 CppJobGenerator 的 AddType 对 TypeArguments 的递归）——
+            // 少了这一步就会生成一个 include 不存在文件的 job 头，MSVC 直接报 "file not found"，
+            // 且报错落在生成目录里极易被误判为构建缓存问题。
+            if (type is INamedTypeSymbol container && NativeTranspiler.IsEntJoyNativeContainerType(container))
+            {
+                foreach (var arg in container.TypeArguments)
+                    CollectFromType(arg, collected);
+                return;
+            }
             if (NativeTranspiler.IsEntJoyPredefinedType(type))
                 return;
             if (type.Name == Config.Span && type.ContainingNamespace?.ToDisplayString() == Config.NamespaceSystem)
