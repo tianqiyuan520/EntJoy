@@ -132,7 +132,16 @@ namespace EntJoy.Collections
             // 双条件：状态须活跃 且 version 须匹配（防 index 复用后的 ABA）
             if (Volatile.Read(ref _state[index]) != StateActive ||
                 Volatile.Read(ref _version[index]) != handle.Version)
+            {
+                // 区分"从未创建/binding 前访问"与"已释放"：默认句柄是 (Index=0, Version=0)
+                // （Allocate 会把 version 置为 ≥1），报错信息不同能省一次排查
+                // —— 实测踩过：对未绑定的 default NativeArray 写索引得到 "has been disposed"，
+                //    而真实原因是"还没创建/还没绑定"。
+                if (index == 0 && handle.Version == 0)
+                    throw new InvalidOperationException(
+                        "NativeArray 未创建（default 句柄）：请先分配或用 CreateView 绑定后再访问。");
                 throw new ObjectDisposedException("NativeContainer has been disposed.");
+            }
 
             nint ctx = JobIdentity.CurrentContext;
             if (_writeTxExempt[index] != 0)
