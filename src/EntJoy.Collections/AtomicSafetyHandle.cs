@@ -56,7 +56,8 @@ namespace EntJoy.Collections
         private static int[] _writeTxExempt = new int[MaxHandles];   // 1 = 豁免并行读写持有跟踪（共享/框架内部句柄）
         // ctx → 该 job 写过的容器 index，用于 job 结束时一次性释放其写声明
         private static readonly ConcurrentDictionary<nint, System.Collections.Generic.List<int>> _ctxWrites = new();
-        // ctx → 该 job 读过的容器 index 集合（幂等：同一 job 对同一容器至多 +1）
+        // ctx → 该 job 读过的容器 index 集合（幂等：同一 job 对同一容器至多 +1）。
+        // 必须按 ctx 分集合：多个 job 可并发读同一容器，单个槽位的「归属 ctx」无法表达多读者。
         private static readonly ConcurrentDictionary<nint, System.Collections.Generic.HashSet<int>> _ctxReads = new();
 #endif
 
@@ -149,7 +150,7 @@ namespace EntJoy.Collections
             if (ctx != 0)
             {
                 // job 内读：登记本 job 为读者（幂等，job 结束 ReleaseReadsForContext 释放）
-                RegisterRead(index);
+                RegisterRead(index, handle.Version);
                 return;
             }
             // 主线程读：任何 job 在写或读该容器 → 拦截
@@ -215,9 +216,12 @@ namespace EntJoy.Collections
             if (existing == 0)
             {
                 Volatile.Write(ref _writerCtx[index], ctx);
-                // 记录本 job 写过的容器，便于结束时释放
-                if (!_ctxWrites.TryGetValue(ctx, out var list))
-                    list = _ctxWrites.GetOrAdd(ctx, _ => new System.Collections.Generic.List<int>());
+                // 登记本 job 写过的容器，便于 job 结束时释放。
+                // 必须用单次 GetOrAdd 取得「当前字典里那份 list」并在锁内 Add —— 不能用
+                // TryGetValue + GetOrAdd 组合：两者之间条目可能被并发 ReleaseWritesForContext 移除，
+                // 于是 index 被写进一份即将被丢弃的 list，释放时扫不到它，
+                // _writerCtx[index] 永久残留该 ctx → Complete() 后主线程访问被永久误拦。
+                var list = _ctxWrites.GetOrAdd(ctx, _ => new System.Collections.Generic.List<int>());
                 lock (list) { if (!list.Contains(index)) list.Add(index); }
             }
             else if (existing != ctx)
@@ -229,7 +233,11 @@ namespace EntJoy.Collections
         }
 
         /// <summary>
-        /// 释放某 job 执行上下文声明的全部写者（job 执行结束回调调用）。
+        /// 释放某 job 执行上下文声明的全部写者。Native 侧在 job 完成回调（所有 tile 之后）调用一次；
+        /// Managed 侧目前在 tile 结束时调用（同一 ctx 会被多次调用）。
+        /// 不删 _ctxWrites 条目：条目一旦被删，并发 tile 的 TryAcquireWriteContext 会 GetOrAdd 出一份新 list，
+        /// 而调用方随后删掉的那份新 list 里的 index 永远不会被释放（_writerCtx 残留 → 永久误拦）。
+        /// 保留条目只做清空，使「同一 ctx 只有一份 list」恒成立；条目随 ctx 存活，ctx 有限，不会无界增长。
         /// </summary>
         public static void ReleaseWritesForContext(nint ctx)
         {
@@ -241,32 +249,59 @@ namespace EntJoy.Collections
         }
 
         /// <summary>
+        /// 快路径缓存：本线程最近一次「确实完成登记」的 (ctx, 容器 index, 句柄代际)。
+        /// 命中即代表该 (ctx, index) 已登记且其登记尚未被释放，可直接返回，
+        /// 免掉每次索引的 ConcurrentDictionary.GetOrAdd + Monitor 开销。
+        ///
+        /// 命中即安全的依据：
+        ///  - 首次登记成功（+1）才写入缓存，而 +1 与释放侧的 -1 成对；
+        ///  - ctx 只会在本线程的 job 内等于缓存值（JobIdentity 是 [ThreadStatic]，跨 job 会还原/换值），
+        ///    故命中时必然仍处于「写入缓存的那个 ctx」的 job 生命周期内，无需回查槽位归属；
+        ///  - 句柄代际（version）参与比较，覆盖 index 释放后复用的情形：复用必然递增代际 → 缓存失效并重新登记；
+        ///  - 豁免句柄（_writeTxExempt）在首个访问就提前 return，永不写缓存，故缓存条目恒为非豁免容器。
+        /// 这些数组都是内部状态：一旦发生泄漏/失配，RepeatedParallelReadJobs_NoReaderCountLeak 会持续失败。
+        /// </summary>
+        [ThreadStatic] private static nint _fastReadCtx;
+        [ThreadStatic] private static int _fastReadIndex;
+        [ThreadStatic] private static int _fastReadVersion;
+
+        /// <summary>
         /// 并行读持有标记：登记当前 job（JobIdentity.CurrentContext）为容器读者。
         /// 仅当该 (ctx, 容器) 首次读时才把读者计数 +1（幂等，同一 job 对同一容器至多 +1，
         /// 避免并行 tile 重复计数撑爆）。主线程（ctx=0）不登记，只查。
         /// 幂等集合与并发释放（ReleaseReadsForContext）之间的竞态：同 ctx 多 tile 并发时，
-        /// 一个 tile 的 RegisterRead 可能在另一 tile 已把该 ctx 条目从字典移除后仍持有旧 set，
-        /// 若不管会让 +1 永不配对（读者计数泄漏 → 容器被永久误锁）。故加锁内先校验
-        /// 「当前字典仍持有本 set」，否则丢弃并重新登记到现役（或新建）条目。
+        /// 一个 tile 的 RegisterRead 可能在另一 tile 已把该 ctx 条目从字典移除后仍持有旧 set。
+        /// 计数只允许在「条目仍现役」时进行，且校验必须放在 Add 之后（见方法内注释），
+        /// 否则 +1 会落在已丢弃的 set 上而永不配对（读者计数泄漏 → 容器被永久误锁、主线程被永久误拦）。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        private static void RegisterRead(int index)
+        private static void RegisterRead(int index, int version)
         {
 #if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
-            if (_writeTxExempt[index] != 0) return;
             nint ctx = JobIdentity.CurrentContext;
+            // 快路径：同线程在同一 job 内对同一容器反复访问（绝大多数热循环形态）
+            if (ctx == _fastReadCtx && index == _fastReadIndex && version == _fastReadVersion)
+                return;
+            if (_writeTxExempt[index] != 0) return;
             if (ctx == 0) return;
             while (true)
             {
                 var set = _ctxReads.GetOrAdd(ctx, _ => new System.Collections.Generic.HashSet<int>());
                 lock (set)
                 {
-                    // 条目可能已被并发 ReleaseReadsForContext 移除或替换：落进旧 set 的 +1 永不配对，
-                    // 必须丢弃并重新登记到现役条目（GetOrAdd 会在无条目时新建）。
-                    if (!_ctxReads.TryGetValue(ctx, out var cur) || !ReferenceEquals(cur, set))
-                        continue;
-                    if (set.Add(index)) Interlocked.Increment(ref _readerCount[index]);
-                    return;
+                    // 顺序要紧：必须「先 Add 再校验条目仍是现役」。
+                    // 若先校验再 Add，则在本行与锁定之间条目可能被并发 ReleaseReadsForContext 移除，
+                    // 此时 Add 会在已被丢弃的 set 上返回 true 并 +1，而 ReleaseReadsForContext 只递减
+                    // 它移除时看到的那份 set 的成员 → +1 永不配对 → _readerCount 永久泄漏 → 主线程被永久误拦。
+                    // Add 返回 true 即代表本次是本 set 内该 index 的首次登记，故撤销自己的登记是安全的。
+                    if (!set.Add(index)) { _fastReadCtx = ctx; _fastReadIndex = index; _fastReadVersion = version; return; }
+                    if (_ctxReads.TryGetValue(ctx, out var cur) && ReferenceEquals(cur, set))
+                    {
+                        Interlocked.Increment(ref _readerCount[index]);   // 仅在条目仍现役时计数，保证与释放侧配平
+                        _fastReadCtx = ctx; _fastReadIndex = index; _fastReadVersion = version;
+                        return;
+                    }
+                    set.Remove(index);   // 落进了已被移除的条目：撤销后重新登记到现役条目
                 }
             }
 #endif

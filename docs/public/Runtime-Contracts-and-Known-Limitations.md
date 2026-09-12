@@ -63,9 +63,24 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 
 ### 开关与开销
 
-- 由 `ENTJOY_SAFETY` 或 `ENTJOY_SAFETY_BOUNDS` 宏启用（委托原生实现时二者之一生效），因此 **Release 默认开启**，作为防 Use-After-Free 兜底的一部分。
-- 单次容器写访问的开销约为 1–2ns（热路径的追踪登记）；读访问额外承担一次原子计数登记与查询。可通过 `SafetyChecksEnabled=false` 或编译期全关安全宏（`-p:DefineConstants=`）彻底关闭，关闭后不再检测冲突。
+- 由 `ENTJOY_SAFETY` 或 `ENTJOY_SAFETY_BOUNDS` 宏启用（委托原生实现时二者之一生效），因此 **Release 默认开启**，作为防 Use-After-Free 兜底的一部分。注意 Debug 与 Release 走的是**同一段**追踪代码，Release 并不免除该开销。
+- 实测每次索引的检查开销（`tools/SafetyLockOverheadBench`，Native 后端，1,048,576 实体 × 20 次、5 轮取中位）：
+  - 主线程访问：约 2.7ns/次（`ctx==0`，只做状态/版本/持有者判定，不登记）。
+  - **Job 内、同线程反复访问同一容器：约 0.8ns/次**（命中 thread-static 快路径，见下）。
+  - Job 内经 `NativeArray` 索引器跨容器访问（如每元素 2 读 2 写）：残余检查约 1.7ns/访问；同一 job 改用 `AsSpan()` 后残余为 0，实测整任务 **2.1~2.2x** 加速。
+- 可通过 `SafetyChecksEnabled=false` 或编译期全关安全宏（`-p:DefineConstants=`）彻底关闭，关闭后不再检测冲突。
 - 依赖调度之下冲突不会误报：前一 Job 结束即释放其对容器的主持有声明，后继 Job 正常接续。冲突检测只在运行时出现真正交错的访问时才触发，并非调度期确定性检测。
+
+### 登记机制与两条必须保持的顺序契约
+
+读写持有登记的状态由 `SafetyHandleManager` 维护，其中有两处顺序是**正确性前提**，改动前请先读此处与代码注释：
+
+1. **写声明按 Job 完成点释放，不得按 tile 释放。** 同一 Job 的所有 tile 共享一个执行上下文（ctx），逐 tile 释放会先把该 ctx 的 `_ctxWrites` 条目移除，而仍在运行的 tile 随后登记时会把 index 写进一份被丢弃的 list，释放循环再也扫不到它 → `_writerCtx[index]` 永久残留该 ctx，`Complete()` 后主线程访问被**永久误拦**。同理 `ReleaseWritesForContext` 只清空条目、不删除条目。
+2. **读者计数登记的校验必须在 `set.Add` 之后。** 若「先校验条目现役、再 Add」，两步之间条目可能被并发释放移除，`+1` 会落在已丢弃的集合上而永不配对 → `_readerCount` 永久为正，同样导致主线程被永久误拦。
+
+两条都是先在 Native 后端实测复现（`tools/SafetyLockOverheadBench/repro`，N=262144 / batch=16384，曾于第 14 次尝试触发）、修复后 0 触发的回归项，并由测试 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 持续守护。
+
+另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）。
 
 ## SharedBlob 和调试 pin
 
@@ -81,6 +96,7 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 - `SharedBlob<T>` 的值复制不增加引用计数，跨系统共享必须使用 `Clone()`。
 - 调试 pin 地址只在对象保持存活且未释放 pin 时有效；不得缓存到业务生命周期。
 - Job 之间的冲突检测只覆盖「写-写」：不同 Job 对同一容器的并发读（读读共享）或读-写组合不作为 Job 间冲突检测目标，并行读写同一容器时的确定性需由上层保证。主线程与 Job 的任意读/写组合则由上述「主线程访问拦截」覆盖。
+- **Managed 回退后端的完成协议与安全声明释放尚未形成同一同步点（已知缺陷）**：`ManagedJobHandle.IsCompleted` 直接等于 `ManagedCompletion.Remaining == 0`，而释放读/写声明发生在该计数归零之后，主线程可能在声明释放前就观察到「已完成」→ `Complete()` 后的合法访问被误拦。另一个已定位因素是托管路径的执行上下文取自 `RuntimeHelpers.GetHashCode(box)`，而 box 由 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx，使上一次 Job 的按-ctx 释放清掉下一次 Job 的登记。此外，隐藏 `NativeDll.dll` 后在托管路径上运行 `tools/SafetyLockOverheadBench/repro` 会稳定**卡死在 `Complete()`**（提交态代码即复现）。**该缺陷不影响 Native 后端**（`JobScheduler` 默认走 Native，本仓库测试集即运行在 Native 上：`IsNative=True`）；若需要在 NativeDll 加载失败的回退路径上也保证同一强度，需按「完成阶段状态机」重设计 `ManagedCompletion`（先放行声明、再发布完成态）并给每次 Job 调用分配唯一 ctx，两者需同批实施。详见 `NativeArray-Index-Safety-Overhead-and-Fixes.md`。
 - IJobEntity 的 DOTS 式 `Entity` 参数（`Execute(ref T0 c0, Entity e)`）的 `Execute` 方法体必须是**块体 `{ }`**，不支持表达式体 `=>`（ISPC 生成器只识别块体）。`e.Id` 即全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组（无该参数零开销）。
 
 CI 全绿证明已覆盖路径通过；发布前仍应在目标平台运行 sanitizer、压力和长稳测试。

@@ -37,6 +37,19 @@ namespace EntJoy.ECS.Tests
         private const int N = 2048;
         private const int InnerBatch = 128;
 
+        // 循环内改用 Span 读取：AsSpan 只在取 Span 时做一次检查并登记读者，
+        // 之后循环内访问零检查。回归护栏：确认登记仍然发生（主线程仍被拦）。
+        private struct SpanReadJob : IJobParallelFor
+        {
+            public NativeArray<long> Data;
+            public void Execute(int index)
+            {
+                for (int j = 0; j < 4; j++) System.Threading.Thread.SpinWait(8);
+                var span = Data.AsSpan();
+                _ = span[index];
+            }
+        }
+
         static ParallelReadWriteContainmentTests()
         {
             JobScheduler.Initialize();
@@ -154,6 +167,74 @@ namespace EntJoy.ECS.Tests
                 }
             }
             finally { data.Dispose(); }
+        }
+
+        /// <summary>
+        /// Span 路径不得绕过并行读登记：job 通过 AsSpan() 访问容器时，
+        /// 主线程在 job 活跃期间读仍须被拦（否则 use-after-free 检测被静默削弱）。
+        /// </summary>
+        [Fact]
+        public void MainThreadAccess_WhileSpanJobReads_Throws()
+        {
+            for (int attempt = 0; attempt < 40; attempt++)
+            {
+                var data = new NativeArray<long>(N, Allocator.Persistent);
+                try
+                {
+                    var h = new SpanReadJob { Data = data }.Schedule(N, InnerBatch);   // 不 Complete，保持活跃
+                    var ex = Record.Exception(() =>
+                    {
+                        for (int k = 0; k < N; k++) _ = data[k];
+                    });
+                    h.Complete();
+                    if (ex != null && ContainsMessage(ex, "being read by an active job"))
+                        return;
+                }
+                finally { data.Dispose(); }
+            }
+            Assert.Fail("Span 路径未登记读者：主线程在 span 读 job 活跃期间的访问 40 次尝试均未被拦。");
+        }
+
+        /// <summary>
+        /// 写者声明不得残留：多 tile 并发的写 job，Complete() 后主线程访问必须全部放行。
+        /// 回归护栏（曾复现）：写声明若在 tile 级释放，先结束的 tile 会把同 ctx 仍在运行 tile 的登记
+        /// 写进一份随后被丢弃的 list，释放时扫不到该 index，_writerCtx 永久残留该 ctx，主线程访问被永久误拦。
+        /// 泄漏一旦发生是持续态（后续尝试恒失败），故本测试必然失败。
+        /// </summary>
+        [Fact]
+        public void MultiTileWriteJob_AfterComplete_MainThreadNotBlocked()
+        {
+            const int len = 32768;
+            const int batch = 2048;   // 16 tile：与复现配置同量级
+
+            for (int attempt = 0; attempt < 400; attempt++)
+            {
+                var data = new NativeArray<long>(len, Allocator.Persistent);
+                try
+                {
+                    for (int j = 0; j < 5; j++)
+                    {
+                        var h = new WriteJob { Data = data }.Schedule(len, batch);   // 不 Complete，保持活跃
+                        // 主线程与 job 竞争：期间必须被拦（有 job 持写）
+                        Record.Exception(() =>
+                        {
+                            for (int k = 0; k < len; k++) _ = data[k];
+                        });
+                        h.Complete();
+
+                        // Complete 后必须放行 —— 若写者声明残留，这里会抛
+                        try
+                        {
+                            for (int k = 0; k < len; k++) _ = data[k];
+                        }
+                        catch (Exception ex)
+                        {
+                            Assert.Fail($"attempt {attempt}/job {j}: Complete() 后主线程访问仍被拦（写者声明残留）: {ex.Message}");
+                        }
+                    }
+                }
+                finally { data.Dispose(); }
+            }
         }
     }
 }

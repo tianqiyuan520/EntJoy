@@ -1000,6 +1000,9 @@ namespace EntJoy.JobSystem
         internal static void ManagedCleanup(IntPtr ctx)
         {
             if (ctx == IntPtr.Zero) return;
+            // job 完整结束点（RunBatchCleanup 只认领一次，在所有 tile 之后）：
+            // 释放本 ctx 的写声明。tile 级释放会与仍在运行的同 ctx tile 竞争，见 ReleaseWritesForContext 注释。
+            SafetyHandleManager.ReleaseWritesForContext(ctx);
             var handle = GCHandle.FromIntPtr(ctx);
             if (handle.IsAllocated) handle.Free();
         }
@@ -1018,6 +1021,9 @@ namespace EntJoy.JobSystem
         internal unsafe static void Cleanup(IntPtr dataPtr)
         {
             if (dataPtr == IntPtr.Zero) return;
+            // job 完整结束点（RunBatchCleanup 只认领一次，在所有 tile 之后）：
+            // 释放本 ctx 的写声明。tile 级释放会与仍在运行的同 ctx tile 竞争，见 ReleaseWritesForContext 注释。
+            SafetyHandleManager.ReleaseWritesForContext(dataPtr);
             int size = *(int*)((byte*)dataPtr - sizeof(int));
             ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
         }
@@ -1050,7 +1056,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseWritesForContext(ctx);
                     SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
@@ -1084,7 +1089,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseWritesForContext(ctx);
                     SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
@@ -1119,7 +1123,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseWritesForContext(ctx);
                     SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
@@ -1153,7 +1156,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseWritesForContext(ctx);
                     SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
