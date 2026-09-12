@@ -1,0 +1,101 @@
+# NativeArray 索引安全检查：实测开销、两处并发缺陷与修复记录
+
+本文记录 2026-09-12 对「Job 内 `NativeArray` 索引的并行读写安全检查」的实测、两处真实并发缺陷的定位与修复，以及 Span 快路径的收益。结论均已由测试与可复现基准支撑。
+
+相关契约见 `Runtime-Contracts-and-Known-Limitations.md` 的「并行读写冲突检测」一节。
+
+## 一、问题起点
+
+`NativeArray<T>` / `NativeList<T>` 的索引器每次访问都会调用 `SafetyHandleManager.CheckReadAndThrow` / `CheckWriteAndThrow`。在 Job 内（`JobIdentity.CurrentContext != 0`）读访问会进入 `RegisterRead` 做读者登记。最初实测发现同线程对同一容器反复索引时，每次访问都要付出 `ConcurrentDictionary.GetOrAdd + Monitor` 的开销。
+
+## 二、实测数据（Native 后端）
+
+基准：`tools/SafetyLockOverheadBench`（1,048,576 实体 × 20 次，5 轮取中位；与 `samples/Godot/SpritesRandomMove` 的 `NativeMoveJob` 逐行同构）。
+
+| 形态 | 优化前 | 优化后 | Span 参照（无检查） |
+|---|---|---|---|
+| 同容器反复索引（读） | 54.73 ns/访问 | **0.85 ns/访问** | 0.09 ns/访问 |
+| NativeMoveJob 同构（每元素 2 读 2 写，4 容器） | 2.16x vs Span | **2.13x vs Span** | — |
+| ↑ 其中每次索引的残余检查开销 | ~17.8 ns/访问 | **0.76 ns/访问** | — |
+
+对照（修复前测得的基线，用于界定「检查开销」这一项）：
+
+| 路径 | ns/次索引 |
+|---|---|
+| Job 内，关闭全部检查 | 0.47 |
+| Job 内，豁免句柄（ECS chunk view 同构） | 1.82 |
+| 主线程，普通句柄（`ctx==0`，不登记） | 2.75 |
+| **Job 内，普通句柄（进入 `RegisterRead`）** | **19.64** |
+
+机制微基准交叉验证：`ConcurrentDictionary.GetOrAdd + lock(HashSet) + Add` 单次 17.65 ns，与容器内实测 19.64 ns 吻合，确认瓶颈就是这条路径。
+
+## 三、缺陷 1：写者声明按 tile 释放（Native 后端）
+
+**症状**：`Complete()` 之后主线程访问容器抛 `"NativeContainer is being written by an active job; Complete() before accessing it from the main thread."`，且**持续失败**（后续访问恒被拦）。
+
+**定位**：用「反射读取 `SafetyHandleManager` 私有状态」的手段在失败点快照（不改引擎源码）：`_ctxWrites=0`（字典条目已空）但 `slot1/slot2/slot3` 的 `_writerCtx` 全部残留同一个 ctx —— 说明释放循环从未覆盖这些 index，条目却已从字典移除。
+
+**根因**：读写释放点不对称。`ReleaseReadsForContext` 在 **Job 完整结束**调用，而 `ReleaseWritesForContext` 在 **每个 tile 的回调 finally** 调用。同一 Job 的多个 tile 共享同一 ctx：
+
+1. tile A 结束 → `TryRemove(ctx)` 移除条目并释放它看到的 index；
+2. tile B 仍在运行 → 写容器时走 `TryGetValue` + `GetOrAdd`，拿到（或新建）一份**随后被丢弃**的 list，其 index 从此无人释放；
+3. `_writerCtx[index]` 永久残留 → 主线程访问被永久误拦。
+
+**修复**：
+- 写声明释放移到 Job 完成点（`NativeJobCore.Cleanup` / `ManagedCleanup`；C++ 侧 `RunBatchCleanup` 只认领一次，在所有 tile 之后执行），删除 4 个 tile 回调里的逐 tile 写释放；
+- `TryAcquireWriteContext` 改为单次 `GetOrAdd`（不再 `TryGetValue` + `GetOrAdd` 两步）；
+- `ReleaseWritesForContext` 改为**保留条目只清空**，使「同一 ctx 只有一份 list」恒成立（条目随 ctx 存活，ctx 数量有限，不会无界增长）。
+
+**验证**：同一配置（N=262144 / batch=16384 / 16 tile）修复前第 14 次尝试触发，修复后 **40/40 无触发**，`_ctxWrites` 无增长。回归护栏：`MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`（对旧行为在 attempt 5/job 3 失败，对修复通过）。
+
+## 四、缺陷 2：读者登记配对的校验顺序（两后端共有）
+
+**根因**：`RegisterRead` 原实现是「先校验条目仍现役，再 `set.Add(index)`」。两步之间条目可能被并发 `ReleaseReadsForContext` 移除，此时：
+
+- `set.Add` 在已丢弃的集合上返回 true 并执行 `+1`；
+- 释放侧只递减「它移除时看到的那份集合」的成员；
+
+→ 该 `+1` 永不配对，`_readerCount` 永久为正，主线程访问被永久误拦。
+
+**修复**：改为「先 `Add`，再校验条目仍是现役；不现役则撤销自己的登记并重新登记」。`Add` 返回 true 即代表本次是该集合内该 index 的首次登记，撤销自身登记是安全的。
+
+**证据**：Managed 后端失败点快照为 `ctxReads=0` 而槽位读者计数为正；递增调用栈为 `NativeArray.get_Item ← WriteJob.Execute ← ParallelCache.Run`。
+
+> 注意：不能用「每槽位归属单个读者 ctx」的数组替代「ctx → index 集合」—— 多个 Job 可以**并发读同一容器**（读-读不冲突），单槽位归属无法表达多读者，会把「已由别的 ctx 持有」误判成幂等，破坏读者计数语义（该方案实测引入新失败，已放弃）。
+
+## 五、Span 快路径
+
+热循环里对同一容器反复索引是绝大多数 Job 的形态。`RegisterRead` 增加 thread-static 快路径，键为 `(ctx, 容器 index, 句柄代际)`，命中即返回，跳过 `GetOrAdd` 与 `Monitor`。命中即安全的依据：
+
+1. 只有登记成功（`+1`）才写入缓存，而 `+1` 与释放侧 `-1` 成对；
+2. `ctx` 来自 `JobIdentity`（`[ThreadStatic]`），Job 退出会还原/换值，故命中时必然仍处于写入缓存的那个 Job 生命周期内；
+3. **句柄代际参与比较**：index 释放后复用必然递增代际 → 缓存自动失效并重新登记，不削弱 Use-After-Free 检测；
+4. 豁免句柄在首个访问就提前返回，永不写缓存。
+
+## 六、调用方建议（SPI）
+
+- 热循环内直接持有 `NativeArray` 成员并逐元素索引的 Job（如 `IJobParallelFor`），在循环外取一次 `Span<T>`：`var positions = Positions.AsSpan();`。`AsSpan()` 只做一次检查并登记读者，循环内零检查。`SpritesRandomMove.NativeMoveJob` 即按此改造，实测 **2.1~2.2x**。
+- `IJobEntity` 生成的代码本身就用 `GetComponentDataSpan`（零 per-access 检查）；`ArchetypeChunk.GetComponentDataNativeArray` 走共享豁免句柄，检查开销约 1.35 ns/访问。
+- 注意 `NativeArray` 的 `implicit operator ReadOnlySpan<T>` **不做任何检查**（不登记读者），需要安全检查时请用 `AsSpan()` 而不是该隐式转换；测试 `MainThreadAccess_WhileSpanJobReads_Throws` 专门守护这一点。
+
+## 七、未修复项：Managed 回退后端
+
+同一根因族在 Managed 回退后端（`JobScheduler` 在 NativeDll 加载失败时的 fallback）仍然存在，且**未修复**：
+
+- **可复现的硬证据（提交态代码即如此）**：隐藏 `bin/NativeDll.dll` 后运行复现器
+  `dotnet run -c Debug --project tools/SafetyLockOverheadBench/repro/repro.csproj -- 3 262144 16384`
+  （3 次尝试 × 各 20 次 job）会**卡死在 `Complete()`**，稳定停在同一位置（约第 130 次调度附近），`Remaining` 停留在正值。该行为与本节所有改动无关：把 `src/EntJoy.Jobs/Managed/*` 还原为提交态后同样复现。
+- xUnit 全量在 Managed 下的结果**不稳定**：单独运行连续 4 次均为 191/191，但紧跟 Native 全量跑之后（机器仍被 15 个 worker 占用）出现过 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 2 红。归因未定，故不据此下结论。
+- 已定位的两个成因：
+  1. `ManagedJobHandle.IsCompleted` 直接等于 `ManagedCompletion.Remaining == 0`，而释放读/写声明发生在计数归零之后 → 主线程可能在释放前观察到「已完成」；
+  2. 托管路径 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，box 由 `ParallelCache<T>` 池化复用 → 相邻两次 Job 可能拿到同一 ctx，前一次 Job 的按-ctx 释放会清掉后一次 Job 的登记。
+- 尝试过的组合（均未收口，已全部回退，未提交）：只调释放顺序、只加「每次调用唯一 ctx」、两者都加、以及「完成阶段状态机（Pending/Finalizing/Done）+ 唯一 ctx」。最后一种在受限测试上 14/14 通过，但没能消除上述复现器的挂起。
+- 若要彻底修复，应按「完成阶段状态机 + 每次调用唯一 ctx」**同批实施**，并以复现器不挂起 + Managed 下全量稳定全绿两者共同作为验收。
+
+**影响面**：`JobScheduler` 默认走 Native，本仓库测试集与 Godot 示例均运行在 Native 上，因此该缺陷不影响当前主路径；仅在 NativeDll 加载失败的回退场景下才会暴露。
+
+## 八、复现与基准工具
+
+- 性能基准：`dotnet run -c Debug --project tools/SafetyLockOverheadBench/SafetyLockOverheadBench.csproj`
+- 残留/泄漏复现器：`dotnet run -c Debug --project tools/SafetyLockOverheadBench/repro/repro.csproj -- <attempts> <N> <batch>`（默认 `40 262144 16384`；隐藏 `bin/NativeDll.dll` 可切到 Managed 后端复现）
+- 判定标准：`触发器: 触发=0  残留状态=-  _ctxWrites max=0 _ctxReads max=0`
