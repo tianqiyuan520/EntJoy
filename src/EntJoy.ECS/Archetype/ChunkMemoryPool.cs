@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -33,8 +33,20 @@ namespace EntJoy.ECS
         /// 分配一个 64KB 对齐的块（≥ <see cref="kBlockSize"/> 可用空间）。
         /// 调用方通过块起始 + offset 访问 chunk 数据（与 Archetype._currentSlab 模式一致）。
         /// </summary>
-        public static nint Allocate()
+        public static nint Allocate() => Allocate(kBlockSize);
+
+        /// <summary>
+        /// 分配一个 64KB 对齐的块，可用空间 ≥ <paramref name="minBytes"/>。
+        /// 超过标准块大小时直通 OS（大块不进池：池按"块"记账，无法区分大小）。
+        /// </summary>
+        public static nint Allocate(int minBytes)
         {
+            if (minBytes > kBlockSize)
+            {
+                Interlocked.Increment(ref s_misses);
+                Interlocked.Increment(ref s_allocs);
+                return Marshal.AllocHGlobal(minBytes + kOverAlloc);
+            }
             nint raw;
             lock (_lock)
             {
@@ -57,10 +69,19 @@ namespace EntJoy.ECS
         /// 归还块（仅池化 ≤ <see cref="kBlockSize"/> 的标准块）。
         /// 非本池块（超大/未知来源）直通 OS 释放。
         /// </summary>
-        public static void Free(nint raw)
+        public static void Free(nint raw) => Free(raw, kBlockSize);
+
+        /// <summary>归还块，按 <paramref name="bytes"/> 判断是否可入池（标准块才入池）。</summary>
+        public static void Free(nint raw, int bytes)
         {
             if (raw == nint.Zero) return;
             Interlocked.Increment(ref s_frees);
+
+            if (bytes > kBlockSize)
+            {
+                Marshal.FreeHGlobal(raw);
+                return;
+            }
 
             // 安全：若已超过池上限，直接 OS 释放
             lock (_lock)

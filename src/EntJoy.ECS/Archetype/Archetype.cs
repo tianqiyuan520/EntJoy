@@ -38,7 +38,9 @@ namespace EntJoy.ECS
             {
                 componentTypeRecorder.Add(types[i], i);
             }
-            _chunkCapacity = CalculateOptimalChunkCapacity(types);
+            _chunkCapacity = ChunkCapacityOverride > 0
+                ? Math.Max(64, ChunkCapacityOverride)   // 64 = 缓存行，位图/遍历以 64 为自然边界
+                : CalculateOptimalChunkCapacity(types);
             _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types);
         }
 
@@ -167,11 +169,20 @@ namespace EntJoy.ECS
         // 已移除 Chunk 的空洞（复用：新 Chunk 优先从这里取，避免 slab 无限增长）
         private readonly List<nint> _freeChunks = new();
 
+        /// <summary>
+        /// 显式指定所有 Archetype 的 Chunk 容量（0 = 用 <see cref="CalculateOptimalChunkCapacity"/> 自动值）。
+        /// 用途：需要"整个 Archetype 只有 1 个 Chunk、组件列连续"的场景（如百万单位 SoA 视图）。
+        /// ⚠ 必须在创建 Archetype（<c>World.CreateEntities</c> 等）**之前**设置；超大容量会让
+        /// Chunk stride 超过 <see cref="SLAB_SIZE"/>，此时每个 Chunk 独占一个按 stride 大小分配的 slab。
+        /// </summary>
+        public static int ChunkCapacityOverride;
+
         /// <summary>单个 slab 的追踪信息（复用/压缩用）。</summary>
         private sealed class SlabInfo
         {
             public nint RawPtr;       // ChunkMemoryPool.Free 用（未对齐）
             public nint AlignedPtr;   // Chunk 地址基准（对齐后）
+            public int Bytes;         // 本 slab 的可用字节数（≥ SLAB_SIZE；超大 stride 时按 stride 给）
             public int ChunkCount;    // 该 slab 已分配的 Chunk 数
             public int ReleasedCount; // 已释放（移除）的 Chunk 数
         }
@@ -182,8 +193,16 @@ namespace EntJoy.ECS
         /// <summary>本 Archetype 已分配的 slab 数量（内存分析器用）。</summary>
         public int SlabCount => _slabs.Count;
 
-        /// <summary>本 Archetype 已分配的 slab 总字节数（每 slab 64KB，内存分析器用）。</summary>
-        public long SlabBytes => (long)_slabs.Count * SLAB_SIZE;
+        /// <summary>本 Archetype 已分配的 slab 总字节数（内存分析器用）。</summary>
+        public long SlabBytes
+        {
+            get
+            {
+                long total = 0;
+                for (int i = 0; i < _slabs.Count; i++) total += _slabs[i].Bytes;
+                return total;
+            }
+        }
         /// <summary>
         /// 内部 _chunkList 的零拷贝只读视图（v3 Phase 1.4：调度/查询热路径遍历
         /// 不再经 GetChunks() 每次 new List&lt;Chunk&gt; 拷贝）。
@@ -311,15 +330,19 @@ namespace EntJoy.ECS
 
             if (_chunkStride == 0) _chunkStride = ComputeChunkStride();
 
+            // 每个 slab 的可用字节数：常规 64KB；stride 超过 64KB（超大容量 Chunk）时按 stride 给，
+            // 使该 Chunk 独占一个 slab（此时一个 slab 只有一个 chunk）。
+            int slabBytes = _chunkStride > SLAB_SIZE ? _chunkStride : SLAB_SIZE;
+
             // Ensure slab allocation
-            if (_currentSlab == null || _currentSlabOffset + _chunkStride > SLAB_SIZE)
+            if (_currentSlab == null || _currentSlabOffset + _chunkStride > _currentSlab.Bytes)
             {
-                // ChunkMemoryPool.Allocate 返回 kBlockSize + kOverAlloc（128KB），
+                // ChunkMemoryPool.Allocate 返回 申请字节 + kOverAlloc（64KB），
                 // 下面的对齐计算保证返回的 _currentSlab 满足 SLAB_ALIGNMENT（64KB）。
-                nint raw = ChunkMemoryPool.Allocate();
+                nint raw = ChunkMemoryPool.Allocate(slabBytes);
                 long addr = raw.ToInt64();
                 long aligned = (addr + SLAB_ALIGNMENT - 1) & ~(SLAB_ALIGNMENT - 1);
-                _currentSlab = new SlabInfo { RawPtr = raw, AlignedPtr = new nint(aligned) };
+                _currentSlab = new SlabInfo { RawPtr = raw, AlignedPtr = new nint(aligned), Bytes = slabBytes };
                 _slabs.Add(_currentSlab);
                 _currentSlabOffset = 0;
             }
@@ -341,7 +364,7 @@ namespace EntJoy.ECS
             for (int i = 0; i < _slabs.Count; i++)
             {
                 long start = _slabs[i].AlignedPtr.ToInt64();
-                if (addr >= start && addr < start + SLAB_SIZE)
+                if (addr >= start && addr < start + _slabs[i].Bytes)
                 {
                     slab = _slabs[i];
                     break;
@@ -354,17 +377,18 @@ namespace EntJoy.ECS
             if (slab.ReleasedCount == slab.ChunkCount)
             {
                 // 该 slab 所有 Chunk 都已释放 → 归还整个 slab（压缩）
-                ChunkMemoryPool.Free(slab.RawPtr);
+                ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes);
                 _slabs.Remove(slab);
                 // 重置 current slab：否则 _currentSlab 仍指向已归还内存，后续 AllocateFromSlab
                 // 会继续在已释放的 slab 上切 chunk（use-after-free）。
                 if (_currentSlab == slab) { _currentSlab = null; _currentSlabOffset = 0; }
                 // 从空洞列表移除该 slab 的 Chunk（已随 slab 归还，不能再复用）
                 long start = slab.AlignedPtr.ToInt64();
+                long end = start + slab.Bytes;
                 _freeChunks.RemoveAll(c =>
                 {
                     long a = c.ToInt64();
-                    return a >= start && a < start + SLAB_SIZE;
+                    return a >= start && a < end;
                 });
             }
             else
@@ -613,7 +637,7 @@ namespace EntJoy.ECS
             DestroyAllEntityComponents(errors);
             foreach (var slab in _slabs)
             {
-                try { ChunkMemoryPool.Free(slab.RawPtr); }
+                try { ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes); }
                 catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
             }
             _slabs.Clear();

@@ -127,9 +127,36 @@ namespace EntJoy.Collections
             return new NativeArray<T>(ptr, length, Allocator.None, new AtomicSafetyHandle(-1, 1, isReadOnly: false), isOwner: false);
         }
 
-        // ========== 释放 ==========
-        public void Dispose()
+        /// <summary>用于 <see cref="CreateView"/> 的**共享**安全句柄（写跟踪豁免）。
+        /// 非拥有视图的内存由调用方负责，且典型用途是"把外部内存（如 ECS chunk 的组件列）
+        /// 交给并行 job 读写"，调度器的写跟踪对这种并发写会误报。</summary>
+        private static readonly AtomicSafetyHandle s_sharedViewSafety = CreateSharedViewSafety();
+
+        private static AtomicSafetyHandle CreateSharedViewSafety()
         {
+            var h = SafetyHandleManager.Allocate();
+            SafetyHandleManager.ExemptWriteTracking(h.Index);
+            return h;
+        }
+
+        /// <summary>
+        /// 从外部内存创建**非拥有视图**，带**可用的共享安全句柄**（写跟踪豁免）——
+        /// 与 <c>ArchetypeChunk.GetComponentDataNativeArray</c> 读 chunk 组件列的做法同源。
+        ///
+        /// 与 <see cref="FromExternalPtr"/> 的区别：那个用无效句柄（-1），因此**不能用索引器**
+        /// （`arr[i]` 会走 `CheckWriteAndThrow` 抛 "Invalid handle index."），只能走 `GetUnsafePtr()`；
+        /// 本方法返回的视图可以正常用索引器（本工程百万单位的仿真代码全是索引器访问）。
+        ///
+        /// 生命周期：`Dispose()` 不释放外部内存（isOwner=false）；外部内存必须先于视图失效。
+        /// </summary>
+        public static NativeArray<T> CreateView(void* buffer, int length)
+        {
+            if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+            return new NativeArray<T>(buffer, length, Allocator.None, s_sharedViewSafety, isOwner: false);
+        }
+
+        // ========== 释放 ==========
+        public void Dispose()        {
             if (_buffer == null) return;
 #if DEBUG
             // 先保存原始 index：Release 会把 _safety 置为 (-1, false)，此时再取 Index 得 -1，
