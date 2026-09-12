@@ -955,8 +955,20 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             // 保留并行度。BATCH_SIZE=0（单 TU）在生成代码量大时（EntJoySample 207 cpp +
             // 40 ispc）单 TU ClangCL 编译串行成为瓶颈（全量 ~33s）；拆批后
             // `cmake --build --parallel` 并行编译多 TU，增量也只重编变化的 TU。
+            //
+            // 但拆批有**运行期**代价：job 批函数调用的静态帮助函数（CpuOrca/CpuFlow/CpuObstacle/
+            // CpuScan 的 static 方法）各自是独立 .cpp，拆批会把它们与调它的 job 分到不同 TU
+            // ⇒ 跨 TU 调用**无法内联**（帮助函数还带 GENERATED_API=dllexport）。
+            // 实测（百万单位 Melee，1s 交替 A/B 配对、每配置 2 轮）：
+            //   批 8：C++ 内核比 C# 内核 **慢** 2.9±2.3ms/步；单 TU：**快** 6.3±2.3ms/步（≈10% Melee）
+            //   —— 托管 JIT 会把同样的平凡帮助函数内联，拆批相当于让 C++ 侧白吃亏。
+            // 编译时间差距在小规模下可忽略（63 文件：单 TU 27s vs 批 8 25s）⇒ 小规模默认单 TU。
             sb.AppendLine("set(CMAKE_UNITY_BUILD ON)");
-            sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)");
+            int unityBatch = cppFiles.Count + ispcFiles.Count <= 96 ? 0 : 8;
+            sb.AppendLine($"set(CMAKE_UNITY_BUILD_BATCH_SIZE {unityBatch})"
+                + (unityBatch == 0
+                    ? "   # 0 = 单 TU：让 job 与它调用的静态帮助函数同 TU 可内联（见上方实测）"
+                    : "   # 大规模：保留并行/增量编译，代价是跨 TU 调用不可内联"));
             sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
@@ -1247,6 +1259,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");
             sb.AppendLine("endif()");
             sb.AppendLine();
+            // 注：曾试过对 NativeTranspiled 开 INTERPROCEDURAL_OPTIMIZATION（/GL+/LTCG、-flto）
+            // 来解决同一个"跨 TU 不可内联"问题 —— **实测无收益**（ΔMelee 从 −3.8±4.6 变到 −2.5±2.6ms，
+            // 即在噪声内），而且 /GL 会拖慢链接。真正的解法是上面的 unity 批大小（单 TU），故此处不开 IPO。
 
             sb.AppendLine("# ============================================================");
             sb.AppendLine("# Platform-specific output suffix");
