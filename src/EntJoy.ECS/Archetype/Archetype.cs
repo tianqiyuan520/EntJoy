@@ -333,6 +333,13 @@ namespace EntJoy.ECS
             // 每个 slab 的可用字节数：常规 64KB；stride 超过 64KB（超大容量 Chunk）时按 stride 给，
             // 使该 Chunk 独占一个 slab（此时一个 slab 只有一个 chunk）。
             int slabBytes = _chunkStride > SLAB_SIZE ? _chunkStride : SLAB_SIZE;
+            // 不变式：slab 必须容得下**一个** chunk，否则 chunk 会跨出 slab 边界并静默踩坏相邻内存
+            // （`_currentSlabOffset + _chunkStride > slabBytes` 只保证"放不下就换新 slab"，
+            //   而 stride > slabBytes 时换多少 slab 都放不下 ⇒ 必须在这里响亮失败）。
+            if (slabBytes < _chunkStride)
+                throw new InvalidOperationException(
+                    $"Chunk stride {_chunkStride} 超过 slab {slabBytes}：容量/组件布局把 chunk 撑过了 slab。"
+                    + "请调小 ChunkCapacityOverride 或增大 slab。");
 
             // Ensure slab allocation
             if (_currentSlab == null || _currentSlabOffset + _chunkStride > _currentSlab.Bytes)
