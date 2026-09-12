@@ -118,12 +118,25 @@ namespace EntJoy.Collections
         /// 指针登记进 <see cref="PinnedMemory"/>，GPU 调度（ScheduleCuda 等）识别后
         /// 上传/回读直连单跳，免 C# 侧拷贝。外部内存生命周期由调用方负责。
         /// </summary>
+        /// <summary>
+        /// 从外部内存创建非拥有视图（isOwner=false，Dispose 不释放外部内存）。
+        /// 页锁定内存（CUDA cuMemAllocHost 等 CPU 可直写、GPU 可直读）请传 pinned:true ——
+        /// 指针登记进 <see cref="PinnedMemory"/>，GPU 调度（ScheduleCuda 等）识别后
+        /// 上传/回读直连单跳，免 C# 侧拷贝。外部内存生命周期由调用方负责。
+        ///
+        /// ⚠ 本方法用**无效安全句柄 index=-1**，因此**索引器不可用**：`arr[i]` 的 get/set 会先走
+        /// <c>SafetyHandleManager.CheckReadAndThrow</c>，它对 <c>index &lt; 0</c> 直接抛
+        /// <c>InvalidOperationException("Invalid handle index.")</c>。这个视图只能用
+        /// <see cref="GetUnsafePtr"/> 裸指针访问。
+        /// 需要**能走索引器**的外部内存视图（例如把 ECS chunk 的组件列交给仿真代码）请用
+        /// <see cref="CreateView"/> —— 它带一个共享的"写跟踪豁免"句柄。
+        /// </summary>
         public static NativeArray<T> FromExternalPtr(T* ptr, int length, bool pinned = false)
         {
             if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
             if (pinned) PinnedMemory.Register(ptr);
             // 外部内存视图：不分配安全句柄（原实现会 Allocate 却因 isOwner=false 永不 Release → 每次泄漏一个句柄）。
-            // 用无效句柄 index=-1，视图不参与安全检查（外部内存生命周期由调用方负责）。
+            // 用无效句柄 index=-1 ⇒ 只可 GetUnsafePtr()，不可索引（见上面的 ⚠）。
             return new NativeArray<T>(ptr, length, Allocator.None, new AtomicSafetyHandle(-1, 1, isReadOnly: false), isOwner: false);
         }
 
