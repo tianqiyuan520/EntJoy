@@ -909,8 +909,8 @@ namespace NativeTranspiler.Analyzer.Common
                 sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                 sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                 sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;");
-                sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+                sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图");
+                sb.AppendLine("    __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
                 if (entityParamNames.Count > 0)
                     sb.AppendLine("    __chunkDataLite.entityArray = __chunkData->entityArray;");
             }

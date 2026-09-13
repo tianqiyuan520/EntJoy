@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NativeTranspiler.Analyzer.Common;
@@ -300,6 +301,24 @@ namespace NativeTranspiler.Analyzer
         //   ISPC subclasses disable this (ISPC has no `(unsigned)` cast).
         // ================================================================
         protected virtual bool EnableWrapSafeIntArithmetic => true;
+
+        /// <summary>
+        /// C++（Windows/LLP64）字面量后缀修正：C# 的 <c>long</c>/<c>ulong</c> 是 **64 位**，而 C++ 的
+        /// <c>long</c>/<c>unsigned long</c> 是 **32 位** ⇒ `1UL`/`1L` 必须译成 `1ULL`/`1LL`。
+        ///
+        /// 实测（框架自带样例可复现）：C# 写 `v | (1UL &lt;&lt; b)`（b 可达 32..63）→ 生成 C++ `1UL &lt;&lt; b`
+        /// ⇒ clang 报 `shift count &gt;= width of type`（UB，实际按 `&amp; 31` 折叠）⇒ **掩码/位图静默写错**
+        /// （50,000 实体 enable 位图错 78%；`(1UL&lt;&lt;40)&gt;&gt;32` 由 256 变成 -4）。
+        /// </summary>
+        protected override string NormalizeNumericLiteral(string text)
+        {
+            if (text.EndsWith("UL", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith("LU", StringComparison.OrdinalIgnoreCase))
+                return text.Substring(0, text.Length - 2) + "ULL";
+            if (text.EndsWith("L", StringComparison.OrdinalIgnoreCase))
+                return text.Substring(0, text.Length - 1) + "LL";
+            return text;   // U/u（C# uint ↔ C++ unsigned int）两语言一致，原样保留
+        }
 
         private bool IsInt32Type(ExpressionSyntax expr)
         {

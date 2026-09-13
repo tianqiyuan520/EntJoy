@@ -40,6 +40,43 @@ namespace NativeTranspiler.Analyzer
         /// <summary>F-5：IJobParallelForBatch 目前只有 Cpp 后端 + 标量代码生成路径（ISPC/AutoSIMD 未实现）。</summary>
         public static readonly DiagnosticDescriptor ParallelForBatchRequiresCppBackendError = new("NT025", "IJobParallelForBatch requires the Cpp backend without AutoSIMD", "[NativeTranspile] struct '{0}' implements IJobParallelForBatch, which is only implemented for Target = Cpp with AutoSIMD = Disabled (the ISPC/AutoSIMD paths only know the per-index Execute(int) shape). Drop Target = Ispc / AutoSIMD, or use IJobParallelFor instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
+        /// <summary>
+        /// 生成器自身崩溃（P0-5b）：此前只会变成 Roslyn 的 CS8785 —— 只有异常类型名、没有行号，
+        /// 定位只能靠二分（实测代价：一整轮）。本诊断给出异常消息 + 调用栈前 6 帧，
+        /// 完整 ToString() 落盘到 <c>%TEMP%/entjoy-native-transpiler-crash.txt</c>。
+        /// </summary>
+        public static readonly DiagnosticDescriptor GeneratorCrashError = new("NT026", "NativeTranspiler generator crashed", "[NativeTranspile] 生成器抛出 {0}: {1}｜调用栈（前 6 帧；完整版见 %TEMP%/entjoy-native-transpiler-crash.txt）：{2}", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>
+        /// P0-5b：原生 job 不支持 `ref` 局部（`ref T x = ref expr;`）。
+        /// 转译器此前把它当**按值拷贝**翻译（`T x = expr;`）——对指针数组元素取 ref 时语义直接错；
+        /// 而在可空注解上下文（`Nullable=enable`）下更会因类型解析返回 null 而打崩生成器。
+        /// 正确写法：**指针局部** `T* p = &amp;arr[i];`。
+        /// </summary>
+        public static readonly DiagnosticDescriptor RefLocalNotSupportedError = new("NT027", "ref local element type cannot be resolved", "[NativeTranspile] 方法 '{0}' 的 `ref` 局部（`ref T x = ref …`）**元素类型无法解析**：无法生成 `T& x = …`。请显式写出元素类型（避免 `ref var`），或改用指针局部 `T* p = &arr[i];`。", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>
+        /// 解析局部声明的类型（P0-5b 修复）：优先类型语法节点的语义类型；**为 null 时回退到声明符号的类型**
+        /// —— `ref T x = ref expr;` 在 `Nullable=enable` 下 `GetTypeInfo(Type).Type` 返回 null，
+        /// 校验器此前靠 null 判断静默跳过、转译器则直接 NRE。
+        /// </summary>
+        private static ITypeSymbol? ResolveLocalType(SemanticModel model, LocalDeclarationStatementSyntax localDecl)
+        {
+            var t = model.GetTypeInfo(localDecl.Declaration.Type).Type;
+            if (t != null) return t;
+            foreach (var v in localDecl.Declaration.Variables)
+                if (model.GetDeclaredSymbol(v) is ILocalSymbol ls) return ls.Type;
+            return null;
+        }
+
+        /// <summary>是否为 `ref` 局部（初始化器是 `ref expr`）。</summary>
+        private static bool IsRefLocal(LocalDeclarationStatementSyntax localDecl)
+        {
+            foreach (var v in localDecl.Declaration.Variables)
+                if (v.Initializer?.Value is RefExpressionSyntax) return true;
+            return false;
+        }
+
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
         {
@@ -122,7 +159,12 @@ namespace NativeTranspiler.Analyzer
                 switch (node)
                 {
                     case LocalDeclarationStatementSyntax localDecl:
-                        var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
+                        if (IsRefLocal(localDecl) && ResolveLocalType(semanticModel, localDecl) == null)
+                        {
+                            diagnostics.Add(Diagnostic.Create(RefLocalNotSupportedError, localDecl.GetLocation(), method.Name));
+                            break;
+                        }
+                        var localType = ResolveLocalType(semanticModel, localDecl);
                         if (localType != null && !IsUnmanagedType(localType))
                             foreach (var v in localDecl.Declaration.Variables)
                                 diagnostics.Add(Diagnostic.Create(InvalidLocalVariableTypeError, v.GetLocation(), method.Name, v.Identifier.Text, localType.ToDisplayString()));
@@ -290,7 +332,12 @@ namespace NativeTranspiler.Analyzer
                     switch (node)
                     {
                         case LocalDeclarationStatementSyntax localDecl:
-                            var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
+                            if (IsRefLocal(localDecl) && ResolveLocalType(semanticModel, localDecl) == null)
+                            {
+                                diagnostics.Add(Diagnostic.Create(RefLocalNotSupportedError, localDecl.GetLocation(), executeMethod.Name));
+                                break;
+                            }
+                            var localType = ResolveLocalType(semanticModel, localDecl);
                             if (localType != null && !IsUnmanagedType(localType) && !(isChunkJob && IsAllowedChunkSpanLocal(localDecl, semanticModel)))
                                 foreach (var v in localDecl.Declaration.Variables)
                                     diagnostics.Add(Diagnostic.Create(InvalidLocalVariableTypeError, v.GetLocation(), executeMethod.Name, v.Identifier.Text, localType.ToDisplayString()));
@@ -455,7 +502,7 @@ namespace NativeTranspiler.Analyzer
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
                 if (allowChunkMethods && SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeArchetypeChunk)) &&
-                    (method.Name == Config.GetComponentDataNativeArray || method.Name == Config.GetComponentDataSpan))
+                    (method.Name == Config.GetComponentDataNativeArray || method.Name == Config.GetComponentDataSpan || method.Name == Config.GetEnableBitMapPtr))
                     return true;
                 return false;
             }

@@ -54,6 +54,22 @@ namespace EntJoy.Collections
         private static int[] _readerCount = new int[MaxHandles];
 #if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
         private static int[] _writeTxExempt = new int[MaxHandles];   // 1 = 豁免并行读写持有跟踪（共享/框架内部句柄）
+
+        /// <summary>
+        /// 读登记快路径标记（P1-10）：high 32 = epoch，low 32 = ctx。
+        ///
+        /// 为什么要它：原实现只有**单槽** TLS 快路径（<c>_fastReadCtx/_fastReadIndex/_fastReadVersion</c>），
+        /// job 内**交替访问多个容器**时 100% miss ⇒ 每次索引访问都要
+        /// `ConcurrentDictionary.GetOrAdd` + `lock(HashSet)` + `HashSet.Add` + `Interlocked.Increment`，
+        /// 实测 **~167 ns/访问**（15 列 × 1M = 2.3 s/步，见 CPU 百万同屏文档 §5.6）。
+        /// 有了它，同一 job 内每容器只在首次访问时走慢路径，之后每次访问只多"一次 long 读 + 比较"。
+        ///
+        /// 正确性：epoch 在 <see cref="ReleaseReadsForContext"/> 递增 ⇒ 任何 job 结束都会让全部标记失效
+        /// （ctx 值来自上下文池会被复用，若不失效，新 job 会误判"已登记"而不计数 → 主线程保护失效）。
+        /// 失效只会让另一线程正在跑的 job 多做一次幂等登记，不影响语义。
+        /// </summary>
+        private static long[] _readMark = new long[MaxHandles];
+        private static int _readMarkEpoch;
         // ctx → 该 job 写过的容器 index，用于 job 结束时一次性释放其写声明
         private static readonly ConcurrentDictionary<nint, System.Collections.Generic.List<int>> _ctxWrites = new();
         // ctx → 该 job 读过的容器 index 集合（幂等：同一 job 对同一容器至多 +1）。
@@ -149,8 +165,12 @@ namespace EntJoy.Collections
                 return;   // 共享/框架内部句柄：豁免并行读写持有跟踪（job 与主线程访问均放行）
             if (ctx != 0)
             {
-                // job 内读：登记本 job 为读者（幂等，job 结束 ReleaseReadsForContext 释放）
+                // job 内读：先查"本 epoch 内本 ctx 是否已登记过该容器"（一次 long 读 + 比较）
+                long mark = ((long)Volatile.Read(ref _readMarkEpoch) << 32) | (uint)(int)ctx;
+                if (Volatile.Read(ref _readMark[index]) == mark) return;
+                // 登记本 job 为读者（幂等，job 结束 ReleaseReadsForContext 释放）
                 RegisterRead(index, handle.Version);
+                Volatile.Write(ref _readMark[index], mark);
                 return;
             }
             // 主线程读：任何 job 在写或读该容器 → 拦截
@@ -316,6 +336,8 @@ namespace EntJoy.Collections
         {
 #if ENTJOY_SAFETY || ENTJOY_SAFETY_BOUNDS
             if (ctx == 0) return;
+            // 令全部 _readMark 失效（ctx 会被复用；不失效会让后续 job 误判"已登记"而不计数，削弱主线程保护）
+            Volatile.Write(ref _readMarkEpoch, Volatile.Read(ref _readMarkEpoch) + 1);
             if (_ctxReads.TryRemove(ctx, out var set))
             {
                 lock (set)

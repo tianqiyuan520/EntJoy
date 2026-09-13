@@ -533,7 +533,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new StatementTranslator(semanticModel, useFastMath);
+                var translator = new CppEntityStatementTranslator(semanticModel, jobStruct, useFastMath);
                 scalarBody = translator.Translate(methodSyntax.Body);
             }
 
@@ -587,7 +587,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new StatementTranslator(semanticModel, useFastMath);
+                var translator = new CppEntityStatementTranslator(semanticModel, jobStruct, useFastMath);
                 scalarBody = translator.Translate(methodSyntax.Body);
             }
 
@@ -697,7 +697,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new StatementTranslator(semanticModel, useFastMath);
+                var translator = new CppEntityStatementTranslator(semanticModel, jobStruct, useFastMath);
                 scalarBody = translator.Translate(methodSyntax.Body);
             }
 
@@ -851,7 +851,8 @@ namespace NativeTranspiler.Analyzer
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                     continue;
                 if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
-                    (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan))
+                    (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan
+                     && methodSymbol.Name != Config.GetEnableBitMapPtr))
                     continue;
                 if (methodSymbol.TypeArguments.Length == 0 || methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)
                     continue;
@@ -921,12 +922,14 @@ namespace NativeTranspiler.Analyzer
                     AddType(ptr.PointedAtType);
                     return;
                 }
-                // 容器元素类型递归 + 不 return：容器自身无头文件，但元素 struct（及其嵌套字段）可能有。
-                if (type is INamedTypeSymbol named && named.IsGenericType && NativeTranspiler.IsEntJoyNativeContainerType(type))
+                // 泛型：先递归模板实参（EntJoy 侧泛型如 NativeComponentLookup<T> 自身由框架头提供，
+                // 但实参是用户结构体时必须有头文件 —— 例如体内 `T* p = …` 会写全限定名 T*）。
+                if (type is INamedTypeSymbol generic && generic.IsGenericType)
                 {
-                    foreach (var arg in named.TypeArguments)
+                    foreach (var arg in generic.TypeArguments)
                         AddType(arg);
-                    return;
+                    if (NativeTranspiler.IsEntJoyNativeContainerType(type))
+                        return;
                 }
                 if (type is INamedTypeSymbol namedType &&
                     type.TypeKind == TypeKind.Struct &&
@@ -1209,8 +1212,9 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                     sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                     sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                    sb.AppendLine("    __chunkDataLite.enableBitMaps = nullptr;     // 预留 IEnableComponent");
-                    sb.AppendLine("    __chunkDataLite.enableBitmapCount = 0;");
+                    sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图（优先与 componentArrays 同序的 required 版）");
+                    sb.AppendLine("    __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
+                    sb.AppendLine("    // 位图下标与 componentArrays 同序（required 序）；读写原语见 src/NativeDll/NativeEnableMask.h");
                     // 仅当 Execute 声明 Entity 参数时才传实体数组（没有就不传，避免无谓拷贝/解引用）
                     if (executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type)))
                         sb.AppendLine("    __chunkDataLite.entityArray = __chunkData->entityArray;");
@@ -1405,8 +1409,8 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("        __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                     sb.AppendLine("        __chunkDataLite.entityCount = __chunkData->entityCount;");
                     sb.AppendLine("        __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                    sb.AppendLine("        __chunkDataLite.enableBitMaps = nullptr;");
-                    sb.AppendLine("        __chunkDataLite.enableBitmapCount = 0;");
+                    sb.AppendLine("        __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图");
+                    sb.AppendLine("        __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
                     // 仅当 Execute 声明 Entity 参数时才传实体数组
                     if (executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type)))
                         sb.AppendLine("        __chunkDataLite.entityArray = __chunkData->entityArray;");
@@ -1587,6 +1591,7 @@ namespace NativeTranspiler.Analyzer
                             CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
                         string remBody = remTr.Translate(methodSyntax.Body);
                         remBody = remBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
+                        remBody = remBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                         remBody = remBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
                         // 移除 SIMD prelude 已声明的 ptr/length/entityCount
                         remBody = Regex.Replace(remBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__batchData->componentArrays\[\d+\]\);\r?\n?", "");
@@ -1614,6 +1619,7 @@ namespace NativeTranspiler.Analyzer
                             CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
                         string fbBody = fbTr.Translate(methodSyntax.Body);
                         fbBody = fbBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
+                        fbBody = fbBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                         fbBody = fbBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
                         foreach (var l in fbBody.Split('\n'))
                             if (!string.IsNullOrWhiteSpace(l))
@@ -1629,6 +1635,7 @@ namespace NativeTranspiler.Analyzer
                     var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
                     var bodyCode = tr.Translate(methodSyntax.Body);
                     bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
+                    bodyCode = bodyCode.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                     bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
                     foreach (var l in bodyCode.Split(new[] { "\n" }, StringSplitOptions.None))
                     {

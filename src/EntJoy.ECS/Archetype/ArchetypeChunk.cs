@@ -122,5 +122,23 @@ namespace EntJoy.ECS
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             _chunk.SetComponentEnabled(idx, entityIndex, enabled);
         }
+
+        /// <summary>
+        /// 该 chunk 内组件 T 的 **逐实体 enable 位图指针**（每实体 1 bit，64 位字；位 i 对应 chunk 内第 i 个实体）。
+        /// 组件非 enableable 时返回 null。
+        ///
+        /// 原生路径（P1-6/P1-7）：转译器把本调用翻成
+        /// <c>reinterpret_cast&lt;unsigned long long*&gt;(__chunkData-&gt;requiredEnableBitMaps[requiredIdx])</c>，
+        /// **requiredIdx 按 `GetComponentDataNativeArray&lt;T&gt;()` 的 required 序号对齐** ⇒ 原生 job 内
+        /// 必须同时访问该组件的组件列（否则该类型不在 required 列表里，生成期直接报错）。
+        /// 并发纪律：位图是 chunk 内存的一部分，同一 chunk 的位图只应由一个 worker 写。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe ulong* GetEnableBitMapPtr<T>() where T : struct, IEnableableComponent
+        {
+            ThrowIfNull();
+            int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
+            return _chunk.GetEnableBitMapPointer(idx);
+        }
     }
 }

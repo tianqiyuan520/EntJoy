@@ -271,10 +271,12 @@ namespace EntJoy.ECS.JobSystem
 
                 int requiredCount = requiredComponentTypeIds?.Length ?? 0;
                 void** requiredArrays = null;
+                void** requiredBitmaps = null;
                 if (requiredCount > 0)
                 {
                     requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                    for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+                    requiredBitmaps = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                    for (int r = 0; r < requiredCount; r++) { requiredArrays[r] = null; requiredBitmaps[r] = null; }
                 }
 
                 for (int c = 0; c < compCount; c++)
@@ -295,6 +297,7 @@ namespace EntJoy.ECS.JobSystem
                             if (typeIndices[c] == requiredTypeId)
                             {
                                 requiredArrays[r] = compPtrs[c];
+                                requiredBitmaps[r] = bitmaps[c];
                                 break;
                             }
                         }
@@ -314,7 +317,8 @@ namespace EntJoy.ECS.JobSystem
                     requiredComponentArrays = requiredArrays,
                     requiredComponentCount = requiredCount,
                     sharedValuePtrs = FillSharedValuePtrs(chunk, arch, compCount),
-                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(arch, compCount) : 0
+                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(arch, compCount) : 0,
+                    requiredEnableBitMaps = requiredBitmaps
                 };
             }
         }
@@ -642,14 +646,18 @@ namespace EntJoy.ECS.JobSystem
             int requiredCount = requiredComponentTypeIds?.Length ?? 0;
             bool hasEnableFilter = query.AllEnabled != null && query.AllEnabled.Length > 0;
             int enableBitmapCount = hasEnableFilter ? requiredCount : 0;
+            // P1-6：位图块按 requiredCount 分配（与查询是否带 enable 过滤无关）—— 原生内核用
+            // `GetEnableBitMapPtr<T>()` 显式读位图时不能拿到 nullptr；而 enableBitmapCount 仍只在
+            // 过滤查询时非 0，避免改变既有"按 enableBitmapCount 决定是否过滤"的语义。
+            int enableBitmapStride = requiredCount;
 
             var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(batchCount * sizeof(EntityBatchData));
             void* componentArraysBlock = null;
             if (requiredCount > 0)
                 componentArraysBlock = (void*)Marshal.AllocHGlobal(batchCount * requiredCount * sizeof(void*));
             void* enableBitMapsBlock = null;
-            if (enableBitmapCount > 0)
-                enableBitMapsBlock = (void*)Marshal.AllocHGlobal(batchCount * enableBitmapCount * sizeof(void*));
+            if (enableBitmapStride > 0)
+                enableBitMapsBlock = (void*)Marshal.AllocHGlobal(batchCount * enableBitmapStride * sizeof(void*));
 
             for (int batchIndex = 0; batchIndex < batchCount; batchIndex++)
             {
@@ -682,10 +690,10 @@ namespace EntJoy.ECS.JobSystem
 
                 if (enableBitMapsBlock != null)
                 {
-                    void** bitmapsBase = (void**)enableBitMapsBlock + batchIndex * enableBitmapCount;
+                    void** bitmapsBase = (void**)enableBitMapsBlock + batchIndex * enableBitmapStride;
                     batchesPtr[batchIndex].enableBitMaps = bitmapsBase;
                     batchesPtr[batchIndex].enableBitmapCount = enableBitmapCount;
-                    for (int e = 0; e < enableBitmapCount; e++)
+                    for (int e = 0; e < enableBitmapStride; e++)
                     {
                         bitmapsBase[e] = null;
                         int requiredTypeId = requiredComponentTypeIds[e];
@@ -747,18 +755,24 @@ namespace EntJoy.ECS.JobSystem
                 int componentCount = chunk.ComponentCount;
                 var componentArrays = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
                 var componentTypeIndices = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
+                // P1-6：逐组件 enable 位图（非 enableable 组件为 null）。原生 IJobChunk/IJobEntity 经
+                // 生成的 C++ 包装把它拷进轻量 ChunkData.enableBitMaps，内核据此读写存活/启用状态。
+                var enableBitmaps = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
                 void** requiredArrays = null;
+                void** requiredBitmaps = null;
 
                 if (requiredCount > 0)
                 {
                     requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                    for (int r = 0; r < requiredCount; r++) requiredArrays[r] = null;
+                    requiredBitmaps = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                    for (int r = 0; r < requiredCount; r++) { requiredArrays[r] = null; requiredBitmaps[r] = null; }
                 }
 
                 for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
                 {
                     componentArrays[componentIndex] = (void*)chunk.GetComponentArrayPointer(componentIndex);
                     componentTypeIndices[componentIndex] = archetype.Types[componentIndex].Id;
+                    enableBitmaps[componentIndex] = chunk.GetEnableBitMapPointer(componentIndex);
                 }
 
                 if (requiredArrays != null)
@@ -771,6 +785,7 @@ namespace EntJoy.ECS.JobSystem
                             if (componentTypeIndices[componentIndex] == requiredTypeId)
                             {
                                 requiredArrays[r] = componentArrays[componentIndex];
+                                requiredBitmaps[r] = enableBitmaps[componentIndex];
                                 break;
                             }
                         }
@@ -784,13 +799,14 @@ namespace EntJoy.ECS.JobSystem
                     componentCount = componentCount,
                     componentArrays = componentArrays,
                     componentSizes = null,
-                    enableBitMaps = null,
+                    enableBitMaps = enableBitmaps,
                     componentTypeIndices = componentTypeIndices,
                     chunkHandle = IntPtr.Zero,
                     requiredComponentArrays = requiredArrays,
                     requiredComponentCount = requiredCount,
                     sharedValuePtrs = FillSharedValuePtrs(chunk, archetype, componentCount),
-                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(archetype, componentCount) : 0
+                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(archetype, componentCount) : 0,
+                    requiredEnableBitMaps = requiredBitmaps
                 };
             }
 
@@ -1015,6 +1031,7 @@ namespace EntJoy.ECS.JobSystem
                     if (chunkData.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)chunkData.enableBitMaps);
                     if (chunkData.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentTypeIndices);
                     if (chunkData.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)chunkData.requiredComponentArrays);
+                    if (chunkData.requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)chunkData.requiredEnableBitMaps);
                     if (OwnsChunkHandles && chunkData.chunkHandle != IntPtr.Zero)
                     {
                         var handle = GCHandle.FromIntPtr(chunkData.chunkHandle);

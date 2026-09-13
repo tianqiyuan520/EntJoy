@@ -50,6 +50,9 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
+            if (TryTranslateEnableBitMapLocal(localDecl))
+                return;
+
             if (TryTranslateChunkArrayLocal(localDecl))
                 return;
 
@@ -57,6 +60,47 @@ namespace NativeTranspiler.Analyzer
                 return;
 
             base.TranslateLocalDeclaration(localDecl);
+        }
+
+        /// <summary>
+        /// P1-6/P1-7：`ulong* mask = chunk.GetEnableBitMapPtr&lt;T&gt;();` →
+        /// C++ `auto* mask = reinterpret_cast&lt;unsigned long long*&gt;(__chunkData-&gt;requiredEnableBitMaps[requiredIdx]);`
+        /// </summary>
+        private bool TryTranslateEnableBitMapLocal(LocalDeclarationStatementSyntax localDecl)
+        {
+            if (localDecl.Declaration.Variables.Count != 1) return false;
+            var variable = localDecl.Declaration.Variables[0];
+            if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation) return false;
+            if (!TryBuildEnableBitMapExpression(invocation, out var expression)) return false;
+
+            AppendIndent();
+            _builder.Append("auto* RESTRICT ");
+            _builder.Append(variable.Identifier.Text);
+            _builder.Append(" = ");
+            _builder.Append(expression);
+            _builder.AppendLine(";");
+            return true;
+        }
+
+        private bool TryBuildEnableBitMapExpression(InvocationExpressionSyntax invocation, out string expression)
+        {
+            expression = "";
+            if (_semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
+                return false;
+            if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk)
+                return false;
+            if (methodSymbol.Name != Config.GetEnableBitMapPtr || methodSymbol.TypeArguments.Length != 1)
+                return false;
+
+            var componentType = methodSymbol.TypeArguments[0];
+            int requiredIndex = _requiredComponentTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, componentType));
+            if (requiredIndex < 0)
+                throw new InvalidOperationException(
+                    $"GetEnableBitMapPtr<{componentType.ToDisplayString()}> 的类型不在 required 组件列表中。" +
+                    "原生 job 内必须同时用 GetComponentDataNativeArray<T>() 访问该组件列，required 序号才能对齐。");
+
+            expression = $"reinterpret_cast<unsigned long long*>(__chunkData->requiredEnableBitMaps[{requiredIndex}])";
+            return true;
         }
 
         protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
@@ -125,6 +169,12 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateInvocation(InvocationExpressionSyntax invocation)
         {
+            if (TryBuildEnableBitMapExpression(invocation, out var bitmapExpression))
+            {
+                _builder.Append(bitmapExpression);
+                return;
+            }
+
             if (TryBuildChunkArrayExpression(invocation, out _, out var expression))
             {
                 _builder.Append(expression);
