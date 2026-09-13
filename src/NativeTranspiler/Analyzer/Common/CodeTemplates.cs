@@ -110,6 +110,20 @@ namespace NativeTranspiler.Analyzer.Common
         /// 生成 ISPC 通用头文件 EntJoyCommon.ispc 的内容，
         /// 包含 float2/int2/uint2 结构定义 + 所有运算符 + 数学函数
         /// </summary>
+        /// <summary>
+        /// ISPC 侧 Interlocked 宏定义（拼进 EntJoyCommon.ispc）。
+        /// 单独做成普通字符串常量：C# 逐字字符串里写 <c>#</c> 开头会被当成 C# 预处理指令（CS1032），
+        /// 而 <c>\u0023</c> 在逐字字符串里不转义（CS1056）。
+        /// </summary>
+        private const string IspcAtomicMacros =
+            "#define INTERLOCKED_FETCH_ADD32(ptr, val)       atomic_add_global((ptr), (val))\n" +
+            "#define INTERLOCKED_FETCH_SUB32(ptr, val)       atomic_subtract_global((ptr), (val))\n" +
+            "#define INTERLOCKED_EXCHANGE32(ptr, val)        atomic_swap_global((ptr), (val))\n" +
+            "#define INTERLOCKED_ADD_AND_FETCH32(ptr, val)   (atomic_add_global((ptr), (val)) + (val))\n" +
+            "#define INTERLOCKED_INCREMENT_AND_FETCH32(ptr)  (atomic_add_global((ptr), 1) + 1)\n" +
+            "#define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  (atomic_subtract_global((ptr), 1) - 1)\n" +
+            "#define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) atomic_compare_exchange_global((ptr), (oldVal), (newVal))\n";
+
         public static string GenerateCommonIspcHeader() => @"
 // NativeMath.ispc – ISPC compatible math library
 struct float2 { float x; float y; };
@@ -316,6 +330,14 @@ static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
-";
+
+// ---------- Interlocked 宏（ISPC 侧） ----------
+// 基类 StatementTranslator.TranslateInterlockedCall 会吐 C++ 的 INTERLOCKED_* 宏。
+// ISPC 的静态方法 lane-callable helper（IspcGenerator.Helper）若把 C++ 宏直接落进 .ispc，
+// 会报 Undeclared symbol INTERLOCKED_EXCHANGE32。这里给 ISPC 等价定义：
+// ISPC 的 atomic_add_global 是 fetch-add（返回旧值），故 ADD/INCREMENT 系补回增量以对齐 C# 的 add-fetch 语义。
+// 已知限制：atomic_add_global 只接受 32 位 load/store（64 位原子在 ISPC 不可用）。
+" + IspcAtomicMacros + @"
+#endif // __ENTJOY_ISPC_COMMON_DEFINED";
     }
 }

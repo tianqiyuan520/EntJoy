@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -34,7 +35,7 @@ namespace NativeTranspiler.Analyzer
             // For now, only handle: for (int i = start; i < end; i++)
             if (stmt.Declaration == null || stmt.Declaration.Variables.Count != 1)
             {
-                AppendLine("// Unsupported SIMD for-loop pattern (non-standard declaration)");
+                AppendLine($"// {UnsupportedMarkers.Stmt}SIMD_ForDeclaration");
                 return;
             }
 
@@ -73,7 +74,7 @@ namespace NativeTranspiler.Analyzer
             bool isSimpleIncrement = stmt.Incrementors.Count == 1;
             if (!isSimpleIncrement)
             {
-                AppendLine("// Unsupported SIMD for-loop increment pattern");
+                AppendLine($"// {UnsupportedMarkers.Stmt}SIMD_ForIncrement");
                 return;
             }
 

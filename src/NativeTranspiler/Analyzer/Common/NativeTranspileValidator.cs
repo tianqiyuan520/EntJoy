@@ -11,12 +11,12 @@ namespace NativeTranspiler.Analyzer
     {
         public static readonly DiagnosticDescriptor InvalidReturnTypeError = new("NT001", "Invalid return type", "[NativeTranspile] method '{0}' return type '{1}' must be unmanaged or void", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidParameterTypeError = new("NT002", "Invalid parameter type", "[NativeTranspile] method '{0}' parameter '{1}' type '{2}' must be unmanaged", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor InvalidLocalVariableTypeError = new("NT003", "Invalid local variable type", "[NativeTranspile] method '{0}' local variable '{1}' type '{2}' must be unmanaged", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor InvalidLocalVariableTypeError = new("NT003", "Invalid local variable type", "[NativeTranspile] method '{0}' local variable '{1}' type '{2}' must be unmanaged. 局部数组（含定长数组）与托管类型不支持：把临时缓冲改成 job 字段传入（NativeArray/UnsafeList），或放进 job 结构体字段后在体内取本地别名。", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedMethodCallError = new("NT004", "Disallowed method call", "[NativeTranspile] method '{0}' cannot call '{1}' because its signature contains non‑unmanaged types or it is not a static method in the same assembly", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedObjectCreationError = new("NT005", "Managed object creation", "[NativeTranspile] method '{0}' cannot create managed object of type '{1}'", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor ReferenceTypeUsageError = new("NT006", "Reference type usage", "[NativeTranspile] method '{0}' uses reference type '{1}' which is not allowed", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor ReferenceTypeUsageError = new("NT006", "Reference type usage", "[NativeTranspile] method '{0}' uses reference type '{1}' which is not allowed. 引用类型静态字段（如 `static readonly int[]`）、`switch` 表达式、字符串、委托都无法转译：把常量表改成 job 的 NativeArray 字段由宿主传入，`switch` 表达式改成 if/else 或静态查表。", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobTypeError = new("NT007", "Invalid Job type", "[NativeTranspile] can only be applied to structs. '{0}' is not a struct.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, IJobFor, IJobChunk, or IJobEntity.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, IJobParallelForBatch, IJobFor, IJobChunk, or IJobEntity.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobFieldError = new("NT009", "Invalid Job field", "[NativeTranspile] struct '{0}' field '{1}' type '{2}' must be unmanaged.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
@@ -25,6 +25,20 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UnsupportedStructLayoutError = new("NT016", "Unsupported struct layout for ISPC", "[NativeTranspile] struct '{0}' uses {1} which ISPC cannot represent (ISPC does not support #pragma pack); NativeArray<{0}> layout would misalign. Use Sequential default layout (no Pack < 8, no Explicit).", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MultiRelationAccessError = new("NT017", "Multi-relation access in native job", "[NativeTranspile] '{0}' cannot access [MultiRelation] relation type '{1}'. Multi-relation data is stored in managed lists on the main thread and is not readable from native jobs. Use C# main-thread code or a single-value relation column instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor VectorizeRequiresChunkOrEntityError = new("NT018", "AutoSIMD.Vectorize requires IJobChunk/IJobEntity", "[NativeTranspile] struct '{0}' sets AutoSIMD = Vectorize but is not an IJobChunk/IJobEntity; the Vectorize path is only implemented for those two, so the flag is silently dropped. Use AutoSIMD = Enabled for IJobParallelFor/IJobFor/IJob.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor AutoSimdRequiresCppBackendError = new("NT019", "AutoSIMD requires Cpp backend", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled together with Target = Ispc; the ISPC backend never reads AutoSIMD (it vectorizes via foreach/gang), so the flag is silently dropped. Drop AutoSIMD, or switch Target to Cpp.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor MathPrecisionRequiresCppBackendError = new("NT020", "MathPrecision requires Cpp backend", "[NativeTranspile] struct '{0}' sets MathPrecision but Target is not Cpp; per-job precision is emitted as a '#define SIMD_MATH_PRECISION' only into the C++ translation unit. ISPC precision is controlled by IspcMathLib instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor CppMathLibRequiresCppBackendError = new("NT021", "CppMathLib requires Cpp backend", "[NativeTranspile] struct '{0}' sets CppMathLib = fast but Target is not Cpp; that flag only controls the /fp:fast compilation unit split for C++ jobs.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor UseIspcMtRequiresIspcBackendError = new("NT022", "UseISPC_MT requires Ispc backend", "[NativeTranspile] struct '{0}' sets UseISPC_MT but Target is not Ispc; the multi-task ISPC variant is only generated for the ISPC backend.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>F-6：SimdMathPrecision.High 没有实现（产物与 IEEE 逐字相同），不能让人以为拿到了更快的 1.0ULP 路径。</summary>
+        public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation (the Sleef polynomials were removed): the emitted code is identical to MathPrecision = IEEE. Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+
+        /// <summary>F-2：AutoSIMD.Enabled 在 IJobParallelFor 上实测无收益（更慢），且多数 job 会整体退回标量。</summary>
+        public static readonly DiagnosticDescriptor AutoSimdNoMeasuredGainWarning = new("NT024", "AutoSIMD has no measured gain on IJobParallelFor", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled on an IJobParallelFor/IJobFor/IJob: measured end-to-end it is ~10% slower than the scalar baseline, and a body containing Interlocked / UnsafeUtility.ArrayElementAsRef / user static helpers falls back to a per-lane scalar loop (no SIMD at all). Keep AutoSIMD = Disabled unless your own measurement says otherwise.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+
+        /// <summary>F-5：IJobParallelForBatch 目前只有 Cpp 后端 + 标量代码生成路径（ISPC/AutoSIMD 未实现）。</summary>
+        public static readonly DiagnosticDescriptor ParallelForBatchRequiresCppBackendError = new("NT025", "IJobParallelForBatch requires the Cpp backend without AutoSIMD", "[NativeTranspile] struct '{0}' implements IJobParallelForBatch, which is only implemented for Target = Cpp with AutoSIMD = Disabled (the ISPC/AutoSIMD paths only know the per-index Execute(int) shape). Drop Target = Ispc / AutoSIMD, or use IJobParallelFor instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         // 预定义的系统 API 白名单
         private static readonly HashSet<string> AllowedStaticMethods = new()
@@ -161,9 +175,11 @@ namespace NativeTranspiler.Analyzer
 
             bool isChunkJob = structSymbol.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk));
             bool isEntityJob = structSymbol.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity));
+            bool isBatchJob = structSymbol.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch));
             bool implementsJob = structSymbol.AllInterfaces.Any(i =>
                 SymbolHelper.IsEntJoyJobInterface(i, Config.IJob) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor) ||
-                SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) ||
+                SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch) ||
+                SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) ||
                 SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity));
             if (!implementsJob)
                 diagnostics.Add(Diagnostic.Create(MissingJobInterfaceError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
@@ -201,7 +217,67 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // GPU/CUDA Job 校验已随后端拆分至 feature/gpu-offload 分支，dev 仅保留 Cpp/Ispc。
+                // ─── 属性组合校验（C2）───
+                // 生成器只对 IJobChunk / IJobEntity 实现 Vectorize 路径；IJobParallelFor/IJobFor/IJob
+                // 落到 else if (IsParallelForJob || IsForJob) / 兜底分支，Vectorize 被**静默丢弃**，
+                // 用户以为开了向量化其实没有。这里直接报错而不是放任。
+                var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+                var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
+                var autoSimd = AttributeHelper.GetAutoSIMD(structSymbol, attrSymbol);
+
+                if (autoSimd == NativeTranspiler.AutoSIMD.Vectorize && !isChunkJob && !isEntityJob)
+                {
+                    diagnostics.Add(Diagnostic.Create(VectorizeRequiresChunkOrEntityError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // AutoSIMD.Enabled 是 Cpp 后端专有：ISPC 路径用 foreach/gang 自带向量化，
+                // 该标志在 ISPC 下无任何读取点（静默丢弃）。
+                if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && target == NativeTranspiler.BackendTarget.Ispc)
+                {
+                    diagnostics.Add(Diagnostic.Create(AutoSimdRequiresCppBackendError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // 逐 job 精度覆盖只写进 C++ 单元（#define SIMD_MATH_PRECISION），ISPC 侧不读。
+                if (AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) != NativeTranspiler.SimdMathPrecision.Fastest
+                    && target != NativeTranspiler.BackendTarget.Cpp)
+                {
+                    diagnostics.Add(Diagnostic.Create(MathPrecisionRequiresCppBackendError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // CppMathLib.fast 只对 Cpp 后端生效（控制 /fp:fast 单元分组）。
+                if (AttributeHelper.HasFastCppMathLib(structSymbol, attrSymbol)
+                    && target != NativeTranspiler.BackendTarget.Cpp)
+                {
+                    diagnostics.Add(Diagnostic.Create(CppMathLibRequiresCppBackendError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // UseISPC_MT 只对 ISPC 后端生效。
+                if (AttributeHelper.HasUseISPC_MT(structSymbol, attrSymbol)
+                    && target != NativeTranspiler.BackendTarget.Ispc)
+                {
+                    diagnostics.Add(Diagnostic.Create(UseIspcMtRequiresIspcBackendError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // F-6：High 没有实现（NativeSIMD_math.h 的 == 2 分支为空）⇒ 产物与 IEEE 相同。
+                // 只警告不报错：行为不错，但名字会误导（有人以为它比 Fastest 更精确且仍向量化）。
+                if (AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) == NativeTranspiler.SimdMathPrecision.High
+                    && target == NativeTranspiler.BackendTarget.Cpp)
+                {
+                    diagnostics.Add(Diagnostic.Create(SimdMathPrecisionHighUnimplementedWarning,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // F-2：AutoSIMD.Enabled 在本 job 形态上实测无收益（详见描述），显式告知。
+                if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && !isChunkJob && !isEntityJob)
+                {
+                    diagnostics.Add(Diagnostic.Create(AutoSimdNoMeasuredGainWarning,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
+                // F-5：IJobParallelForBatch 的代码生成只有 Cpp 标量一条路径。
+                if (isBatchJob && (target != NativeTranspiler.BackendTarget.Cpp || autoSimd != NativeTranspiler.AutoSIMD.Disabled))
+                {
+                    diagnostics.Add(Diagnostic.Create(ParallelForBatchRequiresCppBackendError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
             }
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);

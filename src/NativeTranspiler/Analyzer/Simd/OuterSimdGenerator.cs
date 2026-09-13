@@ -89,8 +89,8 @@ namespace NativeTranspiler.Analyzer
                 if (writePattern != null)
                 {
                     sb.AppendLine("            // Unified write");
-                    sb.AppendLine("            for (int lane = 0; lane < g_simdWidthInt; lane++) {");
-                    sb.AppendLine($"                int {writePattern.IndexVar}_lane = n_extract_lane_epi32(v_{writePattern.IndexVar}.v, lane);");
+                    sb.AppendLine("            for (int __ej_lane = 0; __ej_lane < g_simdWidthInt; __ej_lane++) {");
+                    sb.AppendLine($"                int {writePattern.IndexVar}_lane = n_extract_lane_epi32(v_{writePattern.IndexVar}.v, __ej_lane);");
                     sb.AppendLine($"                if ({writePattern.IndexVar}_lane != {writePattern.Sentinel})");
                     sb.AppendLine($"                    {writePattern.WriteExpr};");
                     sb.AppendLine("            }");
@@ -149,7 +149,7 @@ namespace NativeTranspiler.Analyzer
             int ptrIdx = scalarBody.LastIndexOf("_ptr[index]", idx);
             int lhsStart = scalarBody.LastIndexOfAny(" \n\r;{".ToCharArray(), ptrIdx) + 1;
             string lhsArray = scalarBody.Substring(lhsStart, ptrIdx - lhsStart);
-            string writeExpr = $"{lhsArray}_ptr[si + lane] = {writeRHS}";
+            string writeExpr = $"{lhsArray}_ptr[si + __ej_lane] = {writeRHS}";
 
             return new WritePattern { WriteExpr = writeExpr, IndexVar = indexVar, Sentinel = sentinel };
         }
@@ -186,14 +186,18 @@ namespace NativeTranspiler.Analyzer
                 body = Regex.Replace(body, $@"\b{kvp.Key}\b", kvp.Value);
 
             bool hr = body.Contains("return;");
+            // ★ per-lane 回退循环固定声明 `int index`，因此实体体里出现的 index 形参名
+            //   （Execute(int tid) 的 `tid`）必须一并改名为 `index` —— 否则生成 `tid` 未声明。
+            if (!string.IsNullOrEmpty(_idx) && _idx != "index")
+                body = Regex.Replace(body, $@"\b{Regex.Escape(_idx)}\b", "index");
             var sb = new StringBuilder();
             sb.AppendLine("    // --- Outer SIMD: per-lane ---");
             sb.AppendLine("    int simd_end_=__startIndex+((__count)/g_simdWidthInt)*g_simdWidthInt;");
             sb.AppendLine("    if(simd_end_>__startIndex){");
             sb.AppendLine("        simd_value<int> v_base=simd_value<int>::sequence(0);");
             sb.AppendLine("        for(int si=__startIndex;si<simd_end_;si+=g_simdWidthInt){");
-            sb.AppendLine("            for(int lane=0;lane<g_simdWidthInt;lane++){");
-            sb.AppendLine("                int index=si+lane;");
+            sb.AppendLine("            for(int __ej_lane=0;__ej_lane<g_simdWidthInt;__ej_lane++){");
+            sb.AppendLine("                int index=si+__ej_lane;");
             if (hr) sb.AppendLine("                do{");
             foreach (var line in body.Split('\n'))
             {

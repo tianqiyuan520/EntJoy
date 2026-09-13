@@ -23,6 +23,17 @@ namespace NativeTranspiler.Analyzer
 
         public static bool IsParallelForJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor));
+
+        /// <summary>
+        /// IJobParallelForBatch：`Execute(int startIndex, int count)`，每批一次调用（不再逐 index 循环）。
+        /// 与 IJobParallelFor 的区别只在**调度粒度**，C++ 侧同一份 `..._Batch` 函数即可承载。
+        /// </summary>
+        public static bool IsParallelForBatchJob(INamedTypeSymbol jobStruct) =>
+            jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch));
+
+        /// <summary>所有"批调度"（range/batch）job：绑定层与代码生成层都按同一形态处理。</summary>
+        public static bool IsRangeScheduledJob(INamedTypeSymbol jobStruct) =>
+            IsParallelForJob(jobStruct) || IsForJob(jobStruct) || IsParallelForBatchJob(jobStruct);
         public static bool IsForJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor));
         public static bool IsIJob(INamedTypeSymbol jobStruct) =>

@@ -67,6 +67,10 @@ namespace NativeTranspiler.Analyzer
         // 已检测到的规约模式：在 if(x < best) { best = x; ... } 中标记 best 为 reduction
         private readonly HashSet<string> _reductionTargets = new();
 
+        // 指针局部变量 / 指针形参 → 元素 C++ 类型（纯语法收集，见 CollectPointerSymbols）
+        private readonly Dictionary<string, string> _localPointerElemCpp = new();
+        private readonly Dictionary<string, string> _paramPointerElemCpp = new();
+
         public SimdVariableAnalyzer(SemanticModel semanticModel, INamedTypeSymbol jobStruct, string indexParamName = "index")
         {
             _semanticModel = semanticModel;
@@ -82,6 +86,7 @@ namespace NativeTranspiler.Analyzer
         {
             _variables.Clear();
             _reductionTargets.Clear();
+            CollectPointerSymbols(method);
 
             if (method.Body == null)
                 return _variables;
@@ -140,6 +145,12 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         public IReadOnlyDictionary<string, SimdVariableInfo> Variables => _variables;
 
+        /// <summary>指针局部变量 → 元素 C++ 类型（供 SIMD 生成器判定"裸指针变量"而非 NativeArray 字段）。</summary>
+        public IReadOnlyDictionary<string, string> LocalPointerElemCpp => _localPointerElemCpp;
+
+        /// <summary>指针形参 → 元素 C++ 类型（静态 helper，如 Expand(int cell, int* mPtr, ...)）。</summary>
+        public IReadOnlyDictionary<string, string> ParamPointerElemCpp => _paramPointerElemCpp;
+
         /// <summary>
         /// 判断一个表达式是否产生 varying 值。
         /// 供 SimdControlFlowGenerator 在表达式翻译时使用。
@@ -173,6 +184,51 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
+        /// 收集指针符号（局部变量 + 形参）及其元素 C++ 类型。
+        /// 纯语法解析：源生成器上下文里 SemanticModel 对局部符号不可靠（框架既有代码同样只用名字解析）。
+        /// SIMD 侧据此区分"NativeArray 字段"（需 `X_ptr`）与"裸指针变量"（直接用 <c>X</c>），见 A2。
+        /// </summary>
+        private void CollectPointerSymbols(MethodDeclarationSyntax method)
+        {
+            _localPointerElemCpp.Clear();
+            _paramPointerElemCpp.Clear();
+            if (method.Body == null) return;
+
+            foreach (var param in method.ParameterList.Parameters)
+                if (PointerElemFromTypeSyntax(param.Type) is { } pt)
+                    _paramPointerElemCpp[param.Identifier.Text] = pt;
+
+            foreach (var localDecl in method.Body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+            {
+                if (localDecl.Declaration.Type is not PointerTypeSyntax) continue;
+                if (PointerElemFromTypeSyntax(localDecl.Declaration.Type) is not { } et) continue;
+                foreach (var v in localDecl.Declaration.Variables)
+                    _localPointerElemCpp[v.Identifier.Text] = et;
+            }
+        }
+
+        /// <summary>指针类型语法 → 元素 C++ 类型；非受支持的内置指针返回 null。</summary>
+        private static string? PointerElemFromTypeSyntax(TypeSyntax? type)
+        {
+            if (type is not PointerTypeSyntax pt || pt.ElementType is not PredefinedTypeSyntax pre)
+                return null;
+            switch (pre.Keyword.Text)
+            {
+                case "int": return "int";
+                case "uint": return "unsigned int";
+                case "byte": return "unsigned char";
+                case "sbyte": return "signed char";
+                case "short": return "short";
+                case "ushort": return "unsigned short";
+                case "long": return "long long";
+                case "ulong": return "unsigned long long";
+                case "float": return "float";
+                case "double": return "double";
+                default: return null;
+            }
+        }
+
+        /// <summary>
         /// 从方法体重收集所有局部变量声明
         /// </summary>
         private void CollectDeclarations(SyntaxNode node)
@@ -191,6 +247,7 @@ namespace NativeTranspiler.Analyzer
                     else if (typeText.Contains("int2")) cppType = "EntJoy::Mathematics::int2";
                     else if (typeText == "float") cppType = "float";
                     else if (typeText == "bool") cppType = "bool";
+                    else if (localDecl.Declaration.Type is PointerTypeSyntax) cppType = "int*";
                     AddVariable(name, cppType, VarKind.Uniform, null, csharpType: typeText);
                 }
             }
@@ -457,6 +514,17 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             // 处理 float2.x / float2.y
             string memberName = memberAccess.Name.Identifier.Text;
+
+            // ★ 结构体元素的字段读取是**标量**，不是 varying。
+            //   `CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath`
+            //   （以及同一表达式内的 `cfgPtr[<simd_index>].FramesDeath + 1`）走的是 SIMD 侧
+            //   "标量包装 + 结构体字段"路径：翻译出来是 `cfgPtr[...].FramesDeath`，本身无 `.v`。
+            //   若这里判成 Varying，EmitElementStore 会按"varying RHS"补 `.v`，
+            //   生成 `(... .FramesDeath + 1).v` → clang 报
+            //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
+            if (IsStructElementFieldRead(memberAccess))
+                return VarKind.Uniform;
+
             var exprKind = ClassifyExpressionInternal(memberAccess.Expression, new HashSet<string>());
 
             // 如果是 .x / .y 成员访问且 source 是 varying，则分量也是 varying
@@ -465,6 +533,23 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
 
             // 成员方法调用（如 .Length, .x()）— 表达式本身是 uniform 或看上下文
             return exprKind;
+        }
+
+        /// <summary>
+        /// `X_ptr[下标].字段`（或裸指针 `p[下标].字段`）形式的结构体字段读取。
+        /// 当 X 是 NativeArray/指针且元素类型不是 float/int 内置标量时，
+        /// SIMD 侧把它翻成标量结构体字段读取（不产生 `.v`），故分类为 uniform。
+        /// </summary>
+        private bool IsStructElementFieldRead(MemberAccessExpressionSyntax memberAccess)
+        {
+            if (memberAccess.Expression is not ElementAccessExpressionSyntax ea) return false;
+            if (ea.Expression is not IdentifierNameSyntax baseId) return false;
+            string elem = null;
+            if (_localPointerElemCpp.TryGetValue(baseId.Identifier.Text, out var lpe)) elem = lpe;
+            else if (_paramPointerElemCpp.TryGetValue(baseId.Identifier.Text, out var ppe)) elem = ppe;
+            if (elem == null) return false;
+            return elem != "float" && elem != "int" && elem != "unsigned char" && elem != "signed char"
+                && elem != "unsigned int" && elem != "short" && elem != "unsigned short" && elem != "bool";
         }
 
         private VarKind ClassifyElementAccess(ElementAccessExpressionSyntax elementAccess)

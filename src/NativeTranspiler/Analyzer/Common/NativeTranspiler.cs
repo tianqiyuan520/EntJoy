@@ -38,8 +38,11 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// SIMD 数学函数精度等级（用于 SLEEF 向量数学库）。
-        /// Fastest = ~3.5 ULP, High = ~1.0 ULP, IEEE = 标量精确。
+        /// SIMD 数学函数精度等级。
+        /// ⚠ 事实（2026-09-13 核对）：Sleef 已从 NativeDll 移除，目前**只有 Fastest 有 SIMD 实现**
+        /// （AVX2/AVX512 内联多项式，`NativeSIMD_math.h` 的 `#if SIMD_MATH_PRECISION == 1`）。
+        /// `High` 分支在头文件里是空的 ⇒ 产物与 `IEEE` 完全相同（逐通道标量回退）。
+        /// 选 `High` 会得到一条 NT023 警告（见 NativeTranspileValidator）。
         /// </summary>
         public enum SimdMathPrecision
         {
@@ -50,6 +53,9 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 自动 SIMD 向量化开关。
+        /// ⚠ 事实（2026-09-13 实测）：对 `IJobParallelFor` 的 job，整步比标量基线**慢 ~10%**，
+        /// 且命中原子/取引用/用户静态辅助函数的 job 会整段退回 per-lane 标量循环（无 SIMD 收益）。
+        /// 设 `Enabled` 会得到一条 NT024 警告（见 NativeTranspileValidator）。
         /// </summary>
         public enum AutoSIMD
         {

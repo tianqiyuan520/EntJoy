@@ -2,6 +2,9 @@
 
 本文定义 EntJoy v1.0 的线程、生命周期、依赖和所有权边界。未满足契约的行为不属于框架保证的支持范围；调用方应在自己的封装层保证这些前置条件。
 
+> NativeTranspiler（源生成器 / 原生编译任务）侧的边界、诊断与回归防线另见
+> [`NativeTranspiler-Boundaries-and-Diagnostics.md`](./NativeTranspiler-Boundaries-and-Diagnostics.md)。
+
 ## 调度器生命周期
 
 - 在提交任何 Job 之前调用 `JobScheduler.Initialize()`（统一入口：native 优先，不可用时自动回退 managed）；所有 World、JobHandle 和相关资源释放后，再调用 `JobScheduler.Shutdown()`。
