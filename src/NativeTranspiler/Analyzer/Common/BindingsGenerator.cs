@@ -192,7 +192,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateStaticDelegateFields(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
             if (isChunk)
@@ -241,7 +241,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateStaticConstructorInitialization(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             string jobTypeFullName = jobStruct.ToDisplayString();
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
 
@@ -369,7 +369,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateJobDllImport(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
@@ -472,7 +472,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateJobScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
 
@@ -1085,7 +1085,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateJobExtensionMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
 
@@ -1147,7 +1147,7 @@ namespace NativeTranspiler.Analyzer
         private static void GenerateJobRunMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = CppJobGenerator.IsParallelForJob(jobStruct);
+            bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             string jobTypeName = jobStruct.ToDisplayString();
 

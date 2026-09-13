@@ -95,14 +95,16 @@ namespace NativeTranspiler.Analyzer
                     if (!NativeTranspileValidator.ValidateJobStruct(job, ctx.Compilation, out var diags))
                         allErrors.AddRange(diags);
                 }
-                if (allErrors.Any())
-                {
-                    foreach (var diag in allErrors) spc.ReportDiagnostic(diag);
+                // 诊断一律上报；只有 Error 才终止生成。
+                // （NT023/NT024 是"事实告知"类 Warning —— 既不能憋着不报，也不能因为它们而整个项目不生成产物。）
+                foreach (var diag in allErrors) spc.ReportDiagnostic(diag);
+                if (allErrors.Any(d => d.Severity == DiagnosticSeverity.Error))
                     return;
-                }
 
                 var outputDir = Path.Combine(ctx.GetProjectDirectory(), "NativeTranspiler_Generated");
                 Directory.CreateDirectory(outputDir);
+                // D1：录制本次写出的全部产物文件名（含"内容未变跳过写入"的）
+                CodeGenIo.BeginOutputTracking();
 
                 var cppFiles = new List<string>();
                 var fastMathCppFiles = new HashSet<string>();
@@ -482,6 +484,19 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
+                // ─── D1：清理陈旧生成物（见 PruneStaleGeneratedFiles 注释）───
+                // "本次产物" 直接取自 CodeGenIo 录制到的写入集合 —— 不靠手写文件名推导，
+                // 避免漏掉 job 的 .h / 依赖头文件而误删（实测踩过两次）。
+                // ⚠ 位置必须在 **所有 CodeGenIo 写入之后**（含 run_clangcl.bat / CMakeLists.txt）。
+                var trackedOutputs = CodeGenIo.EndOutputTracking();
+                if (trackedOutputs != null && cppFiles.Count + ispcFiles.Count > 0)
+                {
+                    var expected = new HashSet<string>(trackedOutputs, StringComparer.OrdinalIgnoreCase);
+                    foreach (var f in cppFiles) expected.Add(f);
+                    foreach (var f in ispcFiles) expected.Add(f.fileName);
+                    PruneStaleGeneratedFiles(outputDir, expected);
+                }
+
                 // 生成 run_clangcl.bat：用 ClangCL (LLVM 后端) 编译 NativeDll
                 {
                     var repoRoot2 = CodeGenIo.FindRepoRoot(ctx.GetProjectDirectory());
@@ -509,8 +524,34 @@ namespace NativeTranspiler.Analyzer
                         CodeGenIo.WriteAllTextWithRetry(clangBatPath, clangBatContent);
                 }
 
+                // ─── 生成器版本戳（F-11）───
+                // 记录"这批产物是哪个内容的生成器生成的"。NativeCompileTask 用它判定
+                // "生成器改了但产物没重新生成"（Roslyn 内容哈希门控会让这条静默发生），并据此报 warning。
+                // ⚠ 不要把它加进 native 依赖哈希（内容含时间戳，会让每次构建都重编 CMake）。
+                WriteGeneratorStamp(outputDir);
+
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
                 spc.AddSource("NativeTranspiler.Bindings.g.cs", bindingsCode);
+
+                // 环境变量 ENTJOY_DUMP_BINDINGS=<path> 时把绑定源码落盘。
+                // 用途：Unity 工程无法跑 MSBuild 源生成器管线，需要离线 dump 绑定后直接编译
+                // （tools/UnityJobBenchNative 的 build.ps1 依赖这个开关）。
+                // 未设该环境变量时完全无副作用（只多一次 GetEnvironmentVariable）。
+                try
+                {
+                    var dumpPath = System.Environment.GetEnvironmentVariable("ENTJOY_DUMP_BINDINGS");
+                    if (!string.IsNullOrEmpty(dumpPath))
+                    {
+                        var dumpDir = Path.GetDirectoryName(dumpPath);
+                        if (!string.IsNullOrEmpty(dumpDir)) Directory.CreateDirectory(dumpDir);
+                        CodeGenIo.WriteAllTextWithRetry(dumpPath, bindingsCode);
+                        Console.WriteLine($"[NativeTranspiler] Bindings dumped to {dumpPath}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[NativeTranspiler] Failed to dump bindings: {ex.Message}");
+                }
 
                 // ─── SendEvent 元数据：供 BindingsGenerator 注册到 ChunkJobScheduler ───
                 if (allJobEventTypes.Count > 0)
@@ -594,7 +635,7 @@ namespace NativeTranspiler.Analyzer
             if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
                 return;
             if (method.Name == Config.Execute && method.ContainingType?.AllInterfaces.Any(i =>
-                SymbolHelper.IsEntJoyJobInterface(i, Config.IJob) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity)) == true)
+                SymbolHelper.IsEntJoyJobInterface(i, Config.IJob) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity)) == true)
                 return;
             if (!collected.Add(method)) return;
             if (!NativeTranspileValidator.ValidateMethod(method, compilation, out var diags))
@@ -777,6 +818,69 @@ namespace NativeTranspiler.Analyzer
                 SymbolEqualityComparer.Default.Equals(ad.AttributeClass, attrSymbol)) ? structSymbol : null;
         }
 
+        /// <summary>
+        /// F-11：写下"本次产物是哪个生成器版本生成的"（生成器程序集内容哈希）。
+        /// NativeCompileTask.WarnIfGeneratedArtifactsStale 用它判定"生成器改了但产物没重新生成"：
+        /// Roslyn 的 CoreCompile 内容哈希门控会让这种情况静默发生（改了生成器，跑的却是上一版产物）。
+        /// 用内容哈希而不是时间戳，避免"重编但内容未变"造成的误报。
+        /// </summary>
+        private static void WriteGeneratorStamp(string outputDir)
+        {
+            try
+            {
+                var asm = typeof(NativeTranspilerGenerator).Assembly;
+                string hash = "";
+                try
+                {
+                    var location = asm.Location;
+                    if (!string.IsNullOrEmpty(location) && File.Exists(location))
+                    {
+                        using (var md5 = System.Security.Cryptography.MD5.Create())
+                        using (var fs = File.OpenRead(location))
+                        {
+                            var bytes = md5.ComputeHash(fs);
+                            var sbHash = new StringBuilder(bytes.Length * 2);
+                            foreach (var b in bytes) sbHash.Append(b.ToString("x2"));
+                            hash = sbHash.ToString();
+                        }
+                    }
+                }
+                catch { /* 单文件发布/无法读取位置时留空，任务侧会跳过校验 */ }
+
+                var text = $"generatorVersion={asm.GetName().Version}\ngeneratorHash={hash}\nwrittenUtc={DateTime.UtcNow:O}\n";
+                var stampPath = Path.Combine(outputDir, "generator.stamp");
+                if (!File.Exists(stampPath) || File.ReadAllText(stampPath) != text)
+                    CodeGenIo.WriteAllTextWithRetry(stampPath, text);
+            }
+            catch { /* 版本戳是诊断信息，写失败不影响生成 */ }
+        }
+
+        /// <summary>
+        /// D1：删除本次未生成、但上一次运行遗留的生成物。
+        /// 只处理本生成器自己的命名空间（`SharpNative_*` 前缀的 .cpp/.h/.ispc），
+        /// 绝不触碰 build/ 缓存、CMakeLists.txt、*.bat、native_compile.hash 等由编译任务管理的文件。
+        /// </summary>
+        private static void PruneStaleGeneratedFiles(string outputDir, HashSet<string> expected)
+        {
+            string[] exts = { ".cpp", ".h", ".ispc" };
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(outputDir, "SharpNative_*"))
+                {
+                    string ext = Path.GetExtension(path);
+                    if (Array.IndexOf(exts, ext) < 0) continue;
+                    string name = Path.GetFileName(path);
+                    if (expected.Contains(name)) continue;
+                    CodeGenIo.DeleteIfExists(path);
+                    Console.WriteLine($"[NativeTranspiler] Pruned stale generated file: {name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[NativeTranspiler] Failed to prune stale files: {ex.Message}");
+            }
+        }
+
         private static string GenerateCommonIspcHeader()
         {
             // include guard：job 的 .ispc 与它 #include 的 helper .ispc 都会引入本文件，
@@ -847,6 +951,23 @@ static struct float2 operator*(struct float2 v, float s) {
 static struct float2 operator*(float s, struct float2 v) { return v * s; }
 static struct float2 operator/(struct float2 v, float s) {
     struct float2 r; r.x = v.x / s; r.y = v.y / s; return r;
+}
+// ★ uniform 变体：uniform 标量循环（for (uniform int) + if (programIndex!=0) return）里
+//   所有局部都是 uniform，`uniform float2 * uniform float` 若只匹配上面的 varying 重载，
+//   结果会是 varying struct，无法赋给 uniform 局部（探针 _probe5 实证）。
+//   ISPC 允许仅靠 uniform/varying 区分重载；varying 场景传 uniform 实参会自动 splat，故两者可共存。
+static uniform struct float2 operator*(uniform struct float2 v, uniform float s) {
+    uniform struct float2 r; r.x = v.x * s; r.y = v.y * s; return r;
+}
+static uniform struct float2 operator*(uniform float s, uniform struct float2 v) { return v * s; }
+static uniform struct float2 operator/(uniform struct float2 v, uniform float s) {
+    uniform struct float2 r; r.x = v.x / s; r.y = v.y / s; return r;
+}
+static uniform struct float2 operator+(uniform struct float2 a, uniform struct float2 b) {
+    uniform struct float2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
+}
+static uniform struct float2 operator-(uniform struct float2 a, uniform struct float2 b) {
+    uniform struct float2 r; r.x = a.x - b.x; r.y = a.y - b.y; return r;
 }
 
 // ---------- int2 operators ----------
@@ -936,14 +1057,41 @@ static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
+
+// ---------- Interlocked 宏（ISPC 侧） ----------
+// 基类 StatementTranslator.TranslateInterlockedCall 会吐 C++ 的 INTERLOCKED_* 宏。
+// ISPC 的静态方法 lane-callable helper（IspcGenerator.Helper）若把 C++ 宏直接落进 .ispc，
+// 会报 Undeclared symbol INTERLOCKED_EXCHANGE32。这里给 ISPC 等价定义：
+// ISPC 的 atomic_add_global 是 fetch-add（返回旧值），故 ADD/INCREMENT 系补回增量以对齐 C# 的 add-fetch 语义。
+// 已知限制：atomic_add_global 只接受 32 位 load/store（64 位原子在 ISPC 不可用）。
+" + IspcAtomicMacros + @"
 " + "\n#endif // __ENTJOY_ISPC_COMMON_DEFINED\n";
         }
+
+        /// <summary>
+        /// ISPC 侧 Interlocked 宏定义（拼进 EntJoyCommon.ispc）。
+        /// 单独做成普通字符串常量：C# 逐字字符串里写 <c>#</c> 开头会被当成 C# 预处理指令（CS1032），
+        /// 而 <c>\u0023</c> 在逐字字符串里不转义（CS1056）。
+        /// </summary>
+        private const string IspcAtomicMacros =
+            "#define INTERLOCKED_FETCH_ADD32(ptr, val)       atomic_add_global((ptr), (val))\n" +
+            "#define INTERLOCKED_FETCH_SUB32(ptr, val)       atomic_subtract_global((ptr), (val))\n" +
+            "#define INTERLOCKED_EXCHANGE32(ptr, val)        atomic_swap_global((ptr), (val))\n" +
+            "#define INTERLOCKED_ADD_AND_FETCH32(ptr, val)   (atomic_add_global((ptr), (val)) + (val))\n" +
+            "#define INTERLOCKED_INCREMENT_AND_FETCH32(ptr)  (atomic_add_global((ptr), 1) + 1)\n" +
+            "#define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  (atomic_subtract_global((ptr), 1) - 1)\n" +
+            "#define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) atomic_compare_exchange_global((ptr), (oldVal), (newVal))\n";
 
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
                                   string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
                                   List<string>? existingCppOrder = null)
         {
             var sb = new StringBuilder();
+            // 跨盘符时 GetRelativePath 返回绝对路径，再拼 ${CMAKE_CURRENT_SOURCE_DIR}/ 会得到
+            // 无效路径（.../NativeTranspiler_Generated/C:/Users/.../.nuget/...）。绝对路径直接用。
+            string cmakeNativeDllDir = Path.IsPathRooted(relativeNativeDllDir)
+                ? relativeNativeDllDir
+                : "${CMAKE_CURRENT_SOURCE_DIR}/" + relativeNativeDllDir;
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
             sb.AppendLine("set(CMAKE_INSTALL_PREFIX \"${CMAKE_CURRENT_BINARY_DIR}/install\" CACHE PATH \"Install prefix\" FORCE)");
             sb.AppendLine("project(NativeDll LANGUAGES CXX)");
@@ -972,7 +1120,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
-            sb.AppendLine($"include_directories(\"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}\")");
+            sb.AppendLine($"include_directories(\"{cmakeNativeDllDir}\")");
             sb.AppendLine();
             sb.AppendLine("# ============================================================");
             sb.AppendLine("# CPU architecture detection");
@@ -1006,11 +1154,11 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine();
 
             sb.AppendLine("# No explicit task system defined; tasksys.cpp will pick the best one for the platform");
-            sb.AppendLine($"if(EXISTS \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
-            sb.AppendLine($"    set(TASKSYS_SRC \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
+            sb.AppendLine($"if(EXISTS \"{cmakeNativeDllDir}/tasksys.cpp\")");
+            sb.AppendLine($"    set(TASKSYS_SRC \"{cmakeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("else()");
             sb.AppendLine("    set(TASKSYS_SRC \"\")");
-            sb.AppendLine($"    message(WARNING \"tasksys.cpp not found at ${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/tasksys.cpp\")");
+            sb.AppendLine($"    message(WARNING \"tasksys.cpp not found at {cmakeNativeDllDir}/tasksys.cpp\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
 
@@ -1035,7 +1183,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     .ToList()
                 : new List<string>();
             foreach (var f in nativeDllCppFiles)
-                sb.AppendLine($"    \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/{f}\"");
+                sb.AppendLine($"    \"{cmakeNativeDllDir}/{f}\"");
             sb.AppendLine(")");
             sb.AppendLine();
             sb.AppendLine("# Generated job wrappers + ISPC runtime (NativeTranspiled.dll)");
@@ -1096,7 +1244,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Dear ImGui debug panel (Windows / D3D11)");
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(WIN32)");
-            sb.AppendLine($"    set(IMGUI_DIR   \"${{CMAKE_CURRENT_SOURCE_DIR}}/{relativeNativeDllDir}/thirdParty/imgui\")");
+            sb.AppendLine($"    set(IMGUI_DIR   \"{cmakeNativeDllDir}/thirdParty/imgui\")");
             sb.AppendLine("    set(IMGUI_BACK  \"${IMGUI_DIR}/backends\")");
             sb.AppendLine("    target_include_directories(NativeDll PRIVATE ${IMGUI_DIR} ${IMGUI_BACK})");
             sb.AppendLine("    target_sources(NativeDll PRIVATE");

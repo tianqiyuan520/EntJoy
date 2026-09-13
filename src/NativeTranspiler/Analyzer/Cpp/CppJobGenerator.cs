@@ -91,7 +91,7 @@ namespace NativeTranspiler.Analyzer
                 var singleFuncName = GetCppJobFunctionName(jobStruct);
                 sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams});");
             }
-            else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
+            else if (IsRangeScheduledJob(jobStruct))
             {
                 var batchParams = BuildBatchJobParameters(jobStruct);
                 var baseFuncName = GetCppJobFunctionName(jobStruct, isBatch: true);
@@ -147,6 +147,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
+            // ─── 逐 job 精度覆盖（C1）───
+            // CMake 的 NATIVE_SIMD_MATH_PRECISION 是**全库**一刀切；NativeSIMD_math.h 用
+            // `#if !defined(SIMD_MATH_PRECISION)` 兜底，因此这里在 include 之前按 job 的
+            // [NativeTranspile(MathPrecision = ...)] 覆盖。修正前该 attribute 全仓无读取点（死开关）。
+            //   1 = Fastest（AVX2 内联多项式 ~3.5 ULP）
+            //   2 = High（无 SIMD 路径 → 逐通道标量回退，~1.0 ULP）
+            //   3 = IEEE （逐通道标量，与 C# 逐位一致）
+            sb.AppendLine($"#define SIMD_MATH_PRECISION {(int)simdMathPrecision + 1}");
             sb.AppendLine("#include \"NativeSIMD.h\"");
             sb.AppendLine("#include \"SimdValue.h\"");
 
@@ -210,7 +218,7 @@ namespace NativeTranspiler.Analyzer
                 else
                     GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
             }
-            else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct))
+            else if (IsParallelForJob(jobStruct) || IsForJob(jobStruct) || IsParallelForBatchJob(jobStruct))
             {
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -222,6 +230,8 @@ namespace NativeTranspiler.Analyzer
 
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
+                // IJobParallelForBatch：Execute(startIndex, count) 自身就是**一段区间**，C++ 侧不再包 index 循环。
+                bool isRangeJob = IsParallelForBatchJob(jobStruct);
 
                 if (boolFields.Count > 0)
                 {
@@ -232,12 +242,12 @@ namespace NativeTranspiler.Analyzer
                         var values = new List<bool>();
                         for (int i = 0; i < boolFields.Count; i++)
                             values.Add((mask & (1 << i)) != 0);
-                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision);
+                        GenerateBatchFunctionVariant(jobStruct, boolFields, values, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision, isRangeJob);
                     }
                 }
                 else
                 {
-                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision);
+                    GenerateBatchFunctionStandard(jobStruct, semanticModel, methodSyntax, sb, useFastMath, autoSIMD, simdMathPrecision, isRangeJob);
                 }
             }
             else
@@ -274,7 +284,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
+        private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
@@ -282,6 +292,22 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+
+            // IJobParallelForBatch：Execute(startIndex, count) 就是一次区间调用 ⇒ 不生成 index 循环，
+            // 两个形参分别映射到 C++ 形参 `__startIndex` / `__count`（`__count` 由 BuildBatchJobParameters 声明）。
+            if (isRangeJob)
+            {
+                string countParamName = methodSyntax.ParameterList.Parameters.Count > 1
+                    ? methodSyntax.ParameterList.Parameters[1].Identifier.Text
+                    : null;
+                var rangeTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct,
+                    indexParamName, "__startIndex", useFastMath, false,
+                    countParamName, "__count");
+                sb.Append(rangeTranslator.Translate(methodSyntax.Body));
+                sb.AppendLine("}");
+                sb.AppendLine();
+                return;
+            }
 
             // 先用标量翻译器翻译 body（余量循环需要标量体）
             var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, /* scalar body, no SIMD */ false);
@@ -299,15 +325,24 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 回退标量路径
+            // 批循环把整段 [__startIndex, __startIndex+__count) 放进同一个函数体，而 C# 的 `return;`
+            // （Execute 内）只结束**本次 index**。裸 `return;` 在 C++ 里会退出整个函数 ⇒ 静默跳过本批
+            // 剩余下标（实测：1024 元素单批、index 0 处 return ⇒ 只有 index 0 被处理）。
+            // ⚠ do-while 包裹**不能**解决这个问题（它只重定向 `break`，`return` 照样穿出去）——
+            //   必须用一个立即调用的 lambda 包住体，`return;` 就变成"结束本次迭代"。
+            //   仅当体内真的出现 `return` 时才包，其余 job 的产物与改动前逐字相同（零性能影响）。
+            bool bodyHasReturn = scalarBody.Contains("return;");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
+            if (bodyHasReturn) sb.AppendLine("        [&]() {");
             sb.Append(scalarBody);
+            if (bodyHasReturn) sb.AppendLine("        }();");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
         }
 
-        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest)
+        private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
         {
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
@@ -316,6 +351,21 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
+
+            // IJobParallelForBatch：与 GenerateBatchFunctionStandard 的 isRangeJob 分支同构（不生成 index 循环）。
+            if (isRangeJob)
+            {
+                string countParamName = methodSyntax.ParameterList.Parameters.Count > 1
+                    ? methodSyntax.ParameterList.Parameters[1].Identifier.Text
+                    : null;
+                var rangeTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct,
+                    indexParamName, "__startIndex", useFastMath, false,
+                    countParamName, "__count");
+                sb.Append(rangeTranslator.Translate(methodSyntax.Body));
+                sb.AppendLine("}");
+                sb.AppendLine();
+                return;
+            }
 
             // 先用标量翻译器翻译 body + 替换 bool 常量
             bool scalar_noSIMD = false;
@@ -343,10 +393,13 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
 
-            // 标量回退
+            // 标量回退（同上：体内有 `return;` 时用立即调用 lambda 包住，保证它只结束本次 index）
+            bool variantHasReturn = bodyCode.Contains("return;");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
+            if (variantHasReturn) sb.AppendLine("        [&]() {");
             sb.Append(bodyCode);
+            if (variantHasReturn) sb.AppendLine("        }();");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
@@ -1093,7 +1146,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             bool isChunkJob = IsChunkScheduledJob(jobStruct);
-            bool isParallelFor = IsParallelForJob(jobStruct) || IsForJob(jobStruct);
+            bool isParallelFor = IsRangeScheduledJob(jobStruct);
 
             if (isChunkJob)
             {

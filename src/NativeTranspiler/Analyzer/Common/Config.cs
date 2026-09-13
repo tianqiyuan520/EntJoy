@@ -20,6 +20,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string IJob = "IJob";
         public const string IJobFor = "IJobFor";
         public const string IJobParallelFor = "IJobParallelFor";
+        public const string IJobParallelForBatch = "IJobParallelForBatch";
         public const string IJobChunk = "IJobChunk";
         public const string IJobEntity = "IJobEntity";
 

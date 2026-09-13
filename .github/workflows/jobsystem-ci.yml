@@ -114,6 +114,31 @@ jobs:
           ./tools/JobSystemStressTest.CSharp/bin/Release/net8.0/JobSystemStressTest.CSharp.exe --timeout 60
         shell: bash
 
+  # 生成器回归（NativeTranspiler）：CI 里唯一会**真正编译生成物**的 job。
+  # 背景：framework-test 用 -p:EnableNativeCompile=false 构建，NativeCompileTask 被条件跳过 ⇒
+  # 生成的 C++/ISPC 从不被编译、静默降级标记（__ENTJOY_UNSUPPORTED）也从不被扫描。
+  # 本 job 跑 tools/NativeTranspilerFixture：生成 → 标记扫描 → CMake/ClangCL(或 MSVC 回退) → 原生编译
+  # → 运行时语义断言（IJobParallelForBatch 区间调度、批内 return; 语义）；再做一次负向自检。
+  # ⚠ 尚未挂进 release-gate：GitHub runner 上 clang-cl 组件是否存在未验证（缺则回退 MSVC），
+  #   先观察若干轮再决定是否设为必需检查。
+  native-transpiler-regression:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build + run generator fixture (native compile + runtime semantics)
+        run: dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release
+
+      - name: Negative check (marker gate must fail the build)
+        shell: pwsh
+        run: ./tools/NativeTranspilerFixture/negative-check.ps1
+
   ispc-width-test:
     runs-on: windows-latest
     timeout-minutes: 15

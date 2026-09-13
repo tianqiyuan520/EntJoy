@@ -1407,8 +1407,10 @@ namespace NativeTranspiler.Analyzer.Common
                 sb.AppendLine();
                 sb.AppendLine($"{Indent}for (uniform int {indexParamName} = __startIndex; {indexParamName} < {endBound}; {indexParamName}++) {{");
                 var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues, useUniformVars: true);
+                // 批索引循环上下文：体内 index 层级的 `return;` 要降级成 `continue;`（否则退出整个导出函数）
+                translator.SetInsideBatchIndexLoop(true);
                 var bodyCode = translator.Translate(methodSyntax.Body);
-                sb.Append(bodyCode);
+                sb.Append(NormalizeUniformPointerLocals(bodyCode));
                 sb.AppendLine($"{Indent}}}");
             }
             else
@@ -1448,7 +1450,7 @@ namespace NativeTranspiler.Analyzer.Common
                         var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
                         translator.SetInsideForeach(true);
                         var bodyCode = translator.Translate(methodSyntax.Body);
-                        sb.Append(bodyCode);
+                        sb.Append(NormalizeUniformPointerLocals(bodyCode));
                         sb.AppendLine($"{Indent}}}");
                     }
                     else
@@ -1459,8 +1461,9 @@ namespace NativeTranspiler.Analyzer.Common
                         var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
                         translator.PreScanAccumulatorVars(methodSyntax);
                         translator.SetInsideUniformFor(true);
+                        translator.SetInsideBatchIndexLoop(true);
                         var bodyCode = translator.Translate(methodSyntax.Body);
-                        sb.Append(bodyCode);
+                        sb.Append(NormalizeUniformPointerLocals(bodyCode));
                         sb.AppendLine($"{Indent}}}");
                     }
                 }
@@ -1472,7 +1475,7 @@ namespace NativeTranspiler.Analyzer.Common
                     var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
                     translator.SetInsideForeach(true);
                     var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
+                    sb.Append(NormalizeUniformPointerLocals(bodyCode));
                     sb.AppendLine($"{Indent}}}");
                 }
             }
@@ -1493,8 +1496,23 @@ namespace NativeTranspiler.Analyzer.Common
 
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, null, false);
             var bodyCode = translator.Translate(methodSyntax.Body);
-            sb.Append(bodyCode);
+            sb.Append(NormalizeUniformPointerLocals(bodyCode));
             sb.AppendLine("}");
+        }
+
+        /// <summary>
+        /// 把局部指针声明的 `uniform T* name` 规范成 `uniform T* uniform name`。
+        /// ⚠ ISPC 里 `uniform T*` 是"**指向 uniform T 的 varying 指针**"——指针本身逐 lane 一份；
+        /// 串行 uniform-for 路径下用它解引用得到的是 varying 值，赋给 uniform 局部变量会报
+        /// 「Can't convert from type "varying int32" to type "uniform int32" for initializer」。
+        /// 这里的指针来源恒为 uniform 地址空间（NativeArray 的 `T name_ptr[]` 形参 /
+        /// GetUnsafePtr() 推出的 uniform 指针），故指针本身也必须是 uniform。
+        /// </summary>
+        private static string NormalizeUniformPointerLocals(string code)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(code,
+                @"(?m)^([ \t]*)uniform[ \t]+([A-Za-z_][A-Za-z0-9_:]*)[ \t]*\*[ \t]+(?!uniform\b)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=",
+                "$1uniform $2* uniform $3 =");
         }
 
         /// <summary>
@@ -1581,6 +1599,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine($"{Indent}for (uniform int {indexParamName} = start; {indexParamName} < end; {indexParamName}++) {{");
 
             var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolField, constBoolValue, useUniformVars: true);
+            // 同上：task 函数里的批索引循环，体内 index 层级 `return;` 降级为 `continue;`
+            translator.SetInsideBatchIndexLoop(true);
             string bodyCode = translator.Translate(methodSyntax.Body);
 
             using (var reader = new StringReader(bodyCode))

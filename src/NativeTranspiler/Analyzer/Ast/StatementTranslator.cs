@@ -109,8 +109,11 @@ namespace NativeTranspiler.Analyzer
                     _builder.AppendLine("continue;");
                     break;
                 default:
+                    // 未支持的语句一律写唯一标记：构建期扫描到即失败。
+                    // （静默丢弃语句会生成"少了一句"的 C++；若被丢的是非 void 函数的唯一 return，
+                    //   则生成空函数体 = C++ UB —— 历史上 `unchecked { }` 就是这样炸的。）
                     AppendIndent();
-                    _builder.AppendLine($"// Unsupported statement: {statement.Kind()}");
+                    _builder.AppendLine($"// {UnsupportedMarkers.Stmt}{statement.Kind()}");
                     break;
             }
         }
@@ -511,7 +514,7 @@ namespace NativeTranspiler.Analyzer
                     TranslateExpression(checkedExpr.Expression);
                     break;
                 default:
-                    _builder.Append($"/* Unsupported expression: {expr.Kind()} */");
+                    _builder.Append($"/*{UnsupportedMarkers.Expr}{expr.Kind()}*/");
                     break;
             }
         }
@@ -935,7 +938,7 @@ namespace NativeTranspiler.Analyzer
             };
             if (cppFunc == null)
             {
-                _builder.Append($"/* Unsupported Math function: {method.Name} */");
+                _builder.Append($"/*{UnsupportedMarkers.Expr}Math.{method.Name}*/");
                 return;
             }
             _builder.Append(cppFunc).Append('(');
@@ -976,7 +979,9 @@ namespace NativeTranspiler.Analyzer
 
             if (macroBase == null)
             {
-                _builder.Append($"/* Unsupported Interlocked method: {method.Name} */");
+                // 明确报错，不再"静默生成非法 C++"：ISPC 侧的基类分支此前直接吐注释，
+                // 结果是 C++ 编译器在很远的地方报一连串无关错误（B3）。
+                _builder.Append($"#error ENTJOY_UNSUPPORTED_INTERLOCKED({method.Name})");
                 return;
             }
 

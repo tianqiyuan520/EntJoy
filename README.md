@@ -1128,6 +1128,30 @@ Debug builds reduce JIT, C#, C++, and linker optimization and may enable additio
 
 Current ISPC samples target AVX-512 SKX. Verify CPU support or change the NativeTranspiler ISPC target and regenerate native code.
 
+### Build fails with `NativeTranspiler generated silently-degraded code`
+
+The generator writes a unique marker (`__ENTJOY_UNSUPPORTED_STMT__…` / `__ENTJOY_UNSUPPORTED_EXPR__…`) for any
+construct it cannot translate, and `NativeCompileTask` refuses to compile that output — this is deliberate: a
+silently dropped statement used to produce code that compiled but computed nothing (or an empty function body).
+Locate the reported `file(line): // __ENTJOY_UNSUPPORTED_STMT__<construct>`, then either rewrite that job or extend
+the generator. Boundaries, workarounds and the full diagnostic table (NT001–NT025) live in
+[`docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md).
+
+### The build looks like it used stale generated code
+
+Roslyn's `CoreCompile` content-hash gating can skip the source generator entirely when only the *generator* changed,
+while the native compile task then skips CMake — so the previous artifacts get compiled again. The task now detects
+this (`generator.stamp` vs the generator assembly hash) and emits a warning with the exact recipe: delete
+`<project>\.godot\mono\temp\obj\<Configuration>` (or `obj\<Configuration>`),
+`NativeTranspiler_Generated\build` and `NativeTranspiler_Generated\native_compile.hash`, then rebuild.
+
+### Where are the NativeTranspiler rules and limits documented?
+
+[`docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md):
+the silent-degradation gate, batch-loop `return` semantics, `IJobParallelForBatch` support, ISPC call-site bridging
+(return value / pointer / `ref`-`out` slot), the NT diagnostic table, staleness gating, and the CI + regression fixture
+(`tools/NativeTranspilerFixture`).
+
 ## Acknowledgements and Inspirations
 
 EntJoy's design and implementation are informed by:

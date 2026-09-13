@@ -89,6 +89,21 @@ namespace NativeTranspiler.Tasks
                 return true;
             }
 
+            // ★ 生成物静默失败自检（必须早于增量哈希短路 —— 否则"上一轮生成的坏产物 + 本轮直接跳过"
+            //   会让坏内核被当成最新版本交付）。
+            //   生成器遇到未支持的语句/表达式形态时会写下唯一标记（前缀 __ENTJOY_UNSUPPORTED，
+            //   见 NativeTranspiler.Analyzer.Common.UnsupportedMarkers），而不是静默丢弃语句或返回 0。
+            //   `.ispc` 一并扫描：ISPC 产物同样有静默降级通道。
+            var generatedSources = cppFiles
+                .Concat(Directory.GetFiles(NativeCodeGenDir, "*.ispc"))
+                .ToArray();
+            if (!CheckGeneratedMarkers(generatedSources))
+                return false;
+
+            // ★ 生成器变了但产物没重新生成 → 本轮编译的其实是上一版产物（Roslyn 的 CoreCompile 内容哈希门控
+            //   会让"只改生成器、不改 C# 源"的构建整轮不跑源生成器）。这件事必须报出来，不能静默。
+            WarnIfGeneratedArtifactsStale();
+
             if (!IsCMakeAvailable())
             {
                 Log.LogWarning("CMake not found in PATH. Skipping native compilation.");
@@ -249,6 +264,123 @@ namespace NativeTranspiler.Tasks
             // 最终确认实际使用的编译器（读 CMakeCache 记录）
             Log.LogMessage(MessageImportance.High, $"★ Native build toolchain confirmed: {GetConfiguredToolchain(buildDir)}");
             return true;
+        }
+
+        /// <summary>
+        /// 扫描生成物里的"静默失败"标记。生成器碰到未支持的语句/表达式形态会写标记而非静默丢弃；
+        /// 命中即让构建失败，把问题挡在"编译通过但算错"之前。
+        /// 只认前缀，不再逐个列举标记名 —— 历史上新增一类静默降级却忘了加进扫描表，
+        /// 结果产物照样算错且构建成功。
+        /// </summary>
+        private bool CheckGeneratedMarkers(string[] generatedFiles)
+        {
+            string[] markers = { "__ENTJOY_UNSUPPORTED", "Unsupported Interlocked method" };
+            var offenders = new List<string>();
+            foreach (var file in generatedFiles)
+            {
+                string[] lines;
+                try { lines = File.ReadAllLines(file); }
+                catch { continue; }
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    foreach (var marker in markers)
+                    {
+                        if (lines[i].IndexOf(marker, StringComparison.Ordinal) < 0) continue;
+                        offenders.Add($"{Path.GetFileName(file)}({i + 1}): {lines[i].Trim()}");
+                        break;
+                    }
+                }
+            }
+
+            if (offenders.Count == 0)
+                return true;
+
+            Log.LogError(
+                "NativeTranspiler generated silently-degraded code — refusing to compile and ship it. " +
+                "Unsupported constructs are emitted as markers (prefix __ENTJOY_UNSUPPORTED) instead of " +
+                "dropping the statement / returning a silent 0; either fix the generator or avoid the " +
+                "construct in the affected job.");
+            foreach (var line in offenders.Distinct().Take(40))
+                Log.LogError("  " + line);
+            return false;
+        }
+
+        /// <summary>
+        /// 生成器程序集与"产物生成时的生成器"不一致 ⇒ 本轮编译的是**上一版产物**。
+        /// 成因：Roslyn 的 CoreCompile 内容哈希门控会让"只改生成器、不改 C# 源"的构建整轮不跑源生成器，
+        /// 而本任务的哈希门控又会跳过 CMake —— 两边都跳过，且没有任何提示（实测反复踩）。
+        /// 判据用**内容哈希**（生成器自己写在 generator.stamp 里）而不是时间戳：
+        /// 单纯重编生成器但内容未变不应打扰用户。只报 warning，不改变构建结果。
+        /// </summary>
+        private void WarnIfGeneratedArtifactsStale()
+        {
+            try
+            {
+                var generatorDll = TryFindGeneratorAssembly();
+                if (generatorDll == null) return;
+
+                var stampPath = Path.Combine(NativeCodeGenDir, "generator.stamp");
+                if (!File.Exists(stampPath)) return;
+
+                string stamped = null;
+                foreach (var line in File.ReadAllLines(stampPath))
+                {
+                    const string prefix = "generatorHash=";
+                    if (line.StartsWith(prefix, StringComparison.Ordinal))
+                    {
+                        stamped = line.Substring(prefix.Length).Trim();
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(stamped)) return;
+
+                var current = ComputeFileHash(generatorDll);
+                if (string.IsNullOrEmpty(current) ||
+                    string.Equals(current, stamped, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                Log.LogWarning(
+                    "The generator assembly changed but the generated sources were NOT regenerated " +
+                    $"(stamp says {Short(stamped)}, generator is {Short(current)}). " +
+                    "Roslyn's CoreCompile content-hash gating can skip the source generator entirely, and this task then " +
+                    "compiles the previous artifacts. Force a full regeneration: delete the project's " +
+                    ".godot\\mono\\temp\\obj\\<Configuration> (or obj\\<Configuration>), NativeTranspiler_Generated\\build " +
+                    "and NativeTranspiler_Generated\\native_compile.hash, then rebuild.");
+            }
+            catch { /* 诊断失败不影响构建 */ }
+        }
+
+        /// <summary>取哈希前 8 位用于日志（Tasks 工程是 C# 7.3，没有范围运算符）。</summary>
+        private static string Short(string hash) =>
+            string.IsNullOrEmpty(hash) ? "<none>" : hash.Substring(0, Math.Min(8, hash.Length));
+
+        /// <summary>
+        /// 按仓库布局（src/NativeTranspiler.Tasks 与 src/NativeTranspiler 平级）从任务程序集位置推生成器程序集；
+        /// 找不到返回 null（外部消费者可继续不配置任何东西）。
+        /// </summary>
+        private static string TryFindGeneratorAssembly()
+        {
+            try
+            {
+                // .../src/NativeTranspiler.Tasks/bin/<Cfg>/netstandard2.0/NativeTranspiler.Tasks.dll
+                var tasksDll = typeof(NativeCompileTask).Assembly.Location;
+                if (string.IsNullOrEmpty(tasksDll)) return null;
+                var tfmDir = Path.GetDirectoryName(tasksDll);                 // .../netstandard2.0
+                if (string.IsNullOrEmpty(tfmDir)) return null;
+                var cfgDir = Path.GetDirectoryName(tfmDir);                   // .../<Cfg>
+                if (string.IsNullOrEmpty(cfgDir)) return null;
+                var binDir = Path.GetDirectoryName(cfgDir);                   // .../bin
+                if (string.IsNullOrEmpty(binDir)) return null;
+                var tasksProjectDir = Path.GetDirectoryName(binDir);          // .../NativeTranspiler.Tasks
+                if (string.IsNullOrEmpty(tasksProjectDir)) return null;
+                var srcDir = Path.GetDirectoryName(tasksProjectDir);          // .../src
+                if (string.IsNullOrEmpty(srcDir)) return null;
+
+                var candidate = Path.Combine(srcDir, "NativeTranspiler", "bin",
+                    Path.GetFileName(cfgDir), "netstandard2.0", "NativeTranspiler.dll");
+                return File.Exists(candidate) ? candidate : null;
+            }
+            catch { return null; }
         }
 
         /// <summary>运行 clang-cl --version 获取版本号（如 "19.1.5"）；失败返回空串。</summary>
@@ -495,6 +627,12 @@ namespace NativeTranspiler.Tasks
                 foreach (var item in ExtraDependencies)
                     files.Add(item.ItemSpec);
             }
+
+            // 生成器程序集本身也是依赖：生成器改了但产物没变（内容哈希门控没重跑生成器）时，
+            // 至少让 CMake 重新编译一次，而不是"跳过了却以为是最新的"。
+            var generatorDll = TryFindGeneratorAssembly();
+            if (generatorDll != null)
+                files.Add(generatorDll);
 
             return files.Distinct().OrderBy(f => f).ToList();
         }
