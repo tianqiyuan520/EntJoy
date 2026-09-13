@@ -99,3 +99,35 @@
 - 性能基准：`dotnet run -c Debug --project tools/SafetyLockOverheadBench/SafetyLockOverheadBench.csproj`
 - 残留/泄漏复现器：`dotnet run -c Debug --project tools/SafetyLockOverheadBench/repro/repro.csproj -- <attempts> <N> <batch>`（默认 `40 262144 16384`；隐藏 `bin/NativeDll.dll` 可切到 Managed 后端复现）
 - 判定标准：`触发器: 触发=0  残留状态=-  _ctxWrites max=0 _ctxReads max=0`
+
+## 九、快路径的语义负向用例（P1-10 回归）与两个构造陷阱
+
+`RegisterRead` 的快路径（`_readMark`/`_readMarkEpoch`，见 `AtomicSafetyHandle.cs`）把 job 内跨容器交替访问
+从 ~167 ns/访问 降到 ~2 ns/访问。**快路径只能省"重复登记"，绝不能漏"新登记"**，因此需要一条负向用例：
+
+```
+dotnet run --project tools/SafetyInterceptProbe/SafetyInterceptProbe.csproj -c Debug     # Release 同样有效
+```
+判据（全部 PASS）：无 job 时主线程正常 → **两轮** job 运行期主线程读/写均被拦截 → `Complete()` 后主线程可读可写；
+两轮是刻意的：连续两个 job 会**复用同一个 ctx**（实测两轮体内 `ctx` 相同），这正是"快路径误判已登记"最容易出错的形态。
+
+两个构造陷阱（都踩过，探针注释里也写了）：
+
+1. **必须在 worker 上跑**：单 tile/小规模的托管 job 会**内联在调用线程执行**（实测体内 `JobIdentity.CurrentContext == 0`），
+   此时任务已经结束、也没有 job 侧登记，负向用例天然不成立（曾据此得出过"未拦截 = 快路径吞掉了违规"的错误结论）。
+   探针因此打印并断言 `体内 ctx != 0`、`读时 job 仍在运行`。
+2. **Release 不等于"没有检查"**：`ENTJOY_SAFETY`（Debug）与 `ENTJOY_SAFETY_BOUNDS`（Release）**编译的是同一段**
+   读/写持有追踪代码（`AtomicSafetyHandle.cs` 内所有 `#if` 都是 `||` 形式），两种配置都能验拦截。
+
+### 顺带把 Managed 后端的缺陷复现成了确定现象（非本轮引入）
+
+把本探针切成 Managed 回退后端（把 `JobScheduler.Initialize()` 换成 `ManagedJobScheduler.Initialize()`）后：
+
+- **第 1 轮**：拦截正常；
+- **第 2 轮**（同一 ctx 被复用）：主线程读/写**均不再被拦截**（`_readerCount` 没被加上）；
+- 随后第 1 轮滞后的释放会对第 2 轮没加过的计数做递减 ⇒ `_readerCount` 变负 ⇒ **`Complete()` 之后主线程访问被永久拦截**
+  （Release 配置下 3/3 稳定复现，表现为未捕获异常直接终止）。
+
+这正是 §七 里已登记的两个成因（完成计数先归零、读声明后释放 + box 池化导致 ctx 复用）的叠加效果，
+**与本轮快路径改动无关**（旧的 `_ctxReads[ctx]` 幂等集合在同样的组合下同样会跳过 `+1`）。
+结论不变：`JobScheduler` 默认走 Native，主路径不受影响；探针固定用 Native 后端，故两种配置下均稳定全绿。

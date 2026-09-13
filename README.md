@@ -481,7 +481,31 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 ## 样例项目
 
-[`src/EntJoySample`](src/EntJoySample) 包含以下案例：
+> ⚠ 本节的部分链接仍写 `src/EntJoySample`（旧布局）；当前实际路径是 [`samples/EntJoySample`](samples/EntJoySample)。
+> 新增的框架验收样例与探针（2026-09-13）见下一节。
+
+### 框架能力验收样例（原生编译 + 运行）
+
+- [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup)：blittable 实体定位表 + job-safe 跨 chunk 随机访问（`NativeComponentLookup<T>`，体内用 `ref` 局部）+ ECB 批量创建/写列/销毁/清空 + 非分配批量创建 + 回收池重建。
+- [`13_EnableBitMapNative`](samples/EntJoySample/13_EnableBitMapNative)：原生 `IJobChunk` **读/写**逐组件 enable 位图（`GetEnableBitMapPtr<T>()`，与托管逐实体 + `WithEnabled` 查询全量一致）+ 原生 `IJobEntity` + `NativeArray` 辅助表 + `Entity` 参数。
+- [`14_AutoSimdChunkWriteback`](samples/EntJoySample/14_AutoSimdChunkWriteback)：`IJobChunk` 双组件整结构体回写（AutoSIMD vs 标量 C++ vs C# 基线，逐实体一致）。
+- 统一入口：[`12_EntityNativeLookup/Program.cs`](samples/EntJoySample/12_EntityNativeLookup/Program.cs)（三段依次运行）；
+  文档：[`docs/public/Runtime-Contracts-and-Known-Limitations.md`](docs/public/Runtime-Contracts-and-Known-Limitations.md)、
+  [`docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md)。
+
+### 探针（`tools/`，均为可运行工程、退出码即判据）
+
+| 探针 | 覆盖 |
+|---|---|
+| `EntityLocateProbe` | 定位表 vs 托管表（创建/销毁/压缩/Id 复用后）一致 |
+| `EntityCommandBufferProbe` | ECB 批量创建/写列/回放分配 |
+| `EntityBulkDestroyProbe` | 批量销毁 / `DestroyAllInArchetype` |
+| `EntityDestroyIsolationProbe` | 销毁隔离 / 幽灵实体 / 表容量 |
+| `EcsShapeCostProbe` | 定位表 lookup 成本、结构变更成本、chunk 压缩、批量创建 |
+| `EcbParallelWriterProbe` | `ParallelWriter`（单线程 + **跨 tile 共享**原子占位 + 容量不足失败路径） |
+| `SafetyInterceptProbe` | 安全检查语义负向用例（快路径不得吞掉违规；必须用 Native 后端） |
+
+[`samples/EntJoySample`](samples/EntJoySample) 包含以下案例：
 
 ### 01 JobSystem
 

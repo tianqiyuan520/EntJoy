@@ -85,6 +85,41 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 
 另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）。
 
+## ECS 原生内核（`NativeTranspile`）访问契约
+
+### 逐组件 enable 位图（P1-6 / P1-7）
+
+- 原生侧取位图：`ArchetypeChunk.GetEnableBitMapPtr<T>()`。托管实现直接返回 chunk 内的真实位图指针；
+  原生内核被转译为 `reinterpret_cast<unsigned long long*>(__chunkData->requiredEnableBitMaps[requiredIdx])`
+  （entity-batch 适配器为 `__batchData->enableBitMaps[requiredIdx]`）。
+- **布局**：每实体 1 bit、64 实体/字；位 i 对应 chunk 内第 i 个实体。组件不是 enableable 时返回 `nullptr`（不抛异常）。
+- **required 序号对齐**：位图数组与 `requiredComponentArrays` **同序**（`CollectChunkNativeArrayTypes` 会同时收集
+  `GetComponentDataNativeArray<T>()` 与 `GetEnableBitMapPtr<T>()` 的类型）⇒ 同一 job 里两者对同一组件取到的序号一致。
+  若某类型不在 required 列表却调用了位图 API，**生成期直接抛错**，不会静默取错列。
+- **写位图的并发纪律**：位图是 chunk 内存的一部分。按实体逐位 `w = bits[word]; bits[word] = w | bit;` 时，
+  多个 lane 命中同一字会互相覆盖（丢更新）。正确做法二选一：**按 64 位字整体写 + 字值是该字索引的纯函数**
+  （两个 lane 命中同一字也写入同一个值 ⇒ 幂等），或保证**同一字只被一个 lane 写**。
+- 托管侧 `IsComponentEnabled<T>` / `WithEnabled<T>()` 读的是同一份位图 ⇒ 原生写后托管侧立即可见。
+
+### ECB 并行记录（`ParallelWriter`）
+
+- **单线程形态**（`CreateParallelWriter(index)`）：一个 writer 同一时刻只能被一个线程使用，违反抛异常；
+  staging 可扩容；只支持自包含命令（`DestroyEntity` / `SetComponent<T>`）。
+- **跨 tile 共享形态**（`CreateSharedParallelWriter(index, stagingCapacityBytes, destroyCapacity)`）：
+  追加走 `Interlocked.CompareExchange` 原子占位（无需线程独占）；**不扩容**（并发下无法安全搬移整块 staging）
+  ⇒ 两个容量必须一次给足。CAS 占位保证两个不变式：`Offset ≤ Capacity`、`DestroyCount ≤ DestroyCapacity`；
+  占位失败发生在写字节之前 ⇒ 失败只抛异常，既不越界写、回放也不会越界读。
+- **命令顺序**：同一 writer 内跨 lane 的顺序不确定（与 DOTS 的 `EntityCommandBuffer.ParallelWriter` 同语义）；
+  回放按 staging 顺序，并把**连续销毁槽**合并回一次批量销毁（遇非销毁命令先落地，保证命令序不被重排）。
+- 记录期不得做结构变更；回放由主线程调用 `PlaybackParallel`。
+
+### `DeferredCommandBuffer` 的值回放路径
+
+- `SetComponentRange` 与 `AddComponentRaw(Entity entity, int typeId, byte* value, int elemSize)` 都按**原始字节**落列
+  （无反射、无装箱、无 `Type` 解析）。字节数必须与组件实际大小一致（记录侧取 `Unsafe.SizeOf<T>()`），
+  否则会按错误的 stride 写列。
+- 未知 `typeId` 会在 `ComponentTypeManager.GetTypeByComponentType` 处抛 `KeyNotFoundException`（响亮失败）。
+
 ## SharedBlob 和调试 pin
 
 - `SharedBlob<T>` 是带显式引用计数的值类型。复制其值不会自动增加引用计数；需要共享副本时必须调用 `Clone()`，每个成功的 `Clone()` 对应一次 `Dispose()`。
@@ -101,5 +136,11 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 - Job 之间的冲突检测只覆盖「写-写」：不同 Job 对同一容器的并发读（读读共享）或读-写组合不作为 Job 间冲突检测目标，并行读写同一容器时的确定性需由上层保证。主线程与 Job 的任意读/写组合则由上述「主线程访问拦截」覆盖。
 - **Managed 回退后端的完成协议与安全声明释放尚未形成同一同步点（已知缺陷）**：`ManagedJobHandle.IsCompleted` 直接等于 `ManagedCompletion.Remaining == 0`，而释放读/写声明发生在该计数归零之后，主线程可能在声明释放前就观察到「已完成」→ `Complete()` 后的合法访问被误拦。另一个已定位因素是托管路径的执行上下文取自 `RuntimeHelpers.GetHashCode(box)`，而 box 由 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx，使上一次 Job 的按-ctx 释放清掉下一次 Job 的登记。此外，隐藏 `NativeDll.dll` 后在托管路径上运行 `tools/SafetyLockOverheadBench/repro` 会稳定**卡死在 `Complete()`**（提交态代码即复现）。**该缺陷不影响 Native 后端**（`JobScheduler` 默认走 Native，本仓库测试集即运行在 Native 上：`IsNative=True`）；若需要在 NativeDll 加载失败的回退路径上也保证同一强度，需按「完成阶段状态机」重设计 `ManagedCompletion`（先放行声明、再发布完成态）并给每次 Job 调用分配唯一 ctx，两者需同批实施。详见 `NativeArray-Index-Safety-Overhead-and-Fixes.md`。
 - IJobEntity 的 DOTS 式 `Entity` 参数（`Execute(ref T0 c0, Entity e)`）的 `Execute` 方法体必须是**块体 `{ }`**，不支持表达式体 `=>`（ISPC 生成器只识别块体）。`e.Id` 即全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组（无该参数零开销）。
+- **并行创建未提供**：`ParallelWriter` 只支持自包含命令（销毁 + 写单个组件）。并行 `CreateEntitiesRange`
+  （DOTS 的 placeholder 机制）未实现；创建/结构变更仍限主线程。
+- **ISPC 后端未接逐组件 enable 位图 API**：`ArchetypeChunk.GetEnableBitMapPtr<T>()` 目前只有 C++ 后端转译
+  （ISPC job 使用它会得到 ISPC/C++ 编译错误，不会静默错值）。
+- **`IJobChunk` + `AutoSIMD` 的收益未证明**：双组件整结构体回写的正确性已逐实体验证（不一致=0），
+  但没有证据表明该路径比标量 C++ 更快（历史结论是 `AutoSIMD` 在 `IJobParallelFor` 上慢 ~10%）。
 
 CI 全绿证明已覆盖路径通过；发布前仍应在目标平台运行 sanitizer、压力和长稳测试。
