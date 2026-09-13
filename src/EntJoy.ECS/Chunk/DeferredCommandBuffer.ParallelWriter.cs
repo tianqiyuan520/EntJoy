@@ -159,31 +159,48 @@ namespace EntJoy.ECS
             st.DestroyCapacity = newCapacity;
         }
         /// <summary>
-        /// **原子占位追加**（跨 tile 共享 writer 的写入路径）：<c>Interlocked.Add</c> 抢一段 staging 空间，
-        /// 抢到的空间只由本线程写 ⇒ 记录期无锁、无需线程独占。
+        /// **原子占位追加**（跨 tile 共享 writer 的写入路径）：CAS 抢一段 staging 空间，抢到的空间只由本线程写
+        /// ⇒ 记录期无锁、无需线程独占。
         ///
-        /// 为什么共享 writer **不能扩容**：扩容要搬移整块 staging 并换指针，多个 lane 同时在写时无法安全完成；
-        /// 因此共享 writer 的容量必须在创建时给足，超限直接响亮失败（而不是静默写坏内存）。
+        /// 两个不变式：
+        ///   ① **`Offset` 永不越过 `Capacity`**：用 <c>Interlocked.Add</c> 的话，失败的那次已把 `Offset` 推过容量，
+        ///      回放期 `while (offset &lt; st.Offset)` 会**越界读** staging（读到垃圾 opcode）⇒ 必须用 CAS 先判后占。
+        ///   ② 超容量**不扩容**：扩容要搬移整块 staging 并换指针，多 lane 并发写时无法安全完成 ⇒ 创建时给足容量。
+        /// 失败时抛错（不写任何字节：占位失败发生在写入之前），且 writer 状态仍自洽（`Offset ≤ Capacity`）。
         /// </summary>
         public static int ReserveShared(this ref EcbWriterState st, int bytes)
         {
-            int start = System.Threading.Interlocked.Add(ref st.Offset, bytes) - bytes;
-            if (start + bytes > st.Capacity)
-                throw new InvalidOperationException(
-                    $"共享 ParallelWriter staging 容量不足（需要 {start + bytes} B，容量 {st.Capacity} B）："
-                    + "共享 writer 不支持扩容（扩容会破坏并发安全）⇒ 用 CreateSharedParallelWriter 预分配更大的容量。");
-            return start;
+            while (true)
+            {
+                int current = System.Threading.Volatile.Read(ref st.Offset);
+                if (current + bytes > st.Capacity)
+                    throw new InvalidOperationException(
+                        $"共享 ParallelWriter staging 容量不足（需要 {current + bytes} B，容量 {st.Capacity} B）："
+                        + "共享 writer 不支持扩容（扩容会破坏并发安全）⇒ 用 CreateSharedParallelWriter 预分配更大的容量。");
+                if (System.Threading.Interlocked.CompareExchange(ref st.Offset, current + bytes, current) == current)
+                    return current;
+            }
         }
 
         /// <summary>共享 writer 的销毁记录：原子占一个销毁槽 + 一条「该槽、count=1」的批量销毁命令。
-        /// 回放期把**连续槽**合并回一次批量销毁（见 <c>DeferredCommandBuffer.ReplayWriterBuffer</c>）。</summary>
+        /// 回放期把**连续槽**合并回一次批量销毁（见 <c>DeferredCommandBuffer.ReplayWriterBuffer</c>）。
+        /// 槽位同样用 CAS 占（不变式：<c>DestroyCount ≤ DestroyCapacity</c>）。</summary>
         public static void DestroyEntityShared(this ref EcbWriterState st, Entity entity)
         {
-            int slot = System.Threading.Interlocked.Increment(ref st.DestroyCount) - 1;
-            if (slot >= st.DestroyCapacity)
-                throw new InvalidOperationException(
-                    $"共享 ParallelWriter 销毁表容量不足（需要 {slot + 1}，容量 {st.DestroyCapacity}）"
-                    + "⇒ 用 CreateSharedParallelWriter 预分配更大的 destroyCapacity。");
+            int slot;
+            while (true)
+            {
+                int current = System.Threading.Volatile.Read(ref st.DestroyCount);
+                if (current >= st.DestroyCapacity)
+                    throw new InvalidOperationException(
+                        $"共享 ParallelWriter 销毁表容量不足（需要 {current + 1}，容量 {st.DestroyCapacity}）"
+                        + "⇒ 用 CreateSharedParallelWriter 预分配更大的 destroyCapacity。");
+                if (System.Threading.Interlocked.CompareExchange(ref st.DestroyCount, current + 1, current) == current)
+                {
+                    slot = current;
+                    break;
+                }
+            }
             st.Destroys[slot] = entity;
             int start = st.ReserveShared(sizeof(int) * 3);
             *(int*)(st.Staging + start) = DeferredCommandBuffer.OP_DESTROY_RANGE;

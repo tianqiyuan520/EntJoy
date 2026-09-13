@@ -1,8 +1,9 @@
 # NativeTranspiler：边界、诊断与回归防线
 
 > 适用：`src/NativeTranspiler`（源生成器）+ `src/NativeTranspiler.Tasks`（原生编译任务）
-> 最后核对：2026-09-13（对应本轮修复：静默降级标记、批内 `return;` 语义、`IJobParallelForBatch`、
-> `MathPrecision.High` 诚实化、生成器陈旧门控、CI 覆盖、回归夹具）
+> 最后核对：2026-09-13（第五批：**整数字面量后缀**、`ref` 局部支持、job 头文件收集、IJobEntity 体翻译器；
+> 前四批：静默降级标记、批内 `return;` 语义、`IJobParallelForBatch`、`MathPrecision.High` 诚实化、
+> 生成器陈旧门控、CI 覆盖、回归夹具）
 >
 > 本文只写"容易踩、且踩了不报错"的部分。API 用法见 README。
 
@@ -59,6 +60,8 @@
 | **NT023** | warning | `MathPrecision = High` **没有实现**：`NativeSIMD_math.h` 的 `== 2` 分支为空，产物与 `IEEE` 逐字相同；`Fastest` 才有 AVX2/AVX512 内联多项式 |
 | **NT024** | warning | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%**，且命中原子/取引用/用户静态辅助函数的 job 会整段退回 per-lane 标量循环 |
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |
+| **NT026** | error | 生成器**自身崩溃**（NRE 等）：把异常堆栈落盘到 `%TEMP%/entjoy-native-transpiler-crash.txt` 并报出，避免历史上"`CS8785` + 连坐 `CS0234 Bindings 缺失`"这种看不出原因的失败 |
+| **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 
@@ -130,3 +133,56 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
   3. `IJobParallelFor` 批内 `return;` **只跳过本次 index**；
   4. `return;` 前后语句的可见性（前面执行、后面跳过）。
 - 相关既有工具：`tools/AutoSIMDVerify`（AutoSIMD 与 C# 基线的逐值对照，23/23）——改 SIMD 生成器后**必跑**。
+
+## 8. 第五批修复（2026-09-13）：三处"语法对、语义错"的转译缺陷
+
+> 共同点：都不是编译错误，而是**生成的 C++ 语义与 C# 不一致**（前两个静默错值、第三个只在 unity build 分组变化时才报错）。
+> 三者都是"框架侧通解修复"，消费方代码已还原成直白写法。
+
+### 8.1 整数字面量后缀：C# 的 `long`/`ulong` 是 64 位，C++ 的不是
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 原生内核算出的位图/掩码**静默错值**：50,000 实体 enable 位图 782 个字里 781 个字错；体内探针 `(int)((1UL << 40) >> 32)` 实测 **-4**（C# 语义应为 **256**） |
+| 根因 | 数值字面量 token 原样输出 ⇒ C# `1UL`（`ulong`，64 位）→ C++ `1UL`（`unsigned long`，**Windows/LLP64 下 32 位**）。`1UL << b`（b 可达 63）触发 `shift count >= width of type`（UB，clang 按 `& 31` 折叠）。`1L` 同理（C++ `long` 32 位） |
+| 独立复现 | 把生成的循环抄成独立 clang-cl 程序（`/O2`）：`word0=0x00000000FFFFFFFF popcount=25006` + 警告 `shift count >= width of type`，与消费方输出逐位一致 |
+| 修法 | `StatementTranslator.NormalizeNumericLiteral(text)` 钩子（默认恒等 ⇒ ISPC 不受影响）；C++ 后端覆盖：`UL`/`LU` → `ULL`、`L` → `LL`（`U`/`u` 两语言同为 32 位，保留）。十六进制分支同样过钩子（`0x1UL` → `0x1ULL`） |
+| 自检 | 生成产物里出现 `1ULL` / `0ULL`；消费方体内探针回到 256，位图 782 字全对 |
+
+**写代码时的建议**：64 位掩码/移位一律用 `1UL << b` 这类**C# 语义**写法即可（转译器负责后缀），
+不要再为了"稳妥"手写 `(ulong)(1)` 之类的绕法。
+
+### 8.2 `ref` 局部已支持（此前在 `Nullable=enable` 下打崩生成器）
+
+- 形态：`ref EntityLocateB e = ref Lookup.Locate[id];` → C++ `EntJoy::ECS::EntityLocateB& e = Lookup.Locate[neighborId];`
+  （`StatementTranslator.TranslateLocalDeclaration`：`RefTypeSyntax` ⇒ 输出 `T&`，并把初始化器的 `ref` 前缀剥掉）。
+  引用即引用 ⇒ 体内后续赋值天然写回，**不需要**退出时回写。
+- 为什么以前必须绕：`Nullable=enable` 下 `GetTypeInfo(Type).Type` 对 `ref T` 返回 null
+  ⇒ 旧代码把它直接喂给 `MapCSharpTypeToCpp`（NRE）⇒ 生成器整体崩溃（`CS8785`）⇒ bindings 不生成 ⇒
+  消费方连坐 `CS0234: 命名空间 "NativeTranspiler" 中不存在 "Bindings"`。
+- 现在的防线：类型解析回退到**声明符号类型**（`ILocalSymbol.Type`）；真解析不到才报 **NT027**（error）；
+  生成器任何未捕获异常报 **NT026** 并把堆栈落盘。
+- ISPC/其它后端同样走基类的这条路径（本轮未改 ISPC 的字面量行为）。
+
+### 8.3 生成的 job 头文件必须包含"体内用到的"用户结构体
+
+- 现象：`no member named 'X' in namespace 'Y'` —— 体内 `LPos* p = …` 会写出**全限定 C++ 名**，
+  但 job 的 `.h` 没 include `Y_X.h`。
+- 为什么长期没暴露：unity build 把该类型头文件从**别的 TU** 带了进来 ⇒ 依赖编译顺序"偶然可见"，
+  本轮新增文件改变 unity 分组后才显形。
+- 根因：`CppJobGenerator.CollectJobStructIncludes` 只从**字段类型**收集，且泛型只在"EntJoy 容器类型"时递归
+  ⇒ `NativeComponentLookup<T>`（非容器）的实参、以及体内局部类型都不收集。
+- 修法：泛型**一律先递归实参**（EntJoy 容器类型仍提前返回；EntJoy 自身的泛型继续走原"结构体头文件"分支）。
+
+### 8.4 IJobEntity 原生体改用 `CppEntityStatementTranslator`
+
+- 现象：原生 `IJobEntity` 体内写 `Out[i] = …`（`Out` 是 `NativeArray<int>` 字段）报
+  `use of undeclared identifier 'Out'` —— 生成函数的形参其实叫 `Out_ptr`。
+- 根因：IJobEntity 的 Execute 体用了**基类 `StatementTranslator`**（它不认识"job 字段 → 生成函数形参"的映射），
+  只靠字符串替换处理组件参数。
+- 修法：新增 `CppEntityStatementTranslator : CppPointerStatementTranslator`（容器字段 → `_ptr`/`_length`、
+  `GetUnsafePtr()` → `_ptr`、指针字段 → `_ptr`），并**关闭 wrap-safe int 算术**
+  （IJobChunk 路径本来就带 wrap-safe；IJobEntity 既有产物是裸算术，保持原形态避免无谓回归）。
+  Vectorize / Standard / EntityChunk 三处生成点统一换用。
+- 验收：原生 IJobEntity + `NativeArray` 辅助表 + `Entity` 参数逐实体不一致=0
+  （样例 `samples/EntJoySample/13_EnableBitMapNative` 第 [8] 段）。
