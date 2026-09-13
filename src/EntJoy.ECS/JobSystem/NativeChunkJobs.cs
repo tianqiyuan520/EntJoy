@@ -30,6 +30,7 @@ namespace EntJoy.ECS.JobSystem
         public int requiredComponentCount;     // requiredComponentArrays 数量
         public void** sharedValuePtrs;          // SharedComponent blittable 值指针 [sharedValueCount]
         public int sharedValueCount;            // sharedValuePtrs 数量，0 = 无 shared 组件
+        public void** requiredEnableBitMaps;    // P1-6：与 requiredComponentArrays **同序**的逐组件 enable 位图（元素可为 null）
     }
 
     /// <summary>
@@ -251,6 +252,7 @@ namespace EntJoy.ECS.JobSystem
                             if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
                             if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
                             if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
+                            if (cd.requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.requiredEnableBitMaps);
                             if (cd.sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)cd.sharedValuePtrs);
                         }
                     }

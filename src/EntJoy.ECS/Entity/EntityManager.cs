@@ -26,10 +26,69 @@ namespace EntJoy.ECS
         public ref readonly Archetype[] Archetypes => ref allArchetypes;
 
         /// <summary>实体回收队列（对象池）</summary>
-        private Queue<Entity> recycleEntities;  // 实体回收队列
+        /// <summary>
+        /// 实体 Id 回收栈（**非托管 LIFO**，P0-4c）。
+        /// 原先用 <c>Queue&lt;Entity&gt;</c>：1M 级销毁/重生会把托管队列扩到 ~1M 项
+        /// （实测批量销毁 100k 时回放期分配 **3.2MB**，全部来自队列扩容）。
+        /// 换成非托管栈后销毁/创建路径**零托管分配**；语义由 FIFO 变 LIFO（最近销毁的 Id 优先复用），
+        /// 与 GPU 版实体池（freeList 栈）一致。
+        /// </summary>
+        private unsafe Entity* _recycleStack;
+        private int _recycleCount;
+        private int _recycleCapacity;
+
+        private unsafe bool TryPopRecycled(out Entity entity)
+        {
+            if (_recycleCount > 0)
+            {
+                entity = _recycleStack[--_recycleCount];
+                return true;
+            }
+            entity = default;
+            return false;
+        }
+
+        private unsafe void PushRecycled(Entity entity)
+        {
+            EnsureRecycleCapacity(_recycleCount + 1);
+            _recycleStack[_recycleCount++] = entity;
+        }
+
+        private void ClearRecycled() => _recycleCount = 0;
+
+        private unsafe void EnsureRecycleCapacity(int needed)
+        {
+            if (needed <= _recycleCapacity) return;
+            int newCapacity = _recycleCapacity > 0 ? _recycleCapacity : 1024;
+            while (newCapacity < needed) newCapacity *= 2;
+            var next = (Entity*)System.Runtime.InteropServices.Marshal.AllocHGlobal(newCapacity * sizeof(Entity));
+            if (_recycleStack != null)
+            {
+                Buffer.MemoryCopy(_recycleStack, next, (long)newCapacity * sizeof(Entity), (long)_recycleCount * sizeof(Entity));
+                System.Runtime.InteropServices.Marshal.FreeHGlobal((IntPtr)_recycleStack);
+            }
+            _recycleStack = next;
+            _recycleCapacity = newCapacity;
+        }
 
         /// <summary>实体索引数组（直接索引访问）</summary>
         private EntityIndexInWorld[] entities;  // 实体索引数组
+
+        /// <summary>
+        /// **blittable 实体定位表**（索引 = 实体 Id），与 <see cref="entities"/> **在同一点更新**
+        /// （<see cref="UpdateEntityLocation"/> / <see cref="RefreshChunkEntityIndices"/>）：
+        /// 每项记录 chunk 数据块基址 + 该 Archetype 的非托管列偏移表 + slot + version。
+        /// 用途：让并行 job 与 NativeTranspile 生成的 C++ 内核做**跨 chunk 随机访问**
+        /// （托管 <see cref="EntityIndexInWorld"/> 含托管 Archetype 引用，原生读不到）。
+        /// 容量随 <see cref="entities"/> 扩容（见 <see cref="EnsureLocateCapacity"/>）。
+        /// </summary>
+        private unsafe EntityLocateB* _locateB;
+
+        /// <summary><see cref="_locateB"/> 的容量（= entities.Length；0 表示尚未分配）。</summary>
+        private int _locateBCapacity;
+
+        /// <summary>下一个 Archetype 编号（<see cref="Archetype.ArchetypeId"/> 的分配源）。</summary>
+        private int _nextArchetypeId;
 
         /// <summary>当前已创建的实体总数</summary>
         private int entityCount;  // 实体计数器
@@ -60,8 +119,13 @@ namespace EntJoy.ECS
 
         public EntityManager()
         {
-            recycleEntities = new Queue<Entity>();  // 初始化回收队列
+            _recycleCapacity = 0;
+            _recycleCount = 0;
+            _recycleStack = (Entity*)System.Runtime.InteropServices.Marshal.AllocHGlobal(1024 * sizeof(Entity));
+            _recycleCapacity = 1024;
             entities = new EntityIndexInWorld[32];  // 初始实体数组
+            _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
+            _locateBCapacity = entities.Length;
             archetypeMap = new Dictionary<int, List<Archetype>>();  // 初始化原型映射（哈希 -> Archetype 列表）
             allArchetypes = new Archetype[8];  // 初始原型数组
         }
@@ -88,6 +152,7 @@ namespace EntJoy.ECS
             }
             // 不存在具体匹配的 Archetype，创建新原型
             var archetype = new Archetype(types.ToArray());
+            archetype.ArchetypeId = _nextArchetypeId++;
             archetypeList.Add(archetype);
             //检查原型数组容量
             if (archetypeCount >= allArchetypes.Length)
@@ -127,13 +192,23 @@ namespace EntJoy.ECS
             }
 
             archetypeMap.Clear();
-            recycleEntities.Clear();
+            ClearRecycled();
+            if (_recycleStack != null)
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal((IntPtr)_recycleStack);
+                _recycleStack = null;
+                _recycleCapacity = 0;
+                _recycleCount = 0;
+            }
             _lastChunkPerSharedValue.Clear();
             ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
             _observers?.Clear();
             _observerCount = 0;
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
+            NativeLocateStorage.Free(_locateB);
+            _locateB = null;
+            _locateBCapacity = 0;
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
             entityCount = 0;
@@ -257,9 +332,16 @@ namespace EntJoy.ECS
                 return;
             }
             if (extra == null || extra == info.Archetype)
-                CompleteArchetypeJobs(new[] { info.Archetype });
+            {
+                // 零分配单元素重载（P0-4c）：原先这里每次 new[] { archetype } ⇒ 32B/实体，
+                // 批量销毁 100k 实测 3.2MB 分配全出在这一行。
+                Archetype single = info.Archetype;
+                CompleteArchetypeJobs(System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref single, 1));
+            }
             else
-                CompleteArchetypeJobs(new[] { info.Archetype, extra });
+            {
+                CompleteArchetypeJobs(new[] { info.Archetype, extra });   // 罕见路径（迁移/双 archetype）
+            }
         }
 
         /// <summary>从 Archetype 移除实体槽位，并修正 swap-pop 搬移实体与空 chunk 压缩后的位置索引。</summary>
@@ -328,7 +410,7 @@ namespace EntJoy.ECS
         /// 只等待访问受影响 Archetype 的 Job（Selective Wait）。
         /// affectedComponentTypes: 如果提供，只等待写入了这些组件的 Job（精确过滤）。
         /// </summary>
-        internal void CompleteArchetypeJobs(Archetype[] affectedArchetypes, ComponentType[]? affectedComponentTypes = null)
+        internal void CompleteArchetypeJobs(ReadOnlySpan<Archetype> affectedArchetypes, ComponentType[]? affectedComponentTypes = null)
         {
             if (NativeJobScheduler.IsExecutingJob)
                 throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing.");
@@ -421,6 +503,123 @@ namespace EntJoy.ECS
             entityInfoRef.Archetype = archetype;
             entityInfoRef.ChunkIndex = chunkIndex;
             entityInfoRef.SlotInChunk = slotInChunk;
+            // blittable 镜像：与托管表同一处更新（这里 + RefreshChunkEntityIndices 是仅有的两个写入点）
+            // ⚠ 惰性扩容守卫：**不依赖调用方是否记得同步扩容定位表**（实测踩过：SharedComponent.cs 里
+            //   还有第 5 个 Array.Resize(ref entities) 站点漏了同步 ⇒ 超出旧容量的实体读到越界/零值）。
+            if ((uint)entityId >= (uint)_locateBCapacity) EnsureLocateCapacity(entityId + 1);
+            {
+                Chunk chunk = archetype.ChunkList[chunkIndex];
+                ref var loc = ref _locateB[entityId];
+                loc.ChunkMemory = (void*)chunk.MemoryBlock;
+                loc.ChunkOffsets = archetype.GetChunkOffsetsNative();
+                loc.SlotInChunk = slotInChunk;
+            }
+        }
+
+        /// <summary>把实体版本号写进 blittable 定位表（版本号在 <see cref="UpdateEntityLocation"/> 之后单独写入）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void SetLocateBVersion(int entityId, int version)
+        {
+            if ((uint)entityId >= (uint)_locateBCapacity) EnsureLocateCapacity(entityId + 1);
+            _locateB[entityId].Version = version;
+        }
+
+        /// <summary>清空某实体在 blittable 定位表中的项（销毁路径）。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ClearLocateB(int entityId)
+        {
+            if ((uint)entityId < (uint)_locateBCapacity)
+            {
+                ref var loc = ref _locateB[entityId];
+                loc.ChunkMemory = null;
+                loc.ChunkOffsets = null;
+                loc.SlotInChunk = -1;
+            }
+        }
+
+        /// <summary>
+        /// 扩容托管实体表（**唯一入口**）：与 blittable 定位表**同步**扩容。
+        /// 纪律：任何地方都不应直接 <c>Array.Resize(ref entities, …)</c> —— 漏掉定位表同步会让
+        /// 超出旧容量的实体在定位表里读到越界/零值（实测症状：VerifyLocateTable 报不一致，
+        /// 且不一致项的 id 恒大于 <see cref="LocateCapacity"/>）。
+        /// </summary>
+        private void ResizeEntityTable(int newLength)
+        {
+            if (newLength <= entities.Length) return;
+            Array.Resize(ref entities, newLength);
+            EnsureLocateCapacity(entities.Length);
+        }
+
+        /// <summary>blittable 定位表随实体数组一起扩容（4 处 Array.Resize(ref entities, …) 之后调用）。</summary>
+        private void EnsureLocateCapacity(int needed)
+        {
+            if (needed <= _locateBCapacity) return;
+            int newCapacity = _locateBCapacity > 0 ? _locateBCapacity : 32;
+            while (newCapacity < needed) newCapacity *= 2;
+            _locateB = NativeLocateStorage.GrowLocate(_locateB, _locateBCapacity, newCapacity);
+            _locateBCapacity = newCapacity;
+        }
+
+        // ======================== blittable 定位表的对外访问（job / 原生内核） ========================
+
+        /// <summary>blittable 定位表首址（索引 = 实体 Id）；长度 = <see cref="LocateCapacity"/>。</summary>
+        public unsafe EntityLocateB* GetEntityLocatePtr() => _locateB;
+
+        /// <summary>blittable 定位表容量（实体 Id 上界）。</summary>
+        public int LocateCapacity => _locateBCapacity;
+
+        /// <summary>
+        /// 构造 job-safe 的组件随机访问句柄（值语义，可作为 job 字段传给并行 job / 原生内核）。
+        /// </summary>
+        /// <param name="archetype">目标组件所在的 Archetype（用于预解析组件列下标）。</param>
+        public unsafe NativeComponentLookup<T> CreateNativeLookup<T>(Archetype archetype) where T : unmanaged
+        {
+            return new NativeComponentLookup<T>
+            {
+                Locate = _locateB,
+                ComponentIndex = archetype.GetComponentTypeIndex<T>(),
+                Length = _locateBCapacity,
+            };
+        }
+
+        /// <summary>构造 job-safe 的位置查询句柄（实体 → chunk 基址 / slot / version）。</summary>
+        public unsafe NativeEntityLookup CreateNativeEntityLookup()
+            => new NativeEntityLookup { Locate = _locateB, Length = _locateBCapacity };
+
+        /// <summary>
+        /// **探针**：逐实体比对 blittable 定位表 vs 托管 <see cref="EntityIndexInWorld"/>，
+        /// 返回不一致项数（0 = 一致）。遍历全部 Archetype/Chunk/Slot，覆盖
+        /// "结构变更（NewEntity/DestroyEntity/Add/Remove/空 chunk 压缩）之后"的一致性判据。
+        /// </summary>
+        public unsafe long VerifyLocateTable(out int checkedEntities)
+        {
+            long mismatch = 0;
+            int seen = 0;
+            for (int a = 0; a < archetypeCount; a++)
+            {
+                var arch = allArchetypes[a];
+                if (arch == null) continue;
+                int* offsets = arch.GetChunkOffsetsNative();
+                for (int c = 0; c < arch.ChunkList.Count; c++)
+                {
+                    var chunk = arch.ChunkList[c];
+                    for (int slot = 0; slot < chunk.EntityCount; slot++)
+                    {
+                        int id = chunk.GetEntity(slot).Id;
+                        if ((uint)id >= (uint)_locateBCapacity) { mismatch++; continue; }
+                        ref var loc = ref _locateB[id];
+                        var info = entities[id];
+                        seen++;
+                        if (loc.ChunkMemory != (void*)chunk.MemoryBlock) mismatch++;
+                        else if (loc.ChunkOffsets != offsets) mismatch++;
+                        else if (loc.SlotInChunk != slot) mismatch++;
+                        else if (info.Archetype != arch || info.ChunkIndex != c || info.SlotInChunk != slot) mismatch++;
+                        else if (loc.Version != info.Version) mismatch++;
+                    }
+                }
+            }
+            checkedEntities = seen;
+            return mismatch;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -475,7 +674,7 @@ namespace EntJoy.ECS
             lock (_structuralLock)
             {
                 var newEntity = new Entity();  // 创建新实体
-                bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);  // 尝试从回收队列获取
+                bool isRecycled = TryPopRecycled(out var recycledEnt);  // 尝试从回收栈获取
 
                 if (isRecycled)  // 使用回收的实体
                 {
@@ -488,6 +687,7 @@ namespace EntJoy.ECS
                     if (newEntity.Id >= entities.Length)  // 检查数组容量
                     {
                         Array.Resize(ref entities, entities.Length * 2);  // 扩容数组
+                        EnsureLocateCapacity(entities.Length);
                     }
                 }
 
@@ -499,6 +699,7 @@ namespace EntJoy.ECS
                 UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
                 // 存储实体版本号用于悬垂引用检测
                 GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+                SetLocateBVersion(newEntity.Id, newEntity.Version);
 
                 // Observer：Added（单实体 NewEntity；新组件槽为初始零值；count=1 批量派发）
                 if (_observerCount > 0 && _observers != null)
@@ -520,6 +721,131 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
+        /// **批量创建的零分配版本**（P1-8）：与 <see cref="CreateEntities(int, ComponentType[])"/> 同一路径，
+        /// 但把新实体写进调用方提供的**非托管缓冲**而非托管 <c>Entity[]</c>。
+        /// 用途：每步生成大批单位（本项目 65,536/步）时避免 512KB/步 的托管分配，并给 ECB 批量回放用。
+        /// </summary>
+        /// <returns>实际创建数（= min(count, outputCapacity)）。</returns>
+        public unsafe int CreateEntities(int count, ComponentType[] types, Entity* output, int outputCapacity)
+        {
+            CheckDisposed();
+            if (count <= 0 || output == null || outputCapacity <= 0 || types == null) return 0;
+            if (count > outputCapacity) count = outputCapacity;
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                var targetArch = GetOrCreateArchetype(types);
+                int created = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    var newEntity = new Entity();
+                    if (TryPopRecycled(out var recycledEnt))
+                    {
+                        newEntity.Id = recycledEnt.Id;
+                        newEntity.Version = recycledEnt.Version + 1;
+                    }
+                    else
+                    {
+                        newEntity.Id = entityCount++;
+                        if (newEntity.Id >= entities.Length)
+                        {
+                            Array.Resize(ref entities, entities.Length * 2);
+                            EnsureLocateCapacity(entities.Length);
+                        }
+                    }
+                    targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
+                    UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
+                    // ⚠ 两张表必须同点更新：托管表的 Version 也在这里写（漏了它会让 Id 复用的实体
+                    //   在 GetComponent/DestroyEntity 的悬垂校验里报 "stale reference (version mismatch)"）。
+                    GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+                    SetLocateBVersion(newEntity.Id, newEntity.Version);
+                    output[created++] = newEntity;
+                }
+                structuralVersion++;
+                // ⚠ 与托管版不同：非托管路径**不做 Observer Added 派发**（需要托管 Entity[] 才能批量派发）。
+                //    需要 Observer 的调用方请用托管版本 CreateEntities。
+                return created;
+            }
+        }
+
+        /// <summary>
+        /// **单实体组件写入**（P1-9）：经 blittable 定位表直落组件列，无反射/无装箱。
+        /// 与批量路径 <see cref="WriteComponentRange"/> 同源（都走 <see cref="TryGetComponentPointer"/> 的解析规则）。
+        /// </summary>
+        public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
+        {
+            CheckDisposed();
+            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+            if (!TryGetComponentPointer(entity, typeId, sizeof(T), out void* ptr))
+                throw new InvalidOperationException(
+                    $"SetComponent<{typeof(T).Name}> 失败：实体 {entity.Id} 无效/已销毁/版本不匹配，或该实体没有该组件列。");
+            *(T*)ptr = value;
+        }
+
+        /// <summary>
+        /// 经定位表解析"某实体某组件列的可写指针"（单实体路径）。
+        /// 返回 false 的四种情形：Id 越界 / 未分配或已销毁 / 版本不匹配（悬垂）/ Archetype 无该组件列。
+        /// </summary>
+        internal unsafe bool TryGetComponentPointer(Entity entity, int componentTypeId, int elemSize, out void* ptr)
+        {
+            ptr = null;
+            if ((uint)entity.Id >= (uint)_locateBCapacity) return false;
+            ref var loc = ref _locateB[entity.Id];
+            if (loc.ChunkMemory == null || loc.SlotInChunk < 0) return false;
+            if (loc.Version != entity.Version) return false;
+            if ((uint)entity.Id >= (uint)entities.Length) return false;
+            var arch = entities[entity.Id].Archetype;
+            if (arch == null) return false;
+            var ct = new ComponentType(componentTypeId);
+            if (!arch.HasComponent(ct)) return false;
+            int compIdx = arch.GetComponentTypeIndex(ct);
+            ptr = (byte*)loc.ChunkMemory + loc.ChunkOffsets[compIdx] + loc.SlotInChunk * elemSize;
+            return true;
+        }
+
+        /// <summary>
+        /// 把一段**连续取值**批量写进给定实体的某组件列（P0-4/P0-5 用，ECB 回放零反射路径）。
+        /// 逐实体经 blittable 定位表解析列基址（见 <see cref="EntityLocateB"/>），不做任何反射/装箱。
+        /// </summary>
+        /// <param name="componentTypeId">目标组件类型 Id。</param>
+        /// <param name="elemSize">组件元素字节数（= sizeof(T)）。</param>
+        /// <param name="srcEntities">实体列表（长度 ≥ count）。</param>
+        /// <param name="srcValues">取值缓冲（长度 ≥ count × elemSize，与 srcEntities 一一对应）。</param>
+        /// <param name="count">元素数。</param>
+        /// <returns>实际写入数（实体无效/无该组件列的项被跳过）。</returns>
+        internal unsafe int WriteComponentRange(int componentTypeId, int elemSize, Entity* srcEntities, byte* srcValues, int count)
+        {
+            if (count <= 0 || elemSize <= 0 || srcEntities == null || srcValues == null) return 0;
+            if (_locateB == null) return 0;
+            int written = 0;
+            int cachedArchetypeId = -1;
+            int compIdx = -1;
+            for (int i = 0; i < count; i++)
+            {
+                int id = srcEntities[i].Id;
+                if ((uint)id >= (uint)_locateBCapacity) continue;
+                ref var loc = ref _locateB[id];
+                if (loc.ChunkMemory == null || loc.SlotInChunk < 0) continue;
+                if ((uint)id >= (uint)entities.Length) continue;
+                var arch = entities[id].Archetype;
+                if (arch == null) continue;
+                // 同一批通常同 archetype：只在切换时重解析组件列下标（字典查询）
+                if (arch.ArchetypeId != cachedArchetypeId)
+                {
+                    cachedArchetypeId = arch.ArchetypeId;
+                    var ct = new ComponentType(componentTypeId);
+                    // 该 archetype 没有这个组件列 → 整批跳过（GetComponentTypeIndex 是字典索引器，缺失会抛）
+                    compIdx = arch.HasComponent(ct) ? arch.GetComponentTypeIndex(ct) : -1;
+                }
+                if (compIdx < 0) continue;
+                byte* dst = (byte*)loc.ChunkMemory + loc.ChunkOffsets[compIdx] + loc.SlotInChunk * elemSize;
+                Buffer.MemoryCopy(srcValues + (long)i * elemSize, dst, elemSize, elemSize);
+                written++;
+            }
+            return written;
+        }
+
+        /// <summary>
         /// 批量创建实体：一次 Archetype 查找、一次批量添加、一次 CompleteActiveJobs。
         /// 比逐个 NewEntity 快 N 倍（N = 实体数），因为减少了锁和 CompleteActiveJobs 调用。
         /// </summary>
@@ -536,7 +862,7 @@ namespace EntJoy.ECS
                 for (int i = 0; i < count; i++)
                 {
                     var newEntity = new Entity();
-                    bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);
+                    bool isRecycled = TryPopRecycled(out var recycledEnt);
                     if (isRecycled)
                     {
                         newEntity.Id = recycledEnt.Id;
@@ -547,11 +873,13 @@ namespace EntJoy.ECS
                         newEntity.Id = entityCount++;
                         if (newEntity.Id >= entities.Length)
                             Array.Resize(ref entities, entities.Length * 2);
+                            EnsureLocateCapacity(entities.Length);
                     }
 
                     targetArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
                     UpdateEntityLocation(newEntity.Id, targetArch, chunkIndex, slotInChunk);
                     GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+                    SetLocateBVersion(newEntity.Id, newEntity.Version);
                     result[i] = newEntity;
                 }
 
@@ -624,6 +952,97 @@ namespace EntJoy.ECS
         {
             for (int i = 0; i < archetypeCount; i++)
                 allArchetypes[i]?.ClearAllChangedBitMasks();
+        }
+
+        /// <summary>
+        /// **批量销毁**（P0-4b）：一次 <c>CompleteActiveJobs</c> + 一次锁处理整批，
+        /// 避免"逐实体 DestroyEntity"时每条命令都等一遍在飞 job。
+        /// 无效/已销毁/版本不匹配的项被静默跳过（返回实际销毁数）。
+        /// </summary>
+        public unsafe int DestroyEntities(Entity* targets, int count)
+        {
+            CheckDisposed();
+            if (targets == null || count <= 0) return 0;
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                int destroyed = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    int id = targets[i].Id;
+                    if ((uint)id >= (uint)entities.Length) continue;
+                    ref var info = ref entities[id];
+                    if (info.Archetype == null) continue;
+                    if (info.Version != targets[i].Version) continue;
+                    DestroyEntityInternal(targets[i]);   // 锁内版本：含 Observer 与关系索引清理
+                    destroyed++;
+                }
+                return destroyed;
+            }
+        }
+
+        /// <summary>
+        /// **清空某 Archetype 的全部实体**（P0-4b，ClearAll 快路径）：代价 O(Chunk 数) 而非 O(实体数)——
+        /// 逐实体只做"清两表 + Id 回池"，Chunk/slab 整批释放（不做 swap-pop 与空 chunk 压缩）。
+        ///
+        /// ⚠ 含**关系列**的 Archetype 会自动退回逐实体 <see cref="DestroyEntityInternal"/> 路径
+        /// （关系反向索引需要逐实体清理），此时退化为 O(实体数)。
+        /// </summary>
+        public unsafe long DestroyAllInArchetype(Archetype archetype)
+        {
+            CheckDisposed();
+            if (archetype == null) return 0;
+            CompleteActiveJobs();
+            lock (_structuralLock)
+            {
+                // 关系列存在时不能用快路径（反向索引/多值关系需要逐实体清理）
+                bool hasRelation = false;
+                var types = archetype.Types;
+                for (int i = 0; i < types.Length; i++)
+                    if (types[i].IsRelation) { hasRelation = true; break; }
+
+                long destroyed = 0;
+                var chunks = archetype.ChunkList;
+                if (hasRelation)
+                {
+                    for (int c = 0; c < chunks.Count; c++)
+                    {
+                        var chunk = chunks[c];
+                        int ec = chunk.EntityCount;
+                        for (int slot = 0; slot < ec; slot++)
+                        {
+                            var e = chunk.GetEntity(slot);
+                            if ((uint)e.Id >= (uint)entities.Length) continue;
+                            ref var info = ref entities[e.Id];
+                            if (info.Archetype == null || info.Version != e.Version) continue;
+                            DestroyEntityInternal(e);
+                            destroyed++;
+                        }
+                    }
+                    return destroyed;
+                }
+
+                for (int c = 0; c < chunks.Count; c++)
+                {
+                    var chunk = chunks[c];
+                    int ec = chunk.EntityCount;
+                    for (int slot = 0; slot < ec; slot++)
+                    {
+                        var e = chunk.GetEntity(slot);
+                        if ((uint)e.Id >= (uint)entities.Length) continue;
+                        ref var info = ref entities[e.Id];
+                        info.Archetype = null;
+                        info.ChunkIndex = -1;
+                        info.SlotInChunk = -1;
+                        ClearLocateB(e.Id);
+                        PushRecycled(e);   // Id 回池，后续 Spawn 复用（Version+1 防悬垂）
+                        destroyed++;
+                    }
+                }
+                archetype.ClearAllEntities();
+                structuralVersion++;
+                return destroyed;
+            }
         }
 
         public void DestroyEntity(Entity entity)
@@ -778,7 +1197,8 @@ namespace EntJoy.ECS
             entityInfoRef.Archetype = null;
             entityInfoRef.ChunkIndex = -1;
             entityInfoRef.SlotInChunk = -1;
-            recycleEntities.Enqueue(entity);
+            ClearLocateB(entity.Id);
+            PushRecycled(entity);
             structuralVersion++;
 
             // Observer：派发 Destroyed（销毁后派发，实体仍可解析；用销毁前快照）
@@ -824,6 +1244,28 @@ namespace EntJoy.ECS
         // ======================== 非泛型方法（供 ECB Playback 使用） ========================
 
         /// <summary>
+        /// 添加组件并写入**原始字节**值（ECB 回放去反射路径：无 <c>Marshal.PtrToStructure</c>、无装箱）。
+        /// 组件已存在时等价于原地写列（与 <see cref="WriteComponentRange"/> 同源）。
+        /// </summary>
+        public unsafe void AddComponentRaw(Entity entity, int componentTypeId, byte* value, int elemSize)
+        {
+            CheckDisposed();
+            var componentType = ComponentTypeManager.GetTypeByComponentType(componentTypeId);
+            Archetype? targetArch = null;
+            if ((uint)entity.Id < (uint)entities.Length)
+            {
+                ref var info = ref GetEntityInfoRef(entity.Id);
+                if (info.Archetype != null && !info.Archetype.Has(componentType))
+                    targetArch = info.Archetype.GetAddEdge(ComponentTypeManager.GetComponentType(componentType));
+            }
+            CompleteEntityJobs(entity, targetArch);
+            lock (_structuralLock)
+            {
+                AddComponentRawCore(entity, componentType, null, value, elemSize);
+            }
+        }
+
+        /// <summary>
         /// 添加组件（非泛型版本，核心实现）
         /// </summary>
         public unsafe void AddComponentRaw(Entity entity, Type componentType, object value)
@@ -845,9 +1287,20 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 添加组件核心（调用方必须已持有 _structuralLock）。
+        /// 把**原始字节**写进某实体所在 chunk 的组件列（结构变更后的落值步骤，无反射/无装箱）。
         /// </summary>
-        private unsafe void AddComponentRawCore(Entity entity, Type componentType, object value)
+        private static unsafe void WriteColumnBytes(Archetype arch, int chunkIndex, int slotInChunk, Type componentType, byte* src, int elemSize)
+        {
+            int compIdx = arch.GetComponentTypeIndex(ComponentTypeManager.GetComponentType(componentType));
+            byte* colBase = (byte*)arch.ChunkList[chunkIndex].GetComponentArrayPointer(compIdx);
+            Buffer.MemoryCopy(src, colBase + (long)slotInChunk * elemSize, elemSize, elemSize);
+        }
+
+        /// <summary>
+        /// 添加组件核心（调用方必须已持有 _structuralLock）。
+        /// <paramref name="rawValue"/> 非 null 时走**原始字节**写入（值以字节为准，忽略 <paramref name="value"/>）。
+        /// </summary>
+        private unsafe void AddComponentRawCore(Entity entity, Type componentType, object value, byte* rawValue = null, int rawSize = 0)
         {
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             if (entityInfoRef.Archetype == null)
@@ -857,7 +1310,10 @@ namespace EntJoy.ECS
             var oldArch = entityInfoRef.Archetype;
             if (oldArch.Has(componentType))
             {
-                oldArch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
+                if (rawValue != null)
+                    WriteColumnBytes(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, rawValue, rawSize);
+                else
+                    oldArch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
                 return;
             }
 
@@ -881,7 +1337,10 @@ namespace EntJoy.ECS
             RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
 
             UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
-            targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
+            if (rawValue != null)
+                WriteColumnBytes(targetArch, chunkIndex, slotInChunk, componentType, rawValue, rawSize);
+            else
+                targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
             structuralVersion++;
 
             // Observer：Added（迁移完成后派发，回调内实体可查、新组件已存在；count=1）
@@ -1199,7 +1658,7 @@ namespace EntJoy.ECS
                 for (int i = 0; i < count; i++)
                 {
                     var newEntity = new Entity();
-                    bool isRecycled = recycleEntities.TryDequeue(out var recycledEnt);
+                    bool isRecycled = TryPopRecycled(out var recycledEnt);
                     if (isRecycled)
                     {
                         newEntity.Id = recycledEnt.Id;
@@ -1210,11 +1669,13 @@ namespace EntJoy.ECS
                         newEntity.Id = entityCount++;
                         if (newEntity.Id >= entities.Length)
                             Array.Resize(ref entities, entities.Length * 2);
+                            EnsureLocateCapacity(entities.Length);
                     }
 
                     instanceArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
                     UpdateEntityLocation(newEntity.Id, instanceArch, chunkIndex, slotInChunk);
                     GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
+                    SetLocateBVersion(newEntity.Id, newEntity.Version);
 
                     // 复制组件值（ICopyable 走 OnCopy 如 SharedBlob refcount++；普通走位拷贝）
                     var instanceChunk = instanceArch.ChunkList[chunkIndex];
@@ -1434,6 +1895,7 @@ namespace EntJoy.ECS
                 var arch = GetOrCreateArchetype(signatures[archIdx]);
                 if (id >= entities.Length)
                     Array.Resize(ref entities, Math.Max(entities.Length * 2, id + 1));
+                    EnsureLocateCapacity(entities.Length);
                 if (id >= entityCount) entityCount = id + 1;
 
                 var entity = new Entity { Id = id, Version = version };
@@ -1462,7 +1924,7 @@ namespace EntJoy.ECS
                 allArchetypes[i] = null;
             }
             archetypeMap.Clear();
-            recycleEntities.Clear();
+            ClearRecycled();
             _relationIndex.Clear();
             _relationListStore.Clear();
             _managedLookup.Clear();
@@ -1470,6 +1932,10 @@ namespace EntJoy.ECS
             _managedSharedValueCount = 0;
             _lastChunkPerSharedValue.Clear();
             entities = new EntityIndexInWorld[Math.Max(256, entities.Length)];
+            // blittable 定位表随实体表一起重建（旧内容全部作废：Archetype 已全部清空）
+            NativeLocateStorage.Free(_locateB);
+            _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
+            _locateBCapacity = entities.Length;
             archetypeCount = 0;
             entityCount = 0;
             structuralVersion++;

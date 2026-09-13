@@ -109,7 +109,8 @@ namespace EntJoy.ECS.JobSystem
                 var typeIndices = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
                 int reqCount = requiredIds?.Length ?? 0;
                 void** reqArrays = reqCount > 0 ? (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*))) : null;
-                if (reqArrays != null) for (int r = 0; r < reqCount; r++) reqArrays[r] = null;
+                void** reqBitmaps = reqCount > 0 ? (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*))) : null;
+                if (reqArrays != null) for (int r = 0; r < reqCount; r++) { reqArrays[r] = null; reqBitmaps[r] = null; }
                 for (int c = 0; c < compCount; c++)
                 {
                     compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
@@ -123,7 +124,7 @@ namespace EntJoy.ECS.JobSystem
                     {
                         int reqId = requiredIds![r];
                         for (int c = 0; c < compCount; c++)
-                            if (typeIndices[c] == reqId) { reqArrays[r] = compPtrs[c]; break; }
+                            if (typeIndices[c] == reqId) { reqArrays[r] = compPtrs[c]; reqBitmaps[r] = bitmaps[c]; break; }
                     }
                 }
                 // SharedComponent blittable 值指针（per-chunk，非 per-entity）
@@ -153,6 +154,7 @@ namespace EntJoy.ECS.JobSystem
                     enableBitMaps = bitmaps, componentTypeIndices = typeIndices,
                     chunkHandle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero,
                     requiredComponentArrays = reqArrays, requiredComponentCount = reqCount,
+                    requiredEnableBitMaps = reqBitmaps,
                     sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
                     };
                 }
@@ -175,6 +177,7 @@ namespace EntJoy.ECS.JobSystem
                 if (tablePtr[i].enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].enableBitMaps);
                 if (tablePtr[i].componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentTypeIndices);
                 if (tablePtr[i].requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].requiredComponentArrays);
+                if (tablePtr[i].requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].requiredEnableBitMaps);
                 if (tablePtr[i].sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].sharedValuePtrs);
             }
             Marshal.FreeHGlobal((IntPtr)tablePtr);

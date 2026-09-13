@@ -838,10 +838,14 @@ namespace NativeTranspiler.Analyzer
                         parameters.Add($"{csElementType}* {field.Name}_ptr, int {field.Name}_length");
                     }
                 }
-                else if (field.Type is IPointerTypeSymbol)
+                else if (field.Type is IPointerTypeSymbol pointerField)
                 {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);  // 杩斿洖 "int*"
-                    parameters.Add($"{cppType} {field.Name}_ptr");
+                    // P0-5c：此处生成的是**托管 trampoline 的 C# 方法签名**，不能用 C++ 类型名 ——
+                    // `MapCSharpTypeToCpp` 对用户结构体会给出 `EntJoy::ECS::X*`，C# 侧解析为"别名"⇒ CS0432
+                    //（基元指针 `int*`/`void*` 两语言同名，所以此前没有暴露）。
+                    // 正确做法：取**被指类型的 C# 限定名**再加 `*`。
+                    var csPointeeType = pointerField.PointedAtType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                    parameters.Add($"{csPointeeType}* {field.Name}_ptr");
                 }
                 else
                 {

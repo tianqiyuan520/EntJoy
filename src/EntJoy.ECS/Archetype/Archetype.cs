@@ -9,7 +9,7 @@ using System.Threading;
 namespace EntJoy.ECS
 {
     // Archetype 主要
-    public sealed partial class Archetype
+    public unsafe sealed partial class Archetype
     {
         private ComponentType[] types;
         public ReadOnlySpan<ComponentType> Types => types;
@@ -42,6 +42,7 @@ namespace EntJoy.ECS
                 ? Math.Max(64, ChunkCapacityOverride)   // 64 = 缓存行，位图/遍历以 64 为自然边界
                 : CalculateOptimalChunkCapacity(types);
             _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types);
+            _chunkOffsetsNative = NativeLocateStorage.AllocateOffsets(_sharedMetadata.ComponentOffsets);
         }
 
         /// <summary>
@@ -104,7 +105,7 @@ namespace EntJoy.ECS
     }
 
     // 组件类型判定
-    public sealed partial class Archetype
+    public unsafe sealed partial class Archetype
     {
         public bool HasAllOf(Span<ComponentType> spanTypes)
         {
@@ -151,11 +152,25 @@ namespace EntJoy.ECS
     }
 
     // Archetype Chunk 管理
-    public sealed partial class Archetype : IDisposable
+    public unsafe sealed partial class Archetype : IDisposable
     {
         private readonly List<Chunk> _chunkList = new();
         private readonly int _chunkCapacity;
         private readonly ChunkMetadata _sharedMetadata;
+
+        /// <summary>本 Archetype 在 EntityManager 中的稳定编号（由 EntityManager 分配；blittable 定位表/原生内核用）。</summary>
+        public int ArchetypeId;
+
+        /// <summary>
+        /// 组件列字节偏移的**非托管镜像**（长度 = ComponentCount，按 componentIndex 索引）。
+        /// 作用：让 job / NativeTranspile 原生内核在拿到 <see cref="EntityLocateB.ChunkMemory"/> 后
+        /// 直接算出某组件列的基址，无需经托管 <see cref="ChunkMetadata.ComponentOffsets"/>（int[]）。
+        /// 生命周期 = Archetype，构造时分配、Dispose 时释放，内容不可变。
+        /// </summary>
+        private int* _chunkOffsetsNative;
+
+        /// <summary>非托管列偏移表首址（只读；与 <see cref="ChunkMetadata.ComponentOffsets"/> 逐项一致）。</summary>
+        public int* GetChunkOffsetsNative() => _chunkOffsetsNative;
         private const int _chunkHeaderSize = 64;
 
         // Contiguous memory slab: 64 KB per slab. Multiple chunks are carved
@@ -636,6 +651,36 @@ namespace EntJoy.ECS
             }
         }
 
+        /// <summary>
+        /// **清空本 Archetype 的全部实体与 Chunk**（P0-4b，配合 <c>EntityManager.DestroyAllInArchetype</c>）。
+        ///
+        /// 与逐个 <c>DestroyEntity</c> 的区别：这里**不做逐实体移除**（不会触发 swap-pop 与空 chunk 压缩），
+        /// 直接析构组件值（IDisposable 组件持有原生内存，必须逐个析构）后整批释放 slab ⇒ 代价 O(Chunk 数) 而非 O(实体数)。
+        /// ⚠ 调用方负责：先把实体的托管/定位表项清空、把 Id 压回回收池；
+        ///   含关系列的 Archetype **不能**用本方法（关系反向索引需要逐实体清理）。
+        /// </summary>
+        public void ClearAllEntities()
+        {
+            if (_chunkList.Count == 0)
+            {
+                EntityCount = 0;
+                return;
+            }
+            // 组件析构钩子：必须在释放 slab 之前（析构里会读 chunk 内存）
+            DestroyAllEntityComponents(null);
+            foreach (var slab in _slabs)
+            {
+                try { ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes); }
+                catch { /* ClearAll 语义下不因单个 slab 释放失败中断 */ }
+            }
+            _slabs.Clear();
+            _freeChunks.Clear();
+            _chunkList.Clear();
+            _currentSlab = null;
+            _currentSlabOffset = 0;
+            EntityCount = 0;
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
@@ -650,6 +695,11 @@ namespace EntJoy.ECS
             _slabs.Clear();
             _freeChunks.Clear();
             _chunkList.Clear();
+            if (_chunkOffsetsNative != null)
+            {
+                NativeLocateStorage.Free(_chunkOffsetsNative);
+                _chunkOffsetsNative = null;
+            }
             GC.SuppressFinalize(this);
             if (errors.Count > 0) throw new AggregateException("Archetype disposal failed.", errors);
         }
@@ -681,7 +731,7 @@ namespace EntJoy.ECS
     }
 
     // debug 部分
-    public partial class Archetype
+    public unsafe partial class Archetype
     {
         private IntPtr _cachedAddress;
 

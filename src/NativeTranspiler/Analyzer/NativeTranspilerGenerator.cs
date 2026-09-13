@@ -52,6 +52,13 @@ namespace NativeTranspiler.Analyzer
 
             context.RegisterSourceOutput(combined, (spc, ctx) =>
             {
+                // 生成器自身异常的诊断出口（P0-5b）：
+                // 没有这层保护时，任何 NRE 只会变成 Roslyn 的
+                //   `CS8785: 生成器"NativeTranspilerGenerator"未能生成源 … NullReferenceException`
+                // —— 只有异常类型名、**没有行号**，定位只能靠二分（实测代价：一整轮）。
+                // 这里捕获后上报 NT026（含异常消息 + 调用栈），并落盘一份完整 ToString()。
+                try
+                {
                 // =====================================================================
                 // CodeGenPipeline（阶段化编排；历史遗留内联于 RegisterSourceOutput）
                 //   0) 空集短路
@@ -581,7 +588,40 @@ namespace NativeTranspiler.Analyzer
 
                 spc.AddSource("NativeTranspiler_GeneratedMarker.g.cs",
                     $"// Generated at {DateTime.UtcNow}\n// {validMarkedMethods.Count()} methods, {methodsToGenerate.Count - validMarkedMethods.Count()} deps, {validJobs.Count()} jobs transpiled.");
+                }
+                catch (Exception ex)
+                {
+                    ReportGeneratorCrash(spc, ex);
+                }
             });
+        }
+
+        /// <summary>
+        /// 生成器崩溃诊断（NT026）：上报异常消息 + 调用栈，并把完整 <c>ToString()</c> 落盘到
+        /// <c>%TEMP%/entjoy-native-transpiler-crash.txt</c>（消息受 MSBuild 输出长度限制，
+        /// 栈可能被截断 —— 文件是完整版）。
+        /// </summary>
+        private static void ReportGeneratorCrash(SourceProductionContext spc, Exception ex)
+        {
+            var detail = ex.ToString();
+            try
+            {
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "entjoy-native-transpiler-crash.txt"), detail);
+            }
+            catch
+            {
+                // 落盘失败不影响诊断上报
+            }
+            var firstFrames = string.Join(" <- ", detail.Split('\n')
+                .Where(l => l.TrimStart().StartsWith("at ", StringComparison.Ordinal))
+                .Take(6)
+                .Select(l => l.Trim()));
+            spc.ReportDiagnostic(Diagnostic.Create(
+                NativeTranspileValidator.GeneratorCrashError,
+                Location.None,
+                ex.GetType().Name,
+                ex.Message,
+                firstFrames));
         }
 
         // ----- 辅助方法（委托到 AttributeHelper） -----

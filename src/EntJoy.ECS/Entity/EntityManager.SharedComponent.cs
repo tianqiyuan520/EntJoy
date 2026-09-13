@@ -453,11 +453,11 @@ namespace EntJoy.ECS
             return chunk.HasAnyEntityChanged();
         }
 
-        /// <summary>分配实体 id（复用回收队列或递增）。</summary>
+        /// <summary>分配实体 id（复用回收栈或递增）。</summary>
         private Entity AllocateEntityId()
         {
             var newEntity = new Entity();
-            if (recycleEntities.TryDequeue(out var recycledEnt))
+            if (TryPopRecycled(out var recycledEnt))
             {
                 newEntity.Id = recycledEnt.Id;
                 newEntity.Version = recycledEnt.Version + 1;
@@ -466,7 +466,7 @@ namespace EntJoy.ECS
             {
                 newEntity.Id = entityCount++;
                 if (newEntity.Id >= entities.Length)
-                    Array.Resize(ref entities, entities.Length * 2);
+                    ResizeEntityTable(entities.Length * 2);
             }
             return newEntity;
         }

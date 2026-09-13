@@ -14,6 +14,10 @@ namespace EntJoy.ECS
         // relTypeId → sourceId → targets（追加式 List，保持插入顺序）
         private readonly Dictionary<int, Dictionary<int, List<RelationSlot>>> _forward = new();
 
+        /// <summary>ClearAllForSource 的复用缓冲（P0-4c）：原先每次调用 <c>new List&lt;int&gt;()</c>
+        /// ⇒ **每次销毁实体 32B 分配**（实测 100k 批量销毁 3.2MB），即使该实体没有任何多值关系。</summary>
+        private readonly List<int> _emptyKeysBuffer = new();
+
         /// <summary>追加关系（幂等：同 target 不重复）。调用方保证 ExclusiveTarget 解绑已处理。</summary>
         public void Add(int relTypeId, Entity source, RelationSlot target)
         {
@@ -99,8 +103,11 @@ namespace EntJoy.ECS
         public void ClearAllForSource(Entity source, List<(int relTypeId, RelationSlot slot)> removed)
         {
             removed.Clear();
+            // 无多值关系数据时直接返回（绝大多数销毁走这里）⇒ 零遍历、零分配
+            if (_forward.Count == 0) return;
             // 先收集需删除的 relTypeId（遍历时不得修改 _forward）
-            var emptyKeys = new List<int>();
+            var emptyKeys = _emptyKeysBuffer;
+            emptyKeys.Clear();
             foreach (var kv in _forward)
             {
                 int relTypeId = kv.Key;

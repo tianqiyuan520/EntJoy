@@ -138,11 +138,31 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        /// <summary>
+        /// 解析局部声明的 C# 类型（P0-5b 修复）：优先类型语法节点的语义类型，**为 null 时回退到声明符号的类型**。
+        /// `ref T x = ref expr;` 在 `Nullable=enable` 的工程里 `GetTypeInfo(Type).Type` 会返回 null ——
+        /// 此前直接把 null 传进 <c>MapCSharpTypeToCpp</c> ⇒ `type.IsReferenceType` 抛 NRE ⇒ 整个生成器崩（CS8785）。
+        /// </summary>
+        private ITypeSymbol? ResolveLocalType(TypeSyntax typeSyntax, SeparatedSyntaxList<VariableDeclaratorSyntax> variables)
+        {
+            var t = _semanticModel.GetTypeInfo(typeSyntax).Type;
+            if (t != null) return t;
+            foreach (var v in variables)
+                if (_semanticModel.GetDeclaredSymbol(v) is ILocalSymbol ls && ls.Type != null) return ls.Type;
+            return null;
+        }
+
         protected virtual void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
         {
             AppendIndent();
-            var type = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-            var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
+            var type = ResolveLocalType(localDecl.Declaration.Type, localDecl.Declaration.Variables);
+            if (type == null)
+                throw new InvalidOperationException(
+                    $"无法解析局部声明的类型：{localDecl.Declaration.Type}（P0-5b）。"
+                    + "请显式写出类型并避免 `ref` 局部（改用指针局部 T* p = &arr[i]）。");
+            var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
+            // `ref T x = ref expr;` → C++ `T& x = expr;`（P0-5b 通解：引用即引用，无需写回）
+            bool byRef = localDecl.Declaration.Type is RefTypeSyntax;
             for (int i = 0; i < localDecl.Declaration.Variables.Count; i++)
             {
                 var variable = localDecl.Declaration.Variables[i];
@@ -150,13 +170,17 @@ namespace NativeTranspiler.Analyzer
                 if (i == 0)
                 {
                     _builder.Append(cppType);
+                    if (byRef) _builder.Append('&');
                     _builder.Append(' ');
                 }
                 _builder.Append(variable.Identifier.Text);
-                if (variable.Initializer != null)
+                var initializer = variable.Initializer?.Value is RefExpressionSyntax refExpr
+                    ? refExpr.Expression
+                    : variable.Initializer?.Value;
+                if (initializer != null)
                 {
                     _builder.Append(" = ");
-                    if (variable.Initializer.Value is ObjectCreationExpressionSyntax objectCreation)
+                    if (initializer is ObjectCreationExpressionSyntax objectCreation)
                     {
                         _builder.Append(cppType).Append('(');
                         var args = objectCreation.ArgumentList?.Arguments ?? new SeparatedSyntaxList<ArgumentSyntax>();
@@ -169,7 +193,7 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        TranslateExpression(variable.Initializer.Value);
+                        TranslateExpression(initializer);
                     }
                 }
             }
@@ -185,8 +209,10 @@ namespace NativeTranspiler.Analyzer
             _builder.Append("for (");
             if (forStmt.Declaration != null)
             {
-                var type = _semanticModel.GetTypeInfo(forStmt.Declaration.Type).Type;
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
+                var type = ResolveLocalType(forStmt.Declaration.Type, forStmt.Declaration.Variables);
+                if (type == null)
+                    throw new InvalidOperationException($"无法解析 for 声明中的类型：{forStmt.Declaration.Type}（P0-5b）。");
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
                 for (int i = 0; i < forStmt.Declaration.Variables.Count; i++)
                 {
                     var v = forStmt.Declaration.Variables[i];
@@ -416,6 +442,12 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        /// <summary>
+        /// 整数字面量后缀的后端规范化钩子（默认恒等）。C++ 后端必须覆写：C# 的 <c>long</c>/<c>ulong</c> 是 64 位，
+        /// 而 C++（Windows/LLP64）的 <c>long</c>/<c>unsigned long</c> 是 32 位 ⇒ 原样输出会把 64 位字面量截成 32 位。
+        /// </summary>
+        protected virtual string NormalizeNumericLiteral(string text) => text;
+
         protected virtual void TranslateExpression(ExpressionSyntax expr)
         {
             switch (expr)
@@ -442,7 +474,7 @@ namespace NativeTranspiler.Analyzer
                         if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
                             text.StartsWith("0X", StringComparison.OrdinalIgnoreCase))
                         {
-                            _builder.Append(text);
+                            _builder.Append(NormalizeNumericLiteral(text));
                         }
                         else if (text.EndsWith("f", StringComparison.OrdinalIgnoreCase))
                         {
@@ -458,12 +490,15 @@ namespace NativeTranspiler.Analyzer
                         }
                         else
                         {
-                            _builder.Append(text);
+                            _builder.Append(NormalizeNumericLiteral(text));
                         }
                     }
                     else
                     {
-                        _builder.Append(token.Text);
+                        // P0-5e：`null` 字面量必须译成 C++ 的 `nullptr`。
+                        // 原实现原样输出 "null"，C++ 里 `null` 未声明 ⇒ use of undeclared identifier 'null'。
+                        if (token.IsKind(SyntaxKind.NullKeyword)) _builder.Append("nullptr");
+                        else _builder.Append(token.Text);
                     }
                     break;
 
@@ -613,7 +648,11 @@ namespace NativeTranspiler.Analyzer
             }
 
             TranslateExpression(memberAccess.Expression);
-            _builder.Append('.').Append(memberName);
+            // P0-5d：C# 的**指针成员访问** `p->Field` 也用 MemberAccessExpressionSyntax 表示
+            // （OperatorToken = `->`）。原实现一律输出 `.` ⇒ C++ 报
+            // "member reference type 'X*' is a pointer; did you mean to use '->'?"。
+            _builder.Append(memberAccess.OperatorToken.IsKind(SyntaxKind.MinusGreaterThanToken) ? "->" : ".")
+                .Append(memberName);
         }
 
         protected virtual void TranslateInvocation(InvocationExpressionSyntax invocation)

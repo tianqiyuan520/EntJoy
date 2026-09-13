@@ -75,6 +75,13 @@ namespace NativeTranspiler.Analyzer
 
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
         {
+            // P0-5b：历史上调用方用 `type!` 压住编译告警后把 null 传进来 ⇒ 下一行 `type.IsReferenceType`
+            // 抛 NullReferenceException，生成器整体崩（只留 CS8785，无行号）。这里显式守卫，
+            // 让错误可被 NT026 连栈上报。
+            if (type == null)
+                throw new ArgumentNullException(nameof(type),
+                    "MapCSharpTypeToCpp 收到 null 类型（见 NT027：`ref` 局部不受支持，改用指针局部）。");
+
             if (type is IPointerTypeSymbol pointerType)
                 return MapCSharpTypeToCpp(pointerType.PointedAtType) + "*";
 
