@@ -45,8 +45,8 @@ namespace SafetyInterceptProbe
             Console.WriteLine("    说明：读写持有追踪在 Debug(ENTJOY_SAFETY) 与 Release(ENTJOY_SAFETY_BOUNDS) 下是**同一段代码**，");
             Console.WriteLine("          两种配置都验拦截；两轮都跑是为了覆盖 **ctx 被复用**（连续两个 job 拿到同一执行上下文）时");
             Console.WriteLine("          快路径不得误判「已登记」而漏计数。\n");
-            // 用**默认（Native）调度器**：本框架推荐路径，且其完成协议正确（release 在 job 的 finally 内、
-            // 先于句柄完成）。Managed 回退后端的完成协议缺陷见 EntJoy docs/public/Runtime-Contracts-and-Known-Limitations.md。
+            // 用入口 API（默认 Native；缺 NativeDll 时自动回退 Managed）。两条后端的完成协议都已校验：
+            // Managed 侧 2026-09-16 修完（声明释放在完成发布之前 + 每次调度唯一 ctx），本探针在两后端下均全绿。
             JobScheduler.Initialize();
 
             var data = new NativeArray<int>(N, Allocator.Persistent);
@@ -105,9 +105,8 @@ namespace SafetyInterceptProbe
             Volatile.Write(ref ReadWhileSpinJob.Gate, 1);
             handle.Complete();
 
-            // 完成后主线程必须可访问（正控）。在 **Native 默认后端**上 release 发生在 job 的 finally 内、
-            // 先于句柄完成 ⇒ 这里应当 0 次重试；保留极短重试只是为了在 Managed 回退后端下也能如实报数
-            // （该后端"完成计数先归零、读声明后释放"，见 docs/public/Runtime-Contracts-and-Known-Limitations.md）。
+            // 完成后主线程必须可访问（正控）。两条后端的声明释放都发生在句柄完成之前（Managed 侧由
+            // ManagedCompletion._declReleased 门保证）⇒ 这里应当 0 次重试；保留极短重试只为如实报数。
             int retries = 0;
             while (true)
             {

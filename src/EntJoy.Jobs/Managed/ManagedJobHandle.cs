@@ -24,8 +24,8 @@ namespace EntJoy.JobSystem.Managed
             Epoch = ManagedJobScheduler.Epoch;
         }
 
-        /// <summary>是否已完成（Remaining == 0；若槽位已被复用，本 handle 视为已完成/过期）。</summary>
-        public bool IsCompleted => IsExpired || Volatile.Read(ref Completion.Remaining) == 0;
+        /// <summary>是否已完成（Remaining 归零且读声明已释放；若槽位已被复用，本 handle 视为已完成/过期）。</summary>
+        public bool IsCompleted => IsExpired || Completion.IsCompleted;
 
         /// <summary>阻塞等待完成。等待后尝试回池复用（若由托管调度器分配）。</summary>
         public void Complete()
@@ -85,7 +85,8 @@ namespace EntJoy.JobSystem.Managed
         internal int _returned;        // 1=已归还/自动归还（幂等防 double-return）。归还后保持 1，Rent 新 job 时清 0。
         internal int _autoReturn;      // 1=此 job 完成后由调度器自动归还（依赖链中间 handle，防泄漏）；一律经 Volatile.Read/Write 访问
         internal Exception _exception; // 首个 job 异常（first-wins），供异常传播；Reset 时清空
-        internal nint HostCtx;         // 此 job 的并行冲突检测执行上下文（托管 job 用 box 哈希；0=未设置）。Signal 归零时释放其读声明。
+        internal nint HostCtx;         // 此 job 的并行冲突检测执行上下文（Managed 侧由 ManagedJobScheduler.NextCtx 每次调度分配，0=未设置）。Signal 归零时释放其写/读声明。
+        internal int _declReleased;    // 1=读声明已释放。Remaining 归零发生在释放**之前**，故"已完成"必须等它置位：否则主线程 Complete() 立即返回、紧接着访问容器会被读者护栏误拦。
 
         internal ManagedCompletion()
         {
@@ -115,6 +116,8 @@ namespace EntJoy.JobSystem.Managed
         internal void Reset()
         {
             Remaining = 1;
+            Volatile.Write(ref _declReleased, 0);
+            HostCtx = 0;   // 槽位复用时不继承上一个 job 的 ctx（新 job 由调度器重新分配）
             _onComplete = null;
             _exception = null;
             _done.Reset();
@@ -162,7 +165,13 @@ namespace EntJoy.JobSystem.Managed
             {
                 int completedGeneration = Volatile.Read(ref Generation);
                 if (HostCtx != 0)
-                    SafetyHandleManager.ReleaseReadsForContext(HostCtx);   // job 完整结束：释放其读声明
+                {
+                    // job 完整结束（所有 tile 之后）：先释放写声明、再释放读声明，最后才发布"已完成"。
+                    // 三者顺序都是正确性前提：声明若晚于发布点，Complete() 后的主线程访问会被误拦。
+                    SafetyHandleManager.ReleaseWritesForContext(HostCtx);
+                    SafetyHandleManager.ReleaseReadsForContext(HostCtx);
+                }
+                Volatile.Write(ref _declReleased, 1);                      // 释放之后才发布"已完成"
                 _done.Set();
                 DispatchComplete();
                 // 依赖链中间 handle：完成后由完成线程自动归还，避免只等末端 handle 导致的连中部 completion 泄漏。
@@ -172,7 +181,7 @@ namespace EntJoy.JobSystem.Managed
         }
 
         /// <summary>当前是否已完成</summary>
-        internal bool IsCompleted => Volatile.Read(ref Remaining) == 0;
+        internal bool IsCompleted => Volatile.Read(ref Remaining) == 0 && Volatile.Read(ref _declReleased) == 1;
 
         /// <summary>阻塞等待完成。使用 ManualResetEventSlim，零 CPU 自旋。</summary>
         internal void Wait()

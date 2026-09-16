@@ -78,19 +78,49 @@
 - `IJobEntity` 生成的代码本身就用 `GetComponentDataSpan`（零 per-access 检查）；`ArchetypeChunk.GetComponentDataNativeArray` 走共享豁免句柄，检查开销约 1.35 ns/访问。
 - 注意 `NativeArray` 的 `implicit operator ReadOnlySpan<T>` **不做任何检查**（不登记读者），需要安全检查时请用 `AsSpan()` 而不是该隐式转换；测试 `MainThreadAccess_WhileSpanJobReads_Throws` 专门守护这一点。
 
-## 七、未修复项：Managed 回退后端
+## 七、Managed 回退后端：通解已落地（2026-09-16）
 
-同一根因族在 Managed 回退后端（`JobScheduler` 在 NativeDll 加载失败时的 fallback）仍然存在，且**未修复**：
+Managed 回退后端（`JobScheduler` 在 NativeDll 加载失败时的 fallback）与 §§三、四 属同一根因族。2026-09-16 按
+「完成发布顺序 + 声明释放点 + ctx 唯一性」三条一次修完，此前记录的「复现器挂死在 `Complete()`」与
+「xUnit 全量在 Managed 下不稳定」两个现象都不再复现。
 
-- **可复现的硬证据（提交态代码即如此）**：隐藏 `bin/NativeDll.dll` 后运行复现器
-  `dotnet run -c Debug --project tools/SafetyLockOverheadBench/repro/repro.csproj -- 3 262144 16384`
-  （3 次尝试 × 各 20 次 job）会**卡死在 `Complete()`**，稳定停在同一位置（约第 130 次调度附近），`Remaining` 停留在正值。该行为与本节所有改动无关：把 `src/EntJoy.Jobs/Managed/*` 还原为提交态后同样复现。
-- xUnit 全量在 Managed 下的结果**不稳定**：单独运行连续 4 次均为 191/191，但紧跟 Native 全量跑之后（机器仍被 15 个 worker 占用）出现过 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 2 红。归因未定，故不据此下结论。
-- 已定位的两个成因：
-  1. `ManagedJobHandle.IsCompleted` 直接等于 `ManagedCompletion.Remaining == 0`，而释放读/写声明发生在计数归零之后 → 主线程可能在释放前观察到「已完成」；
-  2. 托管路径 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，box 由 `ParallelCache<T>` 池化复用 → 相邻两次 Job 可能拿到同一 ctx，前一次 Job 的按-ctx 释放会清掉后一次 Job 的登记。
-- 尝试过的组合（均未收口，已全部回退，未提交）：只调释放顺序、只加「每次调用唯一 ctx」、两者都加、以及「完成阶段状态机（Pending/Finalizing/Done）+ 唯一 ctx」。最后一种在受限测试上 14/14 通过，但没能消除上述复现器的挂起。
-- 若要彻底修复，应按「完成阶段状态机 + 每次调用唯一 ctx」**同批实施**，并以复现器不挂起 + Managed 下全量稳定全绿两者共同作为验收。
+### 三处改动（`src/EntJoy.Jobs/Managed/`）
+
+1. **完成发布晚于声明释放**（原成因 1）。`ManagedJobHandle.Signal` 里 `Remaining` 归零发生在释放**之前**，而
+   `IsCompleted`/`Wait()` 只认 `Remaining == 0` ⇒ 主线程在「计数已归零、声明未释放」的窗口内 `Complete()` 立即返回，
+   紧接着访问容器被误拦。修法：`ManagedCompletion` 增加 `_declReleased` 门；`Signal` 中**先释放写/读声明、再置位、
+   最后 `_done.Set()`**；`ManagedCompletion.IsCompleted` 与 `ManagedJobHandle.IsCompleted` 都要求
+   `Remaining == 0 && _declReleased == 1`；`Reset()` 清零。等待、依赖判定、`Complete()` 共用这一处定义。
+2. **写声明在完成点释放，不再按 tile 释放**。Native 侧按 §三 早已如此，Managed 侧却仍在 `ExecuteTileTask` 的 finally 里
+   逐 tile 释放 ⇒ 与仍在运行的同 ctx tile 竞争：登记可能落进一份已被 `TryRemove` 的 list，从此无人清理 ⇒
+   `_writerCtx[index]` 残留 ⇒ `Complete()` 后主线程被误拦。该条是修完第 1 条后才暴露的（失败变体由全部
+   `being read` 转为全部 `being written`）。修法：Managed 侧写释放移到 `ManagedJobHandle.Signal` 的完成点
+   （与读释放、发布点同处），删除 tile 级调用。
+3. **每次调度唯一 ctx**（原成因 2）。托管 ctx 原为 `RuntimeHelpers.GetHashCode(box)`，而 box 由
+   `SingleCache<T>`/`ParallelCache<T>` 池化复用 ⇒ 相邻两次 Job 可能拿到同一 ctx，幂等写登记与 `_readMark` 快路径跨 job 串味。
+   修法：新增 `ManagedJobScheduler.NextCtx()`（`2^40 + 递增计数`；基准取 2^40 以避开 32 位 ctx 值域，且低 32 位在
+   `_readMark` 打包下仍唯一）；tile 侧改为从 `task.Completion.HostCtx` 取 ctx（同一 Job 的所有 tile 天然共享）；
+   `ManagedCompletion.Reset()` 同时清 `HostCtx`，槽位复用不继承上一个 Job 的 ctx。
+
+### 验收（本机 16 核；Managed = 临时改名 `bin/NativeDll.dll`，且必须在 `EntJoy` 目录下运行）
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| `ParallelReadWriteContainmentTests`（Managed） | 4/4 红（全 `being read`） | **6/6 绿** |
+| xUnit 全量 191 条（Managed，连跑 5 遍，对齐 CI 的 5 遍循环） | 首遍即红（CI 现场 attempt 73/job 3） | **5/5 绿** |
+| xUnit 全量 + containment 类（Native） | 绿 | **绿（2/2 + 1/1，零影响）** |
+| `tools/SafetyInterceptProbe`（Managed，两轮 ctx 复用） | §九 记录的第 2 轮不再拦截 | **两轮均拦截；`Complete()` 后首个访问即可读（重试=0）** |
+| `repro`（Managed，默认 `40 262144 16384`） | 曾**卡死在 `Complete()`** | **6 s 跑完；`触发=0 _ctxWrites max=0 _ctxReads max=0`** |
+
+CI 现场对应关系：`framework-test` 用 `-p:EnableNativeCompile=false` 构建、且该 job 没有 NativeDll ⇒ 那 191 条测试
+**必然**跑在 Managed 上；2026-09-16 的 run 第 1 遍死在 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`，正是成因 1。
+
+> 测量陷阱（踩过）：这些工具按 CWD 搜索 NativeDll。若在**游戏仓目录**下运行 EntJoy 的工具，会静默加载
+> `ComputeShaderBattleSimulation/.godot/mono/temp/bin/Debug/NativeDll.dll`（游戏侧的另一份构建），于是「Managed 验收」
+> 实际跑成了 Native。上表数据全部在 `EntJoy` 目录下取得，并以日志中的 `falling back` / `Loaded NativeDll` 行确认后端。
+
+> 历史：此前尝试过「只调释放顺序」「只加每次调用唯一 ctx」「两者都加」「完成阶段状态机（Pending/Finalizing/Done）+ 唯一 ctx」
+> 四种组合，均因未同时满足「复现器不挂起 + Managed 下全量稳定全绿」而全部回退（未提交）。本次三条同批落地，两个验收项均通过。
 
 **影响面**：`JobScheduler` 默认走 Native，本仓库测试集与 Godot 示例均运行在 Native 上，因此该缺陷不影响当前主路径；仅在 NativeDll 加载失败的回退场景下才会暴露。
 
@@ -131,3 +161,8 @@ dotnet run --project tools/SafetyInterceptProbe/SafetyInterceptProbe.csproj -c D
 这正是 §七 里已登记的两个成因（完成计数先归零、读声明后释放 + box 池化导致 ctx 复用）的叠加效果，
 **与本轮快路径改动无关**（旧的 `_ctxReads[ctx]` 幂等集合在同样的组合下同样会跳过 `+1`）。
 结论不变：`JobScheduler` 默认走 Native，主路径不受影响；探针固定用 Native 后端，故两种配置下均稳定全绿。
+
+> 2026-09-16 更新：§七 的三处改动落地后，把 DLL 隐藏让 `JobScheduler.Initialize()` 自然落到 Managed 重跑本探针：
+> 1/2 两轮均拦截、两轮 `Complete()` 后首个访问即可读（重试次数=0），上面那条"第 2 轮不再被拦截"的确定现象已消失。
+> Managed 下两轮体内 ctx 实测为 `2^40+1` / `2^40+2`（每次调度唯一），Native 下两轮仍为同一 ctx，两条后端都通过。
+> 注意复测时必须在 `EntJoy` 目录下运行：按 CWD 搜索会捡到游戏仓 `.godot/mono/temp/bin/...` 里的另一份 NativeDll。
