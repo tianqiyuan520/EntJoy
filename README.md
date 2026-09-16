@@ -100,10 +100,10 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 
 ### 3. 克隆仓库
 
-仓库无子模块依赖，普通克隆即可：
+仓库有 1 个子模块（`src/NativeDll/thirdParty/imgui`，Dear ImGui 调试面板），必须带子模块克隆：
 
 ```powershell
-git clone https://github.com/tianqiyuan520/EntJoy.git
+git clone --recurse-submodules https://github.com/tianqiyuan520/EntJoy.git
 cd EntJoy
 ```
 
@@ -564,7 +564,7 @@ ispc --version
 
 ### 子模块缺失
 
-仓库已无子模块依赖；若检出旧提交（仍引用 `sleef` 子模块），执行：
+克隆时若漏带子模块（`src/NativeDll/thirdParty/imgui` 为空，CMake 报 `Cannot find source file: .../thirdParty/imgui/imgui.cpp`），执行：
 
 ```powershell
 git submodule update --init --recursive
@@ -700,10 +700,10 @@ The currently recommended environment is:
 
 ### 3. Clone
 
-The repository has no Git submodule dependencies; clone normally:
+The repository has one submodule (`src/NativeDll/thirdParty/imgui`, the Dear ImGui debug panel); clone with submodules:
 
 ```powershell
-git clone https://github.com/tianqiyuan520/EntJoy.git
+git clone --recurse-submodules https://github.com/tianqiyuan520/EntJoy.git
 cd EntJoy
 ```
 
@@ -1134,7 +1134,7 @@ Install Desktop development with C++, MSVC v143, and a Windows SDK through Visua
 
 ### Submodules are missing
 
-The repository no longer has submodules. If an old commit (still referencing the `sleef` submodule) is checked out, initialize it:
+If the checkout is missing the `src/NativeDll/thirdParty/imgui` submodule (CMake fails with `Cannot find source file: .../thirdParty/imgui/imgui.cpp`), initialize it:
 
 ```powershell
 git submodule update --init --recursive
