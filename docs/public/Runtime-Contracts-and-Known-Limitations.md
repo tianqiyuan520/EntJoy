@@ -85,6 +85,34 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 
 另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）。
 
+### ⚠ 跨 Job 共享的容器必须用 `GetUnsafePtr()` 访问（**不能用索引器**）
+
+**契约**：当**多个并列的 Job** 需要访问同一个容器（哪怕各自处理的索引区间互不相交、逻辑上完全无冲突），job 体内必须
+通过 **`GetUnsafePtr()` 裸指针**读写；用 `NativeArray` 索引器（`arr[i]`）会被写跟踪当成"另一个 Job 正在写该容器"而抛错：
+
+```
+System.AggregateException: One or more scheduled C# jobs failed.
+  ---> System.InvalidOperationException: NativeContainer already being written by another parallel job
+       (ctx=… vs …); schedule it after that job with a dependency, or use separate containers.
+```
+
+为什么：写跟踪的粒度是**容器**而不是索引区间，且以"Job 执行上下文（ctx）"为持有者标识 —— 并列的两个 Job ctx 不同，
+第二个 Job 写同一容器即判定冲突（见上文「Job 间冲突（写-写）」）。这是**设计使然**（框架无法证明两段区间不相交），
+不是 bug；`CreateView` 出来的共享视图句柄（`ExemptWriteTracking`）不受此限，但那是给"外部内存视图"用的。
+
+**实测症状（CPU 百万同屏工程，2026-09-13）**：把 `YSort` 的直方图阶段新增的 `Keys[i] = key`（索引器）从
+`histPtr[key]++`（裸指针）风格改写成索引器后，47 个直方图 Job 并列写同一 `Keys` 数组
+⇒ 上述异常直接冒泡到主线程 ⇒ **仿真中止**（外部可见现象是"单位不再生成/存活数恒 0、统计窗口稀疏"），
+而同一段代码用 `keysPtr[i] = key`（裸指针）则完全正常。该工程的原实现一直用裸指针，所以此前从未暴露。
+
+**并列 Job 共享容器的三种正确写法**：
+1. `var p = (int*)arr.GetUnsafePtr();` ⇒ `p[i] = …`（最常用；ECS chunk 组件列也是这么用的）；
+2. 让容器走 `NativeArray<T>.CreateView(...)` 的共享句柄（仅适用于外部内存视图）；
+3. 拆成"每个 Job 独占一个容器"（各自一份私有 scratch），事后由主线程归约。
+
+**排查建议**：看到 `AggregateException … already being written by another parallel job` 时，先找"哪个容器被两个并列 Job 同时写"，
+而不是先怀疑依赖缺失 —— 索引区间不相交也会触发，这是最常见的成因。
+
 ## ECS 原生内核（`NativeTranspile`）访问契约
 
 ### 逐组件 enable 位图（P1-6 / P1-7）
@@ -119,6 +147,20 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
   （无反射、无装箱、无 `Type` 解析）。字节数必须与组件实际大小一致（记录侧取 `Unsafe.SizeOf<T>()`），
   否则会按错误的 stride 写列。
 - 未知 `typeId` 会在 `ComponentTypeManager.GetTypeByComponentType` 处抛 `KeyNotFoundException`（响亮失败）。
+
+### `Interlocked.CompareExchange` 的参数序（2026-09-13 修）
+
+- **契约**：C++ 后端生成的 `Interlocked.CompareExchange(ref loc, value, comparand)` 与 C# 语义一致
+  （命中 `comparand` 时写入 `value`，返回旧值）。宏形参名是 `(ptr, oldVal, newVal)`
+  ⇒ 生成器必须**先 comparand（期望旧值）再 value（新值）**。
+- **曾经的 bug**：`Ast/StatementTranslator.cs` 按 C# 参数顺序直传，等价于写出
+  `_InterlockedCompareExchange(ptr, comparand, value)` —— 命中时**写入 comparand**、把期望值当新值，
+  语义完全相反。ISPC 后端一直是正确次序（`IspcStatementTranslator` 有显式换序与注释），只有 C++ 后端错。
+- **症状**：转译内核里用 CAS 做「比较并更新」的代码静默失效。实测症状是
+  `while (cur > mx) { var seen = Interlocked.CompareExchange(ref mx, cur, mx); ... }` 的自旋最大值计数器恒为 0
+  （值写不进去，且返回值恰好等于比较值 ⇒ 循环立刻 break，不报错、不崩溃）。
+- **修复判据**：生成产物里应为 `INTERLOCKED_COMPARE_EXCHANGE32(&x, <comparand>, <value>)`；
+  运行期用「CAS 自旋最大值」这类探针应能看到非零结果（修复前恒 0）。
 
 ## SharedBlob 和调试 pin
 

@@ -56,6 +56,10 @@ namespace JobSystem
     }
 
     // per-thread state 缓存：定义在本头使 t_stateCache 可跨 TU extern（State 模块直接读写）。
+    // t_stateCreator：本线程是否调用过 CreateState。回收只在"自己会再造"的线程进 TLS 缓存；
+    // 其它线程（.NET 终结器线程、渲染线程等）直接还共享池——否则回收全堆在那些线程的缓存里，
+    // 调度线程永远命中不到、每次 CreateState 都走 new（实测 `new` 92～95%，见 docs/07 §7l）。
+    extern thread_local bool t_stateCreator;
     // 析构时批量交还共享池；g_statePoolMutex 在 Shutdown 中始终存活（本对象先于其初始化，按标准后销毁），线程退出取锁安全。
     extern std::mutex g_statePoolMutex;
     extern std::vector<HandleState*> g_statePool;
@@ -124,6 +128,7 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_mainExecutedRanges;
     extern std::atomic<uint64_t> g_stealCount;
     extern std::atomic<uint64_t> g_parkWakeCount;
+    extern std::atomic<uint64_t> g_hotSpinHits;
     extern std::atomic<uint64_t> g_publishedJobs;
     extern std::atomic<uint64_t> g_waitFallbacks;
     extern std::atomic<uint64_t> g_notifiedWorkers;
@@ -142,6 +147,18 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_stealEmptyExits;
     extern std::atomic<uint64_t> g_batchStorageCreated;
     extern std::atomic<uint64_t> g_batchStorageReused;
+    // State 池命中分布（诊断：§7k 实测 CreateState 0.50 µs/job 明显高于"热路径只有池弹出+原子写"的预期）。
+    extern std::atomic<uint64_t> g_statePoolHit;
+    extern std::atomic<uint64_t> g_statePoolRefill;
+    extern std::atomic<uint64_t> g_statePoolNew;
+    // 回收侧：RecycleState 总次数 + 其中发生在 worker 线程的比例（worker 的 TLS 缓存会吃掉回收，
+    // 使主调度线程的缓存恒空 → 每次都走 new）。
+    extern std::atomic<uint64_t> g_stateRecycled;
+    extern std::atomic<uint64_t> g_stateRecycledOnWorker;
+    // 按线程槽统计"创建/回收"分布：判定二者是否落在同一批线程上（命中率只有 7% 的真因）。
+    inline constexpr size_t kStateThreadSlots = 8;
+    extern std::atomic<uint64_t> g_stateCreateByThread[kStateThreadSlots];
+    extern std::atomic<uint64_t> g_stateRecycleByThread[kStateThreadSlots];
     extern std::atomic<uint64_t> g_batchStorageReturned;
     extern std::atomic<uint64_t> g_batchStorageDropped;
     extern std::atomic<uint64_t> g_submitToFirstWorkerEwmaNs;
@@ -519,6 +536,15 @@ namespace JobSystem
 
     // ---- Tiles 模块（定义在 JobSystem_Tiles.cpp） ----
     int ResolveWorkerTarget(int workerCap, int targetCount) noexcept;
+    // 按 JobCostCache 的预估工作量缩放"唤醒的工作者数"（`ENTJOY_WORK_SCALED_WORKERS=1` 时生效）。
+    int ResolveWorkScaledWorkerTarget(uint32_t funcHash, int length, uint32_t tileCount, int rc) noexcept;
+    // 小 job（每 worker ≤2 chunk）且 worker 目标 > 物理核数时，退到物理核数（A/B：`ENTJOY_PHYSCAP_SMALLJOB=1`）。
+    int ApplyPhysCoreCapForSmallJob(int targetWorkers, uint32_t tileCount, int length) noexcept;
+    // 本机物理核数（0 = 不可知）。定义在 JobSystem.cpp；由 Scheduler::Initialize 刷新。
+    int PhysicalCoreCountForDiagnostics() noexcept;
+    void RefreshPhysicalCoreCount() noexcept;
+    extern std::atomic<int> g_physicalCores;
+    extern std::atomic<uint64_t> g_physCapApplied;
     int ResolveEcsBatchRangeSize(int itemCount, int workerCount) noexcept;
     int GuidedTileCount(int length, int workerCount, int k, int floor) noexcept;
     int BuildGuidedTiles(ExecutionTile* tiles, int length, int workerCount,
@@ -530,14 +556,62 @@ namespace JobSystem
     void FailNextBatchStorageAcquireForTests(int count) noexcept;
 #endif
     void ClearBatchStoragePool() noexcept;
+    void FlushBatchContextCacheToSharedPool();
+    void ClearBatchContextPool() noexcept;
     void FlushBatchStorageCacheToSharedPool();
     void SubmitBatch(BatchState* batch, int workerCap = 0);
     // 隐式批（native 收集）入口：开关开 → 挂 pending（持 state 引用防悬垂）；否则直接 SubmitBatch。
     void SubmitOrPending(BatchState* batch);
     // 隐式批 force point：defer 窗口内提交全部 pending + 单次唤醒（EndFrame / Complete 自动触发）。
     void FlushPendingSubmits();
+    // ── 只推迟"唤醒广播"（A/B：`ENTJOY_DEFER_WAKE=1`，默认关）──
+    // 动机（§7p/§7r）：EntJoy 在 `Schedule()` 内发布+唤醒 ⇒ 单发 schedule+complete 口径下，
+    // 提交线程的唤醒停顿（~6.6 µs）被完整暴露；Unity 的 `Schedule()` 只入队、派发在
+    // `ScheduleBatchedJobs`/`Complete` ⇒ 天然被等待覆盖。本开关把广播推迟到调用方即将阻塞时
+    // （`Complete()` 入口 / `FlushPendingSubmits`），**不动提交与批语义**（token 仍立即入注入器，
+    // 已醒着的 worker 照旧能自己领到）。
+    // ⚠ 代价：若调用方 schedule 后不立即 complete，作业启动会推迟到下一次 complete/flush。
+    bool DeferWakeEnabled() noexcept;
+    void FlushDeferredWake() noexcept;
+    extern std::atomic<uint64_t> g_deferredWakeFlushes;
+    // 生效证据（否则"开关没打开"会被读成"改动无效"）。
+    extern std::atomic<uint64_t> g_schedPrioApplied;
+    // 是否有"待广播"的唤醒（SubmitBatch 在 defer 模式下置位，FlushDeferredWake 消费）。
+    extern std::atomic<int> g_pendingDeferredWake;
     bool ChunkExecuteTile(void* ctx, const ExecutionTile& tile);
     void CleanupChunkContext(void* ctx);
+
+    // Complete 分段诊断（实现在 JobSystem_State.cpp；未设 `ENTJOY_DIAG_NATIVE_PHASE=1` 时为空操作）。
+    namespace DiagPhase { void Dump(); }
+    // 原生 Schedule 分段诊断（实现主体在 JobSystem_Scheduler.cpp；未设
+    // `ENTJOY_DIAG_NATIVE_SCHED=1` 时为空操作）。SubmitAcct 段由 JobSystem_Tiles.cpp 的
+    // SubmitBatch 自记；SubmitTokens / SubmitNotify 两段由 ChaseLevScheduler::SubmitBatch 自记
+    // （都嵌套于 Schedule 的 submit 段内）。
+    namespace SchedPhase
+    {
+        enum : int {
+            Resolve = 0, Ctx = 1, Storage = 2, StateCreate = 3, StateFields = 4,
+            Tile = 5, SubmitDs = 6, SubmitAcct = 7, SubmitTokens = 8, SubmitNotify = 9,
+            SubmitOther = 10, Calib = 11, Count = 12 };
+        extern std::atomic<uint64_t> g_sumNs[Count];
+        extern std::atomic<uint64_t> g_calls[Count];
+        extern std::atomic<uint64_t> g_entries;
+        extern std::atomic<uint64_t> g_submitEntries;
+        bool Enabled();
+        void Dump();
+        inline void Add(int slot, uint64_t ns)
+        {
+            g_sumNs[slot].fetch_add(ns, std::memory_order_relaxed);
+            g_calls[slot].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    // ── 批上下文池（A：「共享批上下文」的最后一块）──
+    // GeneralBatchContext / ChunkBatchContext 每次调度一个：线程本地缓存 + 共享池两级复用（与 BatchStorage 同款），去掉每 job 一次 malloc/free。
+    GeneralBatchContext* AcquireGeneralBatchContext();
+    void ReleaseGeneralBatchContext(GeneralBatchContext* bc) noexcept;
+    ChunkBatchContext* AcquireChunkBatchContext();
+    void ReleaseChunkBatchContext(ChunkBatchContext* cc) noexcept;
     void DestroyChunkContextWithoutCleanup(void* ctx) noexcept;
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile);
     void CleanupGeneralContext(void* ctx);

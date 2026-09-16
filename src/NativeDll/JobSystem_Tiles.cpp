@@ -35,10 +35,73 @@ namespace JobSystem
         return std::max(1, std::min({ cap, g_numThreads.load(std::memory_order_relaxed), targetCount }));
     }
 
+    // ── 按"预估工作量"决定唤醒多少工作者（A/B 开关：`ENTJOY_WORK_SCALED_WORKERS=1`）──
+    // 动机（实测）：每 job 的调度成本 ∝ **唤醒的 worker 数**（斜率 ~0.5 µs/worker，1→15 worker 时
+    //   2.34→9.35 µs，见 `docs/gridsearch/07` §7e-7h），而默认路径对任何 job 都投 O(workers) 个令牌
+    //   ⇒ 空 job / 小 job 也要唤醒全部 worker，然后 `Complete` 等它们全部到齐（5～7 µs 的"往返"）。
+    //
+    // ⚠ 但**不能按"每工作者 150 µs"缩并行度**（§7h 实测：那样真实步均 +8.6%）：
+    //   150 µs/worker 是 JCC 算 tile 尺寸用的**吞吐**目标；本项目 400 次/步是**延迟**链
+    //   （BFS 波逐波依赖），并行度不足会把每个 job 的**墙钟**拉长，代价远超派发节省。
+    //   JCC-EST 实测（真实负载）：est/measured 比值 0.78～0.96（估算本身可信），但
+    //   `estUs=474` 的小 job 按 150 µs/worker 只唤醒 3 个 ⇒ 墙钟 158 µs vs 15 个 worker 的 ~32 µs。
+    //
+    // ⇒ 安全边界：**只有当整批工作量小于"派发节省"（~10 µs）时才缩到 1 个工作者**——
+    //   此时该 job 本身没有可损失的执行时间（1 个 worker 也能在 µs 级做完），纯赚派发。
+    //   真实负载里所有 job 的聚合工作量都 ≥200 µs（JCC-EST 实测），因此**在本项目里本规则基本不触发**；
+    //   它服务的是"框架里存在大量微小 job"的场景。
+    int ResolveWorkScaledWorkerTarget(uint32_t funcHash, int length, uint32_t tileCount, int rc) noexcept
+    {
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_WORK_SCALED_WORKERS");
+            return v != nullptr && v[0] == '1';
+        }();
+        const int baseline = ResolveWorkerTarget(0, rc);
+        if (!enabled) return baseline;
+        if (funcHash == 0 || length <= 0 || tileCount == 0) return baseline;
+        const double perElem = g_jobCostCache.GetPerElemCost(funcHash);
+        const double perTile = g_jobCostCache.GetPerTileCost(funcHash);
+        if (perElem <= 0.0 && perTile <= 0.0) return baseline;   // 无数据：不判断（保守并行）
+        const double estNs = perElem * static_cast<double>(length)
+                           + perTile * static_cast<double>(tileCount);
+        constexpr double kTinyBatchNs = 10000.0;                 // 10 µs：小于它就只剩派发成本可比
+        if (estNs > kTinyBatchNs) return baseline;               // 有真实执行量 ⇒ 一律用满并行度
+        return 1;
+    }
+
+    // ── 小 job 的 worker 上限 = **物理核数**（A/B 开关：`ENTJOY_PHYSCAP_SMALLJOB=1`，默认关）──
+    // 实测动机（16 逻辑核 / 8 物理核 SMT；BFS 波 job：每波 ~900 格 / ~15 tile，15 worker 时
+    // 每个 worker 只摊到 1 个 tile）：
+    //   8 worker  → worker 启动散布 P50 **0.6 µs**、park 唤醒 **32/步**、波前 14.7～15.8 ms
+    //   15 worker → 启动散布 **13.9 µs**、唤醒 **1968/步**、波前 **53.7～59.9 ms**
+    //   ⇒ SMT 兄弟线程的自旋/窃取互抢执行单元，粒度越细越严重。
+    // 判据：**每 worker 摊到的元素数 ≤ 256** 才封顶。取"元素数"而不是"chunk 数"有两个理由：
+    //   ① `tileCount` 由 JCC 学习出的 chunk size 决定、会漂移，实测造成过无效 A/B 臂；
+    //      元素数是 schedule 入参，稳定。
+    //   ② **安全**：`20260826-JobSystem-帧间隔调度开销分析.md:80` 记录过"默认 worker=物理核 ⇒
+    //      compute-bound Heavy C++ −61% 回归 ⇒ 回退"。若按 chunk 数封顶，一个"1M 实体 / 16 个粗块"
+    //      的 compute-bound job 每 worker 只有 1 个 chunk，会被误封顶 ⇒ 重蹈该回归。
+    //      元素数上限把封顶限定在**总工作量本来就极小**的 job 上（15 worker 时 ≤3840 元素）。
+    // 不可知物理核数（返回 0）或未超订时，一律保持 baseline。
+    int ApplyPhysCoreCapForSmallJob(int targetWorkers, uint32_t tileCount, int length) noexcept
+    {
+        // 默认开；`ENTJOY_PHYSCAP_SMALLJOB=0` 可关闭（实测 3 轮交替 A/B、区间不重叠 ⇒ 已验收，见 §7q）。
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_PHYSCAP_SMALLJOB");
+            return !(v != nullptr && v[0] == '0');
+        }();
+        if (!enabled) return targetWorkers;
+        const int phys = PhysicalCoreCountForDiagnostics();
+        if (phys <= 0 || targetWorkers <= phys) return targetWorkers;
+        (void)tileCount;
+        if (length <= 0 || length > targetWorkers * 256) return targetWorkers;
+        g_physCapApplied.fetch_add(1, std::memory_order_relaxed);
+        return phys;
+    }
+
     int ResolveEcsBatchRangeSize(
         int itemCount,
-        int workerCount) noexcept
-    {
+        int workerCount) noexcept    {
         // 保持足够可独立认领的范围以吸收 worker 倾斜，避免每物理 chunk 一次原子认领/回调。
         constexpr int kTargetTilesPerWorker = 4;
         constexpr int kMinChunksPerTile = 4;
@@ -230,6 +293,192 @@ namespace JobSystem
         }
     };
     thread_local ThreadBatchStorageCache t_batchStorageCache;
+
+    // ============================================================
+    // 批上下文池（A）：GeneralBatchContext / ChunkBatchContext 去 new/delete
+    // 结构与 BatchStorage 同款：线程本地缓存（零锁命中） + 共享池（缓存空/满时批量迁移）。
+    // 必要性：上下文在**主线程**获取、由**完成该批的线程**（多为 worker）释放 ⇒ 只有
+    // 两级池才能让主线程的 acquire 命中（worker 释放的实例经共享池回到主线程）。
+    // ============================================================
+    std::mutex g_ctxPoolMutex;
+    std::vector<GeneralBatchContext*> g_generalCtxPool;
+    std::vector<ChunkBatchContext*> g_chunkCtxPool;
+    constexpr size_t kCtxCacheCap = 16;
+    constexpr size_t kMaxPooledCtx = 256;
+
+    struct ThreadContextCache
+    {
+        std::vector<GeneralBatchContext*> general;
+        std::vector<ChunkBatchContext*> chunk;
+        ~ThreadContextCache()
+        {
+            if (general.empty() && chunk.empty()) return;
+            std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+            for (auto* p : general)
+            {
+                if (g_generalCtxPool.size() < kMaxPooledCtx) g_generalCtxPool.push_back(p);
+                else delete p;
+            }
+            for (auto* p : chunk)
+            {
+                if (g_chunkCtxPool.size() < kMaxPooledCtx) g_chunkCtxPool.push_back(p);
+                else delete p;
+            }
+            general.clear();
+            chunk.clear();
+        }
+    };
+    thread_local ThreadContextCache t_ctxCache;
+
+    static void SpillGeneralContextCacheToSharedPool()
+    {
+        if (t_ctxCache.general.empty()) return;
+        std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+        for (auto* p : t_ctxCache.general)
+        {
+            if (g_generalCtxPool.size() < kMaxPooledCtx) g_generalCtxPool.push_back(p);
+            else delete p;
+        }
+        t_ctxCache.general.clear();
+    }
+
+    static void SpillChunkContextCacheToSharedPool()
+    {
+        if (t_ctxCache.chunk.empty()) return;
+        std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+        for (auto* p : t_ctxCache.chunk)
+        {
+            if (g_chunkCtxPool.size() < kMaxPooledCtx) g_chunkCtxPool.push_back(p);
+            else delete p;
+        }
+        t_ctxCache.chunk.clear();
+    }
+
+    GeneralBatchContext* AcquireGeneralBatchContext()
+    {
+        if (!t_ctxCache.general.empty())
+        {
+            auto* p = t_ctxCache.general.back();
+            t_ctxCache.general.pop_back();
+            return p;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+            if (!g_generalCtxPool.empty())
+            {
+                auto* p = g_generalCtxPool.back();
+                g_generalCtxPool.pop_back();
+                for (size_t i = 1; i < kCtxCacheCap && !g_generalCtxPool.empty(); ++i)
+                {
+                    t_ctxCache.general.push_back(g_generalCtxPool.back());
+                    g_generalCtxPool.pop_back();
+                }
+                return p;
+            }
+        }
+        return new GeneralBatchContext{};
+    }
+
+    void ReleaseGeneralBatchContext(GeneralBatchContext* bc) noexcept
+    {
+        if (!bc) return;
+        // 归还前清空引用型字段：池中实例不得留下上次 job 的指针（防误用；acquire 后调用方整体赋值）。
+        bc->indexFunc = nullptr;
+        bc->batchFunc = nullptr;
+        bc->originalContext = nullptr;
+        bc->originalCleanup = nullptr;
+        bc->funcHash = 0;
+        try
+        {
+            if (t_ctxCache.general.size() < kCtxCacheCap)
+            {
+                t_ctxCache.general.push_back(bc);
+                return;
+            }
+            SpillGeneralContextCacheToSharedPool();
+            t_ctxCache.general.push_back(bc);
+        }
+        catch (...)
+        {
+            delete bc;   // 池化失败绝不吞掉实例（否则内存泄漏）
+        }
+    }
+
+    ChunkBatchContext* AcquireChunkBatchContext()
+    {
+        if (!t_ctxCache.chunk.empty())
+        {
+            auto* p = t_ctxCache.chunk.back();
+            t_ctxCache.chunk.pop_back();
+            return p;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+            if (!g_chunkCtxPool.empty())
+            {
+                auto* p = g_chunkCtxPool.back();
+                g_chunkCtxPool.pop_back();
+                for (size_t i = 1; i < kCtxCacheCap && !g_chunkCtxPool.empty(); ++i)
+                {
+                    t_ctxCache.chunk.push_back(g_chunkCtxPool.back());
+                    g_chunkCtxPool.pop_back();
+                }
+                return p;
+            }
+        }
+        return new ChunkBatchContext{};
+    }
+
+    void ReleaseChunkBatchContext(ChunkBatchContext* cc) noexcept
+    {
+        if (!cc) return;
+        cc->func = nullptr;
+        cc->rangeFunc = nullptr;
+        cc->entityRangeFunc = nullptr;
+        cc->originalContext = nullptr;
+        cc->originalCleanup = nullptr;
+        cc->chunks = nullptr;
+        cc->entityBatches = nullptr;
+        try
+        {
+            if (t_ctxCache.chunk.size() < kCtxCacheCap)
+            {
+                t_ctxCache.chunk.push_back(cc);
+                return;
+            }
+            SpillChunkContextCacheToSharedPool();
+            t_ctxCache.chunk.push_back(cc);
+        }
+        catch (...)
+        {
+            delete cc;
+        }
+    }
+
+    // Shutdown 路径：主线程缓存先交还共享池，再清空共享池（与 BatchStorage 同序）。
+    void FlushBatchContextCacheToSharedPool()
+    {
+        SpillGeneralContextCacheToSharedPool();
+        SpillChunkContextCacheToSharedPool();
+    }
+
+    // Shutdown 路径：只清**共享池**（其中的实例都已释放、无人引用）。
+    // 线程本地缓存交给各自线程的 ThreadContextCache 析构（与 BatchStorage 同款语义），
+    // 避免在这里删掉可能仍被在飞批次引用的对象。
+    void ClearBatchContextPool() noexcept
+    {
+        std::vector<GeneralBatchContext*> g;
+        std::vector<ChunkBatchContext*> c;
+        try
+        {
+            std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
+            g.swap(g_generalCtxPool);
+            c.swap(g_chunkCtxPool);
+        }
+        catch (...) { return; }
+        for (auto* p : g) delete p;
+        for (auto* p : c) delete p;
+    }
 
     void FlushBatchStorageCacheToSharedPool()
     {
@@ -618,6 +867,13 @@ namespace JobSystem
     void SubmitBatch(BatchState* batch, int /*workerCap*/)
     {
         if (!batch || !batch->handle) return;
+        const bool spDiag = SchedPhase::Enabled();
+        uint64_t spT0 = 0;
+        if (spDiag)
+        {
+            spT0 = MonotonicNowNs();
+            SchedPhase::g_submitEntries.fetch_add(1, std::memory_order_relaxed);
+        }
         auto scheduler = LoadChaseLevScheduler();
         if (!scheduler || !scheduler->IsRunning())
         {
@@ -654,7 +910,11 @@ namespace JobSystem
         batch->publishedAt.store(publishedAt, std::memory_order_release);
         g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
 
+        uint64_t spT1 = 0;
+        if (spDiag) spT1 = MonotonicNowNs();
         scheduler->SubmitBatch(batch);
+        if (spDiag)
+            SchedPhase::Add(SchedPhase::SubmitAcct, spT1 - spT0);
     }
 
     // ============================================================
@@ -735,6 +995,28 @@ namespace JobSystem
             scheduler->WakePending();
     }
 
+    // ── 只推迟"唤醒广播"（A/B：`ENTJOY_DEFER_WAKE=1`，默认关；见 JobSystemInternal.h 的动机注释）──
+    std::atomic<uint64_t> g_deferredWakeFlushes{ 0 };
+    std::atomic<uint64_t> g_schedPrioApplied{ 0 };
+    std::atomic<int> g_pendingDeferredWake{ 0 };
+
+    bool DeferWakeEnabled() noexcept
+    {
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_DEFER_WAKE");
+            return v != nullptr && v[0] == '1';
+        }();
+        return enabled;
+    }
+
+    void FlushDeferredWake() noexcept
+    {
+        if (g_pendingDeferredWake.exchange(0, std::memory_order_acq_rel) == 0) return;
+        g_deferredWakeFlushes.fetch_add(1, std::memory_order_relaxed);
+        if (auto scheduler = LoadChaseLevScheduler())
+            scheduler->WakePending();
+    }
+
     // ---------- Chunk/Entity adaptors ----------
     // ChunkBatchContext / GeneralBatchContext 定义见 JobSystemInternal.h。
 
@@ -801,15 +1083,15 @@ namespace JobSystem
         }
         catch (...)
         {
-            delete bc;
+            ReleaseChunkBatchContext(bc);
             throw;
         }
-        delete bc;
+        ReleaseChunkBatchContext(bc);
     }
 
     void DestroyChunkContextWithoutCleanup(void* ctx) noexcept
     {
-        delete static_cast<ChunkBatchContext*>(ctx);
+        ReleaseChunkBatchContext(static_cast<ChunkBatchContext*>(ctx));
     }
 
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile)
@@ -834,15 +1116,15 @@ namespace JobSystem
         }
         catch (...)
         {
-            delete bc;
+            ReleaseGeneralBatchContext(bc);
             throw;
         }
-        delete bc;
+        ReleaseGeneralBatchContext(bc);
     }
 
     void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept
     {
-        delete static_cast<GeneralBatchContext*>(ctx);
+        ReleaseGeneralBatchContext(static_cast<GeneralBatchContext*>(ctx));
     }
 
     // ============================================================
@@ -920,6 +1202,37 @@ namespace JobSystem
                         std::printf("[JCC] L hash=%08x tiles=%u N=%u execSpanUs=%.1f perElem=%.2fns coarse=%d\n",
                             batch->funcHash, batch->tileCount, batch->totalElements,
                             totalNs / 1000.0, perElemNs, targetCoarse ? 1 : 0);
+                    // ── 估算器精度诊断（由 `ENTJOY_JCC_VERBOSE=1` 开启，采样打印防刷屏）──
+                    // 目的：判断 §7h 里"按预估算唤醒数"为何在真实负载上变慢（怀疑估算低估 ⇒ 并行度不足）。
+                    //   measuredNs   = wcNow × 执行窗口 = 本批的**等效聚合 CPU 时长**（实测）
+                    //   estNs        = 学习到的 perElem×N + perTile×tiles（估算器实际用的两个量）
+                    //   idealWorkers = ceil(measuredNs / 150µs) —— 按实测该唤醒几个才够
+                    //   estWorkers   = ceil(estNs / 150µs)     —— 按估算实际会唤醒几个
+                    // 若 estWorkers << idealWorkers ⇒ 低估、并行度不足，正是变慢的机制。
+                    if (g_jobCostCacheVerbose)
+                    {
+                        static std::atomic<uint64_t> s_estDump{ 0 };
+                        const uint64_t dn = s_estDump.fetch_add(1, std::memory_order_relaxed);
+                        if (dn < 400 || (dn & 63) == 0)
+                        {
+                            const double learnedElem = g_jobCostCache.GetPerElemCost(batch->funcHash);
+                            const double learnedTile = g_jobCostCache.GetPerTileCost(batch->funcHash);
+                            const double estNs = learnedElem * static_cast<double>(batch->totalElements)
+                                               + learnedTile * static_cast<double>(batch->tileCount);
+                            const double measuredNs = static_cast<double>(wcNow) * totalNs;
+                            constexpr double kPerWorkerTargetNs = 150000.0;
+                            int estWorkers = static_cast<int>(estNs / kPerWorkerTargetNs) + (estNs > 0.0 ? 1 : 0);
+                            int idealWorkers = static_cast<int>(measuredNs / kPerWorkerTargetNs) + (measuredNs > 0.0 ? 1 : 0);
+                            if (estWorkers < 1) estWorkers = 1;
+                            if (idealWorkers < 1) idealWorkers = 1;
+                            std::printf("[JCC-EST] hash=%08x tiles=%u N=%u measuredUs=%.1f estUs=%.1f ratio=%.3f"
+                                        " perElem=%.3fns perTile=%.3fns estWorkers=%d idealWorkers=%d baselineWorkers=%u\n",
+                                batch->funcHash, batch->tileCount, batch->totalElements,
+                                measuredNs / 1000.0, estNs / 1000.0,
+                                measuredNs > 0.0 ? estNs / measuredNs : 0.0,
+                                learnedElem, learnedTile, estWorkers, idealWorkers, wcNow);
+                        }
+                    }
                 }
             }
             // 标准 Chase-Lev：不需要 UnregisterBatch（无共享注册表）

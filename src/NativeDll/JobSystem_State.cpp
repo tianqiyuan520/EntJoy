@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -14,6 +17,65 @@
 
 namespace JobSystem
 {
+    // ============================================================
+    // Complete 分段诊断（`ENTJOY_DIAG_NATIVE_PHASE=1`）
+    //
+    // 背景：`gridsearch/07` §7e 实测"S+C 交替"形状下每 job 的 82% 花在 `JobSystem_Complete` 里，
+    // 但**内部**（快路径 / 自旋 / completedCv 阻塞等待 / 等 backendRetired / 取异常）的比例未知，
+    // 于是无法判断该动哪一段（先前"在等退役期间 assist"的尝试实测无效，就属于没先分段就动手）。
+    //
+    // 本诊断按段累加纳秒与次数，`Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）。
+    // 未启用时每段只有一次静态 bool 读，热路径零成本。
+    // ============================================================
+    namespace DiagPhase
+    {
+        enum : int { FastPath = 0, Spin2048 = 1, Spin256 = 2, BlockWait = 3, WaitRetired = 4, ExcCheck = 5, Count = 6 };
+        std::atomic<uint64_t> g_sumNs[Count];
+        std::atomic<uint64_t> g_calls[Count];
+        std::atomic<uint64_t> g_entries;
+
+        bool Enabled()
+        {
+            static const bool enabled = [] {
+                const char* v = std::getenv("ENTJOY_DIAG_NATIVE_PHASE");
+                return v != nullptr && v[0] == '1';
+            }();
+            return enabled;
+        }
+
+        inline void Add(int slot, uint64_t ns)
+        {
+            g_sumNs[slot].fetch_add(ns, std::memory_order_relaxed);
+            g_calls[slot].fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void Dump()
+        {
+            if (!Enabled()) return;
+            static const char* kNames[Count] = {
+                "fastpath(already completed)",
+                "spin2048(to completed)",
+                "spin256(to completed)",
+                "blockWait(completedCv)",
+                "waitBackendRetired",
+                "excCheck" };
+            const uint64_t entries = g_entries.load(std::memory_order_relaxed);
+            uint64_t sumAll = 0;
+            for (int i = 0; i < Count; ++i) sumAll += g_sumNs[i].load(std::memory_order_relaxed);
+            std::printf("[NPHS] JobSystem_Complete: entries=%llu sum=%.1f us (sum of segment means=%.3f us/entry)\n",
+                (unsigned long long)entries, sumAll / 1000.0,
+                entries ? (sumAll / 1000.0) / (double)entries : 0.0);
+            for (int i = 0; i < Count; ++i)
+            {
+                const uint64_t ns = g_sumNs[i].load(std::memory_order_relaxed);
+                const uint64_t n = g_calls[i].load(std::memory_order_relaxed);
+                std::printf("[NPHS]   %-28s calls=%llu total=%.1f us mean=%.3f us\n",
+                    kNames[i], (unsigned long long)n, ns / 1000.0, n ? (ns / 1000.0) / (double)n : 0.0);
+            }
+            std::fflush(stdout);
+        }
+    }
+
     // ---------- State lifecycle ----------
     // 无锁 continuation 节点：fn 完整构造后才 CAS 入原子槽（无发布竞态）。
     // CompleteState 摘取后执行并 delete。槽位 ≤1 节点，CAS 只对 nullptr 比较，
@@ -43,9 +105,21 @@ namespace JobSystem
             RunContinuationChain(leftover);
     }
 
+    // 线程槽：判定"创建"与"回收"是否落在同一批线程上（TLS 缓存命中率只有 7% 的真因）。
+    static uint32_t StateThreadSlot() noexcept
+    {
+        thread_local const uint32_t slot = static_cast<uint32_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()) % kStateThreadSlots);
+        return slot;
+    }
+
     void RecycleState(HandleState* state) noexcept
     {
         if (!state) return;
+        g_stateRecycled.fetch_add(1, std::memory_order_relaxed);
+        g_stateRecycleByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
+        if (WorkerIndexManager::GetCurrentIndex() >= 0)
+            g_stateRecycledOnWorker.fetch_add(1, std::memory_order_relaxed);
         // 释放依赖链持有引用（依赖 state 可能仍被自身 batch 持有，不会悬垂）。
         if (state->dependency)
         {
@@ -76,6 +150,17 @@ namespace JobSystem
             return;
         }
         // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
+        // 非"创建者"线程（典型：.NET 终结器线程释放托管 NativeJobHandleBox）不进 TLS 缓存，
+        // 直接还共享池——否则调度线程的缓存永远空，CreateState 每次都 new（实测 92～95%）。
+        if (!t_stateCreator)
+        {
+            std::lock_guard<std::mutex> lock(g_statePoolMutex);
+            if (g_statePool.size() < kMaxPooledStates)
+                g_statePool.push_back(state);
+            else
+                delete state;
+            return;
+        }
         if (t_stateCache.entries.size() < kStateCacheCap)
         {
             t_stateCache.entries.push_back(state);
@@ -87,11 +172,14 @@ namespace JobSystem
 
     HandleState* CreateState(bool completed)
     {
+        t_stateCreator = true;
+        g_stateCreateByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
         HandleState* state = nullptr;
         if (!t_stateCache.entries.empty())
         {
             state = t_stateCache.entries.back();
             t_stateCache.entries.pop_back();
+            g_statePoolHit.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
@@ -107,6 +195,11 @@ namespace JobSystem
                     t_stateCache.entries.push_back(g_statePool.back());
                     g_statePool.pop_back();
                 }
+                g_statePoolRefill.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                g_statePoolNew.fetch_add(1, std::memory_order_relaxed);
             }
         }
         if (!state) state = new HandleState(completed);
@@ -464,7 +557,7 @@ namespace JobSystem
                 if (outJccFine) *outJccFine = true;   // JCC 公式产出（细粒度学习样本）
                 const double totalUs = length * costNs / 1000.0;
                 // perElem 是「并行 wall 稀释」成本，直接用它算 tiles 会产出巨型 tile
-                // 损失并行度；还原为「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
+                // 「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
                 const double serialUs = totalUs * wc;
                 double targetTilesD = std::clamp(serialUs / kTargetTileUs, 1.0,
                     static_cast<double>(wc) * kMaxAdaptiveTpw);
@@ -553,6 +646,40 @@ namespace JobSystem
     void JobHandle::Complete() const
     {
         if (!_state) return;
+        // `ENTJOY_DEFER_WAKE=1`：调用方即将阻塞 ⇒ 在这里补一次被推迟的唤醒广播
+        // （把唤醒成本挪进"无论如何都要等"的窗口里，见 JobSystemInternal.h 的动机注释）。
+        FlushDeferredWake();
+
+        const bool diag = DiagPhase::Enabled();
+        uint64_t mark = 0;
+        if (diag)
+        {
+            DiagPhase::g_entries.fetch_add(1, std::memory_order_relaxed);
+            mark = MonotonicNowNs();
+        }
+        // 统一收尾（原实现有 6 处相同的"等退役 → 取异常 → return"）。
+        //   exitSlot       = "等到 completed 是在哪一段"（spin2048 / spin256 / blockWait / fastpath）——
+        //                    这是判定"每 job 的等待到底是自旋还是阻塞"的关键：自旋等待有上界（µs 级），
+        //                    一旦落到 blockWait 就是"等了 256 µs 超时轮"的量级。
+        //   WaitRetired 段 = 等 backendRetired（cleanup + 存储回收）
+        //   ExcCheck 段    = 摘取并重抛 job 异常
+        auto finish = [&](int exitSlot) {
+            if (diag)
+            {
+                uint64_t n = MonotonicNowNs();
+                DiagPhase::Add(exitSlot, n - mark);
+                mark = n;
+            }
+            WaitBackendRetired(_state);
+            if (diag)
+            {
+                uint64_t n = MonotonicNowNs();
+                DiagPhase::Add(DiagPhase::WaitRetired, n - mark);
+                mark = n;
+            }
+            RethrowBatchException(_state);
+            if (diag) DiagPhase::Add(DiagPhase::ExcCheck, MonotonicNowNs() - mark);
+        };
 
         const uint64_t diagnosticId =
             _state->diagnosticBatchId.load(std::memory_order_acquire);
@@ -561,8 +688,13 @@ namespace JobSystem
 
         if (_state->completed.load(std::memory_order_acquire))
         {
-            WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+            if (diag)
+            {
+                uint64_t n = MonotonicNowNs();
+                DiagPhase::Add(DiagPhase::FastPath, n - mark);
+                mark = n;
+            }
+            finish(DiagPhase::FastPath);
             return;
         }
 
@@ -576,8 +708,7 @@ namespace JobSystem
         {
             if (_state->completed.load(std::memory_order_acquire))
             {
-                WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+                finish(DiagPhase::Spin2048);
                 return;
             }
             // Chase-Lev：spin 期间协助认领（每 16 次，更积极兜底慢 worker）
@@ -589,8 +720,7 @@ namespace JobSystem
         }
         if (_state->completed.load(std::memory_order_acquire))
         {
-            WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+            finish(DiagPhase::Spin2048);
             return;
         }
 
@@ -602,8 +732,7 @@ namespace JobSystem
         {
             if (_state->completed.load(std::memory_order_acquire))
             {
-                WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+                finish(DiagPhase::Spin256);
                 return;
             }
             if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && (i & 15) == 0)
@@ -614,8 +743,7 @@ namespace JobSystem
         }
         if (_state->completed.load(std::memory_order_acquire))
         {
-            WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+            finish(DiagPhase::Spin256);
             return;
         }
 
@@ -652,8 +780,7 @@ namespace JobSystem
                 }
             }
         }
-        WaitBackendRetired(_state);
-            RethrowBatchException(_state);
+        finish(DiagPhase::BlockWait);
         const uint64_t completeWakeAt = MonotonicNowNs();
         const uint64_t completeReturnAt = MonotonicNowNs();
         if (completeReturnAt >= completeWakeAt)

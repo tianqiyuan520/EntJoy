@@ -257,6 +257,12 @@ namespace EntJoy.ECS
         /// <summary>本轮回放创建的实体总数。</summary>
         public int CreatedEntityCount => _createdEntityCount;
 
+        /// <summary>已记录的 <see cref="DestroyEntity"/> **实体条数**。
+        /// ⚠ 与 <see cref="CommandCount"/> 不同：连续的 destroy 会合并成**一个连续段 = 一条命令**
+        /// （见 <see cref="DestroyEntity"/>），故 3200 次并发 `DestroyEntity` 时
+        /// `DestroyedEntityCount = 3200` 而 `CommandCount = 1`。要断言"写得没丢"用本属性。</summary>
+        public int DestroyedEntityCount => _destroyEntityCount;
+
         public DeferredCommandBuffer()
         {
             _staging = (byte*)Marshal.AllocHGlobal(InitialCapacity);

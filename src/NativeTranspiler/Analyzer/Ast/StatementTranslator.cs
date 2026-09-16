@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
@@ -141,7 +141,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 解析局部声明的 C# 类型（P0-5b 修复）：优先类型语法节点的语义类型，**为 null 时回退到声明符号的类型**。
         /// `ref T x = ref expr;` 在 `Nullable=enable` 的工程里 `GetTypeInfo(Type).Type` 会返回 null ——
-        /// 此前直接把 null 传进 <c>MapCSharpTypeToCpp</c> ⇒ `type.IsReferenceType` 抛 NRE ⇒ 整个生成器崩（CS8785）。
         /// </summary>
         private ITypeSymbol? ResolveLocalType(TypeSyntax typeSyntax, SeparatedSyntaxList<VariableDeclaratorSyntax> variables)
         {
@@ -1018,7 +1017,6 @@ namespace NativeTranspiler.Analyzer
 
             if (macroBase == null)
             {
-                // 明确报错，不再"静默生成非法 C++"：ISPC 侧的基类分支此前直接吐注释，
                 // 结果是 C++ 编译器在很远的地方报一连串无关错误（B3）。
                 _builder.Append($"#error ENTJOY_UNSUPPORTED_INTERLOCKED({method.Name})");
                 return;
@@ -1040,10 +1038,14 @@ namespace NativeTranspiler.Analyzer
             }
             else if (method.Name == Config.CompareExchange && args.Count >= 3)
             {
+                // C#：Interlocked.CompareExchange(ref loc, value, comparand)
+                // 宏：INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) → _InterlockedCompareExchange(ptr, newVal, oldVal)
+                //   comparand/value 写反（命中时写入 comparand、期望值当成新值），语义完全相反；
+                //   ISPC 后端一直是正确次序（见 IspcStatementTranslator.TranslateInterlocked）。
                 _builder.Append(", ");
-                TranslateExpression(args[1].Expression);
+                TranslateExpression(args[2].Expression);   // comparand（期望旧值）
                 _builder.Append(", ");
-                TranslateExpression(args[2].Expression);
+                TranslateExpression(args[1].Expression);   // value（新值）
             }
             _builder.Append(')');
         }

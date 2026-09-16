@@ -428,8 +428,9 @@ namespace EntJoy.ECS.JobSystem
             // 多 World 支持：绑定本次调度的 World（drain 写回正确 EventStream）
             world ??= World.DefaultWorld;
 
-            // ── 临时诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：C# 调度侧四段细分计时 ──
-            bool cDiag = s_csharpPhaseDiag;
+            // ── 诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：C# 调度侧四段细分计时。
+            //    采样窗口关闭后连时间戳都不取（Sampling=false）⇒ 诊断对稳态零影响。 ──
+            bool cDiag = s_csharpPhaseDiag && CSharpPhaseDiag.Sampling("chunk.cache+hash");
             long d0 = cDiag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             long d1 = 0, d2 = 0, d3 = 0;
 
@@ -480,8 +481,16 @@ namespace EntJoy.ECS.JobSystem
                         entityManager._pendingNativeEvents.Add((contextBlock, evtJobType, world));
                 }
                 var ret = TrackEntityJob(entityManager, FromNative(handle));
-                if (cDiag && s_csharpPhaseCount++ < 24)
-                    Console.WriteLine($"[CPHS] cache+hash={us(d1 - d0):F1} us  contextBlock={us(d2 - d1):F1} us  PInvoke={us(d3 - d2):F1} us  track+return={us(System.Diagnostics.Stopwatch.GetTimestamp() - d3):F1} us");
+                if (cDiag)
+                {
+                    // ⚠ 必须走 CSharpPhaseDiag（攒满窗口后打印一次），**不能**在这里直接 Console.WriteLine：
+                    // 逐次打印会落在外层 “schedule+complete” 的计时区内，实测把 chunk 派发读数放大 ~10×
+                    // （同一天同二进制：关诊断 3.86 ns/chunk，开诊断 38.6 ns/chunk）。见 CSharpPhaseDiag 类注释。
+                    CSharpPhaseDiag.Add("chunk.cache+hash", us(d1 - d0));
+                    CSharpPhaseDiag.Add("chunk.contextBlock", us(d2 - d1));
+                    CSharpPhaseDiag.Add("chunk.PInvoke", us(d3 - d2));
+                    CSharpPhaseDiag.Add("chunk.track+return", us(CSharpPhaseDiag.Now() - d3));
+                }
                 return ret;
             }
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
@@ -491,7 +500,6 @@ namespace EntJoy.ECS.JobSystem
 
         private static readonly bool s_csharpPhaseDiag =
             Environment.GetEnvironmentVariable("ENTJOY_DIAG_CSHARP_PHASE") == "1";
-        private static uint s_csharpPhaseCount = 0;
 
         /// <summary>
         /// 同步执行 [NativeTranspile] IJobChunk：以 ImmediateNative 模式提交（C++ 侧主线程直接执行，

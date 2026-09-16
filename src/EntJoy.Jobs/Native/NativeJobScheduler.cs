@@ -401,17 +401,36 @@ public static unsafe partial class NativeJobScheduler
     public static void Complete(ref NativeJobHandle h)
     {
         if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
+        // 诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：把每 job 的 Complete 拆成 5 段，
+        // 用来回答"每 job 调度的开销里，哪些是 EntJoy 真的多付的"（对照 Unity 同形状 4.71 µs/job）。
+        bool cDiag = CSharpPhaseDiag.Sampling("complete.t0");
+        long t0 = cDiag ? CSharpPhaseDiag.Now() : 0;
         // 隐式批：Complete 前先 flush 当前批（Unity ScheduleBatchedJobs 同语义：Complete 隐式刷新）
         ImplicitBatch.FlushForComplete();
+        long t1 = cDiag ? CSharpPhaseDiag.Now() : 0;
         // Complete 不消费句柄（Unity 值语义；拷贝共享 Box，不能在此 detach）。
         // 等待窗口持 retain，防并发 Release/finalizer 回收正在等待的 state（TOCTOU）。
         using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
         IntPtr handle = handleLease.Handle;
         if (handle == IntPtr.Zero) return;
+        long t2 = cDiag ? CSharpPhaseDiag.Now() : 0;
 
-        NativeJobCore.JobSystem_Complete(handle);
+        NativeJobCore.JobSystem_Complete(handle);            // ← 原生：自旋/等待/退役握手全在这里
+        long t3 = cDiag ? CSharpPhaseDiag.Now() : 0;
         ulong batchId = NativeJobCore.JobSystem_GetDiagnosticBatchId(handle);
+        long t4 = cDiag ? CSharpPhaseDiag.Now() : 0;
         NativeJobCore.ThrowRecordedJobExceptions(batchId);
+        long t5 = cDiag ? CSharpPhaseDiag.Now() : 0;
+
+        if (cDiag)
+        {
+            CSharpPhaseDiag.Add("complete.flush", CSharpPhaseDiag.Us(t0, t1));
+            CSharpPhaseDiag.Add("complete.leaseAcquire", CSharpPhaseDiag.Us(t1, t2));
+            CSharpPhaseDiag.Add("complete.native_wait", CSharpPhaseDiag.Us(t2, t3));
+            CSharpPhaseDiag.Add("complete.getBatchId", CSharpPhaseDiag.Us(t3, t4));
+            CSharpPhaseDiag.Add("complete.excCheck", CSharpPhaseDiag.Us(t4, t5));
+            CSharpPhaseDiag.Add("complete.t0", CSharpPhaseDiag.Us(t0, t5));
+        }
     }
 
     public static bool IsCompleted(NativeJobHandle h)
@@ -466,7 +485,9 @@ public static unsafe partial class NativeJobScheduler
     // transpiler 生成的 Schedule_{Job} 在调度后调用，把 batchId → Job 名注册进调试器字典。
     public static void RegisterScheduledJob(IntPtr handle, string jobName)
     {
+        long t0 = CSharpPhaseDiag.Sampling("sched.register") ? CSharpPhaseDiag.Now() : 0;
         NativeJobCore.RegisterScheduledJobName(handle, jobName);
+        if (t0 != 0) CSharpPhaseDiag.Add("sched.register", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
     }
 
     // ======================== 面板 / 状态 ========================

@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -41,7 +41,13 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ParallelForBatchRequiresCppBackendError = new("NT025", "IJobParallelForBatch requires the Cpp backend without AutoSIMD", "[NativeTranspile] struct '{0}' implements IJobParallelForBatch, which is only implemented for Target = Cpp with AutoSIMD = Disabled (the ISPC/AutoSIMD paths only know the per-index Execute(int) shape). Drop Target = Ispc / AutoSIMD, or use IJobParallelFor instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>
-        /// 生成器自身崩溃（P0-5b）：此前只会变成 Roslyn 的 CS8785 —— 只有异常类型名、没有行号，
+        /// E-1：**部分生成**告知。某个 job 校验失败（如 NT008）时，生成器不再中止整批产物，
+        /// 而是把该 job 排除后继续为其余 job 产出 Bindings.g.cs；本 Warning 说明"哪些 job 没有产物"。
+        /// 目的：把"缺绑定"这件事**明确说出来**。
+        /// </summary>
+        public static readonly DiagnosticDescriptor PartialBindingsWarning = new("NT028", "Bindings generated without some jobs", "{0} 个 [NativeTranspile] job 未通过校验、已从本批绑定生成中排除：{1}。其余 job 的绑定照常产出；上述 job 不会生成 Schedule 绑定（调用点会报 CS0103，而不是整包 CS0234）。", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+
+        /// <summary>
         /// 定位只能靠二分（实测代价：一整轮）。本诊断给出异常消息 + 调用栈前 6 帧，
         /// 完整 ToString() 落盘到 <c>%TEMP%/entjoy-native-transpiler-crash.txt</c>。
         /// </summary>
@@ -49,7 +55,6 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// P0-5b：原生 job 不支持 `ref` 局部（`ref T x = ref expr;`）。
-        /// 转译器此前把它当**按值拷贝**翻译（`T x = expr;`）——对指针数组元素取 ref 时语义直接错；
         /// 而在可空注解上下文（`Nullable=enable`）下更会因类型解析返回 null 而打崩生成器。
         /// 正确写法：**指针局部** `T* p = &amp;arr[i];`。
         /// </summary>
@@ -58,7 +63,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 解析局部声明的类型（P0-5b 修复）：优先类型语法节点的语义类型；**为 null 时回退到声明符号的类型**
         /// —— `ref T x = ref expr;` 在 `Nullable=enable` 下 `GetTypeInfo(Type).Type` 返回 null，
-        /// 校验器此前靠 null 判断静默跳过、转译器则直接 NRE。
         /// </summary>
         private static ITypeSymbol? ResolveLocalType(SemanticModel model, LocalDeclarationStatementSyntax localDecl)
         {

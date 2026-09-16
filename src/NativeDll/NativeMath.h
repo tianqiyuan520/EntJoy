@@ -66,6 +66,13 @@ namespace EntJoy {
 			float2(const float2&) = default;
 			float2& operator=(const float2&) = default;
 
+			// 读路径专用：**返回值**。原访问器返回 `float&`，使 `float2 q = p[i]` 的读退化成两次
+			// 4 字节标量读（编译器无法把两个分量合并成一次 8 字节载入），逐元素热循环实测 2.3× 代价
+			// （tools/HotSpotMicro/count_place_shape.cpp：3.70ms vs 1.60ms / 100 万单位）。
+			// x()/y() 保留引用语义供少量写路径（生成代码里 8 处赋值/复合赋值）使用。
+			float xr() const { return data[0]; }
+			float yr() const { return data[1]; }
+
 			float& x() { return data[0]; }
 			float& y() { return data[1]; }
 			const float& x() const { return data[0]; }
@@ -81,12 +88,12 @@ namespace EntJoy {
 			float2 operator-() const { return float2(-x(), -y()); }
 			float2 operator+() const { return *this; }
 
-			float2& operator+=(const float2& rhs) { x() += rhs.x(); y() += rhs.y(); return *this; }
-			float2& operator-=(const float2& rhs) { x() -= rhs.x(); y() -= rhs.y(); return *this; }
-			float2& operator*=(const float2& rhs) { x() *= rhs.x(); y() *= rhs.y(); return *this; }
-			float2& operator/=(const float2& rhs) { x() /= rhs.x(); y() /= rhs.y(); return *this; }
-			float2& operator*=(float s) { x() *= s; y() *= s; return *this; }
-			float2& operator/=(float s) { x() /= s; y() /= s; return *this; }
+			float2& operator+=(const float2& rhs) { data[0] += rhs.data[0]; data[1] += rhs.data[1]; return *this; }
+			float2& operator-=(const float2& rhs) { data[0] -= rhs.data[0]; data[1] -= rhs.data[1]; return *this; }
+			float2& operator*=(const float2& rhs) { data[0] *= rhs.data[0]; data[1] *= rhs.data[1]; return *this; }
+			float2& operator/=(const float2& rhs) { data[0] /= rhs.data[0]; data[1] /= rhs.data[1]; return *this; }
+			float2& operator*=(float s) { data[0] *= s; data[1] *= s; return *this; }
+			float2& operator/=(float s) { data[0] /= s; data[1] /= s; return *this; }
 
 			bool operator==(const float2& rhs) const { return x() == rhs.x() && y() == rhs.y(); }
 			bool operator!=(const float2& rhs) const { return !(*this == rhs); }
