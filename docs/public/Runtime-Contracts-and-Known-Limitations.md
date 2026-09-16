@@ -74,14 +74,17 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 - 可通过 `SafetyChecksEnabled=false` 或编译期全关安全宏（`-p:DefineConstants=`）彻底关闭，关闭后不再检测冲突。
 - 依赖调度之下冲突不会误报：前一 Job 结束即释放其对容器的主持有声明，后继 Job 正常接续。冲突检测只在运行时出现真正交错的访问时才触发，并非调度期确定性检测。
 
-### 登记机制与两条必须保持的顺序契约
+### 登记机制与四条必须保持的顺序/唯一性契约
 
-读写持有登记的状态由 `SafetyHandleManager` 维护，其中有两处顺序是**正确性前提**，改动前请先读此处与代码注释：
+读写持有登记的状态由 `SafetyHandleManager` 维护，其中有四处是**正确性前提**，改动前请先读此处与代码注释：
 
-1. **写声明按 Job 完成点释放，不得按 tile 释放。** 同一 Job 的所有 tile 共享一个执行上下文（ctx），逐 tile 释放会先把该 ctx 的 `_ctxWrites` 条目移除，而仍在运行的 tile 随后登记时会把 index 写进一份被丢弃的 list，释放循环再也扫不到它 → `_writerCtx[index]` 永久残留该 ctx，`Complete()` 后主线程访问被**永久误拦**。同理 `ReleaseWritesForContext` 只清空条目、不删除条目。
+1. **写声明按 Job 完成点释放，不得按 tile 释放。** 同一 Job 的所有 tile 共享一个执行上下文（ctx），逐 tile 释放会先把该 ctx 的 `_ctxWrites` 条目移除，而仍在运行的 tile 随后登记时会把 index 写进一份被丢弃的 list，释放循环再也扫不到它 → `_writerCtx[index]` 永久残留该 ctx，`Complete()` 后主线程访问被**永久误拦**。`ReleaseWritesForContext` 的实现是 `TryRemove(ctx)` + 清空该 list（`AtomicSafetyHandle.cs`）；ctx 为每次调度唯一，故条目必须移除，否则字典随 Job 数无界增长。
 2. **读者计数登记的校验必须在 `set.Add` 之后。** 若「先校验条目现役、再 Add」，两步之间条目可能被并发释放移除，`+1` 会落在已丢弃的集合上而永不配对 → `_readerCount` 永久为正，同样导致主线程被永久误拦。
 
-两条都是先在 Native 后端实测复现（`tools/SafetyLockOverheadBench/repro`，N=262144 / batch=16384，曾于第 14 次尝试触发）、修复后 0 触发的回归项，并由测试 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 持续守护。
+3. **「已完成」的发布必须晚于声明释放。** 完成计数（`ManagedCompletion.Remaining`）归零发生在释放之前；若完成判定只看计数，主线程会在「计数已归零、声明未释放」的窗口内 `Complete()` 返回并立即访问容器 → 被误拦。Managed 侧用 `_declReleased` 门把发布推到释放之后（`Signal` 中：释放写/读声明 → 置位 → `_done.Set()`）。
+4. **并行冲突检测的 ctx 必须每次调度唯一。** 不得用池化对象的哈希充当 ctx（box 复用 ⇒ 相邻两次 Job 同 ctx ⇒ 幂等写登记与 `_readMark` 快路径跨 job 串味）。Managed 侧由 `ManagedJobScheduler.NextCtx()` 分配，tile 从所属 Job 的 completion 取，槽位复用时 `Reset` 清 `HostCtx`。
+
+前两条先在 Native 后端实测复现（`tools/SafetyLockOverheadBench/repro`，N=262144 / batch=16384，曾于第 14 次尝试触发）、修复后 0 触发的回归项；第 3、4 条属 Managed 回退后端的同一根因族（2026-09-16 修复，见 `NativeArray-Index-Safety-Overhead-and-Fixes.md` §七）。四条都由测试 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 与探针 `tools/SafetyInterceptProbe` 持续守护。
 
 另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）。
 

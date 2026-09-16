@@ -4,8 +4,9 @@
        CheckReadAndThrow 的"逐访问登记快路径"（_readMark / _readMarkEpoch）不能把违规访问吞掉。
        判据：job 运行期主线程读或写该容器必须抛异常；Complete() 后主线程访问必须正常。
        运行环境：Debug 与 Release 都有效（ENTJOY_SAFETY / ENTJOY_SAFETY_BOUNDS 都编译同一段追踪代码）。
-       必须用**默认（Native）调度器**：Managed 回退后端的完成协议缺陷会让下一轮 job 的读登记失效
-       （见 EntJoy docs/public/Runtime-Contracts-and-Known-Limitations.md 的 Known limitation 条）。
+       两条后端都跑：入口是 JobScheduler.Initialize()，所以缺 NativeDll 时自动落到 Managed（2026-09-16 起
+       Managed 侧三处完成协议缺陷已修，隐藏 bin/NativeDll.dll 后本探针同样全绿；见 §七）。
+       注意必须在 EntJoy 目录下运行：NativeDll 按 CWD 搜索，在游戏仓目录下会捡到游戏侧的 .godot 构建产物。
        运行方式：dotnet run 指定本工程（可选加参数 -c Debug） -->
 
   <PropertyGroup>

@@ -198,6 +198,14 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
+        // 每次调度的唯一并行冲突检测 ctx（同一 job 的所有 tile 共享，job 之间绝不重复）。
+        // 不能用 box 哈希：box 由 SingleCache/ParallelCache 池化复用，相邻两次调度会拿到同一 ctx，
+        // 幂等写登记与 _readMark 快路径就会跨 job 串味（见 docs/public/NativeArray-Index-Safety-Overhead-and-Fixes.md §七 成因 2）。
+        // 基准取 2^40：与 32 位 ctx（native 侧指针/哈希派生）不可能相等，且低 32 位在 _readMark 打包下仍唯一。
+        private static long _ctxCounter;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static nint NextCtx() => (nint)((1L << 40) + Interlocked.Increment(ref _ctxCounter));
+
         // ──────────────────── 调度 API ────────────────────
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -442,8 +450,8 @@ namespace EntJoy.JobSystem.Managed
             // 对齐 Native 回调：设置执行深度，使 EntityManager 的 IsExecutingJob 检测
             // 在 Managed fallback 下同样生效——否则 job 内结构变更会自等待自 → 死锁。
             NativeJobCore.EnterJobExecution();
-            // 并行写冲突检测 ctx：同一 job 的 boxed 实例唯一（tile 复用同箱 → 同 ctx 放行）
-            nint ctx = RuntimeHelpers.GetHashCode(task.Job);
+            // 并行写冲突检测 ctx：取本 job 调度时分配的唯一 ctx（同一 job 的所有 tile 共用 → 同 ctx 放行）
+            nint ctx = task.Completion?.HostCtx ?? 0;
             nint prevCtx = EntJoy.Collections.JobIdentity.CurrentContext;
             EntJoy.Collections.JobIdentity.SetCurrentContext(ctx);
             try
@@ -457,7 +465,9 @@ namespace EntJoy.JobSystem.Managed
             finally
             {
                 NativeJobCore.ExitJobExecution();
-                EntJoy.Collections.SafetyHandleManager.ReleaseWritesForContext(ctx);
+                // 写声明不在此（tile 级）释放：tile 级释放会与仍在运行的同 ctx tile 竞争——登记可能落进一份
+                // 已被 TryRemove 的 list，从此无人清理 → _writerCtx 残留该 ctx → Complete() 后主线程被误拦。
+                // 改由完成点 ManagedJobHandle.Signal 统一释放（与 Native 侧 NativeJobCore.Cleanup 一致）。
                 EntJoy.Collections.JobIdentity.SetCurrentContext(prevCtx);
                 // completion 信号
                 task.Completion?.Signal();
@@ -513,8 +523,8 @@ namespace EntJoy.JobSystem.Managed
 
             // 先 box job（避免 ref 参数在 lambda 中捕获）
             var boxedJob = SingleCache<T>.Box(job);
-            // 托管 job 并行冲突检测 ctx：box 哈希，同一 job 所有 tile 共享（与 ExecuteTileTask 一致）
-            completion.HostCtx = RuntimeHelpers.GetHashCode(boxedJob);
+            // 托管 job 并行冲突检测 ctx：每次调度唯一（同一 job 所有 tile 共享，见 NextCtx 注释）
+            completion.HostCtx = NextCtx();
 
             void EnqueueSingle()
             {
@@ -576,8 +586,8 @@ namespace EntJoy.JobSystem.Managed
             Interlocked.Exchange(ref completion.Remaining, taskCount);
 
             var box = ParallelCache<T>.Box(job);
-            // 托管 job 并行冲突检测 ctx：box 哈希，同一 job 所有 tile 共享（与 ExecuteTileTask 一致）
-            completion.HostCtx = RuntimeHelpers.GetHashCode(box);
+            // 托管 job 并行冲突检测 ctx：每次调度唯一（同一 job 所有 tile 共享，见 NextCtx 注释）
+            completion.HostCtx = NextCtx();
             completion.OnCompleted(() => ParallelCache<T>.ReleaseBox(box));
 
             void EnqueueTiles()
