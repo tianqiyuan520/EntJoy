@@ -28,7 +28,9 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Build solution
-        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false
+        # EntJoySample 默认样例集里有多个非注释 Main（ManyJobsBenchTest / 09_ECS / 12_EntityNativeLookup）
+        # ⇒ 必须显式指定入口，否则 CS0017。
+        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
 
       - name: Build ECS tests
         run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
@@ -125,7 +127,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
+      # 生成物 CMake 在 WIN32 下无条件编 imgui 调试面板（ENTJOY_IMGUI_ENABLED=1）
+      # ⇒ 必须带出 src/NativeDll/thirdParty/imgui 子模块（imgui @ v1.91.6）。
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
