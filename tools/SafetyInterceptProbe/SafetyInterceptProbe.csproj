@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 安全检查语义负向用例（P1-10 回归）：
+       CheckReadAndThrow 的"逐访问登记快路径"（_readMark / _readMarkEpoch）不能把违规访问吞掉。
+       判据：job 运行期主线程读或写该容器必须抛异常；Complete() 后主线程访问必须正常。
+       运行环境：Debug 与 Release 都有效（ENTJOY_SAFETY / ENTJOY_SAFETY_BOUNDS 都编译同一段追踪代码）。
+       必须用**默认（Native）调度器**：Managed 回退后端的完成协议缺陷会让下一轮 job 的读登记失效
+       （见 EntJoy docs/public/Runtime-Contracts-and-Known-Limitations.md 的 Known limitation 条）。
+       运行方式：dotnet run 指定本工程（可选加参数 -c Debug） -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SafetyInterceptProbe</AssemblyName>
+    <RootNamespace>SafetyInterceptProbe</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
+  </ItemGroup>
+
+</Project>

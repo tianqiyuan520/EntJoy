@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
@@ -60,7 +60,6 @@ namespace NativeTranspiler.Analyzer
                 try
                 {
                 // =====================================================================
-                // CodeGenPipeline（阶段化编排；历史遗留内联于 RegisterSourceOutput）
                 //   0) 空集短路
                 //   1) Validate  —— 收集依赖 + NativeTranspileValidator 校验，出错即停
                 //   2) Resolve   —— 收集用户结构体、后端选择、输出目录、公共头
@@ -96,16 +95,29 @@ namespace NativeTranspiler.Analyzer
                     if (!NativeTranspileValidator.ValidateMethod(method, ctx.Compilation, out var diags))
                         allErrors.AddRange(diags);
                 }
+                var invalidJobs = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+                int jobLevelErrorCount = 0;
                 foreach (var job in ctx.JobStructSymbols)
                 {
                     if (job == null) continue;
                     if (!NativeTranspileValidator.ValidateJobStruct(job, ctx.Compilation, out var diags))
+                    {
+                        jobLevelErrorCount += diags.Count(d => d.Severity == DiagnosticSeverity.Error);
                         allErrors.AddRange(diags);
+                        invalidJobs.Add(job);
+                    }
                 }
                 // 诊断一律上报；只有 Error 才终止生成。
                 // （NT023/NT024 是"事实告知"类 Warning —— 既不能憋着不报，也不能因为它们而整个项目不生成产物。）
                 foreach (var diag in allErrors) spc.ReportDiagnostic(diag);
-                if (allErrors.Any(d => d.Severity == DiagnosticSeverity.Error))
+                // E-1（DX 修复）：**单个 job 的校验错误不再终止整批生成**。
+                // 旧行为是"只要有 job 校验失败 → 整个 NativeTranspiler.Bindings.g.cs 不产出"，
+                // 下游表现为几十条 CS0234「找不到 NativeTranspiler.Bindings」，把唯一有用的 NT008
+                // （例如漏写 `using EntJoy.JobSystem;` 导致 job 没实现任何接口）埋在噪声里。
+                // 现在：把校验失败的 job 排除出生成集，其余 job 照常产出绑定；Error 仍然让编译失败，
+                // 但错误信息只剩 NT008/NT028 这一组，且**不再有 CS0234 级联**。
+                int fatalErrorCount = allErrors.Count(d => d.Severity == DiagnosticSeverity.Error) - jobLevelErrorCount;
+                if (fatalErrorCount > 0)
                     return;
 
                 var outputDir = Path.Combine(ctx.GetProjectDirectory(), "NativeTranspiler_Generated");
@@ -122,9 +134,13 @@ namespace NativeTranspiler.Analyzer
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
                 var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
 
-                // 收集被标记的方法和 Job 结构体
+                // 收集被标记的方法和 Job 结构体（校验失败的 job 已排除，见上）
                 var validMarkedMethods = ctx.MethodSymbols.Where(m => m != null).Cast<IMethodSymbol>();
-                var validJobs = ctx.JobStructSymbols.Where(j => j != null).Cast<INamedTypeSymbol>();
+                var validJobs = ctx.JobStructSymbols.Where(j => j != null && !invalidJobs.Contains(j!)).Cast<INamedTypeSymbol>();
+                if (invalidJobs.Count > 0)
+                    spc.ReportDiagnostic(Diagnostic.Create(NativeTranspileValidator.PartialBindingsWarning,
+                        invalidJobs.First().Locations.FirstOrDefault(), invalidJobs.Count,
+                        string.Join(", ", invalidJobs.Select(j => j!.Name))));
 
                 // 收集用户自定义结构体（用于生成 ISPC 头文件）
                 var userStructs = CollectUserStructTypes(validMarkedMethods, validJobs, ctx.Compilation);
@@ -493,7 +509,6 @@ namespace NativeTranspiler.Analyzer
 
                 // ─── D1：清理陈旧生成物（见 PruneStaleGeneratedFiles 注释）───
                 // "本次产物" 直接取自 CodeGenIo 录制到的写入集合 —— 不靠手写文件名推导，
-                // 避免漏掉 job 的 .h / 依赖头文件而误删（实测踩过两次）。
                 // ⚠ 位置必须在 **所有 CodeGenIo 写入之后**（含 run_clangcl.bat / CMakeLists.txt）。
                 var trackedOutputs = CodeGenIo.EndOutputTracking();
                 if (trackedOutputs != null && cppFiles.Count + ispcFiles.Count > 0)
@@ -861,7 +876,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// F-11：写下"本次产物是哪个生成器版本生成的"（生成器程序集内容哈希）。
         /// NativeCompileTask.WarnIfGeneratedArtifactsStale 用它判定"生成器改了但产物没重新生成"：
-        /// Roslyn 的 CoreCompile 内容哈希门控会让这种情况静默发生（改了生成器，跑的却是上一版产物）。
         /// 用内容哈希而不是时间戳，避免"重编但内容未变"造成的误报。
         /// </summary>
         private static void WriteGeneratorStamp(string outputDir)
@@ -1152,11 +1166,18 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             //   —— 托管 JIT 会把同样的平凡帮助函数内联，拆批相当于让 C++ 侧白吃亏。
             // 编译时间差距在小规模下可忽略（63 文件：单 TU 27s vs 批 8 25s）⇒ 小规模默认单 TU。
             sb.AppendLine("set(CMAKE_UNITY_BUILD ON)");
-            int unityBatch = cppFiles.Count + ispcFiles.Count <= 96 ? 0 : 8;
-            sb.AppendLine($"set(CMAKE_UNITY_BUILD_BATCH_SIZE {unityBatch})"
-                + (unityBatch == 0
-                    ? "   # 0 = 单 TU：让 job 与它调用的静态帮助函数同 TU 可内联（见上方实测）"
-                    : "   # 大规模：保留并行/增量编译，代价是跨 TU 调用不可内联"));
+            // 2026-09-16 决策：**不分数量，任何规模都单 TU**。
+            // 为什么取消阈值：阈值是在回答一个"编译时间"问题，却在决定一个**运行期**问题 ——
+            //   拆批会把生成内核与它调用的静态帮助函数（CpuOrca/CpuFlow/CpuObstacle/CpuScan 的 static，
+            //   带 GENERATED_API=dllexport）分到不同 TU ⇒ 无 LTO ⇒ 不可内联 ⇒ 上面实测的 ~10% Melee 回归。
+            //   Melee 是**每一步**都付的成本，编译只在改动时付一次 ⇒ 不该让工程规模去决定这件事。
+            // 已告知并接受的代价：① 单 TU 是 ClangCL **串行**编译，`--parallel` 用不上 —— 大工程全量编译显著变慢
+            //   （EntJoySample 207 cpp + 40 ispc：单 TU ~33s vs 26 TU 并行 ~1.6s）；
+            //   ② 增量粒度退化为"整份"：改任何一个发射件都要重编整个 TU（本仓 169 文件约数十秒）。
+            // ⇒ 将来若某工程编译时间不可接受，**不要**恢复阈值分支（那会再次静默回归 ~10% Melee）：
+            //   正确做法是"按配置区分"（开发档拆批 / 基准与交付档单 TU），且改动必须带 **Melee 段验收**。
+            sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 0)"
+                + "   # 0 = 单 TU：让 job 与它调用的静态帮助函数同 TU 可内联（见上方实测）");
             sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
             sb.AppendLine();
             sb.AppendLine("include_directories(${CMAKE_CURRENT_SOURCE_DIR})");
@@ -1251,12 +1272,11 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             //   无 fast-math 的静态库，再链回同一个 NativeTranspiled.dll，使 AutoSIMD
             //   导出符号仍从该 DLL 导出、被托管绑定 P/Invoke。
             //   Unity Build 无法按源文件区分编译 flag，故独立静态库是可靠做法。
-            //   precise 库同样继承 CMAKE_UNITY_BUILD（批 8），与主库同构，
-            //   改一个 AutoSIMD 文件只重编其所在批 → 增量编译友好。
+            //   precise 库同样继承 CMAKE_UNITY_BUILD（与主库一致：**单 TU**）。
             // ============================================================
             if (autoSimdCppFiles.Count > 0)
             {
-                // 确定性排序：precise 库的 unity 批成员稳定，改一个 AutoSIMD 文件只重编其所在批。
+                // 确定性排序：precise 库的 unity 成员稳定（单 TU ⇒ 全库一个 TU，排序只为发射文本确定）。
                 var autoSimdSorted = autoSimdCppFiles.OrderBy(f => f, StringComparer.Ordinal).ToList();
                 sb.AppendLine("# --- AutoSIMD precise static lib (fast-math OFF) ---");
                 sb.AppendLine("set(AUTOSIMD_SOURCES");
@@ -1447,7 +1467,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");
             sb.AppendLine("endif()");
             sb.AppendLine();
-            // 注：曾试过对 NativeTranspiled 开 INTERPROCEDURAL_OPTIMIZATION（/GL+/LTCG、-flto）
             // 来解决同一个"跨 TU 不可内联"问题 —— **实测无收益**（ΔMelee 从 −3.8±4.6 变到 −2.5±2.6ms，
             // 即在噪声内），而且 /GL 会拖慢链接。真正的解法是上面的 unity 批大小（单 TU），故此处不开 IPO。
 

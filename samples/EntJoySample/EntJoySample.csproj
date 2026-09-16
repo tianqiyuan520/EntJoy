@@ -11,6 +11,9 @@
 
 		<!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<!-- 本工程有多个 sample 的 Main（其余为注释态）；用 ENTJOY_STARTUP 指定入口，
+		     这样 -p:ENTJOY_STARTUP=... 只影响本工程，不会传播到库工程（否则报 CS2017 /main）。 -->
+		<StartupObject Condition="'$(ENTJOY_STARTUP)' != ''">$(ENTJOY_STARTUP)</StartupObject>
 		<!-- CS8500: 源生成器生成的 N 元组查询对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
 		<NoWarn>$(NoWarn);8500</NoWarn>
 	</PropertyGroup>
@@ -19,6 +22,19 @@
 		<Compile Remove="NativeTranspiler_Generated\**" />
 		<EmbeddedResource Remove="NativeTranspiler_Generated\**" />
 		<None Remove="NativeTranspiler_Generated\**" />
+	</ItemGroup>
+
+	<!-- 同一程序集内只允许一个「重型对比样本」处于活动态：
+	     IJobChunkMoveCompareTest 与 AutoSIMDTest（IJobEntityAutoSIMDTest.cs + Case6_MoveJob/MoveJob.cs）
+	     定义了同名 job/组件（HeavyJobChunkCpp / HeavyJobEntityCpp / MovePosition / MoveVelocity），
+	     而生成器的 NativeExports 以**简单名**为键 ⇒ 同时活动必然 CS0102/CS0111 冲突（实测踩到）。
+	     默认（不传该属性）= 原行为：AutoSIMDTest 活动、MoveCompare 排除；
+	     `-p:ENTJOY_SAMPLE_SET=movecompare` = 反过来（跑托管 vs 原生对比时用）。 -->
+	<ItemGroup Condition="'$(ENTJOY_SAMPLE_SET)' != 'movecompare'">
+		<Compile Remove="02_IJobChunkECS\IJobChunkMoveCompareTest\**" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(ENTJOY_SAMPLE_SET)' == 'movecompare'">
+		<Compile Remove="03_NativeTranspiler\AutoSIMDTest\**" />
 	</ItemGroup>
 
 	<ItemGroup>

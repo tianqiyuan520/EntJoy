@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -14,6 +14,7 @@ namespace NativeTranspiler.Analyzer
     {
         /// <summary>
         /// 获取所有 bool 条件字段列表
+        /// 与 CppGenerator.GenerateImplementation 对静态方法的处理对齐。
         /// </summary>
         private static List<IFieldSymbol> GetBoolConditionalFields(INamedTypeSymbol jobStruct, Compilation compilation)
         {
@@ -76,6 +77,20 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#endif");
             sb.AppendLine();
 
+            // ─── 纯值字段打包：结构体定义放进头文件（声明与适配器都引用它），include guard 防重定义 ───
+            if (PackScalarsForJob(jobStruct))
+            {
+                var scalarsStruct = BuildScalarsStruct(jobStruct);
+                if (scalarsStruct.Length > 0)
+                {
+                    sb.AppendLine($"#ifndef __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
+                    sb.AppendLine($"#define __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
+                    sb.Append(scalarsStruct);
+                    sb.AppendLine("#endif");
+                    sb.AppendLine();
+                }
+            }
+
             // IJobEntity: 无独立 Execute 函数，循环体内联到 Adapter 中
             if (IsChunkJob(jobStruct))
             {
@@ -109,7 +124,6 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 收集 Job Execute 直接/间接调用的同程序集静态方法（用于生成 #include）。
-        /// 与 CppGenerator.GenerateImplementation 对静态方法的处理对齐（job 侧原先缺失）。
         /// </summary>
         private static HashSet<IMethodSymbol> CollectAllCalledStaticMethods(INamedTypeSymbol jobStruct, Compilation compilation)
         {
@@ -280,7 +294,16 @@ namespace NativeTranspiler.Analyzer
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 if (field.Type is IPointerTypeSymbol) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                sb.AppendLine($"    const {cppType}& {field.Name} = *{field.Name}_ptr;");
+                // 保持**引用**绑定：值绑定（`const T X = *X_ptr`）两次实测都无收益甚至更差
+                // （闸门比值 49.7 vs 47.2 噪声内；真实内核 Melee 比值 1.0287，5/6 轮变差）⇒ 别再试。
+                // 热循环的栈流量来自"同时存活约 22 个值 > ~14 个 GP 寄存器"，与绑定形式无关。
+                // 打包路径（ENTJOY_PACK_SCALARS=1）：纯值字段的 `X_ptr` 形参已被 `__scalars` 取代
+                //（见 BuildBatchJobParameters），所以绑定目标要改成结构体成员——成员名同为 `<field>_ptr`，
+                // 打开打包后多个 job 报 `use of undeclared identifier 'X_ptr'` 而构建失败。
+                string scalarSrc = PackScalarsForJob(jobStruct)
+                    ? $"__scalars->{field.Name}_ptr"
+                    : $"{field.Name}_ptr";
+                sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
             }
         }
 
@@ -310,6 +333,8 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 先用标量翻译器翻译 body（余量循环需要标量体）
+            // 体首指针别名声明的两轮"作用域收窄"（①单点下沉 ②按使用块复制）都已实测为负
+            // （②覆盖 18/28，Melee 比值仍 1.0402）⇒ 别再试；寄存器压力来自同时存活约 22 个值。
             var scalarTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct, indexParamName, indexParamName, useFastMath, /* scalar body, no SIMD */ false);
             var scalarBody = scalarTranslator.Translate(methodSyntax.Body);
 
@@ -330,7 +355,6 @@ namespace NativeTranspiler.Analyzer
             // 剩余下标（实测：1024 元素单批、index 0 处 return ⇒ 只有 index 0 被处理）。
             // ⚠ do-while 包裹**不能**解决这个问题（它只重定向 `break`，`return` 照样穿出去）——
             //   必须用一个立即调用的 lambda 包住体，`return;` 就变成"结束本次迭代"。
-            //   仅当体内真的出现 `return` 时才包，其余 job 的产物与改动前逐字相同（零性能影响）。
             bool bodyHasReturn = scalarBody.Contains("return;");
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
             sb.AppendLine("    {");
@@ -341,6 +365,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
             sb.AppendLine();
         }
+
 
         private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
         {
@@ -779,10 +804,90 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", parameters);
         }
 
+        // ── 标量形参打包（`ENTJOY_PACK_SCALARS`）──
+        // 动机（实测，docs §16.45(aa/ab)）：每个标量字段各占一个形参 ⇒ `MeleeSimJob` 生成 70+ 形参，
+        // 而 x64 只有 4 个整数实参寄存器，其余全部经调用者栈；热循环里每次取用都要从栈重载。
+        // 把"纯值字段"收进一个结构体、以单个指针传参，可把形参数降到 (数组字段 + 1)。
+        // 闸门实测（同输入、同内核体、只差参数形状）：快约 5%（10/10 同号）。
+        // 关闭方式：环境变量 `ENTJOY_PACK_SCALARS=0`（生成器进程环境），用于 A/B 与回归。
+        private static bool PackScalarsEnabled()
+        {
+            // 默认**关闭**：闸门实测表明"形参数降到 ~19 后打包已无收益"，而生产内核的真实收益
+            // 取决于 MeleeSimJob（102 形参）的端到端验证——尚未完成；且该改造需覆盖
+            // 批处理 / 非批处理 / ISPC 三条发射路径（后两者开启时会构建失败，实测）。
+            // 故保留为**可选实验开关**，默认不影响既有构建与产物。
+            // 打开方式：生成器进程设 `ENTJOY_PACK_SCALARS=1`（见 docs §16.45(ac)）。
+            var v = System.Environment.GetEnvironmentVariable("ENTJOY_PACK_SCALARS");
+            return v != null && v.Length > 0 && v[0] == '1';
+        }
+
+        /// <summary>打包只针对**批处理（IJobParallelFor 系）C++ 后端** job：其签名、适配器、局部绑定三处
+        /// 都由本文件同源生成，改造面自洽。两类必须排除：
+        /// ① 非批处理路径（专用执行函数 + 另一套参数构造）尚未纳入，强行套用会产出未声明的 `__scalars`；
+        /// ② **ISPC 后端 job**：它的 `_Batch` 由 `IspcGenerator.GenerateCppWrapper` 生成，而该产物在
+        ///    "auto refresh disabled" 下**只写缺失文件、不再重写**（实测 `MoveJob_..._wrapper.cpp` 的
+        ///    mtime 停在 2026-09-13）⇒ 打包改造永远传不到它；单 TU 下适配器的打包声明与 wrapper 的
+        ///    未打包定义同处一个翻译单元 ⇒ `conflicting types for '..._Batch'`（110 条错误，同一根因）。
+        /// 排除 ISPC 后两者都与既有构建一致。</summary>
+        private static bool PackScalarsForJob(INamedTypeSymbol jobStruct)
+            => PackScalarsEnabled() && IsParallelForJob(jobStruct) && !IsIspcBackedJob(jobStruct);
+
+        /// <summary>该 job 是否声明了 ISPC 后端（`[NativeTranspile(Target = BackendTarget.Ispc)]`）。
+        /// 用**属性类名 + Target 参数**判定，从而不需要 attrSymbol（本文件深处拿不到 compilation）。
+        /// 判定逻辑与 AttributeHelper.GetBackendTarget 对齐：ctor 第 0 参与命名参数 `Target` 都算。</summary>
+        private static bool IsIspcBackedJob(INamedTypeSymbol jobStruct)
+        {
+            foreach (var ad in jobStruct.GetAttributes())
+            {
+                if (ad.AttributeClass?.Name != Config.NativeTranspileAttribute) continue;
+                if (ad.ConstructorArguments.Length > 0 && ad.ConstructorArguments[0].Value is int c0
+                    && c0 == (int)NativeTranspiler.BackendTarget.Ispc)
+                    return true;
+                foreach (var na in ad.NamedArguments)
+                    if (na.Key == "Target" && na.Value.Value is int nv
+                        && nv == (int)NativeTranspiler.BackendTarget.Ispc)
+                        return true;
+            }
+            return false;
+        }
+
+        /// <summary>纯值字段（既不是 NativeArray/NativeList，也不是指针字段）——即打包对象。</summary>
+        private static List<IFieldSymbol> GetScalarFields(INamedTypeSymbol jobStruct)
+            => jobStruct.GetMembers().OfType<IFieldSymbol>()
+                .Where(f => !f.IsStatic
+                    && !NativeTranspiler.IsEntJoyNativeContainerType(f.Type)
+                    && f.Type is not IPointerTypeSymbol)
+                .ToList();
+
+        private static string GetScalarsStructName(INamedTypeSymbol jobStruct)
+            => $"__Scalars_{jobStruct.Name}";
+
+        /// <summary>生成标量结构体定义（放在批函数之前；每个 TU 内局部类型，名字带 job 名避免冲突）。
+        /// 字段名沿用 `<field>_ptr`，这样既有的"解引用绑定"语句只要改绑定目标即可。</summary>
+        private static string BuildScalarsStruct(INamedTypeSymbol jobStruct)
+        {
+            var scalars = GetScalarFields(jobStruct);
+            if (scalars.Count == 0 || !PackScalarsForJob(jobStruct)) return string.Empty;
+            var sb = new StringBuilder();
+            sb.AppendLine($"struct {GetScalarsStructName(jobStruct)} {{");
+            foreach (var f in scalars)
+            {
+                var cppType = NativeTranspiler.MapCSharpTypeToCpp(f.Type);
+                sb.AppendLine($"    const {cppType}* {f.Name}_ptr;");
+            }
+            sb.AppendLine("};");
+            sb.AppendLine();
+            return sb.ToString();
+        }
+
+        /// <summary>批函数的形参：数组/指针字段照旧逐个传，纯值字段全部走 `__scalars`。
+        /// 参数顺序必须与适配器侧的调用参数顺序一致（适配器由同一份字段遍历生成）。</summary>
         private static string BuildBatchJobParameters(INamedTypeSymbol jobStruct)
         {
             var parameters = new List<string> { "int __startIndex", "int __count" };
             AppendFieldParameters(jobStruct, parameters);
+            if (GetScalarFields(jobStruct).Count > 0 && PackScalarsForJob(jobStruct))
+                parameters.Add($"const {GetScalarsStructName(jobStruct)}* RESTRICT __scalars");
             return string.Join(", ", parameters);
         }
 
@@ -811,11 +916,12 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     parameters.Add($"{cppType} RESTRICT {field.Name}_ptr");
                 }
-                else
+                else if (!PackScalarsForJob(jobStruct))
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     parameters.Add($"{cppType}* RESTRICT {field.Name}_ptr");
                 }
+                // 打包开启时：纯值字段不进形参表（由 __scalars 携带）
             }
         }
 
@@ -1104,6 +1210,19 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
+            // 纯值字段打包：适配器是独立 TU，需要看到 __Scalars_<Job> 类型。
+            // 与 job 头文件里的定义共用同一 include guard ⇒ 二者同构、不会重复定义。
+            if (PackScalarsForJob(jobStruct))
+            {
+                var adapterScalarsStruct = BuildScalarsStruct(jobStruct);
+                if (adapterScalarsStruct.Length > 0)
+                {
+                    sb.AppendLine($"#ifndef __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
+                    sb.AppendLine($"#define __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
+                    sb.Append(adapterScalarsStruct);
+                    sb.AppendLine("#endif");
+                }
+            }
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 sb.AppendLine("#include \"SimdValue.h\"");
             if (IsChunkScheduledJob(jobStruct))
@@ -1665,6 +1784,7 @@ namespace NativeTranspiler.Analyzer
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 
                 // 生成适配函数
+                // 纯值字段打包：结构体定义必须在本 TU 可见（适配器是独立 TU）⇒ 放在函数之前。
                 sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, int __startIndex, int __count)");
                 sb.AppendLine("{");
                 
@@ -1700,12 +1820,24 @@ namespace NativeTranspiler.Analyzer
                         fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
                         callArgs.Add($"{field.Name}_ptr");
                     }
+                    else if (PackScalarsForJob(jobStruct))
+                    {
+                        // 纯值字段：进 __scalars 局部结构体（见 BuildScalarsStruct 的动机注释）
+                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                        fieldReads.AppendLine($"    scalarsLocal.{field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
+                    }
                     else
                     {
                         var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                         fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
                         callArgs.Add($"{field.Name}_ptr");
                     }
+                }
+
+                if (GetScalarFields(jobStruct).Count > 0 && PackScalarsForJob(jobStruct))
+                {
+                    fieldReads.Insert(0, $"    {GetScalarsStructName(jobStruct)} scalarsLocal;\n");
+                    callArgs.Add("&scalarsLocal");
                 }
 
                 sb.Append(fieldReads);

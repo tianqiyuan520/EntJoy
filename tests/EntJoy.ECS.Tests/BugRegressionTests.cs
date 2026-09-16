@@ -97,7 +97,10 @@ namespace EntJoy.ECS.Tests
             }
             foreach (var t in threads) t.Join();
 
-            Assert.Equal(threadCount * perThread, ecb.CommandCount);
+            Assert.Equal(threadCount * perThread, ecb.DestroyedEntityCount);
+            // `CommandCount` 数的是**命令**，而连续的 destroy 合并成一个连续段 = 一条命令（P0-4b）
+            // ⇒ 本用例里只写 destroy、中间无其它命令，故恰好 1 条。
+            Assert.Equal(1, ecb.CommandCount);
             ecb.Dispose();
         }
 

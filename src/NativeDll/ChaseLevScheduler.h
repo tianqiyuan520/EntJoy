@@ -125,10 +125,23 @@ namespace JobSystem
 
         // ── 自适应自旋参数（WorkerLoop park 段）──
         // 执行后拉满 → 连续调度零唤醒；空转退火 → 快速让出 CPU；activeTasks>0 用更大窗口。
+        // A/B 旋钮（`ENTJOY_SPIN_BUSY=<pause 次数>`，默认 8192 = 原行为）：_mm_pause 在 Zen4 约
+        // 35-40 cycle ≈10ns ⇒ 8192 次 ≈ 82µs 自旋窗，而本工作负载单批墙钟仅约 43µs ⇒ 空转 worker
+        // 在"有活但抢不到"时实际是全程自旋而非退火。该旋钮只为量化这一段，不改变任何语义。
         static constexpr uint32_t kSpinBase = 256;
         static constexpr uint32_t kSpinMax = 4096;
         static constexpr uint32_t kSpinBusy = 8192;
         static constexpr uint32_t kSpinMin = 64;
+        static uint32_t SpinBusyCap() noexcept
+        {
+            static const uint32_t cap = []() -> uint32_t {
+                const char* v = std::getenv("ENTJOY_SPIN_BUSY");
+                if (v == nullptr) return kSpinBusy;
+                const long long n = std::atoll(v);
+                return n > 0 ? static_cast<uint32_t>(n) : kSpinBusy;
+            }();
+            return cap;
+        }
         // workerCap 令牌标记：firstTile==UINT32_MAX 为参与令牌，执行体原子认领 nextTile（并行度 ≤ 令牌数）。
         static constexpr uint32_t kClaimTokenMarker = UINT32_MAX;
 

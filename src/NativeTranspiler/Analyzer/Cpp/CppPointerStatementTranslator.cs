@@ -110,6 +110,29 @@ namespace NativeTranspiler.Analyzer
             TranslateExpression(assignment.Right);
         }
 
+        /// <summary>该成员访问是否处于"纯读"上下文（不是赋值/复合赋值的左值、也不是自增自减的操作数）。
+        /// 只有纯读才可换成返回值访问器；其余一律保留返回引用的访问器。</summary>
+        private static bool IsReadContext(MemberAccessExpressionSyntax memberAccess)
+        {
+            switch (memberAccess.Parent)
+            {
+                case AssignmentExpressionSyntax assign when assign.Left == memberAccess:
+                    return false;
+                case PrefixUnaryExpressionSyntax pre
+                    when (pre.IsKind(SyntaxKind.PreIncrementExpression)
+                       || pre.IsKind(SyntaxKind.PreDecrementExpression))
+                    && pre.Operand == memberAccess:
+                    return false;
+                case PostfixUnaryExpressionSyntax post
+                    when (post.IsKind(SyntaxKind.PostIncrementExpression)
+                       || post.IsKind(SyntaxKind.PostDecrementExpression))
+                    && post.Operand == memberAccess:
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             var exprType = _semanticModel.GetTypeInfo(memberAccess.Expression).Type;
@@ -164,6 +187,16 @@ namespace NativeTranspiler.Analyzer
                     _builder.Append(".capacity()");
                     return;
                 }
+            }
+
+            // float2 读路径改用**值**访问器 xr()/yr()：x()/y() 返回引用，会让 `float2 q = p[i]`
+            // 的读退化成两次 4 字节标量读（逐元素热循环实测 2.3× 代价，见 NativeMath.h 注释）。
+            // 只在"纯读"上下文改写；赋值/复合赋值/自增减的左值必须保留引用版本。
+            if (memberName is "x" or "y" && IsReadContext(memberAccess))
+            {
+                TranslateExpression(memberAccess.Expression);
+                _builder.Append(memberName == "x" ? ".xr()" : ".yr()");
+                return;
             }
 
             base.TranslateMemberAccess(memberAccess);

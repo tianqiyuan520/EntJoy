@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -257,9 +258,28 @@ namespace JobSystem
     // ============================================================
     // Scheduler
     // ============================================================
-    static bool ResolveWorkerAffinityEnabled() noexcept
+    // A/B（`ENTJOY_SCHED_PRIO=1`，默认关）：把**提交线程自身**抬到 ABOVE_NORMAL（worker 保持 NORMAL）。
+    // 动机（§7p）：单发 schedule+complete 口径下，地板 8.2 µs 里有 ~6.6 µs 是"提交线程被唤醒的
+    // worker 抢占后回不来"。进程 `PriorityClass=High` 已实测**无效**（worker 线程被显式设为 NORMAL，
+    // 不受进程类影响）⇒ 必须在线程级抬。每线程只设一次（thread_local），不进热路径。
+    static void EnsureSchedThreadPriority() noexcept
     {
-        // 默认关闭 CPU 亲和性：worker 交 OS 自由调度（避免 SMT 双线程死绑共享执行单元）。
+#if defined(_WIN32)
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_SCHED_PRIO");
+            return v != nullptr && v[0] == '1';
+        }();
+        if (!enabled) return;
+        static thread_local bool done = false;
+        if (done) return;
+        done = true;
+        ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        g_schedPrioApplied.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+
+    static bool ResolveWorkerAffinityEnabled() noexcept
+    {        // 默认关闭 CPU 亲和性：worker 交 OS 自由调度（避免 SMT 双线程死绑共享执行单元）。
         // ENTJOY_WORKER_AFFINITY=1 可显式开启（无 SMT / 独占机器场景）。
         std::string value;
 #if defined(_WIN32)
@@ -323,6 +343,8 @@ namespace JobSystem
             resolved = std::min(resolved, kMaxTrackedWorkers);
             if (auto scheduler = LoadChaseLevScheduler(); scheduler && scheduler->IsRunning()) return true;
             g_numThreads.store(resolved, std::memory_order_relaxed);
+            // 物理核数在此刷新（冷路径一次；"小 job 不超订物理核"的上限判定要用它）。
+            RefreshPhysicalCoreCount();
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
@@ -393,6 +415,29 @@ namespace JobSystem
         // 先把 main 线程缓存的 batch storage 交还共享池再清空；worker 已 join，其 thread_local 缓存已交还。
         FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
+        // 批上下文池同理（A）：主线程缓存交还共享池后清空。
+        FlushBatchContextCacheToSharedPool();
+        ClearBatchContextPool();
+        // 诊断收尾：`ENTJOY_DIAG_NATIVE_PHASE=1` 时打印 Complete 分段（未设该变量时为空操作）。
+        DiagPhase::Dump();
+        // 诊断收尾：`ENTJOY_DIAG_NATIVE_SCHED=1` 时打印 Schedule 分段（未设该变量时为空操作）。
+        SchedPhase::Dump();
+        // 小 job 物理核封顶策略的可观测性（每次 Shutdown 一行，便于判定 A/B 臂是否真的生效；
+        // 曾因一次性 static 查询失败导致"封顶静默不生效"，出现无效 A/B 臂）。
+        const char* physCapEnv = std::getenv("ENTJOY_PHYSCAP_SMALLJOB");
+        std::printf("[JOBPHYS] physicalCores=%d workerThreads=%d smalljobPhysCap=%s cappedJobs=%llu\n",
+            g_physicalCores.load(std::memory_order_relaxed),
+            g_numThreads.load(std::memory_order_relaxed),
+            (physCapEnv != nullptr && physCapEnv[0] == '0') ? "OFF(=0)" : "ON(default)",
+            (unsigned long long)g_physCapApplied.load(std::memory_order_relaxed));
+        const char* deferEnv = std::getenv("ENTJOY_DEFER_WAKE");
+        const char* prioEnv = std::getenv("ENTJOY_SCHED_PRIO");
+        std::printf("[JOBPHYS] deferWake=%s flushes=%llu | schedPrio=%s applied=%llu\n",
+            (deferEnv != nullptr && deferEnv[0] == '1') ? "ON" : "OFF",
+            (unsigned long long)g_deferredWakeFlushes.load(std::memory_order_relaxed),
+            (prioEnv != nullptr && prioEnv[0] == '1') ? "ON" : "OFF",
+            (unsigned long long)g_schedPrioApplied.load(std::memory_order_relaxed));
+        std::fflush(stdout);
         // 先交还 main 缓存中的 state 再清空；worker 已 join 交还，故清空覆盖全部 state。
         FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
@@ -493,6 +538,7 @@ namespace JobSystem
     // Schedule 一律异步提交（对齐 IJob/IJobFor）。
     JobHandle Scheduler::ScheduleParallelFor(void (*func)(void*, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
+        EnsureSchedThreadPriority();
         if (g_shuttingDown.load(std::memory_order_acquire))
             return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
@@ -508,7 +554,8 @@ namespace JobSystem
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
-        auto* bc = new GeneralBatchContext{ func, nullptr, context, cleanup };
+        auto* bc = AcquireGeneralBatchContext();
+        *bc = GeneralBatchContext{ func, nullptr, context, cleanup };
         bc->funcHash = funcHash;
         // General 路径默认"等量 tile"（配合批量认领既均衡又低争用）；g_guidedEnabled 开启时走 guided。
         const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
@@ -550,7 +597,11 @@ namespace JobSystem
                 }
             }
             batch->tiles = storage->tileBuffer;
-            batch->workerCount = targetWorkers;
+            // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
+            batch->workerCount = static_cast<uint32_t>(
+                ApplyPhysCoreCapForSmallJob(
+                    ResolveWorkScaledWorkerTarget(funcHash, length, batch->tileCount, rc),
+                    batch->tileCount, length));
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
             PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -605,10 +656,117 @@ namespace JobSystem
     }
 
     // ---------- IJobParallelForBatch ----------
+    // ============================================================
+    // 原生 Schedule 分段诊断（`ENTJOY_DIAG_NATIVE_SCHED=1`）
+    //
+    // 背景：`gridsearch/07` §7e 实测每 job 调度成本 ∝ 唤醒 worker 数（斜率 ~0.5 µs/worker），
+    // 其中 ~1.0 µs 落在 `ScheduleParallelForBatch` 本体，但**内部**（JCC 求解 / 批上下文获取 /
+    // 存储与状态 / tile 回填 / 提交唤醒）的比例未知 ⇒ 无法判断该动哪一段（A1「job 形状缓存」
+    // 值不值得做，取决于 tile 段占多少）。
+    //
+    // 本诊断按段累加纳秒与次数，`Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）；
+    // 未启用时每段只有一次静态 bool 读，热路径零成本。
+    //
+    // 自带插桩税校准：每 entry 额外做一次相邻 Now()/Now() 对。读数用的是
+    // `steady_clock::now()`（Windows 下 QueryPerformanceCounter，~24 ns），每 entry 13 次调用
+    // 在 1 µs 量级上不可忽略；**净账**（raw − 13×calib）才是各段真实占比。
+    // ============================================================
+    namespace SchedPhase
+    {
+        std::atomic<uint64_t> g_sumNs[Count];
+        std::atomic<uint64_t> g_calls[Count];
+        std::atomic<uint64_t> g_entries;
+        std::atomic<uint64_t> g_submitEntries;
+
+        bool Enabled()
+        {
+            static const bool enabled = [] {
+                const char* v = std::getenv("ENTJOY_DIAG_NATIVE_SCHED");
+                return v != nullptr && v[0] == '1';
+            }();
+            return enabled;
+        }
+
+        void Dump()
+        {
+            if (!Enabled()) return;
+            static const char* kNames[Count] = {
+                "resolve(jcc+chunksize)",
+                "ctx(acquire+fields)",
+                "storage(Acquire)",
+                "state(CreateState)",
+                "state(field stores)",
+                "tile fill+batch tail",
+                "submit.ds+branch",
+                "submit.acct(inside)",
+                "submit.tokens(inside)",
+                "submit.notify(inside)",
+                "submit.other(outer)",
+                "calib(1x Now())" };
+            const uint64_t entries = g_entries.load(std::memory_order_relaxed);
+            const uint64_t submitEntries = g_submitEntries.load(std::memory_order_relaxed);
+            const uint64_t calibCalls = g_calls[Calib].load(std::memory_order_relaxed);
+            const uint64_t calibNs = calibCalls ? g_sumNs[Calib].load(std::memory_order_relaxed) / calibCalls : 0;
+            uint64_t sumAll = 0;
+            for (int i = 0; i < SubmitOther; ++i) sumAll += g_sumNs[i].load(std::memory_order_relaxed);
+            const double sumUs = sumAll / 1000.0;
+            const double perUs = entries ? sumUs / (double)entries : 0.0;
+            const double taxUs = (16.0 * static_cast<double>(calibNs)) / 1000.0;
+            std::printf("[NPSCHED] ScheduleParallelForBatch: entries=%llu submit=%llu net=%.3f us/entry | 1xNow()=%.1f ns -> tax(16 calls)=%.3f us/entry\n",
+                (unsigned long long)entries, (unsigned long long)submitEntries,
+                perUs - taxUs, static_cast<double>(calibNs), taxUs);
+            for (int i = 0; i < Count; ++i)
+            {
+                const uint64_t ns = g_sumNs[i].load(std::memory_order_relaxed);
+                const uint64_t n = g_calls[i].load(std::memory_order_relaxed);
+                std::printf("[NPSCHED]   %-24s calls=%llu total=%.1f us mean=%.3f us\n",
+                    kNames[i], (unsigned long long)n, ns / 1000.0, n ? (ns / 1000.0) / (double)n : 0.0);
+            }
+            // SubmitOther 是包住 submit.acct/tokens/notify 的外层段（那三段在调用链内部自记），
+            // 单独报余量；不计入上方 net 合计。
+            const uint64_t otherNs = g_sumNs[SubmitOther].load(std::memory_order_relaxed)
+                - g_sumNs[SubmitAcct].load(std::memory_order_relaxed)
+                - g_sumNs[SubmitTokens].load(std::memory_order_relaxed)
+                - g_sumNs[SubmitNotify].load(std::memory_order_relaxed);
+            std::printf("[NPSCHED]   submit.other residual mean=%.3f us (negative=非 Schedule 调用者也进了 acct/tokens/notify)\n",
+                entries ? (static_cast<double>(otherNs) / 1000.0) / (double)entries : 0.0);
+            // State 池命中分布：`CreateState` 0.50 µs/job 明显高于"热路径只有池弹出 + 原子写"的预期，
+            // 用它判定是否常态走 new HandleState（若如此则修池是确定收益）。
+            const uint64_t hit = g_statePoolHit.load(std::memory_order_relaxed);
+            const uint64_t refill = g_statePoolRefill.load(std::memory_order_relaxed);
+            const uint64_t brandNew = g_statePoolNew.load(std::memory_order_relaxed);
+            const uint64_t total = hit + refill + brandNew;
+            std::printf("[NPSCHED] CreateState: total=%llu | tls-hit=%llu(%.1f%%) pool-refill=%llu(%.1f%%) new=%llu(%.1f%%)\n",
+                (unsigned long long)total,
+                (unsigned long long)hit, total ? 100.0 * (double)hit / (double)total : 0.0,
+                (unsigned long long)refill, total ? 100.0 * (double)refill / (double)total : 0.0,
+                (unsigned long long)brandNew, total ? 100.0 * (double)brandNew / (double)total : 0.0);
+            const uint64_t recycled = g_stateRecycled.load(std::memory_order_relaxed);
+            const uint64_t recycledOnWorker = g_stateRecycledOnWorker.load(std::memory_order_relaxed);
+            std::printf("[NPSCHED] RecycleState: total=%llu (create=%llu, gap=%lld) | on-worker=%llu(%.1f%%) | sizeof(HandleState)=%llu B\n",
+                (unsigned long long)recycled, (unsigned long long)total,
+                (long long)total - (long long)recycled,
+                (unsigned long long)recycledOnWorker,
+                recycled ? 100.0 * (double)recycledOnWorker / (double)recycled : 0.0,
+                (unsigned long long)sizeof(HandleState));
+            std::printf("[NPSCHED] State thread slots (create | recycle):");
+            for (size_t i = 0; i < kStateThreadSlots; ++i)
+                std::printf(" [%zu]%llu|%llu", i,
+                    (unsigned long long)g_stateCreateByThread[i].load(std::memory_order_relaxed),
+                    (unsigned long long)g_stateRecycleByThread[i].load(std::memory_order_relaxed));
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+    }
+
     // Schedule 一律异步提交。
     JobHandle Scheduler::ScheduleParallelForBatch
     (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
+        EnsureSchedThreadPriority();
+        const bool spDiag = SchedPhase::Enabled();
+        uint64_t spMarks[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+        if (spDiag) spMarks[0] = MonotonicNowNs();
         if (g_shuttingDown.load(std::memory_order_acquire))
             return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
@@ -624,13 +782,15 @@ namespace JobSystem
         bool jccFine = false;
         int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash, &jccFine));
         int rc = CeilDiv(length, cs);
+        if (spDiag) spMarks[1] = MonotonicNowNs();
         // 单批次任务：走按依赖排序的池任务（异步）。
         if (rc <= 1)
             return ScheduleFastPath([func, context, length]() { func(context, 0, length); }, context, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
-        auto* bc = new GeneralBatchContext{ nullptr, func, context, cleanup };
+        auto* bc = AcquireGeneralBatchContext();
+        *bc = GeneralBatchContext{ nullptr, func, context, cleanup };
         bc->funcHash = funcHash;
         // General 路径：guided 按工作量切 tile（可变代价 job 负载均衡）。
         const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;
@@ -640,13 +800,16 @@ namespace JobSystem
             ? GuidedTileCount(length, static_cast<int>(targetWorkers),
                 guidedK, guidedFloor)
             : rc;
+        if (spDiag) spMarks[2] = MonotonicNowNs();
         BatchStorage* storage = nullptr;
         HandleState* state = nullptr;
         try
         {
             storage = AcquireBatchStorage(static_cast<uint32_t>(tileCount));
+            if (spDiag) spMarks[3] = MonotonicNowNs();
             auto* batch = &storage->batch;
             state = CreateState(false); batch->handle = state;
+            if (spDiag) spMarks[4] = MonotonicNowNs();
             batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
             batch->executeTile = &GeneralExecuteTile;
             batch->funcHash = funcHash;
@@ -655,6 +818,7 @@ namespace JobSystem
             batch->tileCount = static_cast<uint32_t>(tileCount);
             batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
+            if (spDiag) spMarks[5] = MonotonicNowNs();
             if (guided)
             {
                 BuildGuidedTiles(storage->tileBuffer, length,
@@ -674,12 +838,18 @@ namespace JobSystem
                 }
             }
             batch->tiles = storage->tileBuffer;
-            batch->workerCount = targetWorkers;
+            // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
+            batch->workerCount = static_cast<uint32_t>(
+                ApplyPhysCoreCapForSmallJob(
+                    ResolveWorkScaledWorkerTarget(funcHash, length, batch->tileCount, rc),
+                    batch->tileCount, length));
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
             PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
+            if (spDiag) spMarks[6] = MonotonicNowNs();
 
             auto* ds = dependency.State();
+            if (spDiag) spMarks[7] = MonotonicNowNs();
             if (!ds || ds->completed.load(std::memory_order_acquire))
             {
                 try { SubmitOrPending(batch); }
@@ -702,6 +872,24 @@ namespace JobSystem
                     AbortUnsubmittedBatch(batch, std::current_exception());
                     ReleaseState(state);
                 }
+            }
+            if (spDiag)
+            {
+                const uint64_t tEnd = MonotonicNowNs();
+                const uint64_t c0 = MonotonicNowNs();
+                const uint64_t c1 = MonotonicNowNs();
+                SchedPhase::Add(SchedPhase::Resolve, spMarks[1] - spMarks[0]);
+                SchedPhase::Add(SchedPhase::Ctx, spMarks[2] - spMarks[1]);
+                SchedPhase::Add(SchedPhase::Storage, spMarks[3] - spMarks[2]);
+                SchedPhase::Add(SchedPhase::StateCreate, spMarks[4] - spMarks[3]);
+                SchedPhase::Add(SchedPhase::StateFields, spMarks[5] - spMarks[4]);
+                SchedPhase::Add(SchedPhase::Tile, spMarks[6] - spMarks[5]);
+                SchedPhase::Add(SchedPhase::SubmitDs, spMarks[7] - spMarks[6]);
+                // SubmitAcct / SubmitPush 由 SubmitBatch 内部自记（嵌套在本段内）；
+                // 本段余量（依赖分支尾部、句柄构造、异常门控）记入 SubmitOther。
+                SchedPhase::Add(SchedPhase::SubmitOther, tEnd - spMarks[7]);
+                SchedPhase::Add(SchedPhase::Calib, c1 - c0);
+                SchedPhase::g_entries.fetch_add(1, std::memory_order_relaxed);
             }
             return JobHandle(state);
         }
@@ -738,6 +926,7 @@ namespace JobSystem
         ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind,
         uint32_t unitGeneration)
     {
+        EnsureSchedThreadPriority();
         if (g_shuttingDown.load(std::memory_order_acquire))
             return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
@@ -779,8 +968,8 @@ namespace JobSystem
             return JobHandle(st);
         }
 
-        ChunkBatchContext* cc = new ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup,
-            chunks, batches };
+        ChunkBatchContext* cc = AcquireChunkBatchContext();
+        *cc = ChunkBatchContext{ func, rangeFunc, entityRangeFunc, context, cleanup, chunks, batches };
         BatchStorage* storage = nullptr;
         HandleState* state = nullptr;
         try

@@ -34,6 +34,16 @@ public struct JobHandle
         if (_managedHandle.Completion != null) { _managedHandle.Complete(); return; }
         if (!_nativeHandle.IsValid) return;
         NativeJobScheduler.Complete(ref _nativeHandle);
+        // Complete **消费**句柄（Unity 同语义）：等待完成后立刻确定性释放 native HandleState，
+        // 不再把释放推迟到 .NET 终结器。动机（实测，docs/gridsearch/07 §7l / §7m）：
+        // 托管 NativeJobHandleBox 的终结器负责 ReleaseRawHandleForFinalizer ⇒ 回收发生在
+        // **终结器线程**、且只在 GC 批量发生时成批出现，于是调度线程的 TLS 状态缓存恒空：
+        // 每次 Schedule 都要 `new HandleState`（384 B），实测 `new` 占 CreateState 的 92～95%，
+        // 且运行中最多有半数 state 悬着不回收（25 s 内 ~5.2 万个 = ~20 MB）。
+        // 释放后 _nativeHandle 置空 ⇒ 已完成句柄继续当依赖/查询一律安全
+        // （IsValid=false ⇒ 视为"已完成、无依赖"）；重复 Complete 变为空操作。
+        NativeJobScheduler.Release(_nativeHandle);
+        _nativeHandle = default;
     }
 
     internal NativeJobHandle GetNativeDependency() => _nativeHandle;

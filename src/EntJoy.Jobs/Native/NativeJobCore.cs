@@ -1011,10 +1011,12 @@ namespace EntJoy.JobSystem
         {
             int size = Unsafe.SizeOf<T>();
             int totalSize = size + sizeof(int);
+            long t0 = CSharpPhaseDiag.Sampling("ctx.alloc") ? CSharpPhaseDiag.Now() : 0;
             IntPtr dataPtr = ContextPool.Rent(totalSize);
             *(int*)dataPtr = size;
             byte* jobPtr = (byte*)dataPtr + sizeof(int);
             Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)size);
+            if (t0 != 0) CSharpPhaseDiag.Add("ctx.alloc", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
             return (IntPtr)jobPtr;
         }
 
@@ -1177,8 +1179,11 @@ namespace EntJoy.JobSystem
 
         internal static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
         {
+            long t0 = CSharpPhaseDiag.Sampling("parfor.pinvoke") ? CSharpPhaseDiag.Now() : 0;
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
+            var ret = new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
+            if (t0 != 0) CSharpPhaseDiag.Add("parfor.pinvoke", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
+            return ret;
         }
 
         internal static void ReleaseRawHandleForFinalizer(IntPtr handle)

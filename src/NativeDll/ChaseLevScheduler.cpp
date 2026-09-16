@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <new>
 #include <thread>
 
@@ -21,6 +22,33 @@ namespace JobSystem
     // 全局 RangeTask 池定义
     // ============================================================
     RangeTaskPool ChaseLevScheduler::s_taskPool_;
+
+    // ── 停靠前"热窗"（A/B 开关：`ENTJOY_SPIN_HOT_US`，默认 0 = 关闭 = 旧行为）──
+    // 动机（`docs/gridsearch/07` §7k 实测）：worker 领到活后自旋预算拉到 kSpinMax(4096)，但空转期
+    // 每轮折半退火到 kSpinMin(64) 后 park；真实 job 间隔（≈357 µs）**大于**退火总时长（≈200 µs）
+    // ⇒ 每次 Schedule 都要 `notify_all` 广播唤醒 15 个停靠线程，实测 **16.6 µs/次 = Schedule 本体 90%**。
+    // 本窗口内把"有活"视同成立、继续用大窗自旋 ⇒ 广播退化为无等待者的 ≈0.15 µs。
+    // 代价：每次活动后多烧 hotUs 的 CPU（步均 143 ms 下可忽略）——**必须用真实步均验收**。
+    static uint64_t SpinHotNs() noexcept
+    {
+        static const uint64_t hotNs = []() -> uint64_t {
+            const char* v = std::getenv("ENTJOY_SPIN_HOT_US");
+            if (v == nullptr) return 0;
+            const long long us = std::atoll(v);
+            return us > 0 ? static_cast<uint64_t>(us) * 1000ull : 0ull;
+        }();
+        return hotNs;
+    }
+
+    // A/B（`ENTJOY_SPIN_NEEDS_WORK`，默认**开**；`=0` 关闭）：大自旋窗只在"注入器里有可认领的活"时给。
+    static bool SpinNeedsWorkEnabled() noexcept
+    {
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_SPIN_NEEDS_WORK");
+            return !(v != nullptr && v[0] == '0');
+        }();
+        return enabled;
+    }
 
     // ============================================================
     // 构造 / 析构
@@ -152,9 +180,16 @@ namespace JobSystem
         for (uint32_t offset = 1; offset < workerCount_; ++offset)
         {
             const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
+            SparseTileDeque* victimDeque = workers_[victimIdx]->deque.get();
+            // 空 deque 提前跳过：StealTop 必然失败，仍会白做 4 次 CAS 尝试。
+            // 空判读的是本就被 StealTop 读取的同一对 atomic，语义不变；
+            // 被跳过的 CAS 只可能命中此刻并发出现的元素，那种情况 owner 会自行取走。
+            if (victimDeque->IsEmpty())
+                continue;
+            // 计数放在空判之后：扫描数只统计"真正发起窃取"的受害者，不再被空转刷高。
             g_victimScans.fetch_add(1, std::memory_order_relaxed);
             TileTask tileTask;
-            if (workers_[victimIdx]->deque->StealTop(tileTask))
+            if (victimDeque->StealTop(tileTask))
             {
                 g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
                 g_stealCount.fetch_add(1, std::memory_order_relaxed);
@@ -416,6 +451,9 @@ namespace JobSystem
         }
 
         const uint32_t tileCount = batch->tileCount;
+        const bool spDiag = SchedPhase::Enabled();
+        uint64_t spT0 = 0;
+        if (spDiag) spT0 = MonotonicNowNs();
 
         // ── token（令牌）提交（唯一路径）──
         // 只投 O(workers) 个令牌，令牌内 nextTile.fetch_add 细粒度认领（流量 O(tiles)→O(workers)，消除洪泛背压）。
@@ -428,6 +466,8 @@ namespace JobSystem
         if (tokenCount == 0) return;
         batch->pendingTasks.store(tokenCount, std::memory_order_release);
         activeTasks.fetch_add(static_cast<int64_t>(tokenCount), std::memory_order_acq_rel);
+        uint64_t spT1 = 0;
+        if (spDiag) spT1 = MonotonicNowNs();
 
         // PushMany：批量创建 token 任务 + 一次 CAS 批量入队注入器
         constexpr uint32_t kMaxBulkTokens = 64;   // 栈数组上限（worker 数实际 ≤ 64）
@@ -486,12 +526,29 @@ namespace JobSystem
         for (uint32_t i = 0; i < directTokens; ++i)
             ExecuteClaimToken(batch, kMaxTrackedWorkers);
 
+        uint64_t spT2 = 0;
+        if (spDiag) spT2 = MonotonicNowNs();
         // deferNotify：窗口内跳过逐批唤醒，由 Flush 统一广播。depth<=0 才唤醒：
         // 负值（Flush 下溢）也广播，防止批量任务被永久搁置（下溢使 ==0 永不成立 → 永不唤醒）。
         if (g_submitDeferDepth.load(std::memory_order_relaxed) <= 0)
         {
-            wakeEpoch.fetch_add(1, std::memory_order_release);
-            wakeEpoch.notify_all();
+            if (DeferWakeEnabled())
+            {
+                // 只推迟广播：token 已在注入器里，已醒着的 worker 照旧能自己领到；
+                // 广播由调用方即将阻塞时（`Complete()`/`FlushDeferredWake`）补一次。
+                g_pendingDeferredWake.store(1, std::memory_order_release);
+            }
+            else
+            {
+                wakeEpoch.fetch_add(1, std::memory_order_release);
+                wakeEpoch.notify_all();
+            }
+        }
+        if (spDiag)
+        {
+            const uint64_t t3 = MonotonicNowNs();
+            SchedPhase::Add(SchedPhase::SubmitTokens, spT2 - spT1);
+            SchedPhase::Add(SchedPhase::SubmitNotify, t3 - spT2);
         }
     }
 
@@ -502,6 +559,11 @@ namespace JobSystem
     void ChaseLevScheduler::ExecuteClaimToken(BatchState* batch, uint32_t workerIndex, TileAccount account) noexcept
     {
         if (!batch) return;
+        // 令牌认领计数（`[M-16] 令牌 worker/main`）。
+        if (workerIndex >= kMaxTrackedWorkers)
+            g_mainClaimedTokens.fetch_add(1, std::memory_order_relaxed);
+        else
+            g_workerClaimedTokens.fetch_add(1, std::memory_order_relaxed);
         // timing 诊断：记录 worker 进入批次（首/末 worker 时间）
         ChaseLevRecordWorkerEntry(batch);
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
@@ -680,6 +742,10 @@ namespace JobSystem
         // （下限 kSpinMin）快速让出 CPU；activeTasks>0 用更大窗口（kSpinBusy，下一任务即将被认领）。
         // thread_local：每 worker 独立一份。
         thread_local uint32_t spinBudget = kSpinBase;
+        // 热窗（`ENTJOY_SPIN_HOT_US`）：本线程最近一次"领到活"的时间戳；窗口内不 park，
+        // 消除每次 Schedule 对停靠线程的广播唤醒（见 SpinHotNs 注释）。
+        const uint64_t spinHotNs = SpinHotNs();
+        uint64_t lastActiveNs = MonotonicNowNs();
 
         while (true)
         {
@@ -693,6 +759,7 @@ namespace JobSystem
             if (got && task.batch && task.tileCount > 0)
             {
                 spinBudget = kSpinMax;   // 有活：拉高自旋预算
+                lastActiveNs = MonotonicNowNs();
                 // workerCap 令牌（firstTile==kClaimTokenMarker）：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
                 {
@@ -741,6 +808,7 @@ namespace JobSystem
             if (injector_.Pop(rangeTask))
             {
                 spinBudget = kSpinMax;   // 有活：拉高自旋预算
+                lastActiveNs = MonotonicNowNs();
                 // 通用 work（batch==nullptr）直接执行：TileTask 无 work 回调，入 deque 会丢失 work。
                 if (rangeTask->batch == nullptr)
                 {
@@ -768,6 +836,9 @@ namespace JobSystem
             for (uint32_t offset = 1; offset < workerCount_; ++offset)
             {
                 const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
+                // 空 deque 提前跳过（同上：空判语义不变，空转不再进全局计数）
+                if (workers_[victimIdx]->deque->IsEmpty())
+                    continue;
                 g_victimScans.fetch_add(1, std::memory_order_relaxed);
                 if (workers_[victimIdx]->deque->StealTop(task))
                 {
@@ -785,6 +856,7 @@ namespace JobSystem
             if (got && task.batch && task.tileCount > 0)
             {
                 spinBudget = kSpinMax;   // 有活（窃取成功）：拉高自旋预算
+                lastActiveNs = MonotonicNowNs();
                 // workerCap 令牌：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
                 {
@@ -884,7 +956,19 @@ namespace JobSystem
                 // worker 停在自旋区，避免每帧重复 park+唤醒。
                 const bool globalBusy =
                     activeTasks.load(std::memory_order_acquire) > 0;
-                const uint32_t spinCap = globalBusy ? kSpinBusy : spinBudget;
+                // A/B（`ENTJOY_SPIN_NEEDS_WORK`，默认**开**；`=0` 关闭）：只有"注入器里还有可认领的活"时才给大自旋窗。
+                // 动机（实测）：批的 workerCount 被物理核封顶后（见 ApplyPhysCoreCapForSmallJob），
+                //   未被唤醒的 worker 仍因 `activeTasks>0` 拿 kSpinBusy（8192 次 pause ≈ 100～300 µs）
+                //   硬自旋整整一波 ⇒ 与真正干活的 8 个 worker 抢 SMT 执行单元，波前只从 53→31 ms，
+                //   而 8 worker 整机时波前是 14.7 ms ⇒ 差价就是这群"无事可做却满速自旋"的线程。
+                //   本开关让它们在注入器为空时走普通退火预算（→ 逐步 park）。
+                const bool spinNeedsWork = SpinNeedsWorkEnabled();
+                const bool busy = globalBusy &&
+                    (!spinNeedsWork || !injector_.IsEmpty());
+                // 热窗内视同"有活"：继续用大窗自旋，避免 park 后每次 Schedule 都要广播唤醒 N 个线程。
+                const bool hot = spinHotNs != 0 &&
+                    (MonotonicNowNs() - lastActiveNs) < spinHotNs;
+                const uint32_t spinCap = (busy || hot) ? SpinBusyCap() : spinBudget;
                 uint32_t s = 0;
                 while (s < spinCap)
                 {
@@ -892,9 +976,15 @@ namespace JobSystem
                         goto drain_quit;
                     // 新批/新任务 → 回主循环认领
                     if (wakeEpoch.load(std::memory_order_acquire) != spinStamp)
+                    {
+                        g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
                         goto main_loop;
+                    }
                     if (!injector_.IsEmpty() || !myDeque->IsEmpty())
+                    {
+                        g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
                         goto main_loop;
+                    }
                     CpuPause();
                     ++s;
                 }
@@ -902,7 +992,10 @@ namespace JobSystem
                 if (spinBudget > kSpinMin)
                     spinBudget /= 2;
                 if (!injector_.IsEmpty())
+                {
+                    g_hotSpinHits.fetch_add(1, std::memory_order_relaxed);
                     goto main_loop;
+                }
             }
 
 // ---- 5b. Park — wait(共享 epoch) ----
@@ -915,6 +1008,8 @@ namespace JobSystem
             if (!injector_.IsEmpty() || !myDeque->IsEmpty())
                 goto main_loop;
             wakeEpoch.wait(seenStamp, std::memory_order_relaxed);
+            // 真的在 futex 上睡过并被唤醒（`[M-16] 唤醒=`）。
+            g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
             continue; // 唤醒后回到主循环
 
         main_loop:

@@ -88,6 +88,7 @@ namespace JobSystem
     std::vector<HandleState*> g_statePool;
 
     thread_local ThreadStateCache t_stateCache;
+    thread_local bool t_stateCreator = false;
 
     void FlushStateCacheToSharedPool()
     {
@@ -112,6 +113,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_mainExecutedRanges{ 0 };
     std::atomic<uint64_t> g_stealCount{ 0 };
     std::atomic<uint64_t> g_parkWakeCount{ 0 };
+    std::atomic<uint64_t> g_hotSpinHits{ 0 };
     std::atomic<uint64_t> g_publishedJobs{ 0 };
     std::atomic<uint64_t> g_waitFallbacks{ 0 };
     std::atomic<uint64_t> g_notifiedWorkers{ 0 };
@@ -130,6 +132,13 @@ namespace JobSystem
     std::atomic<uint64_t> g_stealEmptyExits{ 0 };
     std::atomic<uint64_t> g_batchStorageCreated{ 0 };
     std::atomic<uint64_t> g_batchStorageReused{ 0 };
+    std::atomic<uint64_t> g_statePoolHit{ 0 };
+    std::atomic<uint64_t> g_statePoolRefill{ 0 };
+    std::atomic<uint64_t> g_statePoolNew{ 0 };
+    std::atomic<uint64_t> g_stateRecycled{ 0 };
+    std::atomic<uint64_t> g_stateRecycledOnWorker{ 0 };
+    std::atomic<uint64_t> g_stateCreateByThread[kStateThreadSlots];
+    std::atomic<uint64_t> g_stateRecycleByThread[kStateThreadSlots];
     std::atomic<uint64_t> g_batchStorageReturned{ 0 };
     std::atomic<uint64_t> g_batchStorageDropped{ 0 };
     std::atomic<uint64_t> g_submitToFirstWorkerEwmaNs{ 0 };
@@ -527,6 +536,29 @@ namespace JobSystem
 #endif
     }
 
+    // 本机**物理核数**（SMT 兄弟共享一个物理核）。**在 Scheduler::Initialize 计算一次**并缓存：
+    // 每 job 调用时再查会太贵；而"查失败"绝不能变成永久失效（曾踩到：一次性 static 查询失败后
+    // 整进程静默不生效，A/B 出现无效臂）。0 = 不可知 ⇒ 依赖它的策略保守退化。
+    std::atomic<int> g_physicalCores{ 0 };
+    std::atomic<uint64_t> g_physCapApplied{ 0 };
+
+    void RefreshPhysicalCoreCount() noexcept
+    {
+        int maxIndex = -1;
+        const int probe = std::max(1, g_numThreads.load(std::memory_order_relaxed)) * 2 + 64;
+        for (int i = 0; i < probe; ++i)
+        {
+            const int pc = PhysicalCoreIndexForDiagnostics(i);
+            if (pc > maxIndex) maxIndex = pc;
+        }
+        g_physicalCores.store(maxIndex + 1, std::memory_order_relaxed);
+    }
+
+    int PhysicalCoreCountForDiagnostics() noexcept
+    {
+        return g_physicalCores.load(std::memory_order_relaxed);
+    }
+
     static void WaitForBackendBatches() noexcept;
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept
@@ -540,9 +572,9 @@ namespace JobSystem
         stats->workerExecutedRanges = g_workerExecutedRanges.load(std::memory_order_relaxed);
         stats->mainExecutedRanges = g_mainExecutedRanges.load(std::memory_order_relaxed);
         stats->stealCount = g_stealCount.load(std::memory_order_relaxed);
-        // parkWake/hotSpin 由 Chase-Lev（g_parkWakeCount）统计。
+        // parkWake/hotSpin 由 Chase-Lev 统计（自增点在 ChaseLevScheduler::WorkerLoop 的 park/自旋出口）。
         stats->parkWakeCount = g_parkWakeCount.load(std::memory_order_relaxed);
-        stats->hotSpinHits = 0;
+        stats->hotSpinHits = g_hotSpinHits.load(std::memory_order_relaxed);
         stats->publishedJobs = g_publishedJobs.load(std::memory_order_relaxed);
         stats->waitFallbacks = g_waitFallbacks.load(std::memory_order_relaxed);
         stats->notifiedWorkers = g_notifiedWorkers.load(std::memory_order_relaxed);
@@ -634,6 +666,7 @@ namespace JobSystem
         g_mainExecutedRanges.store(0, std::memory_order_relaxed);
         g_stealCount.store(0, std::memory_order_relaxed);
         g_parkWakeCount.store(0, std::memory_order_relaxed);
+        g_hotSpinHits.store(0, std::memory_order_relaxed);
         g_publishedJobs.store(0, std::memory_order_relaxed);
         g_waitFallbacks.store(0, std::memory_order_relaxed);
         g_notifiedWorkers.store(0, std::memory_order_relaxed);
