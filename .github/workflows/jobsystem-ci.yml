@@ -32,6 +32,12 @@ jobs:
         # ⇒ 必须显式指定入口，否则 CS0017。
         run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
 
+      - name: Jobs-only transpiler guard
+        # 无 ECS 引用的消费方必须能用 [NativeTranspile] 数组 job（生成物不得含 ECS 耦合）。
+        # 断言与自证逻辑见 tests/JobsOnlyTranspilerCheck/check.ps1。
+        shell: pwsh
+        run: ./tests/JobsOnlyTranspilerCheck/check.ps1
+
       - name: Build ECS tests
         run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
 
@@ -145,6 +151,28 @@ jobs:
         shell: pwsh
         run: ./tools/NativeTranspilerFixture/negative-check.ps1
 
+  # NuGet 包消费回归：pack 四个包 → 从本地 feed 还原 → 两个 PackageReference-only 消费者构建并运行。
+  #   tests/NuGetConsumer     ：ECS 侧（托管 ECS + 原生 JobSystem + 转译的 IJobParallelFor/IJobChunk/IJobEntity）
+  #   tests/NuGetJobsConsumer ：Jobs-only 侧（只装 EntJoy.Jobs，无 EntJoy.ECS，四种数组 job 形态转译为 native）
+  # 这是 CI 里唯一覆盖"消费者从包消费"的 job（其它 job 都是仓库内源码引用）。
+  # 不依赖 ISPC、也不依赖 clang-cl：两个消费者只编 Cpp 后端，CMake 无 ClangCL 时会回退 MSVC。
+  nuget-consumer-test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # 一键：stage 预编译原生制品（tools/NativeDllCore）→ dotnet pack 四包 → 清 NuGet 缓存
+      # → 两个消费者 restore/build/run（断言不通过即非 0 退出）
+      - name: Stage native artifacts, pack, and run NuGet consumers
+        shell: pwsh
+        run: ./tests/NuGetConsumer/run.ps1
+
   ispc-width-test:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -222,12 +250,13 @@ jobs:
 
   release-gate:
     if: always()
-    needs: [framework-test, windows-test, ispc-width-test, linux-sanitizers]
+    needs: [framework-test, windows-test, nuget-consumer-test, ispc-width-test, linux-sanitizers]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release check
         run: |
           test "${{ needs.framework-test.result }}" = "success"
           test "${{ needs.windows-test.result }}" = "success"
+          test "${{ needs.nuget-consumer-test.result }}" = "success"
           test "${{ needs.ispc-width-test.result }}" = "success"
           test "${{ needs.linux-sanitizers.result }}" = "success"
