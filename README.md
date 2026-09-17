@@ -52,8 +52,6 @@ dotnet add package EntJoy.Jobs     # 只写 Job、不用 ECS 时改装这一个
 
 发布流程：改 `EntJoyVersion` → 提交推送 → 打并推 `v*` tag 即自动发布（workflow 先跑 `tests/NuGetConsumer/run.ps1` 门禁，再向上面两个 feed 推送）。
 
-> **当前发布状态：nuget.org 上尚无任何版本**（`1.0.0` 未打 tag）。在此之前请用[方式 B：源码引用](#方式-b源码引用仓库内项目)或本地出包（见[配置自己的项目](#配置自己的项目)）。GitHub Packages 上已有 `1.0.0`，但该源需要 PAT。
-
 ## 目录
 
 - [通过 NuGet 使用](#通过-nuget-使用)
@@ -674,8 +672,6 @@ Feeds:
 | **GitHub Packages** (`nuget.pkg.github.com/tianqiyuan520`) | **Yes** — classic PAT with `read:packages` | mirror feed. It does not allow anonymous restore even for public packages, and you should add `packageSourceMapping` so that its intermittent auth failures cannot break the whole restore |
 
 Releasing: bump `EntJoyVersion` → commit and push → push a `v*` tag; the workflow runs the `tests/NuGetConsumer/run.ps1` gate first, then pushes to both feeds above.
-
-> **Current publishing status: no version exists on nuget.org yet** (the `1.0.0` tag was never pushed). Until then use [Option B: source reference](#option-b-source-reference-projects-inside-this-repository) or pack locally (see [Configure Your Own Project](#configure-your-own-project)). GitHub Packages already has `1.0.0`, but that feed requires a PAT.
 
 ## Contents
 

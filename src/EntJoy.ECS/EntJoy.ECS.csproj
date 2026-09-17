@@ -18,6 +18,7 @@
     <Title>EntJoy.ECS</Title>
     <Description>EntJoy Archetype ECS（headless）：Entity / Component / Query / Chunk / 关系 / 共享组件 / Observer，配套 ECS 源生成器；原生 JobSystem 与 NativeTranspiler 由依赖 EntJoy.Jobs 提供（仅 win-x64）。</Description>
     <PackageTags>ecs;archetype;dots;headless</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />
@@ -30,5 +31,8 @@
     <!-- ECS 源生成器随本包分发（analyzers\ 为 NuGet 约定的分析器目录） -->
     <None Include="..\EntJoy.ECS.SourceGenerator\bin\$(Configuration)\netstandard2.0\EntJoy.ECS.SourceGenerator.dll"
           Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

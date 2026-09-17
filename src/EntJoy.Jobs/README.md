@@ -37,7 +37,7 @@ EntJoy 的 JobSystem 与 NativeTranspiler 转译设施。提供托管与原生�
 - **写 `[NativeTranspile]` native Job**：需要 **CMake + MSVC（或 ClangCL）**，ISPC 可选（缺失时自动跳过 ISPC 后端）。构建期生成 C++/ISPC 并编译出 `NativeTranspiled.dll`。
 - 生成器带自校验不变量：编译单元含 `IJobChunk` / `IJobEntity` 却未引用 `EntJoy.ECS` 报 **NT029**（Error）；未引用 ECS 但生成物出现 ECS 符号报 **NT030**（Warning）。
 
-怎么写、怎么配的完整说明见 [`docs/public/Native-Jobs-Guide.md`](../../docs/public/Native-Jobs-Guide.md)。
+怎么写、怎么配的完整说明见 [`docs/public/Native-Jobs-Guide.md`](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Native-Jobs-Guide.md)。
 
 ## 引用
 
@@ -51,9 +51,9 @@ EntJoy 的 JobSystem 与 NativeTranspiler 转译设施。提供托管与原生�
 
 ## 相关
 
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) —— 本包的依赖。
-- [`EntJoy.ECS`](../EntJoy.ECS/README.md) —— 需要 ECS 时改装入口包（它已依赖本包）。
-- 根 [README](../../README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) —— 本包的依赖。
+- [`EntJoy.ECS`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.ECS/README.md) —— 需要 ECS 时改装入口包（它已依赖本包）。
+- 根 [README](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
 
 # EntJoy.Jobs (English)
 
@@ -94,7 +94,7 @@ EntJoy's JobSystem and NativeTranspiler infrastructure. It ships both the manage
 - **`[NativeTranspile]` native jobs**: requires **CMake + MSVC (or ClangCL)**; ISPC is optional (the ISPC backend is skipped when missing). The build generates the C++/ISPC and compiles `NativeTranspiled.dll`.
 - The generator self-checks an invariant: a compilation unit containing `IJobChunk` / `IJobEntity` without referencing `EntJoy.ECS` reports **NT029** (error); generated output referencing ECS symbols without that reference reports **NT030** (warning).
 
-The full how-to-write / how-to-configure guide lives in [`docs/public/Native-Jobs-Guide.md`](../../docs/public/Native-Jobs-Guide.md) (Chinese).
+The full how-to-write / how-to-configure guide lives in [`docs/public/Native-Jobs-Guide.md`](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Native-Jobs-Guide.md) (Chinese).
 
 ## Reference it
 
@@ -108,6 +108,6 @@ The full how-to-write / how-to-configure guide lives in [`docs/public/Native-Job
 
 ## See also
 
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) — this package's dependency.
-- [`EntJoy.ECS`](../EntJoy.ECS/README.md) — the entry package when you need ECS (it already depends on this one).
-- [Using NuGet Packages](../../README.md#using-nuget-packages) in the root README.
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) — this package's dependency.
+- [`EntJoy.ECS`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.ECS/README.md) — the entry package when you need ECS (it already depends on this one).
+- [Using NuGet Packages](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#using-nuget-packages) in the root README.

@@ -26,8 +26,8 @@ EntJoy 的数学与底层辅助包：SIMD 友好的 POD 向量、静态数学函
 
 ## 相关
 
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) —— 唯一直接依赖本包的库。
-- 根 [README](../../README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) —— 唯一直接依赖本包的库。
+- 根 [README](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
 
 # EntJoy.Mathematics (English)
 
@@ -57,5 +57,5 @@ EntJoy's math and low-level helper package: SIMD-friendly POD vectors, static ma
 
 ## See also
 
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) — the only library that depends on this package.
-- [Using NuGet Packages](../../README.md#using-nuget-packages) in the root README.
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) — the only library that depends on this package.
+- [Using NuGet Packages](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#using-nuget-packages) in the root README.
