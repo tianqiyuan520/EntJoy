@@ -3,7 +3,8 @@
   <!-- NativeTranspiler 生成器回归夹具（F-9/F-10）：
        自带原生编译（生成 → 标记扫描 → CMake → C++ 编译），等价于真实消费方的构建链路；
        Program 里对生成代码做运行时语义断言（见 Program.cs 表头）。
-       CI 直接 dotnet run 本工程（-c Release），退出码非 0 即失败。 -->
+       CI 直接 dotnet run 本工程（-c Release），退出码非 0 即失败。
+       原生的编译与复制接线由共享 props/targets 提供（src\EntJoy.Jobs\msbuild\）。 -->
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -13,12 +14,6 @@
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Compile Remove="NativeTranspiler_Generated\**" />
-    <EmbeddedResource Remove="NativeTranspiler_Generated\**" />
-    <None Remove="NativeTranspiler_Generated\**" />
-  </ItemGroup>
 
   <!-- 负向夹具：默认排除。用 -p:FixtureMarkerGate=true 编进来时，构建**必须失败**
        （生成器写出 __ENTJOY_UNSUPPORTED 标记 → NativeCompileTask 拒绝编译）。
@@ -33,38 +28,9 @@
     <ProjectReference Include="..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
     <ProjectReference Include="..\..\src\EntJoy.Collections\EntJoy.Collections.csproj" />
     <ProjectReference Include="..\..\src\EntJoy.Mathematics\EntJoy.Mathematics.csproj" />
-    <ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-    <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
 
-  <PropertyGroup>
-    <EntJoyNativeDllDir>$(MSBuildThisFileDirectory)..\..\src\NativeDll</EntJoyNativeDllDir>
-  </PropertyGroup>
-  <ItemGroup>
-    <CompilerVisibleProperty Include="EntJoyNativeDllDir" />
-  </ItemGroup>
-
-  <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
-
-  <Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
-          Inputs="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeCompileTask.cs;$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
-          Outputs="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll">
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
-             Targets="Build" Properties="Configuration=$(Configuration)" />
-  </Target>
-
-  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks"
-          Condition="'$(EnableNativeCompile)' != 'false' And Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
-    <Message Importance="high" Text="Starting native compilation for generated C++ code (fixture)..." />
-    <NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" NativeDllDir="$(EntJoyNativeDllDir)" />
-  </Target>
-
-  <Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
-    <ItemGroup>
-      <NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll')" />
-      <NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
-    </ItemGroup>
-    <Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="@(NativeDll) != ''" />
-  </Target>
+  <Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.props" />
+  <Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.targets" />
 
 </Project>

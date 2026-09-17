@@ -8,6 +8,12 @@
     <NoWarn>$(NoWarn);8632</NoWarn>
     <!-- CS0169: DisposeSentinel.s_lastCallSite 为诊断保留字段（当前未读） -->
     <NoWarn>$(NoWarn);0169</NoWarn>
+
+    <IsPackable>true</IsPackable>
+    <PackageId>EntJoy.Collections</PackageId>
+    <Title>EntJoy.Collections</Title>
+    <Description>EntJoy 原生容器与分配器：NativeArray / NativeList / UnsafeList / 原子操作与安全检查句柄。</Description>
+    <PackageTags>ecs;native;collections</PackageTags>
   </PropertyGroup>
 
   <!-- 安全检查宏分层（S22）：

@@ -79,6 +79,9 @@ imgui.ini
 # Local offline NuGet package-source config (machine-specific)
 NuGet.Offline.config
 
+# Pack staging: prebuilt native artifacts + produced nupkg
+/artifacts/
+
 # Only public documentation belongs to this repository.
 /docs/*
 !/docs/public/

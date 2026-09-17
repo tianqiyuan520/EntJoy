@@ -18,12 +18,6 @@
 		<NoWarn>$(NoWarn);8500</NoWarn>
 	</PropertyGroup>
 
-	<ItemGroup>
-		<Compile Remove="NativeTranspiler_Generated\**" />
-		<EmbeddedResource Remove="NativeTranspiler_Generated\**" />
-		<None Remove="NativeTranspiler_Generated\**" />
-	</ItemGroup>
-
 	<!-- 同一程序集内只允许一个「重型对比样本」处于活动态：
 	     IJobChunkMoveCompareTest 与 AutoSIMDTest（IJobEntityAutoSIMDTest.cs + Case6_MoveJob/MoveJob.cs）
 	     定义了同名 job/组件（HeavyJobChunkCpp / HeavyJobEntityCpp / MovePosition / MoveVelocity），
@@ -37,58 +31,15 @@
 		<Compile Remove="03_NativeTranspiler\AutoSIMDTest\**" />
 	</ItemGroup>
 
+	<!-- ECS 侧引用（ECS 运行时 + ECS 生成器）留在本工程；
+	     原生转译链（NativeTranspiler 分析器 / NativeTranspiler.Tasks / 原生链接与编译）
+	     统一由共享 props/targets 提供，见 src\EntJoy.Jobs\msbuild\。 -->
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
-		<ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<!-- 新增：引用任务项目，以确保它先构建，但不复制到运行时 -->
-		<ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
 	</ItemGroup>
 
-	<!-- 显式配置原生 NativeDll 源码目录（源生成+ 编译任务共用-->
-	<PropertyGroup>
-		<EntJoyNativeDllDir>$(MSBuildThisFileDirectory)..\..\src\NativeDll</EntJoyNativeDllDir>
-	</PropertyGroup>
-	<ItemGroup>
-		<CompilerVisibleProperty Include="EntJoyNativeDllDir" />
-	</ItemGroup>
-
-	<!-- 不再强制清除生成目录；保留上次生成的文件以支持增量检
-	      NativeCompileTask 依赖 stamp 文件对比时间戳来判断是否需要重新编-->
-	<UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll" TaskFactory="TaskHostFactory" />
-
-	<Target Name="BuildNativeTranspilerTasks" BeforeTargets="CompileCppWithCustomTask"
-	        Inputs="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeCompileTask.cs;$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
-	        Outputs="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll">
-		<MSBuild
-			Projects="$(MSBuildThisFileDirectory)..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj"
-			Targets="Build"
-			Properties="Configuration=$(Configuration)" />
-	</Target>
-
-	<Target Name="CleanStaleNativeTranspilerBindings" BeforeTargets="CoreCompile">
-		<!-- 清理 source generator 中间缓存（不影响已生成的 C++ 文件） -->
-		<RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
-		<RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
-	</Target>
-
-  <Target Name="CompileCppWithCustomTask" AfterTargets="CoreCompile" DependsOnTargets="BuildNativeTranspilerTasks" Condition="'$(EnableNativeCompile)' != 'false' And Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\CMakeLists.txt')">
-		<Message Importance="high" Text="Starting native compilation for generated C++ code..." />
-		<NativeCompileTask NativeCodeGenDir="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\" NativeDllDir="$(EntJoyNativeDllDir)" />
-	</Target>
-
-	<Target Name="CopyNativeDll" AfterTargets="CompileCppWithCustomTask" Condition="'$(EnableNativeCompile)' != 'false'">
-		<ItemGroup>
-			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeDll.dll')" />
-			<!-- DLL 分离：生成代码独DLL，一并复制到输出 -->
-			<NativeDll Include="$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildThisFileDirectory)NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
-		</ItemGroup>
-		<Copy SourceFiles="@(NativeDll)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="@(NativeDll) != ''" />
-	</Target>
-
-	<Target Name="CleanLegacyNativeTranspilerDll" AfterTargets="CopyNativeDll">
-		<!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
-		<Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
-	</Target>
+	<Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.props" />
+	<Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.targets" />
 
 </Project>

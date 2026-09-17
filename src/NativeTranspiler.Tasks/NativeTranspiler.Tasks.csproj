@@ -1,9 +1,11 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <TargetFramework>netstandard2.0</TargetFramework>
+        <!-- 本工程不单独出包：任务 DLL 由 EntJoy.Jobs 打进 tools\（见 EntJoy.Jobs.csproj） -->
     </PropertyGroup>
     <ItemGroup>
-        <PackageReference Include="Microsoft.Build.Framework" Version="18.4.0" />
-        <PackageReference Include="Microsoft.Build.Utilities.Core" Version="18.4.0" />
+        <!-- 任务在 MSBuild 宿主进程内运行，Microsoft.Build.* 由宿主提供：不得成为包依赖 -->
+        <PackageReference Include="Microsoft.Build.Framework" Version="18.4.0" PrivateAssets="all" />
+        <PackageReference Include="Microsoft.Build.Utilities.Core" Version="18.4.0" PrivateAssets="all" />
     </ItemGroup>
 </Project>
