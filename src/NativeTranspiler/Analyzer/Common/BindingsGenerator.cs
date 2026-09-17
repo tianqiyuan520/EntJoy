@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -26,8 +26,15 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("using System;");
             sb.AppendLine("using System.Runtime.InteropServices;");
             sb.AppendLine("using System.Runtime.CompilerServices;");
-            sb.AppendLine("using EntJoy.ECS;");
-            sb.AppendLine("using EntJoy.ECS.JobSystem;");
+            // Jobs-only 支持：无 chunk/entity（ECS）job 时不发射 ECS 命名空间与 ECS 类型成员，
+            // 使只引用 EntJoy.Collections/EntJoy.Jobs 的项目也能编译生成的 bindings。
+            var jobList = jobStructs.ToList();
+            bool hasChunkScheduledJob = jobList.Any(CppJobGenerator.IsChunkScheduledJob);
+            if (hasChunkScheduledJob)
+            {
+                sb.AppendLine("using EntJoy.ECS;");
+                sb.AppendLine("using EntJoy.ECS.JobSystem;");
+            }
             sb.AppendLine("using EntJoy.Collections;");
             sb.AppendLine("using EntJoy.JobSystem;");
             sb.AppendLine();
@@ -37,14 +44,15 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    {");
             sb.AppendLine("        public delegate void JobFuncDelegate(IntPtr context);");
             sb.AppendLine("        public delegate void BatchJobFuncDelegate(IntPtr context, int startIndex, int count);");
-            sb.AppendLine("        public delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);");
+            if (hasChunkScheduledJob)
+                sb.AppendLine("        public delegate void ChunkJobFuncDelegate(IntPtr context, ChunkJobData* chunkData);");
             sb.AppendLine("        public delegate void CleanupFuncDelegate(IntPtr context);");
             sb.AppendLine();
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
 
             // GPU/CUDA 后端已拆分至 feature/gpu-offload 分支；dev 仅保留 Cpp/Ispc Job。
-            var nativeJobs = jobStructs.ToList();
+            var nativeJobs = jobList;
 
             // 1. 为每个 Job 结构体生成静态缓存的委托字段和函数指针。
             foreach (var jobStruct in nativeJobs)
@@ -493,8 +501,13 @@ namespace NativeTranspiler.Analyzer
                 parameters.Add("int innerBatchCount = 0");
             }
             parameters.Add("JobHandle dependsOn = default");
-            // 多 World 支持：显式指定 World（默认 DefaultWorld）
-            parameters.Add("World world = null");
+            if (isChunk)
+            {
+                // 多 World 支持：显式指定 World（默认 DefaultWorld）。
+                // 数组类 job（IJobFor/IJobParallelFor/Batch）无 World 概念，不发射该参数
+                // ——它会让 Jobs-only 项目因 World 类型缺失而编译失败。
+                parameters.Add("World world = null");
+            }
 
             sb.AppendLine($"        public static JobHandle Schedule_{jobStruct.Name}({string.Join(", ", parameters)})");
             sb.AppendLine("        {");

@@ -21,6 +21,12 @@ namespace NativeTranspiler.Tasks
         /// </summary>
         public string NativeDllDir { get; set; }
 
+        /// <summary>
+        /// 可选："true" 表示 NativeDll 由 NuGet 包预编译提供 —— 本任务只负责产出 NativeTranspiled.dll，
+        /// 不再要求 build\Release\NativeDll.dll 存在（该 DLL 由包 props 复制到输出目录）。
+        /// </summary>
+        public string PrebuiltNative { get; set; }
+
         public ITaskItem[] ExtraDependencies { get; set; }
 
         public override bool Execute()
@@ -117,14 +123,21 @@ namespace NativeTranspiler.Tasks
             var buildDir = Path.Combine(NativeCodeGenDir, "build");
             var expectedNativeDll = Path.Combine(buildDir, "Release", "NativeDll.dll");
             var expectedGeneratedDll = Path.Combine(buildDir, "Release", "NativeTranspiled.dll");
-            if (IsUpToDateByHash(dependencies, hashFile) && File.Exists(expectedNativeDll) && File.Exists(expectedGeneratedDll))
+            // prebuilt-native 模式（NuGet 包消费）：NativeDll 由包提供，本工程只产出 NativeTranspiled.dll
+            bool prebuiltNative = string.Equals(PrebuiltNative, "true", StringComparison.OrdinalIgnoreCase);
+            bool nativeDllExpected = !prebuiltNative;
+            if (IsUpToDateByHash(dependencies, hashFile)
+                && (!nativeDllExpected || File.Exists(expectedNativeDll))
+                && File.Exists(expectedGeneratedDll))
             {
                 Log.LogMessage(MessageImportance.High, "Native code is up-to-date (content hashes unchanged). Skipping CMake build.");
                 return true;
             }
-            if (!File.Exists(expectedNativeDll) || !File.Exists(expectedGeneratedDll))
+            if ((nativeDllExpected && !File.Exists(expectedNativeDll)) || !File.Exists(expectedGeneratedDll))
             {
-                Log.LogMessage(MessageImportance.High, "Native output missing (NativeDll.dll / NativeTranspiled.dll). CMake build required.");
+                Log.LogMessage(MessageImportance.High, prebuiltNative
+                    ? "Native output missing (NativeTranspiled.dll). CMake build required."
+                    : "Native output missing (NativeDll.dll / NativeTranspiled.dll). CMake build required.");
             }
 
             // 分离 CMakeLists.txt 和其他依赖的检测：

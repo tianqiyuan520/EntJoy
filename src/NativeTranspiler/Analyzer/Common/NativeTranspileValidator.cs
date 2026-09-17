@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -28,6 +28,21 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor VectorizeRequiresChunkOrEntityError = new("NT018", "AutoSIMD.Vectorize requires IJobChunk/IJobEntity", "[NativeTranspile] struct '{0}' sets AutoSIMD = Vectorize but is not an IJobChunk/IJobEntity; the Vectorize path is only implemented for those two, so the flag is silently dropped. Use AutoSIMD = Enabled for IJobParallelFor/IJobFor/IJob.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor AutoSimdRequiresCppBackendError = new("NT019", "AutoSIMD requires Cpp backend", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled together with Target = Ispc; the ISPC backend never reads AutoSIMD (it vectorizes via foreach/gang), so the flag is silently dropped. Drop AutoSIMD, or switch Target to Cpp.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MathPrecisionRequiresCppBackendError = new("NT020", "MathPrecision requires Cpp backend", "[NativeTranspile] struct '{0}' sets MathPrecision but Target is not Cpp; per-job precision is emitted as a '#define SIMD_MATH_PRECISION' only into the C++ translation unit. ISPC precision is controlled by IspcMathLib instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>
+        /// 生成器不变量：编译中出现了 chunk/entity（ECS）job，却检测不到 EntJoy.ECS 引用。
+        /// 正常不可能发生（IJobChunk/IJobEntity 的类型定义在 EntJoy.ECS 内）；一旦出现即说明
+        /// job 种类判定与类型可见性不一致，必须修生成器而不是让用户看 CS0234。
+        /// </summary>
+        public static readonly DiagnosticDescriptor EcsRequiredButMissingError = new("NT029", "ECS required but not referenced", "[NativeTranspile] this compilation contains IJobChunk/IJobEntity jobs, which require a reference to EntJoy.ECS, but EntJoy.ECS was not found. The generator's job-kind detection disagrees with type visibility.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>
+        /// 生成器不变量："Jobs-only 解耦"的自校验。编译未引用 EntJoy.ECS，但生成的 bindings
+        /// 仍出现 ECS 符号 ⇒ 某个 ECS 相关发射点漏了条件化（新增代码路径的常见回归）。
+        /// 消费者此时本来也会撞上 CS0234/CS0246，本诊断把原因直接指向生成器。
+        /// 若这些名字是用户自己的类型，可改名或忽略（词边界匹配，MyWorldJob 之类不会误报）。
+        /// </summary>
+        public static readonly DiagnosticDescriptor GeneratedEcsCouplingWarning = new("NT030", "Generated bindings couple to EntJoy.ECS", "NativeTranspiler generated bindings reference ECS symbols ({0}) while this compilation does not reference EntJoy.ECS. Either a generator emission point lost its conditional guard, or your own types use these names.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
         public static readonly DiagnosticDescriptor CppMathLibRequiresCppBackendError = new("NT021", "CppMathLib requires Cpp backend", "[NativeTranspile] struct '{0}' sets CppMathLib = fast but Target is not Cpp; that flag only controls the /fp:fast compilation unit split for C++ jobs.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UseIspcMtRequiresIspcBackendError = new("NT022", "UseISPC_MT requires Ispc backend", "[NativeTranspile] struct '{0}' sets UseISPC_MT but Target is not Ispc; the multi-task ISPC variant is only generated for the ISPC backend.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
