@@ -1,0 +1,21 @@
+<Project>
+
+  <!-- src\ 下所有工程的共享打包元数据。
+       只放在 src\ 下（不放仓库根）以免影响 samples/tests/tools 的构建产物。
+       打包是逐工程 opt-in：默认 IsPackable=false，只有 4 个发布工程显式打开。 -->
+
+  <PropertyGroup>
+    <EntJoyVersion>1.0.0</EntJoyVersion>
+    <Version>$(EntJoyVersion)</Version>
+    <Authors>tianqiyuan520</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/tianqiyuan520/EntJoy</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/tianqiyuan520/EntJoy</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <IsPackable>false</IsPackable>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\packages\</PackageOutputPath>
+    <!-- 预编译原生制品（由 tools/NativeDllCore 构建后 stage 到此目录，见 docs/NuGet打包规划.md T3） -->
+    <EntJoyNativeStageDir Condition="'$(EntJoyNativeStageDir)' == ''">$(MSBuildThisFileDirectory)..\artifacts\native\win-x64\</EntJoyNativeStageDir>
+  </PropertyGroup>
+
+</Project>

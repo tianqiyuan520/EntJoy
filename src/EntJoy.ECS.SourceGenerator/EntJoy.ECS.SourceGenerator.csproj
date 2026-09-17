@@ -2,26 +2,19 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
-    <Authors>tianqiyuan520</Authors>
-	  <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-	  <LangVersion>preview</LangVersion>
-	  <Version>1.0.0</Version>
-	  <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!-- 本工程不单独出包：其生成器 DLL 由 EntJoy.ECS 打进 analyzers\dotnet\cs（见 EntJoy.ECS.csproj）。
+         IsPackable=false 来自 src\Directory.Build.props。 -->
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <LangVersion>preview</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <None Remove="bin\Release\netstandard2.0\\EntJoy.SourceGenerator.dll" />
-
-	  <!-- Package the generator in the analyzer directory of the nuget package -->
-	  <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <!-- 编译器宿主自带 Roslyn：不得成为包依赖 -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
 
     <!-- 诊断规则发布跟踪（消除 RS2008） -->
     <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
     <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
   </ItemGroup>
-
-
-
 
 </Project>

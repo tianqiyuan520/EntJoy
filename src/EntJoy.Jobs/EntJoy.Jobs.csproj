@@ -8,8 +8,50 @@
     <NoWarn>$(NoWarn);8632</NoWarn>
     <!-- CA2255: ModuleInitializer 用于 JobSystem 主动初始化（应用代码用法），非库误用 -->
     <NoWarn>$(NoWarn);CA2255</NoWarn>
+
+    <!-- 方案 J：本包同时是 native 与转译设施的唯一归属者 -->
+    <IsPackable>true</IsPackable>
+    <PackageId>EntJoy.Jobs</PackageId>
+    <Title>EntJoy.Jobs</Title>
+    <Description>EntJoy JobSystem（托管 + 原生 Chase-Lev 调度器）与 NativeTranspiler 转译设施：包含预编译 NativeDll.dll、原生链接套件（头文件 / 导入库 / tasksys.cpp）、NativeTranspiler 分析器与 MSBuild 任务。仅 win-x64。</Description>
+    <PackageTags>ecs;jobsystem;native;simd;transpiler</PackageTags>
   </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\EntJoy.Collections\EntJoy.Collections.csproj" />
+    <!-- 分析器与任务工程：只用于构建顺序，不作为包依赖（PrivateAssets=all 阻止其变成依赖项） -->
+    <ProjectReference Include="..\NativeTranspiler\NativeTranspiler.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="..\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- ================= 包内容 ================= -->
+  <PropertyGroup>
+    <_EntJoyAnalyzerBin>$(MSBuildThisFileDirectory)..\NativeTranspiler\bin\$(Configuration)\netstandard2.0\</_EntJoyAnalyzerBin>
+    <_EntJoyTasksBin>$(MSBuildThisFileDirectory)..\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\</_EntJoyTasksBin>
+    <_EntJoyNativeSrc>$(MSBuildThisFileDirectory)..\NativeDll\</_EntJoyNativeSrc>
+  </PropertyGroup>
+
+  <!-- 预编译原生制品缺失时给出明确指引，而不是打出一个残缺的包 -->
+  <Target Name="EntJoyVerifyNativeStage" BeforeTargets="GenerateNuspec">
+    <Error Condition="!Exists('$(EntJoyNativeStageDir)NativeDll.dll') Or !Exists('$(EntJoyNativeStageDir)NativeDll.lib')"
+           Text="预编译原生制品缺失：$(EntJoyNativeStageDir)NativeDll.dll / NativeDll.lib。请先执行：cmake -S tools/NativeDllCore -B artifacts/native/cmake-build -A x64 &amp;&amp; cmake --build artifacts/native/cmake-build --config Release，再把 Release\NativeDll.dll 与 NativeDll.lib 复制到 $(EntJoyNativeStageDir)。" />
+  </Target>
+
+  <ItemGroup>
+    <!-- 运行时：核心 Native JobSystem（纯托管消费者零工具链即可运行） -->
+    <None Include="$(EntJoyNativeStageDir)NativeDll.dll" Pack="true" PackagePath="runtimes/win-x64/native/" Visible="false" />
+
+    <!-- 链接套件：仅 [NativeTranspile] 消费者本地编译 NativeTranspiled.dll 时需要 -->
+    <None Include="$(EntJoyNativeStageDir)NativeDll.lib" Pack="true" PackagePath="build/native/" Visible="false" />
+    <None Include="$(_EntJoyNativeSrc)tasksys.cpp" Pack="true" PackagePath="build/native/" Visible="false" />
+    <None Include="$(_EntJoyNativeSrc)*.h" Pack="true" PackagePath="build/native/" Visible="false" />
+
+    <!-- 分析器与 MSBuild 任务（放 tools\，由 buildTransitive 的 props 显式挂接，避免重复加载） -->
+    <None Include="$(_EntJoyAnalyzerBin)NativeTranspiler.dll" Pack="true" PackagePath="tools/" Visible="false" />
+    <None Include="$(_EntJoyTasksBin)NativeTranspiler.Tasks.dll" Pack="true" PackagePath="tools/" Visible="false" />
+
+    <!-- MSBuild 接线：只用 buildTransitive（对直接与间接消费方都生效，且全图只挂一次） -->
+    <None Include="msbuild\EntJoy.Jobs.props" Pack="true" PackagePath="buildTransitive/" Visible="false" />
+    <None Include="msbuild\EntJoy.Jobs.targets" Pack="true" PackagePath="buildTransitive/" Visible="false" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,55 @@
+<Project>
+
+  <!-- 与 EntJoy.Jobs.props 配套：原生编译链的 MSBuild 目标。
+       三种来源的产物统一落到 $(OutputPath)：NativeDll.dll / NativeTranspiled.dll。
+         · Source  模式：CMake 从 src/NativeDll 源码编译两者（开发者默认路径）
+         · Package 模式：NativeDll.dll 由包内 runtimes\ 直接复制；
+                         [NativeTranspile] 用户本地只编 NativeTranspiled.dll（链接包内 NativeDll.lib） -->
+
+  <!-- 仓库内：任务程序集需先构建 -->
+  <Target Name="EntJoyBuildNativeTranspilerTasks" BeforeTargets="EntJoyCompileNative"
+          Condition="'$(EntJoyConsumeMode)' == 'Source'"
+          Inputs="$(_EntJoyTasksProject);$(EntJoyRepoRoot)src\NativeTranspiler.Tasks\NativeCompileTask.cs"
+          Outputs="$(_EntJoyTasksAssembly)">
+    <MSBuild Projects="$(_EntJoyTasksProject)" Targets="Build" Properties="Configuration=$(Configuration)" />
+  </Target>
+
+  <Target Name="EntJoyCleanStaleTranspilerBindings" BeforeTargets="CoreCompile">
+    <RemoveDir Directories="$(BaseIntermediateOutputPath)$(Configuration)\NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
+    <RemoveDir Directories="$(IntermediateOutputPath)NativeTranspiler.Analyzer.NativeTranspilerGenerator" ContinueOnError="true" />
+  </Target>
+
+  <Target Name="EntJoyCompileNative" AfterTargets="CoreCompile" DependsOnTargets="EntJoyBuildNativeTranspilerTasks"
+          Condition="'$(EnableNativeCompile)' != 'false' And Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\CMakeLists.txt')">
+    <Message Importance="high" Text="Starting native compilation for generated C++/ISPC code..." />
+    <NativeCompileTask NativeCodeGenDir="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\"
+                       NativeDllDir="$(EntJoyNativeDllDir)"
+                       PrebuiltNative="$(EntJoyIsPrebuiltNative)" />
+  </Target>
+
+  <Target Name="EntJoyCopyNativeDll" AfterTargets="EntJoyCompileNative" Condition="'$(EnableNativeCompile)' != 'false'">
+    <ItemGroup>
+      <_EntJoyBuildOutput Include="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeDll.dll" Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeDll.dll')" />
+      <_EntJoyBuildOutput Include="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_EntJoyBuildOutput)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="'@(_EntJoyBuildOutput)' != ''" />
+    <!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
+    <Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
+  </Target>
+
+  <!-- Package 模式：运行时 NativeDll.dll 随包提供，纯托管消费者零工具链即可运行 -->
+  <Target Name="EntJoyCopyPackagedNativeRuntime" AfterTargets="Build" Condition="'$(EntJoyConsumeMode)' == 'Package'">
+    <ItemGroup>
+      <_EntJoyPackagedRuntime Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\NativeDll.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_EntJoyPackagedRuntime)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="'@(_EntJoyPackagedRuntime)' != ''" />
+  </Target>
+
+  <Target Name="EntJoyCopyPackagedNativeRuntimeToPublish" AfterTargets="Publish" Condition="'$(EntJoyConsumeMode)' == 'Package'">
+    <ItemGroup>
+      <_EntJoyPackagedRuntimePublish Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\NativeDll.dll" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\NativeDll.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_EntJoyPackagedRuntimePublish)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(_EntJoyPackagedRuntimePublish)' != ''" />
+  </Target>
+
+</Project>

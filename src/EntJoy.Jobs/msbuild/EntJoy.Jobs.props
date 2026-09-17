@@ -1,0 +1,59 @@
+<Project>
+
+  <!-- EntJoy 原生转译链（NativeTranspiler + NativeTranspiler.Tasks）与原生链接套件的共享 MSBuild 接线。
+       同一份文件服务两种消费模式：
+         · Source  ：仓库内源码消费 —— 分析器/任务走 ProjectReference，NativeDll 源码取自 src/NativeDll
+         · Package ：NuGet 包消费    —— 分析器/任务/头与导入库取自包内 tools\ 与 build\native\
+       模式由文件所在位置自动判定（见 _EntJoyRepoLayout），无需消费者配置。 -->
+
+  <PropertyGroup>
+    <_EntJoyRepoLayout Condition="'$(_EntJoyRepoLayout)' == '' And Exists('$(MSBuildThisFileDirectory)..\..\..\EntJoy.sln')">true</_EntJoyRepoLayout>
+    <_EntJoyRepoLayout Condition="'$(_EntJoyRepoLayout)' == ''">false</_EntJoyRepoLayout>
+    <EntJoyConsumeMode Condition="'$(EntJoyConsumeMode)' == '' And '$(_EntJoyRepoLayout)' == 'true'">Source</EntJoyConsumeMode>
+    <EntJoyConsumeMode Condition="'$(EntJoyConsumeMode)' == ''">Package</EntJoyConsumeMode>
+  </PropertyGroup>
+
+  <!-- 生成目录不参与编译（C++/ISPC 由 NativeTranspiler 生成到 NativeTranspiler_Generated） -->
+  <ItemGroup>
+    <Compile Remove="NativeTranspiler_Generated\**" />
+    <EmbeddedResource Remove="NativeTranspiler_Generated\**" />
+    <None Remove="NativeTranspiler_Generated\**" />
+  </ItemGroup>
+
+  <!-- ================= Source 模式（仓库内） ================= -->
+  <PropertyGroup Condition="'$(EntJoyConsumeMode)' == 'Source'">
+    <EntJoyRepoRoot Condition="'$(EntJoyRepoRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\</EntJoyRepoRoot>
+    <EntJoyNativeDllDir Condition="'$(EntJoyNativeDllDir)' == ''">$(EntJoyRepoRoot)src\NativeDll</EntJoyNativeDllDir>
+    <_EntJoyTasksAssembly>$(EntJoyRepoRoot)src\NativeTranspiler.Tasks\bin\$(Configuration)\netstandard2.0\NativeTranspiler.Tasks.dll</_EntJoyTasksAssembly>
+    <_EntJoyTasksProject>$(EntJoyRepoRoot)src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj</_EntJoyTasksProject>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(EntJoyConsumeMode)' == 'Source'">
+    <ProjectReference Include="$(EntJoyRepoRoot)src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="$(EntJoyRepoRoot)src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
+  </ItemGroup>
+
+  <!-- ================= Package 模式（NuGet） ================= -->
+  <PropertyGroup Condition="'$(EntJoyConsumeMode)' == 'Package'">
+    <_EntJoyPackageRoot>$(MSBuildThisFileDirectory)..\</_EntJoyPackageRoot>
+    <!-- build\native\ = 预编译 NativeDll 的链接套件：头文件 + tasksys.cpp + NativeDll.lib -->
+    <EntJoyNativeDllDir Condition="'$(EntJoyNativeDllDir)' == ''">$(_EntJoyPackageRoot)build\native\</EntJoyNativeDllDir>
+    <EntJoyPrebuiltNativeDir Condition="'$(EntJoyPrebuiltNativeDir)' == ''">$(_EntJoyPackageRoot)build\native\</EntJoyPrebuiltNativeDir>
+    <EntJoyIsPrebuiltNative>true</EntJoyIsPrebuiltNative>
+    <_EntJoyTasksAssembly>$(_EntJoyPackageRoot)tools\NativeTranspiler.Tasks.dll</_EntJoyTasksAssembly>
+  </PropertyGroup>
+
+  <!-- 分析器显式挂接：不依赖 NuGet analyzers/ 的传递行为（文档与实际不一致），
+       只由本包挂一次，因此不会重复加载。 -->
+  <ItemGroup Condition="'$(EntJoyConsumeMode)' == 'Package'">
+    <Analyzer Include="$(_EntJoyPackageRoot)tools\NativeTranspiler.dll" Condition="Exists('$(_EntJoyPackageRoot)tools\NativeTranspiler.dll')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="EntJoyNativeDllDir" />
+    <CompilerVisibleProperty Include="EntJoyPrebuiltNativeDir" />
+  </ItemGroup>
+
+  <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(_EntJoyTasksAssembly)" TaskFactory="TaskHostFactory" />
+
+</Project>
