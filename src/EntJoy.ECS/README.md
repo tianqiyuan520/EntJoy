@@ -22,7 +22,7 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 
 配套的 **ECS 源生成器**为 `IJobEntity`、原生绑定与调度扩展生成代码，随包以分析器形式加载，不需要在消费工程里引用生成器工程。
 
-> `IJobChunk` / `IJobEntity` / `SendEvent` 属于 ECS 能力，必须引用本包；只写数组类 Job（`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch`）的项目可以只引用 [`EntJoy.Jobs`](../EntJoy.Jobs/README.md)。
+> `IJobChunk` / `IJobEntity` / `SendEvent` 属于 ECS 能力，必须引用本包；只写数组类 Job（`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch`）的项目可以只引用 [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md)。
 
 ## 工具链前提
 
@@ -43,9 +43,9 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 
 ## 相关
 
-- [`EntJoy.Jobs`](../EntJoy.Jobs/README.md) —— 原生 JobSystem 与 NativeTranspiler 设施。
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) / [`EntJoy.Mathematics`](../EntJoy.Mathematics/README.md)。
-- 根 [README](../../README.md#ecs-示例) 的 ECS 示例与[通过 NuGet 使用](../../README.md#通过-nuget-使用)。
+- [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md) —— 原生 JobSystem 与 NativeTranspiler 设施。
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) / [`EntJoy.Mathematics`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Mathematics/README.md)。
+- 根 [README](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#ecs-示例) 的 ECS 示例与[通过 NuGet 使用](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#通过-nuget-使用)。
 
 # EntJoy.ECS (English)
 
@@ -71,7 +71,7 @@ EntJoy's Archetype ECS (headless). This is **the only package you need to refere
 
 The bundled **ECS source generator** emits code for `IJobEntity`, the native bindings, and the scheduling extensions; it loads as an analyzer from the package, so consumers never reference the generator project.
 
-> `IJobChunk` / `IJobEntity` / `SendEvent` are ECS features and require this package. A project that only writes array-shaped jobs (`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch`) can reference [`EntJoy.Jobs`](../EntJoy.Jobs/README.md) alone.
+> `IJobChunk` / `IJobEntity` / `SendEvent` are ECS features and require this package. A project that only writes array-shaped jobs (`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch`) can reference [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md) alone.
 
 ## Toolchain requirements
 
@@ -92,6 +92,6 @@ The bundled **ECS source generator** emits code for `IJobEntity`, the native bin
 
 ## See also
 
-- [`EntJoy.Jobs`](../EntJoy.Jobs/README.md) — native JobSystem and NativeTranspiler infrastructure.
-- [`EntJoy.Collections`](../EntJoy.Collections/README.md) / [`EntJoy.Mathematics`](../EntJoy.Mathematics/README.md).
-- The [ECS example](../../README.md#ecs-example) and [Using NuGet Packages](../../README.md#using-nuget-packages) in the root README.
+- [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md) — native JobSystem and NativeTranspiler infrastructure.
+- [`EntJoy.Collections`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Collections/README.md) / [`EntJoy.Mathematics`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Mathematics/README.md).
+- The [ECS example](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#ecs-example) and [Using NuGet Packages](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#using-nuget-packages) in the root README.

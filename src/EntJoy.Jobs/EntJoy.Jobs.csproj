@@ -15,6 +15,7 @@
     <Title>EntJoy.Jobs</Title>
     <Description>EntJoy JobSystem（托管 + 原生 Chase-Lev 调度器）与 NativeTranspiler 转译设施：包含预编译 NativeDll.dll、原生链接套件（头文件 / 导入库 / tasksys.cpp）、NativeTranspiler 分析器与 MSBuild 任务。仅 win-x64。</Description>
     <PackageTags>ecs;jobsystem;native;simd;transpiler</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,5 +54,8 @@
     <!-- MSBuild 接线：只用 buildTransitive（对直接与间接消费方都生效，且全图只挂一次） -->
     <None Include="msbuild\EntJoy.Jobs.props" Pack="true" PackagePath="buildTransitive/" Visible="false" />
     <None Include="msbuild\EntJoy.Jobs.targets" Pack="true" PackagePath="buildTransitive/" Visible="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

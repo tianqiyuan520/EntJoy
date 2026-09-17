@@ -21,7 +21,7 @@ EntJoy 的原生容器、分配器与安全检查层：`NativeArray<T>` / `Nativ
 | `DisposeSentinel` | Debug 构建专用的泄漏检测：哨兵存于静态表（key = safety handle index），容器 `Dispose` 时注销；`DumpLeaks` 扫描并报告未释放容器。 |
 | `JobIdentity` | 当前线程正在执行的 job 身份（`CurrentContext`，非 job 代码为 `default`）。容器写入点据此区分「同一 job 的并行 tile 写」（合法）与「不同 job 交叉写同一容器」（冲突）。 |
 
-> 安全检查的行为细节（并行读写声明的登记时机、拦截窗口、`ENTJOY_SAFETY` / `ENTJOY_SAFETY_BOUNDS` 开关）见 [`docs/public/Runtime-Contracts-and-Known-Limitations.md`](../../docs/public/Runtime-Contracts-and-Known-Limitations.md)。
+> 安全检查的行为细节（并行读写声明的登记时机、拦截窗口、`ENTJOY_SAFETY` / `ENTJOY_SAFETY_BOUNDS` 开关）见 [`docs/public/Runtime-Contracts-and-Known-Limitations.md`](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Runtime-Contracts-and-Known-Limitations.md)。
 
 ## 引用
 
@@ -36,9 +36,9 @@ EntJoy 的原生容器、分配器与安全检查层：`NativeArray<T>` / `Nativ
 
 ## 相关
 
-- [`EntJoy.Mathematics`](../EntJoy.Mathematics/README.md) —— 本包的依赖。
-- [`EntJoy.Jobs`](../EntJoy.Jobs/README.md) —— 在其之上提供 JobSystem 与原生调度器。
-- 根 [README](../../README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
+- [`EntJoy.Mathematics`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Mathematics/README.md) —— 本包的依赖。
+- [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md) —— 在其之上提供 JobSystem 与原生调度器。
+- 根 [README](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#通过-nuget-使用) 的「通过 NuGet 使用」。
 
 # EntJoy.Collections (English)
 
@@ -63,7 +63,7 @@ EntJoy's native containers, allocators, and safety layer: `NativeArray<T>` / `Na
 | `DisposeSentinel` | Leak detection for Debug builds: the sentinel lives in a static table keyed by safety-handle index and is unregistered on container `Dispose`; `DumpLeaks` scans and reports containers that were never disposed. |
 | `JobIdentity` | Identity of the job currently running on this thread (`CurrentContext`; `default` outside jobs). Container write paths use it to tell "parallel tile writes of the same job" (legal) from "different jobs writing the same container" (a conflict). |
 
-> For the precise safety-check behavior (when parallel read/write claims are registered, the interception window, and the `ENTJOY_SAFETY` / `ENTJOY_SAFETY_BOUNDS` switches), see [`docs/public/Runtime-Contracts-and-Known-Limitations.md`](../../docs/public/Runtime-Contracts-and-Known-Limitations.md).
+> For the precise safety-check behavior (when parallel read/write claims are registered, the interception window, and the `ENTJOY_SAFETY` / `ENTJOY_SAFETY_BOUNDS` switches), see [`docs/public/Runtime-Contracts-and-Known-Limitations.md`](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Runtime-Contracts-and-Known-Limitations.md).
 
 ## Reference it
 
@@ -78,6 +78,6 @@ EntJoy's native containers, allocators, and safety layer: `NativeArray<T>` / `Na
 
 ## See also
 
-- [`EntJoy.Mathematics`](../EntJoy.Mathematics/README.md) — this package's dependency.
-- [`EntJoy.Jobs`](../EntJoy.Jobs/README.md) — builds the JobSystem and native scheduler on top of it.
-- [Using NuGet Packages](../../README.md#using-nuget-packages) in the root README.
+- [`EntJoy.Mathematics`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Mathematics/README.md) — this package's dependency.
+- [`EntJoy.Jobs`](https://github.com/tianqiyuan520/EntJoy/blob/main/src/EntJoy.Jobs/README.md) — builds the JobSystem and native scheduler on top of it.
+- [Using NuGet Packages](https://github.com/tianqiyuan520/EntJoy/blob/main/README.md#using-nuget-packages) in the root README.
