@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
@@ -471,6 +471,14 @@ namespace NativeTranspiler.Analyzer
                     CodeGenIo.WriteAllTextWithRetry(batPath, batContent.ToString());
                 }
 
+                // prebuilt-native 模式：包消费时由 props 注入（NativeDll 预编译 + 头 + tasksys 所在目录）。
+                // 提升到方法作用域：CMakeLists 生成与 run_clangcl.bat 生成两处都要用。
+                string? prebuiltNativeDir = null;
+                if (ctx.Options.GlobalOptions.TryGetValue("build_property.EntJoyPrebuiltNativeDir", out var configuredPrebuilt) && !string.IsNullOrWhiteSpace(configuredPrebuilt))
+                {
+                    prebuiltNativeDir = Path.GetFullPath(configuredPrebuilt);
+                }
+
                 // 只在内容变化时写入 CMakeLists.txt，避免触发 CMake reconfigure
                 if (cppFiles.Count > 0 || ispcFiles.Count > 0)
                 {
@@ -481,6 +489,11 @@ namespace NativeTranspiler.Analyzer
             if (globalOptions.TryGetValue("build_property.EntJoyNativeDllDir", out var configuredDllDir) && !string.IsNullOrWhiteSpace(configuredDllDir))
             {
                 nativeDllDir = Path.GetFullPath(configuredDllDir);
+                solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
+            }
+            else if (prebuiltNativeDir != null)
+            {
+                nativeDllDir = prebuiltNativeDir;
                 solutionBinDir = Path.GetFullPath(Path.Combine(ctx.GetProjectDirectory(), "..", "..", "bin"));
             }
             else
@@ -499,7 +512,7 @@ namespace NativeTranspiler.Analyzer
                     // 配合 CMake Unity Build（批大小 8），新增 job/method 不会打乱既有批的成员，
                     // 从而 native 侧只需重编新 TU + 末尾批，而不是把所有批重编一遍。
                     var existingCppOrder = ReadExistingCppSourceOrder(cmakePath);
-                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, autoSimdCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder);
+                    var cmakeContent = GenerateCMakeLists(cppFiles, ispcFiles, fastMathCppFiles, autoSimdCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder, prebuiltNativeDir);
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
                     {
@@ -535,9 +548,14 @@ namespace NativeTranspiler.Analyzer
                     clangBat.AppendLine("cmake -B build -G \"Visual Studio 17 2022\" -T ClangCL -A x64 -DNATIVE_SIMD_LEVEL=AVX2");
                     clangBat.AppendLine("if errorlevel 1 exit /b 1");
                     clangBat.AppendLine("echo Building NativeDll + NativeTranspiled with ClangCL...");
-                    clangBat.AppendLine("cmake --build build --config Release --target NativeDll --target NativeTranspiled");
+                    clangBat.AppendLine(prebuiltNativeDir == null
+                        ? "cmake --build build --config Release --target NativeDll --target NativeTranspiled"
+                        : "cmake --build build --config Release --target NativeTranspiled");
                     clangBat.AppendLine("if errorlevel 1 exit /b 1");
-                    clangBat.AppendLine("copy /Y build\\Release\\NativeDll.dll \"" + solBinDir + "\"");
+                    if (prebuiltNativeDir == null)
+                        clangBat.AppendLine("copy /Y build\\Release\\NativeDll.dll \"" + solBinDir + "\"");
+                    else
+                        clangBat.AppendLine("copy /Y \"" + Path.Combine(prebuiltNativeDir, "NativeDll.dll").Replace("\\", "\\\\") + "\" \"" + solBinDir + "\"");
                     clangBat.AppendLine("copy /Y build\\Release\\NativeTranspiled.dll \"" + solBinDir + "\"");
                     clangBat.AppendLine("echo Done. NativeDll.dll + NativeTranspiled.dll copied to " + solBinDir);
                     // 内容未变则不写（#22）：避免时间戳更新触发无关重编/检查
@@ -554,6 +572,33 @@ namespace NativeTranspiler.Analyzer
 
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
                 spc.AddSource("NativeTranspiler.Bindings.g.cs", bindingsCode);
+
+                // ─── 不变量自校验：生成物与"是否引用 EntJoy.ECS"必须一致（NT029 / NT030）───
+                // 背景：bindings 的 ECS 相关发射（using EntJoy.ECS、ChunkJobFuncDelegate、World 形参）
+                // 由 job 种类条件化，使只引用 EntJoy.Collections/Jobs 的项目也能用 [NativeTranspile]。
+                // 这条不变量把"解耦"从经验保证升级为生成器自校验：
+                //   · 有 chunk/entity job 却没有 ECS → NT029（Error，说明 job 种类判定与类型可见性不一致）
+                //   · 无 ECS 但生成物仍出现 ECS 符号 → NT030（Warning，生成器新增发射点漏了条件化；
+                //     消费者此时本来也会看到 CS0234/CS0246，这条诊断负责把原因指到生成器）
+                {
+                    bool ecsReferenced = ctx.Compilation.GetTypeByMetadataName(Config.TypeWorld) != null;
+                    bool needsEcs = validJobs.Any(CppJobGenerator.IsChunkScheduledJob);
+                    if (needsEcs && !ecsReferenced)
+                    {
+                        spc.ReportDiagnostic(Diagnostic.Create(
+                            NativeTranspileValidator.EcsRequiredButMissingError, Location.None));
+                    }
+                    else if (!ecsReferenced)
+                    {
+                        var leaked = EcsCouplingTokens(bindingsCode);
+                        if (leaked.Count > 0)
+                        {
+                            spc.ReportDiagnostic(Diagnostic.Create(
+                                NativeTranspileValidator.GeneratedEcsCouplingWarning, Location.None,
+                                string.Join(", ", leaked)));
+                        }
+                    }
+                }
 
                 // 环境变量 ENTJOY_DUMP_BINDINGS=<path> 时把绑定源码落盘。
                 // 用途：Unity 工程无法跑 MSBuild 源生成器管线，需要离线 dump 绑定后直接编译
@@ -1136,9 +1181,27 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             "#define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  (atomic_subtract_global((ptr), 1) - 1)\n" +
             "#define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) atomic_compare_exchange_global((ptr), (oldVal), (newVal))\n";
 
+        /// <summary>
+        /// 扫描生成物中出现的 ECS 耦合符号（词边界匹配 ⇒ 用户自定义的 MyWorldJob 之类不会误报）。
+        /// 仅在编译未引用 EntJoy.ECS 时用于 NT030 自校验。
+        /// </summary>
+        private static List<string> EcsCouplingTokens(string generatedCode)
+        {
+            var found = new List<string>();
+            foreach (var token in new[] { "EntJoy.ECS", "World", "QueryBuilder", "ArchetypeChunk", "EntityManager", "ChunkJobScheduler", "ChunkJobData", "ChunkEnabledMask" })
+            {
+                var pattern = token == "EntJoy.ECS"
+                    ? System.Text.RegularExpressions.Regex.Escape(token)
+                    : "\\b" + System.Text.RegularExpressions.Regex.Escape(token) + "\\b";
+                if (System.Text.RegularExpressions.Regex.IsMatch(generatedCode, pattern))
+                    found.Add(token);
+            }
+            return found;
+        }
+
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
                                   string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
-                                  List<string>? existingCppOrder = null)
+                                  List<string>? existingCppOrder = null, string? prebuiltNativeDir = null)
         {
             var sb = new StringBuilder();
             // 跨盘符时 GetRelativePath 返回绝对路径，再拼 ${CMAKE_CURRENT_SOURCE_DIR}/ 会得到
@@ -1146,6 +1209,12 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             string cmakeNativeDllDir = Path.IsPathRooted(relativeNativeDllDir)
                 ? relativeNativeDllDir
                 : "${CMAKE_CURRENT_SOURCE_DIR}/" + relativeNativeDllDir;
+            // prebuilt-native 模式（NuGet 包消费）：NativeDll 由包预编译提供，本工程只编 NativeTranspiled，
+            // 因此不发射 add_library(NativeDll ...) / imgui / NativeDll 专属编译选项，改为链接包内导入库。
+            bool prebuiltNative = !string.IsNullOrEmpty(prebuiltNativeDir);
+            string prebuiltNativeLibRef = prebuiltNative
+                ? Path.GetFullPath(Path.Combine(prebuiltNativeDir!, "NativeDll.lib")).Replace("\\", "/")
+                : "";
             sb.AppendLine("cmake_minimum_required(VERSION 3.10)");
             sb.AppendLine("set(CMAKE_INSTALL_PREFIX \"${CMAKE_CURRENT_BINARY_DIR}/install\" CACHE PATH \"Install prefix\" FORCE)");
             sb.AppendLine("project(NativeDll LANGUAGES CXX)");
@@ -1233,20 +1302,28 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             // NativeDll 核心源文件（按目录 glob，TU 拆分/新增时免维护漏列）。
             // 曾硬编码 JobSystem.cpp 单文件，模块化拆分为 State/Tiles/Scheduler 后漏列
             // 三个新 TU → 链接期 LNK2019（Scheduler/JobHandle 未定义）。glob 从根上消除该类回归。
-            sb.AppendLine("# Core runtime (NativeDll.dll)");
-            sb.AppendLine("add_library(NativeDll SHARED");
-            var nativeDllAbsDir = Path.GetFullPath(Path.Combine(outputDir, relativeNativeDllDir));
-            var nativeDllCppFiles = Directory.Exists(nativeDllAbsDir)
-                ? Directory.GetFiles(nativeDllAbsDir, "*.cpp")
-                    .Select(f => Path.GetFileName(f))
-                    .Where(f => !string.Equals(f, "tasksys.cpp", StringComparison.OrdinalIgnoreCase))
-                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                    .ToList()
-                : new List<string>();
-            foreach (var f in nativeDllCppFiles)
-                sb.AppendLine($"    \"{cmakeNativeDllDir}/{f}\"");
-            sb.AppendLine(")");
-            sb.AppendLine();
+            if (!prebuiltNative)
+            {
+                sb.AppendLine("# Core runtime (NativeDll.dll)");
+                sb.AppendLine("add_library(NativeDll SHARED");
+                var nativeDllAbsDir = Path.GetFullPath(Path.Combine(outputDir, relativeNativeDllDir));
+                var nativeDllCppFiles = Directory.Exists(nativeDllAbsDir)
+                    ? Directory.GetFiles(nativeDllAbsDir, "*.cpp")
+                        .Select(f => Path.GetFileName(f))
+                        .Where(f => !string.Equals(f, "tasksys.cpp", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                        .ToList()
+                    : new List<string>();
+                foreach (var f in nativeDllCppFiles)
+                    sb.AppendLine($"    \"{cmakeNativeDllDir}/{f}\"");
+                sb.AppendLine(")");
+                sb.AppendLine();
+            }
+            else
+            {
+                sb.AppendLine("# Core runtime (NativeDll.dll) is provided prebuilt by the NuGet package");
+                sb.AppendLine();
+            }
             sb.AppendLine("# Generated job wrappers + ISPC runtime (NativeTranspiled.dll)");
             sb.AppendLine("#   tasksys.cpp（ISPCAlloc/ISPCLaunch/ISPCSync 任务系统）必须与 ISPC 编译产物");
             sb.AppendLine("#   同 DLL：ISPC .obj 以普通符号引用 ISPCLaunch 等，MSVC 无法从另一 DLL");
@@ -1261,7 +1338,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             }
             sb.AppendLine("    ${TASKSYS_SRC}");
             sb.AppendLine(")");
-            sb.AppendLine("target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
+            sb.AppendLine(prebuiltNative
+                ? $"target_link_libraries(NativeTranspiled PRIVATE \"{prebuiltNativeLibRef}\")"
+                : "target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
             sb.AppendLine();
 
             // ============================================================
@@ -1300,25 +1379,29 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
 
             // ---- 调试面板：Dear ImGui 集成（Windows + D3D11 后端） ----
             // 源码位于 NativeDll/thirdParty/imgui。Windows 上编译 imgui 核心 + Win32 + D3D11。
-            sb.AppendLine("# ============================================================");
-            sb.AppendLine("# Dear ImGui debug panel (Windows / D3D11)");
-            sb.AppendLine("# ============================================================");
-            sb.AppendLine("if(WIN32)");
-            sb.AppendLine($"    set(IMGUI_DIR   \"{cmakeNativeDllDir}/thirdParty/imgui\")");
-            sb.AppendLine("    set(IMGUI_BACK  \"${IMGUI_DIR}/backends\")");
-            sb.AppendLine("    target_include_directories(NativeDll PRIVATE ${IMGUI_DIR} ${IMGUI_BACK})");
-            sb.AppendLine("    target_sources(NativeDll PRIVATE");
-            sb.AppendLine("        ${IMGUI_DIR}/imgui.cpp");
-            sb.AppendLine("        ${IMGUI_DIR}/imgui_draw.cpp");
-            sb.AppendLine("        ${IMGUI_DIR}/imgui_tables.cpp");
-            sb.AppendLine("        ${IMGUI_DIR}/imgui_widgets.cpp");
-            sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_win32.cpp");
-            sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_dx11.cpp");
-            sb.AppendLine("    )");
-            sb.AppendLine("    target_link_libraries(NativeDll PRIVATE d3d11 dxgi)");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_IMGUI_ENABLED=1)");
-            sb.AppendLine("endif()");
-            sb.AppendLine();
+            // prebuilt 模式下 imgui 已编入包内 NativeDll，消费者不需要 imgui 源码/子模块。
+            if (!prebuiltNative)
+            {
+                sb.AppendLine("# ============================================================");
+                sb.AppendLine("# Dear ImGui debug panel (Windows / D3D11)");
+                sb.AppendLine("# ============================================================");
+                sb.AppendLine("if(WIN32)");
+                sb.AppendLine($"    set(IMGUI_DIR   \"{cmakeNativeDllDir}/thirdParty/imgui\")");
+                sb.AppendLine("    set(IMGUI_BACK  \"${IMGUI_DIR}/backends\")");
+                sb.AppendLine("    target_include_directories(NativeDll PRIVATE ${IMGUI_DIR} ${IMGUI_BACK})");
+                sb.AppendLine("    target_sources(NativeDll PRIVATE");
+                sb.AppendLine("        ${IMGUI_DIR}/imgui.cpp");
+                sb.AppendLine("        ${IMGUI_DIR}/imgui_draw.cpp");
+                sb.AppendLine("        ${IMGUI_DIR}/imgui_tables.cpp");
+                sb.AppendLine("        ${IMGUI_DIR}/imgui_widgets.cpp");
+                sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_win32.cpp");
+                sb.AppendLine("        ${IMGUI_BACK}/imgui_impl_dx11.cpp");
+                sb.AppendLine("    )");
+                sb.AppendLine("    target_link_libraries(NativeDll PRIVATE d3d11 dxgi)");
+                sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_IMGUI_ENABLED=1)");
+                sb.AppendLine("endif()");
+                sb.AppendLine();
+            }
 
             // SIMD arch flags + defines (after add_library)
             // 生成代码（NativeTranspiled）与核心（NativeDll）都 include Native Containes/Math
@@ -1327,8 +1410,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# SIMD arch flags + defines（NativeDll + NativeTranspiled 一致）");
             sb.AppendLine("# ============================================================");
             string simdTgtList = autoSimdCppFiles.Count > 0
-                ? "NativeDll NativeTranspiled NativeTranspiledPrecise"
-                : "NativeDll NativeTranspiled";
+                ? (prebuiltNative ? "NativeTranspiled NativeTranspiledPrecise" : "NativeDll NativeTranspiled NativeTranspiledPrecise")
+                : (prebuiltNative ? "NativeTranspiled" : "NativeDll NativeTranspiled");
             sb.AppendLine($"foreach(SIMD_TGT {simdTgtList})");
             sb.AppendLine("    if(NATIVE_SIMD_LEVEL STREQUAL \"AVX2\")");
             sb.AppendLine("        target_compile_definitions(${SIMD_TGT} PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8)");
@@ -1372,7 +1455,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Sentinel layout: match C# #if DEBUG DisposeSentinel (native templates add 8B sentinel field)");
             sb.AppendLine("option(ENTJOY_ENABLE_SENTINEL \"Match C# #if DEBUG DisposeSentinel container layout\" OFF)");
             sb.AppendLine("if(ENTJOY_ENABLE_SENTINEL)");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_ENABLE_SENTINEL)");
+            if (!prebuiltNative)
+                sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE ENTJOY_ENABLE_SENTINEL)");
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE ENTJOY_ENABLE_SENTINEL)");
             if (autoSimdCppFiles.Count > 0)
                 sb.AppendLine("    target_compile_definitions(NativeTranspiledPrecise PRIVATE ENTJOY_ENABLE_SENTINEL)");
@@ -1445,25 +1529,30 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
             sb.AppendLine("        # /MP：Unity Build 拆批后同 project 内的多个 TU 并行编译");
             sb.AppendLine("        #（--parallel 只并行 project 间；缺 /MP 时拆批反而串行更慢）");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
+            if (!prebuiltNative)
+                sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
             // NativeTranspiled keeps /fp:fast for performance (gridsearch build/query hot paths).
             // AutoSIMD files are compiled separately WITHOUT /fp:fast in NativeTranspiledPrecise
             // (see above), preserving 454229d's IEEE-754 NaN/±0 semantics (EC2/EC8/E5/E8/E11).
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
-            sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            if (!prebuiltNative)
+                sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("    endif()");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            if (!prebuiltNative)
+                sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("    # NativeTranspiled 导出生成代码 wrapper/adapter（GENERATED_API → dllexport）");
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG NOMINMAX GENERATED_EXPORTS)");
             sb.AppendLine("else()");
-            sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
+            if (!prebuiltNative)
+                sb.AppendLine("    target_compile_options(NativeDll PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
             // NativeTranspiled keeps -ffast-math for performance; AutoSIMD precise lib (above)
             // compiles without -ffast-math to preserve 454229d's IEEE-754 semantics.
             sb.AppendLine("    target_compile_options(NativeTranspiled PRIVATE -O3 -march=native -mtune=native -ffast-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer)");
-            sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
+            if (!prebuiltNative)
+                sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");
             sb.AppendLine("endif()");
             sb.AppendLine();
@@ -1474,21 +1563,27 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("# Platform-specific output suffix");
             sb.AppendLine("# ============================================================");
             sb.AppendLine("if(WIN32)");
-            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dll\")");
+            if (!prebuiltNative)
+                sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dll\")");
             sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".dll\")");
             sb.AppendLine("elseif(APPLE)");
-            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dylib\")");
+            if (!prebuiltNative)
+                sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".dylib\")");
             sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".dylib\")");
             sb.AppendLine("else()");
-            sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".so\")");
+            if (!prebuiltNative)
+                sb.AppendLine("    set_target_properties(NativeDll PROPERTIES SUFFIX \".so\")");
             sb.AppendLine("    set_target_properties(NativeTranspiled PROPERTIES SUFFIX \".so\")");
             sb.AppendLine("endif()");
             sb.AppendLine();
-            sb.AppendLine("set_target_properties(NativeDll PROPERTIES");
-            sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
-            sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
-            sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
-            sb.AppendLine(")");
+            if (!prebuiltNative)
+            {
+                sb.AppendLine("set_target_properties(NativeDll PROPERTIES");
+                sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+                sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+                sb.AppendLine("    ARCHIVE_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
+                sb.AppendLine(")");
+            }
             sb.AppendLine("set_target_properties(NativeTranspiled PROPERTIES");
             sb.AppendLine("    RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
             sb.AppendLine("    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\"");
