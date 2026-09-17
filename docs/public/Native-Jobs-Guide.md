@@ -15,6 +15,10 @@
 
 两种方式下 `[NativeTranspile]` 的**写法完全一致**；差别只在"分析器/任务/原生头与导入库从哪来"。
 
+包从哪来：发布到 **nuget.org**（`dotnet add package EntJoy.ECS` / `EntJoy.Jobs`，可匿名还原）与 **GitHub Packages**
+（镜像源；该 feed 即使包公开也必须带 classic PAT，且建议配 `packageSourceMapping`）。发布由 `v*` tag 触发，
+详见[运行时契约与已知限制](Runtime-Contracts-and-Known-Limitations.md)与[边界、诊断与回归防线](NativeTranspiler-Boundaries-and-Diagnostics.md) §7。
+
 ---
 
 ## 2. 怎么写
