@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Jobs-only regression guard (run by CI's framework-test job via check.ps1).
+       This project deliberately does NOT reference EntJoy.ECS.
+       If NativeTranspiler's generated bindings re-introduce an ECS dependency, this project
+       stops compiling -> the guard fails. See check.ps1 for the assertion list. -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableNativeCompile>false</EnableNativeCompile>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)gen</CompilerGeneratedFilesOutputPath>
+    <NoWarn>$(NoWarn);CS0169</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="NativeTranspiler_Generated\**" />
+    <EmbeddedResource Remove="NativeTranspiler_Generated\**" />
+    <None Remove="NativeTranspiler_Generated\**" />
+  </ItemGroup>
+
+  <!-- Jobs-only 引用面：Collections / Jobs / Mathematics + NativeTranspiler 分析器。 -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EntJoy.Collections\EntJoy.Collections.csproj" />
+    <ProjectReference Include="..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
+    <ProjectReference Include="..\..\src\EntJoy.Mathematics\EntJoy.Mathematics.csproj" />
+    <ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <EntJoyNativeDllDir>$(MSBuildThisFileDirectory)..\..\src\NativeDll</EntJoyNativeDllDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="EntJoyNativeDllDir" />
+  </ItemGroup>
+
+</Project>
