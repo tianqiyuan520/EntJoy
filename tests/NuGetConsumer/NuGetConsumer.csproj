@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- NuGet 消费冒烟测试：只用 PackageReference 消费 EntJoy（不引用任何仓库路径）。
+       覆盖三条交付链路：
+         1) 托管 ECS（实体 / 查询 / chunk 遍历）
+         2) 原生 JobSystem（包内 runtimes\win-x64\native\NativeDll.dll 由包 props 复制并加载）
+         3) [NativeTranspile] native job（包内分析器生成 C++ → 包内 tasks/链接套件本地编 NativeTranspiled.dll）
+       前置：先 `dotnet pack` 出包到 artifacts\packages（tests\NuGetConsumer\run.ps1 会做）。
+       路径 3) 需要本机 CMake + MSVC/ClangCL（ISPC 可选）。 -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NuGetAudit>false</NuGetAudit>
+    <EntJoyPackageVersion Condition="'$(EntJoyPackageVersion)' == ''">1.0.0</EntJoyPackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="EntJoy.ECS" Version="$(EntJoyPackageVersion)" />
+  </ItemGroup>
+
+</Project>

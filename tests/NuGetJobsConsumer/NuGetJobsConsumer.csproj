@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- NuGet 消费冒烟测试（Jobs-only 侧）：只装 EntJoy.Jobs，**不装、也不引用 EntJoy.ECS**。
+       用 [NativeTranspile] 写 4 种数组形态的 native job（IJob / IJobFor / IJobParallelFor /
+       IJobParallelForBatch），由包内分析器生成 C++、包内 tasks + build\native 编出 NativeTranspiled.dll，
+       再与托管结果做 parity。
+       前置：先 `dotnet pack` 出包到 artifacts\packages（tests\NuGetConsumer\run.ps1 会做）。
+       需要本机 CMake + MSVC/ClangCL；不使用 ISPC（保持对无 ISPC 机器的兼容）。 -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NuGetAudit>false</NuGetAudit>
+    <EntJoyPackageVersion Condition="'$(EntJoyPackageVersion)' == ''">1.0.0</EntJoyPackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="EntJoy.Jobs" Version="$(EntJoyPackageVersion)" />
+  </ItemGroup>
+
+</Project>
