@@ -166,3 +166,33 @@ dotnet run --project tools/SafetyInterceptProbe/SafetyInterceptProbe.csproj -c D
 > 1/2 两轮均拦截、两轮 `Complete()` 后首个访问即可读（重试次数=0），上面那条"第 2 轮不再被拦截"的确定现象已消失。
 > Managed 下两轮体内 ctx 实测为 `2^40+1` / `2^40+2`（每次调度唯一），Native 下两轮仍为同一 ctx，两条后端都通过。
 > 注意复测时必须在 `EntJoy` 目录下运行：按 CWD 搜索会捡到游戏仓 `.godot/mono/temp/bin/...` 里的另一份 NativeDll。
+
+## 十、测试侧确定性握手（消除 CI 假失败，2026-09-17）
+
+**现象**：CI `framework-test` 的 ECS 套件 5 轮里出现
+`ParallelReadWriteContainmentTests.MainThreadRead_WhileJobWrites_Throws` 失败：
+`Main-thread read during job write was not caught in any of 40 attempts.`（190 passed / 1 failed）。
+
+**根因（代码级，非环境噪声）**：读写声明是**惰性登记**的 —— 写声明在 job 内**首次写**时登记
+（`AtomicSafetyHandle.CheckWriteAndThrow` → `TryAcquireWriteContext` → `_writerCtx[index] = ctx`），
+读登记在 job 内**首次读**时登记（`RegisterRead`）。因此原测试的
+"`Schedule()` 后主线程立刻读 2048 个元素，40 次尝试赌至少一次落在 job 活跃窗口内"存在真实竞态：
+只要主线程的读循环在任何 worker 完成首次访问之前跑完（worker 启动稍慢、核心数少、机器负载高时更易发生），
+就没有任何声明可拦，40 次全部落空 ⇒ **假失败**。本机 8 核稳定通过、限核 2/1 也通过，
+只有 CI 环境命中 —— 这正是"环境相关竞态"的典型表现。
+
+**修复（测试侧，不改框架语义）**：把 4 个依赖竞态的用例（`MainThreadRead_WhileJobWrites`、
+`MainThreadWrite_WhileJobReads`、`MainThreadRead_WhileJobReads`、`MainThreadAccess_WhileSpanJobReads`）
+改为**显式握手**：
+
+1. job 完成首次访问（即声明已登记）后置 `s_claimReady` 并**驻留**（有界 ≤3s，避免将来 job 被内联时死锁）；
+2. 主线程等到 `s_claimReady`（有界 5s 超时）后再访问 ⇒ 拦截**必然**发生，单次断言即可，不再重试；
+3. 断言后放行 job 并 `Complete()`（`finally` 保证一定放行，断言失败也不会挂住）。
+
+**验收**：该测试类连续 5 轮全绿；限核 `DOTNET_PROCESSOR_COUNT=2` 与 `=1` 各 3 轮全绿；
+全量套件 `191/191` 连续 5 轮（与 CI 相同次数）全绿。
+**顺带收益**：该类耗时 8s → **0.65s**，全量套件 25s → **1s**（原先的时间几乎都花在 40 次重试调度
+2048 元素 job 上）。
+
+**教训（写这类测试时）**：断言"拦截窗口存在"必须用握手把 job 钉在窗口内，不能用"多试几次"来赌；
+"复现不了 ⇒ 大概是环境问题"在这里是错的 —— 竞态在代码里，只是本机核心多、窗口更容易被踩中。

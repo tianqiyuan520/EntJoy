@@ -57,6 +57,11 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 - **Job 间冲突（写-写）**：不同 Job（不同执行上下文）在未形成依赖的情况下交叉写同一容器，冲突在冲突那次写入抛出。
 - **豁免（合法并行，不检测）**：同一 Job 的并行分块 tile 共享同一执行上下文，放行；ECS chunk 任务的组件列使用共享句柄（`ExemptWriteTracking`），对该句柄的持有跟踪整体豁免。
 - **检测范围**：完整双向——主线程 vs Job 的读/写任意组合均拦截；Job 之间的「读-读」「读-写」不冲突（读共享合法）。Job 间冲突检测仅覆盖「写-写」。
+- **拦截窗口从"某 worker 首次访问该容器"开始**（声明是**惰性登记**的）：
+  写声明在 job 内首次写时登记（`AtomicSafetyHandle.TryAcquireWriteContext`），读登记在 job 内首次读时登记（`RegisterRead`），二者都在 job 结束（`Complete()`）时按执行上下文释放。
+  ⇒ `Schedule()` 返回后、任何 worker 尚未触碰该容器之前的**短暂窗口内**，主线程访问不会被拦（此时确实没有任何 job 持有该容器）。
+  这是"登记开销只在真正访问时付"的代价，**不是缺陷**；需要严格顺序时请先 `Complete()` 再访问，或按 job 依赖串行化。
+  （该惰性语义曾使 `ParallelReadWriteContainmentTests` 的"40 次重试赌 worker 先写"在 CI 上出现假失败，测试已改为确定性握手，见 `docs/public/NativeArray-Index-Safety-Overhead-and-Fixes.md` §十。）
 - **异常文本**（测试与工具依赖，勿改动）：
   - Job 间写冲突（写入点，经 `Complete()` 以 `AggregateException` 重抛）：`"NativeContainer already being written by another parallel job (ctx={ctx} vs {existing}); schedule it after that job with a dependency, or use separate containers."`
   - 主线程读 × Job 写：`"NativeContainer is being written by an active job; Complete() before accessing it from the main thread."`
@@ -187,5 +192,27 @@ System.AggregateException: One or more scheduled C# jobs failed.
   （ISPC job 使用它会得到 ISPC/C++ 编译错误，不会静默错值）。
 - **`IJobChunk` + `AutoSIMD` 的收益未证明**：双组件整结构体回写的正确性已逐实体验证（不一致=0），
   但没有证据表明该路径比标量 C++ 更快（历史结论是 `AutoSIMD` 在 `IJobParallelFor` 上慢 ~10%）。
+
+## 通过 NuGet 包消费时的运行时契约（2026-09-17）
+
+包的组成（`EntJoy.ECS` / `EntJoy.Jobs` / `EntJoy.Collections` / `EntJoy.Mathematics`，lockstep 版本，**仅 win-x64**）：
+
+- `EntJoy.Jobs` 携带运行时 `runtimes/win-x64/native/NativeDll.dll`、原生链接套件（`build/native/`：`NativeDll.lib` + 头 + `tasksys.cpp`）、
+  `NativeTranspiler` 分析器与 MSBuild 任务（`tools/`）、以及 `buildTransitive/` 接线。`EntJoy.ECS` 依赖它，因此**只写一条 `PackageReference EntJoy.ECS` 即可**。
+- 包模式下 `NativeDll.dll` 由 props 复制到 `$(OutDir)` / `$(PublishDir)`；消费者**不重编 NativeDll**（也不编 imgui）。
+  用 `[NativeTranspile]` 时，本地只编出 `NativeTranspiled.dll` 并链接包内 `NativeDll.lib`。
+
+必须遵守的契约：
+
+- **两个原生 DLL 必须同目录**：`NativeTranspiled.dll` 与 `NativeDll.dll` 由运行时从同一目录解析
+  （查找顺序见加载器实现）。缺任一者：前者静默降级为"仅托管路径"，后者直接 `NativeDll.dll is not loaded`。
+- **头文件/布局必须与预编译 DLL 同版本**：包内头与 `NativeDll.lib`、`NativeDll.dll` 来自同一次打包 ⇒ 消费者**不得**
+  混用不同版本的包（例如把 `EntJoy.Jobs` 1.0.0 的头与该包 1.0.1 的 DLL 拼在一起）；升级请整体升级四个包（lockstep）。
+- **ABI/布局校验目前不存在**：没有版本握手，错配只会在运行期以难以定位的错值或崩溃形式出现（已知缺口）。
+- **写 native job 需要本机 C++ 工具链**：CMake + MSVC（或 VS 自带 ClangCL；缺 ClangCL 自动回退 MSVC）；
+  `Target = Ispc` 还要求 `ispc` 在 `PATH`。**纯 C#（不写 `[NativeTranspile]`）不需要任何工具链**。
+- **独立消费 `EntJoy.Jobs` 时**：只有数组类 job（`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`）可转译；
+  `IJobChunk`/`IJobEntity`/`SendEvent` 的类型定义在 `EntJoy.ECS` 内，无该引用时无法表达。
+  生成器会在"生成物与是否引用 ECS"不一致时报 **NT029/NT030**（见边界文档 §4）。
 
 CI 全绿证明已覆盖路径通过；发布前仍应在目标平台运行 sanitizer、压力和长稳测试。

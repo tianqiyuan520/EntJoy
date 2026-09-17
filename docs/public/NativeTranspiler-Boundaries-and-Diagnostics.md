@@ -62,6 +62,8 @@
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |
 | **NT026** | error | 生成器**自身崩溃**（NRE 等）：把异常堆栈落盘到 `%TEMP%/entjoy-native-transpiler-crash.txt` 并报出，避免历史上"`CS8785` + 连坐 `CS0234 Bindings 缺失`"这种看不出原因的失败 |
 | **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
+| **NT029** | error | 编译里出现 `IJobChunk`/`IJobEntity`（ECS）job，却检测不到 `EntJoy.ECS` 引用。**正常不可能发生**（这两个接口的类型定义就在 EntJoy.ECS 内）⇒ 出现即说明"job 种类判定与类型可见性不一致"，必须修生成器 |
+| **NT030** | warning | 编译未引用 `EntJoy.ECS`，但生成的 bindings 仍出现 ECS 符号（`EntJoy.ECS`/`World`/`QueryBuilder`/`ArchetypeChunk`/`EntityManager`/`ChunkJobScheduler`/`ChunkJobData`/`ChunkEnabledMask`）⇒ 某个 ECS 相关发射点漏了条件化。消息里列出具体符号；若这些名字是你自己的类型，改名即可（词边界匹配，`MyWorldJob` 不误报） |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 
@@ -121,18 +123,45 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 
 ## 7. CI 与回归夹具
 
-- **CI 新增 job `native-transpiler-regression`**（`.github/workflows/jobsystem-ci.yml`）：
+- **CI job `native-transpiler-regression`**（`.github/workflows/jobsystem-ci.yml`）：
   `dotnet run tools/NativeTranspilerFixture -c Release`（真做一次生成 → 标记扫描 → CMake/ClangCL(或 MSVC 回退)
   → 原生编译 → 运行时语义断言）+ `negative-check.ps1`（负向门禁自检）。
   ⚠ 尚未挂进 `release-gate`：GitHub runner 上 clang-cl 组件是否存在未验证，先观察若干轮。
-- 背景：原来的 `framework-test` 用 `-p:EnableNativeCompile=false` 构建，`NativeCompileTask` 被条件跳过
-  ⇒ **生成的 C++/ISPC 从不被编译、静默降级标记也从不被扫描**。
+- **CI job `nuget-consumer-test`**（2026-09-17 新增，**已进 release-gate**）：跑
+  `tests/NuGetConsumer/run.ps1` —— stage 预编译原生制品 → `dotnet pack` 四包 → 清 NuGet 缓存 →
+  两个 `PackageReference`-only 消费者 build+run（`tests/NuGetConsumer` ECS 侧、`tests/NuGetJobsConsumer` Jobs-only 侧）。
+  这是 CI 里唯一覆盖"**消费者从包消费**"的 job；不依赖 ISPC / clang-cl（只编 Cpp 后端，缺 ClangCL 回退 MSVC）。
+- **CI 步骤 `Jobs-only transpiler guard`**（在必检 `framework-test` 内）：跑 `tests/JobsOnlyTranspilerCheck/check.ps1`，
+  断言"无 ECS 引用的工程能用 `[NativeTranspile]` 数组 job"（4 条断言 + 含 NT029/NT030 不得出现），
+  并做过负向自证（耦合回退 → `FAIL[1]`；加 ECS 引用绕过 → `FAIL[3]`）。
+- 背景：`framework-test` 用 `-p:EnableNativeCompile=false` 构建，`NativeCompileTask` 被条件跳过
+  ⇒ **生成的 C++/ISPC 从不被编译、静默降级标记也从不被扫描**（由上面两个 job 补齐）。
 - 夹具 `tools/NativeTranspilerFixture`（带原生编译目标，可直接 `dotnet run`）当前断言：
   1. `IJobParallelForBatch` 单批：每个 index 恰好处理一次、`count` 形参可用；
   2. `IJobParallelForBatch` 多批（64）：批边界长度正确；
   3. `IJobParallelFor` 批内 `return;` **只跳过本次 index**；
   4. `return;` 前后语句的可见性（前面执行、后面跳过）。
 - 相关既有工具：`tools/AutoSIMDVerify`（AutoSIMD 与 C# 基线的逐值对照，23/23）——改 SIMD 生成器后**必跑**。
+
+## 7.1 Jobs-only 解耦与包分发（2026-09-17）
+
+**能力**：只引用 `EntJoy.Collections` / `EntJoy.Jobs`（**不引用 ECS**）的项目也能用 `[NativeTranspile]` 把
+数组类 job（`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`）转译为 native 并运行。
+`IJobChunk`/`IJobEntity`/`SendEvent` 仍属 ECS 能力（类型定义在 `EntJoy.ECS` 内，无引用时无法表达）。
+
+**实现**：生成的 bindings 里三处 ECS 相关发射改为**按 job 种类条件化**——
+`using EntJoy.ECS` / `using EntJoy.ECS.JobSystem`、`ChunkJobFuncDelegate`（形参含 `ChunkJobData*`）、
+以及数组 job 的 `Schedule_*` 签名里那个**从未被使用**的 `World world = null`（数组 job 跑在裸 JobSystem 上，
+没有 World 概念；ECS 类 job 的 `World` 参数与多 World 支持**保持不变**）。
+
+**自校验不变量**：见 §4 的 **NT029/NT030** —— 解耦不再只靠"仓库内守卫项目跑一遍"来保证，
+生成器自身会在每次生成后核对"是否引用 ECS"与"生成物是否含 ECS 符号"是否一致。
+
+**包分发（prebuilt-native 模式）**：`EntJoy.Jobs` 包内含预编译 `NativeDll.dll` + 链接套件
+（`NativeDll.lib` + 头 + `tasksys.cpp`）+ 分析器 + MSBuild 任务；包 props 会设
+`EntJoyPrebuiltNativeDir`，生成器据此产出**只编 `NativeTranspiled`、链接包内 `.lib`** 的 CMakeLists
+（不再 `add_library(NativeDll …)`、不编 imgui）⇒ 消费者**不需要** NativeDll 源码、也不需要 imgui 子模块。
+写法与配置细节见 [Native Job：怎么写、怎么配](Native-Jobs-Guide.md)。
 
 ## 8. 第五批修复（2026-09-13）：三处"语法对、语义错"的转译缺陷
 
