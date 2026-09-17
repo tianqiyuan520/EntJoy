@@ -131,6 +131,17 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
   `tests/NuGetConsumer/run.ps1` —— stage 预编译原生制品 → `dotnet pack` 四包 → 清 NuGet 缓存 →
   两个 `PackageReference`-only 消费者 build+run（`tests/NuGetConsumer` ECS 侧、`tests/NuGetJobsConsumer` Jobs-only 侧）。
   这是 CI 里唯一覆盖"**消费者从包消费**"的 job；不依赖 ISPC / clang-cl（只编 Cpp 后端，缺 ClangCL 回退 MSVC）。
+- **发布 workflow `Publish NuGet`**（`.github/workflows/publish-nuget.yml`，2026-09-17 新增）：**仅由 `push v* tag` 触发**，
+  没有手动入口（失败的 tag run 可在页面上 Re-run jobs）。顺序 = 先跑 `tests/NuGetConsumer/run.ps1` 当发布门禁 →
+  推 GitHub Packages（`GITHUB_TOKEN` + `packages: write`，带 `--skip-duplicate`，作为镜像源）→ `NuGet/login@v1`
+  用 OIDC 换一次性临时 API key → 推 nuget.org（**不带** `--skip-duplicate`：版本号忘提时必须让 workflow 失败，
+  该开关会静默跳过并返回 0）。nuget.org 侧依赖仓库外的 Trusted Publishing 策略（Repository Owner / Repository /
+  Workflow File = `tianqiyuan520` / `EntJoy` / `publish-nuget.yml`，Glob `EntJoy.*`，Scope "Push new packages and package versions"）。
+  发版流程：改 `src/Directory.Build.props` 的 `EntJoyVersion`（四包 lockstep）→ 提交推分支 → 打并推 `v*` tag。
+  ⚠ 未加"tag 名必须等于 `v$(EntJoyVersion)`"的守卫：打错 tag 会晚到 nuget.org 推送步骤才失败。
+  ⚠ **`dotnet nuget push` 的通配符在 Windows 下只认反斜杠**：`"artifacts/packages/*.nupkg"`（正斜杠）会直接报
+  `error: File does not exist (…)` 而**不推送任何包**（v1.0.0 首次发布即因此失败：门禁绿、GH Packages 步骤红、
+  OIDC 与 nuget.org 步骤被跳过）。必须写 `"artifacts\packages\*.nupkg"`（本机对照实测确认，与绝对/相对路径无关）。
 - **CI 步骤 `Jobs-only transpiler guard`**（在必检 `framework-test` 内）：跑 `tests/JobsOnlyTranspilerCheck/check.ps1`，
   断言"无 ECS 引用的工程能用 `[NativeTranspile]` 数组 job"（4 条断言 + 含 NT029/NT030 不得出现），
   并做过负向自证（耦合回退 → `FAIL[1]`；加 ECS 引用绕过 → `FAIL[3]`）。

@@ -1,0 +1,51 @@
+name: Publish NuGet
+
+# 发布入口：只由 v* tag 推送触发，无手动入口（失败的 tag run 可在页面上 Re-run jobs）。
+# 门禁 = tests/NuGetConsumer/run.ps1（stage 预编译原生 → pack 四包 → 两个消费者断言），
+# 通过后双推：GitHub Packages（GITHUB_TOKEN）+ nuget.org（OIDC 换一次性临时 key，仓库内无长期密钥）。
+# 前提：nuget.org 已建 Trusted Publishing 策略，其中 Workflow File 填 publish-nuget.yml。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Stage native artifacts, pack, and run consumer smoke tests
+        shell: pwsh
+        run: ./tests/NuGetConsumer/run.ps1
+
+      # GitHub Packages 是镜像源：CI 之外的本地推可能已存在该版本，跳过即可，不阻断主发布。
+      - name: Push to GitHub Packages
+        shell: pwsh
+        run: |
+          dotnet nuget add source --username tianqiyuan520 --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/tianqiyuan520/index.json"
+          dotnet nuget push "artifacts\packages\*.nupkg" --source github --skip-duplicate
+
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: tianqiyuan520
+
+      # 刻意不加 --skip-duplicate：版本号忘提时必须让 workflow 失败；该开关会静默跳过并返回 0。
+      - name: Push to nuget.org
+        shell: pwsh
+        run: dotnet nuget push "artifacts\packages\*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json

@@ -201,6 +201,10 @@ System.AggregateException: One or more scheduled C# jobs failed.
   `NativeTranspiler` 分析器与 MSBuild 任务（`tools/`）、以及 `buildTransitive/` 接线。`EntJoy.ECS` 依赖它，因此**只写一条 `PackageReference EntJoy.ECS` 即可**。
 - 包模式下 `NativeDll.dll` 由 props 复制到 `$(OutDir)` / `$(PublishDir)`；消费者**不重编 NativeDll**（也不编 imgui）。
   用 `[NativeTranspile]` 时，本地只编出 `NativeTranspiled.dll` 并链接包内 `NativeDll.lib`。
+- **发布渠道与还原凭据**：包发布到 **nuget.org**（可匿名还原）与 **GitHub Packages**（`nuget.pkg.github.com/tianqiyuan520`）。
+  后者对**公开包也不支持匿名还原**（实测 `401 (Unauthorized)` / `NU1301`），消费方必须配 classic PAT（`read:packages`，
+  fine-grained 不支持），并建议加 `packageSourceMapping`——否则该源的鉴权偶发失败会连累整个 restore（连它上面根本没有的
+  公共包也失败）。发布由 `v*` tag 触发，见 [NativeTranspiler：边界、诊断与回归防线](NativeTranspiler-Boundaries-and-Diagnostics.md) §7。
 
 必须遵守的契约：
 
