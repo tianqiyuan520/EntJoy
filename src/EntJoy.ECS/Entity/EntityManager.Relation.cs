@@ -454,22 +454,32 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>收集级联销毁集合（DFS：实体 + 所有关系指向它的实体）。</summary>
+        /// <summary>
+        /// 收集级联销毁集合（实体 + 所有关系指向它的实体）。
+        /// **迭代 DFS（显式栈）**：深链（长所有权链/场景图，数千~数万级）会让递归版
+        /// <c>StackOverflowException</c> —— 该异常**不可捕获**，直接终止进程，
+        /// 所以不能用"调用栈更深一点"来容忍，必须改成显式栈。
+        /// </summary>
         private void CollectCascade(Entity entity, List<Entity> toDestroy, HashSet<int> visited)
         {
-            if (!visited.Add(entity.Id)) return;  // 防环
-            toDestroy.Add(entity);
+            var stack = new Stack<Entity>();
+            stack.Push(entity);
 
-            // 查反向索引：所有指向本实体的 sources
-            if (_relationIndex.TryGetSources(entity.Id, out var byType))
+            while (stack.Count > 0)
             {
+                Entity cur = stack.Pop();
+                if (!visited.Add(cur.Id)) continue;  // 防环
+                toDestroy.Add(cur);
+
+                // 查反向索引：所有指向本实体的 sources
+                if (!_relationIndex.TryGetSources(cur.Id, out var byType)) continue;
                 foreach (var kv in byType)
                 {
                     foreach (var source in kv.Value)
                     {
                         // 槽位校验：source 仍指向本实体（防止索引滞后误伤）
-                        if (StillPointsTo(source, entity))
-                            CollectCascade(source, toDestroy, visited);
+                        if (StillPointsTo(source, cur))
+                            stack.Push(source);
                     }
                 }
             }

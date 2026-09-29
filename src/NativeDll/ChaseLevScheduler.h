@@ -89,13 +89,13 @@ namespace JobSystem
         void DumpState(const char* tag) const noexcept;
 
         // 诊断：每个 worker 当前正在执行的 batch（0=空闲）。worker 线程写入，dump 读取。
-        std::atomic<uint64_t> workerCurrentBatch[kMaxTrackedWorkers];
+        PaddedAtomic<uint64_t> workerCurrentBatch[kMaxTrackedWorkers];
 
         // ---- 诊断计数（relaxed 足够）----
-        std::atomic<uint64_t> dequePushed[kMaxTrackedWorkers];
-        std::atomic<uint64_t> dequePopped[kMaxTrackedWorkers];
-        std::atomic<uint64_t> dequeStolen[kMaxTrackedWorkers];
-        std::atomic<uint64_t> tasksExecuted[kMaxTrackedWorkers];
+        PaddedAtomic<uint64_t> dequePushed[kMaxTrackedWorkers];
+        PaddedAtomic<uint64_t> dequePopped[kMaxTrackedWorkers];
+        PaddedAtomic<uint64_t> dequeStolen[kMaxTrackedWorkers];
+        PaddedAtomic<uint64_t> tasksExecuted[kMaxTrackedWorkers];
         std::atomic<uint64_t> totalTasksPushed{ 0 };
         std::atomic<uint64_t> totalTasksDone{ 0 };
 
@@ -107,10 +107,29 @@ namespace JobSystem
         // 保持 wake-all 语义：绝不做选择性唤醒。
         std::atomic<uint64_t> wakeEpoch{ 0 };
 
+        // §7ah：**停靠等待者计数**（只用于判断"这次广播有没有必要"，不做选择性唤醒目标指定）。
+        // 实测动机：真实负载 `ScheduleParallelForBatch` 净 15.5 µs/次，其中 **submit.notify 14.5 µs（93%）**，
+        // × 63,624 次 ≈ 0.92 s ≈ 4.5% 全程（≈5.6 ms/步）。而绝大多数批次是 **physcap 封顶到 8 人**的小批：
+        // 已醒着的 8 个 worker 会在自旋区自己从注入器领到活；广播只是用 futex+IPI 把另 7 个仍在睡的 worker 叫醒
+        // （它们随后又睡回去）。本计数让提交侧在"无人等待 / 已醒人数已够本批名额"时安全跳过广播。
+        // 丢失唤醒防护：唤醒者**先 bump epoch 再读计数**；停靠者**先登记计数再复查 epoch**（见 .cpp park 段）。
+        std::atomic<int> parkedWorkers{ 0 };
+
         // 全局 Injector（标准 Chase-Lev 的任务入口）
         static constexpr uint32_t kInjectorCapacity = 32768;
         MPMCInjector<RangeTask*, kInjectorCapacity> injector_;
 
+        // （认领信箱曾在此实现，2026-09-27 **移除**：它把 token 固定派给 0..N-1 号 worker，
+        //   在多批重叠时会退化成"等自己被派的 worker"，把并发串行化 —— ECS 读/写序测试
+        //   `SystemReadWriteOrderTests.TwoReaderSystems_StayParallel` 与
+        //   `ReadWriteOrderingDisabled_FallsBackToLegacyBehaviour` 两条功能性断言当场抓到。
+        //   微基准上它在参与者 ≤ 物理核时曾 −5~−6.5%（W=8），但语义不允许。若要重做，需改成
+        //   "发布一次 + 首到先得 admission"（任意空闲 worker 加入、保留动态认领）。
+        //   ⚠ 但先看证据：同日 `MPMCInjector::PopMany`（同样只求"便宜加入"、同样保留 15 参与者）
+        //   在 W=15 上 k=4/8/15 一律更差（k=2 −7.2%、W=8 全更差）⇒ "保留 N 参与者、把加入做便宜"
+        //   这一方向在 W=15 已有两条否证；而"减少参与者"虽在微基准有效，整步已被否证
+        //   （`ApplyPhysCoreCapForSmallJob` +0.7%、静态切片 +19.6%）。结论：动手前先想清楚收益从哪来，
+        //   且只能由真实负载整步 ≥6 对裁决。见 `docs/gridsearch/07` 顶部两块。）
         // 全局 RangeTask 池
         static RangeTaskPool s_taskPool_;
 

@@ -178,6 +178,19 @@ namespace EntJoy.Collections
 #endif
             if (_isOwner)
             {
+                // 释放前把关：仍被活动 Job 持有时拒绝释放（否则 Job 的写入会落到复用后的新容器内存上）
+                SafetyHandleManager.CheckDeallocateAndThrow(_safety);
+                // ★ B18 残留修复：Temp/TempJob 由**帧末统一回收**（TempAllocator.Reset 会 MarkReleased 并
+                //   归还内存）。若调用方此后仍对陈旧容器 Dispose，绝不能再 Release（index 可能已被新容器
+                //   复用 ⇒ 重复入队）或按地址 Free（那块内存可能已属于别人 ⇒ 释放别人的块）。
+                //   陈旧判据 = 句柄不再"活着"（状态非 Active 或 version 已变）⇒ 幂等空操作。
+                if ((_allocator == Allocator.Temp || _allocator == Allocator.TempJob) &&
+                    !SafetyHandleManager.IsLive(_safety))
+                {
+                    _buffer = null;
+                    _length = 0;
+                    return;
+                }
                 SafetyHandleManager.Release(ref _safety);
                 UnsafeUtility.Free(_buffer, _allocator);
             }
@@ -313,6 +326,9 @@ namespace EntJoy.Collections
             public void CopyTo(NativeArray<T> array) => NativeArray<T>.Copy(this, array);
             public T[] ToArray()
             {
+                // F-05：与索引器/ToArray（拥有者）保持一致——必须做安全句柄检查，
+                // 否则 Disposed/帧末 Reset 之后的 ReadOnly 视图会**静默**拷贝已释放内存。
+                SafetyHandleManager.CheckReadAndThrow(_safety);
                 var arr = new T[_length];
                 fixed (void* dst = arr)
                     UnsafeUtility.MemCpy(dst, _bufferRO, _length * sizeof(T));

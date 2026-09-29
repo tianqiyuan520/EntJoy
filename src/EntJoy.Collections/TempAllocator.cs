@@ -21,7 +21,7 @@ namespace EntJoy.Collections
     {
         // 池化阈值：≥64KB 才进池（覆盖 NativeArray 大缓冲）；MaxPerClass 防无限增长。
         private const int kPoolThreshold = 64 * 1024;
-        private const int HeaderSize = 8;
+        private const int HeaderSize = 16;
         private const int MaxClassIndex = 19;      // 2^19 = 512KB 上限；更大直通 OS
         private const int MaxPerClass = 32;
 
@@ -233,20 +233,24 @@ namespace EntJoy.Collections
         /// <summary>在帧末调用，释放所有未被手动释放的 Temp 内存，并标记对应的安全句柄为已释放。</summary>
         public static void Reset()
         {
+            // ① 先完成所有活跃异步 Job，确保没有 C++ Worker 线程还在读写 Temp 内存。
+            //    若 job 抛异常也须继续——下面的内存释放不能跳过。
+            //
+            //    ⚠ F-04：这一步**必须在拿 `_resetLock` 之前**做。
+            //    跨线程 Free 的慢路径会拿同一把 `_resetLock`；若持锁等待 job，
+            //    而某个 job 恰好正在做跨线程 Temp 释放，就形成「Reset 等 job、job 等锁」的死锁。
+            Exception? pending = null;
+            try
+            {
+                OnBeforeReset?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                pending = ex;
+            }
+
             lock (_resetLock)
             {
-                // ① 先完成所有活跃异步 Job，确保没有 C++ Worker 线程还在读写 Temp 内存。
-                //    若 job 抛异常也须继续——下面的内存释放不能跳过。
-                Exception? pending = null;
-                try
-                {
-                    OnBeforeReset?.Invoke();
-                }
-                catch (Exception ex)
-                {
-                    pending = ex;
-                }
-
                 // ② 逐线程释放（锁内执行，无并发干扰）。
                 //    即使 job 异常也必须执行，否则 Temp 内存 + 安全句柄泄漏，
                 //    且活跃 job 跨帧运行会让主线程读未完成输出（数据竞态）。

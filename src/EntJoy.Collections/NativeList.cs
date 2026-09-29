@@ -141,9 +141,12 @@ namespace EntJoy.Collections
             if (_listData == null) return;
             if (_listData->Length == 0)
             {
-                // 不调用 Dispose() — 那会销毁整个列表
-                // 只把容量缩减到 0
-                _listData->Resize(0);
+                // F-07：空列表必须真的把容量归零。
+                //   旧实现只调 `Resize(0)`（只把 Length 置 0，缓冲区仍持有）⇒ 与"容量缩减到 0"的注释不符，
+                //   一个曾经长到很大的列表会一直占着内存直到 Dispose。
+                _listData->Dispose();          // 释放内部缓冲区并置 Ptr=null
+                _listData->Length = 0;
+                _listData->Capacity = 0;
                 return;
             }
 
@@ -178,6 +181,16 @@ namespace EntJoy.Collections
 #if DEBUG
             int safetyIndex = _safety.Index;   // 先保存：Release 后 _safety.Index 变 -1，否则 Unregister 注销不到原 index
 #endif
+            // 释放前把关：仍被活动 Job 持有时拒绝释放（否则 Job 的写入会落到复用后的新容器内存上）
+            SafetyHandleManager.CheckDeallocateAndThrow(_safety);
+            // ★ B18 残留修复：同 NativeArray —— 帧末已回收过的 Temp 容器再 Dispose 必须是幂等空操作，
+            //   不得重复入队 index（可能已复用给新容器）或按地址释放已归属他人的块。
+            if ((_allocator == Allocator.Temp || _allocator == Allocator.TempJob) &&
+                !SafetyHandleManager.IsLive(_safety))
+            {
+                _listData = null;
+                return;
+            }
             SafetyHandleManager.Release(ref _safety);
             _listData->Dispose();               // 释放内部缓冲区
             UnsafeUtility.Free(_listData, _allocator); // 释放 UnsafeList 结构体本身

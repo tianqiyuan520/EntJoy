@@ -42,7 +42,7 @@ namespace EntJoy.ECS.Tests
         // 对齐现有 ECS 测试惯例：一次性初始化后端，不 Shutdown（避免干扰并行测试类）
         static ParallelWriteConflictTests()
         {
-            JobScheduler.Initialize();
+            TestBackend.EnsureInitialized();
         }
 
         private static long Sum(NativeArray<long> d)

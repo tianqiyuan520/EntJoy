@@ -78,6 +78,30 @@ namespace NativeTranspiler.Analyzer
             return result;
         }
 
+    /// <summary>
+    /// 助手（非入口）的**头内联**发射：函数体直接进 .h 并标 `static inline`，不再发 dllexport 独立 TU。
+    /// 动机（实测，见 `docs/gridsearch/07 §7x(j)(h)`）：助手原为 `EXTERNC __declspec(dllexport)`，
+    /// clang 对 dllexport 函数**不内联**（单 TU 也不行——反汇编实测 7 处 `callq`）；仅加 `inline` 无效。
+    /// 改为头内联后调用点可内联，且**不依赖 UNITY_BUILD**：需要助手体的 TU 只需 include 本头。
+    /// 入口方法（`[NativeTranspile]` 标记的）仍走 `GenerateHeader`/`GenerateImplementation`（dllexport）。
+    /// </summary>
+    public static string GenerateInlineHelperHeader(IMethodSymbol method, Compilation compilation,
+        HashSet<INamedTypeSymbol>? userStructs = null,
+        NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
+    {
+        var functionName = GetCppFunctionName(method);
+        var exportSig = GenerateCppFunctionSignature(method, fullyQualified: true);
+        var inlineSig = "static inline " + exportSig
+            .Replace("GENERATED_API ", string.Empty)
+            .Replace("CALLINGCONVENTION ", string.Empty);
+        var body = GenerateImplementation(method, compilation, userStructs, autoSIMD);
+        // 去掉对自身 .h 的 include（体已在本头内）；其余 include 原样保留（体依赖它们）。
+        body = body.Replace("#include \"" + functionName + ".h\"\r\n", string.Empty)
+                   .Replace("#include \"" + functionName + ".h\"\n", string.Empty)
+                   .Replace(exportSig, inlineSig);
+        return "#pragma once\n" + body;
+    }
+
     public static string GenerateImplementation(IMethodSymbol method, Compilation compilation,
         HashSet<INamedTypeSymbol>? userStructs = null,
         NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled)
@@ -309,14 +333,26 @@ namespace NativeTranspiler.Analyzer
                     var ibody = innerFor.Statement is BlockSyntax ibs ? ibs
                         : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
                     if (PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
-                        return GenerateVectorizedInnerLoop(forStmt, innerFor, ibody, forStmt.Statement, nap);
+                    {
+                        // ★ NT-09：只有**证明得了**"内层体恰好把单个 NativeArray 的原始元素
+                        //   min/max 到累加量、累加量初值恰为单位元、随后写回 ra[outerVar]"时才向量化。
+                        //   旧实现只要体内出现第一个 `if (x < y)` 就凭空合成"对体内每个数组读的
+                        //   原始元素做 min/max"，体内真正的计算（closest-point 的 d = f(arr[i])、
+                        //   argmin 写回…）被整段丢弃 ⇒ 静默错值。证明不了就老实退标量。
+                        if (TryProveRowRawReduction(forStmt.Statement, innerFor, ibody, outerVar, iVar,
+                                innerLimitExpr.GetText().ToString().Trim(), nap,
+                                out string reduceFn, out string cmpOp, out string initVal, out string reductionArray))
+                            return GenerateVectorizedInnerLoop(forStmt, innerFor, nap,
+                                reduceFn, cmpOp, initVal, reductionArray);
+                        return FallbackScalarTranslation(method, body, semanticModel, useFastMath);
+                    }
                 }
             }
-            return GenerateBatchLoopSIMD(method, forStmt, nap, semanticModel);
+            return GenerateBatchLoopSIMD(method, forStmt, nap, semanticModel, useFastMath);
         }
 
         private static string GenerateBatchLoopSIMD(IMethodSymbol method, ForStatementSyntax forStmt,
-            Dictionary<string, string> nap, SemanticModel semanticModel)
+            Dictionary<string, string> nap, SemanticModel semanticModel, bool useFastMath = false)
         {
             var sb = new StringBuilder();
             string idx = forStmt.Declaration.Variables[0].Identifier.Text;
@@ -342,59 +378,169 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("            " + line.TrimEnd());
             sb.AppendLine("        __simd_exit: ; } }");
             sb.AppendLine();
-            var rm = new Dictionary<string, string>();
-            foreach (var kv in nap) rm[string.Format("{0}[", kv.Key)] = string.Format("{0}_ptr[", kv.Key);
-            rm["MathF.Sin("] = "::sinf("; rm["MathF.Cos("] = "::cosf(";
-            rm["MathF.Sqrt("] = "::sqrtf("; rm["MathF.Log("] = "::logf(";
-            rm["MathF.Log10("] = "::log10f("; rm["MathF.Exp("] = "::expf(";
-            rm["MathF.Abs("] = "::fabsf("; rm["float.MaxValue"] = "3.402823466e+38f";
+            // ★ 余数（n % NSIMD_WIDTH）循环体必须走**真正的指针转译器**。
+            //   旧实现把 C# 源文本 `stmt.GetText()` 过一张 9 条手写替换表（数组名、MathF.*、float.MaxValue）
+            //   就直接交付 ⇒ 真转译器修过的语义原样复活：
+            //     · C# `1UL` 是 64 位，C++（Windows/LLP64）的 `unsigned long` 是 32 位
+            //       ⇒ `m_ptr[i] |= 1UL << (i & 63)` 位移量 ≥32 = UB（clang 折叠成 &31）⇒ 尾部掩码静默错值
+            //       （正是文档 §8.1 记为已修的缺陷）；
+            //     · 其它 C#-only 构造（`MathF.Max(`、switch 表达式…）被**原样**漏进 C++。
+            //   转译器自带数组字段→`_ptr`、MathF.*→`::fmaxf`、字面量后缀归一化（1UL→1ULL）等映射，
+            //   手写表因此删除；循环头仍然只在这里重写（区分 vec/tail 两段）。
+            var tailTranslator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
+            // ⚠ 用**原语法树里**的节点：`ib` 在"循环体不是 Block"时是 SyntaxFactory 造的脱离树节点，
+            //   喂给语义模型会抛 ArgumentException（NT026）⇒ 单条语句走 TranslateSingleStatement。
+            string tailCode = forStmt.Statement is BlockSyntax tailBlock
+                ? tailTranslator.Translate(tailBlock)
+                : tailTranslator.TranslateSingleStatement(forStmt.Statement);
             sb.AppendLine(string.Format("    for (int {0} = vec_count; {0} < {1}; {0}++)", idx, lim));
             sb.AppendLine("    {");
-            foreach (var stmt in (forStmt.Statement is BlockSyntax ? ib.Statements : new SyntaxList<StatementSyntax>(forStmt.Statement)))
-            {
-                string l = stmt.GetText().ToString().Trim();
-                foreach (var kv in rm) l = l.Replace(kv.Key, kv.Value);
-                sb.AppendLine(string.Format("    {0}", l));
-            }
+            foreach (var line in tailCode.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    sb.AppendLine("        " + line.TrimEnd());
             sb.AppendLine("    }");
             return sb.ToString();
         }
 
+        /// <summary>
+        /// ★ NT-09：证明内层循环体**恰好**是"把某个 NativeArray 的原始元素按 min/max 归约到累加量"。
+        ///
+        /// 成立的全部条件（缺一不可；发射器会硬编码单位元初值、按 <c>base = ov * il</c> 寻址、
+        /// 只写一条 <c>ra_ptr[ov] = h</c>，所以这些都必须被证明）：
+        /// <list type="number">
+        /// <item>内层体是**一条**无 else 的 <c>if</c>；</item>
+        /// <item>体内**读**到的 NativeArray 恰好一个；</item>
+        /// <item>条件的一侧是<b>该数组的原始元素</b> <c>arr[ov * il + iv]</c>（规范行下标），
+        ///       另一侧是普通标识符（累加量）；</item>
+        /// <item>then 分支是**单条** <c>acc = arr[同一元素]</c>（只更新累加量，无其它副作用）；</item>
+        /// <item>累加量是外层体内、内层循环**之前**声明的局部量，且初值恰为发射器硬编码的单位元
+        ///       （否则用 FLT_MAX 顶替用户初值会改语义）；</item>
+        /// <item>外层体（内层循环之外）恰好一条 NativeArray 元素写入 <c>ra[outerVar] = acc</c>。</item>
+        /// </list>
+        /// 任一条不成立即返回 false —— 调用点必须退 <c>FallbackScalarTranslation</c>，
+        /// **绝不**从"比较扫描"合成归约。
+        /// </summary>
+        private static bool TryProveRowRawReduction(
+            StatementSyntax outerBodyStmt, ForStatementSyntax innerFor, BlockSyntax ibody,
+            string outerVar, string innerVar, string innerLimitText, Dictionary<string, string> nap,
+            out string reduceFn, out string cmpOp, out string initVal, out string reductionArray)
+        {
+            reduceFn = null; cmpOp = null; initVal = null; reductionArray = null;
+
+            // (1) 内层体：一条无 else 的 if
+            if (ibody.Statements.Count != 1 || !(ibody.Statements[0] is IfStatementSyntax ifs) || ifs.Else != null)
+                return false;
+            if (!(ifs.Condition is BinaryExpressionSyntax cond)) return false;
+            string opText = cond.OperatorToken.Text;
+            if (opText != "<" && opText != ">") return false;
+
+            // (2) 体内读到的 NativeArray 恰好一个
+            var readArrays = new HashSet<string>();
+            foreach (var ea in ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (ea.Expression is IdentifierNameSyntax rid && nap.ContainsKey(rid.Identifier.Text)
+                    && !(ea.Parent is AssignmentExpressionSyntax raes && raes.Left == ea))
+                    readArrays.Add(rid.Identifier.Text);
+            }
+            if (readArrays.Count != 1) return false;
+            string arr = readArrays.First();
+
+            // (3) 条件：一侧 = 规范行下标的原始元素，另一侧 = 标识符（累加量）
+            ExpressionSyntax elemSide = null;
+            string accVar = null;
+            if (IsCanonicalRawElement(cond.Left, arr, outerVar, innerVar, innerLimitText)
+                && cond.Right is IdentifierNameSyntax accRight)
+            { elemSide = cond.Left; accVar = accRight.Identifier.Text; }
+            else if (IsCanonicalRawElement(cond.Right, arr, outerVar, innerVar, innerLimitText)
+                && cond.Left is IdentifierNameSyntax accLeft)
+            { elemSide = cond.Right; accVar = accLeft.Identifier.Text; }
+            if (elemSide == null) return false;
+
+            // 方向：`elem < acc` / `acc > elem` ⇒ min；`elem > acc` / `acc < elem` ⇒ max
+            bool elemOnLeft = elemSide == cond.Left;
+            bool isMin = opText == "<" ? elemOnLeft : !elemOnLeft;
+            reduceFn = isMin ? "n_min_ps" : "n_max_ps";
+            cmpOp = isMin ? "<" : ">";
+            initVal = isMin ? "3.402823466e+38f" : "-3.402823466e+38f";
+
+            // (4) then 分支：单条 `acc = <同一原始元素>`
+            var thenStmts = ifs.Statement is BlockSyntax tb
+                ? tb.Statements : new SyntaxList<StatementSyntax>(ifs.Statement);
+            if (thenStmts.Count != 1) return false;
+            if (!(thenStmts[0] is ExpressionStatementSyntax tes)
+                || !(tes.Expression is AssignmentExpressionSyntax ta)) return false;
+            if (ta.OperatorToken.Text != "=") return false;
+            if (!(ta.Left is IdentifierNameSyntax taId) || taId.Identifier.Text != accVar) return false;
+            if (ta.Right.GetText().ToString().Trim() != elemSide.GetText().ToString().Trim()) return false;
+
+            // (5) 累加量：外层体内、内层循环之前的局部量，且初值恰为单位元
+            if (!(outerBodyStmt is BlockSyntax outerBlock)) return false;
+            int innerIdx = outerBlock.Statements.IndexOf(innerFor);
+            if (innerIdx < 0) return false;
+            string[] acceptedInit = isMin
+                ? new[] { "3.402823466e+38f", "float.MaxValue" }
+                : new[] { "-3.402823466e+38f", "-float.MaxValue" };
+            bool accDeclared = false;
+            for (int i = 0; i < innerIdx; i++)
+            {
+                if (!(outerBlock.Statements[i] is LocalDeclarationStatementSyntax lds)) continue;
+                foreach (var v in lds.Declaration.Variables)
+                    if (v.Identifier.Text == accVar)
+                        accDeclared = v.Initializer != null
+                            && System.Array.IndexOf(acceptedInit, v.Initializer.Value.GetText().ToString().Trim()) >= 0;
+            }
+            if (!accDeclared) return false;
+
+            // (6) 外层体（内层循环之外）恰好一条 NativeArray 元素写入 `ra[outerVar] = acc`
+            var stores = new List<AssignmentExpressionSyntax>();
+            foreach (var stmt in outerBlock.Statements)
+            {
+                if (stmt == innerFor) continue;
+                foreach (var aes in stmt.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>())
+                    if (aes.Left is ElementAccessExpressionSyntax) stores.Add(aes);
+            }
+            if (stores.Count != 1) return false;
+            var store = stores[0];
+            if (!(store.Left is ElementAccessExpressionSyntax sea)
+                || !(sea.Expression is IdentifierNameSyntax sId) || !nap.ContainsKey(sId.Identifier.Text)) return false;
+            var sIdx = sea.ArgumentList?.Arguments.FirstOrDefault()?.Expression;
+            if (sIdx == null || sIdx.GetText().ToString().Trim() != outerVar) return false;
+            if (!(store.Right is IdentifierNameSyntax rId) || rId.Identifier.Text != accVar) return false;
+
+            reductionArray = arr;
+            return true;
+        }
+
+        /// <summary><c>arr[ov * il + iv]</c>（与发射器的 <c>base = ov * il</c> + <c>iv</c> 寻址一致）。</summary>
+        private static bool IsCanonicalRawElement(ExpressionSyntax expr, string arr,
+            string outerVar, string innerVar, string innerLimitText)
+        {
+            if (!(expr is ElementAccessExpressionSyntax ea)) return false;
+            if (!(ea.Expression is IdentifierNameSyntax id) || id.Identifier.Text != arr) return false;
+            var args = ea.ArgumentList?.Arguments;
+            if (args == null || args.Value.Count != 1) return false;
+            if (!(args.Value[0].Expression is BinaryExpressionSyntax plus) || plus.OperatorToken.Text != "+")
+                return false;
+            if (!(plus.Right is IdentifierNameSyntax ivId) || ivId.Identifier.Text != innerVar) return false;
+            if (!(plus.Left is BinaryExpressionSyntax mul) || mul.OperatorToken.Text != "*") return false;
+            if (!(mul.Left is IdentifierNameSyntax ovId) || ovId.Identifier.Text != outerVar) return false;
+            return mul.Right.GetText().ToString().Trim() == innerLimitText.Trim();
+        }
+
         private static string GenerateVectorizedInnerLoop(ForStatementSyntax ofs,
-            ForStatementSyntax ifs, BlockSyntax ibody, StatementSyntax outerBodyStmt,
-            Dictionary<string, string> nap)
+            ForStatementSyntax ifs,
+            Dictionary<string, string> nap, string reduceFn, string cmpOp, string initVal,
+            string reductionArray)
         {
             var sb = new StringBuilder();
             string ov = ofs.Declaration.Variables[0].Identifier.Text;
             string ol = ((BinaryExpressionSyntax)ofs.Condition).Right.GetText().ToString().Trim();
             string iv = ifs.Declaration.Variables[0].Identifier.Text;
             string il = ((BinaryExpressionSyntax)ifs.Condition).Right.GetText().ToString().Trim();
-            string ra = null;
-            var ias = new HashSet<string>();
-            // Scan for result array and input arrays (type-agnostic)
-            foreach (var ea in (outerBodyStmt as BlockSyntax ?? outerBodyStmt).DescendantNodes().OfType<ElementAccessExpressionSyntax>())
-                if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
-                    && ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea)
-                    ra = id.Identifier.Text;
-            foreach (var ea in ibody.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
-                if (ea.Expression is IdentifierNameSyntax id && nap.ContainsKey(id.Identifier.Text)
-                    && !(ea.Parent is AssignmentExpressionSyntax aes && aes.Left == ea))
-                    ias.Add(id.Identifier.Text);
+            string arr = reductionArray;
+            string elemType = nap.TryGetValue(arr, out var t) ? t : "float";
 
-            // Detect reduction type: min (v < best) or max (v > best)
-            string reduceFn = "n_min_ps";
-            string initVal = "3.402823466e+38f";
-            string cmpOp = "<";
-            foreach (var ifStmt in ibody.DescendantNodes().OfType<IfStatementSyntax>())
-            {
-                if (ifStmt.Condition is BinaryExpressionSyntax cond && cond.OperatorToken.Text == "<")
-                { reduceFn = "n_min_ps"; initVal = "3.402823466e+38f"; cmpOp = "<"; break; }
-                if (ifStmt.Condition is BinaryExpressionSyntax cond2 && cond2.OperatorToken.Text == ">")
-                { reduceFn = "n_max_ps"; initVal = "-3.402823466e+38f"; cmpOp = ">"; break; }
-            }
-
-            // Build type-aware load/reduce/store per array
-
+            // 归约方向/初值/目标数组已由 TryProveRowRawReduction 证明（不再扫描体内 if 猜）。
             sb.AppendLine(string.Format("    for (int {0} = 0; {0} < {1}; {0}++) {{", ov, ol));
             sb.AppendLine(string.Format("        n_float v_best = n_set1_ps({0});", initVal));
             sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
@@ -403,14 +549,10 @@ namespace NativeTranspiler.Analyzer
             //   NSIMD_WIDTH), producing garbage min/max or OOB memory access.
             sb.AppendLine(string.Format("        int __aligned = ({0} / NSIMD_WIDTH) * NSIMD_WIDTH;", il));
             sb.AppendLine(string.Format("        for (int {0} = 0; {0} < __aligned; {0} += NSIMD_WIDTH) {{", iv));
-            foreach (var arr in ias)
-            {
-                string elemType = nap.TryGetValue(arr, out var t) ? t : "float";
-                if (elemType == "int")
-                    sb.AppendLine(string.Format("            v_best = {0}(v_best, simd_value<float>{{ n_cvtepi32_ps(n_load_epi32({1}_ptr + base + {2})) }});", reduceFn, arr, iv));
-                else
-                    sb.AppendLine(string.Format("            v_best = {0}(v_best, n_load_ps({1}_ptr + base + {2}));", reduceFn, arr, iv));
-            }
+            if (elemType == "int")
+                sb.AppendLine(string.Format("            v_best = {0}(v_best, simd_value<float>{{ n_cvtepi32_ps(n_load_epi32({1}_ptr + base + {2})) }});", reduceFn, arr, iv));
+            else
+                sb.AppendLine(string.Format("            v_best = {0}(v_best, n_load_ps({1}_ptr + base + {2}));", reduceFn, arr, iv));
             sb.AppendLine("        }");
             sb.AppendLine("        float lane[NSIMD_WIDTH]; n_store_ps(lane, v_best);");
             sb.AppendLine("        float h = lane[0];");
@@ -418,16 +560,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(string.Format("            if (lane[i] {0} h) h = lane[i];", cmpOp));
             // ★ Tail: reduce the remaining [__aligned, il) elements scalar
             sb.AppendLine(string.Format("        for (int {0} = __aligned; {0} < {1}; {0}++) {{", iv, il));
-            foreach (var arr in ias)
-            {
-                string elemType = nap.TryGetValue(arr, out var t2) ? t2 : "float";
-                string cast = elemType == "int" ? "(float)" : "";
-                sb.AppendLine(string.Format("            float __v_{0} = {1}_ptr[base + {2}];", arr, arr, iv));
-                sb.AppendLine(string.Format("            if ({0}__v_{1} {2} h) h = __v_{1};", cast, arr, cmpOp));
-            }
+            string cast = elemType == "int" ? "(float)" : "";
+            sb.AppendLine(string.Format("            float __v_{0} = {1}_ptr[base + {2}];", arr, arr, iv));
+            sb.AppendLine(string.Format("            if ({0}__v_{1} {2} h) h = __v_{1};", cast, arr, cmpOp));
             sb.AppendLine("        }");
-            if (ra != null)
-                sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", ra, ov));
+            sb.AppendLine(string.Format("        {0}_ptr[{1}] = h;", arr, ov));
             sb.AppendLine("    }");
             return sb.ToString();
         }
@@ -459,26 +596,26 @@ namespace NativeTranspiler.Analyzer
                     {
                         var elementType = ((INamedTypeSymbol)p.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* RESTRICT {p.Name}_listData");
+                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* {p.Name}_listData");
                     }
                     else // NativeArray
                     {
                         var elementType = ((INamedTypeSymbol)p.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        parameters.Add($"{cppElementType}* RESTRICT {p.Name}_ptr, int {p.Name}_length");
+                        parameters.Add($"{cppElementType}* {p.Name}_ptr, int {p.Name}_length");
                     }
                 }
                 else if (p.Type is IPointerTypeSymbol)
                 {
                     // ★ 修改：不再添加多余的 *，MapCSharpTypeToCpp 已返回带 * 的类型
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
-                    parameters.Add($"{cppType} RESTRICT {p.Name}_ptr");
+                    parameters.Add($"{cppType} {p.Name}_ptr");
                 }
                 else if (p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out)
                 {
                     // ref/out：保持指针 ABI（调用方必须传左值地址）
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
-                    parameters.Add($"{cppType}* RESTRICT {p.Name}_ptr");
+                    parameters.Add($"{cppType}* {p.Name}_ptr");
                 }
                 else
                 {
@@ -500,10 +637,18 @@ namespace NativeTranspiler.Analyzer
         {
             var calledMethods = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
-            if (methodSyntax?.Body == null) return calledMethods;
+            if (methodSyntax == null) return calledMethods;
+
+            // ⚠ 块体与**表达式体**都要走：表达式体（`=> BinKey(...)`）没有 Body，
+            //   旧实现直接 return ⇒ 依赖不被收集 ⇒ 该助手的头内联版缺 `#include "<dep>.h"`
+            //   （实测报 `use of undeclared identifier 'SharpNative_..._BinKey'`）。
+            IEnumerable<SyntaxNode> roots;
+            if (methodSyntax.Body != null) roots = new SyntaxNode[] { methodSyntax.Body };
+            else if (methodSyntax.ExpressionBody != null) roots = new SyntaxNode[] { methodSyntax.ExpressionBody.Expression };
+            else return calledMethods;
 
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-            foreach (var node in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            foreach (var node in roots.SelectMany(r => r.DescendantNodesAndSelf()).OfType<InvocationExpressionSyntax>())
             {
                 var symbolInfo = semanticModel.GetSymbolInfo(node);
                 if (symbolInfo.Symbol is IMethodSymbol calledMethod && calledMethod.IsStatic)

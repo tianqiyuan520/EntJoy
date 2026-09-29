@@ -65,6 +65,19 @@ namespace JobSystem {
         // 故 exception_ptr 用独立于依赖锁的互斥体保护。
         std::mutex exceptionMutex;
 
+        // ── §7aq：本批**预期执行时长**（ns，来自 JobCostCache 已学到的 perElem×N + perTile×tiles）。
+        // 由 Schedule 侧在 publish 前写入、`JobHandle::Complete()` 的 Phase-2 自旋窗读取（同一线程，
+        // 且状态复用前由 CreateState 清零）。0 = 未知/未学到 ⇒ 退化为固定自旋（原行为）。
+        // 用途：**自适应自旋**。大批（如 Melee 单批 ~70 ms）自旋纯属抢 SMT 执行单元；
+        // 微批（如波前 574 批/步、每批 ~28 µs）主线程自旋期的 `TryAssistOne()` 是真实算力。
+        // 两者相差三个数量级 ⇒ 用同一个数字即可分开（§7ai 只否证了固定值，未否定自适应）。
+        uint64_t estBatchNs{ 0 };
+        // 性能项 3：batchExceptionPtr 的**无锁可读影子标志**。回收路径（每 job 一次）据此
+        // 跳过 exceptionMutex（绝大多数 job 没有异常）。写入方在 exceptionMutex 内以 release
+        // 发布，回收方在 refCount 归零（acquire 语义）后读取，故不会漏。
+        // 追加在结构体尾部：C# HandleStateView 只读前 8 字节，布局前缀不变。
+        std::atomic<bool> hasException{ false };
+
         // 依赖：单依赖走 `dependency`（热路径），合并走 `dependencies`；均持有引用（AcquireState/RecycleState），防 handle 丢弃后悬垂。
         // 【约束】依赖图必须无环（循环依赖会使 Complete() 永不返回）；运行时不做环检测，调用方必须保证无环。
         HandleState* dependency{ nullptr };

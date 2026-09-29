@@ -117,6 +117,7 @@ namespace JobSystem
         // 调试面板
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
         SetCurrentBatchId(batch->diagnosticId);
+        E1::Begin();
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
@@ -126,6 +127,7 @@ namespace JobSystem
 
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+        E1::End(workerIndex);
         SetCurrentBatchId(0);
         DebugEndExec();
 
@@ -217,6 +219,7 @@ namespace JobSystem
                     DebugBeginExec(tileTask.batch->diagnosticId, tileTask.batch->tileCount,
                                    tileTask.batch->workerCount, false);
                     SetCurrentBatchId(tileTask.batch->diagnosticId);
+                    E1::Begin();
                     if (workerIndex < kMaxTrackedWorkers)
                         workerCurrentBatch[workerIndex].store(
                             tileTask.batch->diagnosticId, std::memory_order_relaxed);
@@ -228,6 +231,7 @@ namespace JobSystem
 
                     if (workerIndex < kMaxTrackedWorkers)
                         workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                    E1::End(workerIndex);
                     SetCurrentBatchId(0);
                     DebugEndExec();
 
@@ -407,6 +411,7 @@ namespace JobSystem
     // 标准 Chase-Lev：任务经 Injector 分发，worker 从 Injector 拉取推入 deque。
     // ============================================================
 
+
     // Injector 满：有限退避（yield + pause），避免提交线程 busy-loop
     bool ChaseLevScheduler::PushTaskBackoff(RangeTask* task) noexcept
     {
@@ -427,6 +432,7 @@ namespace JobSystem
         }
         return true;
     }
+
 
     void ChaseLevScheduler::SubmitBatch(BatchState* batch) noexcept
     {
@@ -466,8 +472,35 @@ namespace JobSystem
         if (tokenCount == 0) return;
         batch->pendingTasks.store(tokenCount, std::memory_order_release);
         activeTasks.fetch_add(static_cast<int64_t>(tokenCount), std::memory_order_acq_rel);
+
+        // 兜底（罕见：Stop 竞态 / 堆耗尽）：本线程同步执行一个认领令牌（原语义）。
+        auto runFallbackToken = [&](uint32_t) noexcept { ExecuteClaimToken(batch, kMaxTrackedWorkers); };
+
+        // ── Stop 竞态守卫（2026-09-26）──
+        // `quit_`/`running_` 一旦置位，worker 会退出且 DrainRemaining 已排空注入器：此后推入的 token
+        // **再无人消费** ⇒ batch->pendingTasks 永不归零 ⇒ TryFinalizeChaseLevBatch 不执行
+        // ⇒ cleanup/ReleaseBatch/HandleState/g_backendBatchesOutstanding 全部残留（泄漏），
+        // 且调用方 JobHandle::Complete() 永久阻塞、JobSystem_GetStats 卡在 WaitForBackendBatches。
+        // 注意：`SubmitWork` 与 `PushTaskBackoff` 一直有该守卫，只有这里的批量快路径漏了。
+        // 拒绝入队时按既有 directTokens 语义在提交线程同步执行，保证每个发布 tile 都达终态。
+        if (quit_.load(std::memory_order_acquire) || !running_.load(std::memory_order_acquire))
+        {
+            for (uint32_t i = 0; i < tokenCount; ++i)
+                runFallbackToken(i);
+            return;
+        }
+
         uint64_t spT1 = 0;
         if (spDiag) spT1 = MonotonicNowNs();
+
+        // ── 认领信箱快路（默认自动：**全体 worker 参与且 ≤ 物理核**时才用）──
+        // 实测依据（124 tile、同会话）：
+        //   · 池 8 / 参与者 8（全体、≤物理核）：5434 → 4885（−10.1%）✓
+        //   · 池 15 / 参与者 15（全体但 >物理核）：6449 → 11354（+76%）✗（SMT 超订下"共享弹出的意外节流"消失）
+        //   · 池 15 / 参与者 8（封顶档，固定派给 0..7 号）：7500 ✗ 比只封顶的 5637 更差
+        //     —— 固定子集忽略了"哪 8 个线程实际落在不同物理核上"，而 injector 让任意空闲线程去拿。
+        // ⇒ 只在"全体参与且放得进物理核"时启用；其余情况保持原 injector 路径（零回归）。
+        // （认领信箱已移除：见 ChaseLevScheduler.h 的说明 —— 固定派给会串行化多批重叠）
 
         // PushMany：批量创建 token 任务 + 一次 CAS 批量入队注入器
         constexpr uint32_t kMaxBulkTokens = 64;   // 栈数组上限（worker 数实际 ≤ 64）
@@ -477,6 +510,15 @@ namespace JobSystem
         for (uint32_t base = 0; base < tokenCount; base += kMaxBulkTokens)
         {
             const uint32_t n = std::min(kMaxBulkTokens, tokenCount - base);
+
+            // 循环期间 Stop 可能已经开始：不再入队，本组逻辑 token 转由提交线程同步执行兜底
+            // （与分配的 OOM 兜底同语义：不分配 task，仅计入 directTokens，末尾统一 ExecuteClaimToken）。
+            if (quit_.load(std::memory_order_acquire) || !running_.load(std::memory_order_acquire))
+            {
+                directTokens += n;
+                continue;
+            }
+
             uint32_t allocated = 0;
             for (uint32_t i = 0; i < n; ++i)
             {
@@ -486,9 +528,8 @@ namespace JobSystem
                     task = new (std::nothrow) RangeTask();
                     if (!task)
                     {
-                        // Keep the task accounting exact even when the heap is
-                        // exhausted.  An unallocated token is executed by the
-                        // submitting thread below, so no tile is silently lost.
+                        // Keep the task accounting exact even when the heap is exhausted:
+                        // the token is executed by the submitting thread below (directTokens).
                         ++directTokens;
                         continue;
                     }
@@ -541,7 +582,16 @@ namespace JobSystem
             else
             {
                 wakeEpoch.fetch_add(1, std::memory_order_release);
-                wakeEpoch.notify_all();
+                // §7ah：只有"确有等待者、且已醒人数不够本批名额"时才付 futex 广播（+ IPI）。
+                //   已醒的 worker 在自旋区会看到注入器里的 token；睡着的 worker 不必为用不上的名额被叫醒。
+                const int parked = parkedWorkers.load(std::memory_order_acquire);
+                const int awake = static_cast<int>(workerCount_) - parked;
+                const int need = batch->workerCount > 0
+                    ? static_cast<int>(batch->workerCount) : static_cast<int>(workerCount_);
+                if (parked > 0 && awake < need)
+                    wakeEpoch.notify_all();
+                else
+                    g_notifySkipped.fetch_add(1, std::memory_order_relaxed);
             }
         }
         if (spDiag)
@@ -568,6 +618,7 @@ namespace JobSystem
         ChaseLevRecordWorkerEntry(batch);
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
         SetCurrentBatchId(batch->diagnosticId);
+        E1::Begin();
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
@@ -578,6 +629,9 @@ namespace JobSystem
             batch->tileCount / std::max(1u, workerCount_),
             1u, kClaimBatchSize);
         uint32_t executed = 0;
+        // 认领组聚合记账（固定启用）：组内 tile 只本地计数，组末一次 fetch_sub。
+        // 见 JobSystemInternal.h 的语义说明；executor_ 为 noexcept 路径，循环体不会抛出。
+        TileAcctGroupBegin();
         while (true)
         {
             const uint32_t start = batch->nextTile.fetch_add(
@@ -590,6 +644,7 @@ namespace JobSystem
                 ++executed;
             }
         }
+        TileAcctGroupFlush(batch);
         // 令牌认领的 tile 按执行者口径计数（local/stolen/assist 三态）
         switch (account)
         {
@@ -601,6 +656,7 @@ namespace JobSystem
 
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+        E1::End(workerIndex);
         SetCurrentBatchId(0);
         DebugEndExec();
         if (workerIndex < kMaxTrackedWorkers)
@@ -649,8 +705,29 @@ namespace JobSystem
             return false;
         }
 
-        wakeEpoch.fetch_add(1, std::memory_order_release);
-        wakeEpoch.notify_all();
+        // 性能项 1（2026-09-26）：此前这里**无条件** bump+notify_all，完全忽略提交 defer 窗口
+        // 与 `ENTJOY_DEFER_WAKE`。实测：15 个 parked worker 上一次广播约 37～39 µs；被最坏情况
+        // （首帧/空闲后）放大为 ~600 ns/job（`probe defer`：IJob x100 hot sched 832 ns/job →
+        // parked 1439 ns/job，+607 ns/job ≈ +61 µs/frame）。
+        // 与 SubmitBatch（:557-570）保持**同一**守卫：
+        //   depth>0 → 跳过逐 job 广播（窗口关闭处 Exports.cpp:241/248、:341、Tiles.cpp:995、
+        //             FlushPendingSubmits 都会无条件 WakePending 一次 ⇒ 不会丢唤醒）；
+        //   depth<=0 且 defer 模式 → 只置 pending，由调用方阻塞前（JobHandle::Complete →
+        //             FlushDeferredWake，JobSystem_State.cpp:651）补一次广播。
+        // 任务已进入注入器，仍在自旋的 worker 会自行领取（ChaseLevScheduler.cpp:1016/1041 的
+        // 入 park 前 IsEmpty 复查），因此推迟广播不改变可观察语义，只把 N 次广播合并为 1 次。
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) <= 0)
+        {
+            if (DeferWakeEnabled())
+            {
+                g_pendingDeferredWake.store(1, std::memory_order_release);
+            }
+            else
+            {
+                wakeEpoch.fetch_add(1, std::memory_order_release);
+                wakeEpoch.notify_all();
+            }
+        }
         return true;
     }
 
@@ -695,11 +772,23 @@ namespace JobSystem
 #endif
             if (enabled)
             {
-                // 绑定逻辑核心 1+i（与 WorkerLoop 启动时一致）
-                GROUP_AFFINITY affinity{};
-                affinity.Group = 0;
-                affinity.Mask = static_cast<KAFFINITY>(1) << (1 + i);
-                ::SetThreadGroupAffinity(handle, &affinity, nullptr);
+                // 绑定逻辑核心 1+i（与 WorkerLoop 启动时一致）。
+                // ⚠ 2026-09-27：`static_cast<KAFFINITY>(1) << (1 + i)` 在 `1+i >= 位宽(64)` 时是
+                //   **UB**，且结果掩码为 0 ⇒ SetThreadGroupAffinity 静默失败/不绑核。
+                //   worker 数由用户请求（可达数百），必须显式跳过超范围的核心；
+                //   跨 processor group（cpuIndex ≥ 64）需要 GROUP_AFFINITY.Group，这里不做，
+                //   保持"系统自选核心"（不设置）比写入非法掩码安全。
+                // 掩码计算提取为纯函数 ComputeAffinityMask（ThreadAffinity.h），
+                // 使 `>= 位宽 ⇒ nullopt` 这一分支可被 AffinityMaskTests 覆盖
+                //（此前该防御分支无任何测试，属"缺失的 RED"）。
+                const auto mask = ComputeAffinityMask(i);
+                if (mask.has_value())
+                {
+                    GROUP_AFFINITY affinity{};
+                    affinity.Group = 0;
+                    affinity.Mask = *mask;
+                    ::SetThreadGroupAffinity(handle, &affinity, nullptr);
+                }
             }
             else
             {
@@ -781,15 +870,19 @@ namespace JobSystem
                 DebugBeginExec(task.batch->diagnosticId, task.batch->tileCount,
                                task.batch->workerCount, false);
                 SetCurrentBatchId(task.batch->diagnosticId);
+                E1::Begin();
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(
                         task.batch->diagnosticId, std::memory_order_relaxed);
 
+                TileAcctGroupBegin();
                 for (uint32_t t = task.firstTile; t < end; ++t)
                     executor_(task.batch, t);
+                TileAcctGroupFlush(task.batch);
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                E1::End(workerIndex);
                 SetCurrentBatchId(0);
                 DebugEndExec();
 
@@ -877,15 +970,19 @@ namespace JobSystem
                 DebugBeginExec(task.batch->diagnosticId, task.batch->tileCount,
                                task.batch->workerCount, false);
                 SetCurrentBatchId(task.batch->diagnosticId);
+                E1::Begin();
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(
                         task.batch->diagnosticId, std::memory_order_relaxed);
 
+                TileAcctGroupBegin();
                 for (uint32_t t = task.firstTile; t < end; ++t)
                     executor_(task.batch, t);
+                TileAcctGroupFlush(task.batch);
 
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
+                E1::End(workerIndex);
                 SetCurrentBatchId(0);
                 DebugEndExec();
 
@@ -933,8 +1030,12 @@ namespace JobSystem
                             uint32_t end2 = task.firstTile + task.tileCount;
                             if (end2 > task.batch->tileCount) end2 = task.batch->tileCount;
                             SetCurrentBatchId(task.batch->diagnosticId);
+                            E1::Begin();
+                            TileAcctGroupBegin();
                             for (uint32_t t = task.firstTile; t < end2; ++t)
                                 executor_(task.batch, t);
+                            TileAcctGroupFlush(task.batch);
+                            E1::End(workerIndex);
                             SetCurrentBatchId(0);
                             // 从 deque 执行的任务也需要 taskDone
                             if (taskDone_)
@@ -1007,7 +1108,16 @@ namespace JobSystem
                 goto drain_quit;
             if (!injector_.IsEmpty() || !myDeque->IsEmpty())
                 goto main_loop;
+            // §7ah：登记"我在停靠"，随后**复查 epoch** 防丢失唤醒
+            // （唤醒者先 bump epoch 再读本计数；若它读到 0 而跳过了广播，这里必能看到 epoch 已变 ⇒ 不睡）。
+            parkedWorkers.fetch_add(1, std::memory_order_acq_rel);
+            if (wakeEpoch.load(std::memory_order_acquire) != seenStamp)
+            {
+                parkedWorkers.fetch_sub(1, std::memory_order_acq_rel);
+                continue;
+            }
             wakeEpoch.wait(seenStamp, std::memory_order_relaxed);
+            parkedWorkers.fetch_sub(1, std::memory_order_acq_rel);
             // 真的在 futex 上睡过并被唤醒（`[M-16] 唤醒=`）。
             g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
             continue; // 唤醒后回到主循环

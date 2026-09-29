@@ -134,6 +134,8 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
         private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetStatsSize;
+        // 诊断（句柄是否被确定性回收）：老 NativeDll.dll 无此导出 ⇒ 用 TryGetExport，缺失时上层报告"不可用"。
+        private static delegate* unmanaged[Cdecl]<long> _jobSystem_GetLiveHandleCount;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetMainThreadAssist;
@@ -380,6 +382,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
             _jobSystem_GetStatsSize = (delegate* unmanaged[Cdecl]<uint>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStatsSize");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetLiveHandleCount", out IntPtr fnLiveHandleCount))
+                _jobSystem_GetLiveHandleCount = (delegate* unmanaged[Cdecl]<long>)fnLiveHandleCount;
             _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
             _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
@@ -647,6 +651,15 @@ namespace EntJoy.JobSystem
             return stats;
         }
 
+        /// <summary>存活句柄 state 数（诊断/测试）。老 NativeDll.dll 缺该导出时返回 false。</summary>
+        internal static bool TryGetLiveHandleStateCount(out long count)
+        {
+            count = 0;
+            if (_nativeDll == IntPtr.Zero || _jobSystem_GetLiveHandleCount == null) return false;
+            count = _jobSystem_GetLiveHandleCount();
+            return true;
+        }
+
         /// <summary>布局防御：校验 C#/C++ 统计结构体字节数一致（防 GetStats 越界写）。
         /// 新增统计字段时必须两处同步。</summary>
         internal static void ValidateStatsLayout()
@@ -880,6 +893,13 @@ namespace EntJoy.JobSystem
         // 快速门控：>0 表示有待取异常，避免每次 Complete 都 lock+查字典（异常是罕见路径）。
         private static int _pendingJobExceptionCount;
 
+        /// <summary>
+        /// 是否有待取的 Job 异常（罕见路径）。Complete 用它门控一次 `JobSystem_GetDiagnosticBatchId`
+        /// 的 P/Invoke：计数器为 0 时该 batch 不可能有已记录异常（记录必先自增），
+        /// 与 <see cref="ThrowRecordedJobExceptions"/> 的首行判断完全等价。
+        /// </summary>
+        internal static bool HasPendingJobExceptions => Volatile.Read(ref _pendingJobExceptionCount) != 0;
+
         internal static void RecordJobException(ulong batchId, Exception exception)
         {
             lock (_exceptionLock)
@@ -1001,8 +1021,12 @@ namespace EntJoy.JobSystem
         {
             if (ctx == IntPtr.Zero) return;
             // job 完整结束点（RunBatchCleanup 只认领一次，在所有 tile 之后）：
-            // 释放本 ctx 的写声明。tile 级释放会与仍在运行的同 ctx tile 竞争，见 ReleaseWritesForContext 注释。
+            // 释放本 ctx 的写声明与读声明。**两者都必须在 job 完成点释放**：
+            // 按 tile 释放会和仍在运行的同 ctx 兄弟 tile 竞争 —— 第一个结束的 tile 会把整个 ctx 的
+            // 读声明清空，兄弟 tile 此后不再重新登记（_readMark/TLS 快路径命中），于是 job 未完成时
+            // 主线程访问不再被拦截（契约见 Runtime-Contracts §并行读写冲突检测）。
             SafetyHandleManager.ReleaseWritesForContext(ctx);
+            SafetyHandleManager.ReleaseReadsForContext(ctx);
             var handle = GCHandle.FromIntPtr(ctx);
             if (handle.IsAllocated) handle.Free();
         }
@@ -1024,8 +1048,9 @@ namespace EntJoy.JobSystem
         {
             if (dataPtr == IntPtr.Zero) return;
             // job 完整结束点（RunBatchCleanup 只认领一次，在所有 tile 之后）：
-            // 释放本 ctx 的写声明。tile 级释放会与仍在运行的同 ctx tile 竞争，见 ReleaseWritesForContext 注释。
+            // 释放本 ctx 的写声明与读声明（理由同 ManagedCleanup：按 tile 释放会提前清空兄弟 tile 的读者计数）。
             SafetyHandleManager.ReleaseWritesForContext(dataPtr);
+            SafetyHandleManager.ReleaseReadsForContext(dataPtr);
             int size = *(int*)((byte*)dataPtr - sizeof(int));
             ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
         }
@@ -1058,7 +1083,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
@@ -1091,7 +1115,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
@@ -1125,7 +1148,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
@@ -1158,7 +1180,6 @@ namespace EntJoy.JobSystem
                 finally
                 {
                     ExitJobExecution();
-                    SafetyHandleManager.ReleaseReadsForContext(ctx);
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
             };

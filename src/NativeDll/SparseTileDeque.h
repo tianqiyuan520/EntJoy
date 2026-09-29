@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <new>
+#include <stdexcept>
 
 namespace JobSystem
 {
@@ -40,8 +41,26 @@ namespace JobSystem
     class SparseTileDeque
     {
     public:
-        explicit SparseTileDeque(uint32_t capacity) noexcept
-            : capacity_(RoundUpPow2(capacity < 8 ? 8 : capacity))
+        /// <summary>
+        /// 容量校验（2026-09-27）：旧实现直接 `RoundUpPow2(capacity)`：
+        ///  · `capacity >= 2^31` 时向上取整溢出成 0 ⇒ `mask_ = 2^32-1`，`new Slot[0]`，
+        ///    而 Get() 用 mask_ 索引 ⇒ **越界读写**；
+        ///  · ctor 标了 `noexcept`，一旦 `new[]` 失败（大容量）就 std::terminate（无法上报）。
+        /// 现在显式拒绝过大/溢出容量（抛异常），并去掉 ctor 的 noexcept 让分配失败可被捕获。
+        /// </summary>
+        static uint32_t CheckedCapacity(uint32_t requested)
+        {
+            const uint32_t want = requested < 8u ? 8u : requested;
+            if (want > (1u << 30))
+                throw std::length_error("SparseTileDeque: capacity too large");
+            const uint32_t rounded = RoundUpPow2(want);
+            if (rounded == 0 || rounded < want)
+                throw std::length_error("SparseTileDeque: capacity overflow");
+            return rounded;
+        }
+
+        explicit SparseTileDeque(uint32_t capacity)
+            : capacity_(CheckedCapacity(capacity))
             , mask_(capacity_ - 1)
             , buffer_(new Slot[capacity_]())
             , top_{ 0 }

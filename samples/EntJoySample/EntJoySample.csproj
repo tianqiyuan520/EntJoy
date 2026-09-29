@@ -16,6 +16,13 @@
 		<StartupObject Condition="'$(ENTJOY_STARTUP)' != ''">$(ENTJOY_STARTUP)</StartupObject>
 		<!-- CS8500: 源生成器生成的 N 元组查询对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
 		<NoWarn>$(NoWarn);8500</NoWarn>
+
+		<!-- B3：AutoSIMD = Enabled 在 IJobParallelFor/IJobFor/IJob 上默认报 error（NT024：实测比标量
+		     基线慢 ~10%）。本样例的 AutoSIMD job **就是**被测对象，且由
+		     tools/AutoSIMDVerify（23/23）与 tools/AutoSIMDEdgeCases（140/140）逐值对照过 C# 标量基线
+		     ⇒ 在此显式声明"已量过"。注意这只解除 NT024；body 不可向量化的 job 仍会报 NT031（见
+		     样例里被显式改成 AutoSIMD.Disabled 的那几处）。 -->
+		<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>
 	</PropertyGroup>
 
 	<!-- 同一程序集内只允许一个「重型对比样本」处于活动态：

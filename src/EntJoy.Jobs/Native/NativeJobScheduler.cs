@@ -417,7 +417,13 @@ public static unsafe partial class NativeJobScheduler
 
         NativeJobCore.JobSystem_Complete(handle);            // ← 原生：自旋/等待/退役握手全在这里
         long t3 = cDiag ? CSharpPhaseDiag.Now() : 0;
-        ulong batchId = NativeJobCore.JobSystem_GetDiagnosticBatchId(handle);
+        // 性能项 2（收尾）：无待取异常（正常路径）时**不付** `JobSystem_GetDiagnosticBatchId`
+        // 那次 P/Invoke —— 计数器为 0 ⇒ 本 batch 不可能有已记录异常（记录必先自增，
+        // 且 Complete 返回时本批 job 已全部结束），与 ThrowRecordedJobExceptions 首行判断等价。
+        // 每 job 省一次跨托管/原生调用（10k jobs/frame 量级下有意义）；异常路径语义不变。
+        ulong batchId = NativeJobCore.HasPendingJobExceptions
+            ? NativeJobCore.JobSystem_GetDiagnosticBatchId(handle)
+            : 0UL;
         long t4 = cDiag ? CSharpPhaseDiag.Now() : 0;
         NativeJobCore.ThrowRecordedJobExceptions(batchId);
         long t5 = cDiag ? CSharpPhaseDiag.Now() : 0;

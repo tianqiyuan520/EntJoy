@@ -34,10 +34,10 @@
 namespace JobSystem
 {
     // ---------- 调试面板 per-worker 实时状态 ----------
-    std::atomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers]{};
-    std::atomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers]{};
-    std::atomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers]{};
-    std::atomic<bool>     g_workerIsActive[kMaxTrackedWorkers]{};
+    PaddedAtomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers];
+    PaddedAtomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers];
+    PaddedAtomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers];
+    PaddedAtomic<bool>     g_workerIsActive[kMaxTrackedWorkers];
     std::atomic<bool>     g_debugPaused{ false }; // GUI 暂停标志：暂停时停止记录新段
     ExecWindowRing g_execWindows[kMaxTrackedWorkers]{};
     // 共享时间线历史：job 执行线程在结束瞬间追加（DebugEndExec），GUI 线程只读渲染
@@ -51,6 +51,10 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
     std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
+    // 性能项 5：调度器**进程内唯一实例**（永不析构）+ 伴生裸指针（热路径无锁读取）。
+    // 详见 JobSystemInternal.h 的 LoadChaseLevScheduler 注释。
+    std::shared_ptr<ChaseLevScheduler> g_chaseLevSchedulerInstance;
+    std::atomic<ChaseLevScheduler*> g_chaseLevSchedulerRaw{ nullptr };
     std::atomic<int> g_numThreads{ 0 };
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
@@ -65,6 +69,23 @@ namespace JobSystem
     // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
     std::atomic<int> g_submitDeferDepth{ 0 };
 
+    // ── 性能项 3（2026-09-26）：诊断统计总开关 ──
+    // 热路径（每 job / 每 tile 提交 / state 创建回收）此前**无条件**对多个共享原子做 locked RMW。
+    // 这些计数器只被 GetStatsSnapshot / 调试面板消费，本身不是同步原语（唯一例外
+    // g_backendBatchesOutstanding：它是 WaitForBackendBatches 的等待条件，见该处注释，**不 gate**），
+    // 却与 worker 侧计数器同处若干缓存行 ⇒ 多核下反复弹跳。一次 relaxed 载入即可整体旁路。
+    // 默认 **true**：数值/语义与改动前逐位一致（ResetStatsSnapshot/GetStatsSnapshot 的精确性保证、
+    // JobSystemTests 的 TestCooperativeStatsReset / Diagnostic*Bounded 全部不受影响）；
+    // `ENTJOY_STATS=0` 显式关闭（换取热路径零 RMW；此时统计读数不再精确，属调用方主动放弃）。
+    std::atomic<bool> g_statsEnabled{ true };
+    // 进程启动读一次 env（与 g_jobCostCacheVerbose 同法；同 TU 内 g_statsEnabled 已常量初始化）。
+    static const bool g_statsEnvInitialized = []() -> bool {
+        const char* v = std::getenv("ENTJOY_STATS");
+        if (v != nullptr && v[0] == '0')
+            g_statsEnabled.store(false, std::memory_order_relaxed);
+        return true;
+    }();
+
     // 隐式批（native 收集）开关 + pending 列表（extern 声明见 JobSystemInternal.h）。
     // 默认关闭：Schedule* 直接提交；开启后 tile 路径 job 挂入 pending，由 FlushPendingSubmits 统一提交 + 单次唤醒。
     std::atomic<bool> g_implicitBatchEnabled{ false };
@@ -76,6 +97,19 @@ namespace JobSystem
     bool g_jobCostCacheVerbose = []() -> bool {
         const char* v = std::getenv("ENTJOY_JCC_VERBOSE");
         return v != nullptr && v[0] == '1';
+    }();
+
+    // §7aq：自适应主线程自旋（默认关）。动机见 JobSystem_State.cpp 的 Complete() 注释。
+    // 实测结论（07 §7aq）：**否证** —— 12 对 A/B 整步 +4.15 ms（9/12 更差）、Melee +2.62、wave +0.88。
+    // 保留为默认关的器械（记录 + 可复跑），默认档零额外开销。
+    bool g_completeSpinAdaptEnabled = []() -> bool {
+        const char* v = std::getenv("ENTJOY_COMPLETE_SPIN_ADAPT");
+        return v != nullptr && v[0] == '1';
+    }();
+    uint64_t g_completeSpinBigNs = []() -> uint64_t {
+        const char* v = std::getenv("ENTJOY_COMPLETE_SPIN_BIGNS");
+        const long long n = (v != nullptr) ? std::atoll(v) : 1000000;   // 默认 1 ms（聚合口径）
+        return static_cast<uint64_t>(n < 0 ? 0 : n);
     }();
 
     // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。0=off；>0=on。
@@ -113,6 +147,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_mainExecutedRanges{ 0 };
     std::atomic<uint64_t> g_stealCount{ 0 };
     std::atomic<uint64_t> g_parkWakeCount{ 0 };
+std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（自证）
     std::atomic<uint64_t> g_hotSpinHits{ 0 };
     std::atomic<uint64_t> g_publishedJobs{ 0 };
     std::atomic<uint64_t> g_waitFallbacks{ 0 };
@@ -137,6 +172,7 @@ namespace JobSystem
     std::atomic<uint64_t> g_statePoolNew{ 0 };
     std::atomic<uint64_t> g_stateRecycled{ 0 };
     std::atomic<uint64_t> g_stateRecycledOnWorker{ 0 };
+    std::atomic<int64_t> g_liveHandleStates{ 0 };
     std::atomic<uint64_t> g_stateCreateByThread[kStateThreadSlots];
     std::atomic<uint64_t> g_stateRecycleByThread[kStateThreadSlots];
     std::atomic<uint64_t> g_batchStorageReturned{ 0 };
@@ -166,11 +202,15 @@ namespace JobSystem
         g_currentBatchIdCallback.store(cb, std::memory_order_release);
     }
 
-    // GUI Activity 用的原生发布事件（动态保留全部历史，不覆盖；调试面板开启时记录）
+    // GUI Activity 用的原生发布事件（调试面板开启时记录）。
+    // ⚠ 必须**有界**：面板长期开着（或忘记 clear）时事件向量会单调增长——几百 job/帧约 1MB/s。
+    // 超上限时丢弃最旧的一半，并用 base 维持读取侧的"绝对索引"语义。
     std::atomic<bool> g_nativeActivityCaptureEnabled{ false };
     static std::mutex g_nativeActivityMutex;
-    static std::vector<NativeActivityEvent> g_nativeActivity;   // 已发布事件（保留）
-    static size_t g_nativeActivityTotal = 0;                     // 累计写入数（含被截断者）
+    static std::vector<NativeActivityEvent> g_nativeActivity;
+    static size_t g_nativeActivityTotal = 0;   // 累计写入数（含被丢弃者）
+    static size_t g_nativeActivityBase = 0;    // 已丢弃的最旧事件数：绝对索引 = base + i
+    static constexpr size_t kNativeActivityCap = 65536;
 
     static double NativeNowMs() noexcept
     {
@@ -183,49 +223,98 @@ namespace JobSystem
     {
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lock(g_nativeActivityMutex);
-        g_nativeActivity.emplace_back(NativeActivityEvent{ batchId, tiles, NativeNowMs() });
-        ++g_nativeActivityTotal;
+        if (g_nativeActivity.size() >= kNativeActivityCap)
+        {
+            const size_t drop = kNativeActivityCap / 2;
+            g_nativeActivity.erase(g_nativeActivity.begin(),
+                g_nativeActivity.begin() + static_cast<std::ptrdiff_t>(drop));
+            g_nativeActivityBase += drop;
+        }
+        try
+        {
+            g_nativeActivity.emplace_back(NativeActivityEvent{ batchId, tiles, NativeNowMs() });
+            ++g_nativeActivityTotal;
+        }
+        catch (...)
+        {
+            // 诊断路径：分配失败不得穿透 noexcept（否则 terminate），静默丢弃本次事件。
+        }
     }
 
-    // GUI 从 readIndex 起读取新增事件（不删除，历史完整保留）。返回读取条数。
+    // GUI 从 readIndex（**绝对**索引，跨"丢弃最旧一半"仍然有效）起读取新增事件。返回读取条数。
     int ConsumePublishedJobs(NativeActivityEvent* out, int maxCount, uint64_t* readIndex) noexcept
     {
         if (out == nullptr || maxCount <= 0) return 0;
         uint64_t startIdx = readIndex ? *readIndex : 0;
         std::lock_guard<std::mutex> lock(g_nativeActivityMutex);
-        if (startIdx >= g_nativeActivity.size())
+        const uint64_t base = static_cast<uint64_t>(g_nativeActivityBase);
+        if (startIdx < base) startIdx = base;   // 起点已被丢弃 → 从最旧可用处继续，不重放旧事件
+        const uint64_t end = base + static_cast<uint64_t>(g_nativeActivity.size());
+        if (startIdx >= end)
         {
-            if (readIndex) *readIndex = static_cast<uint64_t>(g_nativeActivity.size());
+            if (readIndex) *readIndex = end;
             return 0;
         }
-        const size_t n = std::min<size_t>(maxCount, g_nativeActivity.size() - static_cast<size_t>(startIdx));
-        size_t base = static_cast<size_t>(startIdx);
-        for (size_t i = 0; i < n; ++i) out[i] = g_nativeActivity[base + i];
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(
+            static_cast<uint64_t>(maxCount), end - startIdx));
+        const size_t first = static_cast<size_t>(startIdx - base);
+        for (size_t i = 0; i < n; ++i) out[i] = g_nativeActivity[first + i];
         if (readIndex) *readIndex = startIdx + n;
         return static_cast<int>(n);
-    }
-
-    void ClearPublishedJobs() noexcept
-    {
-        std::lock_guard<std::mutex> lock(g_nativeActivityMutex);
-        g_nativeActivity.clear();
-        g_nativeActivityTotal = 0;
     }
 
     // 直接调用（ISPC-MT 等方法直跑，不经调度器）：也记入 published 计数与 activity，并维护 id→名字
     static std::mutex g_nativeJobNameMutex;
     static std::unordered_map<uint64_t, std::string> g_nativeJobNameMap;
 
+    // id→名字表：键是**单调递增**的 batchId、永不删除 ⇒ 长时间采集同样会无界增长。
+    // 名字只用于面板显示，故超限整体清空（旧 id 在面板上退化为无名）。
+    static constexpr size_t kNativeJobNameCap = 65536;
+
+    /// 调用方必须已持有 g_nativeJobNameMutex。
+    static void StoreNativeJobNameNoLock(uint64_t id, const char* name) noexcept
+    {
+        if (name == nullptr) return;
+        try
+        {
+            if (g_nativeJobNameMap.size() >= kNativeJobNameCap)
+                g_nativeJobNameMap.clear();
+            g_nativeJobNameMap[id] = name;
+        }
+        catch (...)
+        {
+            // 诊断路径：分配失败不得影响作业执行
+        }
+    }
+
+    void ClearPublishedJobs() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_nativeActivityMutex);
+            g_nativeActivity.clear();
+            g_nativeActivityTotal = 0;
+            g_nativeActivityBase = 0;
+        }
+        {
+            // 名字表必须一起清：它与 activity 同源（都以单调 batchId 为键）
+            std::lock_guard<std::mutex> lock(g_nativeJobNameMutex);
+            g_nativeJobNameMap.clear();
+        }
+    }
+
     void RecordDirectCall(const char* jobName, uint32_t tiles) noexcept
     {
         // 直调也是一次"发布"：统一计数口径，使 GUI 的 Published Jobs 与 Activity 事件一一对应。
-        g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+        // 性能项 3：原先在检查采集开关**之前**无条件 RMW，采集关闭时这次 RMW 纯属浪费；
+        // 默认 g_statsEnabled=true ⇒ 计数口径与改动前完全一致。
+        if (StatsEnabled())
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
         const uint64_t id = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
         if (jobName)
         {
             std::lock_guard<std::mutex> lock(g_nativeJobNameMutex);
-            g_nativeJobNameMap[id] = jobName;
+            StoreNativeJobNameNoLock(id, jobName);
         }
         RecordPublishedJob(id, tiles);
     }
@@ -251,7 +340,8 @@ namespace JobSystem
         if (name)
         {
             std::lock_guard<std::mutex> lock(g_nativeJobNameMutex);
-            g_nativeJobNameMap[id] = std::string("[ISPC]") + name;
+            const std::string ispcName = std::string("[ISPC]") + name;
+            StoreNativeJobNameNoLock(id, ispcName.c_str());
         }
         DebugBeginExec(id, 1, 1, true); // isDirect=true，复用直调样式
         return id;
@@ -273,13 +363,15 @@ namespace JobSystem
     {
         // 直调执行窗口开始：发布计数 + 记 Activity + 开当前线程泳道窗口（事件驱动）。
         // isDirect=true：GUI 将直调标记为 [D]，与调度式 Job 区分（直调不经调度器）。
-        g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+        // 性能项 3：同 RecordDirectCall，发布计数同样排在采集开关检查之后（默认统计开启 ⇒ 口径不变）。
+        if (StatsEnabled())
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return 0;
         const uint64_t id = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
         if (jobName)
         {
             std::lock_guard<std::mutex> lock(g_nativeJobNameMutex);
-            g_nativeJobNameMap[id] = jobName;
+            StoreNativeJobNameNoLock(id, jobName);
         }
         RecordPublishedJob(id, tiles);
         const uint32_t workers = tiles > 0 ? tiles : 1u; // 直调并行度 ≈ tile 数（MT 用 CPU 数）

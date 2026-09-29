@@ -752,7 +752,7 @@ namespace NativeTranspiler.Tasks
             string fileName, string[] arguments, string workingDir, int timeoutMilliseconds,
             bool cleanseDotnetMSBuildEnv = false)
         {
-            var argsString = string.Join(" ", arguments.Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
+            var argsString = string.Join(" ", arguments.Select(CommandLineQuoting.QuoteArgument));
 
             var startInfo = new ProcessStartInfo(fileName, argsString)
             {
@@ -830,6 +830,62 @@ namespace NativeTranspiler.Tasks
                 dir = dir.Parent;
             }
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Windows 命令行参数的引号规则（纯函数，便于单测）。
+    ///
+    /// 规则来自 CRT / <c>CommandLineToArgvW</c>：反斜杠只在**紧跟引号**时有转义含义，
+    /// 因此"闭合引号前的那串反斜杠"必须倍增，否则会把闭合引号吃掉。
+    /// </summary>
+    public static class CommandLineQuoting
+    {
+        /// <summary>
+        /// 把单个参数转成可直接拼进命令行的片段。
+        ///
+        /// ⚠ 旧实现 <c>a.Contains(' ') ? "\"" + a + "\"" : a</c> 有三个洞：
+        ///   ① 只在"含空格"时加引号 —— 含 <c>&amp;</c>/<c>(</c>/<c>;</c>/TAB 等照样能改变命令行结构；
+        ///   ② 不做反斜杠转义 —— 参数以 <c>\</c> 结尾时该反斜杠会**吃掉闭合引号**
+        ///      （<c>"…NativeTranspiler_Generated\"</c> 里的 <c>\"</c> 被解析成字面引号）；
+        ///      而仓库自带的参数正是
+        ///      <c>NativeCodeGenDir="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\"</c>
+        ///      （见 <c>src/EntJoy.Jobs/msbuild/EntJoy.Jobs.targets</c>），**永远**以 <c>\</c> 结尾
+        ///      ⇒ 只要项目路径含空格，<c>cmake -S</c> / <c>-B</c> 就整体解析错位；
+        ///   ③ 内嵌 <c>"</c> 无法安全表达（需要 <c>\"</c> 且反斜杠倍增）⇒ 这里**直接抛错**，
+        ///      不让一个畸形参数静默变成"另一个参数"。
+        /// </summary>
+        public static string QuoteArgument(string a)
+        {
+            if (a == null) throw new ArgumentNullException(nameof(a));
+            if (a.IndexOf('"') >= 0)
+                throw new ArgumentException(
+                    "命令行参数不能包含双引号（无法安全转义；请改用不含 \" 的路径/取值）: " + a, nameof(a));
+            if (a.Length == 0) return "\"\"";
+
+            // 先剥掉尾部分隔符：对目录参数语义等价，却是"闭合引号前反斜杠"这类陷阱的常见来源。
+            // 例外：盘符根（`C:\`）与 UNC 根不能剥成 `C:` / 空串，否则含义就变了。
+            string s = a;
+            while (s.Length > 0 && (s[s.Length - 1] == '\\' || s[s.Length - 1] == '/'))
+            {
+                string candidate = s.Substring(0, s.Length - 1);
+                if (candidate.Length == 0 || candidate[candidate.Length - 1] == ':') break;
+                s = candidate;
+            }
+
+            var sb = new StringBuilder(s.Length + 2);
+            sb.Append('"');
+            int backslashes = 0;
+            foreach (char c in s)
+            {
+                if (c == '\\') { backslashes++; continue; }
+                if (backslashes > 0) { sb.Append('\\', backslashes); backslashes = 0; }
+                sb.Append(c);
+            }
+            // 结尾的反斜杠必须倍增（2n 个 ⇒ 解析回 n 个字面反斜杠，且不转义闭合引号）。
+            sb.Append('\\', backslashes * 2);
+            sb.Append('"');
+            return sb.ToString();
         }
     }
 }

@@ -143,6 +143,61 @@ namespace JobSystem
             return true;
         }
 
+        // 批量出队：一次 CAS 抢占至多 maxCount 个**已发布**的连续槽（FIFO 前缀），返回实际弹出数。
+        // 与 Pop 的 seq 协议完全一致（消费者仍按 dequeuePos 顺序推进）；差异在于：
+        //   · N 次「尾指针 CAS + 单元行写」压成 ceil(N/maxCount) 次；
+        //   · 每个消费者抢到的单元区间互不相交 ⇒ 单元 seq 行不再被相邻消费者互踢。
+        // 只弹已发布前缀：生产者刚 CAS 到槽位但尚未 seq.store 的那一项不会被跳过（否则丢任务），
+        // 此时返回 0 或不足 maxCount 的前缀，由调用方稍后重试。
+        //
+        // ⚠ 当前调度器**未使用**它：2026-09-27 实测否证（`docs/gridsearch/07` 顶部块、原始档
+        //   `tools/gate-run/popsweep/`）。W=15 / 124 tile 同会话 16 对轮转：k=2 −7.2%（12/16 同号）、
+        //   k=4 打平（8/16）、k=8 +7.0%、k=15 +10.8%（均更差）；W=8：k=2 +4.3%、k=4 +8.1%、k=8 +11.8%（全更差）。
+        //   机制：多弹出的 token 只能经「本地 deque → 被窃取」再分发，窃取（扫描 + 两次 CAS）比它
+        //   省下的注入器出队更贵；参与者数一多（>物理核）则两败俱伤。保留本原语是因为它对
+        //   "发布一次 + 首到先得 admission" 这类不需要把 token 排队的方案仍可能有用，且单测覆盖了
+        //   FIFO / 回绕 / 并发不丢不重不双认领（`tests/NativeDll.Tests/MPMCInjectorTests.cpp`）。
+        uint32_t PopMany(T* out, uint32_t maxCount) noexcept
+        {
+            if (maxCount == 0) return 0;
+            for (;;)
+            {
+                uint64_t pos = dequeuePos.load(std::memory_order_relaxed);
+                uint32_t ready = 0;
+                bool staleTail = false;
+                for (; ready < maxCount; ++ready)
+                {
+                    const uint64_t seq = cells[(pos + ready) & (Capacity - 1)]
+                                             .seq.load(std::memory_order_acquire);
+                    const int64_t diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos + ready + 1);
+                    if (diff == 0) continue;    // 已发布且未消费 ⇒ 可弹
+                    if (diff < 0)
+                    {
+                        // 该槽尚未发布。**只有队首未发布**才算"队列空"（与 Pop 一致）；
+                        // 队首已就绪而后面还没发布时必须返回已就绪前缀 —— 否则队列里明明有
+                        // 可弹出的项却报空 ⇒ 消费方永久空转（曾因此在 k=2 下卡死批次退役）。
+                        if (ready == 0) return 0;
+                        break;
+                    }
+                    staleTail = true;           // 尾指针过期（其他消费者已推进）：重读
+                    break;
+                }
+                if (staleTail) continue;
+                if (ready == 0) return 0;
+                if (dequeuePos.compare_exchange_weak(pos, pos + ready, std::memory_order_relaxed))
+                {
+                    for (uint32_t i = 0; i < ready; ++i)
+                    {
+                        Cell& cell = cells[(pos + i) & (Capacity - 1)];
+                        out[i] = cell.data;
+                        cell.seq.store(pos + i + Capacity, std::memory_order_release);
+                    }
+                    return ready;
+                }
+                // CAS 失败：重新读尾指针并重探前缀
+            }
+        }
+
         // 诊断：近似占用数（并发时可能不精确）
         uint32_t ApproxSize() const noexcept
         {

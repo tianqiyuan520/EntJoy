@@ -1,5 +1,37 @@
 # NativeTranspiler：边界、诊断与回归防线
 
+> ✅ **已修复（2026-09-26）——AutoSIMD 向量化部分的复合赋值曾被当作覆盖写**
+>
+> 缺陷形态（修复前）：`m[i] |= 1UL << (i & 63)` 的向量化产物是
+> `((unsigned long long*)(m_ptr))[n_extract_lane_epi32((v_i).v,__l)] = static_cast<unsigned long long>(...)`
+> —— 运算符被丢弃、旧值未读（`+=`/`&=`/`<<=` 同族同样中招），**静默错值**。
+>
+> 修复：`SimdExpressionTranslator.EmitElementStore` 现在读取 `assign.OperatorToken`：复合赋值统一发射
+> **逐 lane 标量 load-modify-store**（掩码感知），不再退化成普通 store；普通赋值与原有向量 store 路径不变。
+> 回归用例：`tests/NativeTranspiler.Tests/NT12_NT13_SimdStoreAndLiteralTests.cs::CompoundAssignment_MustReadModifyWrite_NotOverwrite`
+> （停用该守卫即红、启用即绿）。同批修复的还有 **NT-13**（SIMD 侧数值字面量后缀：`1UL`→`1ULL`，与标量路径共用
+> `CppNumericLiteral.NormalizeSuffix`，避免"同一规则两处实现、只修一处"）。
+>
+> ⚠ **排查教训（写给后续维护者）**：本轮定位该缺陷时，我在生成的**不同层级**插入过抛异常探针，探针异常会被
+> 生成器转成 **NT026** 并触发 fallback 发射 —— 于是"探针没打印"被误读成"这段代码没被执行"，导致一度错误
+> 结论"缺陷不在 `EmitElementStore`"。**用探针定位生成器问题时，必须区分"探针未触发"与"探针触发但异常被上层吞掉/降级"**
+> （`OuterSimdGenerator` 等位置有 `catch (Exception) { return ""; }`）。
+
+> **回归网运行须知（2026-09-26）**：`tools/AutoSIMDVerify`（23 项）与 `tools/AutoSIMDEdgeCases`（140 项）
+> 通过 `DllImport`/`NativeLibrary` 加载 `NativeDll.dll` / `NativeTranspiled.dll`，而加载器**优先
+> `AppContext.BaseDirectory`**。因此运行前必须把仓库 `bin\` 下的这两个 DLL 复制到工具的输出目录
+> （`tools/*/bin/Release/`），否则会**静默**测到构建目录里残留的旧 DLL
+> （实测：工具目录里留着 9/08–9/13 的旧 DLL 时报 `EntryPointNotFoundException`；
+> 刷新后 AutoSIMDVerify 23/23、AutoSIMDEdgeCases 140/140 全过）。
+
+> **ISPC 后端"静默错值"面审计（2026-09-27，逐条读码而非信注释）**：
+> - **`return` 语义**：foreach 内裸 `return;` → `continue;`（等价跳过当前 lane）；批索引循环内裸 `return;` → `continue;`（等价结束本 index）；**嵌套循环内** `return` → 写 `__ENTJOY_UNSUPPORTED_STMT__ISPC_ReturnInsideNestedLoopInBatch`（构建失败）；foreach 内**带值** `return` → 降级 base，让 ISPC 编译器**报错**（暴露语义问题而非错译）。
+> - **`SendEvent` 参数形态**：字段值形态（`Target = entities[i]`）走 `TranslateIspcNestedFieldWrite`，**已正确处理**；整个实参非对象创建（`SendEvent(已有变量)`）原本**静默丢写**，现发标记 ⇒ 构建失败。
+> - **事件类型含非 4B 字段**（double/bool/byte/short/long）：生成 `__ENTJOY_UNALIGNED_EVENT_TYPE_…` 这一**故意的编译错误**（ISPC uniform struct 的 stride 假设会错），不是静默错布局。
+> - **未知语句/表达式**：ISPC 翻译器继承 `CppPointerStatementTranslator → StatementTranslator`，`default:` 分支写 `UnsupportedMarkers.Stmt/Expr`。
+> - **`IsIspcExtractableScalar` 返回 false**：回落 `base.TranslateInvocation`（不是丢弃）；`[Hint]` 包装被剥离属于**语义中性**（剥离的是提示而非语义）。
+> - 结论：除上述已修的那一处，**未再发现静默错值路径**。⚠ 方法提醒：源码注释可能描述的是**历史缺陷**（如 `IspcStatementTranslator` 里"静默丢掉剩余 index"的注释，其下方代码已用 `continue` 修好）——判断必须以代码为准。
+
 > 适用：`src/NativeTranspiler`（源生成器）+ `src/NativeTranspiler.Tasks`（原生编译任务）
 > 最后核对：2026-09-13（第五批：**整数字面量后缀**、`ref` 局部支持、job 头文件收集、IJobEntity 体翻译器；
 > 前四批：静默降级标记、批内 `return;` 语义、`IJobParallelForBatch`、`MathPrecision.High` 诚实化、
@@ -58,7 +90,8 @@
 | NT018 | error | `AutoSIMD = Vectorize` 但 job 不是 `IJobChunk`/`IJobEntity`（该路径未实现，会被静默丢弃） |
 | NT019 / NT020 / NT021 / NT022 | error | 属性与后端不匹配（ISPC 不读 AutoSIMD / MathPrecision / CppMathLib / UseISPC_MT） |
 | **NT023** | warning | `MathPrecision = High` **没有实现**：`NativeSIMD_math.h` 的 `== 2` 分支为空，产物与 `IEEE` 逐字相同；`Fastest` 才有 AVX2/AVX512 内联多项式 |
-| **NT024** | warning | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%**，且命中原子/取引用/用户静态辅助函数的 job 会整段退回 per-lane 标量循环 |
+| **NT024** | **error**（2026-09-27 由 warning 升级） | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%** ⇒ 默认不许开。要开必须**显式声明已量过**：MSBuild 属性 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`（由 `EntJoy.Jobs.props` 的 `CompilerVisibleProperty` 传给分析器）。job 被排除后调用点会报 CS0103 —— 这是故意的"响亮失败" |
+| **NT031** | error | `AutoSIMD = Enabled/Vectorize`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。**已知缺口**：`IJobEntity` 路径的 body 会被实体循环改写，判据需要对齐改写后的方法，暂未纳入（其余 job 形态覆盖） |
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |
 | **NT026** | error | 生成器**自身崩溃**（NRE 等）：把异常堆栈落盘到 `%TEMP%/entjoy-native-transpiler-crash.txt` 并报出，避免历史上"`CS8785` + 连坐 `CS0234 Bindings 缺失`"这种看不出原因的失败 |
 | **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
@@ -66,12 +99,22 @@
 | **NT030** | warning | 编译未引用 `EntJoy.ECS`，但生成的 bindings 仍出现 ECS 符号（`EntJoy.ECS`/`World`/`QueryBuilder`/`ArchetypeChunk`/`EntityManager`/`ChunkJobScheduler`/`ChunkJobData`/`ChunkEnabledMask`）⇒ 某个 ECS 相关发射点漏了条件化。消息里列出具体符号；若这些名字是你自己的类型，改名即可（词边界匹配，`MyWorldJob` 不误报） |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
+> 反过来说，**已经实测负收益/不生效的模式一律用 error**、不用 warning：NT024（AutoSIMD 实测慢 ~10%）、
+> NT031（AutoSIMD 整段退回 per-lane、等于没开）都属于这一类 —— warning 的后果是"用户照样能开一个
+> 慢 10%（或干脆没向量化）的模式，只是构建日志里多一行"。
+>
+> 样例项目（`samples/EntJoySample`）显式声明 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`：
+> 它的 AutoSIMD job **就是**被测对象，并由 `tools/AutoSIMDVerify`（23/23）+ `tools/AutoSIMDEdgeCases`
+> （140/140）逐值对照过 C# 标量基线。实测：把该属性关掉后，样例里 **35 处**（distinct 文件:行）
+> `AutoSIMD = Enabled` 会立刻变成 error；而 NT031 在样例上是 **0 处**（样例的 AutoSIMD job 都可向量化）。
 
 ## 5. 已知边界（当前不打算改）
 
 1. **AutoSIMD（`AutoSIMD.Enabled`，IJobParallelFor 路径）**：能编译、语义正确，但**无收益**
    （实测整步 +10.3%；16/18 个 job 因体内含原子/取引用/静态辅助函数而整体退回 per-lane 标量循环）。
    真向量路径仍有阻塞项（`cfgPtr[<varying>]` 的标量包装形状），未修完 —— 因期望收益为负而暂停。
+   **2026-09-27（B3）后不再是"静默可开"**：这两种形态都改成 error（NT024 默认禁止、NT031 禁止
+   per-lane 退回），见 §4；要把某个 job 的 AutoSIMD 留下来，得在项目里显式声明已量过。
 2. **ISPC 的 uniform 标量循环边界**：`Target = Ispc` 的 job 里，走 uniform 串行路径（体内有自修改
    `NativeArray` 或使用 `Interlocked` 返回值）的 job 会在"uniform 调用点 vs varying 签名的 helper"处失败。
    当前实测（以 CPU 百万同屏工程的 19 个 job 为例）：**全部可编译（19/19）**。
@@ -248,7 +291,7 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 | 值绑定 `const T& X = *X_ptr;` → `const T X = *X_ptr;` | 1.0287（5/6 轮更差） | 负 |
 | 指针别名声明单点下沉 / 按使用块复制下沉 | 1.0402（4/6 轮更差） | 负 |
 | 形参打包（96 → 65 形参，`ENTJOY_PACK_SCALARS=1`） | 1.0005 | 中性 |
-| `AutoSIMD = Enabled`（IJobParallelFor） | 生成物**完全没有 SIMD**（per-lane 标量包装，0 个 `simd_mask`） | 与诊断 **NT024** 的预警一致：体里含原子/取引用/用户静态辅助函数即整段退回 |
+| `AutoSIMD = Enabled`（IJobParallelFor） | 生成物**完全没有 SIMD**（per-lane 标量包装，0 个 `simd_mask`） | 诊断 **NT024**（默认 error：实测慢 ~10%）与 **NT031**（body 不可向量化 ⇒ 整段退回 per-lane）现在都把这条堵在构建期 |
 | **`-mllvm -inline-threshold=2000`**（把剩余 4 处外呼也内联） | **1.1132（8/8 更差）** | 负，且很重 |
 | **PGO**（`-fprofile-instr-generate` 训练 + `-fprofile-instr-use`） | **1.2224（8/8 更差）** | 负，且很重 |
 
@@ -257,8 +300,80 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 参考对照：同算法在 Unity Burst（AOT/AVX2）下为 **1465 条指令**，本框架为 **1891 条（多 29%）**；但**外呼数（8 vs 7）、栈引用密度（26.8% vs 26.2%）、浮点算术（141 vs 142）三项都与对手持平**——多出来的 ~425 条集中在**整数搬移（+146 `mov`）、地址计算（+54 `lea`/`movsxd`）、条件判断（+62）与分支（+84）**。⇒ 差距在"搬数 / 算地址 / 再判一次"这一层，不在数学、不在调用、不在溢出。生成内核的**静态普查**（指令数 / 栈引用比 / 外呼数 / **按类别的指令构成** / 函数体字节）在本项目中是发现这类结构性缺陷最快的手段，建议纳入回归夹具。
 ⚠ 统计口径：**分词后按操作码字段**归类，不要用行首/行内正则猜指令 —— 曾用 `-match '^call'` 匹配以地址开头的行，把外呼数恒算成 0，从而写出"对手 0 外呼/完全内联"的错误结论。
 
+### 9.2b 接管复核（2026-09-26）：`+29% 数据搬运` 能否用生成器局部改动解决 → **不能**（有证据）
+
+一审结论"补对齐/非负/无别名事实"这句**不能照做**，逐条复核如下（工具 `tools/CodegenAsmProbe`，MSVC `/O2 /arch:AVX2`）：
+
+| 设想的事实 | 复核结果 |
+|---|---|
+| **无别名**（给分量指针加 `__restrict`） | 铺开后 15 内核合计仅 **−2.1% 指令**（`mov` −6.7%，但 `lea/movsxd` **+2.0% 反升**），且 `snap_autosimd_chunk` **回归 +56.5%**；别名判定本身也不完整（同一 `NativeArray` 二次绑定、带副作用索引时都不该加）⇒ 已把 `RESTRICT` 宏定义为空（见 `CodeTemplates.cs`，保留宏名便于后续逐处收窄再启用） |
+| **对齐**（`__assume(ptr % 64 == 0)`） | **不成立**：分量指针来自 `componentArrays[]`，框架**没有** 64B 对齐保证 ⇒ 该 `__assume` 是 UB 提示（编译期可据此丢弃边界处理）。已退化为无副作用表达式 `(void)(...)`；`/O2` 下它不产生指令，即"补对齐事实"这条**目前无安全可用的事实可补** |
+| **非负**（`__assume(idx >= 0)`） | 同样无契约保证（调用方可传负 `__startIndex/__count`）⇒ 不可加 |
+| **减少整数搬移**（值绑定 / 别名声明作用域收窄） | §9.2 已实测为负（1.0287 / 1.0402） |
+
+**普查可复现性（同一次复核内验证）**：同样的生成物 + 同样的 flags 连跑两次，9 个非 `@emit` 内核**逐项完全一致**（例：`melee_pack` 310 / mov 85 / lea 32 / cmp 31 / branch 40 —— 两次相同）⇒ 该仪器可用于 before/after 决策。
+⚠ 但**两臂必须都刷新 `@emit` 语料**：`-SkipSnapshot` 那一臂会静默丢掉 6 个 `@emit` 内核（TOTAL 1548 vs 1955），TOTAL 直接不可比（实测踩到）。
+
+**本仓当前（提交 `62d892d`）Melee 形状内核的定格数据**（fixture `BenchMeleeScanPackJob`，MSVC `/O2 /arch:AVX2`）：
+`total 310`、`scaffold 188（60.6%：mov 85 / lea+movsxd 32 / cmp+test 31 / j* 40）`、`fpArith 10`、`fpMove 42`、`call 0`、栈引用 24.2%、函数体 929 B。
+
+**判读（可执行结论）**：多出来的 425 条**集中在标量脚手架**，机制是"元素循环里同时存活约 22 个值 > ~14 个 GP 寄存器"⇒ 溢出/重载/地址重算，属**后端寄存器分配与活跃区间**问题，**不是**生成器少写了几条语句。所有已试的生成器局部改动（restrict / 值绑定 / 别名作用域 / `-O3 -funroll-loops` / 内联阈值 / PGO / 形参打包）实测**中性或为负**；因此：
+1. **不要再尝试**"在生成代码里补舍入/对齐/非负假设"这类局部补丁 —— 无安全事实可补，且历史尝试全为负；
+2. 想真正收敛这 29%，只剩两条路：**（a）改内核源码以缩短活跃区间**（属内核/样例工作，非生成器）；**（b）宽 SIMD 形状改走 ISPC 后端**（`Target = Ispc`，框架已支持，见 §7/§8）；
+3. 任何后续尝试**必须**用同会话交错 A/B 的**墙钟**判定，不能只看普查指令数 —— `__restrict` 正是反例：指令 −2.1% 却无墙钟收益、还带来单内核 +56.5% 回归。
+
+### 9.2c B2 内核结构实验（2026-09-27）：逐格元数据预计算 → 静态指令 −4.8%，**墙钟无收益**
+
+路线（a）"改内核源码以缩短活跃区间"在本仓的唯一可测载体是 Melee 形状的**夹具内核**（外部工程那个
+内核源码不在本仓）。本轮把 §9.2b 判读指向的方向做成一支实验臂并量到底：
+
+- **实验臂**：`tools/NativeTranspilerFixture/BenchOffsetsJob.cs` 的 `BenchMeleeScanOffsetsJob` ——
+  与 `BenchMeleeScanPackJob`（= 普查里的 `melee_pack`）**逐行相同**，只改一处：把热循环里逐格计算的
+  `j % 9 - 4` / `4 - j / 9` / `oy * cellsW` 换成调用方预计算的 `CellDelta[jj] = ox - oy * cellsW`
+  ⇒ 循环体少一次 `ScanOrder[jj]` 载入、两处"除以 9"的魔数乘序列、一次乘法。
+- **语义等价**：bench 模式用同一输入 + 每臂前置状态清零（该内核会读回自己写下的 `KD2` 槽位，清零是
+  公平 A/B 的前提）对拍 `KD2` 与 `KPeer` 校验和，**逐位相同**（`Report(...)` 计入夹具断言门）。
+
+**普查（MSVC `/O2 /arch:AVX2`，`tools/CodegenAsmProbe`，`-KernelFilter melee`）**
+
+| kernel | total | mov | lea* | cmp | branch | scaffold | stack% | bytes |
+|---|---|---|---|---|---|---|---|---|
+| `melee_pack`（基线，**与 `e1-base.json` 逐项相同**） | 310 | 85 | 32 | 31 | 40 | 188 | 24.2 | 929 |
+| `melee_offsets`（本变体） | **295** | 83 | **29** | 30 | 40 | **182** | **21.0** | **890** |
+
+⇒ total **−15（−4.8%）**、scaffold **−6（−3.2%）**、函数体 −39 B、栈引用 24.2% → 21.0%。
+（`melee_pack` 与 `e1-base.json` 完全一致 ⇒ 该仪器与本轮的生成物/标志可复现。）
+
+**墙钟（同会话交错 A/B：8 对、臂序逐对交替、每臂 6 次重复 × 1e6 元素）**
+
+| 臂 | median | p95 |
+|---|---|---|
+| `melee_pack` | 164.9 ns/elem | 178.8 |
+| `melee_offsets` | 162.6 ns/elem | 181.8 |
+
+对级比值 `off/pack` 落在 **0.93–1.11**、中位 ≈ **0.99** ⇒ **测不出收益**（该夹具自身噪声地板 ~±10%，
+见 `CodegenAsmProbe/README.md`）。
+
+**判读**：静态指令砍掉 ~5% 却不改变墙钟 ⇒ 本形状是**内存/延迟受限**（~165 ns/元素由
+`CellStart[hash]` / `SortedIndex[s]` / `Positions[i]` 的随机访问主导），与 §9.2b 的结论一致：
+多出来的脚手架**不是墙钟瓶颈**（属后端寄存器分配与访问模式问题），也再次证明 §9.2 的规则——
+**不能用静态指令数替代墙钟判定**。
+
+**复现**：
+`dotnet run --project tools\NativeTranspilerFixture\NativeTranspilerFixture.csproj -c Release -- bench`
+（打印 8 对交错 A/B + 中位/p95 + 两条等价性断言；已并入本轮门禁 `fixture-bench`）；
+普查用 `tools\CodegenAsmProbe\probe.ps1 -KernelFilter melee`（`kernels.txt` 已追加 `melee_offsets` 条目；
+⚠ 普查工具与基线不在版本库，见未决清单 #3）。
+
+**剩余（仍未收敛的 29%）**：真正要收敛的是**外部工程那个内核**（1M 单位真实内核，源码不在本仓），
+本轮只能证明"这类可静态消掉的逐格整数运算不是瓶颈"；另一条路 ISPC 后端在该外部工程上的实测是
+**负收益**（§5：Cpp 113–119 ms vs ISPC 129–133 ms），故本仓 **B2 到此为止**：生成器侧杠杆（§9.2 的
+"不要再试"清单）与内核结构侧的可静态消项均已量到底，剩下的只有"在真实内核上做数据布局/访问模式
+重构"这一件仓外工作。
+
+
 **换工具链版本已验证无用（2026-09-16 实测）**：VS 自带 clang **19.1.5** 与官方 **LLVM 23.1.1**（独立解压、`-DCMAKE_CXX_COMPILER` 指定）编译同一份生成物 ⇒ **整个 DLL 的指令流逐条相同**（18,073 条；Melee 内核 1891 条/9360 B/栈引用/外呼数/类别计数全等）。
-⇒ **不要靠升级 LLVM 版本来改善内核代码质量**；差距在**喂给 LLVM 的 IR 与选项**（Burst 从 IL 生成 IR 时带别名/对齐/假设元数据，而生成代码目前只给了 `__restrict` 形参）。下一步应做的是**在生成代码里补对齐/非负/无别名事实**。
+⇒ **不要靠升级 LLVM 版本来改善内核代码质量**；差距在**喂给 LLVM 的 IR 与选项**（Burst 从 IL 生成 IR 时带别名/对齐/假设元数据，而生成代码目前只给了 `__restrict` 形参）。~~下一步应做的是在生成代码里补对齐/非负/无别名事实~~ ⚠ **这句已被 §9.2b 的复核推翻**（对齐/非负无契约可依、`__restrict` 实测为负）——请以 §9.2b 的结论为准。
 ⚠ 换工具链或被跳过时的两个陷阱：`NativeCompileTask` 有"输入哈希未变即跳过"的早退门；CMake 缓存会沿用已记录的编译器路径（工具集名不变就不 reconfigure）⇒ 换工具链**必须先删 `build\`**。
 
 **采样佐证（WPR CPU profile，同一次运行，需管理员）**：进程级 168,168 个采样点中，**生成内核（NativeTranspiled.dll）占 76.3%**、托管宿主 8.3%、**框架运行期（NativeDll.dll：JobSystem/Collections/调度）只占 8.2%**、其它 ~7%。
@@ -274,3 +389,4 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 2. **改 job 字段列表 = 改原生 ABI**：此时 A/B **不能只换原生 DLL**，必须同时换托管程序集（绑定签名来自生成代码），否则两臂当场全废（实测 8/8 轮 INCOMPLETE）。
 3. **栈流量统计必须 `[rsp]` + `[rbp]` 一起数**：clang-cl 默认省略帧指针、Burst 保留 rbp 帧；只数 `[rsp]` 会得出"对侧少 6 倍"的假象（真实两侧相同）。
 4. **不要拿二进制哈希当"是否同一版本"的判据**（PE 时间戳/常量地址会变）；等价性用同会话配对性能 + 生成物比对。
+5. **普查工具的两臂必须对称刷新语料**：`probe.ps1 -SkipSnapshot` 会静默丢掉 6 个 `@emit` 内核（TOTAL 从 1955 掉到 1548）⇒ TOTAL 不可比；只有 `-KernelFilter` 收窄时必须确认两臂过滤一致。

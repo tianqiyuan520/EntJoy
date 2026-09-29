@@ -55,6 +55,10 @@ namespace JobSystem
     {
         std::atomic<bool> g_guiLaunched{ false };
         std::atomic<bool> g_guiRunning{ false };
+        // 停止请求：由 JobDebuggerGUI::Shutdown()（主线程/关停路径）置位，GUI 线程每帧检查后退出。
+        // 旧实现没有停止路径（Shutdown 为空 + 线程 detach + 一次性 latch 不复位）
+        // ⇒ JobSystem 关停后窗口线程仍活着继续读 JobSystem 状态，且再也无法重新打开面板。
+        std::atomic<bool> g_guiStopRequested{ false };
 
         // 窗口数据
         struct GuiState
@@ -932,7 +936,7 @@ namespace JobSystem
 
             MSG msg;
             bool running = true;
-            while (running)
+            while (running && !g_guiStopRequested.load(std::memory_order_acquire))
             {
                 while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
                 {
@@ -970,6 +974,8 @@ namespace JobSystem
 
             g_guiRunning.store(false, std::memory_order_release);
             g_gui = nullptr;
+            // 复位一次性 latch：否则 JobSystem 关停后再次 Initialize/Launch 时面板永远不会重新打开。
+            g_guiLaunched.store(false, std::memory_order_release);
         }
 
     } // namespace
@@ -1017,8 +1023,27 @@ namespace JobSystem
 
     void JobDebuggerGUI::Shutdown()
     {
-        // 后台线程检测到 WM_QUIT 时自行退出；此处可补充停止路径
-        //（当前 detach；进程退出时窗口随之销毁）
+        // 停止调试面板并**等待它真的退出**，再让调用方（JobSystem 关停路径）去拆除 worker/状态。
+        // 为什么必须有界等待：GUI 线程是 detach 的，`g_guiRunning=false` 之前它每帧都会调用
+        // CurrentWorkerCount()/活动环与名字表读取；JobSystem 关停后继续跑虽然目前不会 UAF
+        // （这些读取只碰全局原子/数组/受锁 map），但会出现"窗口比 JobSystem 活得更久"、
+        // 无法重新 Launch（一次性 latch）以及关停期读数无意义的问题。
+        if (!g_guiLaunched.load(std::memory_order_acquire) &&
+            !g_guiRunning.load(std::memory_order_acquire))
+            return;   // 从未启动
+
+        g_guiStopRequested.store(true, std::memory_order_release);
+        // 循环每帧（vsync ≈60Hz）检查该标志，故最坏 ~16ms 内退出；这里给 3s 上限并轮询。
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (g_guiRunning.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (g_guiRunning.load(std::memory_order_acquire))
+            LogGui("stop request timed out (window thread still running)");
+        else
+            LogGui("stopped debug window");
     }
 
 #else // !ENTJOY_IMGUI_ENABLED

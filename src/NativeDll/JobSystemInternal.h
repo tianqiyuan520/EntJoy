@@ -40,6 +40,12 @@ namespace JobSystem
     // per-thread state 缓存上限。命中零锁；满额批量迁移共享池（每 ~64 次回收 1 次锁）。
     // state 单 owner（refCount==0 才回池），跨线程迁移只发生在共享池锁内，无 ABA。
     inline constexpr size_t kStateCacheCap = 64;
+    // 非"创建者"线程（worker：每 job 都回收、但几乎从不 CreateState）的 TLS 缓存上限**刻意更小**。
+    // 理由（性能项 3 实测）：把它们也纳入 TLS 缓存后，回收的 state 会滞留在这条线程手里，
+    // 而真正需要复用它们的调度/提交线程从共享池里拿不到 ⇒ CreateState 退回 `new`。
+    // cap=64 时实测 500 帧 × 32 job 的新增分配超过 64（本模块测试的上界）；cap=8 让
+    // mutex 流量降到 1/8（满 8 个才整体迁移一次），同时把滞留上限压到 8×worker 数。
+    inline constexpr size_t kStateCacheCapNonCreator = 8;
 
     inline constexpr uint64_t kLongBatchBarrierNs = 800'000;
 
@@ -83,18 +89,45 @@ namespace JobSystem
 
     // ---- 调试面板 per-worker 实时状态 ----
     inline constexpr int kMaxTrackedWorkers = 64;
-    extern std::atomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers];
-    extern std::atomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers];
-    extern std::atomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers];
-    extern std::atomic<bool>     g_workerIsActive[kMaxTrackedWorkers];
+    // 每 worker 独占一个 cache line 的原子计数器（§7w(e)1「纯布局、零语义」）：
+    //   原为 `std::atomic<T>[64]` ⇒ **8 个 worker 共享一行**，相邻 worker 每次自增/写都让对方那行失效
+    //   （false sharing）。改成 alignas(64) 的子类后**调用点 `.store/.load/.fetch_add` 一行不用改**，
+    //   取值与语义完全不变；`sizeof` 断言保证真的独占一行。
+    template <typename T>
+    struct alignas(64) PaddedAtomic : public std::atomic<T>
+    {
+        PaddedAtomic() noexcept : std::atomic<T>(T{}) {}
+    };
+    static_assert(sizeof(PaddedAtomic<uint64_t>) == 64, "per-worker counter must own a cache line");
+    static_assert(sizeof(PaddedAtomic<uint32_t>) == 64, "per-worker counter must own a cache line");
+    static_assert(sizeof(PaddedAtomic<bool>) == 64, "per-worker counter must own a cache line");
+    extern PaddedAtomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers];
+    extern PaddedAtomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers];
+    extern PaddedAtomic<uint32_t> g_workerBatchTileCount[kMaxTrackedWorkers];
+    extern PaddedAtomic<bool>     g_workerIsActive[kMaxTrackedWorkers];
 
     // ---- base 模块（JobSystem.cpp）定义的全局 ----
     extern std::atomic<bool> g_workerAffinityEnabled;
     extern std::mutex g_schedulerMutex;
     extern std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
-    inline std::shared_ptr<ChaseLevScheduler> LoadChaseLevScheduler() noexcept
+    // 性能项 5：作废 `LoadChaseLevScheduler()` 里的**进程级 shared_ptr 自旋锁**
+    //（`atomic_load(shared_ptr)` 每次调用都是一次 CAS 加锁 + 一次解锁；它是每个 Schedule /
+    // 每个 worker 完成路径的必经点）。
+    //
+    // 现在发布**伴生裸指针**（release 发布），热路径退化为一次 acquire 载入（只读缓存行，
+    // 仅 Initialize/Shutdown 写）——无锁、无 RMW、无引用计数弹跳。
+    //
+    // 生命周期安全（无需读者计数即可证明无 UAF）：调度器**实例进程内唯一且永不析构**
+    //（`g_chaseLevSchedulerInstance`，见 JobSystem.cpp）。Initialize 复用同一实例（只 Start），
+    // Shutdown 只 Stop 不销毁，因此任何线程一旦取得过该指针，其解引用在进程生命周期内永远有效。
+    // Shutdown 先把本裸指针清空再 Stop，使"之后"的新读者拿到 nullptr —— 与旧实现
+    // `atomic_exchange(g_chaseLevScheduler, {})` 之后的可空语义逐位一致（调用方一律
+    // `if (scheduler) ...` 判空，且关键路径再叠加 `IsRunning()`）。
+    extern std::shared_ptr<ChaseLevScheduler> g_chaseLevSchedulerInstance;
+    extern std::atomic<ChaseLevScheduler*> g_chaseLevSchedulerRaw;
+    inline ChaseLevScheduler* LoadChaseLevScheduler() noexcept
     {
-        return std::atomic_load_explicit(&g_chaseLevScheduler, std::memory_order_acquire);
+        return g_chaseLevSchedulerRaw.load(std::memory_order_acquire);
     }
     extern std::atomic<int> g_numThreads;
     extern std::atomic<int> g_configuredTilesPerWorker;
@@ -117,9 +150,23 @@ namespace JobSystem
     // 诊断：ENTJOY_JCC_VERBOSE=1 时打印 ResolveChunkSize 决策 + 退役学习快照。
     // 只在 flag 开启时读取；进程启动时从 env 初始化一次，之后只读 → 无竞态。
     extern bool g_jobCostCacheVerbose;
+    // §7aq：自适应主线程自旋（`ENTJOY_COMPLETE_SPIN_ADAPT=1`，默认 false）。
+    // 做成进程级只读标志（而非函数内 static），因为**发布侧**（JobSystem_Tiles）也要据此决定
+    // 是否写 `HandleState::estBatchNs` —— 默认档必须零额外开销（否则每次 publish 多两次 JCC 查询）。
+    extern bool g_completeSpinAdaptEnabled;
+    extern uint64_t g_completeSpinBigNs;
     extern thread_local ThreadStateCache t_stateCache;
 
     // 统计计数器（base 定义；Tiles 递增 / base GetStatsSnapshot 读取）。
+    // ── 性能项 3：诊断统计总开关 ──
+    // 热路径只做**一次** relaxed 载入 + 分支即可旁路全部纯诊断 RMW；默认 true（数值不变），
+    // `ENTJOY_STATS=0` 关闭。同步/账本类原子（g_backendBatchesOutstanding、batch->tilesRemaining、
+    // batch->pendingTasks）**不属于**诊断计数，永不 gate。
+    extern std::atomic<bool> g_statsEnabled;
+    inline bool StatsEnabled() noexcept
+    {
+        return g_statsEnabled.load(std::memory_order_relaxed);
+    }
     extern std::atomic<uint64_t> g_completeWaitLoops;
     extern std::atomic<uint64_t> g_assistAttempts;
     extern std::atomic<uint64_t> g_assistExecuted;
@@ -127,6 +174,8 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_workerExecutedRanges;
     extern std::atomic<uint64_t> g_mainExecutedRanges;
     extern std::atomic<uint64_t> g_stealCount;
+    // §7ah：提交侧**跳过 futex 广播**的次数（无人等待、或已醒人数已够本批名额）——自证用。
+    extern std::atomic<uint64_t> g_notifySkipped;
     extern std::atomic<uint64_t> g_parkWakeCount;
     extern std::atomic<uint64_t> g_hotSpinHits;
     extern std::atomic<uint64_t> g_publishedJobs;
@@ -155,6 +204,11 @@ namespace JobSystem
     // 使主调度线程的缓存恒空 → 每次都走 new）。
     extern std::atomic<uint64_t> g_stateRecycled;
     extern std::atomic<uint64_t> g_stateRecycledOnWorker;
+    // 存活句柄 state 数：CreateState 分配 / RecycleState 回收的差值（即"已借出但未归还"的
+    // HandleState 数）。**不**受 `ENTJOY_STATS=0` 门控——托管侧用它断言"句柄是否被确定性
+    // 回收"（见 JobSystem_GetLiveHandleCount），关闭统计时仍须给出真实值。
+    // 代价：每次 CreateState/RecycleState 各一次 relaxed RMW（每 job 1 次创建 + N 次回收）。
+    extern std::atomic<int64_t> g_liveHandleStates;
     // 按线程槽统计"创建/回收"分布：判定二者是否落在同一批线程上（命中率只有 7% 的真因）。
     inline constexpr size_t kStateThreadSlots = 8;
     extern std::atomic<uint64_t> g_stateCreateByThread[kStateThreadSlots];
@@ -197,6 +251,11 @@ namespace JobSystem
     // ---- State 模块（JobSystem_State.cpp）定义的全局 ----
     extern std::mutex g_longBatchBarrierMutex;
     extern std::vector<HandleState*> g_longBatchBarriers;
+    // 性能项 4：`g_longBatchBarriers` 的**无锁快照计数**。该列表绝大多数提交时为空，
+    // 但 ConsumeLongBatchBarriers 此前每次提交都取全局互斥体 + 交换两个 vector。
+    // 计数与列表在同一把锁内同增同减，故 0 一定蕴含"列表空"（保守真值，不是提示性估计）；
+    // 非 0 只是"可能有"，仍需进锁复核。
+    extern std::atomic<uint32_t> g_longBatchBarrierCount;
     extern thread_local HandleState* g_completingBatchState;
 
     // ---- 跨模块类型 ----
@@ -207,7 +266,10 @@ namespace JobSystem
         GeneralRange,
         ChunkCallbacks,
         ChunkRange,
-        EntityBatchRange
+        EntityBatchRange,
+        // 打包 plain IJob 分片（见 SubmitPackedPlainJobs）：firstItem/itemCount 是
+        // PackedPlainBatch::jobs 的下标区间，不走 ChunkBatchContext 预取路径。
+        PackedJobs
     };
 
     struct ExecutionTile {
@@ -252,19 +314,21 @@ namespace JobSystem
         // storage boundaries; tiles are contiguous descriptor/index ranges.
         ExecutionTile* tiles{ nullptr };
         uint32_t tileCount{ 0 };
-        std::atomic<uint32_t> nextTile{ 0 };
+        // 热计数器各自独占 cache line（2026-09-27：原来三者在同一行，15 worker 的每次认领 RMW
+        // 都会连带失效"入场/完成计数"的行副本 ⇒ 单行反复弹跳；拆开后 RMW 次数不变、跨计数器误失效消失）。
+        alignas(64) std::atomic<uint32_t> nextTile{ 0 };
         uint32_t workerCount{ 0 };
-        std::atomic<uint32_t> workerSlotsEntered{ 0 };
+        alignas(64) std::atomic<uint32_t> workerSlotsEntered{ 0 };
         // 逻辑完成由 tile 完成驱动，而非任务退役：公共 JobHandle 已完成后，
         // 慢 worker 槽可能仍在退出窃取循环。
-        std::atomic<uint32_t> tilesRemaining{ 0 };
+        alignas(64) std::atomic<uint32_t> tilesRemaining{ 0 };
         std::atomic<bool> logicalCompleted{ false };
         // ---- Chase-Lev：在飞任务计数（防 use-after-free）----
         // SubmitBatch 时 = 任务数，每个任务执行完 fetch_sub(1)。
         // 退役须满足 tilesRemaining==0 && pendingTasks==0：tilesRemaining=0 仅代表 tile 执行完，
         // deque 中可能仍有已 pop 未执行的任务（task.batch 引用本 storage），须等其全部完成才能 ReleaseBatch。
         // 由"最后者"（tile 完成者或 task 完成者）执行退役。
-        std::atomic<uint32_t> pendingTasks{ 0 };
+        alignas(64) std::atomic<uint32_t> pendingTasks{ 0 };
 
         std::atomic<uint64_t> publishedAt{ 0 };
         std::atomic<uint64_t> firstWorkerAt{ 0 };
@@ -338,6 +402,21 @@ namespace JobSystem
         // JobCostCache：Schedule 入口设置的 funcPtr hash（0 = 未标记）。
         uint32_t funcHash{ 0 };
     };
+
+    // ---- 打包 plain IJob 描述符（SubmitPackedPlainJobs 的输入） ----
+    // 与 Exports.h 的 JobFunc / ContextCleanupFunc 是同一底层类型（void(*)(void*)），
+    // 但此处刻意不复用导出头，保持内部头不依赖 C ABI 头。
+    struct PackedPlainJobDesc {
+        void (*func)(void*);
+        void* context;
+        void (*cleanup)(void*);
+    };
+    // 把 K 个**无依赖** plain IJob 描述符当作**一个** batch 提交：
+    // 每个 worker token 连续执行若干 tile，每 tile = 一段连续描述符（func → 该 job 的 cleanup），
+    // 每 job 各自发布其 HandleState 终态。
+    // 返回写入 outStates 的句柄数；0 表示"未走打包路径"（调用方回退逐描述符提交），
+    // 此时不消费任何 context（所有权仍归调用方）。
+    int SubmitPackedPlainJobs(const PackedPlainJobDesc* descs, int count, void** outStates) noexcept;
 
     // ---- base 模块助手（定义在 JobSystem.cpp） ----
     inline void SetCurrentBatchId(uint64_t id) noexcept
@@ -536,8 +615,6 @@ namespace JobSystem
 
     // ---- Tiles 模块（定义在 JobSystem_Tiles.cpp） ----
     int ResolveWorkerTarget(int workerCap, int targetCount) noexcept;
-    // 按 JobCostCache 的预估工作量缩放"唤醒的工作者数"（`ENTJOY_WORK_SCALED_WORKERS=1` 时生效）。
-    int ResolveWorkScaledWorkerTarget(uint32_t funcHash, int length, uint32_t tileCount, int rc) noexcept;
     // 小 job（每 worker ≤2 chunk）且 worker 目标 > 物理核数时，退到物理核数（A/B：`ENTJOY_PHYSCAP_SMALLJOB=1`）。
     int ApplyPhysCoreCapForSmallJob(int targetWorkers, uint32_t tileCount, int length) noexcept;
     // 本机物理核数（0 = 不可知）。定义在 JobSystem.cpp；由 Scheduler::Initialize 刷新。
@@ -558,6 +635,10 @@ namespace JobSystem
     void ClearBatchStoragePool() noexcept;
     void FlushBatchContextCacheToSharedPool();
     void ClearBatchContextPool() noexcept;
+    // 性能项 2：BackendAsyncContext（plain IJob 的异步窗口上下文）池的两个 Shutdown 收尾点，
+    // 定义在 JobSystem_State.cpp；语义与 BatchContext 池一致（先交还 main 的 TLS 缓存，再清共享池）。
+    void FlushAsyncContextCacheToSharedPool();
+    void ClearAsyncContextPool() noexcept;
     void FlushBatchStorageCacheToSharedPool();
     void SubmitBatch(BatchState* batch, int workerCap = 0);
     // 隐式批（native 收集）入口：开关开 → 挂 pending（持 state 引用防悬垂）；否则直接 SubmitBatch。
@@ -583,6 +664,26 @@ namespace JobSystem
 
     // Complete 分段诊断（实现在 JobSystem_State.cpp；未设 `ENTJOY_DIAG_NATIVE_PHASE=1` 时为空操作）。
     namespace DiagPhase { void Dump(); }
+    // E1：worker 忙比 / 相位尾部（实现在 JobSystem_State.cpp；未设 `ENTJOY_DIAG_E1=1` 时为空操作）。
+    // `Begin/End` 由 ChaseLevScheduler 的**执行窗口**成对调用（每线程 TLS 记窗口起点）。
+    namespace E1
+    {
+        bool Enabled() noexcept;
+        void Reset() noexcept;                       // Initialize：清计数 + 记起点
+        void Begin() noexcept;                       // 进入 tile 执行窗口
+        void End(uint32_t workerIndex) noexcept;     // 离开窗口（>= kMaxTrackedWorkers ⇒ 主线程口径）
+        void Dump() noexcept;                        // Shutdown：打印忙比与抖动
+        // 批级：参与者数 / tile 数直方图 + 批间空隙（回答"为什么喂不饱 N 个 worker"）
+        void RecordBatch(uint32_t tileCount, uint32_t enteredWorkers, uint64_t wallNs) noexcept;
+        void RecordPublish(uint64_t publishedNs) noexcept;
+        void MarkTopologyDone(uint64_t topologyDoneNs) noexcept;
+        // 退役链分段（`lastTileAt` → `topologyDoneAt` 之间那 ~11 µs 到底花在哪）
+        enum : int { kRetireCas = 0, kRetireTiming = 1, kRetireBarrier = 2, kRetireCleanup = 3,
+                     kRetireCompleteState = 4, kRetireTopology = 5, kRetireTotal = 6, kRetireSlots = 7 };
+        void RetirePhase(int slot, uint64_t ns) noexcept;
+        // 启停斜坡：按"实际参与 worker 数"分桶记录 `firstWorkerAt → lastWorkerAt`（EWMA 不稳，需分布）
+        void RecordWorkerSpread(uint32_t enteredWorkers, uint64_t spreadNs) noexcept;
+    }
     // 原生 Schedule 分段诊断（实现主体在 JobSystem_Scheduler.cpp；未设
     // `ENTJOY_DIAG_NATIVE_SCHED=1` 时为空操作）。SubmitAcct 段由 JobSystem_Tiles.cpp 的
     // SubmitBatch 自记；SubmitTokens / SubmitNotify 两段由 ChaseLevScheduler::SubmitBatch 自记
@@ -626,5 +727,21 @@ namespace JobSystem
     void ChaseLevTaskDone(BatchState* batch) noexcept;
     // 记录 worker 进入批次的时间（firstWorkerAt/lastWorkerAt），供 timing 诊断。
     void ChaseLevRecordWorkerEntry(BatchState* batch) noexcept;
+
+    // ---- 认领组聚合 tile 完成计数（**固定启用，无开关**） ----
+    // 动机（2026-09-27 实测）：每 tile 成本 W=1 时 ~10 ns、W=15 时 ~44 ns
+    // ⇒ 其中 ~34 ns/tile 随参与者数增长 = 共享 cache line 争用；而每 tile 唯一的共享写
+    // 就是 TryExecuteOneTile 末尾的 `tilesRemaining.fetch_sub(1, acq_rel)`（124 次/job，15 核抢同一行）。
+    // 组模式：认领组内 tile 只在本线程本地计数，组末一次 `fetch_sub(组内实际执行数)`（step=4 ⇒ RMW ÷4）。
+    // 语义等价：tile 仍是"执行完才记账" ⇒ 计数归零仍 ⟺ 全部 tile 执行完（`lastTileAt` 最多延后一组，
+    // 它是纯诊断时间戳）；异常由 TryExecuteOneTile 内部记录，不影响本组记账。
+    // 实测收益：等口径 7936×64 空 job 11.00 → 7.52 µs/job（−32%，同会话 4 对）；真实负载整步
+    // 126.63 → 123.72 ms/步（−2.3%，6 对 5/6 同号）；Melee 段 −2.9%。正确性：native 11/11、ECS 233/233、
+    // ASAN 10/10。
+    void TileAcctGroupBegin() noexcept;
+    void TileAcctGroupFlush(BatchState* batch) noexcept;
+    // 组模式的线程局部状态（定义在 JobSystem_Tiles.cpp；TryExecuteOneTile 在文件前段读取）。
+    extern thread_local bool t_tileAcctGroupActive;
+    extern thread_local uint32_t t_tileAcctGroupCount;
     // （标准 Chase-Lev 不需要共享注册表追踪）
 } // namespace JobSystem

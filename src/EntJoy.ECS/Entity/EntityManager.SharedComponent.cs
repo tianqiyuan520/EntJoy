@@ -110,6 +110,10 @@ namespace EntJoy.ECS
                     {
                         srcChunk.SetSharedValueIndex(compIdx, newIdx);
                         srcChunk.MarkEntityChanged(info.SlotInChunk);
+                        // 就地改值同样改变「该 chunk 匹配哪个 shared 过滤」⇒ 必须推进结构版本：
+                        // EntityQuery / 调度缓存只在 StructuralVersion 变化时刷新匹配集合，
+                        // 否则 WithShared(旧值) 的查询会继续把这个 chunk 当成匹配项返回（静默错值）。
+                        structuralVersion++;
                         return;
                     }
 
@@ -126,6 +130,8 @@ namespace EntJoy.ECS
                     {
                         WriteBlittableSharedBoxed(srcChunk, compIdx, value, ct.Size);
                         srcChunk.MarkEntityChanged(info.SlotInChunk);
+                        // 理由同上：就地改值必须让 WithShared 过滤/调度缓存失效
+                        structuralVersion++;
                         return;
                     }
 

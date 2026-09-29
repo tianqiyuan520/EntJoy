@@ -49,8 +49,16 @@ namespace NativeTranspiler.Analyzer
         /// <summary>F-6：SimdMathPrecision.High 没有实现（产物与 IEEE 逐字相同），不能让人以为拿到了更快的 1.0ULP 路径。</summary>
         public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation (the Sleef polynomials were removed): the emitted code is identical to MathPrecision = IEEE. Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
-        /// <summary>F-2：AutoSIMD.Enabled 在 IJobParallelFor 上实测无收益（更慢），且多数 job 会整体退回标量。</summary>
-        public static readonly DiagnosticDescriptor AutoSimdNoMeasuredGainWarning = new("NT024", "AutoSIMD has no measured gain on IJobParallelFor", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled on an IJobParallelFor/IJobFor/IJob: measured end-to-end it is ~10% slower than the scalar baseline, and a body containing Interlocked / UnsafeUtility.ArrayElementAsRef / user static helpers falls back to a per-lane scalar loop (no SIMD at all). Keep AutoSIMD = Disabled unless your own measurement says otherwise.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+        /// <summary>F-2 / B3：AutoSIMD.Enabled 在 IJobParallelFor/IJobFor/IJob 上实测无收益（更慢）⇒
+        /// **默认 error**，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
+        /// 由 EntJoy.Jobs.props 的 CompilerVisibleProperty 传入）。原来只是 warning ⇒ 用户照样能开一个
+        /// 实测慢 ~10% 的模式，且"没有 SIMD 收益"这件事只以警告出现、容易被忽略。</summary>
+        public static readonly DiagnosticDescriptor AutoSimdNoMeasuredGainError = new("NT024", "AutoSIMD has no measured gain on IJobParallelFor", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled on an IJobParallelFor/IJobFor/IJob: measured end-to-end it is ~10% slower than the scalar baseline. Keep AutoSIMD = Disabled, or — if your own measurement says otherwise — set the MSBuild property <EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured> to state that you measured it.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
+        /// <summary>B3：body 命中"不可向量化"判据 ⇒ 整段退回 per-lane 标量循环（产物正确但**完全没有
+        /// SIMD**）。原先这条退化是静默的 ⇒ 现在报 error，让"以为开了向量化、实际跑标量"在构建期暴露。
+        /// 判据与发射侧共用同一份实现（SimdVectorizability.HasNonVectorizableCall）。</summary>
+        public static readonly DiagnosticDescriptor AutoSimdFallsBackToPerLaneError = new("NT031", "AutoSIMD falls back to per-lane scalar", "[NativeTranspile] struct '{0}' sets AutoSIMD = {1}, but its body contains a construct the vectorizer cannot handle ({2}) ⇒ the whole body falls back to a **per-lane scalar loop** (no SIMD at all). Remove the construct, or set AutoSIMD = Disabled to state that scalar is intended.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>F-5：IJobParallelForBatch 目前只有 Cpp 后端 + 标量代码生成路径（ISPC/AutoSIMD 未实现）。</summary>
         public static readonly DiagnosticDescriptor ParallelForBatchRequiresCppBackendError = new("NT025", "IJobParallelForBatch requires the Cpp backend without AutoSIMD", "[NativeTranspile] struct '{0}' implements IJobParallelForBatch, which is only implemented for Target = Cpp with AutoSIMD = Disabled (the ISPC/AutoSIMD paths only know the per-index Execute(int) shape). Drop Target = Ispc / AutoSIMD, or use IJobParallelFor instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
@@ -224,10 +232,14 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            return diagnostics.Count == 0;
+            // NT-05：只有 **error** 才算校验失败。NT023/NT024（事实告知类 warning）不得把 job 判成
+            // "无效" —— 文档 §4 末尾承诺「warning 不阻断生成」，而调用方（NativeTranspilerGenerator）
+            // 用返回值决定是否把 job 摘出 validJobs，返回 true 却被摘掉会直接吞掉 Schedule 绑定（CS0103 + NT028）。
+            return !diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
         }
 
-        public static bool ValidateJobStruct(INamedTypeSymbol structSymbol, Compilation compilation, out List<Diagnostic> diagnostics)
+        public static bool ValidateJobStruct(INamedTypeSymbol structSymbol, Compilation compilation, out List<Diagnostic> diagnostics,
+            bool autoSimdMeasured = false)
         {
             diagnostics = new List<Diagnostic>();
 
@@ -327,10 +339,11 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(SimdMathPrecisionHighUnimplementedWarning,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
-                // F-2：AutoSIMD.Enabled 在本 job 形态上实测无收益（详见描述），显式告知。
-                if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && !isChunkJob && !isEntityJob)
+                // F-2 / B3：AutoSIMD.Enabled 在本 job 形态上实测无收益（详见描述）⇒ 默认 error；
+                // 显式声明"我已量过"（EntJoyAutoSimdMeasured=true）才放行。
+                if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && !isChunkJob && !isEntityJob && !autoSimdMeasured)
                 {
-                    diagnostics.Add(Diagnostic.Create(AutoSimdNoMeasuredGainWarning,
+                    diagnostics.Add(Diagnostic.Create(AutoSimdNoMeasuredGainError,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
                 // F-5：IJobParallelForBatch 的代码生成只有 Cpp 标量一条路径。
@@ -408,7 +421,40 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            return diagnostics.Count == 0;
+            // B3（①）：AutoSIMD 开着、但 body 命中发射侧"不可向量化"判据 ⇒ 整个 body 退回 per-lane
+            // 标量循环（产物正确但**一点 SIMD 都没有**）。原先这条退化是静默的，用户以为开了向量化。
+            // 判据与发射侧共用同一份实现（SimdVectorizability），避免"两个真相"。
+            if (methodSyntax?.Body != null && !isEntityJob)
+            {
+                var attrSymSimd = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+                var autoSimdBody = AttributeHelper.GetAutoSIMD(structSymbol, attrSymSimd);
+                var targetBody = AttributeHelper.GetBackendTarget(structSymbol, attrSymSimd);
+                if (autoSimdBody != NativeTranspiler.AutoSIMD.Disabled
+                    && targetBody == NativeTranspiler.BackendTarget.Cpp)
+                {
+                    try
+                    {
+                        var semanticModelSimd = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                        var varAnalyzer = new SimdVariableAnalyzer(
+                            semanticModelSimd, structSymbol, executeMethod.Parameters.FirstOrDefault()?.Name ?? "index");
+                        varAnalyzer.Analyze(methodSyntax);
+                        if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason))
+                        {
+                            diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
+                                executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
+                                structSymbol.Name, autoSimdBody, reason ?? "unknown"));
+                        }
+                    }
+                    catch
+                    {
+                        // 校验侧分析失败不报 NT031（发射侧该退还是会退，且已有 NT026 兜生成器崩溃）：
+                        // 这里宁可漏报，不可把生成器打崩。
+                    }
+                }
+            }
+
+            // NT-05：同 ValidateMethod —— 只有 error 才算失败（warning 只上报、不阻断生成）。
+            return !diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
         }
 
         /// <summary>IJobEntity Execute 参数校验：Entity 参数（DOTS 式，按值传）豁免 ref/in 要求。</summary>

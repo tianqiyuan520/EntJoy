@@ -108,7 +108,7 @@ namespace EntJoy.ECS.Tests
 
         static ParallelReadWriteContainmentTests()
         {
-            JobScheduler.Initialize();
+            TestBackend.EnsureInitialized();
         }
 
         private static bool ContainsMessage(Exception? ex, string fragment)

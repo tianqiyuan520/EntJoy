@@ -90,8 +90,9 @@ namespace EntJoy.JobSystem
             if (_handles == null) return;
             for (int i = 0; i < _handleCount; i++)
             {
-                if (_handles[i]._nativeHandle.IsValid)
-                    _handles[i].Complete();
+                // 无条件 Complete：理由同 BatchScope.CompleteAll —— 后端无关，空句柄 no-op；
+                // 用 `_nativeHandle.IsValid` 守卫会让 Managed 回退后端整批不等待、不抛异常。
+                _handles[i].Complete();
             }
         }
 

@@ -15,6 +15,15 @@ namespace
 {
     using namespace JobSystem;
 
+    // 本 target 的 CMakeLists 定义了 NDEBUG ⇒ 标准 `assert` 是**空操作**（既有用例因此只能捕获
+    // 崩溃/挂起，捕获不到数值错误）。PopMany 用例一律用下面的 Check（不受 NDEBUG 影响），
+    // 失败时打印并让 main 返回非零。
+    int g_failures = 0;
+    void Check(bool cond, const char* what)
+    {
+        if (!cond) { std::printf("[FAIL] %s\n", what); ++g_failures; }
+    }
+
     // ============================================================
     // 基本测试
     // ============================================================
@@ -217,6 +226,161 @@ namespace
     }
 
     // ============================================================
+    // 批量出队（PopMany）
+    // ============================================================
+
+    void TestPopManyBasic()
+    {
+        MPMCInjector<int, 16> q;
+        int out[8] = { 0 };
+
+        // 空队列：一次都不弹
+        Check(q.PopMany(out, 4) == 0, "empty PopMany must return 0");
+
+        for (int i = 1; i <= 7; ++i) Check(q.Push(i * 10), "push 10..70");   // 10..70
+
+        // 一次弹 3 个（FIFO 前缀，且按序写入 out[]）
+        Check(q.PopMany(out, 3) == 3, "PopMany(3) of 7");
+        Check(out[0] == 10 && out[1] == 20 && out[2] == 30, "PopMany(3) FIFO order");
+
+        // maxCount 大于剩余量：只弹剩下的 4 个（队尾之外未发布 ⇒ 只能是"已就绪前缀"）
+        Check(q.PopMany(out, 8) == 4, "PopMany(8) of 4 remaining returns ready prefix 4");
+        Check(out[0] == 40 && out[1] == 50 && out[2] == 60 && out[3] == 70, "PopMany prefix values");
+
+        Check(q.PopMany(out, 8) == 0, "PopMany on empty after drain");
+
+        // Pop 与 PopMany 混排：Pop 必须是 PopMany(1) 的等价物
+        Check(q.Push(1) && q.Push(2) && q.Push(3), "push 1..3");
+        int v = -1;
+        Check(q.PopMany(out, 2) == 2, "PopMany(2) of 3");
+        Check(out[0] == 1 && out[1] == 2, "PopMany(2) values");
+        Check(q.Pop(v) && v == 3, "Pop after PopMany");
+        Check(!q.Pop(v), "Pop on empty");
+
+        printf("[PASS] TestPopManyBasic\n");
+    }
+
+    void TestPopManyPartialReady()
+    {
+        // 队首已就绪、后继未发布 ⇒ 必须返回 1 个（**不能**当作队列空返回 0，否则调用方永久空转）
+        MPMCInjector<int, 8> q;
+        int out[4] = { 0 };
+
+        Check(q.Push(11) && q.Push(12), "push 11,12");
+        Check(q.PopMany(out, 1) == 1 && out[0] == 11, "PopMany(1)");
+        Check(q.PushMany(nullptr, 0) == 0, "PushMany count==0");   // count==0 边界
+        int two[2] = { 13, 14 };
+        Check(q.PushMany(two, 2) == 2, "PushMany 13,14");
+
+        Check(q.PopMany(out, 4) == 3, "PopMany(4) of 3 ready");
+        Check(out[0] == 12 && out[1] == 13 && out[2] == 14, "PopMany(4) values");
+        Check(q.PopMany(out, 4) == 0, "PopMany on empty");
+
+        // 关键回归：只剩 1 个可弹项、且 maxCount > 1 时必须返回 1（曾因"后继未发布 ⇒ 返回 0"卡死）
+        Check(q.Push(99), "push 99");
+        Check(q.PopMany(out, 4) == 1, "single ready item with maxCount=4 must still pop it");
+        Check(out[0] == 99, "single ready item value");
+
+        printf("[PASS] TestPopManyPartialReady\n");
+    }
+
+    void TestPopManyWrapAround()
+    {
+        MPMCInjector<int, 4> q;   // 小容量快速回绕
+        int out[4] = { 0 };
+        int v = -1;
+
+        for (int round = 0; round < 200; ++round)
+        {
+            int batch[3] = { round * 3, round * 3 + 1, round * 3 + 2 };
+            Check(q.PushMany(batch, 3) == 3, "PushMany 3");
+            Check(q.PopMany(out, 2) == 2, "PopMany(2)");
+            Check(out[0] == batch[0] && out[1] == batch[1], "PopMany(2) values");
+            Check(q.Pop(v) && v == batch[2], "Pop last");
+        }
+
+        printf("[PASS] TestPopManyWrapAround\n");
+    }
+
+    void TestPopManyConcurrentMix()
+    {
+        // 多生产者（Push / PushMany 混合）+ 多消费者（PopMany）：不丢、不重、且同一生产者的
+        // 项在任一消费者内部严格递增（PopMany 只弹 FIFO 前缀 ⇒ 双认领会当场破坏该序）。
+        constexpr int kCapacity = 128;
+        constexpr int kProducers = 3;
+        constexpr int kConsumers = 4;
+        constexpr int kItems = 20000;   // 每个生产者
+
+        MPMCInjector<int, kCapacity> q;
+        std::atomic<int64_t> poppedPerProducer[kProducers];
+        for (int i = 0; i < kProducers; ++i) poppedPerProducer[i].store(0);
+        std::atomic<bool> orderViolation{ false };
+        std::atomic<int> producersDone{ 0 };
+
+        auto producer = [&](int id) {
+            int64_t local = 0;
+            while (local < kItems)
+            {
+                if (id & 1)   // 奇数号生产者用 PushMany（随机批 1..4）
+                {
+                    int batch[4];
+                    uint32_t n = static_cast<uint32_t>((local % 4) + 1);
+                    if (local + n > kItems) n = static_cast<uint32_t>(kItems - local);
+                    for (uint32_t i = 0; i < n; ++i) batch[i] = id * 1000000 + static_cast<int>(local + i);
+                    uint32_t got = q.PushMany(batch, n);
+                    while (got < n)
+                    {
+                        if (q.Push(batch[got])) ++got;
+                    }
+                    local += n;
+                }
+                else
+                {
+                    if (q.Push(id * 1000000 + static_cast<int>(local))) ++local;
+                }
+            }
+            producersDone.fetch_add(1, std::memory_order_release);
+        };
+
+        auto consumer = [&]() {
+            int last[kProducers];
+            for (int i = 0; i < kProducers; ++i) last[i] = -1;
+            int out[8];
+            for (;;)
+            {
+                uint32_t got = q.PopMany(out, 8);
+                if (got == 0)
+                {
+                    // 生产者全部退出后仍弹空 ⇒ 队列确定排空（生产者不再有"已占位未发布"的槽）
+                    if (producersDone.load(std::memory_order_acquire) == kProducers) break;
+                    continue;
+                }
+                for (uint32_t i = 0; i < got; ++i)
+                {
+                    int id = out[i] / 1000000;
+                    int idx = out[i] % 1000000;
+                    // 同一生产者的项在本消费者内必须严格递增（PopMany 只弹 FIFO 前缀 ⇒ 双认领会破坏该序）
+                    if (id < 0 || id >= kProducers || idx <= last[id]) orderViolation.store(true);
+                    last[id] = idx;
+                    poppedPerProducer[id].fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (int i = 0; i < kProducers; ++i) threads.emplace_back(producer, i);
+        for (int i = 0; i < kConsumers; ++i) threads.emplace_back(consumer);
+        for (auto& t : threads) t.join();
+
+        for (int i = 0; i < kProducers; ++i)
+            Check(poppedPerProducer[i].load() == kItems, "each producer fully popped exactly once");
+        Check(!orderViolation.load(), "no out-of-order / double claim per producer");
+
+        printf("[PASS] TestPopManyConcurrentMix (popped=%lld)\n",
+            (long long)(poppedPerProducer[0].load() + poppedPerProducer[1].load() + poppedPerProducer[2].load()));
+    }
+
+    // ============================================================
     // 多线程并发测试
     // ============================================================
 
@@ -331,9 +495,18 @@ int main()
     TestPushManyFullPartial();
     TestPushManyWrapAround();
     TestPushManyConcurrentMix();
+    TestPopManyBasic();
+    TestPopManyPartialReady();
+    TestPopManyWrapAround();
+    TestPopManyConcurrentMix();
     TestConcurrentMPMC();
     TestHighContention();
 
+    if (g_failures != 0)
+    {
+        printf("\nMPMCInjector tests FAILED: %d check(s)\n", g_failures);
+        return 1;
+    }
     printf("\nAll MPMCInjector tests passed.\n");
     return 0;
 }

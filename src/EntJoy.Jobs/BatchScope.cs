@@ -195,8 +195,11 @@ namespace EntJoy.JobSystem
             JobHandle[] handles = _ended ? GetSubmittedHandles() : Submit();
             foreach (var h in handles)
             {
-                if (h._nativeHandle.IsValid)
-                    h.Complete();
+                // 无条件 Complete：JobHandle.Complete() 本身后端无关，空句柄是 no-op。
+                // 曾经用 `h._nativeHandle.IsValid` 守卫 —— 在 Managed 回退后端（NativeDll 缺失/ABI 不匹配时的
+                // 官方回退路径）句柄只带 _managedHandle，整批被静默跳过：既不等、也不传播 Job 异常，
+                // 调用方随后 Dispose/读容器就与仍在运行的 worker 竞争（UAF 窗口）。
+                h.Complete();
             }
         }
 

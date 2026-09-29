@@ -73,16 +73,19 @@ EntJoy 将托管层的易用性与原生执行后端组合在一起：
 2. **Query** 使用 `WithAll`、`WithAny`、`WithNone` 和 `WithEnabled` 选择匹配的 Chunk。
 3. **JobSystem** 把 for、batch、chunk 或 entity 工作提交给原生工作线程，并通过 `JobHandle` 表达依赖。
 4. **Source Generator** 为 `IJobEntity`、原生绑定和调度扩展生成代码。
-5. **NativeTranspiler** 将标记了 `[NativeTranspile]` 的受支持 C# 代码生成 C++、ISPC、WGSL（wgpu）或 CUDA（`.cu` → cubin）。
-6. **NativeDll** 编译生成的代码，并提供统一的原生调度器、GPU 执行后端（wgpu / CUDA 驱动 API）和运行时 ABI。
+5. **NativeTranspiler** 将标记了 `[NativeTranspile]` 的受支持 C# 代码生成 C++ 或 ISPC。
+6. **NativeDll** 编译生成的代码，并提供统一的原生调度器与运行时 ABI。
+
+> **GPU 后端不在当前版本内。** WGSL/wgpu 与 CUDA 后端位于 `feature/gpu-offload` 分支（`BackendTarget` 目前只有 `Cpp`/`Ispc`），
+> 未合入、未随 NuGet 包发布，也没有 CI 覆盖；请勿按 GPU 能力选型，相关工作请在该分支上恢复。
 
 | 目录 | 作用 |
 | --- | --- |
 | [`src/EntJoy.ECS`](src/EntJoy.ECS) | ECS、Query、JobSystem、Native Collections 和基础运行时 |
 | [`src/EntJoy.ECS.SourceGenerator`](src/EntJoy.ECS.SourceGenerator) | ECS Job 的 C# Source Generator |
-| [`src/NativeTranspiler`](src/NativeTranspiler) | C# 到 C++/ISPC/WGSL/CUDA 的生成器与分析器 |
+| [`src/NativeTranspiler`](src/NativeTranspiler) | C# 到 C++/ISPC 的生成器与分析器（GPU 后端在 `feature/gpu-offload` 分支） |
 | [`src/NativeTranspiler.Tasks`](src/NativeTranspiler.Tasks) | 从 MSBuild 调用 CMake 的自定义任务 |
-| [`src/NativeDll`](src/NativeDll) | C++ JobSystem、Profiler、原生容器与 wgpu/CUDA GPU 执行后端 |
+| [`src/NativeDll`](src/NativeDll) | C++ JobSystem、Profiler 与原生容器（wgpu/CUDA GPU 后端在 `feature/gpu-offload` 分支） |
 | [`samples/EntJoySample`](samples/EntJoySample) | 功能验证、用法示例和性能测试 |
 
 ## 安装
@@ -141,8 +144,10 @@ cd EntJoy
 ### 4. Release 构建
 
 ```powershell
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
 ```
+
+> **`ENTJOY_STARTUP` 是必需的**：`EntJoySample` 里有多个样例各自定义了 `Main`（其余为注释态），不指定入口会以 `CS0017 程序定义了多个入口点` 失败。该属性只作用于本工程（写成 `StartupObject`），不会传播到库工程。可选入口见 [§5 运行样例](#5-运行样例)。
 
 这条命令会自动完成以下步骤：
 
@@ -160,7 +165,17 @@ dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
 .\bin\EntJoySample.exe
 ```
 
-当前启用的入口位于 [`SchedulerCompareTest/Program.cs`](samples/EntJoySample/01_JobSystem/SchedulerCompareTest/Program.cs)，首次运行时自动执行 Managed JobSystem 正确性自检；切换样例请注释当前入口并取消目标目录中 `Program.cs` 的注释。
+入口由 `-p:ENTJOY_STARTUP=<全限定入口类型>` 选择（见 [§4](#4-release-构建)）。当前源码中处于**启用态**的入口有：
+
+| `ENTJOY_STARTUP` | 目录 |
+| --- | --- |
+| `EntJoySample.ManyJobsBenchTest.Program`（CI 使用的入口） | [`01_JobSystem/ManyJobsBenchTest`](samples/EntJoySample/01_JobSystem/ManyJobsBenchTest/Program.cs) |
+| `EntJoySample.ParallelRwConflictTest.Program` | [`01_JobSystem/ParallelRwConflictTest`](samples/EntJoySample/01_JobSystem/ParallelRwConflictTest/Program.cs) |
+| `EntJoySample.IJobChunkMoveCompareTest.Program` | [`02_IJobChunkECS/IJobChunkMoveCompareTest`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs) |
+| `EntJoySample.ECS.Program` | [`09_ECS`](samples/EntJoySample/09_ECS/Program.cs) |
+| `EntJoySample.NativeLookup.Entry.Program` | [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup/Program.cs) |
+
+其余样例的 `Main` 处于注释态；要运行它们，既可以用 `ENTJOY_STARTUP` 指向其类型（并给该文件解除注释），也可以按老办法注释掉其他入口。
 
 ## 配置自己的项目
 
@@ -487,8 +502,8 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 | 主题 | 要点 |
 | --- | --- |
 | 支持形态 | 数组类：`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch`（**不引用 ECS 也能用**）；ECS 类：`IJobChunk` / `IJobEntity`（需 `EntJoy.ECS`，调度扩展在 `EntJoy.ECS.JobSystem`，须 `using`） |
-| 属性选项 | `Target`(Cpp/Ispc)、`MathLib`、`CppMathLib`、`UseISPC_MT`、`AutoSIMD`、`MathPrecision`、`DisabledAutoRefresh`；选项与后端不匹配会被 **error** 拦下（NT018–NT022、NT025） |
-| 属性（MSBuild） | `EntJoyNativeDllDir`（原生目录）、`EntJoyPrebuiltNativeDir`（非空=链接预编译 NativeDll，包模式用）、`EnableNativeCompile=false`（跳过 CMake）；手写接线时**必须**把它们加进 `CompilerVisibleProperty` |
+| 属性选项 | `Target`(Cpp/Ispc)、`MathLib`、`CppMathLib`、`UseISPC_MT`、`AutoSIMD`、`MathPrecision`、`DisabledAutoRefresh`；选项与后端不匹配会被 **error** 拦下（NT018–NT022、NT025），**已实测无收益/不生效的模式也是 error**（NT024：`AutoSIMD = Enabled` 在 `IJobParallelFor/IJobFor/IJob` 上实测慢 ~10%；NT031：body 不可向量化时整段退回 per-lane 标量） |
+| 属性（MSBuild） | `EntJoyNativeDllDir`（原生目录）、`EntJoyPrebuiltNativeDir`（非空=链接预编译 NativeDll，包模式用）、`EntJoyAutoSimdMeasured=true`（显式声明"我已量过"，才允许 `AutoSIMD = Enabled`，否则 NT024 error）、`EnableNativeCompile=false`（跳过 CMake）；手写接线时**必须**把它们加进 `CompilerVisibleProperty` |
 | CMake 选项 | `NATIVE_SIMD_LEVEL`(AUTO/AVX2/AVX/SSE4/NEON/SCALAR)、`NATIVE_SIMD_MATH_PRECISION`(1/2/3)、`ENTJOY_ENABLE_SENTINEL`(默认 OFF) |
 | 工具链 | 纯 C#：仅 .NET 8 SDK；Cpp 后端：+ CMake/MSVC（缺 ClangCL 自动回退）；ISPC 后端：+ `ispc` 在 `PATH` |
 | 产物 | `<项目>/NativeTranspiler_Generated/`（cpp/h/ispc + `CMakeLists.txt` + 哈希门控文件 + `build/Release/{NativeDll,NativeTranspiled}.dll`）；运行期两个 DLL 必须同目录 |
@@ -694,8 +709,12 @@ EntJoy combines a convenient managed API with native execution backends:
 2. **Query** selects matching Chunks through `WithAll`, `WithAny`, `WithNone`, and `WithEnabled`.
 3. **JobSystem** submits for, batch, chunk, or entity work to native workers and expresses dependencies with `JobHandle`.
 4. **Source Generator** emits code for `IJobEntity`, native bindings, and scheduling extensions.
-5. **NativeTranspiler** generates C++, ISPC, WGSL (wgpu), or CUDA (`.cu` → cubin) from supported C# code marked with `[NativeTranspile]`.
-6. **NativeDll** compiles generated code and provides the shared native scheduler, GPU execution backends (wgpu / CUDA driver API), and runtime ABI.
+5. **NativeTranspiler** generates C++ or ISPC from supported C# code marked with `[NativeTranspile]`.
+6. **NativeDll** compiles generated code and provides the shared native scheduler and runtime ABI.
+
+> **The GPU backends are not part of this version.** WGSL/wgpu and CUDA live on the `feature/gpu-offload` branch
+> (`BackendTarget` currently only has `Cpp`/`Ispc`); they are not merged, not published in the NuGet packages, and have no CI coverage —
+> do not select this framework based on GPU capability. Resume that work on that branch.
 
 | Directory | Purpose |
 | --- | --- |
@@ -760,8 +779,10 @@ cd EntJoy
 ### 4. Build Release
 
 ```powershell
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
 ```
+
+> **`ENTJOY_STARTUP` is required**: `EntJoySample` contains several samples that each define `Main` (the rest are commented out); without an explicit entry point the build fails with `CS0017: Program has more than one entry point defined`. The property is scoped to this project (it sets `StartupObject`) and does not propagate to library projects. Available entries are listed in [§5](#5-run-a-sample).
 
 The build automatically:
 
@@ -779,7 +800,17 @@ The first build is slower than incremental builds. When generated and native sou
 .\bin\EntJoySample.exe
 ```
 
-The active entry point is currently [`SchedulerCompareTest/Program.cs`](samples/EntJoySample/01_JobSystem/SchedulerCompareTest/Program.cs), which runs a Managed JobSystem correctness self-check on first launch; to switch samples, comment the current entry and uncomment `Program.cs` in the target directory.
+The entry point is selected with `-p:ENTJOY_STARTUP=<fully-qualified entry type>` (see [§4](#4-build-release)). The entries that are currently **enabled** in source are:
+
+| `ENTJOY_STARTUP` | Directory |
+| --- | --- |
+| `EntJoySample.ManyJobsBenchTest.Program` (used by CI) | [`01_JobSystem/ManyJobsBenchTest`](samples/EntJoySample/01_JobSystem/ManyJobsBenchTest/Program.cs) |
+| `EntJoySample.ParallelRwConflictTest.Program` | [`01_JobSystem/ParallelRwConflictTest`](samples/EntJoySample/01_JobSystem/ParallelRwConflictTest/Program.cs) |
+| `EntJoySample.IJobChunkMoveCompareTest.Program` | [`02_IJobChunkECS/IJobChunkMoveCompareTest`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs) |
+| `EntJoySample.ECS.Program` | [`09_ECS`](samples/EntJoySample/09_ECS/Program.cs) |
+| `EntJoySample.NativeLookup.Entry.Program` | [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup/Program.cs) |
+
+The `Main` of every other sample is commented out; to run those, point `ENTJOY_STARTUP` at their type (and uncomment the corresponding file), or keep using the comment/uncomment workflow.
 
 ## Configure Your Own Project
 
@@ -1098,8 +1129,8 @@ NativeTranspiler is not a complete C# compiler. Transpiled jobs should use unman
 | Topic | Key points |
 | --- | --- |
 | Supported shapes | Array-shaped: `IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch` (**usable without any ECS reference**); ECS-shaped: `IJobChunk` / `IJobEntity` (require `EntJoy.ECS`; scheduling extensions live in `EntJoy.ECS.JobSystem` and must be imported) |
-| Attribute options | `Target` (Cpp/Ispc), `MathLib`, `CppMathLib`, `UseISPC_MT`, `AutoSIMD`, `MathPrecision`, `DisabledAutoRefresh`; mismatched option/backend combinations are hard **errors** (NT018–NT022, NT025) |
-| MSBuild properties | `EntJoyNativeDllDir` (native dir), `EntJoyPrebuiltNativeDir` (non-empty ⇒ link the prebuilt NativeDll; used by package mode), `EnableNativeCompile=false` (skip CMake); when wiring by hand you **must** list them in `CompilerVisibleProperty` |
+| Attribute options | `Target` (Cpp/Ispc), `MathLib`, `CppMathLib`, `UseISPC_MT`, `AutoSIMD`, `MathPrecision`, `DisabledAutoRefresh`; mismatched option/backend combinations are hard **errors** (NT018–NT022, NT025), and so are modes **measured to be useless** (NT024: `AutoSIMD = Enabled` on `IJobParallelFor/IJobFor/IJob` measures ~10% slower; NT031: a body that cannot be vectorized falls back to a per-lane scalar loop) |
+| MSBuild properties | `EntJoyNativeDllDir` (native dir), `EntJoyPrebuiltNativeDir` (non-empty ⇒ link the prebuilt NativeDll; used by package mode), `EntJoyAutoSimdMeasured=true` (explicitly state "I measured it", required for `AutoSIMD = Enabled`, otherwise NT024 is an error), `EnableNativeCompile=false` (skip CMake); when wiring by hand you **must** list them in `CompilerVisibleProperty` |
 | CMake options | `NATIVE_SIMD_LEVEL` (AUTO/AVX2/AVX/SSE4/NEON/SCALAR), `NATIVE_SIMD_MATH_PRECISION` (1/2/3), `ENTJOY_ENABLE_SENTINEL` (OFF by default) |
 | Toolchain | C# only: .NET 8 SDK; Cpp backend: + CMake/MSVC (falls back to MSVC when ClangCL is absent); ISPC backend: + `ispc` on `PATH` |
 | Outputs | `<project>/NativeTranspiler_Generated/` (cpp/h/ispc + `CMakeLists.txt` + hash-gate files + `build/Release/{NativeDll,NativeTranspiled}.dll`); both native DLLs must end up in the same directory at runtime |
