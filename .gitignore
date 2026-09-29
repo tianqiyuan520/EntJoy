@@ -7,6 +7,10 @@
 # IDE
 **/.vs/
 **/.vscode/
+# 本机 IDE/调试配置与项目文件备份：属于机器本地状态，不入库
+*.csproj.user
+*.vcxproj.backup
+samples/Godot/Godot.zip
 
 # Claude Code config/cache
 **/.claude/

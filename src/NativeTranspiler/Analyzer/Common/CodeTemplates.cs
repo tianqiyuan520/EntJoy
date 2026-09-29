@@ -52,11 +52,14 @@ namespace NativeTranspiler.Analyzer.Common
 #endif
 
 // restrict keyword compatibility
-#if defined(_MSC_VER) || defined(__clang__)
-  #define RESTRICT __restrict
-#else
-  #define RESTRICT __restrict__
-#endif
+// ⚠ 2026-09-27（接管决定）：**不再对生成的分量指针加 `__restrict`**。
+//   实测（tools/CodegenAsmProbe，before→after，15 内核，MSVC /O2 /FA）：
+//     · 净收益仅 −2.1% 指令（mov −6.7%，但 lea/movsxd +2.0% 反升）；
+//     · `snap_autosimd_chunk` **回归 +56.5%**（lea +200%、cmp/branch 翻倍）；
+//     · 别名判定未完成：同一 NativeArray 二次绑定／带副作用索引时不应加 restrict，需逐处判定。
+//   故把宏定义为空（保留宏名 ⇒ 生成代码语法/形状不变，便于后续**逐处收窄再启用**）。
+//   基线数据与对比报告保留在 tools/CodegenAsmProbe/out/（before*.json / report-after-final.txt）。
+#define RESTRICT
 ";
 
         /// <summary>

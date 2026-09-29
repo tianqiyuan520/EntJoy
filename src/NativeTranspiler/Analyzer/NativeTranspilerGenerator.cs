@@ -92,18 +92,30 @@ namespace NativeTranspiler.Analyzer
                 foreach (var method in ctx.MethodSymbols)
                 {
                     if (method == null) continue;
-                    if (!NativeTranspileValidator.ValidateMethod(method, ctx.Compilation, out var diags))
-                        allErrors.AddRange(diags);
+                    // NT-05：诊断一律收（含 warning）；是否"校验失败"只看 error，见下面 invalidJobs 的判定。
+                    NativeTranspileValidator.ValidateMethod(method, ctx.Compilation, out var diags);
+                    allErrors.AddRange(diags);
                 }
                 var invalidJobs = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
                 int jobLevelErrorCount = 0;
+                // B3：AutoSIMD = Enabled 在 IJobParallelFor/IJobFor/IJob 上默认**报 error**（NT024，实测慢
+                // ~10%）。要开必须显式声明"我已量过"：MSBuild 属性 EntJoyAutoSimdMeasured=true
+                // （由 EntJoy.Jobs.props 的 CompilerVisibleProperty 传到编译期）。
+                bool autoSimdMeasured = ctx.Options.GlobalOptions.TryGetValue("build_property.EntJoyAutoSimdMeasured", out var asmVal)
+                    && (string.Equals(asmVal?.Trim(), "true", StringComparison.OrdinalIgnoreCase) || asmVal?.Trim() == "1");
                 foreach (var job in ctx.JobStructSymbols)
                 {
                     if (job == null) continue;
-                    if (!NativeTranspileValidator.ValidateJobStruct(job, ctx.Compilation, out var diags))
+                    // NT-05：只有 **error** 才把 job 排除出生成集。
+                    // 旧代码用 ValidateJobStruct 的返回值（= diagnostics.Count == 0）判定有效 ⇒
+                    // 只带 warning 的 job（NT023/NT024）也被摘掉 ⇒ Schedule 绑定不生成 ⇒ 调用点 CS0103
+                    // + 误导性 NT028，违反文档「warning 不阻断生成」。
+                    NativeTranspileValidator.ValidateJobStruct(job, ctx.Compilation, out var diags, autoSimdMeasured);
+                    allErrors.AddRange(diags);
+                    int jobErrors = diags.Count(d => d.Severity == DiagnosticSeverity.Error);
+                    if (jobErrors > 0)
                     {
-                        jobLevelErrorCount += diags.Count(d => d.Severity == DiagnosticSeverity.Error);
-                        allErrors.AddRange(diags);
+                        jobLevelErrorCount += jobErrors;
                         invalidJobs.Add(job);
                     }
                 }
@@ -267,17 +279,36 @@ namespace NativeTranspiler.Analyzer
                         bool disabledAutoRefresh = GetDisableAutoRefresh(method, attrSymbol);
                         bool fileExists = File.Exists(hPath) || File.Exists(cppPath);
 
-                        if (!disabledAutoRefresh || !fileExists)
+                        // 纯助手（非 [NativeTranspile] 入口）= 被入口/job 体调用的静态方法。
+                        // 它们不需要被 C# 通过 GetExport 解析 ⇒ 不得发 dllexport（clang 对 dllexport 不内联，
+                        // 实测 7 处 callq 即使在单 TU 下也保留）⇒ 改为 .h 内 static inline。
+                        bool isHelper = !ctx.MethodSymbols.Contains(method)
+                            && methodAutoSIMD != NativeTranspiler.AutoSIMD.Enabled
+                            && !HasFastCppMathLib(method, attrSymbol);
+
+                        if (isHelper)
                         {
-                            CodeGenIo.WriteAllTextWithRetry(hPath, header);
-                            CodeGenIo.WriteAllTextWithRetry(cppPath, impl);
+                            var inlineHeader = CppGenerator.GenerateInlineHelperHeader(
+                                method, ctx.Compilation, userStructs, methodAutoSIMD);
+                            if (!disabledAutoRefresh || !fileExists)
+                                CodeGenIo.WriteAllTextWithRetry(hPath, inlineHeader);
+                            // 不再发独立 dllexport TU：删掉陈旧 .cpp（否则它能被旧列表里的路径编进去）
+                            if (File.Exists(cppPath)) File.Delete(cppPath);
                         }
-                        var cppFile = baseName + ".cpp";
-                        cppFiles.Add(cppFile);
-                        if (methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                            autoSimdCppFiles.Add(cppFile);
-                        if (HasFastCppMathLib(method, attrSymbol) || methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                            fastMathCppFiles.Add(cppFile);
+                        else
+                        {
+                            if (!disabledAutoRefresh || !fileExists)
+                            {
+                                CodeGenIo.WriteAllTextWithRetry(hPath, header);
+                                CodeGenIo.WriteAllTextWithRetry(cppPath, impl);
+                            }
+                            var cppFile = baseName + ".cpp";
+                            cppFiles.Add(cppFile);
+                            if (methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                                autoSimdCppFiles.Add(cppFile);
+                            if (HasFastCppMathLib(method, attrSymbol) || methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                                fastMathCppFiles.Add(cppFile);
+                        }
                     }
                 }
 
@@ -646,8 +677,11 @@ namespace NativeTranspiler.Analyzer
                     spc.AddSource("NativeTranspiler.EventTypes.g.cs", sb.ToString());
                 }
 
+                // ⚠ 不得把时间戳写进生成产物：源生成器的输出是**编译器输入**，
+                //   一旦含 DateTime.UtcNow，每次构建输入都变 ⇒ 增量构建恒定失效、
+                //   可复现构建不可能成立、产物 diff 永远非空（实测 EmitSnapshot 里唯一差异就是这一行）。
                 spc.AddSource("NativeTranspiler_GeneratedMarker.g.cs",
-                    $"// Generated at {DateTime.UtcNow}\n// {validMarkedMethods.Count()} methods, {methodsToGenerate.Count - validMarkedMethods.Count()} deps, {validJobs.Count()} jobs transpiled.");
+                    $"// NativeTranspiler generated marker (deterministic)\n// {validMarkedMethods.Count()} methods, {methodsToGenerate.Count - validMarkedMethods.Count()} deps, {validJobs.Count()} jobs transpiled.");
                 }
                 catch (Exception ex)
                 {
@@ -946,7 +980,9 @@ namespace NativeTranspiler.Analyzer
                 }
                 catch { /* 单文件发布/无法读取位置时留空，任务侧会跳过校验 */ }
 
-                var text = $"generatorVersion={asm.GetName().Version}\ngeneratorHash={hash}\nwrittenUtc={DateTime.UtcNow:O}\n";
+                // 同样不含时间戳：stamp 只被 `generatorHash=` 消费（NativeCompileTask.WarnIfGeneratedArtifactsStale），
+                // 带时间戳会让"内容未变"也被判定为变化 ⇒ stamp 每次构建都被重写。
+                var text = $"generatorVersion={asm.GetName().Version}\ngeneratorHash={hash}\n";
                 var stampPath = Path.Combine(outputDir, "generator.stamp");
                 if (!File.Exists(stampPath) || File.ReadAllText(stampPath) != text)
                     CodeGenIo.WriteAllTextWithRetry(stampPath, text);
@@ -1535,6 +1571,16 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             // AutoSIMD files are compiled separately WITHOUT /fp:fast in NativeTranspiledPrecise
             // (see above), preserving 454229d's IEEE-754 NaN/±0 semantics (EC2/EC8/E5/E8/E11).
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
+            // 【LTO A/B，`ENTJOY_LTO=1`，默认关】给 NativeTranspiled 开 LTO —— MSVC 的 `/GL`+`/LTCG` 等价物。
+            // clang-cl 用 `-flto`（编译+链接）；本工程链接器已是 `lld-link`（见 build/CMakeCache.txt 的 CMAKE_LINKER），
+            // 因此能直接吃 LLVM bitcode。动机：验证"跨 TU 的冗余指令/未内联助手能否被 LTO 消掉"。
+            // ⚠ 本工程生成代码是**单 TU**（CMAKE_UNITY_BUILD + BATCH_SIZE 0），所有助手已头内联（`6a12cfe`）
+            // ⇒ LTO 理论上无事可做；此开关用于把这件事实测钉死（见 docs/gridsearch/07 §7ai）。
+            if (System.Environment.GetEnvironmentVariable("ENTJOY_LTO") == "1")
+            {
+                sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE -flto)");
+                sb.AppendLine("        set_target_properties(NativeTranspiled PROPERTIES LINK_FLAGS \"-flto\")");
+            }
             sb.AppendLine("    else()");
             sb.AppendLine("        # MSVC (default)");
             if (!prebuiltNative)

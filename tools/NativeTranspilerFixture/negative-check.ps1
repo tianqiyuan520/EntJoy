@@ -1,11 +1,12 @@
 # Negative gate self-check (F-3 / F-10) -- ASCII only on purpose: Windows PowerShell 5.1 reads
 # non-BOM UTF-8 as ANSI, which mangles non-ASCII text and can break parsing.
 #
-# Adds Negative\MarkerGateJob.cs (body contains `unchecked { }`, which the generator cannot translate)
-# and asserts the build FAILS:
-#   generator emits `__ENTJOY_UNSUPPORTED_STMT__UncheckedStatement` -> NativeCompileTask refuses to compile.
-# Historical incident: that block was silently dropped, producing a degraded C++ body while the build
-# still succeeded ("compiles but computes nothing").
+# Adds Negative\MarkerGateJob.cs (body contains `checked { }`, which the generator must NOT translate:
+# C# checked throws on overflow, C++ has no equivalent) and asserts the build FAILS:
+#   generator emits `__ENTJOY_UNSUPPORTED_STMT__CheckedStatement` -> NativeCompileTask refuses to compile.
+# Historical incident: such a block was silently dropped, producing a degraded C++ body while the build
+# still succeeded ("compiles but computes nothing"). (`unchecked { }` is translatable since 2026-09-26,
+# so it can no longer serve as the negative sample.)
 #
 # Usage: powershell -File tools/NativeTranspilerFixture/negative-check.ps1
 # Exit code: 0 = gate works (build failed as expected); 1 = gate is broken or failed for another reason.

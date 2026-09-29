@@ -230,14 +230,29 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // ─── 对外接口：收集 + 构建托管 payload ───
+        /// <summary>
+        /// 收集匹配 chunk 并（可选）构建托管 payload。
+        /// ⚠ `chunkArray` **必须是本次调度的独立快照**：`s_chunkBuffer` 是 [ThreadStatic] 复用缓冲，
+        /// 而托管后端「Schedule 一律异步」——直接把 s_chunkBuffer 交给在飞 job，
+        /// 下一次收集会原地覆盖它的前 count 项，job 就会遍历到别的查询的 chunk（静默错值）。
+        /// </summary>
         internal static void CollectAndBuildManaged(EntityManager em, QueryBuilder query, bool fillBitmaps, bool hasEnabledFilter,
-            out ChunkJobData* ptr, out Chunk[] chunkArray, out int chunkCount, out Archetype[] archetypes)
+            out ChunkJobData* ptr, out Chunk[] chunkArray, out int chunkCount, out Archetype[] archetypes,
+            bool buildPayload = true)
         {
             s_archetypeBuffer.Clear();
-            chunkCount = CollectMatchingChunks(em, query, s_archetypeBuffer);
-            if (chunkCount == 0) { ptr = null; chunkArray = Array.Empty<Chunk>(); archetypes = Array.Empty<Archetype>(); return; }
-            chunkArray = s_chunkBuffer;
-            ptr = BuildManagedPayload(chunkArray, chunkCount, fillBitmaps: hasEnabledFilter && fillBitmaps, out _);
+            int count = CollectMatchingChunks(em, query, s_archetypeBuffer);
+            chunkCount = count;
+            if (count == 0) { ptr = null; chunkArray = Array.Empty<Chunk>(); archetypes = Array.Empty<Archetype>(); return; }
+
+            chunkArray = new Chunk[count];
+            Array.Copy(s_chunkBuffer, chunkArray, count);
+
+            // 只需要 Chunk[] 的调用方（托管回退直接遍历 Chunk 对象）不应构建 payload：
+            // 那份 ChunkJobData 表 + 每 chunk 的位图块是 HGlobal，构建了又没人释放就是每调度泄漏。
+            ptr = buildPayload
+                ? BuildManagedPayload(chunkArray, count, fillBitmaps: hasEnabledFilter && fillBitmaps, out _)
+                : null;
             archetypes = s_archetypeBuffer.ToArray();
         }
 

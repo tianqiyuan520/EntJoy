@@ -17,6 +17,15 @@
 
 namespace JobSystem
 {
+    // ── 托管侧 ABI 钉子（C# NativeJobHandle.IsCompletedFast）──────────────────────────────
+    // 托管侧不走 P/Invoke、直接读 HandleState 前 8 字节判定"已完成"（每帧每个被覆盖的写句柄
+    // 少两次跨层调用）。这里把布局钉死：refCount 4 字节 @0 → completed 1 字节 @4（偏移 5 是
+    // backendRetired，恒为 1，所以托管侧必须按 1 字节读；曾经按 int 读 ⇒ 恒判"已完成"）。
+    static_assert(offsetof(HandleState, completed) == 4,
+        "C# NativeJobHandle.IsCompletedFast 依赖 HandleState::completed 位于偏移 4");
+    static_assert(sizeof(std::atomic<bool>) == 1,
+        "C# NativeJobHandle.IsCompletedFast 按 1 字节读取 completed");
+
     // ============================================================
     // Complete 分段诊断（`ENTJOY_DIAG_NATIVE_PHASE=1`）
     //
@@ -76,6 +85,406 @@ namespace JobSystem
         }
     }
 
+    // ============================================================
+    // E1：忙比 / 相位尾部 / 批级并行度（`ENTJOY_DIAG_E1=1`，默认档零成本）
+    //
+    // 三个问题各自对应一组指标：
+    //   ① 忙比      = Σ_tile执行时间 / (worker 数 × 墙钟)                  —— 有多少并行松弛
+    //   ② 相位尾部  = 批完成链分段 + 启停斜坡（按参与度分桶）              —— 每批的串行尾/启停
+    //   ③ 批内并行度= Σ(批内 worker busy) / 批墙钟（每批"平均同时几个在干"）—— 大批内部是否吃饱
+    // 归属按**线程**（TLS lane），不信传入的 workerIndex（实测后者会让两线程写同一槽）。
+    // 未启用时每执行窗口只有一次静态 bool 读。
+    // ============================================================
+    namespace E1
+    {
+        // —— ① 忙比 ——
+        std::atomic<uint64_t> g_busyNs[kMaxTrackedWorkers];
+        std::atomic<uint64_t> g_windows[kMaxTrackedWorkers];
+        std::atomic<uint64_t> g_mainBusyNs{ 0 };
+        std::atomic<uint64_t> g_mainWindows{ 0 };
+        std::atomic<uint32_t> g_nextLane{ 0 };
+        std::atomic<int32_t>  g_workers{ 0 };
+        std::atomic<int64_t>  g_startNs{ 0 };
+        std::atomic<int64_t>  g_lastPrintNs{ 0 };
+        std::atomic<uint64_t> g_lastBusyNs{ 0 };
+        std::atomic<uint64_t> g_badWindows{ 0 };
+        std::atomic<uint64_t> g_orphanEnds{ 0 };
+        // —— ③ 批级：参与度 / 墙钟 / Σbusy / 并发度 ——
+        std::atomic<uint64_t> g_batchCount[16];
+        std::atomic<uint64_t> g_batchWallNs[16];
+        std::atomic<uint64_t> g_batchBusyNs[16];
+        std::atomic<uint64_t> g_concSumMilli[16];
+        std::atomic<uint64_t> g_concHist[16];
+        std::atomic<uint64_t> g_tileCountBatches[25];
+        std::atomic<uint64_t> g_tileCountWallNs[25];
+        std::atomic<uint64_t> g_batchTotal{ 0 };
+        std::atomic<uint64_t> g_batchTotalWallNs{ 0 };
+        std::atomic<uint64_t> g_batchTotalBusyNs{ 0 };
+        std::atomic<uint64_t> g_curBatchBusyNs{ 0 };   // 当前批 Σbusy（本工作量批不重叠）
+        // —— 批间空隙 ——
+        std::atomic<uint64_t> g_gapNs{ 0 };
+        std::atomic<uint64_t> g_gapCount{ 0 };
+        std::atomic<uint64_t> g_gapMaxNs{ 0 };
+        std::atomic<uint64_t> g_lastTopologyNs{ 0 };
+        // —— ② 退役链分段 ——
+        std::atomic<uint64_t> g_retireNs[7];
+        std::atomic<uint64_t> g_retireCount[7];
+        std::atomic<uint64_t> g_retireMaxNs{ 0 };
+        std::atomic<uint64_t> g_retireBucket[5];
+        std::atomic<uint64_t> g_retireBucketNs[5];
+        // —— ② 启停斜坡（按参与度分桶）——
+        std::atomic<uint64_t> g_spreadNs[16];
+        std::atomic<uint64_t> g_spreadCount[16];
+        std::atomic<uint64_t> g_spreadMaxNs[16];
+        thread_local int64_t  t_begin = 0;
+        thread_local int32_t  t_depth = 0;
+        thread_local int32_t  t_lane = -1;
+        thread_local bool     t_isMain = false;
+
+        static constexpr int64_t kMaxWindowNs = 2000000000LL;   // 单窗口上限 2 s
+        static int64_t g_intervalNs = 3000000000LL;            // `ENTJOY_DIAG_E1_MS=<ms>` 可覆盖
+
+        static inline int64_t Now() noexcept
+        {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+
+        bool Enabled() noexcept
+        {
+            static const bool enabled = [] {
+                const char* v = std::getenv("ENTJOY_DIAG_E1");
+                if (v == nullptr || v[0] != '1') return false;
+                const char* ms = std::getenv("ENTJOY_DIAG_E1_MS");
+                if (ms != nullptr)
+                {
+                    const long long v2 = std::atoll(ms);
+                    if (v2 >= 50LL && v2 <= 600000LL) g_intervalNs = v2 * 1000000LL;
+                }
+                return true;
+            }();
+            return enabled;
+        }
+
+        static uint64_t SumBusy() noexcept
+        {
+            uint64_t total = 0;
+            for (int i = 0; i < kMaxTrackedWorkers; ++i)
+                total += g_busyNs[i].load(std::memory_order_relaxed);
+            return total;
+        }
+
+        static int WorkerCount() noexcept
+        {
+            const int w = g_workers.load(std::memory_order_relaxed);
+            return w > 0 ? w : 1;
+        }
+
+        void Reset() noexcept
+        {
+            if (!Enabled()) return;
+            for (int i = 0; i < kMaxTrackedWorkers; ++i)
+            {
+                g_busyNs[i].store(0, std::memory_order_relaxed);
+                g_windows[i].store(0, std::memory_order_relaxed);
+            }
+            g_mainBusyNs.store(0, std::memory_order_relaxed);
+            g_mainWindows.store(0, std::memory_order_relaxed);
+            g_nextLane.store(0, std::memory_order_relaxed);
+            g_workers.store(0, std::memory_order_relaxed);
+            g_badWindows.store(0, std::memory_order_relaxed);
+            g_orphanEnds.store(0, std::memory_order_relaxed);
+            for (int i = 0; i < 16; ++i)
+            {
+                g_batchCount[i].store(0, std::memory_order_relaxed);
+                g_batchWallNs[i].store(0, std::memory_order_relaxed);
+                g_batchBusyNs[i].store(0, std::memory_order_relaxed);
+                g_concSumMilli[i].store(0, std::memory_order_relaxed);
+                g_concHist[i].store(0, std::memory_order_relaxed);
+                g_spreadNs[i].store(0, std::memory_order_relaxed);
+                g_spreadCount[i].store(0, std::memory_order_relaxed);
+                g_spreadMaxNs[i].store(0, std::memory_order_relaxed);
+            }
+            for (int i = 0; i < 25; ++i)
+            {
+                g_tileCountBatches[i].store(0, std::memory_order_relaxed);
+                g_tileCountWallNs[i].store(0, std::memory_order_relaxed);
+            }
+            for (int i = 0; i < 7; ++i)
+            {
+                g_retireNs[i].store(0, std::memory_order_relaxed);
+                g_retireCount[i].store(0, std::memory_order_relaxed);
+            }
+            for (int i = 0; i < 5; ++i)
+            {
+                g_retireBucket[i].store(0, std::memory_order_relaxed);
+                g_retireBucketNs[i].store(0, std::memory_order_relaxed);
+            }
+            g_retireMaxNs.store(0, std::memory_order_relaxed);
+            g_batchTotal.store(0, std::memory_order_relaxed);
+            g_batchTotalWallNs.store(0, std::memory_order_relaxed);
+            g_batchTotalBusyNs.store(0, std::memory_order_relaxed);
+            g_curBatchBusyNs.store(0, std::memory_order_relaxed);
+            g_gapNs.store(0, std::memory_order_relaxed);
+            g_gapCount.store(0, std::memory_order_relaxed);
+            g_gapMaxNs.store(0, std::memory_order_relaxed);
+            g_lastTopologyNs.store(0, std::memory_order_relaxed);
+            const int64_t now = Now();
+            g_startNs.store(now, std::memory_order_relaxed);
+            g_lastPrintNs.store(now, std::memory_order_relaxed);
+            g_lastBusyNs.store(0, std::memory_order_relaxed);
+        }
+
+        void Begin() noexcept
+        {
+            if (!Enabled()) return;
+            if (t_depth < 0 || t_depth > 4) t_depth = 0;
+            if (t_depth++ != 0) return;
+            t_begin = Now();
+            if (t_lane < 0)
+            {
+                t_isMain = (std::this_thread::get_id() == g_mainThreadId);
+                const uint32_t lane = g_nextLane.fetch_add(1, std::memory_order_relaxed);
+                t_lane = lane < static_cast<uint32_t>(kMaxTrackedWorkers)
+                    ? static_cast<int32_t>(lane) : (kMaxTrackedWorkers - 1);
+                if (g_workers.load(std::memory_order_relaxed) == 0)
+                {
+                    const int n = g_numThreads.load(std::memory_order_relaxed);
+                    if (n > 0) g_workers.store(n, std::memory_order_relaxed);
+                }
+            }
+        }
+
+        void End(uint32_t workerIndex) noexcept
+        {
+            (void)workerIndex;
+            if (!Enabled()) return;
+            if (t_depth <= 0) { g_orphanEnds.fetch_add(1, std::memory_order_relaxed); return; }
+            if (--t_depth != 0) return;
+            const int64_t now = Now();
+            const int64_t d = now - t_begin;
+            if (d < 0 || d > kMaxWindowNs) { g_badWindows.fetch_add(1, std::memory_order_relaxed); return; }
+            const uint64_t du = static_cast<uint64_t>(d);
+            if (t_isMain || t_lane < 0)
+            {
+                g_mainBusyNs.fetch_add(du, std::memory_order_relaxed);
+                g_mainWindows.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                g_busyNs[t_lane].fetch_add(du, std::memory_order_relaxed);
+                g_windows[t_lane].fetch_add(1, std::memory_order_relaxed);
+            }
+            g_curBatchBusyNs.fetch_add(du, std::memory_order_relaxed);   // ③ 归属当前批
+
+            int64_t last = g_lastPrintNs.load(std::memory_order_relaxed);
+            if (now - last >= g_intervalNs &&
+                g_lastPrintNs.compare_exchange_strong(last, now, std::memory_order_relaxed))
+            {
+                const uint64_t busy = SumBusy();
+                const uint64_t dBusy = busy - g_lastBusyNs.exchange(busy, std::memory_order_relaxed);
+                const int64_t dt = now - last;
+                const int w = WorkerCount();
+                const double ratio = (dt > 0)
+                    ? static_cast<double>(dBusy) / (static_cast<double>(dt) * w) : 0.0;
+                std::printf("[E1] t=%.1fs dt=%.1fs busy_ratio=%.4f busy=%.1fms wall=%.1fms workers=%d\n",
+                    static_cast<double>(now - g_startNs.load(std::memory_order_relaxed)) / 1e9,
+                    static_cast<double>(dt) / 1e9, ratio, static_cast<double>(dBusy) / 1e6,
+                    static_cast<double>(dt) / 1e6, w);
+                std::fflush(stdout);
+            }
+        }
+
+        // 批完成：参与度 / 墙钟 / Σbusy / 并发度 分桶。
+        void RecordBatch(uint32_t tileCount, uint32_t enteredWorkers, uint64_t wallNs) noexcept
+        {
+            if (!Enabled()) return;
+            const int b = enteredWorkers > 15u ? 15 : static_cast<int>(enteredWorkers);
+            const uint64_t busyNs = g_curBatchBusyNs.exchange(0, std::memory_order_relaxed);
+            g_batchCount[b].fetch_add(1, std::memory_order_relaxed);
+            g_batchWallNs[b].fetch_add(wallNs, std::memory_order_relaxed);
+            g_batchBusyNs[b].fetch_add(busyNs, std::memory_order_relaxed);
+            if (wallNs > 0)
+            {
+                const double conc = static_cast<double>(busyNs) / static_cast<double>(wallNs);
+                g_concSumMilli[b].fetch_add(static_cast<uint64_t>(conc * 1000.0), std::memory_order_relaxed);
+                int ci = static_cast<int>(conc + 0.5);
+                if (ci > 15) ci = 15;
+                if (ci < 0) ci = 0;
+                g_concHist[ci].fetch_add(1, std::memory_order_relaxed);
+            }
+            int t = 0;
+            for (uint32_t v = tileCount; v > 1u; v >>= 1) ++t;
+            if (t > 24) t = 24;
+            g_tileCountBatches[t].fetch_add(1, std::memory_order_relaxed);
+            g_tileCountWallNs[t].fetch_add(wallNs, std::memory_order_relaxed);
+            g_batchTotal.fetch_add(1, std::memory_order_relaxed);
+            g_batchTotalWallNs.fetch_add(wallNs, std::memory_order_relaxed);
+            g_batchTotalBusyNs.fetch_add(busyNs, std::memory_order_relaxed);
+        }
+
+        void RecordPublish(uint64_t publishedNs) noexcept
+        {
+            if (!Enabled()) return;
+            g_curBatchBusyNs.store(0, std::memory_order_relaxed);   // 新批开始
+            const uint64_t prev = g_lastTopologyNs.load(std::memory_order_relaxed);
+            if (prev != 0 && publishedNs > prev)
+            {
+                const uint64_t gap = publishedNs - prev;
+                g_gapNs.fetch_add(gap, std::memory_order_relaxed);
+                g_gapCount.fetch_add(1, std::memory_order_relaxed);
+                uint64_t mx = g_gapMaxNs.load(std::memory_order_relaxed);
+                while (gap > mx && !g_gapMaxNs.compare_exchange_weak(mx, gap, std::memory_order_relaxed)) {}
+            }
+        }
+
+        void MarkTopologyDone(uint64_t topologyDoneNs) noexcept
+        {
+            if (!Enabled()) return;
+            g_lastTopologyNs.store(topologyDoneNs, std::memory_order_relaxed);
+        }
+
+        void RecordWorkerSpread(uint32_t enteredWorkers, uint64_t spreadNs) noexcept
+        {
+            if (!Enabled()) return;
+            const int b = enteredWorkers > 15u ? 15 : static_cast<int>(enteredWorkers);
+            g_spreadNs[b].fetch_add(spreadNs, std::memory_order_relaxed);
+            g_spreadCount[b].fetch_add(1, std::memory_order_relaxed);
+            uint64_t mx = g_spreadMaxNs[b].load(std::memory_order_relaxed);
+            while (spreadNs > mx && !g_spreadMaxNs[b].compare_exchange_weak(mx, spreadNs, std::memory_order_relaxed)) {}
+        }
+
+        void RetirePhase(int slot, uint64_t ns) noexcept
+        {
+            if (!Enabled()) return;
+            if (slot < 0 || slot >= kRetireSlots) return;
+            g_retireNs[slot].fetch_add(ns, std::memory_order_relaxed);
+            g_retireCount[slot].fetch_add(1, std::memory_order_relaxed);
+            if (slot == kRetireTotal)
+            {
+                uint64_t mx = g_retireMaxNs.load(std::memory_order_relaxed);
+                while (ns > mx && !g_retireMaxNs.compare_exchange_weak(mx, ns, std::memory_order_relaxed)) {}
+                int b = 0;
+                if (ns >= 100000) b = 4; else if (ns >= 20000) b = 3; else if (ns >= 5000) b = 2; else if (ns >= 2000) b = 1;
+                g_retireBucket[b].fetch_add(1, std::memory_order_relaxed);
+                g_retireBucketNs[b].fetch_add(ns, std::memory_order_relaxed);
+            }
+        }
+
+        void Dump() noexcept
+        {
+            if (!Enabled()) return;
+            const int64_t start = g_startNs.load(std::memory_order_relaxed);
+            if (start == 0) return;
+            const int64_t now = Now();
+            const int64_t wall = now - start;
+            const int w = WorkerCount();
+            const uint64_t busy = SumBusy();
+            const double ratio = (wall > 0)
+                ? static_cast<double>(busy) / (static_cast<double>(wall) * w) : 0.0;
+            std::printf("[E1] TOTAL t=%.1fs workers=%d busy_ratio=%.4f busy=%.1fms wall=%.1fms\n",
+                static_cast<double>(wall) / 1e9, w, ratio,
+                static_cast<double>(busy) / 1e6, static_cast<double>(wall) / 1e6);
+            std::printf("[E1] main_exec_busy_ms=%.1f windows=%llu (main thread tile execution; NOT in busy_ratio)\n",
+                static_cast<double>(g_mainBusyNs.load(std::memory_order_relaxed)) / 1e6,
+                (unsigned long long)g_mainWindows.load(std::memory_order_relaxed));
+            std::printf("[E1] health: bad_windows=%llu orphan_ends=%llu (0 is ideal)\n",
+                (unsigned long long)g_badWindows.load(std::memory_order_relaxed),
+                (unsigned long long)g_orphanEnds.load(std::memory_order_relaxed));
+            std::printf("[E1] tail/wake EWMA(us): submitToFirstWorker=%.2f workerStartSpread=%.2f lastTileToTopologyDone=%.2f completeWakeToReturn=%.2f\n",
+                static_cast<double>(g_submitToFirstWorkerEwmaNs.load(std::memory_order_relaxed)) / 1000.0,
+                static_cast<double>(g_workerStartSpreadEwmaNs.load(std::memory_order_relaxed)) / 1000.0,
+                static_cast<double>(g_lastTileToTopologyDoneEwmaNs.load(std::memory_order_relaxed)) / 1000.0,
+                static_cast<double>(g_completeWakeToReturnEwmaNs.load(std::memory_order_relaxed)) / 1000.0);
+            const uint64_t totalWall = g_batchTotalWallNs.load(std::memory_order_relaxed);
+            const uint64_t totalBusy = g_batchTotalBusyNs.load(std::memory_order_relaxed);
+            std::printf("[E1] batches n=%llu totalWall=%.1fms totalBusy=%.1fms meanConc=%.2f (meanConc must be <= workers)\n",
+                (unsigned long long)g_batchTotal.load(std::memory_order_relaxed),
+                static_cast<double>(totalWall) / 1e6, static_cast<double>(totalBusy) / 1e6,
+                totalWall > 0 ? static_cast<double>(totalBusy) / static_cast<double>(totalWall) : 0.0);
+            std::printf("[E1] batch by entered-workers (n / wall_ms / busy_ms / meanConcurrency):");
+            for (int i = 0; i < 16; ++i)
+            {
+                const uint64_t c = g_batchCount[i].load(std::memory_order_relaxed);
+                if (!c) continue;
+                const uint64_t bw = g_batchWallNs[i].load(std::memory_order_relaxed);
+                const uint64_t bb = g_batchBusyNs[i].load(std::memory_order_relaxed);
+                std::printf(" w%d:n=%llu,wall=%.1f,busy=%.1f,conc=%.2f", i, (unsigned long long)c,
+                    static_cast<double>(bw) / 1e6, static_cast<double>(bb) / 1e6,
+                    bw > 0 ? static_cast<double>(bb) / static_cast<double>(bw) : 0.0);
+            }
+            std::printf("\n");
+            std::printf("[E1] batch concurrency histogram (avg busy workers per batch, rounded):");
+            for (int i = 0; i < 16; ++i)
+            {
+                const uint64_t c = g_concHist[i].load(std::memory_order_relaxed);
+                if (c) std::printf(" c%d:n=%llu", i, (unsigned long long)c);
+            }
+            std::printf("\n");
+            std::printf("[E1] batch by log2(tiles):");
+            for (int i = 0; i < 25; ++i)
+            {
+                const uint64_t c = g_tileCountBatches[i].load(std::memory_order_relaxed);
+                if (c) std::printf(" 2^%d:n=%llu,wall=%.1fms", i, (unsigned long long)c,
+                    static_cast<double>(g_tileCountWallNs[i].load(std::memory_order_relaxed)) / 1e6);
+            }
+            std::printf("\n");
+            const uint64_t gapN = g_gapCount.load(std::memory_order_relaxed);
+            std::printf("[E1] inter-batch gap n=%llu total=%.1fms mean=%.1fus max=%.1fus\n",
+                (unsigned long long)gapN,
+                static_cast<double>(g_gapNs.load(std::memory_order_relaxed)) / 1e6,
+                gapN ? static_cast<double>(g_gapNs.load(std::memory_order_relaxed)) / static_cast<double>(gapN) / 1000.0 : 0.0,
+                static_cast<double>(g_gapMaxNs.load(std::memory_order_relaxed)) / 1000.0);
+            std::printf("[E1] steal/dispatch: attempts=%llu success=%llu emptyExits=%llu victimScans=%llu stealCount=%llu hotSpin=%llu parkWake=%llu claimedW=%llu claimedM=%llu\n",
+                (unsigned long long)g_stealAttempts.load(std::memory_order_relaxed),
+                (unsigned long long)g_stealSuccesses.load(std::memory_order_relaxed),
+                (unsigned long long)g_stealEmptyExits.load(std::memory_order_relaxed),
+                (unsigned long long)g_victimScans.load(std::memory_order_relaxed),
+                (unsigned long long)g_stealCount.load(std::memory_order_relaxed),
+                (unsigned long long)g_hotSpinHits.load(std::memory_order_relaxed),
+                (unsigned long long)g_parkWakeCount.load(std::memory_order_relaxed),
+                (unsigned long long)g_workerClaimedTokens.load(std::memory_order_relaxed),
+                (unsigned long long)g_mainClaimedTokens.load(std::memory_order_relaxed));
+            {
+                static const char* kRetireNames[7] = {
+                    "cas", "RecordFinalizedTiming", "longBatchBarrier",
+                    "RunBatchCleanup", "CompleteState", "RecordTopologyCompletion", "TOTAL_lastTile2topology" };
+                std::printf("[E1] retire chain(us/batch):");
+                for (int i = 0; i < 7; ++i)
+                {
+                    const uint64_t n = g_retireCount[i].load(std::memory_order_relaxed);
+                    std::printf(" %s=%.2f", kRetireNames[i],
+                        n ? static_cast<double>(g_retireNs[i].load(std::memory_order_relaxed))
+                            / static_cast<double>(n) / 1000.0 : 0.0);
+                }
+                std::printf(" (n=%llu max=%.1fus)\n",
+                    (unsigned long long)g_retireCount[6].load(std::memory_order_relaxed),
+                    static_cast<double>(g_retireMaxNs.load(std::memory_order_relaxed)) / 1000.0);
+                std::printf("[E1] retire TOTAL buckets(us): <2:n=%llu(%.0fms) 2-5:n=%llu(%.0fms) 5-20:n=%llu(%.0fms) 20-100:n=%llu(%.0fms) >=100:n=%llu(%.0fms)\n",
+                    (unsigned long long)g_retireBucket[0].load(std::memory_order_relaxed), static_cast<double>(g_retireBucketNs[0].load(std::memory_order_relaxed)) / 1e6,
+                    (unsigned long long)g_retireBucket[1].load(std::memory_order_relaxed), static_cast<double>(g_retireBucketNs[1].load(std::memory_order_relaxed)) / 1e6,
+                    (unsigned long long)g_retireBucket[2].load(std::memory_order_relaxed), static_cast<double>(g_retireBucketNs[2].load(std::memory_order_relaxed)) / 1e6,
+                    (unsigned long long)g_retireBucket[3].load(std::memory_order_relaxed), static_cast<double>(g_retireBucketNs[3].load(std::memory_order_relaxed)) / 1e6,
+                    (unsigned long long)g_retireBucket[4].load(std::memory_order_relaxed), static_cast<double>(g_retireBucketNs[4].load(std::memory_order_relaxed)) / 1e6);
+            }
+            std::printf("[E1] worker start spread by entered(us):");
+            for (int i = 0; i < 16; ++i)
+            {
+                const uint64_t n = g_spreadCount[i].load(std::memory_order_relaxed);
+                if (n) std::printf(" w%d:mean=%.1f,max=%.1f,n=%llu", i,
+                    static_cast<double>(g_spreadNs[i].load(std::memory_order_relaxed)) / static_cast<double>(n) / 1000.0,
+                    static_cast<double>(g_spreadMaxNs[i].load(std::memory_order_relaxed)) / 1000.0,
+                    (unsigned long long)n);
+            }
+            std::printf("\n");
+            std::printf("[E1] per_worker_busy_ratio=[");
+            for (int i = 0; i < w && i < kMaxTrackedWorkers; ++i)
+                std::printf("%s%.3f", i ? " " : "",
+                    wall > 0 ? static_cast<double>(g_busyNs[i].load(std::memory_order_relaxed)) / static_cast<double>(wall) : 0.0);
+            std::printf("]\n");
+            std::fflush(stdout);
+        }
+    }
     // ---------- State lifecycle ----------
     // 无锁 continuation 节点：fn 完整构造后才 CAS 入原子槽（无发布竞态）。
     // CompleteState 摘取后执行并 delete。槽位 ≤1 节点，CAS 只对 nullptr 比较，
@@ -116,10 +525,16 @@ namespace JobSystem
     void RecycleState(HandleState* state) noexcept
     {
         if (!state) return;
-        g_stateRecycled.fetch_add(1, std::memory_order_relaxed);
-        g_stateRecycleByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
-        if (WorkerIndexManager::GetCurrentIndex() >= 0)
-            g_stateRecycledOnWorker.fetch_add(1, std::memory_order_relaxed);
+        g_liveHandleStates.fetch_sub(1, std::memory_order_relaxed);
+        // 性能项 3：state 创建/回收是 plain IJob 的必经路径（每 job 各一次），下面三个计数
+        // 都是纯诊断 RMW（只被 GetStatsSnapshot 读取）。默认统计开启 ⇒ 计数口径与改动前逐位一致。
+        if (StatsEnabled())
+        {
+            g_stateRecycled.fetch_add(1, std::memory_order_relaxed);
+            g_stateRecycleByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
+            if (WorkerIndexManager::GetCurrentIndex() >= 0)
+                g_stateRecycledOnWorker.fetch_add(1, std::memory_order_relaxed);
+        }
         // 释放依赖链持有引用（依赖 state 可能仍被自身 batch 持有，不会悬垂）。
         if (state->dependency)
         {
@@ -133,10 +548,16 @@ namespace JobSystem
         DrainContinuationSlot(state);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
+        // 性能项 3：仅当确有异常被记录过才取 exceptionMutex（每 job 回收一次的无谓加锁）。
+        // 安全：RecycleState 只在 refCount 归零（ReleaseState 的 acq_rel fetch_sub 返回 1）时
+        // 被调用，而记录方必须持有引用才能写 batchExceptionPtr ⇒ 其 release 与本次 acquire 同步，
+        // hasException 不可能读到陈旧 false。
+        if (state->hasException.load(std::memory_order_acquire))
         {
             std::lock_guard<std::mutex> lock(state->exceptionMutex);
             state->batchExceptionPtr = nullptr;
         }
+        state->hasException.store(false, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->completed.store(false, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
@@ -150,9 +571,14 @@ namespace JobSystem
             return;
         }
         // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
-        // 非"创建者"线程（典型：.NET 终结器线程释放托管 NativeJobHandleBox）不进 TLS 缓存，
-        // 直接还共享池——否则调度线程的缓存永远空，CreateState 每次都 new（实测 92～95%）。
-        if (!t_stateCreator)
+        // 【性能项 3】进入 TLS 缓存的条件从"本线程调用过 CreateState"放宽为
+        // "创建者 **或 worker 线程**"：worker 是回收热路径的主角（每个 job 的
+        // ReleaseState 都发生在 worker 上），但它们几乎从不调用 CreateState
+        // ⇒ 旧条件下每个 job 回收都要取一次全局 g_statePoolMutex。
+        // 不无条件放宽的理由（保留原设计意图）：.NET 终结器线程 / 渲染线程等
+        // 长期存活且从不创建 state 的线程若也进 TLS 缓存，被回收的 state 会
+        // 永久堆在它们的缓存里，调度线程永远命中不到 → CreateState 退回每次 new。
+        if (!t_stateCreator && WorkerIndexManager::GetCurrentIndex() < 0)
         {
             std::lock_guard<std::mutex> lock(g_statePoolMutex);
             if (g_statePool.size() < kMaxPooledStates)
@@ -161,7 +587,7 @@ namespace JobSystem
                 delete state;
             return;
         }
-        if (t_stateCache.entries.size() < kStateCacheCap)
+        if (t_stateCache.entries.size() < (t_stateCreator ? kStateCacheCap : kStateCacheCapNonCreator))
         {
             t_stateCache.entries.push_back(state);
             return;
@@ -173,13 +599,17 @@ namespace JobSystem
     HandleState* CreateState(bool completed)
     {
         t_stateCreator = true;
-        g_stateCreateByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
+        // 性能项 3：入门一次 relaxed 载入，旁路本函数内全部 4 个纯诊断 RMW（池命中/补池/新分配/线程槽）。
+        const bool stats = StatsEnabled();
+        if (stats)
+            g_stateCreateByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
         HandleState* state = nullptr;
         if (!t_stateCache.entries.empty())
         {
             state = t_stateCache.entries.back();
             t_stateCache.entries.pop_back();
-            g_statePoolHit.fetch_add(1, std::memory_order_relaxed);
+            if (stats)
+                g_statePoolHit.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
@@ -195,11 +625,13 @@ namespace JobSystem
                     t_stateCache.entries.push_back(g_statePool.back());
                     g_statePool.pop_back();
                 }
-                g_statePoolRefill.fetch_add(1, std::memory_order_relaxed);
+                if (stats)
+                    g_statePoolRefill.fetch_add(1, std::memory_order_relaxed);
             }
             else
             {
-                g_statePoolNew.fetch_add(1, std::memory_order_relaxed);
+                if (stats)
+                    g_statePoolNew.fetch_add(1, std::memory_order_relaxed);
             }
         }
         if (!state) state = new HandleState(completed);
@@ -209,9 +641,12 @@ namespace JobSystem
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->continuationSlot.store(nullptr, std::memory_order_relaxed);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
+        state->estBatchNs = 0;   // §7aq：状态复用前必须清零，否则会继承上一批的预期时长
         state->continuations.clear();
+        state->hasException.store(false, std::memory_order_relaxed);
         state->dependency = nullptr;
         state->dependencies.clear();
+        g_liveHandleStates.fetch_add(1, std::memory_order_relaxed);
         return state;
     }
 
@@ -242,7 +677,11 @@ namespace JobSystem
         {
             std::lock_guard<std::mutex> lock(state->exceptionMutex);
             if (!state->batchExceptionPtr)
+            {
                 state->batchExceptionPtr = std::move(exception);
+                // 性能项 3：release 发布"有异常"标志，供 RecycleState 无锁跳过 exceptionMutex。
+                state->hasException.store(true, std::memory_order_release);
+            }
         }
         catch (...)
         {
@@ -259,6 +698,7 @@ namespace JobSystem
             std::lock_guard<std::mutex> lock(state->exceptionMutex);
             auto exception = state->batchExceptionPtr;
             state->batchExceptionPtr = nullptr;
+            state->hasException.store(false, std::memory_order_release);
             return exception;
         }
         catch (...)
@@ -269,6 +709,7 @@ namespace JobSystem
 
     std::mutex g_longBatchBarrierMutex;
     std::vector<HandleState*> g_longBatchBarriers;
+    std::atomic<uint32_t> g_longBatchBarrierCount{ 0 };
     thread_local HandleState* g_completingBatchState = nullptr;
 
     void RegisterLongBatchBarrier(HandleState* state) noexcept
@@ -276,19 +717,41 @@ namespace JobSystem
         if (!state || state->backendRetired.load(std::memory_order_acquire))
             return;
         AcquireState(state);
-        std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
-        g_longBatchBarriers.push_back(state);
+        try
+        {
+            std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
+            g_longBatchBarriers.push_back(state);
+            // 与列表在同一把锁内同增，保证 count==0 ⇒ 列表必空（保守真值）。
+            g_longBatchBarrierCount.fetch_add(1, std::memory_order_release);
+        }
+        catch (...)
+        {
+            // 入列失败（分配异常）时平衡上面的 AcquireState，避免引用泄漏。
+            ReleaseState(state);
+        }
     }
 
     static void WaitBackendRetired(HandleState* state) noexcept;   // 定义见 Complete 段（含兜底唤醒看门狗）
 
     void ConsumeLongBatchBarriers() noexcept
     {
+        // 性能项 4：无锁短路。长批 barrier 是罕见事件（批墙钟 > 800 µs 才登记），
+        // 但本函数在**每次** Schedule/Complete 上被调用，此前无条件取全局互斥体 +
+        // 两个 vector 的构造/析构。绝大多数提交 count==0 ⇒ 直接返回。
+        // 语义不变：stale-0 最多让已登记的 barrier 延后到下一次 Flush/Shutdown 消费
+        //（与"没有下一次提交就不消费"的既有行为等价，不产生泄漏也不阻塞退役）。
+        if (g_longBatchBarrierCount.load(std::memory_order_acquire) == 0)
+            return;
+
         std::vector<HandleState*> barriers;
         std::vector<HandleState*> deferred;
         {
             std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
             barriers.swap(g_longBatchBarriers);
+            // 与 swap 同锁：并发登记者的 fetch_add 要么在本行之前（列表已含它）要么在其之后，
+            // 两种情况 count 都等于列表实际长度，不会丢计数。
+            g_longBatchBarrierCount.fetch_sub(
+                static_cast<uint32_t>(barriers.size()), std::memory_order_release);
         }
         for (auto* state : barriers)
         {
@@ -305,6 +768,8 @@ namespace JobSystem
             std::lock_guard<std::mutex> lock(g_longBatchBarrierMutex);
             g_longBatchBarriers.insert(
                 g_longBatchBarriers.end(), deferred.begin(), deferred.end());
+            g_longBatchBarrierCount.fetch_add(
+                static_cast<uint32_t>(deferred.size()), std::memory_order_release);
         }
     }
 
@@ -396,6 +861,124 @@ namespace JobSystem
         HandleState* state{ nullptr };
     };
 
+    // ============================================================
+    // 性能项 2（2026-09-26）：BackendAsyncContext 池化（原：每 job 一次 `new` + `delete`）
+    //
+    // 动机（实测）：plain IJob / IJobFor(≤64) 走 SubmitBackendAsync ⇒ 每次提交
+    // `new BackendAsyncContext` + 执行完 `delete`。该路径 `probe ijob` 实测
+    // sched ≈ 800～900 ns/job（N=1000/10000 individual pipelined），其中堆分配/释放是
+    // 固定且可省的一项；对象生命周期与 job 一一对应、无跨 job 存活需求 ⇒ 可安全复用。
+    //
+    // 形状完全复用同仓库既有两级池（JobSystem_Tiles.cpp:300-355 的 BatchContext、
+    // JobSystem_State.cpp:108-216 的 HandleState）：
+    //   - 对象在**提交线程**（多为 main）获取、由**执行完成该 job 的 worker** 释放 ⇒
+    //     只有"线程本地缓存 + 共享池兜底"才能让提交线程命中（worker 释放的实例经共享池回流）。
+    //   - 线程退出时 TLS 缓存整体交还共享池（worker 线程在 Shutdown 的 Stop()/join 期间退出，
+    //     此后 ClearAsyncContextPool 统一删除）。
+    // 语义不变：work/state 每次 acquire 时覆盖赋值（复用 std::function 对象本身，省掉一次
+    // 目标存储构造），cleanup 回调与异常捕获路径完全未改。
+    // ============================================================
+    std::mutex g_asyncCtxPoolMutex;
+    std::vector<BackendAsyncContext*> g_asyncCtxPool;
+    constexpr size_t kAsyncCtxCacheCap = 16;
+    constexpr size_t kMaxPooledAsyncCtx = 256;
+
+    struct ThreadAsyncCtxCache
+    {
+        std::vector<BackendAsyncContext*> entries;
+        ~ThreadAsyncCtxCache()
+        {
+            if (entries.empty()) return;
+            std::lock_guard<std::mutex> lock(g_asyncCtxPoolMutex);
+            for (auto* p : entries)
+            {
+                if (g_asyncCtxPool.size() < kMaxPooledAsyncCtx) g_asyncCtxPool.push_back(p);
+                else delete p;
+            }
+            entries.clear();
+        }
+    };
+    thread_local ThreadAsyncCtxCache t_asyncCtxCache;
+
+    static void SpillAsyncCtxCacheToSharedPool()
+    {
+        if (t_asyncCtxCache.entries.empty()) return;
+        std::lock_guard<std::mutex> lock(g_asyncCtxPoolMutex);
+        for (auto* p : t_asyncCtxCache.entries)
+        {
+            if (g_asyncCtxPool.size() < kMaxPooledAsyncCtx) g_asyncCtxPool.push_back(p);
+            else delete p;
+        }
+        t_asyncCtxCache.entries.clear();
+    }
+
+    // Shutdown 路径：主线程缓存先交还共享池，再清空共享池（与 BatchContext/BatchStorage 同序）。
+    void FlushAsyncContextCacheToSharedPool()
+    {
+        SpillAsyncCtxCacheToSharedPool();
+    }
+
+    void ClearAsyncContextPool() noexcept
+    {
+        std::vector<BackendAsyncContext*> idle;
+        try
+        {
+            std::lock_guard<std::mutex> lock(g_asyncCtxPoolMutex);
+            idle.swap(g_asyncCtxPool);
+        }
+        catch (...) { return; }
+        for (auto* p : idle) delete p;
+    }
+
+    static BackendAsyncContext* AcquireAsyncContext()
+    {
+        BackendAsyncContext* ctx = nullptr;
+        if (!t_asyncCtxCache.entries.empty())
+        {
+            ctx = t_asyncCtxCache.entries.back();
+            t_asyncCtxCache.entries.pop_back();
+            return ctx;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_asyncCtxPoolMutex);
+            if (!g_asyncCtxPool.empty())
+            {
+                ctx = g_asyncCtxPool.back();
+                g_asyncCtxPool.pop_back();
+                // 一次性补满线程缓存（一次锁 / 最多 kAsyncCtxCacheCap 次获取）
+                for (size_t i = 1; i < kAsyncCtxCacheCap && !g_asyncCtxPool.empty(); ++i)
+                {
+                    t_asyncCtxCache.entries.push_back(g_asyncCtxPool.back());
+                    g_asyncCtxPool.pop_back();
+                }
+                return ctx;
+            }
+        }
+        return new BackendAsyncContext{};
+    }
+
+    static void ReleaseAsyncContext(BackendAsyncContext* ctx) noexcept
+    {
+        if (!ctx) return;
+        // 释放捕获（含 C# 侧闭包）并清 state，避免复用对象把上一次 job 的引用带过去。
+        ctx->work = nullptr;
+        ctx->state = nullptr;
+        try
+        {
+            if (t_asyncCtxCache.entries.size() < kAsyncCtxCacheCap)
+            {
+                t_asyncCtxCache.entries.push_back(ctx);
+                return;
+            }
+            SpillAsyncCtxCacheToSharedPool();
+            t_asyncCtxCache.entries.push_back(ctx);
+        }
+        catch (...)
+        {
+            delete ctx;   // 池化失败绝不吞掉实例（否则内存泄漏）
+        }
+    }
+
     static void RunBackendAsync(void* raw) noexcept
     {
         auto* context = static_cast<BackendAsyncContext*>(raw);
@@ -419,7 +1002,8 @@ namespace JobSystem
 
     static void CompleteBackendAsync(void* raw) noexcept
     {
-        delete static_cast<BackendAsyncContext*>(raw);
+        // 性能项 2：原来在这里 `delete`，现改为交还池（复用对象，同上注释）。
+        ReleaseAsyncContext(static_cast<BackendAsyncContext*>(raw));
     }
 
     bool SubmitBackendAsync(
@@ -435,7 +1019,11 @@ namespace JobSystem
             if (!scheduler || !scheduler->IsRunning())
                 throw std::runtime_error("JobSystem backend is not running");
 
-            context = new BackendAsyncContext{ std::move(work), state };
+            context = AcquireAsyncContext();
+            if (!context)
+                throw std::bad_alloc();
+            context->state = state;
+            context->work = std::move(work);
             // 统一走 Chase-Lev SubmitWork：worker 异步执行，不阻塞调用线程。
             // SubmitWork 内部 PushTaskBackoff 有限退避，injector 满时短暂自旋。
             if (!scheduler->SubmitWork(
@@ -503,17 +1091,42 @@ namespace JobSystem
             // 固定 tpw；compute-bound 走下方公式。两阶段学习：先采粗样本，再以粗成本
             // 为代理产细样本，TryClassify 定 mode（mem-bound / parallel）。
             const auto mode = g_jobCostCache.GetMode(funcHash);
+            const bool robustNow = g_jobCostCache.IsRobust();
+            const int tpwChunk = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
             if (mode == JobSystem::kModeMemBound)
             {
+                // 健壮模式：mem-bound 期**周期探针**（每 kRobustProbeInterval 次解析放一次公式分块）。
+                // 否则锁死后 mem-bound 分支永不产出细样本 ⇒ 判错就永久错、无法纠正（07 §7an）。
+                const bool probe = robustNow && g_jobCostCache.ProbeDue(funcHash);
+                if (!probe)
+                {
+                    if (g_jobCostCacheVerbose)
+                        std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
+                    return tpwChunk;
+                }
                 if (g_jobCostCacheVerbose)
-                    std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
-                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+                    std::printf("[JCC] R length=%d MEM-BOUND PROBE → formula\n", length);
+            }
+            else if (robustNow && mode == JobSystem::kModeUnknown)
+            {
+                // ⚠ 关键（07 §7an 第二轮）：未分类期必须**交错**放粗/细两种分块。
+                // 旧两阶段是"先 3 个粗样本、之后永远走公式"⇒ 重 job 的粗样本永远停在 3 个，
+                // 够不到健壮判据的样本下限 ⇒ mode 永为 unknown ⇒ 永远走公式（= 永远细粒度）
+                // ⇒ grad 受益但 Melee 受损，净收益被抵消（实测正好如此）。
+                if (!g_jobCostCache.ParityProbe(funcHash))
+                {
+                    if (g_jobCostCacheVerbose)
+                        std::printf("[JCC] R length=%d UNKNOWN → tpw chunk (parity coarse)\n", length);
+                    return tpwChunk;
+                }
+                if (g_jobCostCacheVerbose)
+                    std::printf("[JCC] R length=%d UNKNOWN → formula (parity fine)\n", length);
             }
             const double perElemNs = g_jobCostCache.GetPerElemCost(funcHash);
-            if (mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
+            if (!robustNow && mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
             {
                 // 阶段 1：粗样本未齐 → tpw（perElemNs 通常为 0，本分支与兜底一致）
-                return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+                return tpwChunk;
             }
             // 阶段 2（或 parallel 稳态）：细成本优先，缺省用粗成本代理（学习中/冷启动）
             double costNs = perElemNs;
@@ -539,22 +1152,26 @@ namespace JobSystem
                     {
                         // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
                         // 稳态固定 tpw，且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
-                        if (outJccFine) *outJccFine = true;
+                        // 健壮模式下如实标注为**粗样本**（它返回的就是 tpw chunk）。
+                        if (outJccFine) *outJccFine = g_jobCostCache.IsRobust() ? false : true;
                         return chunkTpw4;
                     }
                     // 执行主导：目标每 tile ≈150µs，tileSize = (target − C_fixed)/C_elem，
                     // 下限 256 元素/tile 防 C_fixed 占比过高。
-                    if (outJccFine) *outJccFine = true;
                     double tileSize = (kTargetTileUs * 1000.0 - cfixed) / celem;
                     if (tileSize < 256.0) tileSize = 256.0;
                     int targetTiles = static_cast<int>(length / tileSize + 0.9999);
                     if (targetTiles < wc) targetTiles = wc;
                     if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
-                    return std::max(1, CeilDiv(length, targetTiles));
+                    const int chunk2f = std::max(1, CeilDiv(length, targetTiles));
+                    // 健壮模式：只有**严格细于** tpw 兜底的分块才算细样本（旧代码把 15 tiles 这种
+                    // 比 tpw 的 60 还粗 4× 的分块也记成细样本 ⇒ 系统性推高比值 ⇒ 全判 mem-bound）。
+                    if (outJccFine) *outJccFine = g_jobCostCache.IsRobust() ? (chunk2f < chunkTpw4) : true;
+                    return chunk2f;
                 }
 
                 // ── 单因子回退（冷启动，C_fixed 未学）：既有公式 ──
-                if (outJccFine) *outJccFine = true;   // JCC 公式产出（细粒度学习样本）
+                if (outJccFine && !robustNow) *outJccFine = true;   // JCC 公式产出（细粒度学习样本）
                 const double totalUs = length * costNs / 1000.0;
                 // perElem 是「并行 wall 稀释」成本，直接用它算 tiles 会产出巨型 tile
                 // 「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
@@ -580,6 +1197,8 @@ namespace JobSystem
                     std::printf("[JCC] R length=%d perElem=%.2fns totalUs=%.1f serialUs=%.1f formula=%d floor=%d chunk=%d rc=%d\n",
                         length, costNs, totalUs, serialUs, (int)(serialUs / kTargetTileUs),
                         floorTiles, chunk, CeilDiv(length, chunk));
+                // 健壮模式：只有严格细于 tpw 兜底的分块才算细样本（见上面的理由）。
+                if (outJccFine && robustNow) *outJccFine = (chunk < chunkTpw4);
                 return chunk;
             }
         }
@@ -704,7 +1323,38 @@ namespace JobSystem
         // Phase 2: 先密集 spin（过早 yield 触发完整 OS 上下文切换）。
         // Chase-Lev：主线程 spin 期间即协助认领执行，消除"慢 worker 被抢占
         // + 主线程干等"的尾延迟。
-        for (int i = 0; i < 2048; i++)
+        // A/B（`ENTJOY_COMPLETE_SPIN=<pause 次数>`，默认 2048 = 原行为；`0` = 直接进 Phase 3）：
+        // 主线程第一段自旋窗。动机（docs §7ai）：真实负载上主线程 **82.8% 的时间在 Complete() 里**，
+        // 其中 `spin2048` = 54,050 次 × 45.4 µs = **2.45 s ≈ 14.8 ms/步**；而 15 个 worker 只用 15 个逻辑核
+        // ⇒ 主线程自旋会与某个 worker 抢 SMT 执行单元。旋钮用于量"自旋 vs 让核"的平衡点。
+        static const int kMainSpin = [] {
+            const char* v = std::getenv("ENTJOY_COMPLETE_SPIN");
+            const int n = (v != nullptr) ? std::atoi(v) : 2048;
+            return n < 0 ? 0 : (n > 65536 ? 65536 : n);
+        }();
+        // ── §7aq 自适应自旋（`ENTJOY_COMPLETE_SPIN_ADAPT=1`，默认关 ⇒ 逐位原行为）──
+        // 依据：§7ai 固定值 A/B 显示 2048→512 使 Melee −1.33 ms（5/6 好）但 Flow +1.38（微批需要主线程
+        // 自旋期的协助）⇒ 净 0。而 §7ap 的逐 job 剖面把两者分开：Melee 1 批/步、单批 ~70 ms、
+        // 227 tiles（SMT 已饱和）；波前 574 批/步、单批 28 µs、17.9 tiles（几乎 1 tile/worker）。
+        // 判据：本批预期时长 ≥ g_completeSpinBigNs ⇒ 用最小自旋（把核让给 worker），否则保持完整自旋窗。
+        // ⚠ 实测结论：**否证**（07 §7aq）—— 12 对 A/B 整步 +4.15 ms（9/12 更差）、Melee +2.62、wave +0.88。
+        //   与 §7ai 的"Melee 要少自旋"方向相反 ⇒ 主线程自旋期的协助对**大批同样有用**，
+        //   §7ai 那笔 −1.33（6 对）应为噪声。默认关，仅保留器械。
+        static const bool kAdaptiveSpin = g_completeSpinAdaptEnabled;
+        static const uint64_t kAdaptiveBigNs = g_completeSpinBigNs;
+        const int spinCount = (kAdaptiveSpin && _state->estBatchNs >= kAdaptiveBigNs)
+            ? 0 : kMainSpin;
+        // 自证（`ENTJOY_JCC_VERBOSE=1`）：自适应到底有没有真的做出区分
+        if (kAdaptiveSpin && g_jobCostCacheVerbose)
+        {
+            static std::atomic<uint64_t> s_adaptDump{ 0 };
+            const uint64_t dn = s_adaptDump.fetch_add(1, std::memory_order_relaxed);
+            if (dn < 40 || (dn & 255) == 0)
+                std::printf("[SPINADAPT] estBatchNs=%llu -> spin=%d (full=%d) batchns=%llu\n",
+                    static_cast<unsigned long long>(_state->estBatchNs), spinCount, kMainSpin,
+                    static_cast<unsigned long long>(kAdaptiveBigNs));
+        }
+        for (int i = 0; i < spinCount; i++)
         {
             if (_state->completed.load(std::memory_order_acquire))
             {

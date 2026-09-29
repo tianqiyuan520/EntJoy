@@ -115,6 +115,9 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
+    // 存活句柄 state 数（CreateState 分配 - RecycleState 回收）。诊断/测试用：托管侧据此
+    // 断言"组合依赖句柄被确定性回收"（不受 ENTJOY_STATS 门控）。
+    JOB_API int64_t JobSystem_GetLiveHandleCount();
     // 读 handle 的 diagnosticBatchId（Complete 后 batch 必已 submit，id 已设置）。
     JOB_API uint64_t JobSystem_GetDiagnosticBatchId(void* handle);
 

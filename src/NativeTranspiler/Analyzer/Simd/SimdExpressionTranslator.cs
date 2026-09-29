@@ -147,6 +147,10 @@ namespace NativeTranspiler.Analyzer
             {
                 // edge: integer literals are passed through as-is (valid C++)
             }
+            // ★ NT-13：C# 的 64 位后缀（1UL / 1L）在 C++/LLP64 下只有 32 位 ⇒ 必须归一化，
+            //   否则向量化部分的移位/掩码表达式静默错值（与标量路径共用同一规则，避免再次分叉）。
+            if (literal.IsKind(SyntaxKind.NumericLiteralExpression))
+                text = CppNumericLiteral.NormalizeSuffix(text);
             return text;
         }
 
@@ -1427,8 +1431,8 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
         {
             string name = id.Identifier.Text;
             if (_nativeArrayParams.TryGetValue(name, out var pet)) return pet;
-            if (_localPointerElemCpp.TryGetValue(name, out var le)) return le;
-            if (_paramPointerElemCpp.TryGetValue(name, out var pe)) return pe;
+            if (_varAnalyzer.LocalPointerElemCpp.TryGetValue(name, out var le)) return le;
+            if (_varAnalyzer.ParamPointerElemCpp.TryGetValue(name, out var pe)) return pe;
             return null;
         }
 
@@ -1500,6 +1504,34 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             //   掩码语义与其他路径一致（不再生成 `(int*)(byte_ptr)[i] = <float2>` 这类非法赋值）。
             bool isNarrowElem = elemType != "float" && elemType != "int";
 
+            // ★ NT-12（Critical）：复合赋值必须"读-改-写"。
+            //   旧实现完全忽略 `assign.OperatorToken`，按普通 store 发 `addr = rhs`
+            //   ⇒ `m[i] |= x` 变成**覆盖写**（`+=` / `&=` / `<<=` 等同样中招），静默错值。
+            //   这里统一走逐 lane 标量 load-modify-store（掩码感知）：不试图为下面 4 个向量 store
+            //   分支各写一份复合版本，正确性优先、代价是复合赋值不走向量 intrinsic。
+            string compoundOp = assign.OperatorToken.Text;
+            if (compoundOp != "=")
+            {
+                if (IsStructNativeArrayType(elemType))
+                    throw new System.NotSupportedException(
+                        $"复合赋值不支持结构体元素：`{elemType} {compoundOp}` —— 请拆成两步（先读局部变量、再整体写回）。");
+                string elemPtr = $"(({elemType}*)({basePtr}))";
+                bool narrowedCmp = _currentMask != "simd_mask::all_true()";
+                if (idxKind >= VarKind.Varying)
+                {
+                    string laneRhs = rhsKind >= VarKind.Varying
+                        ? ((elemType == "float" && IsInt32Expr(assign.Right))
+                            ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)"
+                            : $"{extractFn}(({rhsExpr}).v,__l)")
+                        : rhsExpr;
+                    string guardCmp = narrowedCmp
+                        ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)"
+                        : "";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guardCmp}{elemPtr}[n_extract_lane_epi32(({idxExpr}).v,__l)] {compoundOp} {laneRhs};}}}}";
+                }
+                return $"{elemPtr}[{idxExpr}] {compoundOp} {rhsExpr};";
+            }
+
             if (isNarrowElem)
             {
                 bool narrowed = _currentMask != "simd_mask::all_true()";
@@ -1546,16 +1578,15 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                             : $"{extractFn}({rhsSimdExpr}.v,__l)";
                         return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
                     }
-                    if (rhsKind < VarKind.Varying)
-                    {
-                        return $"{storeFnScalar}({basePtr} + {_batchOffsetVar}, {setFnScalar}({rhsExpr}))";
-                    }
-
-                    // Contiguous index optimization: when idx == simdIndexVar or
-                    // uniform_part + simdIndexVar, use contiguous store instead of per-lane scatter.
+                    // ★ NT-01(a)：无掩码连续 store 的**前提**是"索引可证明等于 SIMD 索引变量本身"
+                    //   （`v_i`，或 `<uniform> + v_i` 且批内循环变量已知）。旧代码在**任意** varying
+                    //   下标 + 均匀 RHS 时都发 `n_store_ps(basePtr + offset, set1(rhs))`（假定连续），
+                    //   例如 `Out[index * 2] = 1.0f;` 会把 [offset, offset+W) 整段写成一个值（静默错值）。
+                    //   先做连续性判定，再决定 store 形态；否则回退逐 lane 掩码 scatter。
+                    string contBase = null;
+                    string contOffset = null;
                     if (!string.IsNullOrEmpty(_batchLoopVar))
                     {
-                        string contBase = null;
                         if (idxExpr == _simdIndexVar)
                             contBase = _batchLoopVar;
                         else
@@ -1567,28 +1598,54 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                                 contBase = idxExpr.Substring(0, idxExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
                         }
                         if (contBase != null)
-                        {
-                            // ★ when _returnedMaskVar is set (batch body has `return`), use per-lane
-                            //   masked store to avoid overwriting lanes that already returned with their result.
-                            //   Only write to non-returned lanes (complement of _returnedMaskVar).
-                            if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
-                            {
-                                string rhsSimdExpr;
-                                if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
-                                    rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
-                                else
-                                    rhsSimdExpr = rhsExpr;
-                                return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
-                            }
-                            string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
-                            string off = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
-                            // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
-                            if (elemType == "float" && IsInt32Expr(assign.Right))
-                                return $"{storeFn}({basePtr} + {off}, n_cvtepi32_ps({rhsExpr}.v))";
-                            return $"{storeFn}({basePtr} + {off}, {rhsExpr}.v)";
-                        }
+                            contOffset = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
                     }
-                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
+                    else if (idxExpr == _simdIndexVar && _batchOffsetVar != SimdControlFlowGenerator.UnknownBatchOffset)
+                    {
+                        // ★ NT-01(b)：批内循环变量未登记（IJobChunk/IJobEntity 的 AutoSIMD 批路径，
+                        //   见 CppJobGenerator 的两处 `batchLoopVar: ""`）时索引就是 `v_i` ⇒ 连续，
+                        //   但偏移必须是**外层批循环的当前位置**（调用点传 `si`）。
+                        //   传 `"0"` 会让每个 simd 组都重写 [0,W)，元素 ≥W 永远写不到。
+                        //
+                        // ★ 收尾加固：`UnknownBatchOffset` 是**单 IJob 路径**（用户循环的起点不属于
+                        //   生成器可知的批循环，见 CppJobGenerator.GenerateSingleFunctionStandard）的哨兵 ——
+                        //   此时"v_i 相对基址从 0 开始"无法证明 ⇒ 不发无掩码连续 store，退回逐 lane
+                        //   scatter（`basePtr[extract(idxExpr,lane)]`，永远按真实下标写）。
+                        //   否则任何将来在该路径被向量化的形状都会重演 NT-01(b) 的静默错值。
+                        contBase = _batchOffsetVar;
+                        contOffset = _batchOffsetVar;
+                    }
+
+                    if (contOffset != null)
+                    {
+                        // ★ when _returnedMaskVar is set (batch body has `return`), use per-lane
+                        //   masked store to avoid overwriting lanes that already returned with their result.
+                        //   Only write to non-returned lanes (complement of _returnedMaskVar).
+                        if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
+                        {
+                            string rhsSimdExpr;
+                            if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                                rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
+                            else
+                                rhsSimdExpr = rhsExpr;
+                            return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
+                        }
+                        string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                        // 均匀 RHS + 连续索引：整宽 set1 + 无掩码 store（真正的向量化路径）
+                        if (rhsKind < VarKind.Varying)
+                            return $"{storeFnScalar}({basePtr} + {contOffset}, {setFnScalar}({rhsExpr}))";
+                        // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
+                        if (elemType == "float" && IsInt32Expr(assign.Right))
+                            return $"{storeFn}({basePtr} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
+                        return $"{storeFn}({basePtr} + {contOffset}, {rhsExpr}.v)";
+                    }
+
+                    // 非连续 varying 下标：逐 lane scatter。
+                    if (rhsKind >= VarKind.Varying)
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
+                    // 均匀标量 RHS + 非连续 varying 下标：把标量写到每个 lane 各自的地址
+                    // （旧代码在这里错误地发整宽连续 store）。
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={rhsExpr};}}}}";
                 }
 
                 // uniform idx + varying rhs -> extract lane 0

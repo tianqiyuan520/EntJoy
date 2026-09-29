@@ -1674,7 +1674,10 @@ namespace NativeTranspiler.Analyzer
                 else
                 {
                     // 非对象创建参数：无法逐字段写（字段名未知），不支持。
-                    _builder.AppendLine($"// ISPC SendEvent: non-object-creation argument not supported; use new T {{ ... }}.");
+                    // ⚠ 必须发 __ENTJOY_UNSUPPORTED 标记，不能只写普通注释：构建期
+                    //   NativeCompileTask.CheckGeneratedMarkers 只会让**带标记**的产物构建失败；
+                    //   只写注释 = ISPC 后端静默丢掉这次事件写入（审计"marker 缺口"的最后一处）。
+                    _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_SendEventNonObjectCreationArg");
                 }
             }
 

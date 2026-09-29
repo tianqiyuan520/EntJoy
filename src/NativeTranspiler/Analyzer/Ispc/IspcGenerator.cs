@@ -166,24 +166,24 @@ namespace NativeTranspiler.Analyzer.Common
                     {
                         var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
-                        pars.Append($"EntJoy::Collections::UnsafeList<{cppElem}>* RESTRICT {name}_listData");
+                        pars.Append($"EntJoy::Collections::UnsafeList<{cppElem}>* {name}_listData");
                     }
                     else
                     {
                         var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
-                        pars.Append($"{cppElem}* RESTRICT {name}_ptr, int {name}_length");
+                        pars.Append($"{cppElem}* {name}_ptr, int {name}_length");
                     }
                 }
                 else if (type is IPointerTypeSymbol)
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
-                    pars.Append($"{cppType} RESTRICT {name}_ptr");
+                    pars.Append($"{cppType} {name}_ptr");
                 }
                 else
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
-                    pars.Append($"{cppType}* RESTRICT {name}_ptr");
+                    pars.Append($"{cppType}* {name}_ptr");
                 }
             }
             return pars.ToString();
@@ -783,7 +783,7 @@ namespace NativeTranspiler.Analyzer.Common
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(parameter.Type);
                     var ispcType = ToIspcType(cppType);
                     sb.AppendLine($"        auto* {parameter.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__batchData->componentArrays[{i}]);");
-                    sb.AppendLine($"        __assume((intptr_t){parameter.Name}_ptr % 64 == 0);");
+                    sb.AppendLine($"        (void)((intptr_t){parameter.Name}_ptr % 64 == 0);");
                     callArgs.Add($"{parameter.Name}_ptr");
                 }
                 callArgs.Add("__batchData->entityCount");
@@ -924,7 +924,7 @@ namespace NativeTranspiler.Analyzer.Common
                 sb.AppendLine(CppJobGenerator.IsEntityJob(jobStruct)
                     ? $"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkDataLite.componentArrays[{i}]);"
                     : $"    auto* {name}_ptr = reinterpret_cast<ispc::{ispcType}*>(__chunkData->requiredComponentArrays[{i}]);");
-                sb.AppendLine($"    __assume((intptr_t){name}_ptr % 64 == 0);");
+                sb.AppendLine($"    (void)((intptr_t){name}_ptr % 64 == 0);");
                 callArgs.Add($"{name}_ptr");
             }
 

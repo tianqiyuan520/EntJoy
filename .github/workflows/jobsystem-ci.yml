@@ -41,11 +41,37 @@ jobs:
       - name: Build ECS tests
         run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
 
-      - name: Run ECS tests repeatedly
+      # 后端必须显式指定并断言（ENTJOY_TEST_BACKEND）：
+      # EntJoy.ECS.Tests 的输出目录默认没有 NativeDll.dll，而 NativeJobCore 的 ModuleInitializer 会沿
+      # BaseDirectory → 入口目录 → 程序集目录 → CWD 上溯 探测，于是同一套测试会随本地 bin/ 内容静默切换后端。
+      # 历史问题：文档宣称「测试集运行在 Native」，实际 CI 跑的是 Managed 回退。两条腿都跑，且由
+      # BackendSelectionTests 断言实际后端 == 请求后端，杜绝「native 腿悄悄降级成 Managed 仍全绿」。
+      - name: Run ECS tests (Managed fallback backend, 5x)
         shell: pwsh
+        env:
+          ENTJOY_TEST_BACKEND: managed
         run: |
           1..5 | ForEach-Object {
-            Write-Host "ECS test pass $_/5"
+            Write-Host "ECS test pass (managed) $_/5"
+            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release --no-build --no-restore
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Stage NativeDll for the native-backend leg
+        shell: pwsh
+        run: |
+          cmake -S tools/NativeDllCore -B tools/NativeDllCore/build-ci -A x64
+          cmake --build tools/NativeDllCore/build-ci --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item tools/NativeDllCore/build-ci/Release/NativeDll.dll tests/EntJoy.ECS.Tests/bin/Release/net8.0/ -Force
+
+      - name: Run ECS tests (Native backend, 5x)
+        shell: pwsh
+        env:
+          ENTJOY_TEST_BACKEND: native
+        run: |
+          1..5 | ForEach-Object {
+            Write-Host "ECS test pass (native) $_/5"
             dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release --no-build --no-restore
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -63,7 +89,7 @@ jobs:
       - name: Run C++ tests
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
             ./build/Release/$test.exe
           done
         shell: bash
@@ -127,8 +153,9 @@ jobs:
   # 生成的 C++/ISPC 从不被编译、静默降级标记（__ENTJOY_UNSUPPORTED）也从不被扫描。
   # 本 job 跑 tools/NativeTranspilerFixture：生成 → 标记扫描 → CMake/ClangCL(或 MSVC 回退) → 原生编译
   # → 运行时语义断言（IJobParallelForBatch 区间调度、批内 return; 语义）；再做一次负向自检。
-  # ⚠ 尚未挂进 release-gate：GitHub runner 上 clang-cl 组件是否存在未验证（缺则回退 MSVC），
-  #   先观察若干轮再决定是否设为必需检查。
+  # 2026-09-26：**已纳入 release-gate 必需检查**。原先顾虑「runner 上 clang-cl 是否存在」，但该 job
+  # 在缺 ClangCL 时会自动回退 MSVC，因此顾虑不成立；而它是唯一能拦住「生成物编译不过 / 静默降级」的关卡，
+  # 留在门禁外等于发布不检查 codegen。若真有环境问题，应先修 job 而不是继续豁免。
   native-transpiler-regression:
     runs-on: windows-latest
     timeout-minutes: 45
@@ -226,7 +253,7 @@ jobs:
       - name: Run ASAN+UBSAN
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
             ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build-asan/$test
           done
         shell: bash
@@ -243,14 +270,14 @@ jobs:
       - name: Run TSAN
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
             TSAN_OPTIONS=halt_on_error=1 ./build-tsan/$test
           done
         shell: bash
 
   release-gate:
     if: always()
-    needs: [framework-test, windows-test, nuget-consumer-test, ispc-width-test, linux-sanitizers]
+    needs: [framework-test, windows-test, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release check
@@ -260,3 +287,4 @@ jobs:
           test "${{ needs.nuget-consumer-test.result }}" = "success"
           test "${{ needs.ispc-width-test.result }}" = "success"
           test "${{ needs.linux-sanitizers.result }}" = "success"
+          test "${{ needs.native-transpiler-regression.result }}" = "success"

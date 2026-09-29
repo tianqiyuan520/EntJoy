@@ -84,7 +84,7 @@ namespace EntJoy.ECS.Tests
     {
         static SystemDependencyTests()
         {
-            JobScheduler.Initialize(4);
+            TestBackend.EnsureInitialized(4);
             // 等待 worker 线程启动并进入循环，避免主线程 TryAssistOne 串行执行掩盖并发竞争
             Thread.Sleep(300);
         }

@@ -52,6 +52,9 @@
   <ItemGroup>
     <CompilerVisibleProperty Include="EntJoyNativeDllDir" />
     <CompilerVisibleProperty Include="EntJoyPrebuiltNativeDir" />
+    <!-- B3：AutoSIMD = Enabled 的显式"我已量过"开关。默认不设 ⇒ IJobParallelFor/IJobFor/IJob 上
+         开 AutoSIMD 直接 error（NT024：实测比标量基线慢 ~10%）。设 true 才放行。 -->
+    <CompilerVisibleProperty Include="EntJoyAutoSimdMeasured" />
   </ItemGroup>
 
   <UsingTask TaskName="NativeTranspiler.Tasks.NativeCompileTask" AssemblyFile="$(_EntJoyTasksAssembly)" TaskFactory="TaskHostFactory" />

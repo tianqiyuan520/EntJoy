@@ -223,7 +223,9 @@ namespace JobSystem
         auto* state = CreateState(false);
         const uint64_t id = AssignStateDiagnosticId(state);
         // 与 SubmitBatch 同语义：调度即"发布"（pool 执行窗口另由 FastPath 上报泳道）
-        g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+        // 性能项 3：纯诊断计数（只被 GetStatsSnapshot/GUI 读取），默认统计开启 ⇒ 口径不变。
+        if (StatsEnabled())
+            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         RecordPublishedJob(id, 1);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
@@ -305,6 +307,8 @@ namespace JobSystem
         std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
         g_shuttingDown.store(false, std::memory_order_release);
         g_mainThreadId = std::this_thread::get_id();
+        // E1 忙比诊断：清计数并记起点（`ENTJOY_DIAG_E1=1` 时才真的做，否则空操作）。
+        E1::Reset();
 #if defined(_WIN32)
         // 提升进程优先级，减少 worker 与 OS/其他进程竞争时被降权。
         ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -355,7 +359,11 @@ namespace JobSystem
                 BindCurrentThreadToLogicalProcessor(0);
 
             // Chase-Lev 调度器（唯一路径）：持久 worker 线程 + per-worker deque + MPMC Injector
-            auto scheduler = std::make_shared<ChaseLevScheduler>();
+            // 性能项 5：实例进程内唯一（首次 Initialize 创建，之后复用；Shutdown 只 Stop 不销毁）
+            // ⇒ 伴生裸指针永不悬垂，热路径无需 shared_ptr 自旋锁。
+            if (!g_chaseLevSchedulerInstance)
+                g_chaseLevSchedulerInstance = std::make_shared<ChaseLevScheduler>();
+            auto scheduler = g_chaseLevSchedulerInstance;   // 本代 shared_ptr 别名（锚定生命周期）
             if (!scheduler->Start(
                 static_cast<uint32_t>(resolved),
                 &ChaseLevExecuteTile,
@@ -366,7 +374,9 @@ namespace JobSystem
                 g_shuttingDown.store(true, std::memory_order_release);
                 return false;
             }
-            std::atomic_store_explicit(&g_chaseLevScheduler, std::move(scheduler), std::memory_order_release);
+            // 先发布 shared_ptr（既有语义），再发布裸指针（热路径读取）。
+            std::atomic_store_explicit(&g_chaseLevScheduler, scheduler, std::memory_order_release);
+            g_chaseLevSchedulerRaw.store(scheduler.get(), std::memory_order_release);
 
 #if defined(_WIN32)
             // 只在真正创建一代 scheduler 后增加计时器分辨率引用，避免重复 Initialize 泄漏引用。
@@ -391,6 +401,11 @@ namespace JobSystem
         }
 
         std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
+        // ★ 先关掉 ImGui 调试面板并**等它退出**，再拆 worker/状态：
+        //   面板线程是 detach 的，且在关停期仍会读 JobSystem 状态；先停面板可保证
+        //   "窗口线程不会比 JobSystem 活得更久"，也修掉"关停后无法重新 Launch"（latch 已复位）。
+        //   无 ImGui 构建下该调用是空实现（CMake 目标即如此），不影响 CI/测试路径。
+        JobDebuggerGUI::Shutdown();
         // Shutdown 幂等；停止/重置期间保持 gate，防止 Initialize 与 teardown 并发发布新一代。
         g_shuttingDown.store(true, std::memory_order_release);
         g_numThreads.store(0, std::memory_order_relaxed);
@@ -402,6 +417,10 @@ namespace JobSystem
         }
         // 隐式批排空：执行 pending 中未发布的 job（worker 尚在运行）；未及执行者由 in-flight 兜底，不产生 UAF。
         FlushPendingSubmits();
+        // 性能项 5：先清裸指针（此后新读者得 nullptr，与旧实现交换后语义一致），再取本代
+        // shared_ptr 别名并 Stop。实例本身由 g_chaseLevSchedulerInstance 持有 ⇒ 即便有读者在
+        // 清空之前刚取到指针，其解引用也不会悬垂（对象永不析构）。
+        g_chaseLevSchedulerRaw.store(nullptr, std::memory_order_release);
         if (auto scheduler = std::atomic_exchange_explicit(
                 &g_chaseLevScheduler, std::shared_ptr<ChaseLevScheduler>{}, std::memory_order_acq_rel))
         {
@@ -418,8 +437,13 @@ namespace JobSystem
         // 批上下文池同理（A）：主线程缓存交还共享池后清空。
         FlushBatchContextCacheToSharedPool();
         ClearBatchContextPool();
+        // 性能项 2：BackendAsyncContext 池同理（worker 已 join，其 TLS 缓存已交还共享池）。
+        FlushAsyncContextCacheToSharedPool();
+        ClearAsyncContextPool();
         // 诊断收尾：`ENTJOY_DIAG_NATIVE_PHASE=1` 时打印 Complete 分段（未设该变量时为空操作）。
         DiagPhase::Dump();
+        // E1 收尾：`ENTJOY_DIAG_E1=1` 时打印 worker 忙比 / 窗口抖动（未设该变量时为空操作）。
+        E1::Dump();
         // 诊断收尾：`ENTJOY_DIAG_NATIVE_SCHED=1` 时打印 Schedule 分段（未设该变量时为空操作）。
         SchedPhase::Dump();
         // 小 job 物理核封顶策略的可观测性（每次 Shutdown 一行，便于判定 A/B 臂是否真的生效；
@@ -430,6 +454,9 @@ namespace JobSystem
             g_numThreads.load(std::memory_order_relaxed),
             (physCapEnv != nullptr && physCapEnv[0] == '0') ? "OFF(=0)" : "ON(default)",
             (unsigned long long)g_physCapApplied.load(std::memory_order_relaxed));
+        std::printf("[JOBWAKE] notify_all skipped=%llu (no waiter / enough awake workers)\n",
+            (unsigned long long)g_notifySkipped.load(std::memory_order_relaxed));
+        std::fflush(stdout);
         const char* deferEnv = std::getenv("ENTJOY_DEFER_WAKE");
         const char* prioEnv = std::getenv("ENTJOY_SCHED_PRIO");
         std::printf("[JOBPHYS] deferWake=%s flushes=%llu | schedPrio=%s applied=%llu\n",
@@ -455,7 +482,13 @@ namespace JobSystem
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
     {
         // 并行 for 默认粒度（batchSize=0 时用）。Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
-        g_configuredTilesPerWorker.store(std::max(1, tilesPerWorker), std::memory_order_relaxed);
+        // EntJoy 侧 A/B 覆盖：`ENTJOY_TILES_PER_WORKER=<n>` 时优先（用于扫描"分块粒度 ⇒ 批内并行度"，不改游戏码）。
+        static const int envTpw = [] {
+            const char* v = std::getenv("ENTJOY_TILES_PER_WORKER");
+            return (v != nullptr) ? std::atoi(v) : 0;
+        }();
+        const int effective = (envTpw > 0) ? envTpw : tilesPerWorker;
+        g_configuredTilesPerWorker.store(std::max(1, effective), std::memory_order_relaxed);
     }
 
     void Scheduler::ConfigureGuided(int enabled, int k, int floor)
@@ -490,7 +523,8 @@ namespace JobSystem
         if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            if (StatsEnabled())
+                g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             RecordPublishedJob(id, 1);
             AcquireState(state);
             try
@@ -600,7 +634,7 @@ namespace JobSystem
             // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
             batch->workerCount = static_cast<uint32_t>(
                 ApplyPhysCoreCapForSmallJob(
-                    ResolveWorkScaledWorkerTarget(funcHash, length, batch->tileCount, rc),
+                    ResolveWorkerTarget(0, rc),
                     batch->tileCount, length));
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -841,7 +875,7 @@ namespace JobSystem
             // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
             batch->workerCount = static_cast<uint32_t>(
                 ApplyPhysCoreCapForSmallJob(
-                    ResolveWorkScaledWorkerTarget(funcHash, length, batch->tileCount, rc),
+                    ResolveWorkerTarget(0, rc),
                     batch->tileCount, length));
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -949,7 +983,8 @@ namespace JobSystem
         {
             auto* st = CreateState(true);
             const uint64_t diagId = AssignStateDiagnosticId(st);
-            g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
+            if (StatsEnabled())
+                g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
             RecordPublishedJob(diagId, 1);
             if (func) RunSyncJob(st, [&]() { for (int i = 0; i < itemCount; i++) func(context, &chunks[i]); });
             else if (rangeFunc) RunSyncJob(st, [&]() { rangeFunc(context, chunks, 0, itemCount); });
@@ -987,7 +1022,11 @@ namespace JobSystem
                                                    : static_cast<const void*>(batches);
         uint32_t tileCount = 0;
         int64_t totalEntities = 0;
-        std::vector<uint32_t> tileBounds;
+        // Item 6：tile 布局的 bounds 是**每次提交都会拷一份**的大数组（tileCount+1 ≈ 60+ 项）。
+        // 用 thread_local 复用容量 ⇒ 缓存命中路径不再有 malloc/free（只剩锁内一次 memcpy）。
+        // 语义不变：本函数是唯一使用者，且每次进入都 clear()（容量保留、size 归零）。
+        static thread_local std::vector<uint32_t> tileBounds;
+        tileBounds.clear();
         const bool tileHit = tileKeyPtr != nullptr &&
             TileLayoutTryGet(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
                 tileCount, totalEntities, tileBounds);

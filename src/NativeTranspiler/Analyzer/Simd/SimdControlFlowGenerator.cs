@@ -34,8 +34,7 @@ namespace NativeTranspiler.Analyzer
         private readonly INamedTypeSymbol _jobStruct;
         private readonly Dictionary<string, SimdVariableInfo> _variables;
         private readonly SimdVariableAnalyzer _varAnalyzer;
-        private readonly string _indexParamName;
-        private readonly string _simdIndexVar; // "v_i" — the SIMD index variable from outer loop
+        private readonly string _indexParamName;        private readonly string _simdIndexVar; // "v_i" — the SIMD index variable from outer loop
         private readonly bool _useFastMath;
         private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
@@ -118,12 +117,18 @@ namespace NativeTranspiler.Analyzer
         // Each scope frame tracks which variables were declared in that scope
         private readonly Stack<HashSet<string>> _scopeStack = new();
         private int _scopeDepth = 0;
-        // ★ 指针符号 → 元素 C++ 类型（由 SimdVariableAnalyzer 按语法收集后拷入）。
+        // 指针符号 → 元素 C++ 类型：不再在本类拷贝一份，直接用 SimdVariableAnalyzer 的
+        // LocalPointerElemCpp / ParamPointerElemCpp（同一份数据，避免"两个真相"）。
         //   源生成器里 SemanticModel 对局部符号不可靠（框架既有代码同样只用名字/`_jobStruct.GetMembers`），
-        //   因此必须自带这份表，否则 `int* hpPtr = (int*)HP.GetUnsafePtr();` 会被当成 NativeArray
-        //   字段而生成 `hpPtr_ptr`（A2）。
-        private readonly Dictionary<string, string> _localPointerElemCpp = new();
-        private readonly Dictionary<string, string> _paramPointerElemCpp = new();
+        //   因此判据仍然只依赖分析器按语法收集的这份表，否则
+        //   `int* hpPtr = (int*)HP.GetUnsafePtr();` 会被当成 NativeArray 字段而生成 `hpPtr_ptr`（A2）。
+
+        /// <summary>
+        /// <c>batchOffsetVar</c> 的哨兵值："**没有**可知的批循环偏移"（单 `IJob` 路径：用户的循环
+        /// 起点不属于生成器可知的批循环）。此时不允许发"假定索引相对基址连续"的无掩码向量 store
+        /// （见 <c>SimdExpressionTranslator.EmitElementStore</c> 的 NT-01 判定）。
+        /// </summary>
+        public const string UnknownBatchOffset = "0";
 
         public SimdControlFlowGenerator(
             SemanticModel semanticModel,
@@ -151,10 +156,6 @@ namespace NativeTranspiler.Analyzer
             _batchOffsetVar = batchOffsetVar;
             _nativeArrayParams = nativeArrayParams ?? new Dictionary<string, string>();
             _batchLoopVar = batchLoopVar;
-
-            // 指针符号表由分析器（同一份方法语法）提供，保证语义模型不可用时也能判定裸指针变量
-            foreach (var kv in varAnalyzer.LocalPointerElemCpp) _localPointerElemCpp[kv.Key] = kv.Value;
-            foreach (var kv in varAnalyzer.ParamPointerElemCpp) _paramPointerElemCpp[kv.Key] = kv.Value;
 
             // Pre-identify float2/int2 variables that are varying
             foreach (var kvp in _variables)
@@ -203,7 +204,7 @@ namespace NativeTranspiler.Analyzer
             //   时整段退回 per-lane 标量循环。正确性由构造保证（与标量路径逐位一致），只是放弃该 job 的 SIMD 收益。
             // ★ Enhanced: reduction loops use count-loop, only non-reduction varying → per-lane
             if (string.IsNullOrEmpty(_indexParamName)
-                || HasVaryingNonReductionLoop(body) || HasNonVectorizableCall(body))
+                || HasVaryingNonReductionLoop(body) || SimdVectorizability.HasNonVectorizableCall(body, _varAnalyzer))
             {
                 GeneratePerLaneFullBody(body);
             }
@@ -248,93 +249,16 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>SIMD 路径原生支持（可向量化）的方法名——不属于这些名字且实参含 varying 的调用一律视为不可向量化。</summary>
-        private static readonly HashSet<string> VectorizableCallNames = new()
-        {
-            "min", "max", "clamp", "abs", "sqrt", "floor", "ceil", "round", "trunc", "lerp",
-            "sin", "cos", "tan", "atan", "atan2", "asin", "acos", "exp", "log", "log2", "log10",
-            "pow", "sign", "dot", "length", "distance", "normalize", "saturate", "step", "smoothstep",
-            "fma", "mad", "rsqrt", "rcp", "frac", "mod", "fmod", "hypot", "deg2rad", "rad2deg",
-            "IsNaN", "IsInfinity", "CountBits", "CountLeadingZeros", "CountTrailingZeros",
-            "ReverseBits", "RotateLeft", "RotateRight", "DivRem", "BitIncrement", "BitDecrement",
-            "CopySign", "FusedMultiplyAdd", "ScaleB", "Cbrt", "Sinh", "Cosh", "Tanh",
-            "Asinh", "Acosh", "Atanh", "SinCos", "IEEERemainder", "GetUnsafePtr", "GetUnsafeReadOnlyPtr",
-            "Increment", "Decrement", "Add", "Exchange", "CompareExchange", "Read",
-            "ArrayElementAsRef", "AsRef", "GetRef",
-            // System.Math / System.MathF 的 PascalCase 形式（TranslateMathFFunction 的 case 集合）。
-            // 缺了它们，`Math.Max(cx, Math.Min(cx, n))` 这种常见钳位写法会被误判成"不可向量化"。
-            "Min", "Max", "Clamp", "Sqrt", "Abs", "Ceiling", "Round", "Truncate",
-            "Sin", "Cos", "Tan", "Asin", "Acos", "Atan", "Atan2",
-            "Sinh", "Cosh", "Tanh", "Exp", "Log", "Log10", "Pow",
-        };
+        private static HashSet<string> VectorizableCallNames => SimdVectorizability.VectorizableCallNames;
 
-        /// <summary>
-        /// 是否存在「无法向量化」的调用：
-        ///   - <c>Interlocked.*</c>：per-lane 原子递增/加（源里每 lane 各自一次原子操作，向量化无意义）
-        ///   - <c>UnsafeUtility.ArrayElementAsRef</c>：返回元素引用，需要标量地址
-        ///   - 用户静态辅助函数（如 <c>Expand</c>/<c>BinKey</c>）被喂 varying 实参
-        /// 命中即整段退回 per-lane 标量循环 —— 宁可慢，不可生成错代码。
-        /// </summary>
-        private bool HasNonVectorizableCall(SyntaxNode node)
-        {
-            foreach (var inv in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
-            {
-                string name = null;
-                if (inv.Expression is MemberAccessExpressionSyntax ma)
-                    name = ma.Name.Identifier.Text;
-                else if (inv.Expression is IdentifierNameSyntax idn)
-                    name = idn.Identifier.Text;
-                if (name == null) continue;
-
-                // 原子操作：任何实参 varying 就无法向量化（每 lane 一次原子）
-                if (name == "Increment" || name == "Decrement" || name == "Add" ||
-                    name == "Exchange" || name == "CompareExchange")
-                {
-                    if (inv.Expression is MemberAccessExpressionSyntax mac
-                        && mac.Expression.ToString().EndsWith("Interlocked"))
-                        return true;
-                    continue;
-                }
-                if (name == "ArrayElementAsRef") return true;
-                if (VectorizableCallNames.Contains(name)) continue;
-
-                foreach (var arg in inv.ArgumentList?.Arguments ?? default)
-                {
-                    try
-                    {
-                        if (_varAnalyzer.ClassifyExpression(arg.Expression) >= VarKind.Varying)
-                            return true;
-                    }
-                    catch { }
-                }
-            }
-
-            // 裸指针 + varying 下标 + **宽元素**（float2/int2/自定义结构）：SIMD 路径只能取 lane0，
-            // 等于每 lane 重复写同一地址 —— 静默错解，必须整段退回。
-            // 内置标量元素（byte/sbyte/uint/short/bool）不再兜底：A1 已提供逐 lane gather 读 +
-            // EmitElementStore 的掩码写，能正确向量化。
-            foreach (var ea in node.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
-            {
-                if (ea.ArgumentList?.Arguments.Count == 0) continue;
-                if (ea.Expression is not IdentifierNameSyntax baseId) continue;
-                if (PointerElemCpp(baseId.Identifier.Text) is not { } elemCpp) continue;
-                if (elemCpp == "float" || elemCpp == "int" || elemCpp == "unsigned char" || elemCpp == "signed char"
-                    || elemCpp == "unsigned int" || elemCpp == "short" || elemCpp == "unsigned short" || elemCpp == "bool")
-                    continue;
-                try
-                {
-                    if (_varAnalyzer.ClassifyExpression(ea.ArgumentList.Arguments[0].Expression) >= VarKind.Varying)
-                        return true;
-                }
-                catch { }
-            }
-            return false;
-        }
+        // 「无法向量化」的判据已抽到 SimdVectorizability.HasNonVectorizableCall（唯一一份实现：
+        // 发射侧与校验侧共用；校验侧命中即报 NT031，让"以为开了向量化、实际跑 per-lane 标量"不再静默）。
 
         /// <summary>裸指针变量（局部/形参）指向的元素 C++ 类型；不是裸指针返回 null。</summary>
         private string PointerElemCpp(string name)
         {
-            if (_localPointerElemCpp.TryGetValue(name, out var le)) return le;
-            if (_paramPointerElemCpp.TryGetValue(name, out var pe)) return pe;
+            if (_varAnalyzer.LocalPointerElemCpp.TryGetValue(name, out var le)) return le;
+            if (_varAnalyzer.ParamPointerElemCpp.TryGetValue(name, out var pe)) return pe;
             return null;
         }
 
@@ -414,21 +338,38 @@ namespace NativeTranspiler.Analyzer
                     scalarBody, $@"\b{System.Text.RegularExpressions.Regex.Escape(kvp.Key)}\b", kvp.Value);
 
             bool hasReturn = scalarBody.Contains("return;");
+
+            // ★ NT-04：`Execute()`（IJob，无索引形参）根本没有 lane 可分 —— 索引形参名是空的，
+            //   包 lane 循环只会把整段 body 跑 g_simdWidthInt 次（AVX2 ×8）且 lane 变量是个死变量。
+            //   与 Generate() 里那句注释一致："整段走标量翻译"。此时 `return;` 保持原样
+            //   （IJob 一次调用 ⇒ 退出整个 job，与 C# 语义一致）。
+            if (string.IsNullOrEmpty(_indexParamName))
+            {
+                foreach (var line in scalarBody.Split('\n'))
+                    if (!string.IsNullOrWhiteSpace(line))
+                        AppendLine(line.TrimEnd());
+                return;
+            }
+
+            // ★ NT-03：`return;`（Execute 内）只结束**本次 index**。直接换 `break;` 会跳出
+            //   **lane 循环** ⇒ 静默跳过最多 g_simdWidthInt-1 个 index。这里与
+            //   OuterSimdGenerator.GeneratePerLane 同构：do{}while(false) 把 break 收进"本次 lane"。
+            //   （嵌在体内循环里的 return 无法用 break 表达 ⇒ 由 ReturnStatementRewriter 写标记，
+            //     让构建期扫描失败 —— 见 NT-07。）
             if (hasReturn)
-                scalarBody = scalarBody.Replace("return;", "break;");
+                scalarBody = ReturnStatementRewriter.Rewrite(scalarBody, body, "break;");
 
             AppendLine("for (int __ej_lane = 0; __ej_lane < g_simdWidthInt; __ej_lane++)");
             AppendLine("{");
             _indent++;
-            // ⚠ `Execute()`（IJob，无索引形参）时 _indexParamName 为空 —— 直接拼会生成 `int = si + __ej_lane;`。
-            //   此时实体体自己用 `index` 作循环变量，不能声明同名；直接整段交给标量翻译（见 Generate）。
-            if (!string.IsNullOrEmpty(_indexParamName))
-                AppendLine($"int {_indexParamName} = si + __ej_lane;");
+            AppendLine($"int {_indexParamName} = si + __ej_lane;");
+            if (hasReturn) { AppendLine("do {"); _indent++; }
 
             foreach (var line in scalarBody.Split('\n'))
                 if (!string.IsNullOrWhiteSpace(line))
                     AppendLine(line.TrimEnd());
 
+            if (hasReturn) { _indent--; AppendLine("} while(false);"); }
             _indent--;
             AppendLine("}");
         }

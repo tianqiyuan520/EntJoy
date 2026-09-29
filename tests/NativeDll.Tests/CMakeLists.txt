@@ -53,8 +53,36 @@ add_executable(MPMCInjectorTests
     MPMCInjectorTests.cpp
 )
 
+# Item 8：亲和掩码纯函数（ThreadAffinity.h）单测 —— 纯头文件，不链接 JobSystem 源码。
+add_executable(AffinityMaskTests
+    AffinityMaskTests.cpp
+)
+
 add_executable(ImplicitBatchTests
     ImplicitBatchTests.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
+)
+
+add_executable(ShutdownFinalizeTests
+    ShutdownFinalizeTests.cpp    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
+)
+
+# Item 1（打包 plain IJob 批）：链接 Exports.cpp 以便同时覆盖导出层的 run 分组逻辑。
+add_executable(PackedBatchTests
+    PackedBatchTests.cpp
+    ../../src/NativeDll/Exports.cpp
     ../../src/NativeDll/JobSystem.cpp
     ../../src/NativeDll/JobSystem_State.cpp
     ../../src/NativeDll/JobSystem_Tiles.cpp
@@ -92,7 +120,19 @@ target_include_directories(MPMCInjectorTests PRIVATE
     ../../src/NativeDll
 )
 
+target_include_directories(AffinityMaskTests PRIVATE
+    ../../src/NativeDll
+)
+
 target_include_directories(ImplicitBatchTests PRIVATE
+    ../../src/NativeDll
+)
+
+target_include_directories(ShutdownFinalizeTests PRIVATE
+    ../../src/NativeDll
+)
+
+target_include_directories(PackedBatchTests PRIVATE
     ../../src/NativeDll
 )
 
@@ -125,6 +165,17 @@ if(MSVC)
 
     target_compile_options(ImplicitBatchTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
     target_compile_definitions(ImplicitBatchTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(ShutdownFinalizeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(ShutdownFinalizeTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(PackedBatchTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    # JOB_SYSTEM_EXPORT：本目标把 Exports.cpp 链进 EXE（覆盖导出层分组逻辑），
+    # 不定义时 JOB_API 展开为 dllimport → C2491（不允许 dllimport 函数的定义）。
+    target_compile_definitions(PackedBatchTests PRIVATE NDEBUG NOMINMAX ENTJOY_TESTING JOB_SYSTEM_EXPORT)
+
+    target_compile_options(AffinityMaskTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2)
+    target_compile_definitions(AffinityMaskTests PRIVATE NDEBUG NOMINMAX)
 else()
     # Linux/Clang：std::thread 需要 pthread；sanitizer flags 由 CI 的 CMAKE_CXX_FLAGS 传入。
     add_compile_options(-pthread)

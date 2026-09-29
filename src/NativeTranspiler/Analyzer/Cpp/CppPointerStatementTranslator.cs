@@ -133,8 +133,141 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        /// <summary>
+        /// 把成员访问的"接收者"归一化为字段名：`X` 与 **`this.X`** 都返回 "X"。
+        ///
+        /// `this.X` 是合法的 C# 字段访问（局部变量遮蔽同名字段时必须这样写）。旧实现只认裸标识符
+        /// ⇒ `this.X` 落到基类的 `default:` 分支，产出 `/*__ENTJOY_UNSUPPORTED_EXPR__ThisExpression*/`
+        /// （构建失败，独立验收 C21）。字段名相等时两者的绑定完全一致（`X_ptr` / `X_length`），
+        /// 且 `this.X` 的**符号**就是字段，不存在遮蔽歧义。
+        /// </summary>
+        protected static string SimpleMemberName(ExpressionSyntax? expression)
+            => expression switch
+            {
+                IdentifierNameSyntax identifier => identifier.Identifier.Text,
+                MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } thisAccess
+                    => thisAccess.Name.Identifier.Text,
+                _ => null
+            };
+
+        protected override void TranslateStatement(StatementSyntax statement)
+        {
+            // ① `unchecked { ... }`：C# 默认语义就是 unchecked，而**本路径**的 int `+ - *`／一元负号
+            //    本来就按 `(unsigned)` 环绕发（EnableWrapSafeIntArithmetic）⇒ 等价于普通块。
+            //    旧实现落到基类 default 分支 ⇒ 发 `__ENTJOY_UNSUPPORTED_STMT__CheckedStatement` 标记，
+            //    把完全可译的代码打成构建失败。
+            //    ⚠ 实体路径（CppEntityStatementTranslator，wrap-safe = false）**不满足前提**：
+            //      那边的算术是裸 C++（有符号溢出 UB）⇒ 由本属性保证仍走标记。
+            //    ⚠ `checked { }` **必须**继续发标记：C++ 无法表达"溢出即抛"。
+            if (EnableWrapSafeIntArithmetic
+                && statement is CheckedStatementSyntax uncheckedStmt
+                && uncheckedStmt.Keyword.IsKind(SyntaxKind.UncheckedKeyword))
+            {
+                TranslateBlock(uncheckedStmt.Block, skipOuterBraces: false);
+                return;
+            }
+
+            // ② `switch` 语句（仅常量 case + 整数/字符/布尔选择子）→ C++ `switch`。语义依据：
+            //    C# 要求每个 section 以 break/goto/return/throw 结束（空 section 可穿透），
+            //    常量 case 的比较语义与 C++ 一致 ⇒ 合法 C# 的一一映射不改变行为。
+            //    其余形态（模式 case、枚举/字符串选择子、非常量 case）返回 false ⇒ 基类发标记。
+            if (statement is SwitchStatementSyntax switchStmt && TryTranslateSwitchStatement(switchStmt))
+                return;
+
+            base.TranslateStatement(statement);
+        }
+
+        /// <summary>
+        /// `switch` 语句 → C++ `switch`（**仅**常量 case + 整数/字符/布尔选择子）。任何不确定的形态
+        /// 都返回 false，由基类写唯一标记让构建失败（绝不静默降级）。
+        /// </summary>
+        private bool TryTranslateSwitchStatement(SwitchStatementSyntax switchStmt)
+        {
+            var selectorType = _semanticModel.GetTypeInfo(switchStmt.Expression).Type;
+            if (selectorType == null || !IsSwitchableSelectorType(selectorType))
+                return false;
+
+            foreach (var section in switchStmt.Sections)
+            {
+                foreach (var label in section.Labels)
+                {
+                    if (label is DefaultSwitchLabelSyntax)
+                        continue;
+                    if (label is not CaseSwitchLabelSyntax caseLabel)
+                        return false;   // 模式 case（`case int x when ...`）/ `case var`
+                    if (!_semanticModel.GetConstantValue(caseLabel.Value).HasValue)
+                        return false;   // 非常量 case 值：C++ 要求整型常量表达式
+                }
+            }
+
+            AppendIndent();
+            _builder.Append("switch (");
+            TranslateExpression(switchStmt.Expression);
+            _builder.AppendLine(")");
+            AppendIndent();
+            _builder.AppendLine("{");
+            _indentLevel++;
+            foreach (var section in switchStmt.Sections)
+            {
+                foreach (var label in section.Labels)
+                {
+                    AppendIndent();
+                    if (label is CaseSwitchLabelSyntax caseLabel)
+                    {
+                        _builder.Append("case ");
+                        TranslateExpression(caseLabel.Value);
+                        _builder.AppendLine(":");
+                    }
+                    else
+                    {
+                        _builder.AppendLine("default:");
+                    }
+                }
+
+                _indentLevel++;
+                foreach (var sectionStatement in section.Statements)
+                    TranslateStatement(sectionStatement);
+                _indentLevel--;
+            }
+
+            _indentLevel--;
+            AppendIndent();
+            _builder.AppendLine("}");
+            return true;
+        }
+
+        private static bool IsSwitchableSelectorType(ITypeSymbol type)
+        {
+            switch (type.SpecialType)
+            {
+                case SpecialType.System_Boolean:
+                case SpecialType.System_Char:
+                case SpecialType.System_SByte:
+                case SpecialType.System_Byte:
+                case SpecialType.System_Int16:
+                case SpecialType.System_UInt16:
+                case SpecialType.System_Int32:
+                case SpecialType.System_UInt32:
+                case SpecialType.System_Int64:
+                case SpecialType.System_UInt64:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
+            // `this.X` ≡ 裸字段访问 `X`：**先**归一到标识符翻译，与裸写形态逐字一致
+            // （`X[k]` / `X.GetUnsafePtr()` / `X.Length` 都走与裸名相同的既定路径）。
+            // 旧实现让 `this` 落到基类 default 分支 ⇒ 产物是
+            // `/*__ENTJOY_UNSUPPORTED_EXPR__ThisExpression*/`（构建失败，独立验收 C21）。
+            if (memberAccess.Expression is ThisExpressionSyntax && memberAccess.Name is IdentifierNameSyntax thisMember)
+            {
+                TranslateIdentifier(thisMember);
+                return;
+            }
+
             var exprType = _semanticModel.GetTypeInfo(memberAccess.Expression).Type;
             string memberName = memberAccess.Name.Identifier.Text;
 
@@ -143,9 +276,7 @@ namespace NativeTranspiler.Analyzer
 
             if (isNativeArray)
             {
-                string fieldName = null;
-                if (memberAccess.Expression is IdentifierNameSyntax id)
-                    fieldName = id.Identifier.Text;
+                string fieldName = SimpleMemberName(memberAccess.Expression);
 
                 if (memberName == "Length")
                 {
@@ -207,9 +338,7 @@ namespace NativeTranspiler.Analyzer
             var exprType = _semanticModel.GetTypeInfo(elementAccess.Expression).Type;
             if (exprType != null && NativeTranspiler.IsEntJoyContainerNamed(exprType, Config.NativeArray))
             {
-                string fieldName = null;
-                if (elementAccess.Expression is IdentifierNameSyntax id)
-                    fieldName = id.Identifier.Text;
+                string fieldName = SimpleMemberName(elementAccess.Expression);
 
                 if (fieldName != null && _nativeArrayListNames.Contains(fieldName))
                     _builder.Append(fieldName + "_ptr");
@@ -242,11 +371,12 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (methodSymbol.Name == Config.GetUnsafePtr)
                     {
-                        // 获取调用目标，例如 Counts.GetUnsafePtr() 中的 Counts
+                        // 获取调用目标，例如 Counts.GetUnsafePtr() 中的 Counts（也支持 this.Counts）
                         var targetExpr = (invocation.Expression as MemberAccessExpressionSyntax)?.Expression;
-                        if (targetExpr is IdentifierNameSyntax id && _nativeArrayListNames.Contains(id.Identifier.Text))
+                        string targetField = SimpleMemberName(targetExpr);
+                        if (targetField != null && _nativeArrayListNames.Contains(targetField))
                         {
-                            _builder.Append(id.Identifier.Text + "_ptr");
+                            _builder.Append(targetField + "_ptr");
                         }
                         else
                         {
@@ -344,37 +474,46 @@ namespace NativeTranspiler.Analyzer
         /// （50,000 实体 enable 位图错 78%；`(1UL&lt;&lt;40)&gt;&gt;32` 由 256 变成 -4）。
         /// </summary>
         protected override string NormalizeNumericLiteral(string text)
-        {
-            if (text.EndsWith("UL", StringComparison.OrdinalIgnoreCase) ||
-                text.EndsWith("LU", StringComparison.OrdinalIgnoreCase))
-                return text.Substring(0, text.Length - 2) + "ULL";
-            if (text.EndsWith("L", StringComparison.OrdinalIgnoreCase))
-                return text.Substring(0, text.Length - 1) + "LL";
-            return text;   // U/u（C# uint ↔ C++ unsigned int）两语言一致，原样保留
-        }
+            => CppNumericLiteral.NormalizeSuffix(text);
 
-        private bool IsInt32Type(ExpressionSyntax expr)
+        /// <summary>C# 表达式类型（解析失败返回 <see cref="SpecialType.None"/>）。</summary>
+        private SpecialType GetExpressionSpecialType(ExpressionSyntax expr)
         {
             try
             {
-                var t = _semanticModel.GetTypeInfo(expr).Type;
-                return t != null && (t.SpecialType == SpecialType.System_Int32 || t.SpecialType == SpecialType.System_UInt32);
+                return _semanticModel.GetTypeInfo(expr).Type?.SpecialType ?? SpecialType.None;
             }
-            catch { return false; }
+            catch { return SpecialType.None; }
         }
+
+        private bool Is32BitIntType(SpecialType t)
+            => t == SpecialType.System_Int32 || t == SpecialType.System_UInt32;
 
         protected override void TranslateExpression(ExpressionSyntax expr)
         {
-            // Unary minus on int → (int)(0u - (unsigned)x) — wrap-safe.
             if (EnableWrapSafeIntArithmetic
                 && expr is PrefixUnaryExpressionSyntax pre
-                && pre.IsKind(SyntaxKind.UnaryMinusExpression)
-                && IsInt32Type(pre.Operand))
+                && pre.IsKind(SyntaxKind.UnaryMinusExpression))
             {
-                _builder.Append("(int)(0u - (unsigned)(");
-                TranslateExpression(pre.Operand);
-                _builder.Append("))");
-                return;
+                var operandType = GetExpressionSpecialType(pre.Operand);
+                // ★ C# `-uint`：结果类型是 **long**（不是 uint、更不是 int）。按 32 位回绕发出
+                //   会得到 `1` 而不是 `-4294967295L`（uint.MaxValue 取负）。uint 的最大值取负
+                //   一定能放进 int64 ⇒ 直接 64 位取负，无溢出。
+                if (operandType == SpecialType.System_UInt32)
+                {
+                    _builder.Append("(-(long)(");
+                    TranslateExpression(pre.Operand);
+                    _builder.Append("))");
+                    return;
+                }
+                // 一元负号 int → (int)(0u - (unsigned)x) — wrap-safe（C# 的 `-int.MinValue` 仍是 int）。
+                if (operandType == SpecialType.System_Int32)
+                {
+                    _builder.Append("(int)(0u - (unsigned)(");
+                    TranslateExpression(pre.Operand);
+                    _builder.Append("))");
+                    return;
+                }
             }
             base.TranslateExpression(expr);
         }
@@ -382,16 +521,35 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateBinaryExpression(BinaryExpressionSyntax binary)
         {
             string op = binary.OperatorToken.Text;
-            if (EnableWrapSafeIntArithmetic
-                && (op == "*" || op == "+" || op == "-")
-                && IsInt32Type(binary.Left) && IsInt32Type(binary.Right))
+            if (EnableWrapSafeIntArithmetic && (op == "*" || op == "+" || op == "-"))
             {
-                _builder.Append("(int)((unsigned)(");
-                TranslateExpression(binary.Left);
-                _builder.Append(") ").Append(op).Append(" (unsigned)(");
-                TranslateExpression(binary.Right);
-                _builder.Append("))");
-                return;
+                var leftType = GetExpressionSpecialType(binary.Left);
+                var rightType = GetExpressionSpecialType(binary.Right);
+                if (Is32BitIntType(leftType) && Is32BitIntType(rightType))
+                {
+                    // ★ C# 二元数值提升（spec 12.4.7）：一边 int、一边 uint ⇒ **两侧都提升为 long**
+                    //   再运算，结果类型是 long。按 `(int)((unsigned)L op (unsigned)R)` 发出是
+                    //   32 位无符号算术 ⇒ 静默错值：
+                    //     100000 * 100000u   C# = 10,000,000,000 / 旧发射 = 1,410,065,408
+                    //   二阶后果：回绕后的节点类型成了 int，随后的 `>>` / `%` 变成有符号语义。
+                    if (leftType != rightType)
+                    {
+                        _builder.Append("(long)(");
+                        TranslateExpression(binary.Left);
+                        _builder.Append(") ").Append(op).Append(" (long)(");
+                        TranslateExpression(binary.Right);
+                        _builder.Append(')');
+                        return;
+                    }
+                    // 同号 32 位（int op int / uint op uint）的 C# 结果**仍是 32 位**：
+                    // 回绕不是 UB ⇒ 保留无符号回绕写法。
+                    _builder.Append("(int)((unsigned)(");
+                    TranslateExpression(binary.Left);
+                    _builder.Append(") ").Append(op).Append(" (unsigned)(");
+                    TranslateExpression(binary.Right);
+                    _builder.Append("))");
+                    return;
+                }
             }
             base.TranslateBinaryExpression(binary);
         }

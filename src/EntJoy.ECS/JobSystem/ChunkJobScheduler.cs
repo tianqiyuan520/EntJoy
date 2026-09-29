@@ -238,6 +238,16 @@ namespace EntJoy.ECS.JobSystem
             catch { NativeChunkJobs.ChunkCleanup(contextBlock); throw; }
         }
 
+        /// <summary>
+        /// Chunk 级过滤：`Archetype.IsMatch` 只覆盖 All/Any/None/AllEnabled，
+        /// **必须**再应用 Shared / Changed 过滤 —— 否则 `WithShared(v)` / `WithChanged&lt;T&gt;()` 的 job
+        /// 会处理所有匹配 archetype 的 chunk（包括不匹配的），属于静默错值。
+        /// 与 `EntityQuery` / `ChunkJobCollector` 使用同一对判定函数，保证四条路径一致。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool MatchesChunkFilters(EntityManager entityManager, QueryBuilder query, Chunk chunk)
+            => entityManager.MatchesSharedFilter(query, chunk) && entityManager.MatchesChangedFilter(query, chunk);
+
         private static void CollectMatchingChunks(EntityManager entityManager, QueryBuilder query, List<Chunk> chunkList, List<Archetype> matchingArchetypes)
         {
             for (int i = 0; i < entityManager.ArchetypeCount; i++)
@@ -247,7 +257,7 @@ namespace EntJoy.ECS.JobSystem
                 {
                     matchingArchetypes.Add(arch);
                     foreach (var c in arch.ChunkSpan)
-                        if (c.EntityCount > 0) chunkList.Add(c);
+                        if (c.EntityCount > 0 && MatchesChunkFilters(entityManager, query, c)) chunkList.Add(c);
                 }
             }
         }
@@ -480,6 +490,10 @@ namespace EntJoy.ECS.JobSystem
                     lock (entityManager._pendingNativeEventsLock)
                         entityManager._pendingNativeEvents.Add((contextBlock, evtJobType, world));
                 }
+                // 注意：这里**故意不传** matchingArchetypes（entity-batch 缓存只持有 ptr/count，
+                // 每调度 ToArray 一遍 MatchingArchetypes 会在热路径上产生分配）。
+                // 因此该 Job 属于「archetype 归属未知」→ EntityManager 会把它记入 _unscopedJobs，
+                // 由 CompleteArchetypeJobs 保守等待，结构变更不会与它并发写同一 chunk。
                 var ret = TrackEntityJob(entityManager, FromNative(handle));
                 if (cDiag)
                 {
@@ -637,7 +651,7 @@ namespace EntJoy.ECS.JobSystem
                 {
                     foreach (var chunk in archetype.ChunkSpan)
                     {
-                        if (chunk.EntityCount > 0)
+                        if (chunk.EntityCount > 0 && MatchesChunkFilters(entityManager, query, chunk))
                         {
                             chunkList.Add(chunk);
                         }
@@ -739,7 +753,7 @@ namespace EntJoy.ECS.JobSystem
                     matchingArchetypes.Add(archetype);
                     foreach (var chunk in archetype.ChunkSpan)
                     {
-                        if (chunk.EntityCount > 0)
+                        if (chunk.EntityCount > 0 && MatchesChunkFilters(entityManager, query, chunk))
                         {
                             chunkList.Add(chunk);
                         }
@@ -833,7 +847,7 @@ namespace EntJoy.ECS.JobSystem
                     matchingArchetypes.Add(archetype);
                     foreach (var chunk in archetype.ChunkSpan)
                     {
-                        if (chunk.EntityCount > 0)
+                        if (chunk.EntityCount > 0 && MatchesChunkFilters(entityManager, query, chunk))
                         {
                             chunkList.Add(chunk);
                         }
@@ -847,10 +861,9 @@ namespace EntJoy.ECS.JobSystem
                 return new RawChunkScheduleCache(entityManager.StructuralVersion, null, 0, false);
             }
 
-            // 托管路径：chunkId（整数）+ 一个 GCHandle 保活 Chunk[]，不给每 chunk GCHandle
+            // 托管路径：chunkId（整数）+ 直接持有 Chunk[] 引用（cache.ManagedChunkArray，无 GCHandle）
             var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
             var chunkArray = chunkList.ToArray();
-            var chunkArrayGCHandle = GCHandle.Alloc(chunkArray, GCHandleType.Normal);
             for (int ci = 0; ci < chunkCount; ci++)
             {
                 var chunk = chunkArray[ci];
@@ -889,6 +902,29 @@ namespace EntJoy.ECS.JobSystem
             AddComponentTypesHash(ref hash, query.None);
             AddComponentTypesHash(ref hash, query.AllEnabled);
             hash.Add(query.LimitCount);
+
+            // Shared 过滤必须进指纹：否则 `.WithShared(v1)` 与 `.WithShared(v2)` 会共享同一缓存条目，
+            // 第二条查询直接复用第一条的 Chunk 集合（过滤值被无视）。
+            hash.Add(query.HasSharedFilter);
+            if (query.HasSharedFilter)
+            {
+                hash.Add(query.SharedFilterType.Id);
+                hash.Add(query.SharedFilterValue?.GetHashCode() ?? 0);
+            }
+
+            // 变更追踪过滤同理：ChangedComponents / MinChangedVersion 不同的查询不能共用缓存。
+            AddComponentTypesHash(ref hash, query.ChangedComponents);
+            hash.Add(query.MinChangedVersion);
+
+            // 关系过滤：进指纹以便区分；注意 job 路径目前不做**逐槽位**关系匹配
+            // （chunk 级只能看到列存在性），该限制记录在 Runtime-Contracts 文档中。
+            hash.Add(query.HasRelationshipFilter);
+            if (query.HasRelationshipFilter)
+            {
+                hash.Add(query.RelationshipFilterType.Id);
+                hash.Add(query.RelationshipFilterTarget.TargetId);
+                hash.Add(query.RelationshipFilterTarget.TargetVersion);
+            }
             return hash.ToHashCode();
         }
 
@@ -1040,6 +1076,9 @@ namespace EntJoy.ECS.JobSystem
                     if (chunkData.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentTypeIndices);
                     if (chunkData.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)chunkData.requiredComponentArrays);
                     if (chunkData.requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)chunkData.requiredEnableBitMaps);
+                    // sharedValuePtrs 由 FillSharedValuePtrs 分配（每 chunk 一次 HGlobal）；
+                    // 此前漏释放 ⇒ 每个含 blittable shared 组件的 chunk、每次缓存重建都泄漏一块。
+                    if (chunkData.sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)chunkData.sharedValuePtrs);
                     if (OwnsChunkHandles && chunkData.chunkHandle != IntPtr.Zero)
                     {
                         var handle = GCHandle.FromIntPtr(chunkData.chunkHandle);
@@ -1429,8 +1468,10 @@ namespace EntJoy.ECS.JobSystem
             where T : struct, IJobChunk
         {
             var allEnabledTypes = query.AllEnabled;
+            // buildPayload: false —— 本路径直接遍历 Chunk 对象，不需要 ChunkJobData 表；
+            // 之前忽略了 out ptr 又照建 payload ⇒ 每次托管回退调度泄漏一份 HGlobal 表 + 每 chunk 位图块。
             ChunkJobCollector.CollectAndBuildManaged(entityManager, query, fillBitmaps: true, hasEnabledFilter: true,
-                out var ptr, out var chunkArray, out var chunkCount, out var archetypes);
+                out _, out var chunkArray, out var chunkCount, out var archetypes, buildPayload: false);
             if (chunkCount == 0) return default;
 
             var parallelJob = new ManagedChunkParallelJob<T>
@@ -1490,6 +1531,8 @@ namespace EntJoy.ECS.JobSystem
                 {
                     var chunk = chunks[ci];
                     if (chunk.EntityCount == 0) continue;
+                    // job.Run(query) 同样必须应用 Shared / Changed 过滤
+                    if (!MatchesChunkFilters(entityManager, query, chunk)) continue;
                     var mask = hasFilter ? ComputeChunkMask(chunk, allEnabledTypes) : default;
                     job.Execute(new ArchetypeChunk(chunk), mask);
                 }

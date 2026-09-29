@@ -18,11 +18,25 @@ namespace EntJoy.ECS
         private Archetype[] allArchetypes;  // 所有原型数组
 
         private int archetypeCount;
+        private int archetypeSetVersion;
         public int ArchetypeCount
         {
             get { return archetypeCount; }
-            set { archetypeCount = value; }
+            set
+            {
+                if (archetypeCount != value) archetypeSetVersion++;
+                archetypeCount = value;
+            }
         }
+
+        /// <summary>
+        /// Archetype **集合身份**版本：新建、清空、恢复（数量被外部直接改写）时递增。
+        ///
+        /// 查询的增量刷新必须用它判"匹配集合能否复用"，**不能只比数量**：
+        /// 数量相同而身份不同（Restore 后整体重建、或一增一删恰好抵消）时，
+        /// 复用缓存会让查询继续引用**已释放**的 Archetype ⇒ 静默返回 0 个实体。
+        /// </summary>
+        internal int ArchetypeSetVersion => archetypeSetVersion;
         public ref readonly Archetype[] Archetypes => ref allArchetypes;
 
         /// <summary>实体回收队列（对象池）</summary>
@@ -92,13 +106,36 @@ namespace EntJoy.ECS
 
         /// <summary>当前已创建的实体总数</summary>
         private int entityCount;  // 实体计数器
+        /// <summary>
+        /// ⚠ 语义是**已发放的 id 计数**（单调递增，`newEntity.Id = entityCount++`），**不是存活实体数**：
+        /// Destroy 不会让它下降。存活数请看 <see cref="LiveEntityCount"/>（诊断/内存报告用它）。
+        /// 保留该语义是为了兼容"按 id 从 0 到 EntityCount-1 遍历"的既有用法。
+        /// </summary>
         public int EntityCount => entityCount;
+
+        /// <summary>当前**存活**实体数：按各 Archetype 的实际计数求和（Destroy 后会下降）。</summary>
+        internal int LiveEntityCount
+        {
+            get
+            {
+                int total = 0;
+                for (int i = 0; i < archetypeCount; i++)
+                {
+                    var a = allArchetypes[i];
+                    if (a != null) total += a.EntityCount;
+                }
+                return total;
+            }
+        }
         private int structuralVersion;
         public int StructuralVersion => structuralVersion;
 
         private bool _disposed;
         private readonly object _activeJobLock = new();
         private readonly List<JobHandle> _activeJobs = new();
+        // archetype 归属未知的 Job（无法证明它不触碰目标 archetype）⇒ 结构性变更必须保守等待。
+        // 现实来源：native entity-batch（IJobEntity/IJobChunk 的 raw 路径）注册时不带 archetypes。
+        private readonly List<JobHandle> _unscopedJobs = new();
         private readonly Dictionary<int, List<JobHandle>> _archetypeJobs = new(); // Per-Archetype Job Tracking
         private readonly Dictionary<JobHandle, ComponentType[]> _jobWrittenComponents = new(); // Job → written components
         private readonly object _structuralLock = new();  // 结构性操作（NewEntity/DestroyEntity/AddComponent/RemoveComponent）的锁
@@ -110,6 +147,10 @@ namespace EntJoy.ECS
         // 系统间依赖跟踪：组件类型 Id → 最后写入它的 Job（帧内跨系统传播，DOTS EntityDependencyManager 语义）。
         // 由 SystemRunner 在每个系统结束后按 [Write] 声明维护；CompleteActiveJobs（全量）后清空。
         private readonly Dictionary<int, JobHandle> _lastWritePerComponent = new();
+        // ★ A 项：读依赖表（组件 → 最后读 Job，多读系统时组合）。写系统入站时合并它，
+        //   使 [Read(X)] 的 Job 仍在飞时后续 [Write(X)] 必须等 —— 否则两者并发访问 X（撕裂/陈旧读）。
+        //   读系统**不**合并本表 ⇒ 读读仍然并行。ENTJOY_SYSTEM_READ_WRITE_ORDER=0 时整表不使用。
+        private readonly Dictionary<int, JobHandle> _lastReadPerComponent = new();
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
@@ -162,6 +203,7 @@ namespace EntJoy.ECS
             // Todo: 如果有移除archetype的操作,空白的数组需要被填充
             allArchetypes[archetypeCount] = archetype;
             archetypeCount++;
+            archetypeSetVersion++;   // 集合身份变化（见 ArchetypeSetVersion）
             return archetype;
         }
 
@@ -204,6 +246,8 @@ namespace EntJoy.ECS
             ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
             _observers?.Clear();
             _observerCount = 0;
+            // 上面已 CompleteActiveJobs() ⇒ 无在飞 Job，记账表可整体清空（防残留条目跨 World 存活）
+            ClearJobTrackingNoLock();
             // 用普通 new 分配的数组，直接丢弃即可
             entities = Array.Empty<EntityIndexInWorld>();
             NativeLocateStorage.Free(_locateB);
@@ -211,6 +255,7 @@ namespace EntJoy.ECS
             _locateBCapacity = 0;
             allArchetypes = Array.Empty<Archetype>();
             archetypeCount = 0;
+            archetypeSetVersion++;   // 整体清空/Restore ⇒ 之前缓存的匹配集合（持有旧 Archetype）全部作废
             entityCount = 0;
         }
 
@@ -218,6 +263,18 @@ namespace EntJoy.ECS
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(EntityManager));
+        }
+
+        /// <summary>诊断/测试用：Job→写入组件 记账表条目数（守卫「不随调度次数无界增长」）。</summary>
+        internal int JobWrittenComponentsCount
+        {
+            get { lock (_activeJobLock) return _jobWrittenComponents.Count; }
+        }
+
+        /// <summary>诊断/测试用：archetype 归属未知的在飞 Job 数（应随完成被清理）。</summary>
+        internal int UnscopedJobCount
+        {
+            get { lock (_activeJobLock) return _unscopedJobs.Count; }
         }
 
         internal void RegisterActiveJob(NativeJobHandle nativeHandle)
@@ -244,20 +301,23 @@ namespace EntJoy.ECS
                 throw new InvalidOperationException("Structural changes are not allowed inside an observer callback. Use DeferredCommandBuffer to defer structural changes.");
             }
 
-            // 全量等待后所有 Job 完成，系统间依赖表随之失效。
-            _lastWritePerComponent.Clear();
-
             JobHandle[] jobs;
             lock (_activeJobLock)
             {
                 if (_activeJobs.Count == 0)
                 {
+                    // 无在飞 Job：记账表（含可能残留的已完成条目）一并清空，避免无界增长
+                    ClearJobTrackingNoLock();
+                    // 依赖表同理：已完成句柄确定性释放（未完成的留给终结器，见 ReleaseCompletedHandle）
+                    ReleaseLastWritersAndClear();
                     // 无在飞 Job 时也要 drain 遗留事件（如 schedule 后立即 dispose 的边界）
                     DrainPendingNativeEvents();
                     return;
                 }
                 jobs = _activeJobs.ToArray();
                 _activeJobs.Clear();
+                // 全部 Job 都会在下面 Complete ⇒ 记账表整体失效，直接清空
+                ClearJobTrackingNoLock();
             }
 
             // 即使某个 job 抛异常也必须完成剩余 job——否则它们从 _activeJobs 移除后
@@ -274,6 +334,10 @@ namespace EntJoy.ECS
                     pending ??= ExceptionDispatchInfo.Capture(ex);
                 }
             }
+
+            // 全量等待后所有 Job 完成，系统间依赖表随之失效：先把其中已完成的句柄确定性释放
+            // （被 Complete 消费过的条目此刻已 detach ⇒ Release 是空操作），再清表。
+            ReleaseLastWritersAndClear();
 
             // 关键顺序：先等所有 Job 完成，再 drain/free 事件 buffer——
             // 否则 worker 仍在写 buffer 时主线程已读计数并释放 dataPtr/countPtr → use-after-free。
@@ -301,11 +365,87 @@ namespace EntJoy.ECS
             if (first != null) throw first;
         }
 
-        /// <summary>记录某组件类型的最后写入 Job（系统结束时由 SystemRunner 调用；空句柄即清除）。</summary>
+        /// <summary>记录某组件类型的最后写入 Job（系统结束时由 SystemRunner 调用；空句柄即清除）。
+        /// 覆盖旧值时**确定性回收**旧句柄（交接文档 C 项）：旧句柄已完成时它的 box 不再被任何等待方
+        /// 需要，于是直接 Release 掉原生 HandleState，而不是拖到 .NET 终结器（终结器只在 GC 批量发生
+        /// 时成批回收 ⇒ 调度线程的 state 池恒空）。
+        /// **未完成**的旧句柄绝不提前释放：所有 JobHandle 拷贝共享同一个 box，提前 detach 会让
+        /// `_activeJobs` 记账项与用户手里那份拷贝的 Complete 退化成空操作（等待/结构变更屏障静默消失，
+        /// 且原生 HandleState 可能在 Job 仍在飞时被回收复用）；而已完成句柄上的 Complete 本就是空操作。
+        /// 带待抛 Job 异常时同样不回收，否则异常会随句柄一起被丢弃。</summary>
         internal void SetLastWriter(ComponentType componentType, JobHandle handle)
         {
-            if (handle.IsNull) _lastWritePerComponent.Remove(componentType.Id);
-            else _lastWritePerComponent[componentType.Id] = handle;
+            if (handle.IsNull)
+            {
+                _lastWritePerComponent.Remove(componentType.Id);
+                return;
+            }
+            if (_lastWritePerComponent.TryGetValue(componentType.Id, out var old) &&
+                old._nativeHandle.Handle != handle._nativeHandle.Handle)
+            {
+                ReleaseCompletedHandle(old);
+            }
+            _lastWritePerComponent[componentType.Id] = handle;
+        }
+
+        /// <summary>已完成 ⇒ 释放其原生句柄引用（跨后端安全：空/托管句柄的 Release 是空操作）。</summary>
+        private static void ReleaseCompletedHandle(JobHandle handle)
+        {
+            if (NativeJobCore.HasPendingJobExceptions) return;
+            if (!handle._nativeHandle.IsCompletedFast) return;
+            NativeJobScheduler.Release(handle._nativeHandle);
+        }
+
+        /// <summary>释放依赖表（写表 + 读表）中所有已完成的残留句柄并清空（全量等待后/结构变更前调用）。</summary>
+        private void ReleaseLastWritersAndClear()
+        {
+            if (_lastWritePerComponent.Count > 0)
+            {
+                foreach (var kv in _lastWritePerComponent)
+                    ReleaseCompletedHandle(kv.Value);
+                _lastWritePerComponent.Clear();
+            }
+            if (_lastReadPerComponent.Count > 0)
+            {
+                foreach (var kv in _lastReadPerComponent)
+                    ReleaseCompletedHandle(kv.Value);
+                _lastReadPerComponent.Clear();
+            }
+        }
+
+        /// <summary>记录某组件类型的"最后读取依赖"（A 项：读→写串行）。
+        /// 与写表不同，这里**必须 merge 而不是覆盖**：同一组件一帧内可能被多个读系统先后读，
+        /// 后续写系统要等的是**全部**读 Job（读系统彼此不冲突、可以同时在飞）。
+        /// 空句柄表示"本次没有新增读依赖"（例如该读系统没调度 Job）⇒ **不清表**，否则会抹掉同帧
+        /// 更早读系统留下的依赖，读→写串行又退回静默竞态。</summary>
+        internal void SetLastReader(ComponentType componentType, JobHandle handle)
+        {
+            if (handle.IsNull) return;
+            if (_lastReadPerComponent.TryGetValue(componentType.Id, out var old))
+            {
+                if (old._nativeHandle.Handle == handle._nativeHandle.Handle) return;
+                if (!old._nativeHandle.IsValid || old._nativeHandle.IsCompletedFast)
+                {
+                    // 旧读已完成（或句柄已 detach）⇒ 不必再等它，直接替换，省一次组合
+                    _lastReadPerComponent[componentType.Id] = handle;
+                    return;
+                }
+                _lastReadPerComponent[componentType.Id] = JobHandle.CombineDependencies(old, handle);
+                return;
+            }
+            _lastReadPerComponent[componentType.Id] = handle;
+        }
+
+        /// <summary>查询某组件类型的最后读取依赖（无记录返回空句柄）。仅写系统入站合并用（读读不串行）。</summary>
+        internal JobHandle GetLastReader(ComponentType componentType)
+        {
+            return _lastReadPerComponent.TryGetValue(componentType.Id, out var h) ? h : default;
+        }
+
+        /// <summary>清除某组件类型的读依赖（写系统完成后调用：这次写已经等过所有读）。</summary>
+        internal void ClearLastReader(ComponentType componentType)
+        {
+            _lastReadPerComponent.Remove(componentType.Id);
         }
 
         /// <summary>查询某组件类型的最后写入 Job（无记录返回空句柄）。</summary>
@@ -320,6 +460,16 @@ namespace EntJoy.ECS
         /// </summary>
         private void CompleteEntityJobs(Entity entity, Archetype? extra = null)
         {
+            // Observer 重入保护（与 CompleteActiveJobs 同一契约，2026-09-26 补齐）：
+            // Added/Set 派发把**指向 chunk 组件列的值指针**直接交给回调（零拷贝 span），
+            // 若回调内做结构变更（AddComponent/RemoveComponent/DestroyEntity/迁移），
+            // Archetype.Remove → ReleaseChunkMemory 会把该 chunk 的 slab 归还给全局池，
+            // 同批次后续 observer 读到的就是已释放内存；且 `_structuralLock` 是可重入 Monitor，
+            // 不加这道闸门根本拦不住。约定：回调内结构变更请走 DeferredCommandBuffer。
+            if (s_observerDepth > 0)
+                throw new InvalidOperationException(
+                    "Structural changes are not allowed inside an observer callback. Use DeferredCommandBuffer to defer structural changes.");
+
             if ((uint)entity.Id >= (uint)entities.Length)
             {
                 CompleteActiveJobs();
@@ -354,15 +504,33 @@ namespace EntJoy.ECS
                 RefreshChunkEntityIndices(arch, result.CompactedChunkIndex);
         }
 
+        /// <summary>
+        /// 一次性清空所有 Job 记账结构（调用者必须已保证「没有在飞 Job」：要么刚完成全部，要么本来为空）。
+        /// </summary>
+        private void ClearJobTrackingNoLock()
+        {
+            _unscopedJobs.Clear();
+            _archetypeJobs.Clear();
+            _jobWrittenComponents.Clear();
+        }
+
         private void PruneCompletedJobsNoLock()
         {
+            // 一次扫描把「已完成」句柄从所有记账结构移除。`_activeJobs` 是权威列表
+            // （TrackEntityJob 必然写入它，其余结构只引用其成员），以它为准即可保证
+            // `_jobWrittenComponents` 不随调度次数无界增长 —— 否则每个 Job 都会留下
+            // 一条 Dictionary 条目 + 一个被保留的 ComponentType[]，并且已释放的 native
+            // 句柄值被复用时会与陈旧组件集串味（选择性等待按错误组件集过滤）。
+            List<JobHandle>? completed = null;
             for (int i = _activeJobs.Count - 1; i >= 0; i--)
             {
                 if (_activeJobs[i].IsCompleted)
                 {
+                    (completed ??= new List<JobHandle>()).Add(_activeJobs[i]);
                     _activeJobs.RemoveAt(i);
                 }
             }
+
             // 同步清理 per-archetype 列表中的已完成 Job
             foreach (var kvp in _archetypeJobs)
             {
@@ -371,6 +539,30 @@ namespace EntJoy.ECS
                 {
                     if (list[i].IsCompleted)
                         list.RemoveAt(i);
+                }
+            }
+
+            for (int i = _unscopedJobs.Count - 1; i >= 0; i--)
+            {
+                if (_unscopedJobs[i].IsCompleted)
+                    _unscopedJobs.RemoveAt(i);
+            }
+
+            if (completed != null)
+            {
+                for (int i = 0; i < completed.Count; i++)
+                    _jobWrittenComponents.Remove(completed[i]);
+
+                // ★ C 项：这些句柄**按定义已完成**，且已移出记账表 ⇒ 不再有任何等待方需要它们，
+                //   顺手把原生 HandleState 引用确定性释放。原来这里只做"移除"：帧内先完成的 Job 会在
+                //   下一次 TrackEntityJob 被剪掉，于是永远等不到帧末 CompleteActiveJobs 的 Complete
+                //   （那是唯一的确定性回收点），HandleState 一直悬到 GC 终结器成批回收。
+                //   顺序要点：必须在 `_jobWrittenComponents.Remove` **之后**释放 —— 句柄 detach 后其
+                //   哈希值随之改变，先放会让字典键永远删不掉。
+                if (!NativeJobCore.HasPendingJobExceptions)
+                {
+                    for (int i = 0; i < completed.Count; i++)
+                        NativeJobScheduler.Release(completed[i]._nativeHandle);
                 }
             }
         }
@@ -390,7 +582,7 @@ namespace EntJoy.ECS
                 _activeJobs.Add(handle);
                 if (writtenComponents != null && writtenComponents.Length > 0)
                     _jobWrittenComponents[handle] = writtenComponents;
-                if (matchingArchetypes != null)
+                if (matchingArchetypes != null && matchingArchetypes.Length > 0)
                 {
                     for (int i = 0; i < matchingArchetypes.Length; i++)
                     {
@@ -402,6 +594,12 @@ namespace EntJoy.ECS
                         }
                         list.Add(handle);
                     }
+                }
+                else
+                {
+                    // 没有 archetype 归属 ⇒ 对选择性等待不可见（CompleteArchetypeJobs 只查 _archetypeJobs），
+                    // 结构变更就可能在它仍在写该 chunk 时释放/搬迁内存。记入 _unscopedJobs 由保守等待兜底。
+                    _unscopedJobs.Add(handle);
                 }
             }
         }
@@ -458,7 +656,14 @@ namespace EntJoy.ECS
                     }
                 }
 
+                // archetype 归属未知的 Job：无法证明它不触碰受影响 archetype ⇒ 必须一起等待
+                // （否则 native entity-batch job 可以与结构变更并发写同一 chunk）。
+                // 注意顺序：必须在 `handleSet.Count == 0` 提前返回之前收集，否则「只有 unscoped job」时会被漏掉。
+                for (int j = 0; j < _unscopedJobs.Count; j++)
+                    handleSet.Add(_unscopedJobs[j]);
+
                 if (handleSet.Count == 0) return;
+
                 jobsToComplete = new JobHandle[handleSet.Count];
                 handleSet.CopyTo(jobsToComplete);
             }
@@ -1035,6 +1240,11 @@ namespace EntJoy.ECS
                         info.ChunkIndex = -1;
                         info.SlotInChunk = -1;
                         ClearLocateB(e.Id);
+                        // 本 archetype 没有关系列，但这些实体可能**被别人指向**（target 侧）：
+                        // 必须清掉反向索引条目，否则死 id 的索引永久残留，
+                        // 且 id 被回收后会以「幽灵 source」出现在 GetRelationsOf / GetSourceCount 里。
+                        // （本 archetype 无关系列 ⇒ 实体自身没有出边，故不需要 CleanupSourceRelations。）
+                        _relationIndex.ClearTarget(e.Id);
                         PushRecycled(e);   // Id 回池，后续 Spawn 复用（Version+1 防悬垂）
                         destroyed++;
                     }
@@ -1088,20 +1298,32 @@ namespace EntJoy.ECS
             return false;
         }
 
-        /// <summary>DFS 收集声明级联子树（仅沿 CascadeOnTargetDeleted 关系类型向下，防环）。</summary>
+        /// <summary>
+        /// 收集声明级联子树（仅沿 CascadeOnTargetDeleted 关系类型向下，防环）。
+        /// **迭代 DFS（显式栈）**：理由同 <see cref="CollectCascade"/> —— 递归版在深链上
+        /// <c>StackOverflowException</c> 会直接终止进程。
+        /// </summary>
         private void CollectDeclaredCascade(Entity entity, HashSet<int> visited, List<Entity> toDestroy)
         {
-            if (!visited.Add(entity.Id)) return;
-            toDestroy.Add(entity);
-            if (!_relationIndex.TryGetSources(entity.Id, out var byType)) return;
-            foreach (var kv in byType)
+            var stack = new Stack<Entity>();
+            stack.Push(entity);
+
+            while (stack.Count > 0)
             {
-                if (!ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) continue;   // 仅沿声明级联的关系类型
-                foreach (var source in kv.Value)
+                Entity cur = stack.Pop();
+                if (!visited.Add(cur.Id)) continue;  // 防环
+                toDestroy.Add(cur);
+
+                if (!_relationIndex.TryGetSources(cur.Id, out var byType)) continue;
+                foreach (var kv in byType)
                 {
-                    if (!IsAlive(source)) continue;
-                    if (!StillPointsToRelation(source, entity, kv.Key)) continue;   // 槽位校验：防索引滞后误伤
-                    CollectDeclaredCascade(source, visited, toDestroy);
+                    if (!ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) continue;   // 仅沿声明级联的关系类型
+                    foreach (var source in kv.Value)
+                    {
+                        if (!IsAlive(source)) continue;
+                        if (!StillPointsToRelation(source, cur, kv.Key)) continue;   // 槽位校验：防索引滞后误伤
+                        stack.Push(source);
+                    }
                 }
             }
         }
@@ -1495,8 +1717,13 @@ namespace EntJoy.ECS
                 }
                 if (targetIdx < 0) continue;
 
-                // 搬移 thin 的所有实体到 target
-                MoveEntitiesTo(arch, span, i, targetIdx);
+                // 搬移 thin 的所有实体到 target；返回是否真的搬空。
+                // ⚠ thin 前面的可用空间可能不足（MoveEntitiesTo 会提前 break）⇒ 此时 **不能** 移除该 Chunk：
+                // RemoveEmptyChunkAt 会 swap-pop 掉仍承载实体的 chunk，其 EntityInfo/定位表索引随之错位
+                // （静默丢实体、把实体指向别的 chunk，且这些组件的 IDisposable 钩子永不执行）。
+                bool emptied = MoveEntitiesTo(arch, span, i, targetIdx);
+                if (!emptied)
+                    continue;
 
                 // 移除空 Chunk（swap 到末尾 + RemoveAt + 刷新被 swap Chunk 的索引）
                 RemoveEmptyChunkAt(arch, i);
@@ -1505,7 +1732,8 @@ namespace EntJoy.ECS
             }
         }
 
-        private unsafe void MoveEntitiesTo(Archetype arch, Span<Chunk> span, int thinIdx, int startTargetIdx)
+        /// <summary>把 thin 里的实体搬到前面的未满 Chunk；返回 thin 是否已搬空。</summary>
+        private unsafe bool MoveEntitiesTo(Archetype arch, Span<Chunk> span, int thinIdx, int startTargetIdx)
         {
             ref var thin = ref span[thinIdx];
             int targetIdx = startTargetIdx;
@@ -1540,6 +1768,8 @@ namespace EntJoy.ECS
 
                 UpdateEntityLocation(e.Id, arch, targetIdx, targetSlot);
             }
+
+            return thin.EntityCount == 0;
         }
 
         private void RemoveEmptyChunkAt(Archetype arch, int chunkIndex)
@@ -1574,7 +1804,7 @@ namespace EntJoy.ECS
                 NativeMisses = alloc.Misses,
                 NativeForeign = alloc.Foreign,
                 LeakedContainers = DisposeSentinel.LeakedCount,
-                TotalEntityCount = entityCount,
+                TotalEntityCount = LiveEntityCount,   // 存活数（旧实现填 entityCount = id 发放计数，Destroy 后仍居高）
                 Archetypes = new List<ArchetypeMemoryInfo>(),
             };
 
@@ -1937,6 +2167,7 @@ namespace EntJoy.ECS
             _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
             _locateBCapacity = entities.Length;
             archetypeCount = 0;
+            archetypeSetVersion++;   // 整体清空/Restore ⇒ 之前缓存的匹配集合（持有旧 Archetype）全部作废
             entityCount = 0;
             structuralVersion++;
         }

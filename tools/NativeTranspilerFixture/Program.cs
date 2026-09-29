@@ -1,4 +1,4 @@
-﻿using EntJoy.Collections;
+using EntJoy.Collections;
 using EntJoy.JobSystem;
 using NativeTranspilerFixture;
 
@@ -107,8 +107,8 @@ if (args.Length > 0 && args[0] == "bench")
 
 NativeJobScheduler.Shutdown();
 
-Console.WriteLine(failed == 0 ? "\nPASS: all fixture assertions hold." : $"\nFAIL: {failed} assertion(s) failed.");
-return failed == 0 ? 0 : 1;
+Console.WriteLine(failed + Bench.ExtraFailures == 0 ? "\nPASS: all fixture assertions hold." : $"\nFAIL: {failed + Bench.ExtraFailures} assertion(s) failed.");
+return failed + Bench.ExtraFailures == 0 ? 0 : 1;
 
 void Report(string name, bool ok, string detail)
 {
@@ -298,6 +298,59 @@ static class Bench
             double c = TimeArm2("compiled", 6, () => { compJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
             Console.WriteLine($"      gather={g,7:F1}  compiled={c,7:F1}  compiled/gather={c / g:F3}");
         }
+
+        // ── 臂 4b（B2 内核结构）：逐格元数据预计算（%9 / /9 / *cellsW → 调用方偏移表）──
+        // 判据：① 语义等价（同一输入 + 清零后的输出数组 ⇒ 校验和必须逐位相同，Report 进断言门）
+        //       ② 同会话交错 A/B 的 ns/element（8 对，臂序交替），报中位与 p95
+        var cellDelta = new NativeArray<int>(81, Allocator.Persistent);
+        for (int jj = 0; jj < 81; jj++)
+        {
+            int j = scanOrder[jj];
+            int ox = j % 9 - 4;
+            int oy = 4 - j / 9;
+            cellDelta[jj] = ox - oy * CellsW;
+        }
+        var offJob = new BenchMeleeScanOffsetsJob
+        {
+            Positions = pos, ConfigId = cfg, Team = team, CellStart = cellStart, SortedIndex = sorted,
+            CellDelta = cellDelta, KD2 = kd2, KPeer = kpeer,
+            Props = packJob.Props,
+        };
+        Console.WriteLine("  -- melee_pack (baseline) vs melee_offsets (kernel-structure variant): 8 interleaved pairs --");
+        var packMed = new System.Collections.Generic.List<double>();
+        var offMed = new System.Collections.Generic.List<double>();
+        double packSum = 0, offSum = 0, packPeer = 0, offPeer = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            bool packFirst = (i % 2) == 0;
+            double b, v;
+            if (packFirst)
+            {
+                ZeroOut(kd2, kpeer);
+                b = TimeArm2("melee_pack", 6, () => { packJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                packSum = SumKd2(kd2); packPeer = SumKpeer(kpeer);
+                ZeroOut(kd2, kpeer);
+                v = TimeArm2("melee_offsets", 6, () => { offJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                offSum = SumKd2(kd2); offPeer = SumKpeer(kpeer);
+            }
+            else
+            {
+                ZeroOut(kd2, kpeer);
+                v = TimeArm2("melee_offsets", 6, () => { offJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                offSum = SumKd2(kd2); offPeer = SumKpeer(kpeer);
+                ZeroOut(kd2, kpeer);
+                b = TimeArm2("melee_pack", 6, () => { packJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                packSum = SumKd2(kd2); packPeer = SumKpeer(kpeer);
+            }
+            packMed.Add(b); offMed.Add(v);
+            Console.WriteLine($"      pair {i + 1}: pack={b,7:F1}  offsets={v,7:F1}  off/pack={v / b:F3}");
+        }
+        ReportBench("B2 melee_offsets: same KD2 output as melee_pack", packSum == offSum,
+            $"sum_pack={packSum:R} sum_offsets={offSum:R}");
+        ReportBench("B2 melee_offsets: same KPeer output as melee_pack", packPeer == offPeer,
+            $"sum_pack={packPeer:R} sum_offsets={offPeer:R}");
+        PrintStat("melee_pack   ", packMed);
+        PrintStat("melee_offsets", offMed);
         // ── 臂 6：参数数量三臂对照（125 vs 打包标量 vs 输入全打包）──
         // 目的：判定"形参数是否真是瓶颈"——用同一个内核体、同一份输入，只改参数形状。
         var padArr = new NativeArray<int>[32];
@@ -373,6 +426,42 @@ static class Bench
         int n = 0;
         for (int i = 0; i < a.Length; i++) if (a[i] != 0) n++;
         return n;
+    }
+
+    /// <summary>B2 实验：把输出数组清零，保证两条臂从**同一前置状态**开始（内核会读回自己写下的槽位）。</summary>
+    static void ZeroOut(NativeArray<float> kd2, NativeArray<int> kpeer)
+    {
+        for (int i = 0; i < kd2.Length; i++) kd2[i] = 0f;
+        for (int i = 0; i < kpeer.Length; i++) kpeer[i] = 0;
+    }
+
+    /// <summary>B2 实验：KPeer 输出校验和（等价性对拍的第二个口径）。</summary>
+    static double SumKpeer(NativeArray<int> kpeer)
+    {
+        double s = 0;
+        for (int i = 0; i < kpeer.Length; i++) s += kpeer[i];
+        return s;
+    }
+
+    /// <summary>B2 实验：打印一组固定数量样本的中位与 p95（臂内 8 对，臂序已交替）。</summary>
+    static void PrintStat(string name, System.Collections.Generic.List<double> values)
+    {
+        var s = new System.Collections.Generic.List<double>(values);
+        s.Sort();
+        double med = s.Count % 2 == 1 ? s[s.Count / 2] : 0.5 * (s[s.Count / 2 - 1] + s[s.Count / 2]);
+        int idx = (int)System.Math.Ceiling(0.95 * s.Count) - 1;
+        if (idx < 0) idx = 0;
+        if (idx >= s.Count) idx = s.Count - 1;
+        Console.WriteLine($"      {name}: median {med,7:F1} ns/elem  p95 {s[idx],7:F1}  (n={s.Count})");
+    }
+
+    /// <summary>bench 模式的断言失败计数（顶层的 <c>failed</c> 局部量在静态类里不可见）。</summary>
+    public static int ExtraFailures;
+
+    static void ReportBench(string name, bool ok, string detail)
+    {
+        if (!ok) ExtraFailures++;
+        Console.WriteLine($"  {name,-52}: {(ok ? "✅ PASS" : "❌ FAIL")}{(ok || detail.Length == 0 ? "" : "  " + detail)}");
     }
 
     static double SumCounts(NativeArray<int> c)

@@ -127,6 +127,7 @@ namespace EntJoy.ECS
         private int _cachedStructuralVersion = -1;
         // 已扫描过的 Archetype 总数（判定是否需要重扫签名匹配集合）
         private int _scannedArchetypeCount = 0;
+        private int _scannedArchetypeVersion = -1;
 
         /// <summary>当前查询的规则指纹（共享注册表键）。</summary>
         public QueryKey Key => _key;
@@ -197,6 +198,7 @@ namespace EntJoy.ECS
             }
 
             _scannedArchetypeCount = entityManager.ArchetypeCount;
+            _scannedArchetypeVersion = entityManager.ArchetypeSetVersion;
             _cachedStructuralVersion = entityManager.StructuralVersion;
         }
 
@@ -209,8 +211,11 @@ namespace EntJoy.ECS
             var entityManager = _world.EntityManager;
             int archCount = entityManager.ArchetypeCount;
 
-            // Archetype 签名集合未变化 → 复用匹配集合，只重收 chunk
-            if (archCount == _scannedArchetypeCount)
+            // ⚠ 判据必须是 **Archetype 集合身份**（新建/清空/Restore 都会递增），不能只比数量：
+            //   数量恰好相同（Restore 后整体重建、或一增一删抵消）时复用缓存会继续引用已释放的
+            //   Archetype ⇒ 静默返回 0 个实体。
+            if (archCount == _scannedArchetypeCount
+                && entityManager.ArchetypeSetVersion == _scannedArchetypeVersion)
             {
                 _chunks.Clear();
                 for (int i = 0; i < _matchingArchetypes.Count; i++)
@@ -264,9 +269,16 @@ namespace EntJoy.ECS
         public NativeArray<T> ToComponentDataArray<T>(Allocator allocator = Allocator.Persistent) where T : unmanaged
         {
             EnsureUpToDate();
-            // 使用 _chunks 列表而非 _matchingArchetypes[].GetChunks() 来确保
-            // 与 CalculateEntityCount() 计数一致，避免竞态引发的堆缓冲区溢出
-            int total = CalculateEntityCount();
+            // ⚠ 不能直接用 CalculateEntityCount()：它统计的是**全部匹配实体**，而下面的拷贝会对
+            // 缺少 T 的 chunk `continue` ⇒ 数组尾部会留下一段未初始化数据（静默错值 + 误导调用方）。
+            // 这里只统计真正提供 T 的 chunk，保证 Length == 实际拷贝数。
+            int total = 0;
+            for (int i = 0; i < _chunks.Count; i++)
+            {
+                if (TryGetComponentTypeIndex<T>(_chunks[i].Archetype, out _))
+                    total += _chunks[i].EntityCount;
+            }
+
             var result = new NativeArray<T>(total, allocator);
             int dstIndex = 0;
             int elementSize = Unsafe.SizeOf<T>();

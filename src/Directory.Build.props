@@ -14,7 +14,7 @@
     <RepositoryType>git</RepositoryType>
     <IsPackable>false</IsPackable>
     <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\packages\</PackageOutputPath>
-    <!-- 预编译原生制品（由 tools/NativeDllCore 构建后 stage 到此目录，见 docs/NuGet打包规划.md T3） -->
+    <!-- 预编译原生制品（由 tools/NativeDllCore 构建后 stage 到此目录；消费方式见 README《通过 NuGet 使用》） -->
     <EntJoyNativeStageDir Condition="'$(EntJoyNativeStageDir)' == ''">$(MSBuildThisFileDirectory)..\artifacts\native\win-x64\</EntJoyNativeStageDir>
   </PropertyGroup>
 

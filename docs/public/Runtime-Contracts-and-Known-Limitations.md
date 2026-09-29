@@ -23,7 +23,7 @@
 ## 系统依赖传播（SystemState.Dependency）
 
 - 系统内 `job.Schedule(query)` 未显式传 `dependsOn` 时，自动继承执行上下文的累积依赖，并在调度后回写。
-- `SystemRunner` 按系统的 `[Read]`/`[Write]` 声明合并冲突依赖：读等写、写等写；读读不互相等待。依赖按组件类型传播（per-component 最后写入者），无冲突系统不串行。
+- `SystemRunner` 按系统的 `[Read]`/`[Write]` 声明合并冲突依赖：读等写、写等写；**读读不互相等待**。依赖按组件类型传播，两张表：`lastWrite[X]`（写系统写回，读写系统都入站合并）与 `lastRead[X]`（读系统写回，多读系统 **merge**；**只有写系统**入站合并；写系统完成后清空）⇒ `[Read(X)]` 的 Job 仍在飞时后续 `[Write(X)]` 必须等它，而读读仍并行。无冲突系统不串行；开关 `ENTJOY_SYSTEM_READ_WRITE_ORDER=0` 可回到"只传播写依赖"的旧行为。
 - `ISystemWithState.OnUpdate(ref SystemState)` 可显式读写 `state.Dependency`、调用 `state.CompleteDependency()` 同步等待本系统所有 Job。
 - `World.DefaultWorld` 为 `[ThreadStatic]`（每线程独立）；Job worker 线程由调度器绑定所属 World，`EventBus.SendEvent` 写入正确 World。
 
@@ -91,7 +91,9 @@ EntJoy 在读写点按「Job 执行上下文」登记持有者（写者或读者
 
 前两条先在 Native 后端实测复现（`tools/SafetyLockOverheadBench/repro`，N=262144 / batch=16384，曾于第 14 次尝试触发）、修复后 0 触发的回归项；第 3、4 条属 Managed 回退后端的同一根因族（2026-09-16 修复，见 `NativeArray-Index-Safety-Overhead-and-Fixes.md` §七）。四条都由测试 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak` 与探针 `tools/SafetyInterceptProbe` 持续守护。
 
-另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）。
+另有两条性能相关的实现约束：`RegisterRead` 的 thread-static 快路径以 `(读声明代际, ctx, 容器 index, 句柄代际)` 为键，命中即返回；句柄代际参与比较是防 ABA 的前提（index 释放后被复用时代际必递增，缓存自动失效）；**读声明代际（`_readMarkEpoch`）参与比较**是防「ctx 复用」的前提 —— native ctx 来自 `ContextPool`（指针可被复用），只靠 `(ctx,index,version)` 命中的旧缓存会让新 Job 跳过登记，使读者计数偏少、主线程拦截失效。
+
+**第 5 条契约（2026-09-26 修）**：**读者声明必须与写声明同在 Job 完成点释放，不得按 tile 释放。** 所有 tile 共享一个 ctx，任一 tile 结束就 `ReleaseReadsForContext(ctx)` 会把整个 ctx 的读者计数清零，而兄弟 tile 仍在执行；主线程随后的访问因此不再被拦截（Native 后端曾按 tile 释放，Managed 后端本就是完成点释放 —— 两条后端行为不一致）。回归用例：`ReadClaimReleaseTests.SiblingTileStillRunning_MainThreadAccess_MustBeIntercepted`（双后端都跑）。
 
 ### ⚠ 跨 Job 共享的容器必须用 `GetUnsafePtr()` 访问（**不能用索引器**）
 
@@ -184,7 +186,32 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - `SharedBlob<T>` 的值复制不增加引用计数，跨系统共享必须使用 `Clone()`。
 - 调试 pin 地址只在对象保持存活且未释放 pin 时有效；不得缓存到业务生命周期。
 - Job 之间的冲突检测只覆盖「写-写」：不同 Job 对同一容器的并发读（读读共享）或读-写组合不作为 Job 间冲突检测目标，并行读写同一容器时的确定性需由上层保证。主线程与 Job 的任意读/写组合则由上述「主线程访问拦截」覆盖。
-- **Managed 回退后端的完成协议与安全声明释放尚未形成同一同步点（已知缺陷）**：`ManagedJobHandle.IsCompleted` 直接等于 `ManagedCompletion.Remaining == 0`，而释放读/写声明发生在该计数归零之后，主线程可能在声明释放前就观察到「已完成」→ `Complete()` 后的合法访问被误拦。另一个已定位因素是托管路径的执行上下文取自 `RuntimeHelpers.GetHashCode(box)`，而 box 由 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx，使上一次 Job 的按-ctx 释放清掉下一次 Job 的登记。此外，隐藏 `NativeDll.dll` 后在托管路径上运行 `tools/SafetyLockOverheadBench/repro` 会稳定**卡死在 `Complete()`**（提交态代码即复现）。**该缺陷不影响 Native 后端**（`JobScheduler` 默认走 Native，本仓库测试集即运行在 Native 上：`IsNative=True`）；若需要在 NativeDll 加载失败的回退路径上也保证同一强度，需按「完成阶段状态机」重设计 `ManagedCompletion`（先放行声明、再发布完成态）并给每次 Job 调用分配唯一 ctx，两者需同批实施。详见 `NativeArray-Index-Safety-Overhead-and-Fixes.md`。
+- **Temp 容器在帧末回收后被手动 `Dispose()` 的残留风险**（2026-09-26 记录，独立验收指出尚未覆盖）：`TempAllocator.Reset()` 会对未手动释放的 Temp 容器 `MarkReleased(index)` 并把索引归还空闲队列；而 `MarkReleased` **保留** 原 index（以便旧句柄仍报"已释放"），所以此后若该 index 被新容器复用，调用方再对**陈旧容器**调用 `Dispose()`，`Release` 会看到 `StateActive` 而再次把 index 入队（重复项），并且按地址释放 payload 时可能释放已被重分配给他人的块。**规避**：`Allocator.Temp` / `TempJob` 的容器按设计由帧末统一回收——**不要**手动 `Dispose()`；确需提前释放请在同一帧内、`Reset()` 之前完成。
+- **2026-09-27 审计收尾修复（均有可复现 RED → 回归）**：
+  - `EntityQuery.RefreshIncremental` 原来只比 **Archetype 数量**判断能否复用匹配集合；`World.Restore()` 会整体重建且数量常相同 ⇒ 查询继续引用**已释放** Archetype、**静默返回 0 个实体**（实测 `Expected: 3, Actual: 0`）。现在比 `EntityManager.ArchetypeSetVersion`（新建/清空/Restore 递增）。回归：`QueryRestoreAndMemoryReportTests`。
+  - `MemoryReport.TotalEntityCount` 原来填的是 `entityCount`（**已发放 id 计数**，Destroy 不递减）⇒ 销毁后仍显示历史峰值（实测 `Expected: 3, Actual: 10`）。现在填**存活数**（各 Archetype 计数求和）。`EntityManager.EntityCount` 保留原语义并在 XML 文档中写明"不是存活数"（兼容按 id 遍历的既有用法）。
+  - `ScheduleGraph` 的执行顺序原来依赖**注册顺序**（对称读写冲突的自动边按 i<j 定方向；层内 `List.Sort` 不稳定）⇒ 同一组系统换个注册顺序就产生不同的提交顺序。现在双向冲突按类型全名定方向、层内按 `Order` + 类型全名排序。回归：`ScheduleDeterminismTests`（两种注册顺序拍平后必须逐位相同）。
+  - `SystemRunner.ComputeIncomingDependency` 对**单个**依赖不再构造组合句柄（`JobHandle` 无 `Dispose`，组合句柄只能等终结器）⇒ 消除每帧每冲突系统的无谓句柄抖动。
+  - `TempAllocator.Reset()` 的锁序：旧实现**先取 `_resetLock` 再等待活跃 job**，而跨线程 `TempAllocator.Free` 要拿同一把锁 ⇒ 「Reset 等 job、job 等锁」永久死锁。现在先完成任务再取锁。回归：`TempAllocatorLockOrderTests`（受控 hook 精确复现交错，旧锁序下有界等待超时失败）。
+  - `SparseTileDeque` 容量校验：`RoundUpPow2(0xFFFFFFFF)` 溢出成 0 ⇒ `capacity_=0`、`mask_=2^32-1` ⇒ `new Slot[0]` 后用 mask 索引**越界读写**；且 ctor 标 `noexcept` 时 `new[]` 失败直接 `std::terminate`。现在显式拒绝过大/溢出容量。回归：`SparseTileDequeTests` 的 `PASS SparseTileDequeCapacityValidation`。
+  - `ChaseLevScheduler::ApplyAffinity` 的 `KAFFINITY(1) << (1+i)` 在 `1+i ≥ 64` 时是 UB 且掩码为 0（静默不绑核）：现在跳过超范围核心。**本机 worker 数 ≤ 8，无法构造该分支的运行时用例**（属防御性修复，未取得 RED）。
+  - **ImGui 调试面板的停止路径**（2026-09-27）：面板线程在 `Launch()` 里 `std::thread::detach()`，而 `JobDebuggerGUI::Shutdown()` 是空实现、`Scheduler::Shutdown()` 也不调用它 ⇒ 面板线程**比 JobSystem 活得更久**并继续读状态，且一次性 `g_guiLaunched` 永不复位（关停后再也无法打开面板）。现在：GUI 主循环每帧检查 `g_guiStopRequested`；`Shutdown()` 置位后**有界等待**（≤3s）`g_guiRunning==false`；退出路径复位 latch；`Scheduler::Shutdown()` 在拆 worker/状态**之前**调用它。**注意**：原先怀疑的"关停期 UAF"**不成立**——读取器都不 deref 调度器（`CurrentWorkerCount()` 读全局原子、`GetWorkerSnapshots` 读全局数组、名字表受锁保护），本次修的是生命周期与可重启性。无 ImGui 构建（CMake/CI）走空实现分支；ImGui 分支已用 `cl /DENTJOY_IMGUI_ENABLED=1` 单独编译验证（exit 0），**运行时未验证**（无头环境无法创建 D3D11 窗口）。
+  - **帧末回收后陈旧 Temp 容器的 `Dispose`**（B18 残留，2026-09-27 修复）：`TempAllocator.Reset()` 会对帧末未手动释放的 Temp 容器 `MarkReleased` 并把内存归还池子；此后若调用方仍对那个**陈旧容器**调用 `Dispose()`：① index 已被新容器复用 → 旧实现会把**新容器的 index 再次入队**（同一 index 可能被发给两个容器，安全跟踪失效）；② index 未复用 → 仍按地址 `UnsafeUtility.Free`（那块内存可能已重分配给别人 ⇒ 释放别人的块）。现在释放路径要求"句柄仍活着"（`SafetyHandleManager.IsLive` = 状态 `Active` **且** version 与句柄一致），陈旧 Temp/TempJob 容器的 `Dispose` 降级为**幂等空操作**，活着的容器仍正常释放。回归：`TempStaleDisposeTests`（索引复用 RED 锚点 + "活容器必须真释放"反向守卫）。**规避仍成立**：Temp/TempJob 容器按契约由帧末统一回收，不要手动 `Dispose()`。
+  - **codegen marker 缺口核对**（2026-09-27）：`__ENTJOY_UNSUPPORTED` 标记由 7 个核心翻译器的 `default` 分支与 SIMD/ISPC/嵌套 `return` 路径发射；新增 `NT15_UnsupportedMarkerCoverageTests` 表驱动探针（`unchecked` 块、`goto`/label、`throw`、`try/catch`、`lock`、`using` 语句、`switch` 语句、`checked` 块、`stackalloc`、lambda/委托、非数组 `foreach`），断言每种构造**必须"有 marker 或 有生成器诊断"**，11/11 通过（`GeneratorDriverRunResult.Diagnostics` 只含生成器诊断、不含 C# 编译错误，故不会假绿）。这不是穷举（构造清单会随后续发现扩充），但把"新增分支漏写标记"变成了红灯。**同日补齐 ISPC 侧最后一处漏标记**：`IspcStatementTranslator` 的 `SendEvent(非对象创建实参)`（即 `SendEvent(已有变量)` 而非 `new T { ... }`）原本只写一行普通注释 ⇒ ISPC 后端**静默丢掉该次事件写入**且构建照过；现改为 `{UnsupportedMarkers.Stmt}ISPC_SendEventNonObjectCreationArg`，构建期扫描会让它失败。全仓所有 `SendEvent(...)` 调用点都是 `new T {…}` 形态（无此形状）⇒ **零爆炸半径**，不会打断任何 shipped 样例。ISPC 侧其余静默面已逐条核过（见 `NativeTranspiler-Boundaries-and-Diagnostics.md`）。
+- **2026-09-27 复核后驳回的两条审计疑点（有证据，不修）**：① **defer-wake"漏唤醒"**——`ENTJOY_DEFER_WAKE=1` 时 `SubmitBatch` 只置 `g_pendingDeferredWake`，但 `JobHandle::Complete()`（`JobSystem_State.cpp`）与批量提交导出（`Exports.cpp` 末尾 + 异常路径）都会 `FlushDeferredWake()`/`WakePending()`，且 `DeferWakeEnabled()` 把 env 缓存进 `static const bool` ⇒ 框架内调用点不存在漏唤醒窗口。② **JobProfiler seqlock**——写侧 `seq` 奇/偶 + release 配对、读侧 `s1` 奇偶判断 + 二次读比对，逻辑正确；`ReadAll` 在并发 Push 下的少量丢失/重复已在源码注释中显式声明为诊断设施的可接受行为。
+- **系统间"读→写"已串行（2026-09-27 修复，口径 3：默认安全 + 可回退）**：原先只对 `slot.WriteComponents` 调 `SetLastWriter`，`[Read(X)]` 系统结束后不给后续 `[Write(X)]` 留依赖 ⇒ 前一系统的 Job 仍在飞时，后一系统可与它并发访问 X（撕裂/陈旧读）——这是当时唯一**静默**的竞态。现在 per-type 表拆两份：
+  - `lastWrite[X]`：写系统写回；读系统与写系统入站合并（原行为）。
+  - `lastRead[X]`：读系统写回（多读系统时 **merge**，不是覆盖——写系统要等的是全部读 Job）；**只有写系统**入站合并；写系统完成后清空（这次写已经等过所有读）。
+  - 读系统**不**合并 `lastRead` ⇒ **读读仍然并行**（反向守卫用例断言两个读系统的 Job 时间窗必须重叠）。
+  - 回退开关：`ENTJOY_SYSTEM_READ_WRITE_ORDER=0`（或 `SystemRunner.ReadWriteOrderingEnabled = false`）恢复旧行为。
+  - 代价实测（交错 A/B，8 对；本机 4 worker）：**读多写少**图（3 组件 × 3 读 + 1 写，读系统排在写系统之前 = 真正会命中的形状）ON 中位 1.643 ms / p95 1.807 ms，OFF 中位 1.644 ms / p95 1.773 ms，成对中位比值 OFF/ON = 0.9996 ~ 1.00；把单系统 Job 加重到 ~1.9 ms（8192 实体 × 512 轮，22.5 ms/帧）后成对中位比值仍是 0.9996。**结论：本机/workload 上测不出代价** —— 帧末尾的全量等待（`TempAllocator.Reset → CompleteActiveJobs`）与"每帧系统数 × 每系统 Job 时长"决定了关键路径，读→写串行边落在这条路径之外。⚠ 未测场景：并行度**未饱和**（读 Job 比 worker 少）且读 Job 很长时，写 Job 原本能挤上空闲 worker，此时串行化代价会显现（理论上限 ≈ 写 Job 时长占帧时间的比例）。
+  回归：`SystemReadWriteOrderTests`（`WriterSystem_WaitsForReaderSystemJob` 红→绿主用例 + 读读并行反向守卫 + 开关回退 + 读表生命周期）。
+- **job 路径的 `WithRelationship` 不做逐槽位匹配**：关系过滤在 chunk 收集阶段只能看到「该 archetype 是否含该关系列」，无法按 `RelationSlot` 的 target/version 逐实体筛选 ⇒ 以 `job.Run/Schedule(query)` 运行的关系过滤查询会处理同 archetype 内**所有**实体。需要逐槽位精确匹配时请用托管查询/`QuerySelection` 路径（它们会做槽位校验）。
+- **`RefreshIncremental` 的「archetype 数量相等」捷径在 `World.Restore` 后可能陈旧**：`EntityQuery` 用 `archetypeCount == 上次扫描数` 判定可复用匹配集合，而 `ClearWorldInternal` 会把 `archetypeCount` 归零 ⇒ Restore 后若数量恰好与缓存时相同，缓存的查询可能仍引用已 Dispose 的 Archetype，从而静默返回 0 个实体。**规避**：Restore 后重新构造查询（或 `GetOrCreateEntityQuery` 取新实例）。
+- **`JobHandle.CombineDependencies` 组合句柄已确定性回收（2026-09-27 修复）**：三条回收路径——① 单个依赖不再组合（R11）；② `SystemRunner` 自己组合出的入站句柄"用后即释"（未 adopted 进写表时）；③ `EntityManager` 在"剪枝已完成 Job""覆盖依赖表旧值""全量等待后清空依赖表"三处，对**已完成**句柄显式 `Release`。未完成的句柄**绝不**提前释放（所有 `JobHandle` 拷贝共享同一个 box，提前 detach 会让 `_activeJobs` 记账项与用户手里那份拷贝的 `Complete` 双双退化成空操作 ⇒ 等待/结构变更屏障静默消失）。原生侧新增 `JobSystem_GetLiveHandleCount`（`CreateState - RecycleState`）作为断言口径：1000 帧 + 无 GC 区域下 `EntJoy.ECS.Tests` 的 `TwoDependencyGraph_NativeHandlesDoNotGrowAcrossFrames` 实测增长 **0**（关掉上述任一路径分别增长 2997 / 2996）。
+- **`ScheduleGraph` 的对称读写冲突，边方向取决于注册顺序**：当两个系统互相冲突（A 写 X 读 Y、B 写 Y 读 X）时，单一冲突边的方向按注册先后决定，因此提交顺序随注册顺序变化；层内顺序用 `Order` 排序但排序不稳定（同 Order 时）。需要确定顺序时请显式使用 `[OrderBefore]/[OrderAfter]`。
+- **Managed 回退后端的完成协议（2026-09-16 已修复，此处保留记录）**：此前的缺陷是「完成态发布」与「安全声明释放」不在同一同步点 —— `IsCompleted` 只看 `Remaining == 0`，而读写声明在计数归零之后才释放，主线程可能在声明释放前观察到「已完成」→ `Complete()` 后的合法访问被误拦；另一个成因是托管路径的 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，而 box 被 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx。现实现为：`ManagedCompletion.Signal()` 按「释放写声明 → 释放读声明 → 置 `_declReleased` → `_done.Set()` → 派发回调」的顺序发布，`IsCompleted` 要求 `Remaining == 0 && _declReleased == 1`（`EntJoy.Jobs/Managed/ManagedJobHandle.cs`），且每次调度由 `ManagedJobScheduler.NextCtx()` 分配唯一 ctx。回归证据：`tools/SafetyLockOverheadBench/repro`（隐藏 `NativeDll.dll` 强制 Managed）**触发=0、残留状态为空、正常退出**；守卫用例见 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak`。
+- **两条后端都必须被测试覆盖，且不得隐式切换**：`EntJoy.ECS.Tests` 的运行后端取决于进程能否找到 `NativeDll.dll`（`AppContext.BaseDirectory` → 入口目录 → 程序集目录 → CWD 上溯）。历史上因此出现过「同一套测试本地跑 Native、CI 跑 Managed」的静默差异。现在测试用环境变量 `ENTJOY_TEST_BACKEND=native|managed` 显式指定，并由 `BackendSelectionTests` 断言实际后端与请求一致；CI 对两条后端分别跑一遍。
 - IJobEntity 的 DOTS 式 `Entity` 参数（`Execute(ref T0 c0, Entity e)`）的 `Execute` 方法体必须是**块体 `{ }`**，不支持表达式体 `=>`（ISPC 生成器只识别块体）。`e.Id` 即全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组（无该参数零开销）。
 - **并行创建未提供**：`ParallelWriter` 只支持自包含命令（销毁 + 写单个组件）。并行 `CreateEntitiesRange`
   （DOTS 的 placeholder 机制）未实现；创建/结构变更仍限主线程。
@@ -212,7 +239,7 @@ System.AggregateException: One or more scheduled C# jobs failed.
   （查找顺序见加载器实现）。缺任一者：前者静默降级为"仅托管路径"，后者直接 `NativeDll.dll is not loaded`。
 - **头文件/布局必须与预编译 DLL 同版本**：包内头与 `NativeDll.lib`、`NativeDll.dll` 来自同一次打包 ⇒ 消费者**不得**
   混用不同版本的包（例如把 `EntJoy.Jobs` 1.0.0 的头与该包 1.0.1 的 DLL 拼在一起）；升级请整体升级四个包（lockstep）。
-- **ABI/布局校验目前不存在**：没有版本握手，错配只会在运行期以难以定位的错值或崩溃形式出现（已知缺口）。
+- **ABI 校验覆盖到「版本号 + 统计结构布局」，未覆盖「任意 ABI 结构的布局哈希」**：`LoadNativeDll` 会要求 `JobSystem_GetAbiVersion` 导出存在且等于 `ExpectedAbiVersion`，不满足则 `NativeLibrary.Free` + 回退 Managed（`EntJoy.Jobs/Native/NativeJobCore.cs`，回归用例 `tools/JobSystemBugTests/Stage11_AbiFixture` 的 `stub_no_abi` / `stub_wrong_version`）；初始化后还会由 `ValidateStatsLayout()` 校验统计结构的偏移/大小。残留缺口是：**改动任何跨 ABI 的 job 结构/适配器布局时必须手动递增 `ExpectedAbiVersion`**，没有基于头文件/布局哈希的自动门禁 ⇒ 忘记递增时错配仍是静默错值。
 - **写 native job 需要本机 C++ 工具链**：CMake + MSVC（或 VS 自带 ClangCL；缺 ClangCL 自动回退 MSVC）；
   `Target = Ispc` 还要求 `ispc` 在 `PATH`。**纯 C#（不写 `[NativeTranspile]`）不需要任何工具链**。
 - **独立消费 `EntJoy.Jobs` 时**：只有数组类 job（`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`）可转译；

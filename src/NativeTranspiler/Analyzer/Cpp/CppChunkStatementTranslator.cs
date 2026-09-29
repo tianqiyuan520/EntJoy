@@ -14,12 +14,35 @@ namespace NativeTranspiler.Analyzer
         private sealed class NativeArrayElementAlias
         {
             public string ArrayName { get; set; } = "";
+
+            /// <summary>
+            /// 该局部数组名背后的**存储身份**（`component:&lt;idx&gt;` / `shared:&lt;idx&gt;`）。
+            /// 同一个分量列可以用**多个局部名**绑定（`componentArrays[i]` 是同一块内存）⇒ 任何按"名字"
+            /// 判定的读/写分析都会漏掉"透过另一个名字的写"（独立验收实测：静默错值 1344/4093）。
+            /// </summary>
+            public string StorageKey { get; set; } = "";
+
             public string IndexExpression { get; set; } = "";
+
+            /// <summary>
+            /// 索引表达式的**语法节点**：别名每次使用都重新翻译它（而不是原样抄 C# 文本）。
+            /// 抄文本会让 `arr[Indices[k]]`（NativeArray 字段索引）漏出未声明的 `Indices`、
+            /// 让 `arr[this.Offset]` 漏出 `this.` ⇒ 生成物编译失败。
+            /// </summary>
+            public ExpressionSyntax IndexSyntax { get; set; } = null!;
+
+            /// <summary>索引表达式里出现的标识符（别名要求它们在别名作用域内不被改写，见 <see cref="IsAliasSafe"/>）。</summary>
+            public List<string> IndexIdentifiers { get; } = new List<string>();
         }
 
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly List<INamedTypeSymbol> _requiredSharedTypes;  // SharedComponent 类型（blittable，per-chunk 值指针）
         private readonly HashSet<string> _chunkArrayLocalNames = new();
+        /// <summary>局部数组名 → 存储身份（见 <see cref="NativeArrayElementAlias.StorageKey"/>）。</summary>
+        private readonly Dictionary<string, string> _chunkArrayStorageKeys = new();
+        /// <summary>局部变量**符号** → 存储身份（预扫描填充，符号优先 ⇒ 遮蔽/顺序安全）。</summary>
+        private readonly Dictionary<ISymbol, string> _chunkArraySymbolStorageKeys =
+            new Dictionary<ISymbol, string>(SymbolEqualityComparer.Default);
         private readonly Dictionary<string, NativeArrayElementAlias> _nativeArrayElementAliases = new();
 
         // ─── SendEvent 支持 ───
@@ -74,7 +97,7 @@ namespace NativeTranspiler.Analyzer
             if (!TryBuildEnableBitMapExpression(invocation, out var expression)) return false;
 
             AppendIndent();
-            _builder.Append("auto* RESTRICT ");
+            _builder.Append("auto* ");
             _builder.Append(variable.Identifier.Text);
             _builder.Append(" = ");
             _builder.Append(expression);
@@ -120,11 +143,35 @@ namespace NativeTranspiler.Analyzer
         {
             if (_nativeArrayElementAliases.TryGetValue(identifier.Identifier.Text, out var alias))
             {
-                _builder.Append(alias.ArrayName).Append("_ptr[").Append(alias.IndexExpression).Append(']');
+                _builder.Append(alias.ArrayName).Append("_ptr[");
+                // 重新翻译索引（见 IndexSyntax 注释）：抄文本会漏出未声明的字段名/`this.`
+                TranslateExpression(alias.IndexSyntax);
+                _builder.Append(']');
                 return;
             }
 
             base.TranslateIdentifier(identifier);
+        }
+
+        /// <summary>
+        /// `arr.GetUnsafePtr()` / `arr.GetUnsafeReadOnlyPtr()`（chunk 数组局部）→ `arr_ptr`。
+        /// 旧实现只认**字段**（`_nativeArrayListNames`）⇒ chunk 局部会原样输出 `arr.GetUnsafePtr()`
+        /// 这种 C# 文本，生成物编译失败（独立验收 C25）。
+        /// </summary>
+        private bool TryTranslateChunkArrayUnsafePtr(InvocationExpressionSyntax invocation)
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+                return false;
+            string methodName = memberAccess.Name.Identifier.Text;
+            if (methodName != Config.GetUnsafePtr && methodName != "GetUnsafeReadOnlyPtr")
+                return false;
+            if (memberAccess.Expression is not IdentifierNameSyntax target)
+                return false;
+            if (!_chunkArrayLocalNames.Contains(target.Identifier.Text))
+                return false;
+
+            _builder.Append(target.Identifier.Text).Append("_ptr");
+            return true;
         }
 
         private bool TryTranslateChunkArrayLocal(LocalDeclarationStatementSyntax localDecl)
@@ -143,12 +190,13 @@ namespace NativeTranspiler.Analyzer
             {
                 if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation)
                     return false;
-                if (!TryBuildChunkArrayExpression(invocation, out var cppType, out var expression))
+                if (!TryBuildChunkArrayExpression(invocation, out var cppType, out var expression, out var storageKey))
                     return false;
 
                 _chunkArrayLocalNames.Add(variable.Identifier.Text);
+                _chunkArrayStorageKeys[variable.Identifier.Text] = storageKey;
                 lines.Append(new string(' ', _indentLevel * 4));
-                lines.Append("auto* RESTRICT ");
+                lines.Append("auto* ");
                 lines.Append(variable.Identifier.Text);
                 lines.Append("_ptr = reinterpret_cast<");
                 lines.Append(cppType);
@@ -169,13 +217,16 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateInvocation(InvocationExpressionSyntax invocation)
         {
+            if (TryTranslateChunkArrayUnsafePtr(invocation))
+                return;
+
             if (TryBuildEnableBitMapExpression(invocation, out var bitmapExpression))
             {
                 _builder.Append(bitmapExpression);
                 return;
             }
 
-            if (TryBuildChunkArrayExpression(invocation, out _, out var expression))
+            if (TryBuildChunkArrayExpression(invocation, out _, out var expression, out _))
             {
                 _builder.Append(expression);
                 return;
@@ -184,10 +235,11 @@ namespace NativeTranspiler.Analyzer
             base.TranslateInvocation(invocation);
         }
 
-        private bool TryBuildChunkArrayExpression(InvocationExpressionSyntax invocation, out string cppType, out string expression)
+        private bool TryBuildChunkArrayExpression(InvocationExpressionSyntax invocation, out string cppType, out string expression, out string storageKey)
         {
             cppType = "";
             expression = "";
+            storageKey = "";
 
             var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
             if (symbolInfo.Symbol is not IMethodSymbol methodSymbol)
@@ -212,6 +264,7 @@ namespace NativeTranspiler.Analyzer
                 cppType = NativeTranspiler.MapCSharpTypeToCpp(sharedType);
                 // 解引用指针：GetSharedComponent<T>() 返回值，C++ 侧需 *reinterpret_cast<T*>(...)
                 expression = $"*reinterpret_cast<{cppType}*>(__chunkData->sharedValuePtrs[{sharedIndex}])";
+                storageKey = $"shared:{sharedIndex}";
                 return true;
             }
 
@@ -233,6 +286,7 @@ namespace NativeTranspiler.Analyzer
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
             expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
+            storageKey = $"component:{componentIndex}";
             return true;
         }
 
@@ -267,19 +321,87 @@ namespace NativeTranspiler.Analyzer
 
         private void RegisterNativeArrayElementAliases(BlockSyntax block)
         {
+            // ★ 必须先预扫描：别名安全判定按"存储身份"统计写入，而局部名的登记是**惰性**的
+            //   （翻译到那条声明时才有）。顺序不当就会漏掉"别名之后才声明 / 声明在嵌套块里"的
+            //   同一分量列局部写的（独立验收 F1/F2：静默错值 4093/4093）。
+            PreScanChunkArrayStorageKeys(block);
+
             foreach (var statement in block.Statements)
             {
                 if (statement is not LocalDeclarationStatementSyntax localDecl)
                     continue;
                 if (!TryGetNativeArrayElementAliasLocal(localDecl, out var aliasName, out var alias))
                     continue;
-                bool hasWriteBack = BlockContainsAliasWriteBack(block, aliasName, alias);
-                bool isReadOnlySource = !BlockWritesAlias(block, aliasName) && !BlockWritesChunkArray(block, alias.ArrayName);
-                if (!hasWriteBack && !isReadOnlySource)
+                if (!IsAliasSafe(block, aliasName, alias))
                     continue;
 
                 _nativeArrayElementAliases[aliasName] = alias;
             }
+        }
+
+        /// <summary>
+        /// 预扫描本块子树里所有 chunk 数组局部 → 存储身份（名字表 + 符号表），使别名安全判定
+        /// **与翻译顺序无关**。外层 Execute 体的第一次调用即覆盖整个方法体 ⇒ 符号表完整。
+        /// </summary>
+        private void PreScanChunkArrayStorageKeys(BlockSyntax block)
+        {
+            foreach (var decl in block.DescendantNodesAndSelf().OfType<LocalDeclarationStatementSyntax>())
+            {
+                foreach (var variable in decl.Declaration.Variables)
+                {
+                    if (variable.Initializer?.Value is not InvocationExpressionSyntax invocation)
+                        continue;
+                    string storageKey;
+                    try
+                    {
+                        // 这里只做"识别 + 取键"：未登记在 required 列表里的分量类型仍由真正翻译时报错，
+                        // 预扫描静默跳过（不能让错误提前到错误的位置/被吞掉）。
+                        if (!TryBuildChunkArrayExpression(invocation, out _, out _, out storageKey))
+                            continue;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        continue;
+                    }
+
+                    _chunkArrayStorageKeys[variable.Identifier.Text] = storageKey;
+                    var symbol = _semanticModel.GetDeclaredSymbol(variable);
+                    if (symbol != null)
+                        _chunkArraySymbolStorageKeys[symbol] = storageKey;
+                }
+            }
+        }
+
+        /// <summary>
+        /// NT-11（Critical）：`var e = arr[i];` 在 C# 里是**值拷贝**，别名成 `arr_ptr[i]` 只有在
+        /// "别名作用域内 `arr[i]` 的值不会变"时才等价。旧判定只看 `block.Statements`（直接语句），
+        /// 因此写在 `if` / `for` 体内的数组写看不见 ⇒ 别名读到被改写过的值（静默错值）。
+        ///
+        /// 这里按**整块（含嵌套语句 + 元素字段写）**判定，并且：
+        ///   · 数组在本块内的写**只允许**是"读-改-写回"（`arr[i] = e;`）那一处
+        ///     （按**存储身份**判定：同一分量列的另一个局部名、别名之后才声明的名字、嵌套块里的
+        ///      名字、以及 `arr[i].Field = x` 这类元素字段写都算，见 <see cref="WritesAliasStorage"/>）；
+        ///   · 索引表达式里用到的变量在本块内不得被改写（否则别名的求值时机从"声明处一次"
+        ///     变成"每次使用"，副作用/取值都会重复或错位）；
+        ///   · `e` 被改写却没有写回 ⇒ 别名会把改动泄漏进数组（C# 只改拷贝）。
+        /// 任一条不满足就退回真拷贝（C# 语义，永远正确，只少一次优化）。
+        /// </summary>
+        private bool IsAliasSafe(BlockSyntax block, string aliasName, NativeArrayElementAlias alias)
+        {
+            bool writeBack = BlockContainsAliasWriteBack(block, aliasName, alias);
+            int arrayWrites = CountAliasStorageWrites(block, alias);
+
+            // 数组在本块内被改写：别名读到的是改写后的值，C# 读的是声明处的拷贝。
+            if (arrayWrites != (writeBack ? 1 : 0))
+                return false;
+
+            if (alias.IndexIdentifiers.Count > 0 && BlockWritesAnyIdentifier(block, alias.IndexIdentifiers))
+                return false;
+
+            if (!writeBack && BlockWritesAnyIdentifier(block, new[] { aliasName }))
+                return false;
+
+            return true;
         }
 
         private bool IsNativeArrayElementAliasLocal(LocalDeclarationStatementSyntax localDecl)
@@ -309,94 +431,318 @@ namespace NativeTranspiler.Analyzer
             if (args.Count != 1)
                 return false;
 
+            // NT-11：索引表达式有副作用（`arr[cursor++]`、`arr[Next()]`…）时不得别名 ——
+            // 别名会把索引的求值从"声明处一次"推迟到"每次使用"，副作用被重复执行。
+            if (HasSideEffects(args[0].Expression))
+                return false;
+
+            // NT-11：属性 getter 本质是方法调用（可能每次取值不同/有副作用）⇒ 同样不得别名。
+            if (ContainsPropertyAccess(args[0].Expression))
+                return false;
+
+            if (!TryResolveChunkStorageKey(arrayIdentifier, out var storageKey))
+                return false;
+
             aliasName = variable.Identifier.Text;
             alias = new NativeArrayElementAlias
             {
                 ArrayName = arrayIdentifier.Identifier.Text,
-                IndexExpression = NormalizeExpression(args[0].Expression)
+                StorageKey = storageKey,
+                IndexExpression = NormalizeExpression(args[0].Expression),
+                IndexSyntax = args[0].Expression
             };
+            foreach (var id in args[0].Expression.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>())
+            {
+                string n = id.Identifier.Text;
+                if (!alias.IndexIdentifiers.Contains(n))
+                    alias.IndexIdentifiers.Add(n);
+            }
             return true;
+        }
+
+        /// <summary>索引表达式里是否有属性访问（属性 getter 是方法调用：每次取值可能不同、可能有副作用）。</summary>
+        private bool ContainsPropertyAccess(ExpressionSyntax expression)
+        {
+            foreach (var node in expression.DescendantNodesAndSelf())
+            {
+                if (node is MemberAccessExpressionSyntax memberAccess
+                    && _semanticModel.GetSymbolInfo(memberAccess).Symbol is IPropertySymbol)
+                    return true;
+                if (node is IdentifierNameSyntax identifier
+                    && _semanticModel.GetSymbolInfo(identifier).Symbol is IPropertySymbol)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>索引表达式是否含副作用（赋值 / ++ / -- / 调用 / 对象创建 / await）。</summary>
+        private static bool HasSideEffects(ExpressionSyntax expression)
+        {
+            foreach (var node in expression.DescendantNodesAndSelf())
+            {
+                switch (node)
+                {
+                    case AssignmentExpressionSyntax:
+                    case InvocationExpressionSyntax:
+                    case ObjectCreationExpressionSyntax:
+                    case Microsoft.CodeAnalysis.CSharp.Syntax.AwaitExpressionSyntax:
+                        return true;
+                    case PrefixUnaryExpressionSyntax prefix
+                        when prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreIncrementExpression)
+                          || prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreDecrementExpression):
+                        return true;
+                    case PostfixUnaryExpressionSyntax postfix
+                        when postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostIncrementExpression)
+                          || postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostDecrementExpression):
+                        return true;
+                }
+            }
+            return false;
         }
 
         private bool BlockContainsAliasWriteBack(BlockSyntax block, string aliasName, NativeArrayElementAlias alias)
         {
-            foreach (var statement in block.Statements)
+            // 逐节点（而不是只看 ExpressionStatement）：写回语句也可能嵌在表达式里。
+            foreach (var node in block.DescendantNodes().OfType<AssignmentExpressionSyntax>())
             {
-                if (statement is not ExpressionStatementSyntax exprStmt)
+                if (!node.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression))
                     continue;
-                if (exprStmt.Expression is not AssignmentExpressionSyntax assignment)
+                if (node.Right is not IdentifierNameSyntax right || right.Identifier.Text != aliasName)
                     continue;
-                if (!assignment.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression))
+                if (!TryGetElementAccessParts(node.Left, out var baseExpression, out var indexExpression))
                     continue;
-                if (assignment.Right is not IdentifierNameSyntax right || right.Identifier.Text != aliasName)
-                    continue;
-                if (!TryGetChunkArrayElement(assignment.Left, out var arrayName, out var indexExpression))
-                    continue;
-                if (arrayName == alias.ArrayName && indexExpression == alias.IndexExpression)
+                // 按存储身份比较：透过同一分量列的另一个局部名 / 直接调用写回同样成立（符号优先 ⇒ 遮蔽安全）。
+                if (TryResolveElementBaseStorageKey(baseExpression, out var key)
+                    && key == alias.StorageKey
+                    && indexExpression == alias.IndexExpression)
                     return true;
             }
 
             return false;
         }
 
-        private bool BlockWritesAlias(BlockSyntax block, string aliasName)
+        /// <summary>
+        /// 本块（含嵌套语句 + 任意表达式上下文）里是否改写了任一 <paramref name="identifiers"/>
+        /// （赋值 / ++ / --）。NT-11：递归，且不能只看 ExpressionStatement。
+        /// </summary>
+        private static bool BlockWritesAnyIdentifier(BlockSyntax block, IReadOnlyList<string> identifiers)
         {
-            foreach (var statement in block.Statements)
+            foreach (var expression in block.DescendantNodes().OfType<ExpressionSyntax>())
             {
-                if (statement is not ExpressionStatementSyntax exprStmt)
-                    continue;
-
-                if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
-                    ExpressionStartsWithIdentifier(assignment.Left, aliasName))
+                foreach (var identifier in identifiers)
                 {
-                    return true;
-                }
-
-                if (exprStmt.Expression is PrefixUnaryExpressionSyntax prefix &&
-                    ExpressionStartsWithIdentifier(prefix.Operand, aliasName))
-                {
-                    return true;
-                }
-
-                if (exprStmt.Expression is PostfixUnaryExpressionSyntax postfix &&
-                    ExpressionStartsWithIdentifier(postfix.Operand, aliasName))
-                {
-                    return true;
+                    if (ExpressionWritesIdentifier(expression, identifier))
+                        return true;
                 }
             }
 
             return false;
         }
 
-        private bool BlockWritesChunkArray(BlockSyntax block, string arrayName)
+        private static bool ExpressionWritesIdentifier(ExpressionSyntax expression, string identifier)
         {
-            foreach (var statement in block.Statements)
+            switch (expression)
             {
-                if (statement is not ExpressionStatementSyntax exprStmt)
-                    continue;
+                case AssignmentExpressionSyntax assignment:
+                    return ExpressionStartsWithIdentifier(assignment.Left, identifier);
+                case PrefixUnaryExpressionSyntax prefix
+                    when prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreIncrementExpression)
+                      || prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreDecrementExpression):
+                    return ExpressionStartsWithIdentifier(prefix.Operand, identifier);
+                case PostfixUnaryExpressionSyntax postfix
+                    when postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostIncrementExpression)
+                      || postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostDecrementExpression):
+                    return ExpressionStartsWithIdentifier(postfix.Operand, identifier);
+                default:
+                    return false;
+            }
+        }
 
-                if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
-                    TryGetChunkArrayElement(assignment.Left, out var writtenArray, out _) &&
-                    writtenArray == arrayName)
+        /// <summary>
+        /// 本块（含嵌套语句 + **任意表达式上下文**）里对**别名那块内存**的写次数。
+        ///
+        /// ⚠ 不能只看 <c>ExpressionStatementSyntax</c>：写可以嵌在任何表达式里 ——
+        /// 调用实参 `Eat(arr[i] = x)`、局部声明初始化器 `var t = arr[i] = x`、
+        /// `if`/`while`/`do` 条件、`for` 的初始化器/增量器、三元表达式、lambda、局部函数体……
+        /// 逐节点扫赋值/++/-- 才完备（独立验收 C01–C10/C14/C32/C33/C39 实测漏判 ⇒ 静默错值）。
+        /// 另外 `ref s[i]` / `arr.GetUnsafePtr()` / `ArrayElementAsRef(arr, i)` 会把该列**逃逸**成
+        /// 引用/裸指针别名，之后透过它写的值同样改到这块内存 ⇒ 一律按"本块内被写"处理（保守）。
+        /// </summary>
+        private int CountAliasStorageWrites(BlockSyntax block, NativeArrayElementAlias alias)
+        {
+            int count = 0;
+            foreach (var node in block.DescendantNodes())
+            {
+                switch (node)
                 {
-                    return true;
-                }
-
-                if (exprStmt.Expression is PrefixUnaryExpressionSyntax prefix &&
-                    TryGetChunkArrayElement(prefix.Operand, out writtenArray, out _) &&
-                    writtenArray == arrayName)
-                {
-                    return true;
-                }
-
-                if (exprStmt.Expression is PostfixUnaryExpressionSyntax postfix &&
-                    TryGetChunkArrayElement(postfix.Operand, out writtenArray, out _) &&
-                    writtenArray == arrayName)
-                {
-                    return true;
+                    case AssignmentExpressionSyntax assignment:
+                        if (TargetsAliasStorage(assignment.Left, alias))
+                            count++;
+                        break;
+                    case PrefixUnaryExpressionSyntax prefix
+                        when prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreIncrementExpression)
+                          || prefix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreDecrementExpression):
+                        if (TargetsAliasStorage(prefix.Operand, alias))
+                            count++;
+                        break;
+                    case PostfixUnaryExpressionSyntax postfix
+                        when postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostIncrementExpression)
+                          || postfix.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PostDecrementExpression):
+                        if (TargetsAliasStorage(postfix.Operand, alias))
+                            count++;
+                        break;
+                    case RefExpressionSyntax refExpression:
+                        // ref 别名：`ref s[i]` / `ref arr[i].Field`
+                        if (TargetsAliasStorage(refExpression.Expression, alias))
+                            count++;
+                        break;
+                    case InvocationExpressionSyntax invocation
+                        when InvocationEscapesAliasStorage(invocation, alias):
+                        count++;
+                        break;
                 }
             }
 
+            return count;
+        }
+
+        /// <summary>
+        /// 该调用的结果是否是指向别名那块内存的引用/裸指针（`arr.GetUnsafePtr()`、
+        /// `UnsafeUtility.ArrayElementAsRef(arr, i)`…）。命中即视为"本块内该列被写"。
+        /// </summary>
+        private bool InvocationEscapesAliasStorage(InvocationExpressionSyntax invocation, NativeArrayElementAlias alias)
+        {
+            string name = invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.Text,
+                GenericNameSyntax generic => generic.Identifier.Text,
+                IdentifierNameSyntax identifier => identifier.Identifier.Text,
+                _ => ""
+            };
+            switch (name)
+            {
+                case "GetUnsafePtr":
+                case "GetUnsafeReadOnlyPtr":
+                case "ArrayElementAsRef":
+                case "GetRef":
+                case "AsRef":
+                    break;
+                default:
+                    return false;
+            }
+
+            // 实例调用：`arr.GetUnsafePtr()`
+            if (invocation.Expression is MemberAccessExpressionSyntax receiverAccess
+                && IdentifierTargetsAliasStorage(receiverAccess.Expression, alias))
+                return true;
+
+            // 静态调用：`UnsafeUtility.ArrayElementAsRef(arr, i)` —— 任一实参指向该列即可
+            foreach (var argument in invocation.ArgumentList.Arguments)
+            {
+                if (IdentifierTargetsAliasStorage(argument.Expression, alias))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 表达式是否**指向**别名那块内存：`arr`（裸标识符）或 `arr[i]` / `arr[i].Field`。
+        /// 符号解析不出来时保守返回 true（宁可退回真拷贝）。
+        /// </summary>
+        private bool IdentifierTargetsAliasStorage(ExpressionSyntax expression, NativeArrayElementAlias alias)
+        {
+            if (expression is IdentifierNameSyntax identifier)
+            {
+                if (TryResolveChunkStorageKey(identifier, out var key))
+                    return key == alias.StorageKey;
+                return _semanticModel.GetSymbolInfo(identifier).Symbol == null;
+            }
+
+            return TargetsAliasStorage(expression, alias);
+        }
+
+        /// <summary>写目标是否落在别名那块内存上（`arr[i]` / `arr[i].Field` / `arr[i].Field.Sub`…）。</summary>
+        private bool TargetsAliasStorage(ExpressionSyntax target, NativeArrayElementAlias alias)
+        {
+            if (!TryGetElementAccessParts(target, out var baseExpression, out _))
+                return false;
+
+            if (TryResolveElementBaseStorageKey(baseExpression, out var key))
+                return key == alias.StorageKey;
+
+            // 基名**解析不出来** ⇒ 保守当"同一块内存"；解析出来但不是分量列（普通数组/字段…）⇒ 不是。
+            return baseExpression is IdentifierNameSyntax identifier
+                   && _semanticModel.GetSymbolInfo(identifier).Symbol == null;
+        }
+
+        /// <summary>
+        /// 元素访问的基表达式 → 存储身份。支持两类基：
+        ///   · 局部名：`var arr = chunk.GetComponentDataNativeArray&lt;T&gt;(); arr[i]`
+        ///   · **直接调用**：`chunk.GetComponentDataSpan&lt;T&gt;()[i] = x`（独立验收 C10：之前完全看不见这次写）
+        /// </summary>
+        private bool TryResolveElementBaseStorageKey(ExpressionSyntax baseExpression, out string storageKey)
+        {
+            if (baseExpression is IdentifierNameSyntax identifier)
+                return TryResolveChunkStorageKey(identifier, out storageKey);
+
+            if (baseExpression is InvocationExpressionSyntax invocation)
+            {
+                try
+                {
+                    return TryBuildChunkArrayExpression(invocation, out _, out _, out storageKey);
+                }
+                catch (InvalidOperationException)
+                {
+                    storageKey = "";
+                    return false;
+                }
+            }
+
+            storageKey = "";
+            return false;
+        }
+
+        /// <summary>
+        /// 从元素访问（可带成员访问链）解出基表达式与索引文本：`arr[i]`、`arr[i].Field`、
+        /// `chunk.GetComponentDataSpan&lt;T&gt;()[i]` 都返回基表达式与索引文本。
+        /// </summary>
+        private static bool TryGetElementAccessParts(
+            ExpressionSyntax expression, out ExpressionSyntax baseExpression, out string indexExpression)
+        {
+            baseExpression = null!;
+            indexExpression = "";
+
+            var target = expression;
+            while (target is MemberAccessExpressionSyntax memberAccess)
+                target = memberAccess.Expression;
+            if (target is not ElementAccessExpressionSyntax elementAccess)
+                return false;
+
+            var args = elementAccess.ArgumentList.Arguments;
+            if (args.Count != 1)
+                return false;
+
+            baseExpression = elementAccess.Expression;
+            indexExpression = NormalizeExpression(args[0].Expression);
+            return true;
+        }
+
+        /// <summary>
+        /// 把标识符解析为 chunk 分量列的存储身份。**符号优先**（预扫描表）：只有符号解析不出来时才
+        /// 退回名字表 —— 名字表在变量遮蔽（同名不同列）时会给出错误结论，不能用于"写回识别/写回省略"
+        /// 这类会**省掉一条语句**的判定。
+        /// </summary>
+        private bool TryResolveChunkStorageKey(IdentifierNameSyntax identifier, out string storageKey)
+        {
+            var symbol = _semanticModel.GetSymbolInfo(identifier).Symbol;
+            if (symbol != null && _chunkArraySymbolStorageKeys.TryGetValue(symbol, out storageKey))
+                return true;
+            if (symbol == null && _chunkArrayStorageKeys.TryGetValue(identifier.Identifier.Text, out storageKey))
+                return true;
+
+            storageKey = "";
             return false;
         }
 
@@ -433,31 +779,14 @@ namespace NativeTranspiler.Analyzer
                 return false;
             if (!_nativeArrayElementAliases.TryGetValue(right.Identifier.Text, out var alias))
                 return false;
-            if (!TryGetChunkArrayElement(assignment.Left, out var arrayName, out var indexExpression))
+            if (!TryGetElementAccessParts(assignment.Left, out var baseExpression, out var indexExpression))
                 return false;
 
-            return arrayName == alias.ArrayName && indexExpression == alias.IndexExpression;
-        }
-
-        private bool TryGetChunkArrayElement(ExpressionSyntax expression, out string arrayName, out string indexExpression)
-        {
-            arrayName = "";
-            indexExpression = "";
-
-            if (expression is not ElementAccessExpressionSyntax elementAccess)
-                return false;
-            if (elementAccess.Expression is not IdentifierNameSyntax arrayIdentifier)
-                return false;
-            if (!_chunkArrayLocalNames.Contains(arrayIdentifier.Identifier.Text))
-                return false;
-
-            var args = elementAccess.ArgumentList.Arguments;
-            if (args.Count != 1)
-                return false;
-
-            arrayName = arrayIdentifier.Identifier.Text;
-            indexExpression = NormalizeExpression(args[0].Expression);
-            return true;
+            // 与 BlockContainsAliasWriteBack 同口径：按**符号优先**的存储身份（同一分量列的另一个
+            // 局部名也算写回；遮蔽时不会误判成写回而省掉一条语句）。
+            return TryResolveElementBaseStorageKey(baseExpression, out var key)
+                   && key == alias.StorageKey
+                   && indexExpression == alias.IndexExpression;
         }
 
         private static string NormalizeExpression(ExpressionSyntax expression)

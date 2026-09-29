@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
@@ -66,6 +66,21 @@ namespace NativeTranspiler.Analyzer
             return _builder.ToString();
         }
 
+        /// <summary>
+        /// 转译**一条**语句（不构造脱离语法树的 <c>BlockSyntax</c>）。
+        ///
+        /// ⚠ 调用点若为了"统一成 Block"而用 <c>SyntaxFactory.Block(stmt)</c> 包一层，
+        /// 里面的节点会脱离原语法树 ⇒ 语义模型的 <c>GetTypeInfo</c> 抛
+        /// <c>ArgumentException: 语法节点不在语法树中</c>（整个生成器崩成 NT026）。
+        /// 非 Block 的循环体请走这里。
+        /// </summary>
+        public string TranslateSingleStatement(StatementSyntax statement)
+        {
+            if (statement == null) return "";
+            TranslateStatement(statement);
+            return _builder.ToString();
+        }
+
         protected void AppendIndent() => _builder.Append(new string(' ', _indentLevel * 4));
 
         protected virtual void TranslateStatement(StatementSyntax statement)
@@ -107,6 +122,12 @@ namespace NativeTranspiler.Analyzer
                 case ContinueStatementSyntax continueStmt:
                     AppendIndent();
                     _builder.AppendLine("continue;");
+                    break;
+                case UnsafeStatementSyntax unsafeStmt:
+                    // `unsafe { ... }` 只是 C# 的**编译期许可**（无运行期语义）⇒ 按普通块翻译。
+                    // 旧实现落到 default 分支发 `__ENTJOY_UNSUPPORTED_STMT__UnsafeStatement` 标记，
+                    // 把"完全可译"的代码打成构建失败（块内真的是不支持的构造时，各自照常发标记）。
+                    TranslateBlock(unsafeStmt.Block, skipOuterBraces: false);
                     break;
                 default:
                     // 未支持的语句一律写唯一标记：构建期扫描到即失败。

@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -456,7 +456,10 @@ namespace NativeTranspiler.Analyzer
                     var simdGen = new SimdControlFlowGenerator(
                         semanticModel, jobStruct, variables, varAnalyzer,
                         indexParamName: "", simdIndexVar: "v_i",
-                        batchOffsetVar: "0",
+                        // 单 IJob：没有生成器可知的批循环 ⇒ 偏移未知。先前传字面量 "0" 等于断言
+                        // "v_i 相对基址从 0 开始"，而用户循环起点未知 ⇒ 现用哨兵值让
+                        // EmitElementStore 退回逐 lane scatter（NT-01(b) 同类陷阱封死）。
+                        batchOffsetVar: SimdControlFlowGenerator.UnknownBatchOffset,
                         simdMathPrecision: simdMathPrecision);
                     var simdBody = simdGen.Generate(methodSyntax.Body);
                     sb.Append(simdBody);
@@ -549,8 +552,8 @@ namespace NativeTranspiler.Analyzer
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
-                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+                sb.AppendLine($"    auto* __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
+                sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
 
             // Pre-translate scalar body
@@ -569,9 +572,15 @@ namespace NativeTranspiler.Analyzer
                 scalarBody = scalarBody.Replace(param.Name + ".", $"__entity_param_{i}_ptr[__entity_index].");
             }
 
+            // NT-02（Critical）：旧实现直接 `scalarBody.Replace("return;", "")` ⇒ 无括号写法
+            //   `if (p.X < 0) return; p.Marker += 1;` 变成 `if (p.X < 0) p.Marker += 1;`
+            //   ——控制流反转、静默错值。
+            // NT-07：嵌在循环里的 `return;` 降级为 `break;` 只跳出内层循环 ⇒ 必须写唯一标记
+            //   让构建期（NativeCompileTask.CheckGeneratedMarkers）失败，而不是静默错执行。
+            // index 层级则用 do-while + `break;` 表达"结束本次实体"。
             bool hasReturn = scalarBody.Contains("return;");
             if (hasReturn)
-                scalarBody = scalarBody.Replace("return;", "");
+                scalarBody = ReturnStatementRewriter.Rewrite(scalarBody, methodSyntax?.Body, "break;");
 
             // Flat scalar loop with auto-vectorize pragma (must be directly before the for)
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
@@ -580,11 +589,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#endif");
             sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("    {");
+            if (hasReturn) sb.AppendLine("        do {");
+            string bodyIndent = hasReturn ? "            " : "        ";
             foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
             {
                 if (line.Length == 0) continue;
-                sb.Append("        ").AppendLine(line);
+                sb.Append(bodyIndent).AppendLine(line);
             }
+            if (hasReturn) sb.AppendLine("        } while(false);");
             sb.AppendLine("    }");
             sb.AppendLine("}");
         }
@@ -603,8 +615,8 @@ namespace NativeTranspiler.Analyzer
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
-                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+                sb.AppendLine($"    auto* __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
+                sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
 
             // Pre-translate scalar body
@@ -615,6 +627,12 @@ namespace NativeTranspiler.Analyzer
                 var translator = new CppEntityStatementTranslator(semanticModel, jobStruct, useFastMath);
                 scalarBody = translator.Translate(methodSyntax.Body);
             }
+
+            // NT-02/NT-07：index 层级的 `return;` 配合外层 do-while 降级为 `break;`（结束本次实体）；
+            // 嵌在循环里的 `return;` 不能降级为 break（只跳内层循环），改写为唯一标记 ⇒ 构建期失败。
+            bool hasReturn = scalarBody.Contains("return;");
+            if (hasReturn)
+                scalarBody = ReturnStatementRewriter.Rewrite(scalarBody, methodSyntax?.Body, "break;");
 
             // Generate per-lane SIMD wrapper + remainder loop
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
@@ -632,15 +650,13 @@ namespace NativeTranspiler.Analyzer
                 string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
                 sb.AppendLine($"                {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
             }
-            // Append scalar body (with return; → break; for per-lane context)
-            bool hasReturn = scalarBody.Contains("return;");
             if (hasReturn)
             {
                 sb.AppendLine("                do {");
                 foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                 {
                     if (line.Length == 0) continue;
-                    sb.Append("                    ").AppendLine(line.Replace("return;", "break;"));
+                    sb.Append("                    ").AppendLine(line);
                 }
                 sb.AppendLine("                } while(false);");
             }
@@ -671,7 +687,7 @@ namespace NativeTranspiler.Analyzer
                 foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                 {
                     if (line.Length == 0) continue;
-                    sb.Append("            ").AppendLine(line.Replace("return;", "break;"));
+                    sb.Append("            ").AppendLine(line);
                 }
                 sb.AppendLine("        } while(false);");
             }
@@ -712,8 +728,8 @@ namespace NativeTranspiler.Analyzer
                 if (NativeTranspiler.IsEntityType(param.Type)) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
                 string constPrefix = param.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"    {constPrefix}auto* RESTRICT __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{compIdx}]);");
-                sb.AppendLine($"    __assume((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
+                sb.AppendLine($"    {constPrefix}auto* __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{compIdx}]);");
+                sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
                 compIdx++;
             }
 
@@ -726,7 +742,11 @@ namespace NativeTranspiler.Analyzer
                 scalarBody = translator.Translate(methodSyntax.Body);
             }
 
+            // NT-02/NT-07：index 层级的 `return;` 配合外层 do-while 降级为 `break;`；
+            // 嵌在循环里的 `return;` 降级为 break 只会跳内层循环 ⇒ 改写为唯一标记让构建期失败。
             bool hasReturn = scalarBody.Contains("return;");
+            if (hasReturn)
+                scalarBody = ReturnStatementRewriter.Rewrite(scalarBody, methodSyntax?.Body, "break;");
 
             // Entity 参数：用函数内局部结构体（{ int Id; int Version; } 对齐 C# Entity）。
             // 不用 EntJoy.ECS.Entity 结构头：Entity 是 IJobEntity 的注入参数，不是 chunk 组件列，
@@ -761,7 +781,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     string trimmed = line.TrimEnd();
                     if (trimmed.Length == 0) continue;
-                    sb.AppendLine($"            {trimmed.Replace("return;", "break;")}");
+                    sb.AppendLine($"            {trimmed}");
                 }
                 sb.AppendLine("        } while(false);");
             }
@@ -887,7 +907,7 @@ namespace NativeTranspiler.Analyzer
             var parameters = new List<string> { "int __startIndex", "int __count" };
             AppendFieldParameters(jobStruct, parameters);
             if (GetScalarFields(jobStruct).Count > 0 && PackScalarsForJob(jobStruct))
-                parameters.Add($"const {GetScalarsStructName(jobStruct)}* RESTRICT __scalars");
+                parameters.Add($"const {GetScalarsStructName(jobStruct)}* __scalars");
             return string.Join(", ", parameters);
         }
 
@@ -901,25 +921,25 @@ namespace NativeTranspiler.Analyzer
                     {
                         var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* RESTRICT {field.Name}_listData");
+                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* {field.Name}_listData");
                     }
                     else // NativeArray
                     {
                         var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        parameters.Add($"{cppElementType}* RESTRICT {field.Name}_ptr, int {field.Name}_length");
+                        parameters.Add($"{cppElementType}* {field.Name}_ptr, int {field.Name}_length");
                     }
                 }
                 else if (field.Type is IPointerTypeSymbol)
                 {
                     // ★ 修改：不再添加多余的 *，MapCSharpTypeToCpp 已包含 *
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    parameters.Add($"{cppType} RESTRICT {field.Name}_ptr");
+                    parameters.Add($"{cppType} {field.Name}_ptr");
                 }
                 else if (!PackScalarsForJob(jobStruct))
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    parameters.Add($"{cppType}* RESTRICT {field.Name}_ptr");
+                    parameters.Add($"{cppType}* {field.Name}_ptr");
                 }
                 // 打包开启时：纯值字段不进形参表（由 __scalars 携带）
             }
@@ -1660,8 +1680,8 @@ namespace NativeTranspiler.Analyzer
                         // 组件数组指针声明（batch 级）
                         foreach (var (name, elemType, compIdx) in chunkArrays)
                         {
-                            simdSb.AppendLine($"        auto* RESTRICT {name}_ptr = reinterpret_cast<{elemType}*>(__batchData->componentArrays[{compIdx}]);");
-                            simdSb.AppendLine($"        __assume((intptr_t){name}_ptr % 64 == 0);");
+                            simdSb.AppendLine($"        auto* {name}_ptr = reinterpret_cast<{elemType}*>(__batchData->componentArrays[{compIdx}]);");
+                            simdSb.AppendLine($"        (void)((intptr_t){name}_ptr % 64 == 0);");
                             simdSb.AppendLine($"        int {name}_length = __batchData->entityCount;");
                         }
                         simdSb.AppendLine("        int __entity_count = __batchData->entityCount;");
@@ -1691,7 +1711,9 @@ namespace NativeTranspiler.Analyzer
                             sm, jobStruct, variables, varAnalyzer,
                             indexParamName: entityLoopIv,
                             simdIndexVar: "v_i",
-                            batchOffsetVar: "0",
+                            // NT-01(b)：偏移必须是外层批循环的当前位置 `si`（v_i = v_base + si）。
+                            // 旧值 "0" 让每个 simd 组都重写 [0,W) ⇒ 元素 ≥W 永远写不到（静默错值）。
+                            batchOffsetVar: "si",
                             batchLoopVar: "",
                             nativeArrayParams: nativeArrayParams,
                             simdMathPrecision: simdMathPrecision);
@@ -1713,7 +1735,7 @@ namespace NativeTranspiler.Analyzer
                         remBody = remBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                         remBody = remBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
                         // 移除 SIMD prelude 已声明的 ptr/length/entityCount
-                        remBody = Regex.Replace(remBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__batchData->componentArrays\[\d+\]\);\r?\n?", "");
+                        remBody = Regex.Replace(remBody, @"auto\* \w+_ptr = reinterpret_cast<[^>]+>\(__batchData->componentArrays\[\d+\]\);\r?\n?", "");
                         remBody = Regex.Replace(remBody, @"int \w+_length = __batchData->entityCount;\r?\n?", "");
                         remBody = Regex.Replace(remBody, @"int __entity_count = __batchData->entityCount;\r?\n?", "");
                         // 实体循环从 __simd_end 开始
@@ -1763,7 +1785,7 @@ namespace NativeTranspiler.Analyzer
                         if (trimmed.StartsWith("auto*") && trimmed.Contains("reinterpret_cast<"))
                         {
                             string varName = trimmed.Split('=')[0].Trim().Split(' ').Last();
-                            sb.AppendLine($"        __assume((intptr_t){varName} % 64 == 0);");
+                            sb.AppendLine($"        (void)((intptr_t){varName} % 64 == 0);");
                         }
                     }
                 }
@@ -2351,7 +2373,7 @@ namespace NativeTranspiler.Analyzer
                                 // 2. Generate C++ prelude
                 foreach (var (name, elemType, compIdx) in chunkArrays)
                 {
-                    sb.AppendLine($"    auto* RESTRICT {name}_ptr = reinterpret_cast<{elemType}*>(__chunkData->requiredComponentArrays[{compIdx}]);");
+                    sb.AppendLine($"    auto* {name}_ptr = reinterpret_cast<{elemType}*>(__chunkData->requiredComponentArrays[{compIdx}]);");
                     sb.AppendLine($"    int {name}_length = __chunkData->entityCount;");
                 }
                 sb.AppendLine("    int __entityCount = __chunkData->entityCount;");
@@ -2381,7 +2403,8 @@ namespace NativeTranspiler.Analyzer
                 semanticModel, jobStruct, variables, varAnalyzer,
                 indexParamName: entityLoopIv,
                 simdIndexVar: "v_i",
-                batchOffsetVar: "0",
+                // NT-01(b)：同上 —— 连续向量 store 的偏移是外层批循环变量 `si`，不是常量 0。
+                batchOffsetVar: "si",
                 batchLoopVar: "",
                 nativeArrayParams: nativeArrayParams,
                 simdMathPrecision: simdMathPrecision);
@@ -2416,7 +2439,7 @@ namespace NativeTranspiler.Analyzer
                         var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
                         string scalarBody = tr.Translate(ms.Body);
                         // Remove duplicate pointer/length declarations
-                        try { scalarBody = Regex.Replace(scalarBody, @"auto\* RESTRICT \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", ""); } catch { }
+                        try { scalarBody = Regex.Replace(scalarBody, @"auto\* \w+_ptr = reinterpret_cast<[^>]+>\(__chunkData->requiredComponentArrays\[\d+\]\);\r?\n?", ""); } catch { }
                         try { scalarBody = Regex.Replace(scalarBody, @"int \w+_length = __chunkData->entityCount;\r?\n?", ""); } catch { }
                         try { scalarBody = Regex.Replace(scalarBody, @"int __entityCount = __chunkData->entityCount;\r?\n?", ""); } catch { }
                         scalarBody = scalarBody.Replace("#pragma loop(ivdep)\r\n", "").Replace("#pragma loop(ivdep)\n", "");
@@ -2456,7 +2479,7 @@ namespace NativeTranspiler.Analyzer
             {
                 try
                 {
-                    string ptrDecl = $"auto* RESTRICT {name}_ptr = reinterpret_cast<";
+                    string ptrDecl = $"auto* {name}_ptr = reinterpret_cast<";
                     int idx = scalarBody.IndexOf(ptrDecl);
                     if (idx >= 0)
                     {
@@ -2582,7 +2605,15 @@ namespace NativeTranspiler.Analyzer
         /// 为 IJobEntity 的实体循环生成 per-lane SIMD 包装代码。
         /// 将 "for (int __entity_index = 0; ... < ... ; ...)" 替换为
         /// per-lane batch + remainder 循环。
+        ///
+        /// ⚠ **无调用者（历史遗留，勿直接启用）**：内部对翻译产物做逐行
+        /// `Replace("return;", "break;")`，而 `break;` 在体内**内层循环**里的 `return;` 上只跳出
+        /// 内层循环 ⇒ 静默错值（NT-07）。要启用必须先改走
+        /// <see cref="ReturnStatementRewriter.Rewrite"/>（do-while + break，嵌套循环写
+        /// `__ENTJOY_UNSUPPORTED_STMT__` 标记）。用 `[Obsolete(error: true)]` 把"误用"变成编译错误。
         /// </summary>
+        [System.Obsolete("无调用者（历史遗留）：启用前必须改走 ReturnStatementRewriter.Rewrite(...)，"
+            + "否则内层循环里的 return 会被换成只跳出内层循环的 break（NT-07 静默错值）。", error: true)]
         private static string WrapEntityLoopSIMD(string scalarBodyWithLoop, string entityIndexVar, string entityCountExpr)
         {
             string loopStartPattern = $"for (int {entityIndexVar} = 0; {entityIndexVar} <";

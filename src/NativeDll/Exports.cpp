@@ -201,40 +201,123 @@ extern "C"
     int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles)
     {
         if (!descs || count <= 0 || !outHandles) return 0;
+        // 打包 fast path（Item 1）的最小 run 长度：短 run 走逐描述符路径，避免为 1-3 个 job
+        // 付一个 batch（BatchStorage + token 提交 + 退役）的固定成本。
+        constexpr int kPackMinRun = 4;
         int ok = 0;
+        // 单描述符提交（原行为，未改动）；返回是否成功提交。
+        auto submitOne = [&](int idx) -> bool {
+            outHandles[idx] = nullptr;
+            const JobBatchDesc& d0 = descs[idx];
+            if (!d0.func) return false;
+            JobSystem::JobHandle dep;
+            if (d0.dependency)
+                dep = JobSystem::JobHandle(fromHandle(d0.dependency), true);
+            JobSystem::JobHandle handle;
+            switch (d0.kind)
+            {
+            case 0: // IJob
+                handle = JobSystem::Scheduler::Schedule(
+                    reinterpret_cast<JobFunc>(d0.func), d0.context, d0.cleanup, dep);
+                break;
+            case 1: // IJobFor
+                handle = JobSystem::Scheduler::ScheduleFor(
+                    reinterpret_cast<IndexJobFunc>(d0.func), d0.context, d0.length, d0.cleanup, dep);
+                break;
+            case 2: // IJobParallelFor（auto-batch 语义：batchFunc(ctx,start,count)）
+                handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                    reinterpret_cast<BatchJobFunc>(d0.func), d0.context, d0.length, d0.batchSize, d0.cleanup, dep);
+                break;
+            default:
+                return false;
+            }
+            outHandles[idx] = toHandle(handle);
+            return true;
+        };
         try
         {
             {
                 // deferNotify 窗口：本批 submit 结束后统一唤醒一次（异常路径由 DeferWindow 兜底）。
                 DeferWindow deferWindow;
-                for (int i = 0; i < count; ++i)
+                // 打包描述符暂存：thread_local 复用容量，避免每帧一次大数组分配。
+                static thread_local std::vector<JobSystem::PackedPlainJobDesc> packBuf;
+                int i = 0;
+                while (i < count)
                 {
                     outHandles[i] = nullptr;
                     const JobBatchDesc& d = descs[i];
-                    if (!d.func) continue;
-                    JobSystem::JobHandle dep;
-                    if (d.dependency)
-                        dep = JobSystem::JobHandle(fromHandle(d.dependency), true);
-                    JobSystem::JobHandle handle;
-                    switch (d.kind)
+                    if (!d.func)
                     {
-                    case 0: // IJob
-                        handle = JobSystem::Scheduler::Schedule(
-                            reinterpret_cast<JobFunc>(d.func), d.context, d.cleanup, dep);
-                        break;
-                    case 1: // IJobFor
-                        handle = JobSystem::Scheduler::ScheduleFor(
-                            reinterpret_cast<IndexJobFunc>(d.func), d.context, d.length, d.cleanup, dep);
-                        break;
-                    case 2: // IJobParallelFor（auto-batch 语义：batchFunc(ctx,start,count)）
-                        handle = JobSystem::Scheduler::ScheduleParallelForBatch(
-                            reinterpret_cast<BatchJobFunc>(d.func), d.context, d.length, d.batchSize, d.cleanup, dep);
-                        break;
-                    default:
+                        ++i;
                         continue;
                     }
-                    outHandles[i] = toHandle(handle);
-                    ++ok;
+
+                    // ---- 打包提交：连续、无依赖的 plain IJob（kind==0）合并为一个 batch ----
+                    // 只合并"完全同形"的描述符（无依赖）。任一描述符带依赖即就地断开 run
+                    // —— 依赖语义与 IJobFor/IJobParallelFor 的既有提交路径逐位不变。
+                    if (d.kind == 0 && !d.dependency)
+                    {
+                        int j = i;
+                        while (j < count && descs[j].func && descs[j].kind == 0 &&
+                               !descs[j].dependency)
+                        {
+                            ++j;
+                        }
+                        const int runLen = j - i;
+                        bool packed = false;
+                        if (runLen >= kPackMinRun)
+                        {
+                            try
+                            {
+                                packBuf.clear();
+                                packBuf.reserve(static_cast<size_t>(runLen));
+                                for (int k = i; k < j; ++k)
+                                {
+                                    packBuf.push_back(JobSystem::PackedPlainJobDesc{
+                                        reinterpret_cast<JobFunc>(descs[k].func),
+                                        descs[k].context,
+                                        descs[k].cleanup });
+                                }
+                                const int n = JobSystem::SubmitPackedPlainJobs(
+                                    packBuf.data(), runLen, outHandles + i);
+                                // 全有或全无：只有整段成功才接受打包结果；
+                                // 否则整段回退逐描述符（打包未消费任何 context）。
+                                if (n == runLen)
+                                {
+                                    ok += n;
+                                    packed = true;
+                                }
+                                else if (n > 0)
+                                {
+                                    // 理论上不可达（打包是事务式的）。保守处理：该段视为
+                                    // 未打包并整段回退，同时把已写出的句柄清空，避免
+                                    // 同一 context 被提交两次（重复执行）。
+                                    for (int k = i; k < j; ++k) outHandles[k] = nullptr;
+                                }
+                            }
+                            catch (...)
+                            {
+                                // 降级：整段落入下方逐描述符路径。
+                            }
+                        }
+                        if (packed)
+                        {
+                            i = j;
+                            continue;
+                        }
+                        // 整段回退：逐描述符提交 run 内全部描述符（异常与既有路径一致地
+                        // 穿透到外层 catch，返回已成功提交数）。
+                        for (int k = i; k < j; ++k)
+                        {
+                            if (submitOne(k)) ++ok;
+                        }
+                        i = j;
+                        continue;
+                    }
+
+                    // ---- 带依赖 / IJobFor / IJobParallelFor：逐描述符路径 ----
+                    if (submitOne(i)) ++ok;
+                    ++i;
                 }
             }
             if (auto scheduler = JobSystem::LoadChaseLevScheduler())
@@ -379,6 +462,11 @@ extern "C"
             return toHandle(combined);
         }
         catch (...) { return nullptr; }
+    }
+
+    int64_t JobSystem_GetLiveHandleCount()
+    {
+        return JobSystem::g_liveHandleStates.load(std::memory_order_relaxed);
     }
 
     void* JobSystem_ScheduleChunkJob(

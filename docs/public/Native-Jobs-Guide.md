@@ -95,8 +95,10 @@ public struct MyJob : IJobParallelFor { … }
 | 非 ISPC 后端 + `UseISPC_MT` | ISPC 专用 | NT022 |
 | `AutoSIMD = Vectorize` | 仅 `IJobChunk`/`IJobEntity` 实现 | NT018 |
 | `IJobParallelForBatch` | 仅 Cpp 且不带 AutoSIMD | NT025 |
+| `AutoSIMD = Enabled`（`IJobParallelFor`/`IJobFor`/`IJob`） | 实测整步比标量基线**慢 ~10%** ⇒ 默认 **error**；要开必须在项目里显式声明 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>` | **NT024**（error） |
+| `AutoSIMD = Enabled/Vectorize` 但 body 命中"不可向量化"判据 | `Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针+varying 下标+宽元素 ⇒ 整段退回 **per-lane 标量循环**（产物正确但 0 个 `simd_mask`） | **NT031**（error，2026-09-27 新增） |
 
-**两个"能编但没用"的坑**（warning，明确告知不阻断）：`MathPrecision = High` 未实现（与 `IEEE` 产物逐字相同，NT023）；`AutoSIMD = Enabled` 在 `IJobParallelFor`/`IJobFor`/`IJob` 上实测 **比标量基线慢 ~10%**（NT024）。详见边界文档 §5。
+**两个"能编但没用"的坑**（2026-09-27 起都是 **error**，不再"只提示不阻断"）：`MathPrecision = High` 未实现（与 `IEEE` 产物逐字相同，NT023 仍是 warning）；`AutoSIMD = Enabled` 在 `IJobParallelFor`/`IJobFor`/`IJob` 上实测 **比标量基线慢 ~10%**，且 body 不可向量化时会整段退回 per-lane 标量（NT024 / NT031）。样例项目 `samples/EntJoySample` 因它的 AutoSIMD job 就是被 `tools/AutoSIMDVerify`(23/23)+`tools/AutoSIMDEdgeCases`(140/140) 逐值对照过的被测对象，显式打开了 `EntJoyAutoSimdMeasured`。详见边界文档 §4。
 
 ### 2.4 混合 ECS 与 native
 

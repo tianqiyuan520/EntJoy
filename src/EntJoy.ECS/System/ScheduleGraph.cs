@@ -104,14 +104,27 @@ namespace EntJoy.ECS
                         // 已达可达关系（手动顺序的传递闭包，如 First→Middle→Last）时不再加自动边，
                         // 否则自动冲突边可能与手动顺序形成环（First→Middle→Last→First）误报 cyclic dependency。
                         if (IsReachable(i, j, graph) || IsReachable(j, i, graph)) continue;
-                        if (_systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents) ||
-                            _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents))
+                        bool iBlocksJ = _systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents)
+                                     || _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents);
+                        bool jBlocksI = _systems[j].WriteComponents.Overlaps(_systems[i].ReadComponents)
+                                     || _systems[j].WriteComponents.Overlaps(_systems[i].WriteComponents);
+                        if (iBlocksJ && !jBlocksI)
                         {
                             AddEdge(i, j);
                         }
-                        else
+                        else if (jBlocksI && !iBlocksJ)
                         {
                             AddEdge(j, i);
+                        }
+                        else
+                        {
+                            // ★ R12：双向冲突（A 写 X 读 Y / B 写 Y 读 X）与写-写冲突时，旧实现按
+                            //   **注册顺序**（i<j 就取 i→j）定边 ⇒ 同一组 system 换个注册顺序就得到
+                            //   不同的执行顺序（提交顺序不可复现）。改为按**类型全名**的稳定判据定方向。
+                            if (string.CompareOrdinal(_systems[i].SystemType.FullName, _systems[j].SystemType.FullName) <= 0)
+                                AddEdge(i, j);
+                            else
+                                AddEdge(j, i);
                         }
                     }
                 }
@@ -135,8 +148,16 @@ namespace EntJoy.ECS
                         if (inDegree[next] == 0) queue.Enqueue(next);
                     }
                 }
-                // 同 layer 内按 Order 优先级排序（Order 越小越先执行）
-                layer.Sort((a, b) => a.Order.CompareTo(b.Order));
+                // 同 layer 内按 Order 优先级排序（Order 越小越先执行）。
+                // ★ R12：Order 相等时必须有**与注册顺序无关**的 tiebreak（List.Sort 是不稳定排序，
+                //   旧实现下同 Order 的提交顺序就跟着注册顺序走 ⇒ 不可复现）。
+                layer.Sort((a, b) =>
+                {
+                    int byOrder = a.Order.CompareTo(b.Order);
+                    return byOrder != 0
+                        ? byOrder
+                        : string.CompareOrdinal(a.SystemType.FullName, b.SystemType.FullName);
+                });
                 _layers.Add(layer);
             }
 

@@ -212,6 +212,34 @@ namespace
 
         JobSystem::SparseTileDeque dq1(1);
         Require(dq1.Capacity() >= 8, "minimal capacity is 8");
+
+        // 容量校验（2026-09-27）：旧实现 RoundUpPow2(2^31) 溢出成 0 ⇒ capacity_=0、mask_=2^32-1
+        // ⇒ new Slot[0] 后用 mask_ 索引 = 越界读写。现在必须**抛异常**而不是产出非法 deque。
+        bool threw = false;
+        try
+        {
+            JobSystem::SparseTileDeque bad(1u << 31);
+            (void)bad.Capacity();
+        }
+        catch (const std::exception&)
+        {
+            threw = true;
+        }
+        Require(threw, "SparseTileDeque(2^31) 必须抛异常（容量溢出），不得产出非法 deque");
+
+        bool threw2 = false;
+        try
+        {
+            JobSystem::SparseTileDeque bad2(0xFFFFFFFFu);
+            (void)bad2.Capacity();
+        }
+        catch (const std::exception&)
+        {
+            threw2 = true;
+        }
+        Require(threw2, "SparseTileDeque(UINT32_MAX) 必须抛异常（容量溢出）");
+
+        std::cout << "PASS SparseTileDequeCapacityValidation\n";
     }
 
     // ================================================================

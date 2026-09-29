@@ -202,6 +202,53 @@ namespace EntJoy.ECS
             public int ReleasedCount; // 已释放（移除）的 Chunk 数
         }
 
+        /// <summary>
+        /// 自检 slab 账本不变式（诊断/测试用；返回违例数，0 = 健康）。
+        ///
+        /// 不变式：
+        ///  1) 每个存活 Chunk 的 <c>MemoryBlock</c> 必须落在某个现存 slab 的范围内
+        ///     —— 否则该 chunk 的内存已被归还给全局池，Chunk/EntityInfo 成了悬空指针（UAF）；
+        ///  2) 每个 slab 的 <c>ReleasedCount</c> 必须等于「该 slab 范围内已不在 <c>_chunkList</c> 的 chunk 数」
+        ///     —— 复用空洞后必须把「已释放」还回去，否则 <c>ReleasedCount == ChunkCount</c> 会提前成立；
+        ///  3) <c>ReleasedCount &lt;= ChunkCount</c>。
+        ///
+        /// 这三条同时是 <see cref="ReleaseChunkMemory"/> 归还整块 slab 的前提；违反任意一条都可能
+        /// 让「含活 chunk 的 slab」被归还（跨 Archetype/World 内存别名）。
+        /// </summary>
+        internal int VerifySlabInvariants()
+        {
+            int violations = 0;
+
+            for (int c = 0; c < _chunkList.Count; c++)
+            {
+                long addr = _chunkList[c].MemoryBlock.ToInt64();
+                bool backed = false;
+                for (int i = 0; i < _slabs.Count; i++)
+                {
+                    long start = _slabs[i].AlignedPtr.ToInt64();
+                    if (addr >= start && addr < start + _slabs[i].Bytes) { backed = true; break; }
+                }
+                if (!backed) violations++;
+            }
+
+            for (int i = 0; i < _slabs.Count; i++)
+            {
+                SlabInfo slab = _slabs[i];
+                long start = slab.AlignedPtr.ToInt64();
+                long end = start + slab.Bytes;
+                int live = 0;
+                for (int c = 0; c < _chunkList.Count; c++)
+                {
+                    long addr = _chunkList[c].MemoryBlock.ToInt64();
+                    if (addr >= start && addr < end) live++;
+                }
+                if (slab.ReleasedCount != slab.ChunkCount - live) violations++;
+                if (slab.ReleasedCount > slab.ChunkCount) violations++;
+            }
+
+            return violations;
+        }
+
         public int ChunkCount => _chunkList.Count;
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
 
@@ -340,6 +387,22 @@ namespace EntJoy.ECS
                 int last = _freeChunks.Count - 1;
                 nint reused = _freeChunks[last];
                 _freeChunks.RemoveAt(last);
+
+                // 复用 = 该 chunk 重新变为「存活」，必须把它的「已释放」还回去。
+                // 否则 slab 账本会把活 chunk 记成已释放 ⇒ ReleasedCount == ChunkCount 提前成立 ⇒
+                // 整个 slab（含活 chunk）被 ReleaseChunkMemory 归还给全局池 ⇒
+                // 悬空 Chunk/EntityInfo（UAF）或跨 Archetype/World 内存别名。
+                // 注意：能进 _freeChunks 的空洞必定属于仍存活的 slab —— 归还 slab 时已把其空洞整体移除。
+                long reusedAddr = reused.ToInt64();
+                for (int i = 0; i < _slabs.Count; i++)
+                {
+                    long start = _slabs[i].AlignedPtr.ToInt64();
+                    if (reusedAddr >= start && reusedAddr < start + _slabs[i].Bytes)
+                    {
+                        if (_slabs[i].ReleasedCount > 0) _slabs[i].ReleasedCount--;
+                        break;
+                    }
+                }
                 return reused;
             }
 
