@@ -1,3 +1,4 @@
+#include "TestGuards.h"   // 覆盖判据 / sanitizer 策略（本目录所有原生测试共用）
 #include "../NativeDll/JobSystem.h"
 #include "../NativeDll/ChunkJobData.h"
 #include "../NativeDll/EntityBatchData.h"
@@ -6,10 +7,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -30,6 +35,14 @@ namespace
     void Require(bool value, const char* message)
     {
         if (!value) throw TestFailure(message);
+    }
+
+    // 覆盖判据（形状自证）：非 sanitizer 腿硬失败；sanitizer 腿降级为 [COVERAGE-SKIP] 诊断。
+    // 策略与理由集中在 `TestGuards.h`。
+    void RequireCoverage(bool condition, const char* message)
+    {
+        if (condition) return;
+        if (TestGuards::CoverageMiss(message)) Require(false, message);
     }
 
     struct ParallelContext
@@ -298,20 +311,65 @@ namespace
     {
         constexpr int length = 100'000;
         std::atomic<int> callbackCount{ 0 };
+        // 关掉 per-job 自适应（JCC）使期望确定：本用例测的是 **tpw 兜底**契约
+        // （JCC 打开时自适应路径有自己 16 tiles/worker 的上限，见 ResolveChunkSize）。
+        const bool savedJcc = JobSystem::g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+        JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+        // ⚠ 2026-10-05（`ENTJOY_FORCE_INNER_BATCH`）：该开关把**所有** auto 派发替换成"显式内批 + 跳过 JCC"，
+        //   等于**取消"自动批"本身** ⇒ 与本用例的前提（自动批密度 = tpw 公式）直接冲突。
+        //   后果：`run-native-tests.ps1 -ForceFine`（它的融合覆盖趟，脚本头明确推荐）下本用例**确定性失败**。
+        //   故与关 JCC / 关 F5 同一手法：清零后按契约断言，出作用域前还原。
+        const uint32_t savedForceBatch = JobSystem::g_forceInnerBatch;
+        JobSystem::g_forceInnerBatch = 0;
         auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
             [](void* raw, int, int)
             {
                 static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
             }, &callbackCount, length, 0);
         handle.Complete();
+        JobSystem::g_forceInnerBatch = savedForceBatch;
+        JobSystem::g_jobCostCacheEnabled.store(savedJcc, std::memory_order_relaxed);
         const int workers = JobSystem::CurrentWorkerCount();
-        // Default tile policy is kDefaultTilesPerWorker == 4 tiles/worker
-        // (tpw=4 落地 2026-08-23；与 ECS kTargetTilesPerWorker=4 一致)。
-        // rc = ceil(N / ceil(N / (W*4))) lands within [W*4 - 1, W*4]。
-        Require(callbackCount.load(std::memory_order_relaxed) >= workers * 4 - 1,
-            "automatic batching created too few work units for tail balancing");
-        Require(callbackCount.load(std::memory_order_relaxed) <= workers * 4,
-            "automatic batching exceeded the per-worker tile target");
+        // 默认 tile 策略 = kDefaultTilesPerWorker（2026-09-29 起 64，此前 4）；断言按符号写。
+        // 契约是**精确**的：chunk = max(16, ceil(N/(W*tpw)))，tiles = ceil(N/chunk)。
+        // ⚠ 不要用 [W*tpw-1, W*tpw] 这种"±1 tile"容差：chunk 变小时 ceil 的舍入会被放大
+        //   （tpw=64、W=15、N=1e5 ⇒ 953 tiles vs W*tpw=960）。
+        const int tpw = JobSystem::kDefaultTilesPerWorker;
+        const int expChunk = std::max(16, (length + workers * tpw - 1) / (workers * tpw));
+        const int expTiles = (length + expChunk - 1) / expChunk;
+        Require(callbackCount.load(std::memory_order_relaxed) == expTiles,
+            "automatic batching must produce exactly ceil(N / max(16, ceil(N/(W*tpw)))) tiles");
+    }
+
+    // General 并行-for 路的**元素覆盖**契约（对调用方可见的唯一契约）：
+    //   ① 每次回调的 [start, count) 逐段相接、严格升序、无重叠、无空洞 ⇒ **每个元素恰好一次**；
+    //   ② `count > 0`；③ 回调区间落在 [0, length)。
+    void TestParallelForElementCoverage()
+    {
+        constexpr int length = 100'000;
+        // ctx: 0 = 回调次数, 1 = count<=0 的次数, 2 = 越界次数, 3 = 元素计数和。
+        std::atomic<int> ctx[4];
+        for (int i = 0; i < 4; ++i) ctx[i].store(0, std::memory_order_relaxed);
+        // batch=1 ⇒ 每个元素一个 tile、每次回调只覆盖该 tile。
+        auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+            [](void* raw, int start, int count)
+            {
+                auto* c = static_cast<std::atomic<int>*>(raw);
+                if (count <= 0) c[1].fetch_add(1, std::memory_order_relaxed);
+                if (start < 0 || start + count > length) c[2].fetch_add(1, std::memory_order_relaxed);
+                c[3].fetch_add(count, std::memory_order_relaxed);
+                c[0].fetch_add(1, std::memory_order_relaxed);
+            }, ctx, length, 1);
+        handle.Complete();
+        const int gotCalls = ctx[0].load(std::memory_order_relaxed);
+        Require(ctx[1].load(std::memory_order_relaxed) == 0,
+            "parallel-for: every callback must carry count > 0");
+        Require(ctx[2].load(std::memory_order_relaxed) == 0,
+            "parallel-for: every callback range must stay inside [0, length)");
+        Require(ctx[3].load(std::memory_order_relaxed) == length,
+            "parallel-for: element coverage must be exactly length (no gap, no double-run)");
+        Require(gotCalls == length,
+            "parallel-for: batch=1 must invoke the kernel exactly once per tile");
     }
 
     struct ChunkRangeContext
@@ -382,6 +440,55 @@ namespace
                 "chunk range was missed or duplicated");
         Require(cleanupCount.load(std::memory_order_relaxed) == 1,
             "chunk cleanup must run exactly once");
+    }
+
+    // 2026-10-01（F5b）：**chunk/entity/packed 路**的 tile 也"首尾相接" ⇒ 合并只改回调次数，不改元素覆盖。
+    //   契约：F5 关时回调次数 == tile 数；F5 开时严格更少；两态都要求每个 chunk 恰好被回调一次。
+    struct ChunkRunCtx
+    {
+        std::vector<std::atomic<int>>* hits;
+        std::atomic<int>* calls;
+        std::atomic<int>* sum;
+        std::atomic<int>* badRange;
+        int chunkCount;
+    };
+
+    void ExecuteChunkRun(void* raw, const ChunkJobData*, int start, int count)
+    {
+        auto* c = static_cast<ChunkRunCtx*>(raw);
+        if (start < 0 || count <= 0 || start + count > c->chunkCount)
+            c->badRange->fetch_add(1, std::memory_order_relaxed);
+        for (int i = start; i < start + count; ++i)
+            (*c->hits)[static_cast<size_t>(i)].fetch_add(1, std::memory_order_relaxed);
+        c->sum->fetch_add(count, std::memory_order_relaxed);
+        c->calls->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void CleanupChunkRun(void*) {}
+
+    void TestChunkRunElementCoverage()
+    {
+        constexpr int chunkCount = 1'024;
+        std::vector<ChunkJobData> chunks(chunkCount);
+        // ⚠ 实体数衡 tile：全零 chunk（entityCount=0）会被并为**一个** tile（见 BuildEntityBalancedTiles），
+        //   那样测不到"多 tile"覆盖。给每个 chunk 64 个实体 ⇒ 1024×64 实体 ⇒ ~128 tiles（≫16）。
+        for (auto& c : chunks) { c = ChunkJobData{}; c.entityCount = 64; }
+        std::vector<std::atomic<int>> hits(chunkCount);
+        std::atomic<int> calls{ 0 }, sum{ 0 }, badRange{ 0 };
+        ChunkRunCtx ctx{ &hits, &calls, &sum, &badRange, chunkCount };
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(
+            &ExecuteChunkRun, &ctx, &CleanupChunkRun,
+            chunks.data(), chunkCount, {}, JobSystem::ChunkScheduleMode::PublishAssist);
+        handle.Complete();
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1,
+                "chunk-run coverage: a chunk was missed or duplicated");
+        Require(badRange.load(std::memory_order_relaxed) == 0,
+            "chunk-run coverage: callback range left [0, chunkCount)");
+        Require(sum.load(std::memory_order_relaxed) == chunkCount,
+            "chunk-run coverage: chunk coverage must be exactly chunkCount");
+        Require(calls.load(std::memory_order_relaxed) >= 16,
+            "chunk-run coverage: test needs >= 16 tiles to be meaningful");
     }
 
     void TestCopiedHandleCleansUpOnce()
@@ -910,13 +1017,10 @@ namespace
         JobSystem::ResetStatsSnapshot();
         JobSystem::JobSystemStatsSnapshot stats{};
         JobSystem::GetStatsSnapshot(&stats);
-        Require(stats.directAssistClaims == 0, "direct assist stats did not reset");
-        Require(stats.exhaustedTickets == 0, "exhausted ticket stats did not reset");
-        Require(stats.scheduleToPublishEwmaNs == 0, "schedule-to-publish stats did not reset");
-        Require(stats.publishToFirstMainClaimEwmaNs == 0, "main-claim stats did not reset");
-        Require(stats.publishToFirstWorkerClaimEwmaNs == 0, "worker-claim stats did not reset");
+        // 2026-10-04：原先此处还对 6 个**死字段**断言归零（directAssistClaims / exhaustedTickets /
+        //   scheduleToPublishEwmaNs / publishToFirstMainClaimEwmaNs / publishToFirstWorkerClaimEwmaNs /
+        //   queueLockWaitEwmaNs）。它们全仓只有"赋 0"、无自增，已随 ABI 3 两侧删除 ⇒ 断言一并删除。
         Require(stats.publishToCompletionEwmaNs == 0, "completion stats did not reset");
-        Require(stats.queueLockWaitEwmaNs == 0, "queue-lock stats did not reset");
         Require(stats.workerTargetTotal == 0, "worker-target stats did not reset");
         Require(stats.totalTilesPublished == 0, "published-tile stats did not reset");
         Require(stats.localTiles == 0, "local-tile stats did not reset");
@@ -1664,6 +1768,75 @@ namespace
             "batch storage acquire/return accounting did not reconcile");
     }
 
+    // 2026-10-04（C）：代次校验的**正向**用例 —— 直接构造"批已回收复用、上一代令牌才结算"的场景。
+    // 为什么必须正向测：`[JOBGEN]` 计数恒 0 只能证明"从未触发"，不能证明"机制生效"。
+    // 本用例把机制的两半都点亮（迟到被拒 + 拒绝计数），并顺带证明回绕探针不是死代码。
+    void TestStaleSettlementRejectedByGeneration()
+    {
+        // 取一个 storage（本线程 TLS 缓存命中，或共享池/新建）。
+        JobSystem::BatchStorage* storage = JobSystem::AcquireBatchStorage(0);
+        Require(storage != nullptr, "AcquireBatchStorage returned null");
+        JobSystem::BatchState* batch = &storage->batch;
+        const uint32_t gen0 = storage->generation.load(std::memory_order_acquire);
+        batch->tileCount = 4;
+        batch->tilesRemaining.store(0, std::memory_order_release);
+        batch->logicalCompleted.store(true, std::memory_order_release);
+        batch->pendingTasks.store(2, std::memory_order_release);
+
+        // (1) 同代次结算：必须照常生效（2 → 1）。
+        JobSystem::ChaseLevTaskDone(batch, gen0);
+        Require(batch->pendingTasks.load(std::memory_order_acquire) == 1,
+            "same-generation settle must decrement pendingTasks");
+
+        // (2) 归还池 ⇒ 代次前进；再取回同一块 storage 开"新一代"。
+        JobSystem::ReleaseBatchStorage(storage);
+        JobSystem::BatchStorage* again = JobSystem::AcquireBatchStorage(0);
+        Require(again == storage, "per-thread storage cache must hand back the same storage");
+        const uint32_t gen1 = again->generation.load(std::memory_order_acquire);
+        Require(gen1 != gen0, "released storage must advance its generation");
+        JobSystem::BatchState* batch2 = &again->batch;
+        batch2->tileCount = 4;
+        batch2->tilesRemaining.store(0, std::memory_order_release);
+        batch2->logicalCompleted.store(true, std::memory_order_release);
+        batch2->pendingTasks.store(2, std::memory_order_release);
+
+        // (3) 上一代的迟到结算：必须被拒（不动新一代的 pendingTasks、不触发退役、计数 +1）。
+        const uint64_t staleBefore =
+            JobSystem::g_staleSettleDropped.load(std::memory_order_relaxed);
+        JobSystem::ChaseLevTaskDone(batch2, gen0);
+        Require(batch2->pendingTasks.load(std::memory_order_acquire) == 2,
+            "stale-generation settle must not decrement the new batch's pendingTasks");
+        Require(!batch2->finalized.load(std::memory_order_acquire),
+            "stale-generation settle must not finalize the new batch");
+        Require(JobSystem::g_staleSettleDropped.load(std::memory_order_relaxed) == staleBefore + 1,
+            "stale-generation settle must be counted");
+
+        // (4) 被拒之后，同代次的正常结算仍然生效（2 → 1）。
+        JobSystem::ChaseLevTaskDone(batch2, gen1);
+        Require(batch2->pendingTasks.load(std::memory_order_acquire) == 1,
+            "same-generation settle after a rejection must still work");
+
+        // (5) 回绕探针自身的活性：pendingTasks 置 0 后结算 ⇒ 检出回绕、且**不改变行为**
+        //     （旧代码在 fetch_sub 返回 0 时同样不触发退役）。storage 随后归还池 ⇒ batch 被整体
+        //     重建，这个人为制造的 0xFFFFFFFF 不会外泄到后续用例。
+        const uint64_t wrapBefore = JobSystem::g_pendingTasksWrap.load(std::memory_order_relaxed);
+        batch2->pendingTasks.store(0, std::memory_order_release);
+        JobSystem::ChaseLevTaskDone(batch2, gen1);
+        Require(batch2->pendingTasks.load(std::memory_order_acquire) == 0xFFFFFFFFu,
+            "wrap probe must observe the counter underflow");
+        Require(!batch2->finalized.load(std::memory_order_acquire),
+            "wrap detection must not change behavior (no retire on underflow)");
+        Require(JobSystem::g_pendingTasksWrap.load(std::memory_order_relaxed) == wrapBefore + 1,
+            "wrap counter must be live");
+
+        JobSystem::ReleaseBatchStorage(again);
+
+        // (6) 复原两个全局诊断计数：本用例是**人为**点亮探针，不能污染套件级判据
+        //     （其余 300+ 次 Shutdown 打的 `[JOBGEN]` 必须仍反映真实调度流量 = 0）。
+        JobSystem::g_staleSettleDropped.store(staleBefore, std::memory_order_relaxed);
+        JobSystem::g_pendingTasksWrap.store(wrapBefore, std::memory_order_relaxed);
+    }
+
     void TestBoundaryTimingDiagnostics()
     {
         constexpr int itemCount = 100;
@@ -2007,14 +2180,47 @@ void TestJobCostCacheSpikeSelfHeal()
     std::cout << "PASS JobCostCacheSpikeSelfHeal\n";
 }
 
+// 2026-10-02：槽索引已从 `funcHash & (kJobCostSlots-1)` 改成 **Knuth 乘法散列取高 8 位**
+// （见 `JobCostCache.h` 的 `SlotOf`：内核键是 16 字节对齐的 RVA ⇒ 低位恒 0，原掩码把 15 个内核
+//  压进 4 个槽）。因此"同槽"必须**用框架自己的索引函数**构造 —— 旧写法
+// `h2 = h1 + kJobCostSlots` 在新索引下根本不碰同一槽，测试会测一次不存在的碰撞而假失败。
+static uint32_t SameSlotPartner(uint32_t h1)
+{
+    const uint32_t want = JobSystem::JobCostCache::SlotOf(h1);
+    for (uint32_t h = 1; h < 1000000u; ++h)
+        if (h != h1 && JobSystem::JobCostCache::SlotOf(h) == want) return h;
+    return 0;
+}
+
+// ── 槽索引回归（2026-10-02 修的真实 bug）：**不能用低位当索引** ──
+// 内核键是模块内 RVA，函数 16 字节对齐 ⇒ 键的低 4 位恒为 0。旧实现 `key & 255` 实际只用位 4..7，
+// 实测 15 个内核只落进 4 个槽（0/16/32/48）⇒ 互相踩 `slotHash`/认领几何状态。本用例守住
+// "低位退化的键族必须被打散"这一性质（旧实现下 distinct 会掉到 4）。
+void TestJobCostCacheSlotIndexNotLowBits()
+{
+    bool seen[JobSystem::kJobCostSlots] = {};
+    int distinct = 0;
+    for (uint32_t i = 0; i < 64; ++i)
+    {
+        const uint32_t key = i << 4;                       // 模拟 16 字节对齐的 RVA 族
+        const uint32_t slot = JobSystem::JobCostCache::SlotOf(key);
+        Require(slot < static_cast<uint32_t>(JobSystem::kJobCostSlots), "SlotOf must stay in range");
+        if (!seen[slot]) { seen[slot] = true; ++distinct; }
+    }
+    // 旧实现（低位掩码）下这 64 个键只有 4 个槽；散列后应接近 64（期望 ~57）。
+    Require(distinct >= 48, "SlotOf must scatter 16-byte-aligned keys (low-bit mask collapsed to 4)");
+    std::cout << "PASS JobCostCacheSlotIndexNotLowBits (distinct=" << distinct << ")\n";
+}
+
 void TestJobCostCacheCollisionReuse()
 {
     // 2^k 槽：两个不同 hash 映射同一槽位 → 后者覆盖前者（重学，无正确性风险）。
     JobSystem::g_jobCostCache.Init();
-    const int slots = JobSystem::kJobCostSlots;
     const uint32_t h1 = 0x00000001u;
-    const uint32_t h2 = static_cast<uint32_t>(1 + 1 * static_cast<uint64_t>(slots)); // 同槽不同值
-    Require((h1 & (slots - 1)) == (h2 & (slots - 1)), "test hashes must collide");
+    const uint32_t h2 = SameSlotPartner(h1);               // 同一槽、不同值（用框架索引构造）
+    Require(h2 != 0 && h2 != h1, "test must find a real slot collision under SlotOf");
+    Require(JobSystem::JobCostCache::SlotOf(h1) == JobSystem::JobCostCache::SlotOf(h2),
+        "test hashes must collide");
     JobSystem::g_jobCostCache.UpdatePerElemCost(h1, 1.0, false);
     Require(JobSystem::g_jobCostCache.GetPerElemCost(h1) > 0.9,
         "hash1 must be readable before collision");
@@ -2035,7 +2241,8 @@ void TestResolveChunkSizeFallback()
     JobSystem::g_jobCostCache.UpdatePerElemCost(0x7777u, 0.05, false);  // 若有数据也被 flag 关掉
     int chunk = JobSystem::ResolveChunkSize(100'000, 0, 0x7777u);
     int workers = std::max(1, JobSystem::CurrentWorkerCount());
-    int tpwChunk = std::max(16, (100'000 + workers * 4 - 1) / (workers * 4));
+    const int tpw = JobSystem::kDefaultTilesPerWorker;
+    int tpwChunk = std::max(16, (100'000 + workers * tpw - 1) / (workers * tpw));
     Require(chunk == tpwChunk, "flag-off ResolveChunkSize must equal tpw fallback");
     JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
     std::cout << "PASS ResolveChunkSizeFallback\n";
@@ -2049,7 +2256,7 @@ void TestIntOverflowCeilDiv()
     JobSystem::g_jobCostCache.Init();
 
     const int workers = std::max(1, JobSystem::CurrentWorkerCount());
-    const int denom = workers * 4;
+    const int denom = workers * JobSystem::kDefaultTilesPerWorker;
     constexpr int kMax = std::numeric_limits<int>::max();
 
     // 期望用 int64_t 计算（避免测试自身溢出）：tpw 兜底 = max(16, ceil(length/(W*4)))。
@@ -2116,11 +2323,39 @@ void TestJccConcurrentHeterogeneous()
 {
     JobSystem::g_jobCostCache.Init();
     JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    // ⚠ 2026-10-05：本用例断言的是"**并发下 JCC 真的学到了**成本"，所以必须先把**绕过 JCC 的两个开关**清零，
+    //   否则前提不成立、断言失败（不是缺陷，是器械被外部旋钮改掉了）：
+    //     · `ENTJOY_FORCE_INNER_BATCH=<n>`：auto 派发强制成显式内批且 **funcHash=0 ⇒ 不进学习**
+    //       （实测 `-ForceFine` 下 `[JOBF6] nokey=5000` ⇒ 本用例确定性失败）；
+    //     · `ENTJOY_JOB_BATCH_TABLE`：命中同样置 funcHash=0、跳过 JCC（同一失效形态，潜伏）。
+    //   两者都在进入并发段前清零、join 之后还原（与 TestAutomaticBatchDensity 关 JCC/F5 同一手法）。
+    const uint32_t savedForceBatch = JobSystem::g_forceInnerBatch;
+    const uint32_t savedBatchTable = JobSystem::g_jobBatchTableCount;
+    JobSystem::g_forceInnerBatch = 0;
+    JobSystem::g_jobBatchTableCount = 0;
     constexpr int N = 100'000;
     const JccJobFn fns[4] = { JccJobLight0, JccJobLight1, JccJobHeavy0, JccJobHeavy1 };
 
     const int kThreads = 8;
-    const int kRounds = 30;   // 每线程 30 轮 ×4 job ≈ 960 次调度，足够 EWMA 收敛 + 并发争用
+    // ⚠ 2026-10-05：原来写死"每线程 30 轮"，等于赌"固定次数一定够收敛"。CI 上**偶发失败**
+    //   （同一提交重跑即过）证明那确实是运气：某个 key 是否被 JCC 播种，取决于该 job 实际走到的
+    //   路径与计时样本，跟机器核数/负载有关，不由轮数保证。
+    //   ⇒ 改成**以收敛为退出条件**的并发驱动：线程持续调度，主线程轮询"4 个 key 是否都已学到"，
+    //     全学到即置 done 收工；另设安全上限（时长 + 每线程轮数）以免永久空转 —— 到点仍未收敛时
+    //     判据照旧执行（给出可诊断的失败，而不是悄悄放过或降级）。
+    const auto allLearned = [&]() {
+        for (int j = 0; j < 4; ++j)
+        {
+            const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
+            if (JobSystem::g_jobCostCache.GetPerElemCost(h) <= 0.0 &&
+                JobSystem::g_jobCostCache.GetCoarseCost(h) <= 0.0)
+                return false;
+        }
+        return true;
+    };
+    std::atomic<bool> done{ false };
+    std::atomic<int> rounds{ 0 };            // 参与线程的总调度次数（仅诊断）
+    const int kMaxRoundsPerThread = 4000;    // 安全上限：不再赌次数，但绝不允许无限空转
     std::vector<std::thread> threads;
     for (int t = 0; t < kThreads; ++t)
     {
@@ -2128,25 +2363,46 @@ void TestJccConcurrentHeterogeneous()
             // 每线程独立 out（复用），避免并发写同一数组（TSAN data race）。
             // 结果正确性由 TestJccResultsInvariantAcrossTiles 专门验证，此处只驱动并发学习。
             std::vector<int> out(N, -1);
-            for (int r = 0; r < kRounds; ++r)
+            for (int r = 0; r < kMaxRoundsPerThread && !done.load(std::memory_order_relaxed); ++r)
             {
                 const int jobIdx = (t + r) % 4;   // 多线程交错不同 job（并发冲 cache 槽）
                 auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
                     fns[jobIdx], out.data(), N, 0);
                 h.Complete();   // 死锁/悬挂会卡在这里（无超时即失败）
+                rounds.fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!allLearned() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    done.store(true, std::memory_order_relaxed);
     for (auto& th : threads) th.join();
 
-    // 每个 job 必须学到独立成本（4 个不同 hash → 4 个正 perElem）
+    // 每个 job 必须学到**独立**成本（4 个不同 hash → 4 个正成本）。
+    // ⚠ 学到的成本落在哪个通道取决于分类器给出的档：
+    //   · 默认分类器（`TryClassify`）：UNKNOWN 期按粗/细**交错**采样 ⇒ 细通道 `GetPerElemCost` 会被播种。
+    //   · `ENTJOY_JCC_ROBUST=1`：被判 **mem-bound** 的 job 走 tpw 粗粒度 ⇒ 只写**粗**通道
+    //     （`GetCoarseCost`），细通道保持 0 是**该档的设计行为**，不是学习失败。
+    // 因此判据按"**该 job 在任一通道上学到了正成本**"来写，这样两种分类器下都验证同一个不变量
+    // （并发下 4 个异构 job 各自独立学到自己的成本、互不串扰），而不会把"档位不同"误报成失败。
+    // 覆盖判据：非 sanitizer 腿硬失败；sanitizer 腿降级为诊断（策略集中在 TestGuards.h）。
+    // 依据（CI 实测）：sanitizer 环境下 `[JOBPHYS] physicalCores=0`、`[JOBF6] nokey=5000`
+    // （大量批走表命中/旁路、未进学习路径）⇒ 本用例"8 线程 × 30 轮足以收敛"的前提不成立。
+    // ⚠ 2026-10-05：驱动已改为"以收敛为退出条件 + 20 s 安全上限"（见上），所以非 sanitizer 腿上的
+    //   失败现在确实意味着**长时间并发也没能学到**，是可信的缺陷信号，而不是"给的轮数不够"。
+    std::cout << "JccConcurrentHeterogeneous: rounds=" << rounds.load(std::memory_order_relaxed) << "\n";
     for (int j = 0; j < 4; ++j)
     {
         const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
-        Require(JobSystem::g_jobCostCache.GetPerElemCost(h) > 0.0,
-            "concurrent job must learn its per-element cost");
+        const double fine = JobSystem::g_jobCostCache.GetPerElemCost(h);
+        const double coarse = JobSystem::g_jobCostCache.GetCoarseCost(h);
+        RequireCoverage(fine > 0.0 || coarse > 0.0,
+            "concurrent job must learn its per-element cost (fine or coarse channel)");
     }
     JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);
+    JobSystem::g_forceInnerBatch = savedForceBatch;
+    JobSystem::g_jobBatchTableCount = savedBatchTable;
     std::cout << "PASS JccConcurrentHeterogeneous\n";
 }
 
@@ -2220,9 +2476,9 @@ void TestJccCollisionSlotConcurrent()
 {
     JobSystem::g_jobCostCache.Init();
     const uint32_t h1 = 0x00000111u;
-    const uint32_t h2 = h1 + static_cast<uint32_t>(JobSystem::kJobCostSlots);   // 同槽不同值
-    Require((h1 & (JobSystem::kJobCostSlots - 1)) == (h2 & (JobSystem::kJobCostSlots - 1)),
-        "test hashes must collide");
+    const uint32_t h2 = SameSlotPartner(h1);               // 同槽、不同值（用框架自己的 SlotOf 构造）
+    Require(h2 != 0 && h2 != h1 && JobSystem::JobCostCache::SlotOf(h1) == JobSystem::JobCostCache::SlotOf(h2),
+        "test hashes must collide (real collision under SlotOf)");
     // 先由 h1 持有槽位
     JobSystem::g_jobCostCache.UpdatePerElemCost(h1, 10.0, false);
 
@@ -2504,9 +2760,139 @@ static void TestDiagnosticNameMapBounded()
     std::cout << "PASS DiagnosticNameMapBounded\n";
 }
 
+// ══════════════════════════════════════════════════════════════════════════════════
+// 测试进度看门狗 + 用例耗时剖面（`ENTJOY_TEST_WATCHDOG=1`，**默认关**；纯测试器械，
+// 不触碰被测代码的任何行为）。
+// 动机：本套件完整一轮约 26s（含 ScheduleCompletePressure 5000 次、JccLongRunStability
+//   12000 次调度）。用**外部超时**判定"挂死"有两个致命问题：
+//   ① 判不出**在哪卡住**、也看不出"卡住时账本是什么状态"，只能靠重跑 + stdout 尾部猜；
+//   ② 慢与挂死混在一起（例如跑到 46/56 停住，是"慢"还是"卡死"无法区分），于是只能靠
+//      "重复 N 次看挂几次"这种低信噪比办法，每次重跑都要等满超时。
+// 本器械让**一次运行**即可判读：每个 PASS 行加 `[t=…ms]` 前缀（完整耗时剖面），每 1s 打一行
+// `[WD]`（含 `g_backendBatchesOutstanding` —— 它是 `WaitForBackendBatches` 的等待条件，
+// 一旦被多减一次就会让该自旋失真 ⇒ 挂死）；若 45s 没有新 PASS ⇒ 判定真挂死，打印现场并以
+// rc=3 退出（不再与"慢"混淆，也不再让 CI 靠外部超时兜）。
+// 实测价值：这套器械在 own-batch 实验里一次就定位到"卡在 TestJccLongRunStability、
+//   且 outstanding 已下溢"这一决定性线索。
+// ══════════════════════════════════════════════════════════════════════════════════
+namespace
+{
+    constexpr uint64_t kWatchdogStallMs = 45'000;
+
+    uint64_t TestElapsedMs() noexcept
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count());
+    }
+
+    std::mutex g_progressMutex;
+    std::string g_lastPassName;
+    std::atomic<uint64_t> g_lastPassAtMs{ 0 };
+
+    // 把 stdout 转发到原缓冲，同时：① 给完整行加耗时前缀；② 记录 PASS 进度供看门狗判活。
+    class ProgressStreamBuf : public std::streambuf
+    {
+    public:
+        explicit ProgressStreamBuf(std::streambuf* inner) noexcept : _inner(inner) {}
+    protected:
+        int_type overflow(int_type ch) override
+        {
+            if (traits_type::eq_int_type(ch, traits_type::eof()))
+                return traits_type::not_eof(ch);
+            const char c = traits_type::to_char_type(ch);
+            if (c == '\n') EmitLine();
+            else _line.push_back(c);
+            return ch;
+        }
+        std::streamsize xsputn(const char* s, std::streamsize n) override
+        {
+            for (std::streamsize i = 0; i < n; ++i)
+            {
+                if (s[i] == '\n') EmitLine();
+                else _line.push_back(s[i]);
+            }
+            return n;
+        }
+        int sync() override
+        {
+            if (!_line.empty())
+            {
+                _inner->sputn(_line.data(), static_cast<std::streamsize>(_line.size()));
+                _line.clear();
+            }
+            return _inner->pubsync();
+        }
+    private:
+        void EmitLine()
+        {
+            const uint64_t ms = TestElapsedMs();
+            char prefix[32];
+            const int n = std::snprintf(prefix, sizeof(prefix), "[t=%7llums] ",
+                static_cast<unsigned long long>(ms));
+            _inner->sputn(prefix, n);
+            _inner->sputn(_line.data(), static_cast<std::streamsize>(_line.size()));
+            _inner->sputc('\n');
+            if (_line.compare(0, 5, "PASS ") == 0)
+            {
+                std::lock_guard<std::mutex> lock(g_progressMutex);
+                g_lastPassName = _line;
+                g_lastPassAtMs.store(ms, std::memory_order_release);
+            }
+            _line.clear();
+        }
+        std::streambuf* _inner;
+        std::string _line;
+    };
+} // namespace
+
 int main()
 {
     std::cout << std::unitbuf;
+    const char* watchdogEnv = std::getenv("ENTJOY_TEST_WATCHDOG");
+    const bool watchdogOn = watchdogEnv != nullptr && watchdogEnv[0] == '1';
+    ProgressStreamBuf progressBuf(std::cout.rdbuf());
+    std::jthread watchdog;
+    if (watchdogOn)
+    {
+        std::cout.rdbuf(&progressBuf);
+        g_lastPassAtMs.store(TestElapsedMs(), std::memory_order_release);
+        watchdog = std::jthread([](std::stop_token stop)
+        {
+            while (!stop.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                if (stop.stop_requested()) break;
+                const uint64_t now = TestElapsedMs();
+                const uint64_t last = g_lastPassAtMs.load(std::memory_order_acquire);
+                const uint64_t outstanding =
+                    JobSystem::g_backendBatchesOutstanding.load(std::memory_order_acquire);
+                std::string lastPass;
+                {
+                    std::lock_guard<std::mutex> lock(g_progressMutex);
+                    lastPass = g_lastPassName;
+                }
+                const bool stalled = (now - last) > kWatchdogStallMs;
+                char line[512];
+                std::snprintf(line, sizeof(line),
+                    "[WD t=%llus] lastPass=%s | outstanding=%llu%s\n",
+                    static_cast<unsigned long long>(now / 1000),
+                    lastPass.empty() ? "<none>" : lastPass.c_str(),
+                    static_cast<unsigned long long>(outstanding),
+                    stalled ? "  <<< STALL" : "");
+                std::fwrite(line, 1, std::strlen(line), stderr);
+                std::fflush(stderr);
+                if (stalled)
+                {
+                    std::fprintf(stderr,
+                        "[WD] STALL: no PASS for %llu ms -> real hang, aborting rc=3\n",
+                        static_cast<unsigned long long>(now - last));
+                    std::fflush(stderr);
+                    std::_Exit(3);
+                }
+            }
+        });
+    }
     JobSystem::Scheduler::Initialize();
     try
     {
@@ -2534,6 +2920,8 @@ int main()
         std::cout << "PASS DefaultTileIsDecoupledFromPhysicalChunks\n";
         TestBatchStorageIsReturnedAndReused();
         std::cout << "PASS BatchStorageIsReturnedAndReused\n";
+        TestStaleSettlementRejectedByGeneration();
+        std::cout << "PASS StaleSettlementRejectedByGeneration\n";
         TestBoundaryTimingDiagnostics();
         std::cout << "PASS BoundaryTimingDiagnostics\n";
         TestParallelForExactOnceAndCallerAssist();
@@ -2564,6 +2952,10 @@ int main()
         std::cout << "PASS ChunkShutdownRace\n";
         TestAutomaticBatchDensity();
         std::cout << "PASS AutomaticBatchDensity\n";
+        TestParallelForElementCoverage();
+        std::cout << "PASS ParallelForElementCoverage\n";
+        TestChunkRunElementCoverage();
+        std::cout << "PASS ChunkRunElementCoverage\n";
         TestCopiedHandleCleansUpOnce();
         std::cout << "PASS CopiedHandleCleansUpOnce\n";
         TestCombinedDependencies();
@@ -2595,6 +2987,7 @@ int main()
         TestJobCostCacheBasic();
         TestJobCostCacheNoUnderflow();
         TestJobCostCacheSpikeSelfHeal();
+        TestJobCostCacheSlotIndexNotLowBits();
         TestJobCostCacheCollisionReuse();
         TestResolveChunkSizeFallback();
         TestIntOverflowCeilDiv();

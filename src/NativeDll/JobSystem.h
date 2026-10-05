@@ -65,16 +65,9 @@ namespace JobSystem {
         // 故 exception_ptr 用独立于依赖锁的互斥体保护。
         std::mutex exceptionMutex;
 
-        // ── §7aq：本批**预期执行时长**（ns，来自 JobCostCache 已学到的 perElem×N + perTile×tiles）。
-        // 由 Schedule 侧在 publish 前写入、`JobHandle::Complete()` 的 Phase-2 自旋窗读取（同一线程，
-        // 且状态复用前由 CreateState 清零）。0 = 未知/未学到 ⇒ 退化为固定自旋（原行为）。
-        // 用途：**自适应自旋**。大批（如 Melee 单批 ~70 ms）自旋纯属抢 SMT 执行单元；
-        // 微批（如波前 574 批/步、每批 ~28 µs）主线程自旋期的 `TryAssistOne()` 是真实算力。
-        // 两者相差三个数量级 ⇒ 用同一个数字即可分开（§7ai 只否证了固定值，未否定自适应）。
-        uint64_t estBatchNs{ 0 };
-        // 性能项 3：batchExceptionPtr 的**无锁可读影子标志**。回收路径（每 job 一次）据此
-        // 跳过 exceptionMutex（绝大多数 job 没有异常）。写入方在 exceptionMutex 内以 release
-        // 发布，回收方在 refCount 归零（acquire 语义）后读取，故不会漏。
+        // batchExceptionPtr 的**无锁可读影子标志**：回收路径（每 job 一次）据此跳过 exceptionMutex
+        //（绝大多数 job 没有异常）。写入方在 exceptionMutex 内以 release 发布，回收方在 refCount
+        // 归零（acquire 语义）后读取，故不会漏。
         // 追加在结构体尾部：C# HandleStateView 只读前 8 字节，布局前缀不变。
         std::atomic<bool> hasException{ false };
 
@@ -177,13 +170,12 @@ namespace JobSystem {
         uint64_t scheduleModeDeferredPublish;
         uint64_t scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
-        uint64_t directAssistClaims;
-        uint64_t exhaustedTickets;
-        uint64_t scheduleToPublishEwmaNs;
-        uint64_t publishToFirstMainClaimEwmaNs;
-        uint64_t publishToFirstWorkerClaimEwmaNs;
-        uint64_t publishToCompletionEwmaNs;
-        uint64_t queueLockWaitEwmaNs;
+        // 2026-10-04：原先此处有一块**死字段**（`directAssistClaims` / `exhaustedTickets` /
+        //   `scheduleToPublishEwmaNs` / `publishToFirstMainClaimEwmaNs` / `publishToFirstWorkerClaimEwmaNs` /
+        //   `queueLockWaitEwmaNs` —— 全仓只有"赋 0"、无任何自增），已**两侧同步删除**
+        //   （EntJoy + Unity port），并把 ABI 升到 **3**（`JobSystem_GetAbiVersion`），
+        //   使旧二进制在加载期被拒绝，而不是按错位偏移静默读错。
+        uint64_t publishToCompletionEwmaNs;       // GetStatsSnapshot 载入并参与打印
         uint64_t perRangeExecEwmaNs;
         uint64_t assistExecPctEwma;
         uint64_t completionOverheadUs;
@@ -272,11 +264,16 @@ namespace JobSystem {
             void (*cleanup)(void*) = nullptr,
             const JobHandle& dependency = {});
 
+        // `claimGeom` = **调用点在调度时声明的认领几何**
+        //   0 = Auto（默认；走批表/F6，最终 Adjacent）、1 = Spread（每 worker 独占连续段 + 空手尾部窃取）、
+        //   2 = Adjacent（共享游标发相邻窗口）。数值与 C# 的 `EntJoy.JobSystem.ClaimPolicy` 一致。
+        //   优先级：批表第四字段（显式声明）> 本参数 > F6 学习 > 不切片。缺省 0 ⇒ 逐位不变。
         static JobHandle ScheduleParallelForBatch(
             void (*func)(void*, int, int), void* context,
             int length, int batchSize,
             void (*cleanup)(void*) = nullptr,
-            const JobHandle& dependency = {});
+            const JobHandle& dependency = {},
+            uint32_t claimGeom = 0u);
 
         static JobHandle ScheduleParallelFor(
             void (*func)(void*, int), void* context,

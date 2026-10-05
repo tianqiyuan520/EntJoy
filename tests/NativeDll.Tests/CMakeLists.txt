@@ -69,8 +69,11 @@ add_executable(ImplicitBatchTests
     ../../src/NativeDll/ChaseLevScheduler.cpp
 )
 
+# Test3 覆盖"提交 defer 窗口"的**公开**契约（JobSystem_SubmitDeferBump/Flush）⇒ 需链接 Exports.cpp。
 add_executable(ShutdownFinalizeTests
-    ShutdownFinalizeTests.cpp    ../../src/NativeDll/JobSystem.cpp
+    ShutdownFinalizeTests.cpp
+    ../../src/NativeDll/Exports.cpp
+    ../../src/NativeDll/JobSystem.cpp
     ../../src/NativeDll/JobSystem_State.cpp
     ../../src/NativeDll/JobSystem_Tiles.cpp
     ../../src/NativeDll/JobSystem_Scheduler.cpp
@@ -83,6 +86,19 @@ add_executable(ShutdownFinalizeTests
 add_executable(PackedBatchTests
     PackedBatchTests.cpp
     ../../src/NativeDll/Exports.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
+)
+
+# N12 `ENTJOY_WAKE_POLL` 的存活/饥饿回归测试：丢唤醒是"死锁"而不是崩溃，所以它必须有独立超时判据
+# （RunWithTimeout → DumpState → abort）。见该文件头部的形态说明。
+add_executable(WakeLivenessTests
+    WakeLivenessTests.cpp
     ../../src/NativeDll/JobSystem.cpp
     ../../src/NativeDll/JobSystem_State.cpp
     ../../src/NativeDll/JobSystem_Tiles.cpp
@@ -136,6 +152,23 @@ target_include_directories(PackedBatchTests PRIVATE
     ../../src/NativeDll
 )
 
+target_include_directories(WakeLivenessTests PRIVATE
+    ../../src/NativeDll
+)
+
+# ── 平台无关的编译定义（`if(MSVC)` 之外！）────────────────────────────────────
+# 这两处曾只写在 `if(MSVC)` 分支里 ⇒ Linux/clang 腿（CI 的 linux-sanitizers）编译失败：
+#   `PackedBatchTests.cpp:389` / `JobSystemTests.cpp:130` 会**不带门控**直接调用
+#   `JobSystem::FailNextBatchStorageAcquireForTests`，而它的声明/定义都在
+#   `#ifdef ENTJOY_TESTING` 下（JobSystemInternal.h:912、JobSystem_Tiles.cpp:19/465）
+#   ⇒ 该宏在**每个平台**都必须定义，否则报 "no member named ..."。
+# `JOB_SYSTEM_EXPORT`：把 Exports.cpp 链进 EXE 的目标用。Windows 上不定义会让 JOB_API
+#   展开成 `__declspec(dllimport)` ⇒ C2491；非 Windows 下 JOB_API 是
+#   `__attribute__((visibility("default")))`，该宏无副作用（这里一并定义以保持一致）。
+target_compile_definitions(JobSystemTests PRIVATE ENTJOY_TESTING)
+target_compile_definitions(ShutdownFinalizeTests PRIVATE JOB_SYSTEM_EXPORT)
+target_compile_definitions(PackedBatchTests PRIVATE ENTJOY_TESTING JOB_SYSTEM_EXPORT)
+
 if(MSVC)
     # MSVC SDL 会把 CRT deprecated 警告（C4996，如 getenv）升级为 error；
     # _CRT_SECURE_NO_WARNINGS 统一抑制（Clang 不识别该宏，无副作用）。
@@ -143,7 +176,7 @@ if(MSVC)
     # 源文件为 UTF-8 无 BOM（含中文注释）。不加 /utf-8 时 MSVC 按本地代码页
     # (936) 解析，多字节注释破坏行结构，报出大量与磁盘内容对不上的伪错误。
     target_compile_options(JobSystemTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
-    target_compile_definitions(JobSystemTests PRIVATE NDEBUG NOMINMAX ENTJOY_TESTING)
+    target_compile_definitions(JobSystemTests PRIVATE NDEBUG NOMINMAX)
 
     target_compile_options(AssistLifetimeTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2)
     target_compile_definitions(AssistLifetimeTests PRIVATE NOMINMAX)
@@ -170,9 +203,10 @@ if(MSVC)
     target_compile_definitions(ShutdownFinalizeTests PRIVATE NDEBUG NOMINMAX)
 
     target_compile_options(PackedBatchTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
-    # JOB_SYSTEM_EXPORT：本目标把 Exports.cpp 链进 EXE（覆盖导出层分组逻辑），
-    # 不定义时 JOB_API 展开为 dllimport → C2491（不允许 dllimport 函数的定义）。
-    target_compile_definitions(PackedBatchTests PRIVATE NDEBUG NOMINMAX ENTJOY_TESTING JOB_SYSTEM_EXPORT)
+    target_compile_definitions(PackedBatchTests PRIVATE NDEBUG NOMINMAX)
+
+    target_compile_options(WakeLivenessTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2 /MP)
+    target_compile_definitions(WakeLivenessTests PRIVATE NDEBUG NOMINMAX)
 
     target_compile_options(AffinityMaskTests PRIVATE /utf-8 /O2 /Ob2 /Oi /Ot /arch:AVX2)
     target_compile_definitions(AffinityMaskTests PRIVATE NDEBUG NOMINMAX)

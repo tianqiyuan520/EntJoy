@@ -89,7 +89,7 @@ jobs:
       - name: Run C++ tests
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
             ./build/Release/$test.exe
           done
         shell: bash
@@ -253,7 +253,7 @@ jobs:
       - name: Run ASAN+UBSAN
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
             ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build-asan/$test
           done
         shell: bash
@@ -270,9 +270,61 @@ jobs:
       - name: Run TSAN
         run: |
           set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests; do
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
             TSAN_OPTIONS=halt_on_error=1 ./build-tsan/$test
           done
+        shell: bash
+
+  # N12（2026-10-03）：**弱内存序**验证。本协议的提交侧刻意在"有人正在轮询注入器"时**不写任何
+  # 共享字**，安全性依赖两处 seq-cst fence 的配对（PushFence / SleepFence，见 docs/gridsearch/09 §49.2）。
+  # 为什么必须换架构跑：x86 是 TSO，而且注入器的 push 本身是 locked CAS（已是全屏障），
+  # **在 x86 上即使把两处 fence 全删掉也测不出问题** —— 只有 aarch64 这类弱内存序平台才会真的去考它。
+  # （注意：qemu 用户态模拟**不能**作为内存序证据，它的重排通常比真机更强。）
+  #
+  # ⚠ 为什么只在手动 workflow_dispatch 时跑：`ubuntu-24.04-arm` 对**公开仓库**免费可用，私有仓库需要
+  # 付费 larger runner；若该 label 不可用，job 会**一直排队**，把 push/PR 的正常门禁拖住。
+  # 确认仓库有 arm64 runner 后，把下面的 `if:` 删掉、并把它加进 `release-gate` 的 needs 即可转正。
+  #
+  # 这一步能证明什么 / 不能证明什么：能证明"在弱内存序平台上，本协议在 20 次 × 5 形态的对抗性形状下
+  # 没有丢唤醒"，并且能暴露 aarch64 的编译/可移植性问题（x86 专属代码见 CpuPause / __rdtsc /
+  # _mm_prefetch 的 guard）；**不能**证明协议正确 —— 丢唤醒是概率性的，"没测到反例"不等于"没有反例"。
+  arm64-native:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Configure
+        run: >
+          cmake -S tests/NativeDll.Tests -B build-arm64
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        shell: bash
+      - name: Build
+        run: cmake --build build-arm64 -j
+
+      - name: Run all native suites (aarch64)
+        run: |
+          set -e
+          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
+            ./build-arm64/$test
+          done
+        shell: bash
+
+      - name: Repeat the wake-liveness test x20 (lost wakeup is probabilistic)
+        run: |
+          set -e
+          for i in $(seq 1 20); do
+            if ! ./build-arm64/WakeLivenessTests > /tmp/wl-$i.log 2>&1; then
+              echo "WakeLivenessTests FAILED on iteration $i"
+              cat /tmp/wl-$i.log
+              exit 1
+            fi
+          done
+          echo "20x WakeLivenessTests on aarch64: no lost wakeup observed"
         shell: bash
 
   release-gate:

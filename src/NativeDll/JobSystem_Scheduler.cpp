@@ -45,6 +45,21 @@ namespace JobSystem
     // ============================================================
     // Schedule helpers
     // ============================================================
+    // **认领几何的优先级**：
+    //   ① 调用点声明（表项第四字段，`kClaimGeomSpread|Adjacent`）—— 显式，最高优先；
+    //   ② F6 按 job 学习（仅 General 路；判据 = JCC 学到的每元素成本 + 迟滞）。
+    // 两者都缺省时 ⇒ 恒为"不切片"。
+    // ⚠ 切片**机制本身**（InitSliceCursors / BatchState::sliceCount 等）必须保留：F6 在用它。
+    static bool ResolveClaimSliced(const BatchState* batch, bool allowAdaptive) noexcept
+    {
+        const uint32_t decl = (batch != nullptr) ? batch->claimGeomOverride : kClaimGeomAuto;
+        if (decl == kClaimGeomSpread) return true;
+        if (decl == kClaimGeomAdjacent) return false;
+        if (!allowAdaptive) return false;   // chunk/entity 路：不切片
+        return g_claimAdaptiveEnabled
+            ? g_jobCostCache.ClaimSlicedWanted(batch != nullptr ? batch->funcHash : 0u, /*fallback=*/false)
+            : false;
+    }
     // ── tile 布局缓存：同 key（unitsPtr/itemCount/workerCap/rangeSize/unitGeneration）下划分确定
     //    → 跨 job 共享（同 query 只扫一次）；只存值拷贝不持指针 → 无悬垂。
     namespace {
@@ -222,8 +237,8 @@ namespace JobSystem
     {
         auto* state = CreateState(false);
         const uint64_t id = AssignStateDiagnosticId(state);
-        // 与 SubmitBatch 同语义：调度即"发布"（pool 执行窗口另由 FastPath 上报泳道）
-        // 性能项 3：纯诊断计数（只被 GetStatsSnapshot/GUI 读取），默认统计开启 ⇒ 口径不变。
+        // 与 SubmitBatch 同语义：调度即"发布"（pool 执行窗口另由 FastPath 上报泳道）。
+        // 纯诊断计数（只被 GetStatsSnapshot/GUI 读取），受 g_statsEnabled 门控。
         if (StatsEnabled())
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         RecordPublishedJob(id, 1);
@@ -260,26 +275,7 @@ namespace JobSystem
     // ============================================================
     // Scheduler
     // ============================================================
-    // A/B（`ENTJOY_SCHED_PRIO=1`，默认关）：把**提交线程自身**抬到 ABOVE_NORMAL（worker 保持 NORMAL）。
-    // 动机（§7p）：单发 schedule+complete 口径下，地板 8.2 µs 里有 ~6.6 µs 是"提交线程被唤醒的
-    // worker 抢占后回不来"。进程 `PriorityClass=High` 已实测**无效**（worker 线程被显式设为 NORMAL，
-    // 不受进程类影响）⇒ 必须在线程级抬。每线程只设一次（thread_local），不进热路径。
-    static void EnsureSchedThreadPriority() noexcept
-    {
-#if defined(_WIN32)
-        static const bool enabled = [] {
-            const char* v = std::getenv("ENTJOY_SCHED_PRIO");
-            return v != nullptr && v[0] == '1';
-        }();
-        if (!enabled) return;
-        static thread_local bool done = false;
-        if (done) return;
-        done = true;
-        ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-        g_schedPrioApplied.fetch_add(1, std::memory_order_relaxed);
-#endif
-    }
-
+    // 注意：worker 线程被显式设为 NORMAL 优先级，进程 PriorityClass 不影响它们。
     static bool ResolveWorkerAffinityEnabled() noexcept
     {        // 默认关闭 CPU 亲和性：worker 交 OS 自由调度（避免 SMT 双线程死绑共享执行单元）。
         // ENTJOY_WORKER_AFFINITY=1 可显式开启（无 SMT / 独占机器场景）。
@@ -359,7 +355,7 @@ namespace JobSystem
                 BindCurrentThreadToLogicalProcessor(0);
 
             // Chase-Lev 调度器（唯一路径）：持久 worker 线程 + per-worker deque + MPMC Injector
-            // 性能项 5：实例进程内唯一（首次 Initialize 创建，之后复用；Shutdown 只 Stop 不销毁）
+            // 实例进程内唯一（首次 Initialize 创建，之后复用；Shutdown 只 Stop 不销毁）
             // ⇒ 伴生裸指针永不悬垂，热路径无需 shared_ptr 自旋锁。
             if (!g_chaseLevSchedulerInstance)
                 g_chaseLevSchedulerInstance = std::make_shared<ChaseLevScheduler>();
@@ -390,24 +386,27 @@ namespace JobSystem
 
     void Scheduler::Shutdown()
     {
-        // 线程防护：worker 线程调用 shutdown 会走到 ChaseLevScheduler::Stop 的 join 自身
-        // → 永不返回死锁。非主线程调用直接拒绝（打印并返回，不执行）。
-        if (g_mainThreadId != std::thread::id{} &&
-            std::this_thread::get_id() != g_mainThreadId)
+        // 线程防护：**只有本调度器的 worker 线程**不能调 Shutdown —— 它会走到
+        // ChaseLevScheduler::Stop 的 join 自身 → 永不返回死锁。
+        // 任何非 worker 的线程（含 ProcessExit/DomainUnload 回调线程）调用都是安全的。
+        if (ChaseLevScheduler_IsWorkerThread())
         {
             std::fprintf(stderr,
-                "[JobSystem] Shutdown() called from non-main thread — rejected (would self-join deadlock).\n");
+                "[JobSystem] Shutdown() called from a scheduler worker thread — rejected (would self-join deadlock).\n");
             return;
         }
 
         std::lock_guard<std::mutex> lifecycleLock(g_schedulerMutex);
         // ★ 先关掉 ImGui 调试面板并**等它退出**，再拆 worker/状态：
         //   面板线程是 detach 的，且在关停期仍会读 JobSystem 状态；先停面板可保证
-        //   "窗口线程不会比 JobSystem 活得更久"，也修掉"关停后无法重新 Launch"（latch 已复位）。
+        //   "窗口线程不会比 JobSystem 活得更久"（也让关停后可重新 Launch）。
         //   无 ImGui 构建下该调用是空实现（CMake 目标即如此），不影响 CI/测试路径。
         JobDebuggerGUI::Shutdown();
         // Shutdown 幂等；停止/重置期间保持 gate，防止 Initialize 与 teardown 并发发布新一代。
         g_shuttingDown.store(true, std::memory_order_release);
+        // 关停前的 worker 池大小快照：下面马上要把它清零（给关停期读者看"无池"），
+        // 但末尾的 [JOBPHYS] 诊断行要用它 —— 否则那个字段恒为 0。
+        const int g_numThreadsBeforeShutdown = g_numThreads.load(std::memory_order_relaxed);
         g_numThreads.store(0, std::memory_order_relaxed);
         // 关键：在 pending 锁内关闭隐式批，再 flush——否则「Schedule 读到 enabled=true → 暂停 →
         // Shutdown flush 空队列 → 调度线程继续入队」会把 batch 留在无人 flush 的队列，永久悬挂/泄漏。
@@ -434,10 +433,10 @@ namespace JobSystem
         // 先把 main 线程缓存的 batch storage 交还共享池再清空；worker 已 join，其 thread_local 缓存已交还。
         FlushBatchStorageCacheToSharedPool();
         ClearBatchStoragePool();
-        // 批上下文池同理（A）：主线程缓存交还共享池后清空。
+        // 批上下文池同理：主线程缓存交还共享池后清空。
         FlushBatchContextCacheToSharedPool();
         ClearBatchContextPool();
-        // 性能项 2：BackendAsyncContext 池同理（worker 已 join，其 TLS 缓存已交还共享池）。
+        // BackendAsyncContext 池同理（worker 已 join，其 TLS 缓存已交还共享池）。
         FlushAsyncContextCacheToSharedPool();
         ClearAsyncContextPool();
         // 诊断收尾：`ENTJOY_DIAG_NATIVE_PHASE=1` 时打印 Complete 分段（未设该变量时为空操作）。
@@ -446,25 +445,76 @@ namespace JobSystem
         E1::Dump();
         // 诊断收尾：`ENTJOY_DIAG_NATIVE_SCHED=1` 时打印 Schedule 分段（未设该变量时为空操作）。
         SchedPhase::Dump();
-        // 小 job 物理核封顶策略的可观测性（每次 Shutdown 一行，便于判定 A/B 臂是否真的生效；
-        // 曾因一次性 static 查询失败导致"封顶静默不生效"，出现无效 A/B 臂）。
+        // 小 job 物理核封顶策略的可观测性（每次 Shutdown 一行）。
+        // ⚠ `workerThreads` 必须用**关停前快照**：本函数上方已把 `g_numThreads` 清零，
+        //   直接读该字段会恒为 0（诊断撒谎 ⇒ 结论无效）。
         const char* physCapEnv = std::getenv("ENTJOY_PHYSCAP_SMALLJOB");
         std::printf("[JOBPHYS] physicalCores=%d workerThreads=%d smalljobPhysCap=%s cappedJobs=%llu\n",
             g_physicalCores.load(std::memory_order_relaxed),
-            g_numThreads.load(std::memory_order_relaxed),
+            g_numThreadsBeforeShutdown,
             (physCapEnv != nullptr && physCapEnv[0] == '0') ? "OFF(=0)" : "ON(default)",
             (unsigned long long)g_physCapApplied.load(std::memory_order_relaxed));
-        std::printf("[JOBWAKE] notify_all skipped=%llu (no waiter / enough awake workers)\n",
+        // 代次校验的生效证据（每次 Shutdown 一行）：
+        //   staleSettleDropped = 结算时"令牌代次 != storage 当前代次"被拒的次数；
+        //   pendingTasksWrap   = `pendingTasks.fetch_sub(1)` 打在 0 上的次数。
+        // 两者都应恒为 0；非 0 即证明"批已回收而令牌仍在飞"确实发生。
+        std::printf("[JOBGEN] staleSettleDropped=%llu pendingTasksWrap=%llu\n",
+            (unsigned long long)g_staleSettleDropped.load(std::memory_order_relaxed),
+            (unsigned long long)g_pendingTasksWrap.load(std::memory_order_relaxed));
+        // ⚠ `wakePoll=ON`（默认）时旧的广播守卫整段不执行 ⇒ 该计数恒为 0，
+        //   真正的跳过数见下方的 `[JOBWAKEPOLL]`（"skipped=0" 不代表跳过守卫从不触发）。
+        // 认领几何学习（`ENTJOY_CLAIM_ADAPT`，默认开）的生效证据：
+        //   判据：nosample 若吃掉绝大多数有效调用 ⇒ 学习事实上是死的；flips==0 ⇒ 自适应从未动过。
+        {
+            const char* adaptEnv = std::getenv("ENTJOY_CLAIM_ADAPT");
+            std::printf("[JOBF6] claimAdapt=%s nokey=%llu nosample=%llu sliced=%llu interleaved=%llu flips=%llu\n",
+                (adaptEnv != nullptr && adaptEnv[0] == '0') ? "OFF(=0)" : "ON(default)",
+                (unsigned long long)g_claimGeomNoKey.load(std::memory_order_relaxed),
+                (unsigned long long)g_claimGeomNoSample.load(std::memory_order_relaxed),
+                (unsigned long long)g_claimGeomSliced.load(std::memory_order_relaxed),
+                (unsigned long long)g_claimGeomInterleaved.load(std::memory_order_relaxed),
+                (unsigned long long)g_claimGeomFlips.load(std::memory_order_relaxed));
+        }
+        // 每-job 分母：把"这个 pass 每步被调用几次、每次多少元素"打出来（与宿主的 [M-19] ms 按 key 对照）
+        JobPerKeyDump();
+        // 认领几何生效证据（声明值分桶）：`ClaimPolicy`/批表第 4 字段/F6 这条轴的计数
+        //（"调用点传几何 ⇒ 静默降级到托管回调"靠这里才能证明修好了）。
+        std::printf("[JOBGEOM] declared spread=%llu adjacent=%llu auto=%llu\n",
+            (unsigned long long)g_claimGeomDeclSpread.load(std::memory_order_relaxed),
+            (unsigned long long)g_claimGeomDeclAdjacent.load(std::memory_order_relaxed),
+            (unsigned long long)g_claimGeomDeclAuto.load(std::memory_order_relaxed));
+        // 等宽 tile / 每批快路径的生效证据（默认开，受 thinTiles 判据门控）。
+        // ⚠ `thinTiles` 用的 `cs <= kClaimSpanThinElems(16)` 恰好等于 `ResolveChunkSize` 五处
+        //   `std::max(16, …)` 的硬编码下限（`JobSystem_State.cpp:1183/1203/1259/1281/1342`）
+        //   ⇒ 该判据实际等价于"**JCC 顶在下限上**"，与 tile 厚薄无关；且"进不进该 regime"**随进程翻**
+        //   ⇒ 这个门既不是薄厚判据、也不是 length 的稳定函数。
+        std::printf("[JOBF2F4] uniformTiles=%s applied=%llu | tileFastPath=%s applied=%llu"
+                    " (thinTiles 门控: cs <= 16)\n",
+            g_uniformTilesEnabled ? "ON" : "OFF",
+            (unsigned long long)g_uniformTilesApplied.load(std::memory_order_relaxed),
+            g_tileFastPath ? "ON" : "OFF",
+            (unsigned long long)g_tileFastApplied.load(std::memory_order_relaxed));
+        std::printf("[JOBWAKE] notify_all skipped=%llu (only the legacy broadcast path; inactive while"
+                    " wakePoll=ON -- see [JOBWAKEPOLL] for the real skip count)\n",
             (unsigned long long)g_notifySkipped.load(std::memory_order_relaxed));
         std::fflush(stdout);
-        const char* deferEnv = std::getenv("ENTJOY_DEFER_WAKE");
-        const char* prioEnv = std::getenv("ENTJOY_SCHED_PRIO");
-        std::printf("[JOBPHYS] deferWake=%s flushes=%llu | schedPrio=%s applied=%llu\n",
-            (deferEnv != nullptr && deferEnv[0] == '1') ? "ON" : "OFF",
-            (unsigned long long)g_deferredWakeFlushes.load(std::memory_order_relaxed),
-            (prioEnv != nullptr && prioEnv[0] == '1') ? "ON" : "OFF",
-            (unsigned long long)g_schedPrioApplied.load(std::memory_order_relaxed));
-        std::fflush(stdout);
+        // `ENTJOY_WAKE_POLL` 的生效证据（否则"开关没打开"会被读成"改动无效"）：
+        // skips = 提交侧一个字节都没写的次数；wakes = 真的 bump+notify_all 的次数。
+        {
+            // 计数走 thread_local 累加（热路径不写全局原子）⇒ 打印前先合并**当前线程**的尾巴。
+            WakePollFlushCurrentThread();
+            std::printf("[JOBWAKEPOLL] wakePoll=%s skips=%llu wakes=%llu parkWake=%llu"
+                        " | work skips=%llu wakes=%llu | batch skips=%llu wakes=%llu\n",
+                WakePollEnabled() ? "ON" : "OFF",
+                (unsigned long long)g_wakePollSkips.load(std::memory_order_relaxed),
+                (unsigned long long)g_wakePollWakes.load(std::memory_order_relaxed),
+                (unsigned long long)g_parkWakeCount.load(std::memory_order_relaxed),
+                (unsigned long long)g_wakePollSkipsWork.load(std::memory_order_relaxed),
+                (unsigned long long)g_wakePollWakesWork.load(std::memory_order_relaxed),
+                (unsigned long long)g_wakePollSkipsBatch.load(std::memory_order_relaxed),
+                (unsigned long long)g_wakePollWakesBatch.load(std::memory_order_relaxed));
+            std::fflush(stdout);
+        }
         // 先交还 main 缓存中的 state 再清空；worker 已 join 交还，故清空覆盖全部 state。
         FlushStateCacheToSharedPool();
         { std::lock_guard<std::mutex> lock(g_statePoolMutex); for (auto* s : g_statePool) delete s; g_statePool.clear(); }
@@ -482,7 +532,7 @@ namespace JobSystem
     void Scheduler::ConfigureTilesPerWorker(int tilesPerWorker)
     {
         // 并行 for 默认粒度（batchSize=0 时用）。Initialize 期调用，经 job 提交的 release/acquire 对 worker 可见。
-        // EntJoy 侧 A/B 覆盖：`ENTJOY_TILES_PER_WORKER=<n>` 时优先（用于扫描"分块粒度 ⇒ 批内并行度"，不改游戏码）。
+        // `ENTJOY_TILES_PER_WORKER=<n>` 时优先于入参。
         static const int envTpw = [] {
             const char* v = std::getenv("ENTJOY_TILES_PER_WORKER");
             return (v != nullptr) ? std::atoi(v) : 0;
@@ -572,17 +622,19 @@ namespace JobSystem
     // Schedule 一律异步提交（对齐 IJob/IJobFor）。
     JobHandle Scheduler::ScheduleParallelFor(void (*func)(void*, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
     {
-        EnsureSchedThreadPriority();
         if (g_shuttingDown.load(std::memory_order_acquire))
             return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
         if (!func || length <= 0)
             return MakeCompletedAfterCleanup(cleanup, context);
         // JobCostCache：hash 在 ResolveChunkSize 前计算（自适应分支需要）；FastPath 不学成本，batch 路径退役时学。
-        const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
+        // `ENTJOY_FORCE_INNER_BATCH`（默认关）：强制显式内批并跳过 JCC（funcHash=0）。
+        const bool forceInner = (g_forceInnerBatch > 0) && (batchSize <= 0);
+        const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && !forceInner)
             ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
         bool jccFine = false;
-        int cs = ResolveChunkSize(length, batchSize, funcHash, &jccFine);
+        int cs = forceInner ? static_cast<int>(g_forceInnerBatch)
+                            : ResolveChunkSize(length, batchSize, funcHash, &jccFine);
         int rc = CeilDiv(length, cs);
         if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
 
@@ -602,21 +654,69 @@ namespace JobSystem
         HandleState* state = nullptr;
         try
         {
-            storage = AcquireBatchStorage(static_cast<uint32_t>(tileCount));
+            // 只对**薄 tile**（每 tile 元素数 `cs ≤ kClaimSpanThinElems`）启用"不物化 tileBuffer + 每批快照
+            // 快路径"；厚 tile 逐位走旧路径（`tiles[]` 带 `PrefetchNextTileData` ⇒ **物化是对的**）。
+            // ⚠ 但这条判据**名不副实**：`kClaimSpanThinElems = 16` 恰好等于 `ResolveChunkSize` 各返回路径
+            //   `std::max(16, …)` 的硬编码下限 ⇒ `cs <= 16` 实际是"**JCC 顶在下限上**"，与"tile 厚薄"无关，
+            //   且"进不进该 regime"随进程翻。当前判定为**良性**（短调度 tileCount 本来就小，O(tileCount) 代价小）；
+            //   若要真正的"薄 tile"判据，必须换成**相对**口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
+            const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
+            const bool uniformTiles = g_uniformTilesEnabled && thinTiles;
+            // 等宽时**不申请 tile 缓冲**（只要 batch 对象）。
+            storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             auto* batch = &storage->batch;
             state = CreateState(false); batch->handle = state;
             batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
             batch->executeTile = &GeneralExecuteTile;
+            // 薄 tile 才生效：把每-tile 的 trace/timing/firstTileAt 固定开销提到每批/每令牌。
+            // 厚 tile 下 `AcquireBatchStorage` 快照的 g_tileFastPath 结果被这里覆盖为 false ⇒ 逐位不变。
+            batch->tileFast = g_tileFastPath && thinTiles;
+            // 本批是否真的拿到"每批快照"快路径（`ENTJOY_TILE_FASTPATH` 的生效证据）。
+            if (batch->tileFast) g_tileFastApplied.fetch_add(1, std::memory_order_relaxed);
+            // 认领几何按 job 定（判据 = JCC 学到的每元素成本 + 迟滞，见 JobCostCache.h）。
+            //   `funcHash == 0`（表/强制档，或 JCC 关）⇒ 无样本 ⇒ 回退全局 env。
             batch->funcHash = funcHash;
+            // 每-job 分母：索引在**提交线程**解析一次写进批（worker 只按索引累加 ⇒ 无碰撞混行）。
+            // 键必须用 `JobFuncKey`（批表/jobkeys.txt 同一键空间），**不是** `funcHash`
+            // （后者在"表 + CLAIM_ADAPT=0"时有意为 0 ⇒ 用它会正好让本仪器在对齐档里失效）。
+            int unkeyedReason = -1;
+            batch->perKeyIndex = JobPerKeyResolve(reinterpret_cast<void (*)() noexcept>(func), unkeyedReason);
+            bc->perKeyIndex = batch->perKeyIndex;   // worker 侧从 **context** 读（不做哈希查找）
+            if (batch->perKeyIndex >= 0)
+            {
+                const uint32_t pi = static_cast<uint32_t>(batch->perKeyIndex);
+                g_perKeyBatches[pi].fetch_add(1, std::memory_order_relaxed);
+                g_perKeyElems[pi].fetch_add(static_cast<uint64_t>(length), std::memory_order_relaxed);
+                g_perKeyTiles[pi].fetch_add(static_cast<uint64_t>(tileCount), std::memory_order_relaxed);
+                // 逐键归因薄批来源：该门已证明等价于"length 够短"，故这一列读出的是**短调度分布**
+                //（配 `tiles` 可反查每批平均 cs）。
+                if (thinTiles) g_perKeyThin[pi].fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (unkeyedReason >= 0)
+            {
+                // 未归因：按原因 + 长度量级记账，使"未归因的薄批"可被指名（而不是只看见一个总数）。
+                g_unkeyedBatches[unkeyedReason].fetch_add(1, std::memory_order_relaxed);
+                g_unkeyedLenBucket[unkeyedReason][Log2Bucket(static_cast<uint64_t>(length < 0 ? 0 : length))]
+                    .fetch_add(1, std::memory_order_relaxed);
+                if (thinTiles) g_unkeyedThin[unkeyedReason].fetch_add(1, std::memory_order_relaxed);
+            }
             batch->jccFine = jccFine;
             batch->totalElements = static_cast<uint32_t>(length);
             batch->tileCount = static_cast<uint32_t>(tileCount);
             batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
-            if (guided)
+            if (uniformTiles)
+            {
+                batch->uniformTileSize = static_cast<uint32_t>(cs);
+                // 本批走了"不物化 tileBuffer"（`ENTJOY_TILES_UNIFORM` 的生效证据，与 F4 同一条 thinTiles 判据）。
+                g_uniformTilesApplied.fetch_add(1, std::memory_order_relaxed);
+                batch->tiles = nullptr;
+            }
+            else if (guided)
             {
                 BuildGuidedTiles(storage->tileBuffer, length,
                     static_cast<int>(targetWorkers), guidedK, guidedFloor);
+                batch->tiles = storage->tileBuffer;
             }
             else
             {
@@ -629,13 +729,16 @@ namespace JobSystem
                             static_cast<uint32_t>(length) - first),
                         TileKind::GeneralRange };
                 }
+                batch->tiles = storage->tileBuffer;
             }
-            batch->tiles = storage->tileBuffer;
-            // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
+            // 唤醒多少个工作者 = 由预估工作量决定，再按物理核封顶（小 job）；tile 布局保持不变。
             batch->workerCount = static_cast<uint32_t>(
                 ApplyPhysCoreCapForSmallJob(
                     ResolveWorkerTarget(0, rc),
                     batch->tileCount, length));
+            // 切片认领的段游标必须在 publish 之前初始化（发布后 worker 会立刻执行）。
+            InitSliceCursors(batch, ResolveClaimSliced(batch, true));
+            JccDiagNoteWorkers(batch->workerCount);
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
             PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -693,17 +796,12 @@ namespace JobSystem
     // ============================================================
     // 原生 Schedule 分段诊断（`ENTJOY_DIAG_NATIVE_SCHED=1`）
     //
-    // 背景：`gridsearch/07` §7e 实测每 job 调度成本 ∝ 唤醒 worker 数（斜率 ~0.5 µs/worker），
-    // 其中 ~1.0 µs 落在 `ScheduleParallelForBatch` 本体，但**内部**（JCC 求解 / 批上下文获取 /
-    // 存储与状态 / tile 回填 / 提交唤醒）的比例未知 ⇒ 无法判断该动哪一段（A1「job 形状缓存」
-    // 值不值得做，取决于 tile 段占多少）。
-    //
-    // 本诊断按段累加纳秒与次数，`Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）；
+    // 按段累加纳秒与次数，`Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）；
     // 未启用时每段只有一次静态 bool 读，热路径零成本。
     //
-    // 自带插桩税校准：每 entry 额外做一次相邻 Now()/Now() 对。读数用的是
-    // `steady_clock::now()`（Windows 下 QueryPerformanceCounter，~24 ns），每 entry 13 次调用
-    // 在 1 µs 量级上不可忽略；**净账**（raw − 13×calib）才是各段真实占比。
+    // 自带插桩税校准：每 entry 额外做一次相邻 Now()/Now() 对。读数是 `steady_clock::now()`
+    //（Windows 下 QueryPerformanceCounter，~24 ns），每 entry 16 次调用在 1 µs 量级上不可忽略；
+    // **净账**（raw − 16×calib）才是各段真实占比。
     // ============================================================
     namespace SchedPhase
     {
@@ -764,8 +862,7 @@ namespace JobSystem
                 - g_sumNs[SubmitNotify].load(std::memory_order_relaxed);
             std::printf("[NPSCHED]   submit.other residual mean=%.3f us (negative=非 Schedule 调用者也进了 acct/tokens/notify)\n",
                 entries ? (static_cast<double>(otherNs) / 1000.0) / (double)entries : 0.0);
-            // State 池命中分布：`CreateState` 0.50 µs/job 明显高于"热路径只有池弹出 + 原子写"的预期，
-            // 用它判定是否常态走 new HandleState（若如此则修池是确定收益）。
+            // State 池命中分布：判定是否常态走 new HandleState（若如此则修池是确定收益）。
             const uint64_t hit = g_statePoolHit.load(std::memory_order_relaxed);
             const uint64_t refill = g_statePoolRefill.load(std::memory_order_relaxed);
             const uint64_t brandNew = g_statePoolNew.load(std::memory_order_relaxed);
@@ -795,9 +892,9 @@ namespace JobSystem
 
     // Schedule 一律异步提交。
     JobHandle Scheduler::ScheduleParallelForBatch
-    (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency)
+    (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency,
+     uint32_t claimGeomApi)
     {
-        EnsureSchedThreadPriority();
         const bool spDiag = SchedPhase::Enabled();
         uint64_t spMarks[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
         if (spDiag) spMarks[0] = MonotonicNowNs();
@@ -811,11 +908,44 @@ namespace JobSystem
             return MakeCompletedAfterCleanup(cleanup, context);
         int reqBatch = batchSize < 0 ? -batchSize : batchSize;
         // JobCostCache：hash 在 ResolveChunkSize 前算；显式 batchSize（reqBatch>0）时用户意图优先。
-        const uint32_t funcHash = (g_jobCostCacheEnabled.load(std::memory_order_relaxed) && reqBatch <= 0)
-            ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)) : 0;
+        // `ENTJOY_FORCE_INNER_BATCH`（默认关）：把 auto（reqBatch==0）强制成显式内批并跳过 JCC。
+        // `ENTJOY_JOB_BATCH_TABLE`（默认关）：按 funcHash **逐 job** 给内批，命中优先于全局强制（见 JobSystemInternal.h）。
+        const bool autoBatch = (reqBatch <= 0);
+        const bool tableOn = autoBatch && (g_jobBatchTableCount > 0);
+        // 表键 = 内核在**其所属模块**内的 RVA（跨进程稳定；指针值本身受 ASLR 影响，故不用 HashFuncPtr）。
+        // dump 制表（表为空）时也要算 ⇒ 把 dump 旗标并进 needKey。默认档（表空 + dump 关）不算。
+        const bool needKey = autoBatch && (tableOn || g_jobBatchTableDump);
+        const uint32_t tableKey = needKey
+            ? JobFuncKey(reinterpret_cast<void (*)() noexcept>(func)) : 0u;
+        const uint32_t tableBatch = tableOn ? LookupJobBatch(tableKey) : 0u;
+        // 表项第三字段 = 按 job 的认领上限覆盖（0 = 不覆盖）。
+        const uint32_t tableClaim = tableOn ? LookupJobClaim(tableKey) : 0u;
+        // 表项第三字段的 **`e<N>` 形态 = 该调用点声明的元素跨度**（0 = 未声明）。
+        const uint32_t tableSpan = tableOn ? LookupJobSpan(tableKey) : 0u;
+        // 表项**第四字段** = 该**调用点**声明的**认领几何**（0 = Auto ⇒ 全局 env / F6 学习）。
+        const uint32_t tableGeom = tableOn ? LookupJobGeom(tableKey) : 0u;
+        // **代码里的调用点声明**（C# `Schedule(..., ClaimPolicy)` → 新导出）。
+        //   优先级：批表（诊断覆盖）> API 声明 > F6 学习 > 全局 env > Adjacent。
+        const uint32_t declareGeom = (tableGeom != kClaimGeomAuto) ? tableGeom : claimGeomApi;
+        const uint32_t forced = (tableBatch > 0)
+            ? tableBatch : (autoBatch ? g_forceInnerBatch : 0u);
+        // 学习键（`jccEnabled && reqBatch<=0 && forced==0`）。
+        // F6：内批被**表/强制档钉住**时也保留学习键 —— 内批仍由表决定（`cs = forced`），
+        //   学习键只喂"每元素成本"EWMA 与由它派生的**认领几何**，不参与 batch 选择。
+        const bool jccEnabled = g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+        const uint32_t funcHash = (!jccEnabled || !autoBatch) ? 0u
+            : ((forced == 0)
+                ? HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func))
+                : (g_claimAdaptiveEnabled
+                    ? (tableKey != 0 ? tableKey
+                                     : JobFuncKey(reinterpret_cast<void (*)() noexcept>(func)))
+                    : 0u));
         bool jccFine = false;
-        int cs = std::max(1, reqBatch > 0 ? reqBatch : ResolveChunkSize(length, 0, funcHash, &jccFine));
+        int cs = std::max(1, reqBatch > 0 ? reqBatch
+                          : (forced > 0 ? static_cast<int>(forced)
+                                        : ResolveChunkSize(length, 0, funcHash, &jccFine)));
         int rc = CeilDiv(length, cs);
+        if (g_jobBatchTableDump) NoteJobBatchTableHash(tableKey, length, rc, forced, tableGeom, tableSpan);
         if (spDiag) spMarks[1] = MonotonicNowNs();
         // 单批次任务：走按依赖排序的池任务（异步）。
         if (rc <= 1)
@@ -839,25 +969,84 @@ namespace JobSystem
         HandleState* state = nullptr;
         try
         {
-            storage = AcquireBatchStorage(static_cast<uint32_t>(tileCount));
+            // 只对**薄 tile**（每 tile 元素数 `cs ≤ kClaimSpanThinElems`）启用"不物化 tileBuffer + 每批快照
+            // 快路径"；厚 tile 逐位走旧路径（`tiles[]` 带 `PrefetchNextTileData` ⇒ **物化是对的**）。
+            // ⚠ 但这条判据**名不副实**：`kClaimSpanThinElems = 16` 恰好等于 `ResolveChunkSize` 各返回路径
+            //   `std::max(16, …)` 的硬编码下限 ⇒ `cs <= 16` 实际是"**JCC 顶在下限上**"，与"tile 厚薄"无关，
+            //   且"进不进该 regime"随进程翻。当前判定为**良性**（短调度 tileCount 本来就小，O(tileCount) 代价小）；
+            //   若要真正的"薄 tile"判据，必须换成**相对**口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
+            const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
+            const bool uniformTiles = g_uniformTilesEnabled && thinTiles;
+            // 等宽时**不申请 tile 缓冲**（只要 batch 对象）⇒ 消掉 O(tileCount) 物化与 tile 数组流量。
+            storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             if (spDiag) spMarks[3] = MonotonicNowNs();
             auto* batch = &storage->batch;
             state = CreateState(false); batch->handle = state;
             if (spDiag) spMarks[4] = MonotonicNowNs();
             batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
             batch->executeTile = &GeneralExecuteTile;
+            // 薄 tile 才生效：把每-tile 的 trace/timing/firstTileAt 固定开销提到每批/每令牌。
+            // 厚 tile 下 `AcquireBatchStorage` 快照的 g_tileFastPath 结果被这里覆盖为 false ⇒ 逐位不变。
+            batch->tileFast = g_tileFastPath && thinTiles;
+            // 本批是否真的拿到"每批快照"快路径（`ENTJOY_TILE_FASTPATH` 的生效证据）。
+            if (batch->tileFast) g_tileFastApplied.fetch_add(1, std::memory_order_relaxed);
+            batch->claimCapOverride = tableClaim;   // 按 job 的认领上限（0 = 不覆盖）
+            batch->claimSpanOverride = tableSpan;   // 按调用点声明的**元素跨度**（0 = 不声明）
+            batch->claimGeomOverride = declareGeom;   // 调用点声明的认领几何（0 = Auto）
+            // 认领几何生效证据：按**声明值**分桶 —— 传了 `ClaimPolicy.Spread` 就必须看到 spread>0。
+            if (declareGeom == kClaimGeomSpread)
+                g_claimGeomDeclSpread.fetch_add(1, std::memory_order_relaxed);
+            else if (declareGeom == kClaimGeomAdjacent)
+                g_claimGeomDeclAdjacent.fetch_add(1, std::memory_order_relaxed);
+            else
+                g_claimGeomDeclAuto.fetch_add(1, std::memory_order_relaxed);
+            // 认领几何按 job 定（判据 = JCC 学到的每元素成本 + 迟滞，见 JobCostCache.h）。
+            //   `funcHash == 0`（表/强制档，或 JCC 关）⇒ 无样本 ⇒ 回退全局 env。
             batch->funcHash = funcHash;
+            // 每-job 分母：索引在**提交线程**解析一次写进批（worker 只按索引累加 ⇒ 无碰撞混行）。
+            // 键必须用 `JobFuncKey`（批表/jobkeys.txt 同一键空间），**不是** `funcHash`
+            // （后者在"表 + CLAIM_ADAPT=0"时有意为 0 ⇒ 用它会正好让本仪器在对齐档里失效）。
+            int unkeyedReason = -1;
+            batch->perKeyIndex = JobPerKeyResolve(reinterpret_cast<void (*)() noexcept>(func), unkeyedReason);
+            bc->perKeyIndex = batch->perKeyIndex;   // worker 侧从 **context** 读（不做哈希查找）
+            if (batch->perKeyIndex >= 0)
+            {
+                const uint32_t pi = static_cast<uint32_t>(batch->perKeyIndex);
+                g_perKeyBatches[pi].fetch_add(1, std::memory_order_relaxed);
+                g_perKeyElems[pi].fetch_add(static_cast<uint64_t>(length), std::memory_order_relaxed);
+                g_perKeyTiles[pi].fetch_add(static_cast<uint64_t>(tileCount), std::memory_order_relaxed);
+                // 逐键归因薄批来源：该门已证明等价于"length 够短"，故这一列读出的是**短调度分布**
+                //（配 `tiles` 可反查每批平均 cs）。
+                if (thinTiles) g_perKeyThin[pi].fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (unkeyedReason >= 0)
+            {
+                // 未归因：按原因 + 长度量级记账，使"未归因的薄批"可被指名（而不是只看见一个总数）。
+                g_unkeyedBatches[unkeyedReason].fetch_add(1, std::memory_order_relaxed);
+                g_unkeyedLenBucket[unkeyedReason][Log2Bucket(static_cast<uint64_t>(length < 0 ? 0 : length))]
+                    .fetch_add(1, std::memory_order_relaxed);
+                if (thinTiles) g_unkeyedThin[unkeyedReason].fetch_add(1, std::memory_order_relaxed);
+            }
             batch->jccFine = jccFine;
             batch->totalElements = static_cast<uint32_t>(length);
             batch->tileCount = static_cast<uint32_t>(tileCount);
             batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(batch->tileCount, std::memory_order_relaxed);
             if (spDiag) spMarks[5] = MonotonicNowNs();
-            if (guided)
+            if (uniformTiles)
+            {
+                // 不物化 —— worker 侧按 tileIndex 算术推导（JobSystem_Tiles.cpp 的 TryExecuteOneTile）。
+                batch->uniformTileSize = static_cast<uint32_t>(cs);
+                // 本批走了"不物化 tileBuffer"（`ENTJOY_TILES_UNIFORM` 的生效证据，与 F4 同一条 thinTiles 判据）。
+                g_uniformTilesApplied.fetch_add(1, std::memory_order_relaxed);
+                batch->tiles = nullptr;
+            }
+            else if (guided)
             {
                 BuildGuidedTiles(storage->tileBuffer, length,
                     static_cast<int>(targetWorkers),
                     guidedK, guidedFloor);
+                batch->tiles = storage->tileBuffer;
             }
             else
             {
@@ -870,13 +1059,16 @@ namespace JobSystem
                             static_cast<uint32_t>(length) - first),
                         TileKind::GeneralRange };
                 }
+                batch->tiles = storage->tileBuffer;
             }
-            batch->tiles = storage->tileBuffer;
-            // 唤醒多少个工作者 = 由预估工作量决定（tile 布局保持不变；`ENTJOY_WORK_SCALED_WORKERS` 未开时 = 原 targetWorkers）。
+            // 唤醒多少个工作者 = 由预估工作量决定，再按物理核封顶（小 job）；tile 布局保持不变。
             batch->workerCount = static_cast<uint32_t>(
                 ApplyPhysCoreCapForSmallJob(
                     ResolveWorkerTarget(0, rc),
                     batch->tileCount, length));
+            // 切片认领的段游标必须在 publish 之前初始化（发布后 worker 会立刻执行）。
+            InitSliceCursors(batch, ResolveClaimSliced(batch, true));
+            JccDiagNoteWorkers(batch->workerCount);
             batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
 
             PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
@@ -960,7 +1152,6 @@ namespace JobSystem
         ChunkScheduleMode mode, int workerCap, int rangeSize, EcsJobKind jobKind,
         uint32_t unitGeneration)
     {
-        EnsureSchedThreadPriority();
         if (g_shuttingDown.load(std::memory_order_acquire))
             return MakeCompletedAfterCleanup(cleanup, context);
         ConsumeLongBatchBarriers();
@@ -974,8 +1165,7 @@ namespace JobSystem
         int rs = rangeSize > 0
             ? rangeSize
             : ResolveEcsBatchRangeSize(itemCount, provisionalWorkers);
-        // IJobChunk/IJobEntity 共用 EntityBatchData，jobKind 显式保留以支持独立策略；
-        // useFineRanges 刻意禁用。
+        // IJobChunk/IJobEntity 共用 EntityBatchData，jobKind 显式保留以支持独立策略。
         int rc = CeilDiv(itemCount, rs);
 
         // ImmediateNative：Run 直执语义——主线程同步执行，零 worker 唤醒。
@@ -1022,7 +1212,7 @@ namespace JobSystem
                                                    : static_cast<const void*>(batches);
         uint32_t tileCount = 0;
         int64_t totalEntities = 0;
-        // Item 6：tile 布局的 bounds 是**每次提交都会拷一份**的大数组（tileCount+1 ≈ 60+ 项）。
+        // tile 布局的 bounds 是**每次提交都会拷一份**的大数组（tileCount+1 ≈ 60+ 项）。
         // 用 thread_local 复用容量 ⇒ 缓存命中路径不再有 malloc/free（只剩锁内一次 memcpy）。
         // 语义不变：本函数是唯一使用者，且每次进入都 clear()（容量保留、size 归零）。
         static thread_local std::vector<uint32_t> tileBounds;
@@ -1074,6 +1264,11 @@ namespace JobSystem
             batch->nextTile.store(0, std::memory_order_relaxed);
             batch->tilesRemaining.store(tileCount, std::memory_order_relaxed);
             batch->workerCount = static_cast<uint32_t>(targetWorkers);
+            // 切片认领的段游标必须在 publish 之前初始化。
+            // ⚠ chunk/entity 路的 tile 是**实体均衡**的（非等宽）⇒ 不参与 F6 的按-job 几何学习，
+            //   仍沿用全局 env 的回退值。
+            InitSliceCursors(batch, ResolveClaimSliced(batch, false));
+            JccDiagNoteWorkers(batch->workerCount);
         }
 
         PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);

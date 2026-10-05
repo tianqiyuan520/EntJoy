@@ -15,7 +15,7 @@ struct ChunkJobData {
     void*   chunkHandle;        // GCHandle IntPtr，用于在 C# 回调中恢复 Chunk 对象
     void**  requiredComponentArrays; // NativeTranspile IJobChunk required component arrays
     int     requiredComponentCount;  // requiredComponentArrays length
-    void**  sharedValuePtrs;     // SharedComponent blittable 值指针 [sharedValueCount]（2026-08-26）
+    void**  sharedValuePtrs;     // SharedComponent blittable 值指针 [sharedValueCount]
     int     sharedValueCount;    // sharedValuePtrs 数量，0 = 无 shared 组件
     void**  requiredEnableBitMaps; // P1-6：与 requiredComponentArrays **同序**的逐组件 enable 位图（uint64 字数组，元素可为 nullptr）
 };
@@ -31,6 +31,6 @@ struct ChunkData {
     int     requiredComponentCount; // 组件数组数量
     void**  enableBitMaps;      // enable 位图 [enableCount]，无过滤时为 nullptr（预留）
     int     enableBitmapCount;  // enable 位图数量，0 表示无过滤（预留）
-    void**  sharedValuePtrs;    // SharedComponent blittable 值指针 [sharedValueCount]（2026-08-26）
+    void**  sharedValuePtrs;    // SharedComponent blittable 值指针 [sharedValueCount]
     int     sharedValueCount;   // sharedValuePtrs 数量，0 = 无 shared 组件
 };

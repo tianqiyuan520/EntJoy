@@ -43,7 +43,8 @@ namespace JobSystem
         // Tile 执行回调：executor(batch, tileIndex) → 调用方实现 TryExecuteOneTile 逻辑。
         using TileExecutor = void (*)(BatchState* batch, uint32_t tileIndex) noexcept;
         // 任务完成回调：范围任务执行完后调用（batch 的 pendingTasks-- 由调用方处理）。
-        using TaskDoneFn = void (*)(BatchState* batch) noexcept;
+        // 第二参为**令牌创建时的 BatchStorage 代次**，结算侧据此拒绝迟到结算。
+        using TaskDoneFn = void (*)(BatchState* batch, uint32_t batchGen) noexcept;
 
         // tile 计数口径：Local=worker 本地，Stolen=worker 窃取，Assist=主线程 assist。
         enum class TileAccount : uint8_t { Local = 0, Stolen = 1, Assist = 2 };
@@ -107,29 +108,22 @@ namespace JobSystem
         // 保持 wake-all 语义：绝不做选择性唤醒。
         std::atomic<uint64_t> wakeEpoch{ 0 };
 
-        // §7ah：**停靠等待者计数**（只用于判断"这次广播有没有必要"，不做选择性唤醒目标指定）。
-        // 实测动机：真实负载 `ScheduleParallelForBatch` 净 15.5 µs/次，其中 **submit.notify 14.5 µs（93%）**，
-        // × 63,624 次 ≈ 0.92 s ≈ 4.5% 全程（≈5.6 ms/步）。而绝大多数批次是 **physcap 封顶到 8 人**的小批：
-        // 已醒着的 8 个 worker 会在自旋区自己从注入器领到活；广播只是用 futex+IPI 把另 7 个仍在睡的 worker 叫醒
-        // （它们随后又睡回去）。本计数让提交侧在"无人等待 / 已醒人数已够本批名额"时安全跳过广播。
+        // **停靠等待者计数**（只用于判断"这次广播有没有必要"，不做选择性唤醒目标指定）。
+        // 提交侧据此在"无人等待 / 已醒人数已够本批名额"时安全跳过广播。
         // 丢失唤醒防护：唤醒者**先 bump epoch 再读计数**；停靠者**先登记计数再复查 epoch**（见 .cpp park 段）。
         std::atomic<int> parkedWorkers{ 0 };
+
+        // `ENTJOY_WAKE_POLL`：**搜索区人数** —— "登记中"的 worker 数（在搜索区里读注入器，或刚领到
+        // 任务正在执行、执行完必然回主循环读注入器）。提交侧据此决定"要不要写 wakeEpoch"：>0 ⇒ 一个
+        // 字节都不写。登记是**粘性**的：只在"进入停靠协议"与"退出主循环"两处增减（见 .cpp），
+        // 两处严格配平 —— 残留 >0 会让提交侧永久跳过广播。
+        // 独占一条 cacheline：与 `wakeEpoch` 同线会让提交侧的 epoch 写入更拥挤（那正是要消除的流量）。
+        PaddedAtomic<uint64_t> wakeIdlePollers;
 
         // 全局 Injector（标准 Chase-Lev 的任务入口）
         static constexpr uint32_t kInjectorCapacity = 32768;
         MPMCInjector<RangeTask*, kInjectorCapacity> injector_;
 
-        // （认领信箱曾在此实现，2026-09-27 **移除**：它把 token 固定派给 0..N-1 号 worker，
-        //   在多批重叠时会退化成"等自己被派的 worker"，把并发串行化 —— ECS 读/写序测试
-        //   `SystemReadWriteOrderTests.TwoReaderSystems_StayParallel` 与
-        //   `ReadWriteOrderingDisabled_FallsBackToLegacyBehaviour` 两条功能性断言当场抓到。
-        //   微基准上它在参与者 ≤ 物理核时曾 −5~−6.5%（W=8），但语义不允许。若要重做，需改成
-        //   "发布一次 + 首到先得 admission"（任意空闲 worker 加入、保留动态认领）。
-        //   ⚠ 但先看证据：同日 `MPMCInjector::PopMany`（同样只求"便宜加入"、同样保留 15 参与者）
-        //   在 W=15 上 k=4/8/15 一律更差（k=2 −7.2%、W=8 全更差）⇒ "保留 N 参与者、把加入做便宜"
-        //   这一方向在 W=15 已有两条否证；而"减少参与者"虽在微基准有效，整步已被否证
-        //   （`ApplyPhysCoreCapForSmallJob` +0.7%、静态切片 +19.6%）。结论：动手前先想清楚收益从哪来，
-        //   且只能由真实负载整步 ≥6 对裁决。见 `docs/gridsearch/07` 顶部两块。）
         // 全局 RangeTask 池
         static RangeTaskPool s_taskPool_;
 
@@ -139,14 +133,12 @@ namespace JobSystem
 
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
-        // 每次认领的 tile 数（预切分粒度；放大窗口无端到端收益——fetch_add 被 tile 执行吸收）
+        // 每次认领的 tile 数（预切分粒度）
         static constexpr uint32_t kClaimBatchSize = 4;
 
         // ── 自适应自旋参数（WorkerLoop park 段）──
         // 执行后拉满 → 连续调度零唤醒；空转退火 → 快速让出 CPU；activeTasks>0 用更大窗口。
-        // A/B 旋钮（`ENTJOY_SPIN_BUSY=<pause 次数>`，默认 8192 = 原行为）：_mm_pause 在 Zen4 约
-        // 35-40 cycle ≈10ns ⇒ 8192 次 ≈ 82µs 自旋窗，而本工作负载单批墙钟仅约 43µs ⇒ 空转 worker
-        // 在"有活但抢不到"时实际是全程自旋而非退火。该旋钮只为量化这一段，不改变任何语义。
+        // kSpinBusy 可由 `ENTJOY_SPIN_BUSY`（pause 次数）覆盖；该旋钮只改自旋时长，不改变任何语义。
         static constexpr uint32_t kSpinBase = 256;
         static constexpr uint32_t kSpinMax = 4096;
         static constexpr uint32_t kSpinBusy = 8192;
@@ -166,7 +158,8 @@ namespace JobSystem
 
         // workerCap 令牌执行：原子认领 nextTile 直到空（实际并行受令牌数限制）。
         // 内部处理 taskDone（pendingTasks--）；不 Release（调用方负责）。
-        void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex,
+        // batchGen = 令牌创建时的代次，透传给 taskDone_ 做迟到结算校验。
+        void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex, uint32_t batchGen,
             TileAccount account = TileAccount::Local) noexcept;
 
         // Injector 满时有限退避入队（yield + pause），供所有提交路径共用。
@@ -198,6 +191,7 @@ namespace JobSystem
         uint32_t workerCount_{ 0 };
         bool bindThreads_{ false };
         TileExecutor executor_{ nullptr };
+
         TaskDoneFn taskDone_{ nullptr };
     };
 } // namespace JobSystem

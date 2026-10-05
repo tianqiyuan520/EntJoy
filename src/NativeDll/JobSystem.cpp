@@ -9,6 +9,8 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <memory>
@@ -33,6 +35,38 @@
 
 namespace JobSystem
 {
+    // ---------- 加载期 banner 缓冲（实现见 JobSystemInternal.h 的说明） ----------
+    // 放在本文件（而不是 Exports.cpp）：本文件同时被主 DLL 与 `tests/NativeDll.Tests` 的
+    // 各个 .vcxproj 编译，而 Exports.cpp 只在主 DLL 里 ⇒ 放这里两端都能链接。
+    // 加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）**不做 I/O**：banner 先入缓冲，
+    // 由 `JobSystem_Initialize()`（Exports.cpp）一次性 flush。
+    static char g_loadBannerBuf[8192];
+    static size_t g_loadBannerLen = 0;
+    static std::atomic<bool> g_loadBannerFlushed{ false };
+
+    void LoadBannerAppend(const char* fmt, ...) noexcept
+    {
+        if (g_loadBannerFlushed.load(std::memory_order_relaxed)) return;   // flush 之后（运行期）直接丢
+        const size_t room = sizeof(g_loadBannerBuf) - g_loadBannerLen;
+        if (room == 0) return;
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = std::vsnprintf(g_loadBannerBuf + g_loadBannerLen, room, fmt, ap);
+        va_end(ap);
+        if (n <= 0) return;
+        const size_t wanted = static_cast<size_t>(n);
+        g_loadBannerLen += (wanted < room) ? wanted : (room - 1);
+    }
+
+    void LoadBannerFlush() noexcept
+    {
+        if (g_loadBannerFlushed.exchange(true, std::memory_order_relaxed)) return;
+        if (g_loadBannerLen == 0) return;
+        std::fwrite(g_loadBannerBuf, 1, g_loadBannerLen, stderr);
+        std::fflush(stderr);
+        g_loadBannerLen = 0;
+    }
+
     // ---------- 调试面板 per-worker 实时状态 ----------
     PaddedAtomic<uint64_t> g_workerCurrentBatchId[kMaxTrackedWorkers];
     PaddedAtomic<uint32_t> g_workerCurrentTile[kMaxTrackedWorkers];
@@ -51,32 +85,27 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
     std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
-    // 性能项 5：调度器**进程内唯一实例**（永不析构）+ 伴生裸指针（热路径无锁读取）。
+    // 调度器**进程内唯一实例**（永不析构）+ 伴生裸指针（热路径无锁读取）。
     // 详见 JobSystemInternal.h 的 LoadChaseLevScheduler 注释。
     std::shared_ptr<ChaseLevScheduler> g_chaseLevSchedulerInstance;
     std::atomic<ChaseLevScheduler*> g_chaseLevSchedulerRaw{ nullptr };
     std::atomic<int> g_numThreads{ 0 };
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
-    // 默认 16 为可变代价与均匀代价 job 的折中（GridSearch A/B 定标），env 可覆盖。
+    // 默认 16 为可变代价与均匀代价 job 的折中；env 可覆盖。
     std::atomic<int> g_configuredTilesPerWorker{ kDefaultTilesPerWorker };
 
     // JobCostCache export flag（State 模块 ResolveChunkSize 与 Tiles 退役路径读取）。
-    // 默认开启：per-job 自动 batch 收益显著且压测零回归；C# Initialize 强制同步此值
-    //（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
+    // C# Initialize 强制同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
     std::atomic<bool> g_jobCostCacheEnabled{ true };
 
     // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
     std::atomic<int> g_submitDeferDepth{ 0 };
 
-    // ── 性能项 3（2026-09-26）：诊断统计总开关 ──
-    // 热路径（每 job / 每 tile 提交 / state 创建回收）此前**无条件**对多个共享原子做 locked RMW。
+    // ── 诊断统计总开关 ──
     // 这些计数器只被 GetStatsSnapshot / 调试面板消费，本身不是同步原语（唯一例外
-    // g_backendBatchesOutstanding：它是 WaitForBackendBatches 的等待条件，见该处注释，**不 gate**），
-    // 却与 worker 侧计数器同处若干缓存行 ⇒ 多核下反复弹跳。一次 relaxed 载入即可整体旁路。
-    // 默认 **true**：数值/语义与改动前逐位一致（ResetStatsSnapshot/GetStatsSnapshot 的精确性保证、
-    // JobSystemTests 的 TestCooperativeStatsReset / Diagnostic*Bounded 全部不受影响）；
-    // `ENTJOY_STATS=0` 显式关闭（换取热路径零 RMW；此时统计读数不再精确，属调用方主动放弃）。
+    // g_backendBatchesOutstanding：它是 WaitForBackendBatches 的等待条件，见该处注释，**不 gate**）。
+    // 关闭（`ENTJOY_STATS=0`）可省掉热路径的 locked RMW；此时统计读数不再精确。
     std::atomic<bool> g_statsEnabled{ true };
     // 进程启动读一次 env（与 g_jobCostCacheVerbose 同法；同 TU 内 g_statsEnabled 已常量初始化）。
     static const bool g_statsEnvInitialized = []() -> bool {
@@ -99,17 +128,275 @@ namespace JobSystem
         return v != nullptr && v[0] == '1';
     }();
 
-    // §7aq：自适应主线程自旋（默认关）。动机见 JobSystem_State.cpp 的 Complete() 注释。
-    // 实测结论（07 §7aq）：**否证** —— 12 对 A/B 整步 +4.15 ms（9/12 更差）、Melee +2.62、wave +0.88。
-    // 保留为默认关的器械（记录 + 可复跑），默认档零额外开销。
-    bool g_completeSpinAdaptEnabled = []() -> bool {
-        const char* v = std::getenv("ENTJOY_COMPLETE_SPIN_ADAPT");
-        return v != nullptr && v[0] == '1';
+    // 认领粒子上限的运行期覆盖（`ENTJOY_CLAIM_BATCH=<n>`；0/未设 ⇒ 用 kClaimBatchSize）。
+    // 只调**上限 cap**，`step = clamp(tileCount/workers, 1, cap)` 保留自适应项
+    // ⇒ 小批次自动退回细粒度，只有大批次才被摊薄。
+    uint32_t g_claimBatchSize = []() -> uint32_t {
+        const char* v = std::getenv("ENTJOY_CLAIM_BATCH");
+        if (v == nullptr) return 0;
+        const long n = std::strtol(v, nullptr, 10);
+        if (n <= 0) return 0;              // 0/负数 = 用内置默认（默认档逐位不变）
+        const uint32_t cap = (n > 4096) ? 4096u : static_cast<uint32_t>(n);
+        // 仅在 env 显式设置时打印一次实际生效的认领上限（默认档不打印 ⇒ 生产路径零噪声）。
+        EJ_LOADBANNER( "[CLAIMBATCH] cap=%u (builtin default = 4, see ChaseLevScheduler.h kClaimBatchSize)\n",
+            static_cast<unsigned>(cap));
+        return cap;
     }();
-    uint64_t g_completeSpinBigNs = []() -> uint64_t {
-        const char* v = std::getenv("ENTJOY_COMPLETE_SPIN_BIGNS");
-        const long long n = (v != nullptr) ? std::atoll(v) : 1000000;   // 默认 1 ms（聚合口径）
-        return static_cast<uint64_t>(n < 0 ? 0 : n);
+
+    // 按元素跨度认领的运行期覆盖（`ENTJOY_CLAIM_SPAN=<元素数>`）：把"每次认领的元素跨度"钉住
+    //（而不是钉 tile 数）——`itemsPerTile = totalElements/tileCount`；仅当
+    // `itemsPerTile ≤ kClaimSpanThinElems(=16)` 时 `capEff = clamp(SPAN/itemsPerTile, cap, SPAN)`，
+    // 否则 `capEff = cap`。厚 tile 不受影响（保持 worker 邻近）。内置默认 1024；显式 0 = 关。
+    uint32_t g_claimSpanElems = []() -> uint32_t {
+        const char* v = std::getenv("ENTJOY_CLAIM_SPAN");
+        // 显式 `ENTJOY_CLAIM_SPAN=0` = 关闭（回退逐 tile 认领）。
+        if (v == nullptr) return 1024u;
+        const long n = std::strtol(v, nullptr, 10);
+        if (n <= 0) return 0;              // 显式 0/负数 = 关（复现旧行为）
+        const uint32_t span = (n > kClaimSpanElemsMax) ? kClaimSpanElemsMax : static_cast<uint32_t>(n);
+        EJ_LOADBANNER( "[CLAIMSPAN] span=%u elements (thin-tile gate: itemsPerTile<=%u)\n",
+            static_cast<unsigned>(span), static_cast<unsigned>(kClaimSpanThinElems));
+        return span;
+    }();
+
+    // 等宽 GeneralRange 一律**不物化 tileBuffer**（默认开；`ENTJOY_TILES_UNIFORM=0` 回退）。
+    // 规则：`uniformTiles = 本开关 && !guided`，只作用于"非 guided 的等宽 GeneralRange"；
+    // chunk/entity/packed/guided 路径不变。收益是消掉提交侧 O(tileCount) 填表与执行侧 tile 数组读。
+    bool g_uniformTilesEnabled = []() -> bool {
+        const char* v = std::getenv("ENTJOY_TILES_UNIFORM");
+        const bool on = (v == nullptr) ? true : (v[0] == '1');
+        if (v != nullptr)
+            EJ_LOADBANNER("[TILESUNIFORM] %s (explicit ENTJOY_TILES_UNIFORM=%s)\n", on ? "on" : "off", v);
+        else
+            EJ_LOADBANNER("[TILESUNIFORM] on (built-in default; ENTJOY_TILES_UNIFORM=0 disables)\n");
+        return on;
+    }();
+
+    // 把 `TryExecuteOneTile` 的每-tile 固定开销提到每批/每令牌（默认开；`ENTJOY_TILE_FASTPATH=0` 回退）：
+    // 批构造时把 `g_traceEnabled/g_timingDiagnosticsEnabled` 快照进 `BatchState.traceOn/timingOn`，
+    // `firstTileAt` 判据从"每 tile"改为"每令牌一次"。**不动 `tilesRemaining` 记账**（无挂起风险）。
+    bool g_tileFastPath = []() -> bool {
+        const char* v = std::getenv("ENTJOY_TILE_FASTPATH");
+        const bool on = (v == nullptr) ? true : (v[0] == '1');
+        if (v != nullptr)
+            EJ_LOADBANNER("[TILEFASTPATH] %s (explicit ENTJOY_TILE_FASTPATH=%s)\n", on ? "on" : "off", v);
+        else
+            EJ_LOADBANNER("[TILEFASTPATH] on (built-in default; ENTJOY_TILE_FASTPATH=0 disables)\n");
+        return on;
+    }();
+
+    // **per-job 认领几何**学习（默认开；`ENTJOY_CLAIM_ADAPT=0` 关闭）。学习期奇偶交替（交错/切片），
+    // 两臂各有 ≥4 样本后按"每元素执行成本更低者"定型（3% 迟滞 + 冷却 + 每 64 次反向探针）。
+    // 设计见 JobCostCache.h 的 ClaimMode 段。批表/API 的几何声明优先级更高，已声明的 kernel 不受影响。
+    bool g_claimAdaptiveEnabled = []() -> bool {
+        const char* v = std::getenv("ENTJOY_CLAIM_ADAPT");
+        const bool on = (v == nullptr) ? true : (v[0] == '1');
+        if (v != nullptr)
+            EJ_LOADBANNER("[CLAIMADAPT] %s (explicit ENTJOY_CLAIM_ADAPT=%s)\n", on ? "on" : "off", v);
+        else
+            EJ_LOADBANNER("[CLAIMADAPT] on (built-in default; ENTJOY_CLAIM_ADAPT=0 disables)\n");
+        return on;
+    }();
+
+    // 目标每 tile 串行量（µs），默认 6400：`ResolveChunkSize` 的 `two_factor` 分支的唯一消费者
+    //（`tileSize = (kTargetTileUs − C_fixed)/C_elem`）。`ENTJOY_JCC_TARGET_US=<n>` 运行期覆盖。
+    double g_jccTargetTileUs = []() -> double {
+        const char* v = std::getenv("ENTJOY_JCC_TARGET_US");
+        if (v == nullptr) return 6400.0;
+        const double n = std::strtod(v, nullptr);
+        if (!(n >= 1.0 && n <= 100000.0)) return 6400.0;
+        EJ_LOADBANNER( "[JCCTARGETUS] target=%.1f us (builtin default = 6400)\n", n);
+        return n;
+    }();
+
+    // 强制显式内批（`ENTJOY_FORCE_INNER_BATCH=<n>`，默认 0 = 关）；
+    // 语义/用途见 JobSystemInternal.h 的同名声明。
+    uint32_t g_forceInnerBatch = []() -> uint32_t {
+        const char* v = std::getenv("ENTJOY_FORCE_INNER_BATCH");
+        if (v == nullptr) return 0;
+        const long n = std::strtol(v, nullptr, 10);
+        if (n <= 0) return 0;
+        const uint32_t b = (n > (1 << 20)) ? (1u << 20) : static_cast<uint32_t>(n);
+        EJ_LOADBANNER( "[FORCEINNERBATCH] batch=%u (all auto-batch dispatches forced; JCC bypassed)\n",
+            static_cast<unsigned>(b));
+        return b;
+    }();
+
+    // 按 job 的内批档表（`ENTJOY_JOB_BATCH_TABLE`，默认空 = 关）。语义/用途/前提见
+    // JobSystemInternal.h 的同名声明块。加载时解析一次 env（与 FORCE_INNER_BATCH 同款）。
+    JobBatchTableEntry g_jobBatchTable[kJobBatchTableCap] = {};
+    bool g_jobBatchTableDump = false;
+    uint32_t g_jobBatchTableCount = []() -> uint32_t {
+        const char* d = std::getenv("ENTJOY_JOB_BATCH_TABLE_DUMP");
+        g_jobBatchTableDump = (d != nullptr && d[0] == '1');
+        const char* v = std::getenv("ENTJOY_JOB_BATCH_TABLE");
+        uint32_t n = 0;
+        if (v != nullptr)
+        {
+            const char* p = v;
+            while (*p != '\0' && n < kJobBatchTableCap)
+            {
+                while (*p == ',' || *p == ';' || *p == ' ' || *p == '\t') ++p;
+                if (*p == '\0') break;
+                char* end = nullptr;
+                const unsigned long h = std::strtoul(p, &end, 16);
+                if (end == p) break;
+                p = end;
+                // 段内解析 `<key>:<batch>[:<claim>][:<geom>]`，**各段都可省略**
+                //   ⇒ `key::1024` 合法（只覆盖认领、不改内批）。
+                // 第四字段 = 认领几何：`s`/`S` = Spread（每 worker 独占连续段，空手才窃取）、
+                //   `a`/`A` = Adjacent（共享游标发相邻窗口）；缺省 = Auto（走全局 env / F6 学习）。
+                //   语义是"**调用点声明**"（键就是调用点，不按 job 名特判）。
+                {
+                    const char* segEnd = p;
+                    while (*segEnd != '\0' && *segEnd != ',' && *segEnd != ';') ++segEnd;
+                    long b = 0, c = 0, sp = 0;
+                    uint32_t g = kClaimGeomAuto;
+                    char* e2 = nullptr;
+                    const char* q = p;
+                    if (q < segEnd && (*q == ':' || *q == '=')) ++q;                                // 只跳过**一个**键后分隔符
+                    if (q < segEnd && *q != ':') { b = std::strtol(q, &e2, 10); q = e2; }            // 内批（可空 ⇒ 停在 ':'）
+                    if (q < segEnd && *q == ':') ++q;                                              // 跳过内批后的分隔符
+                    // 第三字段两种形态 —— `<claim>`（tile 数）或 `e<N>`（**元素跨度**）：
+                    //   前导 'e'/'E' 即元素形态；两者互斥（同一字段）。
+                    if (q < segEnd && (*q == 'e' || *q == 'E')) { ++q; sp = std::strtol(q, &e2, 10); q = e2; }
+                    else if (q < segEnd && *q != ':') { c = std::strtol(q, &e2, 10); q = e2; }
+                    if (q < segEnd && *q == ':') ++q;                                              // 跳过认领后的分隔符
+                    if (q < segEnd)                                                                 // 几何（可空）
+                    {
+                        if (*q == 's' || *q == 'S') g = kClaimGeomSpread;
+                        else if (*q == 'a' || *q == 'A') g = kClaimGeomAdjacent;
+                    }
+                    p = segEnd;
+                    if (b > 0 || c > 0 || sp > 0 || g != kClaimGeomAuto)
+                    {
+                        g_jobBatchTable[n].key = static_cast<uint32_t>(h);
+                        g_jobBatchTable[n].batch = (b > 0)
+                            ? ((b > (1 << 20)) ? (1u << 20) : static_cast<uint32_t>(b)) : 0u;
+                        g_jobBatchTable[n].claim = (c > 0)
+                            ? ((c > (1 << 20)) ? (1u << 20) : static_cast<uint32_t>(c)) : 0u;
+                        g_jobBatchTable[n].span = (sp > 0)
+                            ? ((static_cast<uint32_t>(sp) > kClaimSpanDeclaredMax)
+                                ? kClaimSpanDeclaredMax : static_cast<uint32_t>(sp)) : 0u;
+                        g_jobBatchTable[n].geom = g;
+                        ++n;
+                    }
+                }
+            }
+            EJ_LOADBANNER(
+                "[JOBBATCHTABLE] entries=%u dump=%d (auto-batch: table hit wins over ENTJOY_FORCE_INNER_BATCH; JCC bypassed)\n",
+                static_cast<unsigned>(n), g_jobBatchTableDump ? 1 : 0);
+        }
+        else
+        {
+            EJ_LOADBANNER( "[JOBBATCHTABLE] entries=0 dump=%d\n", g_jobBatchTableDump ? 1 : 0);
+        }
+        return n;
+    }();
+
+    uint32_t LookupJobBatch(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+            if (g_jobBatchTable[i].key == key) return g_jobBatchTable[i].batch;
+        return 0;
+    }
+
+    // 表项第三字段：按 job 的认领上限覆盖（缺省 0 = 不覆盖）
+    uint32_t LookupJobClaim(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+            if (g_jobBatchTable[i].key == key) return g_jobBatchTable[i].claim;
+        return 0;
+    }
+
+    // 表项第三字段的 **`e<N>` 元素跨度**形态（0 = 未声明），与 LookupJobClaim 互斥（同一字段的两种形态）；
+    // 上界已在解析时钳到 kClaimSpanDeclaredMax。
+    uint32_t LookupJobSpan(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+            if (g_jobBatchTable[i].key == key) return g_jobBatchTable[i].span;
+        return 0;
+    }
+
+    // 表项**第四字段** = 该调用点的**认领几何**（0=Auto / 1=Spread / 2=Adjacent）。
+    // 缺省/未命中 ⇒ Auto ⇒ 走全局 env 与 F6 学习。
+    uint32_t LookupJobGeom(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+            if (g_jobBatchTable[i].key == key) return g_jobBatchTable[i].geom;
+        return 0;
+    }
+
+    uint32_t JobFuncKey(void (*func)() noexcept) noexcept
+    {
+        const uintptr_t p = reinterpret_cast<uintptr_t>(func);
+        constexpr uint32_t kSlots = 64;
+        static std::atomic<uintptr_t> s_ptr[kSlots];
+        static std::atomic<uint32_t> s_key[kSlots];
+        const uint32_t slot = static_cast<uint32_t>(((p >> 4) ^ (p >> 13)) & (kSlots - 1));
+        if (s_ptr[slot].load(std::memory_order_relaxed) == p)
+            return s_key[slot].load(std::memory_order_relaxed);
+        uint32_t key = static_cast<uint32_t>(p);
+#if defined(_WIN32)
+        HMODULE hmod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(p), &hmod) && hmod != nullptr)
+        {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(hmod);
+            if (p >= base) key = static_cast<uint32_t>(p - base);
+        }
+#endif
+        s_key[slot].store(key, std::memory_order_relaxed);
+        s_ptr[slot].store(p, std::memory_order_relaxed);
+        return key;
+    }
+
+    // `ENTJOY_JOB_TILE_TRACE=<K>` ⇒ 每个键**前 K 次**调度都打印 tiles（默认 0 ⇒ 只打首见），
+    // 用于观测稳态 tiling（而非从墙钟反推）。
+    uint32_t g_jobTileTrace = []() -> uint32_t {
+        const char* v = std::getenv("ENTJOY_JOB_TILE_TRACE");
+        const long k = (v != nullptr) ? std::strtol(v, nullptr, 10) : 0;
+        return (k > 0) ? static_cast<uint32_t>(k > 64 ? 64 : k) : 0u;
+    }();
+
+    void NoteJobBatchTableHash(uint32_t key, int length, int tiles, uint32_t applied, uint32_t geom, uint32_t span) noexcept
+    {
+        if (!g_jobBatchTableDump || key == 0) return;
+        constexpr uint32_t kSeenCap = kJobBatchTableCap * 2;
+        static std::atomic<uint32_t> s_seenCount{ 0 };
+        static uint32_t s_seen[kSeenCap] = {};
+        static uint32_t s_hits[kSeenCap] = {};   // 每个键"见到过几次"（trace 用）
+        const uint32_t seen = s_seenCount.load(std::memory_order_relaxed);
+        const uint32_t lim = seen < kSeenCap ? seen : kSeenCap;
+        for (uint32_t i = 0; i < lim; ++i)
+        {
+            if (s_seen[i] != key) continue;
+            if (g_jobTileTrace != 0 && s_hits[i] < g_jobTileTrace)
+                std::printf("[JOBBATCHTBL] key=%08x N=%d tiles=%d applied=%u hit=%u geom=%u span=%u\n",
+                    key, length, tiles, static_cast<unsigned>(applied), s_hits[i] + 1,
+                    static_cast<unsigned>(geom), static_cast<unsigned>(span));
+            ++s_hits[i];
+            return;
+        }
+        const uint32_t slot = s_seenCount.fetch_add(1, std::memory_order_relaxed);
+        if (slot < kSeenCap)
+        {
+            s_seen[slot] = key;
+            s_hits[slot] = 1;
+            // `span=` 让"声明的元素跨度真的被解析到"在日志里可验（静默 no-op 无法与未生效区分）。
+            std::printf("[JOBBATCHTBL] key=%08x N=%d tiles=%d applied=%u hit=1 geom=%u span=%u\n",
+                key, length, tiles, static_cast<unsigned>(applied),
+                static_cast<unsigned>(geom), static_cast<unsigned>(span));
+        }
+    }
+
+    // JCC/分块决策计数仪器（`ENTJOY_DIAG_JCC=1`，默认关 ⇒ 零开销）。
+    // 用途见 JobSystemInternal.h 的同名声明。
+    bool g_jccDiagEnabled = []() -> bool {
+        const char* v = std::getenv("ENTJOY_DIAG_JCC");
+        const bool on = v != nullptr && v[0] == '1';
+        if (on) EJ_LOADBANNER( "[JCCDIAG] on (per-path counts + chunk/worker histograms)\n");
+        return on;
     }();
 
     // Guided（chunk ∝ 剩余工作量）tile 调度（OpenMP schedule(guided) 同族）。0=off；>0=on。
@@ -147,8 +434,136 @@ namespace JobSystem
     std::atomic<uint64_t> g_mainExecutedRanges{ 0 };
     std::atomic<uint64_t> g_stealCount{ 0 };
     std::atomic<uint64_t> g_parkWakeCount{ 0 };
-std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（自证）
+std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<uint64_t> g_hotSpinHits{ 0 };
+    // 连续 tile 融合统计（见 JobSystemInternal.h）
+    // 等宽 tile / 每批快路径统计（见 JobSystemInternal.h）
+    std::atomic<uint64_t> g_uniformTilesApplied{ 0 };
+    std::atomic<uint64_t> g_tileFastApplied{ 0 };
+    // 认领几何声明分桶（见 JobSystemInternal.h）
+    std::atomic<uint64_t> g_claimGeomDeclSpread{ 0 };
+    std::atomic<uint64_t> g_claimGeomDeclAdjacent{ 0 };
+    std::atomic<uint64_t> g_claimGeomDeclAuto{ 0 };
+
+    // ── 每-job 分母计数（见 JobSystemInternal.h 的声明处说明）──
+    std::atomic<uint32_t> g_perKeyHash[JobSystem::kPerKeySlots];
+    std::atomic<uint32_t> g_perKeyCount{ 0 };
+    std::atomic<uint64_t> g_perKeyBatches[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyElems[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyTiles[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyThin[JobSystem::kPerKeySlots];   // 本键落进 thinTiles 的批数
+    std::atomic<uint64_t> g_unkeyedBatches[JobSystem::kUnkeyedReasons];
+    std::atomic<uint64_t> g_unkeyedThin[JobSystem::kUnkeyedReasons];
+    std::atomic<uint64_t> g_unkeyedLenBucket[JobSystem::kUnkeyedReasons][32];
+    std::atomic<uint64_t> g_perKeyCalls[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyElemsCalled[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyNsSamples[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyNsSum[JobSystem::kPerKeySlots];
+    std::atomic<uint64_t> g_perKeyNsMax[JobSystem::kPerKeySlots];
+
+    int JobPerKeyIndexFor(uint32_t key) noexcept
+    {
+        if (key == 0) return -1;
+        const uint32_t n = g_perKeyCount.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < n; ++i)
+            if (g_perKeyHash[i].load(std::memory_order_relaxed) == key) return static_cast<int>(i);
+        // 首次插入：慢路径加锁 + 再查一次（避免并发重复插入同一 key ⇒ 同一内核被拆成两行）
+        static std::mutex s_insMtx;
+        std::lock_guard<std::mutex> lock(s_insMtx);
+        const uint32_t n2 = g_perKeyCount.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < n2; ++i)
+            if (g_perKeyHash[i].load(std::memory_order_relaxed) == key) return static_cast<int>(i);
+        if (n2 >= JobSystem::kPerKeySlots) return -1;
+        g_perKeyHash[n2].store(key, std::memory_order_relaxed);
+        g_perKeyCount.store(n2 + 1, std::memory_order_release);
+        return static_cast<int>(n2);
+    }
+
+    int JobPerKeyResolve(void (*fn)() noexcept, int& outUnkeyedReason) noexcept
+    {
+        // 诊断默认关 ⇒ 产品路径零开销（不调用 JobFuncKey、不查表，也不记任何未归因账）。
+        if (!g_jobBatchTableDump) { outUnkeyedReason = -1; return -1; }
+        if (fn == nullptr) { outUnkeyedReason = kUnkeyedFnNull; return -1; }
+        const uint32_t key = JobFuncKey(fn);
+        if (key == 0) { outUnkeyedReason = kUnkeyedKeyZero; return -1; }
+        const int idx = JobPerKeyIndexFor(key);
+        if (idx < 0) { outUnkeyedReason = kUnkeyedTableFull; return -1; }
+        outUnkeyedReason = -1;
+        return idx;
+    }
+
+    static const char* UnkeyedReasonName(int reason) noexcept
+    {
+        switch (reason)
+        {
+        case kUnkeyedFnNull:    return "fnNull";
+        case kUnkeyedKeyZero:   return "keyZero";
+        case kUnkeyedTableFull: return "tableFull";
+        default:                return "?";
+        }
+    }
+
+    void JobPerKeyDump() noexcept    {
+        if (!g_jobBatchTableDump) return;
+        const uint32_t n = g_perKeyCount.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            const uint64_t calls = g_perKeyCalls[i].load(std::memory_order_relaxed);
+            const uint64_t elemsScheduled = g_perKeyElems[i].load(std::memory_order_relaxed);
+            const uint64_t elemsCalled = g_perKeyElemsCalled[i].load(std::memory_order_relaxed);
+            const uint64_t nsSamples = g_perKeyNsSamples[i].load(std::memory_order_relaxed);
+            const uint64_t nsSum = g_perKeyNsSum[i].load(std::memory_order_relaxed);
+            const double nsPerCall = nsSamples ? (static_cast<double>(nsSum) / static_cast<double>(nsSamples)) : 0.0;
+            const double elemsPerCall = calls ? (static_cast<double>(elemsCalled) / static_cast<double>(calls)) : 0.0;
+            const double nsPerElem = elemsPerCall > 0.0 ? (nsPerCall / elemsPerCall) : 0.0;
+            std::printf("[JOBPERKEY] key=%08x batches=%llu elems=%llu tiles=%llu calls=%llu"
+                        " elemsCalled=%llu elemPerCall=%.1f kernelNs/call=%.0f kernelNs/elem=%.2f"
+                        " maxCallUs=%.1f nsSamples=%llu mismatch=%lld thin=%llu\n",
+                g_perKeyHash[i].load(std::memory_order_relaxed),
+                (unsigned long long)g_perKeyBatches[i].load(std::memory_order_relaxed),
+                (unsigned long long)elemsScheduled,
+                (unsigned long long)g_perKeyTiles[i].load(std::memory_order_relaxed),
+                (unsigned long long)calls,
+                (unsigned long long)elemsCalled,
+                elemsPerCall, nsPerCall, nsPerElem,
+                static_cast<double>(g_perKeyNsMax[i].load(std::memory_order_relaxed)) / 1000.0,
+                (unsigned long long)nsSamples,
+                (long long)elemsCalled - (long long)elemsScheduled,
+                (unsigned long long)g_perKeyThin[i].load(std::memory_order_relaxed));
+        }
+        // 未归因批：按原因打印（只打非零项）+ 该原因的**长度主桶**，用来指名"谁在产生未归因的批"。
+        for (int r = 0; r < kUnkeyedReasons; ++r)
+        {
+            const uint64_t b = g_unkeyedBatches[r].load(std::memory_order_relaxed);
+            if (b == 0) continue;
+            int domBucket = 0;
+            uint64_t domN = 0;
+            for (int k = 0; k < 32; ++k)
+            {
+                const uint64_t c = g_unkeyedLenBucket[r][k].load(std::memory_order_relaxed);
+                if (c > domN) { domN = c; domBucket = k; }
+            }
+            std::printf("[JOBPERKEY-UNKEYED] reason=%s batches=%llu thin=%llu"
+                        " dominantLen=2^%d (n=%llu)\n",
+                UnkeyedReasonName(r),
+                (unsigned long long)b,
+                (unsigned long long)g_unkeyedThin[r].load(std::memory_order_relaxed),
+                domBucket, (unsigned long long)domN);
+        }
+        std::fflush(stdout);
+    }
+    // 认领几何学习统计（见 JobCostCache.h 的声明处注释）
+    std::atomic<uint64_t> g_claimGeomNoKey{ 0 };
+    std::atomic<uint64_t> g_claimGeomNoSample{ 0 };
+    std::atomic<uint64_t> g_claimGeomSliced{ 0 };
+    std::atomic<uint64_t> g_claimGeomInterleaved{ 0 };
+    std::atomic<uint64_t> g_claimGeomFlips{ 0 };
+    std::atomic<uint64_t> g_wakePollSkips{ 0 };   // 提交侧"不写唤醒字"的次数（自证快路径被走到）
+    std::atomic<uint64_t> g_wakePollWakes{ 0 };   // 提交侧真的 bump+notify_all 的次数
+    std::atomic<uint64_t> g_wakePollSkipsWork{ 0 };   // 同上，分入口（小 job 快路径）
+    std::atomic<uint64_t> g_wakePollWakesWork{ 0 };
+    std::atomic<uint64_t> g_wakePollSkipsBatch{ 0 };  // 同上，分入口（真并行趟）
+    std::atomic<uint64_t> g_wakePollWakesBatch{ 0 };
     std::atomic<uint64_t> g_publishedJobs{ 0 };
     std::atomic<uint64_t> g_waitFallbacks{ 0 };
     std::atomic<uint64_t> g_notifiedWorkers{ 0 };
@@ -165,6 +580,19 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
     std::atomic<uint64_t> g_stealSuccesses{ 0 };
     std::atomic<uint64_t> g_victimScans{ 0 };
     std::atomic<uint64_t> g_stealEmptyExits{ 0 };
+    // 观测开关（`ENTJOY_CLAIM_STAT=1`，默认关）：认领点 rdtsc 探针。认领是 fetch_add（**无 CAS 失败**），
+    // 争用只表现为共享游标 cacheline 的弹跳 ⇒ 直接 rdtsc 包住 fetch_add。
+    // 只在开关打开时取时间戳；每令牌 flush 一次（不新增原子热路径）。
+    std::atomic<bool>     g_claimStatEnabled{ []() -> bool {
+        const char* v = std::getenv("ENTJOY_CLAIM_STAT");
+        const bool on = v != nullptr && v[0] == '1';
+        if (on) EJ_LOADBANNER(
+            "[CLAIMSTAT] on (rdtsc probe around the tile-claim fetch_add; print needs ENTJOY_DIAG_E1=1)\n");
+        return on;
+    }() };
+    std::atomic<uint64_t> g_claimProbeN{ 0 };
+    std::atomic<uint64_t> g_claimProbeCycles{ 0 };
+    std::atomic<uint64_t> g_claimProbeMax{ 0 };
     std::atomic<uint64_t> g_batchStorageCreated{ 0 };
     std::atomic<uint64_t> g_batchStorageReused{ 0 };
     std::atomic<uint64_t> g_statePoolHit{ 0 };
@@ -191,7 +619,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
     std::thread::id g_mainThreadId{};
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
     // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式）：
-    // 实测与开启相当，且释放主线程参与竞争；慢 worker 被 OS 抢占导致尾延迟时，可运行时开启兜底。
+    // 释放主线程参与竞争；慢 worker 被 OS 抢占导致尾延迟时，可运行时开启兜底。
     std::atomic<bool> g_mainThreadAssistEnabled{ false };
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
@@ -305,8 +733,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
     void RecordDirectCall(const char* jobName, uint32_t tiles) noexcept
     {
         // 直调也是一次"发布"：统一计数口径，使 GUI 的 Published Jobs 与 Activity 事件一一对应。
-        // 性能项 3：原先在检查采集开关**之前**无条件 RMW，采集关闭时这次 RMW 纯属浪费；
-        // 默认 g_statsEnabled=true ⇒ 计数口径与改动前完全一致。
+        // 发布计数由 g_statsEnabled 门控：统计关闭时不做这次 RMW。
         if (StatsEnabled())
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
@@ -363,7 +790,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
     {
         // 直调执行窗口开始：发布计数 + 记 Activity + 开当前线程泳道窗口（事件驱动）。
         // isDirect=true：GUI 将直调标记为 [D]，与调度式 Job 区分（直调不经调度器）。
-        // 性能项 3：同 RecordDirectCall，发布计数同样排在采集开关检查之后（默认统计开启 ⇒ 口径不变）。
+        // 发布计数由 g_statsEnabled 门控（同 RecordDirectCall）。
         if (StatsEnabled())
             g_publishedJobs.fetch_add(1, std::memory_order_relaxed);
         if (!g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return 0;
@@ -629,8 +1056,8 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
     }
 
     // 本机**物理核数**（SMT 兄弟共享一个物理核）。**在 Scheduler::Initialize 计算一次**并缓存：
-    // 每 job 调用时再查会太贵；而"查失败"绝不能变成永久失效（曾踩到：一次性 static 查询失败后
-    // 整进程静默不生效，A/B 出现无效臂）。0 = 不可知 ⇒ 依赖它的策略保守退化。
+    // 每 job 调用时再查会太贵；一次性的查询失败绝不能变成进程级永久失效。
+    // 0 = 不可知 ⇒ 依赖它的策略保守退化。
     std::atomic<int> g_physicalCores{ 0 };
     std::atomic<uint64_t> g_physCapApplied{ 0 };
 
@@ -723,15 +1150,15 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
         stats->scheduleModeDeferredPublish = 0;
         stats->scheduleModeDeferredPublishNoAssist = 0;
         stats->frameQueueDepthPeak = 0;
-        stats->directAssistClaims = 0;
-        stats->exhaustedTickets = 0;
-        stats->scheduleToPublishEwmaNs = 0;
-        stats->publishToFirstMainClaimEwmaNs = 0;
-        stats->publishToFirstWorkerClaimEwmaNs = 0;
-        stats->queueLockWaitEwmaNs = 0;
     }
 
     std::atomic<uint32_t> g_backendBatchesOutstanding{ 0 };
+
+    // 代次校验诊断（定义；声明见 JobSystemInternal.h）。
+    // 只在**冷子分支**自增（拒绝迟到结算 / pendingTasks 已为 0），热路径零开销；
+    // Shutdown 时打 `[JOBGEN]` 一行。
+    std::atomic<uint64_t> g_staleSettleDropped{ 0 };
+    std::atomic<uint64_t> g_pendingTasksWrap{ 0 };
 
     static void WaitForBackendBatches() noexcept
     {
@@ -759,6 +1186,48 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
         g_stealCount.store(0, std::memory_order_relaxed);
         g_parkWakeCount.store(0, std::memory_order_relaxed);
         g_hotSpinHits.store(0, std::memory_order_relaxed);
+        // 每-job 分母计数：整表清空（含 key 列），否则上一代的 key 会与新 key 混行
+        {
+            const uint32_t n = g_perKeyCount.load(std::memory_order_relaxed);
+            for (uint32_t i = 0; i < n && i < JobSystem::kPerKeySlots; ++i)
+            {
+                g_perKeyHash[i].store(0, std::memory_order_relaxed);
+                g_perKeyBatches[i].store(0, std::memory_order_relaxed);
+                g_perKeyElems[i].store(0, std::memory_order_relaxed);
+                g_perKeyTiles[i].store(0, std::memory_order_relaxed);
+                g_perKeyThin[i].store(0, std::memory_order_relaxed);
+                g_perKeyCalls[i].store(0, std::memory_order_relaxed);
+                g_perKeyElemsCalled[i].store(0, std::memory_order_relaxed);
+                g_perKeyNsSamples[i].store(0, std::memory_order_relaxed);
+                g_perKeyNsSum[i].store(0, std::memory_order_relaxed);
+                g_perKeyNsMax[i].store(0, std::memory_order_relaxed);
+            }
+            g_perKeyCount.store(0, std::memory_order_relaxed);
+        }
+        // 未归因批的分原因计数与长度直方图（与逐键计数同时清空）
+        for (int r = 0; r < JobSystem::kUnkeyedReasons; ++r)
+        {
+            g_unkeyedBatches[r].store(0, std::memory_order_relaxed);
+            g_unkeyedThin[r].store(0, std::memory_order_relaxed);
+            for (int k = 0; k < 32; ++k)
+                g_unkeyedLenBucket[r][k].store(0, std::memory_order_relaxed);
+        }
+        g_uniformTilesApplied.store(0, std::memory_order_relaxed);
+        g_tileFastApplied.store(0, std::memory_order_relaxed);
+        g_claimGeomDeclSpread.store(0, std::memory_order_relaxed);
+        g_claimGeomDeclAdjacent.store(0, std::memory_order_relaxed);
+        g_claimGeomDeclAuto.store(0, std::memory_order_relaxed);
+        g_claimGeomNoKey.store(0, std::memory_order_relaxed);
+        g_claimGeomNoSample.store(0, std::memory_order_relaxed);
+        g_claimGeomSliced.store(0, std::memory_order_relaxed);
+        g_claimGeomInterleaved.store(0, std::memory_order_relaxed);
+        g_claimGeomFlips.store(0, std::memory_order_relaxed);
+        g_wakePollSkips.store(0, std::memory_order_relaxed);
+        g_wakePollWakes.store(0, std::memory_order_relaxed);
+        g_wakePollSkipsWork.store(0, std::memory_order_relaxed);
+        g_wakePollWakesWork.store(0, std::memory_order_relaxed);
+        g_wakePollSkipsBatch.store(0, std::memory_order_relaxed);
+        g_wakePollWakesBatch.store(0, std::memory_order_relaxed);
         g_publishedJobs.store(0, std::memory_order_relaxed);
         g_waitFallbacks.store(0, std::memory_order_relaxed);
         g_notifiedWorkers.store(0, std::memory_order_relaxed);
@@ -775,6 +1244,9 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // §7ah：跳过广播次数（�
         g_stealSuccesses.store(0, std::memory_order_relaxed);
         g_victimScans.store(0, std::memory_order_relaxed);
         g_stealEmptyExits.store(0, std::memory_order_relaxed);
+        g_claimProbeN.store(0, std::memory_order_relaxed);
+        g_claimProbeCycles.store(0, std::memory_order_relaxed);
+        g_claimProbeMax.store(0, std::memory_order_relaxed);
         g_batchStorageCreated.store(0, std::memory_order_relaxed);
         g_batchStorageReused.store(0, std::memory_order_relaxed);
         g_batchStorageReturned.store(0, std::memory_order_relaxed);

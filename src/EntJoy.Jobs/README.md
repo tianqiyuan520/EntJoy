@@ -31,6 +31,23 @@ EntJoy 的 JobSystem 与 NativeTranspiler 转译设施。提供托管与原生�
 | `tools/` | `NativeTranspiler.dll`（源生成器/分析器）与 `NativeTranspiler.Tasks.dll`（调用 CMake 的 MSBuild 任务）。 |
 | `buildTransitive/` | `EntJoy.Jobs.props` / `.targets`：自动接线分析器、编译目标与 `NativeDll.dll` 复制，无需手写 MSBuild。 |
 
+### 原生直调与注册时机（自动 / 手动，AOT 友好）
+
+`[NativeTranspile]` 的 job 被调度时优先走**原生内核直调**（省掉 `native → managed → native` 转换；对单任务 job，
+这决定了它跑的是**原生内核**还是**托管 JIT 代码**）。转译器为此生成两个可用方式：
+
+| 方式 | 做法 | 适用 |
+| --- | --- | --- |
+| **自动（默认）** | 什么都不做 —— 生成代码里标了 `[ModuleInitializer]`，运行时在**程序集加载时**自动注册 | 绝大多数项目（含 IL2CPP/AOT：目标框架没有该特性时不会发射它） |
+| **手动（兜底）** | 启动处调一次 `NativeTranspiler.Bindings.NativeExports.EnsureNativeJobRegistrations();` | 无 `ModuleInitializer` 的目标框架、裁剪/IL2CPP 下要确定性时机、显式钉住排错 |
+| **关闭** | `ENTJOY_NATIVE_SINGLE_JOB=0`（回退托管） | 对照实验 / 回退阀 |
+
+幂等、可重复调用。自证横幅：`[NATIVEJOB] native direct-dispatch wired: <Job>` 与
+`[NATIVEJOB] first native direct-dispatch: <Job>`（后者出现才代表**运行时真的**走了原生）。
+AOT 友好设计：无反射、无 `MakeGenericType`、delegate 由静态字段生根、`[ModuleInitializer]` 只是**可选增强**；
+ctx 走框架自带 `ContextPool`、**无逐派发堆分配**。详见
+[`docs/public/Native-Jobs-Guide.md` §3.6](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Native-Jobs-Guide.md)。
+
 ### 工具链前提
 
 - **只写托管 Job**：装包即用，**不需要** CMake / MSVC / ISPC。
@@ -87,6 +104,26 @@ EntJoy's JobSystem and NativeTranspiler infrastructure. It ships both the manage
 | `build/native/` | The link kit: `NativeDll.lib` import library, `tasksys.cpp`, and all headers. Link against it when you write `[NativeTranspile]` jobs. |
 | `tools/` | `NativeTranspiler.dll` (source generator/analyzer) and `NativeTranspiler.Tasks.dll` (the MSBuild task that drives CMake). |
 | `buildTransitive/` | `EntJoy.Jobs.props` / `.targets`: wires up the analyzer, the compile targets, and the `NativeDll.dll` copy — no hand-written MSBuild needed. |
+
+### Native direct dispatch and registration timing (automatic / manual, AOT-friendly)
+
+`[NativeTranspile]` jobs are dispatched straight into their **native kernel** (skipping the
+`native → managed → native` round trip; for single-task jobs this decides whether the **native kernel**
+or **managed JIT code** actually runs). The transpiler gives you two ways to guarantee that
+registrations happen before the first dispatch:
+
+| Way | How | When |
+| --- | --- | --- |
+| **Automatic (default)** | Do nothing — the generated code carries a `[ModuleInitializer]`, so the runtime registers at **assembly load** | Most projects (incl. IL2CPP/AOT: the attribute is only emitted when the target framework has it) |
+| **Manual (fallback)** | Call once at startup: `NativeTranspiler.Bindings.NativeExports.EnsureNativeJobRegistrations();` | Target frameworks without `ModuleInitializer`, trimming/IL2CPP where you want a deterministic moment, or when pinning it down for tuning |
+| **Off** | `ENTJOY_NATIVE_SINGLE_JOB=0` (falls back to managed) | A/B experiments / kill switch |
+
+It is idempotent and safe to call repeatedly. Self-proof banners: `[NATIVEJOB] native direct-dispatch wired: <Job>`
+and `[NATIVEJOB] first native direct-dispatch: <Job>` (only the latter proves the native path was **actually** taken).
+AOT-friendly by design: no reflection, no `MakeGenericType`, delegates rooted by static fields, and
+`[ModuleInitializer]` is only an **optional enhancement**; the ctx comes from the framework's own `ContextPool`
+with **no per-dispatch heap allocation**. See
+[`docs/public/Native-Jobs-Guide.md` §3.6](https://github.com/tianqiyuan520/EntJoy/blob/main/docs/public/Native-Jobs-Guide.md).
 
 ### Toolchain requirements
 

@@ -73,14 +73,15 @@ namespace EntJoy.JobSystem
 
         // ─── IJobParallelFor ───
         public static JobHandle ScheduleParallelFor<T>(ref T job, int length, int innerBatchCount,
-            JobHandle dependsOn = default) where T : struct, IJobParallelFor
+            JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelFor
         {
             if (UseNative)
             {
                 if (dependsOn._managedHandle.Completion != null)
                     throw new InvalidOperationException("Native and Managed job handles cannot be mixed.");
-                return new JobHandle(NativeJobScheduler.ScheduleParallelFor(ref job, length, innerBatchCount, dependsOn._nativeHandle));
+                return new JobHandle(NativeJobScheduler.ScheduleParallelFor(ref job, length, innerBatchCount, dependsOn._nativeHandle, claim));
             }
+            // 托管回退：无 tile 认领（无共享游标争用问题）⇒ claim 无意义，忽略。
             if (dependsOn._nativeHandle.IsValid)
                 throw new InvalidOperationException("Native and Managed job handles cannot be mixed.");
             if (dependsOn._managedHandle.Completion != null) return new JobHandle(ManagedJobScheduler.Schedule(ref job, length, innerBatchCount, dependsOn._managedHandle));
@@ -109,13 +110,13 @@ namespace EntJoy.JobSystem
 
         // ─── IJobParallelForBatch ───
         public static JobHandle ScheduleBatch<T>(ref T job, int arrayLength, int batchSize,
-            JobHandle dependsOn = default) where T : struct, IJobParallelForBatch
+            JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelForBatch
         {
             if (UseNative)
             {
                 if (dependsOn._managedHandle.Completion != null)
                     throw new InvalidOperationException("Native and Managed job handles cannot be mixed.");
-                return new JobHandle(NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, dependsOn._nativeHandle));
+                return new JobHandle(NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, dependsOn._nativeHandle, claim));
             }
             if (dependsOn._nativeHandle.IsValid)
                 throw new InvalidOperationException("Native and Managed job handles cannot be mixed.");

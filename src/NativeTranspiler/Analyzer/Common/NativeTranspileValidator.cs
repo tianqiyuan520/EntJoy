@@ -83,6 +83,18 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         public static readonly DiagnosticDescriptor RefLocalNotSupportedError = new("NT027", "ref local element type cannot be resolved", "[NativeTranspile] 方法 '{0}' 的 `ref` 局部（`ref T x = ref …`）**元素类型无法解析**：无法生成 `T& x = …`。请显式写出元素类型（避免 `ref var`），或改用指针局部 `T* p = &arr[i];`。", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
+        /// <summary>NT032：**托管 job 清点** —— 列出了 job 接口但没有 `[NativeTranspile]` 的 struct。
+        /// 判据只有一条：`[NativeTranspile]` 在 ⇒ 原生；不在 ⇒ 托管（**不需要任何"我是托管"的标记**）。
+        /// 由 <see cref="JobIntentChecker"/> 在**混合项目**（默认 `warn`，即本编译单元已有原生 job）或 `strict`
+        /// 策略下报告；`strict` 时用带 `effectiveSeverity` 的 `Diagnostic.Create` 升级为 error。</summary>
+        public static readonly DiagnosticDescriptor ManagedJobsInventory = new("NT032", "Managed jobs inventory",
+            "本编译单元有 {2} 个 [NativeTranspile] job，另有 **{0} 个托管 job**（实现了 Job 接口、没有 [NativeTranspile]）：{1}。" +
+            "⇒ 缺属性**本身就是托管的定义**，无需任何额外标记；本条只回答一个问题：**这里面有没有你本意要原生、却漏写属性的** —— " +
+            "漏写的代价是**静默降级**（调度器仍是 C++，核内是 C# Execute；IJobParallelForBatch 还会退化成**单线程串行**），" +
+            "而语义仍然正确 ⇒ 正确性测试抓不到它。若确实全是有意托管，本条只是清点；用 " +
+            "`<EntJoyJobIntent>`（off|warn|strict，当前 {3}）控制：warn=只在混合项目清点一次，strict=一律报错，off=关闭。",
+            "NativeTranspiler", DiagnosticSeverity.Warning, true);
+
         /// <summary>
         /// 解析局部声明的类型（P0-5b 修复）：优先类型语法节点的语义类型；**为 null 时回退到声明符号的类型**
         /// —— `ref T x = ref expr;` 在 `Nullable=enable` 下 `GetTypeInfo(Type).Type` 返回 null，

@@ -102,7 +102,9 @@ namespace EntJoy.JobSystem
         private static IntPtr _nativeDll = IntPtr.Zero;
         private static int _shutdownRequested;
         // ABI 2: JobSystem_Initialize now returns an int status code.
-        private const uint ExpectedAbiVersion = 2;
+        // ABI 3: 删除 6 个死 stats 字段（stats 结构体布局已变）⇒ 旧的 NativeDll.dll 必须被拒绝，
+        //        否则会按错位偏移静默读错诊断值。与 Exports.cpp 的 JobSystem_GetAbiVersion 同步。
+        private const uint ExpectedAbiVersion = 3;
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
@@ -117,6 +119,8 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
+        // 2026-10-02（ClaimPolicy）：可选导出（老 DLL 没有 ⇒ null ⇒ 退回上面那个，claim 被忽略）。
+        private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatchEx;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
         private static delegate* unmanaged[Cdecl]<IntPtr, ulong> _jobSystem_CompleteAndRelease;
@@ -136,6 +140,10 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetStatsSize;
         // 诊断（句柄是否被确定性回收）：老 NativeDll.dll 无此导出 ⇒ 用 TryGetExport，缺失时上层报告"不可用"。
         private static delegate* unmanaged[Cdecl]<long> _jobSystem_GetLiveHandleCount;
+        // N12 `ENTJOY_WAKE_POLL` 生效证据（可选导出，老 DLL 为 null）。
+        private static delegate* unmanaged[Cdecl]<ulong*, ulong*, void> _jobSystem_GetWakePollCounters;
+        // 认领几何生效证据（可选导出，老 DLL 为 null）。
+        private static delegate* unmanaged[Cdecl]<ulong*, ulong*, ulong*, void> _jobSystem_GetClaimGeomCounters;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_ResetStats;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetTimingDiagnostics;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetMainThreadAssist;
@@ -154,6 +162,50 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<NativeTraceEvent*, int, int> _trace_ReadAll;
         private static delegate* unmanaged[Cdecl]<ulong> _trace_DroppedEvents;
         private static delegate* unmanaged[Cdecl]<void> _trace_Clear;
+
+        // 2026-10-02：`LoadLibraryExW` 的**瞬态** `ERROR_DLL_INIT_FAILED`(0x8007045A) 重试次数。
+        //   实测：同一份字节、同一路径，第一次 `LoadLibraryExW` 报 0x8007045A，紧接着再载成功
+        //   （失败尝试里 DLL 的加载期 static 初始化**已经跑过**，stderr 里有 `[SIMD]`/`[JOBBATCHTABLE]`；
+        //   详见 docs/gridsearch/09 §14）。旧代码因此掉到"另一个目录的那份 DLL"上 ⇒ 静默换二进制。
+        private const int kNativeLoadAttempts = 3;
+
+        private static bool TryLoadNative(string path, out IntPtr handle, out string error)
+        {
+            handle = IntPtr.Zero;
+            error = string.Empty;
+            try
+            {
+                handle = NativeLibrary.Load(path);
+                if (handle != IntPtr.Zero)
+                    return true;
+                error = $"LoadLibraryEx returned NULL (Win32 {Marshal.GetLastPInvokeError()})";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                handle = IntPtr.Zero;
+                error = $"{ex.GetType().Name}: {ex.Message} (Win32 {Marshal.GetLastPInvokeError()})";
+                return false;
+            }
+        }
+
+        private static string FileSha256(string path)
+        {
+            try
+            {
+                using var fs = File.OpenRead(path);
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                return Convert.ToHexString(sha.ComputeHash(fs));
+            }
+            catch (Exception ex)
+            {
+                return "hash-error:" + ex.GetType().Name;
+            }
+        }
+
+        private static string ShortHash(string hash) => string.IsNullOrEmpty(hash) || hash.Length <= 16
+            ? hash
+            : hash.Substring(0, 16);
 
         [System.Runtime.CompilerServices.ModuleInitializer]
         internal static unsafe void LoadNativeDll()
@@ -245,48 +297,93 @@ namespace EntJoy.JobSystem
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
+            // 2026-10-02（BUG-1 收口）：加载语义改成"**首选路径 = 意图路径**"，
+            //   ① 同一路径失败**重试同一路径**（实测 `LoadLibraryExW` 会以 `ERROR_DLL_INIT_FAILED`
+            //      (0x8007045A) 瞬态失败一次，紧接着用**同一份字节**再载就成功 —— 见 09 §14），
+            //   ② 只有在首选路径彻底失败后才考虑别的目录，且**必须字节等价**（长度+SHA256）；
+            //   ③ 字节不等价时**默认拒绝**（老行为"静默用另一份 DLL"曾把一次测量变成两台不同机器：
+            //      Debug 22:18 / Release 21:23 一对不匹配的二进制 ⇒ `applied=0` + 假的 ~10 ms 双峰）。
+            //   想恢复老行为需显式 `ENTJOY_NATIVE_ALLOW_MISMATCHED_FALLBACK=1`。
             IntPtr dllHandle = IntPtr.Zero;
             string loadedPath = string.Empty;
-            foreach (var candidate in primaryCandidates)
+            string intendedPath = primaryCandidates.Length > 0 ? primaryCandidates[0] : string.Empty;
+            int attemptsUsed = 0;
+            string fallbackNote = string.Empty;
+
+            if (intendedPath.Length > 0)
             {
-                try
+                for (int attempt = 1; attempt <= kNativeLoadAttempts; attempt++)
                 {
-                    dllHandle = NativeLibrary.Load(candidate);
-                    if (dllHandle != IntPtr.Zero)
+                    attemptsUsed = attempt;
+                    Console.Error.WriteLine($"[NativeJobScheduler] Trying NativeDll: {intendedPath} (attempt {attempt}/{kNativeLoadAttempts})");
+                    if (TryLoadNative(intendedPath, out dllHandle, out string loadError))
                     {
-                        loadedPath = candidate;
+                        loadedPath = intendedPath;
                         break;
                     }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[NativeJobScheduler] Failed to load {candidate}: {ex.Message}");
-                }
-            }
-
-            foreach (var candidate in existingCandidates)
-            {
-                if (dllHandle != IntPtr.Zero)
-                    break;
-
-                try
-                {
-                    dllHandle = NativeLibrary.Load(candidate.Path);
-                    if (dllHandle != IntPtr.Zero)
-                    {
-                        loadedPath = candidate.Path;
-                        break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[NativeJobScheduler] Failed to load {candidate.Path}: {ex.Message}");
+                    Console.Error.WriteLine($"[NativeJobScheduler] load attempt {attempt}/{kNativeLoadAttempts} FAILED: {loadError}");
+                    if (attempt < kNativeLoadAttempts)
+                        Thread.Sleep(60 * attempt);
                 }
             }
 
             if (dllHandle == IntPtr.Zero)
             {
-                try { dllHandle = NativeLibrary.Load(dllName); } catch { }
+                var tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (intendedPath.Length > 0) tried.Add(intendedPath);
+                var fallbacks = primaryCandidates.Skip(1)
+                    .Concat(existingCandidates.Select(x => x.Path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase);
+                string intendedLen = intendedPath.Length > 0 ? new FileInfo(intendedPath).Length.ToString() : "?";
+                string intendedHash = string.Empty;
+                bool allowMismatch = Environment.GetEnvironmentVariable("ENTJOY_NATIVE_ALLOW_MISMATCHED_FALLBACK") == "1";
+                foreach (var candidate in fallbacks)
+                {
+                    if (dllHandle != IntPtr.Zero) break;
+                    if (!tried.Add(candidate) || !File.Exists(candidate)) continue;
+                    long len = new FileInfo(candidate).Length;
+                    bool identical;
+                    if (intendedPath.Length == 0)
+                    {
+                        identical = true;
+                    }
+                    else
+                    {
+                        if (intendedHash.Length == 0) intendedHash = FileSha256(intendedPath);
+                        identical = len.ToString() == intendedLen
+                            && string.Equals(FileSha256(candidate), intendedHash, StringComparison.Ordinal);
+                    }
+                    if (!identical && !allowMismatch)
+                    {
+                        Console.Error.WriteLine(
+                            $"[NativeJobScheduler] REFUSED fallback (bytes differ from intended): {candidate} " +
+                            $"(size {len} vs {intendedLen}, sha256 {ShortHash(FileSha256(candidate))} vs {ShortHash(intendedHash)}) " +
+                            "-- set ENTJOY_NATIVE_ALLOW_MISMATCHED_FALLBACK=1 to restore the old silent behaviour");
+                        continue;
+                    }
+                    Console.Error.WriteLine($"[NativeJobScheduler] Trying NativeDll fallback: {candidate} (byte-identical={identical})");
+                    if (TryLoadNative(candidate, out dllHandle, out string fbError))
+                    {
+                        loadedPath = candidate;
+                        fallbackNote = identical ? "byte-identical" : "MISMATCHED(override)";
+                        break;
+                    }
+                    Console.Error.WriteLine($"[NativeJobScheduler] fallback FAILED: {candidate}: {fbError}");
+                }
+            }
+
+            if (dllHandle == IntPtr.Zero)
+            {
+                try
+                {
+                    dllHandle = NativeLibrary.Load(dllName);
+                    if (dllHandle != IntPtr.Zero)
+                    {
+                        loadedPath = dllName;
+                        fallbackNote = "byname";
+                    }
+                }
+                catch { }
             }
 
             if (dllHandle == IntPtr.Zero)
@@ -305,6 +402,24 @@ namespace EntJoy.JobSystem
             if (!string.IsNullOrEmpty(loadedPath))
             {
                 Console.Error.WriteLine($"[NativeJobScheduler] Loaded NativeDll: {loadedPath} (UTC: {File.GetLastWriteTimeUtc(loadedPath):O})");
+                // 自证行：把"实际加载了哪一份 / 是不是回退 / 重试了几次"写进日志，任何回退都不再是静默的。
+                string proofHash = File.Exists(loadedPath) ? ShortHash(FileSha256(loadedPath)) : "n/a";
+                string proofSize = File.Exists(loadedPath) ? new FileInfo(loadedPath).Length.ToString() : "n/a";
+                Console.Error.WriteLine(
+                    $"[NativeJobScheduler] dll self-proof: intended={intendedPath} attempts={attemptsUsed} " +
+                    $"fallback={(fallbackNote.Length == 0 ? "none" : fallbackNote)} size={proofSize} sha256={proofHash}");
+                if (fallbackNote.Length != 0 && fallbackNote != "byte-identical")
+                {
+                    Console.Error.WriteLine(
+                        "[NativeJobScheduler] **********************************************\n" +
+                        "[NativeJobScheduler] WARNING: running a DIFFERENT native binary than intended.\n" +
+                        "[NativeJobScheduler]          measurements from this process are NOT comparable.\n" +
+                        "[NativeJobScheduler] **********************************************");
+                }
+                else if (fallbackNote == "byte-identical")
+                {
+                    Console.Error.WriteLine("[NativeJobScheduler] NOTE: fell back to a byte-identical copy in another directory (same content, different path).");
+                }
             }
 
             TryLoadNativeTranspiled(loadedPath);
@@ -348,6 +463,13 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
             _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleParallelForBatch");
+            // 能力探测（非必需）：老 NativeDll 没有该导出 ⇒ 保持 null，claim 参数被忽略（行为与改动前一致）。
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleParallelForBatchEx", out IntPtr fnSchedBatchEx))
+                _jobSystem_ScheduleParallelForBatchEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr>)fnSchedBatchEx;
+            if (_jobSystem_ScheduleParallelForBatchEx != null)
+                Console.Error.WriteLine("[NativeJobScheduler] ClaimPolicy API: JobSystem_ScheduleParallelForBatchEx present (per-call-site claim geometry)");
+            else
+                Console.Error.WriteLine("[NativeJobScheduler] ClaimPolicy API: NOT present in this NativeDll (claim parameters ignored)");
             _jobSystem_ScheduleFor = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleFor");
             _jobSystem_Complete = (delegate* unmanaged[Cdecl]<IntPtr, void>)
@@ -384,6 +506,10 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStatsSize");
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetLiveHandleCount", out IntPtr fnLiveHandleCount))
                 _jobSystem_GetLiveHandleCount = (delegate* unmanaged[Cdecl]<long>)fnLiveHandleCount;
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetWakePollCounters", out IntPtr fnWakePollCounters))
+                _jobSystem_GetWakePollCounters = (delegate* unmanaged[Cdecl]<ulong*, ulong*, void>)fnWakePollCounters;
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetClaimGeomCounters", out IntPtr fnClaimGeomCounters))
+                _jobSystem_GetClaimGeomCounters = (delegate* unmanaged[Cdecl]<ulong*, ulong*, ulong*, void>)fnClaimGeomCounters;
             _jobSystem_ResetStats = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ResetStats");
             _jobSystem_SetTimingDiagnostics = (delegate* unmanaged[Cdecl]<int, void>)
@@ -549,6 +675,18 @@ namespace EntJoy.JobSystem
             return _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
         }
 
+        // 2026-10-02（ClaimPolicy 通解）：带**调用点声明的认领几何**的调度。
+        // 老 NativeDll 没有 `...BatchEx` 导出 ⇒ 退回旧导出（claim 被忽略 = 逐位不变），不打 WARN（能力探测）。
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static IntPtr JobSystem_ScheduleParallelForBatchEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr,
+            int length, int batchSize, int claimGeom, IntPtr dependency)
+        {
+            EnsureNativeLoaded();
+            if (_jobSystem_ScheduleParallelForBatchEx == null)
+                return _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
+            return _jobSystem_ScheduleParallelForBatchEx(funcPtr, context, cleanupPtr, length, batchSize, claimGeom, dependency);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static IntPtr JobSystem_ScheduleFor(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr, int length, IntPtr dependency)
         {
@@ -660,6 +798,32 @@ namespace EntJoy.JobSystem
             return true;
         }
 
+        /// <summary>N12 `ENTJOY_WAKE_POLL` 生效证据：提交侧 [跳过写唤醒字, 真的广播] 次数。
+        /// skips 必须远大于 wakes，否则"开关打开但无效"会被误读成"改动无效"。
+        /// 老 NativeDll.dll 缺该导出时返回 false。</summary>
+        internal static bool TryGetWakePollCounters(out ulong skips, out ulong wakes)
+        {
+            skips = 0; wakes = 0;
+            if (_nativeDll == IntPtr.Zero || _jobSystem_GetWakePollCounters == null) return false;
+            ulong s = 0, w = 0;
+            _jobSystem_GetWakePollCounters(&s, &w);
+            skips = s; wakes = w;
+            return true;
+        }
+
+        /// <summary>认领几何（`ClaimPolicy`）的生效证据：按声明值分桶的批数 [spread, adjacent, auto]。
+        /// 传了 <c>ClaimPolicy.Spread</c> 就必须看到 spread&gt;0 —— 否则说明调用点静默降级到了托管回调
+        /// （09 §52.5）。老 NativeDll.dll 缺该导出时返回 false。</summary>
+        internal static bool TryGetClaimGeomCounters(out ulong spread, out ulong adjacent, out ulong autoDecl)
+        {
+            spread = 0; adjacent = 0; autoDecl = 0;
+            if (_nativeDll == IntPtr.Zero || _jobSystem_GetClaimGeomCounters == null) return false;
+            ulong sp = 0, ad = 0, au = 0;
+            _jobSystem_GetClaimGeomCounters(&sp, &ad, &au);
+            spread = sp; adjacent = ad; autoDecl = au;
+            return true;
+        }
+
         /// <summary>布局防御：校验 C#/C++ 统计结构体字节数一致（防 GetStats 越界写）。
         /// 新增统计字段时必须两处同步。</summary>
         internal static void ValidateStatsLayout()
@@ -747,6 +911,12 @@ namespace EntJoy.JobSystem
         internal static void RegisterCurrentBatchIdCallback()
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterCurrentBatchId == null) return;
+            // 【上限探针】`ENTJOY_BATCHID_CALLBACK=0` 时不注册：native 侧每执行窗口 2 次的反向托管
+            // 调用（`ChaseLevScheduler.cpp:620/660` 的 SetCurrentBatchId(id)/SetCurrentBatchId(0)）就退化成
+            // 一次 null 检查。用途：量化"每 job 的托管反向回调"成本。
+            // ⚠ 实测（2026-09-29，8 worker，[NP-4e] 7936×64 空体）：**开关两臂同为 4.46 µs/job**
+            // ⇒ 该回调 **<0.1 µs/job**，**不是**每-job 残余差距的来源（此候选已否证，勿再试）。
+            if (System.Environment.GetEnvironmentVariable("ENTJOY_BATCHID_CALLBACK") == "0") return;
             _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
             if (_jobSystem_RegisterNameResolver != null)
                 _jobSystem_RegisterNameResolver(&ResolveBatchJobName, &ClearBatchJobNames);
@@ -1044,6 +1214,22 @@ namespace EntJoy.JobSystem
             return (IntPtr)jobPtr;
         }
 
+        /// <summary>
+        /// 2026-10-02（09 §26）：**按生成代码的逐字段布局**租一块 ctx（供原生 adapter 直调）。
+        /// 与 <see cref="AllocContext{T}"/> 共用同一个 <see cref="ContextPool"/> 与同一套 4 字节长度前缀，
+        /// 因此**释放也复用同一个 <see cref="CleanupPtr"/>**（回池 + 释放读写声明），
+        /// 不需要 `Marshal.AllocHGlobal` / `FreeHGlobal` 的逐派发 malloc/free。
+        /// 调用方随后用生成代码的 `JobFieldWriter&lt;T&gt;` 把字段写进返回指针（布局与 C++ adapter 的偏移一致）。
+        /// </summary>
+        internal unsafe static IntPtr RentMarshalledContext(int contextSize)
+        {
+            if (contextSize <= 0) return IntPtr.Zero;
+            int totalSize = contextSize + sizeof(int);
+            IntPtr dataPtr = ContextPool.Rent(totalSize);
+            *(int*)dataPtr = contextSize;
+            return (IntPtr)((byte*)dataPtr + sizeof(int));
+        }
+
         internal unsafe static void Cleanup(IntPtr dataPtr)
         {
             if (dataPtr == IntPtr.Zero) return;
@@ -1198,11 +1384,14 @@ namespace EntJoy.JobSystem
             return new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependencyLease.Handle));
         }
 
-        internal static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null)
+        internal static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto)
         {
             long t0 = CSharpPhaseDiag.Sampling("parfor.pinvoke") ? CSharpPhaseDiag.Now() : 0;
             using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            var ret = new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle));
+            // Auto(0) 走原导出（零额外分支，与引入 ClaimPolicy 前逐位一致）；显式声明走 Ex 导出。
+            var ret = (claim == ClaimPolicy.Auto)
+                ? new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle))
+                : new NativeJobHandle(JobSystem_ScheduleParallelForBatchEx(funcPtr, contextPtr, cleanupPtr, length, batchSize, (int)claim, dependencyLease.Handle));
             if (t0 != 0) CSharpPhaseDiag.Add("parfor.pinvoke", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
             return ret;
         }

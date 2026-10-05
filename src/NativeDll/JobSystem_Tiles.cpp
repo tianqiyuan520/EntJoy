@@ -37,23 +37,16 @@ namespace JobSystem
     }
 
 
-    // ── 小 job 的 worker 上限 = **物理核数**（A/B 开关：`ENTJOY_PHYSCAP_SMALLJOB=1`，默认关）──
-    // 实测动机（16 逻辑核 / 8 物理核 SMT；BFS 波 job：每波 ~900 格 / ~15 tile，15 worker 时
-    // 每个 worker 只摊到 1 个 tile）：
-    //   8 worker  → worker 启动散布 P50 **0.6 µs**、park 唤醒 **32/步**、波前 14.7～15.8 ms
-    //   15 worker → 启动散布 **13.9 µs**、唤醒 **1968/步**、波前 **53.7～59.9 ms**
-    //   ⇒ SMT 兄弟线程的自旋/窃取互抢执行单元，粒度越细越严重。
-    // 判据：**每 worker 摊到的元素数 ≤ 256** 才封顶。取"元素数"而不是"chunk 数"有两个理由：
-    //   ① `tileCount` 由 JCC 学习出的 chunk size 决定、会漂移，实测造成过无效 A/B 臂；
-    //      元素数是 schedule 入参，稳定。
-    //   ② **安全**：`20260826-JobSystem-帧间隔调度开销分析.md:80` 记录过"默认 worker=物理核 ⇒
-    //      compute-bound Heavy C++ −61% 回归 ⇒ 回退"。若按 chunk 数封顶，一个"1M 实体 / 16 个粗块"
-    //      的 compute-bound job 每 worker 只有 1 个 chunk，会被误封顶 ⇒ 重蹈该回归。
-    //      元素数上限把封顶限定在**总工作量本来就极小**的 job 上（15 worker 时 ≤3840 元素）。
+    // ── 小 job 的 worker 上限 = **物理核数**（`ENTJOY_PHYSCAP_SMALLJOB`，默认开；`=0` 关闭）──
+    // SMT 兄弟线程的自旋/窃取互抢执行单元，粒度越细越严重（每 worker 只摊到 1 个 tile 时
+    // 15 worker 明显慢于 8 worker）。判据：**每 worker 摊到的元素数 ≤ targetWorkers*256** 才封顶。
+    // 取"元素数"而不是"chunk 数"：`tileCount` 会漂移，而元素数是 schedule 入参、稳定；
+    // 且 compute-bound job 可能只有少数粗块，按 chunk 数封顶会把它们误封顶（曾因此造成回归）。
+    // 元素数上限把封顶限定在**总工作量本来就极小**的 job 上。
     // 不可知物理核数（返回 0）或未超订时，一律保持 baseline。
     int ApplyPhysCoreCapForSmallJob(int targetWorkers, uint32_t tileCount, int length) noexcept
     {
-        // 默认开；`ENTJOY_PHYSCAP_SMALLJOB=0` 可关闭（实测 3 轮交替 A/B、区间不重叠 ⇒ 已验收，见 §7q）。
+        // 默认开；`ENTJOY_PHYSCAP_SMALLJOB=0` 可关闭。
         static const bool enabled = [] {
             const char* v = std::getenv("ENTJOY_PHYSCAP_SMALLJOB");
             return !(v != nullptr && v[0] == '0');
@@ -62,16 +55,9 @@ namespace JobSystem
         const int phys = PhysicalCoreCountForDiagnostics();
         if (phys <= 0 || targetWorkers <= phys) return targetWorkers;
         (void)tileCount;
-        // 阈值 A/B（2026-09-28，§7ap）：`ENTJOY_PHYSCAP_MAXELEM=<n>` 覆盖"≤ targetWorkers*256 才封顶"这条线。
-        // 动机：JCC 逐 job 剖面显示 **BFS 波 = 574 个/步的小 job，N=18836 但只切出 ~18 个 tile**
-        //（≈1.2 tile/worker），正是 physcap 自注"每 worker 摊到 1 个 tile 时 15 worker 比 8 worker 慢 3.6×"的场景；
-        // 但 18836 > 15×256=3840 ⇒ **现有阈值根本盖不到它**。本开关只改阈值，不改其它语义。
-        static const int capMaxElemOverride = [] {
-            const char* v = std::getenv("ENTJOY_PHYSCAP_MAXELEM");
-            return v != nullptr ? std::atoi(v) : 0;
-        }();
-        const int capMax = capMaxElemOverride > 0 ? capMaxElemOverride : targetWorkers * 256;
-        if (length <= 0 || length > capMax) return targetWorkers;
+        // 封顶阈值：每 worker 摊到的元素数 ≤ targetWorkers*256 才封顶
+        //（用元素数而非 chunk 数：chunk 数会漂移，且粗块 compute-bound job 会被误封顶）。
+        if (length <= 0 || length > targetWorkers * 256) return targetWorkers;
         g_physCapApplied.fetch_add(1, std::memory_order_relaxed);
         return phys;
     }
@@ -486,9 +472,8 @@ namespace JobSystem
             throw std::bad_alloc();
 #endif
         BatchStorage* storage = nullptr;
-        // 性能项 3：BatchStorage 的创建/复用计数与 state 池计数同族（每个 tile 路径 job 各一次），
-        // 只被 GetStatsSnapshot 读取 ⇒ 同样一次 relaxed 载入整体旁路。冷路径的 batchStorageDropped
-        // 保持原样（不在热路径上）。
+        // 创建/复用计数只被 GetStatsSnapshot 读取 ⇒ 一次 relaxed 载入整体旁路；
+        // 冷路径的 batchStorageDropped 保持原样（不在热路径上）。
         const bool stats = StatsEnabled();
         if (!t_batchStorageCache.entries.empty())
         {
@@ -537,22 +522,35 @@ namespace JobSystem
         }
         storage->batch.storage = storage;
         storage->batch.tiles = tileCapacity > 0 ? storage->tileBuffer : nullptr;
+        // F2：等宽不物化的标记必须在这里复位（storage 池化复用 ⇒ 否则陈旧值会泄给后续批）。
+        storage->batch.uniformTileSize = 0;
+        storage->batch.claimCapOverride = 0;   // 必须一起清零（BatchStorage 复用 ⇒ 否则继承陈旧值）
+        storage->batch.claimGeomOverride = kClaimGeomAuto;   // 同上（按调用点声明的认领几何）
+        storage->batch.claimSpanOverride = 0;   // 同上（按调用点声明的**元素跨度**）
+        // F4：每批快照一次全局开关（替代 TryExecuteOneTile 里每 tile 的两次全局载入）。
+        storage->batch.tileFast = g_tileFastPath;
+        storage->batch.traceOn = g_traceEnabled.load(std::memory_order_relaxed);
+        storage->batch.timingOn = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
         return storage;
     }
 
     void ReleaseBatchStorage(BatchStorage* storage) noexcept
     {
         if (!storage) return;
+        // 归还池即**推进代次** —— 此后任何携带旧代次的迟到结算都会被 ChaseLevTaskDone 拒绝。
+        // 必须在 storage 进入缓存/共享池**之前**执行：否则下一个 Acquire 者可能以旧代次开局。
+        // 顺序：++generation → destroy_at/placement new（batch 被整体重建，generation 不受影响）。
+        storage->generation.fetch_add(1, std::memory_order_release);
         std::destroy_at(&storage->batch);
         // std::construct_at 是 C++20 才进入 <memory> 的，NDK r23c 的 libc++ 尚未实现；
         // 用等价的 placement new 调用默认构造，语义完全一致且 C++17 即可用。
         new (&storage->batch) BatchState();
         storage->batch.storage = storage;
-        // 性能项 3：同 AcquireBatchStorage（每 job 一次回收，纯诊断计数）。
+        // 同 AcquireBatchStorage：纯诊断计数。
         if (StatsEnabled())
             g_batchStorageReturned.fetch_add(1, std::memory_order_relaxed);
 
-        // 近无锁：先入 per-thread 缓存；满额时整体迁移共享池（一次锁 / ~8 次回收）。
+        // 先入 per-thread 缓存；满额时整体迁移共享池（一次锁 / ~8 次回收）。
         if (t_batchStorageCache.entries.size() < kBatchStorageCacheCap)
         {
             t_batchStorageCache.entries.push_back(storage);
@@ -589,9 +587,29 @@ namespace JobSystem
     {
         if (!batch || tileIndex >= batch->tileCount) return false;
 
-        const auto& tile = batch->tiles[tileIndex];
+        // ---- F2（`ENTJOY_TILES_UNIFORM`）：等宽 GeneralRange 的 tile 由 tileIndex **算术推导** ----
+        // 与填表口径逐位一致：first = i*size，count = min(size, total-first)（末块裁剪）。
+        ExecutionTile derivedTile;
+        const ExecutionTile* tilePtr;
+        if (batch->uniformTileSize != 0)
+        {
+            const uint32_t first = tileIndex * batch->uniformTileSize;
+            const uint32_t total = batch->totalElements;
+            if (first >= total) return false;                 // 防御：tileCount=ceil(total/size) ⇒ 不应发生
+            uint32_t n = batch->uniformTileSize;
+            if (first + n > total) n = total - first;
+            derivedTile = ExecutionTile{ first, n, TileKind::GeneralRange };
+            tilePtr = &derivedTile;
+        }
+        else
+        {
+            tilePtr = &batch->tiles[tileIndex];
+        }
+        const ExecutionTile& tile = *tilePtr;
         // trace 关闭时跳过事件上报（fast path：一次内联 load，零 call）。
-        const bool traceOn = g_traceEnabled.load(std::memory_order_relaxed);
+        // F4（`ENTJOY_TILE_FASTPATH`）：这两个开关已在批构造时快照进 batch ⇒ 直接读批内字段。
+        const bool traceOn = batch->tileFast
+            ? batch->traceOn : g_traceEnabled.load(std::memory_order_relaxed);
         if (traceOn)
         {
             PushTraceEvent(TraceEventType::Claim, batch->diagnosticId,
@@ -603,7 +621,8 @@ namespace JobSystem
                 static_cast<int>(tile.firstItem),
                 static_cast<int>(tile.itemCount));
         }
-        const bool timingEnabled = g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+        const bool timingEnabled = batch->tileFast
+            ? batch->timingOn : g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
         const uint64_t rangeStartedAt = timingEnabled ? MonotonicNowNs() : 0;
         const uint64_t threadCpuStartedAt = timingEnabled
             ? CurrentThreadCpuTimeNsForDiagnostics() : 0;
@@ -613,7 +632,8 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         // 无条件记录 firstTileAt（JCC perElem 纯执行口径 + execSpan 诊断共用）。
         // load 快速路径：首个 tile 之后仅 1 次 relaxed load（~1ns/tile），零 MonotonicNowNs 重复调用。
-        if (batch->firstTileAt.load(std::memory_order_relaxed) == 0)
+        // F4：`tileFast` 下已在**认领令牌开头**设过一次（ChaseLevScheduler::ExecuteClaimToken）⇒ 这里整段跳过。
+        if (!batch->tileFast && batch->firstTileAt.load(std::memory_order_relaxed) == 0)
         {
             uint64_t empty = 0;
             batch->firstTileAt.compare_exchange_strong(
@@ -623,14 +643,15 @@ namespace JobSystem
 
         // Prefetch the next tile's data (delegated to a helper below that
         // has access to the full ChunkBatchContext layout).
-        if (tileIndex + 1 < batch->tileCount)
+        // F2：等宽路下 `PrefetchNextTileData` 对 GeneralRange 本就不命中 ⇒ 整段跳过（省一次调用 + 一次数组取址）。
+        if (batch->uniformTileSize == 0 && tileIndex + 1 < batch->tileCount)
             PrefetchNextTileData(batch->context, batch->tiles[tileIndex + 1]);
 
         // C++ 异常协议：捕获用户回调异常 → 记录第一个 → 计数继续正常递减（任务不悬挂）；
         // Complete() 在退役后 rethrow；多次异常只保留第一个。
         try
         {
-            batch->executeTile(batch->context, batch->tiles[tileIndex]);
+            batch->executeTile(batch->context, tile);
         }
         catch (...)
         {
@@ -707,7 +728,7 @@ namespace JobSystem
         if (firstWorker != 0 && lastWorker >= firstWorker)
             UpdateUnsignedEwma(g_workerStartSpreadEwmaNs,
                 std::max<uint64_t>(1, lastWorker - firstWorker));
-        // E1：启停斜坡按"实际参与度"分桶（EWMA 不稳：49/384/421 µs 三跑不一致 ⇒ 要看分布）
+        // E1：启停斜坡按"实际参与度"分桶（EWMA 不稳 ⇒ 要看分布）
         if (firstWorker != 0 && lastWorker >= firstWorker)
             E1::RecordWorkerSpread(batch->workerSlotsEntered.load(std::memory_order_relaxed),
                 lastWorker - firstWorker);
@@ -909,10 +930,10 @@ namespace JobSystem
         auto* state = batch->handle;
         const int participantCount = std::max(1, static_cast<int>(batch->workerCount));
 
-        // 性能项 3：下面 4 个计数全部是纯诊断（只被 GetStatsSnapshot/GUI 读取），此前每提交一个
-        // job 无条件 4 次 locked RMW。这里只做**一次** relaxed 载入后整体旁路。
+        // 下面 4 个计数全部是纯诊断（只被 GetStatsSnapshot/GUI 读取）：只做**一次** relaxed
+        // 载入后整体旁路。
         // 注意：紧随其后的 g_backendBatchesOutstanding **不 gate** —— 它是 WaitForBackendBatches
-        // 的等待条件（JobSystem.cpp:698-704）与 ShutdownFinalizeTests 的验收账本，属同步原语。
+        // 的等待条件与 ShutdownFinalizeTests 的验收账本，属同步原语。
         const bool stats = StatsEnabled();
         if (stats)
         {
@@ -939,22 +960,8 @@ namespace JobSystem
         g_backendBatchesOutstanding.fetch_add(1, std::memory_order_acq_rel);
         const uint64_t publishedAt = MonotonicNowNs();
         batch->publishedAt.store(publishedAt, std::memory_order_release);
-        // ── §7aq：把 JobCostCache 学到的成本估成"本批预期工作量"，写进 handle 供
-        //    `JobHandle::Complete()` 的**自适应自旋**决策使用（只在 `ENTJOY_COMPLETE_SPIN_ADAPT=1` 时被读）。
-        //    口径 = 学到的 perElem×N + perTile×tiles（与 §7ah 的 [JCC-EST] 诊断同一算式，属"聚合工作量"，
-        //    不是墙钟）。0 = 未学到 ⇒ 保持原固定自旋。
-        if (state != nullptr && g_completeSpinAdaptEnabled && batch->funcHash != 0 &&
-            g_jobCostCacheEnabled.load(std::memory_order_relaxed))
-        {
-            const double pel = g_jobCostCache.GetPerElemCost(batch->funcHash);
-            const double ptl = g_jobCostCache.GetPerTileCost(batch->funcHash);
-            const double estNs = pel * static_cast<double>(batch->totalElements)
-                               + ptl * static_cast<double>(batch->tileCount);
-            if (estNs > 0.0)
-                state->estBatchNs = static_cast<uint64_t>(estNs);
-        }
         E1::RecordPublish(publishedAt);   // E1：批间空隙（上一批 topologyDone → 本批 publish）
-        // 性能项 3：g_nativeBatches 是纯诊断计数；g_backendBatchesOutstanding（上一行）保持精确。
+        // g_nativeBatches 是纯诊断计数；g_backendBatchesOutstanding（上一行）保持精确。
         if (stats)
             g_nativeBatches.fetch_add(1, std::memory_order_relaxed);
 
@@ -1043,26 +1050,18 @@ namespace JobSystem
             scheduler->WakePending();
     }
 
-    // ── 只推迟"唤醒广播"（A/B：`ENTJOY_DEFER_WAKE=1`，默认关；见 JobSystemInternal.h 的动机注释）──
-    std::atomic<uint64_t> g_deferredWakeFlushes{ 0 };
-    std::atomic<uint64_t> g_schedPrioApplied{ 0 };
-    std::atomic<int> g_pendingDeferredWake{ 0 };
-
-    bool DeferWakeEnabled() noexcept
+    // N12 `ENTJOY_WAKE_POLL`（默认**开**；`=0` 关闭）：提交侧只在"醒着的 worker 数不够本次派发用"
+    // 时才写唤醒字（全协议见 JobSystemInternal.h 的 `WakePollEnabled()` 注释块）。
+    // ⚠ 形态依赖：本协议要求"登记人数 ≥ 本次派发需要的 worker 数"。两个入口的 need 分别是
+    //   小 job=1、真并行趟=`tokenCount`；若将来有入口**低报**需求，就会少唤醒（是延迟问题，
+    //   不是丢任务：登记者的下一次读注入器必然在 push 之后）。
+    bool WakePollEnabled() noexcept
     {
         static const bool enabled = [] {
-            const char* v = std::getenv("ENTJOY_DEFER_WAKE");
-            return v != nullptr && v[0] == '1';
+            const char* v = std::getenv("ENTJOY_WAKE_POLL");
+            return !(v != nullptr && v[0] == '0');
         }();
         return enabled;
-    }
-
-    void FlushDeferredWake() noexcept
-    {
-        if (g_pendingDeferredWake.exchange(0, std::memory_order_acq_rel) == 0) return;
-        g_deferredWakeFlushes.fetch_add(1, std::memory_order_relaxed);
-        if (auto scheduler = LoadChaseLevScheduler())
-            scheduler->WakePending();
     }
 
     // ---------- Chunk/Entity adaptors ----------
@@ -1145,11 +1144,54 @@ namespace JobSystem
         ReleaseChunkBatchContext(static_cast<ChunkBatchContext*>(ctx));
     }
 
-    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile)
+    // 每-job 自计时用的时基（`ENTJOY_JOB_BATCH_TABLE_DUMP=1` 才走到）：x86 用 rdtsc（~10 ns），
+    // 其余平台退回单调时钟。TSC 直接当 ns 累加（频率不变时比值正确；绝对值略偏，不影响"每次调用 vs
+    // 每元素"的判断，且跨键比较的偏置相同）。
+    static inline uint64_t PerKeyNow() noexcept
     {
-        auto* bc = static_cast<GeneralBatchContext*>(ctx);
+#if defined(_WIN32)
+        return static_cast<uint64_t>(__rdtsc());
+#else
+        return MonotonicNowNs();
+#endif
+    }
+
+    bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile)
+    {        auto* bc = static_cast<GeneralBatchContext*>(ctx);
         const int start = static_cast<int>(tile.firstItem);
         const int count = static_cast<int>(tile.itemCount);
+        // 每-job 分母：**内核调用的真实次数**与**逐次传给内核的元素数**（融合后一次调用可能很多元素）。
+        // 这是"每次调用贵 vs 每元素贵"的那个分母；索引由 Schedule 时解析好，
+        // worker 侧不做哈希查找 ⇒ 不会因为碰撞把两个内核混成一行。
+        // 与 Schedule 侧的 `elems` 对照可作一致性判据：不等 = tile 漏执行/重复执行。
+        if (bc->perKeyIndex >= 0)
+        {
+            const uint32_t pi = static_cast<uint32_t>(bc->perKeyIndex);
+            g_perKeyCalls[pi].fetch_add(1, std::memory_order_relaxed);
+            g_perKeyElemsCalled[pi].fetch_add(static_cast<uint64_t>(count), std::memory_order_relaxed);
+            // 内核自计时：**每 32 次调用抽 1 次**，把探针自身扰动压到可忽略
+            //（否则高频调用的内核会被时钟读取本身明显拖慢）。
+            thread_local uint32_t tlCallSeq = 0;
+            const bool sample = ((++tlCallSeq & 31u) == 0u);
+            if (sample)
+            {
+                const uint64_t t0 = PerKeyNow();
+                if (bc->batchFunc)
+                    bc->batchFunc(bc->originalContext, start, count);
+                else
+                    for (int i = start; i < start + count; ++i)
+                        bc->indexFunc(bc->originalContext, i);
+                const uint64_t d = PerKeyNow() - t0;
+                g_perKeyNsSamples[pi].fetch_add(1, std::memory_order_relaxed);
+                g_perKeyNsSum[pi].fetch_add(d, std::memory_order_relaxed);
+                uint64_t curMax = g_perKeyNsMax[pi].load(std::memory_order_relaxed);
+                while (d > curMax &&
+                       !g_perKeyNsMax[pi].compare_exchange_weak(
+                           curMax, d, std::memory_order_relaxed, std::memory_order_relaxed))
+                { /* retry with refreshed curMax */ }
+                return true;
+            }
+        }
         if (bc->batchFunc)
             bc->batchFunc(bc->originalContext, start, count);
         else
@@ -1181,10 +1223,7 @@ namespace JobSystem
     // ============================================================
     // 打包提交：K 个无依赖 plain IJob 作为**一个** batch
     // ============================================================
-    // 动机（实测）：`JobSystem_ScheduleBatch` 此前对每个 descriptor 调一次
-    // `Scheduler::Schedule` ⇒ 每 job 一个 BackendAsyncContext + 一次 SubmitWork（RangeTask
-    // 入注入器）+ 一次唤醒，`BatchScope(N)` 实测 ≈ 910 ns/job（与逐个 schedule 同量级）。
-    // 打包后一次 `SubmitBatch` 只投 O(workers) 个 token，每 token 连续执行 4 个 tile，
+    // 一次 `SubmitBatch` 只投 O(workers) 个 token，每 token 连续执行 4 个 tile，
     // 每 tile = 一段连续描述符；每 job 只保留"必须可观察"的若干次原子操作。
     //
     // 语义保持（与逐描述符路径逐项对齐）：
@@ -1470,6 +1509,30 @@ namespace JobSystem
         }
     }
 
+    // ---- 切片认领的段游标初始化（由调用点声明或 F6 决定，见 ResolveClaimSliced） ----
+    // 语义见 JobSystemInternal.h 中 BatchState 的注释块。必须在 publish 之前调用。
+    void InitSliceCursors(BatchState* batch, bool sliced) noexcept
+    {
+        if (batch == nullptr) return;
+        const uint32_t end = batch->tileCount;
+        if (!sliced || end == 0)
+        {
+            batch->sliceCount = 0;
+            return;
+        }
+        uint32_t slices = std::min(std::max(1u, batch->workerCount), end);
+        if (slices > BatchState::kMaxSliceSlots) slices = BatchState::kMaxSliceSlots;
+        const uint32_t len = CeilDiv(end, slices);
+        for (uint32_t i = 0; i < slices; ++i)
+        {
+            const uint32_t s = i * len;
+            batch->sliceCursors[i].next.store(s, std::memory_order_relaxed);
+            batch->sliceEnd[i] = std::min(end, s + len);
+        }
+        batch->sliceTaken.store(0, std::memory_order_relaxed);
+        batch->sliceCount = slices;
+    }
+
     // ChaseLev 记录 worker 进入批次时间（供 timing 诊断）。
     void ChaseLevRecordWorkerEntry(BatchState* batch) noexcept
     {
@@ -1496,11 +1559,13 @@ namespace JobSystem
             // ---- JobCostCache：batch 退役时更新 per-job 每元素成本 EWMA ----
             // 安全：finalized.exchange 保证本块单线程；读取均在 ReleaseBatch 之前
             // （无 use-after-free）；flag 默认关闭 → 零热路径开销。
-            if (g_jobCostCacheEnabled.load(std::memory_order_relaxed) &&
-                batch->funcHash != 0 && batch->totalElements > 0)
+            // F6（`ENTJOY_CLAIM_ADAPT`）的决策完全用 `GetPerElemCost(funcHash)`：它只**读**这里
+            // 学到的 perElem，自己不写入、不参与本块的入口条件。
+            const bool jccLearn = g_jobCostCacheEnabled.load(std::memory_order_relaxed) != 0;
+            if (jccLearn && batch->funcHash != 0 && batch->totalElements > 0)
             {
                 // perElem 用纯执行口径：首 tile 开始 → 末 tile 完成
-                //（旧口径含唤醒/排队会虚高）。
+                //（含唤醒/排队会虚高）。
                 const uint64_t firstTile =
                     batch->firstTileAt.load(std::memory_order_relaxed);
                 const uint64_t lastTile =
@@ -1534,12 +1599,11 @@ namespace JobSystem
                             batch->funcHash, batch->tileCount, batch->totalElements,
                             totalNs / 1000.0, perElemNs, targetCoarse ? 1 : 0);
                     // ── 估算器精度诊断（由 `ENTJOY_JCC_VERBOSE=1` 开启，采样打印防刷屏）──
-                    // 目的：判断 §7h 里"按预估算唤醒数"为何在真实负载上变慢（怀疑估算低估 ⇒ 并行度不足）。
-                    //   measuredNs   = wcNow × 执行窗口 = 本批的**等效聚合 CPU 时长**（实测）
+                    //   measuredNs   = wcNow × 执行窗口 = 本批的**等效聚合 CPU 时长**
                     //   estNs        = 学习到的 perElem×N + perTile×tiles（估算器实际用的两个量）
                     //   idealWorkers = ceil(measuredNs / 150µs) —— 按实测该唤醒几个才够
                     //   estWorkers   = ceil(estNs / 150µs)     —— 按估算实际会唤醒几个
-                    // 若 estWorkers << idealWorkers ⇒ 低估、并行度不足，正是变慢的机制。
+                    // 若 estWorkers << idealWorkers ⇒ 低估、并行度不足。
                     if (g_jobCostCacheVerbose)
                     {
                         static std::atomic<uint64_t> s_estDump{ 0 };
@@ -1582,10 +1646,36 @@ namespace JobSystem
 
     // ChaseLev 任务完成回调：每个范围任务执行完后 pendingTasks--，
     // 归零时触发双条件退役检查（可能本线程就是最后一个完成者）。
-    void ChaseLevTaskDone(BatchState* batch) noexcept
+    //
+    // **代次校验**：`batchGen` = 令牌创建时从 `batch->storage->generation` 抄下的值；若该 storage
+    // 已被回收复用，其 generation 已前进（`ReleaseBatchStorage` 里 ++），于是这里的比对失败 ⇒
+    // 本次结算属于**上一代**、对象已换人 ⇒ 直接丢弃：不 `fetch_sub`、不进
+    // `TryFinalizeChaseLevBatch`、不动 `g_backendBatchesOutstanding`（否则会减坏新一代的
+    // `pendingTasks`）。注意：这里只守**结算**侧；"迟到令牌执行 tile"需要更早的先验违反才可能
+    //（双条件退役要求 pendingTasks==0 才释放），本项不改变执行侧行为。
+    void ChaseLevTaskDone(BatchState* batch, uint32_t batchGen) noexcept
     {
         if (!batch) return;
-        if (batch->pendingTasks.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        // 无 storage 的批（理论上不存在；防御）按旧行为处理，避免把正常结算误判成迟到。
+        if (batch->storage)
+        {
+            const uint32_t liveGen =
+                batch->storage->generation.load(std::memory_order_acquire);
+            if (liveGen != batchGen)
+            {
+                g_staleSettleDropped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        const uint32_t prev = batch->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+        // 回绕检出：fetch_sub 在 0 上执行（本不该发生，令牌数与 store 恒配平）。
+        // 检出不改变行为：返回值 0 时同样不触发退役。
+        if (prev == 0)
+        {
+            g_pendingTasksWrap.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (prev == 1)
             TryFinalizeChaseLevBatch(batch);
     }
 

@@ -7,7 +7,7 @@
 // ============================================================================
 // enableable 组件位图的**原生读写原语**（P1-6 / P1-7）。
 //
-// 数据来源（2026-09-13 打通）：
+// 数据来源：
 //   C# 侧 `ChunkJobScheduler` 在构建 chunk 调度数据时填 `ChunkJobData.enableBitMaps[i]`
 //   —— 与 `componentArrays[i]` **同序**（= Archetype.Types 序），仅 enableable 组件非 nullptr。
 //   生成的 C++ 包装把它拷进轻量 `ChunkData.enableBitMaps` / `enableBitmapCount`

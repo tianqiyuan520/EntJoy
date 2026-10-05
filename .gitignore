@@ -26,6 +26,8 @@ samples/Godot/Godot.zip
 
 # Docs 顶层工作笔记（本地 .md）不入库；archive/gridsearch/research/public 子目录正常跟踪
 /docs/*.md
+# 例外：文档总索引（对外入口，须入库）
+!/docs/README.md
 
 # Native/CMake/MSVC artifacts
 **/build/

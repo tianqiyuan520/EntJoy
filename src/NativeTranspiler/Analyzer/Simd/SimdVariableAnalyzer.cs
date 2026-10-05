@@ -684,14 +684,5 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
             return a > b ? a : b;
         }
-
-        /// <summary>
-        /// 将 C# 类型映射为 SIMD 上下文的 C++ 类型字符串。
-        /// 对于 float2/int2 类型只返回 EntJoy::Mathematics 格式。
-        /// </summary>
-        private static string GetCppTypeString(ITypeSymbol type)
-        {
-            return NativeTranspiler.MapCSharpTypeToCpp(type);
-        }
     }
 }

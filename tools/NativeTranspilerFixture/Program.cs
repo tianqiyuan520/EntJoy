@@ -351,6 +351,54 @@ static class Bench
             $"sum_pack={packPeer:R} sum_offsets={offPeer:R}");
         PrintStat("melee_pack   ", packMed);
         PrintStat("melee_offsets", offMed);
+
+        // ── 臂 4c（09 §54.5 预注册门槛）：两遍切分 = live-set 缩小 ──
+        // 门槛口径：同会话交错 A/B 的 ns/element **比值 < 1** 才算"做出一个环比 <1 的臂"，
+        // 才有资格谈"碰生成器"；否则这条轴按 §54.5 关闭。
+        // 判据①仍是语义等价：同一输入 + 清零后的输出数组 ⇒ KD2/KPeer 校验和逐位相同（进断言门）。
+        var twoJob = new BenchMeleeScanTwoPassJob
+        {
+            Positions = pos, ConfigId = cfg, Team = team, CellStart = cellStart, SortedIndex = sorted,
+            ScanOrder = scanOrder, KD2 = kd2, KPeer = kpeer,
+            Props = packJob.Props,
+        };
+        Console.WriteLine("  -- melee_pack (baseline) vs melee_twopass (live-set gate, 09 s54.5): 8 interleaved pairs --");
+        var pack2Med = new System.Collections.Generic.List<double>();
+        var twoMed = new System.Collections.Generic.List<double>();
+        var twoRatios = new System.Collections.Generic.List<double>();
+        double pack2Sum = 0, twoSum = 0, pack2Peer = 0, twoPeer = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            bool packFirst = (i % 2) == 0;
+            double b, v;
+            if (packFirst)
+            {
+                ZeroOut(kd2, kpeer);
+                b = TimeArm2("melee_pack", 6, () => { packJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                pack2Sum = SumKd2(kd2); pack2Peer = SumKpeer(kpeer);
+                ZeroOut(kd2, kpeer);
+                v = TimeArm2("melee_twopass", 6, () => { twoJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                twoSum = SumKd2(kd2); twoPeer = SumKpeer(kpeer);
+            }
+            else
+            {
+                ZeroOut(kd2, kpeer);
+                v = TimeArm2("melee_twopass", 6, () => { twoJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                twoSum = SumKd2(kd2); twoPeer = SumKpeer(kpeer);
+                ZeroOut(kd2, kpeer);
+                b = TimeArm2("melee_pack", 6, () => { packJob.Schedule(N, 0).Complete(); }, () => SumKd2(kd2));
+                pack2Sum = SumKd2(kd2); pack2Peer = SumKpeer(kpeer);
+            }
+            pack2Med.Add(b); twoMed.Add(v); twoRatios.Add(v / b);
+            Console.WriteLine($"      pair {i + 1}: pack={b,7:F1}  twopass={v,7:F1}  two/pack={v / b:F3}");
+        }
+        ReportBench("B2 melee_twopass: same KD2 output as melee_pack", pack2Sum == twoSum,
+            $"sum_pack={pack2Sum:R} sum_twopass={twoSum:R}");
+        ReportBench("B2 melee_twopass: same KPeer output as melee_pack", pack2Peer == twoPeer,
+            $"sum_pack={pack2Peer:R} sum_twopass={twoPeer:R}");
+        PrintStat("melee_pack    ", pack2Med);
+        PrintStat("melee_twopass ", twoMed);
+        PrintStat("two/pack ratio", twoRatios);
         // ── 臂 6：参数数量三臂对照（125 vs 打包标量 vs 输入全打包）──
         // 目的：判定"形参数是否真是瓶颈"——用同一个内核体、同一份输入，只改参数形状。
         var padArr = new NativeArray<int>[32];
