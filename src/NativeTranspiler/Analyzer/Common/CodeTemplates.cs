@@ -59,6 +59,10 @@ namespace NativeTranspiler.Analyzer.Common
 //     · 别名判定未完成：同一 NativeArray 二次绑定／带副作用索引时不应加 restrict，需逐处判定。
 //   故把宏定义为空（保留宏名 ⇒ 生成代码语法/形状不变，便于后续**逐处收窄再启用**）。
 //   基线数据与对比报告保留在 tools/CodegenAsmProbe/out/（before*.json / report-after-final.txt）。
+// ⚠ 2026-10-01（08 §32）：曾试把宏打开为 __restrict 实测 —— 但生成器其实直接发 __restrict 字面量、不经该宏
+//   ⇒ 改宏对发射文本无影响；且 SCALAR_RESTRICT=1 下真的带 __restrict 时 asm 仍是 7 次环内重载（§32）
+//   ⇒ 因此不再把该宏当作启用开关。宏保持空定义（不动基线）。
+//   ⚠ 逐字字符串内**不能出现双引号**（会提前终止模板）：本注释曾因写入引号导致 NativeTranspiler 编译失败 7 处。
 #define RESTRICT
 ";
 

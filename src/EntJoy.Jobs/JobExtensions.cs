@@ -21,9 +21,13 @@ public static class JobExtensions
     // ======================== IJobParallelFor 调度 ========================
 
     /// <summary>调度 IJobParallelFor</summary>
+    /// <param name="claim">
+    /// 认领几何（<see cref="ClaimPolicy"/>）：由**调用点**声明该内核要 Spread 还是 Adjacent。
+    /// 缺省 <see cref="ClaimPolicy.Auto"/> ⇒ 框架按 F6/env 解析，行为与引入该参数前逐位一致。
+    /// </param>
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
-        JobHandle dependsOn = default) where T : struct, IJobParallelFor
-        => JobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, dependsOn);
+        JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelFor
+        => JobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, dependsOn, claim);
 
     // ======================== IJobFor 调度 ========================
 
@@ -34,10 +38,10 @@ public static class JobExtensions
 
     // ======================== IJobParallelForBatch 调度 ========================
 
-    /// <summary>调度 IJobParallelForBatch</summary>
+    /// <summary>调度 IJobParallelForBatch（<paramref name="claim"/> 同 <see cref="Schedule{T}(T,int,int,JobHandle,ClaimPolicy)"/>）</summary>
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
-        JobHandle dependsOn = default) where T : struct, IJobParallelForBatch
-        => JobScheduler.ScheduleBatch(ref job, arrayLength, batchSize, dependsOn);
+        JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelForBatch
+        => JobScheduler.ScheduleBatch(ref job, arrayLength, batchSize, dependsOn, claim);
 
     // ======================== ThreadCounter 重载 ========================
 

@@ -180,6 +180,38 @@ buildTransitive/EntJoy.Jobs.props|targets # 接线：UsingTask + 编译目标 + 
 
 ---
 
+### 3.6 原生直调与"注册时机"（自动 / 手动）——**AOT 友好**
+
+带 `[NativeTranspile]` 的 job 被调度时，框架会优先走**原生内核直调**（省掉
+`native → managed → native` 反向转换；对单任务 job 而言，这还决定了它**跑的是原生内核还是托管 JIT 代码**）。
+这要求"job 类型 → 原生 adapter 指针 + 字段写入器"的**注册先于首次调度**。转译器为此生成**两种**用法：
+
+| 方式 | 怎么做 | 适用 |
+|---|---|---|
+| **自动（默认，推荐）** | **什么都不用做**。生成代码里有一个标了 `[ModuleInitializer]` 的
+`NativeExports.EnsureNativeJobRegistrations()`，运行时在**程序集加载时**自动调用一次 | 绝大多数项目（含 Unity IL2CPP / AOT：转译器只在目标框架**存在**该特性时才发射它） |
+| **手动（兜底 / 需要确定性顺序）** | 在启动处显式调用一次<br>`NativeTranspiler.Bindings.NativeExports.EnsureNativeJobRegistrations();` | ① 目标框架无 `[ModuleInitializerAttribute]`（如 `netstandard2.x` / `net472`）；② IL2CPP/裁剪（trimming）环境下你希望**确定性**地自己控制时机；③ 调优/排错时想显式钉住 |
+| **关闭直调（回退托管）** | 设环境变量 `ENTJOY_NATIVE_SINGLE_JOB=0` | 对照实验 / 出问题时的回退阀 |
+
+- **幂等**：`EnsureNativeJobRegistrations()` 只触发一次类型静态构造，可放心重复调用（例如每个启动路径都调一次）。
+- **怎么确认真的生效**：stderr 上会有自证横幅
+  ```
+  [NATIVEJOB] single-job native direct-dispatch: on (default ...; =0 falls back to managed thunk)
+  [NATIVEJOB] native direct-dispatch wired: <JobName> (ctx=NB)
+  [NATIVEJOB] IJobFor index-shaped native adapter wired: <JobName> (ctx=NB)
+  [NATIVEJOB] first native direct-dispatch: <JobName>        ← 运行时**真的**走了原生
+  ```
+  `ENTJOY_NATIVE_SINGLE_JOB=0` 时只有 `wired`、没有 `first native direct-dispatch` —— 这就是"回退生效"的判据。
+- **AOT / IL2CPP 说明（为什么这个设计是 AOT 友好的）**：
+  1. **无反射**：注册走 `typeof(T)` 的静态泛型缓存与字典，不用 `MakeGenericType` / `Activator` / `Assembly.GetTypes`；
+  2. **无泛型实例化爆炸**：只在已编译的泛型形参上做查表；
+  3. **delegate 生根**：交给原生调用的函数指针来自 `static readonly` 字段（`Marshal.GetFunctionPointerForDelegate` 的经典坑是委托被 GC 回收 ⇒ 这里被静态根引用）；
+  4. **`[ModuleInitializer]` 是可选增强**：它在目标框架存在时才发射，且**手动入口始终存在** ⇒ AOT/裁剪场景不依赖它。
+- **零堆分配**：ctx 来自框架自带的 `ContextPool`（与托管路径同一套池与释放契约），**没有**逐派发的
+  `Marshal.AllocHGlobal/FreeHGlobal`；20 万次派生 soak 实测私有内存 **0 KB** 增长。
+
+---
+
 ## 4. 排错速查
 
 | 症状 | 先看什么 |
@@ -190,6 +222,8 @@ buildTransitive/EntJoy.Jobs.props|targets # 接线：UsingTask + 编译目标 + 
 | 改了生成器但产物没更新（无提示） | 生成器陈旧门控 warning；按边界文档 §6 的配方删 `obj/<Cfg>` + `NativeTranspiler_Generated/build` + `native_compile.hash` 再构建 |
 | 生成的 CMakeLists 路径不对/没更新 | 检查 `CompilerVisibleProperty` 是否声明了 `EntJoyNativeDllDir`（§3.1 的坑） |
 | 数组 job 的 `Schedule_*` 找不到 `world` 参数 | 数组 job 无 World 概念；多 World 只对 ECS 类 job 有意义（§2.2） |
+| job 标了 `[NativeTranspile]` 但性能像托管 | 看 stderr 有没有 `[NATIVEJOB] first native direct-dispatch: <Job>`：**没有**说明注册晚于首次调度（AOT/裁剪下常见）⇒ 在启动处显式调 `NativeExports.EnsureNativeJobRegistrations()`（§3.6） |
+| `netstandard2.x` / `net472` 消费者报 `CS0246: ModuleInitializer` | 生成器已做特性探测、不该出现；若出现说明版本不匹配（升级 `NativeTranspiler`），临时可在启动处改用手动注册（§3.6） |
 
 诊断编号全集与严重性见 [NativeTranspiler：边界、诊断与回归防线](NativeTranspiler-Boundaries-and-Diagnostics.md) §4。
 

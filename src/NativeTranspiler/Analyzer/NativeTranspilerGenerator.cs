@@ -70,7 +70,15 @@ namespace NativeTranspiler.Analyzer
                 // 说明：完整抽成独立 CodeGenPipeline 类需配行为对拍（本机 SDK 损坏无法跑
                 // 消费者基准），故先以文档化阶段标记落地；无行为变更。
                 // =====================================================================
-                if (ctx.MethodSymbols.IsEmpty && ctx.JobStructSymbols.IsEmpty) return;
+                if (ctx.MethodSymbols.IsEmpty && ctx.JobStructSymbols.IsEmpty)
+                {
+                    // 即使一个 job 都没标属性，也要跑意图检查：`strict` 策略下"整包都忘了属性"正是要抓的形态。
+                    JobIntentChecker.Report(spc, ctx.Compilation, ctx.Options.GlobalOptions, ctx.JobStructSymbols);
+                    return;
+                }
+
+                // NT032/NT033：把"漏写 [NativeTranspile]"从静默降级变成可判定的第三种状态（判据与策略见 JobIntentChecker）。
+                JobIntentChecker.Report(spc, ctx.Compilation, ctx.Options.GlobalOptions, ctx.JobStructSymbols);
 
                 var methodsToGenerate = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
                 var allErrors = new List<Diagnostic>();

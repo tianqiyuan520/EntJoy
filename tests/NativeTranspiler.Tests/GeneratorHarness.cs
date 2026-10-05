@@ -144,16 +144,18 @@ namespace EntJoy.ECS
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
         }
 
-        public static AnalyzerConfigOptionsProvider CreateOptions(string projectDir, bool autoSimdMeasured = true)
-            => new TestAnalyzerConfigOptionsProvider(projectDir, autoSimdMeasured);
+        public static AnalyzerConfigOptionsProvider CreateOptions(string projectDir, bool autoSimdMeasured = true,
+            IReadOnlyDictionary<string, string> extraProperties = null)
+            => new TestAnalyzerConfigOptionsProvider(projectDir, autoSimdMeasured, extraProperties);
 
         /// <summary>调试用：暴露驱动过程的原始对象。</summary>
         public static (CSharpCompilation compilation, GeneratorDriver driver, GeneratorDriverRunResult run, string projectDir)
-            RawRun(string userSource, string extraSource = null, bool autoSimdMeasured = true)
+            RawRun(string userSource, string extraSource = null, bool autoSimdMeasured = true,
+                IReadOnlyDictionary<string, string> extraProperties = null)
         {
             var compilation = CreateCompilation(userSource, out var projectDir, extraSource);
             var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
-            var optionsProvider = CreateOptions(projectDir, autoSimdMeasured);
+            var optionsProvider = CreateOptions(projectDir, autoSimdMeasured, extraProperties);
 
             IIncrementalGenerator generator = new NativeTranspilerGenerator();
             GeneratorDriver driver = CSharpGeneratorDriver.Create(
@@ -173,9 +175,10 @@ namespace EntJoy.ECS
         /// AutoSIMD 产物**而存在，等价于"已由本夹具/AutoSIMDVerify 量过"；默认关闭时的行为（NT024 error）
         /// 由 NT05 的专项用例显式传 false 覆盖。
         /// </summary>
-        public static EmitResult EmitFor(string userSource, string extraSource = null, bool autoSimdMeasured = true)
+        public static EmitResult EmitFor(string userSource, string extraSource = null, bool autoSimdMeasured = true,
+            IReadOnlyDictionary<string, string> extraProperties = null)
         {
-            var (compilation, _, run, projectDir) = RawRun(userSource, extraSource, autoSimdMeasured);
+            var (compilation, _, run, projectDir) = RawRun(userSource, extraSource, autoSimdMeasured, extraProperties);
 
             var bindings = new StringBuilder();
             foreach (var tree in run.GeneratedTrees)
@@ -199,6 +202,25 @@ namespace EntJoy.ECS
             return new EmitResult(cpp.ToString(), bindings.ToString(), run.Diagnostics, outputDir);
         }
 
+        /// <summary>
+        /// 断言"这次发射确实识别到了 job"，再返回产物。
+        ///
+        /// 动机（2026-09-30 实测踩过）：源码**漏写/写错 `[NativeTranspile]`** 时生成器**不报任何诊断**
+        /// （无属性的 struct 不是 job —— 托管 job 是受支持配置），`EmitFor` 只是返回**空串**
+        /// ⇒ 以"某段文本必须存在"为判据的测试会**假绿**，甚至被误读成"生成器静默产出空集"的缺陷。
+        /// 凡是要断言**发射面存在**的用例，一律走这个方法。
+        /// </summary>
+        public static EmitResult EmitForJob(string userSource, string extraSource = null, bool autoSimdMeasured = true)
+        {
+            var result = EmitFor(userSource, extraSource, autoSimdMeasured);
+            if (!result.Cpp.Contains("GENERATED_API"))
+                throw new InvalidOperationException(
+                    "EmitForJob：没有识别到任何 job —— 源码是否漏写 [NativeTranspile]（或属性名拼错）？" +
+                    Environment.NewLine + "诊断: " + result.DiagnosticSummary +
+                    Environment.NewLine + "输出目录: " + result.OutputDir);
+            return result;
+        }
+
         /// <summary>拼装断言失败信息（把现场文本带上，便于定位）。</summary>
         public static string Fail(EmitResult result, string why)
             => why + Environment.NewLine + "诊断: " + result.DiagnosticSummary + Environment.NewLine + result.Dump();
@@ -206,7 +228,8 @@ namespace EntJoy.ECS
         private sealed class TestAnalyzerConfigOptionsProvider : AnalyzerConfigOptionsProvider
         {
             private readonly TestAnalyzerConfigOptions _options;
-            public TestAnalyzerConfigOptionsProvider(string projectDir, bool autoSimdMeasured)
+            public TestAnalyzerConfigOptionsProvider(string projectDir, bool autoSimdMeasured,
+                IReadOnlyDictionary<string, string> extraProperties = null)
             {
                 var values = new Dictionary<string, string>
                 {
@@ -214,6 +237,9 @@ namespace EntJoy.ECS
                 };
                 if (autoSimdMeasured)
                     values["build_property.EntJoyAutoSimdMeasured"] = "true";
+                if (extraProperties != null)
+                    foreach (var kv in extraProperties)
+                        values[kv.Key] = kv.Value;
                 _options = new TestAnalyzerConfigOptions(values);
             }
 

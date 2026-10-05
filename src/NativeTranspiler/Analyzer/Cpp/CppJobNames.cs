@@ -104,6 +104,18 @@ namespace NativeTranspiler.Analyzer
             return "Get_" + GetRangeAdapterFunctionName(jobStruct) + "Ptr";
         }
 
+        /// <summary>
+        /// 2026-10-02（09 §26）：`IJobFor` 专用的 **index 形** adapter 名
+        ///（`void(void* context, int index)`，对应原生 `IndexJobFunc`）。
+        /// 复用批形 adapter 的命名规则（`<base>_Adapter`）再加 `_Index` 后缀，避免两处各自拼名。
+        /// </summary>
+        public static string GetIndexAdapterFunctionName(INamedTypeSymbol jobStruct)
+            => GetAdapterFunctionName(jobStruct) + "_Index";
+
+        /// <summary>index 形 adapter 的 getter 导出名（与 C++ 侧 `Get_{name}Ptr()` 逐字对应）。</summary>
+        public static string GetIndexAdapterPtrGetterName(INamedTypeSymbol jobStruct)
+            => "Get_" + GetIndexAdapterFunctionName(jobStruct) + "Ptr";
+
         public static string GetEntityBatchAdapterPtrGetterName(INamedTypeSymbol jobStruct)
         {
             return "Get_" + GetEntityBatchAdapterFunctionName(jobStruct) + "Ptr";

@@ -23,6 +23,10 @@
 #include <thread>
 #include <vector>
 
+// 导出层契约（Exports.h 的 extern "C"；本目标链接 Exports.cpp，见 CMakeLists）。
+extern "C" void JobSystem_SubmitDeferBump(void);
+extern "C" void JobSystem_SubmitDeferFlush(void);
+
 namespace {
 
 std::atomic<int> g_executed{ 0 };
@@ -73,14 +77,6 @@ void WaitOutstandingZero(int timeoutMs)
 int main()
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    // ── 性能项 1（2026-09-26）：`ENTJOY_DEFER_WAKE` 必须在**任何** Scheduler::Initialize 之前置位：
-    //    DeferWakeEnabled() 用函数内 static 锁存 env，首次调用后不再重读。本文件因此把它放在
-    //    main 顶部（Test3 专门验证 SubmitWork 与该 defer 模式的组合）。
-#ifdef _WIN32
-    _putenv_s("ENTJOY_DEFER_WAKE", "1");
-#else
-    setenv("ENTJOY_DEFER_WAKE", "1", 1);
-#endif
     constexpr int kLength = 4096;
     constexpr int kBatch = 128;
 
@@ -148,18 +144,20 @@ int main()
         (void)notDrained;
     }
 
-    // ---- Test 3: SubmitWork 必须与 SubmitBatch 共用 defer-wake 守卫（性能项 1）----
+    // ---- Test 3: 提交 defer 窗口内不逐 job 广播，窗口关闭时必须补齐（性能项 1，**公开 API**）----
     // 缺陷（代码级）：`ChaseLevScheduler::SubmitWork` 无条件 `wakeEpoch.fetch_add + notify_all`，
-    // 完全忽略 `g_submitDeferDepth` 与 `ENTJOY_DEFER_WAKE`：N 个批量 plain IJob = N 次广播
+    // 完全忽略提交窗口 `g_submitDeferDepth`：N 个批量 plain IJob = N 次广播
     // （一次唤醒 parked worker 的广播实测 37～39 µs ⇒ 空闲后 100 job 多付 ~61 µs/frame）。
-    // 修复后 SubmitWork 与 SubmitBatch(:557-570) 同守卫：窗口内或 defer 模式下不逐 job 广播，
-    // 只置 `g_pendingDeferredWake`，由窗口关闭处 / `JobHandle::Complete()` 的
-    // `FlushDeferredWake()` 补一次。
-    // 本用例验证的是**可观测后置条件**（丢唤醒 ⇒ Complete 永久阻塞、job 不执行）：
-    //   ① 大量 defer 模式下的 plain IJob / IJobFor / tile 批必须在有界时间内全部 Complete；
-    //   ② 每个 plain IJob 恰好执行一次；
-    //   ③ 推迟的广播确实被补齐（g_deferredWakeFlushes 递增）；
-    //   ④ outstanding 批次回到 0（无泄漏、无半退役）。
+    // 修复后 SubmitWork 与 SubmitBatch(:557-570) 同守卫：窗口内（以及窗口关闭后的 `WakePending`）
+    // 统一补齐，不逐 job 广播。本用例走**导出层契约** `JobSystem_SubmitDeferBump/Flush`
+    // （托管侧 `NativeJobCore.JobSystem_SubmitDeferBump/Flush` 用的就是这两个），因此同时覆盖
+    // "归零时恰好广播一次"的实现。
+    // 注意：**故意先让 worker 全部 park**（等 200 ms 耗尽自旋窗），这样"窗口内没有广播"就等价于
+    // "没有 worker 会来领活"⇒ 一旦补齐路径失效，下面的有界等待必然暴露为 Complete 永久阻塞。
+    // 覆盖的可观测后置条件：
+    //   ① 窗口内提交的 plain IJob / IJobFor / tile 批必须在有界时间内全部 Complete；
+    //   ② 每个 plain IJob 恰好执行一次，每个 IJobFor 迭代与 tile 都执行到；
+    //   ③ outstanding 批次回到 0（无泄漏、无半退役）。
     {
         constexpr int kJobs = 400;
         constexpr int kSerialJobs = 32;
@@ -171,9 +169,9 @@ int main()
         // 就等价于"没有 worker 会来领活"：一旦补齐广播的路径失效，本用例必然在下面的有界等待里
         // 暴露为 Complete 永久阻塞（而不是被仍在自旋的 worker 掩盖）。
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        JobSystem::g_deferredWakeFlushes.store(0, std::memory_order_relaxed);
         JobSystem::ResetStatsSnapshot();   // 清 g_publishedJobs 等，避免把 Test1/2 的计数混进来
 
+        JobSystem_SubmitDeferBump();   // 打开提交窗口：窗口内 SubmitWork/SubmitBatch 都不逐 job 广播
         std::vector<JobSystem::JobHandle> handles;
         handles.reserve(kJobs + kSerialJobs + 32);
         for (int i = 0; i < kJobs; ++i)
@@ -183,6 +181,7 @@ int main()
         for (int i = 0; i < 32; ++i)
             handles.push_back(JobSystem::Scheduler::ScheduleParallelForBatch(
                 BatchFunc, nullptr, kLength, kBatch, nullptr, {}));
+        JobSystem_SubmitDeferFlush();  // 关闭窗口：深度归零 ⇒ 恰好一次 WakePending
 
         // 有界等待：Complete 若丢唤醒会永久阻塞 ⇒ 用看门狗线程 + 1ms 轮询判定"有界"。
         std::atomic<bool> done{ false };
@@ -198,11 +197,11 @@ int main()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
         const bool bounded = done.load(std::memory_order_acquire);
-        CHECK(bounded, "Test3 deferWake handles all completed within 10s bound");
+        CHECK(bounded, "Test3 defer-window handles all completed within 10s bound");
         if (!bounded)
         {
             // 挂死的 waiter 无法 join：直接终止进程，避免测试进程被 CI 超时杀掉而无诊断输出。
-            printf("RESULT: FAIL (deferred-wake lost wakeup: Complete blocked)\n");
+            printf("RESULT: FAIL (defer-window lost wakeup: Complete blocked)\n");
             std::_Exit(1);
         }
         waiter.join();
@@ -213,11 +212,11 @@ int main()
             "Test3 every deferred IJobFor iteration executed");
         CHECK(g_executed.load(std::memory_order_relaxed) == 32 * kLength,
             "Test3 every deferred batch tile executed");
-        CHECK(JobSystem::g_deferredWakeFlushes.load(std::memory_order_relaxed) > 0,
-            "Test3 deferred wake broadcasts were flushed (no silent drop of the wakeup)");
+        CHECK(JobSystem::g_submitDeferDepth.load(std::memory_order_relaxed) == 0,
+            "Test3 defer window depth back to 0 (Bump/Flush balanced)");
         WaitOutstandingZero(2000);
         CHECK(JobSystem::g_backendBatchesOutstanding.load(std::memory_order_acquire) == 0,
-            "Test3 outstanding batches return to 0 after deferred-wake mode");
+            "Test3 outstanding batches return to 0 after defer-window提交");
         JobSystem::Scheduler::Shutdown();
     }
 

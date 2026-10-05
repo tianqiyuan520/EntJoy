@@ -36,17 +36,17 @@ namespace JobSystem
         BatchState* batch{ nullptr };
         uint32_t firstTile{ 0 };
         uint32_t tileCount{ 0 };
+        // batchGen：令牌跨越"批已回收"时用以识别迟到结算。
+        // deque 是"sparse"的（可混存多批任务），故代次必须逐元素携带，不能按 deque 记。
+        uint32_t batchGen{ 0 };
     };
 
     class SparseTileDeque
     {
     public:
         /// <summary>
-        /// 容量校验（2026-09-27）：旧实现直接 `RoundUpPow2(capacity)`：
-        ///  · `capacity >= 2^31` 时向上取整溢出成 0 ⇒ `mask_ = 2^32-1`，`new Slot[0]`，
-        ///    而 Get() 用 mask_ 索引 ⇒ **越界读写**；
-        ///  · ctor 标了 `noexcept`，一旦 `new[]` 失败（大容量）就 std::terminate（无法上报）。
-        /// 现在显式拒绝过大/溢出容量（抛异常），并去掉 ctor 的 noexcept 让分配失败可被捕获。
+        /// 容量校验：显式拒绝过大（> 2^30）或向上取整溢出的容量并抛异常；
+        /// ctor 不带 noexcept ⇒ 分配失败可被调用方捕获，不会 std::terminate。
         /// </summary>
         static uint32_t CheckedCapacity(uint32_t requested)
         {

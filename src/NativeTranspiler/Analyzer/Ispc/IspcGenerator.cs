@@ -1562,12 +1562,6 @@ namespace NativeTranspiler.Analyzer.Common
             return (hasAtomics, usesReturnValue);
         }
 
-        private static bool HasAtomicOperations(INamedTypeSymbol jobStruct, SemanticModel semanticModel)
-        {
-            var (has, _) = CheckAtomicOperations(jobStruct, semanticModel);
-            return has;
-        }
-
         private static void GenerateIspcTaskFunction(StringBuilder sb, string functionName,
             INamedTypeSymbol jobStruct, SemanticModel semanticModel,
             MethodDeclarationSyntax methodSyntax, string indexParamName,

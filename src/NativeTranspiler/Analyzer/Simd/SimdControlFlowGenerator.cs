@@ -113,10 +113,6 @@ namespace NativeTranspiler.Analyzer
         // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
         private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr)> _structVaryingLocals = new();
 
-        // ★ Scope-aware variable tracking: stack-based scope management
-        // Each scope frame tracks which variables were declared in that scope
-        private readonly Stack<HashSet<string>> _scopeStack = new();
-        private int _scopeDepth = 0;
         // 指针符号 → 元素 C++ 类型：不再在本类拷贝一份，直接用 SimdVariableAnalyzer 的
         // LocalPointerElemCpp / ParamPointerElemCpp（同一份数据，避免"两个真相"）。
         //   源生成器里 SemanticModel 对局部符号不可靠（框架既有代码同样只用名字/`_jobStruct.GetMembers`），
@@ -225,27 +221,6 @@ namespace NativeTranspiler.Analyzer
             }
 
             return _builder.ToString();
-        }
-
-        /// <summary>
-        /// 检查方法体中是否有边界 varying 的 for 循环。
-        /// 如果有，整个 body 走 per-lane 避免 SIMD mask/gather 的开销。
-        /// </summary>
-        private bool HasVaryingBoundsLoop(SyntaxNode node)
-        {
-            foreach (var fs in node.DescendantNodes().OfType<ForStatementSyntax>())
-            {
-                if (fs.Declaration == null || fs.Declaration.Variables.Count != 1) continue;
-                var decl = fs.Declaration.Variables[0];
-                if (decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying)
-                    return true;
-                if (fs.Condition is BinaryExpressionSyntax cond)
-                {
-                    if (_varAnalyzer.ClassifyExpression(cond.Right) >= VarKind.Varying)
-                        return true;
-                }
-            }
-            return false;
         }
 
         /// <summary>SIMD 路径原生支持（可向量化）的方法名——不属于这些名字且实参含 varying 的调用一律视为不可向量化。</summary>
@@ -475,40 +450,6 @@ namespace NativeTranspiler.Analyzer
             AppendLine("// Hoisted uniform broadcasts");
             foreach (var kvp in _uniformHoistPending)
                 AppendLine(kvp.Value);
-        }
-
-        // ================================================================
-        // Scope Management
-        // ================================================================
-
-        /// <summary>Push a new scope frame.</summary>
-        private int PushScope()
-        {
-            _scopeStack.Push(new HashSet<string>());
-            return _scopeDepth++;
-        }
-
-        /// <summary>Pop a scope frame and remove its variables from _variables.</summary>
-        private void PopScope()
-        {
-            if (_scopeStack.Count == 0) return;
-            var frame = _scopeStack.Pop();
-            _scopeDepth--;
-
-            foreach (string varName in frame)
-            {
-                _variables.Remove(varName);
-                _simdVaryingVarNames.Remove(varName);
-                _simdVaryingCppType.Remove(varName);
-                _varDeclEmitted.Remove(varName);
-            }
-        }
-
-        /// <summary>Register a variable as declared in the current scope.</summary>
-        private void RegisterScopedVariable(string name)
-        {
-            if (_scopeStack.Count > 0)
-                _scopeStack.Peek().Add(name);
         }
 
         // ================================================================

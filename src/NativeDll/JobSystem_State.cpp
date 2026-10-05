@@ -20,7 +20,7 @@ namespace JobSystem
     // ── 托管侧 ABI 钉子（C# NativeJobHandle.IsCompletedFast）──────────────────────────────
     // 托管侧不走 P/Invoke、直接读 HandleState 前 8 字节判定"已完成"（每帧每个被覆盖的写句柄
     // 少两次跨层调用）。这里把布局钉死：refCount 4 字节 @0 → completed 1 字节 @4（偏移 5 是
-    // backendRetired，恒为 1，所以托管侧必须按 1 字节读；曾经按 int 读 ⇒ 恒判"已完成"）。
+    // backendRetired，恒为 1，所以托管侧必须按 1 字节读）。
     static_assert(offsetof(HandleState, completed) == 4,
         "C# NativeJobHandle.IsCompletedFast 依赖 HandleState::completed 位于偏移 4");
     static_assert(sizeof(std::atomic<bool>) == 1,
@@ -29,11 +29,8 @@ namespace JobSystem
     // ============================================================
     // Complete 分段诊断（`ENTJOY_DIAG_NATIVE_PHASE=1`）
     //
-    // 背景：`gridsearch/07` §7e 实测"S+C 交替"形状下每 job 的 82% 花在 `JobSystem_Complete` 里，
-    // 但**内部**（快路径 / 自旋 / completedCv 阻塞等待 / 等 backendRetired / 取异常）的比例未知，
-    // 于是无法判断该动哪一段（先前"在等退役期间 assist"的尝试实测无效，就属于没先分段就动手）。
-    //
-    // 本诊断按段累加纳秒与次数，`Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）。
+    // 按段累加纳秒与次数（快路径 / 自旋 / completedCv 阻塞等待 / 等 backendRetired / 取异常），
+    // `Scheduler::Shutdown` 时打印一次（不新增导出、不改协议）。
     // 未启用时每段只有一次静态 bool 读，热路径零成本。
     // ============================================================
     namespace DiagPhase
@@ -92,7 +89,7 @@ namespace JobSystem
     //   ① 忙比      = Σ_tile执行时间 / (worker 数 × 墙钟)                  —— 有多少并行松弛
     //   ② 相位尾部  = 批完成链分段 + 启停斜坡（按参与度分桶）              —— 每批的串行尾/启停
     //   ③ 批内并行度= Σ(批内 worker busy) / 批墙钟（每批"平均同时几个在干"）—— 大批内部是否吃饱
-    // 归属按**线程**（TLS lane），不信传入的 workerIndex（实测后者会让两线程写同一槽）。
+    // 归属按**线程**（TLS lane），不信传入的 workerIndex（后者会让两线程写同一槽）。
     // 未启用时每执行窗口只有一次静态 bool 读。
     // ============================================================
     namespace E1
@@ -445,6 +442,20 @@ namespace JobSystem
                 (unsigned long long)g_parkWakeCount.load(std::memory_order_relaxed),
                 (unsigned long long)g_workerClaimedTokens.load(std::memory_order_relaxed),
                 (unsigned long long)g_mainClaimedTokens.load(std::memory_order_relaxed));
+            // 认领点探针（`ENTJOY_CLAIM_STAT=1`）：认领 fetch_add 的往返周期。
+            // 读法：把 mean 与"该几何下同时刻碰同一游标的 worker 数"对照 ——
+            //   General（共享 nextTile）应显著高于切片路（每 worker 独占游标）；两者之比就是"弹跳"的量级。
+            if (g_claimStatEnabled.load(std::memory_order_relaxed))
+            {
+                const uint64_t cn = g_claimProbeN.load(std::memory_order_relaxed);
+                const uint64_t cc = g_claimProbeCycles.load(std::memory_order_relaxed);
+                std::printf("[E1] claim probe: n=%llu total_us=%.1f mean=%.1fcyc (~%.1fns@3.8GHz) max=%llucyc\n",
+                    (unsigned long long)cn,
+                    static_cast<double>(cc) / 3.8e3,
+                    cn ? static_cast<double>(cc) / static_cast<double>(cn) : 0.0,
+                    cn ? static_cast<double>(cc) / static_cast<double>(cn) / 3.8 : 0.0,
+                    (unsigned long long)g_claimProbeMax.load(std::memory_order_relaxed));
+            }
             {
                 static const char* kRetireNames[7] = {
                     "cas", "RecordFinalizedTiming", "longBatchBarrier",
@@ -514,7 +525,7 @@ namespace JobSystem
             RunContinuationChain(leftover);
     }
 
-    // 线程槽：判定"创建"与"回收"是否落在同一批线程上（TLS 缓存命中率只有 7% 的真因）。
+    // 线程槽：诊断计数按线程分槽（判定"创建"与"回收"是否落在同一批线程上）。
     static uint32_t StateThreadSlot() noexcept
     {
         thread_local const uint32_t slot = static_cast<uint32_t>(
@@ -526,8 +537,7 @@ namespace JobSystem
     {
         if (!state) return;
         g_liveHandleStates.fetch_sub(1, std::memory_order_relaxed);
-        // 性能项 3：state 创建/回收是 plain IJob 的必经路径（每 job 各一次），下面三个计数
-        // 都是纯诊断 RMW（只被 GetStatsSnapshot 读取）。默认统计开启 ⇒ 计数口径与改动前逐位一致。
+        // 下面三个计数都是纯诊断 RMW（只被 GetStatsSnapshot 读取），由 StatsEnabled() 统一 gate。
         if (StatsEnabled())
         {
             g_stateRecycled.fetch_add(1, std::memory_order_relaxed);
@@ -548,7 +558,7 @@ namespace JobSystem
         DrainContinuationSlot(state);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
         state->continuations.clear();
-        // 性能项 3：仅当确有异常被记录过才取 exceptionMutex（每 job 回收一次的无谓加锁）。
+        // 仅当确有异常被记录过才取 exceptionMutex（每 job 回收一次的无谓加锁）。
         // 安全：RecycleState 只在 refCount 归零（ReleaseState 的 acq_rel fetch_sub 返回 1）时
         // 被调用，而记录方必须持有引用才能写 batchExceptionPtr ⇒ 其 release 与本次 acquire 同步，
         // hasException 不可能读到陈旧 false。
@@ -571,13 +581,11 @@ namespace JobSystem
             return;
         }
         // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
-        // 【性能项 3】进入 TLS 缓存的条件从"本线程调用过 CreateState"放宽为
-        // "创建者 **或 worker 线程**"：worker 是回收热路径的主角（每个 job 的
-        // ReleaseState 都发生在 worker 上），但它们几乎从不调用 CreateState
-        // ⇒ 旧条件下每个 job 回收都要取一次全局 g_statePoolMutex。
-        // 不无条件放宽的理由（保留原设计意图）：.NET 终结器线程 / 渲染线程等
-        // 长期存活且从不创建 state 的线程若也进 TLS 缓存，被回收的 state 会
-        // 永久堆在它们的缓存里，调度线程永远命中不到 → CreateState 退回每次 new。
+        // 进 TLS 缓存的条件 = "创建者 **或 worker 线程**"：worker 是回收热路径的主角
+        //（每个 job 的 ReleaseState 都发生在 worker 上），但它们几乎从不调用 CreateState。
+        // 不无条件放宽的理由：.NET 终结器线程 / 渲染线程等长期存活且从不创建 state 的线程
+        // 若也进 TLS 缓存，被回收的 state 会永久堆在它们的缓存里，调度线程永远命中不到
+        // → CreateState 退回每次 new。
         if (!t_stateCreator && WorkerIndexManager::GetCurrentIndex() < 0)
         {
             std::lock_guard<std::mutex> lock(g_statePoolMutex);
@@ -599,7 +607,7 @@ namespace JobSystem
     HandleState* CreateState(bool completed)
     {
         t_stateCreator = true;
-        // 性能项 3：入门一次 relaxed 载入，旁路本函数内全部 4 个纯诊断 RMW（池命中/补池/新分配/线程槽）。
+        // 一次 relaxed 载入，旁路本函数内全部 4 个纯诊断 RMW（池命中/补池/新分配/线程槽）。
         const bool stats = StatsEnabled();
         if (stats)
             g_stateCreateByThread[StateThreadSlot()].fetch_add(1, std::memory_order_relaxed);
@@ -641,7 +649,6 @@ namespace JobSystem
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->continuationSlot.store(nullptr, std::memory_order_relaxed);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
-        state->estBatchNs = 0;   // §7aq：状态复用前必须清零，否则会继承上一批的预期时长
         state->continuations.clear();
         state->hasException.store(false, std::memory_order_relaxed);
         state->dependency = nullptr;
@@ -679,7 +686,7 @@ namespace JobSystem
             if (!state->batchExceptionPtr)
             {
                 state->batchExceptionPtr = std::move(exception);
-                // 性能项 3：release 发布"有异常"标志，供 RecycleState 无锁跳过 exceptionMutex。
+                // release 发布"有异常"标志，供 RecycleState 无锁跳过 exceptionMutex。
                 state->hasException.store(true, std::memory_order_release);
             }
         }
@@ -735,11 +742,9 @@ namespace JobSystem
 
     void ConsumeLongBatchBarriers() noexcept
     {
-        // 性能项 4：无锁短路。长批 barrier 是罕见事件（批墙钟 > 800 µs 才登记），
-        // 但本函数在**每次** Schedule/Complete 上被调用，此前无条件取全局互斥体 +
-        // 两个 vector 的构造/析构。绝大多数提交 count==0 ⇒ 直接返回。
-        // 语义不变：stale-0 最多让已登记的 barrier 延后到下一次 Flush/Shutdown 消费
-        //（与"没有下一次提交就不消费"的既有行为等价，不产生泄漏也不阻塞退役）。
+        // 无锁短路：长批 barrier 是罕见事件（批墙钟 > 800 µs 才登记），而本函数在每次
+        // Schedule/Complete 上都被调用。stale-0 最多让已登记的 barrier 延后到下一次
+        // Flush/Shutdown 消费（等价于"没有下一次提交就不消费"），不产生泄漏也不阻塞退役。
         if (g_longBatchBarrierCount.load(std::memory_order_acquire) == 0)
             return;
 
@@ -862,21 +867,14 @@ namespace JobSystem
     };
 
     // ============================================================
-    // 性能项 2（2026-09-26）：BackendAsyncContext 池化（原：每 job 一次 `new` + `delete`）
+    // BackendAsyncContext 池化（两级池：线程本地缓存 + 共享池兜底）
     //
-    // 动机（实测）：plain IJob / IJobFor(≤64) 走 SubmitBackendAsync ⇒ 每次提交
-    // `new BackendAsyncContext` + 执行完 `delete`。该路径 `probe ijob` 实测
-    // sched ≈ 800～900 ns/job（N=1000/10000 individual pipelined），其中堆分配/释放是
-    // 固定且可省的一项；对象生命周期与 job 一一对应、无跨 job 存活需求 ⇒ 可安全复用。
-    //
-    // 形状完全复用同仓库既有两级池（JobSystem_Tiles.cpp:300-355 的 BatchContext、
-    // JobSystem_State.cpp:108-216 的 HandleState）：
-    //   - 对象在**提交线程**（多为 main）获取、由**执行完成该 job 的 worker** 释放 ⇒
-    //     只有"线程本地缓存 + 共享池兜底"才能让提交线程命中（worker 释放的实例经共享池回流）。
-    //   - 线程退出时 TLS 缓存整体交还共享池（worker 线程在 Shutdown 的 Stop()/join 期间退出，
-    //     此后 ClearAsyncContextPool 统一删除）。
-    // 语义不变：work/state 每次 acquire 时覆盖赋值（复用 std::function 对象本身，省掉一次
-    // 目标存储构造），cleanup 回调与异常捕获路径完全未改。
+    // 必要性：对象在**提交线程**（多为 main）获取、由**执行完成该 job 的 worker** 释放 ⇒
+    // 只有让 worker 释放的实例经共享池回流，提交线程的 acquire 才可能命中。
+    // 线程退出时 TLS 缓存整体交还共享池（worker 在 Shutdown 的 Stop()/join 期间退出，
+    // 此后 ClearAsyncContextPool 统一删除）。
+    // 语义不变：work/state 每次 acquire 时覆盖赋值（复用 std::function 对象本身），
+    // cleanup 回调与异常捕获路径完全未改。
     // ============================================================
     std::mutex g_asyncCtxPoolMutex;
     std::vector<BackendAsyncContext*> g_asyncCtxPool;
@@ -1002,7 +1000,7 @@ namespace JobSystem
 
     static void CompleteBackendAsync(void* raw) noexcept
     {
-        // 性能项 2：原来在这里 `delete`，现改为交还池（复用对象，同上注释）。
+        // 交还池复用（见上方 BackendAsyncContext 池化注释）。
         ReleaseAsyncContext(static_cast<BackendAsyncContext*>(raw));
     }
 
@@ -1070,6 +1068,81 @@ namespace JobSystem
         }
     }
 
+    // ============================================================
+    // JCC/分块决策计数仪器（`ENTJOY_DIAG_JCC=1`，默认关 ⇒ 零开销）
+    // 打印每个 return 路径的次数 + 返回 chunk 的 log2 分布 + 每批 workerCount。
+    // ============================================================
+    namespace
+    {
+        std::atomic<uint64_t> g_jccDiagPath[16];
+        std::atomic<uint64_t> g_jccDiagChunkBucket[32];
+        std::atomic<uint64_t> g_jccDiagWorkerBucket[16];
+        std::atomic<uint64_t> g_jccDiagCalls{ 0 };
+        // ⚠ 索引必须与 `JccDiagNote(slot, …)` 的 slot 号严格对齐（下方各 return 处的常量）。
+        //    slot 3 = "membound_coarse" 已随该 A/B 开关删除而**不再有调用点**，但**保留占位**
+        //    以维持后续索引（4..9）与 slot 号一致。
+        const char* const kJccDiagPathNames[11] = {
+            "empty", "explicit", "membound", "membound_coarse(retired)", "unknown_coarse",
+            "stage1", "sched_dominated", "two_factor", "single_factor", "tail_fallback", "-" };
+    }
+
+    static inline void JccDiagBucket(std::atomic<uint64_t>* buckets, uint32_t n, uint32_t v) noexcept
+    {
+        uint32_t b = 0;
+        while (b + 1 < n && (1u << (b + 1)) <= v) ++b;
+        buckets[b].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void JccDiagNoteWorkers(uint32_t workers) noexcept
+    {
+        if (!g_jccDiagEnabled) return;
+        JccDiagBucket(g_jccDiagWorkerBucket, 16, workers < 1 ? 1u : workers);
+    }
+
+    void JccDiagMaybeDump() noexcept;
+
+    static inline int JccDiagNote(int path, int chunk) noexcept
+    {
+        if (!g_jccDiagEnabled) return chunk;
+        if (path >= 0 && path < 16) g_jccDiagPath[path].fetch_add(1, std::memory_order_relaxed);
+        JccDiagBucket(g_jccDiagChunkBucket, 32, static_cast<uint32_t>(chunk < 1 ? 1 : chunk));
+        JccDiagMaybeDump();
+        return chunk;
+    }
+
+    void JccDiagMaybeDump() noexcept
+    {
+        if (!g_jccDiagEnabled) return;
+        const uint64_t n = g_jccDiagCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n != 1 && (n % 8192) != 0) return;
+        char buf[2048];
+        int off = std::snprintf(buf, sizeof(buf), "[JCC-DIAG] calls=%llu paths=", (unsigned long long)n);
+        for (int i = 0; i < 11 && off > 0 && off < (int)sizeof(buf) - 40; ++i)
+        {
+            const uint64_t c = g_jccDiagPath[i].load(std::memory_order_relaxed);
+            if (c == 0) continue;
+            off += std::snprintf(buf + off, sizeof(buf) - off, " %s=%llu",
+                kJccDiagPathNames[i], (unsigned long long)c);
+        }
+        if (off > 0) std::fprintf(stderr, "%.*s\n", off, buf);
+        off = std::snprintf(buf, sizeof(buf), "[JCC-DIAG] calls=%llu chunk[2^k]=", (unsigned long long)n);
+        for (int b = 0; b < 32 && off > 0 && off < (int)sizeof(buf) - 24; ++b)
+        {
+            const uint64_t c = g_jccDiagChunkBucket[b].load(std::memory_order_relaxed);
+            if (c == 0) continue;
+            off += std::snprintf(buf + off, sizeof(buf) - off, " %d:%llu", b, (unsigned long long)c);
+        }
+        if (off > 0) std::fprintf(stderr, "%.*s\n", off, buf);
+        off = std::snprintf(buf, sizeof(buf), "[JCC-DIAG] calls=%llu workers[2^k]=", (unsigned long long)n);
+        for (int b = 0; b < 16 && off > 0 && off < (int)sizeof(buf) - 24; ++b)
+        {
+            const uint64_t c = g_jccDiagWorkerBucket[b].load(std::memory_order_relaxed);
+            if (c == 0) continue;
+            off += std::snprintf(buf + off, sizeof(buf) - off, " %d:%llu", b, (unsigned long long)c);
+        }
+        if (off > 0) std::fprintf(stderr, "%.*s\n", off, buf);
+    }
+
     int ResolveChunkSize(int length, int requestedChunk)
     {
         return ResolveChunkSize(length, requestedChunk, 0);
@@ -1077,10 +1150,9 @@ namespace JobSystem
 
     int ResolveChunkSize(int length, int requestedChunk, uint32_t funcHash,
         bool* outJccFine)
-    {
-        if (outJccFine) *outJccFine = false;
-        if (length <= 0) return 1;
-        if (requestedChunk > 0) return requestedChunk;
+    {        if (outJccFine) *outJccFine = false;
+        if (length <= 0) return JccDiagNote(0, 1);
+        if (requestedChunk > 0) return JccDiagNote(1, requestedChunk);
         int wc = std::max(1, g_numThreads.load(std::memory_order_relaxed));
 
         // 自动 batch：仅当成本缓存开启且有该 job 成本数据时（热路径开销极小）。
@@ -1096,28 +1168,27 @@ namespace JobSystem
             if (mode == JobSystem::kModeMemBound)
             {
                 // 健壮模式：mem-bound 期**周期探针**（每 kRobustProbeInterval 次解析放一次公式分块）。
-                // 否则锁死后 mem-bound 分支永不产出细样本 ⇒ 判错就永久错、无法纠正（07 §7an）。
+                // 否则锁死后 mem-bound 分支永不产出细样本 ⇒ 判错就永久错、无法纠正。
                 const bool probe = robustNow && g_jobCostCache.ProbeDue(funcHash);
                 if (!probe)
                 {
                     if (g_jobCostCacheVerbose)
                         std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
-                    return tpwChunk;
+                    return JccDiagNote(2, tpwChunk);
                 }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d MEM-BOUND PROBE → formula\n", length);
             }
             else if (robustNow && mode == JobSystem::kModeUnknown)
             {
-                // ⚠ 关键（07 §7an 第二轮）：未分类期必须**交错**放粗/细两种分块。
-                // 旧两阶段是"先 3 个粗样本、之后永远走公式"⇒ 重 job 的粗样本永远停在 3 个，
-                // 够不到健壮判据的样本下限 ⇒ mode 永为 unknown ⇒ 永远走公式（= 永远细粒度）
-                // ⇒ grad 受益但 Melee 受损，净收益被抵消（实测正好如此）。
+                // ⚠ 关键：未分类期必须**交错**放粗/细两种分块。若只先采几个粗样本再永远走公式，
+                // 重 job 的粗样本够不到健壮判据的样本下限 ⇒ mode 永为 unknown ⇒ 永远细粒度
+                //（grad 受益但 Melee 受损）。
                 if (!g_jobCostCache.ParityProbe(funcHash))
                 {
                     if (g_jobCostCacheVerbose)
                         std::printf("[JCC] R length=%d UNKNOWN → tpw chunk (parity coarse)\n", length);
-                    return tpwChunk;
+                    return JccDiagNote(4, tpwChunk);
                 }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d UNKNOWN → formula (parity fine)\n", length);
@@ -1126,15 +1197,20 @@ namespace JobSystem
             if (!robustNow && mode == JobSystem::kModeUnknown && !g_jobCostCache.HasLearnedCoarse(funcHash))
             {
                 // 阶段 1：粗样本未齐 → tpw（perElemNs 通常为 0，本分支与兜底一致）
-                return tpwChunk;
+                return JccDiagNote(5, tpwChunk);
             }
             // 阶段 2（或 parallel 稳态）：细成本优先，缺省用粗成本代理（学习中/冷启动）
             double costNs = perElemNs;
             if (costNs <= 0.0) costNs = g_jobCostCache.GetCoarseCost(funcHash);
             if (costNs > 0.0)
             {
-                constexpr double kTargetTileUs = 150.0;     // 目标每 tile 串行量
-                constexpr int kMaxAdaptiveTpw = 16;         // tiles 上限 = workers×16
+                constexpr double kTargetTileUsDefault = 150.0;     // 目标每 tile 串行量（历史值）
+                const double kTargetTileUs =
+                    (g_jccTargetTileUs > 0.0) ? g_jccTargetTileUs : kTargetTileUsDefault;
+                // tiles 上限 = workers × max(16, 配置的 tpw)。
+                // 语义：自适应允许比兜底更细，但不允许比兜底的上限还粗。
+                const int kMaxAdaptiveTpw =
+                    std::max(16, g_configuredTilesPerWorker.load(std::memory_order_relaxed));
                 constexpr int kMaxAutoChunk = 32768;        // 单 tile 最多 32k 元素
                 constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
                 const int chunkTpw4 = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
@@ -1145,16 +1221,23 @@ namespace JobSystem
                 if (cfixed > 0.0 && celem > 0.0)
                 {
                     // 空体/超轻：执行≈0，总成本由调度/唤醒/worker 抖动主导，
-                    // 任何执行成本模型都无解 → tpw 兜底。
+                    // 任何执行成本模型都无解 → 用"调度主导"专用粒度兜底（**与执行默认解耦**）。
+                    // 上限 4：tpw 调大时不能把每-job 固定仪式按 tile 数放大。
                     const double tileTimeTpw =
                         cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))) * celem;
                     if (tileTimeTpw < kSchedulingOverheadNs)
                     {
+                        const int kSchedDominatedTpw =
+                            std::min(4, g_configuredTilesPerWorker.load(std::memory_order_relaxed));
+                        const int chunkSched = std::max(16, CeilDiv(length, wc * std::max(1, kSchedDominatedTpw)));
                         // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
                         // 稳态固定 tpw，且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
                         // 健壮模式下如实标注为**粗样本**（它返回的就是 tpw chunk）。
+                        if (g_jobCostCacheVerbose)
+                            std::printf("[JCC] R length=%d SCHED-DOMINATED chunk=%d rc=%d tileNs=%.0f\n",
+                                length, chunkSched, CeilDiv(length, chunkSched), tileTimeTpw);
                         if (outJccFine) *outJccFine = g_jobCostCache.IsRobust() ? false : true;
-                        return chunkTpw4;
+                        return JccDiagNote(6, chunkSched);
                     }
                     // 执行主导：目标每 tile ≈150µs，tileSize = (target − C_fixed)/C_elem，
                     // 下限 256 元素/tile 防 C_fixed 占比过高。
@@ -1164,10 +1247,13 @@ namespace JobSystem
                     if (targetTiles < wc) targetTiles = wc;
                     if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
                     const int chunk2f = std::max(1, CeilDiv(length, targetTiles));
-                    // 健壮模式：只有**严格细于** tpw 兜底的分块才算细样本（旧代码把 15 tiles 这种
-                    // 比 tpw 的 60 还粗 4× 的分块也记成细样本 ⇒ 系统性推高比值 ⇒ 全判 mem-bound）。
+                    // 健壮模式：只有**严格细于** tpw 兜底的分块才算细样本（否则会系统性推高比值
+                    // ⇒ 全判 mem-bound）。
+                    if (g_jobCostCacheVerbose)
+                        std::printf("[JCC] R length=%d TWO-FACTOR chunk=%d rc=%d targetUs=%.0f\n",
+                            length, chunk2f, CeilDiv(length, chunk2f), kTargetTileUs);
                     if (outJccFine) *outJccFine = g_jobCostCache.IsRobust() ? (chunk2f < chunkTpw4) : true;
-                    return chunk2f;
+                    return JccDiagNote(7, chunk2f);
                 }
 
                 // ── 单因子回退（冷启动，C_fixed 未学）：既有公式 ──
@@ -1199,12 +1285,12 @@ namespace JobSystem
                         floorTiles, chunk, CeilDiv(length, chunk));
                 // 健壮模式：只有严格细于 tpw 兜底的分块才算细样本（见上面的理由）。
                 if (outJccFine && robustNow) *outJccFine = (chunk < chunkTpw4);
-                return chunk;
+                return JccDiagNote(8, chunk);
             }
         }
         // 冷启动 / flag 关闭 / 无数据 → tpw 兜底：batch = N/(W×k) 随 N 自动缩放，
         // 无需每 job 标代价。
-        return std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+        return JccDiagNote(9, std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))));
     }
 
     // ============================================================
@@ -1265,9 +1351,6 @@ namespace JobSystem
     void JobHandle::Complete() const
     {
         if (!_state) return;
-        // `ENTJOY_DEFER_WAKE=1`：调用方即将阻塞 ⇒ 在这里补一次被推迟的唤醒广播
-        // （把唤醒成本挪进"无论如何都要等"的窗口里，见 JobSystemInternal.h 的动机注释）。
-        FlushDeferredWake();
 
         const bool diag = DiagPhase::Enabled();
         uint64_t mark = 0;
@@ -1276,7 +1359,7 @@ namespace JobSystem
             DiagPhase::g_entries.fetch_add(1, std::memory_order_relaxed);
             mark = MonotonicNowNs();
         }
-        // 统一收尾（原实现有 6 处相同的"等退役 → 取异常 → return"）。
+        // 统一收尾（等退役 → 取异常 → return）。
         //   exitSlot       = "等到 completed 是在哪一段"（spin2048 / spin256 / blockWait / fastpath）——
         //                    这是判定"每 job 的等待到底是自旋还是阻塞"的关键：自旋等待有上界（µs 级），
         //                    一旦落到 blockWait 就是"等了 256 µs 超时轮"的量级。
@@ -1323,37 +1406,9 @@ namespace JobSystem
         // Phase 2: 先密集 spin（过早 yield 触发完整 OS 上下文切换）。
         // Chase-Lev：主线程 spin 期间即协助认领执行，消除"慢 worker 被抢占
         // + 主线程干等"的尾延迟。
-        // A/B（`ENTJOY_COMPLETE_SPIN=<pause 次数>`，默认 2048 = 原行为；`0` = 直接进 Phase 3）：
-        // 主线程第一段自旋窗。动机（docs §7ai）：真实负载上主线程 **82.8% 的时间在 Complete() 里**，
-        // 其中 `spin2048` = 54,050 次 × 45.4 µs = **2.45 s ≈ 14.8 ms/步**；而 15 个 worker 只用 15 个逻辑核
-        // ⇒ 主线程自旋会与某个 worker 抢 SMT 执行单元。旋钮用于量"自旋 vs 让核"的平衡点。
-        static const int kMainSpin = [] {
-            const char* v = std::getenv("ENTJOY_COMPLETE_SPIN");
-            const int n = (v != nullptr) ? std::atoi(v) : 2048;
-            return n < 0 ? 0 : (n > 65536 ? 65536 : n);
-        }();
-        // ── §7aq 自适应自旋（`ENTJOY_COMPLETE_SPIN_ADAPT=1`，默认关 ⇒ 逐位原行为）──
-        // 依据：§7ai 固定值 A/B 显示 2048→512 使 Melee −1.33 ms（5/6 好）但 Flow +1.38（微批需要主线程
-        // 自旋期的协助）⇒ 净 0。而 §7ap 的逐 job 剖面把两者分开：Melee 1 批/步、单批 ~70 ms、
-        // 227 tiles（SMT 已饱和）；波前 574 批/步、单批 28 µs、17.9 tiles（几乎 1 tile/worker）。
-        // 判据：本批预期时长 ≥ g_completeSpinBigNs ⇒ 用最小自旋（把核让给 worker），否则保持完整自旋窗。
-        // ⚠ 实测结论：**否证**（07 §7aq）—— 12 对 A/B 整步 +4.15 ms（9/12 更差）、Melee +2.62、wave +0.88。
-        //   与 §7ai 的"Melee 要少自旋"方向相反 ⇒ 主线程自旋期的协助对**大批同样有用**，
-        //   §7ai 那笔 −1.33（6 对）应为噪声。默认关，仅保留器械。
-        static const bool kAdaptiveSpin = g_completeSpinAdaptEnabled;
-        static const uint64_t kAdaptiveBigNs = g_completeSpinBigNs;
-        const int spinCount = (kAdaptiveSpin && _state->estBatchNs >= kAdaptiveBigNs)
-            ? 0 : kMainSpin;
-        // 自证（`ENTJOY_JCC_VERBOSE=1`）：自适应到底有没有真的做出区分
-        if (kAdaptiveSpin && g_jobCostCacheVerbose)
-        {
-            static std::atomic<uint64_t> s_adaptDump{ 0 };
-            const uint64_t dn = s_adaptDump.fetch_add(1, std::memory_order_relaxed);
-            if (dn < 40 || (dn & 255) == 0)
-                std::printf("[SPINADAPT] estBatchNs=%llu -> spin=%d (full=%d) batchns=%llu\n",
-                    static_cast<unsigned long long>(_state->estBatchNs), spinCount, kMainSpin,
-                    static_cast<unsigned long long>(kAdaptiveBigNs));
-        }
+        // 主线程第一段自旋窗固定为 2048：主线程自旋会与某个 worker 抢 SMT 执行单元，
+        // 但自旋期的协助对大批同样有用 ⇒ 缩短窗口/按批次时长自适应实测均为净零，不提供 env 旋钮。
+        constexpr int spinCount = 2048;
         for (int i = 0; i < spinCount; i++)
         {
             if (_state->completed.load(std::memory_order_acquire))

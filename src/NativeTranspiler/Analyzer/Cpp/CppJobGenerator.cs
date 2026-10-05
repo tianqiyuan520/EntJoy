@@ -77,20 +77,6 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#endif");
             sb.AppendLine();
 
-            // ─── 纯值字段打包：结构体定义放进头文件（声明与适配器都引用它），include guard 防重定义 ───
-            if (PackScalarsForJob(jobStruct))
-            {
-                var scalarsStruct = BuildScalarsStruct(jobStruct);
-                if (scalarsStruct.Length > 0)
-                {
-                    sb.AppendLine($"#ifndef __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
-                    sb.AppendLine($"#define __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
-                    sb.Append(scalarsStruct);
-                    sb.AppendLine("#endif");
-                    sb.AppendLine();
-                }
-            }
-
             // IJobEntity: 无独立 Execute 函数，循环体内联到 Adapter 中
             if (IsChunkJob(jobStruct))
             {
@@ -273,7 +259,11 @@ namespace NativeTranspiler.Analyzer
         }
 
         // 局部变量声明：仅保留 NativeList 引用，移除 NativeArray 包装
-        private static void AppendLocalVariableDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb)
+        // 按**缺陷判据**决定绑定形式：只有**参与循环行程数**的字段才按值绑定
+        // （见 GetFieldLoopUse / ValueBindAllowed）。`semanticModel`/`compilation` 传入后可**按符号**判定
+        // 字段用途（同名局部/形参不再造成误判）；两者都缺时退回名字兜底。
+        private static void AppendLocalVariableDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
+            SemanticModel? semanticModel = null, Compilation? compilation = null)
         {
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
@@ -289,22 +279,333 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            var loopUse = GetFieldLoopUse(jobStruct, semanticModel ?? TryGetSemanticModel(jobStruct, compilation));
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 if (field.Type is IPointerTypeSymbol) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                // 保持**引用**绑定：值绑定（`const T X = *X_ptr`）两次实测都无收益甚至更差
-                // （闸门比值 49.7 vs 47.2 噪声内；真实内核 Melee 比值 1.0287，5/6 轮变差）⇒ 别再试。
-                // 热循环的栈流量来自"同时存活约 22 个值 > ~14 个 GP 寄存器"，与绑定形式无关。
-                // 打包路径（ENTJOY_PACK_SCALARS=1）：纯值字段的 `X_ptr` 形参已被 `__scalars` 取代
-                //（见 BuildBatchJobParameters），所以绑定目标要改成结构体成员——成员名同为 `<field>_ptr`，
-                // 打开打包后多个 job 报 `use of undeclared identifier 'X_ptr'` 而构建失败。
-                string scalarSrc = PackScalarsForJob(jobStruct)
-                    ? $"__scalars->{field.Name}_ptr"
-                    : $"{field.Name}_ptr";
-                sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
+                // 绑定形式由 ValueBindAllowed 的判据决定：**参与循环行程数**的字段按值，其余按引用。
+                // 类型判据：≤16 B 的托管值类型**无条件**可；**行程数字段**额外放宽到"任意值类型"——
+                // 一整份拷贝发生在**每次内核调用**（每 tile / 每 chunk 一次），换来的是行程数变编译期常量，
+                // 与"每元素重载 + 无法向量化"不是一个量级。引用类型/容器/指针仍排除。
+                string scalarSrc = $"{field.Name}_ptr";
+                bool tripCount = loopUse.TripCount.Contains(field.Name);
+                bool typeOk = ValueBindTypeOk(field.Type)
+                              || (tripCount && field.Type.IsValueType && ValueBindWideTypeAllowed());
+                if (ValueBindAllowed(tripCount) && typeOk)
+                    sb.AppendLine($"    const {cppType} {field.Name} = *{scalarSrc};");
+                else
+                    sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
             }
+        }
+
+        /// <summary>取 job 的 `Execute` 所在语法树的语义模型（拿不到就返回 null，退回名字兜底）。</summary>
+        private static SemanticModel? TryGetSemanticModel(INamedTypeSymbol jobStruct, Compilation? compilation)
+        {
+            if (compilation == null) return null;
+            try
+            {
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>()
+                    .FirstOrDefault(m => m.Name == Config.Execute);
+                var syntax = executeMethod == null ? null : SymbolHelper.GetMethodSyntax(executeMethod);
+                return syntax == null ? null : compilation.GetSemanticModel(syntax.SyntaxTree);
+            }
+            catch { return null; }
+        }
+
+        // ── 标量按值绑定 ──
+        // 缺陷（"引用绑定挡住优化"的**根因**）：`const T& X = *X_ptr;` 里 `X` 指向的对象
+        // **仍可经同一函数中的其它指针被写**（`X_ptr` 形参本身是非 const 的 `T*`，见
+        // AppendFieldParameters）⇒ 编译器不能把 `X` 当循环不变量：每次使用都要重载，且当内核体
+        // 还写别的数组时必须假设 `*X_ptr` 会被改写 ⇒ **依赖该值的循环行程数在编译期不可知**
+        // ⇒ 无法 hoist / unroll / 向量化。按值绑定后 `X` 是入口取一次的**局部常量**（地址未被取），
+        // 行程数即为编译期常量。这也**正是 C# 源语义**：`X` 是 job 实例的字段，Execute 内无人写它，
+        // 源语言允许把它当循环不变量（RyuJIT/Burst 就是这么做的）；`T*` 形参模型比源语义更严格。
+        //
+        // · 直接证据（2026-09-30，游戏仓 `ZeroCellsJob` 真实内核 obj 反汇编，clang-cl /O2）：
+        //     引用绑定：`cmpl $0,(%r8)` … 循环体 `movl $0,(%rcx,%rax,4)` + **每轮 `movslq (%r8)`**
+        //               （循环内重载上界！）⇒ 8 条指令的标量循环，0 个向量指令；
+        //     按值绑定：`movslq (%r8),%r8`（一次）→ `shlq $2,%r8` → `jmp` **`memset` 尾调用**
+        //               ⇒ 7 条指令，每元素 1 次 AVX2 向量擦写。
+        //
+        // ⚠ **但通解不是"全都按值绑定"**（2026-09-29 逐内核指令普查，A1→A2）：整 TU 指令
+        //   16031→17533（+9%），ZeroCells −30%、FlowGrad −5.6%、Bfs −2.3%、Melee −1%（栈引用
+        //   726→862，+19%），而 **Integrate +9.8%（栈引用 +34%）、FlowClear +53.6%** —— 对**只在
+        //   循环体内出现一次**的字段，按值绑定只有代价没有收益：引用绑定下那次载入可折进操作数
+        //   （0 条额外指令），按值绑定却要求该值跨整个循环存活 ⇒ 寄存器压力大时溢出到栈。
+        //   （`FlowClearJob` 在引用绑定下已向量化 19×`ymm` 即为反证：那里的行程数来自形参。）
+        //   真实负载同臂整步退化 +2.81 ms（5/6 同号）。臂 `=1`（仅单 IJob 路径）同月实测
+        //   Build ±0.01 / 整步 +0.77 ms（4/8）⇒ **路径**不是正确判据，**用途**才是。
+        //
+        // ⇒ **判据（默认，本修复）= 只对"参与循环行程数"的字段按值绑定**
+        //   （出现在 `for` 初值/条件/步进、`while`/`do` 条件里的字段，见 GetFieldLoopUse）。
+        //   这批字段正是编译器被挡住的那批；其余字段的发射件**逐字不变**，
+        //   批处理热内核（行程数来自形参 `__startIndex/__count`）结构上不入判据 ⇒ 单 TU 布局扰动面最小。
+        // · 类型判据：仅**已证 ≤ 16 B 的托管值类型**（内建标量 + EntJoy.Mathematics 的
+        //   float2/int2/uint2）；大结构体/未知大小仍按引用（拷贝成本未证划算）。
+        // · 语义安全性：既有生成码本就以 `const T&` 绑定 ⇒ 内核体**不可能写**这些字段
+        //   （写了编译不过，`const T&` 不可赋值；C# 侧也无法触达 `X_ptr`），
+        //   故按值绑定不改变可观察语义（把"编译器被迫假设会变"变成"源语义保证不变"）。
+        // 判据：字段**参与某处循环的行程数**（`for` 初值/条件/步进，或 `while`/`do` 条件）才按值绑定。
+        // 语义安全性：既有生成码本就以 `const T&` 绑定 ⇒ 内核体**不可能写**这些字段
+        //   （写了编译不过，`const T&` 不可赋值；C# 侧也无法触达 `X_ptr`），
+        //   故按值绑定不改变可观察语义（把"编译器被迫假设会变"变成"源语义保证不变"）。
+        private static bool ValueBindAllowed(bool participatesInLoopTripCount)
+        {
+            return participatesInLoopTripCount;
+        }
+
+        /// <summary>某个 job 的字段在循环里的用处分组（**按符号解析**，不再按名字猜）。</summary>
+        private sealed class FieldLoopUse
+        {
+            /// <summary>参与**循环行程数**的字段名：出现在 `for` 初值/条件/步进、或 `while`/`do` 条件里。</summary>
+            public readonly HashSet<string> TripCount = new HashSet<string>(StringComparer.Ordinal);
+            /// <summary>出现在**任意循环内**（头部或体内）的字段名（判据：这类形参加 `__restrict`）。</summary>
+            public readonly HashSet<string> InLoop = new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// 收集字段的循环用途（行程数 / 循环内）。
+        ///
+        /// **为什么是"行程数"那批按值绑定**：`const T& X = *X_ptr;` 中 `X_ptr` 是非 const 的 `T*` 形参
+        /// ⇒ 编译器必须假设循环体内的任何写都可能改写 `*X_ptr` ⇒ **行程数在编译期不可知**：每轮重载 +
+        /// 无法 unroll/向量化（`ZeroCellsJob` 真实 obj：8 条标量指令、0 向量指令、循环内每轮 `movslq (%r8)`）。
+        /// 按值绑定后 `X` 是入口一次的局部常量 ⇒ 行程数成为编译期常量。
+        ///
+        /// **为什么不是"循环体内"那批也按值绑定**：那里载入本可折进操作数（0 条额外指令），按值绑定却要求
+        /// 该值跨整个循环存活 ⇒ 寄存器压力大时溢出到栈（实测：FlowClear +53.6% 指令、
+        /// Integrate +9.8%、栈引用 +34%）。**循环体内**的字段改用**形参 `__restrict`** 处理
+        /// （零拷贝，可解锁向量化；见 `ScalarRestrictEnabled`）。
+        ///
+        /// **符号解析**（有语义模型时）：标识符必须解析到**本 job 的实例字段** ⇒ 同名局部/形参不再造成
+        /// 误判（旧的名字兜底会把整个名字判为"被屏蔽"而漏掉真字段，见 (l11)(i)⑤）。
+        /// 无模型时保留名字兜底（同名声明一律保守跳过）。
+        /// </summary>
+        private static FieldLoopUse GetFieldLoopUse(INamedTypeSymbol jobStruct, SemanticModel? semanticModel)
+        {
+            var use = new FieldLoopUse();
+            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>()
+                .FirstOrDefault(m => m.Name == Config.Execute);
+            var body = executeMethod == null ? null : SymbolHelper.GetMethodBody(executeMethod);
+            if (body == null) return use;
+
+            var fields = new HashSet<string>(
+                jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).Select(f => f.Name),
+                StringComparer.Ordinal);
+            if (fields.Count == 0) return use;
+
+            HashSet<string>? shadowed = null;
+            if (semanticModel == null)
+            {
+                shadowed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in executeMethod!.Parameters) shadowed.Add(p.Name);
+                foreach (var v in body.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+                    shadowed.Add(v.Identifier.Text);
+            }
+
+            void Take(SyntaxNode? node, HashSet<string> sink)
+            {
+                if (node == null) return;
+                foreach (var id in node.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>())
+                {
+                    var name = id.Identifier.Text;
+                    if (!fields.Contains(name)) continue;
+                    if (semanticModel != null)
+                    {
+                        var sym = semanticModel.GetSymbolInfo(id).Symbol;
+                        if (sym is IFieldSymbol f && !f.IsStatic
+                            && SymbolEqualityComparer.Default.Equals(f.ContainingType, jobStruct))
+                            sink.Add(name);
+                    }
+                    else if (shadowed != null && !shadowed.Contains(name))
+                    {
+                        sink.Add(name);
+                    }
+                }
+            }
+
+            // 循环体内的**条件**（if / 三元）里出现的字段不再单列一桶：唯一消费者（按值绑定的
+            // `=4` 臂）已删除。
+
+            bool sawLoop = false;
+            foreach (var node in body.DescendantNodes())
+            {
+                switch (node)
+                {
+                    case ForStatementSyntax f:
+                        sawLoop = true;
+                        if (f.Declaration != null)
+                            foreach (var v in f.Declaration.Variables) Take(v.Initializer?.Value, use.TripCount);
+                        foreach (var e in f.Initializers) Take(e, use.TripCount);
+                        Take(f.Condition, use.TripCount);
+                        foreach (var e in f.Incrementors) Take(e, use.TripCount);
+                        Take(f.Statement, use.InLoop);
+                        break;
+                    case WhileStatementSyntax w:
+                        sawLoop = true;
+                        Take(w.Condition, use.TripCount);
+                        Take(w.Statement, use.InLoop);
+                        break;
+                    case DoStatementSyntax d:
+                        sawLoop = true;
+                        Take(d.Condition, use.TripCount);
+                        Take(d.Statement, use.InLoop);
+                        break;
+                    case ForEachStatementSyntax fe:
+                        sawLoop = true;
+                        // foreach 的行程数由集合给（容器长度）；集合与元素都算"循环内"。
+                        // ⚠ C++ 路径目前**不支持** foreach 转译（会走 NT0xx 拒绝），此分支只为向前兼容。
+                        Take(fe.Expression, use.InLoop);
+                        Take(fe.Statement, use.InLoop);
+                        break;
+                }
+            }
+            // 2026-10-03：**判据必须考虑"transpiler 自己会合成循环"这件事**。
+            //   `IJobParallelFor`/`IJob` 的 C# 是**逐元素**形态（`Execute(int index)`），源码里**没有循环**；
+            //   合成循环的是 transpiler（`_Execute_Batch` 里包一层 `for (index = __startIndex; ...)`）。
+            //   于是此前在**源码里找循环**的判据（TripCount）对这类 job **永远为空** ⇒ 按值绑定与
+            //   `SCALAR_RESTRICT` 这两条优化对宿主**最重要的 job 类型完全失效**（Count / Integrate /
+            //   Place / Melee 全是 IJobParallelFor）。实测证据：生成的 `CountCellsJob_Execute.cpp` 里
+            //   六个标量全部是 `const T& X = *X_ptr;`，尽管 `Length/CellsW/StateDeath` 每元素都要读。
+            //   修法：源码里没有循环时，**整个 body 就是循环体** ⇒ 全部字段算"循环内"。
+            if (!sawLoop)
+            {
+                Take(body, use.InLoop);
+            }
+            use.InLoop.UnionWith(use.TripCount);
+            return use;
+        }
+
+        /// <summary>行程数字段**不限尺寸**也可按值绑定（仍须是值类型）。</summary>
+        private static bool ValueBindWideTypeAllowed() => true;
+
+        /// <summary>该字段类型是否属于"已证 ≤ 16 B 的托管值类型"（可按值绑定）。</summary>
+        private static bool ValueBindTypeOk(ITypeSymbol t)
+        {
+            switch (t.SpecialType)
+            {
+                case SpecialType.System_Boolean:
+                case SpecialType.System_Byte:
+                case SpecialType.System_SByte:
+                case SpecialType.System_Char:
+                case SpecialType.System_Int16:
+                case SpecialType.System_UInt16:
+                case SpecialType.System_Int32:
+                case SpecialType.System_UInt32:
+                case SpecialType.System_Int64:
+                case SpecialType.System_UInt64:
+                case SpecialType.System_Single:
+                case SpecialType.System_Double:
+                    return true;
+            }
+            if (t is INamedTypeSymbol nt
+                && nt.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyMathematics
+                && (nt.Name == Config.Float2 || nt.Name == Config.Int2 || nt.Name == Config.UInt2))
+                return true;
+            return false;
+        }
+
+        /// <summary>纯值字段形参是否加 `__restrict`：**窄档** —— 只给**出现在循环内**的字段加。
+        /// 机理：只给指向 **job 结构体成员** 的形参加，别名判定成立（与任何数组数据不可能同址），
+        /// 且不像按值绑定那样引入入口拷贝/栈溢出代价。数组/分量指针一律不加。
+        ///
+        /// clang-cl /O2 微实验确认机制本身有效：`int* __restrict len_ptr` + `for (i &lt; len)`
+        /// 会 hoist 行程数并**完全向量化**，而 `const int& len = *len_ptr` 每轮 `movslq`；
+        /// **加在局部引用上无效**（与不加逐字节相同）⇒ 必须加在**形参**上。
+        /// 语义中立：restrict 只排除"经其它指针访问"，**不**排除"经同一指针写"——
+        /// 内联或不可见调用只要通过同一指针写长度，行程数仍逐轮重载。
+        ///
+        /// 为什么是"窄"：把所有纯值字段都加（历史全字段臂）实测退化 ⇒ 只动真正挡住向量化的那批。</summary>
+        private static bool ScalarRestrictEnabled(string fieldName, FieldLoopUse loopUse)
+        {
+            return loopUse.InLoop.Contains(fieldName);
+        }
+
+        /// <summary>
+        /// G（守卫折叠）的 A/B 开关：**构建期**读 `ENTJOY_GUARD_FOLD`（`=0` 关闭 ⇒ 逐位回到未折叠行为）。
+        /// 动机（09 §54.4 / 12 §5 的纪律）：折叠是**生成期**变换，A/B 必须"同一源码、两次构建"，否则差异里会
+        /// 混进别的提交（本轮踩过：拿 10-03 18:19 的部署 DLL 当"改前"，它早于 HEAD 的若干转译器提交）。
+        /// </summary>
+        private static readonly bool GuardFoldEnabled =
+            System.Environment.GetEnvironmentVariable("ENTJOY_GUARD_FOLD") != "0";
+
+        /// <summary>
+        /// G（守卫折叠，2026-10-04；设计与判据见 docs/gridsearch/09 §54.4）：
+        /// 把"每元素一次"的 `index &lt; Length` 合取项折进**合成循环的上界**。
+        ///
+        /// 这里只做**检测**（AST + 语义）；**剥离**在生成文本上做（见 <see cref="StripFirstGuardConjunct"/>）——
+        /// ⚠ 不能用 `ReplaceNode` 重写后再翻译：重写树是**游离**的，Roslyn 的 `CheckSyntaxNode` 会沿父链
+        ///   回溯到根、发现不是本树 ⇒ `ArgumentException: 语法节点不在语法树中`（本实现第一版就这么炸的）。
+        ///
+        /// 识别形状（按**语法形状**，不按 job 名）：Execute 体内存在一个**无 else** 的
+        /// `if (index &lt; &lt;job 的 int 字段&gt; &amp;&amp; …) { … }`，第一个合取项左侧是 index 形参、
+        /// 右侧解析为本 job 的**非静态 int 字段**（宿主里的 `Length` 这类）。命中 ⇒ 输出字段名，返回 true。
+        /// 未命中（形状不符 / 字段不是 int / 没有这样的 if）⇒ 返回 false，调用方**逐位不变**。
+        /// 只认**第一个**命中的 if（宿主全文只命中 Count/Place 两处）。
+        /// </summary>
+        private static bool TryDetectIndexLengthGuard(
+            MethodDeclarationSyntax methodSyntax, string indexParamName, SemanticModel semanticModel,
+            out string foldedField)
+        {
+            foldedField = null;
+            var body = methodSyntax?.Body;
+            if (body == null || semanticModel == null) return false;
+
+            foreach (var ifStmt in body.DescendantNodes().OfType<IfStatementSyntax>())
+            {
+                if (ifStmt.Else != null) continue;            // 设计约束：无 else
+                if (ifStmt.Condition == null) continue;
+
+                // 沿 `&&` 左脊收集合取项（Roslyn 把 a && b && c 解析成 ((a && b) && c)）。
+                var conj = new System.Collections.Generic.List<ExpressionSyntax>();
+                var cur = ifStmt.Condition;
+                while (cur is BinaryExpressionSyntax be && be.IsKind(SyntaxKind.LogicalAndExpression))
+                {
+                    conj.Insert(0, be.Right);
+                    cur = be.Left;
+                }
+                conj.Insert(0, cur);
+                // 必须还有**其它**合取项：若守卫是唯一条件，剥离后 `if ()` 无意义 ⇒ 不折（逐位不变）。
+                if (conj.Count < 2) continue;
+
+                if (!(conj[0] is BinaryExpressionSyntax less) || !less.IsKind(SyntaxKind.LessThanExpression))
+                    continue;
+                if (!(less.Left is IdentifierNameSyntax leftId) || leftId.Identifier.Text != indexParamName)
+                    continue;
+
+                string fieldName = null;
+                if (less.Right is IdentifierNameSyntax rightId) fieldName = rightId.Identifier.Text;
+                else if (less.Right is MemberAccessExpressionSyntax ma && ma.Expression is ThisExpressionSyntax)
+                    fieldName = ma.Name.Identifier.Text;
+                if (fieldName == null) continue;
+
+                // 右侧必须解析为**本 job 的非静态 int 字段**（排除局部变量/形参/其它符号）。
+                var sym = semanticModel.GetSymbolInfo(less.Right).Symbol as IFieldSymbol;
+                if (sym == null || sym.IsStatic || sym.ContainingType == null) continue;
+                if (sym.Type.SpecialType != SpecialType.System_Int32) continue;
+
+                foldedField = fieldName;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// G 的**剥离**一步：在**已翻译**的 C++ 体里把首个 `if (index &lt; Field &amp;&amp; …)` 的首个合取项去掉。
+        /// 只在模式实际命中时返回 true（模式要求后面还有 `&amp;&amp;` ⇒ 不会产出 `if ()`）。
+        /// 模式用 AST 已确认过的 index 形参名与字段名构造 ⇒ 不会误伤别的比较。
+        /// </summary>
+        private static bool StripFirstGuardConjunct(ref string code, string indexParamName, string fieldName)
+        {
+            if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(fieldName)) return false;
+            var pattern = @"(\bif\s*\(\s*)" + Regex.Escape(indexParamName) + @"\s*<\s*"
+                + Regex.Escape(fieldName) + @"\s*&&\s*";
+            var rx = new Regex(pattern);
+            var m = rx.Match(code);
+            if (!m.Success) return false;
+            code = code.Substring(0, m.Index) + m.Groups[1].Value + code.Substring(m.Index + m.Length);
+            return true;
         }
 
         private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
@@ -313,7 +614,7 @@ namespace NativeTranspiler.Analyzer
             string paramsStr = BuildBatchJobParameters(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // IJobParallelForBatch：Execute(startIndex, count) 就是一次区间调用 ⇒ 不生成 index 循环，
@@ -356,7 +657,16 @@ namespace NativeTranspiler.Analyzer
             // ⚠ do-while 包裹**不能**解决这个问题（它只重定向 `break`，`return` 照样穿出去）——
             //   必须用一个立即调用的 lambda 包住体，`return;` 就变成"结束本次迭代"。
             bool bodyHasReturn = scalarBody.Contains("return;");
-            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
+            // G（守卫折叠）：AST 只做检测，剥离在**已翻译文本**上做（未命中 ⇒ 原样，逐位不变）。
+            string scalarLoopEnd = "__startIndex + __count";
+            if (GuardFoldEnabled
+                && TryDetectIndexLengthGuard(methodSyntax, indexParamName, semanticModel, out var guardField)
+                && StripFirstGuardConjunct(ref scalarBody, indexParamName, guardField))
+            {
+                scalarLoopEnd = $"std::min(__startIndex + __count, {guardField})";
+                bodyHasReturn = scalarBody.Contains("return;");
+            }
+            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {scalarLoopEnd}; ++{indexParamName})");
             sb.AppendLine("    {");
             if (bodyHasReturn) sb.AppendLine("        [&]() {");
             sb.Append(scalarBody);
@@ -374,7 +684,7 @@ namespace NativeTranspiler.Analyzer
             string paramsStr = BuildBatchJobParameters(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // IJobParallelForBatch：与 GenerateBatchFunctionStandard 的 isRangeJob 分支同构（不生成 index 循环）。
@@ -419,8 +729,16 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 标量回退（同上：体内有 `return;` 时用立即调用 lambda 包住，保证它只结束本次 index）
+            // G（守卫折叠）：AST 只做检测，剥离在**已翻译文本**上做（未命中 ⇒ 原样，逐位不变）。
+            string variantLoopEnd = "__startIndex + __count";
+            if (GuardFoldEnabled
+                && TryDetectIndexLengthGuard(methodSyntax, indexParamName, semanticModel, out var guardField2)
+                && StripFirstGuardConjunct(ref bodyCode, indexParamName, guardField2))
+            {
+                variantLoopEnd = $"std::min(__startIndex + __count, {guardField2})";
+            }
             bool variantHasReturn = bodyCode.Contains("return;");
-            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < __startIndex + __count; ++{indexParamName})");
+            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {variantLoopEnd}; ++{indexParamName})");
             sb.AppendLine("    {");
             if (variantHasReturn) sb.AppendLine("        [&]() {");
             sb.Append(bodyCode);
@@ -439,7 +757,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({singleParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             if (methodSyntax?.Body != null)
@@ -485,7 +803,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             if (methodSyntax?.Body != null)
@@ -512,7 +830,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             if (methodSyntax?.Body != null)
@@ -544,7 +862,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -607,7 +925,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -715,7 +1033,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -824,95 +1142,76 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", parameters);
         }
 
-        // ── 标量形参打包（`ENTJOY_PACK_SCALARS`）──
-        // 动机（实测，docs §16.45(aa/ab)）：每个标量字段各占一个形参 ⇒ `MeleeSimJob` 生成 70+ 形参，
-        // 而 x64 只有 4 个整数实参寄存器，其余全部经调用者栈；热循环里每次取用都要从栈重载。
-        // 把"纯值字段"收进一个结构体、以单个指针传参，可把形参数降到 (数组字段 + 1)。
-        // 闸门实测（同输入、同内核体、只差参数形状）：快约 5%（10/10 同号）。
-        // 关闭方式：环境变量 `ENTJOY_PACK_SCALARS=0`（生成器进程环境），用于 A/B 与回归。
-        private static bool PackScalarsEnabled()
-        {
-            // 默认**关闭**：闸门实测表明"形参数降到 ~19 后打包已无收益"，而生产内核的真实收益
-            // 取决于 MeleeSimJob（102 形参）的端到端验证——尚未完成；且该改造需覆盖
-            // 批处理 / 非批处理 / ISPC 三条发射路径（后两者开启时会构建失败，实测）。
-            // 故保留为**可选实验开关**，默认不影响既有构建与产物。
-            // 打开方式：生成器进程设 `ENTJOY_PACK_SCALARS=1`（见 docs §16.45(ac)）。
-            var v = System.Environment.GetEnvironmentVariable("ENTJOY_PACK_SCALARS");
-            return v != null && v.Length > 0 && v[0] == '1';
-        }
+        // ── 标量形参打包（`ENTJOY_PACK_SCALARS`）已删除（2026-10-04）──
+        // 原意：把"纯值字段"收进一个结构体、以单个指针传参，把形参数从 70+ 降到 (数组字段 + 1)。
+        // 删除理由：闸门实测"形参数降到 ~19 后打包已无收益"，且该改造需覆盖批处理/非批处理/ISPC
+        // 三条发射路径，后两者开启时**构建失败** ⇒ 始终默认关、从未真正可用。
+        // 注：为 `IJobEntity` 判定 ISPC 后端的原逻辑随之一并移除。
 
-        /// <summary>打包只针对**批处理（IJobParallelFor 系）C++ 后端** job：其签名、适配器、局部绑定三处
-        /// 都由本文件同源生成，改造面自洽。两类必须排除：
-        /// ① 非批处理路径（专用执行函数 + 另一套参数构造）尚未纳入，强行套用会产出未声明的 `__scalars`；
-        /// ② **ISPC 后端 job**：它的 `_Batch` 由 `IspcGenerator.GenerateCppWrapper` 生成，而该产物在
-        ///    "auto refresh disabled" 下**只写缺失文件、不再重写**（实测 `MoveJob_..._wrapper.cpp` 的
-        ///    mtime 停在 2026-09-13）⇒ 打包改造永远传不到它；单 TU 下适配器的打包声明与 wrapper 的
-        ///    未打包定义同处一个翻译单元 ⇒ `conflicting types for '..._Batch'`（110 条错误，同一根因）。
-        /// 排除 ISPC 后两者都与既有构建一致。</summary>
-        private static bool PackScalarsForJob(INamedTypeSymbol jobStruct)
-            => PackScalarsEnabled() && IsParallelForJob(jobStruct) && !IsIspcBackedJob(jobStruct);
-
-        /// <summary>该 job 是否声明了 ISPC 后端（`[NativeTranspile(Target = BackendTarget.Ispc)]`）。
-        /// 用**属性类名 + Target 参数**判定，从而不需要 attrSymbol（本文件深处拿不到 compilation）。
-        /// 判定逻辑与 AttributeHelper.GetBackendTarget 对齐：ctor 第 0 参与命名参数 `Target` 都算。</summary>
-        private static bool IsIspcBackedJob(INamedTypeSymbol jobStruct)
+        /// <summary>
+        /// 2026-10-02（09 §26）：**抽离复用** —— 生成原生 adapter 的"字段解包"代码。
+        /// 批形 adapter（`(void*, int start, int count)`）与 `IJobFor` 的 index 形 adapter
+        /// （`(void*, int index)`）**字段解包逐字相同**，只有前缀实参不同
+        /// （`__startIndex, __count` ↔ `__index, 1`）⇒ 解包部分收敛到这里，避免两处各写一遍。
+        /// 调用方负责先把前缀实参放进 <paramref name="callArgs"/>，本方法追加字段实参。
+        /// </summary>
+        private static void BuildAdapterFieldAccess(INamedTypeSymbol jobStruct, StringBuilder fieldReads, List<string> callArgs)
         {
-            foreach (var ad in jobStruct.GetAttributes())
+            int currentOffset = 0;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
-                if (ad.AttributeClass?.Name != Config.NativeTranspileAttribute) continue;
-                if (ad.ConstructorArguments.Length > 0 && ad.ConstructorArguments[0].Value is int c0
-                    && c0 == (int)NativeTranspiler.BackendTarget.Ispc)
-                    return true;
-                foreach (var na in ad.NamedArguments)
-                    if (na.Key == "Target" && na.Value.Value is int nv
-                        && nv == (int)NativeTranspiler.BackendTarget.Ispc)
-                        return true;
+                int offset = CalculateFieldOffset(field, ref currentOffset);
+
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                {
+                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
+                    {
+                        // NativeList: _listData 在偏移 0（指针）
+                        fieldReads.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)((char*)context + {offset});");
+                        callArgs.Add($"{field.Name}_listData");
+                    }
+                    else // NativeArray
+                    {
+                        // NativeArray: _buffer 在偏移 0, _length 在偏移 8
+                        var cppElemType = GetCppElementType(field.Type);
+                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
+                        fieldReads.AppendLine($"    int {field.Name}_length = *(int*)((char*)context + {offset + 8});");
+                        callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
+                    }
+                }
+                else if (field.Type is IPointerTypeSymbol)
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
+                    callArgs.Add($"{field.Name}_ptr");
+                }
+                else
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
+                    callArgs.Add($"{field.Name}_ptr");
+                }
             }
-            return false;
         }
 
-        /// <summary>纯值字段（既不是 NativeArray/NativeList，也不是指针字段）——即打包对象。</summary>
-        private static List<IFieldSymbol> GetScalarFields(INamedTypeSymbol jobStruct)
-            => jobStruct.GetMembers().OfType<IFieldSymbol>()
-                .Where(f => !f.IsStatic
-                    && !NativeTranspiler.IsEntJoyNativeContainerType(f.Type)
-                    && f.Type is not IPointerTypeSymbol)
-                .ToList();
+        /// <summary>`IJobFor` 的 index 形 adapter 函数名（与批形 adapter 区分开）。</summary>
+        // 名字规则统一放在 CppJobNames.cs 的 GetIndexAdapterFunctionName（同一个 partial class）。
 
-        private static string GetScalarsStructName(INamedTypeSymbol jobStruct)
-            => $"__Scalars_{jobStruct.Name}";
-
-        /// <summary>生成标量结构体定义（放在批函数之前；每个 TU 内局部类型，名字带 job 名避免冲突）。
-        /// 字段名沿用 `<field>_ptr`，这样既有的"解引用绑定"语句只要改绑定目标即可。</summary>
-        private static string BuildScalarsStruct(INamedTypeSymbol jobStruct)
-        {
-            var scalars = GetScalarFields(jobStruct);
-            if (scalars.Count == 0 || !PackScalarsForJob(jobStruct)) return string.Empty;
-            var sb = new StringBuilder();
-            sb.AppendLine($"struct {GetScalarsStructName(jobStruct)} {{");
-            foreach (var f in scalars)
-            {
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(f.Type);
-                sb.AppendLine($"    const {cppType}* {f.Name}_ptr;");
-            }
-            sb.AppendLine("};");
-            sb.AppendLine();
-            return sb.ToString();
-        }
-
-        /// <summary>批函数的形参：数组/指针字段照旧逐个传，纯值字段全部走 `__scalars`。
+        /// <summary>批函数的形参：数组/指针字段逐个传。
         /// 参数顺序必须与适配器侧的调用参数顺序一致（适配器由同一份字段遍历生成）。</summary>
         private static string BuildBatchJobParameters(INamedTypeSymbol jobStruct)
         {
             var parameters = new List<string> { "int __startIndex", "int __count" };
             AppendFieldParameters(jobStruct, parameters);
-            if (GetScalarFields(jobStruct).Count > 0 && PackScalarsForJob(jobStruct))
-                parameters.Add($"const {GetScalarsStructName(jobStruct)}* __scalars");
             return string.Join(", ", parameters);
         }
 
         private static void AppendFieldParameters(INamedTypeSymbol jobStruct, List<string> parameters)
         {
+            // 形参构造点通常没有语义模型 ⇒ 用名字兜底。仅影响 `__restrict` 限定符，误判方向无害
+            // （多一个限定符 vs 少一个优化），且**语义安全性由下面的论证独立成立**。
+            var loopUse = GetFieldLoopUse(jobStruct, null);
+            bool restrictList = ListLengthRestrictEnabled(jobStruct, loopUse);
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
@@ -921,7 +1220,16 @@ namespace NativeTranspiler.Analyzer
                     {
                         var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* {field.Name}_listData");
+                        // NativeList 的 `_listData` 形参：当**该表的长度决定某个循环的行程数**时加 `__restrict`。
+                        // 机理（clang-cl /O2 微实验，2026-09-30）：`UnsafeList<T>& L = *L_listData;` +
+                        // `for (i = 0; i < L.length(); i++)` 无法 hoist（微实验：每轮 `movslq 0x8(%rdx)`），
+                        // 而 `__restrict` 加在**形参**上即可 hoist + 向量化（`movslq` 提到循环外 + `movdqu`）；
+                        // 加在**局部引用**上无效（实测与不加逐字节相同）。
+                        // 语义中立：restrict 只断言"该对象不经其它指针访问"，**不**断言不被写 ——
+                        // 凡是通过同一个指针写（`L.Add()` 内联或不可见调用）的循环，行程数仍逐轮重载
+                        // （微实验已验证 inlined/opaque 两种写法）。真正被排除的只有"另一指针也在写它"。
+                        string lr = restrictList && loopUse.TripCount.Contains(field.Name) ? "__restrict " : "";
+                        parameters.Add($"EntJoy::Collections::UnsafeList<{cppElementType}>* {lr}{field.Name}_listData");
                     }
                     else // NativeArray
                     {
@@ -936,13 +1244,29 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     parameters.Add($"{cppType} {field.Name}_ptr");
                 }
-                else if (!PackScalarsForJob(jobStruct))
+                else
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    parameters.Add($"{cppType}* {field.Name}_ptr");
+                    // 纯值字段形参：可选 `__restrict`（只给这一类别名判定成立的地方加，见
+                    // ScalarRestrictEnabled 的机理注释；数组/分量指针仍不加）。
+                    // 注意：**不走 `RESTRICT` 宏** —— 宏定义在 `GenerateExportMacros` 的发射块里，
+                    // 改它会让 44 个 `emit-snapshot` 基线全部变文本；这里直接发 `__restrict`
+                    // （MSVC/clang-cl/GCC 都认），于是**默认档发射面逐字不变**。
+                    string restrict = ScalarRestrictEnabled(field.Name, loopUse) ? "__restrict " : "";
+                    parameters.Add($"{cppType}* {restrict}{field.Name}_ptr");
                 }
-                // 打包开启时：纯值字段不进形参表（由 __scalars 携带）
             }
+        }
+
+        /// <summary>NativeList 形参是否加 `__restrict`。
+        /// 只作用于**长度决定循环行程数**的表，且该 job 只有**一个** NativeList 字段 ——
+        /// 两个 NativeList 字段可能指向同一份 `UnsafeList`，此时对两者都加 restrict 就是**说谎**（UB）。</summary>
+        private static bool ListLengthRestrictEnabled(INamedTypeSymbol jobStruct, FieldLoopUse loopUse)
+        {
+            int lists = 0;
+            foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                if (NativeTranspiler.IsEntJoyContainerNamed(f.Type, Config.NativeList)) lists++;
+            return lists == 1 && loopUse.TripCount.Count > 0;
         }
 
         public static List<INamedTypeSymbol> CollectChunkNativeArrayTypes(INamedTypeSymbol jobStruct, Compilation compilation)
@@ -1230,19 +1554,6 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
-            // 纯值字段打包：适配器是独立 TU，需要看到 __Scalars_<Job> 类型。
-            // 与 job 头文件里的定义共用同一 include guard ⇒ 二者同构、不会重复定义。
-            if (PackScalarsForJob(jobStruct))
-            {
-                var adapterScalarsStruct = BuildScalarsStruct(jobStruct);
-                if (adapterScalarsStruct.Length > 0)
-                {
-                    sb.AppendLine($"#ifndef __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
-                    sb.AppendLine($"#define __SCALARS_{jobStruct.Name.ToUpperInvariant()}_DEFINED");
-                    sb.Append(adapterScalarsStruct);
-                    sb.AppendLine("#endif");
-                }
-            }
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 sb.AppendLine("#include \"SimdValue.h\"");
             if (IsChunkScheduledJob(jobStruct))
@@ -1811,57 +2122,11 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 
                 // 生成字段读取代码
+                // 2026-10-02（09 §26）：抽成 BuildAdapterFieldAccess 复用 —— 批形 adapter
+                // 与（IJobFor 专用的）index 形 adapter 的**字段解包逐字相同**，只是前缀实参不同。
                 var fieldReads = new StringBuilder();
                 var callArgs = new List<string> { "__startIndex", "__count" };
-                int currentOffset = 0;
-                
-                foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-                {
-                    int offset = CalculateFieldOffset(field, ref currentOffset);
-                    
-                    if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                    {
-                        if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                        {
-                            // NativeList: _listData 在偏移 0（指针）
-                            fieldReads.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)((char*)context + {offset});");
-                            callArgs.Add($"{field.Name}_listData");
-                        }
-                        else // NativeArray
-                        {
-                            // NativeArray: _buffer 在偏移 0, _length 在偏移 8
-                            var cppElemType = GetCppElementType(field.Type);
-                            fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                            fieldReads.AppendLine($"    int {field.Name}_length = *(int*)((char*)context + {offset + 8});");
-                            callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
-                        }
-                    }
-                    else if (field.Type is IPointerTypeSymbol)
-                    {
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
-                        callArgs.Add($"{field.Name}_ptr");
-                    }
-                    else if (PackScalarsForJob(jobStruct))
-                    {
-                        // 纯值字段：进 __scalars 局部结构体（见 BuildScalarsStruct 的动机注释）
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                        fieldReads.AppendLine($"    scalarsLocal.{field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
-                    }
-                    else
-                    {
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
-                        callArgs.Add($"{field.Name}_ptr");
-                    }
-                }
-
-                if (GetScalarFields(jobStruct).Count > 0 && PackScalarsForJob(jobStruct))
-                {
-                    fieldReads.Insert(0, $"    {GetScalarsStructName(jobStruct)} scalarsLocal;\n");
-                    callArgs.Add("&scalarsLocal");
-                }
-
+                BuildAdapterFieldAccess(jobStruct, fieldReads, callArgs);
                 sb.Append(fieldReads);
                 sb.AppendLine();
 
@@ -1915,6 +2180,33 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
+
+                // ── 2026-10-02（09 §26）：`IJobFor` 专用的 **index 形** adapter ──
+                // 动机：`IJobFor` 的调度语义是**单线程串行**（原生 `Scheduler::ScheduleFor`：
+                //   `for (i<length) func(ctx,i)`，typedef `IndexJobFunc(void*, int index)`），
+                //   而上面那个 adapter 是 **Batch 形** `(ctx, start, count)` ⇒ 交给 ScheduleFor 会签名错位。
+                // 做法：复用**同一套字段解包**（BuildAdapterFieldAccess），只把前缀实参换成 `(__index, 1)`
+                //   调同一个批内核（内核本就按 [start, start+count) 循环 ⇒ count=1 即"只跑该 index"；
+                //   两者同在一个 unity TU 里，会被内联）。
+                // 只为 `IJobFor` 发射；`IJobParallelFor`/`Batch` 没有 index 形入口，不需要。
+                if (IsForJob(jobStruct))
+                {
+                    string indexAdapterFuncName = GetIndexAdapterFunctionName(jobStruct);
+                    sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {indexAdapterFuncName}(void* context, int __index)");
+                    sb.AppendLine("{");
+                    var idxFieldReads = new StringBuilder();
+                    var idxCallArgs = new List<string> { "__index", "1" };
+                    BuildAdapterFieldAccess(jobStruct, idxFieldReads, idxCallArgs);
+                    sb.Append(idxFieldReads);
+                    sb.AppendLine();
+                    sb.AppendLine($"    {GetCppJobFunctionName(jobStruct, isBatch: true)}({string.Join(", ", idxCallArgs)});");
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+                    sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{indexAdapterFuncName}Ptr()");
+                    sb.AppendLine("{");
+                    sb.AppendLine($"    return (void*){indexAdapterFuncName};");
+                    sb.AppendLine("}");
+                }
             }
             else
             {
@@ -2343,7 +2635,7 @@ namespace NativeTranspiler.Analyzer
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb);
+            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
 
             try
             {
@@ -2448,7 +2740,17 @@ namespace NativeTranspiler.Analyzer
                         sb.Append(scalarBody);
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    // 2026-10-04：此处原先写作 `catch { }`（静默）。其语义是"**连标量兜底也失败了**"——
+                    //   再吞掉就会发射一个**没有函数体的 job**（静默 do-nothing），比直接失败危险得多
+                    //   （生成码能编译、但什么都不做）。故改为**显式失败**。
+                    //   当前语料里这条路径不触发（否则夹具/测试里那些 job 会变成空体、断言必然失败），
+                    //   所以对现有输入是零行为变化，只把"将来真走到这里"从静默错变成响亮错。
+                    throw new InvalidOperationException(
+                        $"[NativeTranspiler] chunk 函数生成失败：SIMD 路径与标量兜底路径都抛异常（job='{jobStruct.Name}'）。" +
+                        "原实现会在此静默吞掉并发射一个无函数体的 job，已改为显式失败。", ex);
+                }
             }
 
             sb.AppendLine("}");

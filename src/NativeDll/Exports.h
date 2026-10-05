@@ -80,6 +80,10 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
+    // 同 `JobSystem_ScheduleParallelForBatch`，但带**调用点声明的认领几何**
+    //   （claimGeom：0=Auto 1=Spread 2=Adjacent，与 C# `ClaimPolicy` 同值）。旧导出保留 ⇒ 老绑定不受影响；
+    //   C# 侧用 `TryGetExport` 探测：缺这个导出时退回旧导出（claimGeom 被忽略）。
+    JOB_API void* JobSystem_ScheduleParallelForBatchEx(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, int claimGeom, void* dependency);
 
     // ── 显式批提交（BatchScope.Submit 用）：一次 P/Invoke 提交一组 job，句柄回写 outHandles ──
     // kind: 0=IJob(JobFunc) 1=IJobFor(IndexJobFunc, length) 2=IJobParallelFor(BatchJobFunc, length+batchSize)
@@ -172,13 +176,10 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
         unsigned long long scheduleModeDeferredPublish;
         unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
-        unsigned long long directAssistClaims;
-        unsigned long long exhaustedTickets;
-        unsigned long long scheduleToPublishEwmaNs;
-        unsigned long long publishToFirstMainClaimEwmaNs;
-        unsigned long long publishToFirstWorkerClaimEwmaNs;
+        // 2026-10-04：原先此处的 6 个**死字段**（directAssistClaims / exhaustedTickets /
+        //   scheduleToPublishEwmaNs / publishToFirstMainClaimEwmaNs / publishToFirstWorkerClaimEwmaNs /
+        //   queueLockWaitEwmaNs）已删除，ABI 升到 3。C# 与 Unity 侧 port 必须同序同步。
         unsigned long long publishToCompletionEwmaNs;
-        unsigned long long queueLockWaitEwmaNs;
         unsigned long long perRangeExecEwmaNs;
         unsigned long long assistExecPctEwma;
         unsigned long long completionOverheadUs;
@@ -248,6 +249,18 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
     JOB_API void JobSystem_ResetStats();
+
+    /** `ENTJOY_WAKE_POLL` 的**生效证据**通道（诊断，不是功能）：
+     *  提交侧 [跳过写唤醒字, 真的 bump+notify_all] 两个计数；只看耗时曲线无法区分"无效"与"没生效"。
+     *  读法：skips 必须 >> wakes（连发小 job 的形状下应差 2~3 个数量级）。
+     *  老 DLL 无此导出 ⇒ 调用方必须 TryGetExport（见 NativeJobCore.cs）。*/
+    JOB_API void JobSystem_GetWakePollCounters(unsigned long long* skips, unsigned long long* wakes);
+
+    /** 认领几何（`ClaimPolicy`）的**生效证据**：按**声明值**分桶的批数 [spread, adjacent, auto]。
+     *  传了 Spread 就必须看到 spread>0（否则说明几何静默降级）。
+     *  老 DLL 无此导出 ⇒ 调用方必须 TryGetExport。*/
+    JOB_API void JobSystem_GetClaimGeomCounters(unsigned long long* spread, unsigned long long* adjacent,
+                                                unsigned long long* autoDecl);
     JOB_API void JobSystem_SetTimingDiagnostics(int enabled);
     JOB_API void JobSystem_SetMainThreadAssist(int enabled);
     JOB_API void JobSystem_SetWorkerAffinity(int enabled);

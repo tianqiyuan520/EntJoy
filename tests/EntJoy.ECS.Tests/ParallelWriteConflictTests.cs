@@ -17,6 +17,11 @@ namespace EntJoy.ECS.Tests
             public void Execute(int index)
             {
                 long v = Data[index];
+                // 忙等放大执行窗（与 IncJobSingle 同款）：写入冲突检测是**运行时**判据 —— 只有两个 job 的
+                // 执行时段**实际交叉**到同一容器才触发。CI 实测过本用例偶发失败（同一提交重跑即过）：
+                // 调度时序完全串行时 30 次重试全部落空，而"两 job 恰好重叠"本来是**运气**而不是保证。
+                // ⇒ 与兄弟用例一样把窗口撑开，让重叠成为结构性事实，而不是靠重试次数碰运气。
+                System.Threading.Thread.SpinWait(4);
                 Data[index] = v + 1;
             }
         }

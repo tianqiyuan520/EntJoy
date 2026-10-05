@@ -10,19 +10,27 @@
 #include "NativeContainers.h"
 #include <cstdio>
 
-// 运行时输出当前 SIMD 配置（DLL 加载时执行）
+// 加载期输出当前 SIMD 配置（DLL 加载时执行）
+//
+// 【约束】**加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）一律不做 I/O**：
+//   stderr 可能是父进程（Godot `_console.exe` / Start-Process）的**管道**，在 loader lock
+//   里写管道会阻塞；加载期任一环节失败的表现就是 `ERROR_DLL_INIT_FAILED (0x8007045A)`
+//   （整个 DLL 载不进来）。
+//   ⇒ 所有加载期 banner 先追加进内存缓冲（实现与说明在 JobSystemInternal.h + JobSystem.cpp），
+//     由 `JobSystem_Initialize()` 一次性 flush 到 stderr；输出文本（含 `[SIMD] …` 与
+//     `[JOBBATCHTABLE] …`）与原先逐字节一致，只是**推迟到 Initialize**。
 struct SimdInfo {
     SimdInfo() {
 #if defined(__AVX2__)
-        std::fprintf(stderr, "[SIMD] AVX2 8-wide\n");
+        JobSystem::LoadBannerAppend("[SIMD] AVX2 8-wide\n");
 #elif defined(__AVX__)
-        std::fprintf(stderr, "[SIMD] AVX 8-wide\n");
+        JobSystem::LoadBannerAppend("[SIMD] AVX 8-wide\n");
 #elif defined(__SSE4_2__) || defined(__SSE4_1__) || defined(__SSE__) || defined(_M_X64)
-        std::fprintf(stderr, "[SIMD] SSE4 4-wide\n");
+        JobSystem::LoadBannerAppend("[SIMD] SSE4 4-wide\n");
 #elif defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
-        std::fprintf(stderr, "[SIMD] NEON 4-wide\n");
+        JobSystem::LoadBannerAppend("[SIMD] NEON 4-wide\n");
 #else
-        std::fprintf(stderr, "[SIMD] SCALAR 1-wide\n");
+        JobSystem::LoadBannerAppend("[SIMD] SCALAR 1-wide\n");
 #endif
     }
 } g_simdInfo;
@@ -56,11 +64,17 @@ extern "C"
     uint32_t JobSystem_GetAbiVersion()
     {
         // ABI 2: JobSystem_Initialize returns an int status code.
-        return 2u;
+        // ABI 3: 删除 6 个死 stats 字段（directAssistClaims / exhaustedTickets /
+        //        scheduleToPublishEwmaNs / publishToFirstMainClaimEwmaNs /
+        //        publishToFirstWorkerClaimEwmaNs / queueLockWaitEwmaNs）—— 布局已变，
+        //        故必须升版本，使旧二进制在加载期被拒绝，而不是按错位偏移静默读错。
+        return 3u;
     }
 
     int JobSystem_Initialize(int numThreads)
     {
+        // 先把加载期 banner 一次性吐出（加载期不 I/O，见文件头约束）。
+        JobSystem::LoadBannerFlush();
         // 返回 0=成功，非 0=失败；不再静默吞掉初始化失败，让 C# 据此回退 Managed backend。
         try
         {
@@ -187,12 +201,26 @@ extern "C"
     void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup,
         int length, int batchSize, void* dependency)
     {
+        // 旧导出：claimGeom 缺省 0（Auto）。
+        return JobSystem_ScheduleParallelForBatchEx(func, context, cleanup, length, batchSize, 0, dependency);
+    }
+
+    // 调用点**在代码里**声明认领几何的入口。
+    //   claimGeom: 0=Auto（默认）1=Spread（每 worker 独占连续段 + 空手尾部窃取）
+    //              2=Adjacent（共享游标发相邻窗口；Melee 的空间复用靠它）
+    //   只在 1/2 时生效；批表第四字段（显式声明）优先级更高。
+    void* JobSystem_ScheduleParallelForBatchEx(BatchJobFunc func, void* context, ContextCleanupFunc cleanup,
+        int length, int batchSize, int claimGeom, void* dependency)
+    {
         try
         {
             JobSystem::JobHandle dep;
             if (dependency)
                 dep = JobSystem::JobHandle(fromHandle(dependency), true);
-            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length, batchSize, cleanup, dep);
+            uint32_t geom = 0u;
+            if (claimGeom == static_cast<int>(JobSystem::kClaimGeomSpread)) geom = JobSystem::kClaimGeomSpread;
+            else if (claimGeom == static_cast<int>(JobSystem::kClaimGeomAdjacent)) geom = JobSystem::kClaimGeomAdjacent;
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length, batchSize, cleanup, dep, geom);
             return toHandle(handle);
         }
         catch (...) { return nullptr; }
@@ -201,11 +229,11 @@ extern "C"
     int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles)
     {
         if (!descs || count <= 0 || !outHandles) return 0;
-        // 打包 fast path（Item 1）的最小 run 长度：短 run 走逐描述符路径，避免为 1-3 个 job
+        // 打包 fast path 的最小 run 长度：短 run 走逐描述符路径，避免为 1-3 个 job
         // 付一个 batch（BatchStorage + token 提交 + 退役）的固定成本。
         constexpr int kPackMinRun = 4;
         int ok = 0;
-        // 单描述符提交（原行为，未改动）；返回是否成功提交。
+        // 单描述符提交；返回是否成功提交。
         auto submitOne = [&](int idx) -> bool {
             outHandles[idx] = nullptr;
             const JobBatchDesc& d0 = descs[idx];
@@ -673,13 +701,7 @@ extern "C"
         stats->scheduleModeDeferredPublish = snapshot.scheduleModeDeferredPublish;
         stats->scheduleModeDeferredPublishNoAssist = snapshot.scheduleModeDeferredPublishNoAssist;
         stats->frameQueueDepthPeak = snapshot.frameQueueDepthPeak;
-        stats->directAssistClaims = snapshot.directAssistClaims;
-        stats->exhaustedTickets = snapshot.exhaustedTickets;
-        stats->scheduleToPublishEwmaNs = snapshot.scheduleToPublishEwmaNs;
-        stats->publishToFirstMainClaimEwmaNs = snapshot.publishToFirstMainClaimEwmaNs;
-        stats->publishToFirstWorkerClaimEwmaNs = snapshot.publishToFirstWorkerClaimEwmaNs;
         stats->publishToCompletionEwmaNs = snapshot.publishToCompletionEwmaNs;
-        stats->queueLockWaitEwmaNs = snapshot.queueLockWaitEwmaNs;
         stats->perRangeExecEwmaNs = snapshot.perRangeExecEwmaNs;
         stats->assistExecPctEwma = snapshot.assistExecPctEwma;
         stats->completionOverheadUs = snapshot.completionOverheadUs;
@@ -748,6 +770,25 @@ extern "C"
     void JobSystem_ResetStats()
     {
         JobSystem::ResetStatsSnapshot();
+    }
+
+    // `ENTJOY_WAKE_POLL` 生效证据（见 Exports.h 的说明）。
+    void JobSystem_GetWakePollCounters(unsigned long long* skips, unsigned long long* wakes)
+    {
+        // 计数走 thread_local 累加（热路径不写全局原子）⇒ 读取前先把**本线程**的尾巴合并进来，
+        // 否则最近 <1024 次派发读不到（调用方通常是提交线程，正是计数的主要来源）。
+        JobSystem::WakePollFlushCurrentThread();
+        if (skips) *skips = JobSystem::g_wakePollSkips.load(std::memory_order_relaxed);
+        if (wakes) *wakes = JobSystem::g_wakePollWakes.load(std::memory_order_relaxed);
+    }
+
+    // 认领几何生效证据（见 Exports.h）。
+    void JobSystem_GetClaimGeomCounters(unsigned long long* spread, unsigned long long* adjacent,
+                                        unsigned long long* autoDecl)
+    {
+        if (spread) *spread = JobSystem::g_claimGeomDeclSpread.load(std::memory_order_relaxed);
+        if (adjacent) *adjacent = JobSystem::g_claimGeomDeclAdjacent.load(std::memory_order_relaxed);
+        if (autoDecl) *autoDecl = JobSystem::g_claimGeomDeclAuto.load(std::memory_order_relaxed);
     }
 
     void JobSystem_SetTimingDiagnostics(int enabled)

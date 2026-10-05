@@ -79,10 +79,14 @@ namespace NativeTranspiler.Analyzer
         }
 
     /// <summary>
-    /// 助手（非入口）的**头内联**发射：函数体直接进 .h 并标 `static inline`，不再发 dllexport 独立 TU。
+    /// 助手（非入口）的**头内联**发射：函数体直接进 .h 并标 `static __forceinline`，不再发 dllexport 独立 TU。
     /// 动机（实测，见 `docs/gridsearch/07 §7x(j)(h)`）：助手原为 `EXTERNC __declspec(dllexport)`，
-    /// clang 对 dllexport 函数**不内联**（单 TU 也不行——反汇编实测 7 处 `callq`）；仅加 `inline` 无效。
-    /// 改为头内联后调用点可内联，且**不依赖 UNITY_BUILD**：需要助手体的 TU 只需 include 本头。
+    /// clang 对 dllexport 函数**不内联**（单 TU 也不行——反汇编实测 7 处 `callq`）；仅加 `static inline` 只解决了其中一部分。
+    /// 2026-09-29 复测（8 物理核、A 侧逐对交替、哈希自证、12 对）：仅 `static inline` 时
+    /// `MeleeSimJob_Execute_Batch` 仍有 **6 处 `callq`**（`BuildSingleOrcaLine`×1、`FlowGoalDirection`×2、
+    /// `ProjectLineConstraints`×2、`__security_check_cookie`×1），其中一个 13 参数大函数与两个 Orca 子助手未被内联；
+    /// 改为 `static __forceinline` 后 **`callq` 6→0**，实测 **Melee 12/12 同号、中位 −3.43 ms（−2.6%）；
+    /// 整步 10/12、中位 −3.13 ms（−1.8%）** ⇒ 达标并落地。**不依赖 LTO、不改调用方**。
     /// 入口方法（`[NativeTranspile]` 标记的）仍走 `GenerateHeader`/`GenerateImplementation`（dllexport）。
     /// </summary>
     public static string GenerateInlineHelperHeader(IMethodSymbol method, Compilation compilation,
@@ -91,7 +95,7 @@ namespace NativeTranspiler.Analyzer
     {
         var functionName = GetCppFunctionName(method);
         var exportSig = GenerateCppFunctionSignature(method, fullyQualified: true);
-        var inlineSig = "static inline " + exportSig
+        var inlineSig = "static __forceinline " + exportSig
             .Replace("GENERATED_API ", string.Empty)
             .Replace("CALLINGCONVENTION ", string.Empty);
         var body = GenerateImplementation(method, compilation, userStructs, autoSIMD);

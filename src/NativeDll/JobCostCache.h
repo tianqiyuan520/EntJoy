@@ -6,13 +6,12 @@
 // 用每 job 的每元素执行成本 EWMA（batch 退役时从 wall-clock 反推），
 // ResolveChunkSize 据此自动求解最优 tile 数。
 //
-// 自适应内存绑定检测（带宽/延迟绑定 job，如 GridSearch Query 空间哈希 gather）：
-//   纯"每元素成本"模型假设成本随并行度线性摊平（compute-bound）。但对
-//   memory-bound job，总耗时由共享 DRAM 带宽/访问延迟主导，多开 tile 不会
-//   线性提速 —— 按每元素成本推 tile 数会系统性错标。本实现用「粗/细两种
-//   粒度下的每元素成本 EWMA」自检测：若细粒度（JCC 公式选定的 chunk）成本
-//   与粗粒度（tpw chunk）成本几乎相同（比值 > 0.85），说明加 tile 无增益，
-//   判定 memory-bound，退役到固定 tpw 分块；否则判定 parallel，走原公式。
+// 内存绑定检测：纯"每元素成本"模型假设成本随并行度线性摊平（compute-bound）；
+//   但对 memory-bound job（带宽/延迟绑定，如空间哈希 gather），总耗时由共享
+//   DRAM 带宽/访问延迟主导，多开 tile 不会线性提速。本实现用「粗/细两种粒度
+//   下的每元素成本 EWMA」自检测：细粒度（JCC 公式选定的 chunk）成本明显高于
+//   粗粒度（tpw chunk）⇒ 判 memory-bound，退役到固定 tpw 分块；否则判
+//   parallel，走原公式。
 //
 // 设计：
 //   - 固定 256 槽数组（2KB），无锁（槽位独立 atomic）；funcHash（FNV-1a 32-bit）
@@ -32,8 +31,17 @@
 namespace JobSystem
 {
     // 诊断开关（定义在 JobSystem.cpp：`ENTJOY_JCC_VERBOSE=1`）。
-    // 前置声明：本头在 JobSystemInternal.h:15 被包含，早于该 extern 的正式声明（L152）⇒ 必须在此可见。
+    // 本头早于 JobSystemInternal.h 中该 extern 的正式声明被包含 ⇒ 前置声明必须在此可见。
     extern bool g_jobCostCacheVerbose;
+
+    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认**开**）的生效证据计数（定义在 JobSystem.cpp）──
+    // 判据：`flips` 必须 > 0；`nosample` 相对有效调用若占绝大多数 ⇒ F6 事实上是死的
+    //（判据链会在无键 / 无成本样本 / 迟滞不翻转三处静默退化，只看耗时无法区分）。
+    extern std::atomic<uint64_t> g_claimGeomNoKey;       // funcHash==0（表命中等，不问 F6）
+    extern std::atomic<uint64_t> g_claimGeomNoSample;    // 有关键但成本样本为 0（= 静默回退）
+    extern std::atomic<uint64_t> g_claimGeomSliced;      // 决策结果：走切片
+    extern std::atomic<uint64_t> g_claimGeomInterleaved; // 决策结果：走交错
+    extern std::atomic<uint64_t> g_claimGeomFlips;       // 真的发生了状态翻转（= 自适应在动）
 
     // 槽位数。256 对典型游戏（<50 job 类型）足够；碰撞 → EWMA 重学。
     constexpr int kJobCostSlots = 256;
@@ -46,33 +54,19 @@ namespace JobSystem
     constexpr int kCoarseProbeSamples = 3;
     constexpr int kMinFineSamples = 2;
     // 细/粗成本比 > 此值 → 判 memory-bound（细粒度没带来提速）。
-    // 阈值 >1.0：perElem 改为纯执行口径后，compute-bound job 的细/粗分块
-    // perElem 比值天然 ≈1（总执行量相同），0.85 会把 light/medium job 全误判为
-    // mem-bound（tiles 固定 tpw，JCC 自适应失效）。1.15 = 细比粗慢 15% 才判带宽受限
-    //（真 memory-bound 如 GridSearch 空间哈希 gather，多 tile 争带宽 ratio 远大于此）。
+    // 阈值 >1.0：perElem 为纯执行口径，compute-bound job 的细/粗比值天然 ≈1
+    //（总执行量相同）⇒ 判据取"细比粗慢 15%"。
     constexpr double kMemBoundRatio = 1.15;
 
-    // ── 健壮分类（`ENTJOY_JCC_ROBUST=1`；动机见 07 §7an 实测，默认关 ⇒ 关闭时逐位不变）──
-    // 旧判据（kCoarseProbeSamples=3 / kMinFineSamples=2 + unknown→learned 单向锁死）在真实负载上不可靠：
-    //   · 同一 job 相邻批的 execSpan 实测摆动 **3408µs ↔ 594µs（5.7×）**（`tools/gate-run/jcc/`）⇒ 2 个细样本
-    //     就定终身的分类等于掷骰子；锁死后 mem-bound 分支**永不产出细样本** ⇒ 无法恢复。
-    //   · 旧代码把"公式产出的 15 tiles"也记成细样本（比 tpw 的 60 还粗 4×）⇒ 系统性推高比值 ⇒ 全判 mem-bound。
-    // 改法：① 每类环形窗取**中位数**（抢占只增不减 ⇒ 中位稳健）；② 每类 ≥16 样本才判；
-    //   ③ 细/粗标注诚化（chunk 必须严格小于 tpw chunk 才算细）；④ 双向 + 迟滞 + 冷却；
-    //   ⑤ mem-bound 期**周期探针**（每 32 次解析放一次公式分块），保证还能采到新证据。
+    // ── 健壮分类（`ENTJOY_JCC_ROBUST=1`，进程启动读一次；默认关 ⇒ 关闭时逐位不变）──
+    // 每类环形窗取**中位数**（抢占只增不减 ⇒ 中位稳健），样本够 + 冷却到点才判，
+    // 双向（含 unknown→learned）带迟滞；mem-bound 期周期探针保证还能采到新证据。
     constexpr int kRobustWindow = 24;
     constexpr int kRobustMinSamples = 8;
     constexpr uint32_t kRobustCooldown = 16;
     constexpr uint32_t kRobustProbeInterval = 32;
     constexpr double kRobustParallelRatio = 0.95;   // 中位比 < 0.95 ⇒ 细粒度确实更快 ⇒ parallel
     constexpr double kRobustMemRatio = 1.15;        // 中位比 > 1.15 ⇒ mem-bound
-    // ── 第二观测量：**每元素批墙钟**（墙钟口径守卫）──
-    // 动机：`perElem = execSpan/N` 只量"首 tile 开始 → 末 tile 完成"，**不含**唤醒/认领/退役/令牌收尾；
-    // 一个 job 完全可能"execSpan 变好、批墙钟变差"⇒ 单观测量会给错判决。
-    // ── 已撤的第二观测量（记录，勿重做）──
-    // 曾试过把"每元素**批墙钟**"（(finalize−publish)/N）作为第二道门槛（parallel 必须 exec<0.95 且 wall<0.98）。
-    // 12 对 A/B 实测：Melee **由 +4.37 恶化到 +7.67（11/12）**、整步 **+8.08**。原因：wall 含唤醒+令牌收尾+退役链，
-    // 对高频小 job 噪声极大 ⇒ parallel↔memBound 反复抖动，每批换一种粒度。**已回退**（见 07 §7an(c2)）。
     constexpr double kRobustScale = 1000.0;         // 定点：ns × 1000（uint32 可表 4.29e6 ns/元素）
 
     // 每槽分类模式
@@ -82,6 +76,16 @@ namespace JobSystem
         kModeParallel = 1,  // compute-bound：细粒度有增益，走 JCC 公式
         kModeMemBound = 2   // bandwidth/latency-bound：固定 tpw 分块
     };
+
+    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认**开**）：**按 job 的认领几何** ──
+    // 同一条静态几何对不同 job 可能反号，故与 chunk 大小一样只能按 job 定。
+    // 判据 = JCC 已有的**每元素执行成本** EWMA + 迟滞（不做探索）：
+    //   cost < kClaimSliceEnterNs(8ns)  ⇒ 由共享内存 RMW / 每项固定成本主导 ⇒ **切片**（散开同时刻的访问）
+    //   cost > kClaimSliceExitNs(12ns)  ⇒ 由计算与空间复用主导 ⇒ **交错**（保持 worker 邻近，吃邻居/cache 复用）
+    // 区间内保持现状；无样本（cost==0，例如对齐档表命中时 JCC 不学）⇒ 回退**交错**（默认档）。
+    // 观测量与 chunk 学习共用同一个 per-job EWMA（不新增学习器、不与 JCC 抢槽）。
+    constexpr double kClaimSliceEnterNs = 8.0;
+    constexpr double kClaimSliceExitNs = 12.0;
 
     struct JobCostCache
     {
@@ -93,7 +97,7 @@ namespace JobSystem
         // 单 tile 执行时间 ≈ C_fixed + tileSize×C_elem。退役时从
         // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem 反解，EWMA 学习。
         // 空体/超轻 job 的 C_elem≈0、C_fixed 主导 → 单因子 perElem 模型失效，
-        // 必须显式建模 C_fixed（ManyJobsBench 8K/64K/1M 最优 tiles 各异的原因）。
+        // 必须显式建模 C_fixed。
         std::atomic<uint64_t> perTileEwmaNs[kJobCostSlots];
         // funcPtr hash 校验（碰撞时复用 → 重学）
         std::atomic<uint32_t> slotHash[kJobCostSlots];
@@ -109,12 +113,33 @@ namespace JobSystem
         std::atomic<uint32_t> lastEvalTick[kJobCostSlots];   // 上次评估时的样本序号（冷却用）
         std::atomic<uint32_t> probeTick[kJobCostSlots];      // mem-bound 期探针计数
 
+        // ---- F6：per-job 认领几何（交错 / 切片）的迟滞状态 ----
+        // 独立表 + 乘法散列 + 键校验：不能用低位索引（内核 RVA 按 16 字节对齐 ⇒ 低位大量碰撞，
+        // 多个 job 会抢同一格状态）；键校验保证绝不会把别的 job 的决定当自己的（碰撞只退化成偶尔重置状态）。
+        static constexpr uint32_t kClaimGeomSlots = 128;
+        static uint32_t ClaimGeomIndex(uint32_t h) noexcept
+        {
+            return (h * 2654435761u) >> (32u - 7u);   // Knuth 乘法散列取高 7 位 ⇒ 128 槽
+        }
+        std::atomic<uint32_t> claimGeomKey[kClaimGeomSlots];
+        std::atomic<uint8_t> claimGeomState[kClaimGeomSlots];
+
         // `ENTJOY_JCC_ROBUST=1` 时启用健壮分类；进程启动读一次，之后只读。
         bool robustMode = []() -> bool {
             const char* v = std::getenv("ENTJOY_JCC_ROBUST");
             return v != nullptr && v[0] == '1';
         }();
         bool IsRobust() const noexcept { return robustMode; }
+
+        // ── **每 job 槽索引必须散列，不能用低位** ──
+        // 内核键 = 函数在模块内的 RVA，函数按 16 字节对齐 ⇒ 键的低 4 位恒为 0，
+        // `key & (kJobCostSlots-1)` 实际只用位 4..7，多个 job 会共享同一槽并互相踩
+        //（`slotHash` 校验使被踩的 job 读到 0 = 无样本 ⇒ JCC 学不到它，退回 tpw=4 兜底）。
+        // 改用 Knuth 乘法散列取高 8 位。
+        static uint32_t SlotOf(uint32_t funcHash) noexcept
+        {
+            return (funcHash * 2654435761u) >> 24;
+        }
 
         JobCostCache() noexcept { Init(); }
 
@@ -137,12 +162,63 @@ namespace JobSystem
                     coarseRingNs[i][j] = 0;
                 }
             }
+            // ⚠ F6 的独立表是 **kClaimGeomSlots(=128) < kJobCostSlots(=256)**，必须单独清，
+            //   且**绝不能塞进上面那个 0..kJobCostSlots-1 的循环** —— 那是越界写，会踩到相邻成员/全局量。
+            for (uint32_t i = 0; i < kClaimGeomSlots; ++i)
+            {
+                claimGeomState[i].store(0, std::memory_order_relaxed);
+                claimGeomKey[i].store(0, std::memory_order_relaxed);
+            }
+        }
+
+        // ---- F6：认领几何决策（提交侧调用；`funcHash` = JCC 的 per-job 键，0 = 无键）----
+        // 返回 true ⇒ 本批走**切片认领**。见文件头 kClaimSliceEnterNs/ExitNs 的判据说明。
+        bool ClaimSlicedWanted(uint32_t funcHash, bool globalSliced) noexcept
+        {
+            if (funcHash == 0)
+            {
+                g_claimGeomNoKey.fetch_add(1, std::memory_order_relaxed);
+                return globalSliced;
+            }
+            // 判据取**已学到的**每元素成本 —— 细样本优先，**粗样本兜底**：内批被表/强制档钉住时
+            //   `UpdatePerElemCost` 只写 `perElemCoarseNs`，粗样本是该档下**唯一存在**的样本。
+            // 语义仍然"按 job"（键 = 内核 RVA），且不参与 batch 选择 ⇒ 对齐档的粒度契约不破。
+            double cost = GetPerElemCost(funcHash);         // 0 = 未学到（含表命中旁路 JCC 的情形）
+            if (cost <= 0.0) cost = GetCoarseCost(funcHash);
+            if (cost <= 0.0)
+            {
+                // ← 静默回退：无样本可用 ⇒ F6 在本 job 上不生效（该计数即为此设）。
+                g_claimGeomNoSample.fetch_add(1, std::memory_order_relaxed);
+                return globalSliced;
+            }
+            // 独立表 + 键校验：本格属于别的 job ⇒ 重置为本 job 的初始状态（绝不会读到别人的决定）。
+            const uint32_t slot = ClaimGeomIndex(funcHash);
+            if (claimGeomKey[slot].load(std::memory_order_relaxed) != funcHash)
+            {
+                claimGeomKey[slot].store(funcHash, std::memory_order_relaxed);
+                claimGeomState[slot].store(0, std::memory_order_relaxed);
+            }
+            const uint8_t cur = claimGeomState[slot].load(std::memory_order_relaxed);
+            uint8_t want = cur;
+            if (cur == 0 && cost < kClaimSliceEnterNs) want = 1;        // 进入切片
+            else if (cur == 1 && cost > kClaimSliceExitNs) want = 0;    // 退出切片
+            if (want != cur)
+            {
+                claimGeomState[slot].store(want, std::memory_order_relaxed);
+                g_claimGeomFlips.fetch_add(1, std::memory_order_relaxed);
+                if (g_jobCostCacheVerbose)
+                    std::printf("[CLAIMGEOM] hash=%08x perElem=%.2fns -> %s\n",
+                        funcHash, cost, want ? "sliced" : "interleaved");
+            }
+            if (want) g_claimGeomSliced.fetch_add(1, std::memory_order_relaxed);
+            else g_claimGeomInterleaved.fetch_add(1, std::memory_order_relaxed);
+            return want != 0;
         }
 
         // 热路径读取：返回每元素 ns；0 = 冷启动无数据（调用方走 tpw=4 兜底）。
         double GetPerElemCost(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) == funcHash)
             {
                 return static_cast<double>(
@@ -156,7 +232,7 @@ namespace JobSystem
         // 代理跑公式，产出细粒度分块以采集细样本。0 = 冷启动无数据。
         double GetCoarseCost(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) == funcHash)
             {
                 return static_cast<double>(
@@ -169,7 +245,7 @@ namespace JobSystem
         // 每 tile 固定开销（C_fixed）读取：两因子决策用。0 = 未学习。
         double GetPerTileCost(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) == funcHash)
             {
                 return static_cast<double>(
@@ -182,7 +258,7 @@ namespace JobSystem
         // 分类模式读取（ResolveChunkSize 用）：0 unknown / 1 parallel / 2 mem-bound。
         SlotMode GetMode(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) == funcHash)
                 return static_cast<SlotMode>(
                     slotMode[slot].load(std::memory_order_relaxed));
@@ -192,7 +268,7 @@ namespace JobSystem
         // 粗粒度样本学习是否完成（ResolveChunkSize 学习期用）。
         bool HasLearnedCoarse(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) != funcHash)
                 return false;
             return coarseSamples[slot].load(std::memory_order_relaxed) >= kCoarseProbeSamples;
@@ -200,7 +276,7 @@ namespace JobSystem
 
         uint32_t FineSampleCount(uint32_t funcHash) const noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             if (slotHash[slot].load(std::memory_order_relaxed) != funcHash) return 0;
             return fineSamples[slot].load(std::memory_order_relaxed);
         }
@@ -214,7 +290,7 @@ namespace JobSystem
                                bool targetCoarse) noexcept
         {
             if (perElemNs < 0.0) return;
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             slotHash[slot].store(funcHash, std::memory_order_relaxed);
             const uint64_t sample = static_cast<uint64_t>(perElemNs * static_cast<double>(kJobCostQ22));
 
@@ -240,7 +316,7 @@ namespace JobSystem
                 tick = f + 1;
                 if (robustMode) RobustStore(fineRingNs[slot], f, perElemNs);
             }
-            // 健壮模式：旧的一次性单向锁死判据被"中位数 + 双向迟滞"取代；否则保持原语义逐位不变。
+            // 健壮模式：中位数 + 双向迟滞重分类；关闭时走 TryClassify（unknown→learned 单向）逐位不变。
             if (robustMode) RobustReclassify(slot, tick);
             else TryClassify(slot);
         }
@@ -249,7 +325,7 @@ namespace JobSystem
         // 否则锁死后再也采不到细样本、永远无法纠错。单槽原子自增，无锁。
         bool ProbeDue(uint32_t funcHash) noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             const uint32_t t = probeTick[slot].fetch_add(1, std::memory_order_relaxed) + 1;
             return (t % kRobustProbeInterval) == 0;
         }
@@ -259,7 +335,7 @@ namespace JobSystem
         // ⇒ mode 永为 unknown ⇒ 永远走公式（永远细粒度），使 Melee 受损而收益被抵消。
         bool ParityProbe(uint32_t funcHash) noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             const uint32_t t = probeTick[slot].fetch_add(1, std::memory_order_relaxed);
             return (t & 1u) != 0u;
         }
@@ -267,7 +343,7 @@ namespace JobSystem
         // 健壮判据当前的中位比（<=0 表示样本不足）。诊断用（`ENTJOY_JCC_VERBOSE` 路径）。
         double RobustRatio(uint32_t funcHash) noexcept
         {
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             const uint32_t fc = fineSamples[slot].load(std::memory_order_relaxed);
             const uint32_t cc = coarseSamples[slot].load(std::memory_order_relaxed);
             if (fc < kRobustMinSamples || cc < kRobustMinSamples) return 0.0;
@@ -281,7 +357,7 @@ namespace JobSystem
         void UpdatePerTileCost(uint32_t funcHash, double perTileNs) noexcept
         {
             if (perTileNs <= 0.0) return;
-            const int slot = funcHash & (kJobCostSlots - 1);
+            const uint32_t slot = SlotOf(funcHash);
             slotHash[slot].store(funcHash, std::memory_order_relaxed);
             const uint64_t sample = static_cast<uint64_t>(perTileNs * static_cast<double>(kJobCostQ22));
             BlendedUpdate(perTileEwmaNs[slot], sample);
@@ -334,9 +410,8 @@ namespace JobSystem
             const uint32_t fm = MedianOfWindow(fineRingNs[slot], fc);
             const double ratio = static_cast<double>(fm) / static_cast<double>(cm);
 
-            // 第二观测量（wallRatio）已撤：墙钟含唤醒/令牌收尾，对高频小 job 噪声极大，
-            // 加进判决会让 parallel↔memBound 反复抖动（实测 Melee +7.67、整步 +8.08，见 07 §7an(c2)）。
-            // ⇒ 判决只用 execSpan 口径的中位比。
+            // 判决只用 execSpan 口径的中位比：墙钟含唤醒/令牌收尾，对高频小 job 噪声极大，
+            // 加进判决会让 parallel↔memBound 反复抖动。
             SlotMode cur = static_cast<SlotMode>(slotMode[slot].load(std::memory_order_relaxed));
             SlotMode want = cur;
             if (ratio < kRobustParallelRatio) want = kModeParallel;

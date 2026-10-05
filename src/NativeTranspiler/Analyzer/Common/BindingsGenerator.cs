@@ -75,7 +75,78 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            NativeJobScheduler.RegisterJobFieldWriter(typeof({jobStruct.ToDisplayString()}), (NativeJobScheduler.JobFieldWriter<{jobStruct.ToDisplayString()}>)WriteJobFields_{jobStruct.Name});");
                 }
             }
+            // 2026-10-02（09 §22.6）：注册单任务 job 的**原生 adapter 指针**，让运行时泛型
+            // `JobScheduler.Schedule(ref job)`（= 宿主实际调用的路径）也能走原生直调，
+            // 而不是只在生成的 `job.Schedule()` 扩展上可用。
+            // 只在"字段可显式写入"（explicitOk）时注册：原生 adapter 按 C++ 偏移读 ctx，
+            // Debug 下 NativeArray 带 DisposeSentinel ⇒ 裸拷贝布局不可靠，两侧必须同一套逐字段写入。
+            foreach (var jobStruct in nativeJobs)
+            {
+                var marshalInfo = ComputeJobFieldMarshal(jobStruct);
+                if (!marshalInfo.explicitOk) continue;
+                var attrSymReg = AttributeHelper.GetAttributeSymbol(compilation);
+                bool useMTReg = HasUseISPC_MT(jobStruct, attrSymReg);
+                if (CppJobGenerator.IsIJob(jobStruct))
+                {
+                    // ctx 字节数取生成器算出的 `totalSize`（= `WriteJobFields_X` 实际写入的长度），
+                    // 不能由运行时用 `Marshal.SizeOf<T>()` 猜（含 NativeArray 的泛型类型会抛）。
+                    sb.AppendLine($"            NativeJobScheduler.RegisterNativeJobAdapter(typeof({jobStruct.ToDisplayString()}), s_{jobStruct.Name}_JobFuncPtr, {marshalInfo.totalSize});");
+                }
+                else if (CppJobGenerator.IsRangeScheduledJob(jobStruct))
+                {
+                    // 2026-10-02（同类修复，09 §24/§25）：批形态的原生 adapter 签名 `(void*, int, int)`
+                    // 与原生 `BatchJobFunc` 逐字一致 ⇒ 静态运行期 API 也能直换指针。
+                    // ⚠ MT 变体的 `s_X_BatchFuncPtr` 是**托管 delegate**（有意保留）⇒ 不注册。
+                    if (!useMTReg)
+                        sb.AppendLine($"            NativeJobScheduler.RegisterNativeJobAdapter(typeof({jobStruct.ToDisplayString()}), s_{jobStruct.Name}_BatchFuncPtr, {marshalInfo.totalSize});");
+                    // 2026-10-02（09 §26）：`IJobFor` 另有 **index 形** adapter（`IndexJobFunc(void*, int)`），
+                    // 供运行时 `ScheduleFor`（单线程串行语义）直调 —— 与批形分开注册，避免 ABI 混用。
+                    if (!useMTReg && CppJobGenerator.IsForJob(jobStruct))
+                        sb.AppendLine($"            NativeJobScheduler.RegisterNativeForAdapter(typeof({jobStruct.ToDisplayString()}), Get_{jobStruct.Name}_IndexAdapterPtr(), {marshalInfo.totalSize});");
+                }
+            }
             sb.AppendLine("        }");
+            sb.AppendLine();
+            // 2026-10-02（09 §25，注册时机）：上面的注册发生在 `NativeExports` 的**静态构造**里，
+            // 而它只在该类**首次被触碰**时执行。若调用方在触碰它之前就走运行时静态 API
+            //（`JobScheduler.Schedule*` / `ScheduleFor`），那一刻注册表还是空的 ⇒ 该次派发会**回退托管**
+            //（正确但慢），造成"第一拍不是原生"的隐性退化。
+            // 用 `[ModuleInitializer]` 把注册钉在**程序集加载**时，消除对外部调用顺序的依赖。
+            // ⚠ 可移植性：`ModuleInitializerAttribute` 是 net5+ 才有的 BCL 类型。消费方若 target
+            //   netstandard2.x / net472 会 CS0246 ⇒ 先探测再发射；缺该类型时**不发射**，
+            //   注册退回"首次触碰 NativeExports 时"（即本改动之前的惰性语义，正确但仍有时序依赖）。
+            bool hasModuleInitializer = compilation
+                .GetTypeByMetadataName("System.Runtime.CompilerServices.ModuleInitializerAttribute") != null;
+            if (hasModuleInitializer)
+            {
+                // 自动方式：程序集加载即注册。**方法体为空是有意的** ——
+                //   本类型有显式静态构造 ⇒ 运行时在**调用本方法之前**必然先跑 cctor（注册在其中完成）。
+                //   （注意：`_ = typeof(X)` **不保证**触发 cctor，别再用那种写法来表达"触碰类型"。）
+                // 手动方式（AOT/IL2CPP 或不信任 module initializer 的宿主）：直接调用public 的
+                //   `EnsureNativeJobRegistrations()`；cctor 只跑一次 ⇒ 幂等、可重复调用。
+                sb.AppendLine("        /// <summary>");
+                sb.AppendLine("        /// 原生 adapter / 字段写入器注册（自动：本方法标了 [ModuleInitializer]，程序集加载即调用；");
+                sb.AppendLine("        /// 手动：AOT/IL2CPP 宿主或需要确定性顺序时，可在启动处直接调用 —— 幂等，可重复调用）。");
+                sb.AppendLine("        /// </summary>");
+                sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
+                sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
+                sb.AppendLine("        {");
+                sb.AppendLine("            // 有意留空：进入本方法前运行时已完成本类型的静态构造（注册在那里完成）。");
+                sb.AppendLine("        }");
+            }
+            else
+            {
+                // 无 ModuleInitializerAttribute（netstandard2.x / net472）：仍需一个**公开的手动入口**，
+                // 否则消费方无法保证注册先于首次调度。方法体同样为空（调用即触发 cctor）。
+                sb.AppendLine("        /// <summary>");
+                sb.AppendLine("        /// 原生 adapter / 字段写入器注册（手动：本目标框架无 [ModuleInitializer]，");
+                sb.AppendLine("        /// 请在启动处调用一次；幂等，可重复调用）。");
+                sb.AppendLine("        /// </summary>");
+                sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
+                sb.AppendLine("        {");
+                sb.AppendLine("            // 有意留空：进入本方法前运行时已完成本类型的静态构造（注册在那里完成）。");
+                sb.AppendLine("        }");
+            }
             sb.AppendLine();
 
             // 3. 普通方法的 DllImport 和 Wrapper（MT 变体按方法上的 UseISPC_MT 决定）
@@ -238,7 +309,8 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                sb.AppendLine($"        private static readonly JobFuncDelegate s_{jobStruct.Name}_JobFunc;");
+                // 2026-10-02（09 §22.6）：单任务 job 改走原生 adapter 直调 ⇒ 不再需要托管
+                // `JobFuncDelegate` 字段（顺带消掉 CS0169）。只保留指针字段。
                 sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_JobFuncPtr;");
             }
             sb.AppendLine($"        private static readonly CleanupFuncDelegate s_{jobStruct.Name}_CleanupFunc;");
@@ -357,13 +429,14 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                sb.AppendLine($"            s_{jobStruct.Name}_JobFunc = (IntPtr context) =>");
-                sb.AppendLine("            {");
-                sb.AppendLine($"                var jobPtr = ({jobTypeFullName}*)context;");
-                var args = BuildJobExecuteArgsForPointer(jobStruct);
-                sb.AppendLine($"                {jobStruct.Name}_Execute({string.Join(", ", args)});");
-                sb.AppendLine("            };");
-                sb.AppendLine($"            s_{jobStruct.Name}_JobFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_JobFunc);");
+                // 2026-10-02（IJob 原生直调，09 §22.6）：与 IJobParallelFor(非 MT)/Chunk 系一致 ——
+                // 直接取**原生 adapter** 指针，去掉 `Marshal.GetFunctionPointerForDelegate` 造的
+                // native→managed→native 反向 thunk。adapter 由 CppJobGenerator 一直为 IJob 产出
+                //（`X_Execute_Adapter(void* context)`：按 C++ 偏移解字段后调原生内核）。
+                // ⚠ 布局前提：adapter 按 C++ 偏移读 ctx ⇒ 必须用生成代码的**逐字段写入**
+                //（`WriteJobFields_X`），不能用裸拷贝（Debug 下 NativeArray 带 DisposeSentinel）。
+                // 未注册/不可显式写入的情形由运行时**回退托管 delegate**（行为不变）。
+                sb.AppendLine($"            s_{jobStruct.Name}_JobFuncPtr = Get_{jobStruct.Name}_Execute_AdapterPtr();");
             }
 
             sb.AppendLine($"            s_{jobStruct.Name}_CleanupFunc = (IntPtr context) =>");
@@ -464,6 +537,14 @@ namespace NativeTranspiler.Analyzer
                     var adapterGetterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
                     sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{adapterGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
                     sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_Execute_AdapterPtr();");
+                    // 2026-10-02（09 §26）：`IJobFor` 另有一个 **index 形** adapter getter
+                    //（`void(void*, int)`，供 `ScheduleFor` 的单线程串行语义直调）。
+                    if (CppJobGenerator.IsForJob(jobStruct))
+                    {
+                        var indexGetter = CppJobGenerator.GetIndexAdapterPtrGetterName(jobStruct);
+                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{indexGetter}\", CallingConvention = CallingConvention.Cdecl)]");
+                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_IndexAdapterPtr();");
+                    }
                 }
             }
             else
@@ -472,6 +553,14 @@ namespace NativeTranspiler.Analyzer
                 var singleParams = BuildJobDllImportParams(jobStruct);
                 sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{singleFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
                 sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute({string.Join(", ", singleParams)});");
+                // 2026-10-02（IJob 原生直调）：与 IJobParallelFor(非 MT)/Chunk 系保持一致 ——
+                // 声明原生 Adapter getter，供调度器 原生→原生 直调，去掉 Marshal 反向 thunk。
+                // 背景（09 §22）：generate 侧（CppJobGenerator）一直为 IJob 产出 adapter+getter，
+                //   但绑定侧自 c382dbd 起就漏接线（2eed4ad 同一次重构里只接了 chunk 系与批处理）。
+                //   Unity 侧是 IL2CPP（原生 AOT）⇒ 只有走原生直调才是同性质对比。
+                var adapterGetterName2 = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+                sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{adapterGetterName2}\", CallingConvention = CallingConvention.Cdecl)]");
+                sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_Execute_AdapterPtr();");
             }
             sb.AppendLine();
         }
@@ -501,6 +590,13 @@ namespace NativeTranspiler.Analyzer
                 parameters.Add("int innerBatchCount = 0");
             }
             parameters.Add("JobHandle dependsOn = default");
+            // 2026-10-03（docs/gridsearch/09 §52.5）：**调用点声明的认领几何必须能透到原生**。
+            //   此前生成的重载里没有任何几何形参 ⇒ 调用点写成 `job.Schedule(len, 0, h, ClaimPolicy.Spread)`
+            //   时 C# 重载解析绑不到原生重载，**静默**落到托管的 `JobExtensions.Schedule<T>`：
+            //   键从"模块内 RVA"变成堆地址（批表/[JOBPERKEY] 全部对不上）、`applied` 15→12、
+            //   该 pass 慢 2.4×（宿主注释实测 place 2.2→5.3 ms）。
+            //   位置与扩展方法保持一致（跟在 dependsOn 之后）且带默认值 ⇒ 既有调用点逐位不变。
+            if (isParallelFor) parameters.Add("ClaimPolicy claim = ClaimPolicy.Auto");
             if (isChunk)
             {
                 // 多 World 支持：显式指定 World（默认 DefaultWorld）。
@@ -597,8 +693,10 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            int actualBatchSize = innerBatchCount;");
                 }
 
+                // 几何只在真并行批上有意义（IJobFor 是单线程串行语义）⇒ 只在 isParallelFor 时透传。
+                string claimArg = isParallelFor ? ", claim" : "";
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleParallelForBatchRaw(");
-                sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle);");
+                sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle{claimArg});");
                 sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
@@ -868,35 +966,6 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static List<string> BuildJobExecuteArgsForPointer(INamedTypeSymbol jobStruct)
-        {
-            var args = new List<string>();
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-            {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                    {
-                        args.Add($"jobPtr->{field.Name}.GetListData()");
-                    }
-                    else
-                    {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
-                        var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                        args.Add($"({csElementType}*)jobPtr->{field.Name}.GetUnsafePtr(), jobPtr->{field.Name}.Length");
-                    }
-                }
-                else
-                {
-                    if (field.Type is IPointerTypeSymbol)
-                        args.Add($"jobPtr->{field.Name}");
-                    else
-                        args.Add($"&jobPtr->{field.Name}");
-                }
-            }
-            return args;
-        }
-
         private static string BuildBatchCallArgs(INamedTypeSymbol jobStruct, string jobPtrPrefix)
         {
             var args = new List<string>();
@@ -1139,9 +1208,14 @@ namespace NativeTranspiler.Analyzer
                     "int innerBatchCount = 0",
                     "JobHandle dependsOn = default"
                 };
-                sb.AppendLine($"    public static JobHandle Schedule({string.Join(", ", parameters)})");
+                // 2026-10-03（09 §52.5）：调用点透传认领几何（仅在真并行批上；IJobFor 是单线程串行语义）。
+                // 末尾 + 默认值 ⇒ 既有调用点不变，且**不会**与托管 `JobExtensions.Schedule<T>` 产生歧义
+                // （具体扩展方法优先于泛型）。
+                string claimParam = isParallelFor ? ", ClaimPolicy claim = ClaimPolicy.Auto" : "";
+                string claimArgE = isParallelFor ? ", claim" : "";
+                sb.AppendLine($"    public static JobHandle Schedule({string.Join(", ", parameters)}{claimParam})");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, arrayLength, innerBatchCount, dependsOn);");
+                sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, arrayLength, innerBatchCount, dependsOn{claimArgE});");
                 sb.AppendLine("    }");
                 sb.AppendLine();
             }
@@ -1296,73 +1370,5 @@ namespace NativeTranspiler.Analyzer
             };
         }";
         }
-
-        /// <summary>
-        /// 为 IJobEntity 生成 C# IJobChunk 适配器，内部调用原生 Execute 函数。
-        /// 该适配器会被 ECS 源生成器检测并使用（通过命名约定）。
-        /// </summary>
-        private static void GenerateNativeIJobChunkAdapter(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
-        {
-            string jobTypeName = jobStruct.ToDisplayString();
-            string adapterName = $"__NativeTranspiler_IJobChunkAdapter_{jobStruct.Name}";
-
-            // 生成 Execute 方法的 DllImport（从原生代码调用）
-            string executeFuncName = CppJobGenerator.GetCppJobFunctionName(jobStruct, isBatch: false);
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-            var execParams = new List<string>();
-            execParams.Add("IntPtr jobPtr");
-            execParams.Add("ChunkJobData* chunkData");
-            sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{executeFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
-            sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Native({string.Join(", ", execParams)});");
-            sb.AppendLine();
-
-            // 生成 IJobChunk 适配器结构体
-            sb.AppendLine($"    /// <summary>");
-            sb.AppendLine($"    /// NativeTranspiler 生成的 IJobChunk 适配器，用于 {jobTypeName}。");
-            sb.AppendLine($"    /// 该适配器调用原生 Execute 函数，实现高性能执行。");
-            sb.AppendLine($"    /// </summary>");
-            sb.AppendLine($"    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]");
-            sb.AppendLine($"    public struct {adapterName} : IJobChunk");
-            sb.AppendLine($"    {{");
-            sb.AppendLine($"        public {jobTypeName} Job;");
-            sb.AppendLine();
-            sb.AppendLine($"        public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            unsafe");
-            sb.AppendLine($"            {{");
-            sb.AppendLine($"                fixed ({jobTypeName}* jobPtr = &Job)");
-            sb.AppendLine($"                {{");
-            sb.AppendLine($"                    // 调用原生 Execute 函数");
-            sb.AppendLine($"                    {jobStruct.Name}_Execute_Native((IntPtr)jobPtr, null);");
-            sb.AppendLine($"                }}");
-            sb.AppendLine($"            }}");
-            sb.AppendLine($"        }}");
-            sb.AppendLine($"    }}");
-            sb.AppendLine();
-
-            // 生成 JobExtensions 适配器（调用原生 Schedule）
-            sb.AppendLine($"    /// <summary>");
-            sb.AppendLine($"    /// 为 {jobTypeName} 生成的 JobExtensions，调用原生调度路径。");
-            sb.AppendLine($"    /// </summary>");
-            sb.AppendLine($"    public static partial class NativeJobExtensions_{jobStruct.Name}");
-            sb.AppendLine($"    {{");
-            sb.AppendLine($"        public static JobHandle Schedule(this {jobTypeName} job, QueryBuilder query, JobHandle dependsOn = default)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            return NativeExports.Schedule_{jobStruct.Name}(ref job, query, dependsOn);");
-            sb.AppendLine($"        }}");
-            sb.AppendLine();
-            sb.AppendLine($"        public static JobHandle ScheduleWithWorkerCap(this {jobTypeName} job, QueryBuilder query, int workerCap, JobHandle dependsOn = default)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            return NativeExports.ScheduleWithWorkerCap_{jobStruct.Name}(ref job, query, workerCap, dependsOn);");
-            sb.AppendLine($"        }}");
-            sb.AppendLine();
-            sb.AppendLine($"        public static void Run(this {jobTypeName} job, QueryBuilder query)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            NativeExports.Schedule_{jobStruct.Name}(ref job, query, default).Complete();");
-            sb.AppendLine($"        }}");
-            sb.AppendLine($"    }}");
-            sb.AppendLine();
-        }
-
     }
 }
