@@ -1,5 +1,12 @@
 # 08 — 「按 job 给粒度」机制落地 + **Unity `innerloopBatchCount=0` 语义实测** + 确定档同会话 A/B（2026-10-01）
 
+> ⚠ **2026-10-05 追记（二）**：本表"**其余 15 处 = 1**"这一行所依赖的 `0 ⇒ 1` 语义**仍是 Editor 结论**（§3 自陈的
+> "同版本共享实现"假设未被 player 复核）。本轮用 Unity **自带的空体器械** `BattleBenchDispatchFloor`（`M4_DISP=1`，player）
+> 量出了它的**代价上界**：`1 job × 1,000,000 项` 空体，`batch=1`（1,000,000 批）**0.382 ms**、
+> `batch=64`（15,625 批）**0.052 ms**、`batch=1024` **0.0359 ms**；单个空 `IJob` 往返 **0.95 µs**。
+> ⇒ **即使 `0 ⇒ 1` 成立，每 1M 项也只值 ≤0.38 ms**，在 Melee/Flow 那种 20–100 ms 的段里 <1%，
+> **不改变本表任何跨栈结论的量级**。数据与逐调用点表见 [doc15](15-Build与Integrate逐趟定位-器械缺陷与对齐档实测.md) §4.1–§4.2。
+
 > ⚠ **2026-10-05 追记**：F5（`ENTJOY_TILE_RUN`）**已整体删除**；`ENTJOY_CLAIM_SLICE` / `ENTJOY_TILE_STRIDE` 也已删除
 > （切片机制保留，F6 在用）。**凡把 `ENTJOY_TILE_RUN` 写进"对齐档/镜像档"臂配置的地方（§14、§16.34、`mir1_run_f` 等），
 > 该臂现在无法照原样复刻** —— 请用 `ClaimPolicy` / 批表第 4 字段 / F6 表达认领几何。当前门控权威表：`docs/public/Gates-and-Flags.md`。

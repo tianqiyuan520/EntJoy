@@ -615,6 +615,14 @@ transpiler 对 `job.Schedule(len, batch[, dep])` 的调用点改写**只认这�
 协议：同会话 A/B（B = Unity `W0Player` M4 权威臂，相位对齐，`M4_STEPS=40` + 逐步口径修正）；A 侧 `ENTJOY_JOB_WORKERS=8`、
 `ENTJOY_ASSIST=0`（框架默认就是 off，协议口径见 §8.1）；**默认档 = 出厂默认（无批表、JCC 自适应内批、F6 默认开）**，
 **对齐档 = 逐 job 镜像 Unity 内批 + 关自适应（JCC 被批表旁路、`ENTJOY_CLAIM_ADAPT=0`）+ count/place 声明 Spread**。
+
+> ⚠ **2026-10-07 复核（[doc17 §2.3](17-独立复核-HEAD两档判据与Layer核验.md)）：上面那句"框架默认就是 off"**
+> **不能推出"不设该 env 就是 off"。** `ENTJOY_ASSIST` **不是框架 env**（框架已删除其解析，只留托管 API
+> `NativeJobScheduler.SetMainThreadAssistEnabled`，默认 false）；是**游戏仓**自己读它并**默认打开**
+> （`CPUBattleEcs.cs:625`：`!= "0"` ⇒ 开）⇒ **不显式设 `=0` 就等于开着**。本节读数是否含 assist 取决于所用脚本：
+> 老脚本（`ab-aligned.ps1` / `ab-cross-stack-a.ps1` / `count-probe.ps1` 等）显式 pin `0`；
+> **2026-10-05 之后的战役脚本**先清空全部 `ENTJOY_*` 再只设自己那几个 ⇒ **回落"开"**。
+> 引用跨栈数字时必须写明 assist 开/关（doc17 §1.2 有 assist=0 的对照）。
 中位（3 rep；`[M-19]` 逐趟 / `[M-1]` 分段 / 步均总计）：
 
 | 指标 (ms) | **EntJoy 默认** | **EntJoy 对齐**（同 BatchSize、无自适应） | **Unity** | 默认/Unity | 对齐/Unity |

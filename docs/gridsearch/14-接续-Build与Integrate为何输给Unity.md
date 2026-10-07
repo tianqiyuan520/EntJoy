@@ -36,6 +36,20 @@
 **但符号 0/6、0/6 都是满号** ⇒ 这是**系统性**差异，不是噪声。它的价值在于**诊断**（同一根因可能还有更大的量没被吃到），
 而不在于这 0.5 ms 本身。
 
+> ⚠ **2026-10-07 独立复核（[doc17](17-独立复核-HEAD两档判据与Layer核验.md)）：本表的默认档读数已过期，且 Integrate 那一列不对等。**
+> - **同一相位匹配器械在 HEAD（`89e135a`）上重测（6 轮）**：整步 **1.016（4/6）**、Build **0.829（0/6）**、
+>   Flow 0.991、Melee 1.029、MarkDead 1.291、**Integrate 0.892（0/6）**。⇒ **Build 从 0.900 掉到 0.829**；
+>   方向与"§43 的值绑定白名单**已在 HEAD 删除**、热内核回到按引用"一致，但跨会话 Build 漂移可达 18%
+>   ⇒ **幅度未隔离**，不要引用成"白名单删除的代价 = 7%"。
+> - **Integrate 不对等**：Unity 侧源码（`BattleBenchM4.cs:16-19`）与运行日志（`[M4-DISCLOSE]④`）两处自证
+>   "**Integrate 段不可比**"（dump v2 无 velocity/knock/af ⇒ B 每步把 vel/knock/af/stuck 清零、一步回收尸体，
+>   而 A 走全部分支）⇒ **本表的 Integrate 0.9245 不能解读为 codegen 差距**。见 doc17 §3。
+> - §3.2 的 env 表**漏了三个当前必需的 env**：`ENTJOY_ASSIST`（**游戏侧** env、默认**开**。⚠ **脚本之间不一致**：
+>   `ab-aligned.ps1` 等老脚本显式 pin `=0`，而 2026-10-05 之后的战役脚本先清空全部 `ENTJOY_*` 再只设自己那几个
+>   ⇒ 回落到"开"；doc15–doc17 的读数因此含 assist，而 doc10 的不含。本协议下关掉它反而更快）、
+>   `ENTJOY_JOB_COST_CACHE`、`ENTJOY_JOB_BATCH_BY_NAME`（后两个是"对齐档"的定义开关）。权威表见
+>   [Gates-and-Flags](../public/Gates-and-Flags.md)。
+
 **同时注意（别漏）**：`MarkDead` 是 **6/6、EntJoy 快 28.6%**，也是满号但只有 0.16 ms。三段小项都有满号符号差异。
 
 ---
@@ -57,6 +71,16 @@ A 侧源码：`CPUBattleSystems.cs`（`BuildMs/IntegrateMs/MarkDeadMs` 定义 + 
 
 ### 3.1 两侧 Build 逐趟**列名已一一对齐** —— 第一件事就是拉这张表
 
+> ⚠ **2026-10-05 更正（见 [doc15](15-Build与Integrate逐趟定位-器械缺陷与对齐档实测.md) §2，不要按本节原样开跑）**：
+> 两侧的逐趟器械**都带污染**，先修再读 ——
+> ① B 侧 `M4,build,*`（`BattleBenchM4Entry.cs:680-685` / `BattleBenchM2.cs:210`）的累加器**含全部预热步且从不复位**，
+> 而 `sBuild` 只累加 timed 步 ⇒ 读数被放大约 `(W+S)/S ≈ 3.3×`（本 campaign `M4_WARMUP≈89-93`、`M4_STEPS≈37-40`）；
+> ② A 侧 `CPUBATTLE_DIAG_BUILDPASS=1` 里的 `BpFingerprint()`（`[M-20]`，`CPUBattleSpatialHash.cs:198`）
+> 每 32 步在 `Build()` **内部**跑 1.35M 次托管索引，**在六趟计时之外、却在 `BuildMs` 之内**
+> ⇒ 把 A 的 Build 段抬高 **+0.19~+0.51 ms/步**（同会话实测），即"探针税 ≥ 待测赤字"；
+> ⇒ diag 档下 `[M-19] 的 Σ` 与 `[M-1] 的 Build` 必然不自洽（实测 2.53 vs 2.96）。
+> 修法（B 清 `ms[]`、A 把指纹移出 `BuildMs`）与修好后的逐趟表见 doc15 §2–§3。
+
 | A 侧（`CPUBATTLE_DIAG_BUILDPASS=1` → `[M-19]`） | B 侧（CSV 行） |
 |---|---|
 | `zero=` / `count=` / `prefixPartial=` / `hostRewrite=` / `prefixFinal=` / `place=`（`Σ=` 自证） | `M4,build,zero_ms` / `count_ms` / `prefixPartial_ms` / `hostRewrite_ms` / `prefixFinal_ms` / `place_ms` |
@@ -72,9 +96,9 @@ A 侧源码：`CPUBattleSystems.cs`（`BuildMs/IntegrateMs/MarkDeadMs` 定义 + 
 | `CPUBATTLE_DIAG_BUILDPASS=1` | **Build 6 趟逐趟计时**（`[M-19]`，走 Godot 日志） |
 | `CPUBATTLE_FLOW_DISPATCH_PROBE_CELLS/WAVES/BATCH/REPEATS/SPLIT/EMPTY` | `[M-15]` 派发探针；**`_SPLIT=1` 把"只提交"与"只等待"分相**、`_REPEATS=n` 多窗取 min |
 | `ENTJOY_FORCE_INNER_BATCH=<n>` | 强制显式内批（**绕过 JCC**，等同"调用方显式传 batch"） |
-| `ENTJOY_TILES_PER_WORKER=<n>` | 粒度（`2000` ⇒ ~63 元素/tile = Unity `Schedule(n,64)`） |
+| `ENTJOY_TILES_PER_WORKER=<n>` | 只调**全局**粒度（`2000` ⇒ ~63 元素/tile）。⚠ **2026-10-05 实测：它只在 ~70% 的调度上生效** —— 1M 趟有 29% 走 `TWO-FACTOR chunk=125000 rc=8`（8 个巨型静态块），比例随 EWMA 分类器翻转；**所以这不是"对齐档"**，见 [doc15](15-Build与Integrate逐趟定位-器械缺陷与对齐档实测.md) §4.3–§4.4 |
 | `ENTJOY_CLAIM_ADAPT=0/1` | F6 per-job 认领几何学习（**默认开**） |
-| `ENTJOY_JOB_BATCH_TABLE` / `_DUMP=1` | 逐 job 内批**+第 4 字段=认领几何**（格式见 `JobSystem.cpp` ~L250-275；`s`=Spread / `a`=Adjacent） |
+| `ENTJOY_JOB_BATCH_TABLE` / `_DUMP=1` | **⭐ 真对齐档的正确器械**：逐 job 内批（命中即 **`ResolveChunkSize` 不被调用 ⇒ JCC 全关**）。格式 `<模块RVA>:<batch>[, …]`；键**与构建绑定**，每次重建必须用 `_DUMP=1` + `tools/gate-run/pe-exports.ps1` 重推。本构建 15 个键 ↔ Unity 逐调用点的完整对照表见 [doc15 §4.5](15-Build与Integrate逐趟定位-器械缺陷与对齐档实测.md)；自证看 `[JOBBATCHTBL] applied=` 与 `[JCC] R lines = 0` |
 | `ENTJOY_JCC_TARGET_US=<n>` | 目标每 tile 串行量（默认 6400） |
 | `ENTJOY_JCC_VERBOSE=1` / `ENTJOY_DIAG_JCC=1` | JCC 决策取证 |
 

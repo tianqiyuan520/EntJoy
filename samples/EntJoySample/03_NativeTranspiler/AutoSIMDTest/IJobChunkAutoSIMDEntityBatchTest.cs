@@ -1,4 +1,4 @@
-﻿// IJobChunk + AutoSIMD + EntityBatch 路径正确性测试
+// IJobChunk + AutoSIMD + EntityBatch 路径正确性测试
 // 验证：AutoSIMD=Enabled 的 IJobChunk 走 EntityBatch adapter（SimdControlFlowGenerator 真 SIMD），
 //       计算结果与 C# 标量版本一致。
 // 覆盖 Light（纯乘加）与 Heavy（16×sin/cos，容差 1.5e-3）两种场景。
@@ -189,7 +189,7 @@ namespace EntJoySample.AutoSIMDTest
                 if (archetypes == null) return result;
                 for (int a = 0; a < archetypes.Length && idx < N; a++)
                 {
-                    Archetype arch = null;
+                    Archetype? arch = null;
                     try { arch = archetypes[a]; } catch { continue; }
                     if (arch == null) continue;
                     int compIdx;

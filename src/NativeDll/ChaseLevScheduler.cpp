@@ -792,6 +792,27 @@ namespace JobSystem
                 if (c > g_claimSpanElems) c = g_claimSpanElems;
                 capEff = c;
             }
+            // 厚 tile 的**细档**：也按元素跨度给 cap（`kClaimSpanThickElems`），上限 = 每 worker 的
+            // 公平份额（`tileCount/workers`）⇒ 不会退化成静态切分。
+            // ⚠ 更粗的 tile（itemsPerTile > kClaimSpanMidElems）保持 `claimCap`（=4）以维持 worker 邻近
+            //   （Melee 依赖"worker 邻近 ⇒ 空间哈希格复用"；实测把规则放到所有厚 tile 会让默认档
+            //    Melee 84–93 ms → 100–102 ms，3/3）。
+            // ⚠ 优先级：**批表的 per-job claim 声明（`claimCapOverride`）与全局 `ENTJOY_CLAIM_BATCH`
+            //   都必须压过本规则** —— 否则 `key:64:4` 这种"该调用点只要 4 tile/认领"的声明会被**静默忽略**
+            //   （与"批表 > API > F6 > env > 默认"的既有优先级相反）。
+            else if (kClaimSpanThickElems > 0
+                     && itemsPerTile > kClaimSpanThinElems
+                     && itemsPerTile <= kClaimSpanMidElems
+                     && batch->claimCapOverride == 0
+                     && g_claimBatchSize == 0)
+            {
+                uint32_t c = kClaimSpanThickElems / itemsPerTile;
+                if (c < 1) c = 1;
+                const uint32_t fair = batch->tileCount / std::max(1u, workerCount_);
+                if (c > fair) c = fair;
+                if (c < 1) c = 1;
+                capEff = c;
+            }
         }
         uint32_t step = std::clamp(
             batch->tileCount / std::max(1u, workerCount_),
@@ -829,6 +850,8 @@ namespace JobSystem
                     ClaimProbeEnd(claimProbe, cp0);
                     if (t >= sliceEnd) break;
                     const uint32_t last = std::min(sliceEnd, t + step);
+                    const uint32_t fast = TileExecuteUniformRun(batch, t, last - t);
+                    if (fast > 0) { executed += fast; continue; }
                     for (uint32_t i = t; i < last; ++i) { executor_(batch, i); ++executed; }
                 }
             }
@@ -847,6 +870,8 @@ namespace JobSystem
                     ClaimProbeEnd(claimProbe, cp0);
                     if (t >= sliceEnd) break;
                     const uint32_t last = std::min(sliceEnd, t + step);
+                    const uint32_t fast = TileExecuteUniformRun(batch, t, last - t);
+                    if (fast > 0) { executed += fast; continue; }
                     for (uint32_t u = t; u < last; ++u) { executor_(batch, u); ++executed; }
                 }
             }
@@ -865,6 +890,10 @@ namespace JobSystem
             ClaimProbeEnd(claimProbe, cp0);
             if (start >= end) break;
             const uint32_t last = std::min(end, start + step);
+            // 等宽路（内批 ≤ 16 的调用点，如对齐档 batch=1 的 MarkDead/Flow 各趟）：
+            // 逐 tile 仍各一次内核调用（契约不变），但走直调把链路从 4 跳压到 1 跳（doc16 §14）。
+            const uint32_t fast = TileExecuteUniformRun(batch, start, last - start);
+            if (fast > 0) { executed += fast; continue; }
             for (uint32_t t = start; t < last; ++t)
             {
                 executor_(batch, t);

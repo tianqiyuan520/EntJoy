@@ -287,5 +287,8 @@ namespace EntJoy.ECS
                 Unsafe.CopyBlock(dst, src, (uint)type.Size);
             }
         }
+
+        /// <summary>按 id 反查类型（布局指纹登记时要拿 owner 程序集；找不到返回 false）。</summary>
+        public static bool TryGetTypeById(int id, out Type type) => idToTpyeMap.TryGetValue(id, out type);
     }
 }

@@ -103,6 +103,12 @@ extern "C"
         JobSystem::Scheduler::PrewakeWorkers();
     }
 
+    // 排空所有在飞批，但不关 worker；`JobSystem_Shutdown` 是终态，不能复用。
+    void JobSystem_DrainAll()
+    {
+        JobSystem::DrainAll();
+    }
+
     void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker)
     {
         JobSystem::Scheduler::ConfigureTilesPerWorker(tilesPerWorker);
@@ -116,6 +122,11 @@ extern "C"
     void JobSystem_SetJobCostCacheEnabled(int enabled)
     {
         JobSystem::g_jobCostCacheEnabled.store(enabled != 0, std::memory_order_release);
+    }
+
+    int JobSystem_BindBatchName(const char* name, void* func)
+    {
+        return JobSystem::BindJobBatchName(name, func);
     }
 
     void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free)

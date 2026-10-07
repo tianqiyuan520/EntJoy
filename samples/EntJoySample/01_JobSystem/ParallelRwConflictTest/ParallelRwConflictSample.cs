@@ -45,7 +45,7 @@ namespace EntJoySample.ParallelRwConflictTest
         public void Execute(int index)
         {
             _ = Data[0];                                          // 触发读登记（reader count +1）
-            Volatile.Write(ref Started, true);                    // 通知主线程"我已在读该容器"
+            Started = true;                                       // 通知主线程"我已在读该容器"（字段本身是 volatile）
             for (int j = 0; j < 100000; j++) Thread.SpinWait(1);  // 忙等放大窗口，确保主线程访问时 job 仍在读
             _ = Data[0];
         }

@@ -390,3 +390,25 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 3. **栈流量统计必须 `[rsp]` + `[rbp]` 一起数**：clang-cl 默认省略帧指针、Burst 保留 rbp 帧；只数 `[rsp]` 会得出"对侧少 6 倍"的假象（真实两侧相同）。
 4. **不要拿二进制哈希当"是否同一版本"的判据**（PE 时间戳/常量地址会变）；等价性用同会话配对性能 + 生成物比对。
 5. **普查工具的两臂必须对称刷新语料**：`probe.ps1 -SkipSnapshot` 会静默丢掉 6 个 `@emit` 内核（TOTAL 从 1955 掉到 1548）⇒ TOTAL 不可比；只有 `-KernelFilter` 收窄时必须确认两臂过滤一致。
+
+## 10. 生成物清理（D1）的契约：**只删自己写出的文件**（2026-10-07 修）
+
+`PruneStaleGeneratedFiles` 的作用是"删掉本次没生成、但上次遗留的产物"，口径是
+`SharpNative_*` + 扩展名 `.cpp/.h/.ispc`，判据是"**在不在本次写出集合里**"。
+这个口径曾经吃掉**别人的产物**，代价是每次重新生成都重编一次全部 ISPC：
+
+- `SharpNative_<X>_ispc.h`（含 `_mt` 多目标变体 `<X>_mt_ispc.h`）是 **`ispc.exe -h` 的输出**，
+  在生成的 CMake 里声明为 `add_custom_command(OUTPUT …)`；**生成器从不写它** ⇒ 它永远不在写出集合里
+  ⇒ 每次生成都被删 ⇒ CMake 判定 ISPC 步骤输出缺失 ⇒ **31 个 `ispc.exe` 全部串行重跑**（每次 ~0.4 s）。
+- 实测（`EntJoySample`，改一个 job 体的一个常量）：生成后 `*_ispc.h` 数量 **0**，
+  直接 `cmake --build … --target NativeTranspiled` **15.9 s / ISPC 31 次**，端到端 `dotnet build` **19.8–22.8 s**。
+
+**修后的规则**：`<X>.ispc` 仍是本次期望产物 ⇒ 保留 `<X>_ispc.h`；`.ispc` 真没了（job 被删）才连头一起删。
+同一处改动实测：头数 **31**、原生 **2.80 s / ISPC 0 次**、端到端 **9.5 s**；
+D1 原目的未削弱（用伪造的 `.ispc` + 同名头验证过：两个都被清掉）。
+
+**对消费者的含义**：`SharpNative_*_ispc.h` 归 **ISPC 编译步骤**所有，不是生成器的产物 ——
+任何"按前缀清理生成目录"的工具/脚本都必须把它们排除；删它们不会报错，只会让下一次原生编译整份重做。
+另：交付档的 UNITY 批大小保持 `0`（单 TU）。曾为此加过一个 `EntJoyNativeUnityBatch` 开关，
+同日撤销 —— 拆批实测反而更慢（同一处改动：单 TU 2.70 s / 18 个小批 4.89 s），
+见 [Gates-and-Flags.md](Gates-and-Flags.md) E 节与 §9.1 的内联结论。
