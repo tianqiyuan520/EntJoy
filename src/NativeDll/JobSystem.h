@@ -248,6 +248,10 @@ namespace JobSystem {
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
     void ResetStatsSnapshot() noexcept;
+    // 热重载用：等所有已提交批**跑完并物理退役**，但**不关 worker**。
+    // 语义 = ResetStatsSnapshot 读统计前用的同一段（ConsumeLongBatchBarriers + WaitForBackendBatches）。
+    // ⚠ 与 Scheduler::Shutdown() 的区别：Shutdown 是终态（停 worker），DrainAll 之后系统仍可继续派发。
+    void DrainAll() noexcept;
     void SetTimingDiagnosticsEnabled(bool enabled) noexcept;
     void UpdateUnsignedEwma(std::atomic<uint64_t>& target, uint64_t sample) noexcept;
 

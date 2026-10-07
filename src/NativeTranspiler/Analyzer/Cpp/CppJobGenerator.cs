@@ -260,7 +260,7 @@ namespace NativeTranspiler.Analyzer
 
         // 局部变量声明：仅保留 NativeList 引用，移除 NativeArray 包装
         // 按**缺陷判据**决定绑定形式：只有**参与循环行程数**的字段才按值绑定
-        // （见 GetFieldLoopUse / ValueBindAllowed）。`semanticModel`/`compilation` 传入后可**按符号**判定
+        // （见 GetFieldLoopUse）。`semanticModel`/`compilation` 传入后可**按符号**判定
         // 字段用途（同名局部/形参不再造成误判）；两者都缺时退回名字兜底。
         private static void AppendLocalVariableDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
             SemanticModel? semanticModel = null, Compilation? compilation = null)
@@ -285,15 +285,20 @@ namespace NativeTranspiler.Analyzer
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 if (field.Type is IPointerTypeSymbol) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                // 绑定形式由 ValueBindAllowed 的判据决定：**参与循环行程数**的字段按值，其余按引用。
+                // 绑定形式由 typeOk 判据决定：**参与循环行程数**的字段按值，其余按引用。
                 // 类型判据：≤16 B 的托管值类型**无条件**可；**行程数字段**额外放宽到"任意值类型"——
                 // 一整份拷贝发生在**每次内核调用**（每 tile / 每 chunk 一次），换来的是行程数变编译期常量，
                 // 与"每元素重载 + 无法向量化"不是一个量级。引用类型/容器/指针仍排除。
                 string scalarSrc = $"{field.Name}_ptr";
+                // 绑定形式：**只对"参与循环行程数"的字段按值**，其余按引用。
+                // 原理：这批字段正是被挡住的那批 —— 编译器必须假设循环体内的任何写都可能改写 `*X_ptr`，
+                // 于是行程数在编译期不可知（每轮重载 + 无法向量化/展开）；按值后它成为入口常量。
+                // 其余字段的载入本可折进操作数（0 条额外指令），按值反而引入每次内核调用的拷贝 ⇒ 不需要。
+                // 类型上只接受已证 ≤16 B 的平凡可拷贝值类型（ValueBindTypeOk）；引用类型/容器/指针排除。
+                // ⚠ 不做 job 白名单、也不做"按值默认"：两者都在单会话配对里被否（doc16 44.26/44.27）。
                 bool tripCount = loopUse.TripCount.Contains(field.Name);
-                bool typeOk = ValueBindTypeOk(field.Type)
-                              || (tripCount && field.Type.IsValueType && ValueBindWideTypeAllowed());
-                if (ValueBindAllowed(tripCount) && typeOk)
+                bool typeOk = ValueBindTypeOk(field.Type);
+                if (tripCount && typeOk)
                     sb.AppendLine($"    const {cppType} {field.Name} = *{scalarSrc};");
                 else
                     sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
@@ -338,23 +343,8 @@ namespace NativeTranspiler.Analyzer
         //   真实负载同臂整步退化 +2.81 ms（5/6 同号）。臂 `=1`（仅单 IJob 路径）同月实测
         //   Build ±0.01 / 整步 +0.77 ms（4/8）⇒ **路径**不是正确判据，**用途**才是。
         //
-        // ⇒ **判据（默认，本修复）= 只对"参与循环行程数"的字段按值绑定**
-        //   （出现在 `for` 初值/条件/步进、`while`/`do` 条件里的字段，见 GetFieldLoopUse）。
-        //   这批字段正是编译器被挡住的那批；其余字段的发射件**逐字不变**，
-        //   批处理热内核（行程数来自形参 `__startIndex/__count`）结构上不入判据 ⇒ 单 TU 布局扰动面最小。
-        // · 类型判据：仅**已证 ≤ 16 B 的托管值类型**（内建标量 + EntJoy.Mathematics 的
-        //   float2/int2/uint2）；大结构体/未知大小仍按引用（拷贝成本未证划算）。
-        // · 语义安全性：既有生成码本就以 `const T&` 绑定 ⇒ 内核体**不可能写**这些字段
-        //   （写了编译不过，`const T&` 不可赋值；C# 侧也无法触达 `X_ptr`），
-        //   故按值绑定不改变可观察语义（把"编译器被迫假设会变"变成"源语义保证不变"）。
-        // 判据：字段**参与某处循环的行程数**（`for` 初值/条件/步进，或 `while`/`do` 条件）才按值绑定。
-        // 语义安全性：既有生成码本就以 `const T&` 绑定 ⇒ 内核体**不可能写**这些字段
-        //   （写了编译不过，`const T&` 不可赋值；C# 侧也无法触达 `X_ptr`），
-        //   故按值绑定不改变可观察语义（把"编译器被迫假设会变"变成"源语义保证不变"）。
-        private static bool ValueBindAllowed(bool participatesInLoopTripCount)
-        {
-            return participatesInLoopTripCount;
-        }
+        // 绑定形式由 GenerateLocalVariableDeclarations 里的 typeOk 判据决定：
+        // **小 POD 标量默认按值**，只有类型不在 `ValueBindTypeOk` 里时才按引用（见该处注释）。
 
         /// <summary>某个 job 的字段在循环里的用处分组（**按符号解析**，不再按名字猜）。</summary>
         private sealed class FieldLoopUse
@@ -477,8 +467,7 @@ namespace NativeTranspiler.Analyzer
             return use;
         }
 
-        /// <summary>行程数字段**不限尺寸**也可按值绑定（仍须是值类型）。</summary>
-        private static bool ValueBindWideTypeAllowed() => true;
+
 
         /// <summary>该字段类型是否属于"已证 ≤ 16 B 的托管值类型"（可按值绑定）。</summary>
         private static bool ValueBindTypeOk(ITypeSymbol t)
@@ -612,7 +601,32 @@ namespace NativeTranspiler.Analyzer
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
+            // 2026-10-06（doc16 44.25）：**无条件**把 batch 入口内联进它的 Adapter。
+            // 调度器调的是 3 形参 Adapter，Adapter 内部再 call 这个 26 形参入口 ⇒
+            // 对齐档 cs=1 时每个元素多付「一帧 + 一次 26 实参搬迁」。
+            // 实测（9 对交错配对，两臂只差 NativeTranspiled.dll）：整步 **1.0296（9/9）**、
+            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 **1.013**、JCC=1 **1.022**（各 3 轮，
+            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在**声明符之后**：clang 拒绝放在
+            // `extern "C" __declspec(dllexport)` 之前。调用次数不变 ⇒ 契约不受影响。
+            // 2026-10-06（doc16 §46）：**两个编译器都覆盖** —— clang(-cl) 用声明符之后的
+            // `__attribute__((always_inline))`（实测路径）；MSVC 用**声明说明符位**的 `__forceinline`
+            //（`EJ_BATCH_FORCEINLINE_PRE`，放在返回类型之前 —— 这是 MSVC 接受的位置）。
+            // 之前 MSVC 分支宏为空 ⇒ 该编译器下这个优化等于不存在（不报错，但也不生效）。
+            sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
+            sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
+            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE __forceinline");
+            sb.AppendLine("#  else");
+            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE");
+            sb.AppendLine("#  endif");
+            sb.AppendLine("#endif");
+            sb.AppendLine("#ifndef EJ_BATCH_ALWAYS_INLINE");
+            sb.AppendLine("#  if defined(__clang__)");
+            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE __attribute__((always_inline))");
+            sb.AppendLine("#  else");
+            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE");
+            sb.AppendLine("#  endif");
+            sb.AppendLine("#endif");
+            sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
@@ -682,7 +696,32 @@ namespace NativeTranspiler.Analyzer
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({paramsStr})");
+            // 2026-10-06（doc16 44.25）：**无条件**把 batch 入口内联进它的 Adapter。
+            // 调度器调的是 3 形参 Adapter，Adapter 内部再 call 这个 26 形参入口 ⇒
+            // 对齐档 cs=1 时每个元素多付「一帧 + 一次 26 实参搬迁」。
+            // 实测（9 对交错配对，两臂只差 NativeTranspiled.dll）：整步 **1.0296（9/9）**、
+            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 **1.013**、JCC=1 **1.022**（各 3 轮，
+            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在**声明符之后**：clang 拒绝放在
+            // `extern "C" __declspec(dllexport)` 之前。调用次数不变 ⇒ 契约不受影响。
+            // 2026-10-06（doc16 §46）：**两个编译器都覆盖** —— clang(-cl) 用声明符之后的
+            // `__attribute__((always_inline))`（实测路径）；MSVC 用**声明说明符位**的 `__forceinline`
+            //（`EJ_BATCH_FORCEINLINE_PRE`，放在返回类型之前 —— 这是 MSVC 接受的位置）。
+            // 之前 MSVC 分支宏为空 ⇒ 该编译器下这个优化等于不存在（不报错，但也不生效）。
+            sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
+            sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
+            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE __forceinline");
+            sb.AppendLine("#  else");
+            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE");
+            sb.AppendLine("#  endif");
+            sb.AppendLine("#endif");
+            sb.AppendLine("#ifndef EJ_BATCH_ALWAYS_INLINE");
+            sb.AppendLine("#  if defined(__clang__)");
+            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE __attribute__((always_inline))");
+            sb.AppendLine("#  else");
+            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE");
+            sb.AppendLine("#  endif");
+            sb.AppendLine("#endif");
+            sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;

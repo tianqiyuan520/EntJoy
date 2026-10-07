@@ -6,17 +6,8 @@ using Xunit.Abstractions;
 namespace NativeTranspiler.Tests
 {
     /// <summary>
-    /// NT-17（托管 job 清点 / NT032）：把"漏写 <c>[NativeTranspile]</c>"从**静默降级**变成一条可读的清点。
-    ///
-    /// <para>判据只有一条：<c>[NativeTranspile]</c> 在 ⇒ 原生；**不在 ⇒ 托管**。
-    /// 不引入、也不需要任何"我是托管"的标记 —— 缺属性本身就是托管的定义。</para>
-    ///
-    /// <para>缺陷形态（本仓实测踩过：游戏仓 `ZeroCellsJob` 清 351,233 个 int 的串行关键路径趟）：
-    /// job struct 实现了 job 接口但没标 `[NativeTranspile]` ⇒ **三处都不会发声** ——
-    /// ① 生成器的语法提供器谓词要求"有属性列表"⇒ 它**从不看**未标记的 struct（NT001~NT031 全以"已标记"为输入）；
-    /// ② 托管路径是**始终存在**的泛型扩展 `JobExtensions.Schedule&lt;T&gt;`，具体扩展缺失时 C# 重载决议
-    ///    无歧义地落到它 ⇒ 编译期零警告；③ 运行期 `UseNative` 只反映 NativeDll 是否可用，与"这个 job
-    ///    有没有原生内核"无关。</para>
+    /// NT-17（托管 job 清点 / NT032）：列出"实现了 job 接口但没标 <c>[NativeTranspile]</c>"的 struct。
+    /// <c>EntJoyJobIntent</c> = off（**默认，关闭**）| warn（只在混合项目清点）| strict（一律报且升级为 error）。
     /// </summary>
     public class NT17_JobIntentTests
     {
@@ -59,19 +50,29 @@ public struct ManagedTwoJob : IJobParallelFor {
         }
 
         [Fact]
-        public void Default_InventoriesManagedJobsInMixedProject()
+        public void Default_IsOff_SoMixedProjectIsSilent()
         {
+            // 默认 off：这条诊断是**可选**的，不参与默认构建噪声
             var (ids, errors) = Diag(MixedSource);
             _out.WriteLine("ids=" + string.Join(",", ids) + " errors=" + errors);
-            Assert.Contains("NT032", ids);
-            Assert.Equal(0, errors);           // 默认是 warning：不阻断构建
+            Assert.DoesNotContain("NT032", ids);
+            Assert.Equal(0, errors);
         }
 
         [Fact]
-        public void PureManagedProject_IsSilentByDefault()
+        public void PolicyWarn_InventoriesManagedJobsInMixedProject()
         {
-            // 本仓 16 个纯托管项目（如 EntJoy.ECS.Tests 的 20 个 job）一个字都不该报
-            var (ids, _) = Diag(PureManagedSource);
+            var (ids, errors) = Diag(MixedSource, Policy("warn"));
+            _out.WriteLine("ids=" + string.Join(",", ids) + " errors=" + errors);
+            Assert.Contains("NT032", ids);
+            Assert.Equal(0, errors);           // warn：不阻断构建
+        }
+
+        [Fact]
+        public void PolicyWarn_PureManagedProject_IsSilent()
+        {
+            // warn 只在**混合**项目清点；纯托管项目里"全托管"是正常形态
+            var (ids, _) = Diag(PureManagedSource, Policy("warn"));
             Assert.DoesNotContain("NT032", ids);
         }
 
@@ -94,9 +95,9 @@ public struct ManagedTwoJob : IJobParallelFor {
         }
 
         [Fact]
-        public void Inventory_NamesTheManagedJobsAndNeedsNoMarker()
+        public void PolicyWarn_NamesTheManagedJobsAndNeedsNoMarker()
         {
-            var r = GeneratorHarness.EmitFor(MixedSource);
+            var r = GeneratorHarness.EmitFor(MixedSource, extraProperties: Policy("warn"));
             var msg = string.Join("\n", r.Diagnostics.Select(d => d.GetMessage()));
             _out.WriteLine(msg);
             Assert.Contains("ManagedNoAttrJob", msg);   // 列出没有原生内核的 job
@@ -105,7 +106,7 @@ public struct ManagedTwoJob : IJobParallelFor {
         }
 
         [Fact]
-        public void AttributeOnlyJob_ProducesNoInventory()
+        public void PolicyWarn_AttributeOnlyJob_ProducesNoInventory()
         {
             var src = Head + @"
 [NativeTranspile]
@@ -113,7 +114,7 @@ public struct OnlyNativeJob : IJob {
     public NativeArray<int> Out;
     public void Execute() { Out[0] = 1; }
 }";
-            var (ids, _) = Diag(src);
+            var (ids, _) = Diag(src, Policy("warn"));
             Assert.DoesNotContain("NT032", ids);
         }
     }

@@ -6,31 +6,20 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
-		<BaseOutputPath>..\..\bin</BaseOutputPath>
 		<OutputPath>..\..\bin</OutputPath>
-
-		<!-- 关键设置：取消自动跟踪 TargetFramework 子目录 -->
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-		<!-- 本工程有多个 sample 的 Main（其余为注释态）；用 ENTJOY_STARTUP 指定入口，
-		     这样 -p:ENTJOY_STARTUP=... 只影响本工程，不会传播到库工程（否则报 CS2017 /main）。 -->
-		<StartupObject Condition="'$(ENTJOY_STARTUP)' != ''">$(ENTJOY_STARTUP)</StartupObject>
-		<!-- CS8500: 源生成器生成的 N 元组查询对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
-		<NoWarn>$(NoWarn);8500</NoWarn>
 
-		<!-- B3：AutoSIMD = Enabled 在 IJobParallelFor/IJobFor/IJob 上默认报 error（NT024：实测比标量
-		     基线慢 ~10%）。本样例的 AutoSIMD job **就是**被测对象，且由
-		     tools/AutoSIMDVerify（23/23）与 tools/AutoSIMDEdgeCases（140/140）逐值对照过 C# 标量基线
-		     ⇒ 在此显式声明"已量过"。注意这只解除 NT024；body 不可向量化的 job 仍会报 NT031（见
-		     样例里被显式改成 AutoSIMD.Disabled 的那几处）。 -->
+		<!-- 本工程有多个样例各带 Main：-p:ENTJOY_STARTUP=<全限定类型名> 选入口（只影响本工程，不传播到库工程）；
+		     不传时用缺省入口，避免 CS0017。 -->
+		<StartupObject Condition="'$(ENTJOY_STARTUP)' != ''">$(ENTJOY_STARTUP)</StartupObject>
+		<StartupObject Condition="'$(ENTJOY_STARTUP)' == ''">EntJoySample.HotReload.Program</StartupObject>
+		<!-- CS8500：生成器对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
+		<NoWarn>$(NoWarn);8500</NoWarn>
+		<!-- AutoSIMD 的"我已量过"开关（NT024）：本样例的 AutoSIMD job 就是被测对象 -->
 		<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>
 	</PropertyGroup>
 
-	<!-- 同一程序集内只允许一个「重型对比样本」处于活动态：
-	     IJobChunkMoveCompareTest 与 AutoSIMDTest（IJobEntityAutoSIMDTest.cs + Case6_MoveJob/MoveJob.cs）
-	     定义了同名 job/组件（HeavyJobChunkCpp / HeavyJobEntityCpp / MovePosition / MoveVelocity），
-	     而生成器的 NativeExports 以**简单名**为键 ⇒ 同时活动必然 CS0102/CS0111 冲突（实测踩到）。
-	     默认（不传该属性）= 原行为：AutoSIMDTest 活动、MoveCompare 排除；
-	     `-p:ENTJOY_SAMPLE_SET=movecompare` = 反过来（跑托管 vs 原生对比时用）。 -->
+	<!-- 两套「重型对比样本」定义了同名 job/组件（生成器以简单名为键）⇒ 同时活动会 CS0102/CS0111 -->
 	<ItemGroup Condition="'$(ENTJOY_SAMPLE_SET)' != 'movecompare'">
 		<Compile Remove="02_IJobChunkECS\IJobChunkMoveCompareTest\**" />
 	</ItemGroup>
@@ -38,14 +27,12 @@
 		<Compile Remove="03_NativeTranspiler\AutoSIMDTest\**" />
 	</ItemGroup>
 
-	<!-- ECS 侧引用（ECS 运行时 + ECS 生成器）留在本工程；
-	     原生转译链（NativeTranspiler 分析器 / NativeTranspiler.Tasks / 原生链接与编译）
-	     统一由共享 props/targets 提供，见 src\EntJoy.Jobs\msbuild\。 -->
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 		<ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
 	</ItemGroup>
 
+	<!-- 原生转译链（分析器 / 编译 task / 链接套件）由共享 props/targets 提供 -->
 	<Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.props" />
 	<Import Project="..\..\src\EntJoy.Jobs\msbuild\EntJoy.Jobs.targets" />
 

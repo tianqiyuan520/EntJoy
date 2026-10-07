@@ -32,6 +32,12 @@ namespace EntJoy.ECS
         public string TypeName;
         public int Size;
         public ComponentFieldMeta[] Fields;
+
+        /// <summary>布局指纹（生成期算好的字面量；字段顺序/增删/改类型都会改它，不含 offset/size）。</summary>
+        public ulong LayoutHash;
+
+        /// <summary>布局指纹用的全限定类型名（与生成清单里的键逐字一致；`TypeName` 只是短名）。</summary>
+        public string LayoutTypeName;
     }
 
     /// <summary>组件元数据注册表（序列化 / 数据导航 / 调试共用）。</summary>
@@ -42,6 +48,14 @@ namespace EntJoy.ECS
         public static void Register(ComponentMeta meta)
         {
             _byId[meta.TypeId] = meta;
+            // 把布局指纹报到框架侧。键 = `程序集名|类型全名`，所以需要 owner 程序集名（由 TypeId 反查）。
+            System.Reflection.Assembly owner = null;
+            if (ComponentTypeManager.TryGetTypeById(meta.TypeId, out var ownerType) && ownerType != null)
+                owner = ownerType.Assembly;
+            EntJoy.JobSystem.NativeJobScheduler.RecordComponentLayout(
+                owner,
+                string.IsNullOrEmpty(meta.LayoutTypeName) ? meta.TypeName : meta.LayoutTypeName,
+                meta.LayoutHash);
         }
 
         public static ComponentMeta Get(int typeId)

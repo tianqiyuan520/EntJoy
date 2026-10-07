@@ -701,9 +701,87 @@ namespace JobSystem
         return true;
     }
 
-    static void RecordWorkerEntry(BatchState* batch) noexcept
+    // ── 等宽 tile 的**逐 tile 直调**（契约不变：每个 tile 仍恰好一次内核调用）──
+    //
+    // 动机（2026-10-05，doc16 §14）：薄/等宽路（`uniformTileSize != 0`，内批 ≤ 16 的调用点，例如对齐档里
+    // batch=1 的 MarkDead / Flow 各趟）此前每 tile 要付 **4 跳**：
+    //   `executor_`(间接) → `ChaseLevExecuteTile` → `TryExecuteOneTile` → `batch->executeTile`(间接)
+    //   → `GeneralExecuteTile` → `bc->batchFunc`(间接)
+    // 外加逐 tile 的边界检查、等宽派生的乘法、trace/timing/firstTileAt 判据、prefetch 判据。
+    // 实测（同状态、只改同 job 的内批）：MarkDead cs=1 → 1.42–1.60 ms，cs=64 → 0.65–0.67 ms，
+    // Unity（每元素一次 `Execute(i)`，但**内联**）→ 0.586 ms ⇒ 每工作项 ≈0.85 ns 的调度代价就是赤字。
+    //
+    // ⚠ 曾经把连续 tile **融合**成一次调用 ⇒ 被 `JobSystemTests` 的
+    //   `batch=1 must invoke the kernel exactly once per tile` 判为**契约违反**并回退。
+    //   **本函数不改调用次数**，只把上面的链路压成 `bc->batchFunc(...)` 一跳，并跳过
+    //   "诊断未开启时不需要"的逐 tile 判据。
+    //
+    // 适用条件（任一不满足 ⇒ 返回 0，调用方回退到通用逐 tile 路径，语义/诊断逐位不变）：
+    //   · `uniformTileSize != 0`（等宽 GeneralRange ⇒ 派生是纯算术，无越界）
+    //   · `context` 是 GeneralBatchContext、`batchFunc` 非空、`perKeyIndex < 0`（per-job 记账关）
+    //   · trace 与 timing 诊断均关
+    // 记账与异常协议与通用路径**逐位相同**（组内累计 `run`，异常记录第一个后继续）。
+    uint32_t TileExecuteUniformRun(BatchState* batch, uint32_t tileIndex, uint32_t runTiles) noexcept
     {
-        // 诊断计数：relaxed 足够（只记录首/末 worker 进入时刻）。
+        if (!batch || batch->uniformTileSize == 0 || runTiles == 0) return 0;
+        if (!batch->context || !batch->executeTile) return 0;
+        auto* bc = static_cast<GeneralBatchContext*>(batch->context);
+        if (bc->perKeyIndex >= 0 || bc->batchFunc == nullptr) return 0;
+        const bool traceOn = batch->tileFast
+            ? batch->traceOn : g_traceEnabled.load(std::memory_order_relaxed);
+        if (traceOn) return 0;
+        const bool timingOn = batch->tileFast
+            ? batch->timingOn : g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+        if (timingOn) return 0;
+
+        uint32_t run = runTiles;
+        if (run > batch->tileCount - tileIndex) run = batch->tileCount - tileIndex;
+        const uint32_t size = batch->uniformTileSize;
+        const uint32_t total = batch->totalElements;
+        uint32_t done = 0;
+        for (uint32_t k = 0; k < run; ++k)
+        {
+            const uint32_t first = (tileIndex + k) * size;
+            if (first >= total) break;
+            uint32_t n = size;
+            if (first + n > total) n = total - first;
+            try
+            {
+                bc->batchFunc(bc->originalContext, static_cast<int>(first), static_cast<int>(n));
+            }
+            catch (...)
+            {
+                RecordStateException(batch->handle, std::current_exception());
+            }
+            ++done;
+        }
+        if (done == 0) return 0;
+        if (t_tileAcctGroupActive)
+        {
+            t_tileAcctGroupCount += done;
+        }
+        else if (batch->tilesRemaining.fetch_sub(done, std::memory_order_acq_rel) == done)
+        {
+            batch->lastTileAt.store(MonotonicNowNs(), std::memory_order_release);
+            TryCompleteLogicalBatch(batch);
+        }
+        return done;
+    }
+
+    // ── 2026-10-05 记录：**为什么这里没有"等宽 tile 融合执行"**（doc16 §14）──
+    // 曾实现过 `TileExecuteFusedRun`：把一个认领令牌里连续的 `run` 个等宽 tile 合并成**一次**
+    // `executeTile(context, {first, n})`。动机是实测（对齐档、同状态）：MarkDead 在 cs=1 下
+    // 1.42–1.60 ms，同一 job 换成 cs=64 只要 0.65–0.67 ms，而 Unity 在 cs=1 下 0.586 ms
+    // ⇒ 每工作项的调度代价就是它 2.5× 赤字的全部来源。
+    // ⚠ **但融合违反契约**：`JobSystemTests` 明确断言
+    //   `FAIL parallel-for: batch=1 must invoke the kernel exactly once per tile`
+    //   —— 每个 tile 恰好一次内核调用是**已发布的语义**（Unity 也是每元素一次 `Execute(i)`；
+    //   它便宜是因为 `Execute` 被**内联进 worker 的循环**，不是因为它调用得更少）。
+    // ⇒ 融合已**回退**。要吃掉这 0.9 ms/tile，只能**在不改调用次数**的前提下把每次调用变便宜
+    //   （等宽路直接走 `bc->batchFunc`、去掉 `GeneralExecuteTile` 的重复间接与检查），见 doc16 §14.4。
+
+    static void RecordWorkerEntry(BatchState* batch) noexcept
+    {        // 诊断计数：relaxed 足够（只记录首/末 worker 进入时刻）。
         const uint32_t entered =
             batch->workerSlotsEntered.fetch_add(1, std::memory_order_relaxed) + 1;
         if (entered == 1)

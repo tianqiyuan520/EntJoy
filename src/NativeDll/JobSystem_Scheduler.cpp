@@ -915,6 +915,10 @@ namespace JobSystem
         // 表键 = 内核在**其所属模块**内的 RVA（跨进程稳定；指针值本身受 ASLR 影响，故不用 HashFuncPtr）。
         // dump 制表（表为空）时也要算 ⇒ 把 dump 旗标并进 needKey。默认档（表空 + dump 关）不算。
         const bool needKey = autoBatch && (tableOn || g_jobBatchTableDump);
+        // doc16 §46：**按 job 名登记的批表槽位**在静态构造期已由托管侧绑定成 key（见
+        // `BindJobBatchName`）⇒ 这里只需在首次真正查表时打一行对账（纯诊断，不再解析任何东西）。
+        // 也因此表在派发路径上是**只读**的：没有"首次派发时其它线程读到半成品 key"的竞态。
+        if (needKey) ReportJobBatchNames();
         const uint32_t tableKey = needKey
             ? JobFuncKey(reinterpret_cast<void (*)() noexcept>(func)) : 0u;
         const uint32_t tableBatch = tableOn ? LookupJobBatch(tableKey) : 0u;

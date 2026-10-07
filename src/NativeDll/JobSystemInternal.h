@@ -206,6 +206,8 @@ namespace JobSystem
     // 制表：`ENTJOY_JOB_BATCH_TABLE_DUMP=1` ⇒ 每个首见键打一行
     // `[JOBBATCHTBL] key=... N=... tiles=... applied=...`（走 stdout，不在 Godot 的 --log-file 里）；
     // 键→job 名可用 `dumpbin /exports NativeTranspiled.dll` 对齐（导出名即 `SharpNative_Job_<类型>_...`）。
+    // ⚠ 只是**制表**时的做法：日常只用 `ENTJOY_JOB_BATCH_BY_NAME="<job类型名>:<n>"` 即可 ——
+    //   那条路径不经过本表，也不需要知道任何 RVA/导出名（见下方 `BindJobBatchName`）。
     static constexpr uint32_t kJobBatchTableCap = 32;
     // D1：认领跨度成为**调用点声明**（通解形态）。
     // 依据：真正的自变量是**每次内核调用的元素数**（两条独立轴都塌缩到它，最优 ≈1024–2048），
@@ -224,6 +226,13 @@ namespace JobSystem
     extern JobBatchTableEntry g_jobBatchTable[kJobBatchTableCap];
     extern uint32_t g_jobBatchTableCount;
     extern bool g_jobBatchTableDump;
+    /// doc16 §46：把"按 **job 名**登记"的批表槽位绑定到**该 job 实际派发用的函数指针**。
+    /// 由托管侧生成绑定在静态构造期逐个 job 调用（`NativeJobScheduler.BindNativeJobBatchName`）——
+    /// 名字 = 托管 `Type.Name`，指针 = 托管真正交给调度器的那个指针 ⇒ **与符号命名规则无关**。
+    /// 必须在任何派发之前完成（早于读侧 ⇒ 表对读侧只读，无竞态/数据竞争）。返回 1 = 名字在表里。
+    int BindJobBatchName(const char* name, void* func) noexcept;
+    /// 首次真正查表时打一行"按名槽位"的对账（纯诊断；并发调用最多多打一行，不阻塞任何人）。
+    void ReportJobBatchNames() noexcept;
     uint32_t LookupJobBatch(uint32_t key) noexcept;
     // 表项**第三字段**的 `<n>` 形态 = 该 job 的**认领上限覆盖**（单位 = tile）；0 = 不覆盖。
     // 动机：逐趟证据定位 Build 赤字主要在 `count`，机制 = 认领窗口造成的跨核原子争用；
@@ -984,6 +993,10 @@ namespace JobSystem
     void ReleaseChunkBatchContext(ChunkBatchContext* cc) noexcept;
     void DestroyChunkContextWithoutCleanup(void* ctx) noexcept;
     bool GeneralExecuteTile(void* ctx, const ExecutionTile& tile);
+    // 等宽 tile 的**逐 tile 直调**：契约不变（每个 tile 仍恰好一次内核调用），
+    // 只把 `executor_→TryExecuteOneTile→executeTile→GeneralExecuteTile→batchFunc` 压成 `batchFunc` 一跳，
+    // 并跳过诊断未开启时不需要的逐 tile 判据。返回实际消费的 tile 数（0 = 不适用 ⇒ 回退通用路径）。
+    uint32_t TileExecuteUniformRun(BatchState* batch, uint32_t tileIndex, uint32_t runTiles) noexcept;
     void CleanupGeneralContext(void* ctx);
     void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept;
 

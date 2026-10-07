@@ -28,9 +28,9 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Build solution
-        # EntJoySample 默认样例集里有多个非注释 Main（ManyJobsBenchTest / 09_ECS / 12_EntityNativeLookup）
-        # ⇒ 必须显式指定入口，否则 CS0017。
-        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
+        # EntJoySample 里有多个非注释 Main ⇒ 入口由 EntJoySample.csproj 的**缺省 StartupObject** 提供
+        # （需要别的入口时用 -p:ENTJOY_STARTUP=<全限定类型名> 覆盖）。
+        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false
 
       - name: Jobs-only transpiler guard
         # 无 ECS 引用的消费方必须能用 [NativeTranspile] 数组 job（生成物不得含 ECS 耦合）。
@@ -40,6 +40,13 @@ jobs:
 
       - name: Build ECS tests
         run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
+
+      # Hot-reload behaviour gate. The native end-to-end evidence (P1-7 / P2-4 / P4) lives in
+      # tools/HotReloadProbe — gitignored scaffolding with absolute toolchain paths — so it cannot
+      # run here. These tests need no native build and no compiler: they assert the pure-managed
+      # contract (reload-result contract + watcher detection/copy semantics).
+      - name: Hot-reload contract tests
+        run: dotnet test tests/HotReload.Tests/HotReload.Tests.csproj -c Release --nologo
 
       # 后端必须显式指定并断言（ENTJOY_TEST_BACKEND）：
       # EntJoy.ECS.Tests 的输出目录默认没有 NativeDll.dll，而 NativeJobCore 的 ModuleInitializer 会沿

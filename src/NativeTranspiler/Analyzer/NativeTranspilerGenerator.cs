@@ -1003,17 +1003,34 @@ namespace NativeTranspiler.Analyzer
         /// 只处理本生成器自己的命名空间（`SharpNative_*` 前缀的 .cpp/.h/.ispc），
         /// 绝不触碰 build/ 缓存、CMakeLists.txt、*.bat、native_compile.hash 等由编译任务管理的文件。
         /// </summary>
+        /// <remarks>
+        /// ⚠ **ISPC 的 `-h` 头必须按"对应 `.ispc` 还在不在"决定去留，不能按"在不在本次写出集合里"**：
+        /// `<X>_ispc.h` 是 **ispc.exe 的产物**（CMake 里是 <c>add_custom_command</c> 的 OUTPUT），
+        /// 本生成器从不写它 ⇒ 它永远不在 <paramref name="expected"/> 里。早先按"不在集合就删"处理，
+        /// 结果是**每次生成都把全部 31 个 `*_ispc.h` 删掉** ⇒ CMake 判定 ISPC 步骤输出缺失、
+        /// 全部重跑（实测改一个 job 体 31 次 ispc.exe、约 13 s，占整轮 ~19 s 的绝大部分；
+        /// 见 docs/热重载实现规划.md §39）。规则精确化为：`<X>.ispc` 仍是期望产物 ⇒ 保留 `<X>_ispc.h`；
+        /// `.ispc` 真没了（job 被删）才连头一起删 —— D1 的原始目的（不留陈旧产物）不受影响。
+        /// </remarks>
         private static void PruneStaleGeneratedFiles(string outputDir, HashSet<string> expected)
         {
             string[] exts = { ".cpp", ".h", ".ispc" };
             try
             {
+                // ISPC 头（含 `_mt` 多目标变体）与它们的 `.ispc` 源一一对应：源还在就留住头。
+                var ispcOwnedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in expected)
+                {
+                    if (!name.EndsWith(".ispc", StringComparison.OrdinalIgnoreCase)) continue;
+                    ispcOwnedHeaders.Add(name.Substring(0, name.Length - ".ispc".Length) + "_ispc.h");
+                }
+
                 foreach (var path in Directory.EnumerateFiles(outputDir, "SharpNative_*"))
                 {
                     string ext = Path.GetExtension(path);
                     if (Array.IndexOf(exts, ext) < 0) continue;
                     string name = Path.GetFileName(path);
-                    if (expected.Contains(name)) continue;
+                    if (expected.Contains(name) || ispcOwnedHeaders.Contains(name)) continue;
                     CodeGenIo.DeleteIfExists(path);
                     Console.WriteLine($"[NativeTranspiler] Pruned stale generated file: {name}");
                 }
@@ -1594,6 +1611,17 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             if (!prebuiltNative)
                 sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
+            // 2026-10-05（doc16 §27）：**附加编译器开关的实验旋钮**（默认空 = 发射面逐字不变）。
+            // 用途：在**不改发射器**的前提下，对生成 TU 做"构建期 A/B"（例如 `/Ob3`、`/favor:AMD64`）。
+            // 注意 `target_compile_options` 是**追加**语义 ⇒ 后出现的同族开关覆盖前面的。
+            string extraMsvc = System.Environment.GetEnvironmentVariable("ENTJOY_MSVC_EXTRA_FLAGS");
+            if (!string.IsNullOrWhiteSpace(extraMsvc))
+            {
+                sb.AppendLine($"        # ENTJOY_MSVC_EXTRA_FLAGS");
+                sb.AppendLine($"        target_compile_options(NativeTranspiled PRIVATE {extraMsvc!.Trim()})");
+                if (!prebuiltNative)
+                    sb.AppendLine($"        target_compile_options(NativeDll PRIVATE {extraMsvc!.Trim()})");
+            }
             sb.AppendLine("    endif()");
             if (!prebuiltNative)
                 sb.AppendLine("    target_compile_definitions(NativeDll PRIVATE NDEBUG NOMINMAX NATIVEDLL_EXPORTS JOB_SYSTEM_EXPORT)");

@@ -44,11 +44,17 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API int JobSystem_GetWorkerCount();
     JOB_API void JobSystem_Shutdown();
     JOB_API void JobSystem_PrewakeWorkers();
+    // 等所有在飞批退役，但不关 worker。老 DLL 无此导出 ⇒ 托管侧按可选导出处理（TryGetExport）。
+    JOB_API void JobSystem_DrainAll();
     JOB_API void JobSystem_ConfigureTilesPerWorker(int tilesPerWorker);
     JOB_API void JobSystem_ConfigureGuided(int enabled, int k, int floor);
     // 启用/关闭 per-job 自动 batch（JobCostCache）。0=关闭（默认，纯 tpw=4），
     // 1=启用（worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数）。
     JOB_API void JobSystem_SetJobCostCacheEnabled(int enabled);
+    // 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 **job 名**登记的槽位绑定到**该 job 实际派发用的函数指针**。
+    // 由转译器生成的绑定在 `NativeExports` 静态构造里逐个 job 调用（名字 = `Type.Name`）。
+    // 返回值：1 = 该名字在表里（已绑定）；0 = 表里没有这个名字。未设置该 env 时恒为 0 且无副作用。
+    JOB_API int JobSystem_BindBatchName(const char* name, void* func);
 
     // 注册托管 Persistent 分配器回调（NativeContainers.h 的 UnsafeList 扩容/释放走托管侧，
     // 杜绝原生 free 内部指针导致的堆损坏）。alloc/free 参数为 C# 侧函数指针（cdecl）。

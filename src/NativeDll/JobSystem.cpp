@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -21,6 +22,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+// 2026-10-05（doc16 §40，JCC/批表重构）：批表要按**导出名**编写并在加载时解析成 RVA
+// （RVA 会随重编漂移 —— 本次事故的根因），因此需要走本模块自己的 PE 导出表。
+#include <windows.h>
+#endif
 
 #if defined(__linux__)
 #include <sched.h>
@@ -97,7 +104,17 @@ namespace JobSystem
 
     // JobCostCache export flag（State 模块 ResolveChunkSize 与 Tiles 退役路径读取）。
     // C# Initialize 强制同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
-    std::atomic<bool> g_jobCostCacheEnabled{ true };
+    // 2026-10-05（doc16 §40）：**JCC 现在有真正的关断 env** `ENTJOY_JOB_COST_CACHE=0`。
+    // 重构动机（§39 的事故）："对齐档"的定义是"**JCC 全关** + batch 逐调用点与 Unity 一致"，
+    //   但 JCC 此前**没有任何 env 能关**（只有导出函数 `JobSystem_SetJobCostCacheEnabled` 与调试面板开关），
+    //   于是只能绕道"批表命中即 bypass JCC"来表达 —— 而批表 key 会随重编漂移，一失效就静默回到 JCC。
+    //   ⇒ 现在把"JCC 开/关"变成一等配置：本初值读 env，且**托管侧默认值也读同一个 env**
+    //   （否则 C# 的 Initialize 会把这个值盖回去）。
+    //   默认 1 = 与历史行为逐位不变。
+    std::atomic<bool> g_jobCostCacheEnabled{ []() -> bool {
+        const char* v = std::getenv("ENTJOY_JOB_COST_CACHE");
+        return !(v != nullptr && v[0] == '0');
+    }() };
 
     // 提交期延迟唤醒深度（ChaseLevScheduler::SubmitBatch 尾部读取；defer>0 跳过逐批 notify）
     std::atomic<int> g_submitDeferDepth{ 0 };
@@ -225,7 +242,10 @@ namespace JobSystem
     // 按 job 的内批档表（`ENTJOY_JOB_BATCH_TABLE`，默认空 = 关）。语义/用途/前提见
     // JobSystemInternal.h 的同名声明块。加载时解析一次 env（与 FORCE_INNER_BATCH 同款）。
     JobBatchTableEntry g_jobBatchTable[kJobBatchTableCap] = {};
+    /// 与上表**同槽**：非空表示该槽是"按 job 名登记"的（key 由 BindJobBatchName 填）。
+    char g_jobBatchSlotName[kJobBatchTableCap][96] = {};
     bool g_jobBatchTableDump = false;
+
     uint32_t g_jobBatchTableCount = []() -> uint32_t {
         const char* d = std::getenv("ENTJOY_JOB_BATCH_TABLE_DUMP");
         g_jobBatchTableDump = (d != nullptr && d[0] == '1');
@@ -284,15 +304,122 @@ namespace JobSystem
                 }
             }
             EJ_LOADBANNER(
-                "[JOBBATCHTABLE] entries=%u dump=%d (auto-batch: table hit wins over ENTJOY_FORCE_INNER_BATCH; JCC bypassed)\n",
+                "[JOBBATCHTABLE] hex_entries=%u dump=%d (auto-batch: table hit wins over ENTJOY_FORCE_INNER_BATCH; JCC bypassed)\n",
                 static_cast<unsigned>(n), g_jobBatchTableDump ? 1 : 0);
         }
         else
         {
-            EJ_LOADBANNER( "[JOBBATCHTABLE] entries=0 dump=%d\n", g_jobBatchTableDump ? 1 : 0);
+            EJ_LOADBANNER( "[JOBBATCHTABLE] hex_entries=0 dump=%d\n", g_jobBatchTableDump ? 1 : 0);
+        }
+
+        // ── 按**job 名**编写的那一半（`ENTJOY_JOB_BATCH_BY_NAME`，2026-10-05 doc16 §40）──────────────
+        // 形式：`Name:batch[,Name:batch]…`，如 `CountCellsJob:64,PlaceCellsJob:64,IntegrateJob:64,FlowPresenceJob:64`。
+        // `Name` = **托管 job 类型名**（`typeof(T).Name`）。加载期只登记名字（key 留 0），key 由
+        //   `BindJobBatchName` 在**静态构造期**（= 任何派发之前）按"该 job 实际派发用的函数指针"填入
+        //   （见 doc16 §46）：指针 → key 的换算是 `JobFuncKey`（指针在**其所属模块**内的 RVA），
+        //   与派发侧对同一指针的算式逐字相同 ⇒ 必然同键，且与符号命名规则/命名空间无关。
+        // 好处：作者写的是**不随重编漂移的名字** ⇒ 根治 §39 的事故；始终绑不上的名字仍会**大声打印**。
+        {
+            const char* vn = std::getenv("ENTJOY_JOB_BATCH_BY_NAME");
+            if (vn != nullptr && vn[0] != '\0')
+            {
+                uint32_t named = 0;
+                const char* p = vn;
+                while (*p != '\0' && n < kJobBatchTableCap)
+                {
+                    while (*p == ',' || *p == ';' || *p == ' ' || *p == '\t') ++p;
+                    if (*p == '\0') break;
+                    const char* segEnd = p;
+                    while (*segEnd != '\0' && *segEnd != ',' && *segEnd != ';') ++segEnd;
+                    const char* colon = p;
+                    while (colon < segEnd && *colon != ':' && *colon != '=') ++colon;
+                    const size_t tl = static_cast<size_t>(colon - p);
+                    if (tl > 0 && tl < sizeof(g_jobBatchSlotName[0]))
+                    {
+                        std::memcpy(g_jobBatchSlotName[n], p, tl);
+                        g_jobBatchSlotName[n][tl] = '\0';
+                        const long b = (colon < segEnd) ? std::strtol(colon + 1, nullptr, 10) : 0;
+                        g_jobBatchTable[n].key = 0u;            // 未解析：首次派发时填
+                        g_jobBatchTable[n].batch = (b > 0)
+                            ? ((b > (1 << 20)) ? (1u << 20) : static_cast<uint32_t>(b)) : 0u;
+                        g_jobBatchTable[n].claim = 0u;
+                        g_jobBatchTable[n].span = 0u;
+                        g_jobBatchTable[n].geom = kClaimGeomAuto;
+                        ++n; ++named;
+                    }
+                    p = segEnd;
+                }
+                EJ_LOADBANNER(
+                    "[JOBBATCHBYNAME] registered=%u total_slots=%u (key 由托管侧 BindJobBatchName 在静态构造期填；始终未绑的名字会另打一行)\n",
+                    static_cast<unsigned>(named), static_cast<unsigned>(n));
+            }
         }
         return n;
     }();
+
+    /// 把"按名字登记"的批表槽位绑定到**该 job 实际派发用的函数指针**。
+    /// 由托管侧的生成绑定在静态构造里逐个 job 调用（`NativeJobScheduler.BindNativeJobBatchName`）。
+    /// **通用性**：名字来自托管 `Type.Name`，指针来自托管真正交给调度器的那个函数指针 ⇒
+    ///   不需要知道任何符号命名规则/命名空间/ABI 约定。旧实现拼
+    ///   `SharpNative_Job_<命名空间>_<类型>_Execute_Adapter` 并扫 PE 导出表 ⇒ 等价于把**本工程的
+    ///   命名空间**（`CPUBattle`）硬编码进框架，换工程一条都解析不出来。
+    /// **并发**：键由 `JobFuncKey`（= 指针在**其所属模块**内的 RVA）算出，与派发侧对同一指针的算式
+    ///   逐字相同 ⇒ 必然同键；且本函数在**任何派发之前**完成 ⇒ 表在读侧是**只读**的（不再有
+    ///   "首次派发时其它线程在 CAS 观察者路径上读到半成品 key"的竞态与数据竞争）。
+    /// 返回值：1 = 该名字在表里（已绑定）；0 = 表里没有这个名字（调用方无需处理）。
+    int BindJobBatchName(const char* name, void* func) noexcept
+    {
+        if (name == nullptr || name[0] == '\0' || func == nullptr) return 0;
+        const uint32_t key = JobFuncKey(reinterpret_cast<void (*)() noexcept>(func));
+        if (key == 0u) return 0;
+        int bound = 0;
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+        {
+            if (g_jobBatchSlotName[i][0] == '\0') continue;
+            if (std::strcmp(g_jobBatchSlotName[i], name) != 0) continue;
+            if (g_jobBatchTable[i].key == 0u) g_jobBatchTable[i].key = key;
+            bound = 1;
+        }
+        return bound;
+    }
+
+    /// 首次真正查表时打一行"按名槽位"的对账（`resolved` = 已被 `BindJobBatchName` 绑上的槽位数）。
+    /// 纯诊断：只读表、无副作用，重复调用/并发调用最多多打一行（故用 relaxed 交换，不阻塞任何人）。
+    void ReportJobBatchNames() noexcept
+    {
+        static std::atomic<bool> s_reported{ false };
+        bool expected = false;
+        if (!s_reported.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+            return;
+        uint32_t resolved = 0;
+        uint32_t named = 0;
+        bool truncated = false;
+        char unresolved[1024];
+        size_t urLen = 0;
+        unresolved[0] = '\0';
+        for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
+        {
+            if (g_jobBatchSlotName[i][0] == '\0') continue;
+            ++named;
+            if (g_jobBatchTable[i].key != 0u) { ++resolved; continue; }
+            const size_t tl = std::strlen(g_jobBatchSlotName[i]);
+            if (urLen + tl + 2 < sizeof(unresolved))
+            {
+                std::memcpy(unresolved + urLen, g_jobBatchSlotName[i], tl);
+                urLen += tl; unresolved[urLen++] = ' '; unresolved[urLen] = '\0';
+            }
+            else truncated = true;
+        }
+        if (named == 0) return;   // 只有 hex 形态（或表为空）⇒ 无"按名槽位"可对账，不打这一行
+        // ⚠ 这里**不能**用 `EJ_LOADBANNER`：那是"加载期缓冲"，而本函数在**首次派发**时执行
+        //   （缓冲早已 flush）⇒ 报警会被丢掉。承诺是"**不再静默失效**"，故直接写 stderr。
+        std::fprintf(stderr,
+            "[JOBBATCHBYNAME] resolved=%u/%u unresolved=(%s)%s\n",
+            static_cast<unsigned>(resolved), static_cast<unsigned>(named),
+            unresolved[0] != '\0' ? unresolved : "none",
+            truncated ? " +more" : "");
+        std::fflush(stderr);
+    }
 
     uint32_t LookupJobBatch(uint32_t key) noexcept
     {
@@ -1171,6 +1298,14 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
             outstanding =
                 g_backendBatchesOutstanding.load(std::memory_order_acquire);
         }
+    }
+
+    // 排空所有在飞批。刻意**不关 worker**（Shutdown 才是终态）。
+    // 用的是与 ResetStatsSnapshot 读统计前同一段序列。
+    void DrainAll() noexcept
+    {
+        ConsumeLongBatchBarriers();
+        WaitForBackendBatches();
     }
 
     void ResetStatsSnapshot() noexcept

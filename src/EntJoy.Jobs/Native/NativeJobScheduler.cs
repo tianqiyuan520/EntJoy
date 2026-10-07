@@ -177,7 +177,17 @@ public static unsafe partial class NativeJobScheduler
             NativeJobCore.JobSystem_SetJobCostCacheEnabled(value ? 1 : 0);
         }
     }
-    private static bool _jobCostCacheEnabled = true;
+    private static bool _jobCostCacheEnabled = ReadJccEnabledFromEnv();
+
+    /// <summary>2026-10-05（doc16 §40）：JCC 的**托管默认值也读 env**。
+    /// 否则 <c>Initialize</c> 里的 <c>JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled)</c>
+    /// 会把 native 侧读到的 env 值**盖回去**，`ENTJOY_JOB_COST_CACHE=0` 就形同虚设。
+    /// 未设/非 0 ⇒ true（与历史行为一致）。</summary>
+    private static bool ReadJccEnabledFromEnv()
+    {
+        string v = System.Environment.GetEnvironmentVariable("ENTJOY_JOB_COST_CACHE");
+        return string.IsNullOrEmpty(v) || v != "0";
+    }
 
     private static void ConfigureGuidedFromEnv()
     {
@@ -242,6 +252,54 @@ public static unsafe partial class NativeJobScheduler
 
     public static void Shutdown() { if (UseFallback) { Managed.ManagedJobScheduler.Shutdown(); return; } NativeJobCore.SafeShutdown(); }
     public static void PrewakeWorkersOnce() => NativeJobCore.JobSystem_PrewakeWorkers();
+
+    /// <summary>让全部委托缓存换代（清字典 + 自增代次，静态泛型缓存按代次惰性重建）。</summary>
+    public static void InvalidateDelegateCaches() => NativeJobCore.InvalidateDelegateCaches();
+
+    /// <summary>当前委托缓存代次（每次 <see cref="InvalidateDelegateCaches"/> +1）。</summary>
+    public static int DelegateCacheGeneration => NativeJobCore.DelegateCacheGeneration;
+
+    /// <summary>共享的 `Marshal.FreeHGlobal` cleanup 指针（生成代码统一用它）。</summary>
+    public static IntPtr SharedFreeHGlobalCleanupPtr => NativeJobCore.SharedFreeHGlobalCleanupPtr;
+
+    /// <summary>
+    /// 热重载：布局校验 → 排空 → 缓存换代 → 换句柄 → 重跑注册（前两步失败不改变任何状态）。
+    /// 调用方必须先停派发；`newPath` 必须是新文件名（同路径 `Load` 返回旧模块）。
+    /// 拒绝不抛异常，看 <see cref="NativeReloadResult.Outcome"/> / <see cref="NativeReloadResult.Message"/>。
+    /// </summary>
+    public static NativeReloadResult ReloadNativeLibrary(string newPath)
+    {
+        if (string.IsNullOrEmpty(newPath)) throw new ArgumentNullException(nameof(newPath));
+        if (UseFallback)
+            return NativeReloadResult.Refuse(NativeReloadOutcome.NotApplicable,
+                "managed fallback tier: no native NativeTranspiled module to reload.", false, DelegateCacheGeneration);
+        return NativeJobCore.ReloadNativeTranspiledCore(newPath);
+    }
+
+    /// <summary>登记"换过 NativeTranspiled 句柄后要重跑"的回调（幂等；生成物在 `[ModuleInitializer]` 里登记自己）。</summary>
+    public static void RegisterReloadCallback(Action callback)
+        => NativeJobCore.RegisterReloadCallback(callback);
+
+    /// <summary>当前登记的重载回调数（诊断用）。</summary>
+    public static int ReloadCallbackCount => NativeJobCore.ReloadCallbackCount;
+
+    /// <summary>登记一个组件的布局哈希（`ComponentMetaRegistry.Register` 在模块初始化期逐组件调用）。</summary>
+    public static void RecordComponentLayout(System.Reflection.Assembly owner, string typeName, ulong layoutHash)
+        => NativeJobCore.RecordComponentLayout(owner, typeName, layoutHash);
+
+    /// <summary>当前加载程序集的组件布局指纹（逐类型哈希异或，与顺序无关）。</summary>
+    public static ulong ComponentLayoutFingerprint => NativeJobCore.ComponentLayoutFingerprint;
+
+    /// <summary>当前档位是否提供排空导出（托管回退档恒为 false）。</summary>
+    public static bool SupportsDrainAll => !UseFallback && NativeJobCore.HasDrainAll;
+
+    /// <summary>
+    /// 在当前 NativeTranspiled 句柄上按名取导出函数指针（生成代码用它替代
+    /// `[DllImport(EntryPoint="Get_…_AdapterPtr")]`：DllImport 的解析结果被运行时缓存、换不掉）。
+    /// ⚠ 名字不存在 ⇒ 抛（显式失败，不返回 0）。
+    /// </summary>
+    public static IntPtr GetNativeExportPtr(string entryPointName)
+        => NativeJobCore.GetNativeExportPtr(entryPointName);
 
     public static void LaunchDebuggerGUI()
     {
@@ -695,6 +753,38 @@ public static unsafe partial class NativeJobScheduler
         s_nativeJobCtxSizes[type] = ctxSize;
         Console.Error.WriteLine($"[NATIVEJOB] IJobFor index-shaped native adapter wired: {type.Name} (ctx={ctxSize}B)");
     }
+
+    // ==================== 按 job 名的批表绑定（doc16 §46） ====================
+    /// <summary>
+    /// 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按**job 名**登记的批表槽位绑定到该 job **实际派发用的函数指针**。
+    /// 由转译器生成的绑定在 `NativeExports` 静态构造里逐个 job 调用（`funcPtr` = 该 job 交给
+    /// `ScheduleRaw` / `ScheduleParallelForBatchRaw` 的那个指针，单任务形与批形各取本形）。
+    /// <para>
+    /// 通用性：名字取 <see cref="Type.Name"/>、指针取托管自己派发用的值 ⇒ **不依赖任何 C++ 符号命名
+    /// 规则/命名空间/模块**（这正是不再拼导出名、不再扫 PE 导出表的原因）。
+    /// </para>
+    /// <para>
+    /// 时序：在**静态构造期**完成 ⇒ 批表在任何派发之前就是终态，派发路径对表**只读**（无竞态）。
+    /// </para>
+    /// </summary>
+    public static void BindNativeJobBatchName(Type type, IntPtr funcPtr)
+    {
+        if (type == null || funcPtr == IntPtr.Zero) return;
+        int matched = NativeJobCore.JobSystem_BindBatchName(type.Name, funcPtr);
+        if (!s_batchNameBannerDone)
+        {
+            s_batchNameBannerDone = true;
+            Console.Error.WriteLine(
+                "[NATIVEJOB] batch-by-name binding: wired (name = managed Type.Name -> the exact dispatch function pointer)");
+        }
+        // 只有该名字确实出现在 `ENTJOY_JOB_BATCH_BY_NAME` 里时才打（默认档零噪声）；同时给出所绑指针，
+        // 自证"绑的就是派发用的那个指针"而不是一个靠命名规则猜出来的符号。
+        if (matched > 0)
+            Console.Error.WriteLine(
+                $"[NATIVEJOB] batch-by-name bound: {type.Name} -> 0x{funcPtr.ToInt64():X} (ENTJOY_JOB_BATCH_BY_NAME entry)");
+    }
+
+    private static bool s_batchNameBannerDone;
 
     private static readonly HashSet<Type> s_nativeFirstUseLogged = new();
 

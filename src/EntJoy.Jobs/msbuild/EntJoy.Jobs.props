@@ -55,11 +55,8 @@
     <!-- B3：AutoSIMD = Enabled 的显式"我已量过"开关。默认不设 ⇒ IJobParallelFor/IJobFor/IJob 上
          开 AutoSIMD 直接 error（NT024：实测比标量基线慢 ~10%）。设 true 才放行。 -->
     <CompilerVisibleProperty Include="EntJoyAutoSimdMeasured" />
-    <!-- job 后端清点策略（NT032）：off | warn（默认）| strict。
-         判据只有一条：[NativeTranspile] 在 ⇒ 原生；不在 ⇒ 托管（不需要任何"我是托管"的标记）。
-         缺省 warn = 只在"本编译单元已有 ≥1 个 [NativeTranspile] job"（**混合项目**）时清点一次，
-         列出没有原生内核的 job —— 用来发现"本意原生却漏写属性"（漏写会静默降级、正确性测试抓不到）。
-         纯托管项目（0 个原生 job）保持静默；strict = 一律报且升级为 error。 -->
+    <!-- job 后端清点（NT032）：off（默认，关闭）| warn（混合项目清点一次）| strict（一律报且升级为 error）。
+         用来发现"本意原生却漏写 [NativeTranspile]"——漏写会静默降级到托管内核（语义正确、性能量级不同）。 -->
     <CompilerVisibleProperty Include="EntJoyJobIntent" />
   </ItemGroup>
 

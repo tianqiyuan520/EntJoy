@@ -1,4 +1,4 @@
-﻿// IJobEntity + AutoSIMD=Enabled 正确性测试
+// IJobEntity + AutoSIMD=Enabled 正确性测试
 // 验证：AutoSIMD 走 ChunkRange 路径后，IJobEntity 的 SIMD 计算结果与 C# 标量版本一致。
 // 覆盖 Light（纯乘加，无 fast-math 容差）与 Heavy（16×sin/cos，_n_sin_avx2 ~3.5ULP）两种场景。
 // 同时覆盖无 AutoSIMD 的 CPP IJobEntity 与 IJobChunk（对照 baseline）。
@@ -291,7 +291,7 @@ namespace EntJoySample.AutoSIMDTest
                 if (archetypes == null) return result;
                 for (int a = 0; a < archetypes.Length && idx < N; a++)
                 {
-                    Archetype arch = null;
+                    Archetype? arch = null;
                     try { arch = archetypes[a]; } catch { continue; }
                     if (arch == null) continue;
                     int compIdx;

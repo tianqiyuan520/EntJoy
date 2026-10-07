@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Hot-reload behaviour gate (validation door).
+       WHY this project exists: the P1-7/P2-4/P3/P4 evidence lives in tools\HotReloadProbe (gitignored
+       scaffolding with absolute toolchain paths), so before this project the hot-reload behaviour had
+       ZERO CI coverage, and a regression like the "GetExport returns the getter's address" bug would
+       only be caught indirectly. These tests need NO native build and NO compiler: they cover the
+       parts that are pure managed contract (preflight decision table, watcher detection, unregister
+       scoping, reload result contract). The native end-to-end (P1-7/P4) stays in the toolchain
+       dependent driver scripts. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <LangVersion>preview</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.6.6" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
+    <ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
+  </ItemGroup>
+</Project>

@@ -51,10 +51,40 @@
 - **P0-4b 批量销毁**：`DestroyEntities(Entity*, count)`、`DestroyAllInArchetype`（ClearAll 快路径，O(chunk 数)）。
 - **P0-4c 零分配**：清空后重建的 Id 全部来自回收池（非托管栈），销毁/创建路径无逐实体托管分配。
 
+## `13_HotReload`
+
+热重载**可跑样例**（2026-10-07）。入口：`13_HotReload/Program.cs` —— `Initialize()` + 一个 `while` 跑
+`HotReloadAddJob`，并在安全点用 `NativeHotReloadWatcher` 检查**新构建的 `bin\NativeTranspiled.dll`**。
+`HotReloadJob.cs` 的 `Execute` 体就是要手改的内核。
+
+- 值由内核常量决定：`Values[index] += Delta + 1;` ⇒ `values[0]=101`，改成 `+ 2` ⇒ `102`（**不重启**）。
+- 三条命令（一次性准备 + 常驻宿主 + 日常构建，**不用手动拷任何文件**）：
+
+  ```powershell
+  # ① 一次性：准备宿主目录（= 把整套搬过去，MSBuild 自动做，含 NativeTranspiled.layout.json）
+  dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -o artifacts\hotreload-demo
+  # ② 常驻宿主（监视 bin；Ctrl+C 退出）
+  artifacts\hotreload-demo\EntJoySample.exe
+  # ③ 之后每次改完内核常量：零参数普通构建（VS 的 Build 也行）
+  dotnet build samples\EntJoySample\EntJoySample.csproj -c Release
+  ```
+
+- ⚠ 宿主**必须**从 `artifacts\hotreload-demo` 跑：跑在 `bin` 里时它锁住 `bin`（`NativeTranspiled.dll`
+  与正在运行的 `EntJoySample.dll`），普通构建就写不进去（MSB3021/MSB3027）。样例会检查这一点，直接拒启并打印 ① ②。
+  同理**不能**"监视当前加载的那份 DLL"——那份文件正被自己锁着，构建写不进去 ⇒ 监视目录与构建输出目录必须分开。
+- 迭代耗时（改一个内核常量 → 零参数构建）：本工程实测 **≈9.5 s**（托管 + 代码生成 ~6.2 s、原生 ~2.7 s），
+  空转 ~1–2 s。⚠ 若这个数字突然回到 ~20 s，先查 `NativeTranspiler_Generated\*_ispc.h` 是否存在
+  （缺失 ⇒ 31 次 ISPC 全量重跑；成因与修法见 [转译器契约 §10](../../docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md)）。
+- 端到端证据与机制：`tools/HotReloadProbe/p1-7-run.ps1`（`101→203`、数据保留）、`p4-run.ps1`（自动检测+耗时）、
+  `docs/热重载设计.md` §6。
+
 ## 入口切换约定
 
 - 每次只保留一个 `Program.cs` 中的 `Main` 为非注释状态。
 - 切换样例时，先注释当前入口，再取消目标样例入口注释。
+- ⚠ 2026-10-07 更正：上面两条**已不是硬约束**。`EntJoySample.csproj` 用 `-p:ENTJOY_STARTUP=<全限定类型名>`
+  覆盖入口，且**缺省值已设为 `EntJoySample.HotReload.Program`** ⇒ 允许多个非注释 `Main`，直接 Build 即可
+  （不传属性也不会 CS0017）。要跑别的样例就显式传 `ENTJOY_STARTUP`，不必再注释别人的入口。
 
 ## C# Job 上下文约定
 

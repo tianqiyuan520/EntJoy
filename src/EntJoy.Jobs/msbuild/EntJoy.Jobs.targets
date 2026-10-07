@@ -37,6 +37,18 @@
     <Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
   </Target>
 
+  <!-- 组件布局清单落到 DLL 旁（`<dll>.layout.json`），供热重载前逐类型比对；独立于 EntJoyCompileNative：
+       纯托管构建也要放好，否则守卫会因"缺清单"而拒绝。 -->
+  <Target Name="EntJoyCopyLayoutManifest" AfterTargets="Build">
+    <ItemGroup>
+      <_EntJoyLayoutManifest Include="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\LayoutFingerprint.json" Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\LayoutFingerprint.json')" />
+    </ItemGroup>
+    <!-- 用 Path.Combine：`-o <dir>` / `-p:OutputPath=<dir>` 是全局属性，不带结尾分隔符，拼接会得到畸形路径 -->
+    <Copy SourceFiles="@(_EntJoyLayoutManifest)"
+          DestinationFiles="$([System.IO.Path]::Combine('$(OutputPath)', 'NativeTranspiled.layout.json'))"
+          SkipUnchangedFiles="true" Condition="'@(_EntJoyLayoutManifest)' != ''" />
+  </Target>
+
   <!-- Package 模式：运行时 NativeDll.dll 随包提供，纯托管消费者零工具链即可运行 -->
   <Target Name="EntJoyCopyPackagedNativeRuntime" AfterTargets="Build" Condition="'$(EntJoyConsumeMode)' == 'Package'">
     <ItemGroup>

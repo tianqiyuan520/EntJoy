@@ -60,13 +60,29 @@ namespace NativeTranspiler.Analyzer
                 GenerateStaticDelegateFields(sb, jobStruct, compilation);
             }
 
-            // 2. 静态构造函数：初始化所有缓存的委托和函数指针。
+            // 2. 静态构造函数：初始化与代次无关的成员（只剩 MT 变体的托管 thunk），注册交给 ApplyRegistrations()。
             sb.AppendLine("        static NativeExports()");
             sb.AppendLine("        {");
             foreach (var jobStruct in nativeJobs)
             {
                 GenerateStaticConstructorInitialization(sb, jobStruct, compilation);
             }
+            sb.AppendLine("            ApplyRegistrations();");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            // 2b. 注册主体（可重入）：注册表按 `Type` 存的是**某个模块**的指针，换句柄后必须重跑。
+            //     同一代次只注册一次；换代由重载回调重跑本方法。
+            sb.AppendLine("        private static int s_registeredDelegateGeneration = -1;");
+            sb.AppendLine();
+            sb.AppendLine("        /// <summary>");
+            sb.AppendLine("        /// 把字段写入器 / 原生 adapter / 批表绑名刷到**当前代次**的指针上。");
+            sb.AppendLine("        /// 同一代次重复调用是 no-op（幂等）；注册表本身是按 Type 覆盖写，重跑即换成新指针。");
+            sb.AppendLine("        /// </summary>");
+            sb.AppendLine("        private static void ApplyRegistrations()");
+            sb.AppendLine("        {");
+            sb.AppendLine("            int __gen = EntJoy.JobSystem.NativeJobScheduler.DelegateCacheGeneration;");
+            sb.AppendLine("            if (s_registeredDelegateGeneration == __gen) return;");
+            sb.AppendLine("            s_registeredDelegateGeneration = __gen;");
             // 注册 Job 字段显式写入器（chunk 路径 CreateChunkContextBlock 分发用）
             foreach (var jobStruct in nativeJobs)
             {
@@ -105,6 +121,20 @@ namespace NativeTranspiler.Analyzer
                         sb.AppendLine($"            NativeJobScheduler.RegisterNativeForAdapter(typeof({jobStruct.ToDisplayString()}), Get_{jobStruct.Name}_IndexAdapterPtr(), {marshalInfo.totalSize});");
                 }
             }
+            // 2026-10-06（doc16 §46，通解）：把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 **job 名**登记的批表槽位
+            // 绑定到**该 job 实际派发用的函数指针**。名字 = 托管 `Type.Name`，指针 = 生成代码自己交给
+            // `ScheduleRaw` / `ScheduleParallelForBatchRaw` 的那个 ⇒ **不依赖 C++ 符号命名规则/命名空间**，
+            // 也不扫 PE 导出表（旧做法把本工程的命名空间 `CPUBattle` 硬编码在框架里）。
+            // 独立于上面的 `explicitOk` 门：绑名只需要"名字 + 该 job 的派发指针"，与字段写入器无关。
+            // 分支与上面 `s_*_BatchFuncPtr` / `s_*_JobFuncPtr` 的声明链逐字同构（chunk 形态不查该表）。
+            foreach (var jobStruct in nativeJobs)
+            {
+                if (CppJobGenerator.IsChunkScheduledJob(jobStruct)) continue;
+                string jobPtrField = (CppJobGenerator.IsRangeScheduledJob(jobStruct) || CppJobGenerator.IsForJob(jobStruct))
+                    ? $"s_{jobStruct.Name}_BatchFuncPtr"
+                    : $"s_{jobStruct.Name}_JobFuncPtr";
+                sb.AppendLine($"            NativeJobScheduler.BindNativeJobBatchName(typeof({jobStruct.ToDisplayString()}), {jobPtrField});");
+            }
             sb.AppendLine("        }");
             sb.AppendLine();
             // 2026-10-02（09 §25，注册时机）：上面的注册发生在 `NativeExports` 的**静态构造**里，
@@ -115,36 +145,44 @@ namespace NativeTranspiler.Analyzer
             // ⚠ 可移植性：`ModuleInitializerAttribute` 是 net5+ 才有的 BCL 类型。消费方若 target
             //   netstandard2.x / net472 会 CS0246 ⇒ 先探测再发射；缺该类型时**不发射**，
             //   注册退回"首次触碰 NativeExports 时"（即本改动之前的惰性语义，正确但仍有时序依赖）。
+            //
+            // 本方法：① 跑 `ApplyRegistrations()`（带代次守卫，首次调用是 no-op）；② 把自己登记为重载回调（框架去重）。
             bool hasModuleInitializer = compilation
                 .GetTypeByMetadataName("System.Runtime.CompilerServices.ModuleInitializerAttribute") != null;
+            var ensureBody = new[]
+            {
+                "            ApplyRegistrations();",
+                "            // 登记为**重载回调** —— 换完句柄后框架重跑本方法，注册表跟着新代次刷新。",
+                "            EntJoy.JobSystem.NativeJobScheduler.RegisterReloadCallback(EnsureNativeJobRegistrations);"
+            };
             if (hasModuleInitializer)
             {
-                // 自动方式：程序集加载即注册。**方法体为空是有意的** ——
-                //   本类型有显式静态构造 ⇒ 运行时在**调用本方法之前**必然先跑 cctor（注册在其中完成）。
-                //   （注意：`_ = typeof(X)` **不保证**触发 cctor，别再用那种写法来表达"触碰类型"。）
-                // 手动方式（AOT/IL2CPP 或不信任 module initializer 的宿主）：直接调用public 的
-                //   `EnsureNativeJobRegistrations()`；cctor 只跑一次 ⇒ 幂等、可重复调用。
+                // 自动方式：程序集加载即注册（并挂上重载回调）。
+                // 手动方式（AOT/IL2CPP 或不信任 module initializer 的宿主）：直接调用 public 的
+                //   `EnsureNativeJobRegistrations()`；幂等，可重复调用。
                 sb.AppendLine("        /// <summary>");
                 sb.AppendLine("        /// 原生 adapter / 字段写入器注册（自动：本方法标了 [ModuleInitializer]，程序集加载即调用；");
                 sb.AppendLine("        /// 手动：AOT/IL2CPP 宿主或需要确定性顺序时，可在启动处直接调用 —— 幂等，可重复调用）。");
+                sb.AppendLine("        /// 热重载：本方法同时是框架的**重载回调**（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
                 sb.AppendLine("        /// </summary>");
                 sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
                 sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
                 sb.AppendLine("        {");
-                sb.AppendLine("            // 有意留空：进入本方法前运行时已完成本类型的静态构造（注册在那里完成）。");
+                foreach (var line in ensureBody) sb.AppendLine(line);
                 sb.AppendLine("        }");
             }
             else
             {
                 // 无 ModuleInitializerAttribute（netstandard2.x / net472）：仍需一个**公开的手动入口**，
-                // 否则消费方无法保证注册先于首次调度。方法体同样为空（调用即触发 cctor）。
+                // 否则消费方无法保证注册先于首次调度。
                 sb.AppendLine("        /// <summary>");
                 sb.AppendLine("        /// 原生 adapter / 字段写入器注册（手动：本目标框架无 [ModuleInitializer]，");
                 sb.AppendLine("        /// 请在启动处调用一次；幂等，可重复调用）。");
+                sb.AppendLine("        /// 热重载：本方法同时是框架的**重载回调**（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
                 sb.AppendLine("        /// </summary>");
                 sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
                 sb.AppendLine("        {");
-                sb.AppendLine("            // 有意留空：进入本方法前运行时已完成本类型的静态构造（注册在那里完成）。");
+                foreach (var line in ensureBody) sb.AppendLine(line);
                 sb.AppendLine("        }");
             }
             sb.AppendLine();
@@ -274,25 +312,28 @@ namespace NativeTranspiler.Analyzer
             bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
 
+            var attrSymbolDeleg = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+            bool useMTDeleg = HasUseISPC_MT(jobStruct, attrSymbolDeleg);
+
             if (isChunk)
             {
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
             // IJobEntity 统一走 Chunk 级调度（与 ISPC 路径一致）。
-                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
-                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
+                    EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_ChunkFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
+                    EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_ChunkRangeFuncPtr", CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct));
                 }
                 else
                 {
-                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkFuncPtr;");
-                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkRangeFuncPtr;");
+                    EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_ChunkFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
+                    EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_ChunkRangeFuncPtr", CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct));
                     var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
                     // EntityBatch 指针仅对无 shared 的 C++ job 声明（shared 时 adapter 不生成，
                     // 与初始化/调度分流一致）
                     bool hasShared2 = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
                     if (!isIspc2 && !hasShared2)
-                        sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_ChunkEntityBatchFuncPtr;");
+                        EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_ChunkEntityBatchFuncPtr", CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct));
                 }
                 var requiredTypes = CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation);
                 string requiredIds = BuildRequiredComponentTypeIdsInitializer(requiredTypes);
@@ -304,18 +345,50 @@ namespace NativeTranspiler.Analyzer
             }
             else if (isParallelFor || isFor)
             {
-                sb.AppendLine($"        private static readonly BatchJobFuncDelegate s_{jobStruct.Name}_BatchFunc;");
-                sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_BatchFuncPtr;");
+                if (useMTDeleg)
+                {
+                    // MT（task 内部自己调度）保留托管 delegate：原生 Adapter 只生成非 MT 变体
+                    // ⇒ 这个指针不是"从 native 取来的"，不受热重载影响。delegate 字段只有这条路径用。
+                    sb.AppendLine($"        private static readonly BatchJobFuncDelegate s_{jobStruct.Name}_BatchFunc;");
+                    sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_BatchFuncPtr;");
+                }
+                else
+                {
+                    // 非 MT 走原生 adapter 直调 ⇒ 只需指针（可刷新属性），不发射没人用的 delegate 字段
+                    EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_BatchFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
+                }
             }
             else
             {
-                // 2026-10-02（09 §22.6）：单任务 job 改走原生 adapter 直调 ⇒ 不再需要托管
-                // `JobFuncDelegate` 字段（顺带消掉 CS0169）。只保留指针字段。
-                sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_JobFuncPtr;");
+                // 2026-10-02（09 §22.6）：单任务 job 走原生 adapter 直调 ⇒ 不需要托管
+                // `JobFuncDelegate` 字段（顺带消掉 CS0169）。只保留指针（可按代次刷新的属性）。
+                EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_JobFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
             }
-            sb.AppendLine($"        private static readonly CleanupFuncDelegate s_{jobStruct.Name}_CleanupFunc;");
-            sb.AppendLine($"        private static readonly IntPtr s_{jobStruct.Name}_CleanupFuncPtr;");
+            // per-job 的 cleanup 字段不发射：统一用框架共享的 `NativeJobScheduler.SharedFreeHGlobalCleanupPtr`。
             sb.AppendLine();
+        }
+
+        /// <summary>
+        /// 发射一个可按代次刷新的 adapter 指针成员（不能是 `static readonly`：值指向某个具体模块的导出，
+        /// 换 DLL 后必须能重取）。同名属性 ⇒ 既有读取点一行都不用改。
+        /// </summary>
+        private static void EmitRefreshablePtrField(StringBuilder sb, string fieldName, string entryPointName)
+        {
+            sb.AppendLine($"        private static IntPtr {fieldName}_Storage;");
+            sb.AppendLine($"        private static int {fieldName}_Generation = -1;");
+            sb.AppendLine($"        private static IntPtr {fieldName}");
+            sb.AppendLine("        {");
+            sb.AppendLine("            get");
+            sb.AppendLine("            {");
+            sb.AppendLine("                int __gen = EntJoy.JobSystem.NativeJobScheduler.DelegateCacheGeneration;");
+            sb.AppendLine($"                if ({fieldName}_Generation != __gen)");
+            sb.AppendLine("                {");
+            sb.AppendLine($"                    {fieldName}_Storage = EntJoy.JobSystem.NativeJobScheduler.GetNativeExportPtr(\"{entryPointName}\");");
+            sb.AppendLine($"                    {fieldName}_Generation = __gen;");
+            sb.AppendLine("                }");
+            sb.AppendLine($"                return {fieldName}_Storage;");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
         }
 
         private static void GenerateStaticConstructorInitialization(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
@@ -324,6 +397,8 @@ namespace NativeTranspiler.Analyzer
             bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
+
+            int lenBefore = sb.Length;
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -348,23 +423,7 @@ namespace NativeTranspiler.Analyzer
 
             if (isChunk)
             {
-                if (CppJobGenerator.IsEntityJob(jobStruct))
-                {
-            // IJobEntity 统一走 Chunk 级调度（与 ISPC 路径一致）。
-                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
-                }
-                else
-                {
-                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkFuncPtr = Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                    sb.AppendLine($"            s_{jobStruct.Name}_ChunkRangeFuncPtr = Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
-                    var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
-                    bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
-                    // EntityBatchAdapter 不支持 shared components（shared 值 per-chunk，batch 层无访问）
-                    bool hasShared = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
-                    if (!isIspc2 && !hasShared)
-                        sb.AppendLine($"            s_{jobStruct.Name}_ChunkEntityBatchFuncPtr = Get_{jobStruct.Name}_ChunkEntityBatchAdapterPtr();");
-                }
+                // chunk 系的 `s_X_Chunk*FuncPtr` 是可刷新属性（读时按代次取导出）⇒ 本分支什么都不发。
             }
             else if (isParallelFor || isFor)
             {
@@ -419,36 +478,23 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("            };");
                 sb.AppendLine($"            s_{jobStruct.Name}_BatchFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_BatchFunc);");
                 }
-                else
-                {
-                    // 走 MT：调度器直接调原生 _Execute_Adapter(context,start,count)（原生→原生），
-                    // 消除托管 BatchFunc delegate 的 原生→托管→原生 双重转换（每 tile ~3μs 开销）。
-                    // 原生 Adapter 由 CppJobGenerator 生成：同一套字段偏移解析 / UnsafeList 写回 / bool 变体分派。
-                    sb.AppendLine($"            s_{jobStruct.Name}_BatchFuncPtr = Get_{jobStruct.Name}_Execute_AdapterPtr();");
-                }
+                // 非 MT：`s_X_BatchFuncPtr` 是可刷新属性，指针按代次从原生 getter
+                // `X_Execute_Adapter` 取 ⇒ 这里什么都不发。
             }
-            else
-            {
-                // 2026-10-02（IJob 原生直调，09 §22.6）：与 IJobParallelFor(非 MT)/Chunk 系一致 ——
-                // 直接取**原生 adapter** 指针，去掉 `Marshal.GetFunctionPointerForDelegate` 造的
-                // native→managed→native 反向 thunk。adapter 由 CppJobGenerator 一直为 IJob 产出
-                //（`X_Execute_Adapter(void* context)`：按 C++ 偏移解字段后调原生内核）。
-                // ⚠ 布局前提：adapter 按 C++ 偏移读 ctx ⇒ 必须用生成代码的**逐字段写入**
-                //（`WriteJobFields_X`），不能用裸拷贝（Debug 下 NativeArray 带 DisposeSentinel）。
-                // 未注册/不可显式写入的情形由运行时**回退托管 delegate**（行为不变）。
-                sb.AppendLine($"            s_{jobStruct.Name}_JobFuncPtr = Get_{jobStruct.Name}_Execute_AdapterPtr();");
-            }
-
-            sb.AppendLine($"            s_{jobStruct.Name}_CleanupFunc = (IntPtr context) =>");
-            sb.AppendLine("            {");
-            sb.AppendLine("                Marshal.FreeHGlobal(context);");
-            sb.AppendLine("            };");
-            sb.AppendLine($"            s_{jobStruct.Name}_CleanupFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_CleanupFunc);");
-            sb.AppendLine();
+            // chunk 系与单任务 IJob 同理：它们的 `s_X_*FuncPtr` 也是可刷新属性 ⇒ 本函数
+            // 对这两种形态不发射任何东西（指针在首次读取时取，取的是"当前句柄"的导出）。
+            //
+            // per-job 的 cleanup lambda + `Marshal.GetFunctionPointerForDelegate` 也不发射：
+            // 统一用框架共享的 `NativeJobScheduler.SharedFreeHGlobalCleanupPtr`（见 Schedule 发射点）。
+            if (sb.Length != lenBefore) sb.AppendLine();   // 只在真发射了内容时留空行（别攒出连续空行）
         }
 
         private static void GenerateJobDllImport(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
+            // ⚠ 边界（有意如此）：adapter getter 走 `GetNativeExportPtr`（可刷新），但内核本体
+            //   `X_Execute` / `X_Execute_Batch[..]` 这些 void 入口仍是 `[DllImport]` —— 它们是 C# 9 + unsafe
+            //   之外的兼容面，且只在 `Run_X()`（立即执行）与 MT 变体里被调用，派发热路径不走它们。
+            //   ⇒ `Schedule*` 路径重载后即生效；`Run()` 仍会打进旧模块（不崩，跑旧逻辑）。
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
             bool isFor = CppJobGenerator.IsForJob(jobStruct);
@@ -461,30 +507,21 @@ namespace NativeTranspiler.Analyzer
                 if (CppJobGenerator.IsEntityJob(jobStruct))
                 {
             // IJobEntity 统一走 Chunk 级调度。
-                    var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
-                    var rangeGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{rangeGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
+                    EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_ChunkAdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
+                    EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_ChunkRangeAdapterPtr", CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct));
                 }
                 else
                 {
-                    var getterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
-                    var rangeGetterName = CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct);
                     var entityBatchGetterName = CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct);
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{getterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkAdapterPtr();");
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{rangeGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkRangeAdapterPtr();");
+                    EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_ChunkAdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
+                    EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_ChunkRangeAdapterPtr", CppJobGenerator.GetRangeAdapterPtrGetterName(jobStruct));
                     var attrSym2 = AttributeHelper.GetAttributeSymbol(compilation);
                     bool isIspc2 = attrSym2 != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym2) == NativeTranspiler.BackendTarget.Ispc;
-                    // 与声明/初始化一致：shared job 无 EntityBatch adapter，不生成 extern
+                    // 与声明/初始化一致：shared job 无 EntityBatch adapter，不生成 getter
                     bool hasShared2 = CppJobGenerator.CollectSharedComponentTypes(jobStruct, compilation).Count > 0;
                     if (!isIspc2 && !hasShared2)
                     {
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{entityBatchGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_ChunkEntityBatchAdapterPtr();");
+                        EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_ChunkEntityBatchAdapterPtr", entityBatchGetterName);
                     }
                 }
             }
@@ -533,17 +570,13 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    // 走 MT：声明原生 Adapter 指针 Getter（调度器原生→原生直调路径）
-                    var adapterGetterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{adapterGetterName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_Execute_AdapterPtr();");
+                    // 走原生 adapter 直调：声明 Adapter 指针 getter（按名向当前句柄取导出）
+                    EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_Execute_AdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
                     // 2026-10-02（09 §26）：`IJobFor` 另有一个 **index 形** adapter getter
                     //（`void(void*, int)`，供 `ScheduleFor` 的单线程串行语义直调）。
                     if (CppJobGenerator.IsForJob(jobStruct))
                     {
-                        var indexGetter = CppJobGenerator.GetIndexAdapterPtrGetterName(jobStruct);
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{indexGetter}\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_IndexAdapterPtr();");
+                        EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_IndexAdapterPtr", CppJobGenerator.GetIndexAdapterPtrGetterName(jobStruct));
                     }
                 }
             }
@@ -553,16 +586,22 @@ namespace NativeTranspiler.Analyzer
                 var singleParams = BuildJobDllImportParams(jobStruct);
                 sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{singleFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
                 sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute({string.Join(", ", singleParams)});");
-                // 2026-10-02（IJob 原生直调）：与 IJobParallelFor(非 MT)/Chunk 系保持一致 ——
-                // 声明原生 Adapter getter，供调度器 原生→原生 直调，去掉 Marshal 反向 thunk。
-                // 背景（09 §22）：generate 侧（CppJobGenerator）一直为 IJob 产出 adapter+getter，
-                //   但绑定侧自 c382dbd 起就漏接线（2eed4ad 同一次重构里只接了 chunk 系与批处理）。
-                //   Unity 侧是 IL2CPP（原生 AOT）⇒ 只有走原生直调才是同性质对比。
-                var adapterGetterName2 = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
-                sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{adapterGetterName2}\", CallingConvention = CallingConvention.Cdecl)]");
-                sb.AppendLine($"        private static extern IntPtr Get_{jobStruct.Name}_Execute_AdapterPtr();");
+                // 走原生 adapter 直调（声明 Adapter getter，供调度器原生→原生直调）；
+                // Unity 侧是 IL2CPP，只有原生直调才是同性质对比。
+                EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_Execute_AdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
             }
             sb.AppendLine();
+        }
+
+        /// <summary>
+        /// 发射一个"按名从当前句柄取导出"的 adapter getter（不能用 `[DllImport]`：其解析结果被运行时
+        /// 按 (程序集, 库名) 缓存，换文件也不重新咨询 ⇒ 热重载后仍打进旧模块）。
+        /// ⚠ 名字必须与 DLL 导出严格一致：`GetNativeExportPtr` 对不存在的名字抛异常（显式失败，不静默）。
+        /// </summary>
+        private static void EmitAdapterGetter(StringBuilder sb, string csMethodName, string entryPointName)
+        {
+            sb.AppendLine($"        private static IntPtr {csMethodName}()");
+            sb.AppendLine($"            => EntJoy.JobSystem.NativeJobScheduler.GetNativeExportPtr(\"{entryPointName}\");");
         }
 
         // ---------- Job Schedule 方法 ----------
@@ -696,14 +735,14 @@ namespace NativeTranspiler.Analyzer
                 // 几何只在真并行批上有意义（IJobFor 是单线程串行语义）⇒ 只在 isParallelFor 时透传。
                 string claimArg = isParallelFor ? ", claim" : "";
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleParallelForBatchRaw(");
-                sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle{claimArg});");
+                sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.SharedFreeHGlobalCleanupPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle{claimArg});");
                 sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }
             else
             {
                 sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleRaw(");
-                sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, s_{jobStruct.Name}_CleanupFuncPtr, dependsOn._nativeHandle);");
+                sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.SharedFreeHGlobalCleanupPtr, dependsOn._nativeHandle);");
                 sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
                 sb.AppendLine($"            return new JobHandle(nativeHandle);");
             }

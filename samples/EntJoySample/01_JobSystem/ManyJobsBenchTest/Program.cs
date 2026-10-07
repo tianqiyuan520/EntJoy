@@ -1,15 +1,15 @@
-﻿using EntJoy.JobSystem;
+﻿//using EntJoy.JobSystem;
 
-namespace EntJoySample.ManyJobsBenchTest
-{
-    public static class Program
-    {
-        public static void Main()
-        {
-            JobScheduler.Initialize();
+//namespace EntJoySample.ManyJobsBenchTest
+//{
+//    public static class Program
+//    {
+//        public static void Main()
+//        {
+//            JobScheduler.Initialize();
 
-            using var sample = new ManyJobsBenchSample();
-            sample.Run();
-        }
-    }
-}
+//            using var sample = new ManyJobsBenchSample();
+//            sample.Run();
+//        }
+//    }
+//}

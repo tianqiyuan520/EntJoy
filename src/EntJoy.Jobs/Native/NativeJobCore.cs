@@ -56,6 +56,53 @@ namespace EntJoy.JobSystem
         internal static IntPtr CleanupPtr => _cleanupPtr;
         internal static IntPtr ManagedCleanupPtr => _managedCleanupPtr;
 
+        // ── 共享的 FreeHGlobal cleanup thunk ──
+        // 生成代码统一引用它（不是每个 job 各造一个 lambda + thunk）。
+        // ⚠ 刻意不复用 `CleanupPtr`：后者会释放安全句柄账本并读 ctx 前的尺寸前缀，语义不同。
+        private static readonly CleanupFunc _freeHGlobalCleanup = FreeHGlobalCleanup;
+        private static readonly IntPtr _sharedFreeHGlobalCleanupPtr =
+            Marshal.GetFunctionPointerForDelegate(_freeHGlobalCleanup);
+
+        private static void FreeHGlobalCleanup(IntPtr ptr)
+        {
+            if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr);
+        }
+
+        /// <summary>共享的 `Marshal.FreeHGlobal` cleanup 指针（生成代码统一用它）。</summary>
+        internal static IntPtr SharedFreeHGlobalCleanupPtr => _sharedFreeHGlobalCleanupPtr;
+
+        // ── 重载回调注册表 ──
+        // 注册表（字段写入器 / adapter 指针 / 批表绑名）是按 `Type` 键存的指针快照，换句柄后必须重跑
+        // 才会指向新模块；生成代码的 `EnsureNativeJobRegistrations()` 把自己登记在这里。
+        private static readonly List<Action> _reloadCallbacks = new();
+
+        /// <summary>登记一个"换过 NativeTranspiled 句柄后要重跑"的回调（幂等：同一方法只登记一次）。</summary>
+        internal static void RegisterReloadCallback(Action callback)
+        {
+            if (callback == null) return;
+            lock (_reloadCallbacks)
+            {
+                if (!_reloadCallbacks.Contains(callback)) _reloadCallbacks.Add(callback);
+            }
+        }
+
+        /// <summary>当前登记的重载回调数（诊断/验收用）。</summary>
+        internal static int ReloadCallbackCount
+        {
+            get { lock (_reloadCallbacks) return _reloadCallbacks.Count; }
+        }
+
+        /// <summary>
+        /// 重跑全部重载回调（在**新句柄已绑定之后**调用）。
+        /// 先快照再回调：回调里可能再次 `RegisterReloadCallback`（生成代码每次都会调）⇒ 不能在锁内调用。
+        /// </summary>
+        internal static void RunReloadCallbacks()
+        {
+            Action[] snapshot;
+            lock (_reloadCallbacks) snapshot = _reloadCallbacks.ToArray();
+            foreach (var callback in snapshot) callback();
+        }
+
         // ======================== 执行深度 / 当前 batch ========================
         [ThreadStatic] private static int _jobExecutionDepth;
         [ThreadStatic] private static ulong _currentBatchId;
@@ -100,6 +147,9 @@ namespace EntJoy.JobSystem
 
         // ======================== DLL 函数指针（纯 P/Invoke） ========================
         private static IntPtr _nativeDll = IntPtr.Zero;
+        // 生成内核（NativeTranspiled）的当前句柄；取 adapter 指针必须基于它（`[DllImport]` 的解析结果
+        // 被运行时按 (程序集, 库名) 缓存，换不掉）。
+        private static IntPtr _nativeTranspiledDll = IntPtr.Zero;
         private static int _shutdownRequested;
         // ABI 2: JobSystem_Initialize now returns an int status code.
         // ABI 3: 删除 6 个死 stats 字段（stats 结构体布局已变）⇒ 旧的 NativeDll.dll 必须被拒绝，
@@ -108,14 +158,310 @@ namespace EntJoy.JobSystem
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
+        /// <summary>等所有已提交 job 跑完并物理退役（不关 worker）。false = 当前 NativeDll 没有该导出。</summary>
+        internal static bool DrainAllCore()
+        {
+            if (_jobSystem_DrainAll == null) return false;
+            _jobSystem_DrainAll();
+            return true;
+        }
+
+        /// <summary>该 NativeDll 是否提供排空导出。</summary>
+        internal static bool HasDrainAll => _jobSystem_DrainAll != null;
+
+        // ── 组件布局指纹（守卫）──
+        // 只换 native 时 C# 组件布局不变 ⇒ "改组件定义后只重载 native" 会让两侧对同一块内存做不同解释。
+        // 故本次构建把布局假设写成 DLL 旁的 `<dll>.layout.json`，重载前逐类型比对，不一致即拒绝。
+        // 键 = `程序集名|类型全名`（同名类型可来自不同程序集，裸名会互相覆盖）。
+        private static readonly Dictionary<string, ulong> _componentLayoutHashes = new(StringComparer.Ordinal);
+        private static readonly object _componentLayoutLock = new();
+
+        /// <summary>登记一个组件的布局哈希（由 `ComponentMetaRegistry.Register` 在模块初始化期逐组件调用）。</summary>
+        internal static void RecordComponentLayout(Assembly owner, string typeName, ulong layoutHash)
+        {
+            if (string.IsNullOrEmpty(typeName)) return;
+            string asm = owner?.GetName().Name ?? "";
+            string key = asm + "|" + typeName;
+            lock (_componentLayoutLock)
+            {
+                if (_componentLayoutHashes.Count == 0)
+                    Console.Error.WriteLine("[LAYOUT] component layout fingerprint: recording (guard armed)");
+                _componentLayoutHashes[key] = layoutHash;
+            }
+        }
+
+        /// <summary>当前已加载程序集的组件布局指纹：逐类型哈希 **异或**（与顺序无关）。0 = 没有组件。</summary>
+        internal static ulong ComponentLayoutFingerprint
+        {
+            get
+            {
+                ulong acc = 0;
+                lock (_componentLayoutLock)
+                    foreach (var kv in _componentLayoutHashes) acc ^= kv.Value;
+                return acc;
+            }
+        }
+
+        /// <summary>布局守卫的判定结果：把"拒因"也带上，供上层映射成 <see cref="NativeReloadOutcome"/>。</summary>
+        internal readonly struct LayoutVerdict
+        {
+            public bool Ok { get; }
+            public NativeReloadOutcome Outcome { get; }
+            public string Message { get; }
+
+            private LayoutVerdict(bool ok, NativeReloadOutcome outcome, string message)
+            {
+                Ok = ok;
+                Outcome = outcome;
+                Message = message ?? "";
+            }
+
+            public static LayoutVerdict Pass() => new LayoutVerdict(true, NativeReloadOutcome.Swapped, "");
+            public static LayoutVerdict Refuse(NativeReloadOutcome outcome, string message)
+                => new LayoutVerdict(false, outcome, message);
+        }
+
+        /// <summary>
+        /// 把 `dllPath` 旁的布局清单与当前已登记指纹比对（含差异类型名与两侧哈希）。
+        /// 规则：无清单 + 无组件 ⇒ 放行；无清单 + 有组件 ⇒ 拒；空清单 ⇒ 放行；
+        /// 清单声明的程序集在本进程无组件 ⇒ 拒；作用域内缺/多/哈希不同 ⇒ 拒。
+        /// </summary>
+        internal static LayoutVerdict CheckComponentLayoutManifest(string dllPath)
+        {
+            string manifestPath = Path.ChangeExtension(dllPath, ".layout.json");
+            int types;
+            lock (_componentLayoutLock) types = _componentLayoutHashes.Count;
+
+            if (!File.Exists(manifestPath))
+            {
+                if (types == 0)
+                {
+                    Console.Error.WriteLine(
+                        "[LAYOUT] no manifest and no registered components => nothing to verify (accepted)");
+                    return LayoutVerdict.Pass();
+                }
+                return LayoutVerdict.Refuse(NativeReloadOutcome.LayoutManifestMissing,
+                    $"layout manifest not found next to '{dllPath}' (expected '{manifestPath}'); "
+                    + $"this process has {types} component(s) whose layout cannot be verified. "
+                    + "Build the project so the manifest is copied next to the DLL.");
+            }
+
+            string manifestAssembly;
+            Dictionary<string, ulong> manifest;
+            try { (manifestAssembly, manifest) = ParseLayoutManifest(File.ReadAllText(manifestPath)); }
+            catch (Exception ex)
+            {
+                return LayoutVerdict.Refuse(NativeReloadOutcome.LayoutManifestInvalid,
+                    $"layout manifest '{manifestPath}' could not be parsed: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            // 空清单 = 该 DLL 声明"对组件布局没有任何假设" ⇒ 放行（它不可能按偏移读组件）
+            if (manifest.Count == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LAYOUT] manifest '{Path.GetFileName(manifestPath)}' declares no components "
+                    + "=> that DLL makes no component-layout assumptions (accepted)");
+                return LayoutVerdict.Pass();
+            }
+
+            // 作用域：清单没写程序集名（老格式）时退回"全部已登记"
+            string prefix = string.IsNullOrEmpty(manifestAssembly) ? null : manifestAssembly + "|";
+            if (prefix == null)
+                Console.Error.WriteLine(
+                    $"[LAYOUT] manifest '{Path.GetFileName(manifestPath)}' has no \"assembly\" field; "
+                    + "falling back to comparing ALL registered components");
+
+            var scope = new Dictionary<string, ulong>(StringComparer.Ordinal);
+            lock (_componentLayoutLock)
+            {
+                foreach (var kv in _componentLayoutHashes)
+                {
+                    if (prefix == null) { scope[StripScope(kv.Key)] = kv.Value; continue; }
+                    if (kv.Key.StartsWith(prefix, StringComparison.Ordinal)) scope[StripScope(kv.Key)] = kv.Value;
+                }
+            }
+
+            if (scope.Count == 0)
+            {
+                // 清单声明了组件，本进程该作用域里一个都没有 ⇒ 无法证明安全
+                return LayoutVerdict.Refuse(NativeReloadOutcome.LayoutScopeMissing,
+                    $"the new NativeTranspiled was built for assembly '{manifestAssembly}' with {manifest.Count} "
+                    + "component(s), but this process has none of them registered (the managed assembly is not "
+                    + "loaded yet, or it is a different build). Refusing: the layout cannot be verified.");
+            }
+
+            var problems = new List<string>();
+            int matched = 0;
+            foreach (var kv in scope)
+            {
+                if (!manifest.TryGetValue(kv.Key, out var expected))
+                {
+                    problems.Add($"{kv.Key}: missing from manifest");
+                    continue;
+                }
+                if (expected != kv.Value)
+                    problems.Add($"{kv.Key}: layout changed (0x{kv.Value:X16} -> 0x{expected:X16})");
+                else
+                    matched++;
+            }
+            foreach (var name in manifest.Keys)
+            {
+                if (!scope.ContainsKey(name)) problems.Add($"{name}: in manifest but not registered in this process");
+            }
+
+            if (problems.Count > 0)
+            {
+                int show = Math.Min(problems.Count, 8);
+                string more = problems.Count > show ? $" …(+{problems.Count - show} more)" : "";
+                return LayoutVerdict.Refuse(NativeReloadOutcome.LayoutMismatch,
+                    $"component layout changed: {string.Join("; ", problems.GetRange(0, show))}{more} "
+                    + "=> the new NativeTranspiled was generated for a DIFFERENT component layout than the "
+                    + "assembly loaded in this process; rebuild the World (or reload the managed assembly) "
+                    + "instead of hot-reloading the native DLL.");
+            }
+
+            Console.Error.WriteLine(
+                $"[LAYOUT] verified: {matched} component(s) match '{Path.GetFileName(manifestPath)}' (fingerprint=0x{ComponentLayoutFingerprint:X16})");
+            return LayoutVerdict.Pass();
+        }
+
+        /// <summary>把 `程序集名|类型全名` 的键剥成类型全名（对外消息里只报类型名，键是本框架内部约定）。</summary>
+        private static string StripScope(string key)
+        {
+            int bar = key.IndexOf('|');
+            return bar >= 0 ? key.Substring(bar + 1) : key;
+        }
+
+        /// <summary>解析布局清单：`{"version":1,"assembly":"…","entries":[{"type":"…","hash":"0x…"}]}`。</summary>
+        private static (string AssemblyName, Dictionary<string, ulong> Entries) ParseLayoutManifest(string text)
+        {
+            var map = new Dictionary<string, ulong>(StringComparer.Ordinal);
+            using var doc = System.Text.Json.JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                throw new FormatException("manifest root is not an object");
+            if (!doc.RootElement.TryGetProperty("entries", out var entries))
+                throw new FormatException("manifest has no 'entries' array");
+            string assembly = "";
+            if (doc.RootElement.TryGetProperty("assembly", out var asmEl)
+                && asmEl.ValueKind == System.Text.Json.JsonValueKind.String)
+                assembly = asmEl.GetString() ?? "";
+            foreach (var e in entries.EnumerateArray())
+            {
+                string name = e.GetProperty("type").GetString();
+                string hex = e.GetProperty("hash").GetString() ?? "";
+                if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex.Substring(2);
+                if (!string.IsNullOrEmpty(name)) map[name] = Convert.ToUInt64(hex, 16);
+            }
+            return (assembly, map);
+        }
+
+        /// <summary>
+        /// 热重载：排空 → 缓存换代 → 换到新的 NativeTranspiled（顺序即不变量，前两步失败不改变任何状态）。
+        /// 调用方必须先停派发；`path` 必须是**新文件名**（同路径 `Load` 会返回旧模块）；
+        /// 旧模块不 Free（可能仍被 DllImport 引用）；布局守卫比对在换句柄之前。
+        /// </summary>
+        /// <returns>成功 = `Swapped`；其余为带原因的拒绝，不抛异常。</returns>
+        internal static NativeReloadResult ReloadNativeTranspiledCore(string path)
+        {
+            if (string.IsNullOrEmpty(path)) throw new ArgumentNullException(nameof(path));
+            if (!File.Exists(path))
+                return NativeReloadResult.Refuse(NativeReloadOutcome.FileNotFound,
+                    $"NativeTranspiled not found for reload: {path}", false, DelegateCacheGeneration);
+
+            // 先 Load 候选模块但不提交（拒绝时状态零改动）；被拒时同样不 Free（与"旧模块不 Free"同一取舍）
+            IntPtr candidate;
+            try
+            {
+                candidate = LoadNativeTranspiledModule(path);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[HOTRELOAD] REFUSED: loading '{path}' failed: {ex.GetType().Name}: {ex.Message}");
+                return NativeReloadResult.Refuse(NativeReloadOutcome.LoadFailed,
+                    $"loading '{path}' failed: {ex.GetType().Name}: {ex.Message}", false, DelegateCacheGeneration);
+            }
+
+            // 布局守卫在任何副作用之前（不排空、不换代、不提交句柄）
+            LayoutVerdict layout = CheckComponentLayoutManifest(path);
+            if (!layout.Ok)
+            {
+                Console.Error.WriteLine($"[HOTRELOAD] REFUSED: {layout.Message}");
+                return NativeReloadResult.Refuse(layout.Outcome, layout.Message, false, DelegateCacheGeneration);
+            }
+
+            bool drained = DrainAllCore();
+            if (!drained)
+            {
+                // 排空失败必须阻断：DrainAllCore 返回 false 只能是当前 NativeDll 没有 JobSystem_DrainAll
+                // 导出（老件），此时没有"等在飞 job 跑完"的手段。DrainAllCore 无副作用 ⇒ 拒绝是干净的。
+                const string msg = "could not drain in-flight jobs (this NativeDll has no JobSystem_DrainAll export); "
+                                 + "refusing to swap the module.";
+                Console.Error.WriteLine($"[HOTRELOAD] REFUSED: {msg}");
+                return NativeReloadResult.Refuse(NativeReloadOutcome.DrainNotAvailable, msg, false, DelegateCacheGeneration);
+            }
+            InvalidateDelegateCaches();
+
+            IntPtr old = _nativeTranspiledDll;
+            _nativeTranspiledDll = candidate;   // ← 提交（候选已 Load 好）
+            // 句柄已换 ⇒ 让生成代码重跑注册（注册表里存的指针快照要跟着新句柄刷新）。
+            RunReloadCallbacks();
+            bool swapped = old != _nativeTranspiledDll;
+            Console.Error.WriteLine(
+                $"[HOTRELOAD] old=0x{old:X} new=0x{_nativeTranspiledDll:X} drained={drained} generation={DelegateCacheGeneration} callbacks={ReloadCallbackCount} layout={ComponentLayoutFingerprint:X16} path={path}");
+            return new NativeReloadResult(
+                swapped ? NativeReloadOutcome.Swapped : NativeReloadOutcome.NoChange,
+                "", drained, DelegateCacheGeneration);
+        }
+
+        /// <summary>
+        /// 在当前 NativeTranspiled 句柄上按名取 adapter 指针。
+        /// ⚠ 导出是"取指针的**函数**"（`void* Get_…_AdapterPtr()`），必须**调用它**；直接把 `GetExport`
+        /// 的返回值当 adapter 会让原生按 adapter ABI 调用 getter ⇒ 作业静默不执行。
+        /// </summary>
+        internal static IntPtr GetNativeExportPtr(string entryPointName)
+        {
+            if (string.IsNullOrEmpty(entryPointName))
+                throw new ArgumentNullException(nameof(entryPointName));
+            IntPtr h = EnsureNativeTranspiledHandle();
+            delegate* unmanaged[Cdecl]<IntPtr> getter =
+                (delegate* unmanaged[Cdecl]<IntPtr>)NativeLibrary.GetExport(h, entryPointName);
+            IntPtr adapter = getter();
+            if (adapter == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    $"NativeTranspiled export '{entryPointName}' returned a NULL adapter pointer.");
+            return adapter;
+        }
+
+        /// <summary>
+        /// 取 NativeTranspiled 的句柄（优先显式路径）。
+        /// Windows 加载器按**基名**匹配已加载模块，裸名 `Load` 可能命中别的目录里的同名件 ⇒ 取不到生成导出。
+        /// </summary>
+        private static IntPtr EnsureNativeTranspiledHandle()
+        {
+            if (_nativeTranspiledDll != IntPtr.Zero) return _nativeTranspiledDll;
+
+            string beside = Path.Combine(AppContext.BaseDirectory, "NativeTranspiled.dll");
+            if (File.Exists(beside))
+            {
+                _nativeTranspiledDll = NativeLibrary.Load(beside);
+                return _nativeTranspiledDll;
+            }
+            _nativeTranspiledDll = NativeLibrary.Load("NativeTranspiled");
+            return _nativeTranspiledDll;
+        }
+
         private static delegate* unmanaged[Cdecl]<int, int> _jobSystem_Initialize;
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetAbiVersion;
         private static delegate* unmanaged[Cdecl]<int> _jobSystem_GetWorkerCount;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_Shutdown;
         private static delegate* unmanaged[Cdecl]<void> _jobSystem_PrewakeWorkers;
+        // 可选导出（排空）：老 NativeDll 没有 ⇒ 保持 null（调用方按 false 处理）
+        private static delegate* unmanaged[Cdecl]<void> _jobSystem_DrainAll;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_ConfigureTilesPerWorker;
         private static delegate* unmanaged[Cdecl]<int, int, int, void> _jobSystem_ConfigureGuided;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetJobCostCacheEnabled;
+        // doc16 §46：可选导出（老 DLL 没有 ⇒ null ⇒ 按名批表绑不上，行为 = 该 env 无效）。
+        private static delegate* unmanaged[Cdecl]<byte*, IntPtr, int> _jobSystem_BindBatchName;
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
@@ -451,12 +797,17 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Shutdown");
             _jobSystem_PrewakeWorkers = (delegate* unmanaged[Cdecl]<void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_PrewakeWorkers");
+            // 可选（排空）：老 NativeDll 没有该导出 ⇒ 保持 null
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_DrainAll", out IntPtr drainAllPtr))
+                _jobSystem_DrainAll = (delegate* unmanaged[Cdecl]<void>)drainAllPtr;
             _jobSystem_ConfigureTilesPerWorker = (delegate* unmanaged[Cdecl]<int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureTilesPerWorker");
             _jobSystem_ConfigureGuided = (delegate* unmanaged[Cdecl]<int, int, int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ConfigureGuided");
             _jobSystem_SetJobCostCacheEnabled = (delegate* unmanaged[Cdecl]<int, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_SetJobCostCacheEnabled");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_BindBatchName", out IntPtr bindBatchNamePtr))
+                _jobSystem_BindBatchName = (delegate* unmanaged[Cdecl]<byte*, IntPtr, int>)bindBatchNamePtr;
             _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterPersistentAllocator");
             _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
@@ -550,7 +901,23 @@ namespace EntJoy.JobSystem
             AppDomain.CurrentDomain.DomainUnload += static (_, _) => SafeShutdown();
         }
 
-        // DLL 分离：从 NativeDll 所在目录显式加载 NativeTranspiled.dll（生成代码 wrapper/adapter）。
+        /// <summary>
+        /// 只 Load、不提交（重载用：先在候选句柄上做布局判定）。
+        /// 打印实际绑定的路径/大小/sha —— 加载器按基名匹配，且 NativeDll 与 NativeTranspiled 必须成对，
+        /// 所以"绑到哪一份"要可观测。
+        /// </summary>
+        private static IntPtr LoadNativeTranspiledModule(string path)
+        {
+            IntPtr handle = NativeLibrary.Load(path);
+            string size = "n/a", sha = "n/a";
+            try { if (File.Exists(path)) { size = new FileInfo(path).Length.ToString(); sha = ShortHash(FileSha256(path)); } } catch { }
+            Console.Error.WriteLine($"[NativeJobScheduler] NativeTranspiled self-proof: path={path} size={size} sha256={sha}");
+            return handle;
+        }
+
+        private static void BindNativeTranspiled(string path)
+            => _nativeTranspiledDll = LoadNativeTranspiledModule(path);
+
         private static void TryLoadNativeTranspiled(string nativeDllPath)
         {
             const string generatedDllName = "NativeTranspiled.dll";
@@ -570,7 +937,10 @@ namespace EntJoy.JobSystem
                         if (string.IsNullOrEmpty(dir)) continue;
                         string candidate = Path.Combine(dir, generatedDllName);
                         if (File.Exists(candidate))
-                            return NativeLibrary.Load(candidate);
+                        {
+                            BindNativeTranspiled(candidate);
+                            return _nativeTranspiledDll;
+                        }
                     }
                     return IntPtr.Zero;
                 });
@@ -581,12 +951,11 @@ namespace EntJoy.JobSystem
                     string candidate = Path.Combine(dir ?? string.Empty, generatedDllName);
                     if (File.Exists(candidate))
                     {
-                        NativeLibrary.Load(candidate);
-                        Console.Error.WriteLine($"[NativeJobScheduler] Loaded {generatedDllName} from {candidate}");
+                        BindNativeTranspiled(candidate);
                         return;
                     }
                 }
-                try { NativeLibrary.Load(generatedDllName); }
+                try { BindNativeTranspiled(generatedDllName); }
                 catch { }
             }
             catch (Exception ex)
@@ -647,6 +1016,31 @@ namespace EntJoy.JobSystem
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_SetJobCostCacheEnabled == null) return;
             _jobSystem_SetJobCostCacheEnabled(enabled);
+        }
+
+        /// <summary>
+        /// doc16 §46：把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 job 名登记的批表槽位绑定到**该 job 实际派发
+        /// 用的函数指针**（名字 = 托管类型名 ⇒ 与 C++ 符号命名规则/命名空间无关）。
+        /// </summary>
+        /// <returns>1 = 名字在表里（已绑定）；0 = 表里没有该名字，或该导出不存在。</returns>
+        internal static unsafe int JobSystem_BindBatchName(string jobName, IntPtr funcPtr)
+        {
+            if (string.IsNullOrEmpty(jobName) || funcPtr == IntPtr.Zero) return 0;
+            EnsureNativeLoaded();
+            if (_nativeDll == IntPtr.Zero || _jobSystem_BindBatchName == null) return 0;
+            // UTF-8 编码到栈上（无堆分配）。C# 标识符可以是任意 Unicode ⇒ 必须按 UTF-8 编码成字节，
+            // 与 env 里的字节做比较；只搬 ASCII 会在非 ASCII 名上悄悄搬错名字。
+            // 上界：一个 UTF-16 码元最多编成 3 字节 ⇒ `Length <= 42` 保证放得下 127 字节 + NUL。
+            const int kMaxName = 128;
+            if (jobName.Length > (kMaxName - 1) / 3) return 0;
+            byte* buf = stackalloc byte[kMaxName];
+            int n;
+            fixed (char* pName = jobName)
+            {
+                n = System.Text.Encoding.UTF8.GetBytes(pName, jobName.Length, buf, kMaxName - 1);
+            }
+            buf[n] = 0;
+            return _jobSystem_BindBatchName(buf, funcPtr);
         }
 
         internal static int JobSystem_GetWorkerCount()
@@ -1024,32 +1418,81 @@ namespace EntJoy.JobSystem
             return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
         }
 
-        // 静态泛型委托缓存：per (T) 静态字段，热路径零字典查找、零首次 JIT 抖动。
+        // ── 委托缓存换代 ──
+        // 这些缓存持有指向某个具体模块导出的 thunk，换 DLL 后会命中旧指针 ⇒ 换代：清字典 + 自增代次，
+        // 下游静态泛型缓存按代次惰性重建（闭泛型静态无法从外部枚举）。
+        private static int _delegateCacheGeneration;
+        internal static int DelegateCacheGeneration => Volatile.Read(ref _delegateCacheGeneration);
+
+        internal static void InvalidateDelegateCaches()
+        {
+            _delegateCache.Clear();
+            Interlocked.Increment(ref _delegateCacheGeneration);
+        }
+
+        // 静态泛型委托缓存：per (T) 静态字段 + 代次校验（换代后惰性重建）。
+        // 并发换代时可能重复重建（最后写入者胜出，各实例都有效），代价只在换代瞬间。
         internal static class JobDelegateCacheFor<T> where T : struct, IJob
         {
-            public static readonly DelegateCache Cache = new(CreateJobCallback<T>());
+            private static DelegateCache _cache;
+            private static int _gen = -1;
+            public static DelegateCache Cache
+            {
+                get
+                {
+                    int g = DelegateCacheGeneration;
+                    if (_gen != g) { _cache = new(CreateJobCallback<T>()); _gen = g; }
+                    return _cache;
+                }
+            }
         }
 
         internal static class ForDelegateCacheFor<T> where T : struct, IJobFor
         {
-            public static readonly DelegateCache Cache = new(CreateForCallback<T>());
+            private static DelegateCache _cache;
+            private static int _gen = -1;
+            public static DelegateCache Cache
+            {
+                get
+                {
+                    int g = DelegateCacheGeneration;
+                    if (_gen != g) { _cache = new(CreateForCallback<T>()); _gen = g; }
+                    return _cache;
+                }
+            }
         }
 
         internal static class ParallelForBatchDelegateCacheFor<T> where T : struct, IJobParallelForBatch
         {
-            public static readonly DelegateCache Cache = new(CreateParallelForBatchCallback<T>());
+            private static DelegateCache _cache;
+            private static int _gen = -1;
+            public static DelegateCache Cache
+            {
+                get
+                {
+                    int g = DelegateCacheGeneration;
+                    if (_gen != g) { _cache = new(CreateParallelForBatchCallback<T>()); _gen = g; }
+                    return _cache;
+                }
+            }
         }
 
         /// <summary>
-        /// 自动批处理回调（per 泛型 T 缓存一次）：T 实现 IJobParallelForBatch 时用批回调
+        /// 自动批处理回调（per 泛型 T 缓存一次） + 代次校验：T 实现 IJobParallelForBatch 时用批回调
         /// （一次 Execute(start,count)），否则逐元素 Execute(i)，减轻轻任务调度开销。
         /// </summary>
         private static class AutoParallelForCallback<T>
             where T : struct, IJobParallelFor
         {
-            public static readonly DelegateCache Cache = new(CreateParallelForIndexCallback<T>());
+            private static DelegateCache _cache;
+            private static int _gen = -1;
 
-            public static DelegateCache GetCache() => Cache;
+            public static DelegateCache GetCache()
+            {
+                int g = DelegateCacheGeneration;
+                if (_gen != g) { _cache = new(CreateParallelForIndexCallback<T>()); _gen = g; }
+                return _cache;
+            }
         }
 
         internal static DelegateCache GetAutoParallelForCache<T>() where T : struct, IJobParallelFor

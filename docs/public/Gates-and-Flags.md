@@ -6,7 +6,9 @@
 
 > 完整清单、逐条证据与历次"原判错误"的更正见
 > [gridsearch/13-门控清单-缺陷清单与清理计划.md](../gridsearch/13-门控清单-缺陷清单与清理计划.md)。
-> 清理后当前运行期 env 共 **41 个**（原 57 个；删掉的都是默认关且已证伪/从未可用的开关）。
+> 清理后当前运行期 env 共 **43 个** = 原 41 个 + **2026-10-07 补登的 2 个**
+> （`ENTJOY_JOB_COST_CACHE`、`ENTJOY_JOB_BATCH_BY_NAME`，见 D 节 —— 它们是"对齐档"的定义开关，
+> 此前只散落在 gridsearch 的战役文档里，未进契约表）。
 
 ## 约定
 
@@ -56,6 +58,20 @@
 | `ENTJOY_WORKER_AFFINITY` | 关 | worker 绑核（默认交 OS 自由调度，避免 SMT 双线程死绑共享执行单元） |
 | `ENTJOY_JCC_ROBUST` | 关 | JCC 健壮分类（环形窗中位数 + 最小样本 + 冷却 + 双向迟滞 + 周期探针）。**价值 = 可复现性，不是速度**：同一负载 8 rep 下默认档 chunk 呈**双带**、摆 **11.2×**（更早抽样见过 ~40×），开启后压到 **1.0001×**。**已按纪律验收（6 对同会话/逐对同号/五段全看）⇒ 结论"不提默认"，理由 = 性能中性无净收益**：整步在 **median 口径 +0.054 ms（2/6）** 与 **min 口径 −0.081 ms（4/6）** 下**符号相反**、都没达到"逐对同号"；`count` 段稳定略好（5/6、−0.06 ms）。⚠ 两臂共有的 ~2× 偶发停顿是 doc12 表 16 已定性的 **GC/OS 停顿**（只污染 median 口径），**不是**本开关的缺点。⇒ 定位为**可选的可复现性阀**（显式开启可换稳定，代价是偶发停顿）；或改用**钉住 `cs`**（`ENTJOY_JOB_BATCH_TABLE` / `ENTJOY_TILES_PER_WORKER`）这条更便宜的路径。⚠ 开启后被判 mem-bound 的 job 只写**粗**成本通道（`GetPerElemCost` 可能为 0，须读 `GetCoarseCost`） |
 
+⚠ **不在框架 env 面、但影响所有跨栈读数：主线程 assist** —— 框架只提供托管 API
+`NativeJobScheduler.SetMainThreadAssistEnabled`（导出 `JobSystem_SetMainThreadAssistEnabled`），
+**框架默认是关**（`JobSystem.cpp:750 g_mainThreadAssistEnabled{false}`）；但**游戏仓自己把它默认打开**
+（`ComputeShaderBattleSimulation/CPUBattle/Scripts/CPUBattleEcs.cs:625`：
+`JobAssistOn = env("ENTJOY_ASSIST") != "0"`），并打印 `[CPUBattleEcs] JobSystem assist=开`。
+⇒ **`ENTJOY_ASSIST` 是游戏侧 env，不在本框架契约内，且框架已删除该 env 的解析**（只留 API）；
+**脚本之间也不一致**：doc09/doc10 时代的 `ab-aligned.ps1` 等**显式 pin `=0`**，而 2026-10-05 之后的战役脚本
+（`qq-judge2`/`frozen-pairs2,3`/`cs1-cost`/`ab-3arm-2curve`/`perpass-*`）**先清空全部 `ENTJOY_*` 再只设自己那几个**
+⇒ **assist 回落到"开"** ⇒ **doc15–doc17 的读数含 assist，doc10 的不含**，而 Unity 侧无对应物
+（B 侧 `[M4-DISCLOSE]①` 自己标了这一点）。
+引用任何跨栈数字时必须显式写明 assist 开/关 —— doc17 §1.2 的对照显示：在本协议下 assist **关**反而更好
+（整步 1.024、Melee 1.080，对比开着的 1.021 / 1.067）。⚠ 该对照的两臂是**两次会话** ⇒ 含会话漂移，
+**稳健的只是"两臂都 ≈1.02、都 6/6"**；"assist 是成本"若要落定需做**同会话** A/A。
+
 ## D. 诊断 / 器械（默认关，零开销）
 
 | env | 语义 |
@@ -73,6 +89,12 @@
 | `ENTJOY_BATCHID_CALLBACK` | 逐批回调（把托管异常绑定到具体 batch） |
 | `ENTJOY_DEBUG` | Dear ImGui 调试面板 |
 | `ENTJOY_DUMP_BINDINGS` | 生成器侧：dump 形参绑定 |
+| **`ENTJOY_JOB_COST_CACHE`** | `=0` **真关 JCC**（`JobCostCache`）：不再调用 `ResolveChunkSize` 的按成本求和分支，未命中批表的调用点改由 `ENTJOY_TILES_PER_WORKER` 兜底。**这是"对齐档"的两个定义开关之一**（原生初值与托管默认值都读同一 env，否则 C# 的 Initialize 会盖回去）。源码见 `JobSystem_Scheduler.cpp` / `JobSystem.cpp`；证据见 doc16 §40 |
+| **`ENTJOY_JOB_BATCH_BY_NAME`** | 按 **job 名**逐调用点钉死内批：`<JobName>:<batch>[, …]`。命中即 `ResolveChunkSize` **不被调用**（等价于 JCC 全关 + 逐调用点对齐）。名字 = 托管 `Type.Name`，指针由 `BindingsGenerator` 在 `NativeExports` 静态构造里经 `JobSystem_BindBatchName` 绑定 ⇒ **不随重编漂移、不含工程命名空间**（`ENTJOY_JOB_BATCH_TABLE` 的 RVA 键**会**随重编整组漂移且失败静默，只保留作诊断/兼容）。未绑上的名字**逐个打印** + `resolved=N/M`；默认档零噪声。证据见 doc16 §40/§46 |
+
+⚠ **补登说明（2026-10-07）**：这两个开关是 doc15–doc17 里"**对齐档**"（JCC 全关 + batchSize 逐调用点与 Unity 一致）
+的**唯一定义器件**。此前它们只出现在 gridsearch 的战役文档中，不在本契约表里 ⇒ 引用"对齐档"读数时
+**必须同时给出这两个 env**，否则无法复现。
 
 诊断读数的**用法要点**：`[JOBWAKE] skipped=` 在 `wakePoll=ON`（默认）时**恒为 0** ——
 真正的跳过数见 `[JOBWAKEPOLL]`。`[JOBF2F4] applied` 为 0 不代表 F2/F4 没生效，见 A 节的 `thinTiles` 说明。
@@ -85,6 +107,26 @@
 | `ENTJOY_LTO` | 关（`== "1"` 才开） | 给 `NativeTranspiled` 开 LTO（MSVC `/GL`+`/LTCG` 等价物）；生成器把开关写进 CMake |
 | `ENTJOY_NT_SNAP_DIR` | — | 发射面快照目录（夹具的 emit-snapshot 基线） |
 | `EntJoyAutoSimdMeasured` | error | AutoSIMD 显式放行（默认对未测量内核报错） |
+| `ENTJOY_MSVC_EXTRA_FLAGS` | — | 追加给 MSVC/真机构建的额外开关（**实验用**：R21/R27/R28/R34 用它试过 `/Os`、`/GS-`、`/Qpar-`）。⚠ 真机 `NativeTranspiled` 是 **clang-cl** 编的（VS 自带 LLVM），**MSVC 专属开关会被静默忽略** ⇒ 用它得到的"空结果"不等于"MSVC 也这样"（doc16 §44.16） |
+
+⚠ **2026-10-07 有一条"加了又撤"的开关，记在这里以免后人重走**：曾实现过构建期属性
+`EntJoyNativeUnityBatch`（`0` = 交付档单 TU / `N>0` = 每 N 个发射件一批的"开发档"，两档各占
+`build` / `build-batchN` 目录与独立哈希清单）。**同日撤销**，因为实测它解决错了问题：
+"改一个 job 体 ~20 s"的真因是生成器 D1 清理误删 `ispc.exe` 的产物 `SharpNative_*_ispc.h`
+（见下），**修那个 bug** 后端到端 **19.8–22.8 s → 9.5 s**；而该开关最好的一档反而**更慢**
+（同一处改动：批 0 = **2.70 s** / 1 个 unity obj，批 8 = **4.89 s** / 18 个 —— 小 TU 各付一次编译器启动）。
+⇒ **交付档单 TU（`CMAKE_UNITY_BUILD_BATCH_SIZE 0`）保持不变，也不需要暴露成开关**；
+`set(...)` 用普通形式（非 CACHE）即可：它**遮蔽**缓存项，天然免疫"旧缓存把交付档改掉"。
+
+⚠ **同日撤回一条原读数**：曾写成"单 TU 13.4 s → 批 8 3.3 s（本仓实测）"，**不成立**，已删。
+那份对照比较的是两份**不同代**的生成工程文件（`build` 的 `ZERO_CHECK.vcxproj` 停在 2026-09-13、
+`.vcxproj` 停在 10-07 22:57，而 CMakeLists 已 23:19），且 `cmake --build --target NativeTranspiled`
+**不跑 ZERO_CHECK** ⇒ 老目录的工程文件根本不参与重生成。
+**真因（2026-10-07 已修）**：生成器的 D1 清理（`PruneStaleGeneratedFiles`）按"不在本次写出集合里就删"，
+而 `SharpNative_*_ispc.h` 是 **`ispc.exe -h` 的产物**（CMake `add_custom_command` 的 OUTPUT）、生成器从不写它
+⇒ 每次生成把这 31 个头删光 ⇒ CMake 判定 31 个 ISPC 步骤输出缺失、全部重跑（≈13 s）。
+修复后：生成后头数 0 → **31**，原生 **15.9 s → 2.80 s**，端到端 **19.8–22.8 s → 9.5 s**。
+逐条证据见 [热重载实现规划.md](../热重载实现规划.md) §39。
 
 > **codegen 的三个开关已删除、行为已固定**（2026-10-04，不再是可配置项）：
 > · `ENTJOY_VALUE_BIND` → 固定为"字段**参与某处循环的行程数**则按值绑定"；
