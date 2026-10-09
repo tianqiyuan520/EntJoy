@@ -47,7 +47,7 @@ namespace EntJoySample.AutoSIMDTest
         public float2 Value;
     }
 
-    // ═══ Light IJobEntity: AutoSIMD=Enabled（被测目标）═══
+    // Light IJobEntity: AutoSIMD=Enabled（被测目标）
     [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
     public struct LightJobEntityAutoSIMD : IJobEntity
     {
@@ -58,7 +58,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ Heavy IJobEntity: AutoSIMD=Enabled（被测目标）═══
+    // Heavy IJobEntity: AutoSIMD=Enabled（被测目标）
     [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
     public struct HeavyJobEntityAutoSIMD : IJobEntity
     {
@@ -85,7 +85,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ 无 AutoSIMD 的 CPP IJobEntity（对照 baseline）═══
+    // 无 AutoSIMD 的 CPP IJobEntity（对照 baseline）
     [NativeTranspile(Target = BackendTarget.Cpp)]
     public struct LightJobEntityCpp : IJobEntity
     {
@@ -96,7 +96,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ 无 AutoSIMD 的 CPP IJobEntity（Heavy）═══
+    // 无 AutoSIMD 的 CPP IJobEntity（Heavy）
     [NativeTranspile(Target = BackendTarget.Cpp)]
     public struct HeavyJobEntityCpp : IJobEntity
     {
@@ -123,7 +123,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ 无 AutoSIMD 的 CPP IJobChunk（对照 baseline）═══
+    // 无 AutoSIMD 的 CPP IJobChunk（对照 baseline）
     [NativeTranspile(Target = BackendTarget.Cpp)]
     public struct LightJobChunkCpp : IJobChunk
     {
@@ -141,7 +141,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ 无 AutoSIMD 的 CPP IJobChunk（Heavy）═══
+    // 无 AutoSIMD 的 CPP IJobChunk（Heavy）
     [NativeTranspile(Target = BackendTarget.Cpp)]
     public struct HeavyJobChunkCpp : IJobChunk
     {
@@ -194,16 +194,16 @@ namespace EntJoySample.AutoSIMDTest
             Console.WriteLine($"=== IJobEntity / IJobChunk Test (N={N}) ===\n");
             int passed = 0, failed = 0;
 
-            // ── AutoSIMD IJobEntity（ChunkRange 真 SIMD）──
+            // AutoSIMD IJobEntity（ChunkRange 真 SIMD）
             RunCase("Light IJobEntity AutoSIMD", false, LightEpsilon, q => new LightJobEntityAutoSIMD { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
             RunCase("Heavy IJobEntity AutoSIMD", true, HeavyEpsilon, q => new HeavyJobEntityAutoSIMD { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
 
-            // ── 无 AutoSIMD 的 CPP IJobEntity（标量 EntityBatch/ChunkRange）──
+            // 无 AutoSIMD 的 CPP IJobEntity（标量 EntityBatch/ChunkRange）
             // 注意：CPP 标量路径允许 C++ 编译器 FMA 融合，Light 用 1e-6 容差（1 ULP）
             RunCase("Light IJobEntity CPP (no AutoSIMD)", false, LightCppEpsilon, q => new LightJobEntityCpp { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
             RunCase("Heavy IJobEntity CPP (no AutoSIMD)", true, HeavyEpsilon, q => new HeavyJobEntityCpp { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
 
-            // ── 无 AutoSIMD 的 CPP IJobChunk（标量 EntityBatch）──
+            // 无 AutoSIMD 的 CPP IJobChunk（标量 EntityBatch）
             RunCase("Light IJobChunk CPP (no AutoSIMD)", false, LightCppEpsilon, q => new LightJobChunkCpp { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
             RunCase("Heavy IJobChunk CPP (no AutoSIMD)", true, HeavyEpsilon, q => new HeavyJobChunkCpp { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
 

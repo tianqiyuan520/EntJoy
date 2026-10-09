@@ -1,134 +1,132 @@
-using EntJoy.JobSystem;
-// 10_SIMD 已从编译排除（见 EntJoySample.csproj）；恢复时取消本注释与下方 Run() 调用
-//using EntJoySample.SIMD;
+﻿//using EntJoy.JobSystem;
 
-namespace EntJoySample.ECS
-{
-    public static class Program
-    {
-        // 当前入口已切换到 01_JobSystem/ParallelRwConflictTest（README 入口约定：仅保留一个非注释 Main）
-        /*
-        public static void Main()
-        {
-            Console.WriteLine("=== EntJoy ECS Test ===\n");
-            try
-            {
-                // ECS 基准需要原生 worker（C++ Chase-Lev 调度器）；缺失时 Schedule 路径无 worker 可执行
-                JobScheduler.Initialize();
-                //Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
-                // 10_SIMD: ISPC vs AutoSIMD vs Cpp 对比 + 压力测试（对照 C# oracle 找翻译 bug）
-                //SimdCompareTest.Run();
+//namespace EntJoySample.ECS
+//{
+//    public static class Program
+//    {
+        
+//        public static void Main()
+//        {
+//            Console.WriteLine("=== EntJoy ECS Test ===\n");
+//            try
+//            {
+//                // ECS 基准需要原生 worker（C++ Chase-Lev 调度器）；缺失时 Schedule 路径无 worker 可执行
+//                JobScheduler.Initialize();
+//                //Console.WriteLine($"JobSystem initialized: {NativeJobScheduler.JobWorkerCount} workers\n");
 
-                // Observer 测试（组件生命周期事件 push 回调）
-                //ObserverDemo.Run();
+//                // 10_SIMD: ISPC vs AutoSIMD vs Cpp 对比 + 压力测试（对照 C# oracle 找翻译 bug）
+//                //SimdCompareTest.Run();
 
-                // Shared Component per-chunk 存储测试（分组/Set/查询过滤/流式 API/变更追踪）
-                //SharedComponentDemo.Run();
+//                // Observer 测试（组件生命周期事件 push 回调）
+//                //ObserverDemo.Run();
 
-                // Event Channel 测试
-                //EventChannelDemo.Run();
+//                // Shared Component per-chunk 存储测试（分组/Set/查询过滤/流式 API/变更追踪）
+//                //SharedComponentDemo.Run();
 
-                // Event Channel + Managed Job 测试
-                //EventChannelJobTest.Run();
+//                // Event Channel 测试
+//                //EventChannelDemo.Run();
 
-                // Native Event Job 测试（NativeTranspile SendEvent）
-                //NativeEventJobTest.Run();
+//                // Event Channel + Managed Job 测试
+//                //EventChannelJobTest.Run();
 
-                // ISPC Event Job 测试（NativeTranspile ISPC SendEvent）
-                //ISpcEventJobTest.Run();
+//                // Native Event Job 测试（NativeTranspile SendEvent）
+//                //NativeEventJobTest.Run();
 
-                // Change Tracking 测试
-                //ChangeTrackingDemo.Run();
+//                // ISPC Event Job 测试（NativeTranspile ISPC SendEvent）
+//                //ISpcEventJobTest.Run();
 
-                // EnabledComponent 三种方案性能对比
-                //EnabledComparisonBenchmark.Run();
+//                // Change Tracking 测试
+//                //ChangeTrackingDemo.Run();
 
-                // NativeTranspile IJobChunk: Schedule / Run(ImmediateNative) 冒烟
-                //NativeJobSmokeTest.Run();
+//                // EnabledComponent 三种方案性能对比
+//                //EnabledComparisonBenchmark.Run();
 
-                // IJobEntity.Run enabled 开关对比
-                //IJobEntityEnabledBenchmark.Run();
+//                // NativeTranspile IJobChunk: Schedule / Run(ImmediateNative) 冒烟
+//                //NativeJobSmokeTest.Run();
 
-                // ECS JobSystem 重构回归标尺：schedule-only 微基准
-                //ScheduleOverheadBenchmark.Run();
+//                // IJobEntity.Run enabled 开关对比
+//                //IJobEntityEnabledBenchmark.Run();
 
-                // 查询缓存基准：共享注册表 + 增量刷新收益
-                //EntityQueryCacheBenchmark.Run();
+//                // ECS JobSystem 重构回归标尺：schedule-only 微基准
+//                //ScheduleOverheadBenchmark.Run();
 
-                // N 元组查询示例：world.Query<T0, T1, T2>()（SourceGenerator 生成）
-                //QueryTupleDemo.Run();
+//                // 查询缓存基准：共享注册表 + 增量刷新收益
+//                //EntityQueryCacheBenchmark.Run();
 
-                //关系基准：Add/Get/ Has / WithRelationship 性能基线
-                //RelationBenchmark.Run();
+//                // N 元组查询示例：world.Query<T0, T1, T2>()（SourceGenerator 生成）
+//                //QueryTupleDemo.Run();
 
-                // IJobEntity 访问关系列验证（步长一致性）
-                //RelationBenchmark.VerifyIJobEntityRelationAccess();
+//                //关系基准：Add/Get/ Has / WithRelationship 性能基线
+//                //RelationBenchmark.Run();
 
-                // IJobChunk 访问关系列验证（步长一致性）
-                //RelationBenchmark.VerifyIJobChunkRelationAccess();
+//                // IJobEntity 访问关系列验证（步长一致性）
+//                //RelationBenchmark.VerifyIJobEntityRelationAccess();
 
-                // NativeTranspiler 关系访问验证（[NativeTranspile] IJobChunk/IJobEntity）
-                //RelationNativeJobTest.Run();
+//                // IJobChunk 访问关系列验证（步长一致性）
+//                //RelationBenchmark.VerifyIJobChunkRelationAccess();
 
-                // [ECSComponent] 标记组件示例（不写 : IComponentData，源生成器自动补齐接口）
-                //ECSComponentDemo.Run();
+//                // NativeTranspiler 关系访问验证（[NativeTranspile] IJobChunk/IJobEntity）
+//                //RelationNativeJobTest.Run();
 
-                // System 注册生成示例（SystemRegistry.RegisterAll 一行注册本程序集所有 ISystem）
-                //SystemRegistrationDemo.Run();
+//                // [ECSComponent] 标记组件示例（不写 : IComponentData，源生成器自动补齐接口）
+//                //ECSComponentDemo.Run();
 
-                // Reactive 处理器示例（[Reactive] 自动注册 Observer，组件事件 push 回调）
-                //ReactiveDemo.Run();
+//                // System 注册生成示例（SystemRegistry.RegisterAll 一行注册本程序集所有 ISystem）
+//                //SystemRegistrationDemo.Run();
 
-                // 组件持有 NativeCollection 时的内存问题复现（DestroyEntity/RemoveComponent 泄漏）
-                //ComponentLifecycleMemoryDemo.Run();
+//                // Reactive 处理器示例（[Reactive] 自动注册 Observer，组件事件 push 回调）
+//                //ReactiveDemo.Run();
 
-                // 多 World 隔离：两个 World 各自跑 SystemRunner，验证 System 不串扰
-                //MultiWorldIsolationDemo.Run();
+//                // 组件持有 NativeCollection 时的内存问题复现（DestroyEntity/RemoveComponent 泄漏）
+//                //ComponentLifecycleMemoryDemo.Run();
 
-                // Chunk 碎片整理：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
-                //ChunkDefragDemo.Run();
+//                // 多 World 隔离：两个 World 各自跑 SystemRunner，验证 System 不串扰
+//                //MultiWorldIsolationDemo.Run();
 
-                // 内存分析器示例：MemoryReport 原生分配/泄漏/碎片/slab 统计
-                //MemoryProfilerDemo.Run();
+//                // Chunk 碎片整理：制造碎片 + CompactChunks + 验证 chunk 数/实体/查询/生命周期平衡
+//                //ChunkDefragDemo.Run();
 
-                // Prefab 实例化：模板标记 + SpawnFrom 复制 + 默认排除 + 独立副本
-                //PrefabDemo.Run();
+//                // 内存分析器示例：MemoryReport 原生分配/泄漏/碎片/slab 统计
+//                //MemoryProfilerDemo.Run();
 
-                // slab 复用/压缩：销毁回收空 slab + 重建复用空洞
-                //SlabRecycleDemo.Run();
+//                // Prefab 实例化：模板标记 + SpawnFrom 复制 + 默认排除 + 独立副本
+//                //PrefabDemo.Run();
 
-                // 性能分析器：System 耗时 + slab 复用 + 内存统计
-                //PerformanceProfilerDemo.Run();
+//                // slab 复用/压缩：销毁回收空 slab + 重建复用空洞
+//                //SlabRecycleDemo.Run();
 
-                // 组件元数据：字段元数据（含嵌套 struct 展开）+ 用元数据打印字段值
-                //ComponentMetaDemo.Run();
+//                // 性能分析器：System 耗时 + slab 复用 + 内存统计
+//                //PerformanceProfilerDemo.Run();
 
-                // 关系全场景示例：父子层级 / 索敌 / 技能 M:N / 背包（ExclusiveTarget + 关系数据）
-                //RelationScenarioDemo.Run();
+//                // 组件元数据：字段元数据（含嵌套 struct 展开）+ 用元数据打印字段值
+//                //ComponentMetaDemo.Run();
 
-                // 系统 Job 自动依赖（DOTS SystemState.Dependency：隐式依赖 + ISystemWithState 显式）
-                //SystemDependencyDemo.Run();
+//                // 关系全场景示例：父子层级 / 索敌 / 技能 M:N / 背包（ExclusiveTarget + 关系数据）
+//                //RelationScenarioDemo.Run();
 
-                // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
-                //DataNavigationDemo.Run();
+//                // 系统 Job 自动依赖（DOTS SystemState.Dependency：隐式依赖 + ISystemWithState 显式）
+//                //SystemDependencyDemo.Run();
 
-                // World 快照：TakeSnapshot 序列化 → 修改 → Restore 恢复
-                //WorldSnapshotDemo.Run();
+//                // 数据导航工具：DumpEntity / DumpArchetype / DumpWorld（非反射打印）
+//                //DataNavigationDemo.Run();
 
-                // SharedBlob：不可变共享数据 + 引用计数 + SpawnFrom 复制共享
-                //SharedBlobDemo.Run();
+//                // World 快照：TakeSnapshot 序列化 → 修改 → Restore 恢复
+//                //WorldSnapshotDemo.Run();
 
-                // IJobEntity DOTS 式 Entity 参数（Execute(..., Entity e)，e.Id = 全局实体序号，三后端）
-                //EntityParameterDemo.Run();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-                Console.WriteLine(ex.StackTrace);
-            }
-            Console.WriteLine("\n=== All ECS Demos Complete ===\n");
-        }
-        */
-    }
-}
+//                // SharedBlob：不可变共享数据 + 引用计数 + SpawnFrom 复制共享
+//                //SharedBlobDemo.Run();
+
+//                // IJobEntity DOTS 式 Entity 参数（Execute(..., Entity e)，e.Id = 全局实体序号，三后端）
+//                EntityParameterDemo.Run();
+//            }
+//            catch (Exception ex)
+//            {
+//                Console.WriteLine($"Error: {ex.Message}");
+//                Console.WriteLine(ex.StackTrace);
+//            }
+//            Console.WriteLine("\n=== All ECS Demos Complete ===\n");
+//        }
+        
+//    }
+//}

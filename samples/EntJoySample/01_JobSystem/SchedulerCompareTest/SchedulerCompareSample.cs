@@ -9,7 +9,7 @@
 
 //namespace EntJoySample.SchedulerCompareTest
 //{
-//    // ────────────────────────────── Job 定义 ──────────────────────────────
+//    // Job 定义
 
 //    public struct AddOneParallelForJob : IJobParallelFor
 //    {
@@ -56,7 +56,7 @@
 //        }
 //    }
 
-//    // ───────────── 正确性自检用的 Job（写 int[]，便于与串行参考结果对拍） ─────────────
+//    // 正确性自检用的 Job（写 int[]，便于与串行参考结果对拍）
 
 //    public struct CheckFillJob : IJobParallelFor
 //    {
@@ -88,11 +88,11 @@
 //        }
 //    }
 
-//    // ────────────────────────────── 基准主体 ──────────────────────────────
+//    // 基准主体
 
 //    public sealed unsafe class SchedulerCompareSample : IDisposable
 //    {
-//        // ─── 常量 ───
+//        // 常量
 //        private const int ArrayLength = 1_000_000;
 //        private const int WarmupFrames = 20;
 //        private const int MeasureFrames = 100;
@@ -103,7 +103,7 @@
 //        // ThreadPool 分片数 = worker 核心数（每个 worker 一片，公平对比 Native 的自动分片）
 //        private static int WorkerSlices = Environment.ProcessorCount;
 
-//        // ─── 数据（各调度器独立，避免缓存干扰） ───
+//        // 数据（各调度器独立，避免缓存干扰）
 //        private NativeArray<int> _nativeValues;
 //        private NativeArray<int> _managedValues;
 //        private NativeArray<int> _parallelForValues;
@@ -129,7 +129,7 @@
 
 //        /// <summary>
 //        /// Managed JobSystem 正确性自检（对拍串行参考结果）。覆盖：
-//        /// 静态分片 / 共享游标（曾因双重 Signal 提前完成） / 依赖链 / 单 IJob / 零长度 / 异常传播（不挂死）/ 并发压测。
+//        /// 静态分片 / 共享游标 / 依赖链 / 单 IJob / 零长度 / 异常传播（不挂死）/ 并发压测。
 //        /// 任一项不通过即抛异常，阻止把带 bug 的调度器带入基准/生产。
 //        /// </summary>
 //        private static void SelfCheckManaged()
@@ -154,7 +154,7 @@
 //                Assert(pass, "静态分片 innerBatch=0 结果正确");
 //            }
 
-//            // 2) 共享游标 (innerBatchCount > 0) —— 曾因 ExecuteTask 与 Runner 双重 Signal 提前完成，
+//            // 2) 共享游标 (innerBatchCount > 0) —— ExecuteTask 与 Runner 双重 Signal 提前完成，
 //            //    基准只计时不校验结果而漏网；此处必须逐元素对拍。
 //            {
 //                var data = new int[n];
@@ -267,7 +267,7 @@
 //            Console.WriteLine("* 所有数值为 MeasureFrames 次测量均值，单位 ms。");
 //        }
 
-//        // ──────────────────── 通用测量框架 ────────────────────
+//        // 通用测量框架
 
 //        /// <summary>测量 NativeJobScheduler 路径：WarmupFrames 预热 → MeasureFrames 计时</summary>
 //        private static double MeasureNative(Action action)
@@ -328,7 +328,7 @@
 //            return (double)totalTicks * 1000.0 / (Stopwatch.Frequency * MeasureFrames);
 //        }
 
-//        // ──────────────────── 场景 1：分片加法 ────────────────────
+//        // 场景 1：分片加法
 
 //        private double MeasureAddOne_Native() =>
 //            MeasureNative(() => new AddOneParallelForJob { Values = _nativeValues }
@@ -352,7 +352,7 @@
 //            MeasureTPool(() => ThreadPoolForEach(_threadPoolValues, ArrayLength, WorkerSlices,
 //                (values, start, end) => { for (int i = start; i < end; i++) values[i] = values[i] + 1; }));
 
-//        // ──────────────────── 场景 2：空任务 ────────────────────
+//        // 场景 2：空任务
 
 //        private double MeasureEmpty_Native() =>
 //            MeasureNative(() => new EmptyParallelForJob()
@@ -372,7 +372,7 @@
 //            MeasureTPool(() => ThreadPoolForEach(_threadPoolValues, ArrayLength, WorkerSlices,
 //                (values, start, end) => { for (int i = start; i < end; i++) Interlocked.MemoryBarrier(); }));
 
-//        // ──────────────────── 场景 3：依赖链 ────────────────────
+//        // 场景 3：依赖链
 
 //        private double MeasureChain_Native() =>
 //            MeasureNative(() =>
@@ -422,7 +422,7 @@
 //                    (values, start, end) => { for (int i = start; i < end; i++) values[i] = values[i] - 3; });
 //            });
 
-//        // ──────────────────── 场景 4：调度延迟 ────────────────────
+//        // 场景 4：调度延迟
 
 //        private double MeasureLatency_Native() =>
 //            MeasureNative(() =>
@@ -458,7 +458,7 @@
 //                        (values, start, end) => { for (int j = start; j < end; j++) values[j] = values[j] + 1; });
 //            });
 
-//        // ──────────────────── 场景 5：高竞争 ────────────────────
+//        // 场景 5：高竞争
 
 //        private double MeasureHeavy_Native() =>
 //            MeasureNative(() => new HeavyComputeJob { Results = _heavyResults }
@@ -486,7 +486,7 @@
 //        private double MeasureHeavy_ThreadPool() =>
 //            MeasureTPool(() => ThreadPoolHeavyWork(HighContentionCount, WorkerSlices));
 
-//        // ──────────────────── ThreadPool 辅助 ────────────────────
+//        // ThreadPool 辅助
 
 //        /// <summary>
 //        /// 用 ThreadPool 分片执行操作。slices = 期望的并发分片数（= worker 核心数），
@@ -541,7 +541,7 @@
 //            countdown.Wait();
 //        }
 
-//        // ──────────────────── 场景协调（输出表格行） ────────────────────
+//        // 场景协调（输出表格行）
 
 //        private void RunScenario(string label,
 //            Func<double> measureNative, Func<double> measureManaged,
@@ -567,7 +567,7 @@
 //            Console.Out.Flush();
 //        }
 
-//        // ──────────────────── 清理 ────────────────────
+//        // 清理
 
 //        public void Dispose()
 //        {

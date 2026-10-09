@@ -7,18 +7,16 @@ using NativeTranspiler;
 
 namespace EntJoySample.EnableBitmap
 {
-    // ═══════════════════════════════════════════════════════════════════════════
-    // P1-6 / P1-7 运行期验收（2026-09-13）：
-    //   P1-6 原生 IJobChunk 内核**读**逐组件 enable 位图，与托管侧一致（逐实体比对，不一致 = 0）；
-    //   P1-7 原生内核**写**位图后，托管侧 `IsComponentEnabled` / `WithEnabled` 查询立刻反映。
+    // 运行期验收：
+    //   原生 IJobChunk 内核读逐组件 enable 位图，与托管侧一致（逐实体比对，不一致 = 0）；
+    //   原生内核写位图后，托管侧 `IsComponentEnabled` / `WithEnabled` 查询立刻反映。
     //
-    // 数据面：`ChunkJobData.requiredEnableBitMaps`（与 requiredComponentArrays **同序**）
+    // 数据面：`ChunkJobData.requiredEnableBitMaps`（与 requiredComponentArrays 同序）
     //   → 生成的 C++ 包装里由 `ArchetypeChunk.GetEnableBitMapPtr<T>()` 取用：
     //     `reinterpret_cast<unsigned long long*>(__chunkData->requiredEnableBitMaps[requiredIdx])`
     //
-    // 布局约定：本示例把 `Archetype.ChunkCapacityOverride` 设为实体总数 ⇒ **单 chunk**，
+    // 布局约定：本示例把 `Archetype.ChunkCapacityOverride` 设为实体总数 ⇒ 单 chunk，
     //   于是"chunk 内序号 i" 就是全局序号，可以做逐实体比对（多 chunk 下原生 job 拿不到全局序号）。
-    // ═══════════════════════════════════════════════════════════════════════════
 
     public struct EPos : IComponentData { public int V; }
     public struct EAlive : IComponentData, IEnableableComponent { public int V; }
@@ -67,16 +65,16 @@ namespace EntJoySample.EnableBitmap
     }
 
     /// <summary>
-    /// 原生内核**写**位图（P1-7）：i % Mod == 0 的实体被禁用，其余启用。
+    /// 原生内核写位图：i % Mod == 0 的实体被禁用，其余启用。
     ///
     /// 写成"按 64 位字整体写、且字值是该字索引的纯函数"是刻意的：位图是 1 bit/实体、64 实体/字，
     /// 若按实体逐位 read-modify-write，多 lane 命中同一字时后写覆盖先写；而按字整体写 + 纯函数值
     /// 即使两个 lane 命中同一字也写入相同值（幂等）⇒ 无丢更新。
     ///
-    /// ⚠ 本 job 第一版给出的错误位图（782 字中 781 字错、popcount 25,006 而非 42,857）**不是**并发问题，
-    ///   根因是转译器把 C# `1UL` 原样输出为 C++ `1UL`（Windows 上 `unsigned long` 是 32 位）⇒
-    ///   `1UL << b`（b 可达 63）触发 `shift count >= width of type` 的 UB。框架已修（UL→ULL / L→LL），
-    ///   下面的 Diag[3] 就是该修复的运行期判据（`(1UL<<40)>>32` 必须为 256）。
+    /// ⚠ 本 job 第一版给出的错误位图（782 字中 781 字错、popcount 25,006 而非 42,857）不是并发问题，
+    /// 根因是转译器把 C# `1UL` 原样输出为 C++ `1UL`（Windows 上 `unsigned long` 是 32 位）⇒
+    /// `1UL << b`（b 可达 63）触发 `shift count >= width of type` 的 UB。框架已修（UL→ULL / L→LL），
+    /// 下面的 Diag[3] 就是该修复的运行期判据（`(1UL<<40)>>32` 必须为 256）。
     /// </summary>
     [NativeTranspile(Target = BackendTarget.Cpp)]
     public unsafe struct BitWriteJobCpp : IJobChunk
@@ -112,7 +110,7 @@ namespace EntJoySample.EnableBitmap
     }
 
     /// <summary>
-    /// P2-10 验证点：原生 **IJobEntity** + `NativeArray` 辅助表字段 + `Entity` 参数。
+    /// 验证点：原生 IJobEntity + `NativeArray` 辅助表字段 + `Entity` 参数。
     /// （历史记载为"不支持"，实际只需按增量对拍确认；本 job 把结果写进按 `e.Id` 索引的辅助表。）
     /// </summary>
     [NativeTranspile(Target = BackendTarget.Cpp)]
@@ -150,7 +148,7 @@ namespace EntJoySample.EnableBitmap
 
         public static void Run()
         {
-            Console.WriteLine("=== 13_EnableBitMapNative：原生 IJobChunk 读/写逐组件 enable 位图（P1-6 / P1-7）===\n");
+            Console.WriteLine("=== 13_EnableBitMapNative：原生 IJobChunk 读/写逐组件 enable 位图 ===\n");
 
             int savedOverride = Archetype.ChunkCapacityOverride;
             Archetype.ChunkCapacityOverride = EntityCount;   // 单 chunk ⇒ chunk 内序号 = 全局序号
@@ -159,7 +157,7 @@ namespace EntJoySample.EnableBitmap
             var world = new World("EnableBitMapNativeDemo");
             var em = world.EntityManager;
 
-            // ── 1) 建实体：EPos.V = i，EAlive 按 i % 3 == 0 禁用 ──
+            // 1) 建实体：EPos.V = i，EAlive 按 i % 3 == 0 禁用
             var entities = world.CreateEntities(EntityCount, typeof(EPos), typeof(EAlive));
             for (int i = 0; i < entities.Length; i++)
             {
@@ -172,7 +170,7 @@ namespace EntJoySample.EnableBitmap
             Console.WriteLine($"[1] 实体={entities.Length:N0} | chunk 容量覆盖={savedOverride}→{EntityCount} ⇒ chunk 数={arch.ChunkList.Count}"
                 + $" | 初始：i % {DisableEvery} == 0 为**禁用**");
 
-            // ── 2) 托管逐实体参考值（与被测路径完全独立：走 EntityManager API）──
+            // 2) 托管逐实体参考值（与被测路径完全独立：走 EntityManager API）
             var expectFlag = new int[EntityCount];
             var expectVal = new int[EntityCount];
             long expectSum = 0;
@@ -192,14 +190,14 @@ namespace EntJoySample.EnableBitmap
             var valCpp = new NativeArray<int>(EntityCount, Allocator.Persistent);
             Fill(flagCs, -1); Fill(valCs, -1); Fill(flagCpp, -1); Fill(valCpp, -1);
 
-            // ── 3) 托管孪生 job（位图读）──
+            // 3) 托管孪生 job（位图读）
             sw.Restart();
             new BitReadJobCs { Flag = flagCs, Val = valCs }.Schedule(query).Complete();
             sw.Stop();
             Console.WriteLine($"[3] 托管孪生 job（GetEnableBitMapPtr 托管实现）：{sw.Elapsed.TotalMilliseconds:F2} ms，"
                 + $"与参考值不一致 flag={Compare(flagCs, expectFlag)} val={Compare(valCs, expectVal)}");
 
-            // ── 4) 原生内核 job（同一算法，C++）──
+            // 4) 原生内核 job（同一算法，C++）
             long badCppFlag = -1, badCppVal = -1, badCross = -1;
             try
             {
@@ -219,7 +217,7 @@ namespace EntJoySample.EnableBitmap
                     + "用 `dotnet run --project samples\\EntJoySample\\EntJoySample.csproj -c Release` 走完整原生编译即可。");
             }
 
-            // ── 5) 托管查询过滤与位图一致（WithEnabled 口径）──
+            // 5) 托管查询过滤与位图一致（WithEnabled 口径）
             long qSum = 0;
             int qCount = 0;
             foreach (var r in world.Query<EPos>().WithEnabled<EAlive>())
@@ -230,7 +228,7 @@ namespace EntJoySample.EnableBitmap
             Console.WriteLine($"[5] 托管 `WithEnabled<EAlive>` 查询：{qCount:N0} 个，EPos.V 之和={qSum:N0}"
                 + $" ⇒ 与参考值一致={((qCount == CountOn(expectFlag) && qSum == expectSum) ? 1 : 0)}");
 
-            // ── 6) 原生内核**写**位图（P1-7）──
+            // 6) 原生内核写位图
             var diag = new NativeArray<int>(8, Allocator.Persistent);
             for (int i = 0; i < diag.Length; i++) diag[i] = -1;
             try
@@ -248,7 +246,7 @@ namespace EntJoySample.EnableBitmap
                 Console.WriteLine($"[6] 原生写位图：**本机不可用**（{ex.GetType().Name}）");
             }
 
-            // ── 7) 原生写之后：托管侧立即一致 ──
+            // 7) 原生写之后：托管侧立即一致
             long afterMis = 0, afterOn = 0;
             for (int i = 0; i < EntityCount; i++)
             {
@@ -267,7 +265,7 @@ namespace EntJoySample.EnableBitmap
                 + $"，启用 {afterOn:N0} / {EntityCount:N0}");
             Console.WriteLine($"    原生写后 `WithEnabled<EAlive>` 查询：{qCount2:N0} 个，与逐实体一致={(qCount2 == afterOn ? 1 : 0)}");
 
-            // ── 7b) 诊断：位图**整字**内容 vs 期望纯函数（定位"写到哪去了"）──
+            // 7b) 诊断：位图整字内容 vs 期望纯函数（定位"写到哪去了"）
             int wordCount = (EntityCount + 63) >> 6;
             var words = new NativeArray<ulong>(wordCount, Allocator.Persistent);
             new BitDumpJobCs { Words = words }.Schedule(query).Complete();
@@ -295,7 +293,7 @@ namespace EntJoySample.EnableBitmap
 
             bool pass = badCppFlag == 0 && badCppVal == 0 && badCross == 0 && afterMis == 0 && qCount == CountOn(expectFlag) && qCount2 == afterOn;
 
-            // ── 8) P2-10：原生 IJobEntity + NativeArray 辅助表字段 + Entity 参数 ──
+            // 8)：原生 IJobEntity + NativeArray 辅助表字段 + Entity 参数
             var outTable = new NativeArray<int>(EntityCount, Allocator.Persistent);
             Fill(outTable, -1);
             long badEntity = -1;
@@ -307,12 +305,12 @@ namespace EntJoySample.EnableBitmap
                 badEntity = 0;
                 for (int i = 0; i < EntityCount; i++)
                     if (outTable[entities[i].Id] != i + 1) badEntity++;
-                Console.WriteLine($"[8] 原生 IJobEntity + `NativeArray` 辅助表（P2-10）：{sw.Elapsed.TotalMilliseconds:F2} ms，"
+                Console.WriteLine($"[8] 原生 IJobEntity + `NativeArray` 辅助表：{sw.Elapsed.TotalMilliseconds:F2} ms，"
                     + $"逐实体不一致={badEntity}（应 0：Out[e.Id] == EPos.V + 1）");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[8] 原生 IJobEntity（P2-10）：**本机不可用**（{ex.GetType().Name}）");
+                Console.WriteLine($"[8] 原生 IJobEntity：**本机不可用**（{ex.GetType().Name}）");
             }
             outTable.Dispose();
             pass = pass && badEntity == 0;

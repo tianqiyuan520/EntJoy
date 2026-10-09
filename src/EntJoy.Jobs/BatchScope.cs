@@ -7,22 +7,17 @@ namespace EntJoy.JobSystem
     /// 显式批提交（对应 Unity JobHandle.ScheduleBatchedJobs 语义）。
     ///
     /// 用法：
-    ///   using var batch = new BatchScope();
-    ///   batch.Add(ref job1);                       // 入队即快照（blittable 池拷贝）
-    ///   batch.Add(ref job2, dependsOn: h0);        // 依赖"已发布"句柄（批外或上批）
-    ///   batch.AddFor(ref forJob, 1024);
-    ///   batch.AddParallelFor(ref parJob, 8192, 0);
-    ///   var handles = batch.Submit();              // 发布：提交整批（C# v1：逐个走既有入口）
-    ///   handles[i].Complete();                     // 或 batch.CompleteAll();
+    /// using var batch = new BatchScope();
+    /// batch.Add(ref job1); // 入队即快照（blittable 池拷贝）
+    /// batch.Add(ref job2, dependsOn: h0); // 依赖"已发布"句柄（批外或上批）
+    /// batch.AddFor(ref forJob, 1024);
+    /// batch.AddParallelFor(ref parJob, 8192, 0);
+    /// var handles = batch.Submit(); // 发布：提交整批（C# v1：逐个走既有入口）
+    /// handles[i].Complete(); // 或 batch.CompleteAll();
     ///
-    /// 语义（docs 20260826-JobSystem-多Job调度开销基准与分析.md §14）：
-    ///   - 批 = blittable-only：泛型约束 `unmanaged` 在编译期拒绝含托管引用的 job
-    ///     （CS8377），另有运行时 IsReferenceOrContainsReferences 兜底；
-    ///   - Job 字段 = 入队快照；引用内存（NativeArray/指针）= 活引用，批生命周期内主线程只读
-    ///     （§14.5 的容器持有检查随批提交实现后生效）；
-    ///   - End/Complete/Flush 为发布 force point。
-    ///   - v1：C# 层批（入队零 P/Invoke，End 逐个走既有 ScheduleRaw 入口——API 形态先行，
-    ///     P/Invoke 合并 + native 单次唤醒在隐式批阶段随 deferNotify 一起做）。
+    /// 语义（docs 20260826-JobSystem-多Job调度开销基准与分析.md）：
+    /// - Job 字段 = 入队快照；引用内存（NativeArray/指针）= 活引用，批生命周期内主线程只读
+    /// P/Invoke 合并 + native 单次唤醒在隐式批阶段随 deferNotify 一起做）。
     /// </summary>
     public sealed unsafe class BatchScope : IDisposable
     {
@@ -48,7 +43,7 @@ namespace EntJoy.JobSystem
 
         public int Count => IsManaged ? (_managedHandles?.Count ?? 0) : _count;
 
-        // ── 入队：IJob / IJobFor / IJobParallelFor（泛型约束 unmanaged = 编译期拒绝托管 job） ──
+        // 入队：IJob / IJobFor / IJobParallelFor（泛型约束 unmanaged = 编译期拒绝托管 job）
         // 注意：Debug 构建下 EntJoy.Collections 容器保持 blittable（DisposeSentinel 用静态表 + int 句柄，
         // 不嵌入 struct 字段），故含容器的 unmanaged job 在 Debug 下同样满足约束。
 
@@ -127,7 +122,7 @@ namespace EntJoy.JobSystem
             _count++;
         }
 
-        // ── 发布 / 完成 ──
+        // 发布 / 完成
 
         /// <summary>发布整批：单次 P/Invoke 提交全部 job（native 侧 defer 窗口 + 统一唤醒）。</summary>
         public JobHandle[] Submit()
@@ -197,7 +192,6 @@ namespace EntJoy.JobSystem
             {
                 // 无条件 Complete：JobHandle.Complete() 本身后端无关，空句柄是 no-op。
                 // 曾经用 `h._nativeHandle.IsValid` 守卫 —— 在 Managed 回退后端（NativeDll 缺失/ABI 不匹配时的
-                // 官方回退路径）句柄只带 _managedHandle，整批被静默跳过：既不等、也不传播 Job 异常，
                 // 调用方随后 Dispose/读容器就与仍在运行的 worker 竞争（UAF 窗口）。
                 h.Complete();
             }

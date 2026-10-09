@@ -5,7 +5,6 @@ using EntJoy.JobSystem;
 
 namespace EntJoySample.IJobInlineProbeTest
 {
-    // ============================================================
     // IJobInlineProbe —— 验证 IJob / IJobFor 的 Schedule 一律异步提交
     // （对齐 Unity JobSystem：调用线程只提交，不执行）。
     //
@@ -20,9 +19,8 @@ namespace EntJoySample.IJobInlineProbeTest
     //   IJobFor n=100  Light : 每元素空
     //   IJobFor n=100  Heavy : 每元素忙等 0.5ms     → 总数 ~50ms，必须异步
     //   IJobFor n=100000 Light : 每元素空
-    // ============================================================
 
-    // ---- 执行线程记录（job 内写入，Complete 后读取） ----
+    // 执行线程记录（job 内写入，Complete 后读取）
     internal static class ExecTrace
     {
         public static int ThreadId;
@@ -120,14 +118,12 @@ namespace EntJoySample.IJobInlineProbeTest
             RunScheduleModes();
         }
 
-        // ============================================================
         // 第二部分：空 job × 三模式调度性能（100 job/轮，5 轮中位）
         //   模式 1 S+C         : 每 job Schedule 后立即 Complete（逐次往返）
         //   模式 2 只S         : 100 个 Schedule 全部提交 → 最后统一 Complete
         //   模式 3 ImplicitBatch: 开 native 隐式批 → Schedule 挂 pending →
         //                         EndFrame() 统一提交 + 单次唤醒 → 统一 Complete
         // 接口覆盖：IJob / IJobFor（不收集） + IJobParallelFor（SubmitBatch 批路径，隐式批生效）
-        // ============================================================
         private const int ModesReps = 5;
 
         private static void ModeSyncComplete(int jobCount, Func<JobHandle> schedule)

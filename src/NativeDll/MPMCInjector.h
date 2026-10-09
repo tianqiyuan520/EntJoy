@@ -143,14 +143,14 @@ namespace JobSystem
             return true;
         }
 
-        // 批量出队：一次 CAS 抢占至多 maxCount 个**已发布**的连续槽（FIFO 前缀），返回实际弹出数。
+        // 批量出队：一次 CAS 抢占至多 maxCount 个已发布的连续槽（FIFO 前缀），返回实际弹出数。
         // 与 Pop 的 seq 协议完全一致（消费者仍按 dequeuePos 顺序推进）；差异在于：
         //   · N 次「尾指针 CAS + 单元行写」压成 ceil(N/maxCount) 次；
         //   · 每个消费者抢到的单元区间互不相交 ⇒ 单元 seq 行不再被相邻消费者互踢。
         // 只弹已发布前缀：生产者刚 CAS 到槽位但尚未 seq.store 的那一项不会被跳过（否则丢任务），
         // 此时返回 0 或不足 maxCount 的前缀，由调用方稍后重试。
         //
-        // ⚠ 当前调度器**未使用**它：多弹出的 token 只能经「本地 deque → 被窃取」再分发，
+        // ⚠ 当前调度器未使用它：多弹出的 token 只能经「本地 deque → 被窃取」再分发，
         //   窃取（扫描 + 两次 CAS）比它省下的注入器出队更贵。保留本原语是因为它对
         //   "发布一次 + 首到先得 admission" 这类不需要把 token 排队的方案仍可能有用，且单测覆盖了
         //   FIFO / 回绕 / 并发不丢不重不双认领（`tests/NativeDll.Tests/MPMCInjectorTests.cpp`）。
@@ -170,7 +170,7 @@ namespace JobSystem
                     if (diff == 0) continue;    // 已发布且未消费 ⇒ 可弹
                     if (diff < 0)
                     {
-                        // 该槽尚未发布。**只有队首未发布**才算"队列空"（与 Pop 一致）；
+                        // 该槽尚未发布。只有队首未发布才算"队列空"（与 Pop 一致）；
                         // 队首已就绪而后面还没发布时必须返回已就绪前缀 —— 否则队列里明明有
                         // 可弹出的项却报空 ⇒ 消费方永久空转。
                         if (ready == 0) return 0;

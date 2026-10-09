@@ -8,10 +8,10 @@ namespace EntJoy.ECS
     /// 实体构造器：链式 API 消灭 CreateEntity + Set 样板代码
     /// 
     /// 使用方式：
-    ///   var entity = world.Spawn()
-    ///       .With(new Position { X = 1, Y = 1 })
-    ///       .With(new Velocity { X = 0.1f, Y = 0.1f })
-    ///       .Build();
+    /// var entity = world.Spawn()
+    /// .With(new Position { X = 1, Y = 1 })
+    /// .With(new Velocity { X = 0.1f, Y = 0.1f })
+    /// .Build();
     /// </summary>
     public struct EntityBuilder
     {

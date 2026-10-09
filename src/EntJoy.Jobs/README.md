@@ -59,7 +59,7 @@ ctx 走框架自带 `ContextPool`、**无逐派发堆分配**。详见
 ## 引用
 
 ```xml
-<PackageReference Include="EntJoy.Jobs" Version="1.0.0" />
+<PackageReference Include="EntJoy.Jobs" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`；命名空间 `EntJoy.JobSystem`（托管回退在 `EntJoy.JobSystem.Managed`）。
@@ -136,7 +136,7 @@ The full how-to-write / how-to-configure guide lives in [`docs/public/Native-Job
 ## Reference it
 
 ```xml
-<PackageReference Include="EntJoy.Jobs" Version="1.0.0" />
+<PackageReference Include="EntJoy.Jobs" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`; namespace `EntJoy.JobSystem` (managed fallback in `EntJoy.JobSystem.Managed`).

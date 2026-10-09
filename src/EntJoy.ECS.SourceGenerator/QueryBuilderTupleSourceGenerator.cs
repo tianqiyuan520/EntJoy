@@ -15,9 +15,9 @@ namespace EntJoy.ECS.SourceGenerator
     /// QueryBuilder.WithAll&lt;T0..Tn&gt;() N 元组生成器：扫描 <c>builder.WithAll&lt;A,B,C&gt;()</c>
     /// 调用点（接收者符号类型必须是 <see cref="Config.QueryBuilderFullName"/>，arity ≥ 3），
     /// 为每个出现的 arity 生成一份泛型模板：
-    ///   - 内部静态缓存 <c>ComponentTypes&lt;T0..Tn&gt;</c>（.Share 数组，与库内 1/2 元组同构）；
-    ///   - 静态扩展类 <c>QueryBuilderWithAllExtensions{n}</c>，提供
-    ///     <c>WithAll&lt;T0..Tn&gt;(this QueryBuilder)</c>。
+    /// - 内部静态缓存 <c>ComponentTypes&lt;T0..Tn&gt;</c>（.Share 数组，与库内 1/2 元组同构）；
+    /// - 静态扩展类 <c>QueryBuilderWithAllExtensions{n}</c>，提供
+    /// <c>WithAll&lt;T0..Tn&gt;(this QueryBuilder)</c>。
     /// 
     /// 必须用扩展方法而非 partial：生成代码编译进调用方程序集（generator 以 Analyzer 引用，
     /// 见 EntJoySample.csproj），而 QueryBuilder 库类型在 EntJoy.ECS 程序集，跨程序集 partial
@@ -99,7 +99,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("using EntJoy.ECS;");
             sb.AppendLine();
 
-            // ===== ComponentTypes<T0..Tn>（内部静态缓存，与库内 1/2 元组同构） =====
+            // ComponentTypes<T0..Tn>（内部静态缓存，与库内 1/2 元组同构）
             sb.AppendLine($"internal sealed class ComponentTypes<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -111,7 +111,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== 扩展方法（partial 跨程序集不合并，须用 this QueryBuilder） =====
+            // 扩展方法（partial 跨程序集不合并，须用 this QueryBuilder）
             sb.AppendLine($"public static class QueryBuilderWithAllExtensions{n}");
             sb.AppendLine("{");
             sb.AppendLine($"    public static QueryBuilder WithAll<{genList}>(this QueryBuilder builder)");

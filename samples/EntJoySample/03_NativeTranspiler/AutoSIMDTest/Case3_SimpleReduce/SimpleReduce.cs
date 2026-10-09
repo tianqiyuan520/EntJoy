@@ -127,7 +127,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── Static function variants ──
+    // Static function variants
     public static class SimpleReduce_StaticFuncs
     {
         public static void SimpleReduce_Stc_CSharp(

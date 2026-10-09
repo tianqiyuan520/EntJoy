@@ -3,7 +3,7 @@
 //using System.Diagnostics;
 //using Environment = System.Environment;
 
-//// ==================== Job 定义（全部变体） ====================
+//// Job 定义（全部变体）
 //public unsafe struct CSharpJob : IJobParallelFor
 //{
 //    public float* Input;
@@ -108,7 +108,7 @@
 //    }
 //}
 
-//// ==================== Fill 定义（全部变体） ====================
+//// Fill 定义（全部变体）
 //public class IspccComparison
 //{
 //    private const int DATA_COUNT = 20_000_000;
@@ -204,7 +204,7 @@
 //        }
 //    }
 
-//    // ==================== Main 与 RunTest ====================
+//    // Main 与 RunTest
 //    public static void Main()
 //    {
 //        RunTest(); // 预热
@@ -302,7 +302,7 @@
 //        var sw = new Stopwatch();
 //        void Clear() => Array.Clear(output, 0, DATA_COUNT);
 
-//        // ================= Job 测试 =================
+//        // Job 测试
 //        double csharpJobMs, cppJobMs, ispcSystemMs, ispcDefaultMs, ispcFastMs;
 //        double ispcSystemMTMs, ispcDefaultMTMs, ispcFastMTMs;
 
@@ -372,7 +372,7 @@
 //        }
 //        ispcFastMTMs = sw.Elapsed.TotalMilliseconds;
 
-//        // ================= Fill 测试 =================
+//        // Fill 测试
 //        double fillCSharpMs, fillCPPMs, fillIspcSystemMs, fillIspcDefaultMs, fillIspcFastMs;
 //        double fillIspcSystemMTMs, fillIspcDefaultMTMs, fillIspcFastMTMs;
 

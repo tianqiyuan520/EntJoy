@@ -15,7 +15,7 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 | Query | `EntityQuery`、`QueryKey`、`QueryBuilder`、`QuerySelection<T0>` / `QuerySelection<T0,T1>`、`ComponentLookup<T>`、`QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`。 |
 | Relation | `RelationIndex`、`RelationListStore`、`RelationSlot`、`IRelationComponent`，属性 `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted`。 |
 | Observer | `ComponentObserver`、`ObserverHandle`、`ObserverEvents`、`ReactiveAttribute`。 |
-| Event | `EventBus`、`EventStream<T>`、`EventBuffer`。 |
+| Event | `SystemAPI`、`EventStream<T>`、`EventBuffer`。 |
 | System | `ISystem`、`ISystemWithState` / `SystemState`、`SystemRunner`、`ScheduleGraph` / `SystemSlot`，调度属性 `Read` / `Write` / `Order` / `RunWhen` / `OrderBefore` / `OrderAfter`，`DisableAutoCreationAttribute`，`PerformanceReport` / `SystemTiming`、`EventCounter`。 |
 | ECS Job（`EntJoy.ECS.JobSystem`） | `IJobChunk`、`IJobEntity`、`ChunkJobScheduler`、`ChunkJobCallbacks`、`ChunkJobExtensions`、`NativeChunkJobs`（`ChunkJobData` / `ChunkData` / `EntityBatchData`）。 |
 | 内存与工具 | `MemoryReport` / `ArchetypeMemoryInfo`、`Utils`。 |
@@ -33,7 +33,7 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.0" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
 </ItemGroup>
 ```
 
@@ -64,7 +64,7 @@ EntJoy's Archetype ECS (headless). This is **the only package you need to refere
 | Query | `EntityQuery`, `QueryKey`, `QueryBuilder`, `QuerySelection<T0>` / `QuerySelection<T0,T1>`, `ComponentLookup<T>`, `QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`. |
 | Relation | `RelationIndex`, `RelationListStore`, `RelationSlot`, `IRelationComponent`, and the `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted` attributes. |
 | Observer | `ComponentObserver`, `ObserverHandle`, `ObserverEvents`, `ReactiveAttribute`. |
-| Event | `EventBus`, `EventStream<T>`, `EventBuffer`. |
+| Event | `SystemAPI`, `EventStream<T>`, `EventBuffer`. |
 | System | `ISystem`, `ISystemWithState` / `SystemState`, `SystemRunner`, `ScheduleGraph` / `SystemSlot`, the scheduling attributes `Read` / `Write` / `Order` / `RunWhen` / `OrderBefore` / `OrderAfter`, `DisableAutoCreationAttribute`, `PerformanceReport` / `SystemTiming`, `EventCounter`. |
 | ECS jobs (`EntJoy.ECS.JobSystem`) | `IJobChunk`, `IJobEntity`, `ChunkJobScheduler`, `ChunkJobCallbacks`, `ChunkJobExtensions`, `NativeChunkJobs` (`ChunkJobData` / `ChunkData` / `EntityBatchData`). |
 | Memory and utilities | `MemoryReport` / `ArchetypeMemoryInfo`, `Utils`. |
@@ -82,7 +82,7 @@ The bundled **ECS source generator** emits code for `IJobEntity`, the native bin
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.0" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
 </ItemGroup>
 ```
 

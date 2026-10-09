@@ -5,10 +5,10 @@ namespace EntJoy.ECS
     /// 支持链式附加过滤条件（如 WithEnabled&lt;TEnableable&gt;）。
     /// 
     /// 使用示例：
-    ///   foreach (var result in world.Query&lt;Position&gt;().WithEnabled&lt;ActiveComponent&gt;())
-    ///   {
-    ///       ref var pos = ref result.Comp0;
-    ///   }
+    /// foreach (var result in world.Query&lt;Position&gt;().WithEnabled&lt;ActiveComponent&gt;())
+    /// {
+    /// ref var pos = ref result.Comp0;
+    /// }
     /// </summary>
     public readonly struct QuerySelection<T0>
         where T0 : struct

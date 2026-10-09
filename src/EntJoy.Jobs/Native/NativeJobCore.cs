@@ -19,7 +19,7 @@ namespace EntJoy.JobSystem
     /// </summary>
     internal static unsafe class NativeJobCore
     {
-        // ======================== 委托类型 ========================
+        // 委托类型
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate void JobFunc(IntPtr context);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -44,7 +44,7 @@ namespace EntJoy.JobSystem
             public int BatchSize;
         }
 
-        // ======================== 委托缓存 ========================
+        // 委托缓存
         internal static readonly ConcurrentDictionary<Type, DelegateCache> _delegateCache = new();
         internal sealed class DelegateCache { public readonly Delegate Delegate; public readonly IntPtr FuncPtr; public DelegateCache(Delegate del) { Delegate = del; FuncPtr = Marshal.GetFunctionPointerForDelegate(del); } }
 
@@ -56,7 +56,7 @@ namespace EntJoy.JobSystem
         internal static IntPtr CleanupPtr => _cleanupPtr;
         internal static IntPtr ManagedCleanupPtr => _managedCleanupPtr;
 
-        // ── 共享的 FreeHGlobal cleanup thunk ──
+        // 共享的 FreeHGlobal cleanup thunk
         // 生成代码统一引用它（不是每个 job 各造一个 lambda + thunk）。
         // ⚠ 刻意不复用 `CleanupPtr`：后者会释放安全句柄账本并读 ctx 前的尺寸前缀，语义不同。
         private static readonly CleanupFunc _freeHGlobalCleanup = FreeHGlobalCleanup;
@@ -71,7 +71,7 @@ namespace EntJoy.JobSystem
         /// <summary>共享的 `Marshal.FreeHGlobal` cleanup 指针（生成代码统一用它）。</summary>
         internal static IntPtr SharedFreeHGlobalCleanupPtr => _sharedFreeHGlobalCleanupPtr;
 
-        // ── 重载回调注册表 ──
+        // 重载回调注册表
         // 注册表（字段写入器 / adapter 指针 / 批表绑名）是按 `Type` 键存的指针快照，换句柄后必须重跑
         // 才会指向新模块；生成代码的 `EnsureNativeJobRegistrations()` 把自己登记在这里。
         private static readonly List<Action> _reloadCallbacks = new();
@@ -93,7 +93,7 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// 重跑全部重载回调（在**新句柄已绑定之后**调用）。
+        /// 重跑全部重载回调（在新句柄已绑定之后调用）。
         /// 先快照再回调：回调里可能再次 `RegisterReloadCallback`（生成代码每次都会调）⇒ 不能在锁内调用。
         /// </summary>
         internal static void RunReloadCallbacks()
@@ -103,7 +103,7 @@ namespace EntJoy.JobSystem
             foreach (var callback in snapshot) callback();
         }
 
-        // ======================== 执行深度 / 当前 batch ========================
+        // 执行深度 / 当前 batch
         [ThreadStatic] private static int _jobExecutionDepth;
         [ThreadStatic] private static ulong _currentBatchId;
 
@@ -145,7 +145,7 @@ namespace EntJoy.JobSystem
         // 仅调试面板开启后才记录 batchId→Job名，避免影响正常调度热路径。
         internal static void SetDebugNameCapture(bool enabled) => _debugNameCaptureEnabled = enabled;
 
-        // ======================== DLL 函数指针（纯 P/Invoke） ========================
+        // DLL 函数指针（纯 P/Invoke）
         private static IntPtr _nativeDll = IntPtr.Zero;
         // 生成内核（NativeTranspiled）的当前句柄；取 adapter 指针必须基于它（`[DllImport]` 的解析结果
         // 被运行时按 (程序集, 库名) 缓存，换不掉）。
@@ -169,7 +169,7 @@ namespace EntJoy.JobSystem
         /// <summary>该 NativeDll 是否提供排空导出。</summary>
         internal static bool HasDrainAll => _jobSystem_DrainAll != null;
 
-        // ── 组件布局指纹（守卫）──
+        // 组件布局指纹（守卫）
         // 只换 native 时 C# 组件布局不变 ⇒ "改组件定义后只重载 native" 会让两侧对同一块内存做不同解释。
         // 故本次构建把布局假设写成 DLL 旁的 `<dll>.layout.json`，重载前逐类型比对，不一致即拒绝。
         // 键 = `程序集名|类型全名`（同名类型可来自不同程序集，裸名会互相覆盖）。
@@ -190,7 +190,7 @@ namespace EntJoy.JobSystem
             }
         }
 
-        /// <summary>当前已加载程序集的组件布局指纹：逐类型哈希 **异或**（与顺序无关）。0 = 没有组件。</summary>
+        /// <summary>当前已加载程序集的组件布局指纹：逐类型哈希 异或（与顺序无关）。0 = 没有组件。</summary>
         internal static ulong ComponentLayoutFingerprint
         {
             get
@@ -357,7 +357,7 @@ namespace EntJoy.JobSystem
 
         /// <summary>
         /// 热重载：排空 → 缓存换代 → 换到新的 NativeTranspiled（顺序即不变量，前两步失败不改变任何状态）。
-        /// 调用方必须先停派发；`path` 必须是**新文件名**（同路径 `Load` 会返回旧模块）；
+        /// 调用方必须先停派发；`path` 必须是新文件名（同路径 `Load` 会返回旧模块）；
         /// 旧模块不 Free（可能仍被 DllImport 引用）；布局守卫比对在换句柄之前。
         /// </summary>
         /// <returns>成功 = `Swapped`；其余为带原因的拒绝，不抛异常。</returns>
@@ -415,7 +415,7 @@ namespace EntJoy.JobSystem
 
         /// <summary>
         /// 在当前 NativeTranspiled 句柄上按名取 adapter 指针。
-        /// ⚠ 导出是"取指针的**函数**"（`void* Get_…_AdapterPtr()`），必须**调用它**；直接把 `GetExport`
+        /// ⚠ 导出是"取指针的函数"（`void* Get_…_AdapterPtr()`），必须调用它；直接把 `GetExport`
         /// 的返回值当 adapter 会让原生按 adapter ABI 调用 getter ⇒ 作业静默不执行。
         /// </summary>
         internal static IntPtr GetNativeExportPtr(string entryPointName)
@@ -434,7 +434,7 @@ namespace EntJoy.JobSystem
 
         /// <summary>
         /// 取 NativeTranspiled 的句柄（优先显式路径）。
-        /// Windows 加载器按**基名**匹配已加载模块，裸名 `Load` 可能命中别的目录里的同名件 ⇒ 取不到生成导出。
+        /// Windows 加载器按基名匹配已加载模块，裸名 `Load` 可能命中别的目录里的同名件 ⇒ 取不到生成导出。
         /// </summary>
         private static IntPtr EnsureNativeTranspiledHandle()
         {
@@ -460,12 +460,12 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_ConfigureTilesPerWorker;
         private static delegate* unmanaged[Cdecl]<int, int, int, void> _jobSystem_ConfigureGuided;
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetJobCostCacheEnabled;
-        // doc16 §46：可选导出（老 DLL 没有 ⇒ null ⇒ 按名批表绑不上，行为 = 该 env 无效）。
+        // 可选导出（老 DLL 没有 ⇒ null ⇒ 按名批表绑不上，行为 = 该 env 无效）。
         private static delegate* unmanaged[Cdecl]<byte*, IntPtr, int> _jobSystem_BindBatchName;
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
-        // 2026-10-02（ClaimPolicy）：可选导出（老 DLL 没有 ⇒ null ⇒ 退回上面那个，claim 被忽略）。
+        // 可选导出（老 DLL 没有 ⇒ null ⇒ 退回上面那个，claim 被忽略）。
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatchEx;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_Complete;
@@ -509,10 +509,10 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<ulong> _trace_DroppedEvents;
         private static delegate* unmanaged[Cdecl]<void> _trace_Clear;
 
-        // 2026-10-02：`LoadLibraryExW` 的**瞬态** `ERROR_DLL_INIT_FAILED`(0x8007045A) 重试次数。
+        // `LoadLibraryExW` 的瞬态 `ERROR_DLL_INIT_FAILED`(0x8007045A) 重试次数。
         //   实测：同一份字节、同一路径，第一次 `LoadLibraryExW` 报 0x8007045A，紧接着再载成功
-        //   （失败尝试里 DLL 的加载期 static 初始化**已经跑过**，stderr 里有 `[SIMD]`/`[JOBBATCHTABLE]`；
-        //   详见 docs/gridsearch/09 §14）。旧代码因此掉到"另一个目录的那份 DLL"上 ⇒ 静默换二进制。
+        //   （失败尝试里 DLL 的加载期 static 初始化已经跑过，stderr 里有 `[SIMD]`/`[JOBBATCHTABLE]`；
+        //   否则会掉到"另一个目录的那份 DLL"上 ⇒ 静默换二进制。
         private const int kNativeLoadAttempts = 3;
 
         private static bool TryLoadNative(string path, out IntPtr handle, out string error)
@@ -643,13 +643,13 @@ namespace EntJoy.JobSystem
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
-            // 2026-10-02（BUG-1 收口）：加载语义改成"**首选路径 = 意图路径**"，
-            //   ① 同一路径失败**重试同一路径**（实测 `LoadLibraryExW` 会以 `ERROR_DLL_INIT_FAILED`
-            //      (0x8007045A) 瞬态失败一次，紧接着用**同一份字节**再载就成功 —— 见 09 §14），
-            //   ② 只有在首选路径彻底失败后才考虑别的目录，且**必须字节等价**（长度+SHA256）；
-            //   ③ 字节不等价时**默认拒绝**（老行为"静默用另一份 DLL"曾把一次测量变成两台不同机器：
+            // 加载语义：首选路径 = 意图路径，
+            //   ① 同一路径失败重试同一路径（实测 `LoadLibraryExW` 会以 `ERROR_DLL_INIT_FAILED`
+            //      (0x8007045A) 瞬态失败一次，紧接着用同一份字节再载就成功 ——），
+            //   ② 只有在首选路径彻底失败后才考虑别的目录，且必须字节等价（长度+SHA256）；
+            //   ③ 字节不等价时默认拒绝（"静默用另一份 DLL"会把一次测量变成两台不同机器：
             //      Debug 22:18 / Release 21:23 一对不匹配的二进制 ⇒ `applied=0` + 假的 ~10 ms 双峰）。
-            //   想恢复老行为需显式 `ENTJOY_NATIVE_ALLOW_MISMATCHED_FALLBACK=1`。
+            //   要允许该回退需显式 `ENTJOY_NATIVE_ALLOW_MISMATCHED_FALLBACK=1`。
             IntPtr dllHandle = IntPtr.Zero;
             string loadedPath = string.Empty;
             string intendedPath = primaryCandidates.Length > 0 ? primaryCandidates[0] : string.Empty;
@@ -964,7 +964,7 @@ namespace EntJoy.JobSystem
             }
         }
 
-        // ======================== 包装函数 ========================
+        // 包装函数
         private static bool IsNativeLoaded => _nativeDll != IntPtr.Zero && _jobSystem_Initialize != null;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1019,8 +1019,8 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// doc16 §46：把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 job 名登记的批表槽位绑定到**该 job 实际派发
-        /// 用的函数指针**（名字 = 托管类型名 ⇒ 与 C++ 符号命名规则/命名空间无关）。
+        /// 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 job 名登记的批表槽位绑定到该 job 实际派发
+        /// 用的函数指针（名字 = 托管类型名 ⇒ 与 C++ 符号命名规则/命名空间无关）。
         /// </summary>
         /// <returns>1 = 名字在表里（已绑定）；0 = 表里没有该名字，或该导出不存在。</returns>
         internal static unsafe int JobSystem_BindBatchName(string jobName, IntPtr funcPtr)
@@ -1069,7 +1069,7 @@ namespace EntJoy.JobSystem
             return _jobSystem_ScheduleParallelForBatch(funcPtr, context, cleanupPtr, length, batchSize, dependency);
         }
 
-        // 2026-10-02（ClaimPolicy 通解）：带**调用点声明的认领几何**的调度。
+        // 带调用点声明的认领几何的调度。
         // 老 NativeDll 没有 `...BatchEx` 导出 ⇒ 退回旧导出（claim 被忽略 = 逐位不变），不打 WARN（能力探测）。
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static IntPtr JobSystem_ScheduleParallelForBatchEx(IntPtr funcPtr, IntPtr context, IntPtr cleanupPtr,
@@ -1207,7 +1207,7 @@ namespace EntJoy.JobSystem
 
         /// <summary>认领几何（`ClaimPolicy`）的生效证据：按声明值分桶的批数 [spread, adjacent, auto]。
         /// 传了 <c>ClaimPolicy.Spread</c> 就必须看到 spread&gt;0 —— 否则说明调用点静默降级到了托管回调
-        /// （09 §52.5）。老 NativeDll.dll 缺该导出时返回 false。</summary>
+        /// （09）。老 NativeDll.dll 缺该导出时返回 false。</summary>
         internal static bool TryGetClaimGeomCounters(out ulong spread, out ulong adjacent, out ulong autoDecl)
         {
             spread = 0; adjacent = 0; autoDecl = 0;
@@ -1297,7 +1297,7 @@ namespace EntJoy.JobSystem
             fixed (NativeTraceEvent* ptr = buffer) return _trace_ReadAll(ptr, count);
         }
 
-        // ======================== batch id / 名字解析回调 ========================
+        // batch id / 名字解析回调
         // native 每 job 执行窗口调 SetCurrentBatchId 写线程局部当前 batch。
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
         internal static void SetCurrentBatchId(ulong batchId) => _currentBatchId = batchId;
@@ -1308,8 +1308,8 @@ namespace EntJoy.JobSystem
             // 【上限探针】`ENTJOY_BATCHID_CALLBACK=0` 时不注册：native 侧每执行窗口 2 次的反向托管
             // 调用（`ChaseLevScheduler.cpp:620/660` 的 SetCurrentBatchId(id)/SetCurrentBatchId(0)）就退化成
             // 一次 null 检查。用途：量化"每 job 的托管反向回调"成本。
-            // ⚠ 实测（2026-09-29，8 worker，[NP-4e] 7936×64 空体）：**开关两臂同为 4.46 µs/job**
-            // ⇒ 该回调 **<0.1 µs/job**，**不是**每-job 残余差距的来源（此候选已否证，勿再试）。
+            // ⚠ 实测：开关两臂同为 4.46 µs/job
+            // ⇒ 该回调 <0.1 µs/job，不是每-job 残余差距的来源（此候选已否证，勿再试）。
             if (System.Environment.GetEnvironmentVariable("ENTJOY_BATCHID_CALLBACK") == "0") return;
             _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
             if (_jobSystem_RegisterNameResolver != null)
@@ -1337,7 +1337,7 @@ namespace EntJoy.JobSystem
             _debugNameCaptureEnabled = false;
         }
 
-        // ======================== 关闭 ========================
+        // 关闭
         internal static void SafeShutdown()
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_Shutdown == null)
@@ -1366,7 +1366,7 @@ namespace EntJoy.JobSystem
             Console.WriteLine($"[TIMING] ewma          wakeLatency={us(s.WakeLatencyEwmaNs):F1} submit2First={us(s.SubmitToFirstWorkerEwmaNs):F1} workerSpread={us(s.WorkerStartSpreadEwmaNs):F1} lastTileToDone={us(s.LastTileToTopologyDoneEwmaNs):F1} us | assistExecPct={s.AssistExecPctEwma}% | prewake={s.PrewakeCount} parkWake={s.ParkWakeCount}");
         }
 
-        // ======================== 上下文内存池 ========================
+        // 上下文内存池
         internal static class ContextPool
         {
             private const int BucketShift = 6;
@@ -1410,7 +1410,7 @@ namespace EntJoy.JobSystem
             }
         }
 
-        // ======================== 辅助方法 ========================
+        // 辅助方法
         // 泛型委托缓存：供跨程序集路径（EntJoy.ECS ChunkJobScheduler 等）使用；
         // 本程序集热路径用静态泛型缓存（JobDelegateCacheFor 等），此处服务自定义委托类型参数。
         internal static DelegateCache GetOrCreateDelegateCache<T, TDelegate>(Func<TDelegate> factory) where TDelegate : Delegate
@@ -1418,7 +1418,7 @@ namespace EntJoy.JobSystem
             return _delegateCache.GetOrAdd(typeof(T), _ => new DelegateCache(factory()));
         }
 
-        // ── 委托缓存换代 ──
+        // 委托缓存换代
         // 这些缓存持有指向某个具体模块导出的 thunk，换 DLL 后会命中旧指针 ⇒ 换代：清字典 + 自增代次，
         // 下游静态泛型缓存按代次惰性重建（闭泛型静态无法从外部枚举）。
         private static int _delegateCacheGeneration;
@@ -1634,10 +1634,8 @@ namespace EntJoy.JobSystem
         {
             if (ctx == IntPtr.Zero) return;
             // job 完整结束点（RunBatchCleanup 只认领一次，在所有 tile 之后）：
-            // 释放本 ctx 的写声明与读声明。**两者都必须在 job 完成点释放**：
-            // 按 tile 释放会和仍在运行的同 ctx 兄弟 tile 竞争 —— 第一个结束的 tile 会把整个 ctx 的
-            // 读声明清空，兄弟 tile 此后不再重新登记（_readMark/TLS 快路径命中），于是 job 未完成时
-            // 主线程访问不再被拦截（契约见 Runtime-Contracts §并行读写冲突检测）。
+            // 释放本 ctx 的写声明与读声明。两者都必须在 job 完成点释放：
+            // 主线程访问不再被拦截（契约见 Runtime-Contracts）。
             SafetyHandleManager.ReleaseWritesForContext(ctx);
             SafetyHandleManager.ReleaseReadsForContext(ctx);
             var handle = GCHandle.FromIntPtr(ctx);
@@ -1658,9 +1656,9 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// 2026-10-02（09 §26）：**按生成代码的逐字段布局**租一块 ctx（供原生 adapter 直调）。
+        /// 按生成代码的逐字段布局租一块 ctx（供原生 adapter 直调）。
         /// 与 <see cref="AllocContext{T}"/> 共用同一个 <see cref="ContextPool"/> 与同一套 4 字节长度前缀，
-        /// 因此**释放也复用同一个 <see cref="CleanupPtr"/>**（回池 + 释放读写声明），
+        /// 因此释放也复用同一个 <see cref="CleanupPtr"/>（回池 + 释放读写声明），
         /// 不需要 `Marshal.AllocHGlobal` / `FreeHGlobal` 的逐派发 malloc/free。
         /// 调用方随后用生成代码的 `JobFieldWriter&lt;T&gt;` 把字段写进返回指针（布局与 C++ adapter 的偏移一致）。
         /// </summary>
@@ -1684,7 +1682,7 @@ namespace EntJoy.JobSystem
             ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
         }
 
-        // ======================== 回调工厂 ========================
+        // 回调工厂
         internal unsafe static JobFunc CreateJobCallback<T>() where T : struct, IJob
         {
             string name = typeof(T).Name;
@@ -1814,7 +1812,7 @@ namespace EntJoy.JobSystem
             };
         }
 
-        // ======================== 低级原语 ========================
+        // 低级原语
         internal static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
         {
             using var dependencyLease = new RetainedNativeDependency(dependsOn);

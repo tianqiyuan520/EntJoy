@@ -14,28 +14,15 @@ namespace NativeTranspiler.Analyzer
     /// C++/ISPC 均为其具体子类，覆盖点通过 protected virtual 展开；新增后端 = 派生 + 按需 override。
     ///
     /// 继承层级 & virtual 覆盖关系（维护覆盖点时应同步此表）：
-    ///   StatementTranslator（本类，通用 AST 直译/AST 分析）
-    ///   ├─ CppPointerStatementTranslator（C++，指针/引用增强）
-    ///   │   override: TranslateIdentifier / TranslateAssignment / TranslateMemberAccess /
-    ///   │              TranslateElementAccess / TranslateInvocation
-    ///   │   ├─ CppChunkStatementTranslator（C++ chunk 后端，sealed）
-    ///   │   │   override: TranslateBlock / TranslateLocalDeclaration / TranslateExpressionStatement /
-    ///   │   │              TranslateIdentifier / TranslateInvocation / TranslateMemberAccess /
-    ///   │   │              TranslateElementAccess / TranslateForStatement
-    ///   │   └─ CppBatchStatementTranslator（C++ batch 后端）
-    ///   │       override: TranslateIdentifier / TranslateAssignment
-    ///   └─ IspcStatementTranslator（ISPC 后端）
-    ///       override: TranslateIdentifier / EnableBranchlessSimpleIfRewrite → false / TranslateIfStatement /
-    ///                  TranslateLocalDeclaration / TranslateObjectCreation / TranslateCastExpression /
-    ///                  TranslateMemberAccess / TranslateElementAccess / TranslateAssignment /
-    ///                  TranslateBinaryExpression / TranslateInvocation / AppendConstant / TranslateForStatement /
-    ///                  TranslateExpressionStatement / TranslateWhileStatement
-    ///       ⚠ 注意：TranslateEntJoyMathCall / TranslateInterlockedCall 在基类为 virtual，但 ISPC 侧以同名
-    ///               方法【隐藏】而非 override（触发 CS0114）。这是隐性覆盖点，后续应改为 override 对齐。
-    ///       └─ IspcChunkStatementTranslator（ISPC chunk 后端，sealed）
-    ///           override: TranslateLocalDeclaration / TranslateForStatement / TranslateIdentifier /
-    ///                      TranslateMemberAccess / TranslateElementAccess / TranslateExpressionStatement /
-    ///                      TranslateAssignment
+    /// StatementTranslator（本类，通用 AST 直译/AST 分析）
+    /// └─ IspcStatementTranslator（ISPC 后端）
+    /// override: TranslateIdentifier / EnableBranchlessSimpleIfRewrite → false / TranslateIfStatement /
+    /// TranslateLocalDeclaration / TranslateObjectCreation / TranslateCastExpression /
+    /// ⚠ 注意：TranslateEntJoyMathCall / TranslateInterlockedCall 在基类为 virtual，但 ISPC 侧以同名
+    /// └─ IspcChunkStatementTranslator（ISPC chunk 后端，sealed）
+    /// override: TranslateLocalDeclaration / TranslateForStatement / TranslateIdentifier /
+    /// TranslateMemberAccess / TranslateElementAccess / TranslateExpressionStatement /
+    /// TranslateAssignment
     /// </summary>
     public class StatementTranslator
     {
@@ -67,7 +54,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 转译**一条**语句（不构造脱离语法树的 <c>BlockSyntax</c>）。
+        /// 转译一条语句（不构造脱离语法树的 <c>BlockSyntax</c>）。
         ///
         /// ⚠ 调用点若为了"统一成 Block"而用 <c>SyntaxFactory.Block(stmt)</c> 包一层，
         /// 里面的节点会脱离原语法树 ⇒ 语义模型的 <c>GetTypeInfo</c> 抛
@@ -124,7 +111,7 @@ namespace NativeTranspiler.Analyzer
                     _builder.AppendLine("continue;");
                     break;
                 case UnsafeStatementSyntax unsafeStmt:
-                    // `unsafe { ... }` 只是 C# 的**编译期许可**（无运行期语义）⇒ 按普通块翻译。
+                    // `unsafe { ... }` 只是 C# 的编译期许可（无运行期语义）⇒ 按普通块翻译。
                     // 旧实现落到 default 分支发 `__ENTJOY_UNSUPPORTED_STMT__UnsafeStatement` 标记，
                     // 把"完全可译"的代码打成构建失败（块内真的是不支持的构造时，各自照常发标记）。
                     TranslateBlock(unsafeStmt.Block, skipOuterBraces: false);
@@ -160,7 +147,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 解析局部声明的 C# 类型（P0-5b 修复）：优先类型语法节点的语义类型，**为 null 时回退到声明符号的类型**。
+        /// 解析局部声明的 C# 类型（修复）：优先类型语法节点的语义类型，为 null 时回退到声明符号的类型。
         /// `ref T x = ref expr;` 在 `Nullable=enable` 的工程里 `GetTypeInfo(Type).Type` 会返回 null ——
         /// </summary>
         private ITypeSymbol? ResolveLocalType(TypeSyntax typeSyntax, SeparatedSyntaxList<VariableDeclaratorSyntax> variables)
@@ -178,10 +165,10 @@ namespace NativeTranspiler.Analyzer
             var type = ResolveLocalType(localDecl.Declaration.Type, localDecl.Declaration.Variables);
             if (type == null)
                 throw new InvalidOperationException(
-                    $"无法解析局部声明的类型：{localDecl.Declaration.Type}（P0-5b）。"
+                    $"无法解析局部声明的类型：{localDecl.Declaration.Type}。"
                     + "请显式写出类型并避免 `ref` 局部（改用指针局部 T* p = &arr[i]）。");
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
-            // `ref T x = ref expr;` → C++ `T& x = expr;`（P0-5b 通解：引用即引用，无需写回）
+            // `ref T x = ref expr;` → C++ `T& x = expr;`（通解：引用即引用，无需写回）
             bool byRef = localDecl.Declaration.Type is RefTypeSyntax;
             for (int i = 0; i < localDecl.Declaration.Variables.Count; i++)
             {
@@ -231,7 +218,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var type = ResolveLocalType(forStmt.Declaration.Type, forStmt.Declaration.Variables);
                 if (type == null)
-                    throw new InvalidOperationException($"无法解析 for 声明中的类型：{forStmt.Declaration.Type}（P0-5b）。");
+                    throw new InvalidOperationException($"无法解析 for 声明中的类型：{forStmt.Declaration.Type}。");
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
                 for (int i = 0; i < forStmt.Declaration.Variables.Count; i++)
                 {
@@ -515,7 +502,7 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        // P0-5e：`null` 字面量必须译成 C++ 的 `nullptr`。
+                        // `null` 字面量必须译成 C++ 的 `nullptr`。
                         // 原实现原样输出 "null"，C++ 里 `null` 未声明 ⇒ use of undeclared identifier 'null'。
                         if (token.IsKind(SyntaxKind.NullKeyword)) _builder.Append("nullptr");
                         else _builder.Append(token.Text);
@@ -668,7 +655,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             TranslateExpression(memberAccess.Expression);
-            // P0-5d：C# 的**指针成员访问** `p->Field` 也用 MemberAccessExpressionSyntax 表示
+            // C# 的指针成员访问 `p->Field` 也用 MemberAccessExpressionSyntax 表示
             // （OperatorToken = `->`）。原实现一律输出 `.` ⇒ C++ 报
             // "member reference type 'X*' is a pointer; did you mean to use '->'?"。
             _builder.Append(memberAccess.OperatorToken.IsKind(SyntaxKind.MinusGreaterThanToken) ? "->" : ".")
@@ -909,7 +896,7 @@ namespace NativeTranspiler.Analyzer
             TranslateExpression(conditional.WhenFalse);
         }
 
-        // ========== 以下方法改为 protected virtual，允许 ISPC 翻译器重写 ==========
+        // 以下方法改为 protected virtual，允许 ISPC 翻译器重写
         protected virtual void TranslateMathFunctionCall(IMethodSymbol method, InvocationExpressionSyntax invocation)
         {
             bool isMathF = method.ContainingType?.ToDisplayString() == "System.MathF";
@@ -1061,7 +1048,6 @@ namespace NativeTranspiler.Analyzer
             {
                 // C#：Interlocked.CompareExchange(ref loc, value, comparand)
                 // 宏：INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) → _InterlockedCompareExchange(ptr, newVal, oldVal)
-                //   comparand/value 写反（命中时写入 comparand、期望值当成新值），语义完全相反；
                 //   ISPC 后端一直是正确次序（见 IspcStatementTranslator.TranslateInterlocked）。
                 _builder.Append(", ");
                 TranslateExpression(args[2].Expression);   // comparand（期望旧值）
@@ -1136,7 +1122,7 @@ namespace NativeTranspiler.Analyzer
                     return;
 
                 case "length":
-                    // ::sqrtf(v.x()*v.x() + v.y()*v.y())
+                    // sqrtf(v.x()*v.x() + v.y()*v.y())
                     _builder.Append("::sqrtf(");
                     TranslateExpression(args[0].Expression);
                     _builder.Append(".x()*");
@@ -1319,7 +1305,7 @@ namespace NativeTranspiler.Analyzer
             string startExpr = varDecl.Initializer.Value.ToString();
             string endExpr = cond.Right.ToString();
 
-            // ===== 检测规约模式 =====
+            // 检测规约模式
             bool isAos = false;
             string? arrayField = null;
             string? aosVar = null;
@@ -1391,7 +1377,7 @@ namespace NativeTranspiler.Analyzer
 
             if (reductionField == null) return false;
 
-            // ===== 取标量体文本（余量循环用） =====
+            // 取标量体文本（余量循环用）
             string saved = _builder.ToString();
             _builder.Clear();
             int savedIndent = _indentLevel;
@@ -1402,7 +1388,7 @@ namespace NativeTranspiler.Analyzer
             _builder.Append(saved);
             _indentLevel = savedIndent;
 
-            // ===== 生成 SIMD 代码 =====
+            // 生成 SIMD 代码
             AppendIndent(); _builder.AppendLine("{");
             _indentLevel++;
 

@@ -185,7 +185,7 @@ using EntJoy.ECS;
 
 //            Console.WriteLine("开始基准测试...\n");
 
-//            // ----- IJobChunk 基准（先跑，因为它的结果用于验证） -----
+//            // IJobChunk 基准（先跑，因为它的结果用于验证）
 //            ResetWorld();
 //            double totalChunk = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
@@ -202,7 +202,7 @@ using EntJoy.ECS;
 //            // 读取 IJobChunk 后的 ECS 数据作为 "ECS 结果"
 //            var ecsPositions = ReadPositionsFromECS();
 
-//            // ----- Manual Query 基准（重置 ECS 到初始数据） -----
+//            // Manual Query 基准（重置 ECS 到初始数据）
 //            ResetWorld();
 //            double totalManual = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
@@ -219,14 +219,14 @@ using EntJoy.ECS;
 //            // 读取 Manual Query 后的 ECS 数据
 //            var manualPositions = ReadPositionsFromECS();
 
-//            // ----- 结果 -----
+//            // 结果
 //            Console.WriteLine($"\n--- ECS 结果 ---");
 //            Console.WriteLine($"ECS 手动遍历:        {avgManual,8:F3} ms");
 //            Console.WriteLine($"ECS IJobChunk:       {avgChunk,8:F3} ms (加速比 {avgManual / avgChunk:F2}x)");
 
-//            // ==========================================================
+//            //
 //            // 正确性验证 1: ECS (IJobChunk) vs 标量 reference
-//            // ==========================================================
+//            //
 //            // 由于实体通过 AddEntity 按创建 ID 顺序填入 chunk，不存在碎片化问题。
 //            // chunk 遍历顺序 ≡ 创建顺序 ≡ Entity.Id 递增顺序 ≡ 标量数组索引顺序。
 //            // 因此可以直接按索引逐元素比较！
@@ -253,9 +253,9 @@ using EntJoy.ECS;
 //            scalarPositions.Dispose();
 //            scalarVelocities.Dispose();
 
-//            // ==========================================================
+//            //
 //            // 正确性验证 2: IJobChunk vs Manual Query（一致性）
-//            // ==========================================================
+//            //
 //            Console.WriteLine($"\n--- 正确性验证 2: ECS Manual vs IJobChunk ---");
 //            Console.WriteLine($"两者遍历相同的 chunk，元素顺序一致，共 {ENTITY_COUNT} 个实体");
 //            MoveEntitiesTest.VerifyResults(manualPositions, ecsPositions, "ECS Manual vs IJobChunk");
@@ -277,7 +277,7 @@ using EntJoy.ECS;
 //        }
 //    }
 
-//    // ======================== ECS 组件 ========================
+//    // ECS 组件
 
 //    public struct EcsPosition : IComponentData
 //    {
@@ -289,7 +289,7 @@ using EntJoy.ECS;
 //        public float2 vel;
 //    }
 
-//    // ======================== IJobChunk 实现 ========================
+//    // IJobChunk 实现
 
 //    /// <summary>
 //    /// IJobChunk 实体位移 Job

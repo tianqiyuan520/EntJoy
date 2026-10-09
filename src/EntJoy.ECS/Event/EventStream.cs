@@ -16,9 +16,8 @@ namespace EntJoy.ECS
     /// 双缓冲事件流：零结构变更的系统间消息传递。
     ///
     /// 生命周期：
-    ///   帧 N：SendEvent 写 buffer[0]（writeBuffer），writeCount++
-    ///   帧末：NextFrame swap，writeCount → readCount，writeCount = 0
-    ///   帧 N+1：ReadBuffer 读 buffer[1]（readBuffer），取 readCount 条
+    /// 帧 N：SendEvent 写 buffer[0]（writeBuffer），writeCount++
+    /// 帧 N+1：ReadBuffer 读 buffer[1]（readBuffer），取 readCount 条
     /// </summary>
     public sealed class EventStream<T> : IEventStream, IDisposable where T : unmanaged
     {

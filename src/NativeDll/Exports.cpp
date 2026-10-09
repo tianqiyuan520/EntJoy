@@ -12,13 +12,13 @@
 
 // 加载期输出当前 SIMD 配置（DLL 加载时执行）
 //
-// 【约束】**加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）一律不做 I/O**：
-//   stderr 可能是父进程（Godot `_console.exe` / Start-Process）的**管道**，在 loader lock
+// 【约束】加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）一律不做 I/O：
+//   stderr 可能是父进程（Godot `_console.exe` / Start-Process）的管道，在 loader lock
 //   里写管道会阻塞；加载期任一环节失败的表现就是 `ERROR_DLL_INIT_FAILED (0x8007045A)`
 //   （整个 DLL 载不进来）。
 //   ⇒ 所有加载期 banner 先追加进内存缓冲（实现与说明在 JobSystemInternal.h + JobSystem.cpp），
 //     由 `JobSystem_Initialize()` 一次性 flush 到 stderr；输出文本（含 `[SIMD] …` 与
-//     `[JOBBATCHTABLE] …`）与原先逐字节一致，只是**推迟到 Initialize**。
+//     `[JOBBATCHTABLE] …`）与原先逐字节一致，只是推迟到 Initialize。
 struct SimdInfo {
     SimdInfo() {
 #if defined(__AVX2__)
@@ -216,7 +216,7 @@ extern "C"
         return JobSystem_ScheduleParallelForBatchEx(func, context, cleanup, length, batchSize, 0, dependency);
     }
 
-    // 调用点**在代码里**声明认领几何的入口。
+    // 调用点在代码里声明认领几何的入口。
     //   claimGeom: 0=Auto（默认）1=Spread（每 worker 独占连续段 + 空手尾部窃取）
     //              2=Adjacent（共享游标发相邻窗口；Melee 的空间复用靠它）
     //   只在 1/2 时生效；批表第四字段（显式声明）优先级更高。
@@ -786,7 +786,7 @@ extern "C"
     // `ENTJOY_WAKE_POLL` 生效证据（见 Exports.h 的说明）。
     void JobSystem_GetWakePollCounters(unsigned long long* skips, unsigned long long* wakes)
     {
-        // 计数走 thread_local 累加（热路径不写全局原子）⇒ 读取前先把**本线程**的尾巴合并进来，
+        // 计数走 thread_local 累加（热路径不写全局原子）⇒ 读取前先把本线程的尾巴合并进来，
         // 否则最近 <1024 次派发读不到（调用方通常是提交线程，正是计数的主要来源）。
         JobSystem::WakePollFlushCurrentThread();
         if (skips) *skips = JobSystem::g_wakePollSkips.load(std::memory_order_relaxed);

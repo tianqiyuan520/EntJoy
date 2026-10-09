@@ -9,12 +9,10 @@ namespace EntJoy.Collections
     /// <summary>
     /// 临时内存分配器：帧内 Temp 内存。大块（≥kPoolThreshold）走 free-list 分桶池，
     /// 帧末 Reset 归还池而非直通 OS——避免每帧 new + 首次触摸缺页（GridSearch Query
-    /// 的 100k int results 每帧 AllocHGlobal 400KB + 首触 100 页 = Query tail 根因）。
     /// 小块直通（碎块无收益）。对齐 PersistentAllocator 的 free-list 范式。
     ///
-    /// 分配/释放快路径**不再取全局锁**——
-    /// 存活登记从全局 ConcurrentDictionary + `_resetLock`（Alloc/Free/Reset 全抢同一把锁）
-    /// 改为 **per-thread pending 列表**（每线程一把私有无争用 gate；帧末 Reset 依次收集）。
+    /// 分配/释放快路径不再取全局锁——
+    /// 改为 per-thread pending 列表（每线程一把私有无争用 gate；帧末 Reset 依次收集）。
     /// 全局 `_resetLock` 仅由 Reset 与跨线程 Free 慢路径获取。
     /// </summary>
     public static class TempAllocator
@@ -30,9 +28,8 @@ namespace EntJoy.Collections
         private static readonly ConcurrentStack<IntPtr>[] _classes = new ConcurrentStack<IntPtr>[MaxClassIndex + 2];
         private static int s_allocs, s_frees, s_hits, s_misses, s_toOS;
 
-        // ---- 每线程存活登记（v3 Phase 1.1a） ----
+        // 每线程存活登记（v3 Phase 1.1a）
         // 每个托管线程（主线程 / 原生 worker 的托管入口）一条登记表：
-        // gate 只被 owner（分配/释放快路径）与帧末 Reset（慢路径收集）接触，
         // owner 单线程访问 → gate 无争用，分配/释放快路径不触碰任何跨线程共享锁。
         private sealed class ThreadEntry
         {
@@ -236,7 +233,7 @@ namespace EntJoy.Collections
             // ① 先完成所有活跃异步 Job，确保没有 C++ Worker 线程还在读写 Temp 内存。
             //    若 job 抛异常也须继续——下面的内存释放不能跳过。
             //
-            //    ⚠ F-04：这一步**必须在拿 `_resetLock` 之前**做。
+            //    ⚠ F-04：这一步必须在拿 `_resetLock` 之前做。
             //    跨线程 Free 的慢路径会拿同一把 `_resetLock`；若持锁等待 job，
             //    而某个 job 恰好正在做跨线程 Temp 释放，就形成「Reset 等 job、job 等锁」的死锁。
             Exception? pending = null;

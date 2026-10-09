@@ -195,7 +195,7 @@
 //            Console.WriteLine($"逻辑核心: {Environment.ProcessorCount}");
 //            Console.WriteLine();
 
-//            // ---- 1. 先跑标量并保存 reference ----
+//            // 1. 先跑标量并保存 reference
 //            Console.Write("C# 单线程标量     : ");
 //            ResetAllToInitial();
 //            RunAndRecord(MoveEntitiesTest.RunScalar, _positionsScalar, _velocitiesScalar, _scalarTimes);
@@ -204,50 +204,50 @@
 //            _velocitiesScalar.CopyTo(_frameReferenceVelocities);
 //            var (avgScalar, minScalar, maxScalar, medScalar) = AnalyzeTimes(_scalarTimes);
 
-//            // ---- 2. Parallel.For ----
+//            // 2. Parallel.For
 //            Console.Write("C# Parallel.For    : ");
 //            ResetAllToInitial();
 //            RunAndRecord(MoveEntitiesTest.RunParallelFor, _positionsParallel, _velocitiesParallel, _parallelTimes);
 //            var (avgParallel, minParallel, maxParallel, medParallel) = AnalyzeTimes(_parallelTimes);
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsParallel, "Parallel.For");
 
-//            // ---- 3. JobSystem ----
+//            // 3. JobSystem
 //            Console.Write("EntJoy JobSystem    : ");
 //            ResetAllToInitial();
 //            RunAndRecord(MoveEntitiesTest.RunJobSystem, _positionsJob, _velocitiesJob, _jobTimes, preWakeWorkers: true);
 //            var (avgJob, minJob, maxJob, medJob) = AnalyzeTimes(_jobTimes);
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsJob, "JobSystem");
 
-//            // ---- 4. Native C++ (Job) ----
+//            // 4. Native C++ (Job)
 //            Console.Write("NativeTranspile C++ : ");
 //            ResetAllToInitial();
 //            RunAndRecord(MoveEntitiesTest.RunNativeCpp, _positionsNativeCpp, _velocitiesNativeCpp, _nativeCppTimes, preWakeWorkers: true);
 //            var (avgNativeCpp, minNativeCpp, maxNativeCpp, medNativeCpp) = AnalyzeTimes(_nativeCppTimes);
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsNativeCpp, "Native C++");
 
-//            // ---- 5. Native ISPC (Job) ----
+//            // 5. Native ISPC (Job)
 //            Console.Write("NativeTranspile ISPC: ");
 //            ResetAllToInitial();
 //            RunAndRecord(MoveEntitiesTest.RunNativeIspc, _positionsNativeIspc, _velocitiesNativeIspc, _nativeIspcTimes, preWakeWorkers: true);
 //            var (avgNativeIspc, minNativeIspc, maxNativeIspc, medNativeIspc) = AnalyzeTimes(_nativeIspcTimes);
 
-//            // ★ 立即验证 ISPC Job，避免后续 ResetAllToInitial() 覆盖数据
+//            // 立即验证 ISPC Job，避免后续 ResetAllToInitial() 覆盖数据
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsNativeIspc, "Native ISPC Job");
 
-//            // ---- 6. Native C++ (Static) ----
+//            // 6. Native C++ (Static)
 //            Console.Write("NativeTranspile C++(Static): ");
 //            ResetAllToInitial();
 //            RunAndRecord(NativeTranspiler.Bindings.NativeExports.RunNativeCppStatic, _positionsNativeCppStatic, _velocitiesNativeCppStatic, _nativeCppStaticTimes, preWakeWorkers: true);
 //            var (avgNativeCppStatic, minNativeCppStatic, maxNativeCppStatic, medNativeCppStatic) = AnalyzeTimes(_nativeCppStaticTimes);
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsNativeCppStatic, "Native C++ Static");
 
-//            // ---- 7. Native ISPC (Static) ----
+//            // 7. Native ISPC (Static)
 //            Console.Write("NativeTranspile ISPC(Static): ");
 //            ResetAllToInitial();
 //            RunAndRecord(NativeTranspiler.Bindings.NativeExports.RunNativeIspcStatic, _positionsNativeIspcStatic, _velocitiesNativeIspcStatic, _nativeIspcStaticTimes, preWakeWorkers: true);
 //            var (avgNativeIspcStatic, minNativeIspcStatic, maxNativeIspcStatic, medNativeIspcStatic) = AnalyzeTimes(_nativeIspcStaticTimes);
 
-//            // ----- 结果输出 -----
+//            // 结果输出
 //            Console.WriteLine($"\n--- 结果 ({FRAMES} 帧统计, 每帧间隔 {FRAME_INTERVAL_MS}ms) ---");
 //            Console.WriteLine($"{"实现",-30} {"平均(ms)",-10} {"最小(ms)",-10} {"最大(ms)",-10} {"中位数(ms)",-12} {"加速比",-8}");
 //            Console.WriteLine(new string('-', 80));
@@ -259,7 +259,7 @@
 //            Console.WriteLine($"{"NativeTranspile C++ (Static)",-30} {avgNativeCppStatic,-10:F3} {minNativeCppStatic,-10:F3} {maxNativeCppStatic,-10:F3} {medNativeCppStatic,-12:F3} {avgScalar / avgNativeCppStatic,-8:F2}x");
 //            Console.WriteLine($"{"NativeTranspile ISPC (Static)",-30} {avgNativeIspcStatic,-10:F3} {minNativeIspcStatic,-10:F3} {maxNativeIspcStatic,-10:F3} {medNativeIspcStatic,-12:F3} {avgScalar / avgNativeIspcStatic,-8:F2}x");
 
-//            // ----- ISPC Static 最后验证（单独打印） -----
+//            // ISPC Static 最后验证（单独打印）
 //            Console.Write($"  [Native ISPC Static]  ");
 //            MoveEntitiesTest.VerifyResults(_frameReferencePositions, _positionsNativeIspcStatic, "Native ISPC Static");
 //        }

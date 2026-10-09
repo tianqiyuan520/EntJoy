@@ -1,7 +1,5 @@
-// ============================================================
 // CodeTemplates.cs — 共享代码模板
 //   供 C++/ISPC 生成器使用的导出宏、原子操作宏、全局 ISPC 头等
-// ============================================================
 using System.Text;
 
 namespace NativeTranspiler.Analyzer.Common
@@ -13,13 +11,8 @@ namespace NativeTranspiler.Analyzer.Common
     {
         /// <summary>
         /// 导出宏定义：
-        ///   HEAD: dllexport/dllimport（NativeDll 核心；保留兼容旧生成代码）
-        ///   GENERATED_API: NativeTranspiled.dll 专用的 dllexport/dllimport
-        ///      —— DLL 分离后生成代码（wrapper/adapter）编译进 NativeTranspiled.dll，
-        ///         由 CMake 定义 GENERATED_EXPORTS 使其 dllexport；使用侧（头文件包含方）
-        ///         不定义则 dllimport。
-        ///   CALLINGCONVENTION: __cdecl,
-        ///   RESTRICT: __restrict/__restrict__ 跨平台兼容
+        /// HEAD: dllexport/dllimport（NativeDll 核心；保留兼容旧生成代码）
+        /// RESTRICT: __restrict/__restrict__ 跨平台兼容
         /// </summary>
         public static string GenerateExportMacros() => @"
 #ifdef __cplusplus
@@ -52,32 +45,21 @@ namespace NativeTranspiler.Analyzer.Common
 #endif
 
 // restrict keyword compatibility
-// ⚠ 2026-09-27（接管决定）：**不再对生成的分量指针加 `__restrict`**。
-//   实测（tools/CodegenAsmProbe，before→after，15 内核，MSVC /O2 /FA）：
-//     · 净收益仅 −2.1% 指令（mov −6.7%，但 lea/movsxd +2.0% 反升）；
-//     · `snap_autosimd_chunk` **回归 +56.5%**（lea +200%、cmp/branch 翻倍）；
-//     · 别名判定未完成：同一 NativeArray 二次绑定／带副作用索引时不应加 restrict，需逐处判定。
-//   故把宏定义为空（保留宏名 ⇒ 生成代码语法/形状不变，便于后续**逐处收窄再启用**）。
-//   基线数据与对比报告保留在 tools/CodegenAsmProbe/out/（before*.json / report-after-final.txt）。
-// ⚠ 2026-10-01（08 §32）：曾试把宏打开为 __restrict 实测 —— 但生成器其实直接发 __restrict 字面量、不经该宏
-//   ⇒ 改宏对发射文本无影响；且 SCALAR_RESTRICT=1 下真的带 __restrict 时 asm 仍是 7 次环内重载（§32）
-//   ⇒ 因此不再把该宏当作启用开关。宏保持空定义（不动基线）。
-//   ⚠ 逐字字符串内**不能出现双引号**（会提前终止模板）：本注释曾因写入引号导致 NativeTranspiler 编译失败 7 处。
+// 不给生成的分量指针加 `__restrict`（别名判定未逐处完成）；宏保持空定义。
+// ⚠ 逐字字符串内不能出现双引号（会提前终止模板）。
 #define RESTRICT
 ";
 
         /// <summary>
         /// 跨编译器原子操作宏：
-        ///   MSVC → _InterlockedExchangeAdd / _InterlockedExchangeAdd64 等
-        ///   GCC  → __sync_fetch_and_add / __sync_add_and_fetch 等
-        /// 注意：MSVC x64 上 long 是 32 位，long long / __int64 是 64 位，
+        /// MSVC → _InterlockedExchangeAdd / _InterlockedExchangeAdd64 等
         /// 因此提供两组宏（32/64）由转译器根据具体类型宽度选择。
         /// </summary>
         public static string GenerateAtomicMacros() => @"
 // Cross-compiler atomic macros (stateless, no std::atomic_ref)
 #ifdef _MSC_VER
 #include <intrin.h>
-// --- 32-bit operations ---
+// 32-bit operations 
 #define INTERLOCKED_FETCH_ADD32(ptr, val)       _InterlockedExchangeAdd((volatile long*)(ptr), (long)(val))
 #define INTERLOCKED_FETCH_SUB32(ptr, val)       _InterlockedExchangeAdd((volatile long*)(ptr), -(long)(val))
 #define INTERLOCKED_EXCHANGE32(ptr, val)        _InterlockedExchange((volatile long*)(ptr), (long)(val))
@@ -85,7 +67,7 @@ namespace NativeTranspiler.Analyzer.Common
 #define INTERLOCKED_INCREMENT_AND_FETCH32(ptr)  _InterlockedIncrement((volatile long*)(ptr))
 #define INTERLOCKED_DECREMENT_AND_FETCH32(ptr)  _InterlockedDecrement((volatile long*)(ptr))
 #define INTERLOCKED_COMPARE_EXCHANGE32(ptr, oldVal, newVal) _InterlockedCompareExchange((volatile long*)(ptr), (long)(newVal), (long)(oldVal))
-// --- 64-bit operations ---
+// 64-bit operations 
 #define INTERLOCKED_FETCH_ADD64(ptr, val)       _InterlockedExchangeAdd64((volatile __int64*)(ptr), (__int64)(val))
 #define INTERLOCKED_FETCH_SUB64(ptr, val)       _InterlockedExchangeAdd64((volatile __int64*)(ptr), -(__int64)(val))
 #define INTERLOCKED_EXCHANGE64(ptr, val)        _InterlockedExchange64((volatile __int64*)(ptr), (__int64)(val))
@@ -137,7 +119,7 @@ struct float2 { float x; float y; };
 struct int2   { int x; int y; };
 struct uint2  { unsigned int x; unsigned int y; };
 
-// ---------- EventBuffer POD（SendEvent 生成的 ISPC 代码依赖） ----------
+// EventBuffer POD（SendEvent 生成的 ISPC 代码依赖） 
 // 注意：ISPC 中 uniform void* 非法（void 不能带 uniform 限定），data 用 uniform int*（uniform→uniform cast 合法，
 // 且 varying→uniform 指针 cast 被禁止，裸 void* 是 varying 指针无法 cast 到 uniform T*）。
 // count 保持 uniform int*（atomic 需要 uniform 指针）。
@@ -148,7 +130,7 @@ struct __EntJoyEventBuffer {
     uniform int elementSize;
 };
 
-// ---------- helpers (static to avoid duplicate symbols) ----------
+// helpers (static to avoid duplicate symbols) 
 static struct float2 make_float2(float x, float y) {
     struct float2 r; r.x = x; r.y = y; return r;
 }
@@ -175,7 +157,7 @@ static uniform struct uint2 make_uniform_uint2(uniform unsigned int x, uniform u
 static struct float2 float2_from_int2(struct int2 v) { return make_float2(v.x, v.y); }
 static struct int2 int2_from_float2(struct float2 v) { return make_int2((int)v.x, (int)v.y); }
 
-// ---------- float2 operators ----------
+// float2 operators 
 static struct float2 operator+(struct float2 a, struct float2 b) {
     struct float2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -196,7 +178,7 @@ static struct float2 operator/(struct float2 v, float s) {
     struct float2 r; r.x = v.x / s; r.y = v.y / s; return r;
 }
 
-// ---------- float2 compound assignment operators ----------
+// float2 compound assignment operators 
 static inline struct float2 operator+=(struct float2 a, struct float2 b) {
     a.x += b.x; a.y += b.y; return a;
 }
@@ -216,7 +198,7 @@ static inline struct float2 operator/=(struct float2 a, float s) {
     a.x /= s; a.y /= s; return a;
 }
 
-// ---------- int2 operators ----------
+// int2 operators 
 static struct int2 operator+(struct int2 a, struct int2 b) {
     struct int2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -240,7 +222,7 @@ static struct int2 operator-(struct int2 a, int b) {
     struct int2 r; r.x = a.x - b; r.y = a.y - b; return r;
 }
 
-// ---------- int2 compound assignment operators ----------
+// int2 compound assignment operators 
 static inline struct int2 operator+=(struct int2 a, struct int2 b) {
     a.x += b.x; a.y += b.y; return a;
 }
@@ -263,7 +245,7 @@ static inline struct int2 operator-=(struct int2 a, int b) {
     a.x -= b; a.y -= b; return a;
 }
 
-// ---------- uint2 operators ----------
+// uint2 operators 
 static struct uint2 operator+(struct uint2 a, struct uint2 b) {
     struct uint2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -277,7 +259,7 @@ static struct uint2 operator*(struct uint2 v, unsigned int s) {
     struct uint2 r; r.x = v.x * s; r.y = v.y * s; return r;
 }
 
-// ---------- uint2 compound assignment operators ----------
+// uint2 compound assignment operators 
 static inline struct uint2 operator+=(struct uint2 a, struct uint2 b) {
     a.x += b.x; a.y += b.y; return a;
 }
@@ -291,7 +273,7 @@ static inline struct uint2 operator*=(struct uint2 a, unsigned int s) {
     a.x *= s; a.y *= s; return a;
 }
 
-// ---------- math functions ----------
+// math functions 
 static float dot(struct float2 a, struct float2 b) { return a.x * b.x + a.y * b.y; }
 static float lengthsq(struct float2 v) { return dot(v, v); }
 static float length(struct float2 v) { return sqrt(lengthsq(v)); }
@@ -338,7 +320,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
 
-// ---------- Interlocked 宏（ISPC 侧） ----------
+// Interlocked 宏（ISPC 侧） 
 // 基类 StatementTranslator.TranslateInterlockedCall 会吐 C++ 的 INTERLOCKED_* 宏。
 // ISPC 的静态方法 lane-callable helper（IspcGenerator.Helper）若把 C++ 宏直接落进 .ispc，
 // 会报 Undeclared symbol INTERLOCKED_EXCHANGE32。这里给 ISPC 等价定义：

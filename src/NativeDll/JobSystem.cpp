@@ -24,8 +24,7 @@
 #include <vector>
 
 #if defined(_WIN32)
-// 2026-10-05（doc16 §40，JCC/批表重构）：批表要按**导出名**编写并在加载时解析成 RVA
-// （RVA 会随重编漂移 —— 本次事故的根因），因此需要走本模块自己的 PE 导出表。
+// 批表按导出名编写、加载时解析成本模块内的 RVA，因此需要读本模块自己的 PE 导出表。
 #include <windows.h>
 #endif
 
@@ -45,7 +44,7 @@ namespace JobSystem
     // ---------- 加载期 banner 缓冲（实现见 JobSystemInternal.h 的说明） ----------
     // 放在本文件（而不是 Exports.cpp）：本文件同时被主 DLL 与 `tests/NativeDll.Tests` 的
     // 各个 .vcxproj 编译，而 Exports.cpp 只在主 DLL 里 ⇒ 放这里两端都能链接。
-    // 加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）**不做 I/O**：banner 先入缓冲，
+    // 加载期（`_CRT_INIT` = DllMain 期，持有 loader lock）不做 I/O：banner 先入缓冲，
     // 由 `JobSystem_Initialize()`（Exports.cpp）一次性 flush。
     static char g_loadBannerBuf[8192];
     static size_t g_loadBannerLen = 0;
@@ -92,7 +91,7 @@ namespace JobSystem
     // ---------- Globals ----------
     std::mutex g_schedulerMutex;
     std::shared_ptr<ChaseLevScheduler> g_chaseLevScheduler;
-    // 调度器**进程内唯一实例**（永不析构）+ 伴生裸指针（热路径无锁读取）。
+    // 调度器进程内唯一实例（永不析构）+ 伴生裸指针（热路径无锁读取）。
     // 详见 JobSystemInternal.h 的 LoadChaseLevScheduler 注释。
     std::shared_ptr<ChaseLevScheduler> g_chaseLevSchedulerInstance;
     std::atomic<ChaseLevScheduler*> g_chaseLevSchedulerRaw{ nullptr };
@@ -104,13 +103,8 @@ namespace JobSystem
 
     // JobCostCache export flag（State 模块 ResolveChunkSize 与 Tiles 退役路径读取）。
     // C# Initialize 强制同步此值（防 DLL 重载不一致）。关闭 = 纯 tpw=4（冷启动/保守场景）。
-    // 2026-10-05（doc16 §40）：**JCC 现在有真正的关断 env** `ENTJOY_JOB_COST_CACHE=0`。
-    // 重构动机（§39 的事故）："对齐档"的定义是"**JCC 全关** + batch 逐调用点与 Unity 一致"，
-    //   但 JCC 此前**没有任何 env 能关**（只有导出函数 `JobSystem_SetJobCostCacheEnabled` 与调试面板开关），
-    //   于是只能绕道"批表命中即 bypass JCC"来表达 —— 而批表 key 会随重编漂移，一失效就静默回到 JCC。
-    //   ⇒ 现在把"JCC 开/关"变成一等配置：本初值读 env，且**托管侧默认值也读同一个 env**
-    //   （否则 C# 的 Initialize 会把这个值盖回去）。
-    //   默认 1 = 与历史行为逐位不变。
+    // `ENTJOY_JOB_COST_CACHE=0` 关断 JCC（默认 1 = 逐位不变）。托管侧默认值读同一个 env，
+    // 否则 C# 的 Initialize 会把这个值盖回去。
     std::atomic<bool> g_jobCostCacheEnabled{ []() -> bool {
         const char* v = std::getenv("ENTJOY_JOB_COST_CACHE");
         return !(v != nullptr && v[0] == '0');
@@ -121,7 +115,7 @@ namespace JobSystem
 
     // ── 诊断统计总开关 ──
     // 这些计数器只被 GetStatsSnapshot / 调试面板消费，本身不是同步原语（唯一例外
-    // g_backendBatchesOutstanding：它是 WaitForBackendBatches 的等待条件，见该处注释，**不 gate**）。
+    // g_backendBatchesOutstanding：它是 WaitForBackendBatches 的等待条件，见该处注释，不 gate）。
     // 关闭（`ENTJOY_STATS=0`）可省掉热路径的 locked RMW；此时统计读数不再精确。
     std::atomic<bool> g_statsEnabled{ true };
     // 进程启动读一次 env（与 g_jobCostCacheVerbose 同法；同 TU 内 g_statsEnabled 已常量初始化）。
@@ -146,7 +140,7 @@ namespace JobSystem
     }();
 
     // 认领粒子上限的运行期覆盖（`ENTJOY_CLAIM_BATCH=<n>`；0/未设 ⇒ 用 kClaimBatchSize）。
-    // 只调**上限 cap**，`step = clamp(tileCount/workers, 1, cap)` 保留自适应项
+    // 只调上限 cap，`step = clamp(tileCount/workers, 1, cap)` 保留自适应项
     // ⇒ 小批次自动退回细粒度，只有大批次才被摊薄。
     uint32_t g_claimBatchSize = []() -> uint32_t {
         const char* v = std::getenv("ENTJOY_CLAIM_BATCH");
@@ -176,7 +170,7 @@ namespace JobSystem
         return span;
     }();
 
-    // 等宽 GeneralRange 一律**不物化 tileBuffer**（默认开；`ENTJOY_TILES_UNIFORM=0` 回退）。
+    // 等宽 GeneralRange 一律不物化 tileBuffer（默认开；`ENTJOY_TILES_UNIFORM=0` 回退）。
     // 规则：`uniformTiles = 本开关 && !guided`，只作用于"非 guided 的等宽 GeneralRange"；
     // chunk/entity/packed/guided 路径不变。收益是消掉提交侧 O(tileCount) 填表与执行侧 tile 数组读。
     bool g_uniformTilesEnabled = []() -> bool {
@@ -191,7 +185,7 @@ namespace JobSystem
 
     // 把 `TryExecuteOneTile` 的每-tile 固定开销提到每批/每令牌（默认开；`ENTJOY_TILE_FASTPATH=0` 回退）：
     // 批构造时把 `g_traceEnabled/g_timingDiagnosticsEnabled` 快照进 `BatchState.traceOn/timingOn`，
-    // `firstTileAt` 判据从"每 tile"改为"每令牌一次"。**不动 `tilesRemaining` 记账**（无挂起风险）。
+    // `firstTileAt` 判据从"每 tile"改为"每令牌一次"。不动 `tilesRemaining` 记账（无挂起风险）。
     bool g_tileFastPath = []() -> bool {
         const char* v = std::getenv("ENTJOY_TILE_FASTPATH");
         const bool on = (v == nullptr) ? true : (v[0] == '1');
@@ -202,7 +196,7 @@ namespace JobSystem
         return on;
     }();
 
-    // **per-job 认领几何**学习（默认开；`ENTJOY_CLAIM_ADAPT=0` 关闭）。学习期奇偶交替（交错/切片），
+    // per-job 认领几何学习（默认开；`ENTJOY_CLAIM_ADAPT=0` 关闭）。学习期奇偶交替（交错/切片），
     // 两臂各有 ≥4 样本后按"每元素执行成本更低者"定型（3% 迟滞 + 冷却 + 每 64 次反向探针）。
     // 设计见 JobCostCache.h 的 ClaimMode 段。批表/API 的几何声明优先级更高，已声明的 kernel 不受影响。
     bool g_claimAdaptiveEnabled = []() -> bool {
@@ -242,7 +236,7 @@ namespace JobSystem
     // 按 job 的内批档表（`ENTJOY_JOB_BATCH_TABLE`，默认空 = 关）。语义/用途/前提见
     // JobSystemInternal.h 的同名声明块。加载时解析一次 env（与 FORCE_INNER_BATCH 同款）。
     JobBatchTableEntry g_jobBatchTable[kJobBatchTableCap] = {};
-    /// 与上表**同槽**：非空表示该槽是"按 job 名登记"的（key 由 BindJobBatchName 填）。
+    /// 与上表同槽：非空表示该槽是"按 job 名登记"的（key 由 BindJobBatchName 填）。
     char g_jobBatchSlotName[kJobBatchTableCap][96] = {};
     bool g_jobBatchTableDump = false;
 
@@ -262,11 +256,11 @@ namespace JobSystem
                 const unsigned long h = std::strtoul(p, &end, 16);
                 if (end == p) break;
                 p = end;
-                // 段内解析 `<key>:<batch>[:<claim>][:<geom>]`，**各段都可省略**
+                // 段内解析 `<key>:<batch>[:<claim>][:<geom>]`，各段都可省略
                 //   ⇒ `key::1024` 合法（只覆盖认领、不改内批）。
                 // 第四字段 = 认领几何：`s`/`S` = Spread（每 worker 独占连续段，空手才窃取）、
                 //   `a`/`A` = Adjacent（共享游标发相邻窗口）；缺省 = Auto（走全局 env / F6 学习）。
-                //   语义是"**调用点声明**"（键就是调用点，不按 job 名特判）。
+                //   语义是"调用点声明"（键就是调用点，不按 job 名特判）。
                 {
                     const char* segEnd = p;
                     while (*segEnd != '\0' && *segEnd != ',' && *segEnd != ';') ++segEnd;
@@ -274,10 +268,10 @@ namespace JobSystem
                     uint32_t g = kClaimGeomAuto;
                     char* e2 = nullptr;
                     const char* q = p;
-                    if (q < segEnd && (*q == ':' || *q == '=')) ++q;                                // 只跳过**一个**键后分隔符
+                    if (q < segEnd && (*q == ':' || *q == '=')) ++q;                                // 只跳过一个键后分隔符
                     if (q < segEnd && *q != ':') { b = std::strtol(q, &e2, 10); q = e2; }            // 内批（可空 ⇒ 停在 ':'）
                     if (q < segEnd && *q == ':') ++q;                                              // 跳过内批后的分隔符
-                    // 第三字段两种形态 —— `<claim>`（tile 数）或 `e<N>`（**元素跨度**）：
+                    // 第三字段两种形态 —— `<claim>`（tile 数）或 `e<N>`（元素跨度）：
                     //   前导 'e'/'E' 即元素形态；两者互斥（同一字段）。
                     if (q < segEnd && (*q == 'e' || *q == 'E')) { ++q; sp = std::strtol(q, &e2, 10); q = e2; }
                     else if (q < segEnd && *q != ':') { c = std::strtol(q, &e2, 10); q = e2; }
@@ -312,13 +306,10 @@ namespace JobSystem
             EJ_LOADBANNER( "[JOBBATCHTABLE] hex_entries=0 dump=%d\n", g_jobBatchTableDump ? 1 : 0);
         }
 
-        // ── 按**job 名**编写的那一半（`ENTJOY_JOB_BATCH_BY_NAME`，2026-10-05 doc16 §40）──────────────
-        // 形式：`Name:batch[,Name:batch]…`，如 `CountCellsJob:64,PlaceCellsJob:64,IntegrateJob:64,FlowPresenceJob:64`。
-        // `Name` = **托管 job 类型名**（`typeof(T).Name`）。加载期只登记名字（key 留 0），key 由
-        //   `BindJobBatchName` 在**静态构造期**（= 任何派发之前）按"该 job 实际派发用的函数指针"填入
-        //   （见 doc16 §46）：指针 → key 的换算是 `JobFuncKey`（指针在**其所属模块**内的 RVA），
-        //   与派发侧对同一指针的算式逐字相同 ⇒ 必然同键，且与符号命名规则/命名空间无关。
-        // 好处：作者写的是**不随重编漂移的名字** ⇒ 根治 §39 的事故；始终绑不上的名字仍会**大声打印**。
+        // 按 job 名编写的批表（`ENTJOY_JOB_BATCH_BY_NAME`）：`Name:batch[,Name:batch]…`，`Name` = 托管 job
+        // 类型名（`typeof(T).Name`）。加载期只登记名字（key 留 0），key 由 `BindJobBatchName` 在静态构造期
+        // （任何派发之前）按派发用的函数指针填入：`JobFuncKey` = 该指针在其所属模块内的 RVA，与派发侧同式
+        // ⇒ 必然同键，且与符号命名规则无关。名字不随重编漂移；始终绑不上的名字会大声打印。
         {
             const char* vn = std::getenv("ENTJOY_JOB_BATCH_BY_NAME");
             if (vn != nullptr && vn[0] != '\0')
@@ -357,14 +348,14 @@ namespace JobSystem
         return n;
     }();
 
-    /// 把"按名字登记"的批表槽位绑定到**该 job 实际派发用的函数指针**。
+    /// 把"按名字登记"的批表槽位绑定到该 job 实际派发用的函数指针。
     /// 由托管侧的生成绑定在静态构造里逐个 job 调用（`NativeJobScheduler.BindNativeJobBatchName`）。
-    /// **通用性**：名字来自托管 `Type.Name`，指针来自托管真正交给调度器的那个函数指针 ⇒
+    /// 通用性：名字来自托管 `Type.Name`，指针来自托管真正交给调度器的那个函数指针 ⇒
     ///   不需要知道任何符号命名规则/命名空间/ABI 约定。旧实现拼
-    ///   `SharpNative_Job_<命名空间>_<类型>_Execute_Adapter` 并扫 PE 导出表 ⇒ 等价于把**本工程的
-    ///   命名空间**（`CPUBattle`）硬编码进框架，换工程一条都解析不出来。
-    /// **并发**：键由 `JobFuncKey`（= 指针在**其所属模块**内的 RVA）算出，与派发侧对同一指针的算式
-    ///   逐字相同 ⇒ 必然同键；且本函数在**任何派发之前**完成 ⇒ 表在读侧是**只读**的（不再有
+    ///   `SharpNative_Job_<命名空间>_<类型>_Execute_Adapter` 并扫 PE 导出表 ⇒ 等价于把本工程的
+    ///   命名空间（`CPUBattle`）硬编码进框架，换工程一条都解析不出来。
+    /// 并发：键由 `JobFuncKey`（= 指针在其所属模块内的 RVA）算出，与派发侧对同一指针的算式
+    ///   逐字相同 ⇒ 必然同键；且本函数在任何派发之前完成 ⇒ 表在读侧是只读的（不再有
     ///   "首次派发时其它线程在 CAS 观察者路径上读到半成品 key"的竞态与数据竞争）。
     /// 返回值：1 = 该名字在表里（已绑定）；0 = 表里没有这个名字（调用方无需处理）。
     int BindJobBatchName(const char* name, void* func) noexcept
@@ -411,8 +402,8 @@ namespace JobSystem
             else truncated = true;
         }
         if (named == 0) return;   // 只有 hex 形态（或表为空）⇒ 无"按名槽位"可对账，不打这一行
-        // ⚠ 这里**不能**用 `EJ_LOADBANNER`：那是"加载期缓冲"，而本函数在**首次派发**时执行
-        //   （缓冲早已 flush）⇒ 报警会被丢掉。承诺是"**不再静默失效**"，故直接写 stderr。
+        // ⚠ 这里不能用 `EJ_LOADBANNER`：那是"加载期缓冲"，而本函数在首次派发时执行
+        //   （缓冲早已 flush）⇒ 报警会被丢掉。承诺是"不再静默失效"，故直接写 stderr。
         std::fprintf(stderr,
             "[JOBBATCHBYNAME] resolved=%u/%u unresolved=(%s)%s\n",
             static_cast<unsigned>(resolved), static_cast<unsigned>(named),
@@ -436,7 +427,7 @@ namespace JobSystem
         return 0;
     }
 
-    // 表项第三字段的 **`e<N>` 元素跨度**形态（0 = 未声明），与 LookupJobClaim 互斥（同一字段的两种形态）；
+    // 表项第三字段的 `e<N>` 元素跨度形态（0 = 未声明），与 LookupJobClaim 互斥（同一字段的两种形态）；
     // 上界已在解析时钳到 kClaimSpanDeclaredMax。
     uint32_t LookupJobSpan(uint32_t key) noexcept
     {
@@ -445,7 +436,7 @@ namespace JobSystem
         return 0;
     }
 
-    // 表项**第四字段** = 该调用点的**认领几何**（0=Auto / 1=Spread / 2=Adjacent）。
+    // 表项第四字段 = 该调用点的认领几何（0=Auto / 1=Spread / 2=Adjacent）。
     // 缺省/未命中 ⇒ Auto ⇒ 走全局 env 与 F6 学习。
     uint32_t LookupJobGeom(uint32_t key) noexcept
     {
@@ -478,7 +469,7 @@ namespace JobSystem
         return key;
     }
 
-    // `ENTJOY_JOB_TILE_TRACE=<K>` ⇒ 每个键**前 K 次**调度都打印 tiles（默认 0 ⇒ 只打首见），
+    // `ENTJOY_JOB_TILE_TRACE=<K>` ⇒ 每个键前 K 次调度都打印 tiles（默认 0 ⇒ 只打首见），
     // 用于观测稳态 tiling（而非从墙钟反推）。
     uint32_t g_jobTileTrace = []() -> uint32_t {
         const char* v = std::getenv("ENTJOY_JOB_TILE_TRACE");
@@ -658,7 +649,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
                 (long long)elemsCalled - (long long)elemsScheduled,
                 (unsigned long long)g_perKeyThin[i].load(std::memory_order_relaxed));
         }
-        // 未归因批：按原因打印（只打非零项）+ 该原因的**长度主桶**，用来指名"谁在产生未归因的批"。
+        // 未归因批：按原因打印（只打非零项）+ 该原因的长度主桶，用来指名"谁在产生未归因的批"。
         for (int r = 0; r < kUnkeyedReasons; ++r)
         {
             const uint64_t b = g_unkeyedBatches[r].load(std::memory_order_relaxed);
@@ -707,7 +698,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<uint64_t> g_stealSuccesses{ 0 };
     std::atomic<uint64_t> g_victimScans{ 0 };
     std::atomic<uint64_t> g_stealEmptyExits{ 0 };
-    // 观测开关（`ENTJOY_CLAIM_STAT=1`，默认关）：认领点 rdtsc 探针。认领是 fetch_add（**无 CAS 失败**），
+    // 观测开关（`ENTJOY_CLAIM_STAT=1`，默认关）：认领点 rdtsc 探针。认领是 fetch_add（无 CAS 失败），
     // 争用只表现为共享游标 cacheline 的弹跳 ⇒ 直接 rdtsc 包住 fetch_add。
     // 只在开关打开时取时间戳；每令牌 flush 一次（不新增原子热路径）。
     std::atomic<bool>     g_claimStatEnabled{ []() -> bool {
@@ -758,7 +749,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     }
 
     // GUI Activity 用的原生发布事件（调试面板开启时记录）。
-    // ⚠ 必须**有界**：面板长期开着（或忘记 clear）时事件向量会单调增长——几百 job/帧约 1MB/s。
+    // ⚠ 必须有界：面板长期开着（或忘记 clear）时事件向量会单调增长——几百 job/帧约 1MB/s。
     // 超上限时丢弃最旧的一半，并用 base 维持读取侧的"绝对索引"语义。
     std::atomic<bool> g_nativeActivityCaptureEnabled{ false };
     static std::mutex g_nativeActivityMutex;
@@ -796,7 +787,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
         }
     }
 
-    // GUI 从 readIndex（**绝对**索引，跨"丢弃最旧一半"仍然有效）起读取新增事件。返回读取条数。
+    // GUI 从 readIndex（绝对索引，跨"丢弃最旧一半"仍然有效）起读取新增事件。返回读取条数。
     int ConsumePublishedJobs(NativeActivityEvent* out, int maxCount, uint64_t* readIndex) noexcept
     {
         if (out == nullptr || maxCount <= 0) return 0;
@@ -822,7 +813,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     static std::mutex g_nativeJobNameMutex;
     static std::unordered_map<uint64_t, std::string> g_nativeJobNameMap;
 
-    // id→名字表：键是**单调递增**的 batchId、永不删除 ⇒ 长时间采集同样会无界增长。
+    // id→名字表：键是单调递增的 batchId、永不删除 ⇒ 长时间采集同样会无界增长。
     // 名字只用于面板显示，故超限整体清空（旧 id 在面板上退化为无名）。
     static constexpr size_t kNativeJobNameCap = 65536;
 
@@ -1182,7 +1173,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
 #endif
     }
 
-    // 本机**物理核数**（SMT 兄弟共享一个物理核）。**在 Scheduler::Initialize 计算一次**并缓存：
+    // 本机物理核数（SMT 兄弟共享一个物理核）。在 Scheduler::Initialize 计算一次并缓存：
     // 每 job 调用时再查会太贵；一次性的查询失败绝不能变成进程级永久失效。
     // 0 = 不可知 ⇒ 依赖它的策略保守退化。
     std::atomic<int> g_physicalCores{ 0 };
@@ -1282,7 +1273,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<uint32_t> g_backendBatchesOutstanding{ 0 };
 
     // 代次校验诊断（定义；声明见 JobSystemInternal.h）。
-    // 只在**冷子分支**自增（拒绝迟到结算 / pendingTasks 已为 0），热路径零开销；
+    // 只在冷子分支自增（拒绝迟到结算 / pendingTasks 已为 0），热路径零开销；
     // Shutdown 时打 `[JOBGEN]` 一行。
     std::atomic<uint64_t> g_staleSettleDropped{ 0 };
     std::atomic<uint64_t> g_pendingTasksWrap{ 0 };
@@ -1300,7 +1291,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
         }
     }
 
-    // 排空所有在飞批。刻意**不关 worker**（Shutdown 才是终态）。
+    // 排空所有在飞批。刻意不关 worker（Shutdown 才是终态）。
     // 用的是与 ResetStatsSnapshot 读统计前同一段序列。
     void DrainAll() noexcept
     {

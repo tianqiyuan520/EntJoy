@@ -13,7 +13,7 @@ namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
     /// N 元组查询生成器：扫描 <c>world.Query&lt;T0..Tn&gt;()</c> 调用点（接收者符号类型必须是
-    /// <see cref="Config.WorldFullName"/>），为出现的每个 N 元组 **arity**（N ≥ 3）生成一份
+    /// <see cref="Config.WorldFullName"/>），为出现的每个 N 元组 arity（N ≥ 3）生成一份
     /// 泛型模板：强类型 <c>QueryEnumerable</c>/<c>QueryEnumerator</c>/<c>EntityQueryResult</c>
     /// 及 <c>World.Query</c> 扩展方法（body 内 <c>typeof(T0..Tn)</c> 泛型化，非具体组合）。
     /// 运行时零反射。
@@ -105,7 +105,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("using EntJoy.JobSystem;");
             sb.AppendLine();
 
-            // ===== QueryEnumerable<T0..Tn> =====
+            // QueryEnumerable<T0..Tn>
             sb.AppendLine($"public unsafe ref struct QueryEnumerable<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -124,7 +124,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== QueryEnumerator<T0..Tn> =====
+            // QueryEnumerator<T0..Tn>
             sb.AppendLine($"public unsafe ref struct QueryEnumerator<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -375,7 +375,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== EntityQueryResult<T0..Tn> =====
+            // EntityQueryResult<T0..Tn>
             sb.AppendLine($"public unsafe readonly struct EntityQueryResult<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -399,7 +399,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== World.Query<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World） =====
+            // World.Query<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World）
             // 类名带 arity 后缀：同程序集内不同 arity 生成不同类，防 CS0101 同名冲突。
             sb.AppendLine($"public static class QueryTupleWorldExtensions{n}");
             sb.AppendLine("{");

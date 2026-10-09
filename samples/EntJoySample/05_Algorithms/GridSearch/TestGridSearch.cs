@@ -20,7 +20,7 @@
 //            : fallback;
 //    }
 
-//    // 复用 IJobChunkMoveCompareSample.cs:1054 的插值分位数实现（保持两端一致）
+//    // 插值分位数实现（保持两端一致）
 //    private static double Percentile(double[] sorted, double percentile)
 //    {
 //        if (sorted.Length == 0) return 0;
@@ -48,7 +48,7 @@
 //            $"BENCH|runtime=EntJoy|case={label}|entities={N}|queries={K}|frames={samples.Length}|trace=0|avg={avg:F6}|p50={p50:F6}|p95={p95:F6}|p99={p99:F6}|max={max:F6}"));
 //    }
 
-//    // 稳态采样：Stopwatch.GetTimestamp 计时，与 Unity 端 RunBenchmark 一致；sleepMs>0 时每帧后插 Thread.Sleep
+//    // 稳态采样：Stopwatch.GetTimestamp 计时；sleepMs>0 时每帧后插 Thread.Sleep
 //    private static double[] RunSteadyPhase(int warmup, int measure, int sleepMs, Action step, Action onSample)
 //    {
 //        for (int i = 0; i < warmup; i++)
@@ -101,9 +101,9 @@
 //        Console.WriteLine("=== GridSearch2D SoA + ISPC 稳态测量 ===");
 //        Console.WriteLine($"Warmup: {warmup}, Measure: {measure}, Sleep: {(sleepMode ? sleepMs + "ms" : "off")}, QueryBatch: {GridSearch2D.QueryBatchSize}, WorkerCount: {NativeJobScheduler.JobWorkerCount}");
 
-//        // ---- COLD 阶段：每轮全量重建（对齐 Unity GridSearchBurst 真实路径） ----
+//        // COLD 阶段：每轮全量重建
 //        // 墙钟 = Dispose + 重新分配 + 复制 + 6 个 job；core = 纯 job 阶段
-//        // sumPhases/sumQueryCore：恢复原始分阶段计时（[核心]XXX耗时，对齐 b22a56c 的 平均详细计时 块）
+//        // sumPhases/sumQueryCore：分阶段计时累加
 //        GridSearch2D.BuildTimings sumPhases = default;
 //        double sumQueryCore = 0;
 //        var coreBuildCold = new double[measure];
@@ -126,14 +126,14 @@
 //        var coldTimings = gsb.LastBuildTimings;
 //        Console.WriteLine($"COLD 分配诊断 (最后一次): dispose={coldTimings.DisposeNative:F3} ms, alloc+copy={coldTimings.CreateAndCopy:F3} ms — 不计入稳态指标");
 
-//        // ---- STEADY 阶段：暖路径重排（复用缓冲，无重分配），隔离分配器/冷内存方差 ----
+//        // STEADY 阶段：暖路径重排（复用缓冲，无重分配），隔离分配器/冷内存方差
 //        var coreBuildSteady = new double[measure];
 //        int steadyIdx = 0;
 //        double[] buildWallSteady = RunSteadyPhase(warmup, measure, sleepMs,
 //            () => gsb.UpdatePositions(nativePos).Complete(),
 //            () => coreBuildSteady[steadyIdx++] = gsb.LastBuildTimings.CoreBuildTotal);
 
-//        // ---- QUERY 阶段：对同一网格重复查询 ----
+//        // QUERY 阶段：对同一网格重复查询
 //        var coreQuery = new double[measure];
 //        int queryIdx = 0;
 //        double[] queryWall = RunSteadyPhase(warmup, measure, sleepMs,
@@ -146,12 +146,12 @@
 
 //        Console.WriteLine();
 //        PrintSummary("GridSearch-BuildCore-Cold", coreBuildCold);   // 纯 job 阶段（冷分配），跨端主指标 vs Unity BuildCore
-//        PrintSummary("GridSearch-BuildWall-Cold", buildWallCold);   // 墙钟 = Dispose+alloc+copy+6 job，对齐 Unity BuildWall
+//        PrintSummary("GridSearch-BuildWall-Cold", buildWallCold);   // 墙钟 = Dispose+alloc+copy+6 job
 //        PrintSummary("GridSearch-BuildCore-Steady", coreBuildSteady); // 暖路径纯 job，隔离分配噪声
-//        PrintSummary("GridSearch-Query", queryWall);                // 墙钟，含 TempJob results 分配，与 Unity swQuery 对齐
+//        PrintSummary("GridSearch-Query", queryWall);                // 墙钟，含 TempJob results 分配
 //        PrintSummary("GridSearch-QueryCore", coreQuery);            // 纯 job 查询
 
-//        // ---- 平均详细计时（恢复原始输出，对齐 b22a56c）：分阶段 [核心]XXX耗时 ----
+//        // 平均详细计时：分阶段 XXX耗时
 //        // Percentile 假定入参已排序（PrintSummary 内部先 Sort），此处必须先排再算 p50
 //        var buildSorted = (double[])coreBuildCold.Clone(); Array.Sort(buildSorted);
 //        var querySorted = (double[])coreQuery.Clone(); Array.Sort(querySorted);
@@ -166,14 +166,14 @@
 //        Console.WriteLine($"[核心] 核心构建总耗时: {sumPhases.CoreBuildTotal / measure:F3} ms (p50 {Percentile(buildSorted, 0.50):F3} ms)");
 //        Console.WriteLine($"[核心] 核心查询总耗时: {sumQueryCore / measure:F3} ms (p50 {Percentile(querySorted, 0.50):F3} ms)");
 
-//        // 结果抽查（沿用原逻辑）
+//        // 结果抽查
 //        var results = gsb.SearchClosestPoint(nativeQueries);
 //        var resultsArray = new int[results.Length];
 //        results.CopyTo(resultsArray);
 //        Console.WriteLine("查询结果前10个: {0}", string.Join(" ", resultsArray[..10]));
 //        results.Dispose();
 
-//        // ---- DIAG 行 ----
+//        // DIAG 行
 //        var js = NativeJobScheduler.GetStats();
 //        Console.WriteLine(FormattableString.Invariant(
 //            $"DIAG|runtime=EntJoy|case=GridSearch2D|entities={N}|queries={K}|workerCount={NativeJobScheduler.JobWorkerCount}|warmup={warmup}|frames={measure}|sleepMs={sleepMs}|queryBatch={GridSearch2D.QueryBatchSize}|tilesPerWorker={tilesPerWorker}|parkWake={js.ParkWakeCount}|hotSpin={js.HotSpinHits}"));

@@ -4,7 +4,7 @@ using NativeTranspiler;
 
 namespace EntJoySample.ECS
 {
-    // ======================== 关系组件定义（四种形态） ========================
+    // 关系组件定义（四种形态）
 
     /// <summary>父子层级（默认：出边单值 + 入边多源 = 多对一）。</summary>
     public struct SceneChildOf : IRelationComponent { public RelationSlot Target; }
@@ -181,7 +181,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"  HotSkillSlot column width: {ct.Size} bytes (expect 32 = 4 slots x 8B), MaxSlots={ct.MultiRelationMaxSlots}");
             Check(ct.Size == 32 && ct.MultiRelationMaxSlots == 4, "fixed-slot column layout");
 
-            // ===== NativeTranspiler 四路径：IJobChunk/IJobEntity × C++/ISPC 读定长多槽列 =====
+            // NativeTranspiler 四路径：IJobChunk/IJobEntity × C++/ISPC 读定长多槽列
             // mage 槽 {fireball, shield, heal, empty} → 期望 id 和 = fb+sh+heal
             // knight 槽 {fireball, blink, empty, empty} → 期望 id 和 = fb+blink
             long expectedMage = fireball.Id + shield.Id + heal.Id;
@@ -292,7 +292,7 @@ namespace EntJoySample.ECS
         }
     }
 
-    // ======================== NativeTranspiler 定长多槽列 Job（四路径） ========================
+    // NativeTranspiler 定长多槽列 Job（四路径）
     // HotSkillSlot 列宽 32B（4 槽 × 8B），Job 按列宽步进直接读取——多值关系进 native 的关键验证。
     // 空槽 = RelationSlot.Default（TargetId = -1），Job 必须跳过（否则 -1 污染累加和）。
     // 每个 Job 把实体所有有效槽的 TargetId 累加写入 SkillCdSum 列，C# 侧核对。

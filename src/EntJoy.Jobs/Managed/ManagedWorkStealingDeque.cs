@@ -8,29 +8,23 @@ namespace EntJoy.JobSystem.Managed
     /// Chase-Lev 无锁双端队列 — 持久 per-worker 使用。
     ///
     /// 经典 Chase-Lev 协议（owner-only PushBottom/PopBottom）：
-    ///   - Owner 从 bottom 端 PushBottom / PopBottom（无竞争，bottom_ 非原子）
-    ///   - Thief 从 top 端 StealTop（CAS 竞争，低频）
-    ///   - 容量固定（2 的幂），top/bottom 用 long 版本号，物理不可能回绕，免 ABA。
+    /// - Owner 从 bottom 端 PushBottom / PopBottom（无竞争，bottom_ 非原子）
+    /// - 容量固定（2 的幂），top/bottom 用 long 版本号，物理不可能回绕，免 ABA。
     ///
     /// 原子序（对齐 crossbeam-deque 的 stamp 校验）：
-    ///   - top_    : Interlocked（thief CAS）
-    ///   - bottom_ : 普通字段（仅 owner 写）
-    ///   - _seq[]  : Volatile.Write（release）/ Volatile.Read（acquire）
-    ///   - PopBottom: bottom_ 写后 + Thread.MemoryBarrier() 阻断 store→load 重排
-    ///                （对齐 C++ 的 atomic_thread_fence(seq_cst)，
-    ///                 这是修复 Native 105 轮死锁的关键修复）
+    /// （对齐 C++ 的 atomic_thread_fence(seq_cst)，
+    /// 这是修复 Native 105 轮死锁的关键修复）
     ///
     /// 使用方式（crossbeam 标准模型）：
-    ///   每个 Worker 持有一个 ManagedWorkStealingDeque（owner-only 操作）。
-    ///   跨线程提交经 Injector（MPMC 队列）→ worker 拉取到自己的 deque
-    ///   （owner-only PushBottom）→ 标准 Chase-Lev 循环。deque 本身无跨线程 push。
+    /// 跨线程提交经 Injector（MPMC 队列）→ worker 拉取到自己的 deque
+    /// （owner-only PushBottom）→ 标准 Chase-Lev 循环。deque 本身无跨线程 push。
     /// </summary>
     internal sealed class ManagedWorkStealingDeque
     {
-        // ───── 常量 ─────
+        // 常量
         private const int MinCapacity = 8;
 
-        // ───── 数据 ─────
+        // 数据
         private readonly ManagedTileTask[] _buffer;  // 环形数组
         private readonly long[] _seq;                // 每 slot 的发布序号（对齐 crossbeam stamp）
         private readonly int _capacity;
@@ -48,7 +42,7 @@ namespace EntJoy.JobSystem.Managed
         /// </summary>
         private long _bottom;
 
-        // ───── 构造 ─────
+        // 构造
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ManagedWorkStealingDeque(int capacity = 4096)
@@ -64,16 +58,15 @@ namespace EntJoy.JobSystem.Managed
             _bottom = 0;
         }
 
-        // ───── Owner（worker 线程，唯一调用者）─────
+        // Owner（worker 线程，唯一调用者）
 
         /// <summary>
         /// Owner 从底端推入一个任务（无竞争）。
         /// 对齐 C++ SparseTileDeque::PushBottom。
         ///
         /// 顺序：
-        ///   1. 写 _buffer[b] = task
-        ///   2. Volatile.Write(_seq[b], b+1) — release 发布数据
-        ///   3. _bottom = b+1 — 推进底端
+        /// 1. 写 _buffer[b] = task
+        /// 3. _bottom = b+1 — 推进底端
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void PushBottom(ManagedTileTask task)
@@ -147,7 +140,7 @@ namespace EntJoy.JobSystem.Managed
             return false;
         }
 
-        // ───── Thief（其他 worker / 主线程）─────
+        // Thief（其他 worker / 主线程）
 
         /// <summary>
         /// Thief 从顶端窃取一个任务（CAS 竞争，低频）。
@@ -192,7 +185,7 @@ namespace EntJoy.JobSystem.Managed
             return false;
         }
 
-        // ───── 查询 ─────
+        // 查询
 
         /// <summary>deque 是否为空（尽力而为，thief 并发时可能读到过期值）。</summary>
         public bool IsEmpty => Volatile.Read(ref _top) >= Volatile.Read(ref _bottom);
@@ -213,7 +206,7 @@ namespace EntJoy.JobSystem.Managed
         /// <summary>容量（诊断用）。</summary>
         public int Capacity => _capacity;
 
-        // ───── 工具 ─────
+        // 工具
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static int RoundUpPow2(int v)

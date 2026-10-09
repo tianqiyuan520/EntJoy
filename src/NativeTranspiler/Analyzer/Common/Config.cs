@@ -7,7 +7,7 @@ namespace NativeTranspiler.Analyzer.Common
     /// </summary>
     internal static class Config
     {
-        // ============ 容器 / 数值类型名 ============
+        // 容器 / 数值类型名
         public const string NativeList = "NativeList";
         public const string NativeArray = "NativeArray";
         public const string UnsafeList = "UnsafeList";
@@ -16,7 +16,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string Int2 = "int2";
         public const string UInt2 = "uint2";
 
-        // ============ Job 接口名 ============
+        // Job 接口名
         public const string IJob = "IJob";
         public const string IJobFor = "IJobFor";
         public const string IJobParallelFor = "IJobParallelFor";
@@ -24,7 +24,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string IJobChunk = "IJobChunk";
         public const string IJobEntity = "IJobEntity";
 
-        // ============ 方法名 ============
+        // 方法名
         public const string Execute = "Execute";
         public const string SendEvent = "SendEvent";
         public const string Resize = "Resize";
@@ -41,7 +41,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string GetSharedComponent = "GetSharedComponent";
         public const string GetEnableBitMapPtr = "GetEnableBitMapPtr";
 
-        // ============ 命名空间名 ============
+        // 命名空间名
         public const string NamespaceSystem = "System";
         public const string NamespaceEntJoy = "EntJoy";
         public const string NamespaceEntJoyECS = "EntJoy.ECS";
@@ -49,16 +49,16 @@ namespace NativeTranspiler.Analyzer.Common
         public const string NamespaceEntJoyCollections = "EntJoy.Collections";
         public const string NamespaceEntJoyMathematics = "EntJoy.Mathematics";
 
-        // ============ 类型全名（MetadataName，用于 Compilation.GetTypeByMetadataName） ============
+        // 类型全名（MetadataName，用于 Compilation.GetTypeByMetadataName）
         public const string TypeWorld = "EntJoy.ECS.World";
         public const string TypeEntityManager = "EntJoy.ECS.EntityManager";
-        public const string TypeEventBus = "EntJoy.ECS.EventBus";
+        public const string TypeSystemAPI = "EntJoy.ECS.SystemAPI";
         public const string TypeArchetypeChunk = "EntJoy.ECS.ArchetypeChunk";
         public const string TypeEntity = "EntJoy.ECS.Entity";
         public const string TypeIRelationComponent = "EntJoy.ECS.IRelationComponent";
         public const string TypeMultiRelationAttribute = "EntJoy.ECS.MultiRelationAttribute";
 
-        // ============ Attribute 名 ============
+        // Attribute 名
         public const string NativeTranspileAttribute = "NativeTranspileAttribute";
     }
 }

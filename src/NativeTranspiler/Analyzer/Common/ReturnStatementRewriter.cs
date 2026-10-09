@@ -9,11 +9,11 @@ namespace NativeTranspiler.Analyzer.Common
     /// <summary>
     /// 批内 <c>return;</c> 的 C++ 语义重写（NT-02 / NT-07）。
     ///
-    /// C# 的 <c>return;</c>（Execute 体内）只结束**本次 index / 本次实体**；C++ 的 <c>return;</c>
+    /// C# 的 <c>return;</c>（Execute 体内）只结束本次 index / 本次实体；C++ 的 <c>return;</c>
     /// 会退出整个导出函数。各 C++ 后端因此把体包进 <c>do { ... } while(false)</c>，并把
-    /// index 层级的 <c>return;</c> 换成 <c>break;</c>（见 docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md §2）。
+    /// index 层级的 <c>return;</c> 换成 <c>break;</c>。
     ///
-    /// 但 <c>return;</c> 若嵌在体内**循环**里，<c>break;</c> 只会跳出那个内层循环，剩余语句照跑 ——
+    /// 但 <c>return;</c> 若嵌在体内循环里，<c>break;</c> 只会跳出那个内层循环，剩余语句照跑 ——
     /// 静默错值。这种形态在 C++ 里无法表达（与 ISPC 侧同一限制），因此写唯一标记让构建期
     /// 扫描（NativeCompileTask.CheckGeneratedMarkers 认 <c>__ENTJOY_UNSUPPORTED</c> 前缀）失败，
     /// 而不是生成语义错误的代码。
@@ -25,9 +25,9 @@ namespace NativeTranspiler.Analyzer.Common
 
         /// <summary>
         /// 把翻译产物里的 <c>return;</c> 逐条重写成 C++ 批语义：
-        ///   · index 层级 ⇒ <paramref name="indexLevelReplacement"/>（通常是 <c>break;</c>，需外层 do-while 包裹）
-        ///   · 嵌在循环里 ⇒ <c>{ /*&lt;标记&gt;*/ }</c>（保留合法语句形状，构建期扫描报错）
-        /// 重写按**源码顺序**与 ReturnStatementSyntax 一一对应（翻译器逐语句顺序输出）。
+        /// · index 层级 ⇒ <paramref name="indexLevelReplacement"/>（通常是 <c>break;</c>，需外层 do-while 包裹）
+        /// · 嵌在循环里 ⇒ <c>{ /*&lt;标记&gt;*/ }</c>（保留合法语句形状，构建期扫描报错）
+        /// 重写按源码顺序与 ReturnStatementSyntax 一一对应（翻译器逐语句顺序输出）。
         /// 产物里若还有多余的 <c>return;</c>（多于源码里的 return 语句），按 index 层级处理。
         /// </summary>
         public static string Rewrite(string translatedBody, BlockSyntax? body, string indexLevelReplacement)

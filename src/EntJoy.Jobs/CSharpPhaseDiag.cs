@@ -5,20 +5,20 @@ using System.Diagnostics;
 namespace EntJoy.JobSystem
 {
     /// <summary>
-    /// C# 侧调度分段诊断（`ENTJOY_DIAG_CSHARP_PHASE=1`）：**攒满一个窗口后只打印一次**。
+    /// C# 侧调度分段诊断（`ENTJOY_DIAG_CSHARP_PHASE=1`）：攒满一个窗口后只打印一次。
     ///
     /// 为什么必须攒够再打：控制台/重定向输出的单次成本可达 100～200 µs，而诊断打印落在
     /// schedule+complete 的计时区之内 ⇒ 逐次打印会把 chunk 派发的实测值放大约 10×。
     ///
     /// 本实现按 series 独立计窗：每个 series 最多收 <see cref="WindowSize"/> 个样本，
-    /// 满窗时一次性打印汇总（n / mean / p50 / min / max）并**永久关闭该 series 的采样**
+    /// 满窗时一次性打印汇总（n / mean / p50 / min / max）并永久关闭该 series 的采样
     /// ⇒ 被打印污染的至多是“满窗那一次”调度，而不是窗口内每一次；窗口关闭后连计时调用都不再发生。
     ///
     /// 关闭时（未设环境变量）所有入口在 JIT 后都是“一次静态 bool 读 + 早退”，不进热路径。
     /// </summary>
     public static class CSharpPhaseDiag
     {
-        /// <summary>每个 series 的采样窗口：攒满即打印一次汇总并**开启下一窗**（可调 `ENTJOY_DIAG_CSHARP_PHASE_WINDOW`）。
+        /// <summary>每个 series 的采样窗口：攒满即打印一次汇总并开启下一窗（可调 `ENTJOY_DIAG_CSHARP_PHASE_WINDOW`）。
         /// 窗口越大，被打印污染的那一次调度占比越小（1024 ⇒ 0.1%）。</summary>
         public static readonly int WindowSize = ReadWindow();
 

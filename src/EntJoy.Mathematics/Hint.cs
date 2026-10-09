@@ -15,7 +15,7 @@ namespace EntJoy
     /// <code>
     /// if (Hint.Likely(condition))
     /// {
-    ///     // This branch is more likely — compiler can optimize for it.
+    /// // This branch is more likely — compiler can optimize for it.
     /// }
     /// </code>
     /// </remarks>

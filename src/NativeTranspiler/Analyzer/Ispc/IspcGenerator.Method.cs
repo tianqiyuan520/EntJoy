@@ -1,8 +1,6 @@
-// ============================================================
 // IspcGenerator.Method.cs — ISPC 代码生成的「静态方法」入口
 //   拆分自 IspcGenerator（static partial），仅含 IMethodSymbol 入口：
 //   方法级 ISPC 源 / MT 源 / C++ 单线程 Wrapper / C++ 多线程 Wrapper。
-// ============================================================
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
@@ -147,7 +145,6 @@ namespace NativeTranspiler.Analyzer.Common
 
             // 并行化：连续 for 循环批量 launch，末尾统一 sync（ISPC sync 等待本函数内
             // 所有已 launch 任务）→ 相邻无依赖循环真正并行，消除逐个 launch+sync 的串行退化。
-            // 依赖规则：相邻循环若操作共享可变数据，须由用户保证无读写依赖（生成器不跨循环
             // 分析依赖）；循环间出现非循环语句时先 sync（该语句在已 launch 循环完成后执行）。
             int pendingLaunches = 0;
             foreach (var stmt in methodSyntax.Body.Statements)

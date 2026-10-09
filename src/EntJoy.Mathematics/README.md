@@ -17,7 +17,7 @@ EntJoy 的数学与底层辅助包：SIMD 友好的 POD 向量、静态数学函
 ## 引用
 
 ```xml
-<PackageReference Include="EntJoy.Mathematics" Version="1.0.0" />
+<PackageReference Include="EntJoy.Mathematics" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`；**纯托管**，不需要 CMake / MSVC / ISPC。
@@ -48,7 +48,7 @@ EntJoy's math and low-level helper package: SIMD-friendly POD vectors, static ma
 ## Reference it
 
 ```xml
-<PackageReference Include="EntJoy.Mathematics" Version="1.0.0" />
+<PackageReference Include="EntJoy.Mathematics" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`; **pure managed**, no CMake / MSVC / ISPC required.

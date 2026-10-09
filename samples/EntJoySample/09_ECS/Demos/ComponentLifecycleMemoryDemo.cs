@@ -9,8 +9,8 @@ namespace EntJoySample.ECS
     /// 的内存行为对比：无 hook（纯位拷贝）vs 有 hook（IDisposable + move 转移所有权）。
     ///
     /// 用 PersistentAllocator.GetStats() 的 Allocs/Frees/Foreign 差量作为证据：
-    ///   - 无 hook：Allocs > Frees（泄漏），旧副本指针被 swap-pop 覆盖丢弃、无人释放；
-    ///   - 有 hook：Allocs == Frees（平衡），move 零分配（指针转移）+ Dispose 正确释放。
+    /// - 无 hook：Allocs > Frees（泄漏），旧副本指针被 swap-pop 覆盖丢弃、无人释放；
+    /// - 有 hook：Allocs == Frees（平衡），move 零分配（指针转移）+ Dispose 正确释放。
     /// </summary>
     public static class ComponentLifecycleMemoryDemo
     {

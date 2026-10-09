@@ -51,7 +51,7 @@ namespace EntJoy.Collections
             }
         }
 
-        // ========== 构造函数（拥有者） ==========
+        // 构造函数（拥有者）
         public NativeArray(int length, Allocator allocator = Allocator.Persistent)
         : this(length, allocator, NativeArrayOptions.ClearMemory) { }
 
@@ -124,11 +124,11 @@ namespace EntJoy.Collections
         /// 指针登记进 <see cref="PinnedMemory"/>，GPU 调度（ScheduleCuda 等）识别后
         /// 上传/回读直连单跳，免 C# 侧拷贝。外部内存生命周期由调用方负责。
         ///
-        /// ⚠ 本方法用**无效安全句柄 index=-1**，因此**索引器不可用**：`arr[i]` 的 get/set 会先走
+        /// ⚠ 本方法用无效安全句柄 index=-1，因此索引器不可用：`arr[i]` 的 get/set 会先走
         /// <c>SafetyHandleManager.CheckReadAndThrow</c>，它对 <c>index &lt; 0</c> 直接抛
         /// <c>InvalidOperationException("Invalid handle index.")</c>。这个视图只能用
         /// <see cref="GetUnsafePtr"/> 裸指针访问。
-        /// 需要**能走索引器**的外部内存视图（例如把 ECS chunk 的组件列交给仿真代码）请用
+        /// 需要能走索引器的外部内存视图（例如把 ECS chunk 的组件列交给仿真代码）请用
         /// <see cref="CreateView"/> —— 它带一个共享的"写跟踪豁免"句柄。
         /// </summary>
         public static NativeArray<T> FromExternalPtr(T* ptr, int length, bool pinned = false)
@@ -140,7 +140,7 @@ namespace EntJoy.Collections
             return new NativeArray<T>(ptr, length, Allocator.None, new AtomicSafetyHandle(-1, 1, isReadOnly: false), isOwner: false);
         }
 
-        /// <summary>用于 <see cref="CreateView"/> 的**共享**安全句柄（写跟踪豁免）。
+        /// <summary>用于 <see cref="CreateView"/> 的共享安全句柄（写跟踪豁免）。
         /// 非拥有视图的内存由调用方负责，且典型用途是"把外部内存（如 ECS chunk 的组件列）
         /// 交给并行 job 读写"，调度器的写跟踪对这种并发写会误报。</summary>
         private static readonly AtomicSafetyHandle s_sharedViewSafety = CreateSharedViewSafety();
@@ -153,10 +153,10 @@ namespace EntJoy.Collections
         }
 
         /// <summary>
-        /// 从外部内存创建**非拥有视图**，带**可用的共享安全句柄**（写跟踪豁免）——
+        /// 从外部内存创建非拥有视图，带可用的共享安全句柄（写跟踪豁免）——
         /// 与 <c>ArchetypeChunk.GetComponentDataNativeArray</c> 读 chunk 组件列的做法同源。
         ///
-        /// 与 <see cref="FromExternalPtr"/> 的区别：那个用无效句柄（-1），因此**不能用索引器**
+        /// 与 <see cref="FromExternalPtr"/> 的区别：那个用无效句柄（-1），因此不能用索引器
         /// （`arr[i]` 会走 `CheckWriteAndThrow` 抛 "Invalid handle index."），只能走 `GetUnsafePtr()`；
         /// 本方法返回的视图可以正常用索引器（本工程百万单位的仿真代码全是索引器访问）。
         ///
@@ -168,7 +168,7 @@ namespace EntJoy.Collections
             return new NativeArray<T>(buffer, length, Allocator.None, s_sharedViewSafety, isOwner: false);
         }
 
-        // ========== 释放 ==========
+        // 释放
         public void Dispose()        {
             if (_buffer == null) return;
 #if DEBUG
@@ -180,7 +180,7 @@ namespace EntJoy.Collections
             {
                 // 释放前把关：仍被活动 Job 持有时拒绝释放（否则 Job 的写入会落到复用后的新容器内存上）
                 SafetyHandleManager.CheckDeallocateAndThrow(_safety);
-                // ★ B18 残留修复：Temp/TempJob 由**帧末统一回收**（TempAllocator.Reset 会 MarkReleased 并
+                // Temp/TempJob 由帧末统一回收（TempAllocator.Reset 会 MarkReleased 并
                 //   归还内存）。若调用方此后仍对陈旧容器 Dispose，绝不能再 Release（index 可能已被新容器
                 //   复用 ⇒ 重复入队）或按地址 Free（那块内存可能已属于别人 ⇒ 释放别人的块）。
                 //   陈旧判据 = 句柄不再"活着"（状态非 Active 或 version 已变）⇒ 幂等空操作。
@@ -234,7 +234,7 @@ namespace EntJoy.Collections
         //            return deps;
         //        }
 
-        // ========== 复制方法 ==========
+        // 复制方法
         public void CopyTo(T[] array)
         {
             SafetyHandleManager.CheckReadAndThrow(_safety);
@@ -262,7 +262,7 @@ namespace EntJoy.Collections
 
         public void* GetUnsafePtr() => _buffer;
 
-        // ========== 子数组（视图） ==========
+        // 子数组（视图）
         public NativeArray<T> GetSubArray(int start, int length)
         {
             ValidateRange(start, length, _length);
@@ -270,7 +270,7 @@ namespace EntJoy.Collections
             return new NativeArray<T>(subBuffer, length, _allocator, _safety, isOwner: false);
         }
 
-        // ========== 类型重新解释 ==========
+        // 类型重新解释
         public NativeArray<U> Reinterpret<U>() where U : unmanaged
         {
             if (sizeof(T) != sizeof(U))
@@ -278,7 +278,7 @@ namespace EntJoy.Collections
             return new NativeArray<U>(_buffer, _length, _allocator, _safety, isOwner: false);
         }
 
-        // ========== Span 互操作 ==========
+        // Span 互操作
         public Span<T> AsSpan()
         {
             SafetyHandleManager.CheckReadAndThrow(_safety);
@@ -287,7 +287,7 @@ namespace EntJoy.Collections
         public static implicit operator Span<T>(NativeArray<T> arr) => arr.AsSpan();
         public static implicit operator ReadOnlySpan<T>(NativeArray<T> arr) => new ReadOnlySpan<T>(arr._buffer, arr._length);
 
-        // ========== 只读视图 ==========
+        // 只读视图
         public ReadOnly AsReadOnly()
         {
             return new ReadOnly(_buffer, _length, _safety);
@@ -327,7 +327,7 @@ namespace EntJoy.Collections
             public T[] ToArray()
             {
                 // F-05：与索引器/ToArray（拥有者）保持一致——必须做安全句柄检查，
-                // 否则 Disposed/帧末 Reset 之后的 ReadOnly 视图会**静默**拷贝已释放内存。
+                // 否则 Disposed/帧末 Reset 之后的 ReadOnly 视图会静默拷贝已释放内存。
                 SafetyHandleManager.CheckReadAndThrow(_safety);
                 var arr = new T[_length];
                 fixed (void* dst = arr)
@@ -336,7 +336,7 @@ namespace EntJoy.Collections
             }
         }
 
-        // ========== 释放作业 ==========
+        // 释放作业
         //        internal unsafe struct NativeArrayDisposeJob : IJob
         //        {
         //            public Allocator Allocator;
@@ -356,7 +356,7 @@ namespace EntJoy.Collections
         //        }
     }
 
-    // ========== 静态 ==========
+    // 静态
     public unsafe partial struct NativeArray<T>
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -483,7 +483,7 @@ namespace EntJoy.Collections
         }
     }
 
-    // ========== IAtomicHandleProvider 接口实现 ==========
+    // IAtomicHandleProvider 接口实现
     public unsafe partial struct NativeArray<T> : IAtomicHandleProvider
     {
         AtomicSafetyHandle IAtomicHandleProvider.GetSafetyHandle() => _safety;

@@ -73,7 +73,7 @@ using EntJoy.ECS.JobSystem;
 //            data[i] = (float)rand.NextDouble() * 100f;
 
 //        Array.Clear(output, 0, DATA_COUNT);
-//        // ---------- 单线程（托管数组索引，基线）----------
+//        // 单线程（托管数组索引，基线）
 //        Stopwatch sw = Stopwatch.StartNew();
 //        //for (int i = 0; i < DATA_COUNT; i++)
 //        //{
@@ -102,7 +102,7 @@ using EntJoy.ECS.JobSystem;
 //        sw.Stop();
 //        double singleMs = sw.Elapsed.TotalMilliseconds;
 //        Array.Clear(output, 0, DATA_COUNT);
-//        // ---------- Parallel.For（托管数组索引）----------
+//        // Parallel.For（托管数组索引）
 //        sw.Restart();
 //        var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
 //        Parallel.For(0, DATA_COUNT, options, i =>
@@ -116,7 +116,7 @@ using EntJoy.ECS.JobSystem;
 
 //        double parallelMs = sw.Elapsed.TotalMilliseconds;
 //        Array.Clear(output, 0, DATA_COUNT);
-//        // ---------- 自定义 JobSystem（直接指针访问）----------
+//        // 自定义 JobSystem（直接指针访问）
 //        sw.Restart();
 //        unsafe
 //        {

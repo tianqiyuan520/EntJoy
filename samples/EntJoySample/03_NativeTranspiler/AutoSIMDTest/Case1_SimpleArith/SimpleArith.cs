@@ -4,7 +4,7 @@ using EntJoy.JobSystem;
 
 namespace EntJoySample.AutoSIMDTest
 {
-    // ── Component types for IJobChunk/IJobEntity ──
+    // Component types for IJobChunk/IJobEntity
     public struct SimpleArithCompA : IComponentData { public float Value; }
     public struct SimpleArithCompB : IComponentData { public float Value; }
     public struct SimpleArithCompC : IComponentData { public float Value; }
@@ -133,7 +133,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── IJobChunk variants ──
+    // IJobChunk variants
     // IJobChunk with Cpp/scalar path: validates that the transpiler generates valid C++.
     // SIMD variant not included: SimdControlFlowGenerator has limitations with
     // struct field access on gathered values (works best with primitive NativeArray<float>).
@@ -153,7 +153,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── IJobEntity variants ──
+    // IJobEntity variants
 
     [NativeTranspiler.NativeTranspile]
     public struct SimpleArith_Cpp_Entity : IJobEntity
@@ -173,7 +173,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── Static function variants ──
+    // Static function variants
     public static class SimpleArith_StaticFuncs
     {
         public static void SimpleArith_Stc_CSharp(

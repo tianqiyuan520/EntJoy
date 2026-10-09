@@ -7,20 +7,17 @@ namespace EntJoy.JobSystem
     /// 隐式批（全局单例 BatchScope，C# 全权收集）。
     ///
     /// 用法（无头框架推荐，每个逻辑帧一遍）：
-    ///   ImplicitBatch.SetEnabled(true);            // 一次性开启
-    ///   ImplicitBatch.Add(ref job1);               // 纯 C# 收集，零 P/Invoke（入队即快照）
-    ///   ImplicitBatch.AddFor(ref forJob, 1024);
-    ///   ImplicitBatch.AddParallelFor(ref parJob, 8192, 0);
-    ///   ImplicitBatch.EndFrame();                  // force point：一次 ScheduleBatch 提交 + 缓存句柄
-    ///   ImplicitBatch.Handle(0).Complete();        // 批内句柄可用（或 CompleteAll）
-    ///   ...（下一帧重复 Add → EndFrame）
+    /// ImplicitBatch.SetEnabled(true); // 一次性开启
+    /// ImplicitBatch.Add(ref job1); // 纯 C# 收集，零 P/Invoke（入队即快照）
+    /// ImplicitBatch.AddFor(ref forJob, 1024);
+    /// ImplicitBatch.AddParallelFor(ref parJob, 8192, 0);
+    /// ImplicitBatch.EndFrame(); // force point：一次 ScheduleBatch 提交 + 缓存句柄
+    /// ImplicitBatch.Handle(0).Complete(); // 批内句柄可用（或 CompleteAll）
+    /// ...（下一帧重复 Add → EndFrame）
     ///
     /// 语义：
-    ///   - 与 BatchScope 同构（同一收集/提交路径），只是全局单例 + 帧语义命名；
-    ///   - 不触发 EndFrame/CompleteAll 时 job 不提交执行（延迟刷新模型）——超
-    ///     AutoFlushThreshold 自动提交（安全阀，防堆积失控）；
-    ///   - Complete() 前会自动 EndFrame（NativeJobScheduler.Complete 接驳）；
-    ///   - 仅 Native 后端（Managed 回退后端不支持批，Add 抛 NotSupportedException）。
+    /// - 与 BatchScope 同构（同一收集/提交路径），只是全局单例 + 帧语义命名；
+    /// - 仅 Native 后端（Managed 回退后端不支持批，Add 抛 NotSupportedException）。
     /// </summary>
     public static unsafe class ImplicitBatch
     {
@@ -52,7 +49,7 @@ namespace EntJoy.JobSystem
             }
         }
 
-        // ── 收集（纯 C#，零 P/Invoke；入队即快照） ──
+        // 收集（纯 C#，零 P/Invoke；入队即快照）
 
         public static void Add<T>(ref T job, JobHandle dependsOn = default)
             where T : unmanaged, IJob
@@ -66,7 +63,7 @@ namespace EntJoy.JobSystem
             where T : unmanaged, IJobParallelFor
             => EnsureScope().AddParallelFor(ref job, length, innerBatchCount, dependsOn);
 
-        // ── force point ──
+        // force point
 
         /// <summary>帧末统一提交（一次 ScheduleBatch + 单次唤醒），返回本帧句柄数组。</summary>
         public static JobHandle[] EndFrame()
@@ -96,7 +93,7 @@ namespace EntJoy.JobSystem
             }
         }
 
-        // ── 内部：Complete 自动 flush + 安全阀 ──
+        // 内部：Complete 自动 flush + 安全阀
 
         /// <summary>Complete/IsCompleted 前调用：开启时把当前批提交（语义=Unity Complete 隐式刷新）。</summary>
         internal static void FlushForComplete()

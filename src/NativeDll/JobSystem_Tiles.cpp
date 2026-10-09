@@ -37,12 +37,12 @@ namespace JobSystem
     }
 
 
-    // ── 小 job 的 worker 上限 = **物理核数**（`ENTJOY_PHYSCAP_SMALLJOB`，默认开；`=0` 关闭）──
+    // ── 小 job 的 worker 上限 = 物理核数（`ENTJOY_PHYSCAP_SMALLJOB`，默认开；`=0` 关闭）──
     // SMT 兄弟线程的自旋/窃取互抢执行单元，粒度越细越严重（每 worker 只摊到 1 个 tile 时
-    // 15 worker 明显慢于 8 worker）。判据：**每 worker 摊到的元素数 ≤ targetWorkers*256** 才封顶。
+    // 15 worker 明显慢于 8 worker）。判据：**每 worker 摊到的元素数 ≤ targetWorkers*256 才封顶。
     // 取"元素数"而不是"chunk 数"：`tileCount` 会漂移，而元素数是 schedule 入参、稳定；
     // 且 compute-bound job 可能只有少数粗块，按 chunk 数封顶会把它们误封顶（曾因此造成回归）。
-    // 元素数上限把封顶限定在**总工作量本来就极小**的 job 上。
+    // 元素数上限把封顶限定在总工作量本来就极小**的 job 上。
     // 不可知物理核数（返回 0）或未超订时，一律保持 baseline。
     int ApplyPhysCoreCapForSmallJob(int targetWorkers, uint32_t tileCount, int length) noexcept
     {
@@ -260,7 +260,7 @@ namespace JobSystem
     // ============================================================
     // 批上下文池（A）：GeneralBatchContext / ChunkBatchContext 去 new/delete
     // 结构与 BatchStorage 同款：线程本地缓存（零锁命中） + 共享池（缓存空/满时批量迁移）。
-    // 必要性：上下文在**主线程**获取、由**完成该批的线程**（多为 worker）释放 ⇒ 只有
+    // 必要性：上下文在主线程获取、由完成该批的线程（多为 worker）释放 ⇒ 只有
     // 两级池才能让主线程的 acquire 命中（worker 释放的实例经共享池回到主线程）。
     // ============================================================
     std::mutex g_ctxPoolMutex;
@@ -425,7 +425,7 @@ namespace JobSystem
         SpillChunkContextCacheToSharedPool();
     }
 
-    // Shutdown 路径：只清**共享池**（其中的实例都已释放、无人引用）。
+    // Shutdown 路径：只清共享池（其中的实例都已释放、无人引用）。
     // 线程本地缓存交给各自线程的 ThreadContextCache 析构（与 BatchStorage 同款语义），
     // 避免在这里删掉可能仍被在飞批次引用的对象。
     void ClearBatchContextPool() noexcept
@@ -526,7 +526,7 @@ namespace JobSystem
         storage->batch.uniformTileSize = 0;
         storage->batch.claimCapOverride = 0;   // 必须一起清零（BatchStorage 复用 ⇒ 否则继承陈旧值）
         storage->batch.claimGeomOverride = kClaimGeomAuto;   // 同上（按调用点声明的认领几何）
-        storage->batch.claimSpanOverride = 0;   // 同上（按调用点声明的**元素跨度**）
+        storage->batch.claimSpanOverride = 0;   // 同上（按调用点声明的元素跨度）
         // F4：每批快照一次全局开关（替代 TryExecuteOneTile 里每 tile 的两次全局载入）。
         storage->batch.tileFast = g_tileFastPath;
         storage->batch.traceOn = g_traceEnabled.load(std::memory_order_relaxed);
@@ -537,8 +537,8 @@ namespace JobSystem
     void ReleaseBatchStorage(BatchStorage* storage) noexcept
     {
         if (!storage) return;
-        // 归还池即**推进代次** —— 此后任何携带旧代次的迟到结算都会被 ChaseLevTaskDone 拒绝。
-        // 必须在 storage 进入缓存/共享池**之前**执行：否则下一个 Acquire 者可能以旧代次开局。
+        // 归还池即推进代次 —— 此后任何携带旧代次的迟到结算都会被 ChaseLevTaskDone 拒绝。
+        // 必须在 storage 进入缓存/共享池之前执行：否则下一个 Acquire 者可能以旧代次开局。
         // 顺序：++generation → destroy_at/placement new（batch 被整体重建，generation 不受影响）。
         storage->generation.fetch_add(1, std::memory_order_release);
         std::destroy_at(&storage->batch);
@@ -587,7 +587,7 @@ namespace JobSystem
     {
         if (!batch || tileIndex >= batch->tileCount) return false;
 
-        // ---- F2（`ENTJOY_TILES_UNIFORM`）：等宽 GeneralRange 的 tile 由 tileIndex **算术推导** ----
+        // ---- F2（`ENTJOY_TILES_UNIFORM`）：等宽 GeneralRange 的 tile 由 tileIndex 算术推导 ----
         // 与填表口径逐位一致：first = i*size，count = min(size, total-first)（末块裁剪）。
         ExecutionTile derivedTile;
         const ExecutionTile* tilePtr;
@@ -632,7 +632,7 @@ namespace JobSystem
             ? CurrentProcessorIndexForDiagnostics() : -1;
         // 无条件记录 firstTileAt（JCC perElem 纯执行口径 + execSpan 诊断共用）。
         // load 快速路径：首个 tile 之后仅 1 次 relaxed load（~1ns/tile），零 MonotonicNowNs 重复调用。
-        // F4：`tileFast` 下已在**认领令牌开头**设过一次（ChaseLevScheduler::ExecuteClaimToken）⇒ 这里整段跳过。
+        // F4：`tileFast` 下已在认领令牌开头设过一次（ChaseLevScheduler::ExecuteClaimToken）⇒ 这里整段跳过。
         if (!batch->tileFast && batch->firstTileAt.load(std::memory_order_relaxed) == 0)
         {
             uint64_t empty = 0;
@@ -701,26 +701,17 @@ namespace JobSystem
         return true;
     }
 
-    // ── 等宽 tile 的**逐 tile 直调**（契约不变：每个 tile 仍恰好一次内核调用）──
-    //
-    // 动机（2026-10-05，doc16 §14）：薄/等宽路（`uniformTileSize != 0`，内批 ≤ 16 的调用点，例如对齐档里
-    // batch=1 的 MarkDead / Flow 各趟）此前每 tile 要付 **4 跳**：
-    //   `executor_`(间接) → `ChaseLevExecuteTile` → `TryExecuteOneTile` → `batch->executeTile`(间接)
-    //   → `GeneralExecuteTile` → `bc->batchFunc`(间接)
-    // 外加逐 tile 的边界检查、等宽派生的乘法、trace/timing/firstTileAt 判据、prefetch 判据。
-    // 实测（同状态、只改同 job 的内批）：MarkDead cs=1 → 1.42–1.60 ms，cs=64 → 0.65–0.67 ms，
-    // Unity（每元素一次 `Execute(i)`，但**内联**）→ 0.586 ms ⇒ 每工作项 ≈0.85 ns 的调度代价就是赤字。
-    //
-    // ⚠ 曾经把连续 tile **融合**成一次调用 ⇒ 被 `JobSystemTests` 的
-    //   `batch=1 must invoke the kernel exactly once per tile` 判为**契约违反**并回退。
-    //   **本函数不改调用次数**，只把上面的链路压成 `bc->batchFunc(...)` 一跳，并跳过
-    //   "诊断未开启时不需要"的逐 tile 判据。
+    // 等宽 tile 的逐 tile 直调（契约不变：每个 tile 仍恰好一次内核调用）。把 `executor_` →
+    // `ChaseLevExecuteTile` → `TryExecuteOneTile` → `batch->executeTile` → `GeneralExecuteTile` →
+    // `bc->batchFunc` 的多跳压成 `bc->batchFunc(...)` 一跳，并跳过诊断未开启时不需要的逐 tile 判据
+    // （边界检查、等宽派生乘法、trace/timing/firstTileAt、prefetch）。
+    // ⚠ 连续 tile 的融合执行会违反"batch=1 每 tile 恰好一次内核调用"契约（JobSystemTests 断言），不可做。
     //
     // 适用条件（任一不满足 ⇒ 返回 0，调用方回退到通用逐 tile 路径，语义/诊断逐位不变）：
     //   · `uniformTileSize != 0`（等宽 GeneralRange ⇒ 派生是纯算术，无越界）
     //   · `context` 是 GeneralBatchContext、`batchFunc` 非空、`perKeyIndex < 0`（per-job 记账关）
     //   · trace 与 timing 诊断均关
-    // 记账与异常协议与通用路径**逐位相同**（组内累计 `run`，异常记录第一个后继续）。
+    // 记账与异常协议与通用路径逐位相同（组内累计 `run`，异常记录第一个后继续）。
     uint32_t TileExecuteUniformRun(BatchState* batch, uint32_t tileIndex, uint32_t runTiles) noexcept
     {
         if (!batch || batch->uniformTileSize == 0 || runTiles == 0) return 0;
@@ -768,17 +759,8 @@ namespace JobSystem
         return done;
     }
 
-    // ── 2026-10-05 记录：**为什么这里没有"等宽 tile 融合执行"**（doc16 §14）──
-    // 曾实现过 `TileExecuteFusedRun`：把一个认领令牌里连续的 `run` 个等宽 tile 合并成**一次**
-    // `executeTile(context, {first, n})`。动机是实测（对齐档、同状态）：MarkDead 在 cs=1 下
-    // 1.42–1.60 ms，同一 job 换成 cs=64 只要 0.65–0.67 ms，而 Unity 在 cs=1 下 0.586 ms
-    // ⇒ 每工作项的调度代价就是它 2.5× 赤字的全部来源。
-    // ⚠ **但融合违反契约**：`JobSystemTests` 明确断言
-    //   `FAIL parallel-for: batch=1 must invoke the kernel exactly once per tile`
-    //   —— 每个 tile 恰好一次内核调用是**已发布的语义**（Unity 也是每元素一次 `Execute(i)`；
-    //   它便宜是因为 `Execute` 被**内联进 worker 的循环**，不是因为它调用得更少）。
-    // ⇒ 融合已**回退**。要吃掉这 0.9 ms/tile，只能**在不改调用次数**的前提下把每次调用变便宜
-    //   （等宽路直接走 `bc->batchFunc`、去掉 `GeneralExecuteTile` 的重复间接与检查），见 doc16 §14.4。
+    // 连续等宽 tile 不做融合执行：每个 tile 恰好一次内核调用是已发布的语义
+    // （`JobSystemTests` 断言 `batch=1 must invoke the kernel exactly once per tile`）。
 
     static void RecordWorkerEntry(BatchState* batch) noexcept
     {        // 诊断计数：relaxed 足够（只记录首/末 worker 进入时刻）。
@@ -1008,9 +990,9 @@ namespace JobSystem
         auto* state = batch->handle;
         const int participantCount = std::max(1, static_cast<int>(batch->workerCount));
 
-        // 下面 4 个计数全部是纯诊断（只被 GetStatsSnapshot/GUI 读取）：只做**一次** relaxed
+        // 下面 4 个计数全部是纯诊断（只被 GetStatsSnapshot/GUI 读取）：只做一次 relaxed
         // 载入后整体旁路。
-        // 注意：紧随其后的 g_backendBatchesOutstanding **不 gate** —— 它是 WaitForBackendBatches
+        // 注意：紧随其后的 g_backendBatchesOutstanding 不 gate —— 它是 WaitForBackendBatches
         // 的等待条件与 ShutdownFinalizeTests 的验收账本，属同步原语。
         const bool stats = StatsEnabled();
         if (stats)
@@ -1128,10 +1110,10 @@ namespace JobSystem
             scheduler->WakePending();
     }
 
-    // N12 `ENTJOY_WAKE_POLL`（默认**开**；`=0` 关闭）：提交侧只在"醒着的 worker 数不够本次派发用"
+    // N12 `ENTJOY_WAKE_POLL`（默认开；`=0` 关闭）：提交侧只在"醒着的 worker 数不够本次派发用"
     // 时才写唤醒字（全协议见 JobSystemInternal.h 的 `WakePollEnabled()` 注释块）。
     // ⚠ 形态依赖：本协议要求"登记人数 ≥ 本次派发需要的 worker 数"。两个入口的 need 分别是
-    //   小 job=1、真并行趟=`tokenCount`；若将来有入口**低报**需求，就会少唤醒（是延迟问题，
+    //   小 job=1、真并行趟=`tokenCount`；若将来有入口低报需求，就会少唤醒（是延迟问题，
     //   不是丢任务：登记者的下一次读注入器必然在 push 之后）。
     bool WakePollEnabled() noexcept
     {
@@ -1238,7 +1220,7 @@ namespace JobSystem
     {        auto* bc = static_cast<GeneralBatchContext*>(ctx);
         const int start = static_cast<int>(tile.firstItem);
         const int count = static_cast<int>(tile.itemCount);
-        // 每-job 分母：**内核调用的真实次数**与**逐次传给内核的元素数**（融合后一次调用可能很多元素）。
+        // 每-job 分母：内核调用的真实次数与逐次传给内核的元素数（融合后一次调用可能很多元素）。
         // 这是"每次调用贵 vs 每元素贵"的那个分母；索引由 Schedule 时解析好，
         // worker 侧不做哈希查找 ⇒ 不会因为碰撞把两个内核混成一行。
         // 与 Schedule 侧的 `elems` 对照可作一致性判据：不等 = tile 漏执行/重复执行。
@@ -1247,7 +1229,7 @@ namespace JobSystem
             const uint32_t pi = static_cast<uint32_t>(bc->perKeyIndex);
             g_perKeyCalls[pi].fetch_add(1, std::memory_order_relaxed);
             g_perKeyElemsCalled[pi].fetch_add(static_cast<uint64_t>(count), std::memory_order_relaxed);
-            // 内核自计时：**每 32 次调用抽 1 次**，把探针自身扰动压到可忽略
+            // 内核自计时：每 32 次调用抽 1 次，把探针自身扰动压到可忽略
             //（否则高频调用的内核会被时钟读取本身明显拖慢）。
             thread_local uint32_t tlCallSeq = 0;
             const bool sample = ((++tlCallSeq & 31u) == 0u);
@@ -1299,7 +1281,7 @@ namespace JobSystem
     }
 
     // ============================================================
-    // 打包提交：K 个无依赖 plain IJob 作为**一个** batch
+    // 打包提交：K 个无依赖 plain IJob 作为一个 batch
     // ============================================================
     // 一次 `SubmitBatch` 只投 O(workers) 个 token，每 token 连续执行 4 个 tile，
     // 每 tile = 一段连续描述符；每 job 只保留"必须可观察"的若干次原子操作。
@@ -1307,20 +1289,20 @@ namespace JobSystem
     // 语义保持（与逐描述符路径逐项对齐）：
     //   - 每个 descriptor 独占一个 HandleState（就是返回给调用方的句柄）：
     //     Complete()/IsCompleted()/异常/诊断 id 仍逐 job 可观察；
-    //   - func 之后**立即**执行该 job 自己的 cleanup（与 Scheduler::FastPath 顺序一致）；
-    //   - 每 job 异常记录到**该 job 自己的** HandleState（native Complete 时重抛；
+    //   - func 之后立即执行该 job 自己的 cleanup（与 Scheduler::FastPath 顺序一致）；
+    //   - 每 job 异常记录到该 job 自己的 HandleState（native Complete 时重抛；
     //     C# 侧仍按 SetCurrentBatchId(id) 归属到该 job 的 batchId，协议未变）；
     //   - 描述符不再有任何顺序/依赖保证之外的语义变化：本路径只接受 dependency == null
     //     （带依赖的描述符由 Exports 回退到逐描述符路径）。
     //
     // 引用账（与逐 job `Scheduler::FastPath` 逐位等价）：
     //   每个 job 一个 HandleState：
-    //     CreateState 的初始引用 = **打包侧在飞引用**（逐 job 路径里由 FastPath 的
+    //     CreateState 的初始引用 = 打包侧在飞引用（逐 job 路径里由 FastPath 的
     //       AcquireState 扮演同一角色）；
     //     发布给调用方的用户引用 = 发布时的一次 `JobHandle::Acquire`（等价 Exports::toHandle）；
     //     job[0] 另有 SubmitBatch 的 `AcquireState(batch->handle)`（退役路径 ReleaseState 平衡）。
     //   ⇒ 每个 job 的在飞引用恰好由 PackedPlainFinishJob 释放一次（无论正常执行还是
-    //     Abort/Shutdown 兜底），用户引用由调用方释放。故本路径**不需要**任何
+    //     Abort/Shutdown 兜底），用户引用由调用方释放。故本路径不需要任何
     //     "0 号 job 特殊处理"，也不存在 Double-Release / 泄漏。
     struct PackedPlainJob
     {
@@ -1328,7 +1310,7 @@ namespace JobSystem
         void* context{ nullptr };
         void (*cleanup)(void*){ nullptr };
         HandleState* state{ nullptr };
-        // 幂等认领：正常由执行该 job 的 worker 置位；batch **未执行就退役**
+        // 幂等认领：正常由执行该 job 的 worker 置位；batch 未执行就退役
         // （AbortUnsubmittedBatch / ForceFinalizeBatch）时由 PackedPlainCleanup 兜底，
         // 保证用户 context 恰好 cleanup 一次、句柄恰好达终态一次、在飞引用恰好释放一次。
         std::atomic<bool> claimed{ false };
@@ -1339,7 +1321,7 @@ namespace JobSystem
         PackedPlainJob* jobs{ nullptr };
         uint32_t count{ 0 };
         // 打包内存由两侧共同"持有"：执行侧（PackedPlainCleanup）与提交侧
-        // （SubmitPackedPlainJobs）。SubmitBatch 可以在**同步 Abort** 时（backend 未运行/
+        // （SubmitPackedPlainJobs）。SubmitBatch 可以在同步 Abort 时（backend 未运行/
         // 无 worker）立刻走到 cleanup，而提交侧此时还要读 jobs[] 把句柄交给调用方
         // ⇒ 谁最后放手谁 delete（各 exactly once），避免 UAF / 双重释放。
         std::atomic<int> pendingOwners{ 2 };
@@ -1387,7 +1369,7 @@ namespace JobSystem
         ReleaseState(state);   // 打包侧在飞引用（= CreateState 的初始引用）
     }
 
-    // 打包批次的 batch->cleanup：兜底完成**未执行**的 job（Abort / Shutdown 强制退役），
+    // 打包批次的 batch->cleanup：兜底完成未执行的 job（Abort / Shutdown 强制退役），
     // 然后交还执行侧对打包内存的持有。
     static void PackedPlainCleanup(void* raw) noexcept
     {
@@ -1512,7 +1494,7 @@ namespace JobSystem
                 pack->jobs[0].state->diagnosticBatchId.load(std::memory_order_relaxed);
             PushTraceEvent(TraceEventType::Publish, batch->diagnosticId, -1, 0, 0);
 
-            // 必须在 SubmitBatch **之前**发布用户引用：SubmitBatch 可能在同步 Abort 路径里
+            // 必须在 SubmitBatch 之前发布用户引用：SubmitBatch 可能在同步 Abort 路径里
             // 立刻走到 PackedPlainCleanup 并释放打包侧在飞引用（此时若还没发布，state 会被
             // 回收到池里 → 调用方拿到悬垂指针）。
             for (int i = 0; i < count; ++i)
@@ -1637,7 +1619,7 @@ namespace JobSystem
             // ---- JobCostCache：batch 退役时更新 per-job 每元素成本 EWMA ----
             // 安全：finalized.exchange 保证本块单线程；读取均在 ReleaseBatch 之前
             // （无 use-after-free）；flag 默认关闭 → 零热路径开销。
-            // F6（`ENTJOY_CLAIM_ADAPT`）的决策完全用 `GetPerElemCost(funcHash)`：它只**读**这里
+            // F6（`ENTJOY_CLAIM_ADAPT`）的决策完全用 `GetPerElemCost(funcHash)`：它只读这里
             // 学到的 perElem，自己不写入、不参与本块的入口条件。
             const bool jccLearn = g_jobCostCacheEnabled.load(std::memory_order_relaxed) != 0;
             if (jccLearn && batch->funcHash != 0 && batch->totalElements > 0)
@@ -1677,7 +1659,7 @@ namespace JobSystem
                             batch->funcHash, batch->tileCount, batch->totalElements,
                             totalNs / 1000.0, perElemNs, targetCoarse ? 1 : 0);
                     // ── 估算器精度诊断（由 `ENTJOY_JCC_VERBOSE=1` 开启，采样打印防刷屏）──
-                    //   measuredNs   = wcNow × 执行窗口 = 本批的**等效聚合 CPU 时长**
+                    //   measuredNs   = wcNow × 执行窗口 = 本批的等效聚合 CPU 时长
                     //   estNs        = 学习到的 perElem×N + perTile×tiles（估算器实际用的两个量）
                     //   idealWorkers = ceil(measuredNs / 150µs) —— 按实测该唤醒几个才够
                     //   estWorkers   = ceil(estNs / 150µs)     —— 按估算实际会唤醒几个
@@ -1725,11 +1707,11 @@ namespace JobSystem
     // ChaseLev 任务完成回调：每个范围任务执行完后 pendingTasks--，
     // 归零时触发双条件退役检查（可能本线程就是最后一个完成者）。
     //
-    // **代次校验**：`batchGen` = 令牌创建时从 `batch->storage->generation` 抄下的值；若该 storage
+    // 代次校验：`batchGen` = 令牌创建时从 `batch->storage->generation` 抄下的值；若该 storage
     // 已被回收复用，其 generation 已前进（`ReleaseBatchStorage` 里 ++），于是这里的比对失败 ⇒
-    // 本次结算属于**上一代**、对象已换人 ⇒ 直接丢弃：不 `fetch_sub`、不进
+    // 本次结算属于上一代、对象已换人 ⇒ 直接丢弃：不 `fetch_sub`、不进
     // `TryFinalizeChaseLevBatch`、不动 `g_backendBatchesOutstanding`（否则会减坏新一代的
-    // `pendingTasks`）。注意：这里只守**结算**侧；"迟到令牌执行 tile"需要更早的先验违反才可能
+    // `pendingTasks`）。注意：这里只守结算侧；"迟到令牌执行 tile"需要更早的先验违反才可能
     //（双条件退役要求 pendingTasks==0 才释放），本项不改变执行侧行为。
     void ChaseLevTaskDone(BatchState* batch, uint32_t batchGen) noexcept
     {

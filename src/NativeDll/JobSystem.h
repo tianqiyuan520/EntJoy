@@ -65,7 +65,7 @@ namespace JobSystem {
         // 故 exception_ptr 用独立于依赖锁的互斥体保护。
         std::mutex exceptionMutex;
 
-        // batchExceptionPtr 的**无锁可读影子标志**：回收路径（每 job 一次）据此跳过 exceptionMutex
+        // batchExceptionPtr 的无锁可读影子标志：回收路径（每 job 一次）据此跳过 exceptionMutex
         //（绝大多数 job 没有异常）。写入方在 exceptionMutex 内以 release 发布，回收方在 refCount
         // 归零（acquire 语义）后读取，故不会漏。
         // 追加在结构体尾部：C# HandleStateView 只读前 8 字节，布局前缀不变。
@@ -170,11 +170,8 @@ namespace JobSystem {
         uint64_t scheduleModeDeferredPublish;
         uint64_t scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
-        // 2026-10-04：原先此处有一块**死字段**（`directAssistClaims` / `exhaustedTickets` /
-        //   `scheduleToPublishEwmaNs` / `publishToFirstMainClaimEwmaNs` / `publishToFirstWorkerClaimEwmaNs` /
-        //   `queueLockWaitEwmaNs` —— 全仓只有"赋 0"、无任何自增），已**两侧同步删除**
-        //   （EntJoy + Unity port），并把 ABI 升到 **3**（`JobSystem_GetAbiVersion`），
-        //   使旧二进制在加载期被拒绝，而不是按错位偏移静默读错。
+        // ABI = 3（`JobSystem_GetAbiVersion`）：旧二进制在加载期被拒绝，而不是按错位偏移静默读错。
+        // 本结构体必须与 C# / Unity 侧 port 同序同步。
         uint64_t publishToCompletionEwmaNs;       // GetStatsSnapshot 载入并参与打印
         uint64_t perRangeExecEwmaNs;
         uint64_t assistExecPctEwma;
@@ -248,7 +245,7 @@ namespace JobSystem {
 
     void GetStatsSnapshot(JobSystemStatsSnapshot* stats) noexcept;
     void ResetStatsSnapshot() noexcept;
-    // 热重载用：等所有已提交批**跑完并物理退役**，但**不关 worker**。
+    // 热重载用：等所有已提交批跑完并物理退役，但不关 worker。
     // 语义 = ResetStatsSnapshot 读统计前用的同一段（ConsumeLongBatchBarriers + WaitForBackendBatches）。
     // ⚠ 与 Scheduler::Shutdown() 的区别：Shutdown 是终态（停 worker），DrainAll 之后系统仍可继续派发。
     void DrainAll() noexcept;
@@ -268,7 +265,7 @@ namespace JobSystem {
             void (*cleanup)(void*) = nullptr,
             const JobHandle& dependency = {});
 
-        // `claimGeom` = **调用点在调度时声明的认领几何**
+        // `claimGeom` = 调用点在调度时声明的认领几何
         //   0 = Auto（默认；走批表/F6，最终 Adjacent）、1 = Spread（每 worker 独占连续段 + 空手尾部窃取）、
         //   2 = Adjacent（共享游标发相邻窗口）。数值与 C# 的 `EntJoy.JobSystem.ClaimPolicy` 一致。
         //   优先级：批表第四字段（显式声明）> 本参数 > F6 学习 > 不切片。缺省 0 ⇒ 逐位不变。

@@ -18,8 +18,7 @@ namespace EntJoy.ECS
     /// 两种存储模式，按是否指定 <see cref="MaxSlots"/> 路由：
     /// - <c>[MultiRelation]</c>（MaxSlots = 0，默认）：托管列表（RelationListStore），无界、主线程、不进 Job（NT017 拦截）。
     /// - <c>[MultiRelation(MaxSlots = N)]</c>（N ≥ 2）：定长多槽列（chunk 列，宽 N×8B），有界、Job 可读
-    ///   （IJobEntity/IJobChunk 直接访问，同单值关系列）。要求类型是 partial struct 且首字段为 RelationSlot Target，
-    ///   源生成器注入 Slot1..SlotN-1 字段。
+    /// 源生成器注入 Slot1..SlotN-1 字段。
     ///
     /// 两种模式共用反向索引（RelationIndex，target → sources O(1)）。
     /// </summary>

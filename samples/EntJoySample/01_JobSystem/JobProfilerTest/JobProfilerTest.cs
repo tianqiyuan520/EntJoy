@@ -5,7 +5,7 @@
 //using System.Linq;
 //using System.Threading;
 
-//// ===================== 测试用 Job 定义 =====================
+//// 测试用 Job 定义
 
 //public struct HeavyCalcJob : IJob
 //{
@@ -77,7 +77,7 @@
 //    }
 //}
 
-//// ===================== 测试入口 =====================
+//// 测试入口
 
 //public class JobProfilerTest
 //{
@@ -148,7 +148,7 @@
 //        }
 //    }
 
-//    // ======================= 测试 1: IJob =======================
+//    // 测试 1: IJob
 //    private static void Test1_IJob()
 //    {
 //        Console.WriteLine("--- [测试 1] IJob（单次执行，500万次迭代）---");
@@ -172,7 +172,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 2: IJobFor =======================
+//    // 测试 2: IJobFor
 //    private static void Test2_IJobFor()
 //    {
 //        Console.WriteLine("--- [测试 2] IJobFor（串行循环，10万次）---");
@@ -193,7 +193,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 3: 向量加法 =======================
+//    // 测试 3: 向量加法
 //    private static void Test3_VectorAdd()
 //    {
 //        Console.WriteLine("--- [测试 3] VectorAdd 轻量并行（500万元素）---");
@@ -218,7 +218,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 4: 重计算 =======================
+//    // 测试 4: 重计算
 //    private static void Test4_HeavyCalc()
 //    {
 //        Console.WriteLine("--- [测试 4] 计算密集型并行（100万元素）---");
@@ -258,7 +258,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 5: Batch =======================
+//    // 测试 5: Batch
 //    private static void Test5_Batch()
 //    {
 //        Console.WriteLine("--- [测试 5] IJobParallelForBatch 批量处理（100万元素）---");
@@ -283,7 +283,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 6: 混合 =======================
+//    // 测试 6: 混合
 //    private static void Test6_Mixed()
 //    {
 //        Console.WriteLine("--- [测试 6] 多 Job 混合调度（3个 MixedLightJob 同时执行）---");
@@ -315,7 +315,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 7: 开销 =======================
+//    // 测试 7: 开销
 //    private static void Test7_Overhead()
 //    {
 //        Console.WriteLine("--- [测试 7] Profiler 性能开销 ---");
@@ -352,7 +352,7 @@
 //        Console.WriteLine();
 //    }
 
-//    // ======================= 测试 8: 聚合 =======================
+//    // 测试 8: 聚合
 //    private static void Test8_Aggregation()
 //    {
 //        Console.WriteLine("--- [测试 8] 聚合统计演示 ---");
@@ -421,7 +421,7 @@
 //        Console.WriteLine($"  聚合总耗时: {totalMs:F3} ms");
 //    }
 
-//    // ======================= 辅助输出 =======================
+//    // 辅助输出
 
 //    private static void DumpFrame()
 //    {

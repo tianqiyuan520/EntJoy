@@ -14,7 +14,7 @@ using EntJoy.ECS;
 //        //Console.WriteLine("EntJoySample - 100w 实体位移性能测试");
 //        //Console.WriteLine("=====================================\n");
 
-//        //// ========= 测试 1: NativeArray 传统基准（1000次连续求平均） =========
+//        //// 测试 1: NativeArray 传统基准（1000次连续求平均）
 //        //Console.WriteLine("【测试 1】NativeArray 模拟实体位移（1000次迭代求平均）");
 //        //Console.WriteLine("------------------------------");
 //        //var nativeTest = new MoveEntitiesTest();
@@ -29,7 +29,7 @@ using EntJoy.ECS;
 
 //        //Console.WriteLine();
 
-//        //// ========= 测试 2: ECS 传统基准（1000次连续求平均） =========
+//        //// 测试 2: ECS 传统基准（1000次连续求平均）
 //        //Console.WriteLine("【测试 2】ECS World + IJobChunk（1000次迭代求平均）");
 //        //Console.WriteLine("------------------------------");
 //        //var ecsTest = new EcsMoveTest();
@@ -44,14 +44,14 @@ using EntJoy.ECS;
 
 //        //Console.WriteLine();
 
-//        // ========= 测试 3: ISPC Job 正确性专项测试 =========
+//        // 测试 3: ISPC Job 正确性专项测试
 //        //Console.WriteLine("【测试 3】ISPC Job 正确性专项测试");
 //        //Console.WriteLine("------------------------------");
 //        //IspcJobTest.Run();
 
 //        //Console.WriteLine();
 
-//        // ========= 测试 4: NativeArray 帧循环测试（100帧 × 16ms间隔） =========
+//        // 测试 4: NativeArray 帧循环测试（100帧 × 16ms间隔）
 //        Console.WriteLine("【测试 4】NativeArray 帧循环风格（100帧 × 16ms间隔）");
 //        Console.WriteLine("------------------------------");
 //        var nativeFrameTest = new MoveEntitiesFrameTest();
@@ -66,7 +66,7 @@ using EntJoy.ECS;
 
 //        //Console.WriteLine();
 
-//        //// ========= 测试 4: ECS 帧循环测试（100帧 × 16ms间隔） =========
+//        //// 测试 4: ECS 帧循环测试（100帧 × 16ms间隔）
 //        //Console.WriteLine("【测试 4】ECS 帧循环风格（100帧 × 16ms间隔）");
 //        //Console.WriteLine("------------------------------");
 //        //var ecsFrameTest = new EcsMoveFrameTest();
@@ -79,7 +79,7 @@ using EntJoy.ECS;
 //        //    ecsFrameTest.Dispose();
 //        //}
 
-//        //// ========= ISPC 帧循环独立验证 =========
+//        //// ISPC 帧循环独立验证
 //        //Console.WriteLine("\n【测试 5】ISPC 帧循环独立验证（10 帧，每帧对比）");
 //        //Console.WriteLine("------------------------------");
 //        //IspcFrameValidator.Run();

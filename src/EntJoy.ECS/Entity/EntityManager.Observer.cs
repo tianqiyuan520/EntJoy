@@ -21,7 +21,7 @@ namespace EntJoy.ECS
 
         internal static int ObserverDepth => s_observerDepth;
 
-        // ======================== 注册 API ========================
+        // 注册 API
 
         /// <summary>
         /// 注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。
@@ -100,7 +100,7 @@ namespace EntJoy.ECS
             return false;
         }
 
-        // ======================== 派发工具（批量，锁外调用） ========================
+        // 派发工具（批量，锁外调用）
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal bool HasObservers(int typeId)

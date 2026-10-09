@@ -9,12 +9,7 @@ namespace NativeTranspiler.Analyzer
 {
     public static class CppGenerator
     {
-        private static readonly HashSet<string> SkipIncludeTypeNames = new()
-        {
-            "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility",
-            "EntJoy.Hint"
-        };
+        // 不参与发射的类型见 NativeApiSurface.SkipsEmission。
 
         public static string GetCppFunctionName(IMethodSymbol method)
         {
@@ -79,14 +74,8 @@ namespace NativeTranspiler.Analyzer
         }
 
     /// <summary>
-    /// 助手（非入口）的**头内联**发射：函数体直接进 .h 并标 `static __forceinline`，不再发 dllexport 独立 TU。
-    /// 动机（实测，见 `docs/gridsearch/07 §7x(j)(h)`）：助手原为 `EXTERNC __declspec(dllexport)`，
-    /// clang 对 dllexport 函数**不内联**（单 TU 也不行——反汇编实测 7 处 `callq`）；仅加 `static inline` 只解决了其中一部分。
-    /// 2026-09-29 复测（8 物理核、A 侧逐对交替、哈希自证、12 对）：仅 `static inline` 时
-    /// `MeleeSimJob_Execute_Batch` 仍有 **6 处 `callq`**（`BuildSingleOrcaLine`×1、`FlowGoalDirection`×2、
-    /// `ProjectLineConstraints`×2、`__security_check_cookie`×1），其中一个 13 参数大函数与两个 Orca 子助手未被内联；
-    /// 改为 `static __forceinline` 后 **`callq` 6→0**，实测 **Melee 12/12 同号、中位 −3.43 ms（−2.6%）；
-    /// 整步 10/12、中位 −3.13 ms（−1.8%）** ⇒ 达标并落地。**不依赖 LTO、不改调用方**。
+    /// 助手（非入口）的头内联发射：函数体直接进 .h 并标 `static __forceinline`，不再发 dllexport 独立 TU。
+    /// 动机（实测，见 ` x(j)(h)`）：助手原为 `EXTERNC __declspec(dllexport)`，
     /// 入口方法（`[NativeTranspile]` 标记的）仍走 `GenerateHeader`/`GenerateImplementation`（dllexport）。
     /// </summary>
     public static string GenerateInlineHelperHeader(IMethodSymbol method, Compilation compilation,
@@ -338,9 +327,9 @@ namespace NativeTranspiler.Analyzer
                         : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(new SyntaxList<StatementSyntax>(innerFor.Statement));
                     if (PickBestVectorVar(new List<string>{outerVar,iVar}, ibody, nap) == iVar)
                     {
-                        // ★ NT-09：只有**证明得了**"内层体恰好把单个 NativeArray 的原始元素
+                        // NT-09：只有证明得了"内层体恰好把单个 NativeArray 的原始元素
                         //   min/max 到累加量、累加量初值恰为单位元、随后写回 ra[outerVar]"时才向量化。
-                        //   旧实现只要体内出现第一个 `if (x < y)` 就凭空合成"对体内每个数组读的
+                        //   只要体内出现第一个 `if (x < y)` 就凭空合成"对体内每个数组读的
                         //   原始元素做 min/max"，体内真正的计算（closest-point 的 d = f(arr[i])、
                         //   argmin 写回…）被整段丢弃 ⇒ 静默错值。证明不了就老实退标量。
                         if (TryProveRowRawReduction(forStmt.Statement, innerFor, ibody, outerVar, iVar,
@@ -382,17 +371,11 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("            " + line.TrimEnd());
             sb.AppendLine("        __simd_exit: ; } }");
             sb.AppendLine();
-            // ★ 余数（n % NSIMD_WIDTH）循环体必须走**真正的指针转译器**。
-            //   旧实现把 C# 源文本 `stmt.GetText()` 过一张 9 条手写替换表（数组名、MathF.*、float.MaxValue）
-            //   就直接交付 ⇒ 真转译器修过的语义原样复活：
-            //     · C# `1UL` 是 64 位，C++（Windows/LLP64）的 `unsigned long` 是 32 位
-            //       ⇒ `m_ptr[i] |= 1UL << (i & 63)` 位移量 ≥32 = UB（clang 折叠成 &31）⇒ 尾部掩码静默错值
-            //       （正是文档 §8.1 记为已修的缺陷）；
-            //     · 其它 C#-only 构造（`MathF.Max(`、switch 表达式…）被**原样**漏进 C++。
-            //   转译器自带数组字段→`_ptr`、MathF.*→`::fmaxf`、字面量后缀归一化（1UL→1ULL）等映射，
+            // 余数（n % NSIMD_WIDTH）循环体必须走真正的指针转译器。
+            //   若把 C# 源文本 `stmt.GetText()` 过一张 9 条手写替换表（数组名、MathF.*、float.MaxValue）
             //   手写表因此删除；循环头仍然只在这里重写（区分 vec/tail 两段）。
             var tailTranslator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
-            // ⚠ 用**原语法树里**的节点：`ib` 在"循环体不是 Block"时是 SyntaxFactory 造的脱离树节点，
+            // ⚠ 用原语法树里的节点：`ib` 在"循环体不是 Block"时是 SyntaxFactory 造的脱离树节点，
             //   喂给语义模型会抛 ArgumentException（NT026）⇒ 单条语句走 TranslateSingleStatement。
             string tailCode = forStmt.Statement is BlockSyntax tailBlock
                 ? tailTranslator.Translate(tailBlock)
@@ -407,22 +390,22 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// ★ NT-09：证明内层循环体**恰好**是"把某个 NativeArray 的原始元素按 min/max 归约到累加量"。
+        /// NT-09：证明内层循环体恰好是"把某个 NativeArray 的原始元素按 min/max 归约到累加量"。
         ///
         /// 成立的全部条件（缺一不可；发射器会硬编码单位元初值、按 <c>base = ov * il</c> 寻址、
         /// 只写一条 <c>ra_ptr[ov] = h</c>，所以这些都必须被证明）：
         /// <list type="number">
-        /// <item>内层体是**一条**无 else 的 <c>if</c>；</item>
-        /// <item>体内**读**到的 NativeArray 恰好一个；</item>
+        /// <item>内层体是一条无 else 的 <c>if</c>；</item>
+        /// <item>体内读到的 NativeArray 恰好一个；</item>
         /// <item>条件的一侧是<b>该数组的原始元素</b> <c>arr[ov * il + iv]</c>（规范行下标），
-        ///       另一侧是普通标识符（累加量）；</item>
-        /// <item>then 分支是**单条** <c>acc = arr[同一元素]</c>（只更新累加量，无其它副作用）；</item>
-        /// <item>累加量是外层体内、内层循环**之前**声明的局部量，且初值恰为发射器硬编码的单位元
-        ///       （否则用 FLT_MAX 顶替用户初值会改语义）；</item>
+        /// 另一侧是普通标识符（累加量）；</item>
+        /// <item>then 分支是单条 <c>acc = arr[同一元素]</c>（只更新累加量，无其它副作用）；</item>
+        /// <item>累加量是外层体内、内层循环之前声明的局部量，且初值恰为发射器硬编码的单位元
+        /// （否则用 FLT_MAX 顶替用户初值会改语义）；</item>
         /// <item>外层体（内层循环之外）恰好一条 NativeArray 元素写入 <c>ra[outerVar] = acc</c>。</item>
         /// </list>
         /// 任一条不成立即返回 false —— 调用点必须退 <c>FallbackScalarTranslation</c>，
-        /// **绝不**从"比较扫描"合成归约。
+        /// 绝不从"比较扫描"合成归约。
         /// </summary>
         private static bool TryProveRowRawReduction(
             StatementSyntax outerBodyStmt, ForStatementSyntax innerFor, BlockSyntax ibody,
@@ -548,7 +531,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(string.Format("    for (int {0} = 0; {0} < {1}; {0}++) {{", ov, ol));
             sb.AppendLine(string.Format("        n_float v_best = n_set1_ps({0});", initVal));
             sb.AppendLine(string.Format("        int base = {0} * {1};", ov, il));
-            // ★ Align the SIMD loop bound to NSIMD_WIDTH — otherwise the last
+            // Align the SIMD loop bound to NSIMD_WIDTH — otherwise the last
             //   n_load_ps reads past the row end (il is often not a multiple of
             //   NSIMD_WIDTH), producing garbage min/max or OOB memory access.
             sb.AppendLine(string.Format("        int __aligned = ({0} / NSIMD_WIDTH) * NSIMD_WIDTH;", il));
@@ -562,7 +545,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("        float h = lane[0];");
             sb.AppendLine("        for (int i = 1; i < NSIMD_WIDTH; i++)");
             sb.AppendLine(string.Format("            if (lane[i] {0} h) h = lane[i];", cmpOp));
-            // ★ Tail: reduce the remaining [__aligned, il) elements scalar
+            // Tail: reduce the remaining [__aligned, il) elements scalar
             sb.AppendLine(string.Format("        for (int {0} = __aligned; {0} < {1}; {0}++) {{", iv, il));
             string cast = elemType == "int" ? "(float)" : "";
             sb.AppendLine(string.Format("            float __v_{0} = {1}_ptr[base + {2}];", arr, arr, iv));
@@ -611,7 +594,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (p.Type is IPointerTypeSymbol)
                 {
-                    // ★ 修改：不再添加多余的 *，MapCSharpTypeToCpp 已返回带 * 的类型
+                    // 修改：不再添加多余的 *，MapCSharpTypeToCpp 已返回带 * 的类型
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
                     parameters.Add($"{cppType} {p.Name}_ptr");
                 }
@@ -623,7 +606,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    // ★ 按值参数默认按值传递。C# 的值参数语义就是副本，
+                    // 按值参数默认按值传递。C# 的值参数语义就是副本，
                     // 旧实现（T* ptr + T& x = *ptr）实为引用语义，既不符合 C# 语义，
                     // 又要求调用点提供左值 —— 字面量/临时量（&0、&false、&(a-b)）直接编译失败。
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
@@ -643,8 +626,8 @@ namespace NativeTranspiler.Analyzer
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
             if (methodSyntax == null) return calledMethods;
 
-            // ⚠ 块体与**表达式体**都要走：表达式体（`=> BinKey(...)`）没有 Body，
-            //   旧实现直接 return ⇒ 依赖不被收集 ⇒ 该助手的头内联版缺 `#include "<dep>.h"`
+            // ⚠ 块体与表达式体都要走：表达式体（`=> BinKey(...)`）没有 Body，
+            //   直接 return ⇒ 依赖不被收集 ⇒ 该助手的头内联版缺 `#include "<dep>.h"`
             //   （实测报 `use of undeclared identifier 'SharpNative_..._BinKey'`）。
             IEnumerable<SyntaxNode> roots;
             if (methodSyntax.Body != null) roots = new SyntaxNode[] { methodSyntax.Body };
@@ -658,7 +641,7 @@ namespace NativeTranspiler.Analyzer
                 if (symbolInfo.Symbol is IMethodSymbol calledMethod && calledMethod.IsStatic)
                 {
                     var containingTypeFullName = calledMethod.ContainingType?.ToDisplayString();
-                    if (containingTypeFullName != null && SkipIncludeTypeNames.Contains(containingTypeFullName)) continue;
+                    if (NativeApiSurface.SkipsEmission(containingTypeFullName)) continue;
                     if (SymbolEqualityComparer.Default.Equals(calledMethod.ContainingAssembly, compilation.Assembly))
                         calledMethods.Add(calledMethod);
                 }

@@ -86,7 +86,7 @@ namespace EntJoy.JobSystem.Managed
         internal int _autoReturn;      // 1=此 job 完成后由调度器自动归还（依赖链中间 handle，防泄漏）；一律经 Volatile.Read/Write 访问
         internal Exception _exception; // 首个 job 异常（first-wins），供异常传播；Reset 时清空
         internal nint HostCtx;         // 此 job 的并行冲突检测执行上下文（Managed 侧由 ManagedJobScheduler.NextCtx 每次调度分配，0=未设置）。Signal 归零时释放其写/读声明。
-        internal int _declReleased;    // 1=读声明已释放。Remaining 归零发生在释放**之前**，故"已完成"必须等它置位：否则主线程 Complete() 立即返回、紧接着访问容器会被读者护栏误拦。
+        internal int _declReleased;    // 1=读声明已释放。Remaining 归零发生在释放之前，故"已完成"必须等它置位：否则主线程 Complete() 立即返回、紧接着访问容器会被读者护栏误拦。
 
         internal ManagedCompletion()
         {

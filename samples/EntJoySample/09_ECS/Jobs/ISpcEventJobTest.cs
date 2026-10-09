@@ -4,7 +4,7 @@ using EntJoy.ECS.JobSystem;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using NativeTranspiler;
-using static EntJoy.ECS.EventBus;
+using static EntJoy.ECS.SystemAPI;
 
 namespace EntJoySample.ECS
 {
@@ -80,7 +80,7 @@ namespace EntJoySample.ECS
             }
         }
 
-        /// <summary>带 float2 字段的事件（验证 SendEvent 嵌套带参构造 new float2(x,y) 翻译，2026-08-30 Fix 2）。</summary>
+        /// <summary>带 float2 字段的事件（验证 SendEvent 嵌套带参构造 new float2(x,y) 翻译，）。</summary>
         public struct Float2Signal
         {
             public Entity Target;
@@ -351,7 +351,7 @@ namespace EntJoySample.ECS
             Console.WriteLine();
         }
 
-        /// <summary>测试 6：float2 带参构造事件（Fix 2 覆盖：new float2(x,y) 嵌套写 → make_float2）。</summary>
+        /// <summary>测试 6：float2 带参构造事件（覆盖：new float2(x,y) 嵌套写 → make_float2）。</summary>
         private static void TestFloat2ArgEvent()
         {
             Console.WriteLine("--- Test 6: float2 arg-constructor event (Fix 2: new float2(x,y) nested write) ---");

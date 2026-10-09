@@ -3,14 +3,14 @@ namespace NativeTranspiler.Analyzer.Common
     /// <summary>
     /// 生成器"静默降级"标记。
     ///
-    /// 生成器遇到无法转译的构造时，**必须**把标记写进产物（而不是静默丢弃语句/返回 0）：
+    /// 生成器遇到无法转译的构造时，必须把标记写进产物（而不是静默丢弃语句/返回 0）：
     /// NativeTranspiler.Tasks 的 NativeCompileTask 扫描产物里的 <see cref="Prefix"/> 前缀，
     /// 命中即让构建失败 —— 把问题挡在"编译通过但算错"之前。
     ///
     /// 历史教训（两处真实事故，都是"编译通过但算错"）：
-    ///   1. `unchecked { ... }` 语句块不转译 → 生成**空函数体**（非 void 函数无 return = C++ UB，
-    ///      调用时随机访问违例）；
-    ///   2. `histPtr[key]++` 被翻成 `/* unsupported expr */ 0;` → 写入丢失且无任何提示。
+    /// 1. `unchecked { ... }` 语句块不转译 → 生成空函数体（非 void 函数无 return = C++ UB，
+    /// 调用时随机访问违例）；
+    /// 2. `histPtr[key]++` 被翻成 `/* unsupported expr */ 0;` → 写入丢失且无任何提示。
     ///
     /// 新增"跳过某个构造"的分支时，请一律写标记并让构建期扫描拦下它。
     /// </summary>

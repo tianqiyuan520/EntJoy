@@ -84,7 +84,7 @@ namespace EntJoy.ECS.SourceGenerator
 
         /// <summary>
         /// 递归收集叶子字段（内置类型 / enum；嵌套 struct 展开）。
-        /// 只往 <paramref name="entries"/> 写**叶子字段**（`Generate` 会把它发成 `ComponentFieldMeta[]`）。
+        /// 只往 <paramref name="entries"/> 写叶子字段（`Generate` 会把它发成 `ComponentFieldMeta[]`）。
         /// </summary>
         private static void CollectFields(ITypeSymbol type, string prefix, List<FieldEntry> entries)
         {
@@ -133,8 +133,8 @@ namespace EntJoy.ECS.SourceGenerator
 
         /// <summary>
         /// FNV-1a 64 位。输入 = 类型全名 + 按序的 `字段路径:类型关键字:Kind`。
-        /// 这是**变化检测器**（回答"两次构建之间字段布局变了没有"），不追求等价于 CLR 的 offset/size，
-        /// 也**看不见** `Pack`/`FieldOffset`/`fixed`/私有字段的变化（已知取舍）。
+        /// 这是变化检测器（回答"两次构建之间字段布局变了没有"），不追求等价于 CLR 的 offset/size，
+        /// 也看不见 `Pack`/`FieldOffset`/`fixed`/私有字段的变化（已知取舍）。
         /// </summary>
         private static ulong ComputeLayoutHash(string fullName, List<FieldEntry> entries)
         {
@@ -260,7 +260,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine($"            TypeName = \"{typeSymbol.Name}\",");
             sb.AppendLine($"            Size = Unsafe.SizeOf<{fullName}>(),");
             sb.AppendLine("            Fields = fields,");
-            // 布局指纹（**生成期**算好的字面量；不参与运行时哈希 ⇒ 零成本、无分歧）。
+            // 布局指纹（生成期算好的字面量；不参与运行时哈希 ⇒ 零成本、无分歧）。
             sb.AppendLine($"            LayoutHash = 0x{layoutHash:X16}UL,");
             sb.AppendLine($"            LayoutTypeName = \"{fullName}\",");
             sb.AppendLine("        };");

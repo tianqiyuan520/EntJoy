@@ -73,7 +73,6 @@ namespace NativeTranspiler.Analyzer
                 SpecialType.System_UIntPtr => 8,
                 // 容器（NativeArray/NativeList/UnsafeList）不再硬编码，改为按真实字段布局递归推导，
                 // 与运行时编译配置自动保持一致（Unity/Burst 的做法）：
-                //   Release（无 sentinel）：NativeArray=32，NativeList=24，UnsafeList=20
                 //   Debug  （#if DEBUG sentinel 存在）：NativeArray=40，NativeList=32，UnsafeList=20
                 _ => type is INamedTypeSymbol namedType && namedType.IsValueType
                     ? GetStructSizeRecursive(namedType) : 4 // 默认

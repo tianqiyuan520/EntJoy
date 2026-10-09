@@ -26,7 +26,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// IJobParallelForBatch：`Execute(int startIndex, int count)`，每批一次调用（不再逐 index 循环）。
-        /// 与 IJobParallelFor 的区别只在**调度粒度**，C++ 侧同一份 `..._Batch` 函数即可承载。
+        /// 与 IJobParallelFor 的区别只在调度粒度，C++ 侧同一份 `..._Batch` 函数即可承载。
         /// </summary>
         public static bool IsParallelForBatchJob(INamedTypeSymbol jobStruct) =>
             jobStruct.AllInterfaces.Any(i => SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch));
@@ -105,7 +105,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 2026-10-02（09 §26）：`IJobFor` 专用的 **index 形** adapter 名
+        /// `IJobFor` 专用的 index 形 adapter 名
         ///（`void(void* context, int index)`，对应原生 `IndexJobFunc`）。
         /// 复用批形 adapter 的命名规则（`<base>_Adapter`）再加 `_Index` 后缀，避免两处各自拼名。
         /// </summary>

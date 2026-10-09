@@ -26,9 +26,9 @@
 //    /// </summary>
 //    public static class HintLikelyBenchmark
 //    {
-//        // ============================================================
+//        //
 //        //  Heavy — large loop body that stresses µop cache
-//        // ============================================================
+//        //
 
 //        /// <summary>99.9% bias, heavy hot path, NO hint (baseline).</summary>
 //        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
@@ -42,7 +42,7 @@
 //                int v = rng & 0x3FF;          // 0-1023
 //                if (v < 1023)                  // 99.9% true — only 1 in 1024 hits else
 //                {
-//                    // --- Hot path: particle-like transform (~30-40 ops) ---
+//                    // Hot path: particle-like transform (~30-40 ops)
 //                    int a = rng & 0xFF;
 //                    int b = (rng >> 8) & 0xFF;
 //                    int c = (rng >> 16) & 0xFF;
@@ -63,7 +63,7 @@
 //                }
 //                else
 //                {
-//                    // --- Cold path: heavy recovery math (~40-50 ops, large code) ---
+//                    // Cold path: heavy recovery math (~40-50 ops, large code)
 //                    int a = rng & 0xFF;
 //                    int b = (rng >> 8) & 0xFF;
 //                    int c = (rng >> 16) & 0xFF;
@@ -200,9 +200,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  Pure C# reference (no transpilation)
-//        // ============================================================
+//        //
 
 //        [MethodImpl(MethodImplOptions.NoInlining)]
 //        public static int PureCSharpHeavyBaseline(int count)
@@ -258,9 +258,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  Benchmark runner
-//        // ============================================================
+//        //
 
 //        private const int Iterations = 10;
 //        private const int HeavyCount = 50_000_000;   // 50M — heavy body, fewer iters
@@ -270,7 +270,7 @@
 //        {
 //            Console.WriteLine("\n=== Hint.Likely Performance Benchmark ===\n");
 
-//            // --- Correctness check ---
+//            // Correctness check
 //            Console.WriteLine("Correctness verification (all must match):");
 //            int expected = PureCSharpHeavyBaseline(WarmupCount);
 //            int rNoHint = 0, rLikely = 0, rWrongHint = 0;
@@ -296,7 +296,7 @@
 //            Debug.Assert(rNoHint == rLikely && rLikely == rWrongHint && rWrongHint == expected,
 //                "All versions must produce identical results!");
 
-//            // --- Warmup ---
+//            // Warmup
 //            Console.WriteLine($"\nWarmup ({WarmupCount:N0} iterations each)...");
 //            NativeTranspiler.Bindings.NativeExports.HeavyNoHint(WarmupCount);
 //            NativeTranspiler.Bindings.NativeExports.HeavyLikely(WarmupCount);
@@ -304,7 +304,7 @@
 //            PureCSharpHeavyBaseline(WarmupCount);
 //            Console.WriteLine("  Done.");
 
-//            // --- Heavy benchmark (large loop body, µop cache stress) ---
+//            // Heavy benchmark (large loop body, µop cache stress)
 //            Console.WriteLine($"\n--- Heavy loop body ({HeavyCount:N0} iters, {Iterations} runs) ---\n");
 //            Console.WriteLine($"{"Run",-5} {"Pure C#",-12} {"NoHint",-12} {"Likely",-12} {"WrongHint",-12}");
 

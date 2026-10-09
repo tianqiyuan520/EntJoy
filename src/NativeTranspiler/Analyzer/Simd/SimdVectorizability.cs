@@ -7,13 +7,13 @@ namespace NativeTranspiler.Analyzer
     /// <summary>
     /// "这段 body 能不能向量化"的唯一判据（F-2 / B3 项）。
     ///
-    /// 背景：`SimdControlFlowGenerator` 命中本判据时**整段退回 per-lane 标量循环**——产物正确但没有
-    /// 任何 SIMD 收益，且原先是**静默**的。现在同一判据同时被两处使用：
-    ///   · 发射侧 <see cref="SimdControlFlowGenerator"/>：决定是否走 per-lane；
-    ///   · 校验侧 <c>NativeTranspileValidator</c>：命中即报 NT031（error），让"以为开了向量化、实际
-    ///     跑标量"这件事在构建期就暴露。
-    /// ★ 必须是**同一份实现**：把规则抄两遍，只修一处，正是本仓库踩过的坑
-    ///   （NT-13 数字字面量后缀）。
+    /// 背景：`SimdControlFlowGenerator` 命中本判据时整段退回 per-lane 标量循环——产物正确但没有
+    /// 任何 SIMD 收益，且原先是静默的。现在同一判据同时被两处使用：
+    /// · 发射侧 <see cref="SimdControlFlowGenerator"/>：决定是否走 per-lane；
+    /// · 校验侧 <c>NativeTranspileValidator</c>：命中即报 NT031（error），让"以为开了向量化、实际
+    /// 跑标量"这件事在构建期就暴露。
+    /// 必须是同一份实现：把规则抄两遍，只修一处，正是本仓库踩过的坑
+    /// （NT-13 数字字面量后缀）。
     /// </summary>
     internal static class SimdVectorizability
     {
@@ -39,15 +39,13 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 是否存在「无法向量化」的调用：
-        ///   - <c>Interlocked.*</c>：per-lane 原子递增/加（源里每 lane 各自一次原子操作，向量化无意义）
-        ///   - <c>UnsafeUtility.ArrayElementAsRef</c>：返回元素引用，需要标量地址
-        ///   - 用户静态辅助函数（如 <c>Expand</c>/<c>BinKey</c>）被喂 varying 实参
+        /// - <c>Interlocked.*</c>：per-lane 原子递增/加（源里每 lane 各自一次原子操作，向量化无意义）
         /// 命中即整段退回 per-lane 标量循环 —— 宁可慢，不可生成错代码。
         /// </summary>
         public static bool HasNonVectorizableCall(SyntaxNode node, SimdVariableAnalyzer varAnalyzer)
             => HasNonVectorizableCall(node, varAnalyzer, out _);
 
-        /// <summary>同上，并给出**触发原因**（供 NT031 报错信息指名道姓，而不是只说"不可向量化"）。</summary>
+        /// <summary>同上，并给出触发原因（供 NT031 报错信息指名道姓，而不是只说"不可向量化"）。</summary>
         public static bool HasNonVectorizableCall(SyntaxNode node, SimdVariableAnalyzer varAnalyzer, out string? reason)
         {
             reason = null;
@@ -93,9 +91,8 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // 裸指针 + varying 下标 + **宽元素**（float2/int2/自定义结构）：SIMD 路径只能取 lane0，
+            // 裸指针 + varying 下标 + 宽元素（float2/int2/自定义结构）：SIMD 路径只能取 lane0，
             // 等于每 lane 重复写同一地址 —— 静默错解，必须整段退回。
-            // 内置标量元素（byte/sbyte/uint/short/bool）不再兜底：A1 已提供逐 lane gather 读 +
             // EmitElementStore 的掩码写，能正确向量化。
             foreach (var ea in node.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
             {

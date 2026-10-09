@@ -39,9 +39,11 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---- [5] the generator's own decoupling invariant must not fire on an ECS-free project ----
 # NT029 = chunk/entity jobs seen without EntJoy.ECS; NT030 = generated bindings leak ECS symbols.
-if ($output -match 'NT0(29|30)') {
+# Match the diagnostic form ("warning NT029"/"error NT030") only: an RS2008 analyzer-release-tracking
+# warning names the rule id in its message ("... rule \"NT029\" ..."), which is not an emission.
+if ($output -match '(?m)(warning|error)\s+NT0(29|30)\b') {
     Write-Host 'FAIL[5]: the generator decoupling invariant fired on an ECS-free project:'
-    ($output -split "`n") | Where-Object { $_ -match 'NT0(29|30)' } | Select-Object -First 3 |
+    ($output -split "`n") | Where-Object { $_ -match '(warning|error)\s+NT0(29|30)\b' } | Select-Object -First 3 |
         ForEach-Object { Write-Host ("  " + $_.Trim()) }
     exit 1
 }

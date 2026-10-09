@@ -7,7 +7,6 @@ namespace EntJoy.Collections
 {
     /// <summary>
     /// 原子安全句柄。带 generation（代际）防 ABA：句柄释放后 index 复用，旧句柄的 version 不再匹配，
-    /// 无法通过安全检查绕过 use-after-free。
     /// 布局保持 8 字节（int index + int version），与 C++ NativeContainers.h 的 intptr_t 一致。
     /// isReadOnly 编码进 version 符号位（负 = 只读）。
     /// </summary>
@@ -56,12 +55,11 @@ namespace EntJoy.Collections
         private static int[] _writeTxExempt = new int[MaxHandles];   // 1 = 豁免并行读写持有跟踪（共享/框架内部句柄）
 
         /// <summary>
-        /// 读登记快路径标记（P1-10）：high 32 = epoch，low 32 = ctx。
+        /// 读登记快路径标记：high 32 = epoch，low 32 = ctx。
         ///
-        /// 为什么要它：原实现只有**单槽** TLS 快路径（<c>_fastReadCtx/_fastReadIndex/_fastReadVersion</c>），
-        /// job 内**交替访问多个容器**时 100% miss ⇒ 每次索引访问都要
-        /// `ConcurrentDictionary.GetOrAdd` + `lock(HashSet)` + `HashSet.Add` + `Interlocked.Increment`，
-        /// 实测 **~167 ns/访问**（15 列 × 1M = 2.3 s/步，见 CPU 百万同屏文档 §5.6）。
+        /// 为什么要它：原实现只有单槽 TLS 快路径（<c>_fastReadCtx/_fastReadIndex/_fastReadVersion</c>），
+        /// job 内交替访问多个容器时 100% miss ⇒ 每次索引访问都要
+        /// 实测 ~167 ns/访问（15 列 × 1M = 2.3 s/步，见 CPU 百万同屏文档）。
         /// 有了它，同一 job 内每容器只在首次访问时走慢路径，之后每次访问只多"一次 long 读 + 比较"。
         ///
         /// 正确性：epoch 在 <see cref="ReleaseReadsForContext"/> 递增 ⇒ 任何 job 结束都会让全部标记失效
@@ -103,7 +101,7 @@ namespace EntJoy.Collections
                 version = Interlocked.Increment(ref _version[index]); // 0 → 1
                 Interlocked.Exchange(ref _state[index], StateActive);
             }
-            // ⚠ 索引复用必须把"豁免并行写跟踪"标志清掉：该标志只属于**上一个**持有者
+            // ⚠ 索引复用必须把"豁免并行写跟踪"标志清掉：该标志只属于上一个持有者
             //   （如 ECS chunk view）。不清的话，回收后的索引被新容器拿到时会静默继承豁免，
             //   于是该容器的并行持有跟踪完全失效（安全网无声消失）。
             Volatile.Write(ref _writeTxExempt[index], 0);
@@ -130,9 +128,9 @@ namespace EntJoy.Collections
 
         /// <summary>
         /// 强制标记指定索引的句柄为已释放（用于 TempAllocator 紧急清理）。
-        /// 与 <see cref="Release"/> 的区别：**保留** handle 的 Index（不置 -1），
+        /// 与 <see cref="Release"/> 的区别：保留 handle 的 Index（不置 -1），
         /// 使仍持有旧句柄的代码访问时报"已释放"而不是误用新容器。
-        /// 索引**必须**归还空闲队列（2026-09-26 修）：否则每帧 Temp 分配都会永久消耗
+        /// 索引必须归还空闲队列：否则每帧 Temp 分配都会永久消耗
         /// 一个 index（上限 1,048,576），耗尽后所有容器创建都会抛 "Out of safety handles"。
         /// 归还对旧句柄是安全的：index 被复用时 <see cref="Allocate"/> 必递增 version，
         /// 旧句柄因 version 不匹配仍会抛 ObjectDisposedException。
@@ -196,23 +194,19 @@ namespace EntJoy.Collections
         }
 
         /// <summary>
-        /// **释放前把关**：容器仍被某个活动 Job 持有时拒绝释放。
+        /// 释放前把关：容器仍被某个活动 Job 持有时拒绝释放。
         ///
         /// 为什么必须有：`Release` 会把句柄索引放回空闲队列，而 `PersistentAllocator` 的设计就是
         /// 把刚释放的块交给下一个同尺寸请求 ⇒ 主线程在 Job 未完成时 `Dispose()`，
-        /// Job 的后续写入会落到**新容器的内存**上（且裸指针路径不受索引器检查保护）。
+        /// Job 的后续写入会落到新容器的内存上（且裸指针路径不受索引器检查保护）。
         /// 契约要求先 `Complete()` 再释放；这条闸门把"静默跨容器破坏"变成响亮异常。
         /// 豁免句柄（`_writeTxExempt`，如 chunk view / CreateView）永不登记持有者，故不受影响。
         /// </summary>
         /// <summary>
-        /// 该句柄是否**仍指向当前活着的那个容器**（状态 Active 且 version 与句柄一致）。
+        /// 该句柄是否仍指向当前活着的那个容器（状态 Active 且 version 与句柄一致）。
         ///
         /// 用途（B18 残留修复）：`TempAllocator.Reset()` 会把帧末未手动释放的 Temp 容器
-        /// `MarkReleased`；若调用方此后仍对**陈旧容器**调用 `Dispose()`：
-        ///   · index 未被复用 → 状态 Released（旧实现走到 `Release` 后仍会按地址 `Free` 一次，
-        ///     而那块内存已归还池子，可能已被重分配给别人 ⇒ 释放别人的块）；
-        ///   · index 已被复用给新容器 → 状态 Active（旧实现会把新容器的 index **再次入队**，
-        ///     导致同一 index 被发给两个容器，安全跟踪失效）。
+        /// `MarkReleased`；若调用方此后仍对陈旧容器调用 `Dispose()`：
         /// 两种情形下 `IsLive` 都为 false，调用方据此把陈旧容器的释放降级为幂等空操作。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -295,8 +289,6 @@ namespace EntJoy.Collections
                 Volatile.Write(ref _writerCtx[index], ctx);
                 // 登记本 job 写过的容器，便于 job 结束时释放。
                 // 必须用单次 GetOrAdd 取得「当前字典里那份 list」并在锁内 Add —— 不能用
-                // TryGetValue + GetOrAdd 组合：两者之间条目可能被并发 ReleaseWritesForContext 移除，
-                // 于是 index 被写进一份即将被丢弃的 list，释放时扫不到它，
                 // _writerCtx[index] 永久残留该 ctx → Complete() 后主线程访问被永久误拦。
                 var list = _ctxWrites.GetOrAdd(ctx, _ => new System.Collections.Generic.List<int>());
                 lock (list) { if (!list.Contains(index)) list.Add(index); }
@@ -312,8 +304,6 @@ namespace EntJoy.Collections
         /// <summary>
         /// 释放某 job 执行上下文声明的全部写者。Native 侧在 job 完成回调（所有 tile 之后）调用一次；
         /// Managed 侧目前在 tile 结束时调用（同一 ctx 会被多次调用）。
-        /// 不删 _ctxWrites 条目：条目一旦被删，并发 tile 的 TryAcquireWriteContext 会 GetOrAdd 出一份新 list，
-        /// 而调用方随后删掉的那份新 list 里的 index 永远不会被释放（_writerCtx 残留 → 永久误拦）。
         /// 保留条目只做清空，使「同一 ctx 只有一份 list」恒成立；条目随 ctx 存活，ctx 有限，不会无界增长。
         /// </summary>
         public static void ReleaseWritesForContext(nint ctx)
@@ -331,14 +321,7 @@ namespace EntJoy.Collections
         /// 免掉每次索引的 ConcurrentDictionary.GetOrAdd + Monitor 开销。
         ///
         /// 命中即安全的依据：
-        ///  - 首次登记成功（+1）才写入缓存，而 +1 与释放侧的 -1 成对；
-        ///  - ctx 只会在本线程的 job 内等于缓存值（JobIdentity 是 [ThreadStatic]，跨 job 会还原/换值），
-        ///    故命中时必然仍处于「写入缓存的那个 ctx」的 job 生命周期内，无需回查槽位归属；
-        ///  - 句柄代际（version）参与比较，覆盖 index 释放后复用的情形：复用必然递增代际 → 缓存失效并重新登记；
-        ///  - **读声明代际（_readMarkEpoch）参与比较**：`ReleaseReadsForContext` 会释放整个 ctx 的读者计数，
-        ///    而 native ctx 来自 `ContextPool`（指针可被复用）⇒ 仅靠 (ctx, index, version) 命中的旧缓存
-        ///    可能让「新 job」跳过登记（读者计数偏少 → 主线程拦截失效）。epoch 变化即失效重登记。
-        ///  - 豁免句柄（_writeTxExempt）在首个访问就提前 return，永不写缓存，故缓存条目恒为非豁免容器。
+        /// - ctx 只会在本线程的 job 内等于缓存值（JobIdentity 是 [ThreadStatic]，跨 job 会还原/换值），
         /// 这些数组都是内部状态：一旦发生泄漏/失配，RepeatedParallelReadJobs_NoReaderCountLeak 会持续失败。
         /// </summary>
         [ThreadStatic] private static nint _fastReadCtx;
@@ -349,10 +332,6 @@ namespace EntJoy.Collections
         /// <summary>
         /// 并行读持有标记：登记当前 job（JobIdentity.CurrentContext）为容器读者。
         /// 仅当该 (ctx, 容器) 首次读时才把读者计数 +1（幂等，同一 job 对同一容器至多 +1，
-        /// 避免并行 tile 重复计数撑爆）。主线程（ctx=0）不登记，只查。
-        /// 幂等集合与并发释放（ReleaseReadsForContext）之间的竞态：同 ctx 多 tile 并发时，
-        /// 一个 tile 的 RegisterRead 可能在另一 tile 已把该 ctx 条目从字典移除后仍持有旧 set。
-        /// 计数只允许在「条目仍现役」时进行，且校验必须放在 Add 之后（见方法内注释），
         /// 否则 +1 会落在已丢弃的 set 上而永不配对（读者计数泄漏 → 容器被永久误锁、主线程被永久误拦）。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -373,8 +352,6 @@ namespace EntJoy.Collections
                 lock (set)
                 {
                     // 顺序要紧：必须「先 Add 再校验条目仍是现役」。
-                    // 若先校验再 Add，则在本行与锁定之间条目可能被并发 ReleaseReadsForContext 移除，
-                    // 此时 Add 会在已被丢弃的 set 上返回 true 并 +1，而 ReleaseReadsForContext 只递减
                     // 它移除时看到的那份 set 的成员 → +1 永不配对 → _readerCount 永久泄漏 → 主线程被永久误拦。
                     // Add 返回 true 即代表本次是本 set 内该 index 的首次登记，故撤销自己的登记是安全的。
                     if (!set.Add(index)) { _fastReadCtx = ctx; _fastReadIndex = index; _fastReadVersion = version; _fastReadEpoch = epoch; return; }

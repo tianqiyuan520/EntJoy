@@ -127,7 +127,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── Static function variants ──
+    // Static function variants
     public static class MathFuncs_StaticFuncs
     {
         public static void MathFuncs_Stc_CSharp(

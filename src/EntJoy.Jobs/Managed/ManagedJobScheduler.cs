@@ -8,14 +8,8 @@ namespace EntJoy.JobSystem.Managed
     /// 托管无锁 Job 调度器。独立于原生 NativeJobScheduler，可脱离 NativeDll 单独使用。
     ///
     /// 关键架构：
-    ///   - Chase-Lev 工作窃取（标准 crossbeam 模型）：per-worker 持久 deque + 全局 MPMC Injector。
-    ///   - worker parking：空闲 worker 有界自旋后阻塞在 SemaphoreSlim，任务发布按需唤醒。
-    ///   - 混合执行并行 for：预切分为 ManagedTileTask 推入 Injector，worker 从 Injector
-    ///     拉取推入自己 deque（owner-only PushBottom），空闲时从其他 worker steal。
-    ///   - 同步内联覆盖小任务（零调度开销）。
-    ///   - completion 槽位池（预分配数组）+ 单槽 per-类型 job 盒池 → 热路径零分配。
-    ///   - 依赖链中间 completion 完成后自动归还（防泄漏）；槽位带 generation 代际，防旧 handle 复用误操作（防 ABA）。
-    ///   - 依赖回调注册与完成/回收同步，避免并发丢失续体。
+    /// - 依赖链中间 completion 完成后自动归还（防泄漏）；槽位带 generation 代际，防旧 handle 复用误操作（防 ABA）。
+    /// - 依赖回调注册与完成/回收同步，避免并发丢失续体。
     ///
     /// 【约束】依赖图必须是无环 DAG：循环依赖（A→B→A）会导致依赖链
     /// 回调永远无法触发、Complete() 永久阻塞。运行时不做环检测，调用方负责保证。
@@ -35,7 +29,7 @@ namespace EntJoy.JobSystem.Managed
         // Join 自身（w.Join()）死锁，非主线程调用直接拒绝（警告并返回）。
         private static int _mainThreadId;
 
-        // ───── Chase-Lev 路径 ─────
+        // Chase-Lev 路径
         private static ManagedMPMCQueue<ManagedTileTask>? _injector;   // 全局 Injector（跨线程提交入口）
         private static ManagedWorkStealingDeque[]? _deques;            // per-worker 持久 deque
         private static ManagedTileTaskPool? _tileTaskPool;             // 全局任务池
@@ -49,7 +43,7 @@ namespace EntJoy.JobSystem.Managed
         /// </summary>
         private static readonly TimeSpan CompleteAssistInterval = TimeSpan.FromMilliseconds(8);
 
-        // ──────────────────── 生命周期 ────────────────────
+        // 生命周期
 
         public static void Initialize(int workerCount = 0)
         {
@@ -117,7 +111,7 @@ namespace EntJoy.JobSystem.Managed
             _workers = null;
         }
 
-        // ──────────────────── completion 对象池（预分配数组，无 ConcurrentStack Node 分配） ────────────────────
+        // completion 对象池（预分配数组，无 ConcurrentStack Node 分配）
 
         private const int CompletionPoolCap = 4096;
         private static ManagedCompletion[] _completionSlots = null!;
@@ -178,7 +172,7 @@ namespace EntJoy.JobSystem.Managed
 
         private static void ReturnCompletionCore(ManagedCompletion c)
         {
-            // 归还时**不** Reset：保留完成态（Remaining=0、_done=Set），完整 Reset 推迟到 RentCompletion 分配时执行。
+            // 归还时不 Reset：保留完成态（Remaining=0、_done=Set），完整 Reset 推迟到 RentCompletion 分配时执行。
             // 这使"已完成但要被并发注册依赖"的 completion 始终被读为已完成的正确状态，
             // 避免 Signal 的自动归还把 Remaining 改回 1 而让 ChainAfter/OnCompleted 误判未完成、把回调永久挂死在已回收槽位。
             // 归还即代际 +1：任何仍持有本 completion 的旧 handle 立即可判"过期"。
@@ -200,13 +194,12 @@ namespace EntJoy.JobSystem.Managed
 
         // 每次调度的唯一并行冲突检测 ctx（同一 job 的所有 tile 共享，job 之间绝不重复）。
         // 不能用 box 哈希：box 由 SingleCache/ParallelCache 池化复用，相邻两次调度会拿到同一 ctx，
-        // 幂等写登记与 _readMark 快路径就会跨 job 串味（见 docs/public/NativeArray-Index-Safety-Overhead-and-Fixes.md §七 成因 2）。
         // 基准取 2^40：与 32 位 ctx（native 侧指针/哈希派生）不可能相等，且低 32 位在 _readMark 打包下仍唯一。
         private static long _ctxCounter;
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static nint NextCtx() => (nint)((1L << 40) + Interlocked.Increment(ref _ctxCounter));
 
-        // ──────────────────── 调度 API ────────────────────
+        // 调度 API
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void EnsureInitialized()
@@ -242,7 +235,7 @@ namespace EntJoy.JobSystem.Managed
             if (arrayLength <= 0)
             {
                 // 零长度并行 for：无任何分片会执行，立即完成并自动归还。必须在 Signal（触发自动归还，代际+1）
-                // **之前**构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出"已归还"
+                // 之前构造 handle，以抓到归还前的代际快照 —— 否则旧 handle 的 IsExpired 判定不出"已归还"
                 // 已被复用的槽位，用户 Complete() 会误等一个 Remaining 已被重置=1 的槽位而永久挂死。
                 var zero = ManagedJobScheduler.RentCompletion();
                 Interlocked.Exchange(ref zero.Remaining, 1);
@@ -254,14 +247,13 @@ namespace EntJoy.JobSystem.Managed
 
             // Chase-Lev 路径：预切分为 ManagedTileTask 推入 Injector
             // （移除 ≤SyncInlineThreshold 的调用线程同步内联——小并行 for 同样可能
-            //  承载大工作量阻塞调用线程，Schedule 一律异步，对齐 IJob 族）
+            // 承载大工作量阻塞调用线程，Schedule 一律异步，对齐 IJob 族）
             return ScheduleChaseLevParallelFor<T>(ref job, arrayLength, innerBatchCount, dependsOn);
         }
 
         /// <summary>
-        /// 统一挂接依赖启动。带**代际守卫**杜绝跨链 ABA：dep 槽位已被归还/重租（Generation 已前进，
-        /// 与调用方看到的 handle 代际不一致）时，原依赖已完成或已过期 → 直接把 dependent 视为就绪立即启动，
-        /// **绝不把续体回调注册到已被复用的 completion 对象上**（否则该回调可能被后续重租的 Reset 清空而永远丢失，
+        /// 统一挂接依赖启动。带代际守卫杜绝跨链 ABA：dep 槽位已被归还/重租（Generation 已前进，
+        /// 绝不把续体回调注册到已被复用的 completion 对象上（否则该回调可能被后续重租的 Reset 清空而永远丢失，
         /// 正是并发依赖链丢回调死锁的根因）。
         /// 代际仍匹配时才走"已完成直派 / 未完成挂回调"两条正常路径，且把依赖标记为完成后自动归还
         /// （防中间 handle 泄漏）并把依赖异常传播到新 job 的 completion。
@@ -298,7 +290,7 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        // ──────────────────── 主线程协作完成 ────────────────────
+        // 主线程协作完成
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static void CompleteSchedule(ManagedCompletion completion)
@@ -321,19 +313,16 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        // ──────────────────── Chase-Lev Worker 循环 ────────────────────
+        // Chase-Lev Worker 循环
 
         /// <summary>
         /// 标准 Chase-Lev Worker 循环（crossbeam 模型）：
-        ///   1. PopBottom(myDeque)              — LIFO, owner-only, 零竞争
-        ///   2. injector_.TryDequeue → PushBottom — 从 Injector 拉取推入 deque
-        ///   3. StealTop(otherDeque)             — 从其他 worker 窃取
-        ///   4. Park                             — 有界自旋 + SemaphoreSlim wait
+        /// 1. PopBottom(myDeque) — LIFO, owner-only, 零竞争
+        /// 4. Park — 有界自旋 + SemaphoreSlim wait
         ///
         /// 保证：
-        ///   - 所有任务经 deque 执行（LIFO 局部性）
-        ///   - 空闲 worker 可 steal 其他 worker 的任务（负载均衡）
-        ///   - 不规则负载（GridSearch）下尾部可控
+        /// - 所有任务经 deque 执行（LIFO 局部性）
+        /// - 不规则负载（GridSearch）下尾部可控
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private static void WorkerLoopChaseLev(int workerIndex)
@@ -511,7 +500,7 @@ namespace EntJoy.JobSystem.Managed
             _wakeSignal?.Release(_workerCount);
         }
 
-        // ── Chase-Lev Schedule 入口 ──
+        // Chase-Lev Schedule 入口
 
         /// <summary>Chase-Lev 单任务调度。</summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -617,7 +606,7 @@ namespace EntJoy.JobSystem.Managed
             return new ManagedJobHandle(completion);
         }
 
-        // ──────────────────── 泛型委托缓存 ────────────────────
+        // 泛型委托缓存
 
         internal delegate void JobRunner(object boxed, int start, int count);
 

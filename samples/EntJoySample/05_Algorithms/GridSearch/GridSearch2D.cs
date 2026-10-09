@@ -65,7 +65,7 @@
 //        }
 //    }
 
-//    // ================= 构建接口 =================
+//    // 构建接口
 
 //    public JobHandle InitializeGrid(NativeArray<float2> positions)
 //    {
@@ -133,7 +133,7 @@
 //        return InitializeGridInternal();
 //    }
 
-//    // ================= 查询接口 (最近点) =================
+//    // 查询接口 (最近点)
 
 //    public int[] SearchClosestPoint(Vector3[] queryPoints, bool ignoreSelf = false, float epsilon = 0.001f)
 //    {
@@ -195,7 +195,7 @@
 //        return results;
 //    }
 
-//    // ================= 查询接口 (半径搜索) =================
+//    // 查询接口 (半径搜索)
 
 //    public int[] SearchWithin(Vector3[] queryPoints, float radius, int maxNeighborPerQuery)
 //    {
@@ -271,7 +271,7 @@
 //        if (_gridResolution.IsCreated) _gridResolution.Dispose();
 //    }
 
-//    // ================= 内部构建逻辑 =================
+//    // 内部构建逻辑
 
 //    private unsafe JobHandle InitializeGridInternal()
 //    {
@@ -391,7 +391,7 @@
 //        return default;
 //    }
 
-//    // ================= 内部 Job 结构体 =================
+//    // 内部 Job 结构体
 
 //    [NativeTranspiler.NativeTranspile]
 //    public struct GridInitializationJobPointer : IJob
@@ -552,7 +552,7 @@
 //        }
 //    }
 
-//    // ---- 优化的最近点查询 Job (AoS, ISPC, 无全局回退) ----
+//    // 优化的最近点查询 Job (AoS, ISPC, 无全局回退)
 //    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
 //    //[NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
 

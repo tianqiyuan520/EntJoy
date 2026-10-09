@@ -50,9 +50,6 @@ namespace NativeTranspiler.Analyzer
     ///
     /// 推导规则：
     /// 1. Execute index 参数 → varying
-    /// 2. 从 NativeArray[index] 读取 → varying
-    /// 3. 标量字段/常量 → uniform
-    /// 4. 赋值 lhs = rhs: lhs 继承 rhs 的分类
     /// 5. 复合赋值 lhs op= varying: 如果 lhs 原是 uniform，提升为 reduction
     /// 6. min/max 规约模式 if(val &lt; best) best = val → best 是 reduction
     /// 7. 函数调用结果：operands 的分类取 max（uniform &lt; varying &lt; reduction）
@@ -93,13 +90,13 @@ namespace NativeTranspiler.Analyzer
 
             try
             {
-                // === Step 1: 种子分类 ===
+                // Step 1: 种子分类
                 // 1a: Execute 参数（保守：直接用参数名判断，避免 GetDeclaredSymbol 在 source gen 上下文中抛异常）
                 foreach (var param in method.ParameterList.Parameters)
                 {
                     string name = param.Identifier.Text;
                     bool isIndex = name == _indexParamName;
-                    // ★ Type from the parameter's declared type — static-method scalar params
+                    // Type from the parameter's declared type — static-method scalar params
                     //   (e.g. float threshold) must not be classified as int, otherwise float
                     //   comparisons compile to n_cmp_*_epi32 and produce wrong results.
                     string paramCppType = "int";
@@ -115,16 +112,16 @@ namespace NativeTranspiler.Analyzer
                 // 1c：方法体内变量声明
                 CollectDeclarations(method.Body);
 
-                // === Step 2: 表达式传播 ===
+                // Step 2: 表达式传播
                 // 遍历所有赋值，传播 classification
                 PropagateAssignments(method.Body);
 
-                // === Step 2.5: 控制流敏感传播（向 ISPC 靠拢：变量默认 varying 语义）===
+                // Step 2.5: 控制流敏感传播（向 ISPC 靠拢：变量默认 varying 语义）
                 // 标量若在 varying 条件的 if/while 分支体中被赋值 → 提升为 varying，
                 // 否则所有 lane 共享一份标量，产生错误（C12 的 j/found 被判成 uniform）。
                 PropagateControlFlowVarying(method.Body);
 
-                // === Step 3: Reduction 模式检测 ===
+                // Step 3: Reduction 模式检测
                 // 检测 if (val &lt; best) { best = val; } 规约模式
                 DetectReductionPatterns(method.Body);
 
@@ -167,9 +164,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        // ================================================================
         // 内部实现
-        // ================================================================
 
         private void AddVariable(string name, string cppType, VarKind kind, string? initExpr, string? csharpType = null)
         {
@@ -311,9 +306,8 @@ namespace NativeTranspiler.Analyzer
                     if (PromoteWritesInVaryingCtx(ifStmt.Statement)) changed = true;
                     if (ifStmt.Else != null && PromoteWritesInVaryingCtx(ifStmt.Else.Statement)) changed = true;
                 }
-                // ★ 不提升 while 循环体里的无条件赋值（如 C11 的 `frames++`）：这类计数器
+                // 不提升 while 循环体里的无条件赋值（如 C11 的 `frames++`）：这类计数器
                 //   对所有 lane 同步 +1（事实 uniform），配合 while 条件标量化（uniform 子条件
-                //   用标量循环），可避免「uniform 标量 → SIMD mask broadcast」的格式转换。
                 //   嵌套 if 里的赋值已由上面的 if 分支处理（C12 的 j/found 正确提升）。
             }
         }
@@ -433,9 +427,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        // ================================================================
         // 表达式分类
-        // ================================================================
 
         private VarKind ClassifyExpressionInternal(ExpressionSyntax expr, HashSet<string> visiting)
         {
@@ -479,7 +471,7 @@ namespace NativeTranspiler.Analyzer
                     return ClassifyExpressionInternal(assign.Right, visiting);
 
                 case CheckedExpressionSyntax checkedExpr:
-                    // ★ `unchecked(x + y)` / `checked(x + y)` — classification flows
+                    // `unchecked(x + y)` / `checked(x + y)` — classification flows
                     //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
                     return ClassifyExpressionInternal(checkedExpr.Expression, visiting);
 
@@ -515,7 +507,7 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
             // 处理 float2.x / float2.y
             string memberName = memberAccess.Name.Identifier.Text;
 
-            // ★ 结构体元素的字段读取是**标量**，不是 varying。
+            // 结构体元素的字段读取是标量，不是 varying。
             //   `CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath`
             //   （以及同一表达式内的 `cfgPtr[<simd_index>].FramesDeath + 1`）走的是 SIMD 侧
             //   "标量包装 + 结构体字段"路径：翻译出来是 `cfgPtr[...].FramesDeath`，本身无 `.v`。
@@ -620,7 +612,7 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
                     }
                 }
 
-                // ★ Fallback: when GetSymbolInfo fails (e.g. on SyntaxFactory-created AST nodes),
+                // Fallback: when GetSymbolInfo fails (e.g. on SyntaxFactory-created AST nodes),
                 //   try name-based matching for known math functions. If the function name matches
                 //   a known math function (Sin, Cos, Sqrt, etc.) and any argument is Varying,
                 //   return Varying — this keeps inner-loop SIMD propagation alive.

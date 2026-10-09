@@ -1023,7 +1023,7 @@ namespace JobSystem
 
     void JobDebuggerGUI::Shutdown()
     {
-        // 停止调试面板并**等待它真的退出**，再让调用方（JobSystem 关停路径）去拆除 worker/状态。
+        // 停止调试面板并等待它真的退出，再让调用方（JobSystem 关停路径）去拆除 worker/状态。
         // 为什么必须有界等待：GUI 线程是 detach 的，`g_guiRunning=false` 之前它每帧都会调用
         // CurrentWorkerCount()/活动环与名字表读取；JobSystem 关停后继续跑虽然目前不会 UAF
         // （这些读取只碰全局原子/数组/受锁 map），但会出现"窗口比 JobSystem 活得更久"、

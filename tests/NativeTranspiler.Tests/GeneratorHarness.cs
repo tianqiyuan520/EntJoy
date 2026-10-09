@@ -107,7 +107,7 @@ namespace EntJoy.ECS
     public class World { }   // 生成器自校验用 Config.TypeWorld == EntJoy.ECS.World
     // SendEvent stub: 生成器按 命名空间+名字 识别，这里只需让测试源码能编译出可解析的方法符号
     // （类型实参由泛型推断）。用于 IspcMarkerGateTests 的 ISPC 标记缺口回归。
-    public static class EventBus { public static void SendEvent<T>(T evt) where T : unmanaged { } }
+    public static class SystemAPI { public static void SendEvent<T>(T evt) where T : unmanaged { } }
     public struct ChunkEnabledMask { public unsafe ulong* Bits; }
     public unsafe struct ArchetypeChunk
     {

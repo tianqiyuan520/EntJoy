@@ -28,6 +28,7 @@ dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj --filter 
    `RegisterPostInitializationOutput` 注入它，而且 post-init 源**对同一次生成可见**
    （`HarnessInternalsTests.PostInitOutputVisibility` 是这条不变量的自检）。再定义一份 = 同名类型重复定义
    ⇒ `GetTypeByMetadataName` 返回 null ⇒ **一个 job 都认不出来，产物为空且无任何诊断**。
+   ⇒ 断言一律用 `EmitForJob`（源码里一个 job 都没识别到时**直接抛**），不要用会返回空产物的 `EmitFor`。
 2. **`[NativeTranspile]` 必须真的写在被测 struct 上**（谓词 `s.AttributeLists.Count > 0` 是入口条件）。
 3. 替身类型只需"命名空间 + 名字"对得上：`EntJoy.JobSystem.IJob*`、`EntJoy.ECS.IJobChunk/IJobEntity/
    ArchetypeChunk`、`EntJoy.Collections.NativeArray<T>`（见 `GeneratorHarness.Stubs`）。
@@ -49,11 +50,13 @@ dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj --filter 
 
 ## 发射快照工具（可选）
 
-`EmitSnapshot` 把 10 个代表性 job 的产物落盘，用于**逐字对比"改动前/改动后"**，
+`EmitSnapshot` 把代表性 job 的产物落盘（当前 **44 个文件**），用于**逐字对比"改动前/改动后"**，
 证明除缺陷点外没有无关发射变化：
 
 ```powershell
 $env:ENTJOY_NT_SNAP_DIR="$env:TEMP\snap\after"
-dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj --filter "FullyQualifiedName~EmitSnapshot"
+dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release --filter "FullyQualifiedName~EmitSnapshot"
 # 不设该环境变量时该用例直接跳过（无副作用）
 ```
+
+门禁 `emit-snapshot` 用同一套产物与基线目录 `artifacts/verifier/snap/after` 逐文件比哈希，要求 `changed=0`（`SNAP-IDENTICAL`）。

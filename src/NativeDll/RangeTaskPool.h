@@ -29,9 +29,8 @@ namespace JobSystem
         uint32_t firstTile{ 0 };
         uint32_t tileCount{ 0 };
         uint32_t poolIndex{ 0 };  // 在 storage_ 中的索引（用于 Release）
-        // 2026-10-04（C）：创建时从 BatchStorage 抄下的**代次**；结算时与 storage 当前代次比对，
-        // 不匹配即"上一代的迟到结算" ⇒ 由 ChaseLevTaskDone 丢弃（不碰 pendingTasks/退役）。
-        // 对应 Unity `AtomicSafetyHandle{versionNode, version}` 里那个 version 副本（docs/gridsearch/12 §2.5/§3）。
+        // 创建时从 BatchStorage 抄下的代次；结算时与 storage 当前代次比对，不匹配即"上一代的迟到结算"
+        // ⇒ 由 ChaseLevTaskDone 丢弃（不碰 pendingTasks/退役）。与 Unity `AtomicSafetyHandle` 的 version 副本同义。
         uint32_t batchGen{ 0 };
         // 通用 work 任务（batch==nullptr 时有效）：Chase-Lev SubmitWork 通道，
         // 无 batch/完成链（work 内的 CompleteState 由调用方负责）。

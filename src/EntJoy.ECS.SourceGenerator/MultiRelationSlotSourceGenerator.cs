@@ -14,7 +14,6 @@ namespace EntJoy.ECS.SourceGenerator
     /// <summary>
     /// [MultiRelation(MaxSlots = N)]（N ≥ 2）→ 注入 Slot1..SlotN-1 字段的生成器。
     /// 定长多槽列：TRel 占 chunk 列，列宽 = N × sizeof(RelationSlot)（如 4 槽 = 32B），
-    /// 使 NativeTranspiler（IJobEntity/IJobChunk）按列宽步进直接访问——多值关系进 Job 的关键。
     /// 要求：partial struct + 首字段 RelationSlot Target。
     /// 输出：<c>public partial struct Skill { public RelationSlot Slot1; ... }</c>。
     /// </summary>

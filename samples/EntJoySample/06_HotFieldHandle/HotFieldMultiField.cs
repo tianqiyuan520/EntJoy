@@ -5,7 +5,7 @@
 
 //namespace EntJoySample.HotFieldHandle
 //{
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 //    // HotField 多字段套件(E:\Code\HotField 同款结构)
 //    //   · HotFieldOptimizedBenchmark: 2 × Vector2(SoA 分数组)
 //    //   · LargeHotFieldBenchmark:     50 floats(AoS 块)
@@ -13,7 +13,7 @@
 //    // 本文件复刻其关键 shell 形态,量化「shell 形态 × 字段数」:
 //    //   Class(AoS 对象) / Struct(AoS 值数组) / ChunkPtr(基址+偏移) / System(平铺)
 //    // 用平铺 float[] AoS 块(GlobalData[entity*F + field]),与 HotField 一致。
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 
 //    /// <summary>class 实体(数据跟随对象,float[] 数组)。</summary>
 //    public class MultiClassEntity
@@ -193,9 +193,9 @@
 //            Console.WriteLine($"  Struct/Class = {structAvg / classAvg:F2}x");
 //            Console.WriteLine($"  ChunkPtr/Class = {chunkPtrAvg / classAvg:F2}x");
 //            Console.WriteLine($"  System/Class = {systemAvg / classAvg:F2}x");
-//            Console.WriteLine($"  [结论{fieldCount}字段] 字段越多内存带宽越主导,shell 形态差距越被淹没(与 HotField §2/§3 同结论)。");
+//            Console.WriteLine($"  [结论{fieldCount}字段] 字段越多内存带宽越主导,shell 形态差距越被淹没(与 HotField  同结论)。");
 
-//            // ── 子集测试:只碰每实体前 top 个字段(AoS 跨实体跳,验证 SoA 子集带宽优势)──
+//            // 子集测试:只碰每实体前 top 个字段(AoS 跨实体跳,验证 SoA 子集带宽优势)
 //            foreach (int top in fieldCount > 100 ? new[] { 50, 10 } : fieldCount > 10 ? new[] { 10 } : Array.Empty<int>())
 //            {
 //                double[] ctSamples, stSamples, cptSamples, sySamples;
@@ -242,7 +242,7 @@
 //                Console.WriteLine($"  Struct_Top{top}/Class = {stAvg / ctAvg:F2}x");
 //                Console.WriteLine($"  ChunkPtr_Top{top}/Class = {cptAvg / ctAvg:F2}x");
 //                Console.WriteLine($"  System_Top{top}/Class = {syAvg / ctAvg:F2}x");
-//                Console.WriteLine($"  [Top{top}结论] 只碰前 {top} 字段时,AoS 仍要跨实体跳(chunkPtr 逐实体),SoA 分数组形态(每字段连续)优势在子集访问下最明显——与 HotField §2 Top 结论一致。");
+//                Console.WriteLine($"  [Top{top}结论] 只碰前 {top} 字段时,AoS 仍要跨实体跳(chunkPtr 逐实体),SoA 分数组形态(每字段连续)优势在子集访问下最明显——与 HotField  Top 结论一致。");
 //            }
 //        }
 

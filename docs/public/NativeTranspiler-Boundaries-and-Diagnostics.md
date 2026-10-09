@@ -97,6 +97,8 @@
 | **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
 | **NT029** | error | 编译里出现 `IJobChunk`/`IJobEntity`（ECS）job，却检测不到 `EntJoy.ECS` 引用。**正常不可能发生**（这两个接口的类型定义就在 EntJoy.ECS 内）⇒ 出现即说明"job 种类判定与类型可见性不一致"，必须修生成器 |
 | **NT030** | warning | 编译未引用 `EntJoy.ECS`，但生成的 bindings 仍出现 ECS 符号（`EntJoy.ECS`/`World`/`QueryBuilder`/`ArchetypeChunk`/`EntityManager`/`ChunkJobScheduler`/`ChunkJobData`/`ChunkEnabledMask`）⇒ 某个 ECS 相关发射点漏了条件化。消息里列出具体符号；若这些名字是你自己的类型，改名即可（词边界匹配，`MyWorldJob` 不误报） |
+| **NT028** | warning | 本批有 `[NativeTranspile]` job 未通过校验、已从绑定生成中排除：其余 job 照常产出，被排除的 job 不会生成 `Schedule` 绑定（调用点报 `CS0103`，而不是整包 `CS0234`）。消息里列出被排除的 job，按各自的 error 诊断逐个修即可 |
+| **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 > 反过来说，**已经实测负收益/不生效的模式一律用 error**、不用 warning：NT024（AutoSIMD 实测慢 ~10%）、

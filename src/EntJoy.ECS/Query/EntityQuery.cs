@@ -211,7 +211,7 @@ namespace EntJoy.ECS
             var entityManager = _world.EntityManager;
             int archCount = entityManager.ArchetypeCount;
 
-            // ⚠ 判据必须是 **Archetype 集合身份**（新建/清空/Restore 都会递增），不能只比数量：
+            // ⚠ 判据必须是 Archetype 集合身份（新建/清空/Restore 都会递增），不能只比数量：
             //   数量恰好相同（Restore 后整体重建、或一增一删抵消）时复用缓存会继续引用已释放的
             //   Archetype ⇒ 静默返回 0 个实体。
             if (archCount == _scannedArchetypeCount
@@ -269,7 +269,7 @@ namespace EntJoy.ECS
         public NativeArray<T> ToComponentDataArray<T>(Allocator allocator = Allocator.Persistent) where T : unmanaged
         {
             EnsureUpToDate();
-            // ⚠ 不能直接用 CalculateEntityCount()：它统计的是**全部匹配实体**，而下面的拷贝会对
+            // ⚠ 不能直接用 CalculateEntityCount()：它统计的是全部匹配实体，而下面的拷贝会对
             // 缺少 T 的 chunk `continue` ⇒ 数组尾部会留下一段未初始化数据（静默错值 + 误导调用方）。
             // 这里只统计真正提供 T 的 chunk，保证 Length == 实际拷贝数。
             int total = 0;

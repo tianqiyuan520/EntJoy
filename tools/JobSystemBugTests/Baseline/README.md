@@ -1,5 +1,8 @@
 # JobSystem Bug-Fix Baseline
 
+> ⚠ **历史记录（2026-08-30）**：下面是当时的基线快照。其中的 C# stress `FAIL`（DLL 缺 `JobSystem_ScheduleBatch`）
+> 早已修复（见同目录 `../FinalReport/README.md`）；当前门禁口径见 `docs/public/Gates-and-Flags.md` 与 `tools/gate-run/`。
+
 日期：2026-08-30
 
 ## 当前基线

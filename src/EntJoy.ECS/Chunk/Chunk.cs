@@ -270,7 +270,7 @@ namespace EntJoy.ECS
             _enableVersion++;
         }
 
-        // ======================== Shared values 区 ========================
+        // Shared values 区
         // blittable shared 内联存值；managed shared 槽位只存 int 索引（指向 EntityManager 哈希桶数组）。
         // 同一 Chunk 所有实体共享相同的 shared 值组合（不变式）。
 
@@ -329,7 +329,7 @@ namespace EntJoy.ECS
             return MemoryBlock + Meta.SharedValueOffsets[componentIndex];
         }
 
-        // ======================== 变更追踪 ========================
+        // 变更追踪
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ulong* GetChangedBitMaskPointer()
         {

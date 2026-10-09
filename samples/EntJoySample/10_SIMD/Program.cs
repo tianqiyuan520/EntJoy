@@ -14,8 +14,8 @@
 //    /// </summary>
 //    public static class SimdCompareTest
 //    {
-//        // ── 容差：|g-w| ≤ ATol + RTol·|w|（isclose 风格）。ATol 覆盖 ~1000 量级下 1 ULP 的
-//        //    FMA/累加噪声；RTol 覆盖相对 1 ULP（~1.2e-7）。语义 bug 会远超此阈值。──
+//        // 容差：|g-w| ≤ ATol + RTol·|w|（isclose 风格）。ATol 覆盖 ~1000 量级下 1 ULP 的
+//        // FMA/累加噪声；RTol 覆盖相对 1 ULP（~1.2e-7）。语义 bug 会远超此阈值。
 //        const double ATol = 1e-3;
 //        const double RTol = 1e-6;
 
@@ -47,9 +47,9 @@
 //            PrintBugs();
 //        }
 
-//        // =====================================================================
+//        //
 //        // 通用工具
-//        // =====================================================================
+//        //
 //        struct BackendResult
 //        {
 //            public double Ms;
@@ -67,10 +67,10 @@
 //        static double MeasureMs(Action run)
 //        {
 //            run(); // warmup
-//            // ── 基准降噪（2026-08-30）：单次 run() 仅 0.04–1ms，OS 调度抖动 ~30%。
+//            // 基准降噪：单次 run() 仅 0.04–1ms，OS 调度抖动 ~30%。
 //            //    自校准把每个计时样本批量执行到 ~100ms，取 7 样本中位数，噪声降到 ~1–3%。
 //            //    N 必须保持缓存驻留规模（1M/4MB）：N 过大（10M/40MB）会退化成内存带宽
-//            //    对比，所有后端（含标量 Cpp）趋同，测不出计算差异。──
+//            // 对比，所有后端（含标量 Cpp）趋同，测不出计算差异。
 //            const double TargetSampleMs = 100.0;
 //            var sw0 = System.Diagnostics.Stopwatch.StartNew();
 //            run();
@@ -172,9 +172,9 @@
 
 //        static string Fmt(double ms) => ms <= 0 ? "   -  " : $"{ms,7:F3}";
 
-//        // =====================================================================
+//        //
 //        // 用例
-//        // =====================================================================
+//        //
 //        static void RunC01(List<Row> rows)
 //        {
 //            const int n = 1_000_000;
@@ -509,7 +509,7 @@
 //            finally { T.Dispose(); r.Dispose(); }
 //        }
 
-//        // ── C14_Cas: Interlocked.CompareExchange（ISPC Fix 1 覆盖） ──
+//        // C14_Cas: Interlocked.CompareExchange（ISPC 覆盖）
 //        //   仅 Cpp+Ispc：AutoSIMD(Simd*) 无 Interlocked 翻译分支，跳过（PASS 占位，Ms=0 不参与比值）。
 //        static unsafe void RunC14(List<Row> rows)
 //        {
@@ -553,9 +553,9 @@
 //                $" | Auto/Cpp={ac,5:F2}x Auto/ISPC={ai,5:F2}x | Cpp:{c,-6} ISPC:{i,-6} AutoSIMD:{a}");
 //        }
 
-//        // =====================================================================
+//        //
 //        // 压力测试：非 8 倍数尺寸 + 特殊浮点值
-//        // =====================================================================
+//        //
 //        static void RunStress()
 //        {
 //            Console.WriteLine("\n--- Stress: 非 8 倍数尺寸 ---");

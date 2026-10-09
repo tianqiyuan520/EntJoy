@@ -1,8 +1,6 @@
-// ============================================================
 // AttributeHelper.cs — 共享属性解析
 //   统一解析 [NativeTranspile] 特性的所有命名参数，
 //   消除 NativeTranspilerGenerator.cs 和 BindingsGenerator.cs 中的重复代码。
-// ============================================================
 using Microsoft.CodeAnalysis;
 using System.Linq;
 using NativeTranspiler.Analyzer.Common;
@@ -157,7 +155,7 @@ namespace NativeTranspiler.Analyzer.Common
             return NativeTranspiler.SimdMathPrecision.Fastest;
         }
 
-        // ---------- 辅助方法 ----------
+        // 辅助方法
 
         /// <summary>
         /// 将枚举构造参数的值转为 int，处理 byte/int/long 等不同底层类型。

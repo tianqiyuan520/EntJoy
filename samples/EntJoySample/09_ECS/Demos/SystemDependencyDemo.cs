@@ -4,7 +4,7 @@ using EntJoy.ECS.JobSystem;
 
 namespace EntJoySample.ECS
 {
-    // ─── 系统 Job 自动依赖（DOTS SystemState.Dependency）示例 ───
+    // 系统 Job 自动依赖（DOTS SystemState.Dependency）示例
     // 隐式路径：系统内 job.Schedule(query) 未传 dependsOn 时，自动继承执行上下文 Dependency，
     // SystemRunner 按 [Read]/[Write] 声明合并前序系统的冲突依赖（读等写、写等写，读读不冲突）。
 

@@ -19,7 +19,7 @@ namespace EntJoy.ECS.SourceGenerator
         public const string NamespaceEntJoy = "EntJoy";
         public const string NamespaceEntJoyECS = "EntJoy.ECS";
 
-        // ─── QueryTupleSourceGenerator（N 元组查询） ───
+        // QueryTupleSourceGenerator（N 元组查询）
 
         /// <summary>查询方法名（world.Query&lt;T0..Tn&gt;()）。</summary>
         public const string QueryMethod = "Query";
@@ -39,12 +39,12 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>最小元组数量：2 元组库内已有，生成器只处理 N ≥ 3。</summary>
         public const int MinTupleArity = 3;
 
-        // ─── ECSComponentSourceGenerator（[ECSComponent] 补接口） ───
+        // ECSComponentSourceGenerator（[ECSComponent] 补接口）
 
         /// <summary>ECSComponent 特性类名（语义匹配；用户写 [ECSComponent]，AttributeClass.Name 恒为完整类名）。</summary>
         public const string ECSComponentAttribute = "ECSComponentAttribute";
 
-        // ─── SystemRegistrationSourceGenerator（自动收集 ISystem） ───
+        // SystemRegistrationSourceGenerator（自动收集 ISystem）
 
         /// <summary>ISystem 接口名（System 自动收集的语义匹配目标）。</summary>
         public const string ISystem = "ISystem";
@@ -52,7 +52,7 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>DisableAutoCreation 特性类名（带此特性的 System 跳过自动收集）。</summary>
         public const string DisableAutoCreation = "DisableAutoCreationAttribute";
 
-        // ─── ReactiveSystemSourceGenerator（[Reactive] Observer 订阅） ───
+        // ReactiveSystemSourceGenerator（[Reactive] Observer 订阅）
 
         /// <summary>Reactive 特性类名（语义匹配）。</summary>
         public const string ReactiveAttribute = "ReactiveAttribute";
@@ -60,7 +60,7 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>ReadOnlySpan 类型名（Execute 参数推导组件类型的载体）。</summary>
         public const string ReadOnlySpan = "ReadOnlySpan";
 
-        // ─── DisposableRegistrationSourceGenerator（自动收集 IDisposable 组件） ───
+        // DisposableRegistrationSourceGenerator（自动收集 IDisposable 组件）
 
         /// <summary>IDisposable 接口名（持有原生资源组件的销毁钩子）。</summary>
         public const string IDisposable = "IDisposable";

@@ -28,7 +28,7 @@ namespace NativeTranspiler.Tests
 using NativeTranspiler;
 using EntJoy.ECS;
 using EntJoy.Collections;
-using static EntJoy.ECS.EventBus;
+using static EntJoy.ECS.SystemAPI;
 
 public struct LTag { public float V; }
 public struct LIspcEvt { public int Kind; public float Amount; }
@@ -68,7 +68,7 @@ public struct IspcSendEventVarJob : IJobChunk
 using NativeTranspiler;
 using EntJoy.ECS;
 using EntJoy.Collections;
-using static EntJoy.ECS.EventBus;
+using static EntJoy.ECS.SystemAPI;
 
 public struct LTag2 { public float V; }
 public struct LIspcEvt2 { public int Kind; public float Amount; }

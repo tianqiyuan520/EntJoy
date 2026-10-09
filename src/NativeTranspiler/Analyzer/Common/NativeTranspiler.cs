@@ -39,9 +39,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// SIMD 数学函数精度等级。
-        /// ⚠ 事实（2026-09-13 核对）：Sleef 已从 NativeDll 移除，目前**只有 Fastest 有 SIMD 实现**
-        /// （AVX2/AVX512 内联多项式，`NativeSIMD_math.h` 的 `#if SIMD_MATH_PRECISION == 1`）。
-        /// `High` 分支在头文件里是空的 ⇒ 产物与 `IEEE` 完全相同（逐通道标量回退）。
+        /// ⚠ 事实：Sleef 已从 NativeDll 移除，目前只有 Fastest 有 SIMD 实现
         /// 选 `High` 会得到一条 NT023 警告（见 NativeTranspileValidator）。
         /// </summary>
         public enum SimdMathPrecision
@@ -53,8 +51,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 自动 SIMD 向量化开关。
-        /// ⚠ 事实（2026-09-13 实测）：对 `IJobParallelFor` 的 job，整步比标量基线**慢 ~10%**，
-        /// 且命中原子/取引用/用户静态辅助函数的 job 会整段退回 per-lane 标量循环（无 SIMD 收益）。
+        /// ⚠ 事实：对 `IJobParallelFor` 的 job，整步比标量基线慢 ~10%，
         /// 设 `Enabled` 会得到一条 NT024 警告（见 NativeTranspileValidator）。
         /// </summary>
         public enum AutoSIMD
@@ -75,7 +72,7 @@ namespace NativeTranspiler.Analyzer
 
         public static string MapCSharpTypeToCpp(ITypeSymbol type)
         {
-            // P0-5b：历史上调用方用 `type!` 压住编译告警后把 null 传进来 ⇒ 下一行 `type.IsReferenceType`
+            // 历史上调用方用 `type!` 压住编译告警后把 null 传进来 ⇒ 下一行 `type.IsReferenceType`
             // 抛 NullReferenceException，生成器整体崩（只留 CS8785，无行号）。这里显式守卫，
             // 让错误可被 NT026 连栈上报。
             if (type == null)
@@ -485,9 +482,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 计算 C# struct 在 Sequential 布局下的总大小（64位）。
-        /// 用于生成的 C++ static_assert 校验，无需用户手动加 [StructLayout]。
         /// 尺寸/对齐统一委托给 CppJobGenerator 的递归布局推导（单一事实来源），
-        /// 消除第二份硬编码容器尺寸表：容器字段按真实字段布局推导，
         /// Release 无 sentinel = 32/24/20，Debug 带 #if DEBUG sentinel = 40/32/20。
         /// </summary>
         private static int ComputeStructSize(INamedTypeSymbol structType)

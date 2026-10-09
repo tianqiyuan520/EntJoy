@@ -10,11 +10,11 @@
 >
 > **Disclaimer:** EntJoy is not affiliated with, endorsed by, or sponsored by Unity Technologies.
 
-EntJoy 由 **C#、C++ 和 ISPC** 编写，借鉴 Unity DOTS 的数据导向设计：实体数据按 Archetype 和 Chunk 连续存储，工作通过统一 JobSystem 并行调度，同一份 C# Job 还可以由 Source Generator 转译为 C++ 或 ISPC 后端。
+EntJoy 由 **C#、C++ 和 ISPC** 编写，借鉴 Unity DOTS 的数据导向设计：实体数据按 Archetype 和 Chunk 连续存储，工作通过统一 JobSystem 并行调度，同一份 C# Job 可由 Source Generator 转译为 C++ 或 ISPC。
 
-项目提供 Archetype/Chunk ECS（Entity、Component、Query、Enableable Component）、`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`/`IJobChunk`/`IJobEntity`、`JobHandle` 依赖与组合依赖、`Complete()` 协作执行、C#/C++/ISPC 共用的原生工作线程调度器、NativeTranspiler，以及 `NativeArray<T>`、`NativeList<T>`、原子操作和数学类型等底层工具。NativeTranspiler 也可用于纯 JobSystem 项目：只引用 `EntJoy.Collections` / `EntJoy.Jobs`（不引用 ECS）时，数组类 Job（`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`）同样可以转译为 native 并运行；`IJobChunk`/`IJobEntity`/`SendEvent` 属于 ECS 能力，需引用 `EntJoy.ECS`。功能、正确性和性能对比见 [EntJoySample](samples/EntJoySample)。
+提供 Archetype/Chunk ECS（Entity、Component、Query、Enableable Component）、`IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch` / `IJobChunk` / `IJobEntity`、`JobHandle` 依赖与组合依赖、`Complete()` 协作执行、C#/C++/ISPC 共用的原生调度器、NativeTranspiler，以及 `NativeArray<T>` / `NativeList<T>` / 原子操作 / 数学类型。只写 Job、不用 ECS 时（仅引用 `EntJoy.Collections` / `EntJoy.Jobs`），数组类 Job 同样可转译为 native；`IJobChunk` / `IJobEntity` / `SendEvent` 需要 `EntJoy.ECS`。功能、正确性与性能对比见 [EntJoySample](samples/EntJoySample)。
 
-> 当前仓库仅适配并验证了 **Windows x64、.NET 8、MSVC 和 Intel ISPC** 工具链。GCC、G++ 和 Clang 暂不属于当前支持范围。API 仍在演进。支持两种消费方式：**NuGet 包**（`EntJoy.ECS` / `EntJoy.Jobs` / `EntJoy.Collections` / `EntJoy.Mathematics`，仅 win-x64）与**源码项目引用**；发布由 `v*` tag 触发，见[通过 NuGet 使用](#通过-nuget-使用)。
+> 仅适配并验证 **Windows x64 / .NET 8 / MSVC / Intel ISPC**；GCC、G++、Clang 不在支持范围，API 仍在演进。两种消费方式：**NuGet 包**（仅 win-x64）或**源码项目引用**；发布由 `v*` tag 触发，见[通过 NuGet 使用](#通过-nuget-使用)。
 
 ## 通过 NuGet 使用
 
@@ -106,10 +106,10 @@ cd EntJoy
 ### 4. Release 构建
 
 ```powershell
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
 ```
 
-> **`ENTJOY_STARTUP` 是必需的**：`EntJoySample` 里有多个样例各自定义了 `Main`（其余为注释态），不指定入口会以 `CS0017 程序定义了多个入口点` 失败。该属性只作用于本工程（写成 `StartupObject`），不会传播到库工程。可选入口见 [§5 运行样例](#5-运行样例)。
+> 入口由 `EntJoySample.csproj` 的**缺省 `StartupObject`** 提供（`EntJoySample.HotReload.Program`），可用 `-p:ENTJOY_STARTUP=<全限定入口类型>` 覆盖，见 [§5 运行样例](#5-运行样例)；该属性只作用于本工程，不传播到库工程。指定的类型必须有**非注释的 `Main`**，否则报 `CS1555`（增量构建会掩盖它，加 `--no-incremental` 才判得准）。
 
 构建会自动编译 EntJoy、Source Generator 和 NativeTranspiler，生成 C# bindings 与 C++/ISPC 源码到 `NativeTranspiler_Generated`，通过 MSBuild 任务调用 CMake，用 MSVC 编译 C++、用 ISPC 编译 SIMD kernel，最后生成 `NativeDll.dll` 并复制到仓库根目录的 `bin`。首次构建比增量构建慢；生成代码和原生源码没有变化时，后续构建会通过内容哈希跳过不必要的 CMake 编译。
 
@@ -119,17 +119,22 @@ dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_START
 .\bin\EntJoySample.exe
 ```
 
-入口由 `-p:ENTJOY_STARTUP=<全限定入口类型>` 选择（见 [§4](#4-release-构建)）。当前源码中处于**启用态**的入口有：
+入口由 `-p:ENTJOY_STARTUP=<全限定入口类型>` 选择（见 [§4](#4-release-构建)）；不传该属性时用工程缺省入口。当前源码中处于**启用态**的 `Main` 只有三个：
 
 | `ENTJOY_STARTUP` | 目录 |
 | --- | --- |
-| `EntJoySample.ManyJobsBenchTest.Program`（CI 使用的入口） | [`01_JobSystem/ManyJobsBenchTest`](samples/EntJoySample/01_JobSystem/ManyJobsBenchTest/Program.cs) |
+| `EntJoySample.HotReload.Program`（**缺省**，常驻监视宿主） | [`13_HotReload`](samples/EntJoySample/13_HotReload/Program.cs) |
 | `EntJoySample.ParallelRwConflictTest.Program` | [`01_JobSystem/ParallelRwConflictTest`](samples/EntJoySample/01_JobSystem/ParallelRwConflictTest/Program.cs) |
 | `EntJoySample.IJobChunkMoveCompareTest.Program` | [`02_IJobChunkECS/IJobChunkMoveCompareTest`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs) |
-| `EntJoySample.ECS.Program` | [`09_ECS`](samples/EntJoySample/09_ECS/Program.cs) |
-| `EntJoySample.NativeLookup.Entry.Program` | [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup/Program.cs) |
 
-其余样例的 `Main` 处于注释态；要运行它们，既可以用 `ENTJOY_STARTUP` 指向其类型（并给该文件解除注释），也可以按老办法注释掉其他入口。
+缺省的热重载样例**必须**从 `artifacts\hotreload-demo` 运行（跑在 `bin` 里会锁住构建输出，样例会直接拒启并打印步骤）；一次性样例显式指定入口即可：
+
+```powershell
+dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.IJobChunkMoveCompareTest.Program
+.\bin\EntJoySample.exe
+```
+
+其余样例的 `Main` 处于注释态；要运行它们，先给该文件解除注释，再用 `ENTJOY_STARTUP` 指向其类型。
 
 ## 配置自己的项目
 
@@ -137,11 +142,11 @@ dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_START
 
 ### 方式 A：NuGet 包（推荐，仓库外项目）
 
-四个包（版本 lockstep，当前 **1.0.0**，仅 **win-x64**）与各自作用见上文[通过 NuGet 使用](#通过-nuget-使用)；**只装 `EntJoy.ECS` 即可**，其余随依赖到达。工具链要求同上：纯 C# 不需要 CMake / MSVC / ISPC，native job 需要 CMake + MSVC（或 ClangCL）、ISPC 可选。
+包与工具链要求见上文[通过 NuGet 使用](#通过-nuget-使用)：**只装 `EntJoy.ECS`**，其余随依赖到达；纯 C# 不需要 CMake / MSVC / ISPC，native job 需要 CMake + MSVC（或 ClangCL），ISPC 可选。
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.0" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
 </ItemGroup>
 ```
 
@@ -218,7 +223,7 @@ for (int i = 0; i < 10_000; i++)
 
 var query = new QueryBuilder().WithAll<Position, Velocity>();
 
-foreach (var chunk in SystemAPI.QueryChunks<Position, Velocity>())
+foreach (var chunk in world.QueryChunks<Position, Velocity>())
 {
     Span<Position> positions = chunk.GetSpan0();
     Span<Velocity> velocities = chunk.GetSpan1();
@@ -462,8 +467,6 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 ## 样例项目
 
-2026-09-13 新增的框架验收样例与探针：
-
 ### 框架能力验收样例（原生编译 + 运行）
 
 - [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup)：blittable 实体定位表 + job-safe 跨 chunk 随机访问（`NativeComponentLookup<T>`，体内用 `ref` 局部）+ ECB 批量创建/写列/销毁/清空 + 非分配批量创建 + 回收池重建。
@@ -483,7 +486,7 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 | `EcbParallelWriterProbe` | `ParallelWriter`（单线程 + **跨 tile 共享**原子占位 + 容量不足失败路径） |
 | `SafetyInterceptProbe` | 安全检查语义负向用例（快路径不得吞掉违规；必须用 Native 后端） |
 
-[`samples/EntJoySample`](samples/EntJoySample) 包含以下案例：
+以下为 [`samples/EntJoySample`](samples/EntJoySample) 中的其余案例：
 
 ### 01 JobSystem
 
@@ -513,11 +516,11 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 ### 05 Algorithms
 
-- [`GridSearch`](samples/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验。（2026-08 整体注释停用）
+- [`GridSearch`](samples/EntJoySample/05_Algorithms/GridSearch)：二维网格构建、最近点和范围搜索实验（当前整体注释停用）。
 
 ### 06 HotField Handle
 
-- [`HotFieldHandle`](samples/EntJoySample/06_HotFieldHandle)：HotField 可行性原型——普通 class + `[HotFieldEntity]` 属性 → 字段级 SoA 存储（`HotStore`）+ int 索引 + `ref` 属性重定向，System（`IJobParallelFor`）直接消费同一存储。验证「OOP 游戏代码与 plain class 逐字节相同（无感）、Attribute 机械部分零成本、OOD↔DOD 共享存储结果一致；1M 密集 OOP 的 SoA 结构税如实报告（批量走 System）」。
+- [`HotFieldHandle`](samples/EntJoySample/06_HotFieldHandle)：HotField 可行性原型——普通 class + `[HotFieldEntity]` → 字段级 SoA 存储（`HotStore`）+ int 索引 + `ref` 属性重定向，System（`IJobParallelFor`）直接消费同一存储。验证 OOP 代码无感、Attribute 机械部分零成本、OOD↔DOD 共享存储结果一致，并如实报告 1M 密集 OOP 的 SoA 结构税（批量走 System）。
 
 ### 08 Entity Random Access
 
@@ -562,7 +565,19 @@ Debug 构建会减少 JIT、C#、C++ 和链接器优化，还可能启用额外�
 
 ### ISPC 程序启动时出现非法指令
 
-当前 ISPC 样例目标为 AVX-512 SKX。确认 CPU 支持对应指令，或修改 NativeTranspiler 的 ISPC target 并重新生成原生代码。
+当前 ISPC 样例目标为 `avx2-i32x8`。确认 CPU 支持 AVX2，或修改 NativeTranspiler 的 ISPC target 并重新生成原生代码。
+
+### 构建失败：`NativeTranspiler generated silently-degraded code`
+
+生成器对任何无法翻译的构造会写入唯一标记（`__ENTJOY_UNSUPPORTED_STMT__…` / `__ENTJOY_UNSUPPORTED_EXPR__…`），`NativeCompileTask` 拒绝编译该产物——这是刻意的：静默丢语句曾产出"能编译但什么都不算"的代码。按报错里的 `file(line): // __ENTJOY_UNSUPPORTED_STMT__<construct>` 定位，改写该 Job 或扩展生成器。边界、绕法和完整诊断表见 [`docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md)。
+
+### 构建像是用了过期的生成代码
+
+Roslyn 的 `CoreCompile` 内容哈希门控在"只有生成器变了"时可能整个跳过 Source Generator，而原生编译任务随后又跳过 CMake，于是旧产物被重新编译。任务现在能检测这种情况（`generator.stamp` 对比生成器程序集哈希）并给出确切配方：删除 `<项目>\.godot\mono\temp\obj\<Configuration>`（或 `obj\<Configuration>`）、`NativeTranspiler_Generated\build` 与 `NativeTranspiler_Generated\native_compile.hash` 后重建。
+
+### NativeTranspiler 的规则与限制写在哪
+
+[`docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md)：静默降级门控、批处理循环的 `return` 语义、`IJobParallelForBatch` 支持面、ISPC 调用点桥接（返回值 / 指针 / `ref`-`out` 槽）、NT 诊断表、过期门控，以及 CI 与回归夹具（`tools/NativeTranspilerFixture`）。
 
 ## 设计启发与致谢
 
@@ -574,7 +589,7 @@ EntJoy 的设计和实现受到以下项目与技术的启发：
 - [Friflo.Engine.ECS](https://github.com/friflo/Friflo.Engine.ECS)：C# ECS API 与数据布局的实现参考。
 - [Intel ISPC](https://ispc.github.io/)：面向 SPMD/SIMD 的原生计算后端。
 
-感谢这些项目的作者和贡献者公开他们的工作，使 EntJoy 能够在已有经验之上继续探索 C#、C++ 与 SIMD ECS 技术栈。
+感谢这些项目的作者和贡献者公开他们的工作。
 
 ---
 
@@ -590,9 +605,9 @@ EntJoy 的设计和实现受到以下项目与技术的启发：
 
 EntJoy is written in **C#, C++, and ISPC** and follows the data-oriented design of Unity DOTS: entity data is stored contiguously by Archetype and Chunk, work is scheduled in parallel through a unified JobSystem, and the same C# job can be transpiled to a C++ or ISPC backend by the source generator.
 
-The project provides Archetype/Chunk ECS (entities, components, queries, enableable components), the `IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`/`IJobChunk`/`IJobEntity` interfaces, `JobHandle` dependencies with combined dependencies and cooperative `Complete()`, a native worker scheduler shared by C#, C++, and ISPC, NativeTranspiler, and low-level utilities such as `NativeArray<T>`, `NativeList<T>`, atomics, and math types. NativeTranspiler also works for pure JobSystem projects: with only `EntJoy.Collections` / `EntJoy.Jobs` referenced (no ECS), array-shaped jobs (`IJob`/`IJobFor`/`IJobParallelFor`/`IJobParallelForBatch`) transpile and run natively; `IJobChunk`/`IJobEntity`/`SendEvent` are ECS features and require `EntJoy.ECS`. Functional, correctness, and performance comparisons live in [EntJoySample](samples/EntJoySample).
+The project provides Archetype/Chunk ECS (entities, components, queries, enableable components), the `IJob` / `IJobFor` / `IJobParallelFor` / `IJobParallelForBatch` / `IJobChunk` / `IJobEntity` interfaces, `JobHandle` dependencies with `CombineDependencies` and cooperative `Complete()`, a native scheduler shared by C#/C++/ISPC, NativeTranspiler, and utilities such as `NativeArray<T>` / `NativeList<T>` / atomics / math types. For pure JobSystem projects (only `EntJoy.Collections` / `EntJoy.Jobs`, no ECS), array-shaped jobs transpile and run natively too; `IJobChunk` / `IJobEntity` / `SendEvent` require `EntJoy.ECS`. Functional, correctness, and performance comparisons live in [EntJoySample](samples/EntJoySample).
 
-> The repository currently supports and verifies only the **Windows x64, .NET 8, MSVC, and Intel ISPC** toolchain. GCC, G++, and Clang are not currently supported. APIs are still evolving. Two consumption modes are supported: **NuGet packages** (`EntJoy.ECS` / `EntJoy.Jobs` / `EntJoy.Collections` / `EntJoy.Mathematics`, win-x64 only) and **source project references**; releases are triggered by pushing a `v*` tag — see [Using NuGet Packages](#using-nuget-packages).
+> Verified only on **Windows x64 / .NET 8 / MSVC / Intel ISPC**; GCC, G++, and Clang are out of scope, and the API is still evolving. Two consumption modes: **NuGet packages** (win-x64 only) or **source project references**; releases are triggered by a `v*` tag — see [Using NuGet Packages](#using-nuget-packages).
 
 ## Using NuGet Packages
 
@@ -685,10 +700,10 @@ cd EntJoy
 ### 4. Build Release
 
 ```powershell
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.ManyJobsBenchTest.Program
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
 ```
 
-> **`ENTJOY_STARTUP` is required**: `EntJoySample` contains several samples that each define `Main` (the rest are commented out); without an explicit entry point the build fails with `CS0017: Program has more than one entry point defined`. The property is scoped to this project (it sets `StartupObject`) and does not propagate to library projects. Available entries are listed in [§5](#5-run-a-sample).
+> The entry point comes from the project's **default `StartupObject`** (`EntJoySample.HotReload.Program`); override it with `-p:ENTJOY_STARTUP=<fully-qualified entry type>`, see [§5](#5-run-a-sample). The property is scoped to this project and does not propagate to library projects. The named type must have an **uncommented `Main`**, otherwise the build fails with `CS1555` (incremental builds can hide that — use `--no-incremental` to be sure).
 
 The build compiles EntJoy, its source generator, and NativeTranspiler, generates C# bindings and C++/ISPC source under `NativeTranspiler_Generated`, invokes CMake through a custom MSBuild task, compiles C++ with MSVC and SIMD kernels with ISPC, then builds `NativeDll.dll` and copies it to the root `bin` directory. The first build is slower than incremental builds; when generated and native sources have not changed, content hashes avoid unnecessary CMake compilation.
 
@@ -698,17 +713,22 @@ The build compiles EntJoy, its source generator, and NativeTranspiler, generates
 .\bin\EntJoySample.exe
 ```
 
-The entry point is selected with `-p:ENTJOY_STARTUP=<fully-qualified entry type>` (see [§4](#4-build-release)). The entries that are currently **enabled** in source are:
+The entry point is selected with `-p:ENTJOY_STARTUP=<fully-qualified entry type>` (see [§4](#4-build-release)); without it, the project default is used. Only three `Main`s are currently **enabled** in source:
 
 | `ENTJOY_STARTUP` | Directory |
 | --- | --- |
-| `EntJoySample.ManyJobsBenchTest.Program` (used by CI) | [`01_JobSystem/ManyJobsBenchTest`](samples/EntJoySample/01_JobSystem/ManyJobsBenchTest/Program.cs) |
+| `EntJoySample.HotReload.Program` (**default**, long-running watcher host) | [`13_HotReload`](samples/EntJoySample/13_HotReload/Program.cs) |
 | `EntJoySample.ParallelRwConflictTest.Program` | [`01_JobSystem/ParallelRwConflictTest`](samples/EntJoySample/01_JobSystem/ParallelRwConflictTest/Program.cs) |
 | `EntJoySample.IJobChunkMoveCompareTest.Program` | [`02_IJobChunkECS/IJobChunkMoveCompareTest`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/Program.cs) |
-| `EntJoySample.ECS.Program` | [`09_ECS`](samples/EntJoySample/09_ECS/Program.cs) |
-| `EntJoySample.NativeLookup.Entry.Program` | [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup/Program.cs) |
 
-The `Main` of every other sample is commented out; to run those, point `ENTJOY_STARTUP` at their type (and uncomment the corresponding file), or keep using the comment/uncomment workflow.
+The default hot-reload sample **must** run from `artifacts\hotreload-demo` (running it from `bin` locks the build output; the sample then refuses to start and prints the steps). For one-shot samples, name the entry explicitly:
+
+```powershell
+dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -p:ENTJOY_STARTUP=EntJoySample.IJobChunkMoveCompareTest.Program
+.\bin\EntJoySample.exe
+```
+
+The `Main` of every other sample is commented out; to run those, uncomment the file first and then point `ENTJOY_STARTUP` at its type.
 
 ## Configure Your Own Project
 
@@ -716,11 +736,11 @@ Two options depending on whether your project lives inside this repository:
 
 ### Option A: NuGet packages (recommended for out-of-repo projects)
 
-Four packages (lockstep version, currently **1.0.0**, **win-x64 only**); see [Using NuGet Packages](#using-nuget-packages) above for what each one contains — **`EntJoy.ECS` is the only one you need to reference**, the rest arrive as dependencies. The toolchain requirements are the same: C# only needs no CMake / MSVC / ISPC, native jobs need CMake + MSVC (or ClangCL) and optionally ISPC.
+See [Using NuGet Packages](#using-nuget-packages) for the packages and toolchain requirements: **reference `EntJoy.ECS` only**, the rest arrive as dependencies; C#-only projects need no CMake / MSVC / ISPC, native jobs need CMake + MSVC (or ClangCL), ISPC optional.
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.0" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
 </ItemGroup>
 ```
 
@@ -797,7 +817,7 @@ for (int i = 0; i < 10_000; i++)
 
 var query = new QueryBuilder().WithAll<Position, Velocity>();
 
-foreach (var chunk in SystemAPI.QueryChunks<Position, Velocity>())
+foreach (var chunk in world.QueryChunks<Position, Velocity>())
 {
     Span<Position> positions = chunk.GetSpan0();
     Span<Velocity> velocities = chunk.GetSpan1();
@@ -1035,7 +1055,26 @@ Working sources:
 
 ## Samples
 
-[`samples/EntJoySample`](samples/EntJoySample) contains the following cases:
+### Framework acceptance samples (native compile + run)
+
+- [`12_EntityNativeLookup`](samples/EntJoySample/12_EntityNativeLookup): blittable entity locate table + job-safe cross-chunk random access (`NativeComponentLookup<T>`, `ref` locals in the body) + ECB bulk create / column write / destroy / clear + allocation-free bulk create + pool rebuild.
+- [`13_EnableBitMapNative`](samples/EntJoySample/13_EnableBitMapNative): native `IJobChunk` reading and writing per-component enable bitmaps (`GetEnableBitMapPtr<T>()`, fully consistent with the managed per-entity + `WithEnabled` path) + native `IJobEntity` + `NativeArray` side table + `Entity` parameter.
+- [`14_AutoSimdChunkWriteback`](samples/EntJoySample/14_AutoSimdChunkWriteback): `IJobChunk` whole-struct write-back over two components (AutoSIMD vs scalar C++ vs C# baseline, per-entity identical).
+- Single entry point [`12_EntityNativeLookup/Program.cs`](samples/EntJoySample/12_EntityNativeLookup/Program.cs) (three sections in sequence); see [`Runtime-Contracts-and-Known-Limitations.md`](docs/public/Runtime-Contracts-and-Known-Limitations.md) and [`NativeTranspiler-Boundaries-and-Diagnostics.md`](docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md).
+
+### Probes (`tools/`, runnable projects whose exit code is the criterion)
+
+| Probe | Coverage |
+|---|---|
+| `EntityLocateProbe` | locate table vs managed table (after create/destroy/compact/id reuse) |
+| `EntityCommandBufferProbe` | ECB bulk create / column write / playback allocation |
+| `EntityBulkDestroyProbe` | bulk destroy / `DestroyAllInArchetype` |
+| `EntityDestroyIsolationProbe` | destroy isolation / ghost entities / table capacity |
+| `EcsShapeCostProbe` | locate-table lookup cost, structural-change cost, chunk compaction, bulk create |
+| `EcbParallelWriterProbe` | `ParallelWriter` (single-threaded + cross-tile atomic reservation + out-of-capacity failure path) |
+| `SafetyInterceptProbe` | negative safety-check cases (the fast path must not swallow violations; native backend required) |
+
+The remaining cases in [`samples/EntJoySample`](samples/EntJoySample):
 
 ### 01 JobSystem
 
@@ -1065,11 +1104,11 @@ Working sources:
 
 ### 05 Algorithms
 
-- [`GridSearch`](samples/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search. (Entirely commented out since 2026-08)
+- [`GridSearch`](samples/EntJoySample/05_Algorithms/GridSearch): experiments with 2D grid construction, nearest-point lookup, and range search (currently commented out).
 
 ### 06 HotField Handle
 
-- [`HotFieldHandle`](samples/EntJoySample/06_HotFieldHandle): HotField feasibility prototype — an ordinary class + `[HotFieldEntity]` attribute → field-level SoA storage (`HotStore`) + int index + `ref`-property redirection, with Systems (`IJobParallelFor`) consuming the same store directly. Verifies that OOP game code stays byte-identical to a plain class (seamless), the attribute machinery is zero-cost, and OOD↔DOD share storage with identical results; the dense-1M OOP SoA structural tax is reported honestly (bulk goes through Systems).
+- [`HotFieldHandle`](samples/EntJoySample/06_HotFieldHandle): HotField feasibility prototype — an ordinary class + `[HotFieldEntity]` → field-level SoA storage (`HotStore`) + int index + `ref`-property redirection, with Systems (`IJobParallelFor`) consuming the same store directly. Verifies that OOP code is unaffected, that the attribute machinery is zero-cost, and that OOD↔DOD share storage with identical results; reports the dense-1M OOP SoA structural tax honestly (bulk goes through Systems).
 
 ### 08 Entity Random Access
 
@@ -1110,7 +1149,7 @@ Debug builds reduce JIT, C#, C++, and linker optimization and may enable additio
 
 ### The ISPC program reports an illegal instruction
 
-Current ISPC samples target AVX-512 SKX. Verify CPU support or change the NativeTranspiler ISPC target and regenerate native code.
+Current ISPC samples target `avx2-i32x8`. Verify CPU support for AVX2, or change the NativeTranspiler ISPC target and regenerate native code.
 
 ### Build fails with `NativeTranspiler generated silently-degraded code`
 
@@ -1134,4 +1173,4 @@ EntJoy's design and implementation are informed by:
 - [Friflo.Engine.ECS](https://github.com/friflo/Friflo.Engine.ECS), a reference for C# ECS APIs and data layout.
 - [Intel ISPC](https://ispc.github.io/), the SPMD/SIMD native compute backend.
 
-Thanks to the authors and contributors of these projects for making their work available and enabling EntJoy to continue exploring a combined C#, C++, and SIMD ECS stack.
+Thanks to the authors and contributors of these projects for making their work available.

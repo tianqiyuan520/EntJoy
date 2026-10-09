@@ -100,9 +100,8 @@ static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
   //   x = (m-1)/(m+1), x2 = x^2
   //   log(d) = x * P(x2) + e * ln(2)
   //
-  // ★ Fix: the previous version normalized the mantissa to [0.5,1) (OR 0x3f000000)
-  //   and re-scaled by /0.75, which is NOT the SLEEF domain — the polynomial is
-  //   fit for [1,2), so out-of-domain arguments produced large errors (up to ~2.0).
+  // Mantissa must land in the SLEEF domain: the polynomial is fit for m in [1,2),
+  // so arguments outside it produce large errors.
   n_float dpos = _mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));  // |d|
   n_int emm0 = _mm256_srli_epi32(_mm256_castps_si256(dpos), 23);
   n_int e = _mm256_sub_epi32(emm0, _mm256_set1_epi32(127));

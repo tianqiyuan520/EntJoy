@@ -18,16 +18,14 @@ namespace EntJoy.ECS
         private double _lastFrameSystemMs;
 
         /// <summary>上一帧各 system <c>OnUpdate</c> 自身跨度的耗时之和（ms）。
-        /// 诊断口径：<c>Update()</c> 的整步墙钟 − 本值 = **运行器簿记**（层遍历、<c>[RunWhen]</c> 反射、
+        /// 诊断口径：<c>Update()</c> 的整步墙钟 − 本值 = 运行器簿记（层遍历、<c>[RunWhen]</c> 反射、
         /// 入站依赖合并、<c>[Write]</c> 表写回、读依赖表维护、入站组合句柄释放、计时字典，
-        /// 以及帧末 `CompletePendingNativeEvents`/事件交换/`TempAllocator.Reset`）。
-        /// 显式按序直调各 system 的调用方（Unity 侧 M4，见其 `[M4-DISCLOSE] ⑧`）不付这一笔。
-        /// 取证必须在 <c>Update()</c> 返回后**同帧**读取（跨线程读 <c>_timings</c> 会与窗口边界错配）。</summary>
+        /// 取证必须在 <c>Update()</c> 返回后同帧读取（跨线程读 <c>_timings</c> 会与窗口边界错配）。</summary>
         public double LastFrameSystemMsSum => _lastFrameSystemMs;
 
-        // ★ A 项（口径 3）：系统间"读→写"依赖。默认**开启**：读系统结束后把 outgoing 写进读依赖表，
+        // 系统间"读→写"依赖。默认开启：读系统结束后把 outgoing 写进读依赖表，
         //   写系统入站时合并读表 ⇒ [Read(X)] 的 Job 仍在飞时，后续 [Write(X)] 的 Job 必须等它
-        //   （消掉唯一的静默竞态：撕裂/陈旧读）。读系统**不**合并读表 ⇒ 读读仍并行。
+        //   （消掉唯一的静默竞态：撕裂/陈旧读）。读系统不合并读表 ⇒ 读读仍并行。
         //   `ENTJOY_SYSTEM_READ_WRITE_ORDER=0` 回退旧行为（读依赖表整体不参与）。
         private static readonly bool s_readWriteOrderFromEnv = ReadReadWriteOrderFromEnv();
         private bool _readWriteOrdering = s_readWriteOrderFromEnv;
@@ -130,7 +128,7 @@ namespace EntJoy.ECS
             foreach (var t in slot.WriteComponents)
                 _world.EntityManager.SetLastWriter(ComponentTypeManager.GetComponentType(t), outgoing);
 
-            // ★ A 项：读→写串行（读表只在开关打开时参与）
+            // 读→写串行（读表只在开关打开时参与）
             if (_readWriteOrdering)
             {
                 // 写系统：这次写已经等过所有读 ⇒ 清掉这些组件的读依赖
@@ -142,11 +140,10 @@ namespace EntJoy.ECS
                         _world.EntityManager.SetLastReader(ComponentTypeManager.GetComponentType(t), outgoing);
             }
 
-            // ★ C：本系统入站依赖是运行器自己组合出来的句柄时，用后即释。
+            // 本系统入站依赖是运行器自己组合出来的句柄时，用后即释。
             //   组合句柄只作为"入站依赖聚合器"存在：任何用它 Schedule 出去的 Job 在提交时都已
             //   RetainedNativeDependency 持引用（CombineDependencies 内部也对父依赖持引用，直到
             //   全部完成才 ReleaseState），故此处释放不会提前回收在飞依赖；系统若一个 Job 都没调度、
-            //   又把入站句柄原样写回写表（adopted），所有权已转移给依赖表 ⇒ 不释放。
             //   不释放的后果：每个多依赖 system 每帧留一个 HandleState 到 GC 终结器成批回收。
             if (incomingIsCombined && !IsAdoptedByWriteTable(incoming, outgoing, slot))
                 NativeJobScheduler.Release(incoming._nativeHandle);
@@ -169,11 +166,11 @@ namespace EntJoy.ECS
             var deps = new List<JobHandle>();
             CollectConflictDependencies(slot.ReadComponents, deps);
             CollectConflictDependencies(slot.WriteComponents, deps);
-            // ★ A 项：写系统还要等"读过这些组件的系统"留下的 Job（读表只在此处、且仅在写侧参与；
+            // 写系统还要等"读过这些组件的系统"留下的 Job（读表只在此处、且仅在写侧参与；
             //   读系统不合并读表 ⇒ 读读仍并行）。开关关闭时整表不参与，等价旧行为。
             if (_readWriteOrdering && slot.WriteComponents.Count > 0)
                 CollectLastReaderDependencies(slot.WriteComponents, deps);
-            // ★ R11：单个依赖直接返回，不构造组合句柄。
+            // 单个依赖直接返回，不构造组合句柄。
             //   CombineDependencies 会新建一个 native HandleState，而 JobHandle 没有 Dispose/Release
             //   （只能等终结器），所以"每个冲突 system 每帧都组合一次"会造成无谓的句柄抖动。
             //   只有 ≥2 个依赖时才值得组合；语义不变（组合单句柄 ≡ 直接返回该句柄）。

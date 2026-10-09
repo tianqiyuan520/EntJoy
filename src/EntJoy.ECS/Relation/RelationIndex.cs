@@ -7,7 +7,6 @@ namespace EntJoy.ECS
     /// <summary>
     /// 关系反向索引（级联删除 target index）。
     /// target.Id → (relTypeId → sources)。sources 用 HashSet（增删 O(1)）。
-    /// 主动维护：Add/Remove/覆盖更新关系时同步增删；DestroyEntityCascade 时 O(1) 查索引。
     /// 所有操作在 EntityManager 的 _structuralLock 保护下调用（与关系操作同一锁域）。
     /// </summary>
     public sealed class RelationIndex

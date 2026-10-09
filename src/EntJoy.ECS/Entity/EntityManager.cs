@@ -30,21 +30,21 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// Archetype **集合身份**版本：新建、清空、恢复（数量被外部直接改写）时递增。
+        /// Archetype 集合身份版本：新建、清空、恢复（数量被外部直接改写）时递增。
         ///
-        /// 查询的增量刷新必须用它判"匹配集合能否复用"，**不能只比数量**：
+        /// 查询的增量刷新必须用它判"匹配集合能否复用"，不能只比数量：
         /// 数量相同而身份不同（Restore 后整体重建、或一增一删恰好抵消）时，
-        /// 复用缓存会让查询继续引用**已释放**的 Archetype ⇒ 静默返回 0 个实体。
+        /// 复用缓存会让查询继续引用已释放的 Archetype ⇒ 静默返回 0 个实体。
         /// </summary>
         internal int ArchetypeSetVersion => archetypeSetVersion;
         public ref readonly Archetype[] Archetypes => ref allArchetypes;
 
         /// <summary>实体回收队列（对象池）</summary>
         /// <summary>
-        /// 实体 Id 回收栈（**非托管 LIFO**，P0-4c）。
+        /// 实体 Id 回收栈（非托管 LIFO）。
         /// 原先用 <c>Queue&lt;Entity&gt;</c>：1M 级销毁/重生会把托管队列扩到 ~1M 项
-        /// （实测批量销毁 100k 时回放期分配 **3.2MB**，全部来自队列扩容）。
-        /// 换成非托管栈后销毁/创建路径**零托管分配**；语义由 FIFO 变 LIFO（最近销毁的 Id 优先复用），
+        /// （实测批量销毁 100k 时回放期分配 3.2MB，全部来自队列扩容）。
+        /// 换成非托管栈后销毁/创建路径零托管分配；语义由 FIFO 变 LIFO（最近销毁的 Id 优先复用），
         /// 与 GPU 版实体池（freeList 栈）一致。
         /// </summary>
         private unsafe Entity* _recycleStack;
@@ -89,10 +89,10 @@ namespace EntJoy.ECS
         private EntityIndexInWorld[] entities;  // 实体索引数组
 
         /// <summary>
-        /// **blittable 实体定位表**（索引 = 实体 Id），与 <see cref="entities"/> **在同一点更新**
+        /// blittable 实体定位表（索引 = 实体 Id），与 <see cref="entities"/> 在同一点更新
         /// （<see cref="UpdateEntityLocation"/> / <see cref="RefreshChunkEntityIndices"/>）：
         /// 每项记录 chunk 数据块基址 + 该 Archetype 的非托管列偏移表 + slot + version。
-        /// 用途：让并行 job 与 NativeTranspile 生成的 C++ 内核做**跨 chunk 随机访问**
+        /// 用途：让并行 job 与 NativeTranspile 生成的 C++ 内核做跨 chunk 随机访问
         /// （托管 <see cref="EntityIndexInWorld"/> 含托管 Archetype 引用，原生读不到）。
         /// 容量随 <see cref="entities"/> 扩容（见 <see cref="EnsureLocateCapacity"/>）。
         /// </summary>
@@ -107,13 +107,13 @@ namespace EntJoy.ECS
         /// <summary>当前已创建的实体总数</summary>
         private int entityCount;  // 实体计数器
         /// <summary>
-        /// ⚠ 语义是**已发放的 id 计数**（单调递增，`newEntity.Id = entityCount++`），**不是存活实体数**：
+        /// ⚠ 语义是已发放的 id 计数（单调递增，`newEntity.Id = entityCount++`），不是存活实体数：
         /// Destroy 不会让它下降。存活数请看 <see cref="LiveEntityCount"/>（诊断/内存报告用它）。
         /// 保留该语义是为了兼容"按 id 从 0 到 EntityCount-1 遍历"的既有用法。
         /// </summary>
         public int EntityCount => entityCount;
 
-        /// <summary>当前**存活**实体数：按各 Archetype 的实际计数求和（Destroy 后会下降）。</summary>
+        /// <summary>当前存活实体数：按各 Archetype 的实际计数求和（Destroy 后会下降）。</summary>
         internal int LiveEntityCount
         {
             get
@@ -147,9 +147,9 @@ namespace EntJoy.ECS
         // 系统间依赖跟踪：组件类型 Id → 最后写入它的 Job（帧内跨系统传播，DOTS EntityDependencyManager 语义）。
         // 由 SystemRunner 在每个系统结束后按 [Write] 声明维护；CompleteActiveJobs（全量）后清空。
         private readonly Dictionary<int, JobHandle> _lastWritePerComponent = new();
-        // ★ A 项：读依赖表（组件 → 最后读 Job，多读系统时组合）。写系统入站时合并它，
+        // 读依赖表（组件 → 最后读 Job，多读系统时组合）。写系统入站时合并它，
         //   使 [Read(X)] 的 Job 仍在飞时后续 [Write(X)] 必须等 —— 否则两者并发访问 X（撕裂/陈旧读）。
-        //   读系统**不**合并本表 ⇒ 读读仍然并行。ENTJOY_SYSTEM_READ_WRITE_ORDER=0 时整表不使用。
+        //   读系统不合并本表 ⇒ 读读仍然并行。ENTJOY_SYSTEM_READ_WRITE_ORDER=0 时整表不使用。
         private readonly Dictionary<int, JobHandle> _lastReadPerComponent = new();
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
@@ -366,12 +366,8 @@ namespace EntJoy.ECS
         }
 
         /// <summary>记录某组件类型的最后写入 Job（系统结束时由 SystemRunner 调用；空句柄即清除）。
-        /// 覆盖旧值时**确定性回收**旧句柄（交接文档 C 项）：旧句柄已完成时它的 box 不再被任何等待方
-        /// 需要，于是直接 Release 掉原生 HandleState，而不是拖到 .NET 终结器（终结器只在 GC 批量发生
+        /// 覆盖旧值时确定性回收旧句柄（交接文档 C 项）：旧句柄已完成时它的 box 不再被任何等待方
         /// 时成批回收 ⇒ 调度线程的 state 池恒空）。
-        /// **未完成**的旧句柄绝不提前释放：所有 JobHandle 拷贝共享同一个 box，提前 detach 会让
-        /// `_activeJobs` 记账项与用户手里那份拷贝的 Complete 退化成空操作（等待/结构变更屏障静默消失，
-        /// 且原生 HandleState 可能在 Job 仍在飞时被回收复用）；而已完成句柄上的 Complete 本就是空操作。
         /// 带待抛 Job 异常时同样不回收，否则异常会随句柄一起被丢弃。</summary>
         internal void SetLastWriter(ComponentType componentType, JobHandle handle)
         {
@@ -414,9 +410,9 @@ namespace EntJoy.ECS
         }
 
         /// <summary>记录某组件类型的"最后读取依赖"（A 项：读→写串行）。
-        /// 与写表不同，这里**必须 merge 而不是覆盖**：同一组件一帧内可能被多个读系统先后读，
-        /// 后续写系统要等的是**全部**读 Job（读系统彼此不冲突、可以同时在飞）。
-        /// 空句柄表示"本次没有新增读依赖"（例如该读系统没调度 Job）⇒ **不清表**，否则会抹掉同帧
+        /// 与写表不同，这里必须 merge 而不是覆盖：同一组件一帧内可能被多个读系统先后读，
+        /// 后续写系统要等的是全部读 Job（读系统彼此不冲突、可以同时在飞）。
+        /// 空句柄表示"本次没有新增读依赖"（例如该读系统没调度 Job）⇒ 不清表，否则会抹掉同帧
         /// 更早读系统留下的依赖，读→写串行又退回静默竞态。</summary>
         internal void SetLastReader(ComponentType componentType, JobHandle handle)
         {
@@ -460,11 +456,8 @@ namespace EntJoy.ECS
         /// </summary>
         private void CompleteEntityJobs(Entity entity, Archetype? extra = null)
         {
-            // Observer 重入保护（与 CompleteActiveJobs 同一契约，2026-09-26 补齐）：
-            // Added/Set 派发把**指向 chunk 组件列的值指针**直接交给回调（零拷贝 span），
-            // 若回调内做结构变更（AddComponent/RemoveComponent/DestroyEntity/迁移），
-            // Archetype.Remove → ReleaseChunkMemory 会把该 chunk 的 slab 归还给全局池，
-            // 同批次后续 observer 读到的就是已释放内存；且 `_structuralLock` 是可重入 Monitor，
+            // Observer 重入保护（与 CompleteActiveJobs 同一契约）：
+            // Added/Set 派发把指向 chunk 组件列的值指针直接交给回调（零拷贝 span），
             // 不加这道闸门根本拦不住。约定：回调内结构变更请走 DeferredCommandBuffer。
             if (s_observerDepth > 0)
                 throw new InvalidOperationException(
@@ -483,7 +476,7 @@ namespace EntJoy.ECS
             }
             if (extra == null || extra == info.Archetype)
             {
-                // 零分配单元素重载（P0-4c）：原先这里每次 new[] { archetype } ⇒ 32B/实体，
+                // 零分配单元素重载：原先这里每次 new[] { archetype } ⇒ 32B/实体，
                 // 批量销毁 100k 实测 3.2MB 分配全出在这一行。
                 Archetype single = info.Archetype;
                 CompleteArchetypeJobs(System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref single, 1));
@@ -517,9 +510,7 @@ namespace EntJoy.ECS
         private void PruneCompletedJobsNoLock()
         {
             // 一次扫描把「已完成」句柄从所有记账结构移除。`_activeJobs` 是权威列表
-            // （TrackEntityJob 必然写入它，其余结构只引用其成员），以它为准即可保证
             // `_jobWrittenComponents` 不随调度次数无界增长 —— 否则每个 Job 都会留下
-            // 一条 Dictionary 条目 + 一个被保留的 ComponentType[]，并且已释放的 native
             // 句柄值被复用时会与陈旧组件集串味（选择性等待按错误组件集过滤）。
             List<JobHandle>? completed = null;
             for (int i = _activeJobs.Count - 1; i >= 0; i--)
@@ -553,11 +544,10 @@ namespace EntJoy.ECS
                 for (int i = 0; i < completed.Count; i++)
                     _jobWrittenComponents.Remove(completed[i]);
 
-                // ★ C 项：这些句柄**按定义已完成**，且已移出记账表 ⇒ 不再有任何等待方需要它们，
+                // 这些句柄按定义已完成，且已移出记账表 ⇒ 不再有任何等待方需要它们，
                 //   顺手把原生 HandleState 引用确定性释放。原来这里只做"移除"：帧内先完成的 Job 会在
                 //   下一次 TrackEntityJob 被剪掉，于是永远等不到帧末 CompleteActiveJobs 的 Complete
-                //   （那是唯一的确定性回收点），HandleState 一直悬到 GC 终结器成批回收。
-                //   顺序要点：必须在 `_jobWrittenComponents.Remove` **之后**释放 —— 句柄 detach 后其
+                //   顺序要点：必须在 `_jobWrittenComponents.Remove` 之后释放 —— 句柄 detach 后其
                 //   哈希值随之改变，先放会让字典键永远删不掉。
                 if (!NativeJobCore.HasPendingJobExceptions)
                 {
@@ -567,7 +557,7 @@ namespace EntJoy.ECS
             }
         }
 
-        // ======================== Phase 3: Per-Archetype Job Tracking ========================
+        // Phase 3: Per-Archetype Job Tracking
 
         /// <summary>
         /// 登记 Job 到全局列表 + per-archetype 列表。
@@ -709,7 +699,7 @@ namespace EntJoy.ECS
             entityInfoRef.ChunkIndex = chunkIndex;
             entityInfoRef.SlotInChunk = slotInChunk;
             // blittable 镜像：与托管表同一处更新（这里 + RefreshChunkEntityIndices 是仅有的两个写入点）
-            // ⚠ 惰性扩容守卫：**不依赖调用方是否记得同步扩容定位表**（实测踩过：SharedComponent.cs 里
+            // ⚠ 惰性扩容守卫：不依赖调用方是否记得同步扩容定位表（实测踩过：SharedComponent.cs 里
             //   还有第 5 个 Array.Resize(ref entities) 站点漏了同步 ⇒ 超出旧容量的实体读到越界/零值）。
             if ((uint)entityId >= (uint)_locateBCapacity) EnsureLocateCapacity(entityId + 1);
             {
@@ -743,7 +733,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 扩容托管实体表（**唯一入口**）：与 blittable 定位表**同步**扩容。
+        /// 扩容托管实体表（唯一入口）：与 blittable 定位表同步扩容。
         /// 纪律：任何地方都不应直接 <c>Array.Resize(ref entities, …)</c> —— 漏掉定位表同步会让
         /// 超出旧容量的实体在定位表里读到越界/零值（实测症状：VerifyLocateTable 报不一致，
         /// 且不一致项的 id 恒大于 <see cref="LocateCapacity"/>）。
@@ -765,7 +755,7 @@ namespace EntJoy.ECS
             _locateBCapacity = newCapacity;
         }
 
-        // ======================== blittable 定位表的对外访问（job / 原生内核） ========================
+        // blittable 定位表的对外访问（job / 原生内核）
 
         /// <summary>blittable 定位表首址（索引 = 实体 Id）；长度 = <see cref="LocateCapacity"/>。</summary>
         public unsafe EntityLocateB* GetEntityLocatePtr() => _locateB;
@@ -792,7 +782,7 @@ namespace EntJoy.ECS
             => new NativeEntityLookup { Locate = _locateB, Length = _locateBCapacity };
 
         /// <summary>
-        /// **探针**：逐实体比对 blittable 定位表 vs 托管 <see cref="EntityIndexInWorld"/>，
+        /// 探针：逐实体比对 blittable 定位表 vs 托管 <see cref="EntityIndexInWorld"/>，
         /// 返回不一致项数（0 = 一致）。遍历全部 Archetype/Chunk/Slot，覆盖
         /// "结构变更（NewEntity/DestroyEntity/Add/Remove/空 chunk 压缩）之后"的一致性判据。
         /// </summary>
@@ -926,8 +916,8 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **批量创建的零分配版本**（P1-8）：与 <see cref="CreateEntities(int, ComponentType[])"/> 同一路径，
-        /// 但把新实体写进调用方提供的**非托管缓冲**而非托管 <c>Entity[]</c>。
+        /// 批量创建的零分配版本：与 <see cref="CreateEntities(int, ComponentType[])"/> 同一路径，
+        /// 但把新实体写进调用方提供的非托管缓冲而非托管 <c>Entity[]</c>。
         /// 用途：每步生成大批单位（本项目 65,536/步）时避免 512KB/步 的托管分配，并给 ECB 批量回放用。
         /// </summary>
         /// <returns>实际创建数（= min(count, outputCapacity)）。</returns>
@@ -967,14 +957,14 @@ namespace EntJoy.ECS
                     output[created++] = newEntity;
                 }
                 structuralVersion++;
-                // ⚠ 与托管版不同：非托管路径**不做 Observer Added 派发**（需要托管 Entity[] 才能批量派发）。
+                // ⚠ 与托管版不同：非托管路径不做 Observer Added 派发（需要托管 Entity[] 才能批量派发）。
                 //    需要 Observer 的调用方请用托管版本 CreateEntities。
                 return created;
             }
         }
 
         /// <summary>
-        /// **单实体组件写入**（P1-9）：经 blittable 定位表直落组件列，无反射/无装箱。
+        /// 单实体组件写入：经 blittable 定位表直落组件列，无反射/无装箱。
         /// 与批量路径 <see cref="WriteComponentRange"/> 同源（都走 <see cref="TryGetComponentPointer"/> 的解析规则）。
         /// </summary>
         public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
@@ -1009,7 +999,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 把一段**连续取值**批量写进给定实体的某组件列（P0-4/P0-5 用，ECB 回放零反射路径）。
+        /// 把一段连续取值批量写进给定实体的某组件列（用，ECB 回放零反射路径）。
         /// 逐实体经 blittable 定位表解析列基址（见 <see cref="EntityLocateB"/>），不做任何反射/装箱。
         /// </summary>
         /// <param name="componentTypeId">目标组件类型 Id。</param>
@@ -1160,7 +1150,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **批量销毁**（P0-4b）：一次 <c>CompleteActiveJobs</c> + 一次锁处理整批，
+        /// 批量销毁：一次 <c>CompleteActiveJobs</c> + 一次锁处理整批，
         /// 避免"逐实体 DestroyEntity"时每条命令都等一遍在飞 job。
         /// 无效/已销毁/版本不匹配的项被静默跳过（返回实际销毁数）。
         /// </summary>
@@ -1187,10 +1177,10 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **清空某 Archetype 的全部实体**（P0-4b，ClearAll 快路径）：代价 O(Chunk 数) 而非 O(实体数)——
+        /// 清空某 Archetype 的全部实体（ClearAll 快路径）：代价 O(Chunk 数) 而非 O(实体数)——
         /// 逐实体只做"清两表 + Id 回池"，Chunk/slab 整批释放（不做 swap-pop 与空 chunk 压缩）。
         ///
-        /// ⚠ 含**关系列**的 Archetype 会自动退回逐实体 <see cref="DestroyEntityInternal"/> 路径
+        /// ⚠ 含关系列的 Archetype 会自动退回逐实体 <see cref="DestroyEntityInternal"/> 路径
         /// （关系反向索引需要逐实体清理），此时退化为 O(实体数)。
         /// </summary>
         public unsafe long DestroyAllInArchetype(Archetype archetype)
@@ -1240,9 +1230,8 @@ namespace EntJoy.ECS
                         info.ChunkIndex = -1;
                         info.SlotInChunk = -1;
                         ClearLocateB(e.Id);
-                        // 本 archetype 没有关系列，但这些实体可能**被别人指向**（target 侧）：
+                        // 本 archetype 没有关系列，但这些实体可能被别人指向（target 侧）：
                         // 必须清掉反向索引条目，否则死 id 的索引永久残留，
-                        // 且 id 被回收后会以「幽灵 source」出现在 GetRelationsOf / GetSourceCount 里。
                         // （本 archetype 无关系列 ⇒ 实体自身没有出边，故不需要 CleanupSourceRelations。）
                         _relationIndex.ClearTarget(e.Id);
                         PushRecycled(e);   // Id 回池，后续 Spawn 复用（Version+1 防悬垂）
@@ -1300,7 +1289,7 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 收集声明级联子树（仅沿 CascadeOnTargetDeleted 关系类型向下，防环）。
-        /// **迭代 DFS（显式栈）**：理由同 <see cref="CollectCascade"/> —— 递归版在深链上
+        /// 迭代 DFS（显式栈）：理由同 <see cref="CollectCascade"/> —— 递归版在深链上
         /// <c>StackOverflowException</c> 会直接终止进程。
         /// </summary>
         private void CollectDeclaredCascade(Entity entity, HashSet<int> visited, List<Entity> toDestroy)
@@ -1463,10 +1452,10 @@ namespace EntJoy.ECS
             RemoveComponentRaw(entity, typeof(T0));
         }
 
-        // ======================== 非泛型方法（供 ECB Playback 使用） ========================
+        // 非泛型方法（供 ECB Playback 使用）
 
         /// <summary>
-        /// 添加组件并写入**原始字节**值（ECB 回放去反射路径：无 <c>Marshal.PtrToStructure</c>、无装箱）。
+        /// 添加组件并写入原始字节值（ECB 回放去反射路径：无 <c>Marshal.PtrToStructure</c>、无装箱）。
         /// 组件已存在时等价于原地写列（与 <see cref="WriteComponentRange"/> 同源）。
         /// </summary>
         public unsafe void AddComponentRaw(Entity entity, int componentTypeId, byte* value, int elemSize)
@@ -1509,7 +1498,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 把**原始字节**写进某实体所在 chunk 的组件列（结构变更后的落值步骤，无反射/无装箱）。
+        /// 把原始字节写进某实体所在 chunk 的组件列（结构变更后的落值步骤，无反射/无装箱）。
         /// </summary>
         private static unsafe void WriteColumnBytes(Archetype arch, int chunkIndex, int slotInChunk, Type componentType, byte* src, int elemSize)
         {
@@ -1520,7 +1509,7 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 添加组件核心（调用方必须已持有 _structuralLock）。
-        /// <paramref name="rawValue"/> 非 null 时走**原始字节**写入（值以字节为准，忽略 <paramref name="value"/>）。
+        /// <paramref name="rawValue"/> 非 null 时走原始字节写入（值以字节为准，忽略 <paramref name="value"/>）。
         /// </summary>
         private unsafe void AddComponentRawCore(Entity entity, Type componentType, object value, byte* rawValue = null, int rawSize = 0)
         {
@@ -1668,7 +1657,7 @@ namespace EntJoy.ECS
                 }
             }
 
-        // ======================== Chunk 碎片整理 ========================
+        // Chunk 碎片整理
 
         /// <summary>
         /// 合并所有 Archetype 的瘦 Chunk（利用率 &lt; thresholdPercent）。
@@ -1718,8 +1707,7 @@ namespace EntJoy.ECS
                 if (targetIdx < 0) continue;
 
                 // 搬移 thin 的所有实体到 target；返回是否真的搬空。
-                // ⚠ thin 前面的可用空间可能不足（MoveEntitiesTo 会提前 break）⇒ 此时 **不能** 移除该 Chunk：
-                // RemoveEmptyChunkAt 会 swap-pop 掉仍承载实体的 chunk，其 EntityInfo/定位表索引随之错位
+                // ⚠ thin 前面的可用空间可能不足（MoveEntitiesTo 会提前 break）⇒ 此时 不能 移除该 Chunk：
                 // （静默丢实体、把实体指向别的 chunk，且这些组件的 IDisposable 钩子永不执行）。
                 bool emptied = MoveEntitiesTo(arch, span, i, targetIdx);
                 if (!emptied)
@@ -1788,7 +1776,7 @@ namespace EntJoy.ECS
                 RefreshChunkEntityIndices(arch, chunkIndex);
         }
 
-        // ======================== 内存分析 ========================
+        // 内存分析
 
         /// <summary>
         /// 生成内存分析报告（纯观测快照）：原生分配/释放/泄漏、Chunk 数、碎片率、slab 占用。
@@ -1842,7 +1830,7 @@ namespace EntJoy.ECS
             return report;
         }
 
-        // ======================== Prefab 实例化 ========================
+        // Prefab 实例化
 
         /// <summary>
         /// 从 Prefab 模板实体复制创建 count 个实例（对齐 Unity EntityManager.Instantiate）。
@@ -1931,7 +1919,7 @@ namespace EntJoy.ECS
             }
         }
 
-        // ======================== 数据导航（调试 dump） ========================
+        // 数据导航（调试 dump）
 
         /// <summary>打印单个实体的所有组件字段值（用组件元数据，非反射）。</summary>
         public unsafe string DumpEntity(Entity entity)
@@ -2033,7 +2021,7 @@ namespace EntJoy.ECS
             };
         }
 
-        // ======================== World 快照（零拷贝序列化） ========================
+        // World 快照（零拷贝序列化）
 
         /// <summary>序列化当前 World 状态为字节快照（组件值零拷贝 memcpy）。</summary>
         public unsafe WorldSnapshot TakeSnapshot()

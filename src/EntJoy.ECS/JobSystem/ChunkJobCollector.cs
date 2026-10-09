@@ -20,11 +20,11 @@ namespace EntJoy.ECS.JobSystem
             return (int)(count * elementSize);
         }
 
-        // ─── 共享缓冲 ───
+        // 共享缓冲
         [ThreadStatic] private static Chunk[] s_chunkBuffer = new Chunk[64];
         [ThreadStatic] private static List<Archetype> s_archetypeBuffer = new();
 
-        // ─── 核心：archetype 扫描 + chunk 收集 ───
+        // 核心：archetype 扫描 + chunk 收集
         /// <summary>
         /// 扫描所有 archetype，收集匹配 query 的非空 chunk 到 s_chunkBuffer，返回 chunk 数量。
         /// </summary>
@@ -50,7 +50,7 @@ namespace EntJoy.ECS.JobSystem
             return count;
         }
 
-        // ─── 托管路径：轻量 payload（entityCount + componentCount + enableBitMaps + chunkId） ───
+        // 托管路径：轻量 payload（entityCount + componentCount + enableBitMaps + chunkId）
         /// <summary>
         /// 构建托管路径的 ChunkJobData* 表：只填 entityCount、componentCount、enableBitMaps、chunkHandle(=chunkId)。
         /// 组件数组指针/大小/类型索引/required 均 null——组件数据走 Chunk 对象（不跨边界）。
@@ -91,7 +91,7 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
-        // ─── Native/ISPC 路径：完整 payload（所有组件指针） ───
+        // Native/ISPC 路径：完整 payload（所有组件指针）
         internal static ChunkJobData* BuildNativePayload(Chunk[] chunks, int count, int[]? requiredIds, GCHandle[]? gcHandles)
         {
             var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(ChunkJobData)));
@@ -183,7 +183,7 @@ namespace EntJoy.ECS.JobSystem
             Marshal.FreeHGlobal((IntPtr)tablePtr);
         }
 
-        // ─── Cpp entity batch 路径：EntityBatchData* ───
+        // Cpp entity batch 路径：EntityBatchData*
         internal static void BuildEntityBatchPayload(Chunk[] chunks, int count, int[]? requiredIds,
             out EntityBatchData* batchesPtr, out int batchCount, out void* compArraysBlock, out void* enableBitMapsBlock)
         {
@@ -229,11 +229,10 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
-        // ─── 对外接口：收集 + 构建托管 payload ───
+        // 对外接口：收集 + 构建托管 payload
         /// <summary>
         /// 收集匹配 chunk 并（可选）构建托管 payload。
-        /// ⚠ `chunkArray` **必须是本次调度的独立快照**：`s_chunkBuffer` 是 [ThreadStatic] 复用缓冲，
-        /// 而托管后端「Schedule 一律异步」——直接把 s_chunkBuffer 交给在飞 job，
+        /// ⚠ `chunkArray` 必须是本次调度的独立快照：`s_chunkBuffer` 是 [ThreadStatic] 复用缓冲，
         /// 下一次收集会原地覆盖它的前 count 项，job 就会遍历到别的查询的 chunk（静默错值）。
         /// </summary>
         internal static void CollectAndBuildManaged(EntityManager em, QueryBuilder query, bool fillBitmaps, bool hasEnabledFilter,
@@ -256,7 +255,7 @@ namespace EntJoy.ECS.JobSystem
             archetypes = s_archetypeBuffer.ToArray();
         }
 
-        // ─── 对外接口：收集 + 构建 native payload ───
+        // 对外接口：收集 + 构建 native payload
         internal static void CollectAndBuildNative(EntityManager em, QueryBuilder query, int[]? requiredIds,
             out ChunkJobData* ptr, out int chunkCount, out Archetype[] archetypes)
         {
@@ -267,7 +266,7 @@ namespace EntJoy.ECS.JobSystem
             archetypes = s_archetypeBuffer.ToArray();
         }
 
-        // ─── 对外接口：收集 + 构建 entity batch payload ───
+        // 对外接口：收集 + 构建 entity batch payload
         internal static void CollectAndBuildEntityBatch(EntityManager em, QueryBuilder query, int[]? requiredIds,
             out EntityBatchData* ptr, out int batchCount, out Archetype[] archetypes)
         {

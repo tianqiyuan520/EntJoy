@@ -79,7 +79,7 @@ namespace EntJoy.Debugger
             }
         }
 
-        // ---------- 已废弃：以下方法仅返回无效地址，保留仅为编译兼容 ----------
+        // 已废弃：以下方法仅返回无效地址，保留仅为编译兼容
 
         [Obsolete("Use GetAddress(object) instead — this method returned a dangling pointer.")]
         public static IntPtr GetCachedAddress(object obj) => IntPtr.Zero;
