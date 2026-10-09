@@ -5,19 +5,12 @@ using Xunit.Abstractions;
 namespace NativeTranspiler.Tests
 {
     /// <summary>
-    /// NT-16（引用绑定缺口）：`const T&amp; X = *X_ptr;` 的对象**仍可经同函数其它指针被写**
-    /// （`X_ptr` 是非 const 的 `T*`）⇒ 编译器不能把它当循环不变量 ⇒ **依赖该值的循环行程数在编译期
-    /// 不可知**（每轮重载 + 无法 unroll/向量化）。判据：**参与循环行程数**（`for` 初值/条件/步进、
-    /// `while`/`do` 条件）的值类型字段按值绑定，其余保持引用绑定（后者按值只有代价没有收益：
-    /// 载入本可折进操作数，却要求该值跨循环存活）。
+    /// NT-16（引用绑定缺口）：`const T&amp; X = *X_ptr;` 的对象仍可经同函数其它指针被写 ⇒ 编译器不能把它当
+    /// 循环不变量，依赖该值的循环行程数在编译期不可知。判据：参与循环行程数且类型已证 ≤16 B 的值类型字段按值
+    /// 绑定，其余按引用。汇编层面的解锁由真机 A/B 负责。
     ///
-    /// 本测试钉住的是**发射面**（判据与三个历史臂开关）；汇编层面的解锁由真机 A/B 负责
-    /// （`ZeroCellsJob`：8 条标量指令 0 向量 → 一次 `memset` 尾调用）。
-    ///
-    /// ⚠ 夹具陷阱：`GeneratorHarness.EmitFor` 对"**一个 job 都没识别到**"**不报错**（返回空串）——
-    /// 例如源码漏写 `[NativeTranspile]`（无属性的 struct 不是 job，托管 job 是受支持配置，故无诊断）。
-    /// 所以本类的断言一律用 `MustContain`（期望的绑定文本找不到即失败），避免"空产物也算通过"的假绿。
-    /// 本轮的教训：曾据此误报"同一语法树内多个 job ⇒ 静默空集"，真因就是测试源码漏了属性。
+    /// ⚠ 夹具陷阱：`GeneratorHarness.EmitFor` 对"一个 job 都没识别到"不报错（返回空串）⇒ 断言一律用
+    /// `MustContain`，避免"空产物也算通过"的假绿。
     /// </summary>
     public class NT16_ReferenceBindingTests
     {
@@ -61,7 +54,7 @@ public struct ShadowTripJob : IJob {
     }
 }";
 
-        /// <summary>行程数字段是**结构体**（>16 B）⇒ 默认档也按值绑定（一整份拷贝换编译期行程数）。</summary>
+        /// <summary>行程数字段是结构体（>16 B）⇒ 超出类型判据，仍按引用绑定。</summary>
         private const string StructTripJob = Head + @"
 [NativeTranspile]
 public struct StructTripJob : IJob {
@@ -108,7 +101,7 @@ public struct TwoListJob : IJob {
     }
 }";
 
-        /// <summary>只有**出现在循环内**的字段形参加 `__restrict`（循环外的 `Bias` 不加）。</summary>
+        /// <summary>只有出现在循环内的字段形参加 `__restrict`（循环外的 `Bias` 不加）。</summary>
         private const string LoopBodyFieldJob = Head + @"
 [NativeTranspile]
 public struct LoopBodyFieldJob : IJob {
@@ -121,9 +114,8 @@ public struct LoopBodyFieldJob : IJob {
     }
 }";
 
-        /// <summary>跑一次生成（默认判据）。
-        /// 用 <see cref="GeneratorHarness.EmitForJob"/>：源码漏写 `[NativeTranspile]` 时**直接抛**，
-        /// 不让"空产物"变成假绿（本轮踩过的坑）。</summary>
+        /// <summary>跑一次生成：用 <see cref="GeneratorHarness.EmitForJob"/>（源码漏写 `[NativeTranspile]` 时直接抛，
+        /// 不让"空产物"变成假绿）。</summary>
         private static string Emit(string src) => GeneratorHarness.EmitForJob(src).Cpp;
 
         private void MustContain(string cpp, string needle, string why)
@@ -172,8 +164,7 @@ public struct LoopBodyFieldJob : IJob {
                 "被同名局部屏蔽的字段必须保守地保持引用绑定");
         }
 
-        /// <summary>防假绿守卫：源码漏写 `[NativeTranspile]` 时 `EmitForJob` 必须**抛**，
-        /// 而不是像 `EmitFor` 那样返回空产物（本轮误报"生成器静默空集"的直接原因）。</summary>
+        /// <summary>防假绿守卫：源码漏写 `[NativeTranspile]` 时 `EmitForJob` 必须抛，而不是返回空产物。</summary>
         [Fact]
         public void HarnessGuard_ThrowsWhenNoJobIsRecognized()
         {
@@ -183,18 +174,18 @@ public struct LoopBodyFieldJob : IJob {
             Assert.Contains("GENERATED_API", GeneratorHarness.EmitForJob(SingleJob).Cpp);
         }
 
-        // ── (l11)(i) 登记的三项"结构性缺口"的修复 ──────────────────────────────────
+        // ── 结构性缺口的修复 ──────────────────────────────────────────────────────
 
-        /// <summary>缺口①：行程数字段是 >16 B 的结构体 —— 默认档放宽类型判据，按值绑定一次拷贝。</summary>
+        /// <summary>类型判据的边界：行程数字段是 >16 B 的结构体 ⇒ 仍按引用绑定（拷贝成本未证划算）。</summary>
         [Fact]
-        public void Gap1_StructTripCountField_IsValueBound()
+        public void Gap1_StructTripCountField_StaysByReference()
         {
             var cpp = Emit(StructTripJob);
-            MustContain(cpp, "const NtOpt Opt = *Opt_ptr;", "行程数字段即使是结构体也应按值绑定（换取编译期行程数）");
-            MustNotContain(cpp, "const NtOpt& Opt = *Opt_ptr;", "结构体行程数字段不应再按引用绑定");
+            MustContain(cpp, "const NtOpt& Opt = *Opt_ptr;", "超出类型判据的结构体行程数字段保持引用绑定");
+            MustNotContain(cpp, "const NtOpt Opt = *Opt_ptr;", "不得对超出类型判据的结构体按值绑定");
         }
 
-        /// <summary>缺口① 的边界：**非**行程数字段的结构体仍按引用（不引入无谓拷贝）。</summary>
+        /// <summary>边界：非行程数字段的结构体仍按引用（不引入无谓拷贝）。</summary>
         [Fact]
         public void Gap1_StructFieldUsedOutsideLoop_StaysByReference()
         {
@@ -213,7 +204,7 @@ public struct NtOpt { public int Count; public int Mul; public float Pad0; publi
             MustContain(cpp, "const NtOpt& Opt = *Opt_ptr;", "不参与行程数的结构体字段保持引用绑定");
         }
 
-        /// <summary>缺口⑤：同名局部在**别的作用域**时，字段按符号解析后仍能按值绑定。</summary>
+        /// <summary>同名局部在别的作用域时，字段按符号解析后仍能按值绑定。</summary>
         [Fact]
         public void Gap5_SameNameLocalInOtherScope_DoesNotHideField()
         {
@@ -222,7 +213,7 @@ public struct NtOpt { public int Count; public int Mul; public float Pad0; publi
                 "循环条件里的 Length 解析到字段 ⇒ 必须按值绑定（按名字兜底会因嵌套局部而漏掉）");
         }
 
-        /// <summary>缺口②：NativeList 长度决定行程数 ⇒ `_listData` 形参加 `__restrict`（局部保持非 const 引用）。</summary>
+        /// <summary>NativeList 长度决定行程数 ⇒ `_listData` 形参加 `__restrict`（局部保持非 const 引用）。</summary>
         [Fact]
         public void Gap2_ListLengthTripCount_AddsRestrictToParameter()
         {
@@ -231,7 +222,7 @@ public struct NtOpt { public int Count; public int Mul; public float Pad0; publi
             MustContain(cpp, "UnsafeList<int>& Items = *Items_listData;", "局部仍是非 const 引用（写语义不变）");
         }
 
-        /// <summary>缺口② 的安全护栏：两个 NativeList 字段可能指向同一份表 ⇒ 不加 `__restrict`（避免说谎）。</summary>
+        /// <summary>安全护栏：两个 NativeList 字段可能指向同一份表 ⇒ 不加 `__restrict`（避免说谎）。</summary>
         [Fact]
         public void Gap2_TwoListFields_NoRestrict()
         {
@@ -240,7 +231,7 @@ public struct NtOpt { public int Count; public int Mul; public float Pad0; publi
             MustNotContain(cpp, "__restrict B_listData", "两个表字段可能别名 ⇒ 不得加 __restrict");
         }
 
-        /// <summary>缺口⑥（默认落地）：循环内出现的字段形参加 `__restrict`，循环外的字段不加。</summary>
+        /// <summary>循环内出现的字段形参加 `__restrict`，循环外的字段不加。</summary>
         [Fact]
         public void Gap6_ScalarRestrict_DefaultIsLoopOnly()
         {

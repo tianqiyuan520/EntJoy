@@ -2,7 +2,7 @@
 using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using EntJoy.Collections;
-using static EntJoy.ECS.EventBus;
+using static EntJoy.ECS.SystemAPI;
 
 namespace EntJoySample.ECS
 {
@@ -29,8 +29,8 @@ namespace EntJoySample.ECS
 
         /// <summary>
         /// Native Job：
-        ///   Health &lt;= 0  → DeathSignal
-        ///   0 &lt; Health &lt; 50 → DamageSignal
+        /// Health &lt;= 0 → DeathSignal
+        /// 0 &lt; Health &lt; 50 → DamageSignal
         /// 验证多事件类型分别写入独立的 EventBuffer。
         /// </summary>
         [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]

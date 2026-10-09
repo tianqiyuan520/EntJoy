@@ -1,5 +1,8 @@
 # JobSystem 阶段 0～7 回归报告
 
+> ⚠ **历史记录（2026-08-31）**：本文是一次性回归活动的快照，其中的测试计数与"部分通过/待 CI"只对当时的工作树有效。
+> 当前门禁清单与跑法见 `docs/public/Gates-and-Flags.md` 与 `tools/gate-run/gates.ps1`。
+
 日期：2026-08-31（squash 为单个 commit `03d134d "Jobsystem修复"`，自 `1e86d78` 起）
 
 ## 阶段结果

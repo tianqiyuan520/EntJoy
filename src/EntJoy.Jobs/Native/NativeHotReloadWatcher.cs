@@ -9,7 +9,7 @@ namespace EntJoy.JobSystem
     /// <summary>
     /// 文件监视 + 自动重载（开发期可选）：盯住目录里最新的 `NativeTranspiled*.dll`，内容变了就 copy 成
     /// 新文件名并排队（同路径 `Load` 会返回旧模块），伴生布局清单一起搬。
-    /// ⚠ 检测与重载分离：换模块必须由宿主在**安全点**（已停派发）调 <see cref="TryProcessPending"/> 完成。
+    /// ⚠ 检测与重载分离：换模块必须由宿主在安全点（已停派发）调 <see cref="TryProcessPending"/> 完成。
     /// </summary>
     public sealed class NativeHotReloadWatcher : IDisposable
     {
@@ -55,9 +55,9 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// 清掉监视目录里**上一次运行**留下的改名副本（本次运行还没加载任何副本，删得掉）。
+        /// 清掉监视目录里上一次运行留下的改名副本（本次运行还没加载任何副本，删得掉）。
         /// 宿主的旧模块不 Free ⇒ 本进程自己产生的副本只能等进程退出后由下一次启动来清；
-        /// 仍被**别的**进程加载的删不掉（Windows 锁）—— 忽略失败。
+        /// 仍被别的进程加载的删不掉（Windows 锁）—— 忽略失败。
         /// </summary>
         private void PruneStaleCopies()
         {
@@ -145,7 +145,7 @@ namespace EntJoy.JobSystem
         }
 
         /// <summary>
-        /// 宿主在**安全点**（已停派发）调用：若有待处理的变化就换模块，返回 true 并给出结果与耗时。
+        /// 宿主在安全点（已停派发）调用：若有待处理的变化就换模块，返回 true 并给出结果与耗时。
         /// </summary>
         public bool TryProcessPending(out NativeReloadResult result, out double elapsedMs)
         {

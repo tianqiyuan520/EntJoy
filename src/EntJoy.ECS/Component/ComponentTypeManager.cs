@@ -236,7 +236,6 @@ namespace EntJoy.ECS
         /// <summary>
         /// 转移组件所有权（move，零分配）：
         /// IDisposable 组件 → 位拷贝 dst←src 后清空 src（转移指针，避免双所有权/悬垂）；
-        /// 普通 blittable 组件 → 位拷贝（源为死槽，清空无意义，省去）。
         /// 用于跨 archetype 迁移（CopyComponentsTo）。
         /// </summary>
         public static void MoveComponentValue(ComponentType type, void* src, void* dst)

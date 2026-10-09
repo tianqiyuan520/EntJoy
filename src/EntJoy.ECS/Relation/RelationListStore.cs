@@ -6,7 +6,6 @@ namespace EntJoy.ECS
     /// <summary>
     /// 多实例关系（[MultiRelation]）正向存储：source → targets（有序列表，幂等去重）。
     /// 反向复用 EntityManager._relationIndex（target → (relType → sources)），O(1) 查询。
-    /// 存储的是 RelationSlot（含 target version），防 ID 回收：target 销毁后槽位失效。
     /// 所有操作在 EntityManager 的 _structuralLock 保护下调用（与关系操作同一锁域）。
     /// </summary>
     public sealed class RelationListStore
@@ -14,8 +13,8 @@ namespace EntJoy.ECS
         // relTypeId → sourceId → targets（追加式 List，保持插入顺序）
         private readonly Dictionary<int, Dictionary<int, List<RelationSlot>>> _forward = new();
 
-        /// <summary>ClearAllForSource 的复用缓冲（P0-4c）：原先每次调用 <c>new List&lt;int&gt;()</c>
-        /// ⇒ **每次销毁实体 32B 分配**（实测 100k 批量销毁 3.2MB），即使该实体没有任何多值关系。</summary>
+        /// <summary>ClearAllForSource 的复用缓冲：原先每次调用 <c>new List&lt;int&gt;()</c>
+        /// ⇒ 每次销毁实体 32B 分配（实测 100k 批量销毁 3.2MB），即使该实体没有任何多值关系。</summary>
         private readonly List<int> _emptyKeysBuffer = new();
 
         /// <summary>追加关系（幂等：同 target 不重复）。调用方保证 ExclusiveTarget 解绑已处理。</summary>

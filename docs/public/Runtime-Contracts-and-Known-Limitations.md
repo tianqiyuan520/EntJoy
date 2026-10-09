@@ -25,7 +25,7 @@
 - 系统内 `job.Schedule(query)` 未显式传 `dependsOn` 时，自动继承执行上下文的累积依赖，并在调度后回写。
 - `SystemRunner` 按系统的 `[Read]`/`[Write]` 声明合并冲突依赖：读等写、写等写；**读读不互相等待**。依赖按组件类型传播，两张表：`lastWrite[X]`（写系统写回，读写系统都入站合并）与 `lastRead[X]`（读系统写回，多读系统 **merge**；**只有写系统**入站合并；写系统完成后清空）⇒ `[Read(X)]` 的 Job 仍在飞时后续 `[Write(X)]` 必须等它，而读读仍并行。无冲突系统不串行；开关 `ENTJOY_SYSTEM_READ_WRITE_ORDER=0` 可回到"只传播写依赖"的旧行为。
 - `ISystemWithState.OnUpdate(ref SystemState)` 可显式读写 `state.Dependency`、调用 `state.CompleteDependency()` 同步等待本系统所有 Job。
-- `World.DefaultWorld` 为 `[ThreadStatic]`（每线程独立）；Job worker 线程由调度器绑定所属 World，`EventBus.SendEvent` 写入正确 World。
+- `World.DefaultWorld` 为 `[ThreadStatic]`（每线程独立）；Job worker 线程由调度器绑定所属 World，`SystemAPI.SendEvent` 写入正确 World。
 
 ## ECS 线程模型
 

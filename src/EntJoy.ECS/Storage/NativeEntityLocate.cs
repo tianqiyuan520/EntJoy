@@ -5,23 +5,20 @@ using System.Runtime.InteropServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// blittable 实体定位条目：**原生内核与 job 可直接读**的"实体 → 组件列"定位信息。
+    /// blittable 实体定位条目：原生内核与 job 可直接读的"实体 → 组件列"定位信息。
     ///
     /// 设计要点（与托管 <see cref="EntityIndexInWorld"/> 的关键区别）：
-    ///   1. 只有裸指针与整数，**无托管引用** ⇒ 可进 NativeTranspile 生成的 C++ 内核；
-    ///   2. 每个实体携带**自己的 chunk 基址与所属 Archetype 的列偏移表**（而不是 chunk 目录下标）
-    ///      ⇒ chunk 的空闲/压缩/swap-back（<c>Archetype.Remove</c> 的空 chunk 回收）不会让表项失效，
-    ///      因为表项与托管位置表在**同一处**（<c>EntityManager.UpdateEntityLocation</c> /
-    ///      <c>RefreshChunkEntityIndices</c>）被一起更新；
-    ///   3. 无内部可变缓存 ⇒ 可按值传给并行 job 并被多线程只读共享（对齐 Unity DOTS 的
-    ///      <c>ComponentLookup&lt;T&gt;</c> job 用法）；<see cref="ComponentLookup{T}"/> 那份
-    ///      带 single-archetype 缓存、自述 main-thread only，两者用途不同。
+    /// 1. 只有裸指针与整数，无托管引用 ⇒ 可进 NativeTranspile 生成的 C++ 内核；
+    /// 2. 每个实体携带自己的 chunk 基址与所属 Archetype 的列偏移表（而不是 chunk 目录下标）
+    /// 3. 无内部可变缓存 ⇒ 可按值传给并行 job 并被多线程只读共享（对齐 Unity DOTS 的
+    /// <c>ComponentLookup&lt;T&gt;</c> job 用法）；<see cref="ComponentLookup{T}"/> 那份
+    /// 带 single-archetype 缓存、自述 main-thread only，两者用途不同。
     ///
     /// 布局（24B，<c>LayoutKind.Sequential</c>，与 <c>src/NativeDll/NativeEntityLookup.h</c> 一一对应）：
-    ///   +0   void* ChunkMemory   chunk 数据块首址（null = 未分配 / 已销毁）
-    ///   +8   int*  ChunkOffsets  该 Archetype 的"组件列字节偏移"非托管镜像，按 componentIndex 索引
-    ///   +16  int   SlotInChunk
-    ///   +20  int   Version
+    /// +0 void* ChunkMemory chunk 数据块首址（null = 未分配 / 已销毁）
+    /// +8 int* ChunkOffsets 该 Archetype 的"组件列字节偏移"非托管镜像，按 componentIndex 索引
+    /// +16 int SlotInChunk
+    /// +20 int Version
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     public unsafe struct EntityLocateB
@@ -89,7 +86,7 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// job-safe 的**组件随机访问句柄**（值语义，可直接作为 job 字段，可被多线程只读共享）。
+    /// job-safe 的组件随机访问句柄（值语义，可直接作为 job 字段，可被多线程只读共享）。
     ///
     /// 用法：宿主在主线程构造（<c>EntityManager.CreateNativeLookup&lt;T&gt;(archetype)</c>），
     /// 作为 job 字段传入；job 内 <c>lookup.UnsafeResolve(entityId)</c> 得到 <c>T*</c>：
@@ -98,8 +95,8 @@ namespace EntJoy.ECS
     /// </code>
     ///
     /// ⚠ 与 <see cref="ComponentLookup{T}"/> 的分工：
-    ///   - 本结构：跨 chunk 随机访问、**并行 job 与原生内核可用**（2 次依赖加载 + 地址算术）；
-    ///   - <see cref="ComponentLookup{T}"/>：主线程便利句柄，带 archetype/chunk 缓存与版本校验。
+    /// - 本结构：跨 chunk 随机访问、并行 job 与原生内核可用（2 次依赖加载 + 地址算术）；
+    /// - <see cref="ComponentLookup{T}"/>：主线程便利句柄，带 archetype/chunk 缓存与版本校验。
     /// </summary>
     public unsafe struct NativeComponentLookup<T> where T : unmanaged
     {
@@ -149,7 +146,7 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// job-safe 的**位置查询句柄**（实体 → chunk 基址 / slotInChunk / version），
+    /// job-safe 的位置查询句柄（实体 → chunk 基址 / slotInChunk / version），
     /// 对齐 Unity <c>EntityStorageInfoLookup</c> 的用途（不含托管 Archetype 引用）。
     /// </summary>
     public unsafe struct NativeEntityLookup
@@ -183,16 +180,16 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// **静态**解析原语 —— 供**托管** job 使用。
+    /// 静态解析原语 —— 供托管 job 使用。
     ///
-    /// ⚠⚠ 2026-09-13 实测（P0-3b）：`[NativeTranspile]` 原生内核**不能**调用本类，也不能调用句柄上的实例方法。
-    /// 诊断 **NT004** 的确切行为（实测，两种写法都报）：
-    ///   - 实例方法：<c>cannot call 'NativeComponentLookup&lt;T&gt;.UnsafeResolve(int)' … or it is not a static method in the same assembly</c>
-    ///   - **跨程序集静态方法**：<c>cannot call 'NativeLookupOps.IsAllocated&lt;T&gt;(NativeComponentLookup&lt;T&gt;, int)' …</c>
-    /// ⇒ 规则是「**调用目标必须与被转译的 job 在同一个程序集**」。EntJoy.ECS 是被引用程序集，
-    ///   所以框架只能提供**数据结构**，不能提供可调用助手。
+    /// ⚠⚠ 实测：`[NativeTranspile]` 原生内核不能调用本类，也不能调用句柄上的实例方法。
+    /// 诊断 NT004 的确切行为（实测，两种写法都报）：
+    /// - 实例方法：<c>cannot call 'NativeComponentLookup&lt;T&gt;.UnsafeResolve(int)' … or it is not a static method in the same assembly</c>
+    /// - 跨程序集静态方法：<c>cannot call 'NativeLookupOps.IsAllocated&lt;T&gt;(NativeComponentLookup&lt;T&gt;, int)' …</c>
+    /// ⇒ 规则是「调用目标必须与被转译的 job 在同一个程序集」。EntJoy.ECS 是被引用程序集，
+    /// 所以框架只能提供数据结构，不能提供可调用助手。
     ///
-    /// **原生 job 的正确写法 = 在 job 体内直接内联字段运算**（不调用任何方法、不访问任何属性）：
+    /// 原生 job 的正确写法 = 在 job 体内直接内联字段运算（不调用任何方法、不访问任何属性）：
     /// <code>
     /// ref EntityLocateB e = ref Lookup.Locate[id];
     /// if (e.ChunkMemory == null || e.SlotInChunk &lt; 0) continue;

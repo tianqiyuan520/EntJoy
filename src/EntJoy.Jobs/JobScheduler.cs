@@ -9,7 +9,7 @@ namespace EntJoy.JobSystem
     /// </summary>
     public static class JobScheduler
     {
-        // ─── 后端选择 ───
+        // 后端选择
         internal static bool UseNative { get; private set; }
 
         /// <summary>
@@ -56,7 +56,7 @@ namespace EntJoy.JobSystem
             else ManagedJobScheduler.Shutdown();
         }
 
-        // ─── IJob ───
+        // IJob
         public static JobHandle Schedule<T>(ref T job, JobHandle dependsOn = default) where T : struct, IJob
         {
             if (UseNative)
@@ -71,7 +71,7 @@ namespace EntJoy.JobSystem
             return new JobHandle(ManagedJobScheduler.Schedule(ref job));
         }
 
-        // ─── IJobParallelFor ───
+        // IJobParallelFor
         public static JobHandle ScheduleParallelFor<T>(ref T job, int length, int innerBatchCount,
             JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelFor
         {
@@ -88,7 +88,7 @@ namespace EntJoy.JobSystem
             return new JobHandle(ManagedJobScheduler.Schedule(ref job, length, innerBatchCount));
         }
 
-        // ─── IJobFor ───
+        // IJobFor
         /// <summary>调度 IJobFor（串行 for 循环）。</summary>
         public static JobHandle ScheduleFor<T>(ref T job, int length,
             JobHandle dependsOn = default) where T : struct, IJobFor
@@ -108,7 +108,7 @@ namespace EntJoy.JobSystem
             return new JobHandle(ManagedJobScheduler.Schedule(ref wrapper));
         }
 
-        // ─── IJobParallelForBatch ───
+        // IJobParallelForBatch
         public static JobHandle ScheduleBatch<T>(ref T job, int arrayLength, int batchSize,
             JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelForBatch
         {
@@ -126,7 +126,7 @@ namespace EntJoy.JobSystem
             return new JobHandle(ManagedJobScheduler.Schedule(ref wrapper));
         }
 
-        // ─── 托管回退：顺序包装器（IJob 包装，避免 ManagedJobScheduler 泛型约束冲突） ───
+        // 托管回退：顺序包装器（IJob 包装，避免 ManagedJobScheduler 泛型约束冲突）
         private struct SequentialForJob<T> : IJob where T : struct, IJobFor
         {
             public T Job; public int Length;
@@ -153,7 +153,7 @@ namespace EntJoy.JobSystem
             return Math.Max(1, Math.Abs(batchSize));
         }
 
-        // ─── 状态查询 ───
+        // 状态查询
         public static int WorkerCount => UseNative
             ? NativeJobScheduler.JobWorkerCount
             : Math.Max(1, Environment.ProcessorCount - 1);

@@ -190,7 +190,7 @@ dotnet run --project tools/SafetyInterceptProbe/SafetyInterceptProbe.csproj -c D
 3. 断言后放行 job 并 `Complete()`（`finally` 保证一定放行，断言失败也不会挂住）。
 
 **验收**：该测试类连续 5 轮全绿；限核 `DOTNET_PROCESSOR_COUNT=2` 与 `=1` 各 3 轮全绿；
-全量套件 `191/191` 连续 5 轮（与 CI 相同次数）全绿。
+全量套件连续 5 轮（与 CI 相同次数）全绿（当时为 `191/191` 个用例；该套件现在已扩到 **233** 个）。
 **顺带收益**：该类耗时 8s → **0.65s**，全量套件 25s → **1s**（原先的时间几乎都花在 40 次重试调度
 2048 元素 job 上）。
 

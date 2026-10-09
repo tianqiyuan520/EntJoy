@@ -1,8 +1,6 @@
-// ============================================================
 // IspcGenerator.cs — 统一 ISPC 代码生成器
 //   合并了原 IspcMethodGenerator.cs + IspcJobGenerator.cs 的功能，
 //   共享 NativeList 上下文结构、类型转换、回调生成等逻辑。
-// ============================================================
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -23,7 +21,7 @@ namespace NativeTranspiler.Analyzer.Common
     {
         private const string Indent = "    ";
 
-        // ---------- 共享内部类 ----------
+        // 共享内部类
 
         private class TypeSymbolComparer : IEqualityComparer<ITypeSymbol>
         {
@@ -38,7 +36,7 @@ namespace NativeTranspiler.Analyzer.Common
             public string Limit;
         }
 
-        // ---------- 类型映射 ----------
+        // 类型映射
 
         /// <summary>将 C++ 类型名映射为 ISPC 类型名（除去命名空间前缀）</summary>
         private static string ToIspcType(string cppType)
@@ -76,7 +74,7 @@ namespace NativeTranspiler.Analyzer.Common
             !NativeTranspiler.IsBuiltinUnmanaged(type) &&
             !NativeTranspiler.IsEntJoyPredefinedType(type);
 
-        // ---------- 参数列表构建（共享） ----------
+        // 参数列表构建（共享）
 
         /// <summary>
         /// 为 ISPC 函数构建参数列表。
@@ -244,7 +242,7 @@ namespace NativeTranspiler.Analyzer.Common
             return args.ToString();
         }
 
-        // ---------- 共享 ISPC 结构体生成 ----------
+        // 共享 ISPC 结构体生成
 
         /// <summary>
         /// 生成 UnsafeList_Context 结构体定义 + include 头文件。
@@ -275,7 +273,7 @@ namespace NativeTranspiler.Analyzer.Common
             }
         }
 
-        // ---------- 共享 C++ Resize 回调生成 ----------
+        // 共享 C++ Resize 回调生成
 
         private static void GenerateResizeCallbacks(StringBuilder sb,
             IEnumerable<(ITypeSymbol type, string name)> fields)
@@ -342,7 +340,7 @@ namespace NativeTranspiler.Analyzer.Common
             return sb.ToString();
         }
 
-        // ---------- 字段提取 & include 收集（共享） ----------
+        // 字段提取 & include 收集（共享）
 
         private static List<(ITypeSymbol type, string name)> GetFieldsFromMethod(IMethodSymbol method)
             => method.Parameters.Select(p => (p.Type, p.Name)).ToList();
@@ -382,14 +380,9 @@ namespace NativeTranspiler.Analyzer.Common
                 includes.Add(NativeTranspiler.GetStructHeaderFileName((INamedTypeSymbol)type));
         }
 
-        // ===================================================================
         //                       公共 API：静态方法
-        // ===================================================================
         // (isoc 方法级入口已拆分至 IspcGenerator.Method.cs)
-        // ===================================================================
-        // ===================================================================
         //                       公共 API：Job 结构体
-        // ===================================================================
 
         /// <summary>判断是否为纯 IJob（非 ParallelFor/For）</summary>
         public static bool IsIJob(INamedTypeSymbol jobStruct) =>
@@ -426,7 +419,7 @@ namespace NativeTranspiler.Analyzer.Common
                 foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
                     includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
             }
-            // ─── SendEvent: 事件类型 include（ISPC 侧 SendEvent 生成的代码引用事件类型结构） ───
+            // SendEvent: 事件类型 include（ISPC 侧 SendEvent 生成的代码引用事件类型结构）
             foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
             // ISPC 无法调用外部 C++ 符号：Execute 调用的静态方法必须有同 TU 的 ISPC helper
@@ -626,7 +619,7 @@ namespace NativeTranspiler.Analyzer.Common
                 : CollectChunkNativeArrayLocals(jobStruct, compilation);
             foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
-            // ─── SendEvent: 事件类型 include ───
+            // SendEvent: 事件类型 include
             foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
                 includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
@@ -636,7 +629,7 @@ namespace NativeTranspiler.Analyzer.Common
             if (methodSyntax?.Body == null) return "// Error: no Execute body";
             var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
             var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
-            // ─── SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent） ───
+            // SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent）
             bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
             if (usesSendEvent)
                 // 注意：ISPC 中 "uniform void*" 非法（void 不能带 uniform 限定），必须用 "void* uniform"（指针 uniform）
@@ -767,8 +760,7 @@ namespace NativeTranspiler.Analyzer.Common
             }
 
             // Per-batch loop: read from EntityBatchData directly (single hop).
-            // Both MT and non-MT use this path.  ISPC MT is scheduled with
-            // workerCap=1, rangeSize=int.MaxValue (single-tile query range),
+            // Both MT and non-MT use this path. ISPC MT is scheduled with
             // so the parallelization is entirely in the tile scheduler.
             {
                 sb.AppendLine("    const int __batch_end = __batch_start + __batch_count;");
@@ -877,7 +869,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    int requiredComponentTypeIdCount;");
             sb.AppendLine("    int jobIsBoxed;");
             sb.AppendLine("    void* chunkArrayHandle;");
-            sb.AppendLine("    // ─── Event Buffer（与 C# ChunkContextHeader 对齐，SendEvent 需要） ───");
+            sb.AppendLine("    // Event Buffer（与 C# ChunkContextHeader 对齐，SendEvent 需要）");
             sb.AppendLine("    int eventBufferCount;");
             sb.AppendLine("    void* eventBufferHeaders;");
             sb.AppendLine("    void* eventWorldHandle;");
@@ -909,7 +901,7 @@ namespace NativeTranspiler.Analyzer.Common
                 sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                 sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                 sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图");
+                sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // 逐组件 enable 位图");
                 sb.AppendLine("    __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
                 if (entityParamNames.Count > 0)
                     sb.AppendLine("    __chunkDataLite.entityArray = __chunkData->entityArray;");
@@ -998,7 +990,7 @@ namespace NativeTranspiler.Analyzer.Common
             // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
             if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
                 callArgs.Add("std::thread::hardware_concurrency()");
-            // ─── SendEvent: 传递 EventBuffer 元数据（无事件时传 0/null，非 event job 零开销） ───
+            // SendEvent: 传递 EventBuffer 元数据（无事件时传 0/null，非 event job 零开销）
             bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
             if (usesSendEvent)
             {
@@ -1110,9 +1102,7 @@ namespace NativeTranspiler.Analyzer.Common
             return sb.ToString();
         }
 
-        // ===================================================================
         //                       内部辅助方法
-        // ===================================================================
 
         private static LoopInfo? ExtractLoopInfo(ForStatementSyntax forStmt, SemanticModel semanticModel)
         {
@@ -1213,7 +1203,7 @@ namespace NativeTranspiler.Analyzer.Common
             foreach (var ep in entityParams)
                 paramsList += $", uniform __EntJoyEntity {ep.Name}_ptr[]";
 
-            // ─── SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent） ───
+            // SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent）
             bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
             if (usesSendEvent)
                 // 注意：ISPC 中 "uniform void*" 非法（void 不能带 uniform 限定），必须用 "void* uniform"（指针 uniform）
@@ -1502,7 +1492,7 @@ namespace NativeTranspiler.Analyzer.Common
 
         /// <summary>
         /// 把局部指针声明的 `uniform T* name` 规范成 `uniform T* uniform name`。
-        /// ⚠ ISPC 里 `uniform T*` 是"**指向 uniform T 的 varying 指针**"——指针本身逐 lane 一份；
+        /// ⚠ ISPC 里 `uniform T*` 是"指向 uniform T 的 varying 指针"——指针本身逐 lane 一份；
         /// 串行 uniform-for 路径下用它解引用得到的是 varying 值，赋给 uniform 局部变量会报
         /// 「Can't convert from type "varying int32" to type "uniform int32" for initializer」。
         /// 这里的指针来源恒为 uniform 地址空间（NativeArray 的 `T name_ptr[]` 形参 /
@@ -1516,7 +1506,7 @@ namespace NativeTranspiler.Analyzer.Common
         }
 
         /// <summary>
-        /// 检查 Job 是否使用了原子操作，并且是否**使用了返回值**。
+        /// 检查 Job 是否使用了原子操作，并且是否使用了返回值。
         /// </summary>
         private static (bool hasAtomics, bool usesReturnValue) CheckAtomicOperations(
             INamedTypeSymbol jobStruct, SemanticModel semanticModel)
@@ -1647,9 +1637,7 @@ namespace NativeTranspiler.Analyzer.Common
             }
         }
 
-        // ===================================================================
         //               内部类：静态方法 ISPC 翻译器
-        // ===================================================================
 
         private class MethodIspcTranslator : IspcStatementTranslator
         {

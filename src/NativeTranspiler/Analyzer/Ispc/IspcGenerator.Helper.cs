@@ -1,17 +1,13 @@
-// ============================================================
 // IspcGenerator.Helper.cs — ISPC 内部 helper（lane 可调用）生成
 //
 // 背景：job 的 Execute 体内调用的同程序集静态方法（如 CpuOrca.Solve）在 C++ 后端
-// 会各自生成独立 .cpp，调用点按函数名直接链接即可。ISPC 后端不同：ISPC 无法调用
 // 外部 C++ 符号，必须在同一翻译单元内提供 ISPC 版本，因此这里为这些依赖方法生成
 // 「非 export 的 lane 可调用」ISPC 函数，由调用方 .ispc 以 #include 引入。
 //
 // 参数约定（必须能接受 foreach lane 内的 varying 实参，已用 ispc v1.30 探针验证）：
 //   ref/out T x → varying T * uniform x_ptr   实参是 &局部变量（varying 数据 + 常量地址）
-//   T* p        → uniform T * varying p_ptr   实参是 (T*)NativeArray_ptr
 //   值参数 T x  → T x                         默认 varying，uniform 实参可隐式提升
 // 若沿用 export 版的 "uniform T * uniform"，varying 实参无法匹配 → overload 不匹配。
-// ============================================================
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;

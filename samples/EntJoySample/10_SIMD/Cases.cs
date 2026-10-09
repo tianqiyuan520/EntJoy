@@ -6,7 +6,7 @@
 
 //namespace EntJoySample.SIMD
 //{
-//    // =====================================================================
+//    //
 //    // 10_SIMD 用例 job 定义 + C# 标量 oracle。
 //    // 每个用例 3 个后端 job（Cpp=普通翻译基准 / ISPC / AutoSIMD）+ 1 个 oracle。
 //    //
@@ -14,9 +14,9 @@
 //    //   1) Execute 必须块体 { ... }，不能表达式体 => ...。
 //    //   2) 字段必须非托管：NativeArray<T>/标量/float2,int2；不能用 int[]。
 //    //   3) ISPC 不支持 long/int64，重算用 int/uint。
-//    // =====================================================================
+//    //
 
-//    // ── C01_Light: 纯算术 R = A*B + C（float） ──
+//    // C01_Light: 纯算术 R = A*B + C（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C01LightCpp : IJobParallelFor
 //    {
@@ -38,7 +38,7 @@
 //        public void Execute(int i) { R[i] = A[i] * B[i] + C[i]; }
 //    }
 
-//    // ── C02_Heavy: 16 次 sin/cos 迭代累积（float） ──
+//    // C02_Heavy: 16 次 sin/cos 迭代累积（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C02HeavyCpp : IJobParallelFor
 //    {
@@ -87,7 +87,7 @@
 //        }
 //    }
 
-//    // ── C03_ControlFlow: 5 路 if/else-if/else + float 累加 ──
+//    // C03_ControlFlow: 5 路 if/else-if/else + float 累加
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C03FlowCpp : IJobParallelFor
 //    {
@@ -139,7 +139,7 @@
 //        }
 //    }
 
-//    // ── C04_NestedFor: 3×3 邻域 + 双层 for + continue（float） ──
+//    // C04_NestedFor: 3×3 邻域 + 双层 for + continue（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C04NestedCpp : IJobParallelFor
 //    {
@@ -197,7 +197,7 @@
 //        }
 //    }
 
-//    // ── C05_While: while + 变体条件 + break（float） ──
+//    // C05_While: while + 变体条件 + break（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C05WhileCpp : IJobParallelFor
 //    {
@@ -252,7 +252,7 @@
 //        }
 //    }
 
-//    // ── C06_Reduction: min 归约（float） ──
+//    // C06_Reduction: min 归约（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C06ReduceCpp : IJobParallelFor
 //    {
@@ -301,7 +301,7 @@
 //        }
 //    }
 
-//    // ── C07_GatherScatter: 随机索引 gather（float） ──
+//    // C07_GatherScatter: 随机索引 gather（float）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C07GatherCpp : IJobParallelFor
 //    {
@@ -326,7 +326,7 @@
 //        public void Execute(int i) { R[i] = A[Indices[i]] * B[i]; }
 //    }
 
-//    // ── C08_IntUint: uint LCG + 移位 + 位运算 + 混合比较（int，精确比对） ──
+//    // C08_IntUint: uint LCG + 移位 + 位运算 + 混合比较（int，精确比对）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C08IntCpp : IJobParallelFor
 //    {
@@ -390,7 +390,7 @@
 //        }
 //    }
 
-//    // ── C09_FindNearest: 找最近目标（min 距离平方归约 + sqrt，AI/碰撞常见） ──
+//    // C09_FindNearest: 找最近目标（min 距离平方归约 + sqrt，AI/碰撞常见）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C09NearestCpp : IJobParallelFor
 //    {
@@ -440,7 +440,7 @@
 //        }
 //    }
 
-//    // ── C10_MoveBounce: 移动 + 边界反弹（movement 系统，if + 复合赋值 + 速度反转） ──
+//    // C10_MoveBounce: 移动 + 边界反弹（movement 系统，if + 复合赋值 + 速度反转）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C10BounceCpp : IJobParallelFor
 //    {
@@ -484,7 +484,7 @@
 //        }
 //    }
 
-//    // ── C11_Lifetime: 粒子生命周期（while 衰减 + break，粒子系统常见） ──
+//    // C11_Lifetime: 粒子生命周期（while 衰减 + break，粒子系统常见）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C11LifetimeCpp : IJobParallelFor
 //    {
@@ -534,7 +534,7 @@
 //        }
 //    }
 
-//    // ── C12_SearchSkip: 查找 + continue + break（AI 搜索：跳过无效值，找到即停） ──
+//    // C12_SearchSkip: 查找 + continue + break（AI 搜索：跳过无效值，找到即停）
 //    //   ⚠ 靶向 while 循环里的 continue 翻译（潜在 Bug D）。
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C12SearchCpp : IJobParallelFor
@@ -597,7 +597,7 @@
 //        }
 //    }
 
-//    // ── C13_BoundBreak: while(uniform上限 && varying条件) + break（验证方向2标量化+break） ──
+//    // C13_BoundBreak: while(uniform上限 && varying条件) + break（验证方向2标量化+break）
 //    [NativeTranspile(Target = BackendTarget.Cpp)]
 //    public struct C13BoundBreakCpp : IJobParallelFor
 //    {
@@ -650,7 +650,7 @@
 //        }
 //    }
 
-//    // ── C14_Cas: Interlocked.CompareExchange（ISPC 翻译补全验证：2026-08-30 Fix 1） ──
+//    // C14_Cas: Interlocked.CompareExchange（ISPC 翻译补全验证：）
 //    //   每个元素对独立槽位 T[i] 做 CAS：确定性（无跨 lane 竞争），oracle 可比较。
 //    //   R[i] = 旧值；命中 comparand 时 T[i] 被改写为 V[i]（破坏性 → 测试侧每次运行前重置 T）。
 //    //   ⚠ 仅 Cpp+Ispc 后端：AutoSIMD(Simd*) 无 Interlocked 翻译分支，不支持。
@@ -675,9 +675,9 @@
 //        }
 //    }
 
-//    // =====================================================================
+//    //
 //    // C# 标量 oracle：与 job 完全同语义的托管实现（ground truth）。
-//    // =====================================================================
+//    //
 //    public static class Oracles
 //    {
 //        public static float C01(float a, float b, float c) => a * b + c;

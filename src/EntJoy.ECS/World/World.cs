@@ -23,10 +23,10 @@ namespace EntJoy.ECS
 
         private bool _disposed;
 
-        // ─── Event Channel ───
+        // Event Channel
         private readonly ConcurrentDictionary<Type, object> _eventStreams = new();
 
-        // ─── EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新 ───
+        // EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新
         private readonly Dictionary<QueryKey, EntityQuery> _queryCache = new();
         private readonly object _queryCacheLock = new();
 
@@ -128,7 +128,7 @@ namespace EntJoy.ECS
         /// <code>
         /// foreach (var r in world.Query&lt;Position, Velocity&gt;().WithRelationship&lt;ChildOf&gt;(parent))
         /// {
-        ///     ref var pos = ref r.Comp0;   // Position
+        /// ref var pos = ref r.Comp0; // Position
         /// }
         /// </code>
         /// </example>
@@ -144,7 +144,7 @@ namespace EntJoy.ECS
         /// <code>
         /// foreach (var result in world.Query&lt;Position&gt;().WithEnabled&lt;ActiveComponent&gt;())
         /// {
-        ///     // 只处理启用 ActiveComponent 的实体
+        /// // 只处理启用 ActiveComponent 的实体
         /// }
         /// </code>
         /// </example>
@@ -155,7 +155,7 @@ namespace EntJoy.ECS
         public ChunkEnumerable<T0, T1> QueryChunks<T0, T1>() where T0 : struct where T1 : struct
             => new ChunkEnumerable<T0, T1>(_entityManager, new QueryBuilder().WithAll<T0, T1>());
 
-        // ─── Event Channel API ───
+        // Event Channel API
 
         /// <summary>
         /// 注册事件类型。World 初始化时调用，每种事件类型调用一次。
@@ -238,7 +238,7 @@ namespace EntJoy.ECS
             JobSystem.ChunkJobScheduler.DrainAndFreeEventBuffers(contextPtr, this, jobType);
         }
 
-        // ─── Observer 门面（注册表在 EntityManager，见 EntityManager.Observer.cs） ───
+        // Observer 门面（注册表在 EntityManager，见 EntityManager.Observer.cs）
 
         /// <summary>
         /// 注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。

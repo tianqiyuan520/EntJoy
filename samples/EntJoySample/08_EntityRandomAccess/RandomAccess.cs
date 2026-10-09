@@ -6,7 +6,7 @@
 
 //namespace EntJoySample.EntityRandomAccess
 //{
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 //    // 稀疏 Entity 随机访问开销量化（07_EntityRandomAccess）
 //    // 对照 06-HotFieldHandle 的密集路径，本样例测「逐实体随机访问」：
 //    //   ClassArray / StructArray（AoS 基线，乱序）
@@ -14,12 +14,12 @@
 //    //   ComponentLookup / ComponentLookupUnsafe（缓存列索引+chunk 基址）
 //    //   QueryDense（chunk 序，密集参考点）
 //    // 用预先打乱的实体索引排列打破位置表/缓存局部性，逼近真实随机访问。
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 
 //    public struct Position : IComponentData { public float2 Value; }
 //    public struct Velocity : IComponentData { public float2 Value; }
 
-//    // ── 基线:纯 OOP class（AoS 散落堆对象）──
+//    // 基线:纯 OOP class（AoS 散落堆对象）
 //    public class ClassEntity
 //    {
 //        public float2 Pos;
@@ -29,7 +29,7 @@
 //        public void Update(float dt) => Pos += Vel * dt;
 //    }
 
-//    // ── 基线:AoS 值类型数组（连续内存）──
+//    // 基线:AoS 值类型数组（连续内存）
 //    public struct StructEntity
 //    {
 //        public float2 Pos;
@@ -141,7 +141,7 @@
 
 //            var lookup = em.GetComponentLookup<Position>();
 
-//            // ── 正确性门:lookup / UnsafeRef / GetComponent 指向同一内存,与 classArr 一致 ──
+//            // 正确性门:lookup / UnsafeRef / GetComponent 指向同一内存,与 classArr 一致
 //            {
 //                Console.WriteLine();
 //                Console.WriteLine("--- 正确性(lookup == UnsafeRef == GetComponent == classArr)---");

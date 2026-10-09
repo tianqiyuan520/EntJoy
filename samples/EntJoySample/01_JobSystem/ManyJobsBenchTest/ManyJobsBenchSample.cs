@@ -9,7 +9,6 @@ using EntJoy.JobSystem;
 
 namespace EntJoySample.ManyJobsBenchTest
 {
-    // ============================================================
     // ManyJobsBench —— 几百个 Job / 帧：纯调度流程开销定位
     //
     // 规则（按需求收敛）：
@@ -27,11 +26,10 @@ namespace EntJoySample.ManyJobsBenchTest
     //   ENTJOY_JOB_WORKERS      worker 数（全局）
     //   ENTJOY_BENCH_WARMUP     预热帧（默认 5）
     //   ENTJOY_BENCH_FRAMES     Pass A 帧数（默认 100）
-    // ============================================================
 
     public struct BenchData : IComponentData { public long Value; }
 
-    // ---- 4 种类型，空体 ----
+    // 4 种类型，空体
     public struct EmptyJob : IJob
     {
         public void Execute() { }
@@ -52,7 +50,7 @@ namespace EntJoySample.ManyJobsBenchTest
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask) { }
     }
 
-    /// <summary>F 组：**真实耗时** job（内存受限：1M float 读+写 ≈ 0.2～0.3 ms/job）。
+    /// <summary>F 组：真实耗时 job（内存受限：1M float 读+写 ≈ 0.2～0.3 ms/job）。
     /// 空体 job 下"隐式批的单次唤醒"根本测不出来（worker 常驻自旋、唤醒近乎免费），
     /// 本 job 配合帧前 `Thread.Sleep` 把 worker 逼入 park，才能量到唤醒次数的影响。</summary>
     public struct RealParJob : IJobParallelFor
@@ -83,7 +81,7 @@ namespace EntJoySample.ManyJobsBenchTest
         private readonly World _chunkSmallWorld;
         private readonly World _chunkBigWorld;
         private readonly QueryBuilder _chunkQuery;
-        /// <summary>F 组用：每 job 一个独立 4 MB 工作集（**必须各自独立** —— EntJoy 的并行读写冲突检测
+        /// <summary>F 组用：每 job 一个独立 4 MB 工作集（必须各自独立 —— EntJoy 的并行读写冲突检测
         /// 以"容器"为粒度，8 个 job 同写一个 NativeArray 会被正确拦截并抛异常（实测踩到），
         /// 这与 Unity Safety System 同款语义，不是缺陷）。</summary>
         private readonly NativeArray<float>[] _realData;
@@ -119,16 +117,14 @@ namespace EntJoySample.ManyJobsBenchTest
                 entityManager.NewEntity(typeof(BenchData));
         }
 
-        // ============================================================
         // Case 定义：只有调度动作，Job 体为空
-        // ============================================================
         private sealed class BenchCase
         {
             public string Label = "";
             public int N;
             public Action<JobHandle[]> Schedule = null!; // 填 handles[0..N)
             public Action<JobHandle[]> Complete = null!;
-            /// <summary>帧前钩子（**不计时**）：用于强制 worker 进入 park（如 Thread.Sleep），
+            /// <summary>帧前钩子（不计时）：用于强制 worker 进入 park（如 Thread.Sleep），
             /// 使"批的单次唤醒"从"worker 常驻自旋下测不出来"变成可测项。见 F 组 case。</summary>
             public Action? PreFrame;
         }
@@ -163,7 +159,7 @@ namespace EntJoySample.ManyJobsBenchTest
             var emptyPar = new EmptyParJob();
             var emptyChunk = new EmptyChunkJob();
 
-            // ---- IJob（2026-08-30 起全异步：Schedule 一律提交 worker，无 inline） ----
+            // IJob
             cases.Add(Case("IJob x50 (async)", 50, h =>
             {
                 for (int i = 0; i < 50; i++) h[i] = emptyJob.Schedule();
@@ -173,7 +169,7 @@ namespace EntJoySample.ManyJobsBenchTest
                 for (int i = 0; i < 200; i++) h[i] = emptyJob.Schedule();
             }));
 
-            // ---- IJobFor：全异步（≤64 池任务；>64 单 worker 异步任务） ----
+            // IJobFor：全异步（≤64 池任务；>64 单 worker 异步任务）
             cases.Add(Case("IJobFor·1K x100 (async)", 100, h =>
             {
                 for (int i = 0; i < 100; i++) h[i] = emptyFor.Schedule(1024);
@@ -183,7 +179,7 @@ namespace EntJoySample.ManyJobsBenchTest
                 for (int i = 0; i < 100; i++) h[i] = emptyFor.Schedule(100_000);
             }));
 
-            // ---- IJobParallelFor：tile 路径 ----
+            // IJobParallelFor：tile 路径
             cases.Add(Case("IJobParallelFor·8K x100", 100, h =>
             {
                 for (int i = 0; i < 100; i++) h[i] = emptyPar.Schedule(8192, 0);
@@ -205,7 +201,7 @@ namespace EntJoySample.ManyJobsBenchTest
                 for (int i = 0; i < 20; i++) h[i] = emptyPar.Schedule(1_000_000, 0);
             }));
 
-            // ---- IJobChunk：小世界（少量 tile）与大世界（~224 tile） ----
+            // IJobChunk：小世界（少量 tile）与大世界（~224 tile）
             cases.Add(Case("IJobChunk·16K x100 (少量tile)", 100, h =>
             {
                 World.DefaultWorld = _chunkSmallWorld;
@@ -217,7 +213,7 @@ namespace EntJoySample.ManyJobsBenchTest
                 for (int i = 0; i < 50; i++) h[i] = emptyChunk.Schedule(_chunkQuery);
             }));
 
-            // ---- IJob 依赖链 ×200：async 分池路径（每 job 一个 worker 任务） ----
+            // IJob 依赖链 ×200：async 分池路径（每 job 一个 worker 任务）
             cases.Add(Case("IJob chain x200 (async)", 200, h =>
             {
                 h[0] = emptyJob.Schedule();
@@ -225,7 +221,7 @@ namespace EntJoySample.ManyJobsBenchTest
                     h[i] = emptyJob.Schedule(h[i - 1]);
             }));
 
-            // ---- 显式批（BatchScope）对照：同场景走批提交，与逐 job 基线同场对比 ----
+            // 显式批（BatchScope）对照：同场景走批提交，与逐 job 基线同场对比
             cases.Add(Case("Batch·IJob x200", 200, h =>
             {
                 using var b = new BatchScope();
@@ -264,7 +260,7 @@ namespace EntJoySample.ManyJobsBenchTest
                 for (int i = 0; i < hs.Length; i++) h[i] = hs[i];
             }));
 
-            // ---- 隐式批：C# 全局收集（Add 零 P/Invoke）+ 帧末 EndFrame 一次提交（P/Invoke 200→1） ----
+            // 隐式批：C# 全局收集（Add 零 P/Invoke）+ 帧末 EndFrame 一次提交（P/Invoke 200→1）
             cases.Add(Case("Implicit·Mixed(100+50+50) x200", 200, h =>
             {
                 ImplicitBatch.SetEnabled(true);
@@ -282,8 +278,8 @@ namespace EntJoySample.ManyJobsBenchTest
                 }
             }));
 
-            // ---- Native 隐式批：透明收集（SetImplicitBatchEnabled(true) + Schedule 照旧 + EndFrame）。
-            //     仅 tile 路径 job（ParallelFor）进 native pending；IJob/IJobFor 不收集（即时提交），不聚合。 ----
+            // Native 隐式批：透明收集（SetImplicitBatchEnabled(true) + Schedule 照旧 + EndFrame）。
+            //     仅 tile 路径 job（ParallelFor）进 native pending；IJob/IJobFor 不收集（即时提交），不聚合。
             cases.Add(Case("NativeImplicit·Mixed(100+50+50) x200", 200, h =>
             {
                 NativeJobScheduler.SetImplicitBatchEnabled(true);
@@ -301,9 +297,9 @@ namespace EntJoySample.ManyJobsBenchTest
                 }
             }));
 
-            // ---- F：真实耗时 job（内存受限）+ 帧前休眠（把 worker 逼入 park）----
+            // F：真实耗时 job（内存受限）+ 帧前休眠（把 worker 逼入 park）
             //    回答"隐式批在 worker 休眠场景的收益"：逐 job = 每帧 8 次提交/唤醒；批 = 1 次。
-            //    ⚠ 每个 job 必须用**独立** NativeArray（同容器并发写会被读写冲突检测正确拦截）。
+            //    ⚠ 每个 job 必须用独立 NativeArray（同容器并发写会被读写冲突检测正确拦截）。
             var realJobs = new RealParJob[_realData.Length];
             for (int k = 0; k < realJobs.Length; k++) realJobs[k] = new RealParJob { Data = _realData[k] };
             cases.Add(Case("RealPar·1M x8 (back-to-back)", 8, h =>
@@ -339,9 +335,7 @@ namespace EntJoySample.ManyJobsBenchTest
             return cases;
         }
 
-        // ============================================================
         // 测量
-        // ============================================================
         private sealed class CaseResult
         {
             public string Label = "";
@@ -398,7 +392,7 @@ namespace EntJoySample.ManyJobsBenchTest
         {
             var result = new CaseResult { Label = c.Label, N = c.N };
 
-            // ---- Pass A：干净墙钟（timing OFF） ----
+            // Pass A：干净墙钟（timing OFF）
             NativeJobScheduler.ResetStats();
             long allocBefore = GC.GetAllocatedBytesForCurrentThread();
             var total = new double[_measureFrames];
@@ -419,7 +413,7 @@ namespace EntJoySample.ManyJobsBenchTest
             result.AvgScheduleMs = sched.Average();
             result.AvgCompleteMs = compl.Average();
 
-            // ---- Pass B：timing ON（execSpan/maxRange 依赖诊断），帧数按 2048 采样上限自适应 ----
+            // Pass B：timing ON（execSpan/maxRange 依赖诊断），帧数按 2048 采样上限自适应
             int timingFrames = Math.Clamp(2048 / Math.Max(1, c.N), 10, 40);
             NativeJobScheduler.ResetStats();
             RunFrames(c, 2, timingFrames, timingEnabled: true, null, null, null);
@@ -462,7 +456,7 @@ namespace EntJoySample.ManyJobsBenchTest
             }
         }
 
-        // === 仅 Managed 后端（NativeDll 缺失回退）的批烟测 ===
+        // 仅 Managed 后端（NativeDll 缺失回退）的批烟测
     public struct ManagedTouchJob : IJob
     {
         public NativeArray<long> Data;
@@ -513,9 +507,7 @@ namespace EntJoySample.ManyJobsBenchTest
         Console.WriteLine(" Managed 后端批烟测完成");
     }
 
-    // ============================================================
     // 主流程
-    // ============================================================
         public void Run()
         {
             NativeJobScheduler.PrewakeWorkersOnce();
@@ -532,7 +524,7 @@ namespace EntJoySample.ManyJobsBenchTest
             }
             Console.WriteLine($" Workers={NativeJobScheduler.JobWorkerCount}, Warmup={_warmupFrames}, Measure={_measureFrames}");
             Console.WriteLine(" 说明：4 类型空体；每帧 Schedule×N + Complete×N；Pass A 墙钟(timing off)，Pass B 批次分布(timing on)");
-            Console.WriteLine(" 路径：全部 Schedule 一律异步（2026-08-30 起）；IJob=池任务、IJobFor≤64=池任务/>64=单 worker 异步、IJobParallelFor=tile 路径、IJobChunk=ECS tile 路径；Run 直执(ImmediateNative)为唯一同步路径。");
+            Console.WriteLine(" 路径：全部 Schedule 一律异步；IJob=池任务、IJobFor≤64=池任务/>64=单 worker 异步、IJobParallelFor=tile 路径、IJobChunk=ECS tile 路径；Run 直执(ImmediateNative)为唯一同步路径。");
 
             var cases = BuildCases();
             var results = new List<CaseResult>();

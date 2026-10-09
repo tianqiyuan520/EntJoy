@@ -66,7 +66,7 @@ namespace EntJoy {
 			float2(const float2&) = default;
 			float2& operator=(const float2&) = default;
 
-			// 读路径专用：**返回值**。原访问器返回 `float&`，使 `float2 q = p[i]` 的读退化成两次
+			// 读路径专用：返回值。原访问器返回 `float&`，使 `float2 q = p[i]` 的读退化成两次
 			// 4 字节标量读（编译器无法把两个分量合并成一次 8 字节载入），逐元素热循环实测 2.3× 代价
 			// （tools/HotSpotMicro/count_place_shape.cpp：3.70ms vs 1.60ms / 100 万单位）。
 			// x()/y() 保留引用语义供少量写路径（生成代码里 8 处赋值/复合赋值）使用。

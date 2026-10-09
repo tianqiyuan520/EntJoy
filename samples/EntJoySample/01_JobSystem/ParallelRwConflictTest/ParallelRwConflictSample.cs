@@ -5,7 +5,6 @@ using EntJoy.JobSystem;
 
 namespace EntJoySample.ParallelRwConflictTest
 {
-    // ============================================================
     // ParallelRwConflict —— 并行读写冲突检测演示
     //
     // 一、Job 间冲突（写-写）：
@@ -25,7 +24,6 @@ namespace EntJoySample.ParallelRwConflictTest
     //     场景 f) job Complete() 后主线程读/写 → 放行。
     //
     // 判定：b 应抛异常（框架拦截）、d/e 应抛异常（主线程访问被拦）、a/c/f 应正确。
-    // ============================================================
 
     public struct RwIncJob : IJobParallelFor
     {
@@ -139,19 +137,19 @@ namespace EntJoySample.ParallelRwConflictTest
 
             using var data = new NativeArray<long>(N, Allocator.Persistent);
 
-            // ---- 场景 a：串行依赖 ----
+            // 场景 a：串行依赖
             long serial = RunSerialDep(data);
             Console.WriteLine($" [a] 串行依赖(B依赖A)：sum = {serial}（期望 {expected}）  {(serial == expected ? "✅ 正确，无冲突" : "❌ 错误")}");
 
-            // ---- 场景 c：修复对照（同 a 结构，仅确认依赖链可串行化）----
+            // 场景 c：修复对照（同 a 结构，仅确认依赖链可串行化）
             long fixedDep = RunSerialDep(data);
             Console.WriteLine($" [c] 修复对照(依赖链)：sum = {fixedDep}（期望 {expected}）  {(fixedDep == expected ? "✅ 正确，无冲突" : "❌ 错误")}");
 
-            // ---- 场景 b：并行无依赖（冲突）----
+            // 场景 b：并行无依赖（冲突）
             bool caught = RunParallelConflict(data);
             Console.WriteLine($" [b] 并行无依赖：{(caught ? "✅ 框架检测到冲突，抛 InvalidOperationException（Complete 时重抛），竞态被拦截" : "❌ 未检测到冲突（回归）")}");
 
-            // ---- 场景 d/e/f：主线程访问拦截（完整双向）----
+            // 场景 d/e/f：主线程访问拦截（完整双向）
             Console.WriteLine();
             DemonstrateMainThreadBlocked(data);
             // 场景 f：job Complete() 后主线程访问放行

@@ -365,7 +365,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\gate-run\run-native-te
 
 ## 8. 第一轮实测（2026-10-05）：根因是 **claim token 数**，不是"每 tile 仪式"
 
-器械：[tools/BuildPassBench](../tools/BuildPassBench) 已内置全部所需形状（`BENCH_SHAPES=emptyjob|pass`），
+器械：[tools/BuildPassBench](../../tools/BuildPassBench)（本地探针目录，不入库）已内置全部所需形状（`BENCH_SHAPES=emptyjob|pass`），
 且与 Unity 的 `M4_DISP` **同形状**（空体 parFor × 1e6 项）。
 
 ### 8.1 EntJoy 的空体调度曲线（`BENCH_SHAPES=emptyjob`，1 job × 1,000,000 项，8 worker，40 步中位）

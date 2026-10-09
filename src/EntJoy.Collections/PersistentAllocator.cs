@@ -9,18 +9,12 @@ namespace EntJoy.Collections
 {
     /// <summary>
     /// Allocator.Persistent 的 free-list 分配器（参考 Unity AllocatorManager / ContextPool 范式）。
-    /// 目标：同尺寸 dispose→realloc 拿回同一块内存 → 地址/物理页稳定 → 消除冷路径方差。
     /// 线程安全（ConcurrentStack），可被 worker 线程 job 内分配/释放。
-    /// 块布局（HeaderSize=16，payload 16 字节对齐，与 AllocHGlobal 在 x64 的 16 对齐一致）：
-    ///   [0..3]   int classIndex   (0..30 可池化；-1 = 直通 OS；每次分配必写)
-    ///   [4..7]   int payloadSize   (payload 字节数)
-    ///   [8..15]  pad
-    ///   [16..]   payload          返回给调用者
+    /// [16..] payload 返回给调用者
     ///
     /// 外来块安全护栏：存活表 s_live 记录所有本分配器发出的块基址。Free 时先查表——
-    ///   命中   → 本分配器块，按 header 回收/释放；
-    ///   未命中 → 外来块（原生 UnsafeList 用 CRT malloc 扩容后交给 C# 释放的块，无 header），
-    ///            直接按原始指针 FreeHGlobal（LocalAlloc 基址→正确释放；CRT 块→静默泄漏，与改动前行为一致）。
+    /// 命中 → 本分配器块，按 header 回收/释放；
+    /// 直接按原始指针 FreeHGlobal（LocalAlloc 基址→正确释放；CRT 块→静默泄漏，与改动前行为一致）。
     /// 这杜绝了"对内部指针减 HeaderSize 再释放"导致的堆损坏（STATUS_HEAP_CORRUPTION 0xc0000374）。
     /// </summary>
     public static unsafe class PersistentAllocator

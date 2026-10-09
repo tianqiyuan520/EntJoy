@@ -51,7 +51,7 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     // 启用/关闭 per-job 自动 batch（JobCostCache）。0=关闭（默认，纯 tpw=4），
     // 1=启用（worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数）。
     JOB_API void JobSystem_SetJobCostCacheEnabled(int enabled);
-    // 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 **job 名**登记的槽位绑定到**该 job 实际派发用的函数指针**。
+    // 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 job 名登记的槽位绑定到该 job 实际派发用的函数指针。
     // 由转译器生成的绑定在 `NativeExports` 静态构造里逐个 job 调用（名字 = `Type.Name`）。
     // 返回值：1 = 该名字在表里（已绑定）；0 = 表里没有这个名字。未设置该 env 时恒为 0 且无副作用。
     JOB_API int JobSystem_BindBatchName(const char* name, void* func);
@@ -86,7 +86,7 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API void* JobSystem_Schedule(JobFunc func, void* context, ContextCleanupFunc cleanup, void* dependency);
     JOB_API void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup, int length, void* dependency);
     JOB_API void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, void* dependency);
-    // 同 `JobSystem_ScheduleParallelForBatch`，但带**调用点声明的认领几何**
+    // 同 `JobSystem_ScheduleParallelForBatch`，但带调用点声明的认领几何
     //   （claimGeom：0=Auto 1=Spread 2=Adjacent，与 C# `ClaimPolicy` 同值）。旧导出保留 ⇒ 老绑定不受影响；
     //   C# 侧用 `TryGetExport` 探测：缺这个导出时退回旧导出（claimGeom 被忽略）。
     JOB_API void* JobSystem_ScheduleParallelForBatchEx(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, int claimGeom, void* dependency);
@@ -182,9 +182,7 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
         unsigned long long scheduleModeDeferredPublish;
         unsigned long long scheduleModeDeferredPublishNoAssist;
         int frameQueueDepthPeak;
-        // 2026-10-04：原先此处的 6 个**死字段**（directAssistClaims / exhaustedTickets /
-        //   scheduleToPublishEwmaNs / publishToFirstMainClaimEwmaNs / publishToFirstWorkerClaimEwmaNs /
-        //   queueLockWaitEwmaNs）已删除，ABI 升到 3。C# 与 Unity 侧 port 必须同序同步。
+        // ABI = 3。C# 与 Unity 侧 port 必须与本结构体同序同步。
         unsigned long long publishToCompletionEwmaNs;
         unsigned long long perRangeExecEwmaNs;
         unsigned long long assistExecPctEwma;

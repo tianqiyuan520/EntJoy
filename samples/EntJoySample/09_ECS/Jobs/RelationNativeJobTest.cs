@@ -105,7 +105,7 @@ namespace EntJoySample.ECS
 
             var query = new QueryBuilder().WithAll<Position, ChildOf, SumComponent>();
 
-            // ===== 1. NativeTranspile IJobChunk =====
+            // 1. NativeTranspile IJobChunk
             new RelNativeChunkJob().Run(query);
             long chunkSum = SumAll(em, children);
             Console.WriteLine($"Native IJobChunk sum of ChildOf.Target.TargetId: {chunkSum} (expected {expected})");
@@ -115,14 +115,14 @@ namespace EntJoySample.ECS
             // 清零重跑 IJobEntity
             foreach (var c in children) em.Set(c, new SumComponent { Value = 0 });
 
-            // ===== 2. NativeTranspile IJobEntity =====
+            // 2. NativeTranspile IJobEntity
             new RelNativeEntityJob().Run(query);
             long entitySum = SumAll(em, children);
             Console.WriteLine($"Native IJobEntity sum of ChildOf.Target.TargetId: {entitySum} (expected {expected})");
             if (entitySum != expected)
                 throw new InvalidOperationException($"Native IJobEntity relation access FAILED: got {entitySum}, expected {expected}");
 
-            // ===== 3. ISPC IJobChunk =====
+            // 3. ISPC IJobChunk
             foreach (var c in children) em.Set(c, new SumComponent { Value = 0 });
             new RelIspcChunkJob().Run(query);
             long ispcChunkSum = SumAll(em, children);
@@ -130,7 +130,7 @@ namespace EntJoySample.ECS
             if (ispcChunkSum != expected)
                 throw new InvalidOperationException($"ISPC IJobChunk relation access FAILED: got {ispcChunkSum}, expected {expected}");
 
-            // ===== 4. ISPC IJobEntity =====
+            // 4. ISPC IJobEntity
             foreach (var c in children) em.Set(c, new SumComponent { Value = 0 });
             new RelIspcEntityJob().Run(query);
             long ispcEntitySum = SumAll(em, children);

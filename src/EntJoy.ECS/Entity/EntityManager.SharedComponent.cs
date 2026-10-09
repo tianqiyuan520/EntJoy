@@ -11,15 +11,14 @@ namespace EntJoy.ECS
     ///
     /// 双类型策略：
     /// - blittable shared：值内联存储于 Chunk 内存块 Shared values 区。
-    /// - managed shared：值存于 EntityManager 扁平数组（去重索引），Chunk 槽位只存 int 索引。
-    ///   值只增不减，World.Dispose 时整体清空 → GC 回收。
+    /// 值只增不减，World.Dispose 时整体清空 → GC 回收。
     ///
     /// 核心不变式：同一 Chunk 的所有实体共享相同的 SharedComponent 值组合。
     /// 改变 shared 值 → 实体在 Archetype 内部移动到持有目标值的 Chunk（无 Archetype 变更）。
     /// </summary>
     public unsafe partial class EntityManager
     {
-        // ======================== managed shared 值存储（简化版：无 refcount，值只增不减） ========================
+        // managed shared 值存储（简化版：无 refcount，值只增不减）
 
         /// <summary>managed shared 值本体（全局去重数组）。World.Dispose 时清空。</summary>
         private object[] _managedSharedValues = new object[16];
@@ -31,8 +30,6 @@ namespace EntJoy.ECS
         /// <summary>
         /// per-value 最近使用缓存：shared 值 → 最近一次命中的 chunk 索引（Archetype 内）。
         /// key = (Archetype, 组件索引, 值)。managed 的值为全局 index（int box）；blittable 为 boxed 值。
-        /// 目的：SetSharedComponent 移动 / NewEntity 带 shared 的高频路径避免 O(chunks) 全量扫描。
-        /// 失效策略：lazy 验证 —— 命中后验证 chunk 未满且值仍匹配；chunk 被回收（swap-pop）/就地改值
         /// 导致验证失败时移除条目并回退全扫描。删除路径零维护。
         /// </summary>
         private readonly Dictionary<(Archetype, int, object), int> _lastChunkPerSharedValue = new();
@@ -56,7 +53,7 @@ namespace EntJoy.ECS
             return idx;
         }
 
-        // ======================== 读取 / 写入 API ========================
+        // 读取 / 写入 API
 
         /// <summary>获取实体的共享组件值（blittable 读 chunk 内存块内联值；managed 读索引 → 值数组）。</summary>
         public T GetSharedComponent<T>(Entity entity) where T : ISharedComponentData
@@ -80,7 +77,6 @@ namespace EntJoy.ECS
         /// <summary>
         /// 设置实体的共享组件值（per-chunk 语义，对齐 Unity DOTS）：
         /// 1. 所在 chunk 单实体 → 就地改值（无移动）。
-        /// 2. 多实体且值不同 → Archetype 内找/建目标值 chunk，swap-pop 移动实体。
         /// 3. 值相同 → 无操作。
         /// </summary>
         public void SetSharedComponent<T>(Entity entity, T value) where T : ISharedComponentData
@@ -263,7 +259,7 @@ namespace EntJoy.ECS
             arch.ChunkList[targetChunk].MarkEntityChanged(arch.ChunkList[targetChunk].EntityCount - 1);
         }
 
-        // ======================== 创建带初始共享值的实体 ========================
+        // 创建带初始共享值的实体
 
         /// <summary>
         /// 创建实体并指定初始共享值（per-chunk 分组）。
@@ -387,7 +383,7 @@ namespace EntJoy.ECS
             return -1;
         }
 
-        // ======================== 工具方法 ========================
+        // 工具方法
 
         /// <summary>读取 chunk 槽位的 blittable shared 值（boxed，非热路径用）。</summary>
         private object ReadBlittableSharedBoxed(Chunk chunk, int compIdx, Type compType)

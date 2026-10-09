@@ -134,12 +134,11 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 把成员访问的"接收者"归一化为字段名：`X` 与 **`this.X`** 都返回 "X"。
+        /// 把成员访问的"接收者"归一化为字段名：`X` 与 `this.X` 都返回 "X"。
         ///
         /// `this.X` 是合法的 C# 字段访问（局部变量遮蔽同名字段时必须这样写）。旧实现只认裸标识符
         /// ⇒ `this.X` 落到基类的 `default:` 分支，产出 `/*__ENTJOY_UNSUPPORTED_EXPR__ThisExpression*/`
-        /// （构建失败，独立验收 C21）。字段名相等时两者的绑定完全一致（`X_ptr` / `X_length`），
-        /// 且 `this.X` 的**符号**就是字段，不存在遮蔽歧义。
+        /// 且 `this.X` 的符号就是字段，不存在遮蔽歧义。
         /// </summary>
         protected static string SimpleMemberName(ExpressionSyntax? expression)
             => expression switch
@@ -152,13 +151,11 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateStatement(StatementSyntax statement)
         {
-            // ① `unchecked { ... }`：C# 默认语义就是 unchecked，而**本路径**的 int `+ - *`／一元负号
+            // ① `unchecked { ... }`：C# 默认语义就是 unchecked，而本路径的 int `+ - *`／一元负号
             //    本来就按 `(unsigned)` 环绕发（EnableWrapSafeIntArithmetic）⇒ 等价于普通块。
-            //    旧实现落到基类 default 分支 ⇒ 发 `__ENTJOY_UNSUPPORTED_STMT__CheckedStatement` 标记，
-            //    把完全可译的代码打成构建失败。
-            //    ⚠ 实体路径（CppEntityStatementTranslator，wrap-safe = false）**不满足前提**：
+            //    ⚠ 实体路径（CppEntityStatementTranslator，wrap-safe = false）不满足前提：
             //      那边的算术是裸 C++（有符号溢出 UB）⇒ 由本属性保证仍走标记。
-            //    ⚠ `checked { }` **必须**继续发标记：C++ 无法表达"溢出即抛"。
+            //    ⚠ `checked { }` 必须继续发标记：C++ 无法表达"溢出即抛"。
             if (EnableWrapSafeIntArithmetic
                 && statement is CheckedStatementSyntax uncheckedStmt
                 && uncheckedStmt.Keyword.IsKind(SyntaxKind.UncheckedKeyword))
@@ -169,7 +166,6 @@ namespace NativeTranspiler.Analyzer
 
             // ② `switch` 语句（仅常量 case + 整数/字符/布尔选择子）→ C++ `switch`。语义依据：
             //    C# 要求每个 section 以 break/goto/return/throw 结束（空 section 可穿透），
-            //    常量 case 的比较语义与 C++ 一致 ⇒ 合法 C# 的一一映射不改变行为。
             //    其余形态（模式 case、枚举/字符串选择子、非常量 case）返回 false ⇒ 基类发标记。
             if (statement is SwitchStatementSyntax switchStmt && TryTranslateSwitchStatement(switchStmt))
                 return;
@@ -178,7 +174,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// `switch` 语句 → C++ `switch`（**仅**常量 case + 整数/字符/布尔选择子）。任何不确定的形态
+        /// `switch` 语句 → C++ `switch`（仅常量 case + 整数/字符/布尔选择子）。任何不确定的形态
         /// 都返回 false，由基类写唯一标记让构建失败（绝不静默降级）。
         /// </summary>
         private bool TryTranslateSwitchStatement(SwitchStatementSyntax switchStmt)
@@ -258,9 +254,8 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
-            // `this.X` ≡ 裸字段访问 `X`：**先**归一到标识符翻译，与裸写形态逐字一致
+            // `this.X` ≡ 裸字段访问 `X`：先归一到标识符翻译，与裸写形态逐字一致
             // （`X[k]` / `X.GetUnsafePtr()` / `X.Length` 都走与裸名相同的既定路径）。
-            // 旧实现让 `this` 落到基类 default 分支 ⇒ 产物是
             // `/*__ENTJOY_UNSUPPORTED_EXPR__ThisExpression*/`（构建失败，独立验收 C21）。
             if (memberAccess.Expression is ThisExpressionSyntax && memberAccess.Name is IdentifierNameSyntax thisMember)
             {
@@ -320,7 +315,7 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // float2 读路径改用**值**访问器 xr()/yr()：x()/y() 返回引用，会让 `float2 q = p[i]`
+            // float2 读路径改用值访问器 xr()/yr()：x()/y() 返回引用，会让 `float2 q = p[i]`
             // 的读退化成两次 4 字节标量读（逐元素热循环实测 2.3× 代价，见 NativeMath.h 注释）。
             // 只在"纯读"上下文改写；赋值/复合赋值/自增减的左值必须保留引用版本。
             if (memberName is "x" or "y" && IsReadContext(memberAccess))
@@ -366,7 +361,7 @@ namespace NativeTranspiler.Analyzer
             var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
             if (symbolInfo.Symbol is IMethodSymbol methodSymbol)
             {
-                // ---- 新增：处理 NativeArray 的方法调用 ----
+                // 新增：处理 NativeArray 的方法调用
                 if (NativeTranspiler.IsEntJoyContainerNamed(methodSymbol.ContainingType, Config.NativeArray))
                 {
                     if (methodSymbol.Name == Config.GetUnsafePtr)
@@ -454,23 +449,21 @@ namespace NativeTranspiler.Analyzer
             _builder.Append(')');
         }
 
-        // ================================================================
-        // ★ Wrap-safe int arithmetic (C# unchecked semantics)
+        // Wrap-safe int arithmetic (C# unchecked semantics)
         //   C# `int` ops wrap on overflow (unchecked by default); naive C++ `a*b`
         //   is signed-overflow UB — clang -O2 folds `x*2` / `-x` on INT_MIN to 0
         //   (EC10/FZ3 remainder path). Emit unsigned arithmetic (well-defined wrap)
         //   for int * + - and unary minus. Reinterpretation back to int is
         //   implementation-defined but bit-preserving on all supported compilers.
         //   ISPC subclasses disable this (ISPC has no `(unsigned)` cast).
-        // ================================================================
         protected virtual bool EnableWrapSafeIntArithmetic => true;
 
         /// <summary>
-        /// C++（Windows/LLP64）字面量后缀修正：C# 的 <c>long</c>/<c>ulong</c> 是 **64 位**，而 C++ 的
-        /// <c>long</c>/<c>unsigned long</c> 是 **32 位** ⇒ `1UL`/`1L` 必须译成 `1ULL`/`1LL`。
+        /// C++（Windows/LLP64）字面量后缀修正：C# 的 <c>long</c>/<c>ulong</c> 是 64 位，而 C++ 的
+        /// <c>long</c>/<c>unsigned long</c> 是 32 位 ⇒ `1UL`/`1L` 必须译成 `1ULL`/`1LL`。
         ///
         /// 实测（框架自带样例可复现）：C# 写 `v | (1UL &lt;&lt; b)`（b 可达 32..63）→ 生成 C++ `1UL &lt;&lt; b`
-        /// ⇒ clang 报 `shift count &gt;= width of type`（UB，实际按 `&amp; 31` 折叠）⇒ **掩码/位图静默写错**
+        /// ⇒ clang 报 `shift count &gt;= width of type`（UB，实际按 `&amp; 31` 折叠）⇒ 掩码/位图静默写错
         /// （50,000 实体 enable 位图错 78%；`(1UL&lt;&lt;40)&gt;&gt;32` 由 256 变成 -4）。
         /// </summary>
         protected override string NormalizeNumericLiteral(string text)
@@ -496,7 +489,7 @@ namespace NativeTranspiler.Analyzer
                 && pre.IsKind(SyntaxKind.UnaryMinusExpression))
             {
                 var operandType = GetExpressionSpecialType(pre.Operand);
-                // ★ C# `-uint`：结果类型是 **long**（不是 uint、更不是 int）。按 32 位回绕发出
+                // C# `-uint`：结果类型是 long（不是 uint、更不是 int）。按 32 位回绕发出
                 //   会得到 `1` 而不是 `-4294967295L`（uint.MaxValue 取负）。uint 的最大值取负
                 //   一定能放进 int64 ⇒ 直接 64 位取负，无溢出。
                 if (operandType == SpecialType.System_UInt32)
@@ -527,10 +520,8 @@ namespace NativeTranspiler.Analyzer
                 var rightType = GetExpressionSpecialType(binary.Right);
                 if (Is32BitIntType(leftType) && Is32BitIntType(rightType))
                 {
-                    // ★ C# 二元数值提升（spec 12.4.7）：一边 int、一边 uint ⇒ **两侧都提升为 long**
-                    //   再运算，结果类型是 long。按 `(int)((unsigned)L op (unsigned)R)` 发出是
+                    // C# 二元数值提升（spec 12.4.7）：一边 int、一边 uint ⇒ 两侧都提升为 long
                     //   32 位无符号算术 ⇒ 静默错值：
-                    //     100000 * 100000u   C# = 10,000,000,000 / 旧发射 = 1,410,065,408
                     //   二阶后果：回绕后的节点类型成了 int，随后的 `>>` / `%` 变成有符号语义。
                     if (leftType != rightType)
                     {
@@ -541,7 +532,7 @@ namespace NativeTranspiler.Analyzer
                         _builder.Append(')');
                         return;
                     }
-                    // 同号 32 位（int op int / uint op uint）的 C# 结果**仍是 32 位**：
+                    // 同号 32 位（int op int / uint op uint）的 C# 结果仍是 32 位：
                     // 回绕不是 UB ⇒ 保留无符号回绕写法。
                     _builder.Append("(int)((unsigned)(");
                     TranslateExpression(binary.Left);

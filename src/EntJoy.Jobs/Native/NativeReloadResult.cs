@@ -2,7 +2,7 @@ namespace EntJoy.JobSystem
 {
     /// <summary>
     /// 一次 <see cref="NativeJobScheduler.ReloadNativeLibrary"/> 的结局。
-    /// 拒绝**不抛异常**，用本枚举区分原因；只有编程错误（`path` 为 null/空）才抛。
+    /// 拒绝不抛异常，用本枚举区分原因；只有编程错误（`path` 为 null/空）才抛。
     /// </summary>
     public enum NativeReloadOutcome
     {

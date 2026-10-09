@@ -18,28 +18,28 @@ namespace EntJoy.ECS
         public bool DestroyRunOpen;
         public int DestroyRunStart;
         public int DestroyCountFieldOffset;
-        /// <summary>首次使用该 writer 的托管线程 Id（0 = 未使用）。用于**契约守卫**：
+        /// <summary>首次使用该 writer 的托管线程 Id（0 = 未使用）。用于契约守卫：
         /// 一个 writer 同一时刻只能被一个线程使用 —— 违反时抛错，而不是静默写坏非托管内存
         /// （实测：把一个 job 切多 tile 分发到多 worker 时，共享 writer 会把堆写坏 0xC0000374）。</summary>
         public int OwnerThread;
-        /// <summary>1 = **跨 tile 共享** writer（<c>CreateSharedParallelWriter</c>）：追加走原子占位、不扩容、
+        /// <summary>1 = 跨 tile 共享 writer（<c>CreateSharedParallelWriter</c>）：追加走原子占位、不扩容、
         /// 不做线程独占守卫（DOTS <c>EntityCommandBuffer.ParallelWriter</c> 语义）。0 = 单线程 writer。</summary>
         public int Shared;
     }
 
     /// <summary>
-    /// 并行记录句柄（P1-9）：值语义，只含一个非托管指针 ⇒ **可直接作为 job 字段**。
+    /// 并行记录句柄：值语义，只含一个非托管指针 ⇒ 可直接作为 job 字段。
     ///
     /// 与主线程记录（<see cref="DeferredCommandBuffer"/> 的 <c>lock(_sync)</c> 单实例）的区别：
-    ///   - 每个 writer 拥有**自己的非托管 staging 区与自己的销毁表** ⇒ 记录期**完全无锁**；
-    ///     约定：一个 writer 索引同一时刻只被一个 worker/lane 使用。
-    ///   - 回放由主线程按 writer 索引**顺序**进行（确定性），见 <c>PlaybackParallel</c>。
+    /// - 每个 writer 拥有自己的非托管 staging 区与自己的销毁表 ⇒ 记录期完全无锁；
+    /// 约定：一个 writer 索引同一时刻只被一个 worker/lane 使用。
+    /// - 回放由主线程按 writer 索引顺序进行（确定性），见 <c>PlaybackParallel</c>。
     ///
-    /// ⚠ 覆盖范围（诚实声明）：并行 writer 只支持**自包含**的两类命令 ——
-    ///   <see cref="DestroyEntity"/>（进该 writer 的销毁表）与 <see cref="SetComponent{T}"/>（值内联在命令里）。
-    ///   需要"共享类型集合池 / 本轮新建实体表"的 `CreateEntitiesRange` + `SetComponentRange` **仍限主线程**
-    ///   （DOTS 的并行 create 也依赖专门的 placeholder 机制）。本次百万单位改造的实际用法正是：
-    ///   主线程做生成/结构变更，并行 job 只做"标记死亡 + 写组件"。
+    /// ⚠ 覆盖范围（诚实声明）：并行 writer 只支持自包含的两类命令 ——
+    /// <see cref="DestroyEntity"/>（进该 writer 的销毁表）与 <see cref="SetComponent{T}"/>（值内联在命令里）。
+    /// 需要"共享类型集合池 / 本轮新建实体表"的 `CreateEntitiesRange` + `SetComponentRange` 仍限主线程
+    /// （DOTS 的并行 create 也依赖专门的 placeholder 机制）。本次百万单位改造的实际用法正是：
+    /// 主线程做生成/结构变更，并行 job 只做"标记死亡 + 写组件"。
     /// </summary>
     public unsafe struct ParallelWriter
     {
@@ -49,7 +49,7 @@ namespace EntJoy.ECS
         private bool Ready => State != null;
 
         /// <summary>记录一次销毁（同一 writer 内连续的销毁会在回放期合并成一次批量销毁）。
-        /// 共享 writer（<see cref="DeferredCommandBuffer.CreateSharedParallelWriter"/>）下走**原子占位**：
+        /// 共享 writer（<see cref="DeferredCommandBuffer.CreateSharedParallelWriter"/>）下走原子占位：
         /// 每条命令 = 一个销毁槽（回放期把连续槽合并成批量销毁）。</summary>
         public void DestroyEntity(Entity entity)
         {
@@ -110,11 +110,8 @@ namespace EntJoy.ECS
     internal static unsafe class EcbWriterStateExtensions
     {
         /// <summary>
-        /// **契约守卫**（P1-9）：一个 writer 同一时刻只能被一个线程使用。
-        /// ⚠ 为什么必须有它：`job.Schedule(n, 0)`（自适应分批）会把**同一个 job 切成多个 tile 分发到多个 worker**，
-        /// 若这些 tile 共享同一个 writer，两条线会同时改 `Offset`/`DestroyCount` 并交错写 staging ⇒
-        /// 实测直接**堆损坏（0xC0000374）**。有了守卫，违反契约会得到明确异常而不是静默写坏内存。
-        /// 正确做法：一个 writer = 一个 job = 一次单 tile 调度（batch 传整段），或每个 tile 各分配一个 writer。
+        /// 契约守卫：一个 writer 同一时刻只能被一个线程使用。
+        /// ⚠ 为什么必须有它：`job.Schedule(n, 0)`（自适应分批）会把同一个 job 切成多个 tile 分发到多个 worker，
         /// DOTS 里 `ParallelWriter` 之所以能跨 tile 共享，是因为它的追加走原子占位（本实现未做，见文档 TODO）。
         /// </summary>
         public static void ClaimThread(this ref EcbWriterState st)
@@ -159,13 +156,13 @@ namespace EntJoy.ECS
             st.DestroyCapacity = newCapacity;
         }
         /// <summary>
-        /// **原子占位追加**（跨 tile 共享 writer 的写入路径）：CAS 抢一段 staging 空间，抢到的空间只由本线程写
+        /// 原子占位追加（跨 tile 共享 writer 的写入路径）：CAS 抢一段 staging 空间，抢到的空间只由本线程写
         /// ⇒ 记录期无锁、无需线程独占。
         ///
         /// 两个不变式：
-        ///   ① **`Offset` 永不越过 `Capacity`**：用 <c>Interlocked.Add</c> 的话，失败的那次已把 `Offset` 推过容量，
-        ///      回放期 `while (offset &lt; st.Offset)` 会**越界读** staging（读到垃圾 opcode）⇒ 必须用 CAS 先判后占。
-        ///   ② 超容量**不扩容**：扩容要搬移整块 staging 并换指针，多 lane 并发写时无法安全完成 ⇒ 创建时给足容量。
+        /// ① `Offset` 永不越过 `Capacity`：用 <c>Interlocked.Add</c> 的话，失败的那次已把 `Offset` 推过容量，
+        /// 回放期 `while (offset &lt; st.Offset)` 会越界读 staging（读到垃圾 opcode）⇒ 必须用 CAS 先判后占。
+        /// ② 超容量不扩容：扩容要搬移整块 staging 并换指针，多 lane 并发写时无法安全完成 ⇒ 创建时给足容量。
         /// 失败时抛错（不写任何字节：占位失败发生在写入之前），且 writer 状态仍自洽（`Offset ≤ Capacity`）。
         /// </summary>
         public static int ReserveShared(this ref EcbWriterState st, int bytes)
@@ -183,7 +180,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>共享 writer 的销毁记录：原子占一个销毁槽 + 一条「该槽、count=1」的批量销毁命令。
-        /// 回放期把**连续槽**合并回一次批量销毁（见 <c>DeferredCommandBuffer.ReplayWriterBuffer</c>）。
+        /// 回放期把连续槽合并回一次批量销毁（见 <c>DeferredCommandBuffer.ReplayWriterBuffer</c>）。
         /// 槽位同样用 CAS 占（不变式：<c>DestroyCount ≤ DestroyCapacity</c>）。</summary>
         public static void DestroyEntityShared(this ref EcbWriterState st, Entity entity)
         {

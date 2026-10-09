@@ -118,9 +118,9 @@ namespace EntJoy.ECS
                         }
                         else
                         {
-                            // ★ R12：双向冲突（A 写 X 读 Y / B 写 Y 读 X）与写-写冲突时，旧实现按
-                            //   **注册顺序**（i<j 就取 i→j）定边 ⇒ 同一组 system 换个注册顺序就得到
-                            //   不同的执行顺序（提交顺序不可复现）。改为按**类型全名**的稳定判据定方向。
+                            // 双向冲突（A 写 X 读 Y / B 写 Y 读 X）与写-写冲突时，旧实现按
+                            //   注册顺序（i<j 就取 i→j）定边 ⇒ 同一组 system 换个注册顺序就得到
+                            //   不同的执行顺序（提交顺序不可复现）。改为按类型全名的稳定判据定方向。
                             if (string.CompareOrdinal(_systems[i].SystemType.FullName, _systems[j].SystemType.FullName) <= 0)
                                 AddEdge(i, j);
                             else
@@ -149,8 +149,8 @@ namespace EntJoy.ECS
                     }
                 }
                 // 同 layer 内按 Order 优先级排序（Order 越小越先执行）。
-                // ★ R12：Order 相等时必须有**与注册顺序无关**的 tiebreak（List.Sort 是不稳定排序，
-                //   旧实现下同 Order 的提交顺序就跟着注册顺序走 ⇒ 不可复现）。
+                // Order 相等时必须有与注册顺序无关的 tiebreak（List.Sort 是不稳定排序，
+                //   否则同 Order 的提交顺序会跟着注册顺序走 ⇒ 不可复现）。
                 layer.Sort((a, b) =>
                 {
                     int byOrder = a.Order.CompareTo(b.Order);

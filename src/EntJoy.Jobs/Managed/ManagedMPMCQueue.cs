@@ -9,9 +9,8 @@ namespace EntJoy.JobSystem.Managed
     /// 生产者/消费者分别从环形两侧推进 head/tail。无锁、无持有锁。
     ///
     /// 正确性要点：
-    ///   - 初始化 buffer[i].Seq = i（槽位 i 就绪等待排在第 i 位的生产）
-    ///   - 入队：CAS 槽位 seq 由 pos → pos+1 抢占写权，写数据后 release 发布
-    ///   - 出队：CAS 槽位 seq 由 pos+1 → pos+1+capacity 抢占读权，读数据后推进
+    /// - 初始化 buffer[i].Seq = i（槽位 i 就绪等待排在第 i 位的生产）
+    /// - 出队：CAS 槽位 seq 由 pos+1 → pos+1+capacity 抢占读权，读数据后推进
     /// </summary>
     internal sealed class ManagedMPMCQueue<T> where T : struct
     {
@@ -85,7 +84,6 @@ namespace EntJoy.JobSystem.Managed
                         item = _data[idx];
                         // 释放槽位供下一圈（pos + capacity）的生产者写。
                         // 必须写 pos + capacity（而非 pos + 1 + capacity）：生产者在第 pos+capacity 轮
-                        // 重访同一物理槽时期望看到 _seq[idx] == pos + capacity（即 seq == pos），
                         // 写 pos+1+capacity 会让生产者落入 seq > pos 分支无限自旋。
                         Volatile.Write(ref _seq[idx], pos + _capacity);
                         return true;

@@ -7,15 +7,11 @@ namespace EntJoy.ECS
     /// <summary>
     /// 实体关系操作（单实例 SoA 列）+ 级联删除。
     /// 关系类型 = 组件类型（IRelationComponent 空 struct），列值 = RelationSlot（target + version）。
-    /// Add = 首次 AddComponentRaw（结构变更，走 Archetype Edges）+ 已有则 SetRaw 写 8B（零结构变更）。
-    /// Remove = RemoveComponentRaw（edge 快路径）；无组件 no-op。
-    /// Get/Has = 直接列读 + Version 校验（防 ID 回收）。
     /// 反向索引（RelationIndex）：Add/Remove/覆盖时同步维护，DestroyEntityCascade 时 O(1) 查索引。
     /// </summary>
     public unsafe partial class EntityManager
     {
-        // ======================== P1：遍历 API 分配消除 ========================
-        // 复用容器（实例字段）：消除 GetAncestors/GetDescendants/GetSiblings/GetRelationsOfAll
+        // P1：遍历 API 分配消除
         // 每次调用的 List/HashSet 分配。约束：主线程单线程使用、不可重入（遍历中不得再调用
         // 遍历 API——当前 API 无回调，天然满足）；返回值数组独立 new，调用方可安全持有。
 
@@ -227,7 +223,7 @@ namespace EntJoy.ECS
             return targetInfo.Archetype != null && targetInfo.Version == slot.TargetVersion;
         }
 
-        // ======================== 反向查询 GetRelationsOf（利用关系索引 O(1)） ========================
+        // 反向查询 GetRelationsOf（利用关系索引 O(1)）
 
         /// <summary>
         /// 获取所有与 target 建立 TRel 关系的 source 实体（target ←TRel-- sources）。
@@ -285,7 +281,7 @@ namespace EntJoy.ECS
             return info.Archetype != null && info.Version == e.Version;
         }
 
-        // ======================== 关系遍历 API（借鉴 Bevy iter_ancestors/descendants/siblings） ========================
+        // 关系遍历 API（借鉴 Bevy iter_ancestors/descendants/siblings）
 
         /// <summary>
         /// 尝试读取 entity 的 TRel 关系 target（存活 + 有效槽位 + 版本匹配）。
@@ -320,7 +316,6 @@ namespace EntJoy.ECS
         /// <summary>
         /// 获取 entity 的全部祖先（沿 TRel 链向上）：最近的祖先在前，根在后。
         /// 单实例语义（每实体每关系类型最多 1 target），链式向上；visited 防环（含起始实体）。
-        /// 空数组 = entity 无 TRel 关系或无祖先。
         /// 复用容器（P1）：内部 List/HashSet 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetAncestors<TRel>(Entity entity)
@@ -347,7 +342,6 @@ namespace EntJoy.ECS
         /// <summary>
         /// 获取 entity 的全部后代（沿 TRel 链向下，BFS 广度优先）：直接子在前，孙层次随深度。
         /// 走反向索引 O(1) 逐层查 sources，不扫描 chunk；visited 防环（含起始实体）。
-        /// 不包含 entity 自身。
         /// 复用容器（P1）：frontier/next 双缓冲 + visited 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetDescendants<TRel>(Entity entity)
@@ -420,7 +414,7 @@ namespace EntJoy.ECS
             return result.ToArray();
         }
 
-        // ======================== 级联删除 ========================
+        // 级联删除
 
         /// <summary>
         /// 级联销毁实体：销毁 entity 及所有关系指向它的实体（递归，整棵子树）。
@@ -456,8 +450,8 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 收集级联销毁集合（实体 + 所有关系指向它的实体）。
-        /// **迭代 DFS（显式栈）**：深链（长所有权链/场景图，数千~数万级）会让递归版
-        /// <c>StackOverflowException</c> —— 该异常**不可捕获**，直接终止进程，
+        /// 迭代 DFS（显式栈）：深链（长所有权链/场景图，数千~数万级）会让递归版
+        /// <c>StackOverflowException</c> —— 该异常不可捕获，直接终止进程，
         /// 所以不能用"调用栈更深一点"来容忍，必须改成显式栈。
         /// </summary>
         private void CollectCascade(Entity entity, List<Entity> toDestroy, HashSet<int> visited)

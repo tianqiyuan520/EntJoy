@@ -70,7 +70,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine(CodeTemplates.GenerateExportMacros());
             sb.AppendLine();
             sb.AppendLine(CodeTemplates.GenerateAtomicMacros());
-            // ─── SendEvent: __EntJoyChunkContextHeader 前向声明（指针参数） ───
+            // SendEvent: __EntJoyChunkContextHeader 前向声明（指针参数）
             sb.AppendLine("#ifndef __EntJoyChunkContextHeader_FWD");
             sb.AppendLine("#define __EntJoyChunkContextHeader_FWD");
             sb.AppendLine("struct __EntJoyChunkContextHeader;");
@@ -140,25 +140,21 @@ namespace NativeTranspiler.Analyzer
             var autoSIMD = AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol);
             var simdMathPrecision = AttributeHelper.GetMathPrecision(jobStruct, attrSymbol);
             sb.AppendLine($"#include \"{baseFuncName}.h\"");
-            // ─── 依赖的静态方法头文件（Execute 内调用的同程序集静态方法，含传递依赖） ───
+            // 依赖的静态方法头文件（Execute 内调用的同程序集静态方法，含传递依赖）
             // 缺失会导致调用点引用未声明的函数（use of undeclared identifier）。
             foreach (var dep in CollectAllCalledStaticMethods(jobStruct, compilation))
                 sb.AppendLine($"#include \"{CppGenerator.GetCppFunctionName(dep)}.h\"");
             sb.AppendLine("#include <algorithm>");
             sb.AppendLine("#include <cmath>");
             sb.AppendLine("#include <cstdio>");
-            // ─── 逐 job 精度覆盖（C1）───
-            // CMake 的 NATIVE_SIMD_MATH_PRECISION 是**全库**一刀切；NativeSIMD_math.h 用
-            // `#if !defined(SIMD_MATH_PRECISION)` 兜底，因此这里在 include 之前按 job 的
-            // [NativeTranspile(MathPrecision = ...)] 覆盖。修正前该 attribute 全仓无读取点（死开关）。
-            //   1 = Fastest（AVX2 内联多项式 ~3.5 ULP）
-            //   2 = High（无 SIMD 路径 → 逐通道标量回退，~1.0 ULP）
+            // 逐 job 精度覆盖（C1）
+            // CMake 的 NATIVE_SIMD_MATH_PRECISION 是全库一刀切；NativeSIMD_math.h 用
             //   3 = IEEE （逐通道标量，与 C# 逐位一致）
             sb.AppendLine($"#define SIMD_MATH_PRECISION {(int)simdMathPrecision + 1}");
             sb.AppendLine("#include \"NativeSIMD.h\"");
             sb.AppendLine("#include \"SimdValue.h\"");
 
-            // ─── Event Buffer POD struct（SendEvent 生成的代码依赖） ───
+            // Event Buffer POD struct（SendEvent 生成的代码依赖）
             sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
             sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
             sb.AppendLine("struct __EntJoyEventBuffer {");
@@ -170,7 +166,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#endif");
             sb.AppendLine();
 
-            // ─── ChunkContextHeader 完整定义（SendEvent 需要解引用 __header->eventBufferHeaders） ───
+            // ChunkContextHeader 完整定义（SendEvent 需要解引用 __header->eventBufferHeaders）
             if (JobUsesSendEvent(jobStruct, compilation))
             {
                 sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
@@ -189,7 +185,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int requiredComponentTypeIdCount;");
                 sb.AppendLine("    int jobIsBoxed;");
                 sb.AppendLine("    void* chunkArrayHandle;");
-                sb.AppendLine("    // ─── Event Buffer ───");
+                sb.AppendLine("    // Event Buffer");
                 sb.AppendLine("    int eventBufferCount;");
                 sb.AppendLine("    void* eventBufferHeaders;");
                 sb.AppendLine("    void* eventWorldHandle;");
@@ -230,7 +226,7 @@ namespace NativeTranspiler.Analyzer
 
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var boolFields = GetBoolConditionalFields(jobStruct, compilation);
-                // IJobParallelForBatch：Execute(startIndex, count) 自身就是**一段区间**，C++ 侧不再包 index 循环。
+                // IJobParallelForBatch：Execute(startIndex, count) 自身就是一段区间，C++ 侧不再包 index 循环。
                 bool isRangeJob = IsParallelForBatchJob(jobStruct);
 
                 if (boolFields.Count > 0)
@@ -258,10 +254,8 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-        // 局部变量声明：仅保留 NativeList 引用，移除 NativeArray 包装
-        // 按**缺陷判据**决定绑定形式：只有**参与循环行程数**的字段才按值绑定
-        // （见 GetFieldLoopUse）。`semanticModel`/`compilation` 传入后可**按符号**判定
-        // 字段用途（同名局部/形参不再造成误判）；两者都缺时退回名字兜底。
+        // 局部变量声明：仅保留 NativeList 引用，移除 NativeArray 包装。
+        // 标量字段的绑定形式见下方 typeOk 判据；字段用途按符号解析（无语义模型时退回名字兜底）。
         private static void AppendLocalVariableDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
             SemanticModel? semanticModel = null, Compilation? compilation = null)
         {
@@ -285,17 +279,10 @@ namespace NativeTranspiler.Analyzer
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 if (field.Type is IPointerTypeSymbol) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                // 绑定形式由 typeOk 判据决定：**参与循环行程数**的字段按值，其余按引用。
-                // 类型判据：≤16 B 的托管值类型**无条件**可；**行程数字段**额外放宽到"任意值类型"——
-                // 一整份拷贝发生在**每次内核调用**（每 tile / 每 chunk 一次），换来的是行程数变编译期常量，
-                // 与"每元素重载 + 无法向量化"不是一个量级。引用类型/容器/指针仍排除。
+                // 绑定形式：参与循环行程数的字段按值，其余按引用。按值后行程数成为入口常量，
+                // 不再是"每轮重载 + 无法 unroll/向量化"；其余字段的载入本可折进操作数，按值只多一次拷贝。
+                // 类型判据（ValueBindTypeOk）：只认已证 ≤16 B 的平凡可拷贝值类型；引用类型/容器/指针按引用。
                 string scalarSrc = $"{field.Name}_ptr";
-                // 绑定形式：**只对"参与循环行程数"的字段按值**，其余按引用。
-                // 原理：这批字段正是被挡住的那批 —— 编译器必须假设循环体内的任何写都可能改写 `*X_ptr`，
-                // 于是行程数在编译期不可知（每轮重载 + 无法向量化/展开）；按值后它成为入口常量。
-                // 其余字段的载入本可折进操作数（0 条额外指令），按值反而引入每次内核调用的拷贝 ⇒ 不需要。
-                // 类型上只接受已证 ≤16 B 的平凡可拷贝值类型（ValueBindTypeOk）；引用类型/容器/指针排除。
-                // ⚠ 不做 job 白名单、也不做"按值默认"：两者都在单会话配对里被否（doc16 44.26/44.27）。
                 bool tripCount = loopUse.TripCount.Contains(field.Name);
                 bool typeOk = ValueBindTypeOk(field.Type);
                 if (tripCount && typeOk)
@@ -319,58 +306,23 @@ namespace NativeTranspiler.Analyzer
             catch { return null; }
         }
 
-        // ── 标量按值绑定 ──
-        // 缺陷（"引用绑定挡住优化"的**根因**）：`const T& X = *X_ptr;` 里 `X` 指向的对象
-        // **仍可经同一函数中的其它指针被写**（`X_ptr` 形参本身是非 const 的 `T*`，见
-        // AppendFieldParameters）⇒ 编译器不能把 `X` 当循环不变量：每次使用都要重载，且当内核体
-        // 还写别的数组时必须假设 `*X_ptr` 会被改写 ⇒ **依赖该值的循环行程数在编译期不可知**
-        // ⇒ 无法 hoist / unroll / 向量化。按值绑定后 `X` 是入口取一次的**局部常量**（地址未被取），
-        // 行程数即为编译期常量。这也**正是 C# 源语义**：`X` 是 job 实例的字段，Execute 内无人写它，
-        // 源语言允许把它当循环不变量（RyuJIT/Burst 就是这么做的）；`T*` 形参模型比源语义更严格。
-        //
-        // · 直接证据（2026-09-30，游戏仓 `ZeroCellsJob` 真实内核 obj 反汇编，clang-cl /O2）：
-        //     引用绑定：`cmpl $0,(%r8)` … 循环体 `movl $0,(%rcx,%rax,4)` + **每轮 `movslq (%r8)`**
-        //               （循环内重载上界！）⇒ 8 条指令的标量循环，0 个向量指令；
-        //     按值绑定：`movslq (%r8),%r8`（一次）→ `shlq $2,%r8` → `jmp` **`memset` 尾调用**
-        //               ⇒ 7 条指令，每元素 1 次 AVX2 向量擦写。
-        //
-        // ⚠ **但通解不是"全都按值绑定"**（2026-09-29 逐内核指令普查，A1→A2）：整 TU 指令
-        //   16031→17533（+9%），ZeroCells −30%、FlowGrad −5.6%、Bfs −2.3%、Melee −1%（栈引用
-        //   726→862，+19%），而 **Integrate +9.8%（栈引用 +34%）、FlowClear +53.6%** —— 对**只在
-        //   循环体内出现一次**的字段，按值绑定只有代价没有收益：引用绑定下那次载入可折进操作数
-        //   （0 条额外指令），按值绑定却要求该值跨整个循环存活 ⇒ 寄存器压力大时溢出到栈。
-        //   （`FlowClearJob` 在引用绑定下已向量化 19×`ymm` 即为反证：那里的行程数来自形参。）
-        //   真实负载同臂整步退化 +2.81 ms（5/6 同号）。臂 `=1`（仅单 IJob 路径）同月实测
-        //   Build ±0.01 / 整步 +0.77 ms（4/8）⇒ **路径**不是正确判据，**用途**才是。
-        //
-        // 绑定形式由 GenerateLocalVariableDeclarations 里的 typeOk 判据决定：
-        // **小 POD 标量默认按值**，只有类型不在 `ValueBindTypeOk` 里时才按引用（见该处注释）。
+        // 标量绑定：`const T& X = *X_ptr;` 的对象可经同函数其它指针被写（`X_ptr` 是非 const 的 `T*`）
+        // ⇒ 依赖它的循环行程数在编译期不可知（每轮重载 + 无法 unroll/向量化）。按值绑定后 `X` 是入口
+        // 取一次的局部常量 ⇒ 行程数成为编译期常量。绑定形式见 AppendLocalVariableDeclarations 的 typeOk 判据。
 
-        /// <summary>某个 job 的字段在循环里的用处分组（**按符号解析**，不再按名字猜）。</summary>
+        /// <summary>某个 job 的字段在循环里的用处分组（按符号解析，不再按名字猜）。</summary>
         private sealed class FieldLoopUse
         {
-            /// <summary>参与**循环行程数**的字段名：出现在 `for` 初值/条件/步进、或 `while`/`do` 条件里。</summary>
+            /// <summary>参与循环行程数的字段名：出现在 `for` 初值/条件/步进、或 `while`/`do` 条件里。</summary>
             public readonly HashSet<string> TripCount = new HashSet<string>(StringComparer.Ordinal);
-            /// <summary>出现在**任意循环内**（头部或体内）的字段名（判据：这类形参加 `__restrict`）。</summary>
+            /// <summary>出现在任意循环内（头部或体内）的字段名（判据：这类形参加 `__restrict`）。</summary>
             public readonly HashSet<string> InLoop = new HashSet<string>(StringComparer.Ordinal);
         }
 
         /// <summary>
-        /// 收集字段的循环用途（行程数 / 循环内）。
-        ///
-        /// **为什么是"行程数"那批按值绑定**：`const T& X = *X_ptr;` 中 `X_ptr` 是非 const 的 `T*` 形参
-        /// ⇒ 编译器必须假设循环体内的任何写都可能改写 `*X_ptr` ⇒ **行程数在编译期不可知**：每轮重载 +
-        /// 无法 unroll/向量化（`ZeroCellsJob` 真实 obj：8 条标量指令、0 向量指令、循环内每轮 `movslq (%r8)`）。
-        /// 按值绑定后 `X` 是入口一次的局部常量 ⇒ 行程数成为编译期常量。
-        ///
-        /// **为什么不是"循环体内"那批也按值绑定**：那里载入本可折进操作数（0 条额外指令），按值绑定却要求
-        /// 该值跨整个循环存活 ⇒ 寄存器压力大时溢出到栈（实测：FlowClear +53.6% 指令、
-        /// Integrate +9.8%、栈引用 +34%）。**循环体内**的字段改用**形参 `__restrict`** 处理
-        /// （零拷贝，可解锁向量化；见 `ScalarRestrictEnabled`）。
-        ///
-        /// **符号解析**（有语义模型时）：标识符必须解析到**本 job 的实例字段** ⇒ 同名局部/形参不再造成
-        /// 误判（旧的名字兜底会把整个名字判为"被屏蔽"而漏掉真字段，见 (l11)(i)⑤）。
-        /// 无模型时保留名字兜底（同名声明一律保守跳过）。
+        /// 收集字段的循环用途（行程数 / 循环内）：按符号解析，标识符必须解析到本 job 的实例字段 ⇒ 同名
+        /// 局部/形参不造成误判；无语义模型时退回名字兜底（同名声明一律保守跳过）。行程数那批按值绑定
+        /// （见 AppendLocalVariableDeclarations），循环内那批改用形参 `__restrict`（见 `ScalarRestrictEnabled`）。
         /// </summary>
         private static FieldLoopUse GetFieldLoopUse(INamedTypeSymbol jobStruct, SemanticModel? semanticModel)
         {
@@ -415,7 +367,7 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // 循环体内的**条件**（if / 三元）里出现的字段不再单列一桶：唯一消费者（按值绑定的
+            // 循环体内的条件（if / 三元）里出现的字段不再单列一桶：唯一消费者（按值绑定的
             // `=4` 臂）已删除。
 
             bool sawLoop = false;
@@ -445,20 +397,20 @@ namespace NativeTranspiler.Analyzer
                     case ForEachStatementSyntax fe:
                         sawLoop = true;
                         // foreach 的行程数由集合给（容器长度）；集合与元素都算"循环内"。
-                        // ⚠ C++ 路径目前**不支持** foreach 转译（会走 NT0xx 拒绝），此分支只为向前兼容。
+                        // ⚠ C++ 路径目前不支持 foreach 转译（会走 NT0xx 拒绝），此分支只为向前兼容。
                         Take(fe.Expression, use.InLoop);
                         Take(fe.Statement, use.InLoop);
                         break;
                 }
             }
-            // 2026-10-03：**判据必须考虑"transpiler 自己会合成循环"这件事**。
-            //   `IJobParallelFor`/`IJob` 的 C# 是**逐元素**形态（`Execute(int index)`），源码里**没有循环**；
+            // 判据必须考虑"transpiler 自己会合成循环"这件事。
+            //   `IJobParallelFor`/`IJob` 的 C# 是逐元素形态（`Execute(int index)`），源码里没有循环；
             //   合成循环的是 transpiler（`_Execute_Batch` 里包一层 `for (index = __startIndex; ...)`）。
-            //   于是此前在**源码里找循环**的判据（TripCount）对这类 job **永远为空** ⇒ 按值绑定与
-            //   `SCALAR_RESTRICT` 这两条优化对宿主**最重要的 job 类型完全失效**（Count / Integrate /
+            //   于是此前在源码里找循环的判据（TripCount）对这类 job 永远为空 ⇒ 按值绑定与
+            //   `SCALAR_RESTRICT` 这两条优化对宿主最重要的 job 类型完全失效（Count / Integrate /
             //   Place / Melee 全是 IJobParallelFor）。实测证据：生成的 `CountCellsJob_Execute.cpp` 里
             //   六个标量全部是 `const T& X = *X_ptr;`，尽管 `Length/CellsW/StateDeath` 每元素都要读。
-            //   修法：源码里没有循环时，**整个 body 就是循环体** ⇒ 全部字段算"循环内"。
+            //   修法：源码里没有循环时，整个 body 就是循环体 ⇒ 全部字段算"循环内"。
             if (!sawLoop)
             {
                 Take(body, use.InLoop);
@@ -495,14 +447,14 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
-        /// <summary>纯值字段形参是否加 `__restrict`：**窄档** —— 只给**出现在循环内**的字段加。
-        /// 机理：只给指向 **job 结构体成员** 的形参加，别名判定成立（与任何数组数据不可能同址），
+        /// <summary>纯值字段形参是否加 `__restrict`：窄档 —— 只给出现在循环内的字段加。
+        /// 机理：只给指向 job 结构体成员 的形参加，别名判定成立（与任何数组数据不可能同址），
         /// 且不像按值绑定那样引入入口拷贝/栈溢出代价。数组/分量指针一律不加。
         ///
         /// clang-cl /O2 微实验确认机制本身有效：`int* __restrict len_ptr` + `for (i &lt; len)`
-        /// 会 hoist 行程数并**完全向量化**，而 `const int& len = *len_ptr` 每轮 `movslq`；
-        /// **加在局部引用上无效**（与不加逐字节相同）⇒ 必须加在**形参**上。
-        /// 语义中立：restrict 只排除"经其它指针访问"，**不**排除"经同一指针写"——
+        /// 会 hoist 行程数并完全向量化，而 `const int& len = *len_ptr` 每轮 `movslq`；
+        /// 加在局部引用上无效（与不加逐字节相同）⇒ 必须加在形参上。
+        /// 语义中立：restrict 只排除"经其它指针访问"，不排除"经同一指针写"——
         /// 内联或不可见调用只要通过同一指针写长度，行程数仍逐轮重载。
         ///
         /// 为什么是"窄"：把所有纯值字段都加（历史全字段臂）实测退化 ⇒ 只动真正挡住向量化的那批。</summary>
@@ -512,26 +464,25 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// G（守卫折叠）的 A/B 开关：**构建期**读 `ENTJOY_GUARD_FOLD`（`=0` 关闭 ⇒ 逐位回到未折叠行为）。
-        /// 动机（09 §54.4 / 12 §5 的纪律）：折叠是**生成期**变换，A/B 必须"同一源码、两次构建"，否则差异里会
-        /// 混进别的提交（本轮踩过：拿 10-03 18:19 的部署 DLL 当"改前"，它早于 HEAD 的若干转译器提交）。
+        /// 守卫折叠的 A/B 开关：构建期读 `ENTJOY_GUARD_FOLD`（`=0` 关闭 ⇒ 逐位回到未折叠行为）。
+        /// 动机：折叠是生成期变换，A/B 必须"同一源码、两次构建"，否则差异里会混进别的提交。
         /// </summary>
         private static readonly bool GuardFoldEnabled =
             System.Environment.GetEnvironmentVariable("ENTJOY_GUARD_FOLD") != "0";
 
         /// <summary>
-        /// G（守卫折叠，2026-10-04；设计与判据见 docs/gridsearch/09 §54.4）：
-        /// 把"每元素一次"的 `index &lt; Length` 合取项折进**合成循环的上界**。
+        /// G（守卫折叠，；）：
+        /// 把"每元素一次"的 `index &lt; Length` 合取项折进合成循环的上界。
         ///
-        /// 这里只做**检测**（AST + 语义）；**剥离**在生成文本上做（见 <see cref="StripFirstGuardConjunct"/>）——
-        /// ⚠ 不能用 `ReplaceNode` 重写后再翻译：重写树是**游离**的，Roslyn 的 `CheckSyntaxNode` 会沿父链
-        ///   回溯到根、发现不是本树 ⇒ `ArgumentException: 语法节点不在语法树中`（本实现第一版就这么炸的）。
+        /// 这里只做检测（AST + 语义）；剥离在生成文本上做（见 <see cref="StripFirstGuardConjunct"/>）——
+        /// ⚠ 不能用 `ReplaceNode` 重写后再翻译：重写树是游离的，Roslyn 的 `CheckSyntaxNode` 会沿父链
+        /// 回溯到根、发现不是本树 ⇒ `ArgumentException: 语法节点不在语法树中`（本实现第一版就这么炸的）。
         ///
-        /// 识别形状（按**语法形状**，不按 job 名）：Execute 体内存在一个**无 else** 的
+        /// 识别形状（按语法形状，不按 job 名）：Execute 体内存在一个无 else 的
         /// `if (index &lt; &lt;job 的 int 字段&gt; &amp;&amp; …) { … }`，第一个合取项左侧是 index 形参、
-        /// 右侧解析为本 job 的**非静态 int 字段**（宿主里的 `Length` 这类）。命中 ⇒ 输出字段名，返回 true。
-        /// 未命中（形状不符 / 字段不是 int / 没有这样的 if）⇒ 返回 false，调用方**逐位不变**。
-        /// 只认**第一个**命中的 if（宿主全文只命中 Count/Place 两处）。
+        /// 右侧解析为本 job 的非静态 int 字段（宿主里的 `Length` 这类）。命中 ⇒ 输出字段名，返回 true。
+        /// 未命中（形状不符 / 字段不是 int / 没有这样的 if）⇒ 返回 false，调用方逐位不变。
+        /// 只认第一个命中的 if（宿主全文只命中 Count/Place 两处）。
         /// </summary>
         private static bool TryDetectIndexLengthGuard(
             MethodDeclarationSyntax methodSyntax, string indexParamName, SemanticModel semanticModel,
@@ -555,7 +506,7 @@ namespace NativeTranspiler.Analyzer
                     cur = be.Left;
                 }
                 conj.Insert(0, cur);
-                // 必须还有**其它**合取项：若守卫是唯一条件，剥离后 `if ()` 无意义 ⇒ 不折（逐位不变）。
+                // 必须还有其它合取项：若守卫是唯一条件，剥离后 `if ()` 无意义 ⇒ 不折（逐位不变）。
                 if (conj.Count < 2) continue;
 
                 if (!(conj[0] is BinaryExpressionSyntax less) || !less.IsKind(SyntaxKind.LessThanExpression))
@@ -569,7 +520,7 @@ namespace NativeTranspiler.Analyzer
                     fieldName = ma.Name.Identifier.Text;
                 if (fieldName == null) continue;
 
-                // 右侧必须解析为**本 job 的非静态 int 字段**（排除局部变量/形参/其它符号）。
+                // 右侧必须解析为本 job 的非静态 int 字段（排除局部变量/形参/其它符号）。
                 var sym = semanticModel.GetSymbolInfo(less.Right).Symbol as IFieldSymbol;
                 if (sym == null || sym.IsStatic || sym.ContainingType == null) continue;
                 if (sym.Type.SpecialType != SpecialType.System_Int32) continue;
@@ -581,7 +532,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// G 的**剥离**一步：在**已翻译**的 C++ 体里把首个 `if (index &lt; Field &amp;&amp; …)` 的首个合取项去掉。
+        /// G 的剥离一步：在已翻译的 C++ 体里把首个 `if (index &lt; Field &amp;&amp; …)` 的首个合取项去掉。
         /// 只在模式实际命中时返回 true（模式要求后面还有 `&amp;&amp;` ⇒ 不会产出 `if ()`）。
         /// 模式用 AST 已确认过的 index 形参名与字段名构造 ⇒ 不会误伤别的比较。
         /// </summary>
@@ -601,16 +552,13 @@ namespace NativeTranspiler.Analyzer
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            // 2026-10-06（doc16 44.25）：**无条件**把 batch 入口内联进它的 Adapter。
-            // 调度器调的是 3 形参 Adapter，Adapter 内部再 call 这个 26 形参入口 ⇒
+            // 无条件把 batch 入口内联进它的 Adapter。
             // 对齐档 cs=1 时每个元素多付「一帧 + 一次 26 实参搬迁」。
-            // 实测（9 对交错配对，两臂只差 NativeTranspiled.dll）：整步 **1.0296（9/9）**、
-            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 **1.013**、JCC=1 **1.022**（各 3 轮，
-            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在**声明符之后**：clang 拒绝放在
+            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 1.013、JCC=1 1.022（各 3 轮…
+            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在声明符之后：clang 拒绝放在
             // `extern "C" __declspec(dllexport)` 之前。调用次数不变 ⇒ 契约不受影响。
-            // 2026-10-06（doc16 §46）：**两个编译器都覆盖** —— clang(-cl) 用声明符之后的
-            // `__attribute__((always_inline))`（实测路径）；MSVC 用**声明说明符位**的 `__forceinline`
-            //（`EJ_BATCH_FORCEINLINE_PRE`，放在返回类型之前 —— 这是 MSVC 接受的位置）。
+            // 两个编译器都覆盖 —— clang(-cl) 用声明符之后的
+            // `__attribute__((always_inline))`（实测路径）；MSVC 用声明说明符位的 `__forceinline`
             // 之前 MSVC 分支宏为空 ⇒ 该编译器下这个优化等于不存在（不报错，但也不生效）。
             sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
             sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
@@ -666,12 +614,12 @@ namespace NativeTranspiler.Analyzer
 
             // 回退标量路径
             // 批循环把整段 [__startIndex, __startIndex+__count) 放进同一个函数体，而 C# 的 `return;`
-            // （Execute 内）只结束**本次 index**。裸 `return;` 在 C++ 里会退出整个函数 ⇒ 静默跳过本批
+            // （Execute 内）只结束本次 index。裸 `return;` 在 C++ 里会退出整个函数 ⇒ 静默跳过本批
             // 剩余下标（实测：1024 元素单批、index 0 处 return ⇒ 只有 index 0 被处理）。
-            // ⚠ do-while 包裹**不能**解决这个问题（它只重定向 `break`，`return` 照样穿出去）——
+            // ⚠ do-while 包裹不能解决这个问题（它只重定向 `break`，`return` 照样穿出去）——
             //   必须用一个立即调用的 lambda 包住体，`return;` 就变成"结束本次迭代"。
             bool bodyHasReturn = scalarBody.Contains("return;");
-            // G（守卫折叠）：AST 只做检测，剥离在**已翻译文本**上做（未命中 ⇒ 原样，逐位不变）。
+            // G（守卫折叠）：AST 只做检测，剥离在已翻译文本上做（未命中 ⇒ 原样，逐位不变）。
             string scalarLoopEnd = "__startIndex + __count";
             if (GuardFoldEnabled
                 && TryDetectIndexLengthGuard(methodSyntax, indexParamName, semanticModel, out var guardField)
@@ -696,16 +644,13 @@ namespace NativeTranspiler.Analyzer
             string suffix = BuildBoolVariantSuffix(boolFields, values);
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true) + suffix;
             string paramsStr = BuildBatchJobParameters(jobStruct);
-            // 2026-10-06（doc16 44.25）：**无条件**把 batch 入口内联进它的 Adapter。
-            // 调度器调的是 3 形参 Adapter，Adapter 内部再 call 这个 26 形参入口 ⇒
+            // 无条件把 batch 入口内联进它的 Adapter。
             // 对齐档 cs=1 时每个元素多付「一帧 + 一次 26 实参搬迁」。
-            // 实测（9 对交错配对，两臂只差 NativeTranspiled.dll）：整步 **1.0296（9/9）**、
-            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 **1.013**、JCC=1 **1.022**（各 3 轮，
-            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在**声明符之后**：clang 拒绝放在
+            // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 1.013、JCC=1 1.022（各 3 轮…
+            // 该档每轮散布 ±7%，故只作"非负"证据）。属性写在声明符之后：clang 拒绝放在
             // `extern "C" __declspec(dllexport)` 之前。调用次数不变 ⇒ 契约不受影响。
-            // 2026-10-06（doc16 §46）：**两个编译器都覆盖** —— clang(-cl) 用声明符之后的
-            // `__attribute__((always_inline))`（实测路径）；MSVC 用**声明说明符位**的 `__forceinline`
-            //（`EJ_BATCH_FORCEINLINE_PRE`，放在返回类型之前 —— 这是 MSVC 接受的位置）。
+            // 两个编译器都覆盖 —— clang(-cl) 用声明符之后的
+            // `__attribute__((always_inline))`（实测路径）；MSVC 用声明说明符位的 `__forceinline`
             // 之前 MSVC 分支宏为空 ⇒ 该编译器下这个优化等于不存在（不报错，但也不生效）。
             sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
             sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
@@ -768,7 +713,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 标量回退（同上：体内有 `return;` 时用立即调用 lambda 包住，保证它只结束本次 index）
-            // G（守卫折叠）：AST 只做检测，剥离在**已翻译文本**上做（未命中 ⇒ 原样，逐位不变）。
+            // G（守卫折叠）：AST 只做检测，剥离在已翻译文本上做（未命中 ⇒ 原样，逐位不变）。
             string variantLoopEnd = "__startIndex + __count";
             if (GuardFoldEnabled
                 && TryDetectIndexLengthGuard(methodSyntax, indexParamName, semanticModel, out var guardField2)
@@ -1063,7 +1008,7 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// 生成 IJobEntity 的独立 C++ 函数（对标 GenerateChunkFunctionStandard）。
         /// 函数签名：
-        ///   void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
+        /// void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
         /// 使用 ChunkData 轻量结构（不含 __requiredComponentTypeIds），componentArrays 直接索引。
         /// </summary>
         private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
@@ -1108,7 +1053,6 @@ namespace NativeTranspiler.Analyzer
             // Entity 参数：用函数内局部结构体（{ int Id; int Version; } 对齐 C# Entity）。
             // 不用 EntJoy.ECS.Entity 结构头：Entity 是 IJobEntity 的注入参数，不是 chunk 组件列，
             // CollectChunkNativeArrayTypes 已把它跳过（见该函数的 IsEntityType 过滤），
-            // 因此 userStructs 里不含 Entity ⇒ 从未生成 EntJoy_ECS_Entity.h。
             // 局部结构体让生成的批函数自包含，不依赖该框架类型是否被别的 job 带进 userStructs。
             bool hasEntityParam = executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type));
             if (hasEntityParam)
@@ -1170,7 +1114,7 @@ namespace NativeTranspiler.Analyzer
         private static string BuildChunkJobParameters(INamedTypeSymbol jobStruct, bool includeTypeIds = true, bool includeHeader = false)
         {
             // includeTypeIds=false → 轻量 ChunkData 路径（IJobEntity/Chunk 无需类型匹配）
-            // includeTypeIds=true  → 完整 ChunkJobData 路径（需要 __requiredComponentTypeIds）
+            // includeTypeIds=true → 完整 ChunkJobData 路径（需要 __requiredComponentTypeIds）
             var chunkType = includeTypeIds ? "ChunkJobData" : "ChunkData";
             var parameters = new List<string> { $"const {chunkType}* __chunkData" };
             if (includeTypeIds)
@@ -1181,16 +1125,16 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", parameters);
         }
 
-        // ── 标量形参打包（`ENTJOY_PACK_SCALARS`）已删除（2026-10-04）──
+        // 标量形参打包（`ENTJOY_PACK_SCALARS`）已删除
         // 原意：把"纯值字段"收进一个结构体、以单个指针传参，把形参数从 70+ 降到 (数组字段 + 1)。
         // 删除理由：闸门实测"形参数降到 ~19 后打包已无收益"，且该改造需覆盖批处理/非批处理/ISPC
-        // 三条发射路径，后两者开启时**构建失败** ⇒ 始终默认关、从未真正可用。
+        // 三条发射路径，后两者开启时构建失败 ⇒ 始终默认关、从未真正可用。
         // 注：为 `IJobEntity` 判定 ISPC 后端的原逻辑随之一并移除。
 
         /// <summary>
-        /// 2026-10-02（09 §26）：**抽离复用** —— 生成原生 adapter 的"字段解包"代码。
+        /// 抽离复用 —— 生成原生 adapter 的"字段解包"代码。
         /// 批形 adapter（`(void*, int start, int count)`）与 `IJobFor` 的 index 形 adapter
-        /// （`(void*, int index)`）**字段解包逐字相同**，只有前缀实参不同
+        /// （`(void*, int index)`）字段解包逐字相同，只有前缀实参不同
         /// （`__startIndex, __count` ↔ `__index, 1`）⇒ 解包部分收敛到这里，避免两处各写一遍。
         /// 调用方负责先把前缀实参放进 <paramref name="callArgs"/>，本方法追加字段实参。
         /// </summary>
@@ -1248,7 +1192,7 @@ namespace NativeTranspiler.Analyzer
         private static void AppendFieldParameters(INamedTypeSymbol jobStruct, List<string> parameters)
         {
             // 形参构造点通常没有语义模型 ⇒ 用名字兜底。仅影响 `__restrict` 限定符，误判方向无害
-            // （多一个限定符 vs 少一个优化），且**语义安全性由下面的论证独立成立**。
+            // （多一个限定符 vs 少一个优化），且语义安全性由下面的论证独立成立。
             var loopUse = GetFieldLoopUse(jobStruct, null);
             bool restrictList = ListLengthRestrictEnabled(jobStruct, loopUse);
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
@@ -1259,12 +1203,12 @@ namespace NativeTranspiler.Analyzer
                     {
                         var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
-                        // NativeList 的 `_listData` 形参：当**该表的长度决定某个循环的行程数**时加 `__restrict`。
-                        // 机理（clang-cl /O2 微实验，2026-09-30）：`UnsafeList<T>& L = *L_listData;` +
+                        // NativeList 的 `_listData` 形参：当该表的长度决定某个循环的行程数时加 `__restrict`。
+                        // 机理（clang-cl /O2 微实验，）：`UnsafeList<T>& L = *L_listData;` +
                         // `for (i = 0; i < L.length(); i++)` 无法 hoist（微实验：每轮 `movslq 0x8(%rdx)`），
-                        // 而 `__restrict` 加在**形参**上即可 hoist + 向量化（`movslq` 提到循环外 + `movdqu`）；
-                        // 加在**局部引用**上无效（实测与不加逐字节相同）。
-                        // 语义中立：restrict 只断言"该对象不经其它指针访问"，**不**断言不被写 ——
+                        // 而 `__restrict` 加在形参上即可 hoist + 向量化（`movslq` 提到循环外 + `movdqu`）；
+                        // 加在局部引用上无效（实测与不加逐字节相同）。
+                        // 语义中立：restrict 只断言"该对象不经其它指针访问"，不断言不被写 ——
                         // 凡是通过同一个指针写（`L.Add()` 内联或不可见调用）的循环，行程数仍逐轮重载
                         // （微实验已验证 inlined/opaque 两种写法）。真正被排除的只有"另一指针也在写它"。
                         string lr = restrictList && loopUse.TripCount.Contains(field.Name) ? "__restrict " : "";
@@ -1279,7 +1223,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (field.Type is IPointerTypeSymbol)
                 {
-                    // ★ 修改：不再添加多余的 *，MapCSharpTypeToCpp 已包含 *
+                    // 修改：不再添加多余的 *，MapCSharpTypeToCpp 已包含 *
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     parameters.Add($"{cppType} {field.Name}_ptr");
                 }
@@ -1288,9 +1232,7 @@ namespace NativeTranspiler.Analyzer
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     // 纯值字段形参：可选 `__restrict`（只给这一类别名判定成立的地方加，见
                     // ScalarRestrictEnabled 的机理注释；数组/分量指针仍不加）。
-                    // 注意：**不走 `RESTRICT` 宏** —— 宏定义在 `GenerateExportMacros` 的发射块里，
-                    // 改它会让 44 个 `emit-snapshot` 基线全部变文本；这里直接发 `__restrict`
-                    // （MSVC/clang-cl/GCC 都认），于是**默认档发射面逐字不变**。
+                    // （MSVC/clang-cl/GCC 都认），于是默认档发射面逐字不变。
                     string restrict = ScalarRestrictEnabled(field.Name, loopUse) ? "__restrict " : "";
                     parameters.Add($"{cppType}* {restrict}{field.Name}_ptr");
                 }
@@ -1298,8 +1240,8 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>NativeList 形参是否加 `__restrict`。
-        /// 只作用于**长度决定循环行程数**的表，且该 job 只有**一个** NativeList 字段 ——
-        /// 两个 NativeList 字段可能指向同一份 `UnsafeList`，此时对两者都加 restrict 就是**说谎**（UB）。</summary>
+        /// 只作用于长度决定循环行程数的表，且该 job 只有一个 NativeList 字段 ——
+        /// 两个 NativeList 字段可能指向同一份 `UnsafeList`，此时对两者都加 restrict 就是说谎（UB）。</summary>
         private static bool ListLengthRestrictEnabled(INamedTypeSymbol jobStruct, FieldLoopUse loopUse)
         {
             int lists = 0;
@@ -1436,7 +1378,7 @@ namespace NativeTranspiler.Analyzer
             // SharedComponent 类型头文件（blittable，GetSharedComponent<T>() 用）
             foreach (var type in CollectSharedComponentTypes(jobStruct, compilation))
                 AddType(type);
-            // ─── SendEvent 事件类型头文件 ───
+            // SendEvent 事件类型头文件
             foreach (var type in CollectSendEventTypes(jobStruct, compilation))
                 AddType(type);
 
@@ -1478,7 +1420,6 @@ namespace NativeTranspiler.Analyzer
                     {
                         // 注意：不能只查 GetTypeInfo(objCreate.Type)。VS/MSBuild 的 Roslyn 对
                         // object-initializer 的 .Type（QualifiedNameSyntax/IdentifierNameSyntax）
-                        // 在嵌套类型场景下会返回 null，而对整个 new 表达式 GetTypeInfo(objCreate)
                         // 始终返回表达式类型（两种引擎都可靠）。dotnet CLI 两者都行，VS 只有后者行。
                         var createdType = semanticModel.GetTypeInfo(objCreate).Type
                                        ?? semanticModel.GetTypeInfo(objCreate.Type).Type;
@@ -1658,7 +1599,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int requiredComponentTypeIdCount;");
                 sb.AppendLine("    int jobIsBoxed;");
                 sb.AppendLine("    void* chunkArrayHandle;");
-                sb.AppendLine("    // ─── Event Buffer ───");
+                sb.AppendLine("    // Event Buffer");
                 sb.AppendLine("    int eventBufferCount;");
                 sb.AppendLine("    void* eventBufferHeaders;");
                 sb.AppendLine("    void* eventWorldHandle;");
@@ -1701,7 +1642,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                     sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                     sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                    sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图（优先与 componentArrays 同序的 required 版）");
+                    sb.AppendLine("    __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // 逐组件 enable 位图（优先与 componentArrays 同序的 required 版）");
                     sb.AppendLine("    __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
                     sb.AppendLine("    // 位图下标与 componentArrays 同序（required 序）；读写原语见 src/NativeDll/NativeEnableMask.h");
                     // 仅当 Execute 声明 Entity 参数时才传实体数组（没有就不传，避免无谓拷贝/解引用）
@@ -1790,7 +1731,7 @@ namespace NativeTranspiler.Analyzer
                                 sb.Append("    ").AppendLine(line);
                             }
 
-                            // ─── SendEvent: 生成 EventBuffer 变量声明（在 __header 作用域内） ───
+                            // SendEvent: 生成 EventBuffer 变量声明（在 __header 作用域内）
                             if (translator.EventTypes.Count > 0)
                             {
                                 sb.AppendLine($"    // Event Buffer declarations ({translator.EventTypes.Count} types)");
@@ -1898,7 +1839,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine("        __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                     sb.AppendLine("        __chunkDataLite.entityCount = __chunkData->entityCount;");
                     sb.AppendLine("        __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
-                    sb.AppendLine("        __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // P1-6：逐组件 enable 位图");
+                    sb.AppendLine("        __chunkDataLite.enableBitMaps = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredEnableBitMaps : __chunkData->enableBitMaps;   // 逐组件 enable 位图");
                     sb.AppendLine("        __chunkDataLite.enableBitmapCount = __chunkData->requiredEnableBitMaps != nullptr ? __chunkData->requiredComponentCount : __chunkData->componentCount;");
                     // 仅当 Execute 声明 Entity 参数时才传实体数组
                     if (executeMethod.Parameters.Any(p => NativeTranspiler.IsEntityType(p.Type)))
@@ -1946,9 +1887,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
                 sb.AppendLine("}");
 
-                // ★ Unity 风格 EntityBatch 适配器（IJobChunk 专用，IJobEntity 已走 ChunkRangeRaw）
+                // Unity 风格 EntityBatch 适配器（IJobChunk 专用，IJobEntity 已走 ChunkRangeRaw）
                 // EntityBatchAdapter 无法支持 shared components（shared 值是 per-chunk 的，
-                // batch 层无法访问），因此有 shared 组件时跳过生成。
                 // ISPC jobs: ISPC wrapper (IspcGenerator) 已生成 EntityBatch 函数，跳过 C++ 适配器。
                 var sharedTypesForBatch = CollectSharedComponentTypes(jobStruct, compilation);
                 if (!isEntityJob && sharedTypesForBatch.Count == 0 && !isIspcJob)
@@ -2010,9 +1950,8 @@ namespace NativeTranspiler.Analyzer
 
                 if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled && methodSyntax?.Body != null)
                 {
-                    // ─── AutoSIMD: SimdControlFlowGenerator 真 SIMD ───
+                    // AutoSIMD: SimdControlFlowGenerator 真 SIMD
                     // 与 GenerateChunkFunctionSIMD 相同的预处理（PreprocessIJobChunkAST 内含
-                    // DecomposeStructLocals），为 EntityBatch 生成 mask-managed SIMD 代码。
                     // SIMD 生成写入临时 simdSb，成功后才 append 到 sb —— 失败时无半截代码残留。
                     var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                     var simdSb = new StringBuilder();
@@ -2102,8 +2041,7 @@ namespace NativeTranspiler.Analyzer
                     catch
                     {
                         // SIMD 生成失败 → 回退 per-lane 标量（simdSb 丢弃，无半截残留）。
-                        // 注意：fbBody 是完整 Execute body，**已包含实体循环**（用户代码 for(i<entities.Length)），
-                        // 此处直接输出即可，**不得再包外层 __entity_index 循环**——否则双重循环，
+                        // 此处直接输出即可，不得再包外层 __entity_index 循环——否则双重循环，
                         // 每个实体的副作用（如 SendEvent）被执行 entity_count 次
                         var fbTr = new CppChunkStatementTranslator(sm, jobStruct,
                             CollectChunkNativeArrayTypes(jobStruct, compilation),
@@ -2119,7 +2057,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (methodSyntax?.Body != null)
                 {
-                    // ─── 标量路径（原有逻辑） ───
+                    // 标量路径（原有逻辑）
                     var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                     var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
                     var st = CollectSharedComponentTypes(jobStruct, compilation);
@@ -2161,8 +2099,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 
                 // 生成字段读取代码
-                // 2026-10-02（09 §26）：抽成 BuildAdapterFieldAccess 复用 —— 批形 adapter
-                // 与（IJobFor 专用的）index 形 adapter 的**字段解包逐字相同**，只是前缀实参不同。
+                // 抽成 BuildAdapterFieldAccess 复用 —— 批形 adapter
+                // 与（IJobFor 专用的）index 形 adapter 的字段解包逐字相同，只是前缀实参不同。
                 var fieldReads = new StringBuilder();
                 var callArgs = new List<string> { "__startIndex", "__count" };
                 BuildAdapterFieldAccess(jobStruct, fieldReads, callArgs);
@@ -2220,11 +2158,9 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
 
-                // ── 2026-10-02（09 §26）：`IJobFor` 专用的 **index 形** adapter ──
-                // 动机：`IJobFor` 的调度语义是**单线程串行**（原生 `Scheduler::ScheduleFor`：
-                //   `for (i<length) func(ctx,i)`，typedef `IndexJobFunc(void*, int index)`），
-                //   而上面那个 adapter 是 **Batch 形** `(ctx, start, count)` ⇒ 交给 ScheduleFor 会签名错位。
-                // 做法：复用**同一套字段解包**（BuildAdapterFieldAccess），只把前缀实参换成 `(__index, 1)`
+                // `IJobFor` 专用的 index 形 adapter
+                // 动机：`IJobFor` 的调度语义是单线程串行（原生 `Scheduler::ScheduleFor`：
+                // 做法：复用同一套字段解包（BuildAdapterFieldAccess），只把前缀实参换成 `(__index, 1)`
                 //   调同一个批内核（内核本就按 [start, start+count) 循环 ⇒ count=1 即"只跑该 index"；
                 //   两者同在一个 unity TU 里，会被内联）。
                 // 只为 `IJobFor` 发射；`IJobParallelFor`/`Batch` 没有 index 形入口，不需要。
@@ -2305,7 +2241,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
 
-                // ─── SendEvent: 事件类型查询导出函数 ───
+                // SendEvent: 事件类型查询导出函数
                 if (discoveredEventTypes.Count > 0)
                 {
                     sb.AppendLine();
@@ -2331,14 +2267,11 @@ namespace NativeTranspiler.Analyzer
             return (sb.ToString(), discoveredEventTypes);
         }
 
-        // ===================================================================
         // IJobChunk Auto-SIMD: Preprocess AST
-        // ===================================================================
 
         /// <summary>
         /// 预处理 IJobChunk 的 Execute AST 用于 SIMD 生成：
         /// 1. 收集 chunk 数组声明（GetComponentDataNativeArray/GetComponentDataSpan）
-        /// 2. 找到实体 for-loop
         /// 3. SyntaxRewriter: 删除 chunk 数组声明、删除实体 for-loop 头、替换 chunk.Count
         /// </summary>
         private static (List<(string name, string elemType, int compIndex)> chunkArrays,
@@ -2427,9 +2360,9 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// Decompose struct read-modify-write pattern into direct field access.
         /// Replaces:
-        ///   StructType temp = array[idx];   → removed
-        ///   temp.Field += rhs;               → array[idx].Field += rhs
-        ///   array[idx] = temp;               → removed
+        /// StructType temp = array[idx]; → removed
+        /// temp.Field += rhs; → array[idx].Field += rhs
+        /// array[idx] = temp; → removed
         /// This enables SimdControlFlowGenerator to handle struct field access
         /// directly via field-level gather/scatter (ISPC-style).
         /// </summary>
@@ -2573,11 +2506,11 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// ISPC-style struct field decomposition rewriter.
         /// Detects the read-modify-write pattern on struct locals from chunk arrays:
-        ///   StructType temp = array[idx];   // local copy
-        ///   temp.Field += ...;               // field mutation
-        ///   array[idx] = temp;               // write back
+        /// StructType temp = array[idx]; // local copy
+        /// temp.Field += ...; // field mutation
+        /// array[idx] = temp; // write back
         /// Rewrites to direct field access:
-        ///   array[idx].Field += ...;
+        /// array[idx].Field += ...;
         /// This enables SimdControlFlowGenerator to handle struct field access
         /// via n_gather_ps<sizeof(T)> with struct stride (matching ISPC behavior).
         /// </summary>
@@ -2586,7 +2519,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// SyntaxRewriter for IJobChunk SIMD preprocessing:
         /// - Removes chunk array local declarations
-        /// - Replaces chunk.Count with __entityCount
         /// - Replaces entity for-loop with its body (keeps body, removes for-header)
         /// </summary>
         private sealed class IJobChunkSimdRewriter : CSharpSyntaxRewriter
@@ -2652,17 +2584,15 @@ namespace NativeTranspiler.Analyzer
             return result;
         }
 
-        // ===================================================================
         // IJobChunk Auto-SIMD: Generate SIMD Code
-        // ===================================================================
 
         /// <summary>
         /// 生成 IJobChunk 的 Register-Level SIMD Execute 函数体。
         /// 流程：
-        ///   1. 生成 C++ prelude（_ptr / _length 声明）
-        ///   2. 生成外层 batch loop（for si; v_i = v_base + si）
-        ///   3. SimdControlFlowGenerator on 修改后的 body（无 for-loop 头）
-        ///   4. 标量 remainder 循环
+        /// 1. 生成 C++ prelude（_ptr / _length 声明）
+        /// 2. 生成外层 batch loop（for si; v_i = v_base + si）
+        /// 3. SimdControlFlowGenerator on 修改后的 body（无 for-loop 头）
+        /// 4. 标量 remainder 循环
         /// </summary>
         private static void GenerateChunkFunctionSIMD(
             INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb,
@@ -2781,11 +2711,10 @@ namespace NativeTranspiler.Analyzer
                 }
                 catch (Exception ex)
                 {
-                    // 2026-10-04：此处原先写作 `catch { }`（静默）。其语义是"**连标量兜底也失败了**"——
-                    //   再吞掉就会发射一个**没有函数体的 job**（静默 do-nothing），比直接失败危险得多
-                    //   （生成码能编译、但什么都不做）。故改为**显式失败**。
-                    //   当前语料里这条路径不触发（否则夹具/测试里那些 job 会变成空体、断言必然失败），
-                    //   所以对现有输入是零行为变化，只把"将来真走到这里"从静默错变成响亮错。
+                    // 此处若不捕获而静默吞掉，语义是"连标量兜底也失败了"——
+                    //   再吞就会发射一个没有函数体的 job（静默 do-nothing），比直接失败危险得多
+                    //   （生成码能编译、但什么都不做）。故改为显式失败：当前语料里不触发，
+                    //   对现有输入零行为变化，只把"将来真走到这里"从静默错变成响亮错。
                     throw new InvalidOperationException(
                         $"[NativeTranspiler] chunk 函数生成失败：SIMD 路径与标量兜底路径都抛异常（job='{jobStruct.Name}'）。" +
                         "原实现会在此静默吞掉并发射一个无函数体的 job，已改为显式失败。", ex);
@@ -2947,8 +2876,8 @@ namespace NativeTranspiler.Analyzer
         /// 将 "for (int __entity_index = 0; ... < ... ; ...)" 替换为
         /// per-lane batch + remainder 循环。
         ///
-        /// ⚠ **无调用者（历史遗留，勿直接启用）**：内部对翻译产物做逐行
-        /// `Replace("return;", "break;")`，而 `break;` 在体内**内层循环**里的 `return;` 上只跳出
+        /// ⚠ 无调用者（历史遗留，勿直接启用）：内部对翻译产物做逐行
+        /// `Replace("return;", "break;")`，而 `break;` 在体内内层循环里的 `return;` 上只跳出
         /// 内层循环 ⇒ 静默错值（NT-07）。要启用必须先改走
         /// <see cref="ReturnStatementRewriter.Rewrite"/>（do-while + break，嵌套循环写
         /// `__ENTJOY_UNSUPPORTED_STMT__` 标记）。用 `[Obsolete(error: true)]` 把"误用"变成编译错误。

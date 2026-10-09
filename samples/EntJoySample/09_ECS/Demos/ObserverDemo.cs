@@ -7,12 +7,12 @@ namespace EntJoySample.ECS
     /// Observer 测试：组件生命周期事件的 push-based 回调（批量 span 签名）。
     ///
     /// v1 覆盖：
-    ///   - 主线程立即回调：AddComponent / Set / RemoveComponent / DestroyEntity
-    ///   - NewEntity / CreateEntities 带组件 → Added
-    ///   - ECB Playback（主线程手动）→ 内部调用主入口 → 事件照常触发
-    ///   - 多 World 隔离
-    ///   - RemoveObserver
-    ///   - 批量合并：CreateEntities 大数量 → 一次回调（ReadOnlySpan）
+    /// - 主线程立即回调：AddComponent / Set / RemoveComponent / DestroyEntity
+    /// - NewEntity / CreateEntities 带组件 → Added
+    /// - ECB Playback（主线程手动）→ 内部调用主入口 → 事件照常触发
+    /// - 多 World 隔离
+    /// - RemoveObserver
+    /// - 批量合并：CreateEntities 大数量 → 一次回调（ReadOnlySpan）
     /// </summary>
     public static class ObserverDemo
     {

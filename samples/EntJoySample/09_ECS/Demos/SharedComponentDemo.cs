@@ -184,7 +184,7 @@ namespace EntJoySample.ECS
             Console.WriteLine();
         }
 
-        // ======================== NativeTranspile IJobChunk 测试 ========================
+        // NativeTranspile IJobChunk 测试
 
         /// <summary>
         /// [NativeTranspile] IJobChunk：在 Execute 中调用 chunk.GetSharedComponent&lt;Material&gt;()。

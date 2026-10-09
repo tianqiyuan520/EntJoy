@@ -1,7 +1,7 @@
 ﻿//// AutoSIMD 测试入口
 //// 验证：
-////   1. IJobEntity + AutoSIMD 走 ChunkRange 真 SIMD 路径
-////   2. IJobChunk + AutoSIMD 走 EntityBatch + SimdControlFlowGenerator 真 SIMD 路径
+//// 1. IJobEntity + AutoSIMD 走 ChunkRange 真 SIMD 路径
+//// 2. IJobChunk + AutoSIMD 走 EntityBatch + SimdControlFlowGenerator 真 SIMD 路径
 
 //using EntJoy.JobSystem;
 

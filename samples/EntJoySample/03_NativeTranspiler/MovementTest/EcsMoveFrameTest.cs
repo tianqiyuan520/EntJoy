@@ -118,7 +118,7 @@
 //            Console.WriteLine($"实体数: {ENTITY_COUNT:N0}, 帧数: {FRAMES}, 帧间隔: {FRAME_INTERVAL_MS}ms");
 //            Console.WriteLine();
 
-//            // ----- 1. Manual Query -----
+//            // 1. Manual Query
 //            Console.Write("ECS 手动遍历       : ");
 //            var manualWorld = CreateWorld();
 //            EcsMoveTest.RunManualQuery(); // warmup & init static ref
@@ -129,7 +129,7 @@
 //            );
 //            manualWorld.Dispose();
 
-//            // ----- 2. IJobChunk -----
+//            // 2. IJobChunk
 //            Console.Write("ECS IJobChunk       : ");
 //            var chunkWorld = CreateWorld();
 //            EcsMoveTest.RunJobChunk(); // warmup & init static ref
@@ -144,7 +144,7 @@
 //            var (avgManual, minManual, maxManual, medManual) = AnalyzeTimes(_manualTimes);
 //            var (avgChunk, minChunk, maxChunk, medChunk) = AnalyzeTimes(_chunkTimes);
 
-//            // ----- 结果输出 -----
+//            // 结果输出
 //            Console.WriteLine($"\n--- ECS 结果 ({FRAMES} 帧统计, 每帧间隔 {FRAME_INTERVAL_MS}ms) ---");
 //            Console.WriteLine($"{"实现",-22} {"平均(ms)",-10} {"最小(ms)",-10} {"最大(ms)",-10} {"中位数(ms)",-12} {"加速比",-8}");
 //            Console.WriteLine(new string('-', 72));

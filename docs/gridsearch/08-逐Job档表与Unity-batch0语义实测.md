@@ -578,9 +578,9 @@ step   = clamp(tileCount / workers, 1, capEff)                                  
 
 | 路径 | `totalElements` | 后果 |
 |---|---|---|
-| `ScheduleParallelFor` / `ScheduleParallelForBatch`（等宽 GeneralRange） | 正确置为 `length`（[JobSystem_Scheduler.cpp:615/874](src/NativeDll/JobSystem_Scheduler.cpp#L615)） | ✅ 这是被验收的那条 |
-| **chunk / entity 路**（`ChunkCallbacks`/`ChunkRange`/`EntityBatchRange`，[:1083](src/NativeDll/JobSystem_Scheduler.cpp#L1083)） | **根本不设** ⇒ 继承被复用 `BatchStorage` 的**陈旧值** | ❌ 门可能误开（未验收路径） |
-| **packed plain jobs**（[JobSystem_Tiles.cpp:1361](src/NativeDll/JobSystem_Tiles.cpp#L1361)） | 显式置 **0** ⇒ `max(1,0/tileCount)=1` | ❌ 门必然误开 |
+| `ScheduleParallelFor` / `ScheduleParallelForBatch`（等宽 GeneralRange） | 正确置为 `length`（[JobSystem_Scheduler.cpp:615/874](../../src/NativeDll/JobSystem_Scheduler.cpp#L615)） | ✅ 这是被验收的那条 |
+| **chunk / entity 路**（`ChunkCallbacks`/`ChunkRange`/`EntityBatchRange`，[:1083](../../src/NativeDll/JobSystem_Scheduler.cpp#L1083)） | **根本不设** ⇒ 继承被复用 `BatchStorage` 的**陈旧值** | ❌ 门可能误开（未验收路径） |
+| **packed plain jobs**（[JobSystem_Tiles.cpp:1361](../../src/NativeDll/JobSystem_Tiles.cpp#L1361)） | 显式置 **0** ⇒ `max(1,0/tileCount)=1` | ❌ 门必然误开 |
 
 ⇒ 初版 F1 会**把未验收路径一起改掉**，违反"只改已验收行为"的纪律。
 

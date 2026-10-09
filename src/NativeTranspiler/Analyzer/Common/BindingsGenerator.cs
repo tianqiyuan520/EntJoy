@@ -70,12 +70,12 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("            ApplyRegistrations();");
             sb.AppendLine("        }");
             sb.AppendLine();
-            // 2b. 注册主体（可重入）：注册表按 `Type` 存的是**某个模块**的指针，换句柄后必须重跑。
+            // 2b. 注册主体（可重入）：注册表按 `Type` 存的是某个模块的指针，换句柄后必须重跑。
             //     同一代次只注册一次；换代由重载回调重跑本方法。
             sb.AppendLine("        private static int s_registeredDelegateGeneration = -1;");
             sb.AppendLine();
             sb.AppendLine("        /// <summary>");
-            sb.AppendLine("        /// 把字段写入器 / 原生 adapter / 批表绑名刷到**当前代次**的指针上。");
+            sb.AppendLine("        /// 把字段写入器 / 原生 adapter / 批表绑名刷到当前代次的指针上。");
             sb.AppendLine("        /// 同一代次重复调用是 no-op（幂等）；注册表本身是按 Type 覆盖写，重跑即换成新指针。");
             sb.AppendLine("        /// </summary>");
             sb.AppendLine("        private static void ApplyRegistrations()");
@@ -91,7 +91,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            NativeJobScheduler.RegisterJobFieldWriter(typeof({jobStruct.ToDisplayString()}), (NativeJobScheduler.JobFieldWriter<{jobStruct.ToDisplayString()}>)WriteJobFields_{jobStruct.Name});");
                 }
             }
-            // 2026-10-02（09 §22.6）：注册单任务 job 的**原生 adapter 指针**，让运行时泛型
+            // 注册单任务 job 的原生 adapter 指针，让运行时泛型
             // `JobScheduler.Schedule(ref job)`（= 宿主实际调用的路径）也能走原生直调，
             // 而不是只在生成的 `job.Schedule()` 扩展上可用。
             // 只在"字段可显式写入"（explicitOk）时注册：原生 adapter 按 C++ 偏移读 ctx，
@@ -110,20 +110,19 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (CppJobGenerator.IsRangeScheduledJob(jobStruct))
                 {
-                    // 2026-10-02（同类修复，09 §24/§25）：批形态的原生 adapter 签名 `(void*, int, int)`
+                    // 批形态的原生 adapter 签名 `(void*, int, int)`
                     // 与原生 `BatchJobFunc` 逐字一致 ⇒ 静态运行期 API 也能直换指针。
-                    // ⚠ MT 变体的 `s_X_BatchFuncPtr` 是**托管 delegate**（有意保留）⇒ 不注册。
+                    // ⚠ MT 变体的 `s_X_BatchFuncPtr` 是托管 delegate（有意保留）⇒ 不注册。
                     if (!useMTReg)
                         sb.AppendLine($"            NativeJobScheduler.RegisterNativeJobAdapter(typeof({jobStruct.ToDisplayString()}), s_{jobStruct.Name}_BatchFuncPtr, {marshalInfo.totalSize});");
-                    // 2026-10-02（09 §26）：`IJobFor` 另有 **index 形** adapter（`IndexJobFunc(void*, int)`），
+                    // `IJobFor` 另有 index 形 adapter（`IndexJobFunc(void*, int)`），
                     // 供运行时 `ScheduleFor`（单线程串行语义）直调 —— 与批形分开注册，避免 ABI 混用。
                     if (!useMTReg && CppJobGenerator.IsForJob(jobStruct))
                         sb.AppendLine($"            NativeJobScheduler.RegisterNativeForAdapter(typeof({jobStruct.ToDisplayString()}), Get_{jobStruct.Name}_IndexAdapterPtr(), {marshalInfo.totalSize});");
                 }
             }
-            // 2026-10-06（doc16 §46，通解）：把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 **job 名**登记的批表槽位
-            // 绑定到**该 job 实际派发用的函数指针**。名字 = 托管 `Type.Name`，指针 = 生成代码自己交给
-            // `ScheduleRaw` / `ScheduleParallelForBatchRaw` 的那个 ⇒ **不依赖 C++ 符号命名规则/命名空间**，
+            // 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按 job 名登记的批表槽位
+            // 绑定到该 job 实际派发用的函数指针。名字 = 托管 `Type.Name`，指针 = 生成代码自己交给
             // 也不扫 PE 导出表（旧做法把本工程的命名空间 `CPUBattle` 硬编码在框架里）。
             // 独立于上面的 `explicitOk` 门：绑名只需要"名字 + 该 job 的派发指针"，与字段写入器无关。
             // 分支与上面 `s_*_BatchFuncPtr` / `s_*_JobFuncPtr` 的声明链逐字同构（chunk 形态不查该表）。
@@ -137,13 +136,13 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("        }");
             sb.AppendLine();
-            // 2026-10-02（09 §25，注册时机）：上面的注册发生在 `NativeExports` 的**静态构造**里，
-            // 而它只在该类**首次被触碰**时执行。若调用方在触碰它之前就走运行时静态 API
-            //（`JobScheduler.Schedule*` / `ScheduleFor`），那一刻注册表还是空的 ⇒ 该次派发会**回退托管**
+            // 上面的注册发生在 `NativeExports` 的静态构造里，
+            // 而它只在该类首次被触碰时执行。若调用方在触碰它之前就走运行时静态 API
+            //（`JobScheduler.Schedule*` / `ScheduleFor`），那一刻注册表还是空的 ⇒ 该次派发会回退托管
             //（正确但慢），造成"第一拍不是原生"的隐性退化。
-            // 用 `[ModuleInitializer]` 把注册钉在**程序集加载**时，消除对外部调用顺序的依赖。
+            // 用 `[ModuleInitializer]` 把注册钉在程序集加载时，消除对外部调用顺序的依赖。
             // ⚠ 可移植性：`ModuleInitializerAttribute` 是 net5+ 才有的 BCL 类型。消费方若 target
-            //   netstandard2.x / net472 会 CS0246 ⇒ 先探测再发射；缺该类型时**不发射**，
+            //   netstandard2.x / net472 会 CS0246 ⇒ 先探测再发射；缺该类型时不发射，
             //   注册退回"首次触碰 NativeExports 时"（即本改动之前的惰性语义，正确但仍有时序依赖）。
             //
             // 本方法：① 跑 `ApplyRegistrations()`（带代次守卫，首次调用是 no-op）；② 把自己登记为重载回调（框架去重）。
@@ -152,7 +151,7 @@ namespace NativeTranspiler.Analyzer
             var ensureBody = new[]
             {
                 "            ApplyRegistrations();",
-                "            // 登记为**重载回调** —— 换完句柄后框架重跑本方法，注册表跟着新代次刷新。",
+                "            // 登记为重载回调 —— 换完句柄后框架重跑本方法，注册表跟着新代次刷新。",
                 "            EntJoy.JobSystem.NativeJobScheduler.RegisterReloadCallback(EnsureNativeJobRegistrations);"
             };
             if (hasModuleInitializer)
@@ -163,7 +162,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("        /// <summary>");
                 sb.AppendLine("        /// 原生 adapter / 字段写入器注册（自动：本方法标了 [ModuleInitializer]，程序集加载即调用；");
                 sb.AppendLine("        /// 手动：AOT/IL2CPP 宿主或需要确定性顺序时，可在启动处直接调用 —— 幂等，可重复调用）。");
-                sb.AppendLine("        /// 热重载：本方法同时是框架的**重载回调**（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
+                sb.AppendLine("        /// 热重载：本方法同时是框架的重载回调（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
                 sb.AppendLine("        /// </summary>");
                 sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
                 sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
@@ -173,12 +172,12 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // 无 ModuleInitializerAttribute（netstandard2.x / net472）：仍需一个**公开的手动入口**，
+                // 无 ModuleInitializerAttribute（netstandard2.x / net472）：仍需一个公开的手动入口，
                 // 否则消费方无法保证注册先于首次调度。
                 sb.AppendLine("        /// <summary>");
                 sb.AppendLine("        /// 原生 adapter / 字段写入器注册（手动：本目标框架无 [ModuleInitializer]，");
                 sb.AppendLine("        /// 请在启动处调用一次；幂等，可重复调用）。");
-                sb.AppendLine("        /// 热重载：本方法同时是框架的**重载回调**（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
+                sb.AppendLine("        /// 热重载：本方法同时是框架的重载回调（换完 NativeTranspiled 句柄后重跑，刷新注册表）。");
                 sb.AppendLine("        /// </summary>");
                 sb.AppendLine("        public static void EnsureNativeJobRegistrations()");
                 sb.AppendLine("        {");
@@ -243,7 +242,7 @@ namespace NativeTranspiler.Analyzer
         private static bool HasUseISPC_MT(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.HasUseISPC_MT(symbol, attrSymbol);
 
-        // ---------- 方法 DllImport ----------
+        // 方法 DllImport
         private static void GenerateMethodDllImport(StringBuilder sb, IMethodSymbol method)
         {
             var cppFunctionName = CppGenerator.GetCppFunctionName(method);
@@ -305,7 +304,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine();
         }
 
-        // ---------- Job 委托字段 ----------
+        // Job 委托字段
         private static void GenerateStaticDelegateFields(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
@@ -360,7 +359,7 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // 2026-10-02（09 §22.6）：单任务 job 走原生 adapter 直调 ⇒ 不需要托管
+                // 单任务 job 走原生 adapter 直调 ⇒ 不需要托管
                 // `JobFuncDelegate` 字段（顺带消掉 CS0169）。只保留指针（可按代次刷新的属性）。
                 EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_JobFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
             }
@@ -493,7 +492,6 @@ namespace NativeTranspiler.Analyzer
         {
             // ⚠ 边界（有意如此）：adapter getter 走 `GetNativeExportPtr`（可刷新），但内核本体
             //   `X_Execute` / `X_Execute_Batch[..]` 这些 void 入口仍是 `[DllImport]` —— 它们是 C# 9 + unsafe
-            //   之外的兼容面，且只在 `Run_X()`（立即执行）与 MT 变体里被调用，派发热路径不走它们。
             //   ⇒ `Schedule*` 路径重载后即生效；`Run()` 仍会打进旧模块（不崩，跑旧逻辑）。
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
@@ -572,7 +570,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     // 走原生 adapter 直调：声明 Adapter 指针 getter（按名向当前句柄取导出）
                     EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_Execute_AdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
-                    // 2026-10-02（09 §26）：`IJobFor` 另有一个 **index 形** adapter getter
+                    // `IJobFor` 另有一个 index 形 adapter getter
                     //（`void(void*, int)`，供 `ScheduleFor` 的单线程串行语义直调）。
                     if (CppJobGenerator.IsForJob(jobStruct))
                     {
@@ -604,7 +602,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"            => EntJoy.JobSystem.NativeJobScheduler.GetNativeExportPtr(\"{entryPointName}\");");
         }
 
-        // ---------- Job Schedule 方法 ----------
+        // Job Schedule 方法
         private static void GenerateJobScheduleMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
@@ -629,9 +627,9 @@ namespace NativeTranspiler.Analyzer
                 parameters.Add("int innerBatchCount = 0");
             }
             parameters.Add("JobHandle dependsOn = default");
-            // 2026-10-03（docs/gridsearch/09 §52.5）：**调用点声明的认领几何必须能透到原生**。
+            // 调用点声明的认领几何必须能透到原生。
             //   此前生成的重载里没有任何几何形参 ⇒ 调用点写成 `job.Schedule(len, 0, h, ClaimPolicy.Spread)`
-            //   时 C# 重载解析绑不到原生重载，**静默**落到托管的 `JobExtensions.Schedule<T>`：
+            //   时 C# 重载解析绑不到原生重载，静默落到托管的 `JobExtensions.Schedule<T>`：
             //   键从"模块内 RVA"变成堆地址（批表/[JOBPERKEY] 全部对不上）、`applied` 15→12、
             //   该 pass 慢 2.4×（宿主注释实测 place 2.2→5.3 ms）。
             //   位置与扩展方法保持一致（跟在 dependsOn 之后）且带默认值 ⇒ 既有调用点逐位不变。
@@ -674,7 +672,7 @@ namespace NativeTranspiler.Analyzer
             {
                 sb.AppendLine("            world ??= World.DefaultWorld;");
                 sb.AppendLine("            if (world == null) throw new InvalidOperationException(\"No active World found.\");");
-                // ─── SendEvent: 内联注册事件元数据 ───
+                // SendEvent: 内联注册事件元数据
                 var evtTypesInline = CppJobGenerator.CollectSendEventTypes(jobStruct, compilation);
                 if (evtTypesInline.Count > 0)
                 {
@@ -841,7 +839,7 @@ namespace NativeTranspiler.Analyzer
                 // ImmediateNative：主线程同步执行，零 worker 唤醒、无 handle 往返
                 sb.AppendLine("            world ??= World.DefaultWorld;");
                 sb.AppendLine("            if (world == null) throw new InvalidOperationException(\"No active World found.\");");
-                // ─── SendEvent: 内联注册事件元数据 ───
+                // SendEvent: 内联注册事件元数据
                 var runEvtTypes = CppJobGenerator.CollectSendEventTypes(jobStruct, compilation);
                 if (runEvtTypes.Count > 0)
                 {
@@ -873,7 +871,7 @@ namespace NativeTranspiler.Analyzer
             return string.IsNullOrWhiteSpace(ids) ? "Array.Empty<int>()" : $"new int[] {{ {ids} }}";
         }
 
-        // ---------- 辅助：构建参数列表 ----------
+        // 辅助：构建参数列表
         private static List<string> BuildMethodDllImportParams(IMethodSymbol method)
         {
             var parameters = new List<string>();
@@ -990,10 +988,10 @@ namespace NativeTranspiler.Analyzer
                 }
                 else if (field.Type is IPointerTypeSymbol pointerField)
                 {
-                    // P0-5c：此处生成的是**托管 trampoline 的 C# 方法签名**，不能用 C++ 类型名 ——
+                    // 此处生成的是托管 trampoline 的 C# 方法签名，不能用 C++ 类型名 ——
                     // `MapCSharpTypeToCpp` 对用户结构体会给出 `EntJoy::ECS::X*`，C# 侧解析为"别名"⇒ CS0432
                     //（基元指针 `int*`/`void*` 两语言同名，所以此前没有暴露）。
-                    // 正确做法：取**被指类型的 C# 限定名**再加 `*`。
+                    // 正确做法：取被指类型的 C# 限定名再加 `*`。
                     var csPointeeType = pointerField.PointedAtType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                     parameters.Add($"{csPointeeType}* {field.Name}_ptr");
                 }
@@ -1033,7 +1031,7 @@ namespace NativeTranspiler.Analyzer
             return string.Join(", ", args);
         }
 
-        // ---------- 显式逐字段 marshalling（Debug sentinel 布局修复共用） ----------
+        // 显式逐字段 marshalling（Debug sentinel 布局修复共用）
 
         /// <summary>
         /// 计算 Job 结构体所有实例字段在 C++ context 布局下的偏移（与 CppJobGenerator.CalculateFieldOffset 同源），
@@ -1247,8 +1245,8 @@ namespace NativeTranspiler.Analyzer
                     "int innerBatchCount = 0",
                     "JobHandle dependsOn = default"
                 };
-                // 2026-10-03（09 §52.5）：调用点透传认领几何（仅在真并行批上；IJobFor 是单线程串行语义）。
-                // 末尾 + 默认值 ⇒ 既有调用点不变，且**不会**与托管 `JobExtensions.Schedule<T>` 产生歧义
+                // 调用点透传认领几何（仅在真并行批上；IJobFor 是单线程串行语义）。
+                // 末尾 + 默认值 ⇒ 既有调用点不变，且不会与托管 `JobExtensions.Schedule<T>` 产生歧义
                 // （具体扩展方法优先于泛型）。
                 string claimParam = isParallelFor ? ", ClaimPolicy claim = ClaimPolicy.Auto" : "";
                 string claimArgE = isParallelFor ? ", claim" : "";

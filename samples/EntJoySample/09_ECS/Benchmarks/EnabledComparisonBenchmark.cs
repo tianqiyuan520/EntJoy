@@ -85,7 +85,7 @@ namespace EntJoySample.ECS
                 foreach (var r in world.Query<Position>().WithEnabled<ActiveComponent>()) { _ = r.Comp0.X; }
             }
 
-            // ===== 无过滤（100K） =====
+            // 无过滤（100K）
             Console.WriteLine("=== No Filter (all 100K) ===");
 
             // Query foreach（读 X）
@@ -113,7 +113,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"IJobChunk.Run (all)  : {jAllMs,8:F4} ms  sum={jAll} {(jAll == expectedAll ? "OK" : "BAD")}");
             Console.WriteLine();
 
-            // ===== 启用过滤（33K） =====
+            // 启用过滤（33K）
             Console.WriteLine("=== Enabled Filter (33K) ===");
 
             // Query.WithEnabled
@@ -141,7 +141,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"IJobChunk.Run (range): {jEnMs,8:F4} ms  sum={jEn} {(jEn == expectedEnabled ? "OK" : "BAD")}");
             Console.WriteLine();
 
-            // ===== 汇总（同工作量） =====
+            // 汇总（同工作量）
             Console.WriteLine("=== Summary ===\n");
             Console.WriteLine($"{"Method",28} {"ms/iter",10} {"vs Query",10} {"WorkXCount",12}");
             Console.WriteLine(new string('-', 62));

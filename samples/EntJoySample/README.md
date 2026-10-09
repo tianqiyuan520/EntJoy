@@ -18,6 +18,7 @@
 - `03_NativeTranspiler/MovementTest`：移动类 C# / C++ / ISPC Job 对比与验证。
 - `03_NativeTranspiler/StaticMethodTest`：NativeTranspiler 静态方法翻译测试。
 - `03_NativeTranspiler/ISPCMT`：ISPC 多线程相关测试。
+- `03_NativeTranspiler/AutoSIMDTest`：AutoSIMD 基准套件（8 个用例 × 5 个 Job 变体 + LLVM IR 分析）。入口整体注释停用，见该目录 [README](03_NativeTranspiler/AutoSIMDTest/README.md)。
 - `NativeTranspiler_Generated`：NativeTranspiler 生成物目录，保留在根目录，不作为手写样例移动。
 
 ## `04_NativeCollections`
@@ -28,7 +29,7 @@
 
 ## `05_Algorithms`
 
-- `05_Algorithms/GridSearch`：二维网格搜索、最近点、范围搜索等算法测试（2026-08 整体注释停用）。
+- `05_Algorithms/GridSearch`：二维网格搜索、最近点、范围搜索等算法测试（当前整体注释停用）。
 
 ## `06_HotFieldHandle`
 
@@ -38,22 +39,40 @@
 
 - `08_EntityRandomAccess`：稀疏 Entity 随机访问开销基准（ComponentLookup 优化）。
 
+## `09_ECS`
+
+托管 ECS 的功能与契约验证。入口：`09_ECS/Program.cs`（当前整体注释停用）。
+
+- `Demos/`：Change Tracking、Chunk 碎片整理、组件生命周期与内存、Observer、Reactive、关系场景、Shared Component、System 依赖与注册等演示。
+- `Benchmarks/`：Enabled 过滤对比、EntityQuery 缓存、`IJobEntity` + Enabled、关系、Schedule 固定开销。
+- `Jobs/`：关系、托管事件与 ISPC 事件的原生 Job 验证。
+
+## `10_SIMD`
+
+ISPC / AutoSIMD / 标量 C++ 三后端在 8 个用例上的性能与正确性对比（对照 C# 标量 oracle），外加非 8 倍数尺寸与特殊浮点值的压力测试。入口：`10_SIMD/Program.cs`（当前整体注释停用；由 `09_ECS` 的入口调用 `SimdCompareTest.Run()`）。
+
 ## `12_EntityNativeLookup`
 
-**本轮框架新增能力的可运行示例**（2026-09-13）。入口：`12_EntityNativeLookup/Program.cs`。
+可运行示例，入口：`12_EntityNativeLookup/Program.cs`（当前整体注释停用，需解除注释）。
 
-- **P0-1 定位表**：`EntityLocateB`（24B/实体 = chunk 基址 + 该 Archetype 列偏移表 + 槽位 + 版本）、
+- **定位表**：`EntityLocateB`（24B/实体 = chunk 基址 + 该 Archetype 列偏移表 + 槽位 + 版本）、
   默认多 chunk 下"组件列不连续"的事实、`EntityManager.VerifyLocateTable()` 逐实体一致性校验。
-- **P0-3 job-safe lookup**：`NativeComponentLookup<T>` / `NativeEntityLookup` 在**并行 job 内跨 chunk 随机访问**（托管 `IJobParallelFor`）；
-  以及**原生内核版** `[NativeTranspile(Target = Cpp)]`。⚠ 实测纪律 **NT004**：原生 job 不能调用 EntJoy.ECS 的任何方法
-  （实例方法与跨程序集静态方法都报错）⇒ 体内必须**内联字段运算**；手写 C++ 侧对等原语见 `src/NativeDll/NativeEntityLookup.h`。
-- **P0-4 / P0-5 / P1-8 ECB 批量**：`CreateEntitiesRange` + `SetComponentRange`（**回放期零托管分配**）+ `GetBatch`。
-- **P0-4b 批量销毁**：`DestroyEntities(Entity*, count)`、`DestroyAllInArchetype`（ClearAll 快路径，O(chunk 数)）。
-- **P0-4c 零分配**：清空后重建的 Id 全部来自回收池（非托管栈），销毁/创建路径无逐实体托管分配。
+- **job-safe lookup**：`NativeComponentLookup<T>` / `NativeEntityLookup` 在**并行 job 内跨 chunk 随机访问**（托管 `IJobParallelFor`）；
+  以及**原生内核版** `[NativeTranspile(Target = Cpp)]`。⚠ 原生 job 不能调用 `EntJoy.ECS` 的任何方法（实例方法与跨程序集静态方法都报 **NT004**）
+  ⇒ 体内必须**内联字段运算**；手写 C++ 侧对等原语见 `src/NativeDll/NativeEntityLookup.h`。
+- **ECB 批量**：`CreateEntitiesRange` + `SetComponentRange`（**回放期零托管分配**）+ `GetBatch`、
+  `DestroyEntities(Entity*, count)` / `DestroyAllInArchetype`（ClearAll 快路径，O(chunk 数)）。
+- **零分配重建**：清空后重建的 Id 全部来自回收池（非托管栈），销毁/创建路径无逐实体托管分配。
+
+## `13_EnableBitMapNative`
+
+原生 `IJobChunk` **读/写**逐组件 enable 位图（`GetEnableBitMapPtr<T>()`，数据面 `ChunkJobData.requiredEnableBitMaps`，与 `requiredComponentArrays` 同序），
+并与托管侧 `IsComponentEnabled` / `WithEnabled` **逐实体比对**一致。示例把 `Archetype.ChunkCapacityOverride` 设为实体总数 ⇒ 单 chunk，
+于是"chunk 内序号"即全局序号（多 chunk 下原生 job 拿不到全局序号）。入口：`EnableBitMapNativeDemo.cs`。
 
 ## `13_HotReload`
 
-热重载**可跑样例**（2026-10-07）。入口：`13_HotReload/Program.cs` —— `Initialize()` + 一个 `while` 跑
+热重载**可跑样例**。入口：`13_HotReload/Program.cs`（**本工程缺省入口**）—— `Initialize()` + 一个 `while` 跑
 `HotReloadAddJob`，并在安全点用 `NativeHotReloadWatcher` 检查**新构建的 `bin\NativeTranspiled.dll`**。
 `HotReloadJob.cs` 的 `Execute` 体就是要手改的内核。
 
@@ -78,13 +97,18 @@
 - 端到端证据与机制：`tools/HotReloadProbe/p1-7-run.ps1`（`101→203`、数据保留）、`p4-run.ps1`（自动检测+耗时）、
   `docs/热重载设计.md` §6。
 
+## `14_AutoSimdChunkWriteback`
+
+`IJobChunk` + AutoSIMD 的"第二个组件整结构体回写"路径，三条路径逐实体比对：① 托管 C# 标量（基线）、
+② `[NativeTranspile(Cpp)]` 标量 C++ 内核、③ `[NativeTranspile(Cpp, AutoSIMD)]` 真 SIMD 内核。
+判据：② 与 ① 必须**逐实体完全相等**；③ 与 ① 允许 ≤1 ulp 级误差但不得有结构错位。入口：`AutoSimdChunkWritebackDemo.cs`。
+
 ## 入口切换约定
 
-- 每次只保留一个 `Program.cs` 中的 `Main` 为非注释状态。
-- 切换样例时，先注释当前入口，再取消目标样例入口注释。
-- ⚠ 2026-10-07 更正：上面两条**已不是硬约束**。`EntJoySample.csproj` 用 `-p:ENTJOY_STARTUP=<全限定类型名>`
-  覆盖入口，且**缺省值已设为 `EntJoySample.HotReload.Program`** ⇒ 允许多个非注释 `Main`，直接 Build 即可
-  （不传属性也不会 CS0017）。要跑别的样例就显式传 `ENTJOY_STARTUP`，不必再注释别人的入口。
+- 入口由 `EntJoySample.csproj` 的 `StartupObject` 决定：缺省 `EntJoySample.HotReload.Program`，用 `-p:ENTJOY_STARTUP=<全限定类型名>` 覆盖。
+- 因此**允许多个非注释 `Main`**，直接 Build 即可（不传属性也不会 `CS0017`）。
+- ⚠ 指定的类型必须有非注释的 `Main`，否则报 `CS1555`；该错误在增量构建下可能不出现（CSC 未重跑），必要时加 `--no-incremental`。
+- 切换样例时，若目标 `Main` 处于注释态，需先把该文件的注释解除。
 
 ## C# Job 上下文约定
 

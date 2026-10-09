@@ -9,7 +9,7 @@ using System.Threading;
 namespace EntJoy.ECS.JobSystem
 {
 
-    // ======================== Chunk 任务数据结构（与 C++ 一一对应） ========================
+    // Chunk 任务数据结构（与 C++ 一一对应）
     // 命名空间级（非嵌套）：调度层/回调层/transpiler 生成代码均可裸用。
 
     /// <summary>
@@ -30,7 +30,7 @@ namespace EntJoy.ECS.JobSystem
         public int requiredComponentCount;     // requiredComponentArrays 数量
         public void** sharedValuePtrs;          // SharedComponent blittable 值指针 [sharedValueCount]
         public int sharedValueCount;            // sharedValuePtrs 数量，0 = 无 shared 组件
-        public void** requiredEnableBitMaps;    // P1-6：与 requiredComponentArrays **同序**的逐组件 enable 位图（元素可为 null）
+        public void** requiredEnableBitMaps;    // 与 requiredComponentArrays 同序的逐组件 enable 位图（元素可为 null）
     }
 
     /// <summary>
@@ -76,7 +76,7 @@ namespace EntJoy.ECS.JobSystem
         public int requiredComponentTypeIdCount; // 所需组件类型 ID 数量
         public int jobIsBoxed;               // job 区域存的是 GCHandle(ManagedJobBox) 而非裸字节（托管引用 job）
         public IntPtr chunkArrayHandle;      // 单 GCHandle 保活收集期 Chunk[]（托管回调路径按 chunkId 索引）
-        // ─── Event Buffer ───
+        // Event Buffer
         public int eventBufferCount;         // 事件类型数（0 = 无事件）
         public IntPtr eventBufferHeaders;    // EventBufferHeader[] 指针（每个元素 = 一个事件类型的 buffer 描述）
         public IntPtr eventWorldHandle;      // GCHandle → World（cleanup 时自动 drain 到正确的 EventStream）
@@ -102,19 +102,18 @@ namespace EntJoy.ECS.JobSystem
         public T Job;
     }
 
-    // ======================== 回调委托签名 ========================
+    // 回调委托签名
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal unsafe delegate void ChunkRangeJobFuncDelegate(IntPtr context, ChunkJobData* chunks, int startIndex, int count);
 
     /// <summary>
     /// Native 调用层：ECS JobSystem 与 C++ 调度器的唯一桥。
     /// 只承担 ABI 职责——数据结构定义、P/Invoke 函数指针加载、5 个提交入口、
-    /// context/chunk 列表清理回调。无调度编排、无业务逻辑。
     /// 托管调用层（ChunkJobScheduler）与 NativeTranspiler 生成代码（NativeExports）都经它提交。
     /// </summary>
     public static unsafe class NativeChunkJobs
     {
-        // ======================== Chunk P/Invoke 函数指针 ========================
+        // Chunk P/Invoke 函数指针
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, uint, IntPtr> _jobSystem_ScheduleChunkJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, uint, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
@@ -182,7 +181,7 @@ namespace EntJoy.ECS.JobSystem
             return _jobSystem_ScheduleAndCompleteEntityBatchJobEx(funcPtr, context, cleanupPtr, batches, batchCount, dependency, (int)mode, workerCap, rangeSize, (int)jobKind, unitGeneration);
         }
 
-        // ======================== 共享状态（chunk 表保活 / 上下文租赁 / 清理回调） ========================
+        // 共享状态（chunk 表保活 / 上下文租赁 / 清理回调）
         internal static readonly ConcurrentDictionary<IntPtr, GCHandle> ChunkContextLeases = new();
         internal static readonly object ChunkGCHandlesLock = new();
         internal static readonly List<GCHandle> ChunkGCHandles = new();
@@ -190,7 +189,7 @@ namespace EntJoy.ECS.JobSystem
         private static readonly NativeJobCore.CleanupFunc _chunkCleanup = ChunkCleanup;
         internal static readonly IntPtr ChunkCleanupPtr = Marshal.GetFunctionPointerForDelegate(_chunkCleanup);
 
-        // ======================== 上下文块清理 ========================
+        // 上下文块清理
 
         /// <summary>
         /// 释放 chunk 调度上下文：chunk 表保活句柄、GCHandle 列表占用、HGlobal 分配的 chunk 缓冲区、上下文池。
@@ -207,7 +206,7 @@ namespace EntJoy.ECS.JobSystem
 
             try
             {
-                // ─── Event Buffer: 自动 drain 到 World.EventStream ───
+                // Event Buffer: 自动 drain 到 World.EventStream
                 if (header->eventBufferCount > 0 && header->eventWorldHandle != IntPtr.Zero)
                 {
                     var world = (World)GCHandle.FromIntPtr(header->eventWorldHandle).Target!;

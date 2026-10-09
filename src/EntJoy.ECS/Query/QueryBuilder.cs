@@ -100,7 +100,7 @@ namespace EntJoy.ECS
             return this;
         }
 
-        // ======================== 变更追踪过滤 ========================
+        // 变更追踪过滤
 
         /// <summary>只返回指定组件被修改过的实体。</summary>
         public QueryBuilder WithChanged<T>() where T : struct
@@ -124,7 +124,7 @@ namespace EntJoy.ECS
             return this;
         }
 
-        // ======================== Shared Component 过滤 ========================
+        // Shared Component 过滤
 
         /// <summary>
         /// 只处理持有指定 SharedComponent 值的 Chunk（对齐 Unity WithSharedComponentFilter）。
@@ -138,7 +138,7 @@ namespace EntJoy.ECS
             return this;
         }
 
-        // ======================== Relation 过滤 ========================
+        // Relation 过滤
 
         /// <summary>
         /// 只处理持有 <typeparamref name="T"/> 关系且 target == <paramref name="target"/> 的实体。

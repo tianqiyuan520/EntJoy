@@ -8,17 +8,15 @@ using NativeTranspiler;
 
 namespace EntJoySample.AutoSimdBulkWriteback
 {
-    // ═══════════════════════════════════════════════════════════════════════════
-    // P2-12 验收（2026-09-13）：IJobChunk + AutoSIMD 的"**第二个组件的整结构体回写**"缺陷。
+    // 验收：IJobChunk + AutoSIMD 的"**第二个组件的整结构体回写**"缺陷。
     //
     // 现状沉淀坑 2 记载："AutoSIMD 源生成器缺陷：IJobChunk 对『第二个组件整结构体回写』生成 bug"
     //   ⇒ 当时的规避办法是改用 IJobEntity + [NativeTranspile]。
-    // 本示例用**同一段 C# 体**跑三条路径并逐实体比对（两条组件列都要被写）：
+    // 本示例用同一段 C# 体跑三条路径并逐实体比对（两条组件列都要被写）：
     //   ① 托管 C# 标量（基线）
     //   ② [NativeTranspile(Cpp)]          标量 C++ 内核
     //   ③ [NativeTranspile(Cpp, AutoSIMD)] 真 SIMD 内核
-    // 判据：② 与 ① 必须逐实体**完全相等**（float 精确相等）；③ 与 ① 允许 ≤1 ulp 级误差但不得有结构错位。
-    // ═══════════════════════════════════════════════════════════════════════════
+    // 判据：② 与 ① 必须逐实体完全相等（float 精确相等）；③ 与 ① 允许 ≤1 ulp 级误差但不得有结构错位。
 
     public struct WPos : IComponentData { public float2 V; }
     public struct WVel : IComponentData { public float2 V; }
@@ -105,7 +103,7 @@ namespace EntJoySample.AutoSimdBulkWriteback
 
         public static void Run()
         {
-            Console.WriteLine("=== 14_AutoSimdChunkWriteback：IJobChunk 双组件回写（P2-12 / 现状沉淀坑 2）===\n");
+            Console.WriteLine("=== 14_AutoSimdChunkWriteback：IJobChunk 双组件回写 ===\n");
 
             var basePos = new float2[N];
             var baseVel = new float2[N];

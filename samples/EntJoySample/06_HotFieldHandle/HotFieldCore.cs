@@ -8,12 +8,12 @@
 
 //namespace EntJoySample.HotFieldHandle
 //{
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 //    // HotField 核心（重新设计,基于原始目标）:
 //    //   静态 pin 平铺字段级 SoA(指针稳定,无边界检查) + class 门面(int 索引)
 //    //   + free-list 生命周期 + System(IJobParallelFor)
 //    //   对应原始 HotField「指针指向静态 HotStore 数组,开销低」
-//    // ═══════════════════════════════════════════════════════════════════
+//    //
 
 //    /// <summary>标记一个普通 class 为 HotField 支持。</summary>
 //    [AttributeUsage(AttributeTargets.Class)]

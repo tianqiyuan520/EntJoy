@@ -11,15 +11,11 @@ namespace NativeTranspiler.Analyzer
     /// <summary>
     /// 本 partial 文件负责表达式翻译：
     /// TranslateExpression / TranslateMath* / TranslateBinary* /
-    /// TranslateCast* / TranslateAssignment* 等表达式生成方法。
-    /// 与 SimdControlFlowGenerator 主文件和 SimdLoopGenerator
     /// 属于同一个 partial class，可自由互相调用。
     /// </summary>
     public partial class SimdControlFlowGenerator
     {
-        // ================================================================
         // Expression Translation (core)
-        // ================================================================
 
         /// <summary>
         /// 将 C# 表达式翻译为 C++ 表达式字符串。
@@ -39,7 +35,7 @@ namespace NativeTranspiler.Analyzer
                     return TranslateMemberAccess(memberAccess);
 
                 case ElementAccessExpressionSyntax elementAccess:
-                    // ★ 按**父节点**决定返回形态（不能用位置标志位，见文档 §13.20）：
+                    // 按父节点决定返回形态（不能用位置标志位，见文档）：
                     //   出现在另一个元素访问的下标位置（`A[B[i]]`）→ 必须是标量；
                     //   其它位置（条件/赋值 RHS）→ 调用方会取 `.v`，所以必须是 `.v`-able 的 SIMD 包装。
                     return TranslateElementAccess(elementAccess, asScalarIndex: IsSubscriptOfAnotherElementAccess(elementAccess));
@@ -56,7 +52,7 @@ namespace NativeTranspiler.Analyzer
                         return $"simd_mask{{ n_not_mask({TranslateExpression(prefix.Operand)}.m) }}";
                     if (prefix.IsKind(SyntaxKind.BitwiseNotExpression))
                     {
-                        // ★ ~x → x ^ -1 (bitwise NOT). The old code emitted "-x" for "~x",
+                        // ~x → x ^ -1 (bitwise NOT). The old code emitted "-x" for "~x",
                         //   producing ~3 = -3 instead of -4 (ST6: s & ~3 → s & -3, off-by-one).
                         string inner = TranslateExpression(prefix.Operand);
                         return $"({inner} ^ -1)";
@@ -75,7 +71,7 @@ namespace NativeTranspiler.Analyzer
                     return TranslateAssignment(assign);
 
                 case CheckedExpressionSyntax checkedExpr:
-                    // ★ `unchecked(x + y)` / `checked(x + y)` → translate the inner expr.
+                    // `unchecked(x + y)` / `checked(x + y)` → translate the inner expr.
                     //   EntJoy arithmetic is always unchecked (wraps), so the flag is a no-op.
                     return TranslateExpression(checkedExpr.Expression);
 
@@ -85,12 +81,12 @@ namespace NativeTranspiler.Analyzer
                 case ObjectCreationExpressionSyntax objCreation:
                     return TranslateObjectCreation(objCreation);
 
-                // ★ 自增/自减：`histPtr[key]++` 之前落到兜底 → 写入被静默丢弃（Y 排序直方图算错）。
+                // 自增/自减：`histPtr[key]++` 之前落到兜底 → 写入被静默丢弃（Y 排序直方图算错）。
                 case PostfixUnaryExpressionSyntax postfix
                     when postfix.IsKind(SyntaxKind.PostIncrementExpression) || postfix.IsKind(SyntaxKind.PostDecrementExpression):
                     return TranslateIncrementExpression(postfix.Operand, postfix.IsKind(SyntaxKind.PostIncrementExpression) ? "+=" : "-=");
 
-                // ★ 兜底必须是**可检测标记**，不能是静默的 `0`。
+                // 兜底必须是可检测标记，不能是静默的 `0`。
                 //   返回 `0` 会让整条语句变成 `0;` —— 写入被丢弃且编译通过（N-10 / YSortRangeJob 两次事故）。
                 default:
                     return $"/*{UnsupportedMarkers.Expr}{expr.Kind()}*/ 0";
@@ -105,7 +101,7 @@ namespace NativeTranspiler.Analyzer
             if (expr is IdentifierNameSyntax id)
             {
                 string name = id.Identifier.Text;
-                // ★ Bool field with known constant → skip computation, MSVC handles DCE
+                // Bool field with known constant → skip computation, MSVC handles DCE
                 if (_boolFields.TryGetValue(name, out var bv))
                     return bv == "true" ? "simd_mask::all_true()" : "simd_mask::all_false()";
                 // Uniform bool: broadcast to all lanes then compare !=0 to produce proper n_mask
@@ -123,9 +119,7 @@ namespace NativeTranspiler.Analyzer
             return result;
         }
 
-        // ================================================================
         // Expression Sub-Translators
-        // ================================================================
 
         private string TranslateLiteral(LiteralExpressionSyntax literal)
         {
@@ -134,7 +128,7 @@ namespace NativeTranspiler.Analyzer
             if (literal.IsKind(SyntaxKind.FalseLiteralExpression))
                 return "false";
             string text = literal.Token.Text;
-            // ★ Fix: integer-valued float literals (40f, -3f, 2f) must become
+            // Fix: integer-valued float literals (40f, -3f, 2f) must become
             //   40.0f / -3.0f / 2.0f — "40f" is an invalid C++ decimal constant.
             if (literal.IsKind(SyntaxKind.NumericLiteralExpression) &&
                 (text.EndsWith("f") || text.EndsWith("F")))
@@ -147,7 +141,7 @@ namespace NativeTranspiler.Analyzer
             {
                 // edge: integer literals are passed through as-is (valid C++)
             }
-            // ★ NT-13：C# 的 64 位后缀（1UL / 1L）在 C++/LLP64 下只有 32 位 ⇒ 必须归一化，
+            // NT-13：C# 的 64 位后缀（1UL / 1L）在 C++/LLP64 下只有 32 位 ⇒ 必须归一化，
             //   否则向量化部分的移位/掩码表达式静默错值（与标量路径共用同一规则，避免再次分叉）。
             if (literal.IsKind(SyntaxKind.NumericLiteralExpression))
                 text = CppNumericLiteral.NormalizeSuffix(text);
@@ -166,7 +160,7 @@ namespace NativeTranspiler.Analyzer
             if (_forLoopVars.Contains(name))
                 return $"simd_{name}";
 
-            // ★ Bool field with known constant → return literal (MSVC DCE handles the rest)
+            // Bool field with known constant → return literal (MSVC DCE handles the rest)
             if (_boolFields.TryGetValue(name, out var bv))
                 return bv;  // "true" or "false"
 
@@ -208,7 +202,7 @@ namespace NativeTranspiler.Analyzer
         {
             string memberName = memberAccess.Name.Identifier.Text;
 
-                        // ★ Struct NativeArray field access: structArray[idx].fieldName
+                        // Struct NativeArray field access: structArray[idx].fieldName
             //   Generate field-level gather with struct stride (ISPC-style AoS pattern).
             if (memberAccess.Expression is ElementAccessExpressionSyntax ea
                 && ea.Expression is IdentifierNameSyntax arrId)
@@ -223,9 +217,8 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // ★ Deferred struct local field access: structLocal.fieldName
+            // Deferred struct local field access: structLocal.fieldName
             //   Where structLocal was initialized from structArray[idx].
-            //   Example: position.Value  (where position = positions[i])
             //   → field-level gather with struct stride
             if (memberAccess.Expression is IdentifierNameSyntax structLocalId
                 && _structVaryingLocals.TryGetValue(structLocalId.Identifier.Text, out var structLocalInfo))
@@ -240,15 +233,13 @@ namespace NativeTranspiler.Analyzer
             string objName = memberAccess.Expression is IdentifierNameSyntax id ? id.Identifier.Text : null;
             bool isVaryingFloat2 = objName != null && _float2VaryingVars.Contains(objName);
 
-            // ★ 标量位置的字段读取：接收者不是向量 → 绝不做 `.v` 包装。
+            // 标量位置的字段读取：接收者不是向量 → 绝不做 `.v` 包装。
             //   （`CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath` 的接收者翻译出来是
-            //    `simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种**标量** SIMD 包装，本身无 `.v`。）
+            //    `simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种标量 SIMD 包装，本身无 `.v`。）
             bool scalarReceiver = !objExpr.Contains(".v");
 
-            // .MaxValue / .MinValue — 必须**早于** scalarReceiver 的标量回退分支：
+            // .MaxValue / .MinValue — 必须早于 scalarReceiver 的标量回退分支：
             // 接收者是预定义类型（`float.MaxValue` / `int.MaxValue`）时，TranslateExpression(接收者)
-            // 会去翻译一个裸 `float` 关键字节点 → 落兜底标记（`/*…PredefinedType*/ 0`），
-            // 于是标量回退把它拼成 `/*标记*/ 0.MaxValue` —— 编译不过，且整个 AutoSIMD 单元被标记拦下。
             // 本分支不需要 objExpr（类型信息从接收者文本/语义模型取），因此放在最前面即可。
             if (memberName == "MaxValue" || memberName == "MinValue")
             {
@@ -288,9 +279,9 @@ namespace NativeTranspiler.Analyzer
                 return $"{objExpr}.{memberName}()";
             }
 
-            // ★ 标量 SIMD 包装上取字段：退回标量 C++ 表达式。
+            // 标量 SIMD 包装上取字段：退回标量 C++ 表达式。
             //   结构体 → `expr.field`；数学向量 → `expr.x()`（上面已处理）。
-            //   旧代码在这里无条件补 `.v`，生成 `simd_value<int>{...}.FramesDeath` → clang 报
+            //   若在这里无条件补 `.v`，生成 `simd_value<int>{...}.FramesDeath` → clang 报
             //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
             if (scalarReceiver) return $"{objExpr}.{memberName}";
 
@@ -319,13 +310,13 @@ namespace NativeTranspiler.Analyzer
                 return $"{objExpr}.{memberName}";
             }
 
-            // ★ simd_value<float2> 整体（双通道 gather）→ .x/.y 直接取成员
+            // simd_value<float2> 整体（双通道 gather）→ .x/.y 直接取成员
             if ((memberName == "x" || memberName == "y") && objExpr.StartsWith("simd_value<EntJoy::Mathematics::float2>"))
             {
                 return $"{objExpr}.{memberName}";
             }
 
-            // ★ Struct field gather result: n_gather_ps already returns the component value.
+            // Struct field gather result: n_gather_ps already returns the component value.
             //   For .x on a float2 field gather, just return the gather (it's already x).
             //   For .y, we need the gather at offset+1 (y is at +4 bytes).
             if ((memberName == "x" || memberName == "y") && objExpr.Contains("n_gather_ps<"))
@@ -342,7 +333,7 @@ namespace NativeTranspiler.Analyzer
                 return objExpr;
             }
 
-            // ★ Check for hoisted uniform broadcast (pre-broadcast once, reuse in SIMD)
+            // Check for hoisted uniform broadcast (pre-broadcast once, reuse in SIMD)
             if ((memberName == "x" || memberName == "y") && !isVaryingFloat2)
             {
                 if (memberAccess.Expression is IdentifierNameSyntax hoistId)
@@ -352,8 +343,8 @@ namespace NativeTranspiler.Analyzer
                         return hoistVar;
                 }
                 // EntJoy Mathematics types use method syntax: .x() not .x
-                // ⚠ 只有**确实是向量**的表达式才用 `.x/.y` 成员形式。旧判据 `Contains("::") || StartsWith("simd_")`
-                //   过宽：`simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种**标量** SIMD 包装也命中，
+                // ⚠ 只有确实是向量的表达式才用 `.x/.y` 成员形式。旧判据 `Contains("::") || StartsWith("simd_")`
+                //   过宽：`simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种标量 SIMD 包装也命中，
                 //   于是 `.FramesDeath` 被翻成 `simd_value<int>{...}.FramesDeath` → clang 报
                 //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
                 //   真正的向量表达式一定含 `.v`。
@@ -365,7 +356,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// <paramref name="expr"/> 是否出现在**另一个元素访问的下标位置**（即 `A[B[i]]` 里的 `B[i]`）。
+        /// <paramref name="expr"/> 是否出现在另一个元素访问的下标位置（即 `A[B[i]]` 里的 `B[i]`）。
         /// 那种位置需要标量下标；其余位置需要 `.v`-able 的 SIMD 值。
         /// </summary>
         private static bool IsSubscriptOfAnotherElementAccess(ExpressionSyntax expr)
@@ -380,7 +371,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 翻译元素访问。
-        /// <paramref name="asScalarIndex"/>：调用方需要**标量下标**（本表达式是另一个元素访问的下标），
+        /// <paramref name="asScalarIndex"/>：调用方需要标量下标（本表达式是另一个元素访问的下标），
         /// 此时返回裸标量 `baseExpr[sidx]`。
         /// 否则返回 `simd_value&lt;T&gt;{ ... }` 包装 —— 因为条件/赋值 RHS 位置会无条件取 `.v`，
         /// 返回裸标量会生成 `(alivePtr[i]).v` → clang 报
@@ -393,7 +384,7 @@ namespace NativeTranspiler.Analyzer
             string elemCppType = "float";
             string baseExpr = null;
             bool vectorizableElem = false;
-            // ★ 统一解析：NativeArray 字段 → `X_ptr`；裸指针变量（局部/形参）→ `X`（A2）
+            // 统一解析：NativeArray 字段 → `X_ptr`；裸指针变量（局部/形参）→ `X`
             if (NativeArrayBaseInfo(elementAccess.Expression) is { } naInfo)
             {
                 isNativeArray = true;
@@ -430,7 +421,7 @@ namespace NativeTranspiler.Analyzer
                         elemCppType = NativeTranspiler.MapCSharpTypeToCpp(typeArg);
                     if (indexKind >= VarKind.Varying)
                     {
-                        // ★ Safety clamp: mask ctx → clamp to [0, Length-1] for unmasked gather
+                        // Safety clamp: mask ctx → clamp to [0, Length-1] for unmasked gather
                         string safeIdx = _currentMask != "simd_mask::all_true()"
                             ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}.Length - 1))"
                             : indexExpr;
@@ -444,12 +435,12 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // ★ 向量 load/gather 只支持 float/int（n_load_ps / n_load_epi32 / gather）。
+            // 向量 load/gather 只支持 float/int（n_load_ps / n_load_epi32 / gather）。
             //   byte / uint 等窄或宽元素、以及不可向量化的基址 → 退回标量下标读。
 
             if (isNativeArray && vectorizableElem && indexKind >= VarKind.Varying)
             {
-                // ★ Check if index is from a uniform-bound reduction loop induction variable
+                // Check if index is from a uniform-bound reduction loop induction variable
                 //   → emit broadcast of scalar load instead of gather.
                 //   This is the key optimization for fallback loops like for(i=0; i<N; i++):
                 //   one scalar load + broadcast to all 8 lanes.
@@ -472,7 +463,7 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
-                // ★ Safety clamp for gather: when in mask context, clamp indices to
+                // Safety clamp for gather: when in mask context, clamp indices to
                 //   [0, arr_length-1] to prevent AVX2 unmasked gather OOB.
                 //   Skip if index variable was already clamped by a prior gather.
                 string safeIdx;
@@ -548,8 +539,8 @@ namespace NativeTranspiler.Analyzer
                 return $"simd_value<float>::gathf({baseExpr}, {safeIdx}.v)";
             }
 
-            // ★ A1 通解：varying 下标 + 不可向量化元素（byte/sbyte/uint/float2/结构体）的**向量读**。
-            //   旧实现退化成 lane0 标量读（`n_extract_lane_epi32((v_i).v, 0)`）——那是"每 lane 读同一个
+            // A1 通解：varying 下标 + 不可向量化元素（byte/sbyte/uint/float2/结构体）的向量读。
+            //   会退化成 lane0 标量读（`n_extract_lane_epi32((v_i).v, 0)`）——那是"每 lane 读同一个
             //   地址"的静默错解，所以整段 job 还被 `HasNonVectorizableCall` 兜底成 per-lane 标量循环。
             //   这里按元素宽度走"逐 lane 取值 + 掩码 blend"：只在语义上需要 gather 时逐 lane 读，
             //   不做跨元素错位 load（byte 元素相邻下标在内存里只差 1 字节，8 宽 load 会错位）。
@@ -583,14 +574,14 @@ namespace NativeTranspiler.Analyzer
             }
 
             // Scalar access（varying 下标 + 不可向量化元素）
-            // ⚠ 这里返回**裸标量** `baseExpr[lane0]`（无 `.v`）。
-            //   尝试过在"非下标位置"包一层 `simd_value<int>{...}` 让它 `.v`-able，实测**失败且更糟**：
+            // ⚠ 这里返回裸标量 `baseExpr[lane0]`（无 `.v`）。
+            //   尝试过在"非下标位置"包一层 `simd_value<int>{...}` 让它 `.v`-able，实测失败且更糟：
             //   - 结构体元素：`simd_value<int>{ (int)(cfgPtr[i]) }` → cannot convert 'CpuUnitConfigData' to 'int'
             //   - 结构体字段：`simd_value<int>{ (int)(cfgPtr[i]) }.FramesDeath` → 字段取在 int 包装上
             //   - 左值位置：`simd_value<int>{ (int)(velPtr[i]) } = float2(...)` → 临时量不可赋值
-            //   ⇒ **包装点选错了**：不该在"元素访问出口"包，而应在**消费点**
+            //   ⇒ 包装点选错了：不该在"元素访问出口"包，而应在消费点
             //     （条件构造 / 赋值 RHS 取 `.v` 的那几处）按需包装/取 lane0。
-            //     详见 docs §13.21 的设计修正。
+            //     详见 docs  的设计修正。
             if (indexKind >= VarKind.Varying)
             {
                 indexExpr = indexExpr.Contains(".v")
@@ -1053,9 +1044,8 @@ namespace NativeTranspiler.Analyzer
                     if (side is LiteralExpressionSyntax litExpr && litExpr.Token.Text.EndsWith("u"))
                         cmpIsUint = true;
                 }
-                // ★ fallback to SemanticModel for int type detection.
+                // fallback to SemanticModel for int type detection.
                 //   The above pattern matching only catches direct variable refs and bitwise ops,
-                //   but misses computed int expressions like `dx * dy`, `i % 3`, `i & 1`.
                 //   Use Roslyn GetTypeInfo to get the actual result type of each comparison operand.
                 if (!cmpIsInt && !cmpIsUint)
                 {
@@ -1077,7 +1067,7 @@ namespace NativeTranspiler.Analyzer
 // the variable may be recorded as int but its value is uint semantics.
 bool useUnsignedCmp = cmpIsUint;
 string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_set1_ps");
-                // ★ Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
+                // Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
                 bool rightIsHoisted = right.StartsWith("__uni_");
                 bool leftIsHoisted = left.StartsWith("__uni_");
                 if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
@@ -1134,7 +1124,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             {
                 if (anyVarying)
                 {
-                    // ★ Compile-time constant folding: false && expr → false, true && expr → expr
+                    // Compile-time constant folding: false && expr → false, true && expr → expr
                     if (left == "false" || left == "0") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
                     if (left == "true") return right;
                     if (right == "false" || right == "0") return "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
@@ -1171,7 +1161,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 return $"({left} {op} {right})";
             }
 
-            // ★ FMA detection: float a*b + c → n_fmadd_ps(a, b, c)
+            // FMA detection: float a*b + c → n_fmadd_ps(a, b, c)
             //   显式生成 FMA 融合，回收 clang 因 int→float 转换（n_cvtepi32_ps）而
             //   未收缩 mul+add 的那条指令（C12 acc*(j+1)+B[i] 等模式）。
             if (anyVarying && op == "+" && binary.Left is BinaryExpressionSyntax lmul
@@ -1211,11 +1201,8 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 _ => "+"
             };
 
-            // ★ uint right shift: C# `uint >> n` is logical (zero-extended), but C++
+            // uint right shift: C# `uint >> n` is logical (zero-extended), but C++
             //   `int >> n` is arithmetic (sign-extended). Detect uint left operand and
-            //   generate n_srli_epi32 (logical shift) instead of `>>` (arithmetic shift).
-            //   Without this, large uint values (> INT_MAX) produce wrong results.
-            //   Note: SemanticModel returns Int32 for uint locals in source generator context,
             //   so we use the variable analyzer's CSharpType field instead.
             if (op == ">>" && anyVarying)
             {
@@ -1271,7 +1258,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
             string targetTypeStr = cast.Type.ToString();
 
-            // ★ Hoisted broadcasts are already the correct SIMD type — skip cast entirely
+            // Hoisted broadcasts are already the correct SIMD type — skip cast entirely
             if (inner.StartsWith("__uni_"))
                 return inner;
 
@@ -1349,9 +1336,8 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
 
         /// <summary>
         /// 自增/自减 → 增广赋值（<c>x++</c> / <c>++x</c> ⇒ <c>x += 1</c>）。
-        /// 复用 TranslateAssignment 的掩码 + 形状分派（varying 逐 lane scatter / 连续向量 store）。
-        /// ⚠ 只保证**语句用法**的语义（旧值被丢弃）。C# 的 <c>x++</c> 作为表达式时求值为旧值，
-        ///   本实现返回新值 —— 该形态在 job 代码中不存在；一旦出现会走下面的兜底标记，不会静默算错。
+        /// ⚠ 只保证语句用法的语义（旧值被丢弃）。C# 的 <c>x++</c> 作为表达式时求值为旧值，
+        /// 本实现返回新值 —— 该形态在 job 代码中不存在；一旦出现会走下面的兜底标记，不会静默算错。
         /// </summary>
         private string TranslateIncrementExpression(ExpressionSyntax operand, string op)
         {
@@ -1364,7 +1350,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 string idxExpr = TranslateExpression(ea.ArgumentList.Arguments[0].Expression);
                 VarKind idxKind = _varAnalyzer.ClassifyExpression(ea.ArgumentList.Arguments[0].Expression);
                 // 数组字段 `X_ptr` 已是目标元素类型的指针，直接用；
-                // 裸指针变量本身是指针，同样直接用（**不要**转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
+                // 裸指针变量本身是指针，同样直接用（不要转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
                 string elemPtr = info.Base;
                 bool narrowed = _currentMask != "simd_mask::all_true()";
                 string guard = narrowed ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)" : "";
@@ -1499,15 +1485,14 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
             string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
 
-            // ★ 非 float/int 元素（byte/sbyte/float2/结构体…）：向量 store 的 intrinsic 签名只覆盖
-            //   float*/int*（A1）。这里统一走"逐 lane 标量写"，按元素类型正确转换指针，
+            // 非 float/int 元素（byte/sbyte/float2/结构体…）：向量 store 的 intrinsic 签名只覆盖
+            //   float*/int*。这里统一走"逐 lane 标量写"，按元素类型正确转换指针，
             //   掩码语义与其他路径一致（不再生成 `(int*)(byte_ptr)[i] = <float2>` 这类非法赋值）。
             bool isNarrowElem = elemType != "float" && elemType != "int";
 
-            // ★ NT-12（Critical）：复合赋值必须"读-改-写"。
-            //   旧实现完全忽略 `assign.OperatorToken`，按普通 store 发 `addr = rhs`
-            //   ⇒ `m[i] |= x` 变成**覆盖写**（`+=` / `&=` / `<<=` 等同样中招），静默错值。
-            //   这里统一走逐 lane 标量 load-modify-store（掩码感知）：不试图为下面 4 个向量 store
+            // NT-12（Critical）：复合赋值必须"读-改-写"。
+            //   若完全忽略 `assign.OperatorToken`，按普通 store 发 `addr = rhs`
+            //   ⇒ `m[i] |= x` 变成覆盖写（`+=` / `&=` / `<<=` 等同样中招），静默错值。
             //   分支各写一份复合版本，正确性优先、代价是复合赋值不走向量 intrinsic。
             string compoundOp = assign.OperatorToken.Text;
             if (compoundOp != "=")
@@ -1557,9 +1542,8 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
 
             if (idxKind >= VarKind.Varying)
                 {
-                    // ★ Conditional (if/else) store: when the current mask is narrowed,
+                    // Conditional (if/else) store: when the current mask is narrowed,
                     //   ANY store (contiguous or not, uniform or varying rhs) must be
-                    //   masked per-lane — otherwise branch bodies write unconditionally
                     //   and later branches overwrite earlier ones.
                     bool inNarrowedContext = _currentMask != "simd_mask::all_true()";
                     if (inNarrowedContext)
@@ -1571,15 +1555,15 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                             rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                         else
                             rhsSimdExpr = rhsExpr;
-                        // ★ E7 int→float store fix: use n_extract_lane_i2f for numeric conversion
+                        // E7 int→float store fix: use n_extract_lane_i2f for numeric conversion
                         //   (extract int lane, convert to float — not bit reinterpretation)
                         string extractExpr = (elemType == "float" && IsInt32Expr(assign.Right))
                             ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)"
                             : $"{extractFn}({rhsSimdExpr}.v,__l)";
                         return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
                     }
-                    // ★ NT-01(a)：无掩码连续 store 的**前提**是"索引可证明等于 SIMD 索引变量本身"
-                    //   （`v_i`，或 `<uniform> + v_i` 且批内循环变量已知）。旧代码在**任意** varying
+                    // NT-01(a)：无掩码连续 store 的前提是"索引可证明等于 SIMD 索引变量本身"
+                    //   （`v_i`，或 `<uniform> + v_i` 且批内循环变量已知）。在任意 varying
                     //   下标 + 均匀 RHS 时都发 `n_store_ps(basePtr + offset, set1(rhs))`（假定连续），
                     //   例如 `Out[index * 2] = 1.0f;` 会把 [offset, offset+W) 整段写成一个值（静默错值）。
                     //   先做连续性判定，再决定 store 形态；否则回退逐 lane 掩码 scatter。
@@ -1602,12 +1586,12 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                     }
                     else if (idxExpr == _simdIndexVar && _batchOffsetVar != SimdControlFlowGenerator.UnknownBatchOffset)
                     {
-                        // ★ NT-01(b)：批内循环变量未登记（IJobChunk/IJobEntity 的 AutoSIMD 批路径，
+                        // NT-01(b)：批内循环变量未登记（IJobChunk/IJobEntity 的 AutoSIMD 批路径，
                         //   见 CppJobGenerator 的两处 `batchLoopVar: ""`）时索引就是 `v_i` ⇒ 连续，
-                        //   但偏移必须是**外层批循环的当前位置**（调用点传 `si`）。
+                        //   但偏移必须是外层批循环的当前位置（调用点传 `si`）。
                         //   传 `"0"` 会让每个 simd 组都重写 [0,W)，元素 ≥W 永远写不到。
                         //
-                        // ★ 收尾加固：`UnknownBatchOffset` 是**单 IJob 路径**（用户循环的起点不属于
+                        // 收尾加固：`UnknownBatchOffset` 是单 IJob 路径（用户循环的起点不属于
                         //   生成器可知的批循环，见 CppJobGenerator.GenerateSingleFunctionStandard）的哨兵 ——
                         //   此时"v_i 相对基址从 0 开始"无法证明 ⇒ 不发无掩码连续 store，退回逐 lane
                         //   scatter（`basePtr[extract(idxExpr,lane)]`，永远按真实下标写）。
@@ -1618,7 +1602,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
 
                     if (contOffset != null)
                     {
-                        // ★ when _returnedMaskVar is set (batch body has `return`), use per-lane
+                        // when _returnedMaskVar is set (batch body has `return`), use per-lane
                         //   masked store to avoid overwriting lanes that already returned with their result.
                         //   Only write to non-returned lanes (complement of _returnedMaskVar).
                         if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
@@ -1634,7 +1618,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                         // 均匀 RHS + 连续索引：整宽 set1 + 无掩码 store（真正的向量化路径）
                         if (rhsKind < VarKind.Varying)
                             return $"{storeFnScalar}({basePtr} + {contOffset}, {setFnScalar}({rhsExpr}))";
-                        // ★ int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
+                        // int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
                         if (elemType == "float" && IsInt32Expr(assign.Right))
                             return $"{storeFn}({basePtr} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
                         return $"{storeFn}({basePtr} + {contOffset}, {rhsExpr}.v)";
@@ -1659,7 +1643,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
 
         private string TranslateAssignment(AssignmentExpressionSyntax assign)
         {
-            // ★ UnsafeUtility.ArrayElementAsRef<T>(ptr, i) = value
+            // UnsafeUtility.ArrayElementAsRef<T>(ptr, i) = value
             //   之前完全无处理 → 原样吐 C#（A4）。
             if (TryGetArrayElementAsRef(assign.Left) is { } asRefTarget)
                 return TranslateArrayElementAsRefStore(asRefTarget.ElemType, asRefTarget.PtrExpr, asRefTarget.IdxExpr, assign);
@@ -1675,7 +1659,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             if (id != null && TryEmitElementWrite(assign, elemAccess, id) is { } elementWrite)
                 return elementWrite;
 
-            // ★ Struct NativeArray field assignment: structArray[idx].field = rhs
+            // Struct NativeArray field assignment: structArray[idx].field = rhs
             //   Handle positions[i].Value = expr; pattern with per-lane field scatter.
             if (assign.Left is MemberAccessExpressionSyntax ma
                 && ma.Expression is ElementAccessExpressionSyntax ea2
@@ -1736,7 +1720,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 }
             }
 
-            // ★ Deferred struct local field assignment: structLocal.field = rhs
+            // Deferred struct local field assignment: structLocal.field = rhs
             //   Where structLocal = structArray[idx]; decompose into per-lane field scatter
             //   Example: position.Value = expr  →  positions_ptr[v_i].Value = expr (per-lane scatter)
             if (assign.Left is MemberAccessExpressionSyntax ma3
@@ -1766,7 +1750,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 return $"{arrName3}_ptr[{idxExpr3}].{fieldName3} {op3} {rhsExpr3}";
             }
 
-            // ★ Struct field sub-field assignment: array[idx].field1.field2 = rhs
+            // Struct field sub-field assignment: array[idx].field1.field2 = rhs
             //   Handle positions[i].Value.x = expr; pattern per-lane field scatter.
             if (assign.Left is MemberAccessExpressionSyntax ma5
                 && ma5.Expression is MemberAccessExpressionSyntax ma6
@@ -1796,7 +1780,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 }
             }
 
-            // ★ Struct field sub-field assignment (two-level member access on struct NativeArray):
+            // Struct field sub-field assignment (two-level member access on struct NativeArray):
             //   Positions[i].Value.x = expr; → per-lane field scatter with .x() method syntax
             if (assign.Left is MemberAccessExpressionSyntax _ma5
                 && _ma5.Expression is MemberAccessExpressionSyntax _ma6
@@ -1829,10 +1813,9 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             string rhs = TranslateExpression(assign.Right);
             string op = assign.OperatorToken.Text;
 
-            // ★ struct-varying local 重赋值刷新（#13）：structLocal = array[other_idx] 后，
+            // struct-varying local 重赋值刷新：structLocal = array[other_idx] 后，
             //   _structVaryingLocals 里的 (arrName, elemType, indexExpr) 必须同步更新，
             //   否则后续 structLocal.field 访问仍用旧 indexExpr → gather/scatter 地址错误。
-            //   仅整体重赋值（左值是纯 identifier）适用；字段赋值（structLocal.field = x）
             //   已在上方 scatter 分支处理，不在此刷新。
             if (op == "=" && assign.Left is IdentifierNameSyntax svlId
                 && _structVaryingLocals.ContainsKey(svlId.Identifier.Text))
@@ -1870,7 +1853,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 }
             }
 
-            // ★ Reduction folding: return n_min_ps/n_max_ps instead of blend
+            // Reduction folding: return n_min_ps/n_max_ps instead of blend
             if (op == "=" && _foldReduceFn != null)
             {
                 string fn = _foldReduceFn;
@@ -1879,7 +1862,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 return $"{lhs} = simd_value<float>{{ {fn}({lhs}.v, {rhs}.v) }}";
             }
 
-            // ★ CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
+            // CRITICAL: inside mask-narrowed context (if/else), SIMD assignment to a varying
             //   variable must use blend() to preserve inactive lanes. 通解：纯赋值（=）与复合
             //   赋值（+= -= *= /= %= &= |= ^= <<= >>=）都要掩码——否则复合赋值会对所有 lane
             //   无条件执行，破坏 if/else 的 lane 隔离。
@@ -1978,7 +1961,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
         /// Translate field access on a deferred struct local.
         /// The local was initialized from structArray[idx]; field access becomes
         /// a field-level gather with struct stride (ISPC-style).
-        /// Handles: structLocal.fieldName  (where structLocal = structArray[idx])
+        /// Handles: structLocal.fieldName (where structLocal = structArray[idx])
         /// </summary>
         private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string idxExpr)
         {
@@ -2005,8 +1988,8 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
         /// </summary>
         private static bool IsStructNativeArrayType(string elemCppType)
         {
-            // ⚠ 语义是"该类型能否用 `T(v)` 构造"（float2/int2/用户结构体），**不是**"不是标量"。
-            //   旧实现用 `!= "float" && != "int"` 判定，把 unsigned char/signed char/uint 等
+            // ⚠ 语义是"该类型能否用 `T(v)` 构造"（float2/int2/用户结构体），不是"不是标量"。
+            //   用 `!= "float" && != "int"` 判定，把 unsigned char/signed char/uint 等
             //   标量误判成构造类型，生成 `unsigned char(0)` —— C++ 读成 `unsigned` + `char(0)`，
             //   报 "expected '(' for function-style cast or type construction"。
             string leaf = elemCppType;
@@ -2024,9 +2007,9 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
         }
 
         /// <summary>
-        /// 标识符是否是 NativeArray **字段**（需要 `{name}_ptr` 才能得到裸指针）。
+        /// 标识符是否是 NativeArray 字段（需要 `{name}_ptr` 才能得到裸指针）。
         /// 只用名字 + `_jobStruct.GetMembers` 解析 —— 源生成器里 SemanticModel 对名字也不可靠。
-        /// 局部指针变量（如 <c>int* hpPtr = (int*)HP.GetUnsafePtr();</c>）**本身就是指针**，
+        /// 局部指针变量（如 <c>int* hpPtr = (int*)HP.GetUnsafePtr();</c>）本身就是指针，
         /// 不能再套 `_ptr` —— 否则生成 `hpPtr_ptr[v_i]` 这个从未声明的符号。
         /// </summary>
         private bool IsNativeArrayField(IdentifierNameSyntax id)
@@ -2068,9 +2051,7 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
             return $"{cppType}()";
         }
 
-        // ================================================================
         // Utilities
-        // ================================================================
 
         /// <summary>
         /// 提取 SIMD 值中的 x/y 分量。

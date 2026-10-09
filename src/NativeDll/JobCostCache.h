@@ -34,7 +34,7 @@ namespace JobSystem
     // 本头早于 JobSystemInternal.h 中该 extern 的正式声明被包含 ⇒ 前置声明必须在此可见。
     extern bool g_jobCostCacheVerbose;
 
-    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认**开**）的生效证据计数（定义在 JobSystem.cpp）──
+    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认开）的生效证据计数（定义在 JobSystem.cpp）──
     // 判据：`flips` 必须 > 0；`nosample` 相对有效调用若占绝大多数 ⇒ F6 事实上是死的
     //（判据链会在无键 / 无成本样本 / 迟滞不翻转三处静默退化，只看耗时无法区分）。
     extern std::atomic<uint64_t> g_claimGeomNoKey;       // funcHash==0（表命中等，不问 F6）
@@ -59,7 +59,7 @@ namespace JobSystem
     constexpr double kMemBoundRatio = 1.15;
 
     // ── 健壮分类（`ENTJOY_JCC_ROBUST=1`，进程启动读一次；默认关 ⇒ 关闭时逐位不变）──
-    // 每类环形窗取**中位数**（抢占只增不减 ⇒ 中位稳健），样本够 + 冷却到点才判，
+    // 每类环形窗取中位数（抢占只增不减 ⇒ 中位稳健），样本够 + 冷却到点才判，
     // 双向（含 unknown→learned）带迟滞；mem-bound 期周期探针保证还能采到新证据。
     constexpr int kRobustWindow = 24;
     constexpr int kRobustMinSamples = 8;
@@ -77,12 +77,12 @@ namespace JobSystem
         kModeMemBound = 2   // bandwidth/latency-bound：固定 tpw 分块
     };
 
-    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认**开**）：**按 job 的认领几何** ──
+    // ── F6（`ENTJOY_CLAIM_ADAPT`，默认开）：按 job 的认领几何 ──
     // 同一条静态几何对不同 job 可能反号，故与 chunk 大小一样只能按 job 定。
-    // 判据 = JCC 已有的**每元素执行成本** EWMA + 迟滞（不做探索）：
-    //   cost < kClaimSliceEnterNs(8ns)  ⇒ 由共享内存 RMW / 每项固定成本主导 ⇒ **切片**（散开同时刻的访问）
-    //   cost > kClaimSliceExitNs(12ns)  ⇒ 由计算与空间复用主导 ⇒ **交错**（保持 worker 邻近，吃邻居/cache 复用）
-    // 区间内保持现状；无样本（cost==0，例如对齐档表命中时 JCC 不学）⇒ 回退**交错**（默认档）。
+    // 判据 = JCC 已有的每元素执行成本 EWMA + 迟滞（不做探索）：
+    //   cost < kClaimSliceEnterNs(8ns)  ⇒ 由共享内存 RMW / 每项固定成本主导 ⇒ 切片（散开同时刻的访问）
+    //   cost > kClaimSliceExitNs(12ns)  ⇒ 由计算与空间复用主导 ⇒ 交错（保持 worker 邻近，吃邻居/cache 复用）
+    // 区间内保持现状；无样本（cost==0，例如对齐档表命中时 JCC 不学）⇒ 回退交错（默认档）。
     // 观测量与 chunk 学习共用同一个 per-job EWMA（不新增学习器、不与 JCC 抢槽）。
     constexpr double kClaimSliceEnterNs = 8.0;
     constexpr double kClaimSliceExitNs = 12.0;
@@ -131,7 +131,7 @@ namespace JobSystem
         }();
         bool IsRobust() const noexcept { return robustMode; }
 
-        // ── **每 job 槽索引必须散列，不能用低位** ──
+        // ── 每 job 槽索引必须散列，不能用低位 ──
         // 内核键 = 函数在模块内的 RVA，函数按 16 字节对齐 ⇒ 键的低 4 位恒为 0，
         // `key & (kJobCostSlots-1)` 实际只用位 4..7，多个 job 会共享同一槽并互相踩
         //（`slotHash` 校验使被踩的 job 读到 0 = 无样本 ⇒ JCC 学不到它，退回 tpw=4 兜底）。
@@ -162,8 +162,8 @@ namespace JobSystem
                     coarseRingNs[i][j] = 0;
                 }
             }
-            // ⚠ F6 的独立表是 **kClaimGeomSlots(=128) < kJobCostSlots(=256)**，必须单独清，
-            //   且**绝不能塞进上面那个 0..kJobCostSlots-1 的循环** —— 那是越界写，会踩到相邻成员/全局量。
+            // ⚠ F6 的独立表是 kClaimGeomSlots(=128) < kJobCostSlots(=256)，必须单独清，
+            //   且绝不能塞进上面那个 0..kJobCostSlots-1 的循环 —— 那是越界写，会踩到相邻成员/全局量。
             for (uint32_t i = 0; i < kClaimGeomSlots; ++i)
             {
                 claimGeomState[i].store(0, std::memory_order_relaxed);
@@ -172,7 +172,7 @@ namespace JobSystem
         }
 
         // ---- F6：认领几何决策（提交侧调用；`funcHash` = JCC 的 per-job 键，0 = 无键）----
-        // 返回 true ⇒ 本批走**切片认领**。见文件头 kClaimSliceEnterNs/ExitNs 的判据说明。
+        // 返回 true ⇒ 本批走切片认领。见文件头 kClaimSliceEnterNs/ExitNs 的判据说明。
         bool ClaimSlicedWanted(uint32_t funcHash, bool globalSliced) noexcept
         {
             if (funcHash == 0)
@@ -180,8 +180,8 @@ namespace JobSystem
                 g_claimGeomNoKey.fetch_add(1, std::memory_order_relaxed);
                 return globalSliced;
             }
-            // 判据取**已学到的**每元素成本 —— 细样本优先，**粗样本兜底**：内批被表/强制档钉住时
-            //   `UpdatePerElemCost` 只写 `perElemCoarseNs`，粗样本是该档下**唯一存在**的样本。
+            // 判据取已学到的每元素成本 —— 细样本优先，粗样本兜底：内批被表/强制档钉住时
+            //   `UpdatePerElemCost` 只写 `perElemCoarseNs`，粗样本是该档下唯一存在的样本。
             // 语义仍然"按 job"（键 = 内核 RVA），且不参与 batch 选择 ⇒ 对齐档的粒度契约不破。
             double cost = GetPerElemCost(funcHash);         // 0 = 未学到（含表命中旁路 JCC 的情形）
             if (cost <= 0.0) cost = GetCoarseCost(funcHash);
@@ -283,7 +283,7 @@ namespace JobSystem
 
         // 更新 EWMA（α=0.75，双向对称）。仅由退役路径在 flag 开启时调用。
         // 无竞态：CAS 循环（多 worker 同槽并发不丢更新）。
-        //   perElemNs   ：本次 batch 的每元素**执行跨度**成本（execSpan/N）
+        //   perElemNs   ：本次 batch 的每元素执行跨度成本（execSpan/N）
         //   tileCount   ：本次 batch 的 tile 数（≈ 并行粒度）
         //   targetCoarse：本次是否是粗粒度（tpw）分块（调度侧判定后传入）
         void UpdatePerElemCost(uint32_t funcHash, double perElemNs,
@@ -330,7 +330,7 @@ namespace JobSystem
             return (t % kRobustProbeInterval) == 0;
         }
 
-        // 未分类期**交错**探针：奇偶交替放行"公式/细"与"tpw/粗"。
+        // 未分类期交错探针：奇偶交替放行"公式/细"与"tpw/粗"。
         // 没有它，重 job 的粗样本会永远停在两阶段学习的 3 个上 ⇒ 够不到 kRobustMinSamples
         // ⇒ mode 永为 unknown ⇒ 永远走公式（永远细粒度），使 Melee 受损而收益被抵消。
         bool ParityProbe(uint32_t funcHash) noexcept

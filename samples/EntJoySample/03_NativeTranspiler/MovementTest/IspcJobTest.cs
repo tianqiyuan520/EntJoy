@@ -38,31 +38,31 @@
 //            Console.WriteLine($"实体数: {ENTITY_COUNT:N0}, 迭代: {ITERATIONS}");
 //            Console.WriteLine();
 
-//            // ---- 1. 标量 reference（单次迭代）----
+//            // 1. 标量 reference（单次迭代）
 //            initialPos.CopyTo(refPos);
 //            initialVel.CopyTo(refVel);
 //            MoveEntitiesTest.RunScalar(refPos, refVel, ENTITY_COUNT);
 //            Console.WriteLine("标量 reference 完成");
 
-//            // ---- 2. ISPC Job（单次迭代）----
+//            // 2. ISPC Job（单次迭代）
 //            initialPos.CopyTo(ispcJobPos);
 //            initialVel.CopyTo(ispcJobVel);
 //            MoveEntitiesTest.RunNativeIspc(ispcJobPos, ispcJobVel, ENTITY_COUNT);
 //            Console.WriteLine("ISPC Job 完成");
 
-//            // ---- 3. ISPC Static（单次迭代）----
+//            // 3. ISPC Static（单次迭代）
 //            initialPos.CopyTo(ispcStaticPos);
 //            initialVel.CopyTo(ispcStaticVel);
 //            NativeTranspiler.Bindings.NativeExports.RunNativeIspcStatic(ispcStaticPos, ispcStaticVel, ENTITY_COUNT);
 //            Console.WriteLine("ISPC Static 完成");
 
-//            // ---- 验证 ----
+//            // 验证
 //            Console.WriteLine();
 //            Console.WriteLine("--- 正确性验证（单次迭代）---");
 //            MoveEntitiesTest.VerifyResults(refPos, ispcJobPos, "ISPC Job");
 //            MoveEntitiesTest.VerifyResults(refPos, ispcStaticPos, "ISPC Static");
 
-//            // ---- 多次迭代测试（累加 100 次）----
+//            // 多次迭代测试（累加 100 次）
 //            Console.WriteLine();
 //            Console.WriteLine("--- 100 次迭代累加测试 ---");
 
@@ -89,7 +89,7 @@
 //            MoveEntitiesTest.VerifyResults(refPos, ispcJobPos, "ISPC Job x100");
 //            MoveEntitiesTest.VerifyResults(refPos, ispcStaticPos, "ISPC Static x100");
 
-//            // ---- 不同 batchSize 测试 ----
+//            // 不同 batchSize 测试
 //            Console.WriteLine();
 //            Console.WriteLine("--- 不同 batchSize 测试（单次迭代，每个 batchSize 使用独立 reference）---");
 
@@ -126,7 +126,7 @@
 //                batchRefVel.Dispose();
 //            }
 
-//            // ---- 单线程调度测试（batchSize = ENTITY_COUNT）----
+//            // 单线程调度测试（batchSize = ENTITY_COUNT）
 //            Console.WriteLine();
 //            Console.WriteLine("--- 单 batch 调度测试（batchSize = ENTITY_COUNT）---");
 //            {
@@ -156,7 +156,7 @@
 //                singleRefVel.Dispose();
 //            }
 
-//            // ---- 直接调用 DllImport 测试（绕过 JobSystem）----
+//            // 直接调用 DllImport 测试（绕过 JobSystem）
 //            Console.WriteLine();
 //            Console.WriteLine("--- 直接 DllImport 调用测试 ---");
 //            {
@@ -171,7 +171,7 @@
 
 //                unsafe
 //                {
-//                    // ★ 使用 GetUnsafePtr() 获取 NativeArray 的真实缓冲区指针，而非 ToArray() 的副本
+//                    // 使用 GetUnsafePtr() 获取 NativeArray 的真实缓冲区指针，而非 ToArray() 的副本
 //                    float2* posPtr = (float2*)ispcJobPos.GetUnsafePtr();
 //                    float2* velPtr = (float2*)ispcJobVel.GetUnsafePtr();
 

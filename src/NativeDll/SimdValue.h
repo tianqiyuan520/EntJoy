@@ -248,9 +248,9 @@ struct simd_value<int> {
         return simd_value<float>{ n_div_ps(n_set1_ps(a), n_cvtepi32_ps(b.v)) };
     }
 
-    // ★ 隐式 int→float 提升（通解）：AutoSIMD 把 uniform int 循环变量 broadcast 成
-    //   simd_value<int>，再与 simd_value<float> 混合（A[i]*dx、dx+C[i]、dx<A[i] 等）。
-    //   一条隐式转换覆盖所有混合算术/比较，优于逐个运算符重载。
+    // 隐式 int→float 提升：AutoSIMD 把 uniform int 循环变量 broadcast 成 simd_value<int>，再与
+    // simd_value<float> 混合（A[i]*dx、dx+C[i]、dx<A[i] 等）。一条隐式转换覆盖所有混合算术/比较，
+    // 优于逐个运算符重载。
     operator simd_value<float>() const { return simd_value<float>{ n_cvtepi32_ps(v) }; }
 
     // Integer division (no native SIMD instruction, per-lane fallback)
@@ -283,14 +283,9 @@ struct simd_value<int> {
     friend simd_value operator|(simd_value a, simd_value b) { return simd_value{ n_or_epi32(a.v, b.v) }; }
     friend simd_value operator^(simd_value a, simd_value b) { return simd_value{ n_xor_epi32(a.v, b.v) }; }
 
-    // Shift: >> / <<（AutoSIMD LCG 迭代用）
-    // ★ Arithmetic shift right (sign-extends) to match C# `>>` on signed int.
-    //   n_srli_epi32 (logical) zero-fills the top bits — wrong for negative values (EC3).
+    // Shift: >> / <<（AutoSIMD LCG 迭代用）。算术右移对应 C# `int >>`（符号扩展，n_srai_epi32），
+    // 逻辑右移对应 C# `uint >>`（零填充，n_srli_epi32）：只留算术版会让持 uint 值的向量位移出错。
     friend simd_value operator>>(simd_value a, int shift) { return simd_value{ n_srai_epi32(a.v, shift) }; }
-    // ★ Logical (unsigned) shift right: zero-fills top bits, matches C# `uint >> n`.
-    //   C# `uint x >> 3` is logical shift; `int x >> 3` is arithmetic shift.
-    //   Without this overload, `v_x >> 3` uses arithmetic shift even when v_x holds uint
-    //   values, producing wrong results for large uint values (S6 LCG verification bug).
     friend simd_value operator>>(simd_value a, unsigned int shift) { return simd_value{ n_srli_epi32(a.v, shift) }; }
     friend simd_value operator<<(simd_value a, int shift) { return simd_value{ n_slli_epi32(a.v, shift) }; }
 
@@ -358,8 +353,8 @@ inline simd_value<int> simd_mod_u32(simd_value<int> x, unsigned int d) {
     // Extract lanes, compute unsigned modulo, pack back
     int tmp[NSIMD_WIDTH];
     x.store(tmp);
-    // ★ 禁向量化：clang 会把这段标量取模循环向量化回 SIMD（uint 取模模拟超长），
-    //   在 16-wide (AVX512) 下导致优化爆炸（C08 编译 3 分钟+）。
+    // 必须禁向量化：clang 会把这段标量取模循环向量化回 SIMD（uint 取模模拟超长），
+    // 在宽向量下导致编译爆炸。
     #pragma clang loop vectorize(disable)
     for (int i = 0; i < NSIMD_WIDTH; i++)
         tmp[i] = (int)((unsigned int)tmp[i] % d);

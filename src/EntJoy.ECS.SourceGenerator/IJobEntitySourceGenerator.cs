@@ -219,7 +219,7 @@ namespace EntJoy.ECS.SourceGenerator
             // 取 Execute 方法体，执行"managed 源码级内联"：
             //   形参 p/v (in/ref 组件)  ->  __c{i}[__idx]
             //   Job 自定义字段 (DeltaTime) -> Job.DeltaTime （内联进适配器后字段在 Job 字段里）
-            //   this -> Job ；void return; -> continue; （否则第一实体后整个 Execute 退出，破坏循环）
+            //   this -> Job；void return; -> continue; （否则第一实体后整个 Execute 退出，破坏循环）
             if (execute.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not MethodDeclarationSyntax ms ||
                 ms.Body == null)
                 return "";

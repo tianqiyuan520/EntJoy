@@ -312,7 +312,7 @@
 //            _positionsRef.CopyTo(_positionsNativeIspc);
 //            _velocitiesRef.CopyTo(_velocitiesNativeIspc);
 
-//            // ----- 标量基准（也作为参考结果） -----
+//            // 标量基准（也作为参考结果）
 //            double totalScalar = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
 //            {
@@ -329,7 +329,7 @@
 //            _positionsScalar.CopyTo(_positionsRef);
 //            _velocitiesScalar.CopyTo(_velocitiesRef);
 
-//            // ----- Parallel.For 基准 -----
+//            // Parallel.For 基准
 //            double totalParallel = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
 //            {
@@ -342,7 +342,7 @@
 //            Console.WriteLine();
 //            double avgParallel = totalParallel / ITERATIONS;
 
-//            // ----- JobSystem 基准 -----
+//            // JobSystem 基准
 //            double totalJob = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
 //            {
@@ -355,7 +355,7 @@
 //            Console.WriteLine();
 //            double avgJob = totalJob / ITERATIONS;
 
-//            // ----- NativeTranspile C++ 基准 -----
+//            // NativeTranspile C++ 基准
 //            double totalNativeCpp = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
 //            {
@@ -368,7 +368,7 @@
 //            Console.WriteLine();
 //            double avgNativeCpp = totalNativeCpp / ITERATIONS;
 
-//            // ----- NativeTranspile ISPC 基准 -----
+//            // NativeTranspile ISPC 基准
 //            double totalNativeIspc = 0;
 //            for (int i = 0; i < ITERATIONS; i++)
 //            {
@@ -381,7 +381,7 @@
 //            Console.WriteLine();
 //            double avgNativeIspc = totalNativeIspc / ITERATIONS;
 
-//            // ----- 结果 -----
+//            // 结果
 //            Console.WriteLine($"\n--- 结果 ---");
 //            Console.WriteLine($"C# 单线程标量:              {avgScalar,8:F3} ms");
 //            Console.WriteLine($"C# Parallel.For:             {avgParallel,8:F3} ms (加速比 {avgScalar / avgParallel:F2}x)");
@@ -389,7 +389,7 @@
 //            Console.WriteLine($"NativeTranspile C++:         {avgNativeCpp,8:F3} ms (加速比 {avgScalar / avgNativeCpp:F2}x)");
 //            Console.WriteLine($"NativeTranspile ISPC:        {avgNativeIspc,8:F3} ms (加速比 {avgScalar / avgNativeIspc:F2}x)");
 
-//            // ----- 正确性验证 -----
+//            // 正确性验证
 //            Console.WriteLine($"\n--- 正确性验证（对比标量 reference） ---");
 //            Console.WriteLine($"初始数据均来自 seed=42 的相同生成序列");
 //            VerifyResults(_positionsRef, _positionsParallel, "Parallel.For");

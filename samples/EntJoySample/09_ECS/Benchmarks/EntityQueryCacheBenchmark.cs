@@ -6,8 +6,8 @@ namespace EntJoySample.ECS
     /// <summary>
     /// 查询缓存基准：验证「共享注册表 + 增量刷新」的收益。
     /// 对比：
-    ///   1. GetOrCreateEntityQuery（共享，O(1) 查表） vs CreateEntityQuery（每次全量扫描）
-    ///   2. 结构变更后访问共享查询：增量刷新（Archetype 未变化时复用匹配集合）
+    /// 1. GetOrCreateEntityQuery（共享，O(1) 查表） vs CreateEntityQuery（每次全量扫描）
+    /// 2. 结构变更后访问共享查询：增量刷新（Archetype 未变化时复用匹配集合）
     /// </summary>
     public static unsafe class EntityQueryCacheBenchmark
     {
@@ -40,7 +40,7 @@ namespace EntJoySample.ECS
 
             var rule = new QueryBuilder().WithAll<Position, Velocity>();
 
-            // ===== 1. 查询获取：共享 vs 重复构造 =====
+            // 1. 查询获取：共享 vs 重复构造
             Console.WriteLine("--- 1. Query acquisition (same rule, repeated) ---");
 
             // 预热
@@ -73,7 +73,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"CreateEntityQuery      (fresh)  : {freshMs,10:F4} ms/iter");
             Console.WriteLine($"Speedup: {freshMs / sharedMs:F2}x  ({(freshMs > sharedMs ? "shared wins" : "no gain")})\n");
 
-            // ===== 2. 增量刷新 vs 全量重扫（结构变更后） =====
+            // 2. 增量刷新 vs 全量重扫（结构变更后）
             Console.WriteLine("--- 2. Refresh after structural change ---");
 
             var sharedQuery = world.GetOrCreateEntityQuery(rule);
@@ -104,7 +104,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"Incremental refresh ({changePerIter} new entities + query): {incMs,10:F4} ms/iter");
             Console.WriteLine($"Entity count: {before} -> {after} (delta {after - before}, expected {expectedDelta} {(after - before == expectedDelta ? "OK" : "BAD")})\n");
 
-            // ===== 3. Entity Group 反向索引：Entity → 匹配的查询集合 =====
+            // 3. Entity Group 反向索引：Entity → 匹配的查询集合
             Console.WriteLine("--- 3. Entity Group reverse index (GetGroupsOf) ---");
 
             var qPV = world.GetOrCreateEntityQuery(new QueryBuilder().WithAll<Position, Velocity>());

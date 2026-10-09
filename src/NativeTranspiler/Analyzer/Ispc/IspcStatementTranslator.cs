@@ -20,7 +20,7 @@ namespace NativeTranspiler.Analyzer
 
         protected readonly HashSet<string> _entityRefParamNames = new();
 
-        // ─── SendEvent 支持（ISPC EventBuffer 写入） ───
+        // SendEvent 支持（ISPC EventBuffer 写入）
         /// <summary>ISPC 函数中 EventBuffer 指针数组的参数名（null = 未启用 SendEvent）。</summary>
         private string? _eventBufferParamName;
 
@@ -46,7 +46,7 @@ namespace NativeTranspiler.Analyzer
         public void SetInsideUniformFor(bool value) => _insideUniformFor = value;
 
         /// <summary>
-        /// 是否在 ISPC 的**批索引循环**（`for (uniform int index = __startIndex; ...)` 或 foreach）体内。
+        /// 是否在 ISPC 的批索引循环（`for (uniform int index = __startIndex; ...)` 或 foreach）体内。
         /// 只由外部生成器在发射批索引循环时置位 —— 与"嵌套循环"区分开，用于 `return;` 的正确降级。
         /// </summary>
         protected bool _insideBatchIndexLoop;
@@ -204,8 +204,8 @@ namespace NativeTranspiler.Analyzer
         /// asLvalue=false：作为 <c>ref/out</c> 实参 → 取址 <c>&amp;((T*)ptr)[idx]</c>
         /// （只有 Interlocked 那条路径需要取址，它在 TranslateInterlockedCall 里自行拼接）。
         /// ⚠ 修正前 TranslateInvocation 走的是 asLvalue=false，导致 <c>int s = ArrayElementAsRef&lt;int&gt;(ptr, i)</c>
-        ///   生成 <c>int s = &amp;((int*)ptr)[i];</c> → ISPC 报
-        ///   「Can't convert between from pointer type "uniform int32 * varying" to non-pointer type "varying int32"」。
+        /// 生成 <c>int s = &amp;((int*)ptr)[i];</c> → ISPC 报
+        /// 「Can't convert between from pointer type "uniform int32 * varying" to non-pointer type "varying int32"」。
         /// </summary>
         private bool TranslateArrayElementAsRef(InvocationExpressionSyntax invocation,
             IMethodSymbol methodSymbol, bool asLvalue)
@@ -381,7 +381,7 @@ namespace NativeTranspiler.Analyzer
                 return;
             }
 
-            // 批索引循环（`for (uniform int index = __startIndex; ...)`）里裸写 `return;` 会退出**整个**导出函数，
+            // 批索引循环（`for (uniform int index = __startIndex; ...)`）里裸写 `return;` 会退出整个导出函数，
             // 静默丢掉剩余 index（C++ 标量路径已用 do-while 包裹修正同样的问题，见 CppJobGenerator）。
             if (_insideBatchIndexLoop)
             {
@@ -678,7 +678,7 @@ namespace NativeTranspiler.Analyzer
                 if (fullTypeName == "EntJoy.Collections.UnsafeUtility" &&
                     methodSymbol.Name == Config.ArrayElementAsRef)
                 {
-                    // 这里是**求值**上下文（赋值目标是另一条路径，ref 实参在 TranslateInterlockedCall）
+                    // 这里是求值上下文（赋值目标是另一条路径，ref 实参在 TranslateInterlockedCall）
                     if (TranslateArrayElementAsRef(invocation, methodSymbol, asLvalue: true))
                         return;
                     base.TranslateInvocation(invocation);
@@ -761,14 +761,14 @@ namespace NativeTranspiler.Analyzer
                     return;
                 }
 
-                // ── uniform 模式下的「用户 helper 返回值」桥接 ──
+                // uniform 模式下的「用户 helper 返回值」桥接
                 // uniform 循环体内所有局部量都是 uniform，而用户 helper 的 ISPC 签名返回值一律是 varying
                 // （见 IspcGenerator.Helper.cs：`static {ispcReturn} name(...)`，未加 uniform 限定）
                 // ⇒ `uniform float x = Helper(...)` 报 "Can't convert from type varying to uniform for ="。
                 // 语义：uniform 路径一次只处理一个 index，各 lane 的值完全相同 ⇒ extract(...,0) 取回即等价标量。
                 // ⚠ ISPC 的 extract() 只支持标量（struct 返回值取不了，实测报 "Unable to find any matching overload"）
                 //   ⇒ 本桥接只覆盖标量返回值；struct 返回值仍然编不过（见框架文档「已知边界」）。
-                // ⚠ 只处理**同程序集**的静态方法：EntJoy.Collections.UnsafeUtility / EntJoy.Mathematics.math 等
+                // ⚠ 只处理同程序集的静态方法：EntJoy.Collections.UnsafeUtility / EntJoy.Mathematics.math 等
                 //   框架方法位于别的程序集，已在上面各自分支处理，不能被这里包 extract（否则 extract(常量,0) 非法）。
                 if (_useUniformVars
                     && methodSymbol.IsStatic
@@ -813,9 +813,9 @@ namespace NativeTranspiler.Analyzer
         /// <summary>
         /// uniform 模式下的实参转型（helper 的 ISPC 签名一律是 varying 形态，见 IspcGenerator.Helper.cs）。
         /// - 指针形参：helper 侧是 <c>uniform T * varying</c>（varying 指针），而 uniform 上下文里的实参是
-        ///   <c>uniform T * uniform</c> ⇒ ISPC 不做隐式转换（实测 "Unable to find any matching overload"）。
-        ///   指针值广播合法（各 lane 指向同一地址）。**只动指针级，绝不动 pointee 的 uniform/varying** ——
-        ///   varying pointee 是 gang 宽连续（SOA）布局，改了会读越界（见框架文档 §5）。
+        /// <c>uniform T * uniform</c> ⇒ ISPC 不做隐式转换（实测 "Unable to find any matching overload"）。
+        /// 指针值广播合法（各 lane 指向同一地址）。只动指针级，绝不动 pointee 的 uniform/varying ——
+        /// varying pointee 是 gang 宽连续（SOA）布局，改了会读越界（见框架文档）。
         /// - 标量值形参：显式广播为 varying。
         /// - ref/out 形参：由语句级"物化槽"路径接管（见 TryTranslateUniformHelperCallWithRefOut）。
         /// </summary>
@@ -850,16 +850,16 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// uniform 模式 + ref/out 形参的用户 helper 调用桥接（框架文档 §5）：
-        /// helper 的 ISPC 签名把 ref/out 编译成 <c>varying T * uniform</c>（**gang 宽连续布局**，
+        /// uniform 模式 + ref/out 形参的用户 helper 调用桥接（框架文档）：
+        /// helper 的 ISPC 签名把 ref/out 编译成 <c>varying T * uniform</c>（gang 宽连续布局，
         /// 即 lane i 读写第 i 个元素），而 uniform 上下文里的 <c>&amp;局部量</c> 是 <c>uniform T * uniform</c>。
-        /// 两者不能靠类型转换糊过去（那会让 helper 读写该局部量**之后的栈内存**），唯一正确做法是把值物化到
+        /// 两者不能靠类型转换糊过去（那会让 helper 读写该局部量之后的栈内存），唯一正确做法是把值物化到
         /// gang 宽的槽数组：
         /// <code>
-        ///   varying T slot[1];
-        ///   slot[0].f = (varying F)x.f;      // 广播进槽（结构体逐字段）
-        ///   Helper(&amp;slot[0], ...);
-        ///   x.f = extract(slot[0].f, 0);     // 取回 uniform
+        /// varying T slot[1];
+        /// slot[0].f = (varying F)x.f; // 广播进槽（结构体逐字段）
+        /// Helper(&amp;slot[0], ...);
+        /// x.f = extract(slot[0].f, 0); // 取回 uniform
         /// </code>
         /// 语义依据：uniform 路径一次只处理一个 index，各 lane 值完全相同 ⇒ 广播 + 取 lane0 等价标量。
         /// 返回 false 表示"不是可桥接的调用"，交回原路径（保持既有行为）。
@@ -1058,9 +1058,6 @@ namespace NativeTranspiler.Analyzer
 
             // ISPC 原子是 fetch-add/sub（返回旧值），而 C# Interlocked.Add/Increment/Decrement 返回新值（add-fetch）。
             // 翻译后需补回增量使返回值语义与 C# 一致：
-            //   Increment → atomic_add_global(ptr, 1) + 1
-            //   Add       → atomic_add_global(ptr, val) + val
-            //   Decrement → atomic_subtract_global(ptr, 1) - 1
             //   CompareExchange → atomic_compare_exchange_global(ptr, comparand, value)（返回旧值，与 C# 一致）
             string ispcFunc = method.Name switch
             {
@@ -1194,11 +1191,9 @@ namespace NativeTranspiler.Analyzer
             _builder.Append(')');
         }
 
-        // ============================================================
         // 嵌套循环优化：检测外层 for + 内层 for/while 顺序访问模式，
         // 将外层转为 uniform for、内层转为 foreach、累加器加 varying、
         // 输出点加 reduce_min() 跨 lane 归约。
-        // ============================================================
 
         protected override void TranslateForStatement(ForStatementSyntax forStmt)
         {
@@ -1368,7 +1363,6 @@ namespace NativeTranspiler.Analyzer
         /// <summary>判断表达式在 foreach 上下文中是否保证为 uniform。
         /// 字面量 → 总是 uniform。
         /// 字段 → AppendUniformVariableDeclarations 在 foreach 前已复制为 uniform 局部变量。
-        /// 标识符 → 可能是局部变量（可能 varying），不是字段名则不保证 uniform。
         /// 数组/列表访问 → 必定 varying（foreach 上下文中 gather）。
         /// </summary>
         private bool IsUniformExpr(ExpressionSyntax expr)
@@ -1483,7 +1477,7 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
         {
-            // ─── SendEvent 拦截（ISPC EventBuffer 写入） ───
+            // SendEvent 拦截（ISPC EventBuffer 写入）
             if (_eventBufferParamName != null &&
                 exprStmt.Expression is InvocationExpressionSyntax invocation &&
                 TryTranslateSendEvent(invocation))
@@ -1536,7 +1530,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        // ─── SendEvent 翻译（ISPC EventBuffer 写入） ───
+        // SendEvent 翻译（ISPC EventBuffer 写入）
 
         /// <summary>
         /// 检测 world.SendEvent&lt;T&gt;(new T { ... }) 调用，生成 ISPC EventBuffer 写入代码。
@@ -1556,7 +1550,7 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // 情况 2：xxx.SendEvent<T>(...) — MemberAccess 链（EventBus.SendEvent / World.SendEvent）
+            // 情况 2：xxx.SendEvent<T>(...) — MemberAccess 链（SystemAPI.SendEvent / World.SendEvent）
             if (invocation.Expression is MemberAccessExpressionSyntax mac
                 && mac.Name is GenericNameSyntax genericName
                 && genericName.Identifier.Text == Config.SendEvent
@@ -1633,18 +1627,11 @@ namespace NativeTranspiler.Analyzer
             string bufExpr = $"((uniform __EntJoyEventBuffer* uniform*){bufVar})[{typeIndex}]";
 
             // ISPC SendEvent 正确性要点（实测验证）：
-            //  1) 原子槽分配用 atomic_add_global —— ISPC 的 atomic_add_global 是 fetch-add 语义，
-            //     直接返回旧值（= 槽位索引）。⚠ 不要像 C++ 宏 INTERLOCKED_ADD_AND_FETCH32 那样减 1！
-            //     C++ 宏是 add-fetch（返回新值）需减 1 得旧值；ISPC 返回旧值，减 1 会导致 idx=-1 越界写。
-            //  2) SIMD foreach 下 atomic_add_global(uniform ptr, varying val) 对每个 active lane 独立原子，
-            //     返回各自唯一旧值 → 每个 lane 拿唯一槽位（实测 PASS）。
-            //  3) 写入必须用 uniform struct 指针 + 命名字段（AoS 布局）：
-            //     uniform T* 的索引步长 = sizeof(uniform T)，由 ISPC 编译器按 struct 定义自动计算
-            //     （含嵌套 struct 对齐）—— 与 C# Marshal.SizeOf<T>() 的 Sequential 布局一致。
+            // 1) 原子槽分配用 atomic_add_global —— ISPC 的 atomic_add_global 是 fetch-add 语义，
             //     ⚠ 不要用 varying struct 指针（SoA 布局，sizeof = lanes×元素）会越界写坏内存；
             //     ⚠ 不要手写 int 槽位偏移（stride/4 + fieldOffset/4）——那依赖"事件类型全 4B 字段"
             //        + "Entity 恰好两 int"两个脆弱假设，加 double/bool/long 字段即错位。
-            //  4) uniform 局部变量不能声明在 divergent（varying 条件）块内 → SendEvent 代码全部内联表达式。
+            // 4) uniform 局部变量不能声明在 divergent（varying 条件）块内 → SendEvent 代码全部内联表达式。
             AppendIndent();
             _builder.AppendLine($"varying int {tempVar}_idx = atomic_add_global({bufExpr}->count, (varying int)1);");
 
@@ -1675,7 +1662,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     // 非对象创建参数：无法逐字段写（字段名未知），不支持。
                     // ⚠ 必须发 __ENTJOY_UNSUPPORTED 标记，不能只写普通注释：构建期
-                    //   NativeCompileTask.CheckGeneratedMarkers 只会让**带标记**的产物构建失败；
+                    //   NativeCompileTask.CheckGeneratedMarkers 只会让带标记的产物构建失败；
                     //   只写注释 = ISPC 后端静默丢掉这次事件写入（审计"marker 缺口"的最后一处）。
                     _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_SendEventNonObjectCreationArg");
                 }

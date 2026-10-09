@@ -17,7 +17,7 @@ struct ChunkJobData {
     int     requiredComponentCount;  // requiredComponentArrays length
     void**  sharedValuePtrs;     // SharedComponent blittable 值指针 [sharedValueCount]
     int     sharedValueCount;    // sharedValuePtrs 数量，0 = 无 shared 组件
-    void**  requiredEnableBitMaps; // P1-6：与 requiredComponentArrays **同序**的逐组件 enable 位图（uint64 字数组，元素可为 nullptr）
+    void**  requiredEnableBitMaps; // 与 requiredComponentArrays 同序的逐组件 enable 位图（uint64 字数组，元素可为 nullptr）
 };
 
 // NativeTranspile 轻量 Chunk 数据结构

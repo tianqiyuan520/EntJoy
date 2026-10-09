@@ -17,9 +17,7 @@ namespace NativeTranspiler.Analyzer
     /// </summary>
     public partial class SimdControlFlowGenerator
     {
-        // ================================================================
         // ForStatement → for(iter) count-loop
-        // ================================================================
 
         /// <summary>用 Roslyn 求表达式的 int 常量值（识别 -1、常量折叠等，比 int.TryParse 强）。</summary>
         private int? TryGetIntConst(ExpressionSyntax? expr)
@@ -57,9 +55,9 @@ namespace NativeTranspiler.Analyzer
                 _variables[ivName].Kind = VarKind.Varying;
                 _variables[ivName].CppType = "int";
             }
-            // 注：此处原本调 RegisterScopedVariable(ivName)，但作用域机制是**残留的死机构**
+            // 注：此处原本调 RegisterScopedVariable(ivName)，但作用域机制是残留的死机构
             // （栈无人 push ⇒ 守卫恒假 ⇒ 注册惰性），已随之删除。当前设计是"在外层作用域
-            // **一次**声明 + `_varDeclEmitted` 按方法级去重"（见 PredeclareBranchVar），
+            // 一次声明 + `_varDeclEmitted` 按方法级去重"（见 PredeclareBranchVar），
             // 因此不需要"退出作用域就撤销声明"——那对新设计反而是错的。
 
             // Determine start and end expressions
@@ -90,13 +88,13 @@ namespace NativeTranspiler.Analyzer
 
             bool isReduction = IsReductionLoop(stmt);
 
-            // ★ 通解：常量界小循环（≤64 迭代）无论是否 reduction 都优先全展开。
+            // 通解：常量界小循环（≤64 迭代）无论是否 reduction 都优先全展开。
             //   min/max/sum 归约展开后语义不变（顺序一致），且消除循环开销 + 让编译器
             //   CSE 循环不变量（如 C06 的 A[i]/B[i] 不再每轮重载）。
             bool unrollInclusive = stmt.Condition is BinaryExpressionSyntax unrollCond
                 && unrollCond.IsKind(SyntaxKind.LessThanOrEqualExpression);
             int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
-            // ★ 用 Roslyn 常量求值识别负常量：-1 被 TranslateExpression 译成 "(0 - (1))"，
+            // 用 Roslyn 常量求值识别负常量：-1 被 TranslateExpression 译成 "(0 - (1))"，
             //   int.TryParse 会失败，导致嵌套 dx/dy 循环无法 unroll（C04 慢 ~2x 的根因）。
             int? constStart = TryGetIntConst(decl.Initializer?.Value);
             int? constEnd = TryGetIntConst((stmt.Condition as BinaryExpressionSyntax)?.Right);
@@ -143,7 +141,7 @@ namespace NativeTranspiler.Analyzer
                     string exitL = $"__uni_exit_{_labelCounter++}";
                     string contL = $"__uni_cont_{_labelCounter++}";
                     _isUniformScalarLoop = true;
-                    // ★ Uniform loop with a per-lane break condition: the saved mask doubles
+                    // Uniform loop with a per-lane break condition: the saved mask doubles
                     //   as the lane tracker so break can drop matched lanes and keep matching
                     //   others (see GenerateBreakStatement).
                     _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
@@ -163,12 +161,9 @@ namespace NativeTranspiler.Analyzer
                 GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
         }
 
-        // ================================================================
         // Strategy 0: Full unroll for small uniform-bound non-reduction loops.
         //   Eliminates loop-carried dependencies so MSVC can globally schedule
-        //   the entire computation chain (like ISPC's LLVM PHI-node approach).
         //   Only used when iteration count ≤ 64 (HeavyMove: 16, typical inner loops).
-        // ================================================================
         private void GenerateUnrolledLoop(string ivName, int start, int count, ForStatementSyntax stmt)
         {
             string exitLabel = $"__unr_exit_{_labelCounter++}";
@@ -186,7 +181,7 @@ namespace NativeTranspiler.Analyzer
 
             for (int i = start; i < start + count; i++)
             {
-                // ★ Negative iteration values would produce labels like "__unr_cont_1_-2",
+                // Negative iteration values would produce labels like "__unr_cont_1_-2",
                 //   which is not a valid C++ identifier ('-2' parses as subtraction).
                 //   Encode-the-sign into the suffix: -2 → "m2", 3 → "3".
                 string iSuffix = i < 0 ? "m" + (-i).ToString() : i.ToString();
@@ -194,9 +189,8 @@ namespace NativeTranspiler.Analyzer
 
                 // Reset mask for each iteration
                 _currentMask = savedMask;
-                // ★ kill lanes that have already returned (e.g. found their match
+                // kill lanes that have already returned (e.g. found their match
                 //   in a previous unrolled j iteration and wrote R[i]=result).
-                //   Without this, the next j iteration would overwrite the returned lane's
                 //   result because its mask is restored to all_true by savedMask.
                 if (!string.IsNullOrEmpty(_returnedMaskVar))
                 {
@@ -213,7 +207,6 @@ namespace NativeTranspiler.Analyzer
                         AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
                     }
                     // Jump to the unrolled loop's exit label when all lanes have returned.
-                    //   We jump to __simd_exit (the outer batch loop's final exit), NOT
                     //   exitLabel (which would skip the post_mask init above → UB).
                     //   __simd_exit is always emitted by the batch loop generator.
                     _gotoTargets.Add("__simd_exit");
@@ -258,9 +251,8 @@ namespace NativeTranspiler.Analyzer
             }
 
             _currentMask = savedMask;
-            // ★ compute the post-loop mask for the default store.
+            // compute the post-loop mask for the default store.
             //   - ALL lanes returned → no lane needs default → skip store entirely (goto exitLabel)
-            //   - SOME lanes returned → default store writes 777 only for non-returned lanes (post_mask)
             //   - NO lanes returned → default store writes 777 for all lanes (post_mask = all lanes)
             if (!string.IsNullOrEmpty(_returnedMaskVar))
             {
@@ -275,7 +267,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     AppendLine($"{_currentMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
                 }
-                // ★ Skip default store ONLY when ALL lanes returned (post_mask is empty).
+                // Skip default store ONLY when ALL lanes returned (post_mask is empty).
                 //   The goto is from AFTER post_mask init, so no UB.
                 //   `__returned_0.any_true()` = at least one lane returned;
                 //   when the k-loop exits and post_mask is all-false, ALL lanes returned.
@@ -289,11 +281,9 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{exitLabel}: ;");
         }
 
-        // ================================================================
         // Strategy 1: Uniform-bound reduction → scalar for + SIMD broadcast
         //   scalar load + broadcast → 8-wide SIMD op + blend
         //   Mask scope fix: save _currentMask as named var BEFORE the for
-        // ================================================================
         private void GenerateUniformReductionLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt)
         {
             _uniformLoopVars.Add(ivName);
@@ -302,9 +292,8 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__uni_exit_{_labelCounter++}";
             string continueLabel = $"__uni_cont_{_labelCounter++}";
 
-            // ★ Save the entry mask BEFORE the loop: __saved_N doubles as the lane
+            // Save the entry mask BEFORE the loop: __saved_N doubles as the lane
             //   tracker (breaks drop lanes from it), so restoring _currentMask from
-            //   __saved_N after the loop would leak a narrowed mask into the code
             //   that follows (e.g. the final R[i]=... store skips broken lanes).
             string preLoopMask = _currentMask;
             // Save current mask as a named variable outside the for scope
@@ -342,7 +331,7 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"simd_value<int> {hn} = {hexpr};");
 
             AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
-            // ★ ≤ bound gets +1: the emitted loop uses <, so dy <= 1 must loop to 2.
+            // ≤ bound gets +1: the emitted loop uses <, so dy <= 1 must loop to 2.
             //   Otherwise the last iteration is silently dropped.
             AppendLine($"int {ivName}_end{endSuffix} = {endExpr}{(csOpStr == "<=" ? " + 1" : "")};");
             AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
@@ -357,7 +346,7 @@ namespace NativeTranspiler.Analyzer
 
             _loopStack.Push(new LoopFrame
             {
-                // ★ Saved mask doubles as lane tracker so per-lane breaks drop matched
+                // Saved mask doubles as lane tracker so per-lane breaks drop matched
                 //   lanes and keep unmatched ones iterating.
                 TrackerVar = savedMask,
                 IterActiveVar = "",
@@ -396,17 +385,15 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{continueLabel}: ;");
             _indent--;
             AppendLine("}");
-            // ★ Restore the ENTRY mask (not the tracker — breaks may have narrowed it)
+            // Restore the ENTRY mask (not the tracker — breaks may have narrowed it)
             _currentMask = preLoopMask;
             if (_gotoTargets.Contains(exitLabel))
                 AppendLine($"{exitLabel}: ;");
         }
 
-        // ================================================================
         // Strategy 2: Varying-bound reduction → count-loop + hmax + ivdep
         //   hmax(end-start) + for(iter) + clamp + SIMD gather + blend
         //   Mask scope fix: save _currentMask as named var BEFORE the for
-        // ================================================================
         private void GenerateVaryingReductionLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt)
         {
             _inVaryingReductionLoop = true;
@@ -442,7 +429,7 @@ namespace NativeTranspiler.Analyzer
             _indent++;
 
             AppendLine($"simd_mask v_active{sid}{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
-            // ★ kill lanes that have already returned before using as active mask.
+            // kill lanes that have already returned before using as active mask.
             //   Without this, returned lanes would re-activate each count-loop iteration
             //   (v_active is recomputed fresh each iter) and overwrite their result.
             if (!string.IsNullOrEmpty(_returnedMaskVar))
@@ -480,9 +467,7 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{exitLabel}: ;");
         }
 
-        // ================================================================
         // Strategy 3: Standard SIMD loop (while-true + mask) — original pattern
-        // ================================================================
         private void GenerateStandardSIMDLoop(string ivName, string startExpr, string endExpr, ForStatementSyntax stmt, bool isUniformBounds)
         {
             string tracker = $"__tracker_{_maskCounter++}";
@@ -545,9 +530,7 @@ namespace NativeTranspiler.Analyzer
             if (_gotoTargets.Contains(exitLabel))
                 AppendLine($"{exitLabel}: ;");
         }
-        // ================================================================
         // WhileStatement → for(iter) where possible, else while(any_true)
-        // ================================================================
 
         /// <summary>
         /// 方向2：识别 while 条件里的「uniform 子条件 && varying 子条件」结构（如
@@ -639,7 +622,7 @@ namespace NativeTranspiler.Analyzer
 
         private void GenerateWhileStatement(WhileStatementSyntax stmt)
         {
-            // ★ 方向2：uniform 子条件标量化（标量 while + varying tracker）
+            // 方向2：uniform 子条件标量化（标量 while + varying tracker）
             if (TryGenerateUniformBoundedWhile(stmt))
                 return;
 
@@ -656,7 +639,7 @@ namespace NativeTranspiler.Analyzer
             bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
-            // ★ 循环条件常量提升：`j < 16` 翻译出的 n_set1_epi32(16)/n_set1_ps(常量)
+            // 循环条件常量提升：`j < 16` 翻译出的 n_set1_epi32(16)/n_set1_ps(常量)
             //   在循环体内每轮求值，clang 逐轮 vpbroadcastd 重广播（C12 实测）。把字面量 broadcast
             //   提升到循环外（构造一次、循环内直接复用寄存器），省 ~1 条/轮。
             string condExpr = HoistConditionBroadcastConstants(TranslateCondition(stmt.Condition));
@@ -668,7 +651,7 @@ namespace NativeTranspiler.Analyzer
             string condVar = $"__wcond_{_maskCounter++}";
             AppendLine($"simd_mask {condVar} = {condExpr};");
 
-            // ★ 把组合掩码（current & cond & tracker）物化到单个变量，再赋给 _currentMask。
+            // 把组合掩码（current & cond & tracker）物化到单个变量，再赋给 _currentMask。
             //   否则 _currentMask 是 "a & b & c" 复合字符串，`.any_true()`/`.m` 会因运算符
             //   优先级错绑（`!a & b & c.any_true()`、`a & b & c.m`）→ 非法 C++。
             string combined = $"__wm_{_maskCounter++}";
@@ -694,7 +677,7 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            // ★ 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
+            // 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
             //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter。
             _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
             AppendLine("}");
@@ -703,9 +686,7 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{exitLabel}: ;");
         }
 
-        // ================================================================
         // DoStatement
-        // ================================================================
 
         /// <summary>
         /// 把循环条件表达式中的 n_set1_epi32/ps(字面量) 提升为循环外构造的 simd_value：
@@ -747,7 +728,7 @@ namespace NativeTranspiler.Analyzer
             AppendLine("{");
             _indent++;
 
-            // ★ 物化组合掩码（current & tracker），避免 _currentMask 变成 "a & b" 复合串
+            // 物化组合掩码（current & tracker），避免 _currentMask 变成 "a & b" 复合串
             //   （嵌套 if 里的 `.m`/`.any_true()` 会优先级错绑）。
             string combined = $"__dm_{_maskCounter++}";
             if (_currentMask == "simd_mask::all_true()")

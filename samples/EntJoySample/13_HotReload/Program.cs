@@ -12,11 +12,11 @@ namespace EntJoySample.HotReload
     /// 热重载样例：每 500 ms 跑一帧 <see cref="HotReloadAddJob"/>，并在安全点检查新构建的
     /// NativeTranspiled.dll（监视 `bin`）—— 有就换模块，值随内核常量变化（101 → 102）。
     /// <code>
-    /// dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -o artifacts\hotreload-demo   # 一次性：准备宿主目录
-    /// artifacts\hotreload-demo\EntJoySample.exe                                                      # 宿主（Ctrl+C 退出）
-    /// dotnet build samples\EntJoySample\EntJoySample.csproj -c Release                                # 之后：改完就编（零参数）
+    /// dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -o artifacts\hotreload-demo # 一次性：准备宿主目录
+    /// artifacts\hotreload-demo\EntJoySample.exe # 宿主（Ctrl+C 退出）
+    /// dotnet build samples\EntJoySample\EntJoySample.csproj -c Release # 之后：改完就编（零参数）
     /// </code>
-    /// ⚠ 宿主**不能**跑在 `bin` 里：那样它锁住 `bin`，普通构建就写不进去（MSB3021/MSB3027）。
+    /// ⚠ 宿主不能跑在 `bin` 里：那样它锁住 `bin`，普通构建就写不进去（MSB3021/MSB3027）。
     /// </summary>
     public static class Program
     {

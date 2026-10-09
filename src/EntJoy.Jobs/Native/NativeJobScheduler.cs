@@ -40,8 +40,7 @@ public struct NativeJobSystemStats
     public ulong ScheduleModeDeferredPublish;
     public ulong ScheduleModeDeferredPublishNoAssist;
     public int FrameQueueDepthPeak;
-    // 2026-10-04：原先此处的 6 个**死字段**（DirectAssistClaims / ExhaustedTickets /
-    //   ScheduleToPublishEwmaNs / PublishToFirstMainClaimEwmaNs / PublishToFirstWorkerClaimEwmaNs /
+    // 原先此处的 6 个死字段（DirectAssistClaims / ExhaustedTickets /
     //   QueueLockWaitEwmaNs）已两侧同步删除，ABI 升到 3。修改此结构体必须同时改
     //   `src/NativeDll/JobSystem.h` + `Exports.h` 与 Unity 侧 port（三处同序），否则错位读错。
     public ulong PublishToCompletionEwmaNs;
@@ -147,13 +146,12 @@ public struct NativeTraceEvent
 /// </summary>
 public static unsafe partial class NativeJobScheduler
 {
-    // ======================== 配置 ========================
+    // 配置
         /// <summary>当 NativeDll 不可用时自动回退到 ManagedJobScheduler。</summary>
         internal static bool UseFallback { get; set; }
     /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时按此值个 tile/worker 切分。
-    /// 2026-09-29 由 4 改为 64：flat parallel-for 路径在 8/15 worker 两档实测最优
-    /// （8w 整步 −4~−5.6 ms 6/6 同号；15w −1~−2.2 ms；tpw=16 与 ≈2000 都更差）。
+    /// 由 4 改为 64：flat parallel-for 路径在 8/15 worker 两档实测最优
     /// 只影响 flat 路径；ECS chunk 路径用自己的常数。可用 `ENTJOY_TILES_PER_WORKER` 覆盖。
     /// </summary>
     public static int TilesPerWorker = 64;
@@ -179,9 +177,9 @@ public static unsafe partial class NativeJobScheduler
     }
     private static bool _jobCostCacheEnabled = ReadJccEnabledFromEnv();
 
-    /// <summary>2026-10-05（doc16 §40）：JCC 的**托管默认值也读 env**。
+    /// <summary>：JCC 的托管默认值也读 env。
     /// 否则 <c>Initialize</c> 里的 <c>JobSystem_SetJobCostCacheEnabled(JobCostCacheEnabled)</c>
-    /// 会把 native 侧读到的 env 值**盖回去**，`ENTJOY_JOB_COST_CACHE=0` 就形同虚设。
+    /// 会把 native 侧读到的 env 值盖回去，`ENTJOY_JOB_COST_CACHE=0` 就形同虚设。
     /// 未设/非 0 ⇒ true（与历史行为一致）。</summary>
     private static bool ReadJccEnabledFromEnv()
     {
@@ -208,7 +206,7 @@ public static unsafe partial class NativeJobScheduler
         System.Console.WriteLine($"JobSystem|guided={GuidedEnabled}|k={GuidedK}|floor={GuidedFloor}");
     }
 
-    // ======================== 生命周期 ========================
+    // 生命周期
     public static void Initialize(int numThreads = 0)
     {
         if (numThreads == 0)
@@ -307,7 +305,7 @@ public static unsafe partial class NativeJobScheduler
         NativeJobCore.JobSystem_LaunchGUI();
     }
 
-    // ======================== 持久分配器（托管回调注册到 native） ========================
+    // 持久分配器（托管回调注册到 native）
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void* PersistentAllocUnmanaged(int size) => PersistentAllocator.Alloc(size);
 
@@ -319,7 +317,7 @@ public static unsafe partial class NativeJobScheduler
         NativeJobCore.JobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
     }
 
-    // ======================== 直调面板 ========================
+    // 直调面板
     public static unsafe void RecordDirectCall(string jobName, uint tiles)
     {
         if (NativeJobCore.NativeDllHandle == IntPtr.Zero) return;
@@ -348,14 +346,12 @@ public static unsafe partial class NativeJobScheduler
         NativeJobCore.JobSystem_EndDirectCall(id);
     }
 
-    // ======================== 类型化调度 API ========================
+    // 类型化调度 API
     public static NativeJobHandle Schedule<T>(ref T job, NativeJobHandle? dependsOn = null)
         where T : struct, IJob
     {
-        // 2026-10-02（09 §22.6）：优先走**原生 adapter 直调**（去掉 native→managed→native thunk）。
-        // 前提（缺一不可）：① 生成代码注册了 adapter 指针；② 该类型有**字段显式写入器**
+        // 优先走原生 adapter 直调（去掉 native→managed→native thunk）。
         //   —— 原生 adapter 按 C++ 偏移读 ctx，Debug 下 NativeArray 带 DisposeSentinel ⇒ 裸拷贝布局不可靠，
-        //   必须与生成代码同一套逐字段写入（`NativeExports` 静态构造里注册）。
         // 任一不满足 ⇒ 原样回退下述托管路径，未转译 job / 老行为完全不受影响。
         if (s_nativeSingleJobEnabled
             && !RuntimeHelpers.IsReferenceOrContainsReferences<T>()
@@ -393,10 +389,9 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobFor
     {
         if (length <= 0) return default;
-        // 2026-10-02（IJobFor 补齐，09 §26）：走 `IJobFor` **专用的 index 形原生 adapter**
-        //（`X_Execute_IndexAdapter(void*, int index)`，转译器为 IJobFor 专门发射），
-        // 由原生 `Scheduler::ScheduleFor` 直调 —— 与它的**单线程串行**语义
-        //（`for (i<length) func(ctx,i)`）**同一形态**，不再借道批量入口。
+        // 走 `IJobFor` 专用的 index 形原生 adapter
+        // 由原生 `Scheduler::ScheduleFor` 直调 —— 与它的单线程串行语义
+        //（`for (i<length) func(ctx,i)`）同一形态，不再借道批量入口。
         if (s_nativeSingleJobEnabled
             && !RuntimeHelpers.IsReferenceOrContainsReferences<T>()
             && TryGetNativeForAdapter(typeof(T), out IntPtr nativeForAdapter, out int nativeForCtx)
@@ -434,7 +429,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelFor
     {
         if (length <= 0) return default;
-        // 2026-10-02（同类修复，09 §24）：静态运行期 API 也优先走原生 adapter
+        // 静态运行期 API 也优先走原生 adapter
         //（生成扩展 `job.Schedule(len,batch)` 早已原生；这条静态路径此前一律托管）。
         if (s_nativeSingleJobEnabled
             && !RuntimeHelpers.IsReferenceOrContainsReferences<T>()
@@ -472,7 +467,7 @@ public static unsafe partial class NativeJobScheduler
         where T : struct, IJobParallelForBatch
     {
         if (length <= 0) return default;
-        // 2026-10-02（同类修复，09 §24）：同上，`IJobParallelForBatch` 的原生 adapter 也是 BatchJobFunc 形。
+        // 同上，`IJobParallelForBatch` 的原生 adapter 也是 BatchJobFunc 形。
         if (s_nativeSingleJobEnabled
             && !RuntimeHelpers.IsReferenceOrContainsReferences<T>()
             && TryGetNativeJobAdapter(typeof(T), out IntPtr nativePfbAdapter, out int nativePfbCtx)
@@ -504,7 +499,7 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    // ======================== Complete / IsCompleted / Release ========================
+    // Complete / IsCompleted / Release
     public static void Complete(ref NativeJobHandle h)
     {
         if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
@@ -524,9 +519,8 @@ public static unsafe partial class NativeJobScheduler
 
         NativeJobCore.JobSystem_Complete(handle);            // ← 原生：自旋/等待/退役握手全在这里
         long t3 = cDiag ? CSharpPhaseDiag.Now() : 0;
-        // 性能项 2（收尾）：无待取异常（正常路径）时**不付** `JobSystem_GetDiagnosticBatchId`
+        // 性能项 2（收尾）：无待取异常（正常路径）时不付 `JobSystem_GetDiagnosticBatchId`
         // 那次 P/Invoke —— 计数器为 0 ⇒ 本 batch 不可能有已记录异常（记录必先自增，
-        // 且 Complete 返回时本批 job 已全部结束），与 ThrowRecordedJobExceptions 首行判断等价。
         // 每 job 省一次跨托管/原生调用（10k jobs/frame 量级下有意义）；异常路径语义不变。
         ulong batchId = NativeJobCore.HasPendingJobExceptions
             ? NativeJobCore.JobSystem_GetDiagnosticBatchId(handle)
@@ -585,7 +579,7 @@ public static unsafe partial class NativeJobScheduler
         }
     }
 
-    // ======================== 低级原始接口（transpiler 直调） ========================
+    // 低级原始接口（transpiler 直调）
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
         => NativeJobCore.ScheduleRaw(funcPtr, contextPtr, cleanupPtr, dependsOn);
 
@@ -603,7 +597,7 @@ public static unsafe partial class NativeJobScheduler
         if (t0 != 0) CSharpPhaseDiag.Add("sched.register", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
     }
 
-    // ======================== 面板 / 状态 ========================
+    // 面板 / 状态
     public static NativeJobSystemStats GetStats() => NativeJobCore.JobSystem_GetStats();
 
     /// <summary>N12 `ENTJOY_WAKE_POLL` 的生效证据：提交侧 [跳过写唤醒字, 真的广播] 次数。
@@ -613,8 +607,8 @@ public static unsafe partial class NativeJobScheduler
         NativeJobCore.TryGetWakePollCounters(out skips, out wakes);
 
     /// <summary>认领几何（<see cref="ClaimPolicy"/>）的生效证据：按声明值分桶的批数 [spread, adjacent, auto]。
-    /// 验收判据：调用点传了 <c>ClaimPolicy.Spread</c> 就必须看到 spread&gt;0；否则说明该调用点**静默**
-    /// 绑到了托管的 <c>JobExtensions.Schedule&lt;T&gt;</c>（键会从模块内 RVA 变成堆地址，09 §52.5）。
+    /// 验收判据：调用点传了 <c>ClaimPolicy.Spread</c> 就必须看到 spread&gt;0；否则说明该调用点静默
+    /// 绑到了托管的 <c>JobExtensions.Schedule&lt;T&gt;</c>（键会从模块内 RVA 变成堆地址，09）。
     /// 老 DLL 无该导出时返回 false。</summary>
     public static bool TryGetClaimGeomCounters(out ulong spread, out ulong adjacent, out ulong autoDecl) =>
         NativeJobCore.TryGetClaimGeomCounters(out spread, out adjacent, out autoDecl);
@@ -625,8 +619,7 @@ public static unsafe partial class NativeJobScheduler
 
     /// <summary>
     /// 隐式批收集层互斥切换：
-    /// - true  = Native 收集（透明拦截 Schedule* 的 tile 路径 job，EndFrame/Complete 统一提交 + 单次唤醒）；
-    ///           切换前先关闭 C# 层（排空其积压）。NativeDll 不可用时自动回退 C# ImplicitBatch 收集。
+    /// - true = Native 收集（透明拦截 Schedule* 的 tile 路径 job，EndFrame/Complete 统一提交 + 单次唤醒）；
     /// - false = 关闭 Native 收集（内部 flush 排空积压），转接启用 C# ImplicitBatch 收集（显式 Add 路径）。
     /// </summary>
     public static void SetImplicitBatchEnabled(bool enabled)
@@ -679,13 +672,13 @@ public static unsafe partial class NativeJobScheduler
     public static void SetTimingDiagnosticsEnabled(bool enabled) =>
         NativeJobCore.JobSystem_SetTimingDiagnostics(enabled);
 
-    // ======================== Profiler 透传（内部） ========================
+    // Profiler 透传（内部）
     internal static void Profiler_SetEnabled(int enabled) => NativeJobCore.Profiler_SetEnabled(enabled);
     internal static int Profiler_IsEnabled() => NativeJobCore.Profiler_IsEnabled();
     internal static unsafe int Profiler_ReadAll(ProfilerEntry[] buffer, int maxCount) => NativeJobCore.Profiler_ReadAll(buffer, maxCount);
     internal static void Profiler_Clear() => NativeJobCore.Profiler_Clear();
 
-    // ======================== Trace 透传 ========================
+    // Trace 透传
     public static void TraceSetEnabled(bool enabled) => NativeJobCore.Trace_SetEnabled(enabled);
     public static bool TraceIsEnabled() => NativeJobCore.Trace_IsEnabled();
     public static ulong TraceDroppedEvents() => NativeJobCore.Trace_DroppedEvents();
@@ -696,18 +689,18 @@ public static unsafe partial class NativeJobScheduler
         return NativeJobCore.Trace_ReadAll(buffer, maxCount);
     }
 
-    // ======================== 执行中 / 异常冲排（透传） ========================
+    // 执行中 / 异常冲排（透传）
     /// <summary>当前线程是否正在执行某个 job。</summary>
     public static bool IsExecutingJob => NativeJobCore.IsExecutingJob;
 
     /// <summary>抛出所有已记录的 Job 异常（跨所有 batch）。</summary>
     public static void FlushRecordedExceptions() => NativeJobCore.FlushRecordedExceptions();
 
-    // ======================== 句柄辅助（内部，供 JobHandle 使用） ========================
+    // 句柄辅助（内部，供 JobHandle 使用）
     internal static void RetainRawHandleForUse(IntPtr handle) => NativeJobCore.RetainRawHandleForUse(handle);
     internal static void ReleaseRawHandleForFinalizer(IntPtr handle) => NativeJobCore.ReleaseRawHandleForFinalizer(handle);
 
-    // ======================== Job 字段写入器注册表（为非 blittable 结构） ========================
+    // Job 字段写入器注册表（为非 blittable 结构）
     public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
     internal static readonly Dictionary<Type, Delegate> s_jobFieldWriters = new();
 
@@ -716,22 +709,18 @@ public static unsafe partial class NativeJobScheduler
 
     internal static bool TryGetJobFieldWriter(Type type, out Delegate writer) => s_jobFieldWriters.TryGetValue(type, out writer);
 
-    // ==================== IJob 原生 adapter 注册表（2026-10-02，09 §22.6） ====================
+    // IJob 原生 adapter 注册表
     // 背景：转译器一直为 `IJob` 产出原生 adapter + `Get_X_Execute_AdapterPtr()`，但绑定层漏接线
-    //（`BindingsGenerator` 的 IJob 分支用 `Marshal.GetFunctionPointerForDelegate` 造托管 thunk；
-    //  运行时 `NativeJobScheduler.Schedule<T>` 也只有托管路由）⇒ 单任务 job 每次派发都多一次
-    //  native→managed→native 转换。Unity 侧是 IL2CPP（原生 AOT），故只有走原生直调才是同性质对比。
+    // native→managed→native 转换。Unity 侧是 IL2CPP（原生 AOT），故只有走原生直调才是同性质对比。
     //
-    // 设计：**注册表**（与上面的 JobFieldWriter 注册表同型）。
-    //   · 生成代码在 `NativeExports` 静态构造里注册 `typeof(T) → Get_X_Execute_AdapterPtr()`；
-    //   · 运行时泛型 `Schedule<T>` / `ScheduleFor<T>` 优先查表：命中且**该类型也有字段写入器**时走原生直调
-    //     （原生 adapter 按 C++ 偏移读 ctx ⇒ 必须用生成代码的**显式逐字段写入**，不能用裸拷贝）；
-    //   · 未命中（未转译 job、或 Debug 下非 blittable 且无写入器）⇒ **原样回退托管 delegate**，行为不变。
+    // 设计：注册表（与上面的 JobFieldWriter 注册表同型）。
+    //     （原生 adapter 按 C++ 偏移读 ctx ⇒ 必须用生成代码的显式逐字段写入，不能用裸拷贝）；
+    //   · 未命中（未转译 job、或 Debug 下非 blittable 且无写入器）⇒ 原样回退托管 delegate，行为不变。
     internal static readonly Dictionary<Type, IntPtr> s_nativeJobAdapterPtrs = new();
     /// <summary>与 adapter 配套的 ctx 字节数（由生成代码给出，= 其逐字段写入器的总长）。</summary>
     internal static readonly Dictionary<Type, int> s_nativeJobCtxSizes = new();
     /// <summary>
-    /// 2026-10-02（09 §26）：`IJobFor` 专用的 **index 形** adapter（`IndexJobFunc(void*, int)`）。
+    /// `IJobFor` 专用的 index 形 adapter（`IndexJobFunc(void*, int)`）。
     /// 与批形态分开存：两者 ABI 不同，混用会签名错位。
     /// </summary>
     internal static readonly Dictionary<Type, IntPtr> s_nativeForAdapterPtrs = new();
@@ -741,7 +730,7 @@ public static unsafe partial class NativeJobScheduler
     {
         s_nativeJobAdapterPtrs[type] = adapterPtr;
         s_nativeJobCtxSizes[type] = ctxSize;
-        // 自证横幅（与框架其它自证同风格）：证明该类型的原生直调**已接线**（注册发生在
+        // 自证横幅（与框架其它自证同风格）：证明该类型的原生直调已接线（注册发生在
         // NativeExports 静态构造里 ⇒ 进程启动即可见）。避免"静默 no-op 当成已修复"。
         Console.Error.WriteLine($"[NATIVEJOB] native direct-dispatch wired: {type.Name} (ctx={ctxSize}B)");
     }
@@ -754,17 +743,17 @@ public static unsafe partial class NativeJobScheduler
         Console.Error.WriteLine($"[NATIVEJOB] IJobFor index-shaped native adapter wired: {type.Name} (ctx={ctxSize}B)");
     }
 
-    // ==================== 按 job 名的批表绑定（doc16 §46） ====================
+    // 按 job 名的批表绑定
     /// <summary>
-    /// 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按**job 名**登记的批表槽位绑定到该 job **实际派发用的函数指针**。
+    /// 把 `ENTJOY_JOB_BATCH_BY_NAME` 里按job 名登记的批表槽位绑定到该 job 实际派发用的函数指针。
     /// 由转译器生成的绑定在 `NativeExports` 静态构造里逐个 job 调用（`funcPtr` = 该 job 交给
     /// `ScheduleRaw` / `ScheduleParallelForBatchRaw` 的那个指针，单任务形与批形各取本形）。
     /// <para>
-    /// 通用性：名字取 <see cref="Type.Name"/>、指针取托管自己派发用的值 ⇒ **不依赖任何 C++ 符号命名
-    /// 规则/命名空间/模块**（这正是不再拼导出名、不再扫 PE 导出表的原因）。
+    /// 通用性：名字取 <see cref="Type.Name"/>、指针取托管自己派发用的值 ⇒ 不依赖任何 C++ 符号命名
+    /// 规则/命名空间/模块（这正是不再拼导出名、不再扫 PE 导出表的原因）。
     /// </para>
     /// <para>
-    /// 时序：在**静态构造期**完成 ⇒ 批表在任何派发之前就是终态，派发路径对表**只读**（无竞态）。
+    /// 时序：在静态构造期完成 ⇒ 批表在任何派发之前就是终态，派发路径对表只读（无竞态）。
     /// </para>
     /// </summary>
     public static void BindNativeJobBatchName(Type type, IntPtr funcPtr)
@@ -799,7 +788,7 @@ public static unsafe partial class NativeJobScheduler
         string? v = Environment.GetEnvironmentVariable("ENTJOY_NATIVE_SINGLE_JOB");
         bool on = v == null || v[0] != '0';
         Console.Error.WriteLine(on
-            ? "[NATIVEJOB] single-job native direct-dispatch: on (default 2026-10-02; =0 falls back to managed thunk)"
+            ? "[NATIVEJOB] single-job native direct-dispatch: on (default; =0 falls back to managed thunk)"
             : "[NATIVEJOB] single-job native direct-dispatch: off (explicit ENTJOY_NATIVE_SINGLE_JOB=0)");
         return on;
     }
@@ -837,7 +826,7 @@ public static unsafe partial class NativeJobScheduler
     /// 三种原生 adapter 形态共用的"租 ctx + 逐字段写入"一步。
     /// ctx 来自框架自带 `ContextPool`（与 `AllocContext` 同一套 4 字节前缀 ⇒ 释放复用同一个
     /// <see cref="NativeJobCore.CleanupPtr"/>，无逐派发 malloc/free）。
-    /// `ctxSize &lt;= 0`（无字段的 job —— 生成器不会为它注册）是**唯一**的不可用判据。
+    /// `ctxSize &lt;= 0`（无字段的 job —— 生成器不会为它注册）是唯一的不可用判据。
     /// 字段写入器是生成代码的纯指针写、不会抛 ⇒ 不设 try/catch：真有异常就冒泡（fail-fast），不静默回退。
     /// </summary>
     private static unsafe bool TryRentMarshalledContext<T>(
@@ -872,8 +861,8 @@ public static unsafe partial class NativeJobScheduler
     }
 
     /// <summary>
-    /// 2026-10-02（09 §26）：`IJobFor` 的**index 形**（`IndexJobFunc(void*, int)`）原生直调 ——
-    /// 与原生 `Scheduler::ScheduleFor`（单线程串行 `for(i) func(ctx,i)`）**同一形态**，
+    /// `IJobFor` 的 index 形（`IndexJobFunc(void*, int)`）原生直调 ——
+    /// 与原生 `Scheduler::ScheduleFor`（单线程串行 `for(i) func(ctx,i)`）同一形态，
     /// 不再借道批量入口。adapter 由转译器为 `IJobFor` 专门发射（`X_Execute_IndexAdapter`）。
     /// </summary>
     private static unsafe bool TryScheduleForWithNativeAdapter<T>(
@@ -897,7 +886,7 @@ public static unsafe partial class NativeJobScheduler
     /// <summary>
     /// 批形态（`IJobParallelFor` / `IJobParallelForBatch`）的原生直调：
     /// 生成的原生 adapter 签名 `void(void* ctx, int startIndex, int count)` 与原生 typedef
-    /// `BatchJobFunc` **逐字一致** ⇒ 可直接把指针交给 `ScheduleParallelForBatchRaw`。
+    /// `BatchJobFunc` 逐字一致 ⇒ 可直接把指针交给 `ScheduleParallelForBatchRaw`。
     /// </summary>
     private static unsafe bool TryScheduleBatchWithNativeAdapter<T>(
         IntPtr nativeAdapter, int ctxSize, Delegate fieldWriter, ref T job, NativeJobHandle? dependsOn, Type type,

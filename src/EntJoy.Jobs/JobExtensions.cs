@@ -8,7 +8,7 @@ namespace EntJoy.JobSystem
 /// </summary>
 public static class JobExtensions
 {
-    // ======================== IJob 调度 ========================
+    // IJob 调度
 
     /// <summary>调度 IJob（无依赖）</summary>
     public static JobHandle Schedule<T>(this T job) where T : struct, IJob
@@ -18,32 +18,32 @@ public static class JobExtensions
     public static JobHandle Schedule<T>(this T job, JobHandle dependsOn) where T : struct, IJob
         => JobScheduler.Schedule(ref job, dependsOn);
 
-    // ======================== IJobParallelFor 调度 ========================
+    // IJobParallelFor 调度
 
     /// <summary>调度 IJobParallelFor</summary>
     /// <param name="claim">
-    /// 认领几何（<see cref="ClaimPolicy"/>）：由**调用点**声明该内核要 Spread 还是 Adjacent。
+    /// 认领几何（<see cref="ClaimPolicy"/>）：由调用点声明该内核要 Spread 还是 Adjacent。
     /// 缺省 <see cref="ClaimPolicy.Auto"/> ⇒ 框架按 F6/env 解析，行为与引入该参数前逐位一致。
     /// </param>
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
         JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelFor
         => JobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, dependsOn, claim);
 
-    // ======================== IJobFor 调度 ========================
+    // IJobFor 调度
 
     /// <summary>调度 IJobFor（串行 for 循环）</summary>
     public static JobHandle Schedule<T>(this T job, int arrayLength,
         JobHandle dependsOn = default) where T : struct, IJobFor
         => JobScheduler.ScheduleFor(ref job, arrayLength, dependsOn);
 
-    // ======================== IJobParallelForBatch 调度 ========================
+    // IJobParallelForBatch 调度
 
     /// <summary>调度 IJobParallelForBatch（<paramref name="claim"/> 同 <see cref="Schedule{T}(T,int,int,JobHandle,ClaimPolicy)"/>）</summary>
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
         JobHandle dependsOn = default, ClaimPolicy claim = ClaimPolicy.Auto) where T : struct, IJobParallelForBatch
         => JobScheduler.ScheduleBatch(ref job, arrayLength, batchSize, dependsOn, claim);
 
-    // ======================== ThreadCounter 重载 ========================
+    // ThreadCounter 重载
 
     /// <summary>调度 IJobParallelFor（带 ThreadCounter，调试用）</summary>
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
@@ -64,7 +64,7 @@ public static class JobExtensions
             NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
     }
 
-    // ======================== Run 方法（主线程执行，调试用） ========================
+    // Run 方法（主线程执行，调试用）
 
     public static void Run(this IJob job) => job.Execute();
 

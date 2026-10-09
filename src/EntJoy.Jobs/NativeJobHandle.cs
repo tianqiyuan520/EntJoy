@@ -34,7 +34,7 @@ namespace EntJoy.JobSystem
         /// ABI 依据：HandleState 前 8 字节为 <c>atomic&lt;uint32_t&gt; refCount</c>（偏移 0）
         /// + <c>atomic&lt;bool&gt; completed</c>（偏移 4，1 字节），JobSystem.h 显式声明"C# 侧仅读前 8 字节"；
         /// 偏移与字节宽度由 JobSystem_State.cpp 的 static_assert 钉住。
-        /// ⚠ 必须按 **1 字节** 读：偏移 5 是 <c>backendRetired</c>（恒为 1），读 4 字节整数会把它的 1
+        /// ⚠ 必须按 1 字节 读：偏移 5 是 <c>backendRetired</c>（恒为 1），读 4 字节整数会把它的 1
         /// 一并读进来 ⇒ 永远"已完成"。
         /// 安全性：box 自身持有一个引用（refCount ≥ 1），读取期间该 state 不可能被 RecycleState
         /// 回收；标志只单向 0→1，单字节读不会撕裂。
@@ -66,8 +66,6 @@ namespace EntJoy.JobSystem
     {
         // 性能项 2：不再额外 `new object()` 作 _gate，直接以 box 自身为锁。
         // 每 job 省一次 24 B 的小对象分配（10k jobs/frame ⇒ 240 KB/frame 的额外分配 +
-        // 相应的分配/清零/晋升成本）。安全性：本类型 internal sealed 且**只**在
-        // NativeJobHandle / NativeJobScheduler 内使用，不存在外部 `lock(this)` 参与
         // 同一把锁而引入死锁的可能；锁的临界区内容与加锁语义与改动前逐位一致。
         private IntPtr _handle;
 
@@ -96,7 +94,6 @@ namespace EntJoy.JobSystem
                 _handle = IntPtr.Zero;
             }
             // 性能项 2：句柄已被确定性消费（JobHandle.Complete → Release → Detach）后，
-            // 终结器只会做一次 Interlocked.Exchange 得到 0（空操作）。此处直接抑制终结，
             // 使 10k jobs/frame 的 box 不再进入终结队列（避免其被提升 + 终结器线程批量处理）。
             // 语义不变：抑制后终结器路径本就不产生任何副作用。
             if (handle != IntPtr.Zero)

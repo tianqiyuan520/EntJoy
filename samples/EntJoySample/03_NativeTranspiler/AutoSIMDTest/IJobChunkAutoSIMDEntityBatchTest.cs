@@ -40,7 +40,7 @@ internal static class ChunkCSharpBody
 
 namespace EntJoySample.AutoSIMDTest
 {
-    // ═══ Light IJobChunk: AutoSIMD=Enabled（EntityBatch 路径，SimdControlFlowGenerator）═══
+    // Light IJobChunk: AutoSIMD=Enabled（EntityBatch 路径，SimdControlFlowGenerator）
     [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
     public struct LightJobChunkAutoSIMDEntityBatch : IJobChunk
     {
@@ -58,7 +58,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ═══ Heavy IJobChunk: AutoSIMD=Enabled（EntityBatch 路径，SimdControlFlowGenerator）═══
+    // Heavy IJobChunk: AutoSIMD=Enabled（EntityBatch 路径，SimdControlFlowGenerator）
     // 注意：用 read-modify-write 模式（局部变量 + 字段修改 + 写回），
     // 与 IJobChunkMoveCompareTest 的 HeavyJobChunkCppFast 一致，确保 DecomposeStructLocals
     // 能分解为字段级 gather/scatter（直接 new 结构体赋值会触发 n_store_epi32 缺陷）。

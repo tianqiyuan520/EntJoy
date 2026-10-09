@@ -26,7 +26,7 @@ EntJoy 的原生容器、分配器与安全检查层：`NativeArray<T>` / `Nativ
 ## 引用
 
 ```xml
-<PackageReference Include="EntJoy.Collections" Version="1.0.0" />
+<PackageReference Include="EntJoy.Collections" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`；**纯托管**，不需要 CMake / MSVC / ISPC。
@@ -68,7 +68,7 @@ EntJoy's native containers, allocators, and safety layer: `NativeArray<T>` / `Na
 ## Reference it
 
 ```xml
-<PackageReference Include="EntJoy.Collections" Version="1.0.0" />
+<PackageReference Include="EntJoy.Collections" Version="1.0.1" />
 ```
 
 - `net8.0` + `AllowUnsafeBlocks`; **pure managed**, no CMake / MSVC / ISPC required.

@@ -15,9 +15,9 @@
 //    /// </summary>
 //    public static class HintLikelyUopCacheTest
 //    {
-//        // ============================================================
+//        //
 //        //  NoHint — baseline (no branch prediction hint)
-//        // ============================================================
+//        //
 //        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
 //        public static int RunNoHint(int count)
 //        {
@@ -29,7 +29,7 @@
 //                int v = rng & 0x3FF;
 //                if (v < 1023)   // 99.9% true
 //                {
-//                    // --- Hot path: ~130 data-dependent operations (~900 µops) ---
+//                    // Hot path: ~130 data-dependent operations (~900 µops)
 //                    int a = rng & 0xFF;
 //                    int b = (rng >> 8) & 0xFF;
 //                    int c = (rng >> 16) & 0xFF;
@@ -150,7 +150,7 @@
 //                }
 //                else
 //                {
-//                    // --- Cold path: ~65 operations (~400 µops) ---
+//                    // Cold path: ~65 operations (~400 µops)
 //                    int a = rng & 0xFF;
 //                    int b = (rng >> 8) & 0xFF;
 //                    int c = (rng >> 16) & 0xFF;
@@ -196,9 +196,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  Likely — same code with Hint.Likely (correct hint)
-//        // ============================================================
+//        //
 //        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
 //        public static int RunLikely(int count)
 //        {
@@ -375,9 +375,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  WrongHint — same code with [[unlikely]] (WRONG hint)
-//        // ============================================================
+//        //
 //        [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Cpp)]
 //        public static int RunWrongHint(int count)
 //        {
@@ -554,9 +554,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  Pure C# reference (no transpilation)
-//        // ============================================================
+//        //
 //        [MethodImpl(MethodImplOptions.NoInlining)]
 //        public static int PureCSharpBaseline(int count)
 //        {
@@ -733,9 +733,9 @@
 //            return sum;
 //        }
 
-//        // ============================================================
+//        //
 //        //  Runner
-//        // ============================================================
+//        //
 
 //        private const int Iterations = 10;
 //        private const int MaxCount = 20_000_000;

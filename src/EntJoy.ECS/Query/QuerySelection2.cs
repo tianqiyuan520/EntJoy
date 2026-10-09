@@ -5,11 +5,11 @@ namespace EntJoy.ECS
     /// 支持链式附加过滤条件（WithRelationship 等），foreach 兼容（委托 QueryEnumerable）。
     ///
     /// 使用示例：
-    ///   foreach (var r in world.Query&lt;Position, Velocity&gt;().WithRelationship&lt;ChildOf&gt;(parent))
-    ///   {
-    ///       ref var pos = ref r.Comp0;   // Position
-    ///       ref var vel = ref r.Comp1;   // Velocity（关系仅过滤，不占组件位）
-    ///   }
+    /// foreach (var r in world.Query&lt;Position, Velocity&gt;().WithRelationship&lt;ChildOf&gt;(parent))
+    /// {
+    /// ref var pos = ref r.Comp0; // Position
+    /// ref var vel = ref r.Comp1; // Velocity（关系仅过滤，不占组件位）
+    /// }
     /// </summary>
     public readonly struct QuerySelection<T0, T1>
         where T0 : struct

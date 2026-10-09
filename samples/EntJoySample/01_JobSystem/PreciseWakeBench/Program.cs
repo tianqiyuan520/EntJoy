@@ -105,14 +105,14 @@ using EntJoy.ECS.JobSystem;
 //            var c2 = new ChainJob2 { Values = c1.Values };
 //            var c3 = new ChainJob3 { Values = c1.Values };
 
-//            // ---- 高竞争（S5）----
+//            // 高竞争（S5）
 //            var contentionRaw = Measure(() =>
 //            {
 //                contention.Schedule(HighContentionCount, 0).Complete();
 //            });
 //            Print("高竞争(10万x1000)", contentionRaw);
 
-//            // ---- 依赖链（S3）----
+//            // 依赖链（S3）
 //            var chainRaw = Measure(() =>
 //            {
 //                var h1 = c1.Schedule(ChainLength, 0);
@@ -122,7 +122,7 @@ using EntJoy.ECS.JobSystem;
 //            });
 //            Print("依赖链(3级x100万)", chainRaw);
 
-//            // ---- 空任务（S2）：唤醒开销敏感 ----
+//            // 空任务（S2）：唤醒开销敏感
 //            var emptyRaw = Measure(() =>
 //            {
 //                var j = default(EmptyJob);
@@ -130,7 +130,7 @@ using EntJoy.ECS.JobSystem;
 //            });
 //            Print("空任务(100万)", emptyRaw);
 
-//            // ---- 小批量（每帧多个 1K 任务）：精确唤醒主战场 ----
+//            // 小批量（每帧多个 1K 任务）：精确唤醒主战场
 //            var smallRaw = Measure(() =>
 //            {
 //                for (int k = 0; k < 100; k++)

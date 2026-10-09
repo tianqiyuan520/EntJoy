@@ -11,10 +11,9 @@ namespace NativeTranspiler.Analyzer.Common
     /// 判据只有一条：属性在 ⇒ 原生；不在 ⇒ 托管（缺属性本身就是托管的定义，无需额外标记）。
     /// <para>
     /// 为什么值得有一条这样的诊断：未标属性的 struct 源生成器根本看不见，托管路径又是始终存在的泛型扩展
-    /// ⇒ 编译期与运行期都不发声，静默降级只能靠反汇编 obj 才发现（游戏仓 <c>ZeroCellsJob</c> 就这么漏了一趟）。
     /// </para>
     /// <para>
-    /// 策略（MSBuild 属性 <c>EntJoyJobIntent</c>）：<c>off</c>（**默认**）关闭；<c>warn</c> 只在混合项目
+    /// 策略（MSBuild 属性 <c>EntJoyJobIntent</c>）：<c>off</c>（默认）关闭；<c>warn</c> 只在混合项目
     /// （本单元已有原生 job）报一条聚合清点；<c>strict</c> 一律报并升级为 error（"每个 job 都必须原生"的项目用）。
     /// </para>
     /// 保守性：泛型 struct 跳过（原生路径不支持）；整个检查包在 try/catch 里（建议性诊断，不得影响构建）。

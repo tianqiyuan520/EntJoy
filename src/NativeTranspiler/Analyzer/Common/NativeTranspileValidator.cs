@@ -50,13 +50,13 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation (the Sleef polynomials were removed): the emitted code is identical to MathPrecision = IEEE. Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
         /// <summary>F-2 / B3：AutoSIMD.Enabled 在 IJobParallelFor/IJobFor/IJob 上实测无收益（更慢）⇒
-        /// **默认 error**，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
+        /// 默认 error，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
         /// 由 EntJoy.Jobs.props 的 CompilerVisibleProperty 传入）。原来只是 warning ⇒ 用户照样能开一个
         /// 实测慢 ~10% 的模式，且"没有 SIMD 收益"这件事只以警告出现、容易被忽略。</summary>
         public static readonly DiagnosticDescriptor AutoSimdNoMeasuredGainError = new("NT024", "AutoSIMD has no measured gain on IJobParallelFor", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled on an IJobParallelFor/IJobFor/IJob: measured end-to-end it is ~10% slower than the scalar baseline. Keep AutoSIMD = Disabled, or — if your own measurement says otherwise — set the MSBuild property <EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured> to state that you measured it.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
-        /// <summary>B3：body 命中"不可向量化"判据 ⇒ 整段退回 per-lane 标量循环（产物正确但**完全没有
-        /// SIMD**）。原先这条退化是静默的 ⇒ 现在报 error，让"以为开了向量化、实际跑标量"在构建期暴露。
+        /// <summary>B3：body 命中"不可向量化"判据 ⇒ 整段退回 per-lane 标量循环（产物正确但完全没有
+        /// SIMD）。原先这条退化是静默的 ⇒ 现在报 error，让"以为开了向量化、实际跑标量"在构建期暴露。
         /// 判据与发射侧共用同一份实现（SimdVectorizability.HasNonVectorizableCall）。</summary>
         public static readonly DiagnosticDescriptor AutoSimdFallsBackToPerLaneError = new("NT031", "AutoSIMD falls back to per-lane scalar", "[NativeTranspile] struct '{0}' sets AutoSIMD = {1}, but its body contains a construct the vectorizer cannot handle ({2}) ⇒ the whole body falls back to a **per-lane scalar loop** (no SIMD at all). Remove the construct, or set AutoSIMD = Disabled to state that scalar is intended.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
@@ -64,9 +64,9 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ParallelForBatchRequiresCppBackendError = new("NT025", "IJobParallelForBatch requires the Cpp backend without AutoSIMD", "[NativeTranspile] struct '{0}' implements IJobParallelForBatch, which is only implemented for Target = Cpp with AutoSIMD = Disabled (the ISPC/AutoSIMD paths only know the per-index Execute(int) shape). Drop Target = Ispc / AutoSIMD, or use IJobParallelFor instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>
-        /// E-1：**部分生成**告知。某个 job 校验失败（如 NT008）时，生成器不再中止整批产物，
+        /// E-1：部分生成告知。某个 job 校验失败（如 NT008）时，生成器不再中止整批产物，
         /// 而是把该 job 排除后继续为其余 job 产出 Bindings.g.cs；本 Warning 说明"哪些 job 没有产物"。
-        /// 目的：把"缺绑定"这件事**明确说出来**。
+        /// 目的：把"缺绑定"这件事明确说出来。
         /// </summary>
         public static readonly DiagnosticDescriptor PartialBindingsWarning = new("NT028", "Bindings generated without some jobs", "{0} 个 [NativeTranspile] job 未通过校验、已从本批绑定生成中排除：{1}。其余 job 的绑定照常产出；上述 job 不会生成 Schedule 绑定（调用点会报 CS0103，而不是整包 CS0234）。", "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
@@ -77,9 +77,9 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor GeneratorCrashError = new("NT026", "NativeTranspiler generator crashed", "[NativeTranspile] 生成器抛出 {0}: {1}｜调用栈（前 6 帧；完整版见 %TEMP%/entjoy-native-transpiler-crash.txt）：{2}", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>
-        /// P0-5b：原生 job 不支持 `ref` 局部（`ref T x = ref expr;`）。
+        /// 原生 job 不支持 `ref` 局部（`ref T x = ref expr;`）。
         /// 而在可空注解上下文（`Nullable=enable`）下更会因类型解析返回 null 而打崩生成器。
-        /// 正确写法：**指针局部** `T* p = &amp;arr[i];`。
+        /// 正确写法：指针局部 `T* p = &amp;arr[i];`。
         /// </summary>
         public static readonly DiagnosticDescriptor RefLocalNotSupportedError = new("NT027", "ref local element type cannot be resolved", "[NativeTranspile] 方法 '{0}' 的 `ref` 局部（`ref T x = ref …`）**元素类型无法解析**：无法生成 `T& x = …`。请显式写出元素类型（避免 `ref var`），或改用指针局部 `T* p = &arr[i];`。", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
@@ -92,7 +92,7 @@ namespace NativeTranspiler.Analyzer
             "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
         /// <summary>
-        /// 解析局部声明的类型（P0-5b 修复）：优先类型语法节点的语义类型；**为 null 时回退到声明符号的类型**
+        /// 解析局部声明的类型（修复）：优先类型语法节点的语义类型；为 null 时回退到声明符号的类型
         /// —— `ref T x = ref expr;` 在 `Nullable=enable` 下 `GetTypeInfo(Type).Type` 返回 null，
         /// </summary>
         private static ITypeSymbol? ResolveLocalType(SemanticModel model, LocalDeclarationStatementSyntax localDecl)
@@ -112,59 +112,7 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
-        // 预定义的系统 API 白名单
-        private static readonly HashSet<string> AllowedStaticMethods = new()
-        {
-            "System.Math.Abs", "System.MathF.Abs",
-            "System.Math.Acos", "System.MathF.Acos",
-            "System.Math.Asin", "System.MathF.Asin",
-            "System.Math.Atan", "System.MathF.Atan",
-            "System.Math.Atan2", "System.MathF.Atan2",
-            "System.Math.Ceiling", "System.MathF.Ceiling",
-            "System.Math.Clamp", "System.MathF.Clamp",
-            "System.Math.Cos", "System.MathF.Cos",
-            "System.Math.Cosh", "System.MathF.Cosh",
-            "System.Math.Exp", "System.MathF.Exp",
-            "System.Math.Floor", "System.MathF.Floor",
-            "System.Math.Log", "System.MathF.Log",
-            "System.Math.Log10", "System.MathF.Log10",
-            "System.Math.Max", "System.MathF.Max",
-            "System.Math.Min", "System.MathF.Min",
-            "System.Math.Pow", "System.MathF.Pow",
-            "System.Math.Round", "System.MathF.Round",
-            "System.Math.Sin", "System.MathF.Sin",
-            "System.Math.Sinh", "System.MathF.Sinh",
-            "System.Math.Sqrt", "System.MathF.Sqrt",
-            "System.Math.Tan", "System.MathF.Tan",
-            "System.Math.Tanh", "System.MathF.Tanh",
-            "System.Math.Truncate", "System.MathF.Truncate",
-            "System.Single.IsNaN", "System.Double.IsNaN",
-            "System.Single.IsInfinity", "System.Double.IsInfinity",
-            // ToDisplayString() 对 C# 关键字别名返回 "float"/"double"（非 System.Single/Double）
-            "float.IsNaN", "double.IsNaN",
-            "float.IsInfinity", "double.IsInfinity",
-            "System.Threading.Interlocked.Increment",
-            "System.Threading.Interlocked.Decrement",
-            "System.Threading.Interlocked.Add",
-            "System.Threading.Interlocked.Exchange",
-            "System.Threading.Interlocked.CompareExchange",
-            "System.Threading.Interlocked.Read",
-            "EntJoy.Mathematics.math.dot",
-            "EntJoy.Mathematics.math.lengthsq",
-            "EntJoy.Mathematics.math.length",
-            "EntJoy.Mathematics.math.normalize",
-            "EntJoy.Mathematics.math.abs",
-            "EntJoy.Mathematics.math.min",
-            "EntJoy.Mathematics.math.max",
-            "EntJoy.Mathematics.math.clamp",
-            "EntJoy.Mathematics.math.lerp",
-            "EntJoy.Mathematics.math.floor",
-            "EntJoy.Mathematics.math.ceil",
-            "EntJoy.Mathematics.math.distancesq",
-            "EntJoy.Collections.UnsafeUtility.ArrayElementAsRef",
-            "EntJoy.Hint.Likely",
-            "EntJoy.Hint.Unlikely",
-        };
+        // 白名单见 NativeApiSurface。
 
         public static bool ValidateMethod(IMethodSymbol method, Compilation compilation, out List<Diagnostic> diagnostics)
         {
@@ -240,8 +188,8 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // NT-05：只有 **error** 才算校验失败。NT023/NT024（事实告知类 warning）不得把 job 判成
-            // "无效" —— 文档 §4 末尾承诺「warning 不阻断生成」，而调用方（NativeTranspilerGenerator）
+            // NT-05：只有 error 才算校验失败。NT023/NT024（事实告知类 warning）不得把 job 判成
+            // "无效" —— 文档 末尾承诺「warning 不阻断生成」，而调用方（NativeTranspilerGenerator）
             // 用返回值决定是否把 job 摘出 validJobs，返回 true 却被摘掉会直接吞掉 Schedule 绑定（CS0103 + NT028）。
             return !diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
         }
@@ -298,9 +246,8 @@ namespace NativeTranspiler.Analyzer
             }
             else
             {
-                // ─── 属性组合校验（C2）───
-                // 生成器只对 IJobChunk / IJobEntity 实现 Vectorize 路径；IJobParallelFor/IJobFor/IJob
-                // 落到 else if (IsParallelForJob || IsForJob) / 兜底分支，Vectorize 被**静默丢弃**，
+                // 属性组合校验（C2）
+                // 落到 else if (IsParallelForJob || IsForJob) / 兜底分支，Vectorize 被静默丢弃，
                 // 用户以为开了向量化其实没有。这里直接报错而不是放任。
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
                 var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
@@ -430,7 +377,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             // B3（①）：AutoSIMD 开着、但 body 命中发射侧"不可向量化"判据 ⇒ 整个 body 退回 per-lane
-            // 标量循环（产物正确但**一点 SIMD 都没有**）。原先这条退化是静默的，用户以为开了向量化。
+            // 标量循环（产物正确但一点 SIMD 都没有）。原先这条退化是静默的，用户以为开了向量化。
             // 判据与发射侧共用同一份实现（SimdVectorizability），避免"两个真相"。
             if (methodSyntax?.Body != null && !isEntityJob)
             {
@@ -554,19 +501,10 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private static bool IsAllowedMethodCall(IMethodSymbol method, Compilation compilation, bool allowChunkMethods = false)
         {
-            // 0. SendEvent<T> 特放：NativeTranspiler 翻译为 C++ EventBuffer 写入
-            if (method.Name == Config.SendEvent && method.IsGenericMethod)
-            {
-                var containingType = method.ContainingType;
-                if (containingType != null)
-                {
-                    // 允许：World.SendEvent / EntityManager.SendEvent / EventBus.SendEvent
-                    if (SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeWorld)) ||
-                        SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeEntityManager)) ||
-                        SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeEventBus)))
-                        return true;
-                }
-            }
+            // 0. SendEvent 入口（World / EntityManager / SystemAPI）：就地展开为 EventBuffer 写入。
+            if (method.Name == Config.SendEvent && method.IsGenericMethod
+                && NativeApiSurface.IsEmitEntryType(method.ContainingType, compilation))
+                return true;
 
             // 1. 允许对容器类型的实例方法调用 (NativeList, NativeArray)
             if (!method.IsStatic)
@@ -574,20 +512,18 @@ namespace NativeTranspiler.Analyzer
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
-                if (allowChunkMethods && SymbolEqualityComparer.Default.Equals(containingType, compilation.GetTypeByMetadataName(Config.TypeArchetypeChunk)) &&
-                    (method.Name == Config.GetComponentDataNativeArray || method.Name == Config.GetComponentDataSpan || method.Name == Config.GetEnableBitMapPtr))
+                if (allowChunkMethods && NativeApiSurface.IsAllowedChunkMethod(method, compilation))
                     return true;
                 return false;
             }
 
-            // 2. 专门放行 System.Runtime.CompilerServices.Unsafe 类的所有静态方法
-            var containingTypeName = method.ContainingType?.ToDisplayString();
-            if (containingTypeName == "System.Runtime.CompilerServices.Unsafe")
+            // 2. 整类放行（Unsafe）。
+            if (NativeApiSurface.IsMappedType(method.ContainingType?.ToDisplayString()))
                 return true;
 
-            // 3. 系统白名单（静态方法）
+            // 3. 系统白名单。
             var fullName = method.ContainingType.ToDisplayString() + "." + method.Name;
-            if (AllowedStaticMethods.Contains(fullName))
+            if (NativeApiSurface.TryGetMappedKind(fullName, out _))
                 return true;
 
             // 4. 标记了 [NativeTranspile] 的方法

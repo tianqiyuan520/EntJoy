@@ -1,6 +1,6 @@
 # NativeAllocator 实现说明（当前状态）
 
-> 记录 commit `799fe7a` 已实现的分配器改造。配套分析文档见 [02-NativeAllocator-Unity对齐分析与计划](./02-NativeAllocator-Unity对齐分析与计划.md)。
+> 记录 commit `799fe7a` 已实现的分配器改造。配套分析文档见 [NativeAllocator-Unity对齐分析与计划](../NativeAllocator-Unity对齐分析与计划.md)（本地笔记，不入库）。
 >
 > 基线基准：`TestGridSearch`（100k pos + 100k queries，15 worker），PowerShell 运行。
 
@@ -60,7 +60,7 @@ Free(payload):
 
 ### 2.3 设计要点
 
-- **线程安全（必须）**：[GridSearch2D.cs:432](../../src/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs#L432) 的 `CellStartEnd.Resize` 在 worker 线程 job 内增长 Persistent NativeList。
+- **线程安全（必须）**：[GridSearch2D.cs:432](../../samples/EntJoySample/05_Algorithms/GridSearch/GridSearch2D.cs#L432) 的 `CellStartEnd.Resize` 在 worker 线程 job 内增长 Persistent NativeList。
 - **外来块护栏**：杜绝"对内部指针减 HeaderSize 再释放"导致的堆损坏（STATUS_HEAP_CORRUPTION 0xc0000374）。
 - **对齐**：payload 16 字节对齐（当前 Persistent 类型 float2/int2/float/int 均 ≤8，16 对齐充裕）。
 

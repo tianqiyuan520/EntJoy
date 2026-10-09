@@ -5,13 +5,11 @@ using EntJoy.JobSystem;
 
 namespace EntJoySample.AutoSIMDTest
 {
-    // ── Component types ──
+    // Component types
     public struct MovePosition : IComponentData { public float2 Value; }
     public struct MoveVelocity : IComponentData { public float2 Value; }
 
-    // ────────────────────────────────────────────
     // Light IJobChunk: Position += Velocity * dt
-    // ────────────────────────────────────────────
 
     [NativeTranspiler.NativeTranspile]
     public struct MoveJobChunk_Cpp : IJobChunk
@@ -51,9 +49,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ────────────────────────────────────────────
     // Light IJobEntity: Position += Velocity * dt
-    // ────────────────────────────────────────────
 
     [NativeTranspiler.NativeTranspile]
     public struct MoveJobEntity_Cpp : IJobEntity
@@ -77,9 +73,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ────────────────────────────────────────────
     // Heavy IJobChunk: complex math inner loop
-    // ────────────────────────────────────────────
 
     [NativeTranspiler.NativeTranspile]
     public struct HeavyJobChunk_Cpp : IJobChunk
@@ -159,9 +153,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ────────────────────────────────────────────
     // Heavy IJobEntity: complex math inner loop
-    // ────────────────────────────────────────────
 
     [NativeTranspiler.NativeTranspile]
     public struct HeavyJobEntity_Cpp : IJobEntity
@@ -192,7 +184,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ISPC IJobEntity variants ──
+    // ISPC IJobEntity variants
 
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
     public struct MoveJobEntity_ISPC : IJobEntity
@@ -230,9 +222,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ────────────────────────────────────────────
     // Heavy IJobChunk: auto-vectorize mode (scalar sinf/cosf → Clang @llvm.sin.v8f32)
-    // ────────────────────────────────────────────
 
     [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
     public struct HeavyJobChunk_Vectorize : IJobChunk
@@ -331,7 +321,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── ISPC variants ──
+    // ISPC variants
 
     [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc, MathLib = NativeTranspiler.IspcMathLib.fast)]
     public struct MoveJobChunk_ISPC : IJobChunk

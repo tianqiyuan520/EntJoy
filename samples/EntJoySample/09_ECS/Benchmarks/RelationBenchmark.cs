@@ -34,7 +34,7 @@ namespace EntJoySample.ECS
             sw.Stop();
             Console.WriteLine($"  CreateEntities: {sw.Elapsed.TotalMilliseconds:F2} ms\n");
 
-            // ===== 1. AddRelationship（10 万次，纯 SetRaw 覆盖）=====
+            // 1. AddRelationship（10 万次，纯 SetRaw 覆盖）
             const int warmup = 2000;
             // 预热
             for (int i = 0; i < warmup; i++)
@@ -47,7 +47,7 @@ namespace EntJoySample.ECS
             double addMs = sw.Elapsed.TotalMilliseconds;
             Console.WriteLine($"AddRelationship x{entityCount} (SetRaw 8B): {addMs,8:F2} ms total, {addMs / entityCount * 1000:F3} us/op\n");
 
-            // ===== 2. GetRelationship（10 万次）=====
+            // 2. GetRelationship（10 万次）
             sw.Restart();
             for (int i = 0; i < entityCount; i++)
             {
@@ -58,7 +58,7 @@ namespace EntJoySample.ECS
             double getMs = sw.Elapsed.TotalMilliseconds;
             Console.WriteLine($"GetRelationship x{entityCount}: {getMs,8:F2} ms total, {getMs / entityCount * 1000:F3} us/op");
 
-            // ===== 3. HasRelationship（10 万次）=====
+            // 3. HasRelationship（10 万次）
             sw.Restart();
             for (int i = 0; i < entityCount; i++)
             {
@@ -68,7 +68,7 @@ namespace EntJoySample.ECS
             double hasMs = sw.Elapsed.TotalMilliseconds;
             Console.WriteLine($"HasRelationship x{entityCount}: {hasMs,8:F2} ms total, {hasMs / entityCount * 1000:F3} us/op\n");
 
-            // ===== 4. WithRelationship 查询（按父实体过滤）=====
+            // 4. WithRelationship 查询（按父实体过滤）
             // 每父 ~1000 子实体
             sw.Restart();
             long total = 0;
@@ -85,7 +85,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"WithRelationship query (10 parents x ~1000 children): {queryMs,8:F2} ms/query, total matched {total}");
             Console.WriteLine($"  ({entityCount / parents.Length} children per parent expected)\n");
 
-            // ===== 5. 级联删除：DestroyEntityCascade（索引 O(1)）=====
+            // 5. 级联删除：DestroyEntityCascade（索引 O(1)）
             Console.WriteLine("--- 5. Cascade destroy ---");
             // 重建 100 个父实体，各带 ~1000 子
             var parents2 = new Entity[100];
@@ -106,7 +106,7 @@ namespace EntJoySample.ECS
             Console.WriteLine($"DestroyEntityCascade x{parents2.Length} parents (each ~{entityCount / parents2.Length} children): {cascadeMs,8:F2} ms total");
             Console.WriteLine($"  ({cascadeMs / parents2.Length * 1000:F1} us/parent, 包含 {entityCount / parents2.Length} 个子实体销毁)\n");
 
-            // ===== 6. 反向查询：GetRelationsOf（索引 O(1)）=====
+            // 6. 反向查询：GetRelationsOf（索引 O(1)）
             Console.WriteLine("--- 6. GetRelationsOf (reverse index O(1)) ---");
             // 重建 1 父 + 10000 子
             var hub = em.NewEntity(typeof(Position));
@@ -127,7 +127,7 @@ namespace EntJoySample.ECS
             double getRelMs = sw.Elapsed.TotalMilliseconds / 100;
             Console.WriteLine($"GetRelationsOf x{hubChildren.Length} (100 iters): {getRelMs,8:F4} ms/iter ({getRelMs * 1000:F2} us, O(1) 索引查表)\n");
 
-            // ===== 7. 关系遍历基准 =====
+            // 7. 关系遍历基准
             Console.WriteLine("--- 7. Traversal ---");
             // 深链：chain of 10000（每实体一个父，测 GetAncestors 单链爬升）
             var chainRoot = em.NewEntity(typeof(Position));

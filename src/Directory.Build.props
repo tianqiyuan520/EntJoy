@@ -5,7 +5,7 @@
        打包是逐工程 opt-in：默认 IsPackable=false，只有 4 个发布工程显式打开。 -->
 
   <PropertyGroup>
-    <EntJoyVersion>1.0.0</EntJoyVersion>
+    <EntJoyVersion>1.0.1</EntJoyVersion>
     <Version>$(EntJoyVersion)</Version>
     <Authors>tianqiyuan520</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

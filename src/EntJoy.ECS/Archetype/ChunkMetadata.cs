@@ -26,7 +26,7 @@ namespace EntJoy.ECS
         public readonly int ChangedBitMaskOffset;
         public readonly int ChangedBitMaskSize;
 
-        // ======================== Shared values 区 ========================
+        // Shared values 区
 
         /// <summary>
         /// Shared values 区起点（chunk 内存块内偏移；-1 表示无 shared 组件）。
@@ -135,7 +135,7 @@ namespace EntJoy.ECS
                 offset += changedBitMaskSize;
             }
 
-            // ======================== Shared values 区 ========================
+            // Shared values 区
             // blittable shared → 内联存值；managed shared → 存 int 索引（值在 EntityManager 哈希桶数组）
             int sharedValuesOffset = -1;
             int managedSharedCount = 0;

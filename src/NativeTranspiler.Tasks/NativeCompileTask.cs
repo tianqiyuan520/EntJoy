@@ -95,9 +95,8 @@ namespace NativeTranspiler.Tasks
                 return true;
             }
 
-            // ★ 生成物静默失败自检（必须早于增量哈希短路 —— 否则"上一轮生成的坏产物 + 本轮直接跳过"
+            // 生成物静默失败自检（必须早于增量哈希短路 —— 否则"上一轮生成的坏产物 + 本轮直接跳过"
             //   会让坏内核被当成最新版本交付）。
-            //   生成器遇到未支持的语句/表达式形态时会写下唯一标记（前缀 __ENTJOY_UNSUPPORTED，
             //   见 NativeTranspiler.Analyzer.Common.UnsupportedMarkers），而不是静默丢弃语句或返回 0。
             //   `.ispc` 一并扫描：ISPC 产物同样有静默降级通道。
             var generatedSources = cppFiles
@@ -106,7 +105,7 @@ namespace NativeTranspiler.Tasks
             if (!CheckGeneratedMarkers(generatedSources))
                 return false;
 
-            // ★ 生成器变了但产物没重新生成 → 本轮编译的其实是上一版产物（Roslyn 的 CoreCompile 内容哈希门控
+            // 生成器变了但产物没重新生成 → 本轮编译的其实是上一版产物（Roslyn 的 CoreCompile 内容哈希门控
             //   会让"只改生成器、不改 C# 源"的构建整轮不跑源生成器）。这件事必须报出来，不能静默。
             WarnIfGeneratedArtifactsStale();
 
@@ -116,7 +115,7 @@ namespace NativeTranspiler.Tasks
                 return true;
             }
 
-            // ---- 基于内容哈希的增量检测 ----
+            // 基于内容哈希的增量检测
             var dependencies = CollectDependencies(NativeCodeGenDir);
             // 将 hash 文件存在项目根目录下，避免被 CMake 清理 build 目录时删除
             var hashFile = Path.Combine(NativeCodeGenDir, "native_compile.hash");
@@ -162,7 +161,6 @@ namespace NativeTranspiler.Tasks
 
             // 若 CMakeCache.txt 记录的源目录（CMAKE_HOME_DIRECTORY）与当前生成目录不一致
             //（例如整个工程被移动/复制过），原地 reconfigure 会沿用旧绝对路径，必须重建缓存。
-            // 注意比较前要规范化路径：CMakeCache 存的是正斜杠且无末尾分隔符，
             // 而 NativeCodeGenDir 可能带尾部反斜杠。
             string cachedHome = GetCacheHomeDirectory(buildDir);
             bool cmakeHomeMatches = cachedHome == null ||
@@ -176,7 +174,6 @@ namespace NativeTranspiler.Tasks
             {
                 // 只在缓存/工程文件缺失、工具集不匹配或源目录变化时才清空 build 目录（全量重编）。
                 // 若只是 CMakeLists.txt 内容变化（新增/重命名/删除 job 或 method 导致源列表变化），
-                // 原地 reconfigure 即可：CMake 更新工程文件后，--build 仍能按 obj 缓存增量只重编
                 // 新增的 TU 与受影响的 Unity 批，避免每次结构调整都触发 ~30s 全量重编。
                 bool cacheInvalid = !cmakeCacheExists || !cmakeBuildSystemExists || !cacheToolsetMatches || !cmakeHomeMatches;
                 if (cacheInvalid)
@@ -204,7 +201,7 @@ namespace NativeTranspiler.Tasks
                         "CMakeLists.txt changed but cache is valid — reconfiguring in place (incremental obj cache preserved).");
                 }
 
-                // ---- CMake 配置 ----
+                // CMake 配置
                 var configureArgs = new List<string>
                 {
                     "-S", NativeCodeGenDir,
@@ -216,7 +213,7 @@ namespace NativeTranspiler.Tasks
                     configureArgs.Add("ClangCL");
                     string version = GetClangVersion(clangClPath);
                     Log.LogMessage(MessageImportance.High,
-                        $"★ Native toolchain: ClangCL (LLVM backend) {version} — {clangClPath}");
+ $"Native toolchain: ClangCL (LLVM backend) {version} — {clangClPath}");
                 }
                 else
                 {
@@ -236,7 +233,7 @@ namespace NativeTranspiler.Tasks
                 }
             }
 
-            // ---- CMake 构建 ----
+            // CMake 构建
             // Only build NativeTranspiled (skip NativeDll if unchanged — saves ~15s ClangCL startup)
             var buildArgs = new string[] { "--build", buildDir, "--config", "Release", "--parallel", "--target", "NativeTranspiled" };
             Log.LogMessage(MessageImportance.High, $"Running CMake build: cmake {string.Join(" ", buildArgs)}");
@@ -275,7 +272,7 @@ namespace NativeTranspiler.Tasks
             Log.LogMessage(MessageImportance.High, "Native compilation succeeded.");
 
             // 最终确认实际使用的编译器（读 CMakeCache 记录）
-            Log.LogMessage(MessageImportance.High, $"★ Native build toolchain confirmed: {GetConfiguredToolchain(buildDir)}");
+ Log.LogMessage(MessageImportance.High, $"Native build toolchain confirmed: {GetConfiguredToolchain(buildDir)}");
             return true;
         }
 
@@ -319,10 +316,10 @@ namespace NativeTranspiler.Tasks
         }
 
         /// <summary>
-        /// 生成器程序集与"产物生成时的生成器"不一致 ⇒ 本轮编译的是**上一版产物**。
+        /// 生成器程序集与"产物生成时的生成器"不一致 ⇒ 本轮编译的是上一版产物。
         /// 成因：Roslyn 的 CoreCompile 内容哈希门控会让"只改生成器、不改 C# 源"的构建整轮不跑源生成器，
         /// 而本任务的哈希门控又会跳过 CMake —— 两边都跳过，且没有任何提示（实测反复踩）。
-        /// 判据用**内容哈希**（生成器自己写在 generator.stamp 里）而不是时间戳：
+        /// 判据用内容哈希（生成器自己写在 generator.stamp 里）而不是时间戳：
         /// 单纯重编生成器但内容未变不应打扰用户。只报 warning，不改变构建结果。
         /// </summary>
         private void WarnIfGeneratedArtifactsStale()
@@ -701,7 +698,7 @@ namespace NativeTranspiler.Tasks
                     string reason = !existingHashes.ContainsKey(dep)
                         ? "NEW FILE (not in saved hash)"
                         : "CONTENT CHANGED";
-                    Log.LogMessage(MessageImportance.High, $"  ★ {reason}: {Path.GetFileName(dep)}");
+ Log.LogMessage(MessageImportance.High, $" {reason}: {Path.GetFileName(dep)}");
                     return false;
                 }
             }
@@ -711,7 +708,7 @@ namespace NativeTranspiler.Tasks
             {
                 if (!dependencies.Any(d => string.Equals(d, savedFile, StringComparison.OrdinalIgnoreCase)))
                 {
-                    Log.LogMessage(MessageImportance.High, $"  ★ FILE DELETED: {savedFile}");
+ Log.LogMessage(MessageImportance.High, $" FILE DELETED: {savedFile}");
                     return false;
                 }
             }
@@ -836,7 +833,7 @@ namespace NativeTranspiler.Tasks
     /// <summary>
     /// Windows 命令行参数的引号规则（纯函数，便于单测）。
     ///
-    /// 规则来自 CRT / <c>CommandLineToArgvW</c>：反斜杠只在**紧跟引号**时有转义含义，
+    /// 规则来自 CRT / <c>CommandLineToArgvW</c>：反斜杠只在紧跟引号时有转义含义，
     /// 因此"闭合引号前的那串反斜杠"必须倍增，否则会把闭合引号吃掉。
     /// </summary>
     public static class CommandLineQuoting
@@ -845,15 +842,15 @@ namespace NativeTranspiler.Tasks
         /// 把单个参数转成可直接拼进命令行的片段。
         ///
         /// ⚠ 旧实现 <c>a.Contains(' ') ? "\"" + a + "\"" : a</c> 有三个洞：
-        ///   ① 只在"含空格"时加引号 —— 含 <c>&amp;</c>/<c>(</c>/<c>;</c>/TAB 等照样能改变命令行结构；
-        ///   ② 不做反斜杠转义 —— 参数以 <c>\</c> 结尾时该反斜杠会**吃掉闭合引号**
-        ///      （<c>"…NativeTranspiler_Generated\"</c> 里的 <c>\"</c> 被解析成字面引号）；
-        ///      而仓库自带的参数正是
-        ///      <c>NativeCodeGenDir="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\"</c>
-        ///      （见 <c>src/EntJoy.Jobs/msbuild/EntJoy.Jobs.targets</c>），**永远**以 <c>\</c> 结尾
-        ///      ⇒ 只要项目路径含空格，<c>cmake -S</c> / <c>-B</c> 就整体解析错位；
-        ///   ③ 内嵌 <c>"</c> 无法安全表达（需要 <c>\"</c> 且反斜杠倍增）⇒ 这里**直接抛错**，
-        ///      不让一个畸形参数静默变成"另一个参数"。
+        /// ① 只在"含空格"时加引号 —— 含 <c>&amp;</c>/<c>(</c>/<c>;</c>/TAB 等照样能改变命令行结构；
+        /// ② 不做反斜杠转义 —— 参数以 <c>\</c> 结尾时该反斜杠会吃掉闭合引号
+        /// （<c>"…NativeTranspiler_Generated\"</c> 里的 <c>\"</c> 被解析成字面引号）；
+        /// 而仓库自带的参数正是
+        /// <c>NativeCodeGenDir="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\"</c>
+        /// （见 <c>src/EntJoy.Jobs/msbuild/EntJoy.Jobs.targets</c>），永远以 <c>\</c> 结尾
+        /// ⇒ 只要项目路径含空格，<c>cmake -S</c> / <c>-B</c> 就整体解析错位；
+        /// ③ 内嵌 <c>"</c> 无法安全表达（需要 <c>\"</c> 且反斜杠倍增）⇒ 这里直接抛错，
+        /// 不让一个畸形参数静默变成"另一个参数"。
         /// </summary>
         public static string QuoteArgument(string a)
         {

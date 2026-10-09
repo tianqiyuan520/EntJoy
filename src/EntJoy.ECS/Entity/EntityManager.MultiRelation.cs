@@ -7,13 +7,11 @@ namespace EntJoy.ECS
     /// <summary>
     /// 多实例关系（[MultiRelation]）操作：双模式路由。
     /// - 托管列表模式（[MultiRelation]，MaxSlots=0）：RelationListStore（无界，主线程，NT017 拦截 Job）。
-    /// - 定长多槽列模式（[MultiRelation(MaxSlots=N)]，N≥2）：chunk 列（宽 N×8B），Job 可读。
-    /// 两种模式共用反向索引（RelationIndex，target→sources O(1)）。
     /// 叠加 [ExclusiveTarget] 时 target 侧唯一（背包：物品唯一持有者）。
     /// </summary>
     public unsafe partial class EntityManager
     {
-        // ======================== 定长多槽列 读写辅助 ========================
+        // 定长多槽列 读写辅助
         // TRel 首 N 个字段为连续 RelationSlot（源生成器注入 Slot1..SlotN-1，Sequential 布局），
         // Unsafe.As<TRel, RelationSlot> 取槽 0 引用，Unsafe.Add 按 8B 步进访问槽 i。
 
@@ -46,7 +44,7 @@ namespace EntJoy.ECS
             return -1;
         }
 
-        // ======================== Add（核心，锁内调用） ========================
+        // Add（核心，锁内调用）
 
         /// <summary>
         /// 多值关系追加核心（锁内调用）。幂等去重；[ExclusiveTarget] 时先解绑旧 source 的该 target 条目。
@@ -181,7 +179,7 @@ namespace EntJoy.ECS
             return false;
         }
 
-        // ======================== 多值关系专用 API ========================
+        // 多值关系专用 API
 
         /// <summary>多值关系：移除 entity 指向 target 的条目（无则 no-op）。同步维护反向索引。</summary>
         public void RemoveRelationship<TRel>(Entity entity, Entity target)
@@ -357,7 +355,7 @@ namespace EntJoy.ECS
             }
         }
 
-        // ======================== 销毁清理集成 ========================
+        // 销毁清理集成
         // 定长列模式：TRel 占 chunk 列，DestroyEntityCore 的 CleanupSourceRelations（列路径）自动清理反向索引；
         // 托管模式：走 CleanupMultiSourceRelations（列表路径）。
 

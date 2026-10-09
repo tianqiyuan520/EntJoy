@@ -56,7 +56,7 @@ namespace EntJoy.ECS
             where TRel : struct, IRelationComponent
             => _entityManager.GetSiblings<TRel>(entity);
 
-        // ======================== 多值关系（[MultiRelation]） ========================
+        // 多值关系（[MultiRelation]）
 
         /// <summary>多值关系：移除 entity 指向 target 的条目（无则 no-op）。</summary>
         public void RemoveRelationship<TRel>(Entity entity, Entity target)

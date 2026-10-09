@@ -7,8 +7,8 @@ namespace EntJoy.JobSystem.Managed
     /// Chase-Lev 调度器的范围任务结构体（对齐 C++ TileTask + RangeTask）。
     ///
     /// 存储在 ManagedWorkStealingDeque 的结构体数组中：
-    ///   - Owner（worker）通过 PushBottom/PopBottom 操作
-    ///   - Thief（其他 worker）通过 StealTop 操作
+    /// - Owner（worker）通过 PushBottom/PopBottom 操作
+    /// - Thief（其他 worker）通过 StealTop 操作
     ///
     /// 含引用字段（Job/Runner/Completion），GC 会扫描。
     /// 由 ManagedTileTaskPool 池化管理，热路径零分配。

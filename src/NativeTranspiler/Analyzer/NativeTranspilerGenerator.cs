@@ -14,12 +14,7 @@ namespace NativeTranspiler.Analyzer
     [Generator]
     public partial class NativeTranspilerGenerator : IIncrementalGenerator
     {
-        private static readonly HashSet<string> SkipTranspileTypeNames = new()
-        {
-            "EntJoy.Mathematics.math",
-            "EntJoy.Collections.UnsafeUtility",
-            "EntJoy.Hint"
-        };
+        // 不参与发射的类型见 NativeApiSurface.SkipsEmission。
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
@@ -52,24 +47,16 @@ namespace NativeTranspiler.Analyzer
 
             context.RegisterSourceOutput(combined, (spc, ctx) =>
             {
-                // 生成器自身异常的诊断出口（P0-5b）：
+                // 生成器自身异常的诊断出口：
                 // 没有这层保护时，任何 NRE 只会变成 Roslyn 的
                 //   `CS8785: 生成器"NativeTranspilerGenerator"未能生成源 … NullReferenceException`
-                // —— 只有异常类型名、**没有行号**，定位只能靠二分（实测代价：一整轮）。
+                // —— 只有异常类型名、没有行号，定位只能靠二分（实测代价：一整轮）。
                 // 这里捕获后上报 NT026（含异常消息 + 调用栈），并落盘一份完整 ToString()。
                 try
                 {
-                // =====================================================================
                 //   0) 空集短路
                 //   1) Validate  —— 收集依赖 + NativeTranspileValidator 校验，出错即停
-                //   2) Resolve   —— 收集用户结构体、后端选择、输出目录、公共头
-                //   3) Methods   —— 静态方法与 Job 的 C++/ISPC 源 + MT + wrapper 写出
-                //   4) Adapters  —— C++ 包装 + 实体批量适配生成
-                //   5) BuildArtifacts —— CMakeLists.txt + clang 编译 .bat + ISPC 编译 .bat
-                //   6) Bindings  —— 生成 .g.cs 绑定 + 生成标记
-                // 说明：完整抽成独立 CodeGenPipeline 类需配行为对拍（本机 SDK 损坏无法跑
                 // 消费者基准），故先以文档化阶段标记落地；无行为变更。
-                // =====================================================================
                 if (ctx.MethodSymbols.IsEmpty && ctx.JobStructSymbols.IsEmpty)
                 {
                     // 即使一个 job 都没标属性，也要跑意图检查：`strict` 策略下"整包都忘了属性"正是要抓的形态。
@@ -90,7 +77,6 @@ namespace NativeTranspiler.Analyzer
                 }
                 // Job Execute 内部的同程序集静态方法调用也要收集依赖（生成其 C++ 定义），
                 // 否则调用点引用了不存在的函数（use of undeclared identifier）。
-                // 注意：不能直接对 Execute 调 CollectMethodDependencies —— 该方法对 Execute 有早退
                 // 保护（Execute 自身不作为独立函数生成），故单独遍历 Execute 体内的静态调用。
                 foreach (var job in ctx.JobStructSymbols)
                 {
@@ -106,7 +92,7 @@ namespace NativeTranspiler.Analyzer
                 }
                 var invalidJobs = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
                 int jobLevelErrorCount = 0;
-                // B3：AutoSIMD = Enabled 在 IJobParallelFor/IJobFor/IJob 上默认**报 error**（NT024，实测慢
+                // B3：AutoSIMD = Enabled 在 IJobParallelFor/IJobFor/IJob 上默认报 error（NT024，实测慢
                 // ~10%）。要开必须显式声明"我已量过"：MSBuild 属性 EntJoyAutoSimdMeasured=true
                 // （由 EntJoy.Jobs.props 的 CompilerVisibleProperty 传到编译期）。
                 bool autoSimdMeasured = ctx.Options.GlobalOptions.TryGetValue("build_property.EntJoyAutoSimdMeasured", out var asmVal)
@@ -114,9 +100,8 @@ namespace NativeTranspiler.Analyzer
                 foreach (var job in ctx.JobStructSymbols)
                 {
                     if (job == null) continue;
-                    // NT-05：只有 **error** 才把 job 排除出生成集。
+                    // NT-05：只有 error 才把 job 排除出生成集。
                     // 旧代码用 ValidateJobStruct 的返回值（= diagnostics.Count == 0）判定有效 ⇒
-                    // 只带 warning 的 job（NT023/NT024）也被摘掉 ⇒ Schedule 绑定不生成 ⇒ 调用点 CS0103
                     // + 误导性 NT028，违反文档「warning 不阻断生成」。
                     NativeTranspileValidator.ValidateJobStruct(job, ctx.Compilation, out var diags, autoSimdMeasured);
                     allErrors.AddRange(diags);
@@ -130,12 +115,12 @@ namespace NativeTranspiler.Analyzer
                 // 诊断一律上报；只有 Error 才终止生成。
                 // （NT023/NT024 是"事实告知"类 Warning —— 既不能憋着不报，也不能因为它们而整个项目不生成产物。）
                 foreach (var diag in allErrors) spc.ReportDiagnostic(diag);
-                // E-1（DX 修复）：**单个 job 的校验错误不再终止整批生成**。
+                // E-1（DX 修复）：单个 job 的校验错误不再终止整批生成。
                 // 旧行为是"只要有 job 校验失败 → 整个 NativeTranspiler.Bindings.g.cs 不产出"，
                 // 下游表现为几十条 CS0234「找不到 NativeTranspiler.Bindings」，把唯一有用的 NT008
                 // （例如漏写 `using EntJoy.JobSystem;` 导致 job 没实现任何接口）埋在噪声里。
                 // 现在：把校验失败的 job 排除出生成集，其余 job 照常产出绑定；Error 仍然让编译失败，
-                // 但错误信息只剩 NT008/NT028 这一组，且**不再有 CS0234 级联**。
+                // 但错误信息只剩 NT008/NT028 这一组，且不再有 CS0234 级联。
                 int fatalErrorCount = allErrors.Count(d => d.Severity == DiagnosticSeverity.Error) - jobLevelErrorCount;
                 if (fatalErrorCount > 0)
                     return;
@@ -165,13 +150,13 @@ namespace NativeTranspiler.Analyzer
                 // 收集用户自定义结构体（用于生成 ISPC 头文件）
                 var userStructs = CollectUserStructTypes(validMarkedMethods, validJobs, ctx.Compilation);
 
-                // ─── SendEvent 元数据：Job 全名 → 事件类型全名列表 ───
+                // SendEvent 元数据：Job 全名 → 事件类型全名列表
                 var allJobEventTypes = new Dictionary<string, List<string>>();
 
                 bool anyIspc = ctx.MethodSymbols.Any(m => m != null && GetBackendTarget(m, attrSymbol) == NativeTranspiler.BackendTarget.Ispc)
                              || ctx.JobStructSymbols.Any(j => j != null && GetBackendTarget(j, attrSymbol) == NativeTranspiler.BackendTarget.Ispc);
 
-                // ★ 布局加固（C++ 与 ISPC 共用）：Explicit / Pack<8 的 struct 无法在自然对齐下复现
+                // 布局加固（C++ 与 ISPC 共用）：Explicit / Pack<8 的 struct 无法在自然对齐下复现
                 // C# 布局（ISPC 不支持 #pragma pack；C++ 生成器也只用自然对齐），
                 // 字段会错位 → fail-fast 拒绝生成（NT016），避免 static_assert 用自然尺寸静默放行。
                 foreach (var userStruct in userStructs)
@@ -426,7 +411,7 @@ namespace NativeTranspiler.Analyzer
                         }
                         cppFiles.Add($"{plainBase}_Adapter.cpp");
 
-                        // ─── SendEvent: 收集事件类型元数据 ───
+                        // SendEvent: 收集事件类型元数据
                         if (evtTypes.Count > 0)
                         {
                             string jobFullName = job.ToDisplayString();
@@ -559,9 +544,9 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
-                // ─── D1：清理陈旧生成物（见 PruneStaleGeneratedFiles 注释）───
+                // D1：清理陈旧生成物（见 PruneStaleGeneratedFiles 注释）
                 // "本次产物" 直接取自 CodeGenIo 录制到的写入集合 —— 不靠手写文件名推导，
-                // ⚠ 位置必须在 **所有 CodeGenIo 写入之后**（含 run_clangcl.bat / CMakeLists.txt）。
+                // ⚠ 位置必须在 所有 CodeGenIo 写入之后（含 run_clangcl.bat / CMakeLists.txt）。
                 var trackedOutputs = CodeGenIo.EndOutputTracking();
                 if (trackedOutputs != null && cppFiles.Count + ispcFiles.Count > 0)
                 {
@@ -597,13 +582,13 @@ namespace NativeTranspiler.Analyzer
                         clangBat.AppendLine("copy /Y \"" + Path.Combine(prebuiltNativeDir, "NativeDll.dll").Replace("\\", "\\\\") + "\" \"" + solBinDir + "\"");
                     clangBat.AppendLine("copy /Y build\\Release\\NativeTranspiled.dll \"" + solBinDir + "\"");
                     clangBat.AppendLine("echo Done. NativeDll.dll + NativeTranspiled.dll copied to " + solBinDir);
-                    // 内容未变则不写（#22）：避免时间戳更新触发无关重编/检查
+                    // 内容未变则不写：避免时间戳更新触发无关重编/检查
                     string clangBatContent = clangBat.ToString();
                     if (!File.Exists(clangBatPath) || File.ReadAllText(clangBatPath) != clangBatContent)
                         CodeGenIo.WriteAllTextWithRetry(clangBatPath, clangBatContent);
                 }
 
-                // ─── 生成器版本戳（F-11）───
+                // 生成器版本戳（F-11）
                 // 记录"这批产物是哪个内容的生成器生成的"。NativeCompileTask 用它判定
                 // "生成器改了但产物没重新生成"（Roslyn 内容哈希门控会让这条静默发生），并据此报 warning。
                 // ⚠ 不要把它加进 native 依赖哈希（内容含时间戳，会让每次构建都重编 CMake）。
@@ -612,7 +597,7 @@ namespace NativeTranspiler.Analyzer
                 var bindingsCode = BindingsGenerator.GenerateBindingsClass(validMarkedMethods, validJobs, ctx.Compilation);
                 spc.AddSource("NativeTranspiler.Bindings.g.cs", bindingsCode);
 
-                // ─── 不变量自校验：生成物与"是否引用 EntJoy.ECS"必须一致（NT029 / NT030）───
+                // 不变量自校验：生成物与"是否引用 EntJoy.ECS"必须一致（NT029 / NT030）
                 // 背景：bindings 的 ECS 相关发射（using EntJoy.ECS、ChunkJobFuncDelegate、World 形参）
                 // 由 job 种类条件化，使只引用 EntJoy.Collections/Jobs 的项目也能用 [NativeTranspile]。
                 // 这条不变量把"解耦"从经验保证升级为生成器自校验：
@@ -641,7 +626,6 @@ namespace NativeTranspiler.Analyzer
 
                 // 环境变量 ENTJOY_DUMP_BINDINGS=<path> 时把绑定源码落盘。
                 // 用途：Unity 工程无法跑 MSBuild 源生成器管线，需要离线 dump 绑定后直接编译
-                // （tools/UnityJobBenchNative 的 build.ps1 依赖这个开关）。
                 // 未设该环境变量时完全无副作用（只多一次 GetEnvironmentVariable）。
                 try
                 {
@@ -659,7 +643,7 @@ namespace NativeTranspiler.Analyzer
                     Console.Error.WriteLine($"[NativeTranspiler] Failed to dump bindings: {ex.Message}");
                 }
 
-                // ─── SendEvent 元数据：供 BindingsGenerator 注册到 ChunkJobScheduler ───
+                // SendEvent 元数据：供 BindingsGenerator 注册到 ChunkJobScheduler
                 if (allJobEventTypes.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder();
@@ -685,7 +669,7 @@ namespace NativeTranspiler.Analyzer
                     spc.AddSource("NativeTranspiler.EventTypes.g.cs", sb.ToString());
                 }
 
-                // ⚠ 不得把时间戳写进生成产物：源生成器的输出是**编译器输入**，
+                // ⚠ 不得把时间戳写进生成产物：源生成器的输出是编译器输入，
                 //   一旦含 DateTime.UtcNow，每次构建输入都变 ⇒ 增量构建恒定失效、
                 //   可复现构建不可能成立、产物 diff 永远非空（实测 EmitSnapshot 里唯一差异就是这一行）。
                 spc.AddSource("NativeTranspiler_GeneratedMarker.g.cs",
@@ -726,7 +710,7 @@ namespace NativeTranspiler.Analyzer
                 firstFrames));
         }
 
-        // ----- 辅助方法（委托到 AttributeHelper） -----
+        // 辅助方法（委托到 AttributeHelper）
         private static NativeTranspiler.BackendTarget GetBackendTarget(ISymbol symbol, INamedTypeSymbol? attrSymbol)
             => AttributeHelper.GetBackendTarget(symbol, attrSymbol);
 
@@ -774,7 +758,7 @@ namespace NativeTranspiler.Analyzer
             HashSet<IMethodSymbol> collected, List<Diagnostic> allErrors)
         {
             var containingTypeFullName = method.ContainingType?.ToDisplayString();
-            if (containingTypeFullName != null && SkipTranspileTypeNames.Contains(containingTypeFullName))
+            if (NativeApiSurface.SkipsEmission(containingTypeFullName))
                 return;
             if (method.Name == Config.Execute && method.ContainingType?.AllInterfaces.Any(i =>
                 SymbolHelper.IsEntJoyJobInterface(i, Config.IJob) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobFor) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobParallelForBatch) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobChunk) || SymbolHelper.IsEntJoyJobInterface(i, Config.IJobEntity)) == true)
@@ -851,7 +835,7 @@ namespace NativeTranspiler.Analyzer
                                 CollectFromType(localType, structs);
                         }
 
-                        // ─── SendEvent 事件类型收集 ───
+                        // SendEvent 事件类型收集
                         foreach (var invocation in methodSyntax.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
                         {
                             // 判断是否 SendEvent 调用：
@@ -1004,12 +988,11 @@ namespace NativeTranspiler.Analyzer
         /// 绝不触碰 build/ 缓存、CMakeLists.txt、*.bat、native_compile.hash 等由编译任务管理的文件。
         /// </summary>
         /// <remarks>
-        /// ⚠ **ISPC 的 `-h` 头必须按"对应 `.ispc` 还在不在"决定去留，不能按"在不在本次写出集合里"**：
-        /// `<X>_ispc.h` 是 **ispc.exe 的产物**（CMake 里是 <c>add_custom_command</c> 的 OUTPUT），
+        /// ⚠ ISPC 的 `-h` 头必须按"对应 `.ispc` 还在不在"决定去留，不能按"在不在本次写出集合里"：
+        /// `<X>_ispc.h` 是 ispc.exe 的产物（CMake 里是 <c>add_custom_command</c> 的 OUTPUT），
         /// 本生成器从不写它 ⇒ 它永远不在 <paramref name="expected"/> 里。早先按"不在集合就删"处理，
-        /// 结果是**每次生成都把全部 31 个 `*_ispc.h` 删掉** ⇒ CMake 判定 ISPC 步骤输出缺失、
+        /// 结果是每次生成都把全部 31 个 `*_ispc.h` 删掉 ⇒ CMake 判定 ISPC 步骤输出缺失、
         /// 全部重跑（实测改一个 job 体 31 次 ispc.exe、约 13 s，占整轮 ~19 s 的绝大部分；
-        /// 见 docs/热重载实现规划.md §39）。规则精确化为：`<X>.ispc` 仍是期望产物 ⇒ 保留 `<X>_ispc.h`；
         /// `.ispc` 真没了（job 被删）才连头一起删 —— D1 的原始目的（不留陈旧产物）不受影响。
         /// </remarks>
         private static void PruneStaleGeneratedFiles(string outputDir, HashSet<string> expected)
@@ -1051,7 +1034,7 @@ struct float2 { float x; float y; };
 struct int2   { int x; int y; };
 struct uint2  { unsigned int x; unsigned int y; };
 
-// ---------- EventBuffer POD（SendEvent 生成的 ISPC 代码依赖） ----------
+// EventBuffer POD（SendEvent 生成的 ISPC 代码依赖） 
 // 注意：ISPC 中 uniform void* 非法（void 不能带 uniform 限定），data 用 uniform int*（uniform→uniform cast 合法，
 // 且 varying→uniform 指针 cast 被禁止，裸 void* 是 varying 指针无法 cast 到 uniform T*）。
 // count 保持 uniform int*（atomic 需要 uniform 指针）。
@@ -1062,7 +1045,7 @@ struct __EntJoyEventBuffer {
     uniform int elementSize;
 };
 
-// ---------- helpers (static to avoid duplicate symbols) ----------
+// helpers (static to avoid duplicate symbols) 
 static struct float2 make_float2(float x, float y) {
     struct float2 r; r.x = x; r.y = y; return r;
 }
@@ -1089,7 +1072,7 @@ static uniform struct uint2 make_uniform_uint2(uniform unsigned int x, uniform u
 static struct float2 float2_from_int2(struct int2 v) { return make_float2(v.x, v.y); }
 static struct int2 int2_from_float2(struct float2 v) { return make_int2((int)v.x, (int)v.y); }
 
-// ---------- float2 operators ----------
+// float2 operators 
 static struct float2 operator-(struct float2 a) {
     return make_float2(-a.x, -a.y);
 }
@@ -1112,7 +1095,7 @@ static struct float2 operator*(float s, struct float2 v) { return v * s; }
 static struct float2 operator/(struct float2 v, float s) {
     struct float2 r; r.x = v.x / s; r.y = v.y / s; return r;
 }
-// ★ uniform 变体：uniform 标量循环（for (uniform int) + if (programIndex!=0) return）里
+// uniform 变体：uniform 标量循环（for (uniform int) + if (programIndex!=0) return）里
 //   所有局部都是 uniform，`uniform float2 * uniform float` 若只匹配上面的 varying 重载，
 //   结果会是 varying struct，无法赋给 uniform 局部（探针 _probe5 实证）。
 //   ISPC 允许仅靠 uniform/varying 区分重载；varying 场景传 uniform 实参会自动 splat，故两者可共存。
@@ -1130,7 +1113,7 @@ static uniform struct float2 operator-(uniform struct float2 a, uniform struct f
     uniform struct float2 r; r.x = a.x - b.x; r.y = a.y - b.y; return r;
 }
 
-// ---------- int2 operators ----------
+// int2 operators 
 static struct int2 operator-(struct int2 a) {
     return make_int2(-a.x, -a.y);
 }
@@ -1157,7 +1140,7 @@ static struct int2 operator-(struct int2 a, int b) {
     struct int2 r; r.x = a.x - b; r.y = a.y - b; return r;
 }
 
-// ---------- uint2 operators ----------
+// uint2 operators 
 static struct uint2 operator+(struct uint2 a, struct uint2 b) {
     struct uint2 r; r.x = a.x + b.x; r.y = a.y + b.y; return r;
 }
@@ -1171,7 +1154,7 @@ static struct uint2 operator*(struct uint2 v, unsigned int s) {
     struct uint2 r; r.x = v.x * s; r.y = v.y * s; return r;
 }
 
-// ---------- math functions ----------
+// math functions 
 static float dot(struct float2 a, struct float2 b) { return a.x * b.x + a.y * b.y; }
 static float lengthsq(struct float2 v) { return dot(v, v); }
 static float length(struct float2 v) { return sqrt(lengthsq(v)); }
@@ -1218,7 +1201,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
     return a + (b - a) * t;
 }
 
-// ---------- Interlocked 宏（ISPC 侧） ----------
+// Interlocked 宏（ISPC 侧） 
 // 基类 StatementTranslator.TranslateInterlockedCall 会吐 C++ 的 INTERLOCKED_* 宏。
 // ISPC 的静态方法 lane-callable helper（IspcGenerator.Helper）若把 C++ 宏直接落进 .ispc，
 // 会报 Undeclared symbol INTERLOCKED_EXCHANGE32。这里给 ISPC 等价定义：
@@ -1285,27 +1268,20 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine();
             // Unity Build: merge multiple .cpp batches → 减少 ClangCL 启动开销的同时
             // 保留并行度。BATCH_SIZE=0（单 TU）在生成代码量大时（EntJoySample 207 cpp +
-            // 40 ispc）单 TU ClangCL 编译串行成为瓶颈（全量 ~33s）；拆批后
             // `cmake --build --parallel` 并行编译多 TU，增量也只重编变化的 TU。
             //
-            // 但拆批有**运行期**代价：job 批函数调用的静态帮助函数（CpuOrca/CpuFlow/CpuObstacle/
+            // 但拆批有运行期代价：job 批函数调用的静态帮助函数（CpuOrca/CpuFlow/CpuObstacle/
             // CpuScan 的 static 方法）各自是独立 .cpp，拆批会把它们与调它的 job 分到不同 TU
-            // ⇒ 跨 TU 调用**无法内联**（帮助函数还带 GENERATED_API=dllexport）。
-            // 实测（百万单位 Melee，1s 交替 A/B 配对、每配置 2 轮）：
-            //   批 8：C++ 内核比 C# 内核 **慢** 2.9±2.3ms/步；单 TU：**快** 6.3±2.3ms/步（≈10% Melee）
-            //   —— 托管 JIT 会把同样的平凡帮助函数内联，拆批相当于让 C++ 侧白吃亏。
             // 编译时间差距在小规模下可忽略（63 文件：单 TU 27s vs 批 8 25s）⇒ 小规模默认单 TU。
             sb.AppendLine("set(CMAKE_UNITY_BUILD ON)");
-            // 2026-09-16 决策：**不分数量，任何规模都单 TU**。
-            // 为什么取消阈值：阈值是在回答一个"编译时间"问题，却在决定一个**运行期**问题 ——
+            // 决策：不分数量，任何规模都单 TU。
+            // 为什么取消阈值：阈值是在回答一个"编译时间"问题，却在决定一个运行期问题 ——
             //   拆批会把生成内核与它调用的静态帮助函数（CpuOrca/CpuFlow/CpuObstacle/CpuScan 的 static，
             //   带 GENERATED_API=dllexport）分到不同 TU ⇒ 无 LTO ⇒ 不可内联 ⇒ 上面实测的 ~10% Melee 回归。
-            //   Melee 是**每一步**都付的成本，编译只在改动时付一次 ⇒ 不该让工程规模去决定这件事。
-            // 已告知并接受的代价：① 单 TU 是 ClangCL **串行**编译，`--parallel` 用不上 —— 大工程全量编译显著变慢
             //   （EntJoySample 207 cpp + 40 ispc：单 TU ~33s vs 26 TU 并行 ~1.6s）；
             //   ② 增量粒度退化为"整份"：改任何一个发射件都要重编整个 TU（本仓 169 文件约数十秒）。
-            // ⇒ 将来若某工程编译时间不可接受，**不要**恢复阈值分支（那会再次静默回归 ~10% Melee）：
-            //   正确做法是"按配置区分"（开发档拆批 / 基准与交付档单 TU），且改动必须带 **Melee 段验收**。
+            // ⇒ 将来若某工程编译时间不可接受，不要恢复阈值分支（那会再次静默回归 ~10% Melee）：
+            //   正确做法是"按配置区分"（开发档拆批 / 基准与交付档单 TU），且改动必须带 Melee 段验收。
             sb.AppendLine("set(CMAKE_UNITY_BUILD_BATCH_SIZE 0)"
                 + "   # 0 = 单 TU：让 job 与它调用的静态帮助函数同 TU 可内联（见上方实测）");
             sb.AppendLine("add_definitions(-DIMGUI_DEFINE_MATH_OPERATORS)");
@@ -1353,15 +1329,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("endif()");
             sb.AppendLine();
 
-            // ============================================================
             // DLL 分离：NativeDll.dll（核心 runtime）+ NativeTranspiled.dll（生成代码）
             //   - NativeDll：JobSystem / WorkerPool / Profiler / Debugger / imgui / tasksys
-            //   - NativeTranspiled：transpiled job wrappers + ISPC objects，链接 NativeDll
-            //     生成代码只依赖 NativeDll 的 header-only 类型（模板/POD/inline）与
-            //     JOB_API 导出函数，跨 DLL 边界通过链接 NativeDll import lib 解析。
-            // ============================================================
-            // NativeDll 核心源文件（按目录 glob，TU 拆分/新增时免维护漏列）。
-            // 曾硬编码 JobSystem.cpp 单文件，模块化拆分为 State/Tiles/Scheduler 后漏列
             // 三个新 TU → 链接期 LNK2019（Scheduler/JobHandle 未定义）。glob 从根上消除该类回归。
             if (!prebuiltNative)
             {
@@ -1404,16 +1373,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 : "target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
             sb.AppendLine();
 
-            // ============================================================
             // AutoSIMD precise 静态库（fast-math OFF — IEEE-754 NaN/±0）
             //   454229d EC2/EC8/E5/E8/E11：AutoSIMD batch 控制流依赖 NaN/±0 精确语义，
-            //   全局 /fp:fast / -ffast-math 会破坏它。global NativeTranspiled 恢复
-            //   fast-math 提速（GridSearch 构建/查询热路径），这里把这些文件单独编进
-            //   无 fast-math 的静态库，再链回同一个 NativeTranspiled.dll，使 AutoSIMD
-            //   导出符号仍从该 DLL 导出、被托管绑定 P/Invoke。
-            //   Unity Build 无法按源文件区分编译 flag，故独立静态库是可靠做法。
-            //   precise 库同样继承 CMAKE_UNITY_BUILD（与主库一致：**单 TU**）。
-            // ============================================================
+            //   precise 库同样继承 CMAKE_UNITY_BUILD（与主库一致：单 TU）。
             if (autoSimdCppFiles.Count > 0)
             {
                 // 确定性排序：precise 库的 unity 成员稳定（单 TU ⇒ 全库一个 TU，排序只为发射文本确定）。
@@ -1426,9 +1388,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine("add_library(NativeTranspiledPrecise STATIC ${AUTOSIMD_SOURCES})");
                 sb.AppendLine("target_compile_options(NativeTranspiledPrecise PRIVATE");
                 sb.AppendLine("    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");      // MSVC default, no /fp:fast
-                // ClangCL: 禁用自动 FMA 融合（/clang: 前缀是 clang-cl 正确语法；裸 -ffp-contract 被忽略）。
+                // ClangCL: 禁用自动 FMA 融合（clang: 前缀是 clang-cl 正确语法；裸 -ffp-contract 被忽略）。
                 // 自动融合 a*a-3 → fmsub 单次舍入 vs C# 两次舍入，差异经除法放大可达 13 ULP
-                // （FZ1 实测，ulp_probe 复现 strict=0x3D7A45A2 vs fmsub=0x3D7A45AF）→ 禁自动融合保 bit-exact。
                 // 生成器显式 n_fmadd_ps（增量 9）是 intrinsic 调用，不受 fp-contract 影响，性能保留。
                 sb.AppendLine("    $<$<CXX_COMPILER_ID:Clang>:/O2 /Ob2 /Oi /Ot /Qpar /MP /clang:-ffp-contract=off>");
                 sb.AppendLine("    $<$<NOT:$<CXX_COMPILER_ID:MSVC,Clang>>:-O3 -march=native -mtune=native -ffp-contract=off -fno-signed-zeros -fno-trapping-math -funroll-loops -fstrict-aliasing -fomit-frame-pointer>");
@@ -1438,7 +1399,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 sb.AppendLine();
             }
 
-            // ---- 调试面板：Dear ImGui 集成（Windows + D3D11 后端） ----
+            // 调试面板：Dear ImGui 集成（Windows + D3D11 后端）
             // 源码位于 NativeDll/thirdParty/imgui。Windows 上编译 imgui 核心 + Win32 + D3D11。
             // prebuilt 模式下 imgui 已编入包内 NativeDll，消费者不需要 imgui 源码/子模块。
             if (!prebuiltNative)
@@ -1510,7 +1471,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine();
 
             // Sentinel: match C# #if DEBUG DisposeSentinel container layout.
-            // C# Debug 编译下 NativeArray=40B / NativeList=32B（带 sentinel），Release=32/24B。
             // 原生侧以 -DENTJOY_ENABLE_SENTINEL=ON 编译时 C++ 容器模板加 8B sentinel 字段对齐，
             // 否则 C# Debug + 原生适配器的 mirror static_assert 会失败（fail-fast）。Release 保持默认 OFF。
             sb.AppendLine("# Sentinel layout: match C# #if DEBUG DisposeSentinel (native templates add 8B sentinel field)");
@@ -1599,8 +1559,8 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             // 【LTO A/B，`ENTJOY_LTO=1`，默认关】给 NativeTranspiled 开 LTO —— MSVC 的 `/GL`+`/LTCG` 等价物。
             // clang-cl 用 `-flto`（编译+链接）；本工程链接器已是 `lld-link`（见 build/CMakeCache.txt 的 CMAKE_LINKER），
             // 因此能直接吃 LLVM bitcode。动机：验证"跨 TU 的冗余指令/未内联助手能否被 LTO 消掉"。
-            // ⚠ 本工程生成代码是**单 TU**（CMAKE_UNITY_BUILD + BATCH_SIZE 0），所有助手已头内联（`6a12cfe`）
-            // ⇒ LTO 理论上无事可做；此开关用于把这件事实测钉死（见 docs/gridsearch/07 §7ai）。
+            // ⚠ 本工程生成代码是单 TU（CMAKE_UNITY_BUILD + BATCH_SIZE 0），所有助手已头内联（`6a12cfe`）
+            // ⇒ LTO 理论上无事可做；此开关用于把这件事实测钉死（见 ai）。
             if (System.Environment.GetEnvironmentVariable("ENTJOY_LTO") == "1")
             {
                 sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE -flto)");
@@ -1611,9 +1571,9 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             if (!prebuiltNative)
                 sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
             sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Ob2 /Oi /Ot /Qpar /MP /fp:fast)");
-            // 2026-10-05（doc16 §27）：**附加编译器开关的实验旋钮**（默认空 = 发射面逐字不变）。
-            // 用途：在**不改发射器**的前提下，对生成 TU 做"构建期 A/B"（例如 `/Ob3`、`/favor:AMD64`）。
-            // 注意 `target_compile_options` 是**追加**语义 ⇒ 后出现的同族开关覆盖前面的。
+            // 附加编译器开关的实验旋钮（默认空 = 发射面逐字不变）。
+            // 用途：在不改发射器的前提下，对生成 TU 做"构建期 A/B"（例如 `/Ob3`、`/favor:AMD64`）。
+            // 注意 `target_compile_options` 是追加语义 ⇒ 后出现的同族开关覆盖前面的。
             string extraMsvc = System.Environment.GetEnvironmentVariable("ENTJOY_MSVC_EXTRA_FLAGS");
             if (!string.IsNullOrWhiteSpace(extraMsvc))
             {
@@ -1638,7 +1598,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("    target_compile_definitions(NativeTranspiled PRIVATE NDEBUG GENERATED_EXPORTS)");
             sb.AppendLine("endif()");
             sb.AppendLine();
-            // 来解决同一个"跨 TU 不可内联"问题 —— **实测无收益**（ΔMelee 从 −3.8±4.6 变到 −2.5±2.6ms，
+            // 来解决同一个"跨 TU 不可内联"问题 —— 实测无收益（ΔMelee 从 −3.8±4.6 变到 −2.5±2.6ms，
             // 即在噪声内），而且 /GL 会拖慢链接。真正的解法是上面的 unity 批大小（单 TU），故此处不开 IPO。
 
             sb.AppendLine("# ============================================================");
@@ -1692,7 +1652,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     if (inNativeTranspiled)
                     {
                         if (line == ")") break;
-                        // 形如 "    SharpNative_Job_xxx_Execute.cpp"，排除 ${TASKSYS_SRC} 等变量
+                        // 形如 " SharpNative_Job_xxx_Execute.cpp"，排除 ${TASKSYS_SRC} 等变量
                         if (line.EndsWith(".cpp", StringComparison.OrdinalIgnoreCase) && !line.Contains("${"))
                             order.Add(line);
                     }
@@ -1712,7 +1672,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
         /// <summary>
         /// 增量友好的源列表排序：保留 existingOrder（上一次 CMakeLists 的顺序）中仍存在于
         /// cppFiles 的文件，新文件按字典序追加到末尾，绝不打乱既有文件的相对顺序。
-        /// 这样 Unity Build 的既有批成员不变，新增 job/method 只让最后一个批变化，
         /// native 侧只需重编新 TU + 末尾批。
         /// </summary>
         private static List<string> OrderCppSourcesStable(List<string> cppFiles, List<string>? existingCppOrder)

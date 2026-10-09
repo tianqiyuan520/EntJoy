@@ -98,7 +98,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("using EntJoy.ECS;");
             sb.AppendLine();
 
-            // ===== ChunkEnumerable<T0..Tn> =====
+            // ChunkEnumerable<T0..Tn>
             sb.AppendLine($"public unsafe ref struct ChunkEnumerable<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -116,7 +116,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== ChunkEnumerator<T0..Tn> =====
+            // ChunkEnumerator<T0..Tn>
             sb.AppendLine($"public unsafe ref struct ChunkEnumerator<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -207,7 +207,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== ChunkResult<T0..Tn> =====
+            // ChunkResult<T0..Tn>
             sb.AppendLine($"public unsafe readonly ref struct ChunkResult<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
@@ -265,7 +265,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("}");
             sb.AppendLine();
 
-            // ===== World.QueryChunks<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World） =====
+            // World.QueryChunks<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World）
             sb.AppendLine($"public static class ChunkQueryTupleWorldExtensions{n}");
             sb.AppendLine("{");
             sb.AppendLine($"    public static ChunkEnumerable<{genList}> QueryChunks<{genList}>(this World world)");

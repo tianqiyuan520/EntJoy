@@ -162,7 +162,7 @@ namespace EntJoy.ECS
         public int ArchetypeId;
 
         /// <summary>
-        /// 组件列字节偏移的**非托管镜像**（长度 = ComponentCount，按 componentIndex 索引）。
+        /// 组件列字节偏移的非托管镜像（长度 = ComponentCount，按 componentIndex 索引）。
         /// 作用：让 job / NativeTranspile 原生内核在拿到 <see cref="EntityLocateB.ChunkMemory"/> 后
         /// 直接算出某组件列的基址，无需经托管 <see cref="ChunkMetadata.ComponentOffsets"/>（int[]）。
         /// 生命周期 = Archetype，构造时分配、Dispose 时释放，内容不可变。
@@ -187,7 +187,7 @@ namespace EntJoy.ECS
         /// <summary>
         /// 显式指定所有 Archetype 的 Chunk 容量（0 = 用 <see cref="CalculateOptimalChunkCapacity"/> 自动值）。
         /// 用途：需要"整个 Archetype 只有 1 个 Chunk、组件列连续"的场景（如百万单位 SoA 视图）。
-        /// ⚠ 必须在创建 Archetype（<c>World.CreateEntities</c> 等）**之前**设置；超大容量会让
+        /// ⚠ 必须在创建 Archetype（<c>World.CreateEntities</c> 等）之前设置；超大容量会让
         /// Chunk stride 超过 <see cref="SLAB_SIZE"/>，此时每个 Chunk 独占一个按 stride 大小分配的 slab。
         /// </summary>
         public static int ChunkCapacityOverride;
@@ -206,11 +206,9 @@ namespace EntJoy.ECS
         /// 自检 slab 账本不变式（诊断/测试用；返回违例数，0 = 健康）。
         ///
         /// 不变式：
-        ///  1) 每个存活 Chunk 的 <c>MemoryBlock</c> 必须落在某个现存 slab 的范围内
-        ///     —— 否则该 chunk 的内存已被归还给全局池，Chunk/EntityInfo 成了悬空指针（UAF）；
-        ///  2) 每个 slab 的 <c>ReleasedCount</c> 必须等于「该 slab 范围内已不在 <c>_chunkList</c> 的 chunk 数」
-        ///     —— 复用空洞后必须把「已释放」还回去，否则 <c>ReleasedCount == ChunkCount</c> 会提前成立；
-        ///  3) <c>ReleasedCount &lt;= ChunkCount</c>。
+        /// 1) 每个存活 Chunk 的 <c>MemoryBlock</c> 必须落在某个现存 slab 的范围内
+        /// —— 复用空洞后必须把「已释放」还回去，否则 <c>ReleasedCount == ChunkCount</c> 会提前成立；
+        /// 3) <c>ReleasedCount &lt;= ChunkCount</c>。
         ///
         /// 这三条同时是 <see cref="ReleaseChunkMemory"/> 归还整块 slab 的前提；违反任意一条都可能
         /// 让「含活 chunk 的 slab」被归还（跨 Archetype/World 内存别名）。
@@ -338,7 +336,7 @@ namespace EntJoy.ECS
             EntityCount++;
         }
 
-        // ======================== Shared values 支持 ========================
+        // Shared values 支持
 
         /// <summary>
         /// chunk 被回收（空 chunk 从列表移除）时的回调。EntityManager 用它释放
@@ -371,9 +369,6 @@ namespace EntJoy.ECS
         {
             // 单一真值来源：ChunkMetadata.Create 计算 Entity + 组件数组 + enableable 位图 +
             // 变更位掩码 + Shared values 区的完整布局，stride 必须覆盖 TotalSize（64 对齐）。
-            // 此前手算只含 Entity + 组件数组，漏了变更位掩码与共享值区（约 128~192B）→
-            // 下一个 chunk 的 Entity 数组起点压在本 chunk 的位掩码/共享值区上：
-            //   写入新 chunk 的实体 Id 污染上一 chunk 的变更位掩码（WithChanged 假阳性），
             //   共享值写入损坏下一 chunk 的 Entity 数组（实体引用错乱）。
             var meta = ChunkMetadata.Create(this, _chunkCapacity, types);
             return (meta.TotalSize + 63) & ~63;
@@ -390,8 +385,6 @@ namespace EntJoy.ECS
 
                 // 复用 = 该 chunk 重新变为「存活」，必须把它的「已释放」还回去。
                 // 否则 slab 账本会把活 chunk 记成已释放 ⇒ ReleasedCount == ChunkCount 提前成立 ⇒
-                // 整个 slab（含活 chunk）被 ReleaseChunkMemory 归还给全局池 ⇒
-                // 悬空 Chunk/EntityInfo（UAF）或跨 Archetype/World 内存别名。
                 // 注意：能进 _freeChunks 的空洞必定属于仍存活的 slab —— 归还 slab 时已把其空洞整体移除。
                 long reusedAddr = reused.ToInt64();
                 for (int i = 0; i < _slabs.Count; i++)
@@ -411,7 +404,7 @@ namespace EntJoy.ECS
             // 每个 slab 的可用字节数：常规 64KB；stride 超过 64KB（超大容量 Chunk）时按 stride 给，
             // 使该 Chunk 独占一个 slab（此时一个 slab 只有一个 chunk）。
             int slabBytes = _chunkStride > SLAB_SIZE ? _chunkStride : SLAB_SIZE;
-            // 不变式：slab 必须容得下**一个** chunk，否则 chunk 会跨出 slab 边界并静默踩坏相邻内存
+            // 不变式：slab 必须容得下一个 chunk，否则 chunk 会跨出 slab 边界并静默踩坏相邻内存
             // （`_currentSlabOffset + _chunkStride > slabBytes` 只保证"放不下就换新 slab"，
             //   而 stride > slabBytes 时换多少 slab 都放不下 ⇒ 必须在这里响亮失败）。
             if (slabBytes < _chunkStride)
@@ -635,7 +628,7 @@ namespace EntJoy.ECS
             return componentTypeRecorder[componentType];
         }
 
-        // ======================== Phase 2.1: Archetype Edges ========================
+        // Phase 2.1: Archetype Edges
 
         /// <summary>
         /// 获取 Add edge：从当前 Archetype 添加 componentType 后的目标 Archetype。
@@ -686,7 +679,7 @@ namespace EntJoy.ECS
             return componentTypeRecorder.ContainsKey(componentType);
         }
 
-        // ======================== 变更追踪 ========================
+        // 变更追踪
 
         /// <summary>递增全局版本号（结构变更或组件修改时调用）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -715,12 +708,11 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **清空本 Archetype 的全部实体与 Chunk**（P0-4b，配合 <c>EntityManager.DestroyAllInArchetype</c>）。
+        /// 清空本 Archetype 的全部实体与 Chunk（配合 <c>EntityManager.DestroyAllInArchetype</c>）。
         ///
-        /// 与逐个 <c>DestroyEntity</c> 的区别：这里**不做逐实体移除**（不会触发 swap-pop 与空 chunk 压缩），
+        /// 与逐个 <c>DestroyEntity</c> 的区别：这里不做逐实体移除（不会触发 swap-pop 与空 chunk 压缩），
         /// 直接析构组件值（IDisposable 组件持有原生内存，必须逐个析构）后整批释放 slab ⇒ 代价 O(Chunk 数) 而非 O(实体数)。
-        /// ⚠ 调用方负责：先把实体的托管/定位表项清空、把 Id 压回回收池；
-        ///   含关系列的 Archetype **不能**用本方法（关系反向索引需要逐实体清理）。
+        /// 含关系列的 Archetype 不能用本方法（关系反向索引需要逐实体清理）。
         /// </summary>
         public void ClearAllEntities()
         {

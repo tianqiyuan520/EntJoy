@@ -143,7 +143,7 @@
 //            _world.Dispose(); _world = null;
 //        }
 
-//        // ── Test 6: writtenComponents 过滤 ──
+//        // Test 6: writtenComponents 过滤
 //        private void Test6_WrittenComponentsFilter()
 //        {
 //            Console.WriteLine("── Test 6: writtenComponents Selective Wait ──\n");
@@ -179,7 +179,7 @@
 //            _world.Dispose(); _world = null;
 //        }
 
-//        // ── Test 8: ECB 手动延迟命令 ──
+//        // Test 8: ECB 手动延迟命令
 //        private void Test8_ECB()
 //        {
 //            Console.WriteLine("── Test 8: ECB 手动延迟命令 ──\n");

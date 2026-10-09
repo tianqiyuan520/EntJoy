@@ -12,10 +12,8 @@ namespace EntJoy.JobSystem.Managed
     /// 后推入自己 deque（owner-only PushBottom），标准 Chase-Lev 循环执行。
     ///
     /// 池化设计（Treiber 无锁空闲栈）：
-    ///   - 固定容量 PoolSize（16384）
-    ///   - Acquire：从空闲栈弹出（CAS 弹栈），空时返回 null
-    ///   - Release：压回空闲栈（CAS 压栈），真正回收
-    ///   - ABA 防护：64 位 tag（高 32 位 = push/pop 计数，低 32 位 = 栈顶索引）
+    /// - 固定容量 PoolSize（16384）
+    /// - ABA 防护：64 位 tag（高 32 位 = push/pop 计数，低 32 位 = 栈顶索引）
     ///
     /// 调用方契约：池耗尽时 Acquire 返回 null，必须兜底（池外分配，
     /// PoolIndex=-1，Release 跳过归还）；不可跳过任务。

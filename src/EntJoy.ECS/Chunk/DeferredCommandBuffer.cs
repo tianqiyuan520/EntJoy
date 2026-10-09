@@ -11,14 +11,14 @@ namespace EntJoy.ECS
     /// 在 Job 或主线程中记录结构变更命令，帧末在主线程统一 Playback。
     ///
     /// 用法：
-    ///   var ecb = new DeferredCommandBuffer();
-    ///   ecb.CreateEntity(typeof(Position), typeof(Velocity));
-    ///   ecb.DestroyEntity(entity);
-    ///   ecb.AddComponent(entity, new Position { X = 1 });
-    ///   ecb.RemoveComponent<Velocity>(entity);
-    ///   // ... Job 完成后 ...
-    ///   ecb.Playback(world.EntityManager);
-    ///   ecb.Dispose();
+    /// var ecb = new DeferredCommandBuffer();
+    /// ecb.CreateEntity(typeof(Position), typeof(Velocity));
+    /// ecb.DestroyEntity(entity);
+    /// ecb.AddComponent(entity, new Position { X = 1 });
+    /// ecb.RemoveComponent<Velocity>(entity);
+    /// // ... Job 完成后 ...
+    /// ecb.Playback(world.EntityManager);
+    /// ecb.Dispose();
     ///
     /// Observer 集成：Playback 内部调用 EntityManager 主入口（NewEntity/DestroyEntity/AddComponentRaw/
     /// RemoveComponentRaw），主线程结构变更入口统一挂 observer 派发 → ECB Playback 天然触发事件，无需额外扩展。
@@ -34,17 +34,17 @@ namespace EntJoy.ECS
         private const int InitialCapacity = 64 * 1024;
 
         // OpCodes（internal：ParallelWriter 需要引用其中两个，见 DeferredCommandBuffer.ParallelWriter.cs）
-        internal const int OP_CREATE_ENTITIES_RANGE = 1;  // 批量创建（P0-4）：[op][typeSetIndex][count][batchId]
-        internal const int OP_DESTROY_RANGE = 2;          // 批量销毁（P0-4b，记录期成段）：[op][startIndex][count]
+        internal const int OP_CREATE_ENTITIES_RANGE = 1;  // 批量创建：[op][typeSetIndex][count][batchId]
+        internal const int OP_DESTROY_RANGE = 2;          // 批量销毁（记录期成段）：[op][startIndex][count]
         private const int OP_ADD_COMPONENT = 3;
         private const int OP_REMOVE_COMPONENT = 4;
-        private const int OP_SET_COMPONENT_RANGE = 5;     // 批量写组件列（P0-5，零反射）：
+        private const int OP_SET_COMPONENT_RANGE = 5;     // 批量写组件列（零反射）：
                                                           // [op][batchId][typeId][elemSize][elemCount][payload]
-        internal const int OP_SET_COMPONENT_SINGLE = 6;   // 单实体写组件（P1-9，ParallelWriter 用）：
+        internal const int OP_SET_COMPONENT_SINGLE = 6;   // 单实体写组件（ParallelWriter 用）：
                                                           // [op][entity][typeId][elemSize][payload]
 
         /// <summary>组件类型集合池：记录期存下 <c>ComponentType[]</c>，回放期按下标取用
-        /// ⇒ **回放期不再 per-command <c>new ComponentType[]</c>**（P0-5 的去分配关键）。</summary>
+        /// ⇒ 回放期不再 per-command <c>new ComponentType[]</c>（去分配关键）。</summary>
         private readonly List<ComponentType[]> _typeSets = new();
 
         /// <summary>记录期分配的 batch 计数（回放期用同样的序 push 到 <see cref="_batchStarts"/>）。</summary>
@@ -59,7 +59,7 @@ namespace EntJoy.ECS
         private int _createdEntityCapacity;
         private int _createdEntityCount;
 
-        /// <summary>销毁合并用的非托管实体表（P0-4b）：记录期 append，回放期一次 <c>DestroyEntities</c>。</summary>
+        /// <summary>销毁合并用的非托管实体表：记录期 append，回放期一次 <c>DestroyEntities</c>。</summary>
         private Entity* _destroyEntities;
         private int _destroyEntityCapacity;
         private int _destroyEntityCount;
@@ -70,7 +70,7 @@ namespace EntJoy.ECS
         /// <summary>关闭当前 destroy 连续段（任何非 destroy 命令都要调用）。</summary>
         private void CloseDestroyRun() => _destroyRunOpen = false;
 
-        // ═══ 并行记录（P1-9）：每 writer 独立非托管 staging + 独立销毁表，记录期无锁 ═══
+        // 并行记录：每 writer 独立非托管 staging + 独立销毁表，记录期无锁
         // 状态类型 EcbWriterState / 句柄类型 ParallelWriter 定义在 DeferredCommandBuffer.ParallelWriter.cs
         private EcbWriterState* _writers;
         private int _writerCount;
@@ -107,14 +107,14 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 取第 <paramref name="index"/> 个**跨 tile 共享** writer（P1-9 补完，对齐 DOTS 语义）：
-        /// 同一个 job 被切成多个 tile 分发到多个 worker 时可以**共享同一个 writer** ——
+        /// 取第 <paramref name="index"/> 个跨 tile 共享 writer（补完，对齐 DOTS 语义）：
+        /// 同一个 job 被切成多个 tile 分发到多个 worker 时可以共享同一个 writer ——
         /// 追加走 <c>Interlocked</c> 原子占位，不需要"一个 writer 一个线程"的约定。
         ///
         /// 与 <see cref="CreateParallelWriter"/> 的差别：
-        ///   - 记录期允许并发（无 <c>ClaimThread</c> 守卫）；
-        ///   - staging / 销毁表**必须一次给足容量**（并发下不能扩容）⇒ 超限抛明确异常；
-        ///   - 同一 writer 内跨 lane 的**命令顺序不确定**（销毁之间无序、销毁与写组件之间以回放序为准）。
+        /// - 记录期允许并发（无 <c>ClaimThread</c> 守卫）；
+        /// - staging / 销毁表必须一次给足容量（并发下不能扩容）⇒ 超限抛明确异常；
+        /// - 同一 writer 内跨 lane 的命令顺序不确定（销毁之间无序、销毁与写组件之间以回放序为准）。
         /// </summary>
         public ParallelWriter CreateSharedParallelWriter(int index, int stagingCapacityBytes, int destroyCapacity)
         {
@@ -137,7 +137,7 @@ namespace EntJoy.ECS
             return new ParallelWriter { State = _writers + index };
         }
 
-        /// <summary>主线程回放全部并行 writer（**按索引顺序** ⇒ 确定性），回放后清空各 writer。</summary>
+        /// <summary>主线程回放全部并行 writer（按索引顺序 ⇒ 确定性），回放后清空各 writer。</summary>
         public void PlaybackParallel(EntityManager entityManager)
         {
             if (_writers == null) return;
@@ -153,7 +153,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>回放单个 writer 的 staging（只认并行支持的两类命令；其它 opcode 直接抛错）。
-        /// <c>OP_DESTROY_RANGE</c> 在**连续销毁槽**上合并（共享 writer 里每条销毁命令只带一个槽），
+        /// <c>OP_DESTROY_RANGE</c> 在连续销毁槽上合并（共享 writer 里每条销毁命令只带一个槽），
         /// 且遇到非销毁命令前先落地，保证命令序不被重排。</summary>
         private void ReplayWriterBuffer(EntityManager entityManager, ref EcbWriterState st)
         {
@@ -257,8 +257,8 @@ namespace EntJoy.ECS
         /// <summary>本轮回放创建的实体总数。</summary>
         public int CreatedEntityCount => _createdEntityCount;
 
-        /// <summary>已记录的 <see cref="DestroyEntity"/> **实体条数**。
-        /// ⚠ 与 <see cref="CommandCount"/> 不同：连续的 destroy 会合并成**一个连续段 = 一条命令**
+        /// <summary>已记录的 <see cref="DestroyEntity"/> 实体条数。
+        /// ⚠ 与 <see cref="CommandCount"/> 不同：连续的 destroy 会合并成一个连续段 = 一条命令
         /// （见 <see cref="DestroyEntity"/>），故 3200 次并发 `DestroyEntity` 时
         /// `DestroyedEntityCount = 3200` 而 `CommandCount = 1`。要断言"写得没丢"用本属性。</summary>
         public int DestroyedEntityCount => _destroyEntityCount;
@@ -309,7 +309,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **批量创建**命令（P0-4）：一次记录 N 个同 archetype 实体，回放期走
+        /// 批量创建命令：一次记录 N 个同 archetype 实体，回放期走
         /// <see cref="EntityManager.CreateEntities(int, ComponentType[], Entity*, int)"/> 的零分配批量路径
         /// （一次 <c>CompleteActiveJobs</c> + 一次锁 + 无逐实体托管分配）。
         /// </summary>
@@ -337,9 +337,9 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// **批量写组件列**命令（P0-5）：把 <paramref name="values"/> 逐元素写进第 <paramref name="batchId"/>
-        /// 批创建的实体的该组件列。取值在**记录期**就拷进 staging（调用方缓冲随后可自由释放/复用），
-        /// 回放期经 blittable 定位表直接落列 ⇒ **无反射、无装箱、无 per-command 分配**。
+        /// 批量写组件列命令：把 <paramref name="values"/> 逐元素写进第 <paramref name="batchId"/>
+        /// 批创建的实体的该组件列。取值在记录期就拷进 staging（调用方缓冲随后可自由释放/复用），
+        /// 回放期经 blittable 定位表直接落列 ⇒ 无反射、无装箱、无 per-command 分配。
         /// </summary>
         public unsafe void SetComponentRange<T>(int batchId, NativeArray<T> values) where T : unmanaged
         {
@@ -414,9 +414,8 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 记录 DestroyEntity 命令。**连续的 destroy 会在回放期合并成一次批量销毁**（P0-4b）：
+        /// 记录 DestroyEntity 命令。连续的 destroy 会在回放期合并成一次批量销毁：
         /// 记录期把实体 append 到非托管表，staging 里只留 `[OP_DESTROY_RANGE][startIndex][count]` 一条
-        /// （count 随记录就地更新）⇒ 回放期无需扫描/拷贝 staging，直接一次
         /// <c>EntityManager.DestroyEntities</c>（每批一次 job 等待 + 一次锁）。
         /// </summary>
         public void DestroyEntity(Entity entity)
@@ -563,7 +562,7 @@ namespace EntJoy.ECS
                         int compSize = *(int*)(_staging + offset);
                         offset += sizeof(int);
                         
-                        // 去反射（P0-5 收尾）：直接按原始字节落列（无 PtrToStructure / 无装箱 / 无 Type 解析）
+                        // 去反射（收尾）：直接按原始字节落列（无 PtrToStructure / 无装箱 / 无 Type 解析）
                         entityManager.AddComponentRaw(entity, typeId, _staging + offset, compSize);
                         
                         offset += compSize;

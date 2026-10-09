@@ -49,7 +49,7 @@ namespace NativeTranspiler.Analyzer
                 if (!variables.ContainsKey(_idx) || variables.Count == 0) return "";
 
                 var sb = new StringBuilder();
-                sb.AppendLine("    // --- Universal Full-SIMD (ISPC-style) ---");
+                sb.AppendLine("    // Universal Full-SIMD (ISPC-style)");
                 sb.AppendLine("    int simd_end_ = __startIndex + ((__count) / g_simdWidthInt) * g_simdWidthInt;");
                 sb.AppendLine("    if (simd_end_ > __startIndex)");
                 sb.AppendLine("    {");
@@ -63,7 +63,7 @@ namespace NativeTranspiler.Analyzer
                     indexParamName: _idx, simdIndexVar: "v_i",
                     boolFields: _boolFields,
                     simdMathPrecision: _simdMathPrecision,
-                    batchLoopVar: "si");   // ★ P1-1: 启用连续 load/store 优化（v_i → ptr+si）
+                    batchLoopVar: "si");   // 启用连续 load/store 优化（v_i → ptr+si）
 
                 var writePattern = ExtractResultWritePattern(scalarBody);
                 if (writePattern != null)
@@ -73,10 +73,9 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);
-                // ★ RemovePerLaneWrites only applies to the sentinel "unified write" pattern
+                // RemovePerLaneWrites only applies to the sentinel "unified write" pattern
                 //   (ExtractResultWritePattern). It strips per-lane scatters that are replaced
                 //   by the unified write loop. For plain conditionals with narrowed masks the
-                //   masked per-lane scatter is REQUIRED and must be kept — stripping it empties
                 //   branch bodies and leaves dangling __cond_N references.
                 if (writePattern != null)
                     simdBody = RemovePerLaneWrites(simdBody);
@@ -186,12 +185,12 @@ namespace NativeTranspiler.Analyzer
                 body = Regex.Replace(body, $@"\b{kvp.Key}\b", kvp.Value);
 
             bool hr = body.Contains("return;");
-            // ★ per-lane 回退循环固定声明 `int index`，因此实体体里出现的 index 形参名
+            // per-lane 回退循环固定声明 `int index`，因此实体体里出现的 index 形参名
             //   （Execute(int tid) 的 `tid`）必须一并改名为 `index` —— 否则生成 `tid` 未声明。
             if (!string.IsNullOrEmpty(_idx) && _idx != "index")
                 body = Regex.Replace(body, $@"\b{Regex.Escape(_idx)}\b", "index");
             var sb = new StringBuilder();
-            sb.AppendLine("    // --- Outer SIMD: per-lane ---");
+            sb.AppendLine("    // Outer SIMD: per-lane");
             sb.AppendLine("    int simd_end_=__startIndex+((__count)/g_simdWidthInt)*g_simdWidthInt;");
             sb.AppendLine("    if(simd_end_>__startIndex){");
             sb.AppendLine("        simd_value<int> v_base=simd_value<int>::sequence(0);");
@@ -238,7 +237,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var l = line.TrimEnd();
-                // ★ Fix: use goto to exit the j-loop and skip the default store,
+                // Fix: use goto to exit the j-loop and skip the default store,
                 //   instead of break which only exits the k-loop (EC5/FZ4 bug:
                 //   break exits k-loop → j-loop continues → default store overwrites).
                 l = l.Replace("return;", $"goto {doneLabel};");

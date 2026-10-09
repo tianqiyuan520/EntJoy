@@ -16,8 +16,8 @@ namespace NativeTranspiler.Analyzer
             public string ArrayName { get; set; } = "";
 
             /// <summary>
-            /// 该局部数组名背后的**存储身份**（`component:&lt;idx&gt;` / `shared:&lt;idx&gt;`）。
-            /// 同一个分量列可以用**多个局部名**绑定（`componentArrays[i]` 是同一块内存）⇒ 任何按"名字"
+            /// 该局部数组名背后的存储身份（`component:&lt;idx&gt;` / `shared:&lt;idx&gt;`）。
+            /// 同一个分量列可以用多个局部名绑定（`componentArrays[i]` 是同一块内存）⇒ 任何按"名字"
             /// 判定的读/写分析都会漏掉"透过另一个名字的写"（独立验收实测：静默错值 1344/4093）。
             /// </summary>
             public string StorageKey { get; set; } = "";
@@ -25,7 +25,7 @@ namespace NativeTranspiler.Analyzer
             public string IndexExpression { get; set; } = "";
 
             /// <summary>
-            /// 索引表达式的**语法节点**：别名每次使用都重新翻译它（而不是原样抄 C# 文本）。
+            /// 索引表达式的语法节点：别名每次使用都重新翻译它（而不是原样抄 C# 文本）。
             /// 抄文本会让 `arr[Indices[k]]`（NativeArray 字段索引）漏出未声明的 `Indices`、
             /// 让 `arr[this.Offset]` 漏出 `this.` ⇒ 生成物编译失败。
             /// </summary>
@@ -40,12 +40,12 @@ namespace NativeTranspiler.Analyzer
         private readonly HashSet<string> _chunkArrayLocalNames = new();
         /// <summary>局部数组名 → 存储身份（见 <see cref="NativeArrayElementAlias.StorageKey"/>）。</summary>
         private readonly Dictionary<string, string> _chunkArrayStorageKeys = new();
-        /// <summary>局部变量**符号** → 存储身份（预扫描填充，符号优先 ⇒ 遮蔽/顺序安全）。</summary>
+        /// <summary>局部变量符号 → 存储身份（预扫描填充，符号优先 ⇒ 遮蔽/顺序安全）。</summary>
         private readonly Dictionary<ISymbol, string> _chunkArraySymbolStorageKeys =
             new Dictionary<ISymbol, string>(SymbolEqualityComparer.Default);
         private readonly Dictionary<string, NativeArrayElementAlias> _nativeArrayElementAliases = new();
 
-        // ─── SendEvent 支持 ───
+        // SendEvent 支持
         /// <summary>Execute 中发现的 SendEvent 事件类型（有序，index 对应 eventBufferHeaders 数组）。</summary>
         public List<INamedTypeSymbol> EventTypes { get; } = new();
 
@@ -86,7 +86,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// P1-6/P1-7：`ulong* mask = chunk.GetEnableBitMapPtr&lt;T&gt;();` →
+        ///`ulong* mask = chunk.GetEnableBitMapPtr&lt;T&gt;();` →
         /// C++ `auto* mask = reinterpret_cast&lt;unsigned long long*&gt;(__chunkData-&gt;requiredEnableBitMaps[requiredIdx]);`
         /// </summary>
         private bool TryTranslateEnableBitMapLocal(LocalDeclarationStatementSyntax localDecl)
@@ -131,7 +131,7 @@ namespace NativeTranspiler.Analyzer
             if (exprStmt.Expression is AssignmentExpressionSyntax assignment && IsNativeArrayAliasWriteBack(assignment))
                 return;
 
-            // ─── SendEvent 拦截 ───
+            // SendEvent 拦截
             if (exprStmt.Expression is InvocationExpressionSyntax invocation
                 && TryTranslateSendEvent(invocation))
                 return;
@@ -155,7 +155,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// `arr.GetUnsafePtr()` / `arr.GetUnsafeReadOnlyPtr()`（chunk 数组局部）→ `arr_ptr`。
-        /// 旧实现只认**字段**（`_nativeArrayListNames`）⇒ chunk 局部会原样输出 `arr.GetUnsafePtr()`
+        /// 旧实现只认字段（`_nativeArrayListNames`）⇒ chunk 局部会原样输出 `arr.GetUnsafePtr()`
         /// 这种 C# 文本，生成物编译失败（独立验收 C25）。
         /// </summary>
         private bool TryTranslateChunkArrayUnsafePtr(InvocationExpressionSyntax invocation)
@@ -247,7 +247,7 @@ namespace NativeTranspiler.Analyzer
             if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk)
                 return false;
 
-            // ======================== SharedComponent：GetSharedComponent<T>() → 单值指针 ========================
+            // SharedComponent：GetSharedComponent<T>() → 单值指针
             // 返回 per-chunk 共享值（blittable，内联于 chunk 内存块 Shared values 区）。
             // 翻译为 `reinterpret_cast<T*>(__chunkData->sharedValuePtrs[sharedIndex])`。
             if (methodSymbol.Name == Config.GetSharedComponent && methodSymbol.TypeArguments.Length == 1)
@@ -268,7 +268,7 @@ namespace NativeTranspiler.Analyzer
                 return true;
             }
 
-            // ======================== 原有：GetComponentDataNativeArray / GetComponentDataSpan → 数组指针 ========================
+            // 原有：GetComponentDataNativeArray / GetComponentDataSpan → 数组指针
             if (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan)
                 return false;
             if (methodSymbol.TypeArguments.Length == 0)
@@ -321,7 +321,7 @@ namespace NativeTranspiler.Analyzer
 
         private void RegisterNativeArrayElementAliases(BlockSyntax block)
         {
-            // ★ 必须先预扫描：别名安全判定按"存储身份"统计写入，而局部名的登记是**惰性**的
+            // 必须先预扫描：别名安全判定按"存储身份"统计写入，而局部名的登记是惰性的
             //   （翻译到那条声明时才有）。顺序不当就会漏掉"别名之后才声明 / 声明在嵌套块里"的
             //   同一分量列局部写的（独立验收 F1/F2：静默错值 4093/4093）。
             PreScanChunkArrayStorageKeys(block);
@@ -341,7 +341,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 预扫描本块子树里所有 chunk 数组局部 → 存储身份（名字表 + 符号表），使别名安全判定
-        /// **与翻译顺序无关**。外层 Execute 体的第一次调用即覆盖整个方法体 ⇒ 符号表完整。
+        /// 与翻译顺序无关。外层 Execute 体的第一次调用即覆盖整个方法体 ⇒ 符号表完整。
         /// </summary>
         private void PreScanChunkArrayStorageKeys(BlockSyntax block)
         {
@@ -373,17 +373,17 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// NT-11（Critical）：`var e = arr[i];` 在 C# 里是**值拷贝**，别名成 `arr_ptr[i]` 只有在
+        /// NT-11（Critical）：`var e = arr[i];` 在 C# 里是值拷贝，别名成 `arr_ptr[i]` 只有在
         /// "别名作用域内 `arr[i]` 的值不会变"时才等价。旧判定只看 `block.Statements`（直接语句），
         /// 因此写在 `if` / `for` 体内的数组写看不见 ⇒ 别名读到被改写过的值（静默错值）。
         ///
-        /// 这里按**整块（含嵌套语句 + 元素字段写）**判定，并且：
-        ///   · 数组在本块内的写**只允许**是"读-改-写回"（`arr[i] = e;`）那一处
-        ///     （按**存储身份**判定：同一分量列的另一个局部名、别名之后才声明的名字、嵌套块里的
-        ///      名字、以及 `arr[i].Field = x` 这类元素字段写都算，见 <see cref="WritesAliasStorage"/>）；
-        ///   · 索引表达式里用到的变量在本块内不得被改写（否则别名的求值时机从"声明处一次"
-        ///     变成"每次使用"，副作用/取值都会重复或错位）；
-        ///   · `e` 被改写却没有写回 ⇒ 别名会把改动泄漏进数组（C# 只改拷贝）。
+        /// 这里按整块（含嵌套语句 + 元素字段写）判定，并且：
+        /// · 数组在本块内的写只允许是"读-改-写回"（`arr[i] = e;`）那一处
+        /// （按存储身份判定：同一分量列的另一个局部名、别名之后才声明的名字、嵌套块里的
+        /// 名字、以及 `arr[i].Field = x` 这类元素字段写都算，见 <see cref="WritesAliasStorage"/>）；
+        /// · 索引表达式里用到的变量在本块内不得被改写（否则别名的求值时机从"声明处一次"
+        /// 变成"每次使用"，副作用/取值都会重复或错位）；
+        /// · `e` 被改写却没有写回 ⇒ 别名会把改动泄漏进数组（C# 只改拷贝）。
         /// 任一条不满足就退回真拷贝（C# 语义，永远正确，只少一次优化）。
         /// </summary>
         private bool IsAliasSafe(BlockSyntax block, string aliasName, NativeArrayElementAlias alias)
@@ -560,13 +560,11 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 本块（含嵌套语句 + **任意表达式上下文**）里对**别名那块内存**的写次数。
+        /// 本块（含嵌套语句 + 任意表达式上下文）里对别名那块内存的写次数。
         ///
         /// ⚠ 不能只看 <c>ExpressionStatementSyntax</c>：写可以嵌在任何表达式里 ——
-        /// 调用实参 `Eat(arr[i] = x)`、局部声明初始化器 `var t = arr[i] = x`、
-        /// `if`/`while`/`do` 条件、`for` 的初始化器/增量器、三元表达式、lambda、局部函数体……
         /// 逐节点扫赋值/++/-- 才完备（独立验收 C01–C10/C14/C32/C33/C39 实测漏判 ⇒ 静默错值）。
-        /// 另外 `ref s[i]` / `arr.GetUnsafePtr()` / `ArrayElementAsRef(arr, i)` 会把该列**逃逸**成
+        /// 另外 `ref s[i]` / `arr.GetUnsafePtr()` / `ArrayElementAsRef(arr, i)` 会把该列逃逸成
         /// 引用/裸指针别名，之后透过它写的值同样改到这块内存 ⇒ 一律按"本块内被写"处理（保守）。
         /// </summary>
         private int CountAliasStorageWrites(BlockSyntax block, NativeArrayElementAlias alias)
@@ -648,7 +646,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 表达式是否**指向**别名那块内存：`arr`（裸标识符）或 `arr[i]` / `arr[i].Field`。
+        /// 表达式是否指向别名那块内存：`arr`（裸标识符）或 `arr[i]` / `arr[i].Field`。
         /// 符号解析不出来时保守返回 true（宁可退回真拷贝）。
         /// </summary>
         private bool IdentifierTargetsAliasStorage(ExpressionSyntax expression, NativeArrayElementAlias alias)
@@ -672,15 +670,15 @@ namespace NativeTranspiler.Analyzer
             if (TryResolveElementBaseStorageKey(baseExpression, out var key))
                 return key == alias.StorageKey;
 
-            // 基名**解析不出来** ⇒ 保守当"同一块内存"；解析出来但不是分量列（普通数组/字段…）⇒ 不是。
+            // 基名解析不出来 ⇒ 保守当"同一块内存"；解析出来但不是分量列（普通数组/字段…）⇒ 不是。
             return baseExpression is IdentifierNameSyntax identifier
                    && _semanticModel.GetSymbolInfo(identifier).Symbol == null;
         }
 
         /// <summary>
         /// 元素访问的基表达式 → 存储身份。支持两类基：
-        ///   · 局部名：`var arr = chunk.GetComponentDataNativeArray&lt;T&gt;(); arr[i]`
-        ///   · **直接调用**：`chunk.GetComponentDataSpan&lt;T&gt;()[i] = x`（独立验收 C10：之前完全看不见这次写）
+        /// · 局部名：`var arr = chunk.GetComponentDataNativeArray&lt;T&gt;(); arr[i]`
+        /// · 直接调用：`chunk.GetComponentDataSpan&lt;T&gt;()[i] = x`（独立验收 C10：之前完全看不见这次写）
         /// </summary>
         private bool TryResolveElementBaseStorageKey(ExpressionSyntax baseExpression, out string storageKey)
         {
@@ -730,9 +728,9 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 把标识符解析为 chunk 分量列的存储身份。**符号优先**（预扫描表）：只有符号解析不出来时才
+        /// 把标识符解析为 chunk 分量列的存储身份。符号优先（预扫描表）：只有符号解析不出来时才
         /// 退回名字表 —— 名字表在变量遮蔽（同名不同列）时会给出错误结论，不能用于"写回识别/写回省略"
-        /// 这类会**省掉一条语句**的判定。
+        /// 这类会省掉一条语句的判定。
         /// </summary>
         private bool TryResolveChunkStorageKey(IdentifierNameSyntax identifier, out string storageKey)
         {
@@ -767,8 +765,6 @@ namespace NativeTranspiler.Analyzer
 
         // ——— 向量类型运算 ———
         // 不做 x()/y() 分量拆解，交由基类 StatementTranslator 直接生成
-        // 完整的 Value += 调用。现代 MSVC 能完全消除 float2 临时对象，
-        // 生成单条 addps/mulps/paddd 指令。分量拆解反而阻止了这种
         // SIMD 自动向量化。
 
         private bool IsNativeArrayAliasWriteBack(AssignmentExpressionSyntax assignment)
@@ -782,7 +778,7 @@ namespace NativeTranspiler.Analyzer
             if (!TryGetElementAccessParts(assignment.Left, out var baseExpression, out var indexExpression))
                 return false;
 
-            // 与 BlockContainsAliasWriteBack 同口径：按**符号优先**的存储身份（同一分量列的另一个
+            // 与 BlockContainsAliasWriteBack 同口径：按符号优先的存储身份（同一分量列的另一个
             // 局部名也算写回；遮蔽时不会误判成写回而省掉一条语句）。
             return TryResolveElementBaseStorageKey(baseExpression, out var key)
                    && key == alias.StorageKey
@@ -792,7 +788,7 @@ namespace NativeTranspiler.Analyzer
         private static string NormalizeExpression(ExpressionSyntax expression)
             => expression.NormalizeWhitespace().ToFullString();
 
-        // ─── SendEvent 翻译 ───
+        // SendEvent 翻译
 
         /// <summary>
         /// 检测 world.SendEvent&lt;T&gt;(new T { ... }) 调用，生成 C++ EventBuffer 写入代码。

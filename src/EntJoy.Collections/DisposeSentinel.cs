@@ -7,12 +7,9 @@ using System.Threading;
 ///
 /// 
 /// - 不能作为 NativeArray/NativeList 的托管引用字段——那会使容器 struct 含托管引用，
-///   Debug 下破坏 `unmanaged` 约束（含容器的 Job 无法进 Batch/JobSystem 的 blittable 快路径）。
-/// - 因此 sentinel 存于**静态表**（key = 容器的 safety handle index，blittable int），
-///   容器只持有 int，不持有对象引用 → struct 保持 blittable。
 /// - 泄漏检测：finalizer 无法在 struct 被丢弃时触发（struct 无析构），故改为：
-///   容器 Dispose 时注销 sentinel；容器未被 Dispose 时 sentinel 留在表中，
-///   由 <see cref="DumpLeaks"/>（帧末/World Dispose 时调用）扫描表报告未释放容器。
+/// 容器 Dispose 时注销 sentinel；容器未被 Dispose 时 sentinel 留在表中…
+/// 由 <see cref="DumpLeaks"/>（帧末/World Dispose 时调用）扫描表报告未释放容器。
 ///
 /// 语义：safety handle index 在容器生命周期内唯一（Allocate 时不复用直到 Dispose 归还），
 /// 故 (index → sentinel) 映射稳定可靠。

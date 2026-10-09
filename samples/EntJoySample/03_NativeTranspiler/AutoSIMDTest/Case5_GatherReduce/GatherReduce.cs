@@ -127,7 +127,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // ── Static function variants ──
+    // Static function variants
     public static class GatherReduce_StaticFuncs
     {
         public static void GatherReduce_Stc_CSharp(

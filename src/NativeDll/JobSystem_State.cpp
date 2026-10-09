@@ -89,7 +89,7 @@ namespace JobSystem
     //   ① 忙比      = Σ_tile执行时间 / (worker 数 × 墙钟)                  —— 有多少并行松弛
     //   ② 相位尾部  = 批完成链分段 + 启停斜坡（按参与度分桶）              —— 每批的串行尾/启停
     //   ③ 批内并行度= Σ(批内 worker busy) / 批墙钟（每批"平均同时几个在干"）—— 大批内部是否吃饱
-    // 归属按**线程**（TLS lane），不信传入的 workerIndex（后者会让两线程写同一槽）。
+    // 归属按线程（TLS lane），不信传入的 workerIndex（后者会让两线程写同一槽）。
     // 未启用时每执行窗口只有一次静态 bool 读。
     // ============================================================
     namespace E1
@@ -581,7 +581,7 @@ namespace JobSystem
             return;
         }
         // 先入 per-thread 缓存；满额时一次性迁移共享池（一次锁 / 64 次回收）。
-        // 进 TLS 缓存的条件 = "创建者 **或 worker 线程**"：worker 是回收热路径的主角
+        // 进 TLS 缓存的条件 = "创建者 或 worker 线程"：worker 是回收热路径的主角
         //（每个 job 的 ReleaseState 都发生在 worker 上），但它们几乎从不调用 CreateState。
         // 不无条件放宽的理由：.NET 终结器线程 / 渲染线程等长期存活且从不创建 state 的线程
         // 若也进 TLS 缓存，被回收的 state 会永久堆在它们的缓存里，调度线程永远命中不到
@@ -869,7 +869,7 @@ namespace JobSystem
     // ============================================================
     // BackendAsyncContext 池化（两级池：线程本地缓存 + 共享池兜底）
     //
-    // 必要性：对象在**提交线程**（多为 main）获取、由**执行完成该 job 的 worker** 释放 ⇒
+    // 必要性：对象在提交线程（多为 main）获取、由执行完成该 job 的 worker 释放 ⇒
     // 只有让 worker 释放的实例经共享池回流，提交线程的 acquire 才可能命中。
     // 线程退出时 TLS 缓存整体交还共享池（worker 在 Shutdown 的 Stop()/join 期间退出，
     // 此后 ClearAsyncContextPool 统一删除）。
@@ -1079,7 +1079,7 @@ namespace JobSystem
         std::atomic<uint64_t> g_jccDiagWorkerBucket[16];
         std::atomic<uint64_t> g_jccDiagCalls{ 0 };
         // ⚠ 索引必须与 `JccDiagNote(slot, …)` 的 slot 号严格对齐（下方各 return 处的常量）。
-        //    slot 3 = "membound_coarse" 已随该 A/B 开关删除而**不再有调用点**，但**保留占位**
+        //    slot 3 = "membound_coarse" 已随该 A/B 开关删除而不再有调用点，但保留占位
         //    以维持后续索引（4..9）与 slot 号一致。
         const char* const kJccDiagPathNames[11] = {
             "empty", "explicit", "membound", "membound_coarse(retired)", "unknown_coarse",
@@ -1167,7 +1167,7 @@ namespace JobSystem
             const int tpwChunk = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
             if (mode == JobSystem::kModeMemBound)
             {
-                // 健壮模式：mem-bound 期**周期探针**（每 kRobustProbeInterval 次解析放一次公式分块）。
+                // 健壮模式：mem-bound 期周期探针（每 kRobustProbeInterval 次解析放一次公式分块）。
                 // 否则锁死后 mem-bound 分支永不产出细样本 ⇒ 判错就永久错、无法纠正。
                 const bool probe = robustNow && g_jobCostCache.ProbeDue(funcHash);
                 if (!probe)
@@ -1181,7 +1181,7 @@ namespace JobSystem
             }
             else if (robustNow && mode == JobSystem::kModeUnknown)
             {
-                // ⚠ 关键：未分类期必须**交错**放粗/细两种分块。若只先采几个粗样本再永远走公式，
+                // ⚠ 关键：未分类期必须交错放粗/细两种分块。若只先采几个粗样本再永远走公式，
                 // 重 job 的粗样本够不到健壮判据的样本下限 ⇒ mode 永为 unknown ⇒ 永远细粒度
                 //（grad 受益但 Melee 受损）。
                 if (!g_jobCostCache.ParityProbe(funcHash))
@@ -1221,7 +1221,7 @@ namespace JobSystem
                 if (cfixed > 0.0 && celem > 0.0)
                 {
                     // 空体/超轻：执行≈0，总成本由调度/唤醒/worker 抖动主导，
-                    // 任何执行成本模型都无解 → 用"调度主导"专用粒度兜底（**与执行默认解耦**）。
+                    // 任何执行成本模型都无解 → 用"调度主导"专用粒度兜底（与执行默认解耦）。
                     // 上限 4：tpw 调大时不能把每-job 固定仪式按 tile 数放大。
                     const double tileTimeTpw =
                         cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))) * celem;
@@ -1232,7 +1232,7 @@ namespace JobSystem
                         const int chunkSched = std::max(16, CeilDiv(length, wc * std::max(1, kSchedDominatedTpw)));
                         // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
                         // 稳态固定 tpw，且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
-                        // 健壮模式下如实标注为**粗样本**（它返回的就是 tpw chunk）。
+                        // 健壮模式下如实标注为粗样本（它返回的就是 tpw chunk）。
                         if (g_jobCostCacheVerbose)
                             std::printf("[JCC] R length=%d SCHED-DOMINATED chunk=%d rc=%d tileNs=%.0f\n",
                                 length, chunkSched, CeilDiv(length, chunkSched), tileTimeTpw);
@@ -1247,7 +1247,7 @@ namespace JobSystem
                     if (targetTiles < wc) targetTiles = wc;
                     if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
                     const int chunk2f = std::max(1, CeilDiv(length, targetTiles));
-                    // 健壮模式：只有**严格细于** tpw 兜底的分块才算细样本（否则会系统性推高比值
+                    // 健壮模式：只有严格细于 tpw 兜底的分块才算细样本（否则会系统性推高比值
                     // ⇒ 全判 mem-bound）。
                     if (g_jobCostCacheVerbose)
                         std::printf("[JCC] R length=%d TWO-FACTOR chunk=%d rc=%d targetUs=%.0f\n",
