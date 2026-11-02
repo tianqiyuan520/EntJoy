@@ -1,5 +1,6 @@
-﻿using EntJoy.Collections;
+using EntJoy.Collections;
 using EntJoy.JobSystem;
+using EntJoy.Mathematics;
 
 namespace EntJoySample.AutoSIMDTest
 {
@@ -368,6 +369,55 @@ namespace EntJoySample.AutoSIMDTest
                 else acc -= d;
             }
             R[i] = acc;
+        }
+    }
+
+    // ST11: int2 栅格查询（int2.zero 边界 + int2 分量访问 + int2 gather）。编译期回归：
+    // 生成器对这些构造一旦退回非法 C++，本工程的 native 编译直接失败。
+    public struct Stress11_CSharp_For : IJobFor
+    {
+        public NativeArray<float2> QueryPositions;
+        public NativeArray<int2> HashIndex;
+        public NativeArray<int2> CellStartEnd;
+        public NativeArray<int> Results;
+        public float2 GridOrigin;
+        public float2 GridResolutionInv;
+        public int2 GridDimensions;
+        public int GridLength;
+
+        public void Execute(int i)
+        {
+            float2 q = QueryPositions[i];
+            int2 cell = (int2)math.floor((q - GridOrigin) * GridResolutionInv);
+            cell = math.clamp(cell, int2.zero, GridDimensions - new int2(1, 1));
+            int hash = cell.y * GridDimensions.x + cell.x;
+            hash = math.min(math.max(hash, 0), GridLength - 1);
+            int2 range = CellStartEnd[hash];
+            Results[i] = range.x < 0 ? -1 : HashIndex[math.min(range.x, GridLength - 1)].y;
+        }
+    }
+
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    public struct Stress11_SIMD_For : IJobFor
+    {
+        public NativeArray<float2> QueryPositions;
+        public NativeArray<int2> HashIndex;
+        public NativeArray<int2> CellStartEnd;
+        public NativeArray<int> Results;
+        public float2 GridOrigin;
+        public float2 GridResolutionInv;
+        public int2 GridDimensions;
+        public int GridLength;
+
+        public void Execute(int i)
+        {
+            float2 q = QueryPositions[i];
+            int2 cell = (int2)math.floor((q - GridOrigin) * GridResolutionInv);
+            cell = math.clamp(cell, int2.zero, GridDimensions - new int2(1, 1));
+            int hash = cell.y * GridDimensions.x + cell.x;
+            hash = math.min(math.max(hash, 0), GridLength - 1);
+            int2 range = CellStartEnd[hash];
+            Results[i] = range.x < 0 ? -1 : HashIndex[math.min(range.x, GridLength - 1)].y;
         }
     }
 }

@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
@@ -15,6 +16,21 @@ namespace NativeTranspiler.Analyzer
         protected readonly HashSet<string> _nativeArrayListNames;
         protected readonly HashSet<string> _nativeListNames;
 
+        // 归约循环（`v = min(v, a[i])`、`v += a[i]`）生成 4 路独立累加器 + 标量收尾：
+        // 单一累加链是串行依赖，编译器不会自行拆开。
+        private int _reductionSerial;
+
+        protected override void TranslateForStatement(ForStatementSyntax forStmt)
+        {
+            var unrolled = new System.Collections.Generic.List<string>();
+            if (ReductionUnroll.TryBuild(this, forStmt, _reductionSerial, _indentLevel, unrolled))
+            {
+                _reductionSerial++;
+                foreach (var line in unrolled) _builder.AppendLine(line);
+                return;
+            }
+            base.TranslateForStatement(forStmt);
+        }
         public CppPointerStatementTranslator(SemanticModel semanticModel, IMethodSymbol method, bool useFastMath = false, bool enableAutoSIMD = false)
             : base(semanticModel, useFastMath, enableAutoSIMD)
         {
@@ -315,9 +331,8 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // float2 读路径改用值访问器 xr()/yr()：x()/y() 返回引用，会让 `float2 q = p[i]`
-            // 的读退化成两次 4 字节标量读（逐元素热循环实测 2.3× 代价，见 NativeMath.h 注释）。
-            // 只在"纯读"上下文改写；赋值/复合赋值/自增减的左值必须保留引用版本。
+            // 纯读上下文用值访问器 xr()/yr()：x()/y() 返回引用，会让 `float2 q = p[i]` 退化成两次 4 字节读。
+            // float2/int2/uint2 都提供值访问器；赋值/复合赋值/自增减这类左值必须保留引用版本。
             if (memberName is "x" or "y" && IsReadContext(memberAccess))
             {
                 TranslateExpression(memberAccess.Expression);
@@ -544,5 +559,7 @@ namespace NativeTranspiler.Analyzer
             }
             base.TranslateBinaryExpression(binary);
         }
+
     }
 }
+

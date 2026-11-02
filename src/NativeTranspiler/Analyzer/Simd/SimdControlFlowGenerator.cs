@@ -1052,6 +1052,12 @@ namespace NativeTranspiler.Analyzer
                 //   continue lane，后续语句照常执行但 mask 为空（无副作用），消除每轮 1 次
                 //   any_true + 1 分支（C12：3 any_true/4 分支 → 2/2，对齐 ISPC）。
                 //   continue 语句体（如 j+=1）已在 if 块内以 blend 形式执行完毕。
+                if (string.IsNullOrEmpty(frame.BodyMaskVar))
+                {
+                    // 没有 body mask 的 tracker 循环：只能整组跳到 continue 标签。
+                    AppendLine($"goto {frame.ContinueLabel};");
+                    return;
+                }
                 AppendLine($"{frame.BodyMaskVar} = {frame.BodyMaskVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
                 _currentMask = frame.BodyMaskVar;
             }

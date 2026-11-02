@@ -104,11 +104,15 @@ namespace NativeTranspiler.Analyzer
                 && unrollEnd > unrollStart
                 && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
 
-            // Dispatch: unroll → uniform reduction → varying reduction → scalar-for → while-true
+            // Dispatch: unroll → reduction-unroll → uniform reduction → varying reduction → scalar-for → while-true
             if (canUnroll)
             {
                 // Full unroll for small uniform-bound loops（含 min/max/sum 归约）。
                 GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
+            }
+            else if (isUniformBounds && TryEmitReductionUnroll(stmt))
+            {
+                // 归约循环已按 4 路展开生成。
             }
             else if (isUniformBounds && isReduction)
                 GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
@@ -141,11 +145,19 @@ namespace NativeTranspiler.Analyzer
                     string exitL = $"__uni_exit_{_labelCounter++}";
                     string contL = $"__uni_cont_{_labelCounter++}";
                     _isUniformScalarLoop = true;
+                    var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+                    // 循环体含 continue 时，逐 lane 跳过剩余语句需要一个每轮重置的 body mask：
+                    //   continue 只影响本次迭代，不能改 tracker（那是 break 的语义）。
+                    string bodyMaskB = "";
+                    if (bodyB.DescendantNodes().OfType<ContinueStatementSyntax>().Any())
+                    {
+                        bodyMaskB = $"__bm_{_maskCounter++}";
+                        AppendLine($"simd_mask {bodyMaskB} = {loopSavedMask};");
+                    }
                     // Uniform loop with a per-lane break condition: the saved mask doubles
                     //   as the lane tracker so break can drop matched lanes and keep matching
                     //   others (see GenerateBreakStatement).
-                    _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL });
-                    var bodyB = stmt.Statement is BlockSyntax fb2 ? fb2 : Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt.Statement);
+                    _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL, BodyMaskVar = bodyMaskB });
                     GenerateBlock(bodyB, skipBraces: false);
                     _loopStack.Pop();
                     _isUniformScalarLoop = false;
@@ -159,6 +171,20 @@ namespace NativeTranspiler.Analyzer
             }
             else
                 GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
+        }
+
+        // 归约循环走 4 路展开：SIMD 后端没有向量化过的横向归约，标量展开是当前最优形态。
+        private int _unrollSerial;
+
+        private bool TryEmitReductionUnroll(ForStatementSyntax stmt)
+        {
+            var scalar = new CppBatchStatementTranslator(
+                _semanticModel, _jobStruct, _indexParamName, _indexParamName, _useFastMath, false);
+            var lines = new List<string>();
+            if (!ReductionUnroll.TryBuild(scalar, stmt, _unrollSerial, _indent, lines)) return false;
+            _unrollSerial++;
+            foreach (var line in lines) _builder.AppendLine(line);
+            return true;
         }
 
         // Strategy 0: Full unroll for small uniform-bound non-reduction loops.
@@ -344,6 +370,14 @@ namespace NativeTranspiler.Analyzer
             string outerMask = _currentMask;
             _currentMask = savedMask;
 
+            // 循环体含 continue 时补一个每轮重置的 body mask（见 Docs-style 分支同处理）。
+            string bodyMaskVar = "";
+            if (bodyBlock.DescendantNodes().OfType<ContinueStatementSyntax>().Any())
+            {
+                bodyMaskVar = $"__bm_{_maskCounter++}";
+                AppendLine($"simd_mask {bodyMaskVar} = {savedMask};");
+            }
+
             _loopStack.Push(new LoopFrame
             {
                 // Saved mask doubles as lane tracker so per-lane breaks drop matched
@@ -351,7 +385,8 @@ namespace NativeTranspiler.Analyzer
                 TrackerVar = savedMask,
                 IterActiveVar = "",
                 ExitLabel = exitLabel,
-                ContinueLabel = continueLabel
+                ContinueLabel = continueLabel,
+                BodyMaskVar = bodyMaskVar
             });
 
             int hoistStart = _builder.Length;

@@ -133,23 +133,12 @@ namespace JobSystem
 
     private:
         static constexpr uint32_t kDequeCapacity = 4096;
-        // 每次认领的 tile 数（预切分粒度）：厚 tile 的下限兜底。
+        // 每次认领的 tile 数：认领上限的下限兜底。
         static constexpr uint32_t kClaimBatchSize = 4;
-        // 厚 tile 里的细档（`kClaimSpanThinElems < itemsPerTile <= kClaimSpanMidElems`）的
-        // 目标元素跨度：认领上限 `capEff = clamp(kClaimSpanThickElems / itemsPerTile, 1, tileCount/workerCount)`。
-        //
-        // 为什么要有它：此前厚 tile 一律用 `kClaimBatchSize = 4` 作为上限，于是
-        // `step = clamp(tileCount/workerCount, 1, 4) = 4` —— 与 tileCount 无关。在 Unity 的粒度
-        // （内批 64 ⇒ tileCount=15,625）下每 worker 一个认领只覆盖 256 个元素，8 条交错流彼此相距
-        // ~2KB ⇒ 预取器失效。按元素给跨度后，每个认领覆盖 32,768 个连续元素。
-        // 实测（冻结输入面、batch=64、4 轮轮转交替）：Σ六趟 3.094 → 1.793 ms（cap 4 → 512）。
-        //
-        // ⚠ 为什么只作用于 `itemsPerTile <= kClaimSpanMidElems`：放大认领跨度会拉开 8 个 worker
-        //   在 index 空间上的距离，而 Melee 依赖"worker 邻近 ⇒ 空间哈希格复用"。实测把规则应用到
-        //   所有厚 tile 后，默认档的 Melee（该档 tile≈1954 元素）从 84–93 ms 退化到 100–102 ms（3/3）。
-        //   ⇒ 细档（对齐档的 64）取跨度、粗档（默认档的 1954）保持 worker 邻近。上限仍取"每 worker 公平份额"。
-        static constexpr uint32_t kClaimSpanThickElems = 32768;
-        static constexpr uint32_t kClaimSpanMidElems = 256;
+        // 认领跨度按元素给（`g_claimSpanElems`，`ENTJOY_CLAIM_SPAN`，默认 1024），只对
+        // `itemsPerTile <= kClaimSpanMaxItemsPerTile` 生效 —— 更粗的 tile 已是长连续段，
+        // 再加宽只增尾部量子风险 ⇒ 保持 `claimCap`。
+        static constexpr uint32_t kClaimSpanMaxItemsPerTile = 256;
 
         // ── 自适应自旋参数（WorkerLoop park 段）──
         // 执行后拉满 → 连续调度零唤醒；空转退火 → 快速让出 CPU；activeTasks>0 用更大窗口。
@@ -190,8 +179,12 @@ namespace JobSystem
         void ExecuteAndRelease(RangeTask* task, uint32_t workerIndex,
             TileAccount account = TileAccount::Local) noexcept;
 
-        // 从 Injector 或其他 worker 窃取一个任务并执行（TryAssistOne 内部）
-        bool StealAndExecute(uint32_t workerIndex) noexcept;
+        // 从 Injector 或 worker deque 窃取一个任务并执行（TryAssistOne 内部）。
+        // stealStart 是窃取扫描起点，accountIndex 是计账/数组下标，两者分开传：
+        // 主线程没有 worker 槽位，用 kMaxTrackedWorkers 作 accountIndex 让所有数组写入跳过、
+        // 认领计数落进 main 分支；同时 stealStart 仍从 0 起扫全部 deque。
+        // scanAllWorkers 区分调用者：worker 跳过自己，主线程 assist 扫描全部 worker。
+        bool StealAndExecute(uint32_t stealStart, uint32_t accountIndex, bool scanAllWorkers) noexcept;
 
         // 排空 Injector + 各 worker deque 残留 task：通用 work 调 workCleanup，tile 收集 batch 到
         // drainedBatches，RangeTask 回池。仅 Stop() join 后调用（单线程、worker 已退出）。

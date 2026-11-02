@@ -236,7 +236,12 @@ namespace NativeTranspiler.Analyzer
             // 标量位置的字段读取：接收者不是向量 → 绝不做 `.v` 包装。
             //   （`CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath` 的接收者翻译出来是
             //    `simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种标量 SIMD 包装，本身无 `.v`。）
-            bool scalarReceiver = !objExpr.Contains(".v");
+            //   2 分量向量（变量名或 `simd_value<int2>::gather(...)` 这类表达式）的分量是字段不是方法，
+            //   所以它既不能走标量回退，也不能被 `!objExpr.Contains(".v")` 判成标量。
+            bool twoComponentVectorExpr = objExpr.Contains("simd_value<EntJoy::Mathematics::float2")
+                || objExpr.Contains("simd_value<EntJoy::Mathematics::int2")
+                || objExpr.Contains("simd_value<EntJoy::Mathematics::uint2");
+            bool scalarReceiver = !objExpr.Contains(".v") && !isVaryingFloat2 && !twoComponentVectorExpr;
 
             // .MaxValue / .MinValue — 必须早于 scalarReceiver 的标量回退分支：
             // 接收者是预定义类型（`float.MaxValue` / `int.MaxValue`）时，TranslateExpression(接收者)
@@ -267,6 +272,18 @@ namespace NativeTranspiler.Analyzer
                 return $"std::numeric_limits<float>::{fsign}()";
             }
 
+            // .zero on int2/uint2/float2 → 构造函数。接收者是类型名、翻译结果不含 `.v`，
+            // 必须早于 scalarReceiver 回退，否则会被原样输出成 `int2.zero`。
+            if (memberName == "zero")
+            {
+                if (objExpr.Contains("uint2"))
+                    return "EntJoy::Mathematics::uint2(0u, 0u)";
+                if (objExpr.Contains("int2"))
+                    return "EntJoy::Mathematics::int2(0, 0)";
+                if (objExpr.Contains("float2"))
+                    return "EntJoy::Mathematics::float2(0.0f, 0.0f)";
+            }
+
             // .x / .y 的向量成员形式只有真向量才成立；标量接收者走值类型路径（`p.x()`）。
             if ((memberName == "x" || memberName == "y") && scalarReceiver)
             {
@@ -285,14 +302,7 @@ namespace NativeTranspiler.Analyzer
             //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
             if (scalarReceiver) return $"{objExpr}.{memberName}";
 
-            // .MaxValue / .MinValue 已在上面（scalarReceiver 回退之前）处理。
-
-            // .zero on int2/float2 → constructor
-            if (memberName == "zero" && (objExpr.Contains("int2") || objExpr.Contains("float2")))
-            {
-                string prefix = objExpr.Contains("int2") ? "EntJoy::Mathematics::int2" : "EntJoy::Mathematics::float2";
-                return $"{prefix}(0, 0)";
-            }
+            // .MaxValue / .MinValue 与 .zero 已在上面（scalarReceiver 回退之前）处理。
 
             // .Length on NativeArray → _length suffix
             // ⚠ NativeArray 字段的 C++ 名是 `X_ptr`（NativeArrayBase），但长度形参是 `X_length`。
@@ -450,7 +460,8 @@ namespace NativeTranspiler.Analyzer
                     if (rawArg is IdentifierNameSyntax rawId && _uniformLoopVars.Contains(rawId.Identifier.Text))
                     {
                         string scalarIdx = rawId.Identifier.Text;
-                        string naBase = NativeArrayBase(rawId, scalarIdx);
+                        // 基址是数组本身（baseExpr = X_ptr），不是下标变量；按下标取基址会生成 `i[i]`。
+                        string naBase = baseExpr;
                         if (elemCppType.Contains("float2"))
                             return $"simd_value<{elemCppType}>::broadcast({naBase}[{scalarIdx}])";
                         if (elemCppType.Contains("int2"))

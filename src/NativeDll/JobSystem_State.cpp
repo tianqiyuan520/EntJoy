@@ -1165,6 +1165,8 @@ namespace JobSystem
             const auto mode = g_jobCostCache.GetMode(funcHash);
             const bool robustNow = g_jobCostCache.IsRobust();
             const int tpwChunk = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+            // mem-bound 分支的每-tile 目标串行时间（成本已知时用它反推 tile 大小）。
+            constexpr double kMemBoundTileBudgetNs = 20000.0;
             if (mode == JobSystem::kModeMemBound)
             {
                 // 健壮模式：mem-bound 期周期探针（每 kRobustProbeInterval 次解析放一次公式分块）。
@@ -1172,9 +1174,21 @@ namespace JobSystem
                 const bool probe = robustNow && g_jobCostCache.ProbeDue(funcHash);
                 if (!probe)
                 {
+                    // mem-bound 的 tile 大小按"每 tile 目标串行时间"给，而不是固定 tiles/worker：
+                    // 同一 tpw 下重核（~88 ns/元素）与流式核（~1.5 ns/元素）的最优 tile 差一个数量级，
+                    // 全局常数必然顾此失彼（8 worker、1e6 元素实测：重核要 ~250 元素/tile，
+                    // 流式核要 ≥1953）。成本未知时退回 tpw。
+                    const double memPerElem = g_jobCostCache.GetPerElemCost(funcHash);
+                    int memChunk = tpwChunk;
+                    if (memPerElem > 0.0)
+                    {
+                        const int byCost = static_cast<int>(kMemBoundTileBudgetNs / memPerElem);
+                        memChunk = std::clamp(byCost, 16, 32768);
+                    }
                     if (g_jobCostCacheVerbose)
-                        std::printf("[JCC] R length=%d MEM-BOUND → tpw chunk\n", length);
-                    return JccDiagNote(2, tpwChunk);
+                        std::printf("[JCC] R length=%d MEM-BOUND → chunk=%d (perElem=%.2f ns)\n",
+                            length, memChunk, memPerElem);
+                    return JccDiagNote(2, memChunk);
                 }
                 if (g_jobCostCacheVerbose)
                     std::printf("[JCC] R length=%d MEM-BOUND PROBE → formula\n", length);
@@ -1225,6 +1239,23 @@ namespace JobSystem
                     // 上限 4：tpw 调大时不能把每-job 固定仪式按 tile 数放大。
                     const double tileTimeTpw =
                         cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))) * celem;
+                    // 串行工作量不到一个 tile 的成本量级：多 tile 只会把认领/收尾开销放大。
+                    // 实测 n=120：单 tile 1.24 µs，8 tile 3.39 µs。`ENTJOY_SINGLETILE_WORK_NS` 覆盖（0=关）。
+                    static const double kSingleTileWorkNs = []() -> double {
+                        const char* v = std::getenv("ENTJOY_SINGLETILE_WORK_NS");
+                        if (v == nullptr) return 3000.0;
+                        const double n = std::strtod(v, nullptr);
+                        if (!(n >= 0.0 && n <= 1000000.0)) return 3000.0;
+                        return n;
+                    }();
+                    if (kSingleTileWorkNs > 0.0 && static_cast<double>(length) * celem <= kSingleTileWorkNs)
+                    {
+                        if (g_jobCostCacheVerbose)
+                            std::printf("[JCC] R length=%d SCHED-DOMINATED single tile (work=%.0f ns)\n",
+                                length, static_cast<double>(length) * celem);
+                        if (outJccFine) *outJccFine = false;
+                        return JccDiagNote(10, length);
+                    }
                     if (tileTimeTpw < kSchedulingOverheadNs)
                     {
                         const int kSchedDominatedTpw =
@@ -1400,8 +1431,8 @@ namespace JobSystem
             return;
         }
 
-        // Chase-Lev 唯一路径：主线程不参与 tile 级协助计数（tiles 在持久
-        // deque），直接进入 spin/wait，由 worker 完成退役并置 completed。
+        // 主线程在等待期参与认领：assist 打开时先从 Injector 取令牌，取不到再扫各 worker
+        // deque 窃取；批的完成仍由持有令牌的执行者计数，主线程不额外改 pendingTasks。
 
         // Phase 2: 先密集 spin（过早 yield 触发完整 OS 上下文切换）。
         // Chase-Lev：主线程 spin 期间即协助认领执行，消除"慢 worker 被抢占

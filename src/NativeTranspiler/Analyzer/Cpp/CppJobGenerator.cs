@@ -274,18 +274,26 @@ namespace NativeTranspiler.Analyzer
             }
 
             var loopUse = GetFieldLoopUse(jobStruct, semanticModel ?? TryGetSemanticModel(jobStruct, compilation));
+
+            // 按值绑定只在热环里的活值装得下寄存器时启用：判据是"同时活着的可按值标量个数"（range 调度
+            // 的循环由 transpiler 合成、包住整个 body ⇒ 就是 body 里那批可按值字段）。预算 8 = x86-64
+            // 可用 GPR 15 个的一半，另一半留给热环自身的寻址/归纳/累加…
+            const int RegisterBudget = 8;
+            int liveScalars = 0;
+            foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(x => !x.IsStatic))
+                if (ValueBindTypeOk(f.Type) && loopUse.Used.Contains(f.Name) && !loopUse.Written.Contains(f.Name))
+                    liveScalars++;
+            bool bindByValue = liveScalars <= RegisterBudget;
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                 if (field.Type is IPointerTypeSymbol) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                // 绑定形式：参与循环行程数的字段按值，其余按引用。按值后行程数成为入口常量，
-                // 不再是"每轮重载 + 无法 unroll/向量化"；其余字段的载入本可折进操作数，按值只多一次拷贝。
-                // 类型判据（ValueBindTypeOk）：只认已证 ≤16 B 的平凡可拷贝值类型；引用类型/容器/指针按引用。
+                // 绑定形式：`bindByValue`（整个 job 的判定，见上）∧ 类型合格 ∧ 被引用 ∧ 未被写 ⇒ 按值。
+                // 其余一律按引用。形参仍是 `T*` ⇒ 不动 ABI，只是函数体内的局部绑定形式。
                 string scalarSrc = $"{field.Name}_ptr";
-                bool tripCount = loopUse.TripCount.Contains(field.Name);
                 bool typeOk = ValueBindTypeOk(field.Type);
-                if (tripCount && typeOk)
+                if (bindByValue && typeOk && loopUse.Used.Contains(field.Name) && !loopUse.Written.Contains(field.Name))
                     sb.AppendLine($"    const {cppType} {field.Name} = *{scalarSrc};");
                 else
                     sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
@@ -308,7 +316,7 @@ namespace NativeTranspiler.Analyzer
 
         // 标量绑定：`const T& X = *X_ptr;` 的对象可经同函数其它指针被写（`X_ptr` 是非 const 的 `T*`）
         // ⇒ 依赖它的循环行程数在编译期不可知（每轮重载 + 无法 unroll/向量化）。按值绑定后 `X` 是入口
-        // 取一次的局部常量 ⇒ 行程数成为编译期常量。绑定形式见 AppendLocalVariableDeclarations 的 typeOk 判据。
+        // 取一次的局部常量 ⇒ 行程数成为编译期常量。是否按值由 `bindByValue` 决定（见 AppendLocalVariableDeclarations）。
 
         /// <summary>某个 job 的字段在循环里的用处分组（按符号解析，不再按名字猜）。</summary>
         private sealed class FieldLoopUse
@@ -317,12 +325,19 @@ namespace NativeTranspiler.Analyzer
             public readonly HashSet<string> TripCount = new HashSet<string>(StringComparer.Ordinal);
             /// <summary>出现在任意循环内（头部或体内）的字段名（判据：这类形参加 `__restrict`）。</summary>
             public readonly HashSet<string> InLoop = new HashSet<string>(StringComparer.Ordinal);
+            /// <summary>在 body 里被**直接写**的字段名（赋值 / `++` `--` / `ref`|`out` 实参）。
+            /// 被写的字段一律不得按值绑定 —— 按值后写会落到入口副本上，语义直接错。
+            /// 写成 `Arr[i] = …` 不算写字段本身。</summary>
+            public readonly HashSet<string> Written = new HashSet<string>(StringComparer.Ordinal);
+            /// <summary>在 body 里被**引用到**的字段名（含环外引用，按符号解析、屏蔽名不误判）。
+            /// 按值绑定要求"确实用到"：被同名局部屏蔽而实际未被引用的字段保持按引用。</summary>
+            public readonly HashSet<string> Used = new HashSet<string>(StringComparer.Ordinal);
         }
 
         /// <summary>
-        /// 收集字段的循环用途（行程数 / 循环内）：按符号解析，标识符必须解析到本 job 的实例字段 ⇒ 同名
-        /// 局部/形参不造成误判；无语义模型时退回名字兜底（同名声明一律保守跳过）。行程数那批按值绑定
-        /// （见 AppendLocalVariableDeclarations），循环内那批改用形参 `__restrict`（见 `ScalarRestrictEnabled`）。
+        /// 收集字段的循环用途与读写集合：按符号解析，标识符必须解析到本 job 的实例字段 ⇒ 同名局部/形参不误判；
+        /// 无语义模型时退回名字兜底（同名声明一律保守跳过）。`TripCount`/`InLoop` 决定形参 `__restrict`
+        /// （`ScalarRestrictEnabled`/`ListLengthRestrictEnabled`），`Used`/`Written` 参与按值绑定判据。
         /// </summary>
         private static FieldLoopUse GetFieldLoopUse(INamedTypeSymbol jobStruct, SemanticModel? semanticModel)
         {
@@ -367,6 +382,25 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            // 记录"字段本身被写"（不是写它的元素）：赋值左值 / `++` `--` 的操作数 / `ref`|`out` 实参。
+            void TakeWrite(SyntaxNode? node)
+            {
+                if (!(node is IdentifierNameSyntax id)) return;
+                var name = id.Identifier.Text;
+                if (!fields.Contains(name)) return;
+                if (semanticModel != null)
+                {
+                    var sym = semanticModel.GetSymbolInfo(id).Symbol;
+                    if (sym is IFieldSymbol f && !f.IsStatic
+                        && SymbolEqualityComparer.Default.Equals(f.ContainingType, jobStruct))
+                        use.Written.Add(name);
+                }
+                else if (shadowed != null && !shadowed.Contains(name))
+                {
+                    use.Written.Add(name);
+                }
+            }
+
             // 循环体内的条件（if / 三元）里出现的字段不再单列一桶：唯一消费者（按值绑定的
             // `=4` 臂）已删除。
 
@@ -394,6 +428,18 @@ namespace NativeTranspiler.Analyzer
                         Take(d.Condition, use.TripCount);
                         Take(d.Statement, use.InLoop);
                         break;
+                    case AssignmentExpressionSyntax a:
+                        TakeWrite(a.Left);
+                        break;
+                    case PrefixUnaryExpressionSyntax pu:
+                        TakeWrite(pu.Operand);
+                        break;
+                    case PostfixUnaryExpressionSyntax po:
+                        TakeWrite(po.Operand);
+                        break;
+                    case ArgumentSyntax arg when arg.RefOrOutKeyword.RawKind != 0:
+                        TakeWrite(arg.Expression);
+                        break;
                     case ForEachStatementSyntax fe:
                         sawLoop = true;
                         // foreach 的行程数由集合给（容器长度）；集合与元素都算"循环内"。
@@ -406,8 +452,8 @@ namespace NativeTranspiler.Analyzer
             // 判据必须考虑"transpiler 自己会合成循环"这件事。
             //   `IJobParallelFor`/`IJob` 的 C# 是逐元素形态（`Execute(int index)`），源码里没有循环；
             //   合成循环的是 transpiler（`_Execute_Batch` 里包一层 `for (index = __startIndex; ...)`）。
-            //   于是此前在源码里找循环的判据（TripCount）对这类 job 永远为空 ⇒ 按值绑定与
-            //   `SCALAR_RESTRICT` 这两条优化对宿主最重要的 job 类型完全失效（Count / Integrate /
+            //   于是"在源码里找循环"的判据（TripCount / InLoop）对这类 job 永远为空 ⇒ 形参 `__restrict`
+            //   （`ScalarRestrictEnabled`）对宿主最重要的 job 类型完全失效（Count / Integrate /
             //   Place / Melee 全是 IJobParallelFor）。实测证据：生成的 `CountCellsJob_Execute.cpp` 里
             //   六个标量全部是 `const T& X = *X_ptr;`，尽管 `Length/CellsW/StateDeath` 每元素都要读。
             //   修法：源码里没有循环时，整个 body 就是循环体 ⇒ 全部字段算"循环内"。
@@ -416,6 +462,7 @@ namespace NativeTranspiler.Analyzer
                 Take(body, use.InLoop);
             }
             use.InLoop.UnionWith(use.TripCount);
+            Take(body, use.Used);   // 全 body 的字段引用（含环外）：按值绑定要求"确实用到"
             return use;
         }
 
@@ -548,6 +595,18 @@ namespace NativeTranspiler.Analyzer
             return true;
         }
 
+        /// <summary>发标量逐元素循环。体内有 `return;` 时把体包成立即调用 lambda（`return` 只退 lambda）。</summary>
+        private static void EmitElementLoop(StringBuilder sb, string indexParamName, string loopEndExpr,
+            string body, bool anyReturn)
+        {
+            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {loopEndExpr}; ++{indexParamName})");
+            sb.AppendLine("    {");
+            if (anyReturn) sb.AppendLine("        [&]() {");
+            sb.Append(body);
+            if (anyReturn) sb.AppendLine("        }();");
+            sb.AppendLine("    }");
+        }
+
         private static void GenerateBatchFunctionStandard(INamedTypeSymbol jobStruct, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
@@ -628,16 +687,10 @@ namespace NativeTranspiler.Analyzer
                 scalarLoopEnd = $"std::min(__startIndex + __count, {guardField})";
                 bodyHasReturn = scalarBody.Contains("return;");
             }
-            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {scalarLoopEnd}; ++{indexParamName})");
-            sb.AppendLine("    {");
-            if (bodyHasReturn) sb.AppendLine("        [&]() {");
-            sb.Append(scalarBody);
-            if (bodyHasReturn) sb.AppendLine("        }();");
-            sb.AppendLine("    }");
+            EmitElementLoop(sb, indexParamName, scalarLoopEnd, scalarBody, bodyHasReturn);
             sb.AppendLine("}");
             sb.AppendLine();
         }
-
 
         private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
         {
@@ -722,12 +775,7 @@ namespace NativeTranspiler.Analyzer
                 variantLoopEnd = $"std::min(__startIndex + __count, {guardField2})";
             }
             bool variantHasReturn = bodyCode.Contains("return;");
-            sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {variantLoopEnd}; ++{indexParamName})");
-            sb.AppendLine("    {");
-            if (variantHasReturn) sb.AppendLine("        [&]() {");
-            sb.Append(bodyCode);
-            if (variantHasReturn) sb.AppendLine("        }();");
-            sb.AppendLine("    }");
+            EmitElementLoop(sb, indexParamName, variantLoopEnd, bodyCode, variantHasReturn);
             sb.AppendLine("}");
             sb.AppendLine();
             sb.AppendLine();
@@ -1218,6 +1266,8 @@ namespace NativeTranspiler.Analyzer
                     {
                         var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
+                        // 数组形参不加 `__restrict`：job 的数组字段可能互为别名（读邻居/写自身），
+                        // 无别名证据时不能声明 noalias。
                         parameters.Add($"{cppElementType}* {field.Name}_ptr, int {field.Name}_length");
                     }
                 }

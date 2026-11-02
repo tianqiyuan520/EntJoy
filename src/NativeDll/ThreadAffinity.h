@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -43,6 +46,87 @@ namespace JobSystem
             return std::nullopt;
         return static_cast<AffinityMask>(
             static_cast<AffinityMask>(1) << (workerIndex + 1u));
+    }
+
+    // 每个物理核选一个代表逻辑 CPU（Windows: RelationProcessorCore，取组内最低置位；
+    // 其它平台按 `hardware_concurrency` 顺序返回，即"假设无 SMT"）。
+    //
+    // 用途：`ENTJOY_JOB_PIN=core` 把 worker 摊到物理核上。SMT 兄弟核共享执行端口与
+    // L1/L2，两个 worker 落到同一物理核时吞吐接近减半 —— 逻辑 CPU 编号不是核编号。
+    inline std::vector<uint32_t> PhysicalCoreRepresentatives()
+    {
+        std::vector<uint32_t> reps;
+#if defined(_WIN32)
+        DWORD len = 0;
+        ::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+        if (len == 0) return reps;
+        std::vector<unsigned char> buf(len);
+        if (!::GetLogicalProcessorInformationEx(
+                RelationProcessorCore,
+                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
+                &len))
+            return reps;
+        for (DWORD off = 0; off + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= len;)
+        {
+            auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+            if (info->Size == 0) break;  // 防御：解析失配时不死循环
+            if (info->Relationship == RelationProcessorCore && info->Processor.GroupCount > 0)
+            {
+                const GROUP_AFFINITY& ga = info->Processor.GroupMask[0];
+                uint32_t base = 0;  // 该 group 之前所有 group 的逻辑 CPU 数
+                for (WORD g = 0; g < ga.Group; ++g)
+                    base += ::GetActiveProcessorCount(g);
+                for (int bit = 0; bit < static_cast<int>(sizeof(KAFFINITY) * 8); ++bit)
+                {
+                    if (((ga.Mask >> bit) & static_cast<KAFFINITY>(1)) != 0)
+                    {
+                        reps.push_back(base + static_cast<uint32_t>(bit));
+                        break;
+                    }
+                }
+            }
+            off += info->Size;
+        }
+        // 解析可能有记录缺口（实测某些固件只报 n-1 条 RelationProcessorCore）。
+        // 未被任何记录覆盖的逻辑 CPU 补成独立的代表：保证"每个逻辑 CPU 恰好归属一个核"，
+        // 否则 worker 多于解析出的核数时会被拒绑并回落到系统自选核，破坏核摊派。
+        {
+            const uint32_t totalLogical = static_cast<uint32_t>(::GetActiveProcessorCount(0));
+            std::vector<bool> covered(totalLogical, false);
+            for (DWORD off2 = 0; off2 + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= len;)
+            {
+                auto* info2 = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off2);
+                if (info2->Size == 0) break;
+                if (info2->Relationship == RelationProcessorCore && info2->Processor.GroupCount > 0)
+                {
+                    const GROUP_AFFINITY& ga2 = info2->Processor.GroupMask[0];
+                    uint32_t base2 = 0;
+                    for (WORD g = 0; g < ga2.Group; ++g) base2 += ::GetActiveProcessorCount(g);
+                    for (int bit = 0; bit < static_cast<int>(sizeof(KAFFINITY) * 8); ++bit)
+                    {
+                        if (((ga2.Mask >> bit) & static_cast<KAFFINITY>(1)) != 0)
+                        {
+                            const uint32_t cpu = base2 + static_cast<uint32_t>(bit);
+                            if (cpu < totalLogical) covered[cpu] = true;
+                        }
+                    }
+                }
+                off2 += info2->Size;
+            }
+            for (uint32_t cpu = 0; cpu < totalLogical; ++cpu)
+            {
+                if (covered[cpu]) continue;
+                bool dup = false;
+                for (uint32_t r : reps) if (r == cpu) { dup = true; break; }
+                if (!dup) reps.push_back(cpu);
+            }
+            std::sort(reps.begin(), reps.end());
+        }
+#else
+        const unsigned n = std::thread::hardware_concurrency();
+        for (unsigned i = 0; i < n; ++i) reps.push_back(static_cast<uint32_t>(i));
+#endif
+        return reps;
     }
 
     inline bool BindCurrentThreadToLogicalProcessor(

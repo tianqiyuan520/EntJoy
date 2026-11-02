@@ -1,11 +1,10 @@
-using EntJoy.ECS.JobSystem;
+﻿//using System.Diagnostics;
 //using EntJoy.JobSystem;
-
-//using System.Diagnostics;
+//using EntJoy.ECS.JobSystem;
 
 //namespace EntJoySample.PreciseWakeBench
 //{
-//    // 高竞争 Job（对齐 JobLibsBenchmark S5：10万 × 1000 迭代 FMA）
+//    // 高竞争 Job（10 万 × 1000 迭代 FMA）
 //    public struct ContentionJob : IJobParallelFor
 //    {
 //        public long[] Results;
@@ -38,12 +37,21 @@ using EntJoy.ECS.JobSystem;
 //        public void Execute(int i) => Values[i] = Values[i] - 3;
 //    }
 
+//    // 调度侧恒等实现：只测调度与唤醒，不含元素级工作。
+//    public struct EmptyJob : IJobParallelFor
+//    {
+//        public void Execute(int i) { }
+//    }
+
 //    public static class Program
 //    {
-//        private const int HighContentionCount = 100_000;   // S5
-//        private const int ChainLength = 1_000_000;          // S3
-//        private const int WarmupFrames = 5;
-//        private const int MeasureFrames = 9;
+//        private const int HighContentionCount = 100_000;
+//        private const int ChainLength = 1_000_000;
+//        // 帧数由环境变量给出：p99 要落在同一进程内，跨进程比较受 tier-up 影响。
+//        private static readonly int WarmupFrames =
+//            int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_BENCH_WARMUP"), out int wf) ? wf : 20;
+//        private static readonly int MeasureFrames =
+//            int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_BENCH_FRAMES"), out int mf) ? mf : 40;
 
 //        private static double Percentile(double[] sorted, double p)
 //        {
@@ -78,10 +86,13 @@ using EntJoy.ECS.JobSystem;
 //            return r;
 //        }
 
-//        private static void Print(string label, double[] raw)
+//        // 每帧固定工作量 = 一次完整调度 + 等待，用于对齐 JobLibs 的口径。
+//        private static void Print(string label, double[] raw, ulong assistBefore, ulong tilesBefore)
 //        {
 //            var (avg, p50, p95, p99, max) = Stats(raw);
-//            Console.WriteLine($"{label,-28}: avg={avg:F3} p50={p50:F3} p95={p95:F3} p99={p99:F3} max={max:F3} ms");
+//            var st = NativeJobScheduler.GetStats();
+//            Console.WriteLine($"{label,-24}: avg={avg:F3} p50={p50:F3} p95={p95:F3} p99={p99:F3} max={max:F3} ms" +
+//                $" | assistExec+={st.AssistExecuted - assistBefore} assistTiles+={st.AssistTiles - tilesBefore}");
 //        }
 
 //        public static void Main()
@@ -89,69 +100,56 @@ using EntJoy.ECS.JobSystem;
 //            JobScheduler.Initialize();
 //            NativeJobScheduler.PrewakeWorkersOnce();
 
-//            // 读取环境变量设置 assist / guided（可选，也可直接用 API）
-//            string? assistEnv = Environment.GetEnvironmentVariable("ENTJOY_ASSIST");
-//            if (int.TryParse(assistEnv, out int aOn))
-//                NativeJobScheduler.SetMainThreadAssistEnabled(aOn > 0);
-//            string? guidedEnv = Environment.GetEnvironmentVariable("ENTJOY_GUIDED_TILES");
-//            if (int.TryParse(guidedEnv, out int gOn))
-//                NativeJobScheduler.SetGuidedEnabled(gOn > 0);
+//            int assist = int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_ASSIST"), out int a) ? a : 0;
+//            NativeJobScheduler.SetMainThreadAssistEnabled(assist > 0);
+//            if (int.TryParse(Environment.GetEnvironmentVariable("ENTJOY_GUIDED_TILES"), out int g))
+//                NativeJobScheduler.SetGuidedEnabled(g > 0);
 
-//            Console.WriteLine($"WorkerCount={NativeJobScheduler.JobWorkerCount} assist={assistEnv ?? "?"} guided={guidedEnv ?? "?"}");
-//            Console.WriteLine("=== 变化的 JobSystem wake 方式 ===");
+//            Console.WriteLine($"workers={NativeJobScheduler.JobWorkerCount} assist={assist} " +
+//                $"guided={Environment.GetEnvironmentVariable("ENTJOY_GUIDED_TILES") ?? "0"}");
 
 //            var contention = new ContentionJob { Results = new long[HighContentionCount] };
 //            var c1 = new ChainJob1 { Values = new long[ChainLength] };
 //            var c2 = new ChainJob2 { Values = c1.Values };
 //            var c3 = new ChainJob3 { Values = c1.Values };
 
-//            // 高竞争（S5）
-//            var contentionRaw = Measure(() =>
-//            {
-//                contention.Schedule(HighContentionCount, 0).Complete();
-//            });
-//            Print("高竞争(10万x1000)", contentionRaw);
+//            var raw = Measure(() => contention.Schedule(HighContentionCount, 0).Complete());
+//            var st0 = NativeJobScheduler.GetStats();
+//            Print("高竞争(10万x1000)", raw, st0.AssistExecuted, st0.AssistTiles);
 
-//            // 依赖链（S3）
-//            var chainRaw = Measure(() =>
+//            ulong ae = NativeJobScheduler.GetStats().AssistExecuted, at = NativeJobScheduler.GetStats().AssistTiles;
+//            raw = Measure(() =>
 //            {
 //                var h1 = c1.Schedule(ChainLength, 0);
 //                var h2 = c2.Schedule(ChainLength, 0, h1);
 //                var h3 = c3.Schedule(ChainLength, 0, h2);
 //                h3.Complete();
 //            });
-//            Print("依赖链(3级x100万)", chainRaw);
+//            Print("依赖链(3级x100万)", raw, ae, at);
 
-//            // 空任务（S2）：唤醒开销敏感
-//            var emptyRaw = Measure(() =>
+//            ae = NativeJobScheduler.GetStats().AssistExecuted; at = NativeJobScheduler.GetStats().AssistTiles;
+//            raw = Measure(() =>
 //            {
 //                var j = default(EmptyJob);
 //                j.Schedule(1_000_000, 0).Complete();
 //            });
-//            Print("空任务(100万)", emptyRaw);
+//            Print("空任务(100万)", raw, ae, at);
 
-//            // 小批量（每帧多个 1K 任务）：精确唤醒主战场
-//            var smallRaw = Measure(() =>
+//            ae = NativeJobScheduler.GetStats().AssistExecuted; at = NativeJobScheduler.GetStats().AssistTiles;
+//            raw = Measure(() =>
 //            {
 //                for (int k = 0; k < 100; k++)
 //                {
-//                    var j = default(SmallJob);
+//                    var j = default(EmptyJob);
 //                    j.Schedule(1024, 0).Complete();
 //                }
 //            });
-//            Print("小批量(100x1024)", smallRaw);
+//            Print("小批量(100x1024)", raw, ae, at);
 
-//            Console.WriteLine("\n完成。");
-//        }
-
-//        public struct EmptyJob : IJobParallelFor
-//        {
-//            public void Execute(int i) { }
-//        }
-
-//        public struct SmallJob : IJobParallelFor
-//        {
-//            public void Execute(int i) { }
+//            var fin = NativeJobScheduler.GetStats();
+//            Console.WriteLine($"total assistExecuted={fin.AssistExecuted} assistTiles={fin.AssistTiles} " +
+//                $"slowAssistTiles={fin.SlowAssistTiles} assistPct={fin.AssistExecPctEwma:F4}");
+//            NativeJobScheduler.Shutdown();
 //        }
 //    }
 //}

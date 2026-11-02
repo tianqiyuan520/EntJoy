@@ -19,6 +19,9 @@ namespace EntJoy.JobSystem
     /// </summary>
     internal static unsafe class NativeJobCore
     {
+        // Startup noise switch: only the dll self-proof line stays by default;
+        // ENTJOY_DIAG_STARTUP=1 restores load details.
+        internal static readonly bool DiagStartup = Environment.GetEnvironmentVariable("ENTJOY_DIAG_STARTUP") == "1";
         // 委托类型
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate void JobFunc(IntPtr context);
@@ -184,7 +187,7 @@ namespace EntJoy.JobSystem
             string key = asm + "|" + typeName;
             lock (_componentLayoutLock)
             {
-                if (_componentLayoutHashes.Count == 0)
+                if (DiagStartup && _componentLayoutHashes.Count == 0)
                     Console.Error.WriteLine("[LAYOUT] component layout fingerprint: recording (guard armed)");
                 _componentLayoutHashes[key] = layoutHash;
             }
@@ -661,7 +664,8 @@ namespace EntJoy.JobSystem
                 for (int attempt = 1; attempt <= kNativeLoadAttempts; attempt++)
                 {
                     attemptsUsed = attempt;
-                    Console.Error.WriteLine($"[NativeJobScheduler] Trying NativeDll: {intendedPath} (attempt {attempt}/{kNativeLoadAttempts})");
+                    if (DiagStartup)
+                        Console.Error.WriteLine($"[NativeJobScheduler] Trying NativeDll: {intendedPath} (attempt {attempt}/{kNativeLoadAttempts})");
                     if (TryLoadNative(intendedPath, out dllHandle, out string loadError))
                     {
                         loadedPath = intendedPath;
@@ -747,7 +751,6 @@ namespace EntJoy.JobSystem
             _nativeDll = dllHandle;
             if (!string.IsNullOrEmpty(loadedPath))
             {
-                Console.Error.WriteLine($"[NativeJobScheduler] Loaded NativeDll: {loadedPath} (UTC: {File.GetLastWriteTimeUtc(loadedPath):O})");
                 // 自证行：把"实际加载了哪一份 / 是不是回退 / 重试了几次"写进日志，任何回退都不再是静默的。
                 string proofHash = File.Exists(loadedPath) ? ShortHash(FileSha256(loadedPath)) : "n/a";
                 string proofSize = File.Exists(loadedPath) ? new FileInfo(loadedPath).Length.ToString() : "n/a";
@@ -818,7 +821,10 @@ namespace EntJoy.JobSystem
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleParallelForBatchEx", out IntPtr fnSchedBatchEx))
                 _jobSystem_ScheduleParallelForBatchEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr>)fnSchedBatchEx;
             if (_jobSystem_ScheduleParallelForBatchEx != null)
-                Console.Error.WriteLine("[NativeJobScheduler] ClaimPolicy API: JobSystem_ScheduleParallelForBatchEx present (per-call-site claim geometry)");
+            {
+                if (DiagStartup)
+                    Console.Error.WriteLine("[NativeJobScheduler] ClaimPolicy API: JobSystem_ScheduleParallelForBatchEx present (per-call-site claim geometry)");
+            }
             else
                 Console.Error.WriteLine("[NativeJobScheduler] ClaimPolicy API: NOT present in this NativeDll (claim parameters ignored)");
             _jobSystem_ScheduleFor = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr>)

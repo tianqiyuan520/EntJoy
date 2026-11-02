@@ -151,10 +151,11 @@ public static unsafe partial class NativeJobScheduler
         internal static bool UseFallback { get; set; }
     /// <summary>
     /// 并行 for 默认 tiles/worker：batchSize=0 时按此值个 tile/worker 切分。
-    /// 由 4 改为 64：flat parallel-for 路径在 8/15 worker 两档实测最优
-    /// 只影响 flat 路径；ECS chunk 路径用自己的常数。可用 `ENTJOY_TILES_PER_WORKER` 覆盖。
+    /// 64 → 512：同一会话交替配对（8 worker、1e6 元素）整步 −2.8～−3.5%（四个相同步段同号），
+    /// 256/512/768 同处平台、均优于 64。只影响 flat 路径；ECS chunk 路径用自己的常数。
+    /// 可用 `ENTJOY_TILES_PER_WORKER` 覆盖。
     /// </summary>
-    public static int TilesPerWorker = 64;
+    public static int TilesPerWorker = 512;
 
     /// <summary>Guided（chunk ∝ 剩余工作量）tile 调度。默认关闭（uniform 更通用）。</summary>
     public static bool GuidedEnabled = false;
@@ -725,6 +726,10 @@ public static unsafe partial class NativeJobScheduler
     /// </summary>
     internal static readonly Dictionary<Type, IntPtr> s_nativeForAdapterPtrs = new();
 
+    /// <summary>逐 job 的接线明细默认静默（一个工程几十到上百行）；=1 时逐条输出。</summary>
+    private static readonly bool s_verboseNativeBind =
+        Environment.GetEnvironmentVariable("ENTJOY_DIAG_NATIVE_BIND") == "1";
+
     /// <summary>注册 `IJob`/批形态的原生 adapter 指针（由 NativeTranspiler 生成代码调用）。</summary>
     public static void RegisterNativeJobAdapter(Type type, IntPtr adapterPtr, int ctxSize)
     {
@@ -732,7 +737,8 @@ public static unsafe partial class NativeJobScheduler
         s_nativeJobCtxSizes[type] = ctxSize;
         // 自证横幅（与框架其它自证同风格）：证明该类型的原生直调已接线（注册发生在
         // NativeExports 静态构造里 ⇒ 进程启动即可见）。避免"静默 no-op 当成已修复"。
-        Console.Error.WriteLine($"[NATIVEJOB] native direct-dispatch wired: {type.Name} (ctx={ctxSize}B)");
+        if (s_verboseNativeBind)
+            Console.Error.WriteLine($"[NATIVEJOB] native direct-dispatch wired: {type.Name} (ctx={ctxSize}B)");
     }
 
     /// <summary>注册 `IJobFor` 的 index 形原生 adapter（`ScheduleFor` 的直调路径）。</summary>
@@ -740,7 +746,8 @@ public static unsafe partial class NativeJobScheduler
     {
         s_nativeForAdapterPtrs[type] = indexAdapterPtr;
         s_nativeJobCtxSizes[type] = ctxSize;
-        Console.Error.WriteLine($"[NATIVEJOB] IJobFor index-shaped native adapter wired: {type.Name} (ctx={ctxSize}B)");
+        if (s_verboseNativeBind)
+            Console.Error.WriteLine($"[NATIVEJOB] IJobFor index-shaped native adapter wired: {type.Name} (ctx={ctxSize}B)");
     }
 
     // 按 job 名的批表绑定
@@ -763,8 +770,9 @@ public static unsafe partial class NativeJobScheduler
         if (!s_batchNameBannerDone)
         {
             s_batchNameBannerDone = true;
-            Console.Error.WriteLine(
-                "[NATIVEJOB] batch-by-name binding: wired (name = managed Type.Name -> the exact dispatch function pointer)");
+            if (s_verboseNativeBind)
+                Console.Error.WriteLine(
+                    "[NATIVEJOB] batch-by-name binding: wired (name = managed Type.Name -> the exact dispatch function pointer)");
         }
         // 只有该名字确实出现在 `ENTJOY_JOB_BATCH_BY_NAME` 里时才打（默认档零噪声）；同时给出所绑指针，
         // 自证"绑的就是派发用的那个指针"而不是一个靠命名规则猜出来的符号。
@@ -787,9 +795,11 @@ public static unsafe partial class NativeJobScheduler
     {
         string? v = Environment.GetEnvironmentVariable("ENTJOY_NATIVE_SINGLE_JOB");
         bool on = v == null || v[0] != '0';
-        Console.Error.WriteLine(on
-            ? "[NATIVEJOB] single-job native direct-dispatch: on (default; =0 falls back to managed thunk)"
-            : "[NATIVEJOB] single-job native direct-dispatch: off (explicit ENTJOY_NATIVE_SINGLE_JOB=0)");
+        if (NativeJobCore.DiagStartup)
+            Console.Error.WriteLine(on
+                ? "[NATIVEJOB] single-job native direct-dispatch: on (default; =0 falls back to managed thunk;"
+                  + " per-job wiring detail: ENTJOY_DIAG_NATIVE_BIND=1)"
+                : "[NATIVEJOB] single-job native direct-dispatch: off (explicit ENTJOY_NATIVE_SINGLE_JOB=0)");
         return on;
     }
 
@@ -800,7 +810,8 @@ public static unsafe partial class NativeJobScheduler
         {
             if (!s_nativeFirstUseLogged.Add(type)) return;
         }
-        Console.Error.WriteLine($"[NATIVEJOB] first native direct-dispatch: {type.Name}");
+        if (s_verboseNativeBind)
+            Console.Error.WriteLine($"[NATIVEJOB] first native direct-dispatch: {type.Name}");
     }
 
     internal static bool TryGetNativeJobAdapter(Type type, out IntPtr adapterPtr, out int ctxSize)

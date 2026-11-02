@@ -1550,12 +1550,17 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("        # ClangCL (LLVM backend — faster SIMD than MSVC)");
             sb.AppendLine("        # /MP：Unity Build 拆批后同 project 内的多个 TU 并行编译");
             sb.AppendLine("        #（--parallel 只并行 project 间；缺 /MP 时拆批反而串行更慢）");
+            // 内核禁展开：环体是「多流装载 + 条件存」的内存受限形态，展开抬高寄存器压力与溢出槽。
+            // `-O3` 会重新打开展开器，必须显式 `-fno-unroll-loops`；调度器（NativeDll）保留展开，其环体短小。
+            var kernelOpt = System.Environment.GetEnvironmentVariable("ENTJOY_KERNEL_O2") == "1"
+                ? ""
+                : " /clang:-O3 /clang:-ffp-contract=fast"
+                  + " /clang:-fno-trapping-math /clang:-fno-signed-zeros /clang:-fomit-frame-pointer"
+                  + " /clang:-fno-unroll-loops";
+            var schedOpt = kernelOpt + " /clang:-funroll-loops";
             if (!prebuiltNative)
-                sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
-            // NativeTranspiled keeps /fp:fast for performance (gridsearch build/query hot paths).
-            // AutoSIMD files are compiled separately WITHOUT /fp:fast in NativeTranspiledPrecise
-            // (see above), preserving 454229d's IEEE-754 NaN/±0 semantics (EC2/EC8/E5/E8/E11).
-            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP)");
+                sb.AppendLine("        target_compile_options(NativeDll PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP" + schedOpt + ")");
+            sb.AppendLine("        target_compile_options(NativeTranspiled PRIVATE /utf-8 /std:c++20 /O2 /Oi /fp:fast /MP" + kernelOpt + ")");
             // 【LTO A/B，`ENTJOY_LTO=1`，默认关】给 NativeTranspiled 开 LTO —— MSVC 的 `/GL`+`/LTCG` 等价物。
             // clang-cl 用 `-flto`（编译+链接）；本工程链接器已是 `lld-link`（见 build/CMakeCache.txt 的 CMAKE_LINKER），
             // 因此能直接吃 LLVM bitcode。动机：验证"跨 TU 的冗余指令/未内联助手能否被 LTO 消掉"。

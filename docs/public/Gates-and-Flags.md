@@ -43,9 +43,11 @@
 | env | 默认 | 语义 |
 |---|---|---|
 | `ENTJOY_JOB_WORKERS` | 逻辑核心 − 1 | worker 线程数（`>= 0` 生效） |
-| `ENTJOY_CLAIM_SPAN` | **1024** | 每次认领的**元素跨度**（`=0` 关闭 ⇒ 复现旧行为）。薄 tile 摊薄认领、厚 tile 保持 worker 邻近 |
+| `ENTJOY_CLAIM_SPAN` | **1024** | 每次认领的**元素跨度**（`=0` 关闭 ⇒ 复现旧行为）。对 `itemsPerTile ≤ 256` 生效；上限取每 worker 公平份额、下限取 `claimCap` |
 | `ENTJOY_CLAIM_BATCH` | 0 = 内置 4 | 认领粒子上限 cap（`step = clamp(tileCount/workers, 1, cap)`） |
-| `ENTJOY_TILES_PER_WORKER` | 64 | flat parallel-for 的默认 tiles/worker（**只影响 flat 路**） |
+| `ENTJOY_TILES_PER_WORKER` | **512** | flat parallel-for 的默认 tiles/worker（**只影响 flat 路**）。64 → 512：8 worker、1e6 元素交替配对整步 −2.8～−3.5% |
+| `ENTJOY_TILES_UNIFORM_ALL` | 关 | 诊断：把"等宽不物化 + 入场直调快路径"从薄 tile 扩到任意 cs（量每-tile 固定开销用） |
+| `ENTJOY_KERNEL_O2` | 关 | 构建期：`=1` 把 `NativeDll`/`NativeTranspiled` 退回纯 `/O2`（对照用）。默认给 ClangCL 追加 `-O3 -funroll-loops -ffp-contract=fast -fno-trapping-math -fno-signed-zeros -fomit-frame-pointer`——**CLANGCL 分支此前一直是 `/O2`**（那组 `-O3 ...` 只写在非 MSVC 分支），修正后对齐档 Σ5 0.936 → 0.995 |
 | `ENTJOY_JCC_TARGET_US` | 6400 | `ResolveChunkSize` 的 `two_factor` 分支唯一消费者（目标每 tile 串行量，µs） |
 | `ENTJOY_SPIN_BUSY` | 8192 | busy 自旋窗（pause 次数）。**只改自旋时长，不改变语义** |
 | `ENTJOY_STATS` | 开 | 诊断统计总开关（`=0` 旁路全部纯诊断 RMW）。⚠ `g_backendBatchesOutstanding` **不**受它门控 |
@@ -60,17 +62,15 @@
 
 ⚠ **不在框架 env 面、但影响所有跨栈读数：主线程 assist** —— 框架只提供托管 API
 `NativeJobScheduler.SetMainThreadAssistEnabled`（导出 `JobSystem_SetMainThreadAssistEnabled`），
-**框架默认是关**（`JobSystem.cpp:750 g_mainThreadAssistEnabled{false}`）；但**游戏仓自己把它默认打开**
-（`ComputeShaderBattleSimulation/CPUBattle/Scripts/CPUBattleEcs.cs:625`：
-`JobAssistOn = env("ENTJOY_ASSIST") != "0"`），并打印 `[CPUBattleEcs] JobSystem assist=开`。
-⇒ **`ENTJOY_ASSIST` 是游戏侧 env，不在本框架契约内，且框架已删除该 env 的解析**（只留 API）；
-**脚本之间也不一致**：doc09/doc10 时代的 `ab-aligned.ps1` 等**显式 pin `=0`**，而 2026-10-05 之后的战役脚本
-（`qq-judge2`/`frozen-pairs2,3`/`cs1-cost`/`ab-3arm-2curve`/`perpass-*`）**先清空全部 `ENTJOY_*` 再只设自己那几个**
-⇒ **assist 回落到"开"** ⇒ **doc15–doc17 的读数含 assist，doc10 的不含**，而 Unity 侧无对应物
-（B 侧 `[M4-DISCLOSE]①` 自己标了这一点）。
-引用任何跨栈数字时必须显式写明 assist 开/关 —— doc17 §1.2 的对照显示：在本协议下 assist **关**反而更好
-（整步 1.024、Melee 1.080，对比开着的 1.021 / 1.067）。⚠ 该对照的两臂是**两次会话** ⇒ 含会话漂移，
-**稳健的只是"两臂都 ≈1.02、都 6/6"**；"assist 是成本"若要落定需做**同会话** A/A。
+**默认关**（`JobSystem.cpp:750 g_mainThreadAssistEnabled{false}`），框架**不解析任何 env**；战斗仓
+`CPUBattleEcs` 也已不再设置该开关（早期版本用 `ENTJOY_ASSIST` 且默认开，`!= "0"` 的 opt-out 已改为 `== "1"` 的 opt-in 后被移除）
+⇒ **现在的战斗基准一律 assist 关**。⇒ 引用 doc15–doc17 的读数时仍须注明它们产生于"游戏侧默认开"时期，
+doc10 时代的 `ab-aligned.ps1` 则显式 pin 关；Unity 侧无对应物（B 侧 `[M4-DISCLOSE]①` 自己标了这一点）。
+收益判据（同会话交替）：15 worker 配对 Σ5 **0.959（开）vs 1.052（关）**，亏损全在 Flow（393 个 BFS 薄波被等待者插入后逐波串行链被打乱）；
+8 worker 126.61 vs 130.11 ms、4 worker 199.15 vs 198.32 ms —— 差在臂内极差内。
+`EntJoySample/01_JobSystem/PreciseWakeBench`（`ENTJOY_ASSIST=1` 走同一 API）在 1/2/4/8/15 worker 下 p99 无稳定符号，
+而计数器证明主线程确实参与（`assistExec` 60–699、`assistTiles` 2.8k–11.4k）
+⇒ 该设计收益上限只有 1/(workers+1)，worker 铺满物理核后被争用抵消；**保留为 opt-in，不进默认路径**。
 
 ## D. 诊断 / 器械（默认关，零开销）
 
@@ -81,6 +81,7 @@
 | `ENTJOY_DIAG_NATIVE_PHASE` | `Complete()` 分段诊断 |
 | `ENTJOY_DIAG_NATIVE_SCHED` | 原生 `Schedule` 分段 |
 | `ENTJOY_DIAG_CSHARP_PHASE` / `_WINDOW` | 托管侧分段 |
+| `ENTJOY_DIAG_NATIVE_BIND` | `[NATIVEJOB]` 接线/首用/批表绑定明细（默认静默，只留一行总开关状态） |
 | `ENTJOY_DIAG_E1` / `_MS` | E1 worker 忙比 / 相位尾部 |
 | `ENTJOY_DIAG_TIMING` | 关停时打印 timing 直方图 |
 | `ENTJOY_JOB_TILE_TRACE` | 逐 tile trace（会**关掉** tile-run 合并） |
@@ -95,6 +96,13 @@
 ⚠ **补登说明（2026-10-07）**：这两个开关是 doc15–doc17 里"**对齐档**"（JCC 全关 + batchSize 逐调用点与 Unity 一致）
 的**唯一定义器件**。此前它们只出现在 gridsearch 的战役文档中，不在本契约表里 ⇒ 引用"对齐档"读数时
 **必须同时给出这两个 env**，否则无法复现。
+
+⚠ **`=0` 不是"Unity 粒度"（2026-10-11，依据 [doc18](../gridsearch/18-两栈差距定位-子趟分解与细粒度代价.md) §3.1）**：
+Unity 的 `IJobParallelFor.Schedule(n, 0)` 里那个 `0` 是**再平衡粒度**参数——其 C# 层**每个 CPU 核只调度一个 native job**，
+batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](https://docs.unity3d.com/2020.1/Documentation/Manual/JobSystemParallelForJobs.html)），
+所以 `0` **不等于** `innerloopBatchCount=1`。用本开关把内批钉成 `1`（"对齐档"的旧做法）会让 EntJoy 的 work item 数
+比 Unity 实际细 2–3 个数量级（实测 Flow 3,162 → 702,392），是**诊断臂**而非对齐；Unity 侧自己在 Integrate 上也不用 `0`
+（`BattleBenchM4Entry.cs:462` 改成 `64` 并注明"照抄 A 的 0 会更慢"）。
 
 诊断读数的**用法要点**：`[JOBWAKE] skipped=` 在 `wakePoll=ON`（默认）时**恒为 0** ——
 真正的跳过数见 `[JOBWAKEPOLL]`。`[JOBF2F4] applied` 为 0 不代表 F2/F4 没生效，见 A 节的 `thinTiles` 说明。

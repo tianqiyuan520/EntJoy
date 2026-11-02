@@ -762,8 +762,25 @@ namespace JobSystem
     // 连续等宽 tile 不做融合执行：每个 tile 恰好一次内核调用是已发布的语义
     // （`JobSystemTests` 断言 `batch=1 must invoke the kernel exactly once per tile`）。
 
+    // 批拓扑/启停斜坡记账的开关：`ENTJOY_DIAG_E1=1` 或原生活动面板开启时才记。
+    // 为什么必须门控：这两处每批各执行一次，其中 `workerSlotsEntered.fetch_add` 是
+    // 跨核争用的原子、其余是 4 条全局 EWMA + E1 直方图；实测退役链 2.20 µs/批里占 1.62 µs。
+    // 读取方只有 `[E1]` 打印与计时面板，不参与任何调度决策。
+    // 文件级常量（加载期取一次环境变量）：热路径不再需要函数内静态的守卫检查。
+    static const bool g_topologyDiagEnvOn = []() -> bool {
+        const char* v = std::getenv("ENTJOY_DIAG_E1");
+        return v != nullptr && v[0] == '1';
+    }();
+    static bool TopologyDiagEnabled() noexcept
+    {
+        return g_topologyDiagEnvOn ||
+            g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed) ||
+            g_timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+    }
+
     static void RecordWorkerEntry(BatchState* batch) noexcept
     {        // 诊断计数：relaxed 足够（只记录首/末 worker 进入时刻）。
+        if (!TopologyDiagEnabled()) return;
         const uint32_t entered =
             batch->workerSlotsEntered.fetch_add(1, std::memory_order_relaxed) + 1;
         if (entered == 1)
@@ -778,6 +795,7 @@ namespace JobSystem
     {
         const uint64_t now = MonotonicNowNs();
         batch->topologyDoneAt.store(now, std::memory_order_release);
+        if (!TopologyDiagEnabled()) return;
         const uint64_t published = batch->publishedAt.load(std::memory_order_acquire);
         const uint64_t firstWorker = batch->firstWorkerAt.load(std::memory_order_acquire);
         const uint64_t lastWorker = batch->lastWorkerAt.load(std::memory_order_acquire);

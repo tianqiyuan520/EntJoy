@@ -68,6 +68,60 @@ namespace JobSystem
     }
 
     // `ENTJOY_SPIN_NEEDS_WORK`（默认开；`=0` 关闭）：大自旋窗只在"注入器里有可认领的活"时给。
+    // `ENTJOY_JOB_PIN`：worker 线程亲和性（诊断，默认不钉）。取值：
+    //   `core` —— worker i 钉到第 i 个**物理核**的代表逻辑 CPU；
+    //   `even` —— worker i 钉到逻辑 CPU `2*i`（同胞相邻布局下等价于每物理核一个）；
+    //   `low`  —— worker i 钉到逻辑 CPU `1+i`（与 `bindThreads_` 的旧语义相同）。
+    // 目的：区分"8 个 worker 是否真的占满 8 个物理核"。SMT 兄弟共享执行端口与 L1/L2，
+    // 两个 worker 落到同一物理核 ≈ 该核吞吐减半，而逻辑 CPU 编号不等于核编号。
+    enum class WorkerPinMode { None, Core, Even, Low };
+
+    static WorkerPinMode WorkerPinModeFromEnv() noexcept
+    {
+        static const WorkerPinMode mode = [] {
+            const char* v = std::getenv("ENTJOY_JOB_PIN");
+            if (v == nullptr) return WorkerPinMode::None;
+            if (v[0] == 'c') return WorkerPinMode::Core;
+            if (v[0] == 'e') return WorkerPinMode::Even;
+            if (v[0] == 'l') return WorkerPinMode::Low;
+            return WorkerPinMode::None;
+        }();
+        return mode;
+    }
+
+    static bool TopoDumpEnabled() noexcept
+    {
+        static const bool enabled = [] {
+            const char* v = std::getenv("ENTJOY_JOB_TOPO_DUMP");
+            return v != nullptr && v[0] == '1';
+        }();
+        return enabled;
+    }
+
+    // 把 worker i 钉到一个逻辑 CPU；返回实际使用的逻辑号（钉不上返回 -1）。
+    static int PinWorker(uint32_t workerIndex) noexcept
+    {
+        const WorkerPinMode mode = WorkerPinModeFromEnv();
+        if (mode == WorkerPinMode::None) return -1;
+        uint32_t target = 0;
+        if (mode == WorkerPinMode::Low)
+        {
+            target = workerIndex + 1u;
+        }
+        else if (mode == WorkerPinMode::Even)
+        {
+            target = workerIndex * 2u;
+        }
+        else
+        {
+            static const std::vector<uint32_t> reps = PhysicalCoreRepresentatives();
+            if (reps.empty()) return -1;
+            if (workerIndex >= reps.size()) return -1;  // worker 多于物理核：多余的不钉
+            target = reps[workerIndex];
+        }
+        return BindCurrentThreadToLogicalProcessor(target) ? static_cast<int>(target) : -1;
+    }
+
     static bool SpinNeedsWorkEnabled() noexcept
     {
         static const bool enabled = [] {
@@ -274,10 +328,12 @@ namespace JobSystem
     }
 
     // ============================================================
-    // StealAndExecute — 从 Injector 或其他 worker 窃取一个任务并执行
+    // StealAndExecute — 从 Injector 或 worker deque 窃取一个任务并执行。
+    // scanAllWorkers=false 供 worker 调用（跳过自己），true 供主线程 assist 调用（扫全部）。
     // ============================================================
 
-    bool ChaseLevScheduler::StealAndExecute(uint32_t workerIndex) noexcept
+    bool ChaseLevScheduler::StealAndExecute(uint32_t stealStart, uint32_t accountIndex,
+        bool scanAllWorkers) noexcept
     {
         // 1. 从 Injector 窃取（FIFO，1 CAS）
         RangeTask* task = nullptr;
@@ -288,7 +344,7 @@ namespace JobSystem
                 RunWorkTask(task);   // 通用 work：直接执行（内部 Release）
                 return true;
             }
-            ExecuteAndRelease(task, workerIndex, TileAccount::Assist);   // 内部按 Assist 口径记 tile
+            ExecuteAndRelease(task, accountIndex, TileAccount::Assist);   // 内部按 Assist 口径记 tile
             // 主线程 assist 计数
             g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
             g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
@@ -297,9 +353,9 @@ namespace JobSystem
 
         // 2. 从其他 worker deque 窃取（FIFO，1 CAS per victim）
         g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
-        for (uint32_t offset = 1; offset < workerCount_; ++offset)
+        for (uint32_t offset = scanAllWorkers ? 0u : 1u; offset < workerCount_; ++offset)
         {
-            const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
+            const uint32_t victimIdx = (stealStart + offset) % workerCount_;
             SparseTileDeque* victimDeque = workers_[victimIdx]->deque.get();
             // 空 deque 提前跳过：StealTop 必然失败，仍会白做 4 次 CAS 尝试。
             // 空判读的是本就被 StealTop 读取的同一对 atomic，语义不变；
@@ -313,8 +369,8 @@ namespace JobSystem
             {
                 g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
                 g_stealCount.fetch_add(1, std::memory_order_relaxed);
-                if (workerIndex < kMaxTrackedWorkers)
-                    dequeStolen[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                if (accountIndex < kMaxTrackedWorkers)
+                    dequeStolen[accountIndex].fetch_add(1, std::memory_order_relaxed);
 
                 // 从 deque 窃取的是 TileTask，需要转换为 RangeTask 处理
                 if (tileTask.batch && tileTask.tileCount > 0)
@@ -322,7 +378,8 @@ namespace JobSystem
                     // workerCap 令牌：主线程 assist 认领循环执行，内部已 taskDone
                     if (tileTask.firstTile == kClaimTokenMarker)
                     {
-                        ExecuteClaimToken(tileTask.batch, workerIndex, tileTask.batchGen, TileAccount::Assist);
+                        ExecuteClaimToken(tileTask.batch, accountIndex, tileTask.batchGen,
+                            TileAccount::Assist);
                         return true;
                     }
                     // 记录 worker 进入批次时间（供 timing 诊断）
@@ -339,8 +396,8 @@ namespace JobSystem
                                    tileTask.batch->workerCount, false);
                     SetCurrentBatchId(tileTask.batch->diagnosticId);
                     E1::Begin();
-                    if (workerIndex < kMaxTrackedWorkers)
-                        workerCurrentBatch[workerIndex].store(
+                    if (accountIndex < kMaxTrackedWorkers)
+                        workerCurrentBatch[accountIndex].store(
                             tileTask.batch->diagnosticId, std::memory_order_relaxed);
 
                     const uint32_t end = std::min(tempTask.firstTile + tempTask.tileCount,
@@ -348,14 +405,14 @@ namespace JobSystem
                     for (uint32_t t = tempTask.firstTile; t < end; ++t)
                         executor_(tempTask.batch, t);
 
-                    if (workerIndex < kMaxTrackedWorkers)
-                        workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
-                    E1::End(workerIndex);
+                    if (accountIndex < kMaxTrackedWorkers)
+                        workerCurrentBatch[accountIndex].store(0, std::memory_order_relaxed);
+                    E1::End(accountIndex);
                     SetCurrentBatchId(0);
                     DebugEndExec();
 
-                    if (workerIndex < kMaxTrackedWorkers)
-                        tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                    if (accountIndex < kMaxTrackedWorkers)
+                        tasksExecuted[accountIndex].fetch_add(1, std::memory_order_relaxed);
 
                     // 主线程 assist 计数
                     g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
@@ -417,6 +474,18 @@ namespace JobSystem
 
         try
         {
+            if (TopoDumpEnabled())
+            {
+                const std::vector<uint32_t> reps = PhysicalCoreRepresentatives();
+                std::fprintf(stderr, "[TOPOLOGY] logicalCpus=%u physicalCores=%u workers=%u pin=%d\n",
+                             static_cast<unsigned>(std::thread::hardware_concurrency()),
+                             static_cast<unsigned>(reps.size()),
+                             static_cast<unsigned>(workerCount),
+                             static_cast<int>(WorkerPinModeFromEnv()));
+                for (size_t k = 0; k < reps.size(); ++k)
+                    std::fprintf(stderr, "[TOPOLOGY] core%u rep=%u\n",
+                                 static_cast<unsigned>(k), static_cast<unsigned>(reps[k]));
+            }
             workers_.reserve(workerCount);
             for (uint32_t i = 0; i < workerCount; ++i)
             {
@@ -429,8 +498,7 @@ namespace JobSystem
             {
                 auto* raw = workers_[i].get();
                 raw->thread = std::thread([this, i, raw]() { WorkerLoop(i, *raw); });
-            }
-        }
+            }        }
         catch (...)
         {
             // 异常回滚：此时已持有 lifecycleMutex_，不能调 Stop()（会二次加锁死锁）。
@@ -589,8 +657,12 @@ namespace JobSystem
         // workerCap 限制并行时实际参与 ≤ 令牌数。
         const bool capMode = batch->workerCount > 0 &&
             static_cast<uint32_t>(batch->workerCount) < wc;
-        const uint32_t tokenTarget = capMode
-            ? static_cast<uint32_t>(batch->workerCount) : wc;
+        // assist 打开时多投一个令牌：Complete() 的调用线程取走它，与 worker 共享
+        // 同一个 nextTile 认领计数器（caller-participates）。
+        const uint32_t assistExtra =
+            g_mainThreadAssistEnabled.load(std::memory_order_relaxed) ? 1u : 0u;
+        const uint32_t tokenTarget = (capMode
+            ? static_cast<uint32_t>(batch->workerCount) : wc) + assistExtra;
         const uint32_t tokenCount = std::min(tokenTarget, tileCount);
         if (tokenCount == 0) return;
         batch->pendingTasks.store(tokenCount, std::memory_order_release);
@@ -784,34 +856,25 @@ namespace JobSystem
                 if (cd > batch->tileCount) cd = batch->tileCount;
                 capEff = cd;
             }
-            // 未声明 ⇒ 全局规则（薄 tile 才抬高 cap，且不低于内建 claimCap）。
-            else if (g_claimSpanElems > 0 && itemsPerTile <= kClaimSpanThinElems)
-            {
-                uint32_t c = g_claimSpanElems / itemsPerTile;
-                if (c < claimCap) c = claimCap;
-                if (c > g_claimSpanElems) c = g_claimSpanElems;
-                capEff = c;
-            }
-            // 厚 tile 的细档：也按元素跨度给 cap（`kClaimSpanThickElems`），上限 = 每 worker 的
-            // 公平份额（`tileCount/workers`）⇒ 不会退化成静态切分。
-            // ⚠ 更粗的 tile（itemsPerTile > kClaimSpanMidElems）保持 `claimCap`（=4）以维持 worker 邻近
-            //   （Melee 依赖"worker 邻近 ⇒ 空间哈希格复用"；实测把规则放到所有厚 tile 会让默认档
-            //    Melee 84–93 ms → 100–102 ms，3/3）。
-            // ⚠ 优先级：批表的 per-job claim 声明（`claimCapOverride`）与全局 `ENTJOY_CLAIM_BATCH`
-            //   都必须压过本规则 —— 否则 `key:64:4` 这种"该调用点只要 4 tile/认领"的声明会被静默忽略
-            //   （与"批表 > API > F6 > env > 默认"的既有优先级相反）。
-            else if (kClaimSpanThickElems > 0
-                     && itemsPerTile > kClaimSpanThinElems
-                     && itemsPerTile <= kClaimSpanMidElems
+            // 未声明 ⇒ 全局规则：认领跨度按元素给（`g_claimSpanElems` / `ENTJOY_CLAIM_SPAN`，默认 1024），
+            // 上限取每 worker 公平份额 ⇒ 不会退化成静态切分；下限取 `claimCap` ⇒ 粗 tile 逐位同旧行为。
+            // ⚠ 批表的 per-job claim 声明（`claimCapOverride`）与全局 `ENTJOY_CLAIM_BATCH` 压过本规则，
+            //   与"批表 > API > 学习 > env > 默认"的既有优先级一致。
+            else if (itemsPerTile > 0
+                     && itemsPerTile <= kClaimSpanMaxItemsPerTile
                      && batch->claimCapOverride == 0
                      && g_claimBatchSize == 0)
             {
-                uint32_t c = kClaimSpanThickElems / itemsPerTile;
-                if (c < 1) c = 1;
-                const uint32_t fair = batch->tileCount / std::max(1u, workerCount_);
-                if (c > fair) c = fair;
-                if (c < 1) c = 1;
-                capEff = c;
+                const uint32_t span = g_claimSpanElems;
+                if (span > 0)
+                {
+                    uint32_t c = span / itemsPerTile;
+                    if (c < claimCap) c = claimCap;
+                    const uint32_t fair = batch->tileCount / std::max(1u, workerCount_);
+                    if (c > fair) c = fair;
+                    if (c < 1) c = 1;
+                    capEff = c;
+                }
             }
         }
         uint32_t step = std::clamp(
@@ -998,8 +1061,8 @@ namespace JobSystem
     bool ChaseLevScheduler::TryAssistOne() noexcept
     {
         if (!running_.load(std::memory_order_acquire)) return false;
-        // 主线程没有 workerIndex，用 0 作为诊断索引（不影响正确性）
-        return StealAndExecute(0);
+        // 主线程没有 worker 槽位：窃取仍从 deque 0 起扫，计账走 main 分支（accountIndex 越界即跳过数组写入）
+        return StealAndExecute(0, kMaxTrackedWorkers, true);
     }
 
     // ============================================================
@@ -1081,6 +1144,19 @@ namespace JobSystem
             BindCurrentThreadToLogicalProcessor(1 + workerIndex);
         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
+        const int pinnedCpu = PinWorker(workerIndex);
+        if (TopoDumpEnabled())
+        {
+#if defined(_WIN32)
+            std::fprintf(stderr, "[PIN] w%u entry-logical=%u pinned=%d\n",
+                         static_cast<unsigned>(workerIndex),
+                         static_cast<unsigned>(::GetCurrentProcessorNumber()),
+                         pinnedCpu);
+#else
+            std::fprintf(stderr, "[PIN] w%u pinned=%d\n",
+                         static_cast<unsigned>(workerIndex), pinnedCpu);
+#endif
+        }
 
         SparseTileDeque* myDeque = ctx.deque.get();
         TileTask task;
@@ -1115,6 +1191,23 @@ namespace JobSystem
                 }
                 // 记录 worker 进入批次时间（供 timing 诊断）
                 ChaseLevRecordWorkerEntry(task.batch);
+
+                if (TopoDumpEnabled())
+                {
+                    static thread_local bool dumpedSteady = false;
+                    if (!dumpedSteady)
+                    {
+                        dumpedSteady = true;
+#if defined(_WIN32)
+                        std::fprintf(stderr, "[PIN] w%u steady-logical=%u\n",
+                                     static_cast<unsigned>(workerIndex),
+                                     static_cast<unsigned>(::GetCurrentProcessorNumber()));
+#else
+                        std::fprintf(stderr, "[PIN] w%u steady\n",
+                                     static_cast<unsigned>(workerIndex));
+#endif
+                    }
+                }
 
                 // 执行从 deque 取出的任务
                 if (workerIndex < kMaxTrackedWorkers)

@@ -22,7 +22,7 @@ namespace NativeTranspiler.Analyzer
         {
             "min", "max", "clamp", "abs", "sqrt", "floor", "ceil", "round", "trunc", "lerp",
             "sin", "cos", "tan", "atan", "atan2", "asin", "acos", "exp", "log", "log2", "log10",
-            "pow", "sign", "dot", "length", "distance", "normalize", "saturate", "step", "smoothstep",
+            "pow", "sign", "dot", "distancesq", "length", "distance", "normalize", "saturate", "step", "smoothstep",
             "fma", "mad", "rsqrt", "rcp", "frac", "mod", "fmod", "hypot", "deg2rad", "rad2deg",
             "IsNaN", "IsInfinity", "CountBits", "CountLeadingZeros", "CountTrailingZeros",
             "ReverseBits", "RotateLeft", "RotateRight", "DivRem", "BitIncrement", "BitDecrement",

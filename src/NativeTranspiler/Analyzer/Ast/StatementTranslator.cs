@@ -68,6 +68,26 @@ namespace NativeTranspiler.Analyzer
             return _builder.ToString();
         }
 
+        /// <summary>转译一条表达式并返回独立译文（缓冲区回退到调用前，供拼装片段）。</summary>
+        public string CaptureExpression(ExpressionSyntax expr)
+        {
+            int before = _builder.Length;
+            TranslateExpression(expr);
+            string text = _builder.ToString(before, _builder.Length - before);
+            _builder.Length = before;
+            return text;
+        }
+
+        /// <summary>转译一条语句并返回独立译文（缓冲区回退到调用前，供拼装片段）。</summary>
+        public string CaptureStatement(StatementSyntax statement)
+        {
+            int before = _builder.Length;
+            TranslateStatement(statement);
+            string text = _builder.ToString(before, _builder.Length - before);
+            _builder.Length = before;
+            return text;
+        }
+
         protected void AppendIndent() => _builder.Append(new string(' ', _indentLevel * 4));
 
         protected virtual void TranslateStatement(StatementSyntax statement)

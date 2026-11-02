@@ -62,12 +62,14 @@ namespace JobSystem
 
     // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
     // tpw 是"每个 worker 的 tile 数"，但真正决定墙钟的是 tile 的元素大小：
-    //   tile 越小 → 尾部越平，但每-tile 固定开销占比越高；64 是各 worker 数下的折中点。
+    //   tile 越小 → 尾部越平，但每-tile 固定开销占比越高。
+    // 512：8 worker、1e6 元素下与 64 交替配对实测整步 −2.8～−3.5%（四个相同步段同号）；
+    //   256/512/768 同处平台、均优于 64。
     // 作用域：只影响 flat parallel-for 路径（ECS chunk/entity-batch 路径自带
     //   `JobSystem_Tiles.cpp` 的 kTargetTilesPerWorker，不受本值影响）。
     // 可覆盖：`JobSystem_ConfigureTilesPerWorker()` / `NativeJobScheduler.TilesPerWorker` /
     //   环境变量 `ENTJOY_TILES_PER_WORKER`（env 优先）。
-    inline constexpr int kDefaultTilesPerWorker = 64;
+    inline constexpr int kDefaultTilesPerWorker = 512;
 
     // ceil(a/b)，a>=0, b>0；用 (a-1)/b+1 避免 a+b-1 在 a 接近类型上限时的 signed overflow（UB）。
     template <typename T>
@@ -144,7 +146,7 @@ namespace JobSystem
     extern std::atomic<int> g_guidedEnabled;
     extern std::atomic<int> g_guidedK;
     extern std::atomic<int> g_guidedFloor;
-    extern std::atomic<bool> g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 false，由 API 控制）
+    extern std::atomic<bool> g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 true，ENTJOY_MAIN_ASSIST=0 或 API 关闭）
     // JobCostCache export flag：用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，
     // worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数；热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
@@ -186,6 +188,8 @@ namespace JobSystem
     // F4（默认开；`ENTJOY_TILE_FASTPATH=0` 关闭）：把每-tile 的固定开销提到每批。
     // 见 BatchState 里 traceOn/timingOn/tileFast/firstTileAt 的注释。
     extern bool g_tileFastPath;
+    // 诊断（默认关）：把等宽不物化 + 入场直调快路径扩到任意 cs，用于量每-tile 固定开销。
+    extern bool g_uniformAllTiles;
     // F6（默认开；`ENTJOY_CLAIM_ADAPT=0` 关闭）：per-job 认领几何学习。
     // 依据：静态几何对 job 是相反符号 —— 散开对共享计数器争用的 job 有利、对靠空间复用的 job 有害
     // ⇒ 只能按 job 学（详见 JobCostCache.h 的 ClaimMode 段）。

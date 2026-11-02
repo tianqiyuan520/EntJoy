@@ -553,11 +553,17 @@ static N_FORCEINLINE n_double _n_cos_pd_avx512(n_double a) {
 // SSE4: use scalar per-lane for each double lane (only 2-wide anyway, scalar is fine)
 #define N_SIN_PD(a) _n_sin_pd_fallback(a)
 #else
-// Fallback: per-lane scalar sin
+// Fallback: per-lane scalar sin/cos
 static N_FORCEINLINE n_double _n_sin_pd_fallback(n_double a) {
     double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
     n_store_pd(lane, a);
     for (int i = 0; i < w; i++) lane[i] = sin(lane[i]);
+    return n_load_pd(lane);
+}
+static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
+    double lane[8]; int w = NSIMD_WIDTH < 8 ? NSIMD_WIDTH : 8;
+    n_store_pd(lane, a);
+    for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
 #define N_SIN_PD(a) _n_sin_pd_fallback(a)

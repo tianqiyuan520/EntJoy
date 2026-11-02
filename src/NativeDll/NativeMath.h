@@ -117,6 +117,11 @@ namespace EntJoy {
 			int2(int v) { data[0] = v; data[1] = v; }
 			int2(int x_, int y_) { data[0] = x_; data[1] = y_; }
 
+			// 读路径专用：返回值，使一次 8 字节载入读完 int2（生成器把读上下文的 .x/.y 改写为 .xr()/.yr()）。
+			// x()/y() 保留引用语义供写路径使用。
+			int xr() const { return data[0]; }
+			int yr() const { return data[1]; }
+
 			int& x() { return data[0]; }
 			int& y() { return data[1]; }
 			const int& x() const { return data[0]; }
@@ -154,6 +159,11 @@ namespace EntJoy {
 			uint2() { data[0] = 0; data[1] = 0; }
 			uint2(uint32_t v) { data[0] = v; data[1] = v; }
 			uint2(uint32_t x_, uint32_t y_) { data[0] = x_; data[1] = y_; }
+
+			// 读路径专用：返回值，使一次 8 字节载入读完 uint2（生成器把读上下文的 .x/.y 改写为 .xr()/.yr()）。
+			// x()/y() 保留引用语义供写路径使用。
+			uint32_t xr() const { return data[0]; }
+			uint32_t yr() const { return data[1]; }
 
 			uint32_t& x() { return data[0]; }
 			uint32_t& y() { return data[1]; }

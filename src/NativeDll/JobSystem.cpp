@@ -50,6 +50,17 @@ namespace JobSystem
     static size_t g_loadBannerLen = 0;
     static std::atomic<bool> g_loadBannerFlushed{ false };
 
+    // Startup detail (built-in default echo per knob, batch table state) is silent by default;
+    // ENTJOY_DIAG_STARTUP=1 turns it back on.
+    static bool DiagStartup()
+    {
+        static const bool on = []() -> bool {
+            const char* v = std::getenv("ENTJOY_DIAG_STARTUP");
+            return v != nullptr && v[0] != '0';
+        }();
+        return on;
+    }
+
     void LoadBannerAppend(const char* fmt, ...) noexcept
     {
         if (g_loadBannerFlushed.load(std::memory_order_relaxed)) return;   // flush 之后（运行期）直接丢
@@ -178,7 +189,7 @@ namespace JobSystem
         const bool on = (v == nullptr) ? true : (v[0] == '1');
         if (v != nullptr)
             EJ_LOADBANNER("[TILESUNIFORM] %s (explicit ENTJOY_TILES_UNIFORM=%s)\n", on ? "on" : "off", v);
-        else
+        else if (DiagStartup())
             EJ_LOADBANNER("[TILESUNIFORM] on (built-in default; ENTJOY_TILES_UNIFORM=0 disables)\n");
         return on;
     }();
@@ -191,8 +202,16 @@ namespace JobSystem
         const bool on = (v == nullptr) ? true : (v[0] == '1');
         if (v != nullptr)
             EJ_LOADBANNER("[TILEFASTPATH] %s (explicit ENTJOY_TILE_FASTPATH=%s)\n", on ? "on" : "off", v);
-        else
+        else if (DiagStartup())
             EJ_LOADBANNER("[TILEFASTPATH] on (built-in default; ENTJOY_TILE_FASTPATH=0 disables)\n");
+        return on;
+    }();
+
+    // 诊断：把"等宽不物化 + 入场直调快路径"从薄 tile 扩到任意 cs（默认关，用于量每-tile 固定开销）。
+    bool g_uniformAllTiles = []() -> bool {
+        const char* v = std::getenv("ENTJOY_TILES_UNIFORM_ALL");
+        const bool on = (v != nullptr && v[0] == '1');
+        if (on) EJ_LOADBANNER("[TILESUNIFORMALL] on (any cs takes the uniform in-place path)\n");
         return on;
     }();
 
@@ -204,7 +223,7 @@ namespace JobSystem
         const bool on = (v == nullptr) ? true : (v[0] == '1');
         if (v != nullptr)
             EJ_LOADBANNER("[CLAIMADAPT] %s (explicit ENTJOY_CLAIM_ADAPT=%s)\n", on ? "on" : "off", v);
-        else
+        else if (DiagStartup())
             EJ_LOADBANNER("[CLAIMADAPT] on (built-in default; ENTJOY_CLAIM_ADAPT=0 disables)\n");
         return on;
     }();
@@ -363,6 +382,11 @@ namespace JobSystem
         if (name == nullptr || name[0] == '\0' || func == nullptr) return 0;
         const uint32_t key = JobFuncKey(reinterpret_cast<void (*)() noexcept>(func));
         if (key == 0u) return 0;
+        // `ENTJOY_JOB_BATCH_TABLE_DUMP=1` 时把 名字↔键 打出来，供把逐 job 计时（JCC 行）对回 job 名。
+        // 两个键空间：`key` = 模块内 RVA（批表用），`hash` = JCC 学习键（`ENTJOY_JCC_VERBOSE` 行里那个）。
+        if (g_jobBatchTableDump)
+            std::printf("[JOBBATCHNAME] name=%s key=%08x hash=%08x\n", name, key,
+                HashFuncPtr(reinterpret_cast<void (*)() noexcept>(func)));
         int bound = 0;
         for (uint32_t i = 0; i < g_jobBatchTableCount; ++i)
         {
@@ -736,9 +760,12 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<bool> g_shuttingDown{ false };
     std::thread::id g_mainThreadId{};
     std::atomic<bool> g_timingDiagnosticsEnabled{ false };
-    // 主线程 assist 开关（Controller API 可运行时切换）。默认关闭（纯 worker 模式）：
-    // 释放主线程参与竞争；慢 worker 被 OS 抢占导致尾延迟时，可运行时开启兜底。
-    std::atomic<bool> g_mainThreadAssistEnabled{ false };
+    // 主线程 assist 开关（Controller API 可运行时切换）。默认开启：Complete() 的调用线程
+    // 与 worker 一起认领执行，`ENTJOY_MAIN_ASSIST=0` 退回纯 worker 模式。
+    std::atomic<bool> g_mainThreadAssistEnabled{ []() -> bool {
+        const char* v = std::getenv("ENTJOY_MAIN_ASSIST");
+        return !(v != nullptr && v[0] == '0');
+    }() };
 
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
     // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch。

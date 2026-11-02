@@ -19,7 +19,7 @@ namespace NativeTranspiler.Tests
 
         private const string Head = "using NativeTranspiler; using EntJoy.JobSystem; using EntJoy.Collections;\n";
 
-        /// <summary>行程数字段（Length）按值，仅循环体内使用的字段（Scale）按引用。</summary>
+        /// <summary>行程数字段（Length）按值；循环体内只读的字段（Scale）同样按值（环内不变量）。</summary>
         private const string SingleJob = Head + @"
 [NativeTranspile]
 public struct TripCountJob : IJob {
@@ -31,7 +31,7 @@ public struct TripCountJob : IJob {
     }
 }";
 
-        /// <summary>批处理路径同样按判据：ChunkSize 按值、Bias 按引用。</summary>
+        /// <summary>批处理路径同样按判据：ChunkSize 与循环体内只读的 Bias 都按值。</summary>
         private const string BatchJob = Head + @"
 [NativeTranspile]
 public struct BatchTripJob : IJobParallelFor {
@@ -118,6 +118,37 @@ public struct LoopBodyFieldJob : IJob {
         /// 不让"空产物"变成假绿）。</summary>
         private static string Emit(string src) => GeneratorHarness.EmitForJob(src).Cpp;
 
+        /// <summary>含 <paramref name="n"/> 个可按值标量（全部被引用、无一被写）的 job。</summary>
+        private static string LiveScalarJob(int n)
+        {
+            var sb = new System.Text.StringBuilder(Head);
+            sb.Append("[NativeTranspile]\npublic struct LiveScalarJob : IJob {\n    public NativeArray<int> Out;\n");
+            for (int i = 0; i < n; i++) sb.Append($"    public int S{i};\n");
+            sb.Append("    public void Execute() {\n        int acc = 0;\n");
+            for (int i = 0; i < n; i++) sb.Append($"        acc += S{i};\n");
+            sb.Append("        Out[0] = acc;\n    }\n}");
+            return sb.ToString();
+        }
+
+        /// <summary>热环活值 = 预算上限（8）⇒ 全部按值绑定。</summary>
+        [Fact]
+        public void LiveScalarsAtBudget_ByValue()
+        {
+            var cpp = Emit(LiveScalarJob(8));
+            MustContain(cpp, "const int S7 = *S7_ptr;", "8 个可按值标量 = 寄存器预算上限 ⇒ 全部按值");
+            MustNotContain(cpp, "const int& S7 = *S7_ptr;", "预算内不得按引用绑定");
+        }
+
+        /// <summary>热环活值超出预算（9）⇒ 该 job 全部按引用：持活值会溢出，而溢出的存取比重算一次装载更贵。</summary>
+        [Fact]
+        public void LiveScalarsOverBudget_AllByReference()
+        {
+            var cpp = Emit(LiveScalarJob(9));
+            MustContain(cpp, "const int& S0 = *S0_ptr;", "超出寄存器预算 ⇒ 该 job 全部按引用（一个都不绑）");
+            MustContain(cpp, "const int& S8 = *S8_ptr;", "超出寄存器预算 ⇒ 最后一个也按引用");
+            MustNotContain(cpp, "const int S8 = *S8_ptr;", "超预算时不得部分按值绑定");
+        }
+
         private void MustContain(string cpp, string needle, string why)
         {
             _out.WriteLine(why + " -> " + needle);
@@ -136,14 +167,15 @@ public struct LoopBodyFieldJob : IJob {
         }
 
         [Fact]
-        public void SingleJob_TripCountFieldByValue_BodyOnlyFieldByReference()
+        public void SingleJob_TripCountAndReadOnlyLoopField_ByValue()
         {
             var cpp = Emit(SingleJob);
             MustContain(cpp, "const int Length = *Length_ptr;",
                 "单 IJob 路径：参与循环行程数的字段必须按值绑定（否则行程数在编译期不可知）");
-            MustContain(cpp, "const float& Scale = *Scale_ptr;",
-                "只在循环体内出现一次的字段保持引用绑定");
+            MustContain(cpp, "const float Scale = *Scale_ptr;",
+                "循环体内只读的字段同样按值绑定（按引用会每元素重取指针并解引用）");
             MustNotContain(cpp, "const int& Length = *Length_ptr;", "行程数字段不得再按引用绑定");
+            MustNotContain(cpp, "const float& Scale = *Scale_ptr;", "循环内只读字段不得再按引用绑定");
         }
 
         [Fact]
@@ -152,8 +184,35 @@ public struct LoopBodyFieldJob : IJob {
             var cpp = Emit(BatchJob);
             MustContain(cpp, "const int ChunkSize = *ChunkSize_ptr;",
                 "批处理路径中参与行程数的字段同样按值绑定（判据是用途，不是路径）");
-            MustContain(cpp, "const int& Bias = *Bias_ptr;",
-                "批处理路径中仅循环体内使用的字段保持引用绑定");
+            MustContain(cpp, "const int Bias = *Bias_ptr;",
+                "批处理路径中循环体内只读的字段同样按值绑定");
+        }
+
+        /// <summary>循环体内被**直接写**的字段（赋值 / `ref` 实参）⇒ 必须保持引用绑定：
+        /// 按值会让写入落到入口副本上，语义直接错。</summary>
+        private const string WrittenFieldJob = Head + @"
+[NativeTranspile]
+public struct WrittenFieldJob : IJobParallelFor {
+    public NativeArray<int> Out;
+    public int Accum;
+    public int Factor;
+    public void Execute(int index) {
+        Accum = Accum + Factor;
+        System.Threading.Interlocked.Increment(ref Accum);
+        Out[index] = Accum;
+    }
+}";
+
+        [Fact]
+        public void BodyWrittenField_StaysByReference()
+        {
+            var cpp = Emit(WrittenFieldJob);
+            MustContain(cpp, "const int& Accum = *Accum_ptr;",
+                "被直接写（赋值 / ref 实参）的字段必须按引用绑定");
+            MustNotContain(cpp, "const int Accum = *Accum_ptr;",
+                "被直接写的字段不得按值绑定");
+            MustContain(cpp, "const int Factor = *Factor_ptr;",
+                "同一 job 内只读的字段仍按值绑定");
         }
 
         [Fact]

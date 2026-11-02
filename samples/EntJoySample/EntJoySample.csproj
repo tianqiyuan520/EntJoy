@@ -3,6 +3,7 @@
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
+		<StartupObject>TestGridSearch</StartupObject>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
@@ -12,7 +13,6 @@
 		<!-- 本工程有多个样例各带 Main：-p:ENTJOY_STARTUP=<全限定类型名> 选入口（只影响本工程，不传播到库工程）；
 		     不传时用缺省入口，避免 CS0017。 -->
 		<StartupObject Condition="'$(ENTJOY_STARTUP)' != ''">$(ENTJOY_STARTUP)</StartupObject>
-		<StartupObject Condition="'$(ENTJOY_STARTUP)' == ''">EntJoySample.HotReload.Program</StartupObject>
 		<!-- CS8500：生成器对组件指针取址是 ECS 固有模式（组件约束为 struct） -->
 		<NoWarn>$(NoWarn);8500</NoWarn>
 		<!-- AutoSIMD 的"我已量过"开关（NT024）：本样例的 AutoSIMD job 就是被测对象 -->

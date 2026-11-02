@@ -348,7 +348,8 @@ namespace JobSystem
             g_workerAffinityEnabled.store(
                 ResolveWorkerAffinityEnabled(), std::memory_order_relaxed);
 
-            // 主线程 assist 默认关闭（纯 worker 模式）；JobSystem_SetMainThreadAssist(int) 可运行时开启。
+            // 主线程 assist 默认开启（Complete() 等待期参与认领）；ENTJOY_MAIN_ASSIST=0 或
+            // JobSystem_SetMainThreadAssist(0) 退回纯 worker 模式。
 
             // 主线程钉到逻辑核 0，避免被共享 L1/L2 的 worker 抢占。
             if (g_workerAffinityEnabled.load(std::memory_order_relaxed))
@@ -488,13 +489,12 @@ namespace JobSystem
         //   ⇒ 该判据实际等价于"JCC 顶在下限上"，与 tile 厚薄无关；且"进不进该 regime"随进程翻
         //   ⇒ 这个门既不是薄厚判据、也不是 length 的稳定函数。
         std::printf("[JOBF2F4] uniformTiles=%s applied=%llu | tileFastPath=%s applied=%llu"
-                    " (thinTiles 门控: cs <= 16)\n",
+                    " (thinTiles gate: cs <= 16)\n",
             g_uniformTilesEnabled ? "ON" : "OFF",
             (unsigned long long)g_uniformTilesApplied.load(std::memory_order_relaxed),
             g_tileFastPath ? "ON" : "OFF",
             (unsigned long long)g_tileFastApplied.load(std::memory_order_relaxed));
-        std::printf("[JOBWAKE] notify_all skipped=%llu (only the legacy broadcast path; inactive while"
-                    " wakePoll=ON -- see [JOBWAKEPOLL] for the real skip count)\n",
+        std::printf("[JOBWAKE] notify_all skipped=%llu\n",
             (unsigned long long)g_notifySkipped.load(std::memory_order_relaxed));
         std::fflush(stdout);
         // `ENTJOY_WAKE_POLL` 的生效证据（否则"开关没打开"会被读成"改动无效"）：
@@ -660,7 +660,7 @@ namespace JobSystem
             //   且"进不进该 regime"随进程翻。当前判定为良性（短调度 tileCount 本来就小，O(tileCount) 代价小）；
             //   若要真正的"薄 tile"判据，必须换成相对口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
             const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
-            const bool uniformTiles = g_uniformTilesEnabled && thinTiles;
+            const bool uniformTiles = g_uniformTilesEnabled && (thinTiles || (g_uniformAllTiles && !guided));
             // 等宽时不申请 tile 缓冲（只要 batch 对象）。
             storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             auto* batch = &storage->batch;
@@ -859,7 +859,7 @@ namespace JobSystem
                 - g_sumNs[SubmitAcct].load(std::memory_order_relaxed)
                 - g_sumNs[SubmitTokens].load(std::memory_order_relaxed)
                 - g_sumNs[SubmitNotify].load(std::memory_order_relaxed);
-            std::printf("[NPSCHED]   submit.other residual mean=%.3f us (negative=非 Schedule 调用者也进了 acct/tokens/notify)\n",
+            std::printf("[NPSCHED]   submit.other residual mean=%.3f us (negative=non-Schedule callers also entered acct/tokens/notify)\n",
                 entries ? (static_cast<double>(otherNs) / 1000.0) / (double)entries : 0.0);
             // State 池命中分布：判定是否常态走 new HandleState（若如此则修池是确定收益）。
             const uint64_t hit = g_statePoolHit.load(std::memory_order_relaxed);
@@ -979,7 +979,7 @@ namespace JobSystem
             //   且"进不进该 regime"随进程翻。当前判定为良性（短调度 tileCount 本来就小，O(tileCount) 代价小）；
             //   若要真正的"薄 tile"判据，必须换成相对口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
             const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
-            const bool uniformTiles = g_uniformTilesEnabled && thinTiles;
+            const bool uniformTiles = g_uniformTilesEnabled && (thinTiles || (g_uniformAllTiles && !guided));
             // 等宽时不申请 tile 缓冲（只要 batch 对象）⇒ 消掉 O(tileCount) 物化与 tile 数组流量。
             storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             if (spDiag) spMarks[3] = MonotonicNowNs();
