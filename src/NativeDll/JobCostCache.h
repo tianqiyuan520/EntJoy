@@ -108,8 +108,8 @@ namespace JobSystem
         std::atomic<uint32_t> fineSamples[kJobCostSlots];
 
         // 健壮分类窗（仅 g_jobCostCache.IsRobust() 时写入/读取；关闭时零额外开销）
-        uint32_t fineRingNs[kJobCostSlots][kRobustWindow];
-        uint32_t coarseRingNs[kJobCostSlots][kRobustWindow];
+        std::atomic<uint32_t> fineRingNs[kJobCostSlots][kRobustWindow];
+        std::atomic<uint32_t> coarseRingNs[kJobCostSlots][kRobustWindow];
         std::atomic<uint32_t> lastEvalTick[kJobCostSlots];   // 上次评估时的样本序号（冷却用）
         std::atomic<uint32_t> probeTick[kJobCostSlots];      // mem-bound 期探针计数
 
@@ -158,8 +158,8 @@ namespace JobSystem
                 probeTick[i].store(0, std::memory_order_relaxed);
                 for (int j = 0; j < kRobustWindow; ++j)
                 {
-                    fineRingNs[i][j] = 0;
-                    coarseRingNs[i][j] = 0;
+                    fineRingNs[i][j].store(0, std::memory_order_relaxed);
+                    coarseRingNs[i][j].store(0, std::memory_order_relaxed);
                 }
             }
             // ⚠ F6 的独立表是 kClaimGeomSlots(=128) < kJobCostSlots(=256)，必须单独清，
@@ -365,24 +365,25 @@ namespace JobSystem
 
     private:
         // 写环形窗（定点 uint32，超出上限钳位）。写位置 = 该类样本序号 % W；
-        // 多线程同槽并发写入是良性的（漏记一个样本无正确性影响）。
-        static void RobustStore(uint32_t* ring, uint32_t idx, double perElemNs) noexcept
+        // Writers and classifiers may overlap; each sample is atomic. A window
+        // may mix generations, which is acceptable for approximate cost hints.
+        static void RobustStore(std::atomic<uint32_t>* ring, uint32_t idx, double perElemNs) noexcept
         {
             double s = perElemNs * kRobustScale;
             if (s < 0.0) s = 0.0;
             if (s > 4294967000.0) s = 4294967000.0;
-            ring[idx % static_cast<uint32_t>(kRobustWindow)] = static_cast<uint32_t>(s);
+            ring[idx % static_cast<uint32_t>(kRobustWindow)].store(static_cast<uint32_t>(s), std::memory_order_relaxed);
         }
 
         // 窗内中位数。count < W 时只取已填充的 [0,count)；count >= W 时整个窗就是最近 W 个样本
         // （中位数与顺序无关 ⇒ 回绕无需重排）。
-        static uint32_t MedianOfWindow(const uint32_t* w, uint32_t count) noexcept
+        static uint32_t MedianOfWindow(const std::atomic<uint32_t>* w, uint32_t count) noexcept
         {
             const int n = (count >= static_cast<uint32_t>(kRobustWindow))
                 ? kRobustWindow : static_cast<int>(count);
             if (n <= 0) return 0;
             uint32_t tmp[kRobustWindow];
-            for (int i = 0; i < n; ++i) tmp[i] = w[i];
+            for (int i = 0; i < n; ++i) tmp[i] = w[i].load(std::memory_order_relaxed);
             for (int i = 1; i < n; ++i)
             {
                 const uint32_t v = tmp[i];

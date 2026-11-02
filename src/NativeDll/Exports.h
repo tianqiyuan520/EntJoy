@@ -90,6 +90,14 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     //   （claimGeom：0=Auto 1=Spread 2=Adjacent，与 C# `ClaimPolicy` 同值）。旧导出保留 ⇒ 老绑定不受影响；
     //   C# 侧用 `TryGetExport` 探测：缺这个导出时退回旧导出（claimGeom 被忽略）。
     JOB_API void* JobSystem_ScheduleParallelForBatchEx(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, int claimGeom, void* dependency);
+    // The range adapter loops over Execute(index); adjacent ranges may be coalesced.
+    JOB_API void* JobSystem_ScheduleParallelForRange(BatchJobFunc func, void* context, ContextCleanupFunc cleanup, int length, int batchSize, int claimGeom, void* dependency);
+
+    // Borrow the source for this call; the scheduled job owns a pooled copy.
+    // Status: 0 success, 1 invalid source/size/output, 2 allocation failure, 3 submission failure.
+    JOB_API int JobSystem_ScheduleCopiedContext(JobFunc func, const void* source, int bytes, void* dependency, void** outHandle);
+    JOB_API int JobSystem_ScheduleParallelForCopiedContext(BatchJobFunc func, const void* source, int bytes,
+        int length, int batchSize, int claimGeom, int indexedRanges, void* dependency, void** outHandle);
 
     // ── 显式批提交（BatchScope.Submit 用）：一次 P/Invoke 提交一组 job，句柄回写 outHandles ──
     // kind: 0=IJob(JobFunc) 1=IJobFor(IndexJobFunc, length) 2=IJobParallelFor(BatchJobFunc, length+batchSize)
@@ -124,6 +132,11 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API void JobSystem_RetainHandle(void* handle);
     JOB_API int JobSystem_IsCompleted(void* handle);
     JOB_API void JobSystem_ReleaseHandle(void* handle);
+    JOB_API void JobSystem_ReleaseHandles(void** handles, int count);
+    JOB_API void* JobSystem_RentJobContext(int bytes);
+    JOB_API void JobSystem_ReturnJobContext(void* context, int bytes);
+    JOB_API void JobSystem_ReleaseJobContext(void* context);
+    JOB_API uint64_t JobSystem_GetCurrentBatchId();
     JOB_API void* JobSystem_CombineDependencies(void** handles, int count);
     // 存活句柄 state 数（CreateState 分配 - RecycleState 回收）。诊断/测试用：托管侧据此
     // 断言"组合依赖句柄被确定性回收"（不受 ENTJOY_STATS 门控）。

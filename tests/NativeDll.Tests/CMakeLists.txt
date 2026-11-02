@@ -4,6 +4,12 @@ project(EntJoyJobSystemTests LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_executable(NativeColumnTests NativeColumnTests.cpp)
+target_include_directories(NativeColumnTests PRIVATE ../../src/NativeDll)
+if(MSVC)
+    target_compile_options(NativeColumnTests PRIVATE /utf-8)
+endif()
+
 add_executable(JobSystemTests
     JobSystemTests.cpp
     ../../src/NativeDll/JobSystem.cpp
@@ -53,6 +59,13 @@ add_executable(MPMCInjectorTests
     MPMCInjectorTests.cpp
 )
 
+add_executable(JobContextPoolTests JobContextPoolTests.cpp)
+target_include_directories(JobContextPoolTests PRIVATE ../../src/NativeDll)
+if(MSVC)
+    target_compile_options(JobContextPoolTests PRIVATE /utf-8 /O2)
+    target_compile_definitions(JobContextPoolTests PRIVATE NOMINMAX)
+endif()
+
 # Item 8：亲和掩码纯函数（ThreadAffinity.h）单测 —— 纯头文件，不链接 JobSystem 源码。
 add_executable(AffinityMaskTests
     AffinityMaskTests.cpp
@@ -94,6 +107,23 @@ add_executable(PackedBatchTests
     ../../src/NativeDll/JobDebuggerGUI.cpp
     ../../src/NativeDll/ChaseLevScheduler.cpp
 )
+
+add_executable(CopiedContextTests
+    CopiedContextTests.cpp
+    ../../src/NativeDll/Exports.cpp
+    ../../src/NativeDll/JobSystem.cpp
+    ../../src/NativeDll/JobSystem_State.cpp
+    ../../src/NativeDll/JobSystem_Tiles.cpp
+    ../../src/NativeDll/JobSystem_Scheduler.cpp
+    ../../src/NativeDll/JobProfiler.cpp
+    ../../src/NativeDll/JobDebuggerGUI.cpp
+    ../../src/NativeDll/ChaseLevScheduler.cpp
+)
+target_include_directories(CopiedContextTests PRIVATE ../../src/NativeDll)
+target_compile_definitions(CopiedContextTests PRIVATE ENTJOY_TESTING JOB_SYSTEM_EXPORT NOMINMAX)
+if(MSVC)
+    target_compile_options(CopiedContextTests PRIVATE /utf-8 /O2 /arch:AVX2)
+endif()
 
 # N12 `ENTJOY_WAKE_POLL` 的存活/饥饿回归测试：丢唤醒是"死锁"而不是崩溃，所以它必须有独立超时判据
 # （RunWithTimeout → DumpState → abort）。见该文件头部的形态说明。

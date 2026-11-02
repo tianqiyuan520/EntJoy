@@ -18,6 +18,9 @@
 - 依赖图必须是无环 DAG。循环依赖会使依赖回调永远无法满足。
 - 不得在 Job 执行体内同步 `Complete` 自己、自己的祖先、自己的后继，或包含当前 Job 的组合句柄。
 - Job 抛出的异常只在对应句柄 `Complete` 时传播；调用方必须完成需要观察异常的句柄。
+- Native 句柄是共享所有权的槽位与代次。`Complete` 或 `Release` 使同一所有权的副本失效；完成组合句柄会回收已完成的输入所有权，未完成时释放组合句柄保留输入所有权。
+- Native 句柄须显式完成或释放。槽位页作为进程高水位缓存保留地址，关闭时释放剩余任务所有权；代次校验隔离槽位复用和调度器重启。
+- 预热后的转译数组 Job 调度、依赖合并和完成路径使用非托管所有权与上下文池。作业执行和上下文回收在原生层进行，异常与调试需要的批次标识按需读取原生线程局部值；含托管字段的回调 Job、Managed 回退、初始化及诊断路径具有各自的托管分配。
 - Job 执行期间不得直接进行 ECS 结构变更。请使用 `DeferredCommandBuffer`，并在主线程 Playback。
 
 ## 系统依赖传播（SystemState.Dependency）
@@ -193,7 +196,7 @@ System.AggregateException: One or more scheduled C# jobs failed.
   - `EntityQuery.RefreshIncremental` 原来只比 **Archetype 数量**判断能否复用匹配集合；`World.Restore()` 会整体重建且数量常相同 ⇒ 查询继续引用**已释放** Archetype、**静默返回 0 个实体**（实测 `Expected: 3, Actual: 0`）。现在比 `EntityManager.ArchetypeSetVersion`（新建/清空/Restore 递增）。回归：`QueryRestoreAndMemoryReportTests`。
   - `MemoryReport.TotalEntityCount` 原来填的是 `entityCount`（**已发放 id 计数**，Destroy 不递减）⇒ 销毁后仍显示历史峰值（实测 `Expected: 3, Actual: 10`）。现在填**存活数**（各 Archetype 计数求和）。`EntityManager.EntityCount` 保留原语义并在 XML 文档中写明"不是存活数"（兼容按 id 遍历的既有用法）。
   - `ScheduleGraph` 的执行顺序原来依赖**注册顺序**（对称读写冲突的自动边按 i<j 定方向；层内 `List.Sort` 不稳定）⇒ 同一组系统换个注册顺序就产生不同的提交顺序。现在双向冲突按类型全名定方向、层内按 `Order` + 类型全名排序。回归：`ScheduleDeterminismTests`（两种注册顺序拍平后必须逐位相同）。
-  - `SystemRunner.ComputeIncomingDependency` 对**单个**依赖不再构造组合句柄（`JobHandle` 无 `Dispose`，组合句柄只能等终结器）⇒ 消除每帧每冲突系统的无谓句柄抖动。
+  - `SystemRunner.ComputeIncomingDependency` 对**单个**依赖不再构造组合句柄（`JobHandle` 在 `Complete` 时确定性释放原生所有权）⇒ 消除每帧每冲突系统的无谓句柄抖动。
   - `TempAllocator.Reset()` 的锁序：旧实现**先取 `_resetLock` 再等待活跃 job**，而跨线程 `TempAllocator.Free` 要拿同一把锁 ⇒ 「Reset 等 job、job 等锁」永久死锁。现在先完成任务再取锁。回归：`TempAllocatorLockOrderTests`（受控 hook 精确复现交错，旧锁序下有界等待超时失败）。
   - `SparseTileDeque` 容量校验：`RoundUpPow2(0xFFFFFFFF)` 溢出成 0 ⇒ `capacity_=0`、`mask_=2^32-1` ⇒ `new Slot[0]` 后用 mask 索引**越界读写**；且 ctor 标 `noexcept` 时 `new[]` 失败直接 `std::terminate`。现在显式拒绝过大/溢出容量。回归：`SparseTileDequeTests` 的 `PASS SparseTileDequeCapacityValidation`。
   - `ChaseLevScheduler::ApplyAffinity` 的 `KAFFINITY(1) << (1+i)` 在 `1+i ≥ 64` 时是 UB 且掩码为 0（静默不绑核）：现在跳过超范围核心。**本机 worker 数 ≤ 8，无法构造该分支的运行时用例**（属防御性修复，未取得 RED）。
@@ -210,7 +213,7 @@ System.AggregateException: One or more scheduled C# jobs failed.
   回归：`SystemReadWriteOrderTests`（`WriterSystem_WaitsForReaderSystemJob` 红→绿主用例 + 读读并行反向守卫 + 开关回退 + 读表生命周期）。
 - **job 路径的 `WithRelationship` 不做逐槽位匹配**：关系过滤在 chunk 收集阶段只能看到「该 archetype 是否含该关系列」，无法按 `RelationSlot` 的 target/version 逐实体筛选 ⇒ 以 `job.Run/Schedule(query)` 运行的关系过滤查询会处理同 archetype 内**所有**实体。需要逐槽位精确匹配时请用托管查询/`QuerySelection` 路径（它们会做槽位校验）。
 - **`RefreshIncremental` 的「archetype 数量相等」捷径在 `World.Restore` 后可能陈旧**：`EntityQuery` 用 `archetypeCount == 上次扫描数` 判定可复用匹配集合，而 `ClearWorldInternal` 会把 `archetypeCount` 归零 ⇒ Restore 后若数量恰好与缓存时相同，缓存的查询可能仍引用已 Dispose 的 Archetype，从而静默返回 0 个实体。**规避**：Restore 后重新构造查询（或 `GetOrCreateEntityQuery` 取新实例）。
-- **`JobHandle.CombineDependencies` 组合句柄已确定性回收（2026-09-27 修复）**：三条回收路径——① 单个依赖不再组合（R11）；② `SystemRunner` 自己组合出的入站句柄"用后即释"（未 adopted 进写表时）；③ `EntityManager` 在"剪枝已完成 Job""覆盖依赖表旧值""全量等待后清空依赖表"三处，对**已完成**句柄显式 `Release`。未完成的句柄**绝不**提前释放（所有 `JobHandle` 拷贝共享同一个 box，提前 detach 会让 `_activeJobs` 记账项与用户手里那份拷贝的 `Complete` 双双退化成空操作 ⇒ 等待/结构变更屏障静默消失）。原生侧新增 `JobSystem_GetLiveHandleCount`（`CreateState - RecycleState`）作为断言口径：1000 帧 + 无 GC 区域下 `EntJoy.ECS.Tests` 的 `TwoDependencyGraph_NativeHandlesDoNotGrowAcrossFrames` 实测增长 **0**（关掉上述任一路径分别增长 2997 / 2996）。
+- **`JobHandle.CombineDependencies` 组合句柄已确定性回收（2026-09-27 修复）**：三条回收路径——① 单个依赖不再组合（R11）；② `SystemRunner` 自己组合出的入站句柄"用后即释"（未 adopted 进写表时）；③ `EntityManager` 在"剪枝已完成 Job""覆盖依赖表旧值""全量等待后清空依赖表"三处，对**已完成**句柄显式 `Release`。未完成的句柄**绝不**提前释放（所有 `JobHandle` 拷贝共享同一槽位和代次，提前释放所有权 会让 `_activeJobs` 记账项与用户手里那份拷贝的 `Complete` 双双退化成空操作 ⇒ 等待/结构变更屏障静默消失）。原生侧新增 `JobSystem_GetLiveHandleCount`（`CreateState - RecycleState`）作为断言口径：1000 帧 + 无 GC 区域下 `EntJoy.ECS.Tests` 的 `TwoDependencyGraph_NativeHandlesDoNotGrowAcrossFrames` 实测增长 **0**（关掉上述任一路径分别增长 2997 / 2996）。
 - **`ScheduleGraph` 的对称读写冲突，边方向取决于注册顺序**：当两个系统互相冲突（A 写 X 读 Y、B 写 Y 读 X）时，单一冲突边的方向按注册先后决定，因此提交顺序随注册顺序变化；层内顺序用 `Order` 排序但排序不稳定（同 Order 时）。需要确定顺序时请显式使用 `[OrderBefore]/[OrderAfter]`。
 - **Managed 回退后端的完成协议（2026-09-16 已修复，此处保留记录）**：此前的缺陷是「完成态发布」与「安全声明释放」不在同一同步点 —— `IsCompleted` 只看 `Remaining == 0`，而读写声明在计数归零之后才释放，主线程可能在声明释放前观察到「已完成」→ `Complete()` 后的合法访问被误拦；另一个成因是托管路径的 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，而 box 被 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx。现实现为：`ManagedCompletion.Signal()` 按「释放写声明 → 释放读声明 → 置 `_declReleased` → `_done.Set()` → 派发回调」的顺序发布，`IsCompleted` 要求 `Remaining == 0 && _declReleased == 1`（`EntJoy.Jobs/Managed/ManagedJobHandle.cs`），且每次调度由 `ManagedJobScheduler.NextCtx()` 分配唯一 ctx。回归证据：`tools/SafetyLockOverheadBench/repro`（隐藏 `NativeDll.dll` 强制 Managed）**触发=0、残留状态为空、正常退出**；守卫用例见 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak`。
 - **两条后端都必须被测试覆盖，且不得隐式切换**：`EntJoy.ECS.Tests` 的运行后端取决于进程能否找到 `NativeDll.dll`（`AppContext.BaseDirectory` → 入口目录 → 程序集目录 → CWD 上溯）。历史上因此出现过「同一套测试本地跑 Native、CI 跑 Managed」的静默差异。现在测试用环境变量 `ENTJOY_TEST_BACKEND=native|managed` 显式指定，并由 `BackendSelectionTests` 断言实际后端与请求一致；CI 对两条后端分别跑一遍。

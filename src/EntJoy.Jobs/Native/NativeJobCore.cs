@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -59,8 +59,7 @@ namespace EntJoy.JobSystem
         internal static IntPtr CleanupPtr => _cleanupPtr;
         internal static IntPtr ManagedCleanupPtr => _managedCleanupPtr;
 
-        // 共享的 FreeHGlobal cleanup thunk
-        // 生成代码统一引用它（不是每个 job 各造一个 lambda + thunk）。
+        // 供直接使用 Marshal.AllocHGlobal 的调用方配对释放。
         // ⚠ 刻意不复用 `CleanupPtr`：后者会释放安全句柄账本并读 ctx 前的尺寸前缀，语义不同。
         private static readonly CleanupFunc _freeHGlobalCleanup = FreeHGlobalCleanup;
         private static readonly IntPtr _sharedFreeHGlobalCleanupPtr =
@@ -71,8 +70,26 @@ namespace EntJoy.JobSystem
             if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr);
         }
 
-        /// <summary>共享的 `Marshal.FreeHGlobal` cleanup 指针（生成代码统一用它）。</summary>
+        /// <summary>供直接分配上下文使用的共享 `Marshal.FreeHGlobal` cleanup 指针。</summary>
         internal static IntPtr SharedFreeHGlobalCleanupPtr => _sharedFreeHGlobalCleanupPtr;
+
+        // Keep the payload aligned to the allocator alignment (16 bytes on 64-bit).
+        private static readonly int ContextHeaderSize = 2 * IntPtr.Size;
+
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static void ReturnPooledJobContext(void* context)
+        {
+            if (context == null) return;
+            byte* raw = (byte*)context - ContextHeaderSize;
+            ContextPool.Return((IntPtr)raw, *(int*)raw + ContextHeaderSize);
+        }
+
+        internal static IntPtr PooledJobContextCleanupPtr
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _jobSystem_ReleaseJobContext != IntPtr.Zero ? _jobSystem_ReleaseJobContext
+                : (IntPtr)(delegate* unmanaged[Cdecl]<void*, void>)&ReturnPooledJobContext;
+        }
 
         // 重载回调注册表
         // 注册表（字段写入器 / adapter 指针 / 批表绑名）是按 `Type` 键存的指针快照，换句柄后必须重跑
@@ -111,7 +128,8 @@ namespace EntJoy.JobSystem
         [ThreadStatic] private static ulong _currentBatchId;
 
         internal static bool IsExecutingJob => _jobExecutionDepth > 0;
-        internal static ulong CurrentBatchId => _currentBatchId;
+        internal static ulong CurrentBatchId => _jobSystem_GetCurrentBatchId != null
+            ? _jobSystem_GetCurrentBatchId() : _currentBatchId;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static void EnterJobExecution() => _jobExecutionDepth++;
@@ -123,12 +141,13 @@ namespace EntJoy.JobSystem
         private static readonly ConcurrentDictionary<ulong, string> _batchIdToJobName = new();
         // 仅当调试面板（LaunchDebuggerGUI）开启后才记录 batchId→名字，避免影响正常调度热路径
         private static volatile bool _debugNameCaptureEnabled;
+        internal static bool DebugNameCaptureEnabled => _debugNameCaptureEnabled;
 
         // 记录当前 batch 对应的 Job 名（托管回调路径：执行线程上 native 已 set batch id）。
         internal static void RegisterCurrentBatchJobName(string name)
         {
             if (!_debugNameCaptureEnabled) return;
-            ulong batchId = _currentBatchId;
+            ulong batchId = CurrentBatchId;
             if (batchId == 0) return;
             _batchIdToJobName[batchId] = name;
         }
@@ -468,6 +487,9 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
+        private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForRange;
+        private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, int, IntPtr, IntPtr*, int> _jobSystem_ScheduleCopiedContext;
+        private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, int, int, int, int, int, IntPtr, IntPtr*, int> _jobSystem_ScheduleParallelForCopiedContext;
         // 可选导出（老 DLL 没有 ⇒ null ⇒ 退回上面那个，claim 被忽略）。
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatchEx;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, IntPtr, IntPtr> _jobSystem_ScheduleFor;
@@ -484,6 +506,11 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_RetainHandle;
         private static delegate* unmanaged[Cdecl]<IntPtr, int> _jobSystem_IsCompleted;
         private static delegate* unmanaged[Cdecl]<IntPtr, void> _jobSystem_ReleaseHandle;
+        private static delegate* unmanaged[Cdecl]<IntPtr*, int, void> _jobSystem_ReleaseHandles;
+        private static delegate* unmanaged[Cdecl]<int, IntPtr> _jobSystem_RentJobContext;
+        private static delegate* unmanaged[Cdecl]<IntPtr, int, void> _jobSystem_ReturnJobContext;
+        private static IntPtr _jobSystem_ReleaseJobContext;
+        private static delegate* unmanaged[Cdecl]<ulong> _jobSystem_GetCurrentBatchId;
         private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
         private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetStatsSize;
@@ -817,6 +844,12 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
             _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleParallelForBatch");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleParallelForRange", out IntPtr rangeSchedule))
+                _jobSystem_ScheduleParallelForRange = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr>)rangeSchedule;
+            _jobSystem_ScheduleCopiedContext = NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleCopiedContext", out IntPtr copiedSchedule)
+                ? (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, int, IntPtr, IntPtr*, int>)copiedSchedule : null;
+            _jobSystem_ScheduleParallelForCopiedContext = NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleParallelForCopiedContext", out IntPtr copiedParallel)
+                ? (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, int, int, int, int, int, IntPtr, IntPtr*, int>)copiedParallel : null;
             // 能力探测（非必需）：老 NativeDll 没有该导出 ⇒ 保持 null，claim 参数被忽略（行为与改动前一致）。
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ScheduleParallelForBatchEx", out IntPtr fnSchedBatchEx))
                 _jobSystem_ScheduleParallelForBatchEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr>)fnSchedBatchEx;
@@ -855,6 +888,17 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_IsCompleted");
             _jobSystem_ReleaseHandle = (delegate* unmanaged[Cdecl]<IntPtr, void>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ReleaseHandle");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_ReleaseHandles", out IntPtr releaseHandles))
+                _jobSystem_ReleaseHandles = (delegate* unmanaged[Cdecl]<IntPtr*, int, void>)releaseHandles;
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetCurrentBatchId", out IntPtr currentBatchId))
+                _jobSystem_GetCurrentBatchId = (delegate* unmanaged[Cdecl]<ulong>)currentBatchId;
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_RentJobContext", out IntPtr rentContext)
+                && NativeLibrary.TryGetExport(dllHandle, "JobSystem_ReturnJobContext", out IntPtr returnContext))
+            {
+                _jobSystem_RentJobContext = (delegate* unmanaged[Cdecl]<int, IntPtr>)rentContext;
+                _jobSystem_ReturnJobContext = (delegate* unmanaged[Cdecl]<IntPtr, int, void>)returnContext;
+                NativeLibrary.TryGetExport(dllHandle, "JobSystem_ReleaseJobContext", out _jobSystem_ReleaseJobContext);
+            }
             _jobSystem_CombineDependencies = (delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_CombineDependencies");
             _jobSystem_GetStats = (delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void>)
@@ -1175,10 +1219,16 @@ namespace EntJoy.JobSystem
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static IntPtr JobSystem_CombineDependencies(IntPtr[] handles, int count)
+        internal static void JobSystem_ReleaseHandles(IntPtr* handles, int count)
+        {
+            if (_jobSystem_ReleaseHandles != null) _jobSystem_ReleaseHandles(handles, count);
+            else for (int i = 0; i < count; i++) JobSystem_ReleaseHandle(handles[i]);
+        }
+
+        internal static IntPtr JobSystem_CombineDependencies(IntPtr* handles, int count)
         {
             EnsureNativeLoaded();
-            fixed (IntPtr* ptr = handles) return _jobSystem_CombineDependencies(ptr, count);
+            return _jobSystem_CombineDependencies(handles, count);
         }
 
         internal static NativeJobSystemStats JobSystem_GetStats()
@@ -1303,21 +1353,20 @@ namespace EntJoy.JobSystem
             fixed (NativeTraceEvent* ptr = buffer) return _trace_ReadAll(ptr, count);
         }
 
-        // batch id / 名字解析回调
-        // native 每 job 执行窗口调 SetCurrentBatchId 写线程局部当前 batch。
+        // 当前批次由原生 TLS 保存；托管异常和调试路径按需读取。
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
         internal static void SetCurrentBatchId(ulong batchId) => _currentBatchId = batchId;
 
         internal static void RegisterCurrentBatchIdCallback()
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterCurrentBatchId == null) return;
-            // 【上限探针】`ENTJOY_BATCHID_CALLBACK=0` 时不注册：native 侧每执行窗口 2 次的反向托管
-            // 调用（`ChaseLevScheduler.cpp:620/660` 的 SetCurrentBatchId(id)/SetCurrentBatchId(0)）就退化成
-            // 一次 null 检查。用途：量化"每 job 的托管反向回调"成本。
-            // ⚠ 实测：开关两臂同为 4.46 µs/job
-            // ⇒ 该回调 <0.1 µs/job，不是每-job 残余差距的来源（此候选已否证，勿再试）。
-            if (System.Environment.GetEnvironmentVariable("ENTJOY_BATCHID_CALLBACK") == "0") return;
-            _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
+            // 没有 TLS 查询导出的原生库使用回调保持异常归属。
+            if (_jobSystem_GetCurrentBatchId == null)
+            {
+                if (Environment.GetEnvironmentVariable("ENTJOY_BATCHID_CALLBACK") != "0")
+                    _jobSystem_RegisterCurrentBatchId(&SetCurrentBatchId);
+            }
+            else _jobSystem_RegisterCurrentBatchId(null);
             if (_jobSystem_RegisterNameResolver != null)
                 _jobSystem_RegisterNameResolver(&ResolveBatchJobName, &ClearBatchJobNames);
         }
@@ -1348,13 +1397,24 @@ namespace EntJoy.JobSystem
         {
             if (_nativeDll == IntPtr.Zero || _jobSystem_Shutdown == null)
                 return;
+            if (IsExecutingJob || CurrentBatchId != 0)
+            {
+                Console.Error.WriteLine("[JobSystem] Shutdown() called from an executing job — rejected.");
+                return;
+            }
             if (Interlocked.Exchange(ref _shutdownRequested, 1) != 0)
                 return;
+            NativeHandleStorage.SetAccepting(false);
             DumpTimingDiagnosticsIfRequested();
             JobSystem_Shutdown();
+            NativeHandleStorage.ReleaseAll();
         }
 
-        internal static void ResetShutdownGate() => Interlocked.Exchange(ref _shutdownRequested, 0);
+        internal static void ResetShutdownGate()
+        {
+            NativeHandleStorage.SetAccepting(true);
+            Interlocked.Exchange(ref _shutdownRequested, 0);
+        }
 
         private static void DumpTimingDiagnosticsIfRequested()
         {
@@ -1373,16 +1433,23 @@ namespace EntJoy.JobSystem
         }
 
         // 上下文内存池
-        internal static class ContextPool
+        internal static unsafe class ContextPool
         {
             private const int BucketShift = 6;
             private const int MaxBucket = 64;
-            private static readonly ConcurrentStack<IntPtr>[] _buckets = new ConcurrentStack<IntPtr>[MaxBucket];
+            private struct Bucket { public IntPtr Head; public int Count; public int Gate; }
+            private static readonly Bucket[] _buckets = new Bucket[MaxBucket];
+
+            private static void Enter(ref int gate)
+            {
+                var spin = new SpinWait();
+                while (Interlocked.CompareExchange(ref gate, 1, 0) != 0) spin.SpinOnce();
+            }
 
             private static int GetBucketIndex(int size)
             {
-                int idx = (size + (1 << BucketShift) - 1) >> BucketShift;
-                return idx >= MaxBucket ? -1 : idx;
+                return size > 0 && size <= (MaxBucket << BucketShift)
+                    ? (size - 1) >> BucketShift : -1;
             }
 
             private static int GetBucketAllocSize(int idx)
@@ -1390,29 +1457,54 @@ namespace EntJoy.JobSystem
                 return (idx + 1) << BucketShift;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveOptimization)]
             public static IntPtr Rent(int size)
             {
+                if (_jobSystem_RentJobContext != null)
+                {
+                    IntPtr ptr = _jobSystem_RentJobContext(size);
+                    if (ptr == IntPtr.Zero) throw new OutOfMemoryException();
+                    return ptr;
+                }
                 int idx = GetBucketIndex(size);
                 if (idx < 0) return Marshal.AllocHGlobal(size);
-                var bucket = _buckets[idx];
-                if (bucket != null && bucket.TryPop(out var ptr)) return ptr;
+                ref var bucket = ref _buckets[idx];
+                Enter(ref bucket.Gate);
+                try
+                {
+                    if (bucket.Head != IntPtr.Zero)
+                    {
+                        IntPtr ptr = bucket.Head;
+                        bucket.Head = *(IntPtr*)ptr;
+                        bucket.Count--;
+                        return ptr;
+                    }
+                }
+                finally { Volatile.Write(ref bucket.Gate, 0); }
                 return Marshal.AllocHGlobal(GetBucketAllocSize(idx));
             }
 
             public static void Return(IntPtr ptr, int size)
             {
                 if (ptr == IntPtr.Zero) return;
+                if (_jobSystem_ReturnJobContext != null) { _jobSystem_ReturnJobContext(ptr, size); return; }
                 int idx = GetBucketIndex(size);
                 if (idx < 0) { Marshal.FreeHGlobal(ptr); return; }
-                var bucket = Volatile.Read(ref _buckets[idx]);
-                if (bucket == null)
-                {
-                    bucket = new ConcurrentStack<IntPtr>();
-                    bucket = Interlocked.CompareExchange(ref _buckets[idx], bucket, null) ?? bucket;
-                }
+                ref var bucket = ref _buckets[idx];
                 const int MaxPerBucket = 256;
-                if (bucket.Count < MaxPerBucket) bucket.Push(ptr);
-                else Marshal.FreeHGlobal(ptr);
+                Enter(ref bucket.Gate);
+                try
+                {
+                    if (bucket.Count < MaxPerBucket)
+                    {
+                        *(IntPtr*)ptr = bucket.Head;
+                        bucket.Head = ptr;
+                        bucket.Count++;
+                        return;
+                    }
+                }
+                finally { Volatile.Write(ref bucket.Gate, 0); }
+                Marshal.FreeHGlobal(ptr);
             }
         }
 
@@ -1651,11 +1743,11 @@ namespace EntJoy.JobSystem
         internal unsafe static IntPtr AllocContext<T>(ref T job) where T : struct
         {
             int size = Unsafe.SizeOf<T>();
-            int totalSize = size + sizeof(int);
+            int totalSize = checked(size + ContextHeaderSize);
             long t0 = CSharpPhaseDiag.Sampling("ctx.alloc") ? CSharpPhaseDiag.Now() : 0;
             IntPtr dataPtr = ContextPool.Rent(totalSize);
             *(int*)dataPtr = size;
-            byte* jobPtr = (byte*)dataPtr + sizeof(int);
+            byte* jobPtr = (byte*)dataPtr + ContextHeaderSize;
             Unsafe.CopyBlockUnaligned(jobPtr, Unsafe.AsPointer(ref job), (uint)size);
             if (t0 != 0) CSharpPhaseDiag.Add("ctx.alloc", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
             return (IntPtr)jobPtr;
@@ -1663,18 +1755,19 @@ namespace EntJoy.JobSystem
 
         /// <summary>
         /// 按生成代码的逐字段布局租一块 ctx（供原生 adapter 直调）。
-        /// 与 <see cref="AllocContext{T}"/> 共用同一个 <see cref="ContextPool"/> 与同一套 4 字节长度前缀，
+        /// 与 <see cref="AllocContext{T}"/> 共用同一个 <see cref="ContextPool"/> 与同一套对齐长度前缀，
         /// 因此释放也复用同一个 <see cref="CleanupPtr"/>（回池 + 释放读写声明），
         /// 不需要 `Marshal.AllocHGlobal` / `FreeHGlobal` 的逐派发 malloc/free。
         /// 调用方随后用生成代码的 `JobFieldWriter&lt;T&gt;` 把字段写进返回指针（布局与 C++ adapter 的偏移一致）。
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal unsafe static IntPtr RentMarshalledContext(int contextSize)
         {
             if (contextSize <= 0) return IntPtr.Zero;
-            int totalSize = contextSize + sizeof(int);
+            int totalSize = checked(contextSize + ContextHeaderSize);
             IntPtr dataPtr = ContextPool.Rent(totalSize);
             *(int*)dataPtr = contextSize;
-            return (IntPtr)((byte*)dataPtr + sizeof(int));
+            return (IntPtr)((byte*)dataPtr + ContextHeaderSize);
         }
 
         internal unsafe static void Cleanup(IntPtr dataPtr)
@@ -1684,8 +1777,8 @@ namespace EntJoy.JobSystem
             // 释放本 ctx 的写声明与读声明（理由同 ManagedCleanup：按 tile 释放会提前清空兄弟 tile 的读者计数）。
             SafetyHandleManager.ReleaseWritesForContext(dataPtr);
             SafetyHandleManager.ReleaseReadsForContext(dataPtr);
-            int size = *(int*)((byte*)dataPtr - sizeof(int));
-            ContextPool.Return((IntPtr)((byte*)dataPtr - sizeof(int)), size + sizeof(int));
+            int size = *(int*)((byte*)dataPtr - ContextHeaderSize);
+            ContextPool.Return((IntPtr)((byte*)dataPtr - ContextHeaderSize), checked(size + ContextHeaderSize));
         }
 
         // 回调工厂
@@ -1711,7 +1804,7 @@ namespace EntJoy.JobSystem
                 }
                 catch (Exception exception)
                 {
-                    RecordJobException(_currentBatchId, exception);
+                    RecordJobException(CurrentBatchId, exception);
                 }
                 finally
                 {
@@ -1743,7 +1836,7 @@ namespace EntJoy.JobSystem
                 }
                 catch (Exception exception)
                 {
-                    RecordJobException(_currentBatchId, exception);
+                    RecordJobException(CurrentBatchId, exception);
                 }
                 finally
                 {
@@ -1776,7 +1869,7 @@ namespace EntJoy.JobSystem
                 }
                 catch (Exception exception)
                 {
-                    RecordJobException(_currentBatchId, exception);
+                    RecordJobException(CurrentBatchId, exception);
                 }
                 finally
                 {
@@ -1808,7 +1901,7 @@ namespace EntJoy.JobSystem
                 }
                 catch (Exception exception)
                 {
-                    RecordJobException(_currentBatchId, exception);
+                    RecordJobException(CurrentBatchId, exception);
                 }
                 finally
                 {
@@ -1819,56 +1912,128 @@ namespace EntJoy.JobSystem
         }
 
         // 低级原语
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        internal static NativeJobHandle ScheduleCopiedRaw(IntPtr funcPtr, IntPtr source, int bytes, NativeJobHandle? dependsOn)
+        {
+            ValidateContextSource(source, bytes);
+            if (_jobSystem_ScheduleCopiedContext == null)
+                return ScheduleRaw(funcPtr, RentCopiedContext(source, bytes), PooledJobContextCleanupPtr, dependsOn);
+            IntPtr handle;
+            using (var dependencyLease = new RetainedNativeDependency(dependsOn))
+                CheckCopiedSchedule(_jobSystem_ScheduleCopiedContext(funcPtr, source, bytes, dependencyLease.Handle, &handle));
+            return NativeHandleStorage.CreateDependent(handle, dependsOn);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        internal static NativeJobHandle ScheduleParallelForCopiedRaw(IntPtr funcPtr, IntPtr source, int bytes,
+            int length, int batchSize, NativeJobHandle? dependsOn, ClaimPolicy claim, bool indexedRanges)
+        {
+            ValidateContextSource(source, bytes);
+            if (_jobSystem_ScheduleParallelForCopiedContext == null)
+                return ScheduleParallelForBatchRaw(funcPtr, RentCopiedContext(source, bytes), PooledJobContextCleanupPtr,
+                    length, batchSize, dependsOn, claim, indexedRanges);
+            long t0 = CSharpPhaseDiag.Sampling("parfor.pinvoke") ? CSharpPhaseDiag.Now() : 0;
+            IntPtr handle;
+            using (var dependencyLease = new RetainedNativeDependency(dependsOn))
+                CheckCopiedSchedule(_jobSystem_ScheduleParallelForCopiedContext(funcPtr, source, bytes, length, batchSize,
+                    (int)claim, indexedRanges ? 1 : 0, dependencyLease.Handle, &handle));
+            var result = NativeHandleStorage.CreateDependent(handle, dependsOn);
+            if (t0 != 0) CSharpPhaseDiag.Add("parfor.pinvoke", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
+            return result;
+        }
+
+        private static void ValidateContextSource(IntPtr source, int bytes)
+        {
+            if (bytes < 0 || bytes > int.MaxValue - ContextHeaderSize) throw new ArgumentOutOfRangeException(nameof(bytes));
+            if (bytes > 0 && source == IntPtr.Zero) throw new ArgumentNullException(nameof(source));
+        }
+
+        private static IntPtr RentCopiedContext(IntPtr source, int bytes)
+        {
+            IntPtr context = RentMarshalledContext(bytes);
+            if (bytes > 0) Unsafe.CopyBlockUnaligned((void*)context, (void*)source, (uint)bytes);
+            return context;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void CheckCopiedSchedule(int status)
+        {
+            if (status == 0) return;
+            if (status == 2) throw new OutOfMemoryException("Native job context allocation failed.");
+            if (status == 1) throw new ArgumentException("Invalid native job context source, size or output.");
+            throw new InvalidOperationException("Native copied-context job submission failed.");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         internal static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
         {
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(JobSystem_Schedule(funcPtr, contextPtr, cleanupPtr, dependencyLease.Handle));
+            IntPtr handle;
+            try
+            {
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                handle = JobSystem_Schedule(funcPtr, contextPtr, cleanupPtr, dependencyLease.Handle);
+            }
+            catch { CleanupUnsubmittedContext(contextPtr, cleanupPtr); throw; }
+            return NativeHandleStorage.CreateDependent(handle, dependsOn);
         }
 
         internal static NativeJobHandle ScheduleForRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, NativeJobHandle? dependsOn = null)
         {
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            return new NativeJobHandle(JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependencyLease.Handle));
+            IntPtr handle;
+            try
+            {
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                handle = JobSystem_ScheduleFor(funcPtr, contextPtr, cleanupPtr, length, dependencyLease.Handle);
+            }
+            catch { CleanupUnsubmittedContext(contextPtr, cleanupPtr); throw; }
+            return NativeHandleStorage.CreateDependent(handle, dependsOn);
         }
 
-        internal static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto)
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        internal static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto, bool indexedRanges = false)
         {
             long t0 = CSharpPhaseDiag.Sampling("parfor.pinvoke") ? CSharpPhaseDiag.Now() : 0;
-            using var dependencyLease = new RetainedNativeDependency(dependsOn);
-            // Auto(0) 走原导出（零额外分支，与引入 ClaimPolicy 前逐位一致）；显式声明走 Ex 导出。
-            var ret = (claim == ClaimPolicy.Auto)
-                ? new NativeJobHandle(JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle))
-                : new NativeJobHandle(JobSystem_ScheduleParallelForBatchEx(funcPtr, contextPtr, cleanupPtr, length, batchSize, (int)claim, dependencyLease.Handle));
+            IntPtr handle;
+            try
+            {
+                using var dependencyLease = new RetainedNativeDependency(dependsOn);
+                handle = indexedRanges && _jobSystem_ScheduleParallelForRange != null
+                    ? _jobSystem_ScheduleParallelForRange(funcPtr, contextPtr, cleanupPtr, length, batchSize, (int)claim, dependencyLease.Handle)
+                    : (claim == ClaimPolicy.Auto)
+                    ? JobSystem_ScheduleParallelForBatch(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependencyLease.Handle)
+                    : JobSystem_ScheduleParallelForBatchEx(funcPtr, contextPtr, cleanupPtr, length, batchSize, (int)claim, dependencyLease.Handle);
+            }
+            catch { CleanupUnsubmittedContext(contextPtr, cleanupPtr); throw; }
+            var ret = NativeHandleStorage.CreateDependent(handle, dependsOn);
             if (t0 != 0) CSharpPhaseDiag.Add("parfor.pinvoke", CSharpPhaseDiag.Us(t0, CSharpPhaseDiag.Now()));
             return ret;
         }
 
-        internal static void ReleaseRawHandleForFinalizer(IntPtr handle)
+        // Raw 调度从入口接管上下文；所有权登记发生在原生提交之后，不能再次清理。
+        private static void CleanupUnsubmittedContext(IntPtr context, IntPtr cleanup)
         {
-            if (handle == IntPtr.Zero) return;
-            JobSystem_ReleaseHandle(handle);
-        }
-
-        internal static void RetainRawHandleForUse(IntPtr handle)
-        {
-            if (handle == IntPtr.Zero) return;
-            JobSystem_RetainHandle(handle);
+            if (cleanup != IntPtr.Zero)
+                ((delegate* unmanaged[Cdecl]<IntPtr, void>)cleanup)(context);
         }
 
         internal readonly struct RetainedNativeDependency : IDisposable
         {
             public readonly IntPtr Handle;
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public RetainedNativeDependency(NativeJobHandle? dependency)
             {
-                Handle = dependency.HasValue ? dependency.Value.RetainForUse() : IntPtr.Zero;
+                Handle = dependency.HasValue && dependency.Value.Slot != IntPtr.Zero
+                    ? dependency.Value.RetainForUse() : IntPtr.Zero;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public RetainedNativeDependency(NativeJobHandle dependency)
             {
                 Handle = dependency.RetainForUse();
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Dispose()
             {
                 if (Handle != IntPtr.Zero)

@@ -11,6 +11,7 @@ namespace NativeTranspiler.Analyzer
         // DLL 分离后：生成代码（wrapper/adapter）编译进 NativeTranspiled.dll。
         // 核心 runtime（JobSystem 等）仍在 NativeDll.dll。
         private const string NativeLibraryName = "NativeTranspiled";
+        private const int MaxCopiedContextStackBytes = 1024;
 
         public static string GenerateBindingsClass(
             IEnumerable<IMethodSymbol> methods,
@@ -363,7 +364,7 @@ namespace NativeTranspiler.Analyzer
                 // `JobFuncDelegate` 字段（顺带消掉 CS0169）。只保留指针（可按代次刷新的属性）。
                 EmitRefreshablePtrField(sb, $"s_{jobStruct.Name}_JobFuncPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
             }
-            // per-job 的 cleanup 字段不发射：统一用框架共享的 `NativeJobScheduler.SharedFreeHGlobalCleanupPtr`。
+            // per-job 的 cleanup 字段不发射：统一使用框架池化上下文的 cleanup。
             sb.AppendLine();
         }
 
@@ -377,6 +378,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"        private static int {fieldName}_Generation = -1;");
             sb.AppendLine($"        private static IntPtr {fieldName}");
             sb.AppendLine("        {");
+            sb.AppendLine("            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("            get");
             sb.AppendLine("            {");
             sb.AppendLine("                int __gen = EntJoy.JobSystem.NativeJobScheduler.DelegateCacheGeneration;");
@@ -482,7 +484,7 @@ namespace NativeTranspiler.Analyzer
             // 对这两种形态不发射任何东西（指针在首次读取时取，取的是"当前句柄"的导出）。
             //
             // per-job 的 cleanup lambda + `Marshal.GetFunctionPointerForDelegate` 也不发射：
-            // 统一用框架共享的 `NativeJobScheduler.SharedFreeHGlobalCleanupPtr`（见 Schedule 发射点）。
+            // 使用框架共享的池化上下文 cleanup（见 Schedule 发射点）。
             if (sb.Length != lenBefore) sb.AppendLine();   // 只在真发射了内容时留空行（别攒出连续空行）
         }
 
@@ -640,8 +642,32 @@ namespace NativeTranspiler.Analyzer
                 parameters.Add("World world = null");
             }
 
-            sb.AppendLine($"        public static JobHandle Schedule_{jobStruct.Name}({string.Join(", ", parameters)})");
+            if (!isChunk)
+            {
+                var arguments = new List<string> { "ref job" };
+                if (isParallelFor || isFor)
+                {
+                    arguments.Add("arrayLength");
+                    arguments.Add("innerBatchCount");
+                }
+                arguments.Add("dependsOn._nativeHandle");
+                if (isParallelFor) arguments.Add("claim");
+                // 公开句柄保留双后端；原生调度体只传递不含托管引用的所有权标识。
+                sb.AppendLine("        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
+                sb.AppendLine($"        public static JobHandle Schedule_{jobStruct.Name}({string.Join(", ", parameters)})");
+                sb.AppendLine($"            => new JobHandle(ScheduleNative_{jobStruct.Name}({string.Join(", ", arguments)}));");
+                sb.AppendLine();
+                var nativeParameters = parameters.Select(p => p == "JobHandle dependsOn = default" ? "NativeJobHandle dependsOn = default" : p);
+                sb.AppendLine("        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
+                sb.AppendLine($"        private static NativeJobHandle ScheduleNative_{jobStruct.Name}({string.Join(", ", nativeParameters)})");
+            }
+            else
+            {
+                sb.AppendLine("        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
+                sb.AppendLine($"        public static JobHandle Schedule_{jobStruct.Name}({string.Join(", ", parameters)})");
+            }
             sb.AppendLine("        {");
+            bool copiedContext = false;
             if (!isChunk)
             {
                 // Debug 下 NativeArray 带 GC 引用（DisposeSentinel）→ Job struct 非 blittable，裸拷贝布局不可靠；
@@ -650,16 +676,38 @@ namespace NativeTranspiler.Analyzer
                 if (explicitOk)
                 {
                     sb.AppendLine($"            int size = {totalSize};");
-                    sb.AppendLine("            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
-                    sb.AppendLine("            byte* __dst = (byte*)nativePtr;");
-                    EmitExplicitFieldWrites(sb, marshalled, "__dst", "job");
+                    copiedContext = totalSize <= MaxCopiedContextStackBytes;
+                    if (copiedContext)
+                    {
+                        if (totalSize == 0) sb.AppendLine("            IntPtr nativePtr = IntPtr.Zero;");
+                        else
+                        {
+                            sb.AppendLine("            byte* __dst = stackalloc byte[size];");
+                            sb.AppendLine("            IntPtr nativePtr = (IntPtr)__dst;");
+                            EmitExplicitFieldWrites(sb, marshalled, "__dst", "job");
+                        }
+                    }
+                    else
+                    {
+                        sb.AppendLine("            IntPtr nativePtr = NativeJobScheduler.RentJobContext(size);");
+                        sb.AppendLine("            try");
+                        sb.AppendLine("            {");
+                        sb.AppendLine("            byte* __dst = (byte*)nativePtr;");
+                        EmitExplicitFieldWrites(sb, marshalled, "__dst", "job");
+                        sb.AppendLine("            }");
+                        sb.AppendLine("            catch");
+                        sb.AppendLine("            {");
+                        sb.AppendLine("                ((delegate* unmanaged[Cdecl]<IntPtr, void>)NativeJobScheduler.PooledJobContextCleanupPtr)(nativePtr);");
+                        sb.AppendLine("                throw;");
+                        sb.AppendLine("            }");
+                    }
                     sb.AppendLine();
                 }
                 else
                 {
                     // 含不支持字段（NativeList 等）：退回裸拷贝（Release 正确；Debug 由显式路径覆盖的场景外）
                     sb.AppendLine($"            int size = sizeof({jobTypeName});");
-                    sb.AppendLine("            IntPtr nativePtr = Marshal.AllocHGlobal(size);");
+                    sb.AppendLine("            IntPtr nativePtr = NativeJobScheduler.RentJobContext(size);");
                     sb.AppendLine("            void* originalPtr = Unsafe.AsPointer(ref job);");
                     sb.AppendLine("            Unsafe.CopyBlockUnaligned((void*)nativePtr, originalPtr, (uint)size);");
                     sb.AppendLine();
@@ -730,17 +778,37 @@ namespace NativeTranspiler.Analyzer
 
                 // 几何只在真并行批上有意义（IJobFor 是单线程串行语义）⇒ 只在 isParallelFor 时透传。
                 string claimArg = isParallelFor ? ", claim" : "";
-                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleParallelForBatchRaw(");
-                sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.SharedFreeHGlobalCleanupPtr, arrayLength, actualBatchSize, dependsOn._nativeHandle{claimArg});");
-                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
-                sb.AppendLine($"            return new JobHandle(nativeHandle);");
+                string rangeSchedule = CppJobGenerator.IsParallelForJob(jobStruct)
+                    ? "ScheduleParallelForRangeRaw" : "ScheduleParallelForBatchRaw";
+                if (copiedContext)
+                {
+                    string claimValue = isParallelFor ? "claim" : "ClaimPolicy.Auto";
+                    string indexed = CppJobGenerator.IsParallelForJob(jobStruct) ? "true" : "false";
+                    sb.AppendLine("            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleParallelForCopiedRaw(");
+                    sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, size, arrayLength, actualBatchSize, dependsOn, {claimValue}, {indexed});");
+                }
+                else
+                {
+                    sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.{rangeSchedule}(");
+                    sb.AppendLine($"                s_{jobStruct.Name}_BatchFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.PooledJobContextCleanupPtr, arrayLength, actualBatchSize, dependsOn{claimArg});");
+                }
+                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle, \"{jobStruct.Name}\");");
+                sb.AppendLine("            return nativeHandle;");
             }
             else
             {
-                sb.AppendLine($"            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleRaw(");
-                sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.SharedFreeHGlobalCleanupPtr, dependsOn._nativeHandle);");
-                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle.Handle, \"{jobStruct.Name}\");");
-                sb.AppendLine($"            return new JobHandle(nativeHandle);");
+                if (copiedContext)
+                {
+                    sb.AppendLine("            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleCopiedRaw(");
+                    sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, size, dependsOn);");
+                }
+                else
+                {
+                    sb.AppendLine("            NativeJobHandle nativeHandle = NativeJobScheduler.ScheduleRaw(");
+                    sb.AppendLine($"                s_{jobStruct.Name}_JobFuncPtr, nativePtr, EntJoy.JobSystem.NativeJobScheduler.PooledJobContextCleanupPtr, dependsOn);");
+                }
+                sb.AppendLine($"            NativeJobScheduler.RegisterScheduledJob(nativeHandle, \"{jobStruct.Name}\");");
+                sb.AppendLine("            return nativeHandle;");
             }
             sb.AppendLine("        }");
             sb.AppendLine();
@@ -1247,6 +1315,7 @@ namespace NativeTranspiler.Analyzer
                 // （具体扩展方法优先于泛型）。
                 string claimParam = isParallelFor ? ", ClaimPolicy claim = ClaimPolicy.Auto" : "";
                 string claimArgE = isParallelFor ? ", claim" : "";
+                sb.AppendLine("    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
                 sb.AppendLine($"    public static JobHandle Schedule({string.Join(", ", parameters)}{claimParam})");
                 sb.AppendLine("    {");
                 sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, arrayLength, innerBatchCount, dependsOn{claimArgE});");
@@ -1256,11 +1325,13 @@ namespace NativeTranspiler.Analyzer
             else
             {
                 // IJob: generate two overloads (no-arg and dependsOn) to beat existing Schedule<T>(this T job)
+                sb.AppendLine("    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
                 sb.AppendLine($"    public static JobHandle Schedule(this {jobTypeName} job)");
                 sb.AppendLine("    {");
                 sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, default);");
                 sb.AppendLine("    }");
                 sb.AppendLine();
+                sb.AppendLine("    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining | System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]");
                 sb.AppendLine($"    public static JobHandle Schedule(this {jobTypeName} job, JobHandle dependsOn)");
                 sb.AppendLine("    {");
                 sb.AppendLine($"        return NativeTranspiler.Bindings.NativeExports.Schedule_{jobStruct.Name}(ref job, dependsOn);");

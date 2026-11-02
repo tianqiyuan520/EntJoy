@@ -99,7 +99,8 @@ namespace EntJoy {
 			int32_t Capacity, Shift, Length;
 			T* GetElementPtr(int32_t index) const {
 				if (!Chunks) return Flat + index;
-				int32_t chunk = Shift >= 0 ? index >> Shift : index / Capacity;
+				if (Shift >= 0) return Chunks[index >> Shift] + (index & (Capacity - 1));
+				int32_t chunk = index / Capacity;
 				return Chunks[chunk] + (index - chunk * Capacity);
 			}
 			T& operator[](int32_t index) const { return *GetElementPtr(index); }

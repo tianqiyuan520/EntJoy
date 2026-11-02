@@ -58,9 +58,11 @@ namespace EntJoy.JobSystem
         public static double Us(long fromTicks, long toTicks) => (toTicks - fromTicks) * 1_000_000.0 / s_freq;
 
         /// <summary>该 series 是否仍在采样（窗口数未用尽）。</summary>
-        public static bool Sampling(string series)
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static bool Sampling(string series) => Enabled && SamplingEnabled(series);
+
+        private static bool SamplingEnabled(string series)
         {
-            if (!Enabled) return false;
             lock (s_series)
                 return !s_series.TryGetValue(series, out var s) || s.Windows < MaxWindows;
         }

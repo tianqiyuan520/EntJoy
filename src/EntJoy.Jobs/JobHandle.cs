@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using EntJoy.JobSystem.Managed;
 
 namespace EntJoy.JobSystem
@@ -12,6 +13,7 @@ public struct JobHandle
     public NativeJobHandle _nativeHandle;
     internal ManagedJobHandle _managedHandle;
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public JobHandle(NativeJobHandle nativeHandle) => _nativeHandle = nativeHandle;
 
     internal JobHandle(ManagedJobHandle managedHandle) => _managedHandle = managedHandle;
@@ -34,34 +36,28 @@ public struct JobHandle
         if (_managedHandle.Completion != null) { _managedHandle.Complete(); return; }
         if (!_nativeHandle.IsValid) return;
         NativeJobScheduler.Complete(ref _nativeHandle);
-        // Complete 消费句柄（Unity 同语义）：等待完成后立刻确定性释放 native HandleState，
-        // 终结器线程、且只在 GC 批量发生时成批出现，于是调度线程的 TLS 状态缓存恒空：
-        // 释放后 _nativeHandle 置空 ⇒ 已完成句柄继续当依赖/查询一律安全
-        // （IsValid=false ⇒ 视为"已完成、无依赖"）；重复 Complete 变为空操作。
-        NativeJobScheduler.Release(_nativeHandle);
-        _nativeHandle = default;
     }
 
     internal NativeJobHandle GetNativeDependency() => _nativeHandle;
 
     public static JobHandle CombineDependencies(params JobHandle[] handles)
+        => CombineDependencies((ReadOnlySpan<JobHandle>)handles);
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static JobHandle CombineDependencies(ReadOnlySpan<JobHandle> handles)
     {
-        if (handles == null || handles.Length == 0) return default;
-        // 纯 C++ 后端合并
-        var nativeHandles = new NativeJobHandle[handles.Length];
-        bool allNative = true;
-        bool hasNative = false;
+        if (handles.IsEmpty) return default;
+        int nativeCount = 0;
         bool hasManaged = false;
         for (int i = 0; i < handles.Length; i++)
         {
-            nativeHandles[i] = handles[i]._nativeHandle;
-            if (handles[i]._nativeHandle.IsValid) hasNative = true;
-            if (handles[i]._managedHandle.Completion != null) { hasManaged = true; allNative = false; }
+            if (handles[i]._nativeHandle.IsValid) nativeCount++;
+            if (handles[i]._managedHandle.Completion != null) hasManaged = true;
         }
-        if (hasNative && hasManaged)
+        if (nativeCount != 0 && hasManaged)
             throw new InvalidOperationException("Native and Managed job handles cannot be combined.");
-        if (!hasNative && !hasManaged) return default;
-        if (allNative) return new JobHandle(NativeJobScheduler.CombineDependencies(nativeHandles));
+        if (nativeCount == 0 && !hasManaged) return default;
+        if (!hasManaged) return new JobHandle(NativeHandleStorage.Combine(handles, default, nativeCount));
         // 混合/托管后端：合并所有 Completed 的 handle
         ManagedJobHandle? first = null;
         var managed = new ManagedJobHandle[handles.Length];
@@ -71,6 +67,28 @@ public struct JobHandle
         }
         if (first.HasValue) return new JobHandle(ManagedJobHandle.CombineDependencies(managed));
         return default;
+    }
+
+    public static JobHandle CombineDependencies(JobHandle handle)
+    {
+        if (handle._managedHandle.Completion != null) return CombineDependencies(new[] { handle });
+        return new JobHandle(NativeJobScheduler.CombineDependencies(handle._nativeHandle));
+    }
+
+    public static JobHandle CombineDependencies(JobHandle first, JobHandle second)
+    {
+        if (first._managedHandle.Completion != null || second._managedHandle.Completion != null)
+            return CombineDependencies(new[] { first, second });
+        Span<NativeJobHandle> handles = stackalloc NativeJobHandle[2] { first._nativeHandle, second._nativeHandle };
+        return new JobHandle(NativeJobScheduler.CombineDependencies(handles));
+    }
+
+    public static JobHandle CombineDependencies(JobHandle first, JobHandle second, JobHandle third)
+    {
+        if (first._managedHandle.Completion != null || second._managedHandle.Completion != null || third._managedHandle.Completion != null)
+            return CombineDependencies(new[] { first, second, third });
+        Span<NativeJobHandle> handles = stackalloc NativeJobHandle[3] { first._nativeHandle, second._nativeHandle, third._nativeHandle };
+        return new JobHandle(NativeJobScheduler.CombineDependencies(handles));
     }
 }
 }

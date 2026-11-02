@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using EntJoy.Collections;
 using EntJoy.JobSystem;
@@ -30,11 +31,22 @@ public struct DispatchStampJob : IJobParallelFor
     public void Execute(int index) { Stamp[JobIndex * Elements + index] = Epoch; }
 }
 
+[NativeTranspile]
+public unsafe struct DispatchVisitJob : IJobParallelFor
+{
+    public NativeArray<int> Visits;
+    public void Execute(int index)
+    {
+        int* ptr = (int*)Visits.GetUnsafePtr();
+        System.Threading.Interlocked.Increment(ref ptr[index]);
+    }
+}
+
 // Mirrors Unity BattleBenchDispatchFloor: the timer covers submission and completion;
 // per-job counters and full-traversal checks are read outside the timed interval.
 public static class SchedulerDispatchProbe
 {
-    public static void Run(string path)
+    public static void Run(string path, int warmup = 20)
     {
         var csv = new StringBuilder("probe,arm,metric,value\n");
         var iterations = new StringBuilder("arm,rep,ms\n");
@@ -45,7 +57,7 @@ public static class SchedulerDispatchProbe
         try
         {
             Measure("empty_serial_ijob", 1, 1, 0,
-                () => new DispatchSerialJob { Proof = proof }.Schedule().Complete());
+                [MethodImpl(MethodImplOptions.AggressiveOptimization)] () => new DispatchSerialJob { Proof = proof }.Schedule().Complete());
             foreach (int jobs in new[] { 1, 100, 1000 })
                 Parallel($"empty_parallelfor_{jobs}", jobs, 1, 1);
             foreach (int jobs in new[] { 1, 100, 1000 })
@@ -67,7 +79,9 @@ public static class SchedulerDispatchProbe
             JobHandle.CombineDependencies(handles).Complete();
             for (int i = 0; i < jobs * elements; i++)
                 if (stamp[i] != epoch) throw new InvalidOperationException($"Traversal proof failed: {arm} index={i}");
-            Measure(arm, jobs, elements, batch, () => {
+            // Match the ahead-of-time compiled Unity host: the submission loop
+            // must use optimized code throughout the timed repetitions.
+            Measure(arm, jobs, elements, batch, [MethodImpl(MethodImplOptions.AggressiveOptimization)] () => {
                 for (int j = 0; j < jobs; j++)
                     handles[j] = new DispatchParallelJob { Proof = proof, JobIndex = j }.Schedule(elements, batch);
                 JobHandle.CombineDependencies(handles).Complete();
@@ -76,7 +90,6 @@ public static class SchedulerDispatchProbe
 
         void Measure(string arm, int jobs, int elements, int batch, Action body)
         {
-            const int warmup = 20;
             int reps = (int)Math.Min(100, Math.Max(1, 80000000L / ((long)jobs * elements)));
             for (int i = 0; i < warmup; i++) body();
             var values = new double[reps];

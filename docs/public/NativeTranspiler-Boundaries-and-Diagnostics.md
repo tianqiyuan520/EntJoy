@@ -117,6 +117,7 @@
 | **NT028** | warning | 本批有 `[NativeTranspile]` job 未通过校验、已从绑定生成中排除：其余 job 照常产出，被排除的 job 不会生成 `Schedule` 绑定（调用点报 `CS0103`，而不是整包 `CS0234`）。消息里列出被排除的 job，按各自的 error 诊断逐个修即可 |
 | **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
 | **NT033** | error | `NativeColumn<T>` job fields require the C++ backend and `AutoSIMD.Disabled`; indexed access and `GetElementPtr` use the native column ABI. |
+| **NT034** | error | 原生 Job 的 `Execute` 使用块函数体；表达式体 `Execute => ...` 在生成前报错。 |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 > 反过来说，**已经实测负收益/不生效的模式一律用 error**、不用 warning：NT024（AutoSIMD 实测慢 ~10%）、

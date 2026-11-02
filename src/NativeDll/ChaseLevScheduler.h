@@ -5,7 +5,7 @@
 // 模型（标准 Chase-Lev：Injector + 本地 Deque + 窃取）：
 //   - 每个 worker 持有一个 SparseTileDeque（LIFO pop，FIFO steal）——执行队列
 //   - MPMCInjector（Vyukov 无锁 MPMC 环形队列）——跨线程提交入口
-//   - SubmitBatch 预切分为 RangeTask 并推入 Injector；worker 从 Injector 拉取
+//   - SubmitBatch 发布初始 RangeTask，执行者按需补充参与令牌；worker 从 Injector 拉取
 //     推入自己 deque（owner-only PushBottom），标准 Chase-Lev 循环执行。
 //   - 无共享注册表、无 claimers handshake、无扫描开销。
 //
@@ -60,13 +60,16 @@ namespace JobSystem
             TaskDoneFn taskDone, bool bindThreads = false);
         void Stop() noexcept;
 
-        // 提交 batch 全部 tiles：预切分推入 Injector 并唤醒 worker；任意线程可调用。
+        // 提交 batch：发布初始令牌，执行者按需补充参与令牌；任意线程可调用。
         // batch 完成由 tilesRemaining 归零驱动。
         void SubmitBatch(BatchState* batch) noexcept;
 
         // 提交通用 work 任务（无 batch，完成链由调用方负责）；执行序：
         // workFn(ctx) → workCleanup(ctx) → Release。
         bool SubmitWork(void (*fn)(void*), void* ctx, void (*cleanup)(void*)) noexcept;
+        bool SubmitDirectWork(DirectWorkKind kind, void (*fn)(), void* ctx, int length,
+            void (*cleanup)(void*), HandleState* state) noexcept;
+        bool PublishWorkTask(RangeTask* task) noexcept;
 
         // 提交窗口统一唤醒（deferNotify 的 Flush）：bump epoch + notify_all 一次。
         // 供 JobSystem_SubmitDeferFlush 调用；defer 期 SubmitBatch 跳过 per-batch 唤醒。
@@ -165,6 +168,8 @@ namespace JobSystem
         // batchGen = 令牌创建时的代次，透传给 taskDone_ 做迟到结算校验。
         void ExecuteClaimToken(BatchState* batch, uint32_t workerIndex, uint32_t batchGen,
             TileAccount account = TileAccount::Local) noexcept;
+
+        void PublishDemandTokenIfNeeded(BatchState* batch, uint32_t batchGen) noexcept;
 
         // Injector 满时有限退避入队（yield + pause），供所有提交路径共用。
         bool PushTaskBackoff(RangeTask* task) noexcept;

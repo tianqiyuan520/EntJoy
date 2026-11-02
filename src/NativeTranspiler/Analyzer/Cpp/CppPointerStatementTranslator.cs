@@ -16,19 +16,8 @@ namespace NativeTranspiler.Analyzer
         protected readonly HashSet<string> _nativeArrayListNames;
         protected readonly HashSet<string> _nativeListNames;
 
-        // 归约循环（`v = min(v, a[i])`、`v += a[i]`）生成 4 路独立累加器 + 标量收尾：
-        // 单一累加链是串行依赖，编译器不会自行拆开。
-        private int _reductionSerial;
-
         protected override void TranslateForStatement(ForStatementSyntax forStmt)
         {
-            var unrolled = new System.Collections.Generic.List<string>();
-            if (ReductionUnroll.TryBuild(this, forStmt, _reductionSerial, _indentLevel, unrolled))
-            {
-                _reductionSerial++;
-                foreach (var line in unrolled) _builder.AppendLine(line);
-                return;
-            }
             if (!_enableAutoSIMD && IsSmallFixedLoop(forStmt))
             {
                 _builder.AppendLine("#if defined(__clang__)");

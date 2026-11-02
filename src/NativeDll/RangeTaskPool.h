@@ -21,10 +21,13 @@
 namespace JobSystem
 {
     struct BatchState; // forward
+    struct HandleState;
+    enum class DirectWorkKind : uint32_t { Scalar, Indexed, Batched };
 
     // 标准 Chase-Lev 任务对象：一个 tile 范围。
     struct RangeTask
     {
+        static constexpr uint32_t BorrowedPoolIndex = UINT32_MAX - 1;
         BatchState* batch{ nullptr };
         uint32_t firstTile{ 0 };
         uint32_t tileCount{ 0 };
@@ -37,6 +40,7 @@ namespace JobSystem
         void (*workFn)(void*){ nullptr };
         void* workCtx{ nullptr };
         void (*workCleanup)(void*){ nullptr };
+        HandleState* workState{ nullptr };
     };
 
     class RangeTaskPool
@@ -89,6 +93,7 @@ namespace JobSystem
         {
             if (!task) return;
             const uint32_t idx = task->poolIndex;
+            if (idx == RangeTask::BorrowedPoolIndex) return; // batch storage owns the descriptor
             if (idx >= kPoolSize) { delete task; return; } // 堆分配兜底任务
 
             // 清理残留数据
@@ -99,6 +104,7 @@ namespace JobSystem
             task->workFn = nullptr;
             task->workCtx = nullptr;
             task->workCleanup = nullptr;
+            task->workState = nullptr;
 
             uint64_t head = freeHead_.load(std::memory_order_relaxed);
             while (true)

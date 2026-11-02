@@ -243,13 +243,32 @@ namespace JobSystem
     static void RunWorkTask(RangeTask* task) noexcept
     {
         if (!task) return;
+        HandleState* state = task->workState;
+        const uint64_t previousBatchId = g_currentBatchId;
+        if (state)
+        {
+            const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
+            DebugBeginExec(id, 1, 1, false);
+            if (id) SetCurrentBatchId(id);
+        }
         try
         {
-            if (task->workFn) task->workFn(task->workCtx);
+            if (!state) { if (task->workFn) task->workFn(task->workCtx); }
+            else if (task->firstTile == static_cast<uint32_t>(DirectWorkKind::Scalar))
+                task->workFn(task->workCtx);
+            else if (task->firstTile == static_cast<uint32_t>(DirectWorkKind::Indexed))
+            {
+                auto fn = reinterpret_cast<void (*)(void*, int)>(task->workFn);
+                for (uint32_t i = 0; i < task->tileCount; ++i) fn(task->workCtx, static_cast<int>(i));
+            }
+            else
+                reinterpret_cast<void (*)(void*, int, int)>(task->workFn)(task->workCtx, 0, static_cast<int>(task->tileCount));
         }
         catch (...)
         {
+            if (state) RecordStateException(state, std::current_exception());
         }
+        if (state) { SetCurrentBatchId(previousBatchId); DebugEndExec(); }
         if (task->workCleanup)
         {
             try
@@ -258,9 +277,15 @@ namespace JobSystem
             }
             catch (...)
             {
+                if (state) RecordStateException(state, std::current_exception());
             }
         }
-        ChaseLevScheduler::s_taskPool_.Release(task);
+        if (state)
+        {
+            try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
+            ReleaseState(state);
+        }
+        else ChaseLevScheduler::s_taskPool_.Release(task);
     }
 
     void ChaseLevScheduler::ExecuteAndRelease(RangeTask* task, uint32_t workerIndex, TileAccount account) noexcept
@@ -273,8 +298,10 @@ namespace JobSystem
         }
         if (task->firstTile == kClaimTokenMarker)
         {
-            ExecuteClaimToken(task->batch, workerIndex, task->batchGen, account);   // workerCap 令牌：原子认领，内部已 taskDone
+            auto* batch = task->batch;
+            const uint32_t generation = task->batchGen;
             s_taskPool_.Release(task);
+            ExecuteClaimToken(batch, workerIndex, generation, account); // may retire the descriptor's storage
             return;
         }
         if (task->tileCount == 0)
@@ -288,6 +315,7 @@ namespace JobSystem
 
         // 调试面板
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
+        const uint64_t previousBatchId = g_currentBatchId;
         SetCurrentBatchId(batch->diagnosticId);
         E1::Begin();
         if (workerIndex < kMaxTrackedWorkers)
@@ -300,19 +328,19 @@ namespace JobSystem
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
         E1::End(workerIndex);
-        SetCurrentBatchId(0);
+        SetCurrentBatchId(previousBatchId);
         DebugEndExec();
 
         // 诊断计数
         if (workerIndex < kMaxTrackedWorkers)
-            tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(tasksExecuted[workerIndex], 1);
 
         // tile 计数按执行者口径（local/stolen/assist）
         switch (account)
         {
-        case TileAccount::Local:  g_localTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
-        case TileAccount::Stolen: g_stolenTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
-        case TileAccount::Assist: g_assistTiles.fetch_add(task->tileCount, std::memory_order_relaxed); break;
+        case TileAccount::Local:  RecordStatCount(g_localTiles, task->tileCount); break;
+        case TileAccount::Stolen: RecordStatCount(g_stolenTiles, task->tileCount); break;
+        case TileAccount::Assist: RecordStatCount(g_assistTiles, task->tileCount); break;
         }
 
         // 任务完成：pendingTasks--（可能触发退役）；携带本令牌的代次做迟到校验
@@ -320,7 +348,7 @@ namespace JobSystem
         {
             activeTasks.fetch_sub(1, std::memory_order_acq_rel);
             taskDone_(batch, task->batchGen);
-            totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(totalTasksDone, 1);
         }
 
         // 释放 RangeTask 回池
@@ -346,13 +374,13 @@ namespace JobSystem
             }
             ExecuteAndRelease(task, accountIndex, TileAccount::Assist);   // 内部按 Assist 口径记 tile
             // 主线程 assist 计数
-            g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-            g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(g_mainExecutedRanges, 1);
+            RecordStatCount(g_assistExecuted, 1);
             return true;
         }
 
         // 2. 从其他 worker deque 窃取（FIFO，1 CAS per victim）
-        g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
+        RecordStatCount(g_stealAttempts, 1);
         for (uint32_t offset = scanAllWorkers ? 0u : 1u; offset < workerCount_; ++offset)
         {
             const uint32_t victimIdx = (stealStart + offset) % workerCount_;
@@ -367,7 +395,7 @@ namespace JobSystem
             TileTask tileTask;
             if (victimDeque->StealTop(tileTask))
             {
-                g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
+                RecordStatCount(g_stealSuccesses, 1);
                 g_stealCount.fetch_add(1, std::memory_order_relaxed);
                 if (accountIndex < kMaxTrackedWorkers)
                     dequeStolen[accountIndex].fetch_add(1, std::memory_order_relaxed);
@@ -394,6 +422,7 @@ namespace JobSystem
 
                     DebugBeginExec(tileTask.batch->diagnosticId, tileTask.batch->tileCount,
                                    tileTask.batch->workerCount, false);
+                    const uint64_t previousBatchId = g_currentBatchId;
                     SetCurrentBatchId(tileTask.batch->diagnosticId);
                     E1::Begin();
                     if (accountIndex < kMaxTrackedWorkers)
@@ -408,16 +437,16 @@ namespace JobSystem
                     if (accountIndex < kMaxTrackedWorkers)
                         workerCurrentBatch[accountIndex].store(0, std::memory_order_relaxed);
                     E1::End(accountIndex);
-                    SetCurrentBatchId(0);
+                    SetCurrentBatchId(previousBatchId);
                     DebugEndExec();
 
                     if (accountIndex < kMaxTrackedWorkers)
-                        tasksExecuted[accountIndex].fetch_add(1, std::memory_order_relaxed);
+                        RecordStatCount(tasksExecuted[accountIndex], 1);
 
                     // 主线程 assist 计数
-                    g_mainExecutedRanges.fetch_add(1, std::memory_order_relaxed);
-                    g_assistExecuted.fetch_add(1, std::memory_order_relaxed);
-                    g_assistTiles.fetch_add(tileTask.tileCount, std::memory_order_relaxed);
+                    RecordStatCount(g_mainExecutedRanges, 1);
+                    RecordStatCount(g_assistExecuted, 1);
+                    RecordStatCount(g_assistTiles, tileTask.tileCount);
                     tileTask.batch->batchAssistTiles.fetch_add(
                         tileTask.tileCount, std::memory_order_relaxed);
 
@@ -426,7 +455,7 @@ namespace JobSystem
                     {
                         activeTasks.fetch_sub(1, std::memory_order_acq_rel);
                         taskDone_(tileTask.batch, tileTask.batchGen);
-                        totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                        RecordStatCount(totalTasksDone, 1);
                     }
                 }
                 return true;
@@ -591,7 +620,7 @@ namespace JobSystem
                 {
                     activeTasks.fetch_sub(1, std::memory_order_acq_rel);
                     taskDone_(t.batch, t.batchGen);
-                    totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(totalTasksDone, 1);
                 }
             }
         }
@@ -657,14 +686,26 @@ namespace JobSystem
         // workerCap 限制并行时实际参与 ≤ 令牌数。
         const bool capMode = batch->workerCount > 0 &&
             static_cast<uint32_t>(batch->workerCount) < wc;
-        // assist 打开时多投一个令牌：Complete() 的调用线程取走它，与 worker 共享
-        // 同一个 nextTile 认领计数器（caller-participates）。
-        const uint32_t assistExtra =
-            g_mainThreadAssistEnabled.load(std::memory_order_relaxed) ? 1u : 0u;
-        const uint32_t tokenTarget = (capMode
-            ? static_cast<uint32_t>(batch->workerCount) : wc) + assistExtra;
-        const uint32_t tokenCount = std::min(tokenTarget, tileCount);
-        if (tokenCount == 0) return;
+        // assist 开启时将调用线程计入令牌上限；所有令牌共享原子认领游标。
+        const uint32_t tokenTarget = static_cast<uint32_t>(ResolveExecutorCount(
+            static_cast<int>(capMode ? batch->workerCount : wc)));
+        const uint32_t tokenCapacity = std::min(tokenTarget, tileCount);
+        if (tokenCapacity == 0) return;
+        uint32_t tokenCount = tokenCapacity;
+        RangeTask* borrowed = nullptr;
+        if (batch->storage)
+        {
+            batch->storage->nextDispatchTask.store(0, std::memory_order_relaxed);
+            try
+            {
+                // 发布后描述符地址保持不变，额外令牌只预留已有槽位。
+                batch->storage->dispatchTasks.resize(tokenCapacity);
+                borrowed = batch->storage->dispatchTasks.data();
+                batch->storage->nextDispatchTask.store(1, std::memory_order_relaxed);
+                tokenCount = 1;
+            }
+            catch (...) {} // 描述符预留失败时使用现有池任务与同步兜底。
+        }
         batch->pendingTasks.store(tokenCount, std::memory_order_release);
         activeTasks.fetch_add(static_cast<int64_t>(tokenCount), std::memory_order_acq_rel);
         // 本批这一代的代次快照。所有令牌（入队的、以及兜底直执的）都携带它；
@@ -712,7 +753,8 @@ namespace JobSystem
             uint32_t allocated = 0;
             for (uint32_t i = 0; i < n; ++i)
             {
-                RangeTask* task = s_taskPool_.Acquire();
+                RangeTask* task = borrowed ? borrowed + base + i : s_taskPool_.Acquire();
+                if (borrowed) task->poolIndex = RangeTask::BorrowedPoolIndex;
                 if (!task)
                 {
                     task = new (std::nothrow) RangeTask();
@@ -751,7 +793,7 @@ namespace JobSystem
             }
             // 分配失败时这些逻辑 token 由 directTokens 表示而非队列项。
         }
-        totalTasksPushed.fetch_add(pushedTokens, std::memory_order_relaxed);
+        RecordStatCount(totalTasksPushed, pushedTokens);
 
         // 未入队 token 由本线程同步执行兜底（罕见：OOM/Stop 竞态），保证每个发布 tile 都被执行
         // 或达终态，pendingTasks 不会永久为正。
@@ -796,8 +838,43 @@ namespace JobSystem
     }
 
     // ============================================================
-    // ExecuteClaimToken — workerCap 令牌：原子认领 nextTile 直到空
+    // 参与令牌：按需发布，原子认领 nextTile 直到空
     // ============================================================
+
+    void ChaseLevScheduler::PublishDemandTokenIfNeeded(BatchState* batch, uint32_t batchGen) noexcept
+    {
+        auto* storage = batch->storage;
+        if (!storage) return;
+        uint32_t next = storage->nextDispatchTask.load(std::memory_order_relaxed);
+        const uint32_t capacity = static_cast<uint32_t>(storage->dispatchTasks.size());
+        if (next == 0 || next >= capacity) return;
+        const uint32_t executors = static_cast<uint32_t>(ResolveExecutorCount(static_cast<int>(WorkerCount())));
+        // 队列与在飞数仅作供给提示；工作所有权由原子认领与 pendingTasks 保证。
+        if (activeTasks.load(std::memory_order_relaxed) >= executors ||
+            injector_.ApproxSize() != 0) return;
+        if (batch->tilesRemaining.load(std::memory_order_relaxed) == 0 ||
+            (batch->sliceCount == 0 && batch->nextTile.load(std::memory_order_relaxed) >= batch->tileCount)) return;
+        if (!IsRunning()) return;
+        if (!storage->nextDispatchTask.compare_exchange_strong(next, next + 1, std::memory_order_relaxed)) return;
+        RangeTask* task = storage->dispatchTasks.data() + next;
+        task->poolIndex = RangeTask::BorrowedPoolIndex;
+        task->batch = batch;
+        task->batchGen = batchGen;
+        task->firstTile = kClaimTokenMarker;
+        task->tileCount = 1;
+        // 父令牌使 storage 保持存活；子令牌先登记引用，再向队列发布。
+        batch->pendingTasks.fetch_add(1, std::memory_order_acq_rel);
+        activeTasks.fetch_add(1, std::memory_order_acq_rel);
+        if (!injector_.Push(task))
+        {
+            // 未发布的预留直接回滚；正在执行的父令牌保证 pendingTasks 不会归零。
+            activeTasks.fetch_sub(1, std::memory_order_acq_rel);
+            batch->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+            return;
+        }
+        RecordStatCount(totalTasksPushed, 1);
+        if (g_submitDeferDepth.load(std::memory_order_relaxed) <= 0) WakePending();
+    }
 
     void ChaseLevScheduler::ExecuteClaimToken(BatchState* batch, uint32_t workerIndex, uint32_t batchGen, TileAccount account) noexcept
     {
@@ -810,23 +887,32 @@ namespace JobSystem
         // timing 诊断：记录 worker 进入批次（首/末 worker 时间）
         ChaseLevRecordWorkerEntry(batch);
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
+        const uint64_t previousBatchId = g_currentBatchId;
         SetCurrentBatchId(batch->diagnosticId);
         E1::Begin();
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
         const uint32_t end = batch->tileCount;
-        // 认领粒度随批次规模收缩（较小时降到 1），保证小批次每个 tile 可被独立认领——
-        // 阻塞型回调（worker 等待外部事件）时与 slice 语义等价；大批次维持 kClaimBatchSize=4。
+        const uint32_t claimWorkers = batch->workerCount > 0
+            ? std::min(workerCount_, batch->workerCount) : workerCount_;
+        const uint32_t claimExecutors = static_cast<uint32_t>(ResolveExecutorCount(static_cast<int>(claimWorkers)));
+        PublishDemandTokenIfNeeded(batch, batchGen);
+        // ECS tiles already group chunks by entity count. Claim them separately
+        // so the scheduler preserves that balancing granularity.
+        const bool ecsTiles = batch->tiles && end > 0 &&
+            (batch->tiles[0].kind == TileKind::ChunkCallbacks ||
+             batch->tiles[0].kind == TileKind::ChunkRange ||
+             batch->tiles[0].kind == TileKind::EntityBatchRange);
+        const uint32_t defaultClaimCap = ecsTiles ? 1u : kClaimBatchSize;
         // 注意 `tileCount / workers` 这一项保留 ⇒ 小批次自动退回细粒度，只有大批次被摊薄。
         // 上限可覆盖（优先级从高到低）：job 的 claimCapOverride（0 = 不覆盖）、
         // `ENTJOY_CLAIM_BATCH`（0 = 用内置默认）、内建 kClaimBatchSize。
         const uint32_t claimCap =
             (batch->claimCapOverride != 0) ? batch->claimCapOverride
-            : ((g_claimBatchSize != 0) ? g_claimBatchSize : kClaimBatchSize);
+            : ((g_claimBatchSize != 0) ? g_claimBatchSize : defaultClaimCap);
         // `ENTJOY_CLAIM_SPAN`：把"每次认领的元素跨度"钉住，而不是钉 tile 数 —— 只对薄 tile
-        // （itemsPerTile 小）抬高 cap；厚 tile 保持 cap（=4），以维持 8 个 worker 在 index 空间上的邻近
-        // （Melee 依赖它的空间复用）。
+        // （itemsPerTile 小）抬高 cap；较厚 tile 沿用当前认领上限，限制尾部工作量。
         // 另有调用点声明腿（`claimSpanOverride`：单位=元素、与 tile 厚薄无关），优先级高于该全局规则。
         uint32_t capEff = claimCap;
         // ⚠ 两条规则都只作用于"等宽 GeneralRange"，且不能只看 totalElements 的数值：chunk/entity 路
@@ -870,7 +956,7 @@ namespace JobSystem
                 {
                     uint32_t c = span / itemsPerTile;
                     if (c < claimCap) c = claimCap;
-                    const uint32_t fair = batch->tileCount / std::max(1u, workerCount_);
+                    const uint32_t fair = batch->tileCount / claimExecutors;
                     if (c > fair) c = fair;
                     if (c < 1) c = 1;
                     capEff = c;
@@ -878,12 +964,14 @@ namespace JobSystem
             }
         }
         uint32_t step = std::clamp(
-            batch->tileCount / std::max(1u, workerCount_),
+            batch->tileCount / claimExecutors,
             1u, capEff);
         uint32_t executed = 0;
         // `ENTJOY_TILE_FASTPATH`：firstTileAt 每个令牌只判一次（逐 tile 判会多一次 load+compare；
         // 语义差 = "首个令牌开始" vs "首个 tile 开始"，只影响 JCC execSpan/诊断）。
-        if (g_tileFastPath && end > 0 && batch->firstTileAt.load(std::memory_order_relaxed) == 0)
+        if (g_tileFastPath && end > 0 &&
+            (batch->funcHash != 0 || batch->timingOn || g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) &&
+            batch->firstTileAt.load(std::memory_order_relaxed) == 0)
         {
             uint64_t empty = 0;
             batch->firstTileAt.compare_exchange_strong(empty, MonotonicNowNs(),
@@ -904,15 +992,16 @@ namespace JobSystem
             TileAcctGroupBegin();
             if (mySlice < batch->sliceCount)
             {
-                const uint32_t sliceEnd = batch->sliceEnd[mySlice];
+                const uint32_t sliceEnd = batch->storage->slices->ends[mySlice];
                 while (true)
                 {
                     const uint64_t cp0 = ClaimProbeBegin(claimProbe);
-                    const uint32_t t = batch->sliceCursors[mySlice].next.fetch_add(
+                    const uint32_t t = batch->storage->slices->cursors[mySlice].next.fetch_add(
                         step, std::memory_order_relaxed);
                     ClaimProbeEnd(claimProbe, cp0);
                     if (t >= sliceEnd) break;
                     const uint32_t last = std::min(sliceEnd, t + step);
+                    PublishDemandTokenIfNeeded(batch, batchGen);
                     const uint32_t fast = TileExecuteUniformRun(batch, t, last - t);
                     if (fast > 0) { executed += fast; continue; }
                     for (uint32_t i = t; i < last; ++i) { executor_(batch, i); ++executed; }
@@ -924,15 +1013,16 @@ namespace JobSystem
             {
                 const uint32_t i = (mySlice + workerIndex + k) % slices;
                 if (i == mySlice) continue;
-                const uint32_t sliceEnd = batch->sliceEnd[i];
+                const uint32_t sliceEnd = batch->storage->slices->ends[i];
                 while (true)
                 {
                     const uint64_t cp0 = ClaimProbeBegin(claimProbe);
-                    const uint32_t t = batch->sliceCursors[i].next.fetch_add(
+                    const uint32_t t = batch->storage->slices->cursors[i].next.fetch_add(
                         step, std::memory_order_relaxed);
                     ClaimProbeEnd(claimProbe, cp0);
                     if (t >= sliceEnd) break;
                     const uint32_t last = std::min(sliceEnd, t + step);
+                    PublishDemandTokenIfNeeded(batch, batchGen);
                     const uint32_t fast = TileExecuteUniformRun(batch, t, last - t);
                     if (fast > 0) { executed += fast; continue; }
                     for (uint32_t u = t; u < last; ++u) { executor_(batch, u); ++executed; }
@@ -955,6 +1045,7 @@ namespace JobSystem
             const uint32_t last = std::min(end, start + step);
             // 等宽路（内批 ≤ 16 的调用点，如对齐档 batch=1 的 MarkDead/Flow 各趟）：
             // 逐 tile 仍各一次内核调用（契约不变），但走直调把链路从多跳压成 1 跳。
+            PublishDemandTokenIfNeeded(batch, batchGen);
             const uint32_t fast = TileExecuteUniformRun(batch, start, last - start);
             if (fast > 0) { executed += fast; continue; }
             for (uint32_t t = start; t < last; ++t)
@@ -968,27 +1059,27 @@ namespace JobSystem
         // 令牌认领的 tile 按执行者口径计数（local/stolen/assist 三态）
         switch (account)
         {
-        case TileAccount::Local:  g_localTiles.fetch_add(executed, std::memory_order_relaxed); break;
-        case TileAccount::Stolen: g_stolenTiles.fetch_add(executed, std::memory_order_relaxed); break;
-        case TileAccount::Assist: g_assistTiles.fetch_add(executed, std::memory_order_relaxed); break;
+        case TileAccount::Local:  RecordStatCount(g_localTiles, executed); break;
+        case TileAccount::Stolen: RecordStatCount(g_stolenTiles, executed); break;
+        case TileAccount::Assist: RecordStatCount(g_assistTiles, executed); break;
         }
-        g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+        RecordStatCount(g_workerExecutedRanges, 1);
 
         ClaimProbeFlush();
         if (workerIndex < kMaxTrackedWorkers)
             workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
         E1::End(workerIndex);
-        SetCurrentBatchId(0);
+        SetCurrentBatchId(previousBatchId);
         DebugEndExec();
         if (workerIndex < kMaxTrackedWorkers)
-            tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(tasksExecuted[workerIndex], 1);
 
         // 令牌完成：pendingTasks--（双条件退役由 ChaseLevTaskDone 检查；带代次做迟到校验）
         if (taskDone_)
         {
             activeTasks.fetch_sub(1, std::memory_order_acq_rel);
             taskDone_(batch, batchGen);
-            totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(totalTasksDone, 1);
         }
     }
 
@@ -1019,10 +1110,32 @@ namespace JobSystem
         task->workFn = fn;
         task->workCtx = ctx;
         task->workCleanup = cleanup;
+        task->workState = nullptr;
+
+        return PublishWorkTask(task);
+    }
+
+    bool ChaseLevScheduler::SubmitDirectWork(DirectWorkKind kind, void (*fn)(), void* ctx, int length,
+        void (*cleanup)(void*), HandleState* state) noexcept
+    {
+        if (!fn || !running_.load(std::memory_order_acquire) || quit_.load(std::memory_order_acquire)) return false;
+        RangeTask* task = &state->directTask;
+        task->batch = nullptr;
+        task->firstTile = static_cast<uint32_t>(kind);
+        task->tileCount = static_cast<uint32_t>(length);
+        task->workFn = reinterpret_cast<void (*)(void*)>(fn);
+        task->workCtx = ctx;
+        task->workCleanup = cleanup;
+        task->workState = state;
+        return PublishWorkTask(task);
+    }
+
+    bool ChaseLevScheduler::PublishWorkTask(RangeTask* task) noexcept
+    {
 
         if (!PushTaskBackoff(task))
         {
-            s_taskPool_.Release(task);
+            if (!task->workState) s_taskPool_.Release(task);
             return false;
         }
 
@@ -1178,7 +1291,7 @@ namespace JobSystem
             // ---- 1. 本地 PopBottom（LIFO，owner-only，零竞争）----
             got = myDeque->PopBottom(task);
             if (got && workerIndex < kMaxTrackedWorkers)
-                dequePopped[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                RecordStatCount(dequePopped[workerIndex], 1);
 
             if (got && task.batch && task.tileCount > 0)
             {
@@ -1211,15 +1324,16 @@ namespace JobSystem
 
                 // 执行从 deque 取出的任务
                 if (workerIndex < kMaxTrackedWorkers)
-                    tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
-                g_localTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
-                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(tasksExecuted[workerIndex], 1);
+                RecordStatCount(g_localTiles, task.tileCount);
+                RecordStatCount(g_workerExecutedRanges, 1);
 
                 uint32_t end = task.firstTile + task.tileCount;
                 if (end > task.batch->tileCount) end = task.batch->tileCount;
 
                 DebugBeginExec(task.batch->diagnosticId, task.batch->tileCount,
                                task.batch->workerCount, false);
+                const uint64_t previousBatchId = g_currentBatchId;
                 SetCurrentBatchId(task.batch->diagnosticId);
                 E1::Begin();
                 if (workerIndex < kMaxTrackedWorkers)
@@ -1234,7 +1348,7 @@ namespace JobSystem
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
                 E1::End(workerIndex);
-                SetCurrentBatchId(0);
+                SetCurrentBatchId(previousBatchId);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -1242,7 +1356,7 @@ namespace JobSystem
                 {
                     activeTasks.fetch_sub(1, std::memory_order_acq_rel);
                     taskDone_(task.batch, task.batchGen);
-                    totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(totalTasksDone, 1);
                 }
                 continue;
             }
@@ -1266,7 +1380,7 @@ namespace JobSystem
                     rangeTask->batchGen
                 });
                 if (workerIndex < kMaxTrackedWorkers)
-                    dequePushed[workerIndex].fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(dequePushed[workerIndex], 1);
 
                 // 释放 RangeTask 对象（已推入 deque，不再需要）
                 s_taskPool_.Release(rangeTask);
@@ -1276,7 +1390,7 @@ namespace JobSystem
             }
 
             // ---- 3. 从其他 worker deque 窃取（FIFO，1 CAS per victim）----
-            g_stealAttempts.fetch_add(1, std::memory_order_relaxed);
+            RecordStatCount(g_stealAttempts, 1);
             for (uint32_t offset = 1; offset < workerCount_; ++offset)
             {
                 const uint32_t victimIdx = (workerIndex + offset) % workerCount_;
@@ -1287,7 +1401,7 @@ namespace JobSystem
                 if (workers_[victimIdx]->deque->StealTop(task))
                 {
                     got = true;
-                    g_stealSuccesses.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(g_stealSuccesses, 1);
                     g_stealCount.fetch_add(1, std::memory_order_relaxed);
                     if (workerIndex < kMaxTrackedWorkers)
                         dequeStolen[workerIndex].fetch_add(1, std::memory_order_relaxed);
@@ -1310,15 +1424,16 @@ namespace JobSystem
                 ChaseLevRecordWorkerEntry(task.batch);
 
                 if (workerIndex < kMaxTrackedWorkers)
-                    tasksExecuted[workerIndex].fetch_add(1, std::memory_order_relaxed);
-                g_stolenTiles.fetch_add(task.tileCount, std::memory_order_relaxed);
-                g_workerExecutedRanges.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(tasksExecuted[workerIndex], 1);
+                RecordStatCount(g_stolenTiles, task.tileCount);
+                RecordStatCount(g_workerExecutedRanges, 1);
 
                 uint32_t end = task.firstTile + task.tileCount;
                 if (end > task.batch->tileCount) end = task.batch->tileCount;
 
                 DebugBeginExec(task.batch->diagnosticId, task.batch->tileCount,
                                task.batch->workerCount, false);
+                const uint64_t previousBatchId = g_currentBatchId;
                 SetCurrentBatchId(task.batch->diagnosticId);
                 E1::Begin();
                 if (workerIndex < kMaxTrackedWorkers)
@@ -1333,7 +1448,7 @@ namespace JobSystem
                 if (workerIndex < kMaxTrackedWorkers)
                     workerCurrentBatch[workerIndex].store(0, std::memory_order_relaxed);
                 E1::End(workerIndex);
-                SetCurrentBatchId(0);
+                SetCurrentBatchId(previousBatchId);
                 DebugEndExec();
 
                 // 所有执行的任务都需要 taskDone（pendingTasks--）
@@ -1341,7 +1456,7 @@ namespace JobSystem
                 {
                     activeTasks.fetch_sub(1, std::memory_order_acq_rel);
                     taskDone_(task.batch, task.batchGen);
-                    totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                    RecordStatCount(totalTasksDone, 1);
                 }
                 continue;
             }
@@ -1389,6 +1504,7 @@ namespace JobSystem
                             }
                             uint32_t end2 = task.firstTile + task.tileCount;
                             if (end2 > task.batch->tileCount) end2 = task.batch->tileCount;
+                            const uint64_t previousBatchId = g_currentBatchId;
                             SetCurrentBatchId(task.batch->diagnosticId);
                             E1::Begin();
                             TileAcctGroupBegin();
@@ -1396,13 +1512,13 @@ namespace JobSystem
                                 executor_(task.batch, t);
                             TileAcctGroupFlush(task.batch);
                             E1::End(workerIndex);
-                            SetCurrentBatchId(0);
+                            SetCurrentBatchId(previousBatchId);
                             // 从 deque 执行的任务也需要 taskDone
                             if (taskDone_)
                             {
                                 activeTasks.fetch_sub(1, std::memory_order_acq_rel);
                                 taskDone_(task.batch, task.batchGen);
-                                totalTasksDone.fetch_add(1, std::memory_order_relaxed);
+                                RecordStatCount(totalTasksDone, 1);
                             }
                         }
                     }

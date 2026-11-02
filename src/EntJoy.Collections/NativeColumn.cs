@@ -38,7 +38,8 @@ namespace EntJoy.Collections
         public T* GetElementPtr(int index)
         {
             if (_chunks == null) return _flat + index;
-            int chunk = _shift >= 0 ? index >> _shift : index / _capacity;
+            if (_shift >= 0) return _chunks[index >> _shift] + (index & (_capacity - 1));
+            int chunk = index / _capacity;
             return _chunks[chunk] + index - chunk * _capacity;
         }
 

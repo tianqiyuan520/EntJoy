@@ -10,6 +10,9 @@ namespace EntJoy.ECS.Tests
         [Theory]
         [InlineData(4)]
         [InlineData(3)]
+        [InlineData(128)]
+        [InlineData(192)]
+        [InlineData(256)]
         public unsafe void ChunkViews_CrossBoundariesAndCopyWithoutOwningMemory(int capacity)
         {
             var first = new NativeArray<int>(capacity);

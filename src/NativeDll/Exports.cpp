@@ -8,7 +8,10 @@
 #include "JobProfiler.h"
 #include "JobDebuggerGUI.h"
 #include "NativeContainers.h"
+#include "JobContextPool.h"
 #include <cstdio>
+#include <cstring>
+#include <limits>
 
 // 加载期输出当前 SIMD 配置（DLL 加载时执行）
 //
@@ -40,17 +43,40 @@ static JobSystem::HandleState* fromHandle(void* ptr)
     return static_cast<JobSystem::HandleState*>(ptr);
 }
 
-static void* toHandle(const JobSystem::JobHandle& handle)
+static void* toHandle(JobSystem::JobHandle& handle)
 {
-    if (auto* state = handle.State())
-    {
-        JobSystem::JobHandle::Acquire(state);
-        return static_cast<void*>(state);
-    }
-    return nullptr;
+    return static_cast<void*>(handle.ReleaseOwnership());
 }
 
 namespace {
+    // The C ABI takes context ownership on entry, including rejected submissions.
+    void CleanupFailedSchedule(ContextCleanupFunc cleanup, void* context) noexcept
+    {
+        try { if (cleanup) cleanup(context); } catch (...) {}
+    }
+
+    template <typename Submit>
+    int ScheduleCopiedContext(const void* source, int bytes, void** outHandle, Submit&& submit) noexcept
+    {
+        if (!outHandle) return 1;
+        *outHandle = nullptr;
+        constexpr int headerSize = 2 * sizeof(void*);
+        if (bytes < 0 || bytes > (std::numeric_limits<int>::max)() - headerSize || (bytes > 0 && !source))
+            return 1;
+        void* context = nullptr;
+        if (bytes > 0)
+        {
+            auto* raw = static_cast<char*>(JobSystem_RentJobContext(bytes + headerSize));
+            if (!raw) return 2;
+            std::memcpy(raw, &bytes, sizeof(bytes));
+            context = raw + headerSize;
+            std::memcpy(context, source, static_cast<size_t>(bytes));
+        }
+        // Existing scheduling exports consume context on entry, including failure cleanup.
+        *outHandle = submit(context);
+        return *outHandle ? 0 : 3;
+    }
+
     // 提交期 defer 窗口的异常安全守卫：异常路径析构也保证 fetch_sub 与 fetch_add 配对，
     // 防 depth 泄漏导致后续 SubmitBatch 永久跳过唤醒。
     struct DeferWindow {
@@ -192,7 +218,24 @@ extern "C"
             auto handle = JobSystem::Scheduler::Schedule(func, context, cleanup, dep);
             return toHandle(handle);
         }
-        catch (...) { return nullptr; }
+        catch (...) { CleanupFailedSchedule(cleanup, context); return nullptr; }
+    }
+
+    int JobSystem_ScheduleCopiedContext(JobFunc func, const void* source, int bytes, void* dependency, void** outHandle)
+    {
+        return ScheduleCopiedContext(source, bytes, outHandle, [&](void* context) {
+            return JobSystem_Schedule(func, context, &JobSystem_ReleaseJobContext, dependency);
+        });
+    }
+
+    int JobSystem_ScheduleParallelForCopiedContext(BatchJobFunc func, const void* source, int bytes,
+        int length, int batchSize, int claimGeom, int indexedRanges, void* dependency, void** outHandle)
+    {
+        return ScheduleCopiedContext(source, bytes, outHandle, [&](void* context) {
+            return indexedRanges
+                ? JobSystem_ScheduleParallelForRange(func, context, &JobSystem_ReleaseJobContext, length, batchSize, claimGeom, dependency)
+                : JobSystem_ScheduleParallelForBatchEx(func, context, &JobSystem_ReleaseJobContext, length, batchSize, claimGeom, dependency);
+        });
     }
 
     void* JobSystem_ScheduleFor(IndexJobFunc func, void* context, ContextCleanupFunc cleanup,
@@ -206,7 +249,7 @@ extern "C"
             auto handle = JobSystem::Scheduler::ScheduleFor(func, context, length, cleanup, dep);
             return toHandle(handle);
         }
-        catch (...) { return nullptr; }
+        catch (...) { CleanupFailedSchedule(cleanup, context); return nullptr; }
     }
 
     void* JobSystem_ScheduleParallelForBatch(BatchJobFunc func, void* context, ContextCleanupFunc cleanup,
@@ -234,7 +277,24 @@ extern "C"
             auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length, batchSize, cleanup, dep, geom);
             return toHandle(handle);
         }
-        catch (...) { return nullptr; }
+        catch (...) { CleanupFailedSchedule(cleanup, context); return nullptr; }
+    }
+
+    void* JobSystem_ScheduleParallelForRange(BatchJobFunc func, void* context, ContextCleanupFunc cleanup,
+        int length, int batchSize, int claimGeom, void* dependency)
+    {
+        try
+        {
+            JobSystem::JobHandle dep;
+            if (dependency) dep = JobSystem::JobHandle(fromHandle(dependency), true);
+            const uint32_t geom = claimGeom == static_cast<int>(JobSystem::kClaimGeomSpread)
+                ? JobSystem::kClaimGeomSpread : claimGeom == static_cast<int>(JobSystem::kClaimGeomAdjacent)
+                    ? JobSystem::kClaimGeomAdjacent : JobSystem::kClaimGeomAuto;
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(func, context, length,
+                batchSize, cleanup, dep, geom, true);
+            return toHandle(handle);
+        }
+        catch (...) { CleanupFailedSchedule(cleanup, context); return nullptr; }
     }
 
     int JobSystem_ScheduleBatch(const JobBatchDesc* descs, int count, void** outHandles)
@@ -484,20 +544,47 @@ extern "C"
         JobSystem::JobHandle::Release(fromHandle(handle));
     }
 
+    void* JobSystem_RentJobContext(int bytes)
+    {
+        try { return JobSystem::ContextMemory::Rent(bytes); }
+        catch (...) { return nullptr; }
+    }
+
+    void JobSystem_ReturnJobContext(void* context, int bytes)
+    {
+        try { JobSystem::ContextMemory::Return(context, bytes); }
+        catch (...) { std::free(context); }
+    }
+
+    void JobSystem_ReleaseJobContext(void* context)
+    {
+        if (!context) return;
+        constexpr int headerSize = 2 * sizeof(void*);
+        auto* raw = static_cast<char*>(context) - headerSize;
+        int bytes;
+        std::memcpy(&bytes, raw, sizeof(bytes));
+        JobSystem_ReturnJobContext(raw, bytes + headerSize);
+    }
+
+    uint64_t JobSystem_GetCurrentBatchId()
+    {
+        return JobSystem::g_currentBatchId;
+    }
+
+    void JobSystem_ReleaseHandles(void** handles, int count)
+    {
+        if (!handles || count <= 0) return;
+        for (int i = 0; i < count; ++i)
+            if (handles[i]) JobSystem::JobHandle::Release(fromHandle(handles[i]));
+    }
+
     void* JobSystem_CombineDependencies(void** handles, int count)
     {
         if (count <= 0 || !handles)
             return nullptr;
         try
         {
-            std::vector<JobSystem::JobHandle> vec;
-            vec.reserve(count);
-            for (int i = 0; i < count; ++i)
-            {
-                if (handles[i])
-                    vec.emplace_back(fromHandle(handles[i]), true);
-            }
-            auto combined = JobSystem::JobHandle::CombineDependencies(vec);
+            auto combined = JobSystem::CombineBorrowedHandles(handles, count);
             return toHandle(combined);
         }
         catch (...) { return nullptr; }

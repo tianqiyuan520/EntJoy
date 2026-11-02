@@ -88,16 +88,14 @@ namespace JobSystem
         return cc->chunks[unit].entityCount;
     }
 
-    // 实体数衡 tile 目标：每块约 targetTilesPerWorker 个 worker、约 totalEntities/(workerCount*4) 个实体。
-    // 钳制上下限：下限防"极度稀疏实体的空块贪块"，上限防"大工作负载下单块过重/失衡"。
-    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount) noexcept
+    // Balance contiguous ECS ranges by entity count while retaining chunk boundaries.
+    // The minimum limits dispatch overhead for small or sparse queries.
+    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount, int tilesPerWorker) noexcept
     {
-        // 保持足够的并行粒度（~16 tiles/worker）且每块实体数均衡：
-        // 小块多 → 并行填充充分、尾部均衡；实体均衡 → 稀疏/聚集实体不再让单块过重。
-        constexpr int kTargetTilesPerWorker = 16;
         constexpr int kMinEntitiesPerTile = 256;      // 防"极度稀疏实体的空块贪块"导致块数爆炸
         constexpr int kMaxEntitiesPerTile = 1 << 18;  // 262144，仅防超大均匀负载单块过粗
-        const int64_t targetTiles = std::max<int64_t>(1, static_cast<int64_t>(workerCount) * kTargetTilesPerWorker);
+        const int64_t targetTiles = std::max<int64_t>(1,
+            static_cast<int64_t>(workerCount) * std::max(1, tilesPerWorker));
         int64_t target = CeilDiv(totalEntities, targetTiles);
         target = std::clamp(target, static_cast<int64_t>(kMinEntitiesPerTile), static_cast<int64_t>(kMaxEntitiesPerTile));
         return static_cast<int>(std::max<int64_t>(1, target));
@@ -112,7 +110,7 @@ namespace JobSystem
         if (targetEntities < 1) targetEntities = 1;
         int tileCount = 0;
         int unitStart = 0;
-        long acc = 0;
+        int64_t acc = 0;
         for (int unit = 0; unit < itemCount; ++unit)
         {
             acc += UnitEntityCount(cc, kind, unit);
@@ -258,52 +256,32 @@ namespace JobSystem
     thread_local ThreadBatchStorageCache t_batchStorageCache;
 
     // ============================================================
-    // 批上下文池（A）：GeneralBatchContext / ChunkBatchContext 去 new/delete
+    // ChunkBatchContext pool: thread-local cache and shared pool.
     // 结构与 BatchStorage 同款：线程本地缓存（零锁命中） + 共享池（缓存空/满时批量迁移）。
     // 必要性：上下文在主线程获取、由完成该批的线程（多为 worker）释放 ⇒ 只有
     // 两级池才能让主线程的 acquire 命中（worker 释放的实例经共享池回到主线程）。
     // ============================================================
     std::mutex g_ctxPoolMutex;
-    std::vector<GeneralBatchContext*> g_generalCtxPool;
     std::vector<ChunkBatchContext*> g_chunkCtxPool;
     constexpr size_t kCtxCacheCap = 16;
     constexpr size_t kMaxPooledCtx = 256;
 
     struct ThreadContextCache
     {
-        std::vector<GeneralBatchContext*> general;
         std::vector<ChunkBatchContext*> chunk;
         ~ThreadContextCache()
         {
-            if (general.empty() && chunk.empty()) return;
+            if (chunk.empty()) return;
             std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
-            for (auto* p : general)
-            {
-                if (g_generalCtxPool.size() < kMaxPooledCtx) g_generalCtxPool.push_back(p);
-                else delete p;
-            }
             for (auto* p : chunk)
             {
                 if (g_chunkCtxPool.size() < kMaxPooledCtx) g_chunkCtxPool.push_back(p);
                 else delete p;
             }
-            general.clear();
             chunk.clear();
         }
     };
     thread_local ThreadContextCache t_ctxCache;
-
-    static void SpillGeneralContextCacheToSharedPool()
-    {
-        if (t_ctxCache.general.empty()) return;
-        std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
-        for (auto* p : t_ctxCache.general)
-        {
-            if (g_generalCtxPool.size() < kMaxPooledCtx) g_generalCtxPool.push_back(p);
-            else delete p;
-        }
-        t_ctxCache.general.clear();
-    }
 
     static void SpillChunkContextCacheToSharedPool()
     {
@@ -315,56 +293,6 @@ namespace JobSystem
             else delete p;
         }
         t_ctxCache.chunk.clear();
-    }
-
-    GeneralBatchContext* AcquireGeneralBatchContext()
-    {
-        if (!t_ctxCache.general.empty())
-        {
-            auto* p = t_ctxCache.general.back();
-            t_ctxCache.general.pop_back();
-            return p;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
-            if (!g_generalCtxPool.empty())
-            {
-                auto* p = g_generalCtxPool.back();
-                g_generalCtxPool.pop_back();
-                for (size_t i = 1; i < kCtxCacheCap && !g_generalCtxPool.empty(); ++i)
-                {
-                    t_ctxCache.general.push_back(g_generalCtxPool.back());
-                    g_generalCtxPool.pop_back();
-                }
-                return p;
-            }
-        }
-        return new GeneralBatchContext{};
-    }
-
-    void ReleaseGeneralBatchContext(GeneralBatchContext* bc) noexcept
-    {
-        if (!bc) return;
-        // 归还前清空引用型字段：池中实例不得留下上次 job 的指针（防误用；acquire 后调用方整体赋值）。
-        bc->indexFunc = nullptr;
-        bc->batchFunc = nullptr;
-        bc->originalContext = nullptr;
-        bc->originalCleanup = nullptr;
-        bc->funcHash = 0;
-        try
-        {
-            if (t_ctxCache.general.size() < kCtxCacheCap)
-            {
-                t_ctxCache.general.push_back(bc);
-                return;
-            }
-            SpillGeneralContextCacheToSharedPool();
-            t_ctxCache.general.push_back(bc);
-        }
-        catch (...)
-        {
-            delete bc;   // 池化失败绝不吞掉实例（否则内存泄漏）
-        }
     }
 
     ChunkBatchContext* AcquireChunkBatchContext()
@@ -421,7 +349,6 @@ namespace JobSystem
     // Shutdown 路径：主线程缓存先交还共享池，再清空共享池（与 BatchStorage 同序）。
     void FlushBatchContextCacheToSharedPool()
     {
-        SpillGeneralContextCacheToSharedPool();
         SpillChunkContextCacheToSharedPool();
     }
 
@@ -430,16 +357,13 @@ namespace JobSystem
     // 避免在这里删掉可能仍被在飞批次引用的对象。
     void ClearBatchContextPool() noexcept
     {
-        std::vector<GeneralBatchContext*> g;
         std::vector<ChunkBatchContext*> c;
         try
         {
             std::lock_guard<std::mutex> lock(g_ctxPoolMutex);
-            g.swap(g_generalCtxPool);
             c.swap(g_chunkCtxPool);
         }
         catch (...) { return; }
-        for (auto* p : g) delete p;
         for (auto* p : c) delete p;
     }
 
@@ -630,10 +554,12 @@ namespace JobSystem
             ? CurrentThreadCyclesForDiagnostics() : 0;
         const int rangeStartLogicalCore = timingEnabled
             ? CurrentProcessorIndexForDiagnostics() : -1;
-        // 无条件记录 firstTileAt（JCC perElem 纯执行口径 + execSpan 诊断共用）。
+        // Record first execution when JCC or an execution-timing consumer needs it.
         // load 快速路径：首个 tile 之后仅 1 次 relaxed load（~1ns/tile），零 MonotonicNowNs 重复调用。
         // F4：`tileFast` 下已在认领令牌开头设过一次（ChaseLevScheduler::ExecuteClaimToken）⇒ 这里整段跳过。
-        if (!batch->tileFast && batch->firstTileAt.load(std::memory_order_relaxed) == 0)
+        if (!batch->tileFast &&
+            (batch->funcHash != 0 || batch->timingOn || g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) &&
+            batch->firstTileAt.load(std::memory_order_relaxed) == 0)
         {
             uint64_t empty = 0;
             batch->firstTileAt.compare_exchange_strong(
@@ -701,17 +627,9 @@ namespace JobSystem
         return true;
     }
 
-    // 等宽 tile 的逐 tile 直调（契约不变：每个 tile 仍恰好一次内核调用）。把 `executor_` →
-    // `ChaseLevExecuteTile` → `TryExecuteOneTile` → `batch->executeTile` → `GeneralExecuteTile` →
-    // `bc->batchFunc` 的多跳压成 `bc->batchFunc(...)` 一跳，并跳过诊断未开启时不需要的逐 tile 判据
-    // （边界检查、等宽派生乘法、trace/timing/firstTileAt、prefetch）。
-    // ⚠ 连续 tile 的融合执行会违反"batch=1 每 tile 恰好一次内核调用"契约（JobSystemTests 断言），不可做。
-    //
-    // 适用条件（任一不满足 ⇒ 返回 0，调用方回退到通用逐 tile 路径，语义/诊断逐位不变）：
-    //   · `uniformTileSize != 0`（等宽 GeneralRange ⇒ 派生是纯算术，无越界）
-    //   · `context` 是 GeneralBatchContext、`batchFunc` 非空、`perKeyIndex < 0`（per-job 记账关）
-    //   · trace 与 timing 诊断均关
-    // 记账与异常协议与通用路径逐位相同（组内累计 `run`，异常记录第一个后继续）。
+    // Execute a claimed uniform run without the generic tile dispatch chain.
+    // Indexed adapters may traverse the contiguous run in one call; explicit
+    // batch callbacks retain one call per tile. Diagnostics use the generic path.
     uint32_t TileExecuteUniformRun(BatchState* batch, uint32_t tileIndex, uint32_t runTiles) noexcept
     {
         if (!batch || batch->uniformTileSize == 0 || runTiles == 0) return 0;
@@ -730,7 +648,16 @@ namespace JobSystem
         const uint32_t size = batch->uniformTileSize;
         const uint32_t total = batch->totalElements;
         uint32_t done = 0;
-        for (uint32_t k = 0; k < run; ++k)
+        if (bc->indexedRanges)
+        {
+            const uint32_t first = tileIndex * size;
+            const uint32_t last = static_cast<uint32_t>(std::min<uint64_t>(total,
+                static_cast<uint64_t>(tileIndex + run) * size));
+            try { bc->batchFunc(bc->originalContext, static_cast<int>(first), static_cast<int>(last - first)); }
+            catch (...) { RecordStateException(batch->handle, std::current_exception()); }
+            done = run;
+        }
+        else for (uint32_t k = 0; k < run; ++k)
         {
             const uint32_t first = (tileIndex + k) * size;
             if (first >= total) break;
@@ -758,9 +685,6 @@ namespace JobSystem
         }
         return done;
     }
-
-    // 连续等宽 tile 不做融合执行：每个 tile 恰好一次内核调用是已发布的语义
-    // （`JobSystemTests` 断言 `batch=1 must invoke the kernel exactly once per tile`）。
 
     // 批拓扑/启停斜坡记账的开关：`ENTJOY_DIAG_E1=1` 或原生活动面板开启时才记。
     // 为什么必须门控：这两处每批各执行一次，其中 `workerSlotsEntered.fetch_add` 是
@@ -824,8 +748,10 @@ namespace JobSystem
 
     static void RecordFinalizedBatchTiming(BatchState* batch) noexcept
     {
-        // Always retain cheap batch-boundary timing. Per-tile CPU/core/cycle
-        // diagnostics remain gated by g_timingDiagnosticsEnabled.
+        // The sample reservoir takes a global lock. Record it only while a
+        // timing consumer is active; completion and retirement do not use it.
+        if (!g_timingDiagnosticsEnabled.load(std::memory_order_relaxed) &&
+            !g_nativeActivityCaptureEnabled.load(std::memory_order_relaxed)) return;
         const uint64_t now = MonotonicNowNs();
         const uint64_t published = batch->publishedAt.load(std::memory_order_acquire);
         const uint64_t firstWorker = batch->firstWorkerAt.load(std::memory_order_acquire);
@@ -913,8 +839,7 @@ namespace JobSystem
         {
             RecordStateException(state, std::current_exception());
             state->completed.store(true, std::memory_order_release);
-            state->completed.notify_all();
-            state->completedCv.notify_all();
+            state->NotifyBlockedWaiters();
         }
         state->backendRetired.store(true, std::memory_order_release);
         state->backendRetired.notify_all();
@@ -968,8 +893,7 @@ namespace JobSystem
             // 完成回调通常由 CompleteState 兜住；平台分配/锁失败不得逃出 noexcept tile 边界。
             RecordStateException(state, std::current_exception());
             state->completed.store(true, std::memory_order_release);
-            state->completed.notify_all();
-            state->completedCv.notify_all();
+            state->NotifyBlockedWaiters();
         }
         g_completingBatchState = previousCompletingState;
         if (e1)
@@ -1281,21 +1205,7 @@ namespace JobSystem
     void CleanupGeneralContext(void* ctx)
     {
         auto* bc = static_cast<GeneralBatchContext*>(ctx);
-        try
-        {
-            if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
-        }
-        catch (...)
-        {
-            ReleaseGeneralBatchContext(bc);
-            throw;
-        }
-        ReleaseGeneralBatchContext(bc);
-    }
-
-    void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept
-    {
-        ReleaseGeneralBatchContext(static_cast<GeneralBatchContext*>(ctx));
+        if (bc->originalCleanup) bc->originalCleanup(bc->originalContext);
     }
 
     // ============================================================
@@ -1381,8 +1291,7 @@ namespace JobSystem
         {
             RecordStateException(state, std::current_exception());
             state->completed.store(true, std::memory_order_release);
-            state->completed.notify_all();
-            state->completedCv.notify_all();
+            state->NotifyBlockedWaiters();
         }
         ReleaseState(state);   // 打包侧在飞引用（= CreateState 的初始引用）
     }
@@ -1415,6 +1324,7 @@ namespace JobSystem
             auto* state = job.state;
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
             DebugBeginExec(id, 1, 1, false);   // 每 job 一个面板窗口（1 tile / 1 线程）
+            const uint64_t previousBatchId = g_currentBatchId;
             if (id != 0) SetCurrentBatchId(id);
             try
             {
@@ -1424,7 +1334,7 @@ namespace JobSystem
             {
                 RecordStateException(state, std::current_exception());
             }
-            if (id != 0) SetCurrentBatchId(0);
+            if (id != 0) SetCurrentBatchId(previousBatchId);
             DebugEndExec();
             if (!job.claimed.exchange(true, std::memory_order_acq_rel))
                 PackedPlainFinishJob(job);
@@ -1598,14 +1508,19 @@ namespace JobSystem
             batch->sliceCount = 0;
             return;
         }
+        if (!batch->storage->slices)
+        {
+            try { batch->storage->slices = std::make_unique<BatchStorage::SliceWorkspace>(); }
+            catch (...) { batch->sliceCount = 0; return; } // adjacent claiming preserves coverage
+        }
         uint32_t slices = std::min(std::max(1u, batch->workerCount), end);
         if (slices > BatchState::kMaxSliceSlots) slices = BatchState::kMaxSliceSlots;
         const uint32_t len = CeilDiv(end, slices);
         for (uint32_t i = 0; i < slices; ++i)
         {
             const uint32_t s = i * len;
-            batch->sliceCursors[i].next.store(s, std::memory_order_relaxed);
-            batch->sliceEnd[i] = std::min(end, s + len);
+            batch->storage->slices->cursors[i].next.store(s, std::memory_order_relaxed);
+            batch->storage->slices->ends[i] = std::min(end, s + len);
         }
         batch->sliceTaken.store(0, std::memory_order_relaxed);
         batch->sliceCount = slices;
@@ -1659,7 +1574,7 @@ namespace JobSystem
                     // execSpan = (tiles/wc)×C_fixed + (N/wc)×C_elem
                     // → C_fixed = (wc×execSpan − N×C_elem)/tiles（C_elem 用当前细 EWMA，
                     //   冷启动用本批 perElem 近似）。固定开销与分块粒度无关，粗/细批都学习。
-                    const int wcNow = std::max(1, g_numThreads.load(std::memory_order_relaxed));
+                    const int wcNow = ResolveExecutorCount(static_cast<int>(batch->workerCount));
                     if (batch->tileCount > 0)
                     {
                         double celemRef = g_jobCostCache.GetPerElemCost(batch->funcHash);
@@ -1781,8 +1696,7 @@ namespace JobSystem
                 {
                     RecordStateException(state, std::current_exception());
                     state->completed.store(true, std::memory_order_release);
-                    state->completed.notify_all();
-                    state->completedCv.notify_all();
+                    state->NotifyBlockedWaiters();
                 }
             }
             ReleaseBatch(batch);

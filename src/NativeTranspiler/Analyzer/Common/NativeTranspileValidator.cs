@@ -19,6 +19,9 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor MissingJobInterfaceError = new("NT008", "Missing Job interface", "[NativeTranspile] struct '{0}' must implement IJob, IJobParallelFor, IJobParallelForBatch, IJobFor, IJobChunk, or IJobEntity.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobFieldError = new("NT009", "Invalid Job field", "[NativeTranspile] struct '{0}' field '{1}' type '{2}' must be unmanaged.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MissingExecuteMethodError = new("NT010", "Missing Execute method", "[NativeTranspile] struct '{0}' must contain an Execute method.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor ExpressionBodiedJobError = new("NT034", "Execute requires a block body",
+            "[NativeTranspile] struct '{0}' uses an expression-bodied Execute. Use a block body for native job translation.",
+            "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
@@ -234,6 +237,13 @@ namespace NativeTranspiler.Analyzer
             {
                 diagnostics.Add(Diagnostic.Create(MissingExecuteMethodError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 return diagnostics.Count == 0;
+            }
+
+            var executeSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+            if (executeSyntax?.ExpressionBody != null)
+            {
+                diagnostics.Add(Diagnostic.Create(ExpressionBodiedJobError, executeSyntax.ExpressionBody.GetLocation(), structSymbol.Name));
+                return false;
             }
 
             if (isEntityJob)

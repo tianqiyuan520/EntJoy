@@ -104,15 +104,11 @@ namespace NativeTranspiler.Analyzer
                 && unrollEnd > unrollStart
                 && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
 
-            // Dispatch: unroll → reduction-unroll → uniform reduction → varying reduction → scalar-for → while-true
+            // Dispatch: unroll → uniform reduction → varying reduction → scalar-for → while-true
             if (canUnroll)
             {
                 // Full unroll for small uniform-bound loops（含 min/max/sum 归约）。
                 GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
-            }
-            else if (isUniformBounds && TryEmitReductionUnroll(stmt))
-            {
-                // 归约循环已按 4 路展开生成。
             }
             else if (isUniformBounds && isReduction)
                 GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
@@ -171,20 +167,6 @@ namespace NativeTranspiler.Analyzer
             }
             else
                 GenerateStandardSIMDLoop(ivName, startExpr, endExpr, stmt, false);
-        }
-
-        // 归约循环走 4 路展开：SIMD 后端没有向量化过的横向归约，标量展开是当前最优形态。
-        private int _unrollSerial;
-
-        private bool TryEmitReductionUnroll(ForStatementSyntax stmt)
-        {
-            var scalar = new CppBatchStatementTranslator(
-                _semanticModel, _jobStruct, _indexParamName, _indexParamName, _useFastMath, false);
-            var lines = new List<string>();
-            if (!ReductionUnroll.TryBuild(scalar, stmt, _unrollSerial, _indent, lines)) return false;
-            _unrollSerial++;
-            foreach (var line in lines) _builder.AppendLine(line);
-            return true;
         }
 
         // Strategy 0: Full unroll for small uniform-bound non-reduction loops.

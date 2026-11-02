@@ -150,7 +150,7 @@ namespace JobSystem
         return v != nullptr && v[0] == '1';
     }();
 
-    // 认领粒子上限的运行期覆盖（`ENTJOY_CLAIM_BATCH=<n>`；0/未设 ⇒ 用 kClaimBatchSize）。
+    // 认领 tile 上限的运行期覆盖（`ENTJOY_CLAIM_BATCH=<n>`；0/未设时 ECS=1，其余=4）。
     // 只调上限 cap，`step = clamp(tileCount/workers, 1, cap)` 保留自适应项
     // ⇒ 小批次自动退回细粒度，只有大批次才被摊薄。
     uint32_t g_claimBatchSize = []() -> uint32_t {
@@ -207,11 +207,11 @@ namespace JobSystem
         return on;
     }();
 
-    // 诊断：把"等宽不物化 + 入场直调快路径"从薄 tile 扩到任意 cs（默认关，用于量每-tile 固定开销）。
+    // 等宽 GeneralRange 使用边界推导和批内快照；=0 仅保留小区间路径，供对照验证。
     bool g_uniformAllTiles = []() -> bool {
         const char* v = std::getenv("ENTJOY_TILES_UNIFORM_ALL");
-        const bool on = (v != nullptr && v[0] == '1');
-        if (on) EJ_LOADBANNER("[TILESUNIFORMALL] on (any cs takes the uniform in-place path)\n");
+        const bool on = (v == nullptr || v[0] != '0');
+        if (v != nullptr || DiagStartup()) EJ_LOADBANNER("[TILESUNIFORMALL] %s\n", on ? "on" : "off");
         return on;
     }();
 
@@ -759,7 +759,10 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
     std::atomic<bool> g_shuttingDown{ false };
     std::thread::id g_mainThreadId{};
-    std::atomic<bool> g_timingDiagnosticsEnabled{ false };
+    std::atomic<bool> g_timingDiagnosticsEnabled{ [] {
+        const char* value = std::getenv("ENTJOY_DIAG_TIMING");
+        return value && value[0] == '1';
+    }() };
     // 主线程 assist 开关（Controller API 可运行时切换）。默认开启：Complete() 的调用线程
     // 与 worker 一起认领执行，`ENTJOY_MAIN_ASSIST=0` 退回纯 worker 模式。
     std::atomic<bool> g_mainThreadAssistEnabled{ []() -> bool {
@@ -770,6 +773,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     // 线程局部"当前 batch"回调。C# 初始化时注册一次；每次 job 执行窗口入口
     // 调 cb(batchId)、出口 cb(0)，托管异常按此绑定到具体 batch。
     std::atomic<void (*)(uint64_t)> g_currentBatchIdCallback{ nullptr };
+    thread_local uint64_t g_currentBatchId = 0;
     void RegisterCurrentBatchIdCallback(void (*cb)(uint64_t)) noexcept
     {
         g_currentBatchIdCallback.store(cb, std::memory_order_release);

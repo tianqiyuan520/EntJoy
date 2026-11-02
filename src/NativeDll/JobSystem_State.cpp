@@ -557,15 +557,15 @@ namespace JobSystem
         state->dependencies.clear();
         DrainContinuationSlot(state);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
-        state->continuations.clear();
+        if (auto* data = state->FindCold()) data->continuations.clear();
         // 仅当确有异常被记录过才取 exceptionMutex（每 job 回收一次的无谓加锁）。
         // 安全：RecycleState 只在 refCount 归零（ReleaseState 的 acq_rel fetch_sub 返回 1）时
         // 被调用，而记录方必须持有引用才能写 batchExceptionPtr ⇒ 其 release 与本次 acquire 同步，
         // hasException 不可能读到陈旧 false。
         if (state->hasException.load(std::memory_order_acquire))
         {
-            std::lock_guard<std::mutex> lock(state->exceptionMutex);
-            state->batchExceptionPtr = nullptr;
+            std::lock_guard<std::mutex> lock(state->GetCold().exceptionMutex);
+            state->GetCold().batchExceptionPtr = nullptr;
         }
         state->hasException.store(false, std::memory_order_relaxed);
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
@@ -649,7 +649,7 @@ namespace JobSystem
         state->diagnosticBatchId.store(0, std::memory_order_relaxed);
         state->continuationSlot.store(nullptr, std::memory_order_relaxed);
         state->hasExtraContinuations.store(false, std::memory_order_relaxed);
-        state->continuations.clear();
+        if (auto* data = state->FindCold()) data->continuations.clear();
         state->hasException.store(false, std::memory_order_relaxed);
         state->dependency = nullptr;
         state->dependencies.clear();
@@ -682,10 +682,10 @@ namespace JobSystem
         if (!state || !exception) return;
         try
         {
-            std::lock_guard<std::mutex> lock(state->exceptionMutex);
-            if (!state->batchExceptionPtr)
+            std::lock_guard<std::mutex> lock(state->GetCold().exceptionMutex);
+            if (!state->GetCold().batchExceptionPtr)
             {
-                state->batchExceptionPtr = std::move(exception);
+                state->GetCold().batchExceptionPtr = std::move(exception);
                 // release 发布"有异常"标志，供 RecycleState 无锁跳过 exceptionMutex。
                 state->hasException.store(true, std::memory_order_release);
             }
@@ -699,12 +699,12 @@ namespace JobSystem
 
     std::exception_ptr TakeStateException(HandleState* state) noexcept
     {
-        if (!state) return {};
+        if (!state || !state->hasException.load(std::memory_order_acquire)) return {};
         try
         {
-            std::lock_guard<std::mutex> lock(state->exceptionMutex);
-            auto exception = state->batchExceptionPtr;
-            state->batchExceptionPtr = nullptr;
+            std::lock_guard<std::mutex> lock(state->GetCold().exceptionMutex);
+            auto exception = state->GetCold().batchExceptionPtr;
+            state->GetCold().batchExceptionPtr = nullptr;
             state->hasException.store(false, std::memory_order_release);
             return exception;
         }
@@ -785,20 +785,20 @@ namespace JobSystem
 
         // 无锁快路径：原子摘取 continuation 槽（≤1 节点）。completed 先置位再摘取，
         // 保证 AddContinuationOrRunNow 的 G2 重检能看到本摘取已发生或未发生。
-        ContinuationNode* node =
-            state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel);
-        state->completed.notify_all();
-        state->completedCv.notify_all();
+        ContinuationNode* node = state->continuationSlot.load(std::memory_order_acquire);
+        if (node) node = state->continuationSlot.exchange(nullptr, std::memory_order_acq_rel);
+        state->NotifyBlockedWaiters();
         if (node) RunContinuationChain(node);
 
         // 多 continuation（同 handle 扇出）溢出到 mtx + vector。hasExtra 原子跳过空
         // 路径，使单 continuation 的常见完成路径零 mutex。
-        if (state->hasExtraContinuations.exchange(false, std::memory_order_acq_rel))
+        if (state->hasExtraContinuations.load(std::memory_order_acquire) &&
+            state->hasExtraContinuations.exchange(false, std::memory_order_acq_rel))
         {
             std::vector<std::function<void()>> extra;
             {
-                std::lock_guard<std::mutex> lock(state->mtx);
-                extra.swap(state->continuations);
+                std::lock_guard<std::mutex> lock(state->GetCold().mtx);
+                extra.swap(state->GetCold().continuations);
             }
             for (auto& cont : extra)
                 if (cont) { try { cont(); } catch (...) {} }
@@ -835,9 +835,9 @@ namespace JobSystem
         // 慢路径：槽已占（第 2+ 个 continuation）。mtx 内判 completed，完成后不再入列。
         std::function<void()> toRun;
         {
-            std::lock_guard<std::mutex> lock(state->mtx);
+            std::lock_guard<std::mutex> lock(state->GetCold().mtx);
             if (state->completed.load(std::memory_order_acquire)) toRun = std::move(continuation);
-            else state->continuations.emplace_back(std::move(continuation));
+            else state->GetCold().continuations.emplace_back(std::move(continuation));
         }
         if (toRun) { toRun(); return; }
         // 已入列。若 CompleteState 的 hasExtra 摘取早于本发布而漏检（completed 已置位），
@@ -847,12 +847,12 @@ namespace JobSystem
         {
             std::function<void()> mine;
             {
-                std::lock_guard<std::mutex> lock(state->mtx);
-                if (!state->continuations.empty())
+                std::lock_guard<std::mutex> lock(state->GetCold().mtx);
+                if (!state->GetCold().continuations.empty())
                 {
-                    mine = std::move(state->continuations.back());
-                    state->continuations.pop_back();
-                    if (state->continuations.empty())
+                    mine = std::move(state->GetCold().continuations.back());
+                    state->GetCold().continuations.pop_back();
+                    if (state->GetCold().continuations.empty())
                         state->hasExtraContinuations.store(false, std::memory_order_release);
                 }
             }
@@ -1153,7 +1153,10 @@ namespace JobSystem
     {        if (outJccFine) *outJccFine = false;
         if (length <= 0) return JccDiagNote(0, 1);
         if (requestedChunk > 0) return JccDiagNote(1, requestedChunk);
-        int wc = std::max(1, g_numThreads.load(std::memory_order_relaxed));
+        const int wc = ResolveExecutorCount(g_numThreads.load(std::memory_order_relaxed));
+        const int configuredTpw = std::max(1, g_configuredTilesPerWorker.load(std::memory_order_relaxed));
+        const int64_t referenceTiles = static_cast<int64_t>(wc) * configuredTpw;
+        const int referenceChunk = std::max(16, static_cast<int>(CeilDiv(static_cast<int64_t>(length), referenceTiles)));
 
         // 自动 batch：仅当成本缓存开启且有该 job 成本数据时（热路径开销极小）。
         if (funcHash != 0 && g_jobCostCacheEnabled.load(std::memory_order_relaxed))
@@ -1164,7 +1167,7 @@ namespace JobSystem
             // 为代理产细样本，TryClassify 定 mode（mem-bound / parallel）。
             const auto mode = g_jobCostCache.GetMode(funcHash);
             const bool robustNow = g_jobCostCache.IsRobust();
-            const int tpwChunk = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+            const int tpwChunk = referenceChunk;
             // mem-bound 分支的每-tile 目标串行时间（成本已知时用它反推 tile 大小）。
             constexpr double kMemBoundTileBudgetNs = 20000.0;
             if (mode == JobSystem::kModeMemBound)
@@ -1182,8 +1185,8 @@ namespace JobSystem
                     int memChunk = tpwChunk;
                     if (memPerElem > 0.0)
                     {
-                        const int byCost = static_cast<int>(kMemBoundTileBudgetNs / memPerElem);
-                        memChunk = std::clamp(byCost, 16, 32768);
+                        const double byCost = kMemBoundTileBudgetNs / memPerElem;
+                        memChunk = static_cast<int>(std::clamp(byCost, 16.0, 32768.0));
                     }
                     if (g_jobCostCacheVerbose)
                         std::printf("[JCC] R length=%d MEM-BOUND → chunk=%d (perElem=%.2f ns)\n",
@@ -1224,21 +1227,22 @@ namespace JobSystem
                 // tiles 上限 = workers × max(16, 配置的 tpw)。
                 // 语义：自适应允许比兜底更细，但不允许比兜底的上限还粗。
                 const int kMaxAdaptiveTpw =
-                    std::max(16, g_configuredTilesPerWorker.load(std::memory_order_relaxed));
+                    std::max(16, configuredTpw);
+                const int maxAdaptiveTiles = static_cast<int>(std::min<int64_t>(length,
+                    static_cast<int64_t>(wc) * kMaxAdaptiveTpw));
                 constexpr int kMaxAutoChunk = 32768;        // 单 tile 最多 32k 元素
                 constexpr double kSchedulingOverheadNs = 16000.0;  // ~16μs per tile
-                const int chunkTpw4 = std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed)));
+                const int chunkTpw4 = referenceChunk;
 
                 // ── 两因子（C_fixed 每 tile 固定 + C_elem 每元素）优先 ──
                 const double cfixed = g_jobCostCache.GetPerTileCost(funcHash);
                 const double celem = perElemNs > 0.0 ? perElemNs : costNs;
                 if (cfixed > 0.0 && celem > 0.0)
                 {
-                    // 空体/超轻：执行≈0，总成本由调度/唤醒/worker 抖动主导，
-                    // 任何执行成本模型都无解 → 用"调度主导"专用粒度兜底（与执行默认解耦）。
-                    // 上限 4：tpw 调大时不能把每-job 固定仪式按 tile 数放大。
+                    // Light kernels amortize claiming and callback costs over one
+                    // contiguous range per worker. Explicit batches return earlier.
                     const double tileTimeTpw =
-                        cfixed + (static_cast<double>(length) / (wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))) * celem;
+                        cfixed + (static_cast<double>(length) / static_cast<double>(referenceTiles)) * celem;
                     // 串行工作量不到一个 tile 的成本量级：多 tile 只会把认领/收尾开销放大。
                     // 实测 n=120：单 tile 1.24 µs，8 tile 3.39 µs。`ENTJOY_SINGLETILE_WORK_NS` 覆盖（0=关）。
                     static const double kSingleTileWorkNs = []() -> double {
@@ -1258,12 +1262,9 @@ namespace JobSystem
                     }
                     if (tileTimeTpw < kSchedulingOverheadNs)
                     {
-                        const int kSchedDominatedTpw =
-                            std::min(4, g_configuredTilesPerWorker.load(std::memory_order_relaxed));
-                        const int chunkSched = std::max(16, CeilDiv(length, wc * std::max(1, kSchedDominatedTpw)));
-                        // 仍按"公式产出"登记细样本：使细/粗比值≈1 → mem-bound 分类 →
-                        // 稳态固定 tpw，且细 EWMA 有值（JccConcurrentHeterogeneous 断言 perElem>0）。
-                        // 健壮模式下如实标注为粗样本（它返回的就是 tpw chunk）。
+                        const int chunkSched = std::max(16, CeilDiv(length, wc));
+                        // Keep feeding the learned candidate channel; robust mode
+                        // classifies only ranges finer than its reference as fine.
                         if (g_jobCostCacheVerbose)
                             std::printf("[JCC] R length=%d SCHED-DOMINATED chunk=%d rc=%d tileNs=%.0f\n",
                                 length, chunkSched, CeilDiv(length, chunkSched), tileTimeTpw);
@@ -1276,7 +1277,7 @@ namespace JobSystem
                     if (tileSize < 256.0) tileSize = 256.0;
                     int targetTiles = static_cast<int>(length / tileSize + 0.9999);
                     if (targetTiles < wc) targetTiles = wc;
-                    if (targetTiles > wc * kMaxAdaptiveTpw) targetTiles = wc * kMaxAdaptiveTpw;
+                    if (targetTiles > maxAdaptiveTiles) targetTiles = maxAdaptiveTiles;
                     const int chunk2f = std::max(1, CeilDiv(length, targetTiles));
                     // 健壮模式：只有严格细于 tpw 兜底的分块才算细样本（否则会系统性推高比值
                     // ⇒ 全判 mem-bound）。
@@ -1294,7 +1295,7 @@ namespace JobSystem
                 // 「串行总量」：totalUs × wc ≈ 单 worker 串行所需时间。
                 const double serialUs = totalUs * wc;
                 double targetTilesD = std::clamp(serialUs / kTargetTileUs, 1.0,
-                    static_cast<double>(wc) * kMaxAdaptiveTpw);
+                    static_cast<double>(maxAdaptiveTiles));
                 int targetTiles = static_cast<int>(targetTilesD);
                 if (targetTiles < 1) targetTiles = 1;
                 // 安全护栏：单 tile 元素数上限（kMaxAutoChunk）。
@@ -1321,7 +1322,7 @@ namespace JobSystem
         }
         // 冷启动 / flag 关闭 / 无数据 → tpw 兜底：batch = N/(W×k) 随 N 自动缩放，
         // 无需每 job 标代价。
-        return JccDiagNote(9, std::max(16, CeilDiv(length, wc * g_configuredTilesPerWorker.load(std::memory_order_relaxed))));
+        return JccDiagNote(9, referenceChunk);
     }
 
     // ============================================================
@@ -1508,8 +1509,11 @@ namespace JobSystem
 
             // 无事可做才 wait（短超时兜底）
             {
-                std::unique_lock<std::mutex> lock(_state->mtx);
-                if (!_state->completedCv.wait_for(lock, kCompleteRevisit,
+                HandleState::ColdState* waiting;
+                try { waiting = &_state->GetCold(); }
+                catch (...) { std::this_thread::yield(); continue; }
+                std::unique_lock<std::mutex> lock(waiting->mtx);
+                if (!waiting->completedCv.wait_for(lock, kCompleteRevisit,
                         [state = _state] { return state->completed.load(std::memory_order_acquire); }))
                 {
                     // 超时：继续 assist 循环
@@ -1530,28 +1534,54 @@ namespace JobSystem
     }
     HandleState* JobHandle::State() const noexcept { return _state; }
 
-    JobHandle JobHandle::CombineDependencies(const std::vector<JobHandle>& handles)
+    template <typename GetState>
+    static JobHandle CombineStates(int count, const GetState& getState)
     {
         std::vector<HandleState*> pending;
-        for (const auto& h : handles)
-            if (h._state && !h._state->completed.load(std::memory_order_acquire))
-                pending.push_back(h._state);
+        for (int i = 0; i < count; ++i)
+        {
+            auto* state = getState(i);
+            if (state && !state->completed.load(std::memory_order_acquire)) pending.push_back(state);
+        }
         if (pending.empty()) return JobHandle(CreateState(true));
-        auto* cs = CreateState(false);
         auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(pending.size()));
+        JobHandle result(CreateState(false));
+        auto* cs = result.State();
         // 合成 state 持有每个父依赖的引用，保证传递协助链不悬垂；
         // 在 RecycleState 释放。
-        cs->dependencies = pending;
-        for (auto* ds : pending) {
-            AcquireState(ds);
+        cs->dependencies = std::move(pending);
+        for (auto* ds : cs->dependencies) AcquireState(ds);
+        for (auto* ds : cs->dependencies) {
             AcquireState(cs);
-            AddContinuationOrRunNow(ds, [cs, remaining]() {
-                if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
-                    CompleteState(cs);
+            try
+            {
+                AddContinuationOrRunNow(ds, [cs, remaining]() noexcept {
+                    try
+                    {
+                        if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) CompleteState(cs);
+                    }
+                    catch (...) { RecordStateException(cs, std::current_exception()); }
+                    ReleaseState(cs);
+                });
+            }
+            catch (...)
+            {
+                CompleteStateAfterException(cs, std::current_exception());
                 ReleaseState(cs);
-            });
+                break;
+            }
         }
-        return JobHandle(cs);
+        return result;
+    }
+
+    JobHandle JobHandle::CombineDependencies(const std::vector<JobHandle>& handles)
+    {
+        return CombineStates(static_cast<int>(handles.size()), [&](int i) { return handles[i].State(); });
+    }
+
+    JobHandle CombineBorrowedHandles(void* const* handles, int count)
+    {
+        return CombineStates(count, [&](int i) { return static_cast<HandleState*>(handles[i]); });
     }
 
 } // namespace JobSystem

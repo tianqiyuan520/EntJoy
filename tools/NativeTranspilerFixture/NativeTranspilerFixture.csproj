@@ -12,6 +12,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <!-- Correctness fixtures exercise both scalar and AutoSIMD output, as does
+         GeneratorHarness. This test-only opt-in makes no throughput claim. -->
+    <EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>
     <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
   </PropertyGroup>
 

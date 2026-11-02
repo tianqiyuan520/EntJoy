@@ -25,7 +25,7 @@
 | env | 默认 | 语义 | 作用域 |
 |---|---|---|---|
 | `ENTJOY_TILES_UNIFORM` | 开 | 等宽 GeneralRange **不物化** `tileBuffer`（算术推导 tile 边界） | 非 guided 的 General 路 |
-| `ENTJOY_TILE_FASTPATH` | 开 | 把每-tile 的固定开销提到每批 | 同上（同 `thinTiles` 门） |
+| `ENTJOY_TILE_FASTPATH` | 开 | 把每-tile 的固定开销提到每批 | 同上 |
 | `ENTJOY_CLAIM_ADAPT` | 开 | **逐 job 学习认领几何**（散开 / 邻近） | General 路 |
 | `ENTJOY_WAKE_POLL` | 开 | 提交侧"需求感知"唤醒：有人在轮询注入器时**一个字节都不写** | 全部派发入口 |
 | `ENTJOY_SPIN_NEEDS_WORK` | 开 | 大自旋窗只在"注入器里还有活"时给（否则退火 park，不抢 SMT） | worker 停靠 |
@@ -33,10 +33,9 @@
 | `ENTJOY_SYSTEM_READ_WRITE_ORDER` | 开 | ECS 读→写串行化（唯一被发现的静默竞态，已修 + 4 用例） | ECS 系统调度 |
 | `ENTJOY_NATIVE_SINGLE_JOB` | 开 | 单 job 走原生快路径（`=0` 回退托管） | 托管入口 |
 
-⚠ `TILES_UNIFORM` / `TILE_FASTPATH` / `CLAIM_ADAPT` 的默认档行为受
-**`thinTiles` 门**（`cs <= kClaimSpanThinElems(16)`）影响，而该门**等价于"JCC 顶在下限 16 上"**
-（= 这次调度的 `length` 够短），**不是** tile 厚薄判据；且"进不进这个 regime"本身不稳定。
-详见 doc13 §2 与 gridsearch/09 §58。
+`TILES_UNIFORM` 和 `TILE_FASTPATH` 默认覆盖非 guided 的 General 等宽区间。
+`ENTJOY_TILES_UNIFORM_ALL=0` 将两者收窄到 `cs <= 16`，用于对照验证。
+每个 tile 保持一次内核调用；guided、ECS Chunk 和 Entity 路径保留各自的布局。
 
 ## B. 已验收的策略阀（可调，非开关）
 
@@ -44,9 +43,9 @@
 |---|---|---|
 | `ENTJOY_JOB_WORKERS` | 逻辑核心 − 1 | worker 线程数（`>= 0` 生效） |
 | `ENTJOY_CLAIM_SPAN` | **1024** | 每次认领的**元素跨度**（`=0` 关闭 ⇒ 复现旧行为）。对 `itemsPerTile ≤ 256` 生效；上限取每 worker 公平份额、下限取 `claimCap` |
-| `ENTJOY_CLAIM_BATCH` | 0 = 内置 4 | 认领粒子上限 cap（`step = clamp(tileCount/workers, 1, cap)`） |
+| `ENTJOY_CLAIM_BATCH` | 0 = ECS 1、其余 4 | 每次认领的 tile 上限；显式值优先于默认，`step = clamp(tileCount/workers, 1, cap)` |
 | `ENTJOY_TILES_PER_WORKER` | **512** | flat parallel-for 的默认 tiles/worker（**只影响 flat 路**）。64 → 512：8 worker、1e6 元素交替配对整步 −2.8～−3.5% |
-| `ENTJOY_TILES_UNIFORM_ALL` | 关 | 诊断：把"等宽不物化 + 入场直调快路径"从薄 tile 扩到任意 cs（量每-tile 固定开销用） |
+| `ENTJOY_TILES_UNIFORM_ALL` | 开 | 等宽边界推导与批内快照覆盖任意 cs；`=0` 收窄到 cs <= 16 |
 | `ENTJOY_KERNEL_O2` | 关 | 构建期：`=1` 把 `NativeDll`/`NativeTranspiled` 退回纯 `/O2`（对照用）。默认给 ClangCL 追加 `-O3 -funroll-loops -ffp-contract=fast -fno-trapping-math -fno-signed-zeros -fomit-frame-pointer`——**CLANGCL 分支此前一直是 `/O2`**（那组 `-O3 ...` 只写在非 MSVC 分支），修正后对齐档 Σ5 0.936 → 0.995 |
 | `ENTJOY_JCC_TARGET_US` | 6400 | `ResolveChunkSize` 的 `two_factor` 分支唯一消费者（目标每 tile 串行量，µs） |
 | `ENTJOY_SPIN_BUSY` | 8192 | busy 自旋窗（pause 次数）。**只改自旋时长，不改变语义** |
@@ -83,7 +82,7 @@ doc10 时代的 `ab-aligned.ps1` 则显式 pin 关；Unity 侧无对应物（B �
 | `ENTJOY_DIAG_CSHARP_PHASE` / `_WINDOW` | 托管侧分段 |
 | `ENTJOY_DIAG_NATIVE_BIND` | `[NATIVEJOB]` 接线/首用/批表绑定明细（默认静默，只留一行总开关状态） |
 | `ENTJOY_DIAG_E1` / `_MS` | E1 worker 忙比 / 相位尾部 |
-| `ENTJOY_DIAG_TIMING` | 关停时打印 timing 直方图 |
+| `ENTJOY_DIAG_TIMING` | 开启计时样本采集及每 tile CPU/核心诊断，关停时打印直方图；原生活动采集也记录批次样本 |
 | `ENTJOY_JOB_TILE_TRACE` | 逐 tile trace（会**关掉** tile-run 合并） |
 | `ENTJOY_CLAIM_STAT` | 认领点 rdtsc 探针（量共享游标 cacheline 弹跳） |
 | `ENTJOY_JOB_BATCH_TABLE` / `_DUMP` | 逐 job 内批档表（键 = 内核在本模块内的 **RVA**，非 ASLR 指针哈希）；`_DUMP` 打首见键的尺寸 |
@@ -105,7 +104,7 @@ batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](
 （`BattleBenchM4Entry.cs:462` 改成 `64` 并注明"照抄 A 的 0 会更慢"）。
 
 诊断读数的**用法要点**：`[JOBWAKE] skipped=` 在 `wakePoll=ON`（默认）时**恒为 0** ——
-真正的跳过数见 `[JOBWAKEPOLL]`。`[JOBF2F4] applied` 为 0 不代表 F2/F4 没生效，见 A 节的 `thinTiles` 说明。
+真正的跳过数见 `[JOBWAKEPOLL]`。`[JOBF2F4] applied` 记录等宽边界推导和批内快照的使用批次数，`uniformAll` 表示区间大小覆盖范围。
 
 ## E. 构建期开关（生成器 / MSBuild）
 

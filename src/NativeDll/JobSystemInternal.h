@@ -17,6 +17,7 @@
 #include "SparseTileDeque.h"
 
 #include <array>
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <atomic>
@@ -60,13 +61,11 @@ namespace JobSystem
 
     inline constexpr uint64_t kLongBatchBarrierNs = 800'000;
 
-    // 并行 for 默认 tiles/worker（batchSize=0 时 ResolveChunkSize 使用）。
-    // tpw 是"每个 worker 的 tile 数"，但真正决定墙钟的是 tile 的元素大小：
+    // 自动并行 for 的参考分块密度，包含后台 worker 和启用协助的调用线程。
+    // 真正决定墙钟的是 tile 的元素大小：
     //   tile 越小 → 尾部越平，但每-tile 固定开销占比越高。
-    // 512：8 worker、1e6 元素下与 64 交替配对实测整步 −2.8～−3.5%（四个相同步段同号）；
-    //   256/512/768 同处平台、均优于 64。
     // 作用域：只影响 flat parallel-for 路径（ECS chunk/entity-batch 路径自带
-    //   `JobSystem_Tiles.cpp` 的 kTargetTilesPerWorker，不受本值影响）。
+    //   `JobSystem_Tiles.cpp` 的实体数目标与成本细分，不受本值影响）。
     // 可覆盖：`JobSystem_ConfigureTilesPerWorker()` / `NativeJobScheduler.TilesPerWorker` /
     //   环境变量 `ENTJOY_TILES_PER_WORKER`（env 优先）。
     inline constexpr int kDefaultTilesPerWorker = 512;
@@ -147,6 +146,13 @@ namespace JobSystem
     extern std::atomic<int> g_guidedK;
     extern std::atomic<int> g_guidedFloor;
     extern std::atomic<bool> g_mainThreadAssistEnabled;  // 主线程 assist 开关（默认 true，ENTJOY_MAIN_ASSIST=0 或 API 关闭）
+    inline int ResolveExecutorCount(int workerCount) noexcept
+    {
+        const int workers = std::max(0, workerCount);
+        const int assist = workers < (std::numeric_limits<int>::max)()
+            && g_mainThreadAssistEnabled.load(std::memory_order_relaxed) ? 1 : 0;
+        return std::max(1, workers + assist);
+    }
     // JobCostCache export flag：用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，
     // worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数；热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
@@ -162,7 +168,7 @@ namespace JobSystem
     // 诊断：ENTJOY_JCC_VERBOSE=1 时打印 ResolveChunkSize 决策 + 退役学习快照。
     // 只在 flag 开启时读取；进程启动时从 env 初始化一次，之后只读 → 无竞态。
     extern bool g_jobCostCacheVerbose;
-    // 认领粒子上限（`ENTJOY_CLAIM_BATCH=<n>`，0/未设 = 用内置 kClaimBatchSize=4）。
+    // 认领 tile 上限（`ENTJOY_CLAIM_BATCH=<n>`；0/未设时 ECS=1，其余=kClaimBatchSize=4）。
     // `batch->nextTile.fetch_add` 是同一条 cacheline 上的 contended RMW（核间来回迁移）；
     // 把每次认领覆盖的 tile 数放大即可线性摊薄它，而 `step = clamp(tileCount/workers, 1, cap)`
     // 里的 `tileCount/workers` 项保证小批次自动退回细粒度（tileCount ≤ cap×workers 时与 cap 无关）。
@@ -182,13 +188,13 @@ namespace JobSystem
     // `ENTJOY_CLAIM_SPAN` 的量程上限；只约束实验/回退用的 env，内置默认仍是已验收的 1024。
     static constexpr uint32_t kClaimSpanElemsMax = 16384;
     extern uint32_t g_claimSpanElems;
-    // F2（默认开；`ENTJOY_TILES_UNIFORM=0` 关闭）：等宽 GeneralRange 不物化 tileBuffer。
+    // F2（默认开；`ENTJOY_TILES_UNIFORM=0` 关闭）：等宽 GeneralRange 按编号推导边界。
     // 只在"非 guided 的 General 路"生效；chunk/entity/packed/guided 一律不走这里。
     extern bool g_uniformTilesEnabled;
     // F4（默认开；`ENTJOY_TILE_FASTPATH=0` 关闭）：把每-tile 的固定开销提到每批。
     // 见 BatchState 里 traceOn/timingOn/tileFast/firstTileAt 的注释。
     extern bool g_tileFastPath;
-    // 诊断（默认关）：把等宽不物化 + 入场直调快路径扩到任意 cs，用于量每-tile 固定开销。
+    // 默认覆盖任意等宽区间；`ENTJOY_TILES_UNIFORM_ALL=0` 将范围收窄到 cs <= 16。
     extern bool g_uniformAllTiles;
     // F6（默认开；`ENTJOY_CLAIM_ADAPT=0` 关闭）：per-job 认领几何学习。
     // 依据：静态几何对 job 是相反符号 —— 散开对共享计数器争用的 job 有利、对靠空间复用的 job 有害
@@ -274,6 +280,10 @@ namespace JobSystem
     {
         return g_statsEnabled.load(std::memory_order_relaxed);
     }
+    inline void RecordStatCount(std::atomic<uint64_t>& counter, uint64_t count = 1) noexcept
+    {
+        if (StatsEnabled()) counter.fetch_add(count, std::memory_order_relaxed);
+    }
     extern std::atomic<uint64_t> g_completeWaitLoops;
     extern std::atomic<uint64_t> g_assistAttempts;
     extern std::atomic<uint64_t> g_assistExecuted;
@@ -285,9 +295,7 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_notifySkipped;
     extern std::atomic<uint64_t> g_parkWakeCount;
     extern std::atomic<uint64_t> g_hotSpinHits;
-    // F2 / F4 的生效证据。两者都受同一条 thinTiles（cs ≤ kClaimSpanThinElems）判据门控。
-    // ⚠ 该门等价于"JCC 顶在下限 16 上"，不代表 tile 厚薄 ⇒ 默认档与对齐档都非 0，只差占比。
-    //   判据：薄 tile 占比骤降为 0 即为回归告警。
+    // 等宽边界推导和批内快照的实际使用批次数。
     extern std::atomic<uint64_t> g_uniformTilesApplied;
     extern std::atomic<uint64_t> g_tileFastApplied;
 
@@ -520,7 +528,7 @@ namespace JobSystem
         alignas(64) std::atomic<uint32_t> tilesRemaining{ 0 };
         std::atomic<bool> logicalCompleted{ false };
         // ---- Chase-Lev：在飞任务计数（防 use-after-free）----
-        // SubmitBatch 时 = 任务数，每个任务执行完 fetch_sub(1)。
+        // 初始发布时设置；补充令牌先递增再入队，每个令牌执行完 fetch_sub(1)。
         // 退役须满足 tilesRemaining==0 && pendingTasks==0：tilesRemaining=0 仅代表 tile 执行完，
         // deque 中可能仍有已 pop 未执行的任务（task.batch 引用本 storage），须等其全部完成才能 ReleaseBatch。
         // 由"最后者"（tile 完成者或 task 完成者）执行退役。
@@ -600,8 +608,6 @@ namespace JobSystem
         {
             alignas(64) std::atomic<uint32_t> next{ 0 };
         };
-        alignas(64) SliceCursor sliceCursors[kMaxSliceSlots];
-        uint32_t sliceEnd[kMaxSliceSlots]{ 0 };          // 初始化后只读
         uint32_t sliceCount{ 0 };                        // 0 = 未启用切片认领
         alignas(64) std::atomic<uint32_t> sliceTaken{ 0 };
         // 按 job 的认领上限覆盖（0 = 用全局 claimCap）。
@@ -618,9 +624,33 @@ namespace JobSystem
         uint32_t claimGeomOverride{ 0 };
     };
 
+    struct GeneralBatchContext {
+        void (*indexFunc)(void*, int);
+        void (*batchFunc)(void*, int, int);
+        void* originalContext;
+        void (*originalCleanup)(void*);
+        // JobCostCache：Schedule 入口设置的 funcPtr hash（0 = 未标记）。
+        uint32_t funcHash{ 0 };
+        // 每-job 分母计数的槽位索引（Schedule 时由 funcHash 解析一次；-1 = 未登记）
+        int32_t perKeyIndex{ -1 };
+        bool indexedRanges{ false }; // adapter executes Execute(index) for every index in its range
+    };
+
+
     struct BatchStorage
     {
+        struct SliceWorkspace
+        {
+            BatchState::SliceCursor cursors[BatchState::kMaxSliceSlots];
+            uint32_t ends[BatchState::kMaxSliceSlots]{ 0 };
+        };
         BatchState batch;
+        GeneralBatchContext general; // same lifetime as the batch storage
+        // pendingTasks keeps these descriptors alive until every queued token
+        // retires. Capacity is reused together with the batch storage.
+        std::vector<RangeTask> dispatchTasks;
+        // 描述符在发布前固定容量。0 表示池任务兜底；其余为下一可预留槽位。
+        std::atomic<uint32_t> nextDispatchTask{ 0 };
         ExecutionTile* tileBuffer{ nullptr };
         uint32_t tileCapacity{ 0 };
         // 池化代次（对应 Unity `AtomicSafetyHandle` 的中心记录版本号）。
@@ -632,6 +662,10 @@ namespace JobSystem
         //   那一刻被清零 ⇒ 失效检测恒真。且 `batch` 是本结构第一个成员、`batch.storage` 恒指回
         //   自己（构造/Acquire/Release 三处），故结算侧 `batch->storage->generation` 即可取到。
         std::atomic<uint32_t> generation{ 0 };
+
+        // Active entries are initialized by InitSliceCursors before publication.
+        // Keep this reusable workspace outside the reset-on-retirement state.
+        std::unique_ptr<SliceWorkspace> slices;
 
         BatchStorage() noexcept { batch.storage = this; }
         ~BatchStorage()
@@ -650,16 +684,6 @@ namespace JobSystem
         const EntityBatchData* entityBatches;
     };
 
-    struct GeneralBatchContext {
-        void (*indexFunc)(void*, int);
-        void (*batchFunc)(void*, int, int);
-        void* originalContext;
-        void (*originalCleanup)(void*);
-        // JobCostCache：Schedule 入口设置的 funcPtr hash（0 = 未标记）。
-        uint32_t funcHash{ 0 };
-        // 每-job 分母计数的槽位索引（Schedule 时由 funcHash 解析一次；-1 = 未登记）
-        int32_t perKeyIndex{ -1 };
-    };
 
     // ---- 打包 plain IJob 描述符（SubmitPackedPlainJobs 的输入） ----
     // 与 Exports.h 的 JobFunc / ContextCleanupFunc 是同一底层类型（void(*)(void*)），
@@ -677,8 +701,10 @@ namespace JobSystem
     int SubmitPackedPlainJobs(const PackedPlainJobDesc* descs, int count, void** outStates) noexcept;
 
     // ---- base 模块助手（定义在 JobSystem.cpp） ----
+    extern thread_local uint64_t g_currentBatchId;
     inline void SetCurrentBatchId(uint64_t id) noexcept
     {
+        g_currentBatchId = id;
         auto cb = g_currentBatchIdCallback.load(std::memory_order_acquire);
         if (cb) cb(id);
     }
@@ -798,6 +824,7 @@ namespace JobSystem
         uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
         if (id == 0) id = AssignStateDiagnosticId(state);
         DebugBeginExec(id, 1, 1, false); // 同步 inline Job：单线程执行
+        const uint64_t previousBatchId = g_currentBatchId;
         SetCurrentBatchId(id);
         // C++ 异常协议：inline/同步路径（小 job 直跑）异常也捕获到 handle state，
         // 由 Complete() 统一重抛（与批量路径一致；noexcept 下若不捕获会 terminate）。
@@ -809,7 +836,7 @@ namespace JobSystem
         {
             RecordStateException(state, std::current_exception());
         }
-        SetCurrentBatchId(0);
+        SetCurrentBatchId(previousBatchId);
         DebugEndExec();
     }
     void RecordBatchTiming(const BatchTimingSample& sample) noexcept;
@@ -823,6 +850,8 @@ namespace JobSystem
 
     // ---- State 模块（定义在 JobSystem_State.cpp） ----
     void RetainDependency(HandleState* state, HandleState* dep) noexcept;
+    // Caller keeps every input state alive until this function returns.
+    JobHandle CombineBorrowedHandles(void* const* handles, int count);
     void RegisterLongBatchBarrier(HandleState* state) noexcept;
     // 提交异步 state-owned 操作：即使操作在正常尾声前抛异常，state 引用也由后端包装器释放。
     bool SubmitBackendAsync(
@@ -838,7 +867,7 @@ namespace JobSystem
 
     // ---- 实体数衡 tile（定义在 JobSystem_Tiles.cpp） ----
     int UnitEntityCount(const ChunkBatchContext* cc, TileKind kind, int unit) noexcept;
-    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount) noexcept;
+    int ResolveEcsEntityTileTarget(int64_t totalEntities, int workerCount, int tilesPerWorker = 16) noexcept;
     int BuildEntityBalancedTiles(ExecutionTile* tiles, const ChunkBatchContext* cc,
         TileKind kind, int itemCount, int targetEntities) noexcept;
 
@@ -986,9 +1015,7 @@ namespace JobSystem
     }
 
     // ── 批上下文池（A：「共享批上下文」的最后一块）──
-    // GeneralBatchContext / ChunkBatchContext 每次调度一个：线程本地缓存 + 共享池两级复用（与 BatchStorage 同款），去掉每 job 一次 malloc/free。
-    GeneralBatchContext* AcquireGeneralBatchContext();
-    void ReleaseGeneralBatchContext(GeneralBatchContext* bc) noexcept;
+    // Chunk contexts use a separate reusable pool; General context is embedded in BatchStorage.
     ChunkBatchContext* AcquireChunkBatchContext();
     void ReleaseChunkBatchContext(ChunkBatchContext* cc) noexcept;
     void DestroyChunkContextWithoutCleanup(void* ctx) noexcept;
@@ -998,7 +1025,6 @@ namespace JobSystem
     // 并跳过诊断未开启时不需要的逐 tile 判据。返回实际消费的 tile 数（0 = 不适用 ⇒ 回退通用路径）。
     uint32_t TileExecuteUniformRun(BatchState* batch, uint32_t tileIndex, uint32_t runTiles) noexcept;
     void CleanupGeneralContext(void* ctx);
-    void DestroyGeneralContextWithoutCleanup(void* ctx) noexcept;
 
     // ---- Chase-Lev tile 级窃取（定义在 JobSystem_Tiles.cpp） ----
     // ChaseLevScheduler 回调 trampoline（供 Scheduler::Initialize 传给 ChaseLevScheduler::Start）

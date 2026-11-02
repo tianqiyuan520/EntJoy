@@ -329,13 +329,13 @@ namespace
         handle.Complete();
         JobSystem::g_forceInnerBatch = savedForceBatch;
         JobSystem::g_jobCostCacheEnabled.store(savedJcc, std::memory_order_relaxed);
-        const int workers = JobSystem::CurrentWorkerCount();
+        const int executors = JobSystem::ResolveExecutorCount(JobSystem::CurrentWorkerCount());
         // 默认 tile 策略 = kDefaultTilesPerWorker（2026-09-29 起 64，此前 4）；断言按符号写。
         // 契约是**精确**的：chunk = max(16, ceil(N/(W*tpw)))，tiles = ceil(N/chunk)。
         // ⚠ 不要用 [W*tpw-1, W*tpw] 这种"±1 tile"容差：chunk 变小时 ceil 的舍入会被放大
         //   （tpw=64、W=15、N=1e5 ⇒ 953 tiles vs W*tpw=960）。
         const int tpw = JobSystem::kDefaultTilesPerWorker;
-        const int expChunk = std::max(16, (length + workers * tpw - 1) / (workers * tpw));
+        const int expChunk = std::max(16, (length + executors * tpw - 1) / (executors * tpw));
         const int expTiles = (length + expChunk - 1) / expChunk;
         Require(callbackCount.load(std::memory_order_relaxed) == expTiles,
             "automatic batching must produce exactly ceil(N / max(16, ceil(N/(W*tpw)))) tiles");
@@ -370,6 +370,73 @@ namespace
             "parallel-for: element coverage must be exactly length (no gap, no double-run)");
         Require(gotCalls == length,
             "parallel-for: batch=1 must invoke the kernel exactly once per tile");
+    }
+
+    void TestIndexedRangeCoverage()
+    {
+        constexpr int length = 1031;
+        struct Context { std::atomic<int> visits[length]{}; } context;
+        for (int batch : { 1, 3, 64, 1024, 2048 })
+        {
+            for (auto& visit : context.visits) visit.store(0, std::memory_order_relaxed);
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                [](void* raw, int start, int count) {
+                    auto* ctx = static_cast<Context*>(raw);
+                    for (int i = start; i < start + count; ++i)
+                        ctx->visits[i].fetch_add(1, std::memory_order_relaxed);
+                }, &context, length, batch, nullptr, {}, 0u, true);
+            handle.Complete();
+            for (const auto& visit : context.visits)
+                Require(visit.load(std::memory_order_relaxed) == 1,
+                    "indexed ranges must execute every index exactly once");
+        }
+    }
+
+    void TestDemandTokensRetainParallelismAndBatchBoundaries()
+    {
+        const bool previousAssist = JobSystem::g_mainThreadAssistEnabled.exchange(false);
+        struct Context
+        {
+            std::atomic<int> visits[1031]{};
+            std::atomic<int> active{ 0 }, peak{ 0 }, cleanup{ 0 }, badBoundaries{ 0 };
+            bool indexed;
+        };
+        try
+        {
+            for (bool indexed : { false, true })
+            {
+                Context context{};
+                context.indexed = indexed;
+                auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                    [](void* raw, int first, int count)
+                    {
+                        auto& ctx = *static_cast<Context*>(raw);
+                        const int active = ctx.active.fetch_add(1) + 1;
+                        int peak = ctx.peak.load();
+                        while (active > peak && !ctx.peak.compare_exchange_weak(peak, active)) {}
+                        if (!ctx.indexed && (first % 64 != 0 || count != std::min(64, 1031 - first)))
+                            ctx.badBoundaries.fetch_add(1);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        for (int i = first; i < first + count; ++i) ctx.visits[i].fetch_add(1);
+                        ctx.active.fetch_sub(1);
+                    }, &context, 1031, 64,
+                    [](void* raw) { static_cast<Context*>(raw)->cleanup.fetch_add(1); }, {}, 0u, indexed);
+                handle.Complete();
+                for (const auto& visit : context.visits)
+                    Require(visit.load() == 1, "demand tokens must execute each index once");
+                Require(context.cleanup.load() == 1 && context.active.load() == 0,
+                    "demand token cleanup must follow all callbacks exactly once");
+                Require(context.badBoundaries.load() == 0, "explicit batch boundaries must be preserved");
+                if (JobSystem::CurrentWorkerCount() > 1)
+                    Require(context.peak.load() > 1, "an isolated batch must recruit another worker");
+            }
+        }
+        catch (...)
+        {
+            JobSystem::g_mainThreadAssistEnabled.store(previousAssist);
+            throw;
+        }
+        JobSystem::g_mainThreadAssistEnabled.store(previousAssist);
     }
 
     struct ChunkRangeContext
@@ -2240,12 +2307,221 @@ void TestResolveChunkSizeFallback()
     JobSystem::g_jobCostCache.Init();
     JobSystem::g_jobCostCache.UpdatePerElemCost(0x7777u, 0.05, false);  // 若有数据也被 flag 关掉
     int chunk = JobSystem::ResolveChunkSize(100'000, 0, 0x7777u);
-    int workers = std::max(1, JobSystem::CurrentWorkerCount());
+    int executors = JobSystem::ResolveExecutorCount(JobSystem::CurrentWorkerCount());
     const int tpw = JobSystem::kDefaultTilesPerWorker;
-    int tpwChunk = std::max(16, (100'000 + workers * tpw - 1) / (workers * tpw));
+    int tpwChunk = std::max(16, (100'000 + executors * tpw - 1) / (executors * tpw));
     Require(chunk == tpwChunk, "flag-off ResolveChunkSize must equal tpw fallback");
     JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
     std::cout << "PASS ResolveChunkSizeFallback\n";
+}
+
+void TestClaimIncludesAssistCapacity()
+{
+    const bool saved = JobSystem::g_mainThreadAssistEnabled.load();
+    try
+    {
+        const int workers = JobSystem::CurrentWorkerCount();
+        for (bool assist : {false, true})
+        {
+            JobSystem::g_mainThreadAssistEnabled.store(assist);
+            struct Context
+            {
+                std::atomic<int> active{0}, peak{0}, elements{0};
+                std::atomic<bool> release{false}, timedOut{false};
+                int expected;
+            } context;
+            context.expected = workers + (assist ? 1 : 0);
+            Require(JobSystem::ResolveExecutorCount(workers) == context.expected,
+                "executor count must include enabled caller assistance");
+            Require(JobSystem::ResolveExecutorCount((std::numeric_limits<int>::max)()) ==
+                (std::numeric_limits<int>::max)(), "executor count must saturate without overflow");
+            constexpr int batchSize = 256;
+            const int length = workers * 2 * batchSize;
+            auto handle = JobSystem::Scheduler::ScheduleParallelForBatch(
+                [](void* raw, int, int count) {
+                    auto& ctx = *static_cast<Context*>(raw);
+                    const int active = ctx.active.fetch_add(1) + 1;
+                    int peak = ctx.peak.load();
+                    while (active > peak && !ctx.peak.compare_exchange_weak(peak, active)) {}
+                    if (active >= ctx.expected) ctx.release.store(true);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    while (!ctx.release.load())
+                    {
+                        if (std::chrono::steady_clock::now() >= deadline)
+                        {
+                            ctx.timedOut.store(true);
+                            ctx.release.store(true);
+                            break;
+                        }
+                        std::this_thread::yield();
+                    }
+                    ctx.elements.fetch_add(count);
+                    ctx.active.fetch_sub(1);
+                }, &context, length, batchSize);
+            handle.Complete();
+            Require(!context.timedOut.load() && context.peak.load() == context.expected,
+                "claim groups must leave work for every available executor");
+            Require(context.elements.load() == length && context.active.load() == 0,
+                "assisted claiming must preserve complete coverage and retirement");
+        }
+    }
+    catch (...) { JobSystem::g_mainThreadAssistEnabled.store(saved); throw; }
+    JobSystem::g_mainThreadAssistEnabled.store(saved);
+    std::cout << "PASS ClaimIncludesAssistCapacity\n";
+}
+
+void TestRobustCostWindowConcurrent()
+{
+    JobSystem::JobCostCache cache;
+    cache.robustMode = true;
+    constexpr uint32_t hash = 0x3c47u;
+    std::atomic<bool> start{ false };
+    std::atomic<int> finished{ 0 };
+    std::vector<std::thread> writers;
+    for (int thread = 0; thread < 4; ++thread)
+        writers.emplace_back([&, thread]() {
+            start.wait(false, std::memory_order_acquire);
+            for (int n = 0; n < 8192; ++n)
+            {
+                const double value = 1.0 + ((n + thread) % 64);
+                cache.UpdatePerElemCost(hash, value, true);
+                cache.UpdatePerElemCost(hash, value, false);
+            }
+            finished.fetch_add(1, std::memory_order_release);
+        });
+    start.store(true, std::memory_order_release);
+    start.notify_all();
+    bool valid = true;
+    while (finished.load(std::memory_order_acquire) != 4)
+    {
+        const double ratio = cache.RobustRatio(hash);
+        valid = valid && ratio >= 0.0 && ratio <= 64.0;
+    }
+    for (auto& writer : writers) writer.join();
+    const double ratio = cache.RobustRatio(hash);
+    Require(valid && ratio >= 0.0 && ratio <= 64.0,
+        "concurrent robust windows must contain finite bounded samples");
+    std::cout << "PASS RobustCostWindowConcurrent\n";
+}
+
+void TestSchedulingDominatedRanges()
+{
+    const bool saved = JobSystem::g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    const int executors = JobSystem::ResolveExecutorCount(JobSystem::CurrentWorkerCount());
+    struct Sample { int length; double perElementNs; };
+    for (const auto sample : { Sample{257, 20.0}, Sample{1000, 5.0}, Sample{10000, 1.0} })
+    {
+        constexpr uint32_t hash = 0x15ab37u;
+        JobSystem::g_jobCostCache.Init();
+        for (int n = 0; n < JobSystem::kCoarseProbeSamples; ++n)
+            JobSystem::g_jobCostCache.UpdatePerElemCost(hash, sample.perElementNs, true);
+        for (int n = 0; n < JobSystem::kMinFineSamples; ++n)
+            JobSystem::g_jobCostCache.UpdatePerElemCost(hash, sample.perElementNs, false);
+        JobSystem::g_jobCostCache.UpdatePerTileCost(hash, 200.0);
+        // Exercise grain selection with a learned parallel classification.
+        JobSystem::g_jobCostCache.slotMode[JobSystem::JobCostCache::SlotOf(hash)].store(
+            JobSystem::kModeParallel, std::memory_order_relaxed);
+
+        const int chunk = JobSystem::ResolveChunkSize(sample.length, 0, hash);
+        Require(chunk > 0 && chunk <= sample.length, "light auto range must remain valid");
+        Require(JobSystem::CeilDiv(sample.length, chunk) <= executors,
+            "scheduling-dominated work must not create redundant ranges");
+        Require(JobSystem::ResolveChunkSize(sample.length, 1, hash) == 1 &&
+                JobSystem::ResolveChunkSize(sample.length, 31, hash) == 31,
+            "learned costs must preserve explicit batch sizes");
+    }
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
+    std::cout << "PASS SchedulingDominatedRanges\n";
+}
+
+void TestEcsCostAwareLayoutCache()
+{
+    const bool saved = JobSystem::g_jobCostCacheEnabled.load(std::memory_order_relaxed);
+    JobSystem::g_jobCostCacheEnabled.store(true, std::memory_order_relaxed);
+    const int itemCount = std::max(1024, JobSystem::CurrentWorkerCount() * 128);
+    std::vector<ChunkJobData> chunks(itemCount);
+    for (auto& chunk : chunks) chunk.entityCount = 128;
+    std::vector<std::atomic<int>> hits(itemCount);
+    ChunkRangeContext context{ &hits, nullptr };
+    const auto kernel = reinterpret_cast<void (*)() noexcept>(ExecuteChunkRange);
+    const uint32_t hash = JobSystem::HashFuncPtr(kernel);
+    uint64_t coarseTiles = 0;
+    for (const bool heavy : {false, true, false})
+    {
+        for (auto& hit : hits) hit.store(0, std::memory_order_relaxed);
+        JobSystem::g_jobCostCache.Init();
+        JobSystem::g_jobCostCache.UpdatePerElemCost(hash, heavy ? 1000.0 : 0.01, true);
+        JobSystem::ResetStatsSnapshot();
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(ExecuteChunkRange, &context,
+            nullptr, chunks.data(), itemCount, {}, JobSystem::ChunkScheduleMode::PublishAssist,
+            0, 0, 0x1823u);
+        handle.Complete();
+        for (const auto& hit : hits)
+            Require(hit.load(std::memory_order_relaxed) == 1, "ECS adaptive layout lost or duplicated a chunk");
+        JobSystem::JobSystemStatsSnapshot stats{};
+        JobSystem::GetStatsSnapshot(&stats);
+        if (coarseTiles == 0) coarseTiles = stats.totalTilesPublished;
+        Require(heavy ? stats.totalTilesPublished > coarseTiles : stats.totalTilesPublished == coarseTiles,
+            "layout cache must distinguish coarse and refined geometry on the same query");
+    }
+    const int originalWorkers = JobSystem::CurrentWorkerCount();
+    JobSystem::Scheduler::Shutdown();
+    JobSystem::Scheduler::Initialize(1);
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::ResetStatsSnapshot();
+    {
+        auto handle = JobSystem::Scheduler::ScheduleChunkRanges(ExecuteChunkRange, &context,
+            nullptr, chunks.data(), itemCount, {}, JobSystem::ChunkScheduleMode::PublishAssist,
+            0, 0, 0x1823u);
+        handle.Complete();
+    }
+    JobSystem::JobSystemStatsSnapshot singleWorkerStats{};
+    JobSystem::GetStatsSnapshot(&singleWorkerStats);
+    Require(singleWorkerStats.totalTilesPublished < coarseTiles,
+        "cached layout must follow the actual worker count after restart");
+    JobSystem::Scheduler::Shutdown();
+    JobSystem::Scheduler::Initialize(originalWorkers);
+    // A unit may carry a near-limit entity count even after a nonempty prefix.
+    // Accumulation must not overflow the Windows 32-bit long type.
+    chunks[0].entityCount = 128;
+    chunks[1].entityCount = (std::numeric_limits<int>::max)();
+    chunks[2].entityCount = 128;
+    JobSystem::ChunkBatchContext cc{};
+    cc.chunks = chunks.data();
+    Require(JobSystem::BuildEntityBalancedTiles(nullptr, &cc, JobSystem::TileKind::ChunkRange, 3, 256) == 2,
+        "ECS entity accumulation must remain valid above INT_MAX");
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCacheEnabled.store(saved, std::memory_order_relaxed);
+    std::cout << "PASS EcsCostAwareLayoutCache\n";
+}
+
+void TestAutoGeometryExtremeInputs()
+{
+    const bool enabled = JobSystem::g_jobCostCacheEnabled.load();
+    const int configured = JobSystem::g_configuredTilesPerWorker.load();
+    constexpr int maximum = (std::numeric_limits<int>::max)();
+    constexpr uint32_t hash = 0x6e4bu;
+    JobSystem::g_configuredTilesPerWorker.store(maximum);
+    JobSystem::g_jobCostCacheEnabled.store(false);
+    Require(JobSystem::ResolveChunkSize(maximum, 0, hash) == 16,
+        "extreme tile density must not overflow the executor denominator");
+    JobSystem::g_jobCostCacheEnabled.store(true);
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCache.UpdatePerElemCost(hash, 1.0 / JobSystem::kJobCostQ22, false);
+    JobSystem::g_jobCostCache.slotMode[JobSystem::JobCostCache::SlotOf(hash)].store(JobSystem::kModeMemBound);
+    Require(JobSystem::ResolveChunkSize(maximum, 0, hash) == 32768,
+        "tiny learned cost must clamp before conversion to int");
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_jobCostCache.UpdatePerElemCost(hash, 1e9, false);
+    JobSystem::g_jobCostCache.slotMode[JobSystem::JobCostCache::SlotOf(hash)].store(JobSystem::kModeParallel);
+    Require(JobSystem::ResolveChunkSize(maximum, 0, hash) >= 1,
+        "large learned work must not overflow the adaptive tile count");
+    JobSystem::g_jobCostCache.Init();
+    JobSystem::g_configuredTilesPerWorker.store(configured);
+    JobSystem::g_jobCostCacheEnabled.store(enabled);
+    std::cout << "PASS AutoGeometryExtremeInputs\n";
 }
 
 void TestIntOverflowCeilDiv()
@@ -2256,7 +2532,7 @@ void TestIntOverflowCeilDiv()
     JobSystem::g_jobCostCache.Init();
 
     const int workers = std::max(1, JobSystem::CurrentWorkerCount());
-    const int denom = workers * JobSystem::kDefaultTilesPerWorker;
+    const int denom = JobSystem::ResolveExecutorCount(workers) * JobSystem::kDefaultTilesPerWorker;
     constexpr int kMax = std::numeric_limits<int>::max();
 
     // 期望用 int64_t 计算（避免测试自身溢出）：tpw 兜底 = max(16, ceil(length/(W*4)))。
@@ -2953,6 +3229,9 @@ int main()
         TestAutomaticBatchDensity();
         std::cout << "PASS AutomaticBatchDensity\n";
         TestParallelForElementCoverage();
+        TestDemandTokensRetainParallelismAndBatchBoundaries();
+        std::cout << "PASS DemandTokensRetainParallelismAndBatchBoundaries\n";
+        TestIndexedRangeCoverage();
         std::cout << "PASS ParallelForElementCoverage\n";
         TestChunkRunElementCoverage();
         std::cout << "PASS ChunkRunElementCoverage\n";
@@ -2990,6 +3269,11 @@ int main()
         TestJobCostCacheSlotIndexNotLowBits();
         TestJobCostCacheCollisionReuse();
         TestResolveChunkSizeFallback();
+        TestSchedulingDominatedRanges();
+        TestClaimIncludesAssistCapacity();
+        TestAutoGeometryExtremeInputs();
+        TestRobustCostWindowConcurrent();
+        TestEcsCostAwareLayoutCache();
         TestIntOverflowCeilDiv();
 
         // ── JobCostCache 对抗性压力（并发 / 正确性 / 稳定性）──

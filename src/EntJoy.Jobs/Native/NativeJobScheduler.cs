@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -150,9 +150,8 @@ public static unsafe partial class NativeJobScheduler
         /// <summary>当 NativeDll 不可用时自动回退到 ManagedJobScheduler。</summary>
         internal static bool UseFallback { get; set; }
     /// <summary>
-    /// 并行 for 默认 tiles/worker：batchSize=0 时按此值个 tile/worker 切分。
-    /// 64 → 512：同一会话交替配对（8 worker、1e6 元素）整步 −2.8～−3.5%（四个相同步段同号），
-    /// 256/512/768 同处平台、均优于 64。只影响 flat 路径；ECS chunk 路径用自己的常数。
+    /// 自动并行 for 的参考分块密度，按可用执行者计入启用协助的调用线程。
+    /// 只影响 flat 路径；ECS chunk 路径按实体数及已学成本分段。
     /// 可用 `ENTJOY_TILES_PER_WORKER` 覆盖。
     /// </summary>
     public static int TilesPerWorker = 512;
@@ -258,8 +257,13 @@ public static unsafe partial class NativeJobScheduler
     /// <summary>当前委托缓存代次（每次 <see cref="InvalidateDelegateCaches"/> +1）。</summary>
     public static int DelegateCacheGeneration => NativeJobCore.DelegateCacheGeneration;
 
-    /// <summary>共享的 `Marshal.FreeHGlobal` cleanup 指针（生成代码统一用它）。</summary>
+    /// <summary>供直接分配上下文使用的共享 `Marshal.FreeHGlobal` cleanup 指针。</summary>
     public static IntPtr SharedFreeHGlobalCleanupPtr => NativeJobCore.SharedFreeHGlobalCleanupPtr;
+
+    /// <summary>供转译绑定租用字段布局上下文，与 PooledJobContextCleanupPtr 配对。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public static IntPtr RentJobContext(int size) => NativeJobCore.RentMarshalledContext(size);
+    public static IntPtr PooledJobContextCleanupPtr => NativeJobCore.PooledJobContextCleanupPtr;
 
     /// <summary>
     /// 热重载：布局校验 → 排空 → 缓存换代 → 换句柄 → 重跑注册（前两步失败不改变任何状态）。
@@ -365,23 +369,22 @@ public static unsafe partial class NativeJobScheduler
 
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
+        bool handedOff = false;
         try
         {
             var cache = NativeJobCore.JobDelegateCacheFor<T>.Cache;
+            handedOff = true;
             NativeJobHandle handle = NativeJobCore.ScheduleRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, dependsOn);
-            if (!handle.IsValid)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-                return default;
-            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-            else NativeJobCore.Cleanup(ctx);
+            if (!handedOff)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -404,23 +407,22 @@ public static unsafe partial class NativeJobScheduler
         }
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
+        bool handedOff = false;
         try
         {
             var cache = NativeJobCore.ForDelegateCacheFor<T>.Cache;
+            handedOff = true;
             NativeJobHandle handle = NativeJobCore.ScheduleForRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, dependsOn);
-            if (!handle.IsValid)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-                return default;
-            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-            else NativeJobCore.Cleanup(ctx);
+            if (!handedOff)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -437,28 +439,27 @@ public static unsafe partial class NativeJobScheduler
             && TryGetNativeJobAdapter(typeof(T), out IntPtr nativePfaAdapter, out int nativePfaCtx)
             && TryGetJobFieldWriter(typeof(T), out Delegate pfaWriter))
         {
-            if (TryScheduleBatchWithNativeAdapter(nativePfaAdapter, nativePfaCtx, pfaWriter, ref job, dependsOn, typeof(T), length, batchSize, claim, out NativeJobHandle pfaHandle))
+            if (TryScheduleBatchWithNativeAdapter(nativePfaAdapter, nativePfaCtx, pfaWriter, ref job, dependsOn, typeof(T), length, batchSize, claim, out NativeJobHandle pfaHandle, true))
                 return pfaHandle;
         }
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
+        bool handedOff = false;
         try
         {
             var cache = NativeJobCore.GetAutoParallelForCache<T>();
+            handedOff = true;
             NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn, claim);
-            if (!handle.IsValid)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-                return default;
-            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-            else NativeJobCore.Cleanup(ctx);
+            if (!handedOff)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+            }
             throw;
         }
     }
@@ -479,29 +480,39 @@ public static unsafe partial class NativeJobScheduler
         }
         bool managedContext = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
         var ctx = managedContext ? NativeJobCore.AllocManagedContext(ref job) : NativeJobCore.AllocContext(ref job);
+        bool handedOff = false;
         try
         {
             var cache = NativeJobCore.ParallelForBatchDelegateCacheFor<T>.Cache;
+            handedOff = true;
             NativeJobHandle handle = NativeJobCore.ScheduleParallelForBatchRaw(cache.FuncPtr, ctx, managedContext ? NativeJobCore.ManagedCleanupPtr : NativeJobCore.CleanupPtr, length, batchSize, dependsOn, claim);
-            if (!handle.IsValid)
-            {
-                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-                else NativeJobCore.Cleanup(ctx);
-                return default;
-            }
             NativeJobCore.RegisterScheduledJobName(handle.Handle, typeof(T).Name);
             return handle;
         }
         catch
         {
-            if (managedContext) NativeJobCore.ManagedCleanup(ctx);
-            else NativeJobCore.Cleanup(ctx);
+            if (!handedOff)
+            {
+                if (managedContext) NativeJobCore.ManagedCleanup(ctx);
+                else NativeJobCore.Cleanup(ctx);
+            }
             throw;
         }
     }
 
     // Complete / IsCompleted / Release
     public static void Complete(ref NativeJobHandle h)
+    {
+        if (UseFallback) return;
+        try { CompleteCore(h); }
+        finally
+        {
+            Release(h);
+            h = default;
+        }
+    }
+
+    private static void CompleteCore(NativeJobHandle h)
     {
         if (UseFallback) return; // 托管路径通过 JobHandle._managedHandle 处理
         // 诊断（ENTJOY_DIAG_CSHARP_PHASE=1）：把每 job 的 Complete 拆成 5 段，
@@ -511,8 +522,7 @@ public static unsafe partial class NativeJobScheduler
         // 隐式批：Complete 前先 flush 当前批（Unity ScheduleBatchedJobs 同语义：Complete 隐式刷新）
         ImplicitBatch.FlushForComplete();
         long t1 = cDiag ? CSharpPhaseDiag.Now() : 0;
-        // Complete 不消费句柄（Unity 值语义；拷贝共享 Box，不能在此 detach）。
-        // 等待窗口持 retain，防并发 Release/finalizer 回收正在等待的 state（TOCTOU）。
+        // 等待窗口持有原生引用，防并发 Release 回收正在等待的状态。
         using var handleLease = new NativeJobCore.RetainedNativeDependency(h);
         IntPtr handle = handleLease.Handle;
         if (handle == IntPtr.Zero) return;
@@ -552,45 +562,78 @@ public static unsafe partial class NativeJobScheduler
 
     public static void Release(NativeJobHandle h)
     {
-        IntPtr handle = h.Detach();
-        if (handle != IntPtr.Zero)
-        {
-            NativeJobCore.JobSystem_ReleaseHandle(handle);
-        }
+        NativeHandleStorage.Release(h);
     }
 
     public static NativeJobHandle CombineDependencies(params NativeJobHandle[] handles)
+        => CombineDependencies((ReadOnlySpan<NativeJobHandle>)handles);
+
+    internal static NativeJobHandle CombineDependencies(ReadOnlySpan<NativeJobHandle> handles)
+        => NativeHandleStorage.Combine(default, handles);
+
+    public static NativeJobHandle CombineDependencies(NativeJobHandle handle)
     {
-        if (handles == null || handles.Length == 0) return default;
-        var ptrs = new IntPtr[handles.Length];
-        var leases = new NativeJobCore.RetainedNativeDependency[handles.Length];
-        try
-        {
-            for (int i = 0; i < handles.Length; i++)
-            {
-                leases[i] = new NativeJobCore.RetainedNativeDependency(handles[i]);
-                ptrs[i] = leases[i].Handle;
-            }
-            return new NativeJobHandle(NativeJobCore.JobSystem_CombineDependencies(ptrs, handles.Length));
-        }
-        finally
-        {
-            for (int i = 0; i < leases.Length; i++)
-                leases[i].Dispose();
-        }
+        Span<NativeJobHandle> handles = stackalloc NativeJobHandle[1] { handle };
+        return CombineDependencies(handles);
+    }
+
+    public static NativeJobHandle CombineDependencies(NativeJobHandle first, NativeJobHandle second)
+    {
+        Span<NativeJobHandle> handles = stackalloc NativeJobHandle[2] { first, second };
+        return CombineDependencies(handles);
+    }
+
+    public static NativeJobHandle CombineDependencies(NativeJobHandle first, NativeJobHandle second, NativeJobHandle third)
+    {
+        Span<NativeJobHandle> handles = stackalloc NativeJobHandle[3] { first, second, third };
+        return CombineDependencies(handles);
     }
 
     // 低级原始接口（transpiler 直调）
+    /// <summary>同步复制借用载荷后调度；上下文由调度器持有并归还。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public static NativeJobHandle ScheduleCopiedRaw(IntPtr funcPtr, IntPtr source, int bytes, NativeJobHandle? dependsOn = null)
+        => NativeJobCore.ScheduleCopiedRaw(funcPtr, source, bytes, dependsOn);
+
+    /// <summary>复制后提交区间 adapter；indexedRanges 允许合并连续索引，显式 Batch 保留边界。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public static NativeJobHandle ScheduleParallelForCopiedRaw(IntPtr funcPtr, IntPtr source, int bytes, int length, int batchSize,
+        NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto, bool indexedRanges = false)
+        => NativeJobCore.ScheduleParallelForCopiedRaw(funcPtr, source, bytes, length, batchSize, dependsOn, claim, indexedRanges);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public static NativeJobHandle ScheduleRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, NativeJobHandle? dependsOn = null)
         => NativeJobCore.ScheduleRaw(funcPtr, contextPtr, cleanupPtr, dependsOn);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public static NativeJobHandle ScheduleForRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, NativeJobHandle? dependsOn = null)
         => NativeJobCore.ScheduleForRaw(funcPtr, contextPtr, cleanupPtr, length, dependsOn);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public static NativeJobHandle ScheduleParallelForBatchRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto)
         => NativeJobCore.ScheduleParallelForBatchRaw(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn, claim);
 
+    /// <summary>提交逐索引 adapter；adapter 须遍历传入区间的每个 index，连续区间可合并。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public static NativeJobHandle ScheduleParallelForRangeRaw(IntPtr funcPtr, IntPtr contextPtr, IntPtr cleanupPtr, int length, int batchSize, NativeJobHandle? dependsOn = null, ClaimPolicy claim = ClaimPolicy.Auto)
+        => NativeJobCore.ScheduleParallelForBatchRaw(funcPtr, contextPtr, cleanupPtr, length, batchSize, dependsOn, claim, true);
+
     // transpiler 生成的 Schedule_{Job} 在调度后调用，把 batchId → Job 名注册进调试器字典。
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public static void RegisterScheduledJob(NativeJobHandle handle, string jobName)
+    {
+        if (!NativeJobCore.DebugNameCaptureEnabled && !CSharpPhaseDiag.Enabled) return;
+        RegisterScheduledJobWithLease(handle, jobName);
+    }
+
+    private static void RegisterScheduledJobWithLease(NativeJobHandle handle, string jobName)
+    {
+        // 采集期间借用状态引用，保护与 Complete / Release 并发的批次标识读取。
+        using var lease = new NativeJobCore.RetainedNativeDependency(handle);
+        RegisterScheduledJob(lease.Handle, jobName);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void RegisterScheduledJob(IntPtr handle, string jobName)
     {
         long t0 = CSharpPhaseDiag.Sampling("sched.register") ? CSharpPhaseDiag.Now() : 0;
@@ -698,8 +741,6 @@ public static unsafe partial class NativeJobScheduler
     public static void FlushRecordedExceptions() => NativeJobCore.FlushRecordedExceptions();
 
     // 句柄辅助（内部，供 JobHandle 使用）
-    internal static void RetainRawHandleForUse(IntPtr handle) => NativeJobCore.RetainRawHandleForUse(handle);
-    internal static void ReleaseRawHandleForFinalizer(IntPtr handle) => NativeJobCore.ReleaseRawHandleForFinalizer(handle);
 
     // Job 字段写入器注册表（为非 blittable 结构）
     public unsafe delegate void JobFieldWriter<T>(byte* dst, ref T job) where T : struct;
@@ -835,10 +876,10 @@ public static unsafe partial class NativeJobScheduler
 
     /// <summary>
     /// 三种原生 adapter 形态共用的"租 ctx + 逐字段写入"一步。
-    /// ctx 来自框架自带 `ContextPool`（与 `AllocContext` 同一套 4 字节前缀 ⇒ 释放复用同一个
-    /// <see cref="NativeJobCore.CleanupPtr"/>，无逐派发 malloc/free）。
+    /// ctx 来自框架自带 `ContextPool`（与 `AllocContext` 同一套对齐长度前缀 ⇒ 释放复用同一个
+    /// <see cref="NativeJobCore.PooledJobContextCleanupPtr"/>，在原生层归还内存）。
     /// `ctxSize &lt;= 0`（无字段的 job —— 生成器不会为它注册）是唯一的不可用判据。
-    /// 字段写入器是生成代码的纯指针写、不会抛 ⇒ 不设 try/catch：真有异常就冒泡（fail-fast），不静默回退。
+    /// 字段写入失败时归还上下文，异常向调用方传播。
     /// </summary>
     private static unsafe bool TryRentMarshalledContext<T>(
         int ctxSize, Delegate fieldWriter, ref T job, out IntPtr ctx) where T : struct
@@ -846,7 +887,8 @@ public static unsafe partial class NativeJobScheduler
         ctx = IntPtr.Zero;
         if (ctxSize <= 0) return false;
         ctx = NativeJobCore.RentMarshalledContext(ctxSize);
-        ((JobFieldWriter<T>)fieldWriter)((byte*)ctx, ref job);
+        try { ((JobFieldWriter<T>)fieldWriter)((byte*)ctx, ref job); }
+        catch { NativeJobCore.Cleanup(ctx); throw; }
         return true;
     }
 
@@ -860,12 +902,7 @@ public static unsafe partial class NativeJobScheduler
         handle = default;
         if (!TryRentMarshalledContext(ctxSize, fieldWriter, ref job, out IntPtr ctx))
             return false;
-        handle = NativeJobCore.ScheduleRaw(nativeAdapter, ctx, NativeJobCore.CleanupPtr, dependsOn);
-        if (!handle.IsValid)
-        {
-            NativeJobCore.Cleanup(ctx);
-            return false;
-        }
+        handle = NativeJobCore.ScheduleRaw(nativeAdapter, ctx, NativeJobCore.PooledJobContextCleanupPtr, dependsOn);
         LogNativeFirstUse(type);
         NativeJobCore.RegisterScheduledJobName(handle.Handle, type.Name);
         return true;
@@ -883,12 +920,7 @@ public static unsafe partial class NativeJobScheduler
         handle = default;
         if (!TryRentMarshalledContext(ctxSize, fieldWriter, ref job, out IntPtr ctx))
             return false;
-        handle = NativeJobCore.ScheduleForRaw(nativeIndexAdapter, ctx, NativeJobCore.CleanupPtr, length, dependsOn);
-        if (!handle.IsValid)
-        {
-            NativeJobCore.Cleanup(ctx);
-            return false;
-        }
+        handle = NativeJobCore.ScheduleForRaw(nativeIndexAdapter, ctx, NativeJobCore.PooledJobContextCleanupPtr, length, dependsOn);
         LogNativeFirstUse(type);
         NativeJobCore.RegisterScheduledJobName(handle.Handle, type.Name);
         return true;
@@ -901,18 +933,13 @@ public static unsafe partial class NativeJobScheduler
     /// </summary>
     private static unsafe bool TryScheduleBatchWithNativeAdapter<T>(
         IntPtr nativeAdapter, int ctxSize, Delegate fieldWriter, ref T job, NativeJobHandle? dependsOn, Type type,
-        int length, int batchSize, ClaimPolicy claim, out NativeJobHandle handle) where T : struct
+        int length, int batchSize, ClaimPolicy claim, out NativeJobHandle handle, bool indexedRanges = false) where T : struct
     {
         handle = default;
         if (!TryRentMarshalledContext(ctxSize, fieldWriter, ref job, out IntPtr ctx))
             return false;
         handle = NativeJobCore.ScheduleParallelForBatchRaw(
-            nativeAdapter, ctx, NativeJobCore.CleanupPtr, length, batchSize, dependsOn, claim);
-        if (!handle.IsValid)
-        {
-            NativeJobCore.Cleanup(ctx);
-            return false;
-        }
+            nativeAdapter, ctx, NativeJobCore.PooledJobContextCleanupPtr, length, batchSize, dependsOn, claim, indexedRanges);
         LogNativeFirstUse(type);
         NativeJobCore.RegisterScheduledJobName(handle.Handle, type.Name);
         return true;

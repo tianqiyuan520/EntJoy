@@ -60,15 +60,16 @@ namespace JobSystem
             ? g_jobCostCache.ClaimSlicedWanted(batch != nullptr ? batch->funcHash : 0u, /*fallback=*/false)
             : false;
     }
-    // ── tile 布局缓存：同 key（unitsPtr/itemCount/workerCap/rangeSize/unitGeneration）下划分确定
+    // Tile layouts depend on query identity, actual worker count and grain.
     //    → 跨 job 共享（同 query 只扫一次）；只存值拷贝不持指针 → 无悬垂。
     namespace {
         struct TileLayoutEntry
         {
             const void* unitsPtr = nullptr;
             int itemCount = 0;
-            int workerCap = 0;
+            int workerCount = 0;
             int rangeSize = 0;
+            int tilesPerWorker = 16;
             uint32_t unitGeneration = 0; // C# cache StructuralVersion：重建必变 → 防指针地址复用误命中
             int64_t totalEntities = 0;  // 实体总量（JCC 前置判重成本估算用）
             uint32_t tileCount = 0;
@@ -82,8 +83,8 @@ namespace JobSystem
         };
         TileLayoutCache g_tileLayoutCache;
 
-        bool TileLayoutTryGet(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
-            uint32_t unitGeneration, uint32_t& outTileCount, int64_t& outTotalEntities,
+        bool TileLayoutTryGet(const void* unitsPtr, int itemCount, int workerCount, int rangeSize,
+            uint32_t unitGeneration, int tilesPerWorker, uint32_t& outTileCount, int64_t& outTotalEntities,
             std::vector<uint32_t>& outBounds)
         {
             // unitGeneration==0 = 调用方无缓存身份（fallback 路径）→ 不参与缓存（避免指针复用误命中）。
@@ -93,7 +94,7 @@ namespace JobSystem
             {
                 const auto& e = g_tileLayoutCache.entries[i];
                 if (e.unitsPtr == unitsPtr && e.itemCount == itemCount &&
-                    e.workerCap == workerCap && e.rangeSize == rangeSize &&
+                    e.workerCount == workerCount && e.rangeSize == rangeSize && e.tilesPerWorker == tilesPerWorker &&
                     e.unitGeneration == unitGeneration)
                 {
                     outTileCount = e.tileCount;
@@ -105,8 +106,8 @@ namespace JobSystem
             return false;
         }
 
-        void TileLayoutStore(const void* unitsPtr, int itemCount, int workerCap, int rangeSize,
-            uint32_t unitGeneration, int64_t totalEntities, uint32_t tileCount,
+        void TileLayoutStore(const void* unitsPtr, int itemCount, int workerCount, int rangeSize,
+            uint32_t unitGeneration, int tilesPerWorker, int64_t totalEntities, uint32_t tileCount,
             const std::vector<uint32_t>& bounds)
         {
             if (unitGeneration == 0) return;
@@ -116,25 +117,30 @@ namespace JobSystem
             {
                 auto& e = g_tileLayoutCache.entries[i];
                 if (e.unitsPtr == unitsPtr && e.itemCount == itemCount &&
-                    e.workerCap == workerCap && e.rangeSize == rangeSize &&
+                    e.workerCount == workerCount && e.rangeSize == rangeSize && e.tilesPerWorker == tilesPerWorker &&
                     e.unitGeneration == unitGeneration)
                 {
+                    e.bounds = bounds;
                     e.totalEntities = totalEntities;
                     e.tileCount = tileCount;
-                    e.bounds = bounds;
                     return;
                 }
             }
-            int slot = g_tileLayoutCache.count < 16 ? g_tileLayoutCache.count++ : 0;
+            const bool insert = g_tileLayoutCache.count < 16;
+            const int slot = insert ? g_tileLayoutCache.count : 0;
             auto& e = g_tileLayoutCache.entries[slot];
+            // Copy before publishing metadata; uint32_t copy cannot throw, so
+            // allocation failure preserves the previous entry and cache count.
+            e.bounds = bounds;
             e.unitsPtr = unitsPtr;
             e.itemCount = itemCount;
-            e.workerCap = workerCap;
+            e.workerCount = workerCount;
             e.rangeSize = rangeSize;
+            e.tilesPerWorker = tilesPerWorker;
             e.unitGeneration = unitGeneration;
             e.totalEntities = totalEntities;
             e.tileCount = tileCount;
-            e.bounds = bounds;
+            if (insert) ++g_tileLayoutCache.count;
         }
     }
     template <typename WorkBuilder>
@@ -181,59 +187,23 @@ namespace JobSystem
         return JobHandle(state);
     }
 
-    template <typename Work>
-    void FastPath(Work&& work, void* ctx, void (*cleanup)(void*), HandleState* state)
+    static void SubmitDirect(DirectWorkKind kind, void (*func)(), void* ctx, int length,
+        void (*cleanup)(void*), HandleState* state) noexcept
     {
-        AcquireState(state);
-        try
-        {
-            const bool accepted = SubmitBackendAsync([work = std::forward<Work>(work), state, ctx, cleanup]() {
-                // 非 batch 快速路径异步窗口——work() 即 C# func 执行点，
-                // 执行期间 set/clear 当前-batch 使异常按本 job 归属。
-                const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
-                // 调试面板：pool 执行窗口上报到本 worker 泳道（WorkerLoop 已预分配索引）
-                DebugBeginExec(id, 1, 1, false); // 快速路径 Job：单线程执行
-                if (id != 0) SetCurrentBatchId(id);
-                try { work(); }
-                catch (...)
-                {
-                    // C++ 异常协议：快速路径（pool 窗口）异常记录到 handle state，Complete() 统一重抛。
-                    RecordStateException(state, std::current_exception());
-                }
-                if (id != 0) SetCurrentBatchId(0);
-                DebugEndExec();
-                try
-                {
-                    if (cleanup) cleanup(ctx);
-                }
-                catch (...)
-                {
-                    RecordStateException(state, std::current_exception());
-                }
-                try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
-            }, state, cleanup, ctx);
-            (void)accepted; // failure path performs cleanup and terminalization
-        }
-        catch (...)
-        {
-            // std::function construction or an unexpected submission failure
-            // happened before ownership reached the backend wrapper.
-            RecordStateException(state, std::current_exception());
-            try
-            {
-                if (cleanup) cleanup(ctx);
-            }
-            catch (...)
-            {
-                RecordStateException(state, std::current_exception());
-            }
-            try { CompleteState(state); } catch (...) { RecordStateException(state, std::current_exception()); }
-            ReleaseState(state);
-        }
+        AcquireState(state); // queued work owns this reference through cleanup and completion
+        auto* scheduler = LoadChaseLevScheduler();
+        if (scheduler && scheduler->SubmitDirectWork(kind, func, ctx, length, cleanup, state)) return;
+        try { throw std::runtime_error("JobSystem backend rejected asynchronous work"); }
+        catch (...) { RecordStateException(state, std::current_exception()); }
+        try { if (cleanup) cleanup(ctx); }
+        catch (...) { RecordStateException(state, std::current_exception()); }
+        try { CompleteState(state); }
+        catch (...) { RecordStateException(state, std::current_exception()); }
+        ReleaseState(state);
     }
 
-    template <typename Work>
-    JobHandle ScheduleFastPath(Work&& work, void* ctx, void (*cleanup)(void*), const JobHandle& dep)
+    static JobHandle ScheduleDirectFastPath(DirectWorkKind kind, void (*func)(), void* ctx, int length,
+        void (*cleanup)(void*), const JobHandle& dep)
     {
         auto* state = CreateState(false);
         const uint64_t id = AssignStateDiagnosticId(state);
@@ -244,20 +214,13 @@ namespace JobSystem
         RecordPublishedJob(id, 1);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
-        { FastPath(std::forward<Work>(work), ctx, cleanup, state); return JobHandle(state); }
+        { SubmitDirect(kind, func, ctx, length, cleanup, state); return JobHandle(state); }
         AcquireState(state);
         RetainDependency(state, ds);
         try
         {
-            AddContinuationOrRunNow(ds, [state, work = std::forward<Work>(work), ctx, cleanup]() mutable {
-                try
-                {
-                    FastPath(std::forward<Work>(work), ctx, cleanup, state);
-                }
-                catch (...)
-                {
-                    CompleteStateAfterException(state, std::current_exception());
-                }
+            AddContinuationOrRunNow(ds, [state, kind, func, ctx, length, cleanup]() {
+                SubmitDirect(kind, func, ctx, length, cleanup, state);
                 ReleaseState(state);
             });
         }
@@ -387,13 +350,12 @@ namespace JobSystem
 
     void Scheduler::Shutdown()
     {
-        // 线程防护：只有本调度器的 worker 线程不能调 Shutdown —— 它会走到
-        // ChaseLevScheduler::Stop 的 join 自身 → 永不返回死锁。
-        // 任何非 worker 的线程（含 ProcessExit/DomainUnload 回调线程）调用都是安全的。
-        if (ChaseLevScheduler_IsWorkerThread())
+        // A callback may run on a worker or an assisting caller. Neither can
+        // tear down the scheduler while its current job is still executing.
+        if (ChaseLevScheduler_IsWorkerThread() || g_currentBatchId != 0)
         {
             std::fprintf(stderr,
-                "[JobSystem] Shutdown() called from a scheduler worker thread — rejected (would self-join deadlock).\n");
+                "[JobSystem] Shutdown() called from an executing job or worker — rejected.\n");
             return;
         }
 
@@ -483,17 +445,14 @@ namespace JobSystem
             (unsigned long long)g_claimGeomDeclSpread.load(std::memory_order_relaxed),
             (unsigned long long)g_claimGeomDeclAdjacent.load(std::memory_order_relaxed),
             (unsigned long long)g_claimGeomDeclAuto.load(std::memory_order_relaxed));
-        // 等宽 tile / 每批快路径的生效证据（默认开，受 thinTiles 判据门控）。
-        // ⚠ `thinTiles` 用的 `cs <= kClaimSpanThinElems(16)` 恰好等于 `ResolveChunkSize` 五处
-        //   `std::max(16, …)` 的硬编码下限（`JobSystem_State.cpp:1183/1203/1259/1281/1342`）
-        //   ⇒ 该判据实际等价于"JCC 顶在下限上"，与 tile 厚薄无关；且"进不进该 regime"随进程翻
-        //   ⇒ 这个门既不是薄厚判据、也不是 length 的稳定函数。
+        // 等宽边界推导和批内快照的使用次数与覆盖范围。
         std::printf("[JOBF2F4] uniformTiles=%s applied=%llu | tileFastPath=%s applied=%llu"
-                    " (thinTiles gate: cs <= 16)\n",
+                    " (uniformAll=%s)\n",
             g_uniformTilesEnabled ? "ON" : "OFF",
             (unsigned long long)g_uniformTilesApplied.load(std::memory_order_relaxed),
             g_tileFastPath ? "ON" : "OFF",
-            (unsigned long long)g_tileFastApplied.load(std::memory_order_relaxed));
+            (unsigned long long)g_tileFastApplied.load(std::memory_order_relaxed),
+            g_uniformAllTiles ? "ON" : "OFF");
         std::printf("[JOBWAKE] notify_all skipped=%llu\n",
             (unsigned long long)g_notifySkipped.load(std::memory_order_relaxed));
         std::fflush(stdout);
@@ -557,7 +516,7 @@ namespace JobSystem
             return MakeCompletedAfterCleanup(cleanup, context);
         if (!func)
             return MakeCompletedAfterCleanup(cleanup, context);
-        return ScheduleFastPath([func, context]() { func(context); }, context, cleanup, dependency);
+        return ScheduleDirectFastPath(DirectWorkKind::Scalar, reinterpret_cast<void (*)()>(func), context, 1, cleanup, dependency);
     }
 
     // ---------- IJobFor ----------
@@ -569,7 +528,7 @@ namespace JobSystem
             return MakeCompletedAfterCleanup(cleanup, context);
         if (!func || length <= 0)
             return MakeCompletedAfterCleanup(cleanup, context);
-        if (length <= 64) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
+        if (length <= 64) return ScheduleDirectFastPath(DirectWorkKind::Indexed, reinterpret_cast<void (*)()>(func), context, length, cleanup, dependency);
         return ScheduleWithDependency(dependency, [func, context, length, cleanup](HandleState* state) {
             const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
             if (StatsEnabled())
@@ -582,6 +541,7 @@ namespace JobSystem
                     // state 由 ScheduleWithDependency 分配诊断 id，异步窗口同样需要归属。
                     const uint64_t id = state->diagnosticBatchId.load(std::memory_order_acquire);
                     DebugBeginExec(id, 1, 1, false); // ScheduleFor（异步单任务）Job：单线程执行
+                    const uint64_t previousBatchId = g_currentBatchId;
                     if (id != 0) SetCurrentBatchId(id);
                     try
                     {
@@ -591,7 +551,7 @@ namespace JobSystem
                     {
                         RecordStateException(state, std::current_exception());
                     }
-                    if (id != 0) SetCurrentBatchId(0);
+                    if (id != 0) SetCurrentBatchId(previousBatchId);
                     DebugEndExec();
                     try
                     {
@@ -635,13 +595,10 @@ namespace JobSystem
         int cs = forceInner ? static_cast<int>(g_forceInnerBatch)
                             : ResolveChunkSize(length, batchSize, funcHash, &jccFine);
         int rc = CeilDiv(length, cs);
-        if (rc <= 1) return ScheduleFastPath([func, context, length]() { for (int i = 0; i < length; i++) func(context, i); }, context, cleanup, dependency);
+        if (rc <= 1) return ScheduleDirectFastPath(DirectWorkKind::Indexed, reinterpret_cast<void (*)()>(func), context, length, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
-        auto* bc = AcquireGeneralBatchContext();
-        *bc = GeneralBatchContext{ func, nullptr, context, cleanup };
-        bc->funcHash = funcHash;
         // General 路径默认"等量 tile"（配合批量认领既均衡又低争用）；g_guidedEnabled 开启时走 guided。
         const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;   // 开启 guided：按工作量（chunk∝剩余）切 tile，可变代价 job 负载均衡
         const int guidedK = g_guidedK.load(std::memory_order_relaxed);
@@ -653,23 +610,20 @@ namespace JobSystem
         HandleState* state = nullptr;
         try
         {
-            // 只对薄 tile（每 tile 元素数 `cs ≤ kClaimSpanThinElems`）启用"不物化 tileBuffer + 每批快照
-            // 快路径"；厚 tile 逐位走旧路径（`tiles[]` 带 `PrefetchNextTileData` ⇒ 物化是对的）。
-            // ⚠ 但这条判据名不副实：`kClaimSpanThinElems = 16` 恰好等于 `ResolveChunkSize` 各返回路径
-            //   `std::max(16, …)` 的硬编码下限 ⇒ `cs <= 16` 实际是"JCC 顶在下限上"，与"tile 厚薄"无关，
-            //   且"进不进该 regime"随进程翻。当前判定为良性（短调度 tileCount 本来就小，O(tileCount) 代价小）；
-            //   若要真正的"薄 tile"判据，必须换成相对口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
+            // 等宽区间按编号推导边界；GeneralRange 不需要下一 tile 的数据预取。
             const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
             const bool uniformTiles = g_uniformTilesEnabled && (thinTiles || (g_uniformAllTiles && !guided));
             // 等宽时不申请 tile 缓冲（只要 batch 对象）。
             storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             auto* batch = &storage->batch;
+            auto* bc = &storage->general;
+            *bc = GeneralBatchContext{ func, nullptr, context, cleanup };
+            bc->funcHash = funcHash;
             state = CreateState(false); batch->handle = state;
             batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
             batch->executeTile = &GeneralExecuteTile;
-            // 薄 tile 才生效：把每-tile 的 trace/timing/firstTileAt 固定开销提到每批/每令牌。
-            // 厚 tile 下 `AcquireBatchStorage` 快照的 g_tileFastPath 结果被这里覆盖为 false ⇒ 逐位不变。
-            batch->tileFast = g_tileFastPath && thinTiles;
+            // 诊断开关按批快照，区间内仍逐 tile 调用一次内核。
+            batch->tileFast = g_tileFastPath && !guided && (thinTiles || g_uniformAllTiles);
             // 本批是否真的拿到"每批快照"快路径（`ENTJOY_TILE_FASTPATH` 的生效证据）。
             if (batch->tileFast) g_tileFastApplied.fetch_add(1, std::memory_order_relaxed);
             // 认领几何按 job 定（判据 = JCC 学到的每元素成本 + 迟滞，见 JobCostCache.h）。
@@ -707,7 +661,7 @@ namespace JobSystem
             if (uniformTiles)
             {
                 batch->uniformTileSize = static_cast<uint32_t>(cs);
-                // 本批走了"不物化 tileBuffer"（`ENTJOY_TILES_UNIFORM` 的生效证据，与 F4 同一条 thinTiles 判据）。
+                // 本批使用等宽边界推导，不分配 tileBuffer。
                 g_uniformTilesApplied.fetch_add(1, std::memory_order_relaxed);
                 batch->tiles = nullptr;
             }
@@ -770,8 +724,7 @@ namespace JobSystem
         }
         catch (...)
         {
-            // 构造失败时 native 不拥有原始 context；只销毁内部 wrapper，
-            // 调用方（C#）负责随后执行一次用户 cleanup。
+            // 构造失败只回滚内部状态；原始 context 由 C ABI 入口或直接 C++ 调用方清理。
             if (storage)
             {
                 auto* batch = &storage->batch;
@@ -786,7 +739,6 @@ namespace JobSystem
             }
             if (state)
                 ReleaseState(state);
-            DestroyGeneralContextWithoutCleanup(bc);
             throw;
         }
     }
@@ -892,7 +844,7 @@ namespace JobSystem
     // Schedule 一律异步提交。
     JobHandle Scheduler::ScheduleParallelForBatch
     (void (*func)(void*, int, int), void* context, int length, int batchSize, void (*cleanup)(void*), const JobHandle& dependency,
-     uint32_t claimGeomApi)
+     uint32_t claimGeomApi, bool indexedRanges)
     {
         const bool spDiag = SchedPhase::Enabled();
         uint64_t spMarks[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -906,6 +858,10 @@ namespace JobSystem
         if (batchSize == (std::numeric_limits<int>::min)())
             return MakeCompletedAfterCleanup(cleanup, context);
         int reqBatch = batchSize < 0 ? -batchSize : batchSize;
+        // An explicit batch covering the full range needs no parallel geometry
+        // or adaptive-cost lookup. Keep table diagnostics on their normal path.
+        if (reqBatch >= length && !g_jobBatchTableDump)
+            return ScheduleDirectFastPath(DirectWorkKind::Batched, reinterpret_cast<void (*)()>(func), context, length, cleanup, dependency);
         // JobCostCache：hash 在 ResolveChunkSize 前算；显式 batchSize（reqBatch>0）时用户意图优先。
         // `ENTJOY_FORCE_INNER_BATCH`（默认关）：把 auto（reqBatch==0）强制成显式内批并跳过 JCC。
         // `ENTJOY_JOB_BATCH_TABLE`（默认关）：按 funcHash 逐 job 给内批，命中优先于全局强制（见 JobSystemInternal.h）。
@@ -952,13 +908,10 @@ namespace JobSystem
         if (spDiag) spMarks[1] = MonotonicNowNs();
         // 单批次任务：走按依赖排序的池任务（异步）。
         if (rc <= 1)
-            return ScheduleFastPath([func, context, length]() { func(context, 0, length); }, context, cleanup, dependency);
+            return ScheduleDirectFastPath(DirectWorkKind::Batched, reinterpret_cast<void (*)()>(func), context, length, cleanup, dependency);
 
         const uint32_t targetWorkers = static_cast<uint32_t>(
             ResolveWorkerTarget(0, rc));
-        auto* bc = AcquireGeneralBatchContext();
-        *bc = GeneralBatchContext{ nullptr, func, context, cleanup };
-        bc->funcHash = funcHash;
         // General 路径：guided 按工作量切 tile（可变代价 job 负载均衡）。
         const bool guided = g_guidedEnabled.load(std::memory_order_relaxed) != 0;
         const int guidedK = g_guidedK.load(std::memory_order_relaxed);
@@ -972,25 +925,23 @@ namespace JobSystem
         HandleState* state = nullptr;
         try
         {
-            // 只对薄 tile（每 tile 元素数 `cs ≤ kClaimSpanThinElems`）启用"不物化 tileBuffer + 每批快照
-            // 快路径"；厚 tile 逐位走旧路径（`tiles[]` 带 `PrefetchNextTileData` ⇒ 物化是对的）。
-            // ⚠ 但这条判据名不副实：`kClaimSpanThinElems = 16` 恰好等于 `ResolveChunkSize` 各返回路径
-            //   `std::max(16, …)` 的硬编码下限 ⇒ `cs <= 16` 实际是"JCC 顶在下限上"，与"tile 厚薄"无关，
-            //   且"进不进该 regime"随进程翻。当前判定为良性（短调度 tileCount 本来就小，O(tileCount) 代价小）；
-            //   若要真正的"薄 tile"判据，必须换成相对口径（如把 `cs` 与 `length/W` 比较，或用 `rc`）。
+            // 等宽区间按编号推导边界；GeneralRange 不需要下一 tile 的数据预取。
             const bool thinTiles = !guided && static_cast<uint32_t>(cs) <= kClaimSpanThinElems;
             const bool uniformTiles = g_uniformTilesEnabled && (thinTiles || (g_uniformAllTiles && !guided));
             // 等宽时不申请 tile 缓冲（只要 batch 对象）⇒ 消掉 O(tileCount) 物化与 tile 数组流量。
             storage = AcquireBatchStorage(uniformTiles ? 0u : static_cast<uint32_t>(tileCount));
             if (spDiag) spMarks[3] = MonotonicNowNs();
             auto* batch = &storage->batch;
+            auto* bc = &storage->general;
+            *bc = GeneralBatchContext{ nullptr, func, context, cleanup };
+            bc->funcHash = funcHash;
+            bc->indexedRanges = indexedRanges;
             state = CreateState(false); batch->handle = state;
             if (spDiag) spMarks[4] = MonotonicNowNs();
             batch->context = bc; batch->cleanup = [](void* ctx) { CleanupGeneralContext(ctx); };
             batch->executeTile = &GeneralExecuteTile;
-            // 薄 tile 才生效：把每-tile 的 trace/timing/firstTileAt 固定开销提到每批/每令牌。
-            // 厚 tile 下 `AcquireBatchStorage` 快照的 g_tileFastPath 结果被这里覆盖为 false ⇒ 逐位不变。
-            batch->tileFast = g_tileFastPath && thinTiles;
+            // 诊断开关按批快照，区间内仍逐 tile 调用一次内核。
+            batch->tileFast = g_tileFastPath && !guided && (thinTiles || g_uniformAllTiles);
             // 本批是否真的拿到"每批快照"快路径（`ENTJOY_TILE_FASTPATH` 的生效证据）。
             if (batch->tileFast) g_tileFastApplied.fetch_add(1, std::memory_order_relaxed);
             batch->claimCapOverride = tableClaim;   // 按 job 的认领上限（0 = 不覆盖）
@@ -1040,7 +991,7 @@ namespace JobSystem
             {
                 // 不物化 —— worker 侧按 tileIndex 算术推导（JobSystem_Tiles.cpp 的 TryExecuteOneTile）。
                 batch->uniformTileSize = static_cast<uint32_t>(cs);
-                // 本批走了"不物化 tileBuffer"（`ENTJOY_TILES_UNIFORM` 的生效证据，与 F4 同一条 thinTiles 判据）。
+                // 本批使用等宽边界推导，不分配 tileBuffer。
                 g_uniformTilesApplied.fetch_add(1, std::memory_order_relaxed);
                 batch->tiles = nullptr;
             }
@@ -1125,7 +1076,7 @@ namespace JobSystem
         catch (...)
         {
             // RAII 兜底：构造阶段异常只释放 native wrapper/storage/state；原始 context
-            // 仍由调用方拥有，避免 C++ cleanup 后 C# 异常路径再次 cleanup。
+            // 原始 context 由 C ABI 入口或直接 C++ 调用方清理。
             if (storage)
             {
                 auto* batch = &storage->batch;
@@ -1140,7 +1091,6 @@ namespace JobSystem
             }
             if (state)
                 ReleaseState(state);
-            DestroyGeneralContextWithoutCleanup(bc);
             throw;
         }
     }
@@ -1209,6 +1159,11 @@ namespace JobSystem
             ? TileKind::ChunkCallbacks
             : (rangeFunc ? TileKind::ChunkRange : TileKind::EntityBatchRange);
         const int targetWorkers = ResolveWorkerTarget(workerCap, rc);
+        const auto kernel = func ? reinterpret_cast<void (*)() noexcept>(func)
+            : (rangeFunc ? reinterpret_cast<void (*)() noexcept>(rangeFunc)
+                         : reinterpret_cast<void (*)() noexcept>(entityRangeFunc));
+        const uint32_t funcHash = g_jobCostCacheEnabled.load(std::memory_order_relaxed)
+            ? HashFuncPtr(kernel) : 0u;
         // ── tile 布局缓存：同 key 下划分确定不变 → 跨 job 共享（同 query 只扫一次）；
         //    未命中才扫描构建（含 totalEntities 供 JCC 判重）。
         const void* tileKeyPtr = chunks != nullptr ? static_cast<const void*>(chunks)
@@ -1220,18 +1175,26 @@ namespace JobSystem
         // 语义不变：本函数是唯一使用者，且每次进入都 clear()（容量保留、size 归零）。
         static thread_local std::vector<uint32_t> tileBounds;
         tileBounds.clear();
-        const bool tileHit = tileKeyPtr != nullptr &&
-            TileLayoutTryGet(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
-                tileCount, totalEntities, tileBounds);
-        if (!tileHit)
+        bool entitiesKnown = false;
+        const auto loadLayout = [&](int tilesPerWorker)
         {
-            for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
-            const int targetEnt = ResolveEcsEntityTileTarget(totalEntities, targetWorkers);
+            if (TileLayoutTryGet(tileKeyPtr, itemCount, targetWorkers, rangeSize, unitGeneration,
+                tilesPerWorker, tileCount, totalEntities, tileBounds))
+            {
+                entitiesKnown = true;
+                return;
+            }
+            if (!entitiesKnown)
+            {
+                for (int i = 0; i < itemCount; ++i) totalEntities += UnitEntityCount(cc, tileKind, i);
+                entitiesKnown = true;
+            }
+            const int targetEnt = ResolveEcsEntityTileTarget(totalEntities, targetWorkers, tilesPerWorker);
             tileCount = static_cast<uint32_t>(
                 BuildEntityBalancedTiles(nullptr, cc, tileKind, itemCount, targetEnt));
             tileBounds.assign(tileCount + 1, static_cast<uint32_t>(itemCount));
             tileBounds[0] = 0;
-            long acc2 = 0;
+            int64_t acc2 = 0;
             int bi = 1;
             for (int u = 0; u < itemCount && bi <= (int)tileCount; ++u)
             {
@@ -1243,15 +1206,26 @@ namespace JobSystem
                 }
             }
             if (tileKeyPtr)
-                TileLayoutStore(tileKeyPtr, itemCount, workerCap, rangeSize, unitGeneration,
-                    totalEntities, tileCount, tileBounds);
-        }
+                TileLayoutStore(tileKeyPtr, itemCount, targetWorkers, rangeSize, unitGeneration,
+                    tilesPerWorker, totalEntities, tileCount, tileBounds);
+        };
+        loadLayout(16);
+        // Refine only ranges whose learned wall-time estimate exceeds the
+        // existing long-batch budget. Cold and inexpensive kernels retain
+        // the coarse layout; both layouts preserve complete chunk boundaries.
+        const double cost = funcHash != 0 ? g_jobCostCache.GetCoarseCost(funcHash) : 0.0;
+        const int coarseEntities = ResolveEcsEntityTileTarget(totalEntities, targetWorkers);
+        if (cost * coarseEntities > static_cast<double>(kLongBatchBarrierNs))
+            loadLayout(64);
 
         storage = AcquireBatchStorage(tileCount);
         auto* batch = &storage->batch;
         state = CreateState(false); batch->handle = state;
         batch->context = cc; batch->cleanup = &CleanupChunkContext;
         batch->diagnosticId = g_nextDiagnosticBatchId.fetch_add(1, std::memory_order_relaxed) + 1;
+        batch->funcHash = funcHash;
+        batch->totalElements = totalEntities > 0 && totalEntities <= static_cast<int64_t>((std::numeric_limits<uint32_t>::max)())
+            ? static_cast<uint32_t>(totalEntities) : 0u;
 
         {
             auto* tiles = storage->tileBuffer;
@@ -1305,7 +1279,7 @@ namespace JobSystem
         catch (...)
         {
             // RAII 兜底：构造阶段异常只释放 native wrapper/storage/state；原始 context
-            // 仍由调用方拥有，避免 C++ cleanup 后 C# 异常路径再次 cleanup。
+            // 原始 context 由 C ABI 入口或直接 C++ 调用方清理。
             if (storage)
             {
                 auto* batch = &storage->batch;

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include "RangeTaskPool.h"
 
 // Forward declarations for chunk/entity batch data
 struct ChunkJobData;
@@ -55,20 +56,33 @@ namespace JobSystem {
         // C# HandleStateView 仅读前 8 字节（refCount/completed），此布局不破坏托管侧 ABI。
         std::atomic<ContinuationNode*> continuationSlot{ nullptr };
         std::atomic<bool> hasExtraContinuations{ false };
-        std::vector<std::function<void()>> continuations;
-        std::mutex mtx;  // 仅保护多 continuation 溢出 + retire 协调
-        // 条件变量：Complete() wait_for 超时实现"周期回访"（避免病理场景死锁）。
-        // wait_for 期间释放 mtx；notify_all 在 CompleteState 中与 completed 一起发。
-        std::condition_variable completedCv;
+        struct ColdState
+        {
+            std::vector<std::function<void()>> continuations;
+            std::mutex mtx;
+            std::condition_variable completedCv;
+            std::mutex exceptionMutex;
+            std::exception_ptr batchExceptionPtr;
+        };
+        std::atomic<ColdState*> cold{ nullptr };
 
-        // 异常归属冷路径：worker 转移异常期间多个 handle 副本可能并发 Complete，
-        // 故 exception_ptr 用独立于依赖锁的互斥体保护。
-        std::mutex exceptionMutex;
+        ColdState* FindCold() const noexcept { return cold.load(std::memory_order_acquire); }
+        ColdState& GetCold()
+        {
+            if (auto* existing = FindCold()) return *existing;
+            auto candidate = std::make_unique<ColdState>();
+            ColdState* expected = nullptr;
+            if (cold.compare_exchange_strong(expected, candidate.get(),
+                    std::memory_order_acq_rel, std::memory_order_acquire)) return *candidate.release();
+            return *expected;
+        }
+        void NotifyBlockedWaiters() noexcept
+        {
+            if (auto* data = FindCold()) data->completedCv.notify_all();
+        }
 
-        // batchExceptionPtr 的无锁可读影子标志：回收路径（每 job 一次）据此跳过 exceptionMutex
-        //（绝大多数 job 没有异常）。写入方在 exceptionMutex 内以 release 发布，回收方在 refCount
-        // 归零（acquire 语义）后读取，故不会漏。
-        // 追加在结构体尾部：C# HandleStateView 只读前 8 字节，布局前缀不变。
+        // Cold exception storage is published before this release flag.
+        // The C# completion view reads the unchanged refCount/completed prefix.
         std::atomic<bool> hasException{ false };
 
         // 依赖：单依赖走 `dependency`（热路径），合并走 `dependencies`；均持有引用（AcquireState/RecycleState），防 handle 丢弃后悬垂。
@@ -76,9 +90,11 @@ namespace JobSystem {
         HandleState* dependency{ nullptr };
         std::vector<HandleState*> dependencies;
 
-        // C++ 异常协议：退役时转移的第一个回调异常由 Complete() 重抛（TBB 语义）；
-        // 仅 C++ 回调路径使用（C# 侧在 NativeJobCore.cs 记录）。
-        std::exception_ptr batchExceptionPtr;
+        // A scalar or single-range job publishes exactly one task. Its in-flight
+        // reference keeps this embedded descriptor alive until execution ends.
+        RangeTask directTask;
+
+        ~HandleState() { delete cold.load(std::memory_order_relaxed); }
 
         explicit HandleState(bool initialCompleted = false) noexcept
             : completed(initialCompleted) {
@@ -98,6 +114,7 @@ namespace JobSystem {
         void Complete() const;
         bool IsCompleted() const noexcept;
         HandleState* State() const noexcept;
+        HandleState* ReleaseOwnership() noexcept { return std::exchange(_state, nullptr); }
 
         static void Acquire(HandleState* state) noexcept;
         static void Release(HandleState* state) noexcept;
@@ -131,8 +148,7 @@ namespace JobSystem {
             // 即使分配/加锁失败逃出该冷路径，也保持 state 可观察/终态。
             RecordStateException(state, std::current_exception());
             state->completed.store(true, std::memory_order_release);
-            state->completed.notify_all();
-            state->completedCv.notify_all();
+            state->NotifyBlockedWaiters();
         }
     }
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
@@ -274,7 +290,7 @@ namespace JobSystem {
             int length, int batchSize,
             void (*cleanup)(void*) = nullptr,
             const JobHandle& dependency = {},
-            uint32_t claimGeom = 0u);
+            uint32_t claimGeom = 0u, bool indexedRanges = false);
 
         static JobHandle ScheduleParallelFor(
             void (*func)(void*, int), void* context,

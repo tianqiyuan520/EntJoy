@@ -76,8 +76,11 @@ namespace EntJoy.ECS.Tests
                 using var data = new NativeArray<long>(N, Allocator.Persistent);
                 var a = new IncJobSingle { Data = data }.Schedule();
                 var b = new IncJobSingle { Data = data }.Schedule();   // 无依赖 → 并行
-                var ex = Record.Exception(() => { a.Complete(); b.Complete(); });
-                if (ex != null && ContainsWriteConflict(ex))
+                // Complete both jobs even when the first completion throws.
+                var aException = Record.Exception(() => a.Complete());
+                var bException = Record.Exception(() => b.Complete());
+                if ((aException != null && ContainsWriteConflict(aException)) ||
+                    (bException != null && ContainsWriteConflict(bException)))
                     return;
             }
             Assert.Fail("IJob parallel write conflict was not detected in any of 30 attempts.");
@@ -93,8 +96,10 @@ namespace EntJoy.ECS.Tests
                 using var data = new NativeArray<long>(N, Allocator.Persistent);
                 var a = new IncJob { Data = data }.Schedule(N, InnerBatch);
                 var b = new IncJob { Data = data }.Schedule(N, InnerBatch);   // 无依赖 → 并行
-                var ex = Record.Exception(() => { a.Complete(); b.Complete(); });
-                if (ex != null && ContainsWriteConflict(ex))
+                var aException = Record.Exception(() => a.Complete());
+                var bException = Record.Exception(() => b.Complete());
+                if ((aException != null && ContainsWriteConflict(aException)) ||
+                    (bException != null && ContainsWriteConflict(bException)))
                     return;   // 检测到冲突
             }
             Assert.Fail("Parallel write conflict was not detected in any of 30 attempts.");

@@ -27,9 +27,21 @@ int failed = 0;
 
 NativeJobScheduler.Initialize();
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+if (args.Length > 0 && args[0] == "alloc")
+{
+    try { NativeHandleContractProbe.Run(); }
+    finally { NativeJobScheduler.Shutdown(); }
+    return 0;
+}
+if (args.Length > 0 && args[0] == "copy")
+{
+    try { CopiedContextFixture.Run(); }
+    finally { NativeJobScheduler.Shutdown(); }
+    return 0;
+}
 if (args.Length > 0 && args[0] == "jobs")
 {
-    try { SchedulerDispatchProbe.Run(args.Length > 1 ? args[1] : "jobsystem.csv"); }
+    try { SchedulerDispatchProbe.Run(args.Length > 1 ? args[1] : "jobsystem.csv", args.Length > 2 ? int.Parse(args[2]) : 20); }
     finally { NativeJobScheduler.Shutdown(); }
     return 0;
 }
@@ -353,6 +365,70 @@ unsafe
         if (slot != count) bad++;
     }
     Report("[19] read-only chunk context preserves aliased data Run / Schedule", bad == 0, $"mismatch: {bad}");
+}
+
+// Reduction loops retain their initial value, update order and loop condition.
+{
+    const int lanes = 19;
+    using var input = new NativeArray<int>(65, Allocator.Persistent);
+    using var output = new NativeArray<int>(lanes, Allocator.Persistent);
+    using var maximum = new NativeArray<int>(lanes, Allocator.Persistent);
+    unsafe
+    {
+        int* values = (int*)input.GetUnsafePtr();
+        for (int i = 0; i < input.Length; i++) values[i] = (i % 2 == 0 ? 1 : -1) * (i + 1);
+    }
+    int badSum = 0, badSimd = 0, badOrder = 0, badMinMax = 0, badBound = 0;
+    foreach (int count in new[] {0, 1, 3, 4, 5, 8, 9, 17, 65})
+    foreach (int seed in new[] {-7, 0, 5})
+    for (int path = 0; path < 2; path++)
+    {
+        var sum = new SeededReductionJob { Input = input, Output = output, Count = count, Seed = seed };
+        if (path == 0) sum.Run(lanes); else sum.Schedule(lanes, 1).Complete();
+        for (int i = 0; i < lanes; i++)
+        {
+            int expected = seed + i;
+            for (int k = 0; k < count; k++) expected += input[k];
+            if (output[i] != expected) badSum++;
+        }
+        var simd = new SimdSeededReductionJob { Input = input, Output = output, Count = count, Seed = seed };
+        if (path == 0) simd.Run(lanes); else simd.Schedule(lanes, 64).Complete();
+        for (int i = 0; i < lanes; i++)
+        {
+            int expected = seed + i;
+            for (int k = 0; k < count; k++) expected += input[k];
+            if (output[i] != expected) badSimd++;
+        }
+        var ordered = new OrderedReductionJob { Input = input, Output = output, Count = count, Seed = seed };
+        if (path == 0) ordered.Run(lanes); else ordered.Schedule(lanes, 3).Complete();
+        for (int i = 0; i < lanes; i++)
+        {
+            int expected = seed + i;
+            for (int k = 0; k < count; k++) expected -= input[k];
+            if (output[i] != expected) badOrder++;
+        }
+        var minMax = new MinMaxReductionJob { Input = input, Minimum = output, Maximum = maximum, Count = count, Seed = seed };
+        if (path == 0) minMax.Run(lanes); else minMax.Schedule(lanes, 3).Complete();
+        for (int i = 0; i < lanes; i++)
+        {
+            int low = seed + i, high = low;
+            for (int k = 0; k < count; k++) { low = Math.Min(low, input[k]); high = Math.Max(high, input[k]); }
+            if (output[i] != low || maximum[i] != high) badMinMax++;
+        }
+        var bound = new SimdMutableReductionBoundJob { Output = output, Count = count, Seed = seed };
+        if (path == 0) bound.Run(lanes); else bound.Schedule(lanes, 64).Complete();
+        for (int i = 0; i < lanes; i++)
+        {
+            int expected = seed + i, end = count;
+            for (int k = 0; k < end; k++) { expected += k; end--; }
+            if (output[i] != expected) badBound++;
+        }
+    }
+    Report("[20] seeded integer reductions Run / Schedule", badSum == 0, $"mismatch: {badSum}");
+    Report("[21] AutoSIMD reductions and remainder", badSimd == 0, $"mismatch: {badSimd}");
+    Report("[22] ordered custom reduction", badOrder == 0, $"mismatch: {badOrder}");
+    Report("[23] seeded min/max reductions", badMinMax == 0, $"mismatch: {badMinMax}");
+    Report("[24] AutoSIMD mutable reduction bound", badBound == 0, $"mismatch: {badBound}");
 }
 
 NativeJobScheduler.Shutdown();

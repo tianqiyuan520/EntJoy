@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NativeTranspiler\NativeTranspiler.csproj" />
+    <ProjectReference Include="..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
     <!-- NT-06：命令行引号规则（CommandLineQuoting）在 MSBuild 任务工程里，用纯函数直接单测，
          不需要真的去跑 CMake。 -->
     <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" />
