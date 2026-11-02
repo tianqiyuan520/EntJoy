@@ -123,16 +123,20 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 计算组件类型的大小：
-        /// 关系组件（IRelationComponent）→ Marshal.SizeOf(type)（真实大小，允许携带关系数据）。
+        /// 使用 C# 的无引用值类型布局，关系组件允许携带关系数据。
         /// 要求首个字段必须是 RelationSlot Target（偏移 0，LayoutKind.Sequential），
         /// 使列前 8B 重解释为 RelationSlot 的正确性与 GetComponentDataSpan&lt;TRel&gt; 步长一致。
         /// 注册时校验；否则抛异常（防空 struct / 缺 Target 字段误用导致越界或步长错位）。
-        /// 普通 blittable struct → Marshal.SizeOf。
+        /// 普通组件与 typed span、sizeof(T) 和原生转译使用相同的步长。
         /// </summary>
         private static int ComputeComponentSize(Type type)
         {
             if (typeof(IRelationComponent).IsAssignableFrom(type))
             {
+                var target = type.GetField("Target", System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (target == null || target.FieldType != typeof(RelationSlot))
+                    throw new InvalidOperationException($"Relation component '{type.FullName}' requires a RelationSlot Target field.");
                 // 校验 Target 首字段（偏移 0）。Marshal.OffsetOf 对缺失字段抛 ArgumentException。
                 IntPtr targetOffset;
                 try
@@ -150,7 +154,7 @@ namespace EntJoy.ECS
                         $"Relation component '{type.FullName}' must have its RelationSlot 'Target' field at offset 0 "
                         + $"(currently at {targetOffset}). Use LayoutKind.Sequential and declare Target first.");
             }
-            return Marshal.SizeOf(type);
+            return ManagedValueLayout.SizeOf(type);
         }
 
         /// <summary>
@@ -161,25 +165,13 @@ namespace EntJoy.ECS
         private static int ComputeSharedSize(Type type)
         {
             if (type.IsValueType && IsBlittable(type))
-                return Marshal.SizeOf(type);
+                return ManagedValueLayout.SizeOf(type);
             return sizeof(int);  // managed shared：chunk 槽位只存 int 索引
         }
 
-        /// <summary>判断类型是否 blittable（无引用字段的 struct / 原生类型）。</summary>
+        /// <summary>判断是否能按 C# 内存布局保存为无托管引用的值类型。</summary>
         public static bool IsBlittable(Type type)
-        {
-            if (!type.IsValueType) return false;
-            try
-            {
-                // Marshal.SizeOf 对含引用字段的 struct 抛 ArgumentException
-                _ = Marshal.SizeOf(type);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
+            => ManagedValueLayout.IsUnmanaged(type);
 
         /// <summary>该组件类型是否为 Shared（ISharedComponentData）。</summary>
         public static bool GetIsShared(int id) => _componentTypeInfos[id].IsShared;

@@ -8,7 +8,7 @@ namespace EntJoy.JobSystem
 /// 作业句柄，支持 C++ 原生（NativeJobScheduler）和纯 C#（ManagedJobScheduler）双后端。
 /// 当 NativeDll 不可用时自动回退 ManagedJobScheduler，句柄统一。
 /// </summary>
-public struct JobHandle
+public struct JobHandle : IEquatable<JobHandle>
 {
     public NativeJobHandle _nativeHandle;
     internal ManagedJobHandle _managedHandle;
@@ -17,6 +17,19 @@ public struct JobHandle
     public JobHandle(NativeJobHandle nativeHandle) => _nativeHandle = nativeHandle;
 
     internal JobHandle(ManagedJobHandle managedHandle) => _managedHandle = managedHandle;
+
+    public readonly bool Equals(JobHandle other)
+        => _nativeHandle.Equals(other._nativeHandle)
+            && ReferenceEquals(_managedHandle.Completion, other._managedHandle.Completion)
+            && _managedHandle.Gen == other._managedHandle.Gen
+            && _managedHandle.Epoch == other._managedHandle.Epoch;
+
+    public override readonly bool Equals(object obj) => obj is JobHandle other && Equals(other);
+
+    public override readonly int GetHashCode()
+        => HashCode.Combine(_nativeHandle,
+            _managedHandle.Completion == null ? 0 : RuntimeHelpers.GetHashCode(_managedHandle.Completion),
+            _managedHandle.Gen, _managedHandle.Epoch);
 
     public bool IsCompleted
     {

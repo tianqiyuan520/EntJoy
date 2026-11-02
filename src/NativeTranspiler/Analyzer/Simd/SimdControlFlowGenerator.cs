@@ -826,6 +826,16 @@ namespace NativeTranspiler.Analyzer
             // Restore (skip if mask was never saved — e.g., dead-false continue)
             if (savedMaskEmitted || !string.IsNullOrEmpty(savedMask))
                 _currentMask = savedMask;
+            // A branch may have removed lanes through break/continue. Restoring
+            // its entry mask must not reactivate those lanes for later statements.
+            if (_loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar)
+                && _currentMask != _loopStack.Peek().BodyMaskVar)
+            {
+                string bodyMask = _loopStack.Peek().BodyMaskVar;
+                string postMask = $"__post_if_{_maskCounter++}";
+                AppendLine($"simd_mask {postMask} = simd_mask{{ n_and_mask({_currentMask}.m, {bodyMask}.m) }};");
+                _currentMask = postMask;
+            }
         }
 
         /// <summary>

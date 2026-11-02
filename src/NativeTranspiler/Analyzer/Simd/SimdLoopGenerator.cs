@@ -93,22 +93,22 @@ namespace NativeTranspiler.Analyzer
             //   CSE 循环不变量（如 C06 的 A[i]/B[i] 不再每轮重载）。
             bool unrollInclusive = stmt.Condition is BinaryExpressionSyntax unrollCond
                 && unrollCond.IsKind(SyntaxKind.LessThanOrEqualExpression);
-            int unrollStart = 0, unrollEnd = 0, unrollCount = 0;
             // 用 Roslyn 常量求值识别负常量：-1 被 TranslateExpression 译成 "(0 - (1))"，
             //   int.TryParse 会失败，导致嵌套 dx/dy 循环无法 unroll（C04 慢 ~2x 的根因）。
             int? constStart = TryGetIntConst(decl.Initializer?.Value);
             int? constEnd = TryGetIntConst((stmt.Condition as BinaryExpressionSyntax)?.Right);
+            long fixedIterations = constStart.HasValue && constEnd.HasValue
+                ? (long)constEnd.Value - constStart.Value + (unrollInclusive ? 1 : 0) : 0;
             bool canUnroll = isUniformBounds
                 && constStart.HasValue && constEnd.HasValue
-                && (unrollStart = constStart.Value) <= (unrollEnd = constEnd.Value)
-                && unrollEnd > unrollStart
-                && (unrollCount = unrollEnd - unrollStart + (unrollInclusive ? 1 : 0)) <= 64;
+                && !(unrollInclusive && constEnd.Value == int.MaxValue)
+                && fixedIterations > 1 && fixedIterations <= 64;
 
             // Dispatch: unroll → uniform reduction → varying reduction → scalar-for → while-true
             if (canUnroll)
             {
                 // Full unroll for small uniform-bound loops（含 min/max/sum 归约）。
-                GenerateUnrolledLoop(ivName, unrollStart, unrollCount, stmt);
+                GenerateUnrolledLoop(ivName, constStart!.Value, (int)fixedIterations, stmt);
             }
             else if (isUniformBounds && isReduction)
                 GenerateUniformReductionLoop(ivName, startExpr, endExpr, stmt);
@@ -133,7 +133,7 @@ namespace NativeTranspiler.Analyzer
                     string loopSavedMask = $"__saved_{_maskCounter++}";
                     AppendLine($"simd_mask {loopSavedMask} = {_currentMask};");
                     _currentMask = loopSavedMask;
-                    AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName}++)");
+                    AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr2} {endExpr}; {ivName} = (int)((unsigned){ivName} + 1u))");
                     AppendLine("{");
                     _indent++;
                     AppendLine($"simd_{ivName} = simd_value<int>::broadcast({ivName});");
@@ -186,17 +186,30 @@ namespace NativeTranspiler.Analyzer
             // Pre-scan: does the body contain break/continue?
             bool hasBreak = bodyBlock.DescendantNodes().OfType<BreakStatementSyntax>().Any();
             bool hasContinue = bodyBlock.DescendantNodes().OfType<ContinueStatementSyntax>().Any();
+            string tracker = "";
+            if (hasBreak || hasContinue)
+            {
+                tracker = $"__unrolled_tracker_{_maskCounter++}";
+                AppendLine($"simd_mask {tracker} = {savedMask};");
+            }
 
             for (int i = start; i < start + count; i++)
             {
                 // Negative iteration values would produce labels like "__unr_cont_1_-2",
                 //   which is not a valid C++ identifier ('-2' parses as subtraction).
                 //   Encode-the-sign into the suffix: -2 → "m2", 3 → "3".
-                string iSuffix = i < 0 ? "m" + (-i).ToString() : i.ToString();
-                string contLabel = $"__unr_cont_{_labelCounter}_{iSuffix}";
+                string iSuffix = i < 0 ? "m" + (-(long)i).ToString() : i.ToString();
+                string contLabel = $"__unr_cont_{_labelCounter++}_{iSuffix}";
 
                 // Reset mask for each iteration
                 _currentMask = savedMask;
+                string bodyMask = "";
+                if (hasBreak || hasContinue)
+                {
+                    bodyMask = $"__unrolled_body_{_maskCounter++}";
+                    AppendLine($"simd_mask {bodyMask} = {tracker};");
+                    _currentMask = bodyMask;
+                }
                 // kill lanes that have already returned (e.g. found their match
                 //   in a previous unrolled j iteration and wrote R[i]=result).
                 //   result because its mask is restored to all_true by savedMask.
@@ -230,20 +243,23 @@ namespace NativeTranspiler.Analyzer
 
                 if (hasBreak || hasContinue)
                 {
-                    // Push a pseudo-loop frame so break/continue generate valid gotos
+                    // Break removes a lane from future iterations; continue only
+                    // removes it from this iteration's body.
                     _loopStack.Push(new LoopFrame
                     {
-                        TrackerVar = "",
-                        IterActiveVar = "",
+                        TrackerVar = tracker,
+                        IterActiveVar = bodyMask,
+                        BodyMaskVar = bodyMask,
                         ExitLabel = exitLabel,
                         ContinueLabel = contLabel
                     });
                 }
-                _isUniformScalarLoop = true;
+                bool outerScalarLoop = _isUniformScalarLoop;
+                _isUniformScalarLoop = false;
 
                 GenerateBlock(bodyBlock, skipBraces: false);
 
-                _isUniformScalarLoop = false;
+                _isUniformScalarLoop = outerScalarLoop;
                 if (hasBreak || hasContinue)
                     _loopStack.Pop();
 
@@ -296,7 +312,6 @@ namespace NativeTranspiler.Analyzer
         {
             _uniformLoopVars.Add(ivName);
 
-            string endSuffix = $"_{_maskCounter++}";
             string exitLabel = $"__uni_exit_{_labelCounter++}";
             string continueLabel = $"__uni_cont_{_labelCounter++}";
 
@@ -339,10 +354,9 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"simd_value<int> {hn} = {hexpr};");
 
             AppendLine($"// Uniform-bound reduction: scalar for + broadcast SIMD");
-            // ≤ bound gets +1: the emitted loop uses <, so dy <= 1 must loop to 2.
-            //   Otherwise the last iteration is silently dropped.
-            AppendLine($"int {ivName}_end{endSuffix} = {endExpr}{(csOpStr == "<=" ? " + 1" : "")};");
-            AppendLine($"for (int {ivName} = {startExpr}; {ivName} < {ivName}_end{endSuffix}; {ivName}++)");
+            // Reevaluate the original bound each iteration, preserving <= without
+            // adding one to its endpoint. The int counter uses C# unchecked wrap.
+            AppendLine($"for (int {ivName} = {startExpr}; {ivName} {csOpStr} {endExpr}; {ivName} = (int)((unsigned){ivName} + 1u))");
             AppendLine("{");
             _indent++;
             // simd_i for blend targets (bestIdx = simd_i)

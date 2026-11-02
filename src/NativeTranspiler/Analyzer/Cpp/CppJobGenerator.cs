@@ -1259,52 +1259,6 @@ namespace NativeTranspiler.Analyzer
         // 三条发射路径，后两者开启时构建失败 ⇒ 始终默认关、从未真正可用。
         // 注：为 `IJobEntity` 判定 ISPC 后端的原逻辑随之一并移除。
 
-        /// <summary>
-        /// 抽离复用 —— 生成原生 adapter 的"字段解包"代码。
-        /// 批形 adapter（`(void*, int start, int count)`）与 `IJobFor` 的 index 形 adapter
-        /// （`(void*, int index)`）字段解包逐字相同，只有前缀实参不同
-        /// （`__startIndex, __count` ↔ `__index, 1`）⇒ 解包部分收敛到这里，避免两处各写一遍。
-        /// 调用方负责先把前缀实参放进 <paramref name="callArgs"/>，本方法追加字段实参。
-        /// </summary>
-        private static void BuildAdapterFieldAccess(INamedTypeSymbol jobStruct, StringBuilder fieldReads, List<string> callArgs)
-        {
-            int currentOffset = 0;
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-            {
-                int offset = CalculateFieldOffset(field, ref currentOffset);
-
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                    {
-                        // NativeList: _listData 在偏移 0（指针）
-                        fieldReads.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)((char*)context + {offset});");
-                        callArgs.Add($"{field.Name}_listData");
-                    }
-                    else // NativeArray
-                    {
-                        // NativeArray: _buffer 在偏移 0, _length 在偏移 8
-                        var cppElemType = GetCppElementType(field.Type);
-                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                        fieldReads.AppendLine($"    int& {field.Name}_length = *(int*)((char*)context + {offset + 8});");
-                        callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
-                }
-                else
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
-                }
-            }
-        }
-
         /// <summary>`IJobFor` 的 index 形 adapter 函数名（与批形 adapter 区分开）。</summary>
         // 名字规则统一放在 CppJobNames.cs 的 GetIndexAdapterFunctionName（同一个 partial class）。
 
@@ -2243,8 +2197,6 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("{");
                 
                 // 生成字段读取代码
-                // 抽成 BuildAdapterFieldAccess 复用 —— 批形 adapter
-                // 与（IJobFor 专用的）index 形 adapter 的字段解包逐字相同，只是前缀实参不同。
                 // 批入口收 job 结构体地址 ⇒ adapter 只转发，不再逐字段解包。
                 var callArgs = new List<string> { "context", "__startIndex", "__count" };
 
@@ -2299,23 +2251,14 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    return (void*){adapterFuncName};");
                 sb.AppendLine("}");
 
-                // `IJobFor` 专用的 index 形 adapter
-                // 动机：`IJobFor` 的调度语义是单线程串行（原生 `Scheduler::ScheduleFor`：
-                // 做法：复用同一套字段解包（BuildAdapterFieldAccess），只把前缀实参换成 `(__index, 1)`
-                //   调同一个批内核（内核本就按 [start, start+count) 循环 ⇒ count=1 即"只跑该 index"；
-                //   两者同在一个 unity TU 里，会被内联）。
-                // 只为 `IJobFor` 发射；`IJobParallelFor`/`Batch` 没有 index 形入口，不需要。
+                // IJobFor's index entry executes one element through the same
+                // context ABI and variant selection as its batch adapter.
                 if (IsForJob(jobStruct))
                 {
                     string indexAdapterFuncName = GetIndexAdapterFunctionName(jobStruct);
                     sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {indexAdapterFuncName}(void* context, int __index)");
                     sb.AppendLine("{");
-                    var idxFieldReads = new StringBuilder();
-                    var idxCallArgs = new List<string> { "__index", "1" };
-                    BuildAdapterFieldAccess(jobStruct, idxFieldReads, idxCallArgs);
-                    sb.Append(idxFieldReads);
-                    sb.AppendLine();
-                    sb.AppendLine($"    {GetCppJobFunctionName(jobStruct, isBatch: true)}({string.Join(", ", idxCallArgs)});");
+                    sb.AppendLine($"    {adapterFuncName}(context, __index, 1);");
                     sb.AppendLine("}");
                     sb.AppendLine();
                     sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{indexAdapterFuncName}Ptr()");

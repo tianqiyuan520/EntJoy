@@ -396,6 +396,17 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
+            if (methodSyntax?.Body != null && isEntityJob)
+            {
+                var attribute = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+                if (AttributeHelper.GetBackendTarget(structSymbol, attribute) == NativeTranspiler.BackendTarget.Cpp
+                    && AttributeHelper.GetAutoSIMD(structSymbol, attribute) == NativeTranspiler.AutoSIMD.Enabled)
+                    diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
+                        executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
+                        structSymbol.Name, NativeTranspiler.AutoSIMD.Enabled,
+                        "IJobEntity AutoSIMD.Enabled emits a scalar entity body; use Disabled or Vectorize"));
+            }
+
             // B3（①）：AutoSIMD 开着、但 body 命中发射侧"不可向量化"判据 ⇒ 整个 body 退回 per-lane
             // 标量循环（产物正确但一点 SIMD 都没有）。原先这条退化是静默的，用户以为开了向量化。
             // 判据与发射侧共用同一份实现（SimdVectorizability），避免"两个真相"。

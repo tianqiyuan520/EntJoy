@@ -1,5 +1,6 @@
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace NativeTranspiler.Analyzer
@@ -49,6 +50,11 @@ namespace NativeTranspiler.Analyzer
         public static bool HasNonVectorizableCall(SyntaxNode node, SimdVariableAnalyzer varAnalyzer, out string? reason)
         {
             reason = null;
+            foreach (var loop in node.DescendantNodesAndSelf().OfType<ForStatementSyntax>())
+            {
+                if (HasUnsupportedLoopControl(loop, varAnalyzer.SemanticModel, out reason))
+                    return true;
+            }
             foreach (var inv in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
                 string name = null;
@@ -112,6 +118,43 @@ namespace NativeTranspiler.Analyzer
                 }
                 catch { }
             }
+            return false;
+        }
+
+        // SIMD loop emitters synthesize an ascending int counter with unit stride.
+        // Validate that contract before either emitting SIMD or accepting the job.
+        private static bool HasUnsupportedLoopControl(ForStatementSyntax loop, SemanticModel model, out string? reason)
+        {
+            reason = "for loop requires an int counter, < or <=, and ++ on that counter";
+            if (loop.Declaration?.Variables.Count != 1 || loop.Initializers.Count != 0
+                || loop.Incrementors.Count != 1) return true;
+            var variable = loop.Declaration.Variables[0];
+            if (variable.Initializer == null
+                || model.GetDeclaredSymbol(variable) is not ILocalSymbol symbol
+                || symbol.Type.SpecialType != SpecialType.System_Int32
+                || loop.Condition is not BinaryExpressionSyntax condition
+                || !(condition.IsKind(SyntaxKind.LessThanExpression) || condition.IsKind(SyntaxKind.LessThanOrEqualExpression))
+                || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(condition.Left).Symbol, symbol)) return true;
+            ExpressionSyntax? incremented = loop.Incrementors[0] switch
+            {
+                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression) => p.Operand,
+                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression) => p.Operand,
+                _ => null
+            };
+            if (incremented == null
+                || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(incremented).Symbol, symbol)) return true;
+
+            var flow = model.AnalyzeDataFlow(loop.Statement);
+            if (flow == null || !flow.Succeeded
+                || flow.WrittenInside.Contains(symbol, SymbolEqualityComparer.Default)
+                || flow.UnsafeAddressTaken.Contains(symbol, SymbolEqualityComparer.Default)
+                || loop.Statement.DescendantNodes().OfType<RefExpressionSyntax>().Any(r =>
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(r.Expression).Symbol, symbol)))
+            {
+                reason = "for loop modifies or aliases its counter inside the body";
+                return true;
+            }
+            reason = null;
             return false;
         }
 

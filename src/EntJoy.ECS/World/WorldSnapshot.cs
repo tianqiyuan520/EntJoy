@@ -1,6 +1,6 @@
 namespace EntJoy.ECS
 {
-    /// <summary>World 状态快照（字节级序列化，组件值零拷贝）。</summary>
+    /// <summary>保存组件值字节及布局标识的 World 快照。</summary>
     public sealed class WorldSnapshot
     {
         internal readonly byte[] Data;

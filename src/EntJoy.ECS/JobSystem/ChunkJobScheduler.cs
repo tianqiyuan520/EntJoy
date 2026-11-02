@@ -134,6 +134,7 @@ namespace EntJoy.ECS.JobSystem
         private static NativeJobHandle ScheduleChunkNativeCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, ChunkScheduleMode? forcedMode = null, int workerCap = 0, int rangeSize = 0, ComponentType[]? writtenComponents = null, World world = null)
             where T : struct, IJobChunk
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             // 多 World 支持：绑定本次调度的 World
             world ??= World.DefaultWorld;
             // Event Buffer: 按需分配
@@ -193,6 +194,7 @@ namespace EntJoy.ECS.JobSystem
         private static NativeJobHandle ScheduleNativeChunkRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, World world = null)
             where T : struct
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             if (funcPtr == IntPtr.Zero)
                 throw new ArgumentException("Native chunk raw scheduling requires a function pointer.", nameof(funcPtr));
 
@@ -367,6 +369,7 @@ namespace EntJoy.ECS.JobSystem
         private static NativeJobHandle ScheduleNativeChunkRangeRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, ChunkScheduleMode? forcedMode = null, World world = null)
             where T : struct
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             if (funcPtr == IntPtr.Zero)
                 throw new ArgumentException("Native chunk range raw scheduling requires a function pointer.", nameof(funcPtr));
 
@@ -432,6 +435,7 @@ namespace EntJoy.ECS.JobSystem
         private static NativeJobHandle ScheduleNativeEntityBatchRawCore<T>(ref T job, EntityManager entityManager, QueryBuilder query, IntPtr funcPtr, int[] requiredComponentTypeIds, NativeJobHandle? dependsOn, int workerCap, int rangeSize, bool useScheduleAndComplete = false, ChunkScheduleMode? forcedMode = null, NativeEcsJobKind jobKind = NativeEcsJobKind.Entity, World world = null)
             where T : struct
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             if (funcPtr == IntPtr.Zero)
                 throw new ArgumentException("Native entity batch raw scheduling requires a function pointer.", nameof(funcPtr));
 
@@ -544,12 +548,13 @@ namespace EntJoy.ECS.JobSystem
         private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache, out IDisposable lease)
         {
             lease = null;
-            var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), GetRequiredComponentHash(requiredComponentTypeIds), 0);
+            var key = new RawChunkScheduleCacheKey(entityManager, query, requiredComponentTypeIds, 0);
             lock (_rawChunkScheduleCacheLock)
             {
                 if (_rawChunkScheduleCaches.TryGetValue(key, out cache))
                 {
-                    if (cache.StructuralVersion == entityManager.StructuralVersion)
+                    if (cache.StructuralVersion == entityManager.StructuralVersion
+                        && !(query.ChangedComponents?.Length > 0))
                     {
                         if (cache.ChunkCount > 0)
                         {
@@ -563,8 +568,9 @@ namespace EntJoy.ECS.JobSystem
                     _rawChunkScheduleCaches.Remove(key);
                 }
 
+                var storedKey = key.Capture();
                 cache = BuildRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds);
-                _rawChunkScheduleCaches[key] = cache;
+                _rawChunkScheduleCaches[storedKey] = cache;
                 if (cache.ChunkCount > 0)
                 {
                     lease = cache.RetainLease();
@@ -577,12 +583,13 @@ namespace EntJoy.ECS.JobSystem
         private static bool TryGetManagedChunkScheduleCache(EntityManager entityManager, QueryBuilder query, out RawChunkScheduleCache cache, out IDisposable lease)
         {
             lease = null;
-            var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), 0, 1);
+            var key = new RawChunkScheduleCacheKey(entityManager, query, null, 1);
             lock (_rawChunkScheduleCacheLock)
             {
                 if (_rawChunkScheduleCaches.TryGetValue(key, out cache))
                 {
-                    if (cache.StructuralVersion == entityManager.StructuralVersion)
+                    if (cache.StructuralVersion == entityManager.StructuralVersion
+                        && !(query.ChangedComponents?.Length > 0))
                     {
                         if (cache.ChunkCount > 0)
                         {
@@ -596,8 +603,9 @@ namespace EntJoy.ECS.JobSystem
                     _rawChunkScheduleCaches.Remove(key);
                 }
 
+                var storedKey = key.Capture();
                 cache = BuildManagedChunkScheduleCache(entityManager, query);
-                _rawChunkScheduleCaches[key] = cache;
+                _rawChunkScheduleCaches[storedKey] = cache;
                 if (cache.ChunkCount > 0)
                 {
                     lease = cache.RetainLease();
@@ -610,12 +618,13 @@ namespace EntJoy.ECS.JobSystem
         private static bool TryGetEntityBatchScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out EntityBatchScheduleCache cache, out IDisposable lease)
         {
             lease = null;
-            var key = new RawChunkScheduleCacheKey(entityManager, GetQueryHash(query), GetRequiredComponentHash(requiredComponentTypeIds), 3);
+            var key = new RawChunkScheduleCacheKey(entityManager, query, requiredComponentTypeIds, 3);
             lock (_rawChunkScheduleCacheLock)
             {
                 if (_entityBatchScheduleCaches.TryGetValue(key, out cache))
                 {
-                    if (cache.StructuralVersion == entityManager.StructuralVersion)
+                    if (cache.StructuralVersion == entityManager.StructuralVersion
+                        && !(query.ChangedComponents?.Length > 0))
                     {
                         if (cache.BatchCount > 0)
                         {
@@ -629,8 +638,9 @@ namespace EntJoy.ECS.JobSystem
                     _entityBatchScheduleCaches.Remove(key);
                 }
 
+                var storedKey = key.Capture();
                 cache = BuildEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds);
-                _entityBatchScheduleCaches[key] = cache;
+                _entityBatchScheduleCaches[storedKey] = cache;
                 if (cache.BatchCount > 0)
                 {
                     lease = cache.RetainLease();
@@ -966,14 +976,18 @@ namespace EntJoy.ECS.JobSystem
             private readonly int _managerHash;
             private readonly int _queryHash;
             private readonly int _requiredHash;
+            private readonly QueryBuilder _query;
+            private readonly int[] _requiredTypes;
             private readonly int _mode;
 
-            public RawChunkScheduleCacheKey(EntityManager entityManager, int queryHash, int requiredHash, int mode)
+            public RawChunkScheduleCacheKey(EntityManager entityManager, QueryBuilder query, int[] requiredTypes, int mode)
             {
                 _entityManager = entityManager;
                 _managerHash = RuntimeHelpers.GetHashCode(entityManager);
-                _queryHash = queryHash;
-                _requiredHash = requiredHash;
+                _query = query;
+                _requiredTypes = requiredTypes;
+                _queryHash = GetQueryHash(query);
+                _requiredHash = GetRequiredComponentHash(requiredTypes);
                 _mode = mode;
             }
 
@@ -981,7 +995,48 @@ namespace EntJoy.ECS.JobSystem
                 => ReferenceEquals(_entityManager, other._entityManager) &&
                    _queryHash == other._queryHash &&
                    _requiredHash == other._requiredHash &&
-                   _mode == other._mode;
+                   _mode == other._mode &&
+                   SameTypes(_query.All, other._query.All) &&
+                   SameTypes(_query.Any, other._query.Any) &&
+                   SameTypes(_query.None, other._query.None) &&
+                   SameTypes(_query.AllEnabled, other._query.AllEnabled) &&
+                   SameTypes(_query.ChangedComponents, other._query.ChangedComponents) &&
+                   _query.LimitCount == other._query.LimitCount &&
+                   _query.MinChangedVersion == other._query.MinChangedVersion &&
+                   _query.HasSharedFilter == other._query.HasSharedFilter &&
+                   (!_query.HasSharedFilter || (_query.SharedFilterType.Id == other._query.SharedFilterType.Id &&
+                       object.Equals(_query.SharedFilterValue, other._query.SharedFilterValue))) &&
+                   _query.HasRelationshipFilter == other._query.HasRelationshipFilter &&
+                   (!_query.HasRelationshipFilter || (_query.RelationshipFilterType.Id == other._query.RelationshipFilterType.Id &&
+                       _query.RelationshipFilterTarget.TargetId == other._query.RelationshipFilterTarget.TargetId &&
+                       _query.RelationshipFilterTarget.TargetVersion == other._query.RelationshipFilterTarget.TargetVersion)) &&
+                   _requiredTypes.AsSpan().SequenceEqual(other._requiredTypes);
+
+            private static bool SameTypes(ComponentType[] first, ComponentType[] second)
+            {
+                if (ReferenceEquals(first, second)) return true;
+                int length = first?.Length ?? 0;
+                if (length != (second?.Length ?? 0)) return false;
+                for (int i = 0; i < length; i++)
+                    if (first[i].Id != second[i].Id) return false;
+                return true;
+            }
+
+            // Stored keys own their rule arrays. Lookup keys borrow them without
+            // allocation; only a cache miss takes this snapshot.
+            public RawChunkScheduleCacheKey Capture()
+            {
+                var query = _query;
+                query.All = Clone(query.All);
+                query.Any = Clone(query.Any);
+                query.None = Clone(query.None);
+                query.AllEnabled = Clone(query.AllEnabled);
+                query.ChangedComponents = Clone(query.ChangedComponents);
+                return new RawChunkScheduleCacheKey(_entityManager, query, Clone(_requiredTypes), _mode);
+            }
+
+            private static T[] Clone<T>(T[] values)
+                => values == null || values.Length == 0 ? values : (T[])values.Clone();
 
             public bool Matches(EntityManager entityManager)
                 => ReferenceEquals(_entityManager, entityManager);
@@ -1224,17 +1279,16 @@ namespace EntJoy.ECS.JobSystem
             // 前置校验所有事件类型 4 字节对齐，避免分配中途抛异常泄漏已分配的 dataPtr/countPtr
             for (int i = 0; i < meta.Count; i++)
             {
-                int elemSize = System.Runtime.InteropServices.Marshal.SizeOf(meta.EventTypes[i]);
+                int elemSize = ManagedValueLayout.SizeOf(meta.EventTypes[i]);
                 if ((elemSize & 3) != 0)
                     throw new InvalidOperationException(
-                        $"Event type {meta.EventTypes[i].FullName} has Marshal.SizeOf {elemSize}, " +
-                        $"not divisible by 4. ISPC EventBuffer requires 4-byte-aligned blittable layout " +
-                        $"(no double/bool/long fields).");
+                        $"Event type {meta.EventTypes[i].FullName} has C# element size {elemSize}, " +
+                        $"not divisible by 4. Native EventBuffer requires a four-byte-aligned unmanaged element layout.");
             }
 
             for (int i = 0; i < meta.Count; i++)
             {
-                int elemSize = System.Runtime.InteropServices.Marshal.SizeOf(meta.EventTypes[i]);
+                int elemSize = ManagedValueLayout.SizeOf(meta.EventTypes[i]);
                 var dataPtr = Marshal.AllocHGlobal(1024 * elemSize);
                 var countPtr = Marshal.AllocHGlobal(sizeof(int));
                 *(int*)countPtr = 0;
@@ -1519,6 +1573,7 @@ namespace EntJoy.ECS.JobSystem
         internal static unsafe void ExecuteOnQuery<T>(ref T job, EntityManager entityManager, QueryBuilder query)
             where T : struct, IJobChunk
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             var allEnabledTypes = query.AllEnabled;
             bool hasFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
             for (int archIdx = 0; archIdx < entityManager.ArchetypeCount; archIdx++)

@@ -117,11 +117,10 @@ namespace EntJoy.ECS
             return this;
         }
 
-        /// <summary>只返回指定版本号之后被修改过的实体。</summary>
+        /// <summary>当前追踪使用帧级实体变更位，版本阈值过滤不受支持。</summary>
         public QueryBuilder ChangedSince(int version)
         {
-            MinChangedVersion = version;
-            return this;
+            throw new NotSupportedException("ChangedSince requires version-based change tracking; current tracking uses per-frame entity change bits.");
         }
 
         // Shared Component 过滤

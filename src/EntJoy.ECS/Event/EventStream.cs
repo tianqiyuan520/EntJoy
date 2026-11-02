@@ -96,7 +96,7 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 从 Native EventBuffer drain：将 count 个 T 从 dataPtr 复制到写入缓冲区。
-        /// expectedElementSize：C# 分配 buffer 时记录的 Marshal.SizeOf&lt;T&gt;()。
+        /// expectedElementSize：C# 分配 buffer 时记录的实际内存步长。
         /// 若与 T 的真实步长（Unsafe.SizeOf&lt;T&gt;()）不一致，说明 native 侧写的 stride 与 C# 布局
         /// 错位（ISPC uniform struct 对齐 vs C# Sequential），立即失败而不是静默读到错位数据。
         /// </summary>

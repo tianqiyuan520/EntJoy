@@ -1,3 +1,5 @@
+using System;
+
 namespace EntJoy.JobSystem
 {
 
@@ -49,19 +51,16 @@ public static class JobExtensions
     public static JobHandle Schedule<T>(this T job, int arrayLength, int innerBatchCount,
         JobHandle dependsOn, ThreadCounter counter) where T : struct, IJobParallelFor
     {
-        // 当前 C++ 调度器尚未支持 ThreadCounter，直接调度
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(
-            NativeJobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, nativeDep));
+        if (counter != null) throw new NotSupportedException("ThreadCounter scheduling is not supported.");
+        return JobScheduler.ScheduleParallelFor(ref job, arrayLength, innerBatchCount, dependsOn);
     }
 
     /// <summary>调度 IJobParallelForBatch（带 ThreadCounter，调试用）</summary>
     public static JobHandle ScheduleBatch<T>(this T job, int arrayLength, int batchSize,
         JobHandle dependsOn, ThreadCounter counter) where T : struct, IJobParallelForBatch
     {
-        NativeJobHandle? nativeDep = dependsOn.GetNativeDependency();
-        return new JobHandle(
-            NativeJobScheduler.ScheduleParallelForBatch(ref job, arrayLength, batchSize, nativeDep));
+        if (counter != null) throw new NotSupportedException("ThreadCounter scheduling is not supported.");
+        return JobScheduler.ScheduleBatch(ref job, arrayLength, batchSize, dependsOn);
     }
 
     // Run 方法（主线程执行，调试用）

@@ -108,7 +108,7 @@
 | NT019 / NT020 / NT021 / NT022 | error | 属性与后端不匹配（ISPC 不读 AutoSIMD / MathPrecision / CppMathLib / UseISPC_MT） |
 | **NT023** | warning | `MathPrecision = High` **没有实现**：`NativeSIMD_math.h` 的 `== 2` 分支为空，产物与 `IEEE` 逐字相同；`Fastest` 才有 AVX2/AVX512 内联多项式 |
 | **NT024** | **error**（2026-09-27 由 warning 升级） | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%** ⇒ 默认不许开。要开必须**显式声明已量过**：MSBuild 属性 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`（由 `EntJoy.Jobs.props` 的 `CompilerVisibleProperty` 传给分析器）。job 被排除后调用点会报 CS0103 —— 这是故意的"响亮失败" |
-| **NT031** | error | `AutoSIMD = Enabled/Vectorize`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。**已知缺口**：`IJobEntity` 路径的 body 会被实体循环改写，判据需要对齐改写后的方法，暂未纳入（其余 job 形态覆盖） |
+| **NT031** | error | `AutoSIMD = Enabled/Vectorize`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素 / `for` 循环控制不符合下述契约）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。`IJobEntity + AutoSIMD.Enabled` 当前生成标量实体体，直接报 NT031；`Disabled` 和 `Vectorize` 保持各自现有路径 |
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |
 | **NT026** | error | 生成器**自身崩溃**（NRE 等）：把异常堆栈落盘到 `%TEMP%/entjoy-native-transpiler-crash.txt` 并报出，避免历史上"`CS8785` + 连坐 `CS0234 Bindings 缺失`"这种看不出原因的失败 |
 | **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
@@ -118,6 +118,11 @@
 | **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
 | **NT033** | error | `NativeColumn<T>` job fields require the C++ backend and `AutoSIMD.Disabled`; indexed access and `GetElementPtr` use the native column ABI. |
 | **NT034** | error | 原生 Job 的 `Execute` 使用块函数体；表达式体 `Execute => ...` 在生成前报错。 |
+
+AutoSIMD 的 `for` 控制使用单个已初始化的 `int` 计数器、`counter < end` 或 `counter <= end` 条件，以及 `counter++` / `++counter`。循环体保持计数器本身不变且不传出其引用或地址；不符合时报告 NT031，可使用 `AutoSIMD.Disabled` 保留标量循环。固定循环展开使用 64 位行程数计算，带 `int.MaxValue` 包含上界的循环保留原条件；运行时标量计数器按 32 位无检查语义递增。均匀上界的归约循环保留原比较运算，并在每次迭代重新求值上界。SIMD 的 `break` 只移除命中的 lane，`continue` 只跳过该 lane 当前迭代的剩余语句；分支中的 `++` / `--` 使用活动掩码写回。
+
+`IJobFor` 的单索引入口通过批适配器执行一个元素，共用上下文 ABI 和布尔变体选择。
+
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 > 反过来说，**已经实测负收益/不生效的模式一律用 error**、不用 warning：NT024（AutoSIMD 实测慢 ~10%）、

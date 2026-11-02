@@ -19,9 +19,9 @@ namespace EntJoy.JobSystem
         public bool IsValid => Slot != IntPtr.Zero && Handle != IntPtr.Zero;
         internal IntPtr RetainForUse() => NativeHandleStorage.Retain(this);
         internal bool IsCompletedFast => NativeHandleStorage.IsCompleted(this);
-        public bool Equals(NativeJobHandle other) => Handle == other.Handle;
+        public bool Equals(NativeJobHandle other) => Slot == other.Slot && Generation == other.Generation;
         public override bool Equals(object obj) => obj is NativeJobHandle other && Equals(other);
-        public override int GetHashCode() => Handle.GetHashCode();
+        public override int GetHashCode() => HashCode.Combine(Slot, Generation);
         public static bool operator ==(NativeJobHandle left, NativeJobHandle right) => left.Equals(right);
         public static bool operator !=(NativeJobHandle left, NativeJobHandle right) => !left.Equals(right);
     }

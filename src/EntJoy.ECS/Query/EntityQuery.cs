@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 查询规则指纹：唯一标识一组查询条件（All/Any/None/AllEnabled + SharedFilter）。
+    /// 查询规则指纹：区分组件条件、共享/关系过滤、变更过滤和数量限制。
     /// 相同指纹的查询共享同一个 <see cref="EntityQuery"/> 实例（World 注册表复用）。
     /// 基于 ComponentType.Id 计算，与匹配语义一致（Id 全局唯一映射 Type）。
     /// </summary>
@@ -16,6 +16,9 @@ namespace EntJoy.ECS
         private readonly int[] _anyIds;
         private readonly int[] _noneIds;
         private readonly int[] _allEnabledIds;
+        private readonly int[] _changedIds;
+        private readonly int _minChangedVersion;
+        private readonly int _limitCount;
         private readonly int _sharedTypeId;
         private readonly bool _hasSharedFilter;
         // SharedFilterValue 参与指纹——同类型不同值（Material(2) vs Material(3)）是不同查询
@@ -34,10 +37,13 @@ namespace EntJoy.ECS
             _anyIds = ExtractIds(builder.Any);
             _noneIds = ExtractIds(builder.None);
             _allEnabledIds = ExtractIds(builder.AllEnabled);
+            _changedIds = ExtractIds(builder.ChangedComponents);
+            _minChangedVersion = builder.MinChangedVersion;
+            _limitCount = builder.LimitCount;
             _sharedTypeId = builder.SharedFilterType.Id;
             _hasSharedFilter = builder.HasSharedFilter;
             _sharedFilterValue = builder.SharedFilterValue;
-            _sharedFilterValueHash = builder.SharedFilterValue?.GetHashCode() ?? 0;
+            _sharedFilterValueHash = _hasSharedFilter ? builder.SharedFilterValue?.GetHashCode() ?? 0 : 0;
             _relTypeId = builder.RelationshipFilterType.Id;
             _relTargetId = builder.RelationshipFilterTarget.TargetId;
             _relTargetVersion = builder.RelationshipFilterTarget.TargetVersion;
@@ -50,6 +56,9 @@ namespace EntJoy.ECS
                 hash = hash * 31 + HashIds(_anyIds);
                 hash = hash * 31 + HashIds(_noneIds);
                 hash = hash * 31 + HashIds(_allEnabledIds);
+                hash = hash * 31 + HashIds(_changedIds);
+                hash = hash * 31 + _minChangedVersion;
+                hash = hash * 31 + _limitCount;
                 hash = hash * 31 + _sharedTypeId;
                 hash = hash * 31 + (_hasSharedFilter ? 1 : 0);
                 hash = hash * 31 + _sharedFilterValueHash;
@@ -84,6 +93,8 @@ namespace EntJoy.ECS
 
         private static bool SequenceEquals(int[] a, int[] b)
         {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
             if (a.Length != b.Length) return false;
             for (int i = 0; i < a.Length; i++)
                 if (a[i] != b[i]) return false;
@@ -99,6 +110,9 @@ namespace EntJoy.ECS
                 && SequenceEquals(_anyIds, other._anyIds)
                 && SequenceEquals(_noneIds, other._noneIds)
                 && SequenceEquals(_allEnabledIds, other._allEnabledIds)
+                && SequenceEquals(_changedIds, other._changedIds)
+                && _minChangedVersion == other._minChangedVersion
+                && _limitCount == other._limitCount
                 && _hasRelationshipFilter == other._hasRelationshipFilter
                 && _relTypeId == other._relTypeId
                 && _relTargetId == other._relTargetId

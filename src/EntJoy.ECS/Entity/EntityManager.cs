@@ -547,8 +547,7 @@ namespace EntJoy.ECS
                 // 这些句柄按定义已完成，且已移出记账表 ⇒ 不再有任何等待方需要它们，
                 //   顺手把原生 HandleState 引用确定性释放。原来这里只做"移除"：帧内先完成的 Job 会在
                 //   下一次 TrackEntityJob 被剪掉，于是永远等不到帧末 CompleteActiveJobs 的 Complete
-                //   顺序要点：必须在 `_jobWrittenComponents.Remove` 之后释放 —— 句柄 detach 后其
-                //   哈希值随之改变，先放会让字典键永远删不掉。
+                // 先清理记账，再释放原生所有权；句柄键的身份由槽位与代次保持稳定。
                 if (!NativeJobCore.HasPendingJobExceptions)
                 {
                     for (int i = 0; i < completed.Count; i++)
@@ -970,11 +969,16 @@ namespace EntJoy.ECS
         public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
         {
             CheckDisposed();
-            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+            CompleteEntityJobs(entity);
+            var componentType = ComponentTypeManager.GetComponentType(typeof(T));
+            int typeId = componentType.Id;
             if (!TryGetComponentPointer(entity, typeId, sizeof(T), out void* ptr))
                 throw new InvalidOperationException(
                     $"SetComponent<{typeof(T).Name}> 失败：实体 {entity.Id} 无效/已销毁/版本不匹配，或该实体没有该组件列。");
+            ComponentTypeManager.DestroyComponentValue(componentType, ptr);
             *(T*)ptr = value;
+            ref var info = ref entities[entity.Id];
+            info.Archetype.NotifyComponentChanged(info.ChunkIndex, info.SlotInChunk);
         }
 
         /// <summary>
@@ -1021,6 +1025,7 @@ namespace EntJoy.ECS
                 if ((uint)id >= (uint)_locateBCapacity) continue;
                 ref var loc = ref _locateB[id];
                 if (loc.ChunkMemory == null || loc.SlotInChunk < 0) continue;
+                if (loc.Version != srcEntities[i].Version) continue;
                 if ((uint)id >= (uint)entities.Length) continue;
                 var arch = entities[id].Archetype;
                 if (arch == null) continue;
@@ -1035,6 +1040,8 @@ namespace EntJoy.ECS
                 if (compIdx < 0) continue;
                 byte* dst = (byte*)loc.ChunkMemory + loc.ChunkOffsets[compIdx] + loc.SlotInChunk * elemSize;
                 Buffer.MemoryCopy(srcValues + (long)i * elemSize, dst, elemSize, elemSize);
+                ref var info = ref entities[id];
+                arch.NotifyComponentChanged(info.ChunkIndex, info.SlotInChunk);
                 written++;
             }
             return written;
@@ -2021,15 +2028,17 @@ namespace EntJoy.ECS
             };
         }
 
-        // World 快照（零拷贝序列化）
+        // World 组件值快照
 
-        /// <summary>序列化当前 World 状态为字节快照（组件值零拷贝 memcpy）。</summary>
+        /// <summary>等待已登记作业，按组件内存布局保存支持的值状态。</summary>
         public unsafe WorldSnapshot TakeSnapshot()
         {
             CheckDisposed();
+            CompleteActiveJobs();
             using var ms = new System.IO.MemoryStream();
             using var w = new System.IO.BinaryWriter(ms);
-            w.Write("ENTJOY".ToCharArray());  // magic
+            w.Write(SnapshotMagic.ToCharArray());
+            w.Write(IntPtr.Size);
 
             // 收集非空 archetype
             var archetypes = new List<Archetype>();
@@ -2043,8 +2052,11 @@ namespace EntJoy.ECS
                 w.Write(arch.ComponentCount);
                 foreach (var t in arch.Types)
                 {
+                    ValidateSnapshotComponent(t);
                     w.Write(t.Id);
                     w.Write(t.Size);
+                    w.Write(t.Type.AssemblyQualifiedName);
+                    w.Write(t.Type.Module.ModuleVersionId.ToByteArray());
                 }
             }
 
@@ -2077,31 +2089,28 @@ namespace EntJoy.ECS
             return new WorldSnapshot(ms.ToArray());
         }
 
-        /// <summary>从快照恢复 World 状态（清空当前内容后反序列化重建）。</summary>
+        /// <summary>完整校验后恢复组件值，拒绝不兼容快照时保留当前 World。</summary>
         public unsafe void Restore(WorldSnapshot snapshot)
         {
             CheckDisposed();
+            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            if (snapshot.Data == null) throw new System.IO.InvalidDataException("Snapshot data is missing.");
             using var ms = new System.IO.MemoryStream(snapshot.Data);
             using var r = new System.IO.BinaryReader(ms);
 
-            char[] magic = r.ReadChars(6);
-
-            ClearWorldInternal();
-
-            int archCount = r.ReadInt32();
-            var signatures = new ComponentType[archCount][];
-            for (int i = 0; i < archCount; i++)
+            ComponentType[][] signatures;
+            long entityData;
+            try
             {
-                int compCount = r.ReadInt32();
-                var types = new ComponentType[compCount];
-                for (int c = 0; c < compCount; c++)
-                {
-                    int typeId = r.ReadInt32();
-                    int size = r.ReadInt32();
-                    types[c] = new ComponentType(typeId, size);
-                }
-                signatures[i] = types;
+                signatures = ReadSnapshotSignatures(r);
+                entityData = ms.Position;
+                ValidateSnapshotPayload(r, signatures);
             }
+            catch (System.IO.EndOfStreamException error)
+            { throw new System.IO.InvalidDataException("Snapshot is truncated.", error); }
+
+            ms.Position = entityData;
+            ClearWorldInternal();
 
             int entCount = r.ReadInt32();
             for (int i = 0; i < entCount; i++)
@@ -2120,12 +2129,13 @@ namespace EntJoy.ECS
                 arch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
                 UpdateEntityLocation(id, arch, chunkIndex, slotInChunk);
                 GetEntityInfoRef(id).Version = version;
+                SetLocateBVersion(id, version);
 
                 for (int c = 0; c < arch.ComponentCount; c++)
                 {
                     var t = arch.Types[c];
                     byte* compPtr = (byte*)arch.ChunkList[chunkIndex].GetComponentArrayPointer(c) + slotInChunk * t.Size;
-                    r.Read(new Span<byte>(compPtr, t.Size));
+                    ms.ReadExactly(new Span<byte>(compPtr, t.Size));
                 }
             }
 

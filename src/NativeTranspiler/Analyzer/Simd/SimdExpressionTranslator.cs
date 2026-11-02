@@ -1372,10 +1372,18 @@ string bc = useUnsignedCmp ? "n_set1_epi32" : (cmpIsInt ? "n_set1_epi32" : "n_se
                 }
                 return $"{elemPtr}[{idxExpr}] {op} 1;";
             }
-            if (operand is IdentifierNameSyntax)
+            if (operand is IdentifierNameSyntax identifier)
             {
                 string target = TranslateExpression(operand);
                 if (target.Contains(UnsupportedMarkers.Prefix)) return marker;
+                if (_currentMask != "simd_mask::all_true()"
+                    && (_forLoopVars.Contains(identifier.Identifier.Text)
+                        || (_variables.TryGetValue(identifier.Identifier.Text, out var variable)
+                            && variable.Kind >= VarKind.Varying)))
+                {
+                    string operation = op == "+=" ? "+" : "-";
+                    return $"{target} = blend({target}, {target} {operation} 1, {_currentMask});";
+                }
                 return $"{target} {op} 1;";
             }
             return marker;

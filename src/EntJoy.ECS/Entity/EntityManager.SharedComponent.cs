@@ -390,7 +390,7 @@ namespace EntJoy.ECS
         {
             var ptr = chunk.GetSharedValuePointer(compIdx);
             if (ptr == nint.Zero) return null;
-            return Marshal.PtrToStructure(ptr, compType);
+            return ManagedValueLayout.ReadBoxed(compType, ptr);
         }
 
         /// <summary>将 boxed blittable shared 值写入 chunk 槽位（GCHandle pin，非热路径用）。</summary>

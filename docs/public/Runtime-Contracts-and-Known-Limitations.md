@@ -19,6 +19,7 @@
 - 不得在 Job 执行体内同步 `Complete` 自己、自己的祖先、自己的后继，或包含当前 Job 的组合句柄。
 - Job 抛出的异常只在对应句柄 `Complete` 时传播；调用方必须完成需要观察异常的句柄。
 - Native 句柄是共享所有权的槽位与代次。`Complete` 或 `Release` 使同一所有权的副本失效；完成组合句柄会回收已完成的输入所有权，未完成时释放组合句柄保留输入所有权。
+- `JobHandle` / `NativeJobHandle` 的相等性及哈希描述稳定身份，完成或释放改变有效性，不把历史副本变成默认身份；槽位复用使用代次区分。
 - Native 句柄须显式完成或释放。槽位页作为进程高水位缓存保留地址，关闭时释放剩余任务所有权；代次校验隔离槽位复用和调度器重启。
 - 预热后的转译数组 Job 调度、依赖合并和完成路径使用非托管所有权与上下文池。作业执行和上下文回收在原生层进行，异常与调试需要的批次标识按需读取原生线程局部值；含托管字段的回调 Job、Managed 回退、初始化及诊断路径具有各自的托管分配。
 - Job 执行期间不得直接进行 ECS 结构变更。请使用 `DeferredCommandBuffer`，并在主线程 Playback。
@@ -36,6 +37,20 @@
 - 主线程调用结构性 API 前，框架会等待该 World 的活动 Job；调用方不得绕过该同步路径直接修改 Chunk 或组件存储。
 - `World.Dispose()`、`EntityManager.Dispose()`、`Archetype.Dispose()` 不得与查询、调度、事件 drain 或其他销毁操作并发执行。
 - `EntityManager.GetAllArchetypes()` 返回当前 Archetype 的快照数组；后续结构变更不会更新该快照。
+
+## ECS 查询和组件布局
+
+- 查询缓存以完整条件区分身份，哈希相同仍比较条件及所需组件的有序列表。缓存项保存条件数组快照；缓存命中的查找借用调用参数，不复制数组。
+- 带 `WithChanged` 的查询按当前帧变更位重新筛选，数据变更或清除变更位后，调度缓存会重新收集匹配 chunk。当前变更粒度为 chunk 内任意实体的帧级标记，版本阈值筛选不受支持，`ChangedSince` 报 `NotSupportedException`。
+- 组件列、共享值、泛型指针访问和原生转译使用 C# 无托管引用值类型的实际内存布局；`bool` / `char` 保持其 C# 大小。普通组件包含托管引用时注册失败；managed shared 仍存独立旁表索引。
+- `SetComponent<T>` 等待相关已登记作业，覆盖前销毁旧值，并更新变更位及版本。内部批量写入按实体代次检查，跳过已回收 ID 的旧引用。
+- 原生事件缓冲使用相同的 C# 元素大小，当前元素大小须为 4 的整数倍。
+
+## World 快照
+
+- `TakeSnapshot` 等待已登记作业，保存普通值组件和单关系组件的字节；共享旁表、启用状态、多关系旁表及拥有资源/复制钩子的组件报 `NotSupportedException`。外部指针所指对象不做深拷贝，也不转移其所有权。
+- 格式为 `EJSNAP02`，记录指针宽度及组件的类型 ID、大小、程序集类型名和模块标识。恢复要求这些标识匹配；旧格式及不兼容组件布局明确拒绝，不做自动迁移。
+- 恢复在清空 World 前校验全部签名及实体数据；格式、布局、重复身份或数据长度校验失败时，保留现有 World。恢复后的实体代次同步到托管索引和原生定位表。
 
 ## EventStream
 
@@ -149,8 +164,8 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - **单线程形态**（`CreateParallelWriter(index)`）：一个 writer 同一时刻只能被一个线程使用，违反抛异常；
   staging 可扩容；只支持自包含命令（`DestroyEntity` / `SetComponent<T>`）。
 - **跨 tile 共享形态**（`CreateSharedParallelWriter(index, stagingCapacityBytes, destroyCapacity)`）：
-  追加走 `Interlocked.CompareExchange` 原子占位（无需线程独占）；**不扩容**（并发下无法安全搬移整块 staging）
-  ⇒ 两个容量必须一次给足。CAS 占位保证两个不变式：`Offset ≤ Capacity`、`DestroyCount ≤ DestroyCapacity`；
+  预留在短自旋临界区内完成（无需线程独占）；**不扩容**（并发下无法安全搬移整块 staging）
+  ⇒ 两个容量必须一次给足。统一预留保证两个不变式：`Offset ≤ Capacity`、`DestroyCount ≤ DestroyCapacity`；
   占位失败发生在写字节之前 ⇒ 失败只抛异常，既不越界写、回放也不会越界读。
 - **命令顺序**：同一 writer 内跨 lane 的顺序不确定（与 DOTS 的 `EntityCommandBuffer.ParallelWriter` 同语义）；
   回放按 staging 顺序，并把**连续销毁槽**合并回一次批量销毁（遇非销毁命令先落地，保证命令序不被重排）。
@@ -191,7 +206,6 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - `SharedBlob<T>` 的值复制不增加引用计数，跨系统共享必须使用 `Clone()`。
 - 调试 pin 地址只在对象保持存活且未释放 pin 时有效；不得缓存到业务生命周期。
 - Job 之间的冲突检测只覆盖「写-写」：不同 Job 对同一容器的并发读（读读共享）或读-写组合不作为 Job 间冲突检测目标，并行读写同一容器时的确定性需由上层保证。主线程与 Job 的任意读/写组合则由上述「主线程访问拦截」覆盖。
-- **Temp 容器在帧末回收后被手动 `Dispose()` 的残留风险**（2026-09-26 记录，独立验收指出尚未覆盖）：`TempAllocator.Reset()` 会对未手动释放的 Temp 容器 `MarkReleased(index)` 并把索引归还空闲队列；而 `MarkReleased` **保留** 原 index（以便旧句柄仍报"已释放"），所以此后若该 index 被新容器复用，调用方再对**陈旧容器**调用 `Dispose()`，`Release` 会看到 `StateActive` 而再次把 index 入队（重复项），并且按地址释放 payload 时可能释放已被重分配给他人的块。**规避**：`Allocator.Temp` / `TempJob` 的容器按设计由帧末统一回收——**不要**手动 `Dispose()`；确需提前释放请在同一帧内、`Reset()` 之前完成。
 - **2026-09-27 审计收尾修复（均有可复现 RED → 回归）**：
   - `EntityQuery.RefreshIncremental` 原来只比 **Archetype 数量**判断能否复用匹配集合；`World.Restore()` 会整体重建且数量常相同 ⇒ 查询继续引用**已释放** Archetype、**静默返回 0 个实体**（实测 `Expected: 3, Actual: 0`）。现在比 `EntityManager.ArchetypeSetVersion`（新建/清空/Restore 递增）。回归：`QueryRestoreAndMemoryReportTests`。
   - `MemoryReport.TotalEntityCount` 原来填的是 `entityCount`（**已发放 id 计数**，Destroy 不递减）⇒ 销毁后仍显示历史峰值（实测 `Expected: 3, Actual: 10`）。现在填**存活数**（各 Archetype 计数求和）。`EntityManager.EntityCount` 保留原语义并在 XML 文档中写明"不是存活数"（兼容按 id 遍历的既有用法）。
@@ -211,8 +225,7 @@ System.AggregateException: One or more scheduled C# jobs failed.
   - 回退开关：`ENTJOY_SYSTEM_READ_WRITE_ORDER=0`（或 `SystemRunner.ReadWriteOrderingEnabled = false`）恢复旧行为。
   - 代价实测（交错 A/B，8 对；本机 4 worker）：**读多写少**图（3 组件 × 3 读 + 1 写，读系统排在写系统之前 = 真正会命中的形状）ON 中位 1.643 ms / p95 1.807 ms，OFF 中位 1.644 ms / p95 1.773 ms，成对中位比值 OFF/ON = 0.9996 ~ 1.00；把单系统 Job 加重到 ~1.9 ms（8192 实体 × 512 轮，22.5 ms/帧）后成对中位比值仍是 0.9996。**结论：本机/workload 上测不出代价** —— 帧末尾的全量等待（`TempAllocator.Reset → CompleteActiveJobs`）与"每帧系统数 × 每系统 Job 时长"决定了关键路径，读→写串行边落在这条路径之外。⚠ 未测场景：并行度**未饱和**（读 Job 比 worker 少）且读 Job 很长时，写 Job 原本能挤上空闲 worker，此时串行化代价会显现（理论上限 ≈ 写 Job 时长占帧时间的比例）。
   回归：`SystemReadWriteOrderTests`（`WriterSystem_WaitsForReaderSystemJob` 红→绿主用例 + 读读并行反向守卫 + 开关回退 + 读表生命周期）。
-- **job 路径的 `WithRelationship` 不做逐槽位匹配**：关系过滤在 chunk 收集阶段只能看到「该 archetype 是否含该关系列」，无法按 `RelationSlot` 的 target/version 逐实体筛选 ⇒ 以 `job.Run/Schedule(query)` 运行的关系过滤查询会处理同 archetype 内**所有**实体。需要逐槽位精确匹配时请用托管查询/`QuerySelection` 路径（它们会做槽位校验）。
-- **`RefreshIncremental` 的「archetype 数量相等」捷径在 `World.Restore` 后可能陈旧**：`EntityQuery` 用 `archetypeCount == 上次扫描数` 判定可复用匹配集合，而 `ClearWorldInternal` 会把 `archetypeCount` 归零 ⇒ Restore 后若数量恰好与缓存时相同，缓存的查询可能仍引用已 Dispose 的 Archetype，从而静默返回 0 个实体。**规避**：Restore 后重新构造查询（或 `GetOrCreateEntityQuery` 取新实例）。
+- Job 路径的 `WithRelationship` 尚不支持逐实体 target/version 筛选；Run、Schedule 和原生入口明确抛出 `NotSupportedException`。精确关系筛选使用 `QuerySelection`。
 - **`JobHandle.CombineDependencies` 组合句柄已确定性回收（2026-09-27 修复）**：三条回收路径——① 单个依赖不再组合（R11）；② `SystemRunner` 自己组合出的入站句柄"用后即释"（未 adopted 进写表时）；③ `EntityManager` 在"剪枝已完成 Job""覆盖依赖表旧值""全量等待后清空依赖表"三处，对**已完成**句柄显式 `Release`。未完成的句柄**绝不**提前释放（所有 `JobHandle` 拷贝共享同一槽位和代次，提前释放所有权 会让 `_activeJobs` 记账项与用户手里那份拷贝的 `Complete` 双双退化成空操作 ⇒ 等待/结构变更屏障静默消失）。原生侧新增 `JobSystem_GetLiveHandleCount`（`CreateState - RecycleState`）作为断言口径：1000 帧 + 无 GC 区域下 `EntJoy.ECS.Tests` 的 `TwoDependencyGraph_NativeHandlesDoNotGrowAcrossFrames` 实测增长 **0**（关掉上述任一路径分别增长 2997 / 2996）。
 - **`ScheduleGraph` 的对称读写冲突，边方向取决于注册顺序**：当两个系统互相冲突（A 写 X 读 Y、B 写 Y 读 X）时，单一冲突边的方向按注册先后决定，因此提交顺序随注册顺序变化；层内顺序用 `Order` 排序但排序不稳定（同 Order 时）。需要确定顺序时请显式使用 `[OrderBefore]/[OrderAfter]`。
 - **Managed 回退后端的完成协议（2026-09-16 已修复，此处保留记录）**：此前的缺陷是「完成态发布」与「安全声明释放」不在同一同步点 —— `IsCompleted` 只看 `Remaining == 0`，而读写声明在计数归零之后才释放，主线程可能在声明释放前观察到「已完成」→ `Complete()` 后的合法访问被误拦；另一个成因是托管路径的 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，而 box 被 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx。现实现为：`ManagedCompletion.Signal()` 按「释放写声明 → 释放读声明 → 置 `_declReleased` → `_done.Set()` → 派发回调」的顺序发布，`IsCompleted` 要求 `Remaining == 0 && _declReleased == 1`（`EntJoy.Jobs/Managed/ManagedJobHandle.cs`），且每次调度由 `ManagedJobScheduler.NextCtx()` 分配唯一 ctx。回归证据：`tools/SafetyLockOverheadBench/repro`（隐藏 `NativeDll.dll` 强制 Managed）**触发=0、残留状态为空、正常退出**；守卫用例见 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak`。
@@ -252,3 +265,8 @@ System.AggregateException: One or more scheduled C# jobs failed.
   生成器会在"生成物与是否引用 ECS"不一致时报 **NT029/NT030**（见边界文档 §4）。
 
 CI 全绿证明已覆盖路径通过；发布前仍应在目标平台运行 sanitizer、压力和长稳测试。
+
+## 调度与命令缓冲的错误边界
+
+- 带非空 `ThreadCounter` 的调度重载报 `NotSupportedException`；空计数器转发普通调度入口并保留原依赖。
+- ECB 在分配和写命令前检查字节数、元素数与容量溢出。共享销毁的字节区和销毁表槽位一起预留；失败不推进任一计数，成功预留后的有效载荷由生产者独立写入。Playback 仍要求全部生产者先完成。

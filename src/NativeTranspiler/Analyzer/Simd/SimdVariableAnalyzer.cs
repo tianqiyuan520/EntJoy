@@ -57,6 +57,7 @@ namespace NativeTranspiler.Analyzer
     public class SimdVariableAnalyzer
     {
         private readonly SemanticModel _semanticModel;
+        internal SemanticModel SemanticModel => _semanticModel;
         private readonly INamedTypeSymbol _jobStruct;
         private readonly string _indexParamName;
         private readonly Dictionary<string, SimdVariableInfo> _variables = new();
@@ -316,9 +317,17 @@ namespace NativeTranspiler.Analyzer
         private bool PromoteWritesInVaryingCtx(StatementSyntax stmt)
         {
             bool changed = false;
-            foreach (var assign in stmt.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>())
+            var nodes = stmt.DescendantNodesAndSelf().ToArray();
+            var targets = nodes.OfType<AssignmentExpressionSyntax>().Select(a => a.Left)
+                .Concat(nodes.OfType<PrefixUnaryExpressionSyntax>()
+                    .Where(p => p.IsKind(SyntaxKind.PreIncrementExpression) || p.IsKind(SyntaxKind.PreDecrementExpression))
+                    .Select(p => p.Operand))
+                .Concat(nodes.OfType<PostfixUnaryExpressionSyntax>()
+                    .Where(p => p.IsKind(SyntaxKind.PostIncrementExpression) || p.IsKind(SyntaxKind.PostDecrementExpression))
+                    .Select(p => p.Operand));
+            foreach (var target in targets)
             {
-                string? lhs = GetLHSVariableName(assign.Left);
+                string? lhs = GetLHSVariableName(target);
                 if (lhs == null || !_variables.TryGetValue(lhs, out var info)) continue;
                 if (info.Kind < VarKind.Varying)
                 {

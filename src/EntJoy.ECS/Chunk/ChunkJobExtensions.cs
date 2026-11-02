@@ -50,6 +50,7 @@ namespace EntJoy.ECS.JobSystem
         /// <summary>Run IJobChunk：同步执行（无调度开销），由 ChunkJobScheduler 直接遍历执行。</summary>
         public static unsafe void Run<T>(this T job, QueryBuilder query, World world = null) where T : struct, IJobChunk
         {
+            ChunkJobCollector.ValidateJobQuery(query);
             world ??= World.DefaultWorld;
             if (world == null) throw new InvalidOperationException("No active World found.");
             world.EntityManager.CompleteActiveJobs();

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 
 namespace EntJoy.ECS
 {
@@ -102,7 +102,7 @@ namespace EntJoy.ECS
             }
 
             // Entity 数组（置于偏移 0）
-            int entityArraySize = entityCapacity * Marshal.SizeOf<Entity>();
+            int entityArraySize = entityCapacity * Unsafe.SizeOf<Entity>();
             int offset = entityArraySize;
             int previousColumnOffset = 0;
 

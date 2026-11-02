@@ -13,6 +13,12 @@ namespace EntJoy.ECS.JobSystem
     /// </summary>
     internal static unsafe class ChunkJobCollector
     {
+        internal static void ValidateJobQuery(QueryBuilder query)
+        {
+            if (query.HasRelationshipFilter)
+                throw new NotSupportedException("Job relationship filters require per-entity matching; use QuerySelection for this query.");
+        }
+
         private static int CheckedBytes(long count, int elementSize)
         {
             if (count < 0 || count > int.MaxValue / (long)elementSize)
@@ -30,6 +36,7 @@ namespace EntJoy.ECS.JobSystem
         /// </summary>
         private static int CollectMatchingChunks(EntityManager entityManager, QueryBuilder query, List<Archetype> matchingArchetypes)
         {
+            ValidateJobQuery(query);
             if (s_chunkBuffer.Length < 64) s_chunkBuffer = new Chunk[64];
             int count = 0;
             for (int i = 0; i < entityManager.ArchetypeCount; i++)

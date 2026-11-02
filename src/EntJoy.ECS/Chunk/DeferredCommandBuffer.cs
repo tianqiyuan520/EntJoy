@@ -70,7 +70,7 @@ namespace EntJoy.ECS
         /// <summary>关闭当前 destroy 连续段（任何非 destroy 命令都要调用）。</summary>
         private void CloseDestroyRun() => _destroyRunOpen = false;
 
-        // 并行记录：每 writer 独立非托管 staging + 独立销毁表，记录期无锁
+        // 普通 writer 独占缓冲；共享 writer 统一预留空间后独立写入。
         // 状态类型 EcbWriterState / 句柄类型 ParallelWriter 定义在 DeferredCommandBuffer.ParallelWriter.cs
         private EcbWriterState* _writers;
         private int _writerCount;
@@ -86,7 +86,7 @@ namespace EntJoy.ECS
         {
             if (count <= 0 || count <= _writerCount) return;
             int old = _writerCount;
-            var next = (EcbWriterState*)Marshal.AllocHGlobal(count * sizeof(EcbWriterState));
+            var next = (EcbWriterState*)Marshal.AllocHGlobal(CheckedSize((long)count * sizeof(EcbWriterState)));
             if (_writers != null)
             {
                 Buffer.MemoryCopy(_writers, next, (long)count * sizeof(EcbWriterState), (long)old * sizeof(EcbWriterState));
@@ -109,7 +109,7 @@ namespace EntJoy.ECS
         /// <summary>
         /// 取第 <paramref name="index"/> 个跨 tile 共享 writer（补完，对齐 DOTS 语义）：
         /// 同一个 job 被切成多个 tile 分发到多个 worker 时可以共享同一个 writer ——
-        /// 追加走 <c>Interlocked</c> 原子占位，不需要"一个 writer 一个线程"的约定。
+        /// 预留在短临界区内完成，不需要"一个 writer 一个线程"的约定。
         ///
         /// 与 <see cref="CreateParallelWriter"/> 的差别：
         /// - 记录期允许并发（无 <c>ClaimThread</c> 守卫）；
@@ -127,10 +127,15 @@ namespace EntJoy.ECS
             if (st.Staging != null || st.Destroys != null)
                 throw new InvalidOperationException(
                     $"并行 writer {index} 已被占用（共享 writer 需在每轮记录前一次性分配，PlaybackParallel 只清空内容、不释放缓冲）。");
-            st.Staging = (byte*)Marshal.AllocHGlobal(stagingCapacityBytes);
+            int destroyBytes = CheckedSize((long)destroyCapacity * sizeof(Entity));
+            var staging = (byte*)Marshal.AllocHGlobal(stagingCapacityBytes);
+            Entity* destroys;
+            try { destroys = (Entity*)Marshal.AllocHGlobal(destroyBytes); }
+            catch { Marshal.FreeHGlobal((IntPtr)staging); throw; }
+            st.Staging = staging;
             st.Capacity = stagingCapacityBytes;
             st.Offset = 0;
-            st.Destroys = (Entity*)Marshal.AllocHGlobal(destroyCapacity * sizeof(Entity));
+            st.Destroys = destroys;
             st.DestroyCapacity = destroyCapacity;
             st.DestroyCount = 0;
             st.Shared = 1;
@@ -238,8 +243,12 @@ namespace EntJoy.ECS
         {
             if (needed <= _destroyEntityCapacity) return;
             int newCapacity = _destroyEntityCapacity > 0 ? _destroyEntityCapacity : 4096;
-            while (newCapacity < needed) newCapacity *= 2;
-            var next = (Entity*)Marshal.AllocHGlobal(newCapacity * sizeof(Entity));
+            while (newCapacity < needed)
+            {
+                if (newCapacity > int.MaxValue / 2) throw new OverflowException("ECB entity capacity exceeds Int32.MaxValue.");
+                newCapacity *= 2;
+            }
+            var next = (Entity*)Marshal.AllocHGlobal(CheckedSize((long)newCapacity * sizeof(Entity)));
             if (_destroyEntities != null)
             {
                 Buffer.MemoryCopy(_destroyEntities, next, (long)newCapacity * sizeof(Entity), (long)_destroyEntityCount * sizeof(Entity));
@@ -349,6 +358,7 @@ namespace EntJoy.ECS
             if (n <= 0) return;
             long payload = (long)n * elemSize;
             int total = CheckedSize(sizeof(int) * 5 + payload);
+            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
             lock (_sync)
             {
                 CloseDestroyRun();
@@ -357,7 +367,7 @@ namespace EntJoy.ECS
                 _stagingOffset += sizeof(int);
                 *(int*)(_staging + _stagingOffset) = batchId;
                 _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+                *(int*)(_staging + _stagingOffset) = typeId;
                 _stagingOffset += sizeof(int);
                 *(int*)(_staging + _stagingOffset) = elemSize;
                 _stagingOffset += sizeof(int);
@@ -402,8 +412,12 @@ namespace EntJoy.ECS
         {
             if (needed <= _createdEntityCapacity) return;
             int newCapacity = _createdEntityCapacity > 0 ? _createdEntityCapacity : 1024;
-            while (newCapacity < needed) newCapacity *= 2;
-            var next = (Entity*)Marshal.AllocHGlobal(newCapacity * sizeof(Entity));
+            while (newCapacity < needed)
+            {
+                if (newCapacity > int.MaxValue / 2) throw new OverflowException("ECB entity capacity exceeds Int32.MaxValue.");
+                newCapacity *= 2;
+            }
+            var next = (Entity*)Marshal.AllocHGlobal(CheckedSize((long)newCapacity * sizeof(Entity)));
             if (_createdEntities != null)
             {
                 Buffer.MemoryCopy(_createdEntities, next, (long)newCapacity * sizeof(Entity), (long)_createdEntityCount * sizeof(Entity));
@@ -422,6 +436,7 @@ namespace EntJoy.ECS
         {
             lock (_sync)
             {
+                EnsureDestroyCapacity(checked(_destroyEntityCount + 1));
                 if (!_destroyRunOpen)
                 {
                     EnsureCapacity(sizeof(int) * 3);
@@ -436,7 +451,6 @@ namespace EntJoy.ECS
                     _destroyRunOpen = true;
                     CommandCount++;   // 一条命令 = 一个连续段
                 }
-                EnsureDestroyCapacity(_destroyEntityCount + 1);
                 _destroyEntities[_destroyEntityCount++] = entity;
                 *(int*)(_staging + _destroyCountFieldOffset) = _destroyEntityCount - _destroyRunStart;
             }
@@ -445,6 +459,7 @@ namespace EntJoy.ECS
         /// <summary>记录 AddComponent 命令</summary>
         public void AddComponent<T>(Entity entity, T value) where T : struct, IComponentData
         {
+            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
             lock (_sync)
             {
                 CloseDestroyRun();
@@ -456,7 +471,7 @@ namespace EntJoy.ECS
                 _stagingOffset += sizeof(int);
                 *(Entity*)(_staging + _stagingOffset) = entity;
                 _stagingOffset += sizeof(Entity);
-                *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+                *(int*)(_staging + _stagingOffset) = typeId;
                 _stagingOffset += sizeof(int);
                 *(int*)(_staging + _stagingOffset) = compSize;
                 _stagingOffset += sizeof(int);
@@ -469,6 +484,7 @@ namespace EntJoy.ECS
         /// <summary>记录 RemoveComponent 命令</summary>
         public void RemoveComponent<T>(Entity entity) where T : struct
         {
+            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
             lock (_sync)
             {
                 CloseDestroyRun();
@@ -479,7 +495,7 @@ namespace EntJoy.ECS
                 _stagingOffset += sizeof(int);
                 *(Entity*)(_staging + _stagingOffset) = entity;
                 _stagingOffset += sizeof(Entity);
-                *(int*)(_staging + _stagingOffset) = ComponentTypeManager.GetComponentType(typeof(T)).Id;
+                *(int*)(_staging + _stagingOffset) = typeId;
                 _stagingOffset += sizeof(int);
                 CommandCount++;
             }
@@ -511,7 +527,7 @@ namespace EntJoy.ECS
                         offset += sizeof(int);
                         int batchId = *(int*)(_staging + offset);
                         offset += sizeof(int);
-                        EnsureCreatedEntityCapacity(_createdEntityCount + count);
+                        EnsureCreatedEntityCapacity(checked(_createdEntityCount + count));
                         int created = entityManager.CreateEntities(count, _typeSets[typeSetIndex],
                             _createdEntities + _createdEntityCount, _createdEntityCapacity - _createdEntityCount);
                         // batch 表按记录顺序 push；batchId 由记录期分配、与推入顺序一致

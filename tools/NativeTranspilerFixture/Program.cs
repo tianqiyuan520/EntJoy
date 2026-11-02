@@ -431,6 +431,114 @@ unsafe
     Report("[24] AutoSIMD mutable reduction bound", badBound == 0, $"mismatch: {badBound}");
 }
 
+{
+    int badBreak = 0, badContinue = 0, badReturn = 0, badNested = 0;
+    foreach (int length in new[] { 0, 1, 7, 8, 9, 19 })
+    {
+        using var output = new NativeArray<int>(Math.Max(1, length), Allocator.Persistent);
+        for (int path = 0; path < 2; path++)
+        {
+            var breaking = new SimdFixedBreakJob { Output = output };
+            if (path == 0) breaking.Run(length); else breaking.Schedule(length, 64).Complete();
+            for (int i = 0; i < length; i++)
+            {
+                int expected = i;
+                for (int k = 0; k < 4; k++) { if (k == i % 4) { expected += 100; break; } expected += k + 1; }
+                if (output[i] != expected) badBreak++;
+            }
+            var continuing = new SimdFixedContinueJob { Output = output };
+            if (path == 0) continuing.Run(length); else continuing.Schedule(length, 64).Complete();
+            for (int i = 0; i < length; i++)
+            {
+                int expected = i;
+                for (int k = 0; k < 4; k++) { if (k == i % 4) { expected += 100; continue; } expected += k + 1; }
+                if (output[i] != expected) badContinue++;
+            }
+            var returning = new SimdFixedReturnJob { Output = output };
+            if (path == 0) returning.Run(length); else returning.Schedule(length, 64).Complete();
+            for (int i = 0; i < length; i++)
+            {
+                int expected = i;
+                for (int k = 0; k < i % 4; k++) expected += k + 1;
+                if (output[i] != expected) badReturn++;
+            }
+            var nested = new SimdNestedContinueJob { Output = output };
+            if (path == 0) nested.Run(length); else nested.Schedule(length, 64).Complete();
+            for (int i = 0; i < length; i++)
+            {
+                int expected = i;
+                for (int k = -1; k < 2; k++)
+                for (int j = -1; j < 2; j++) { if (j + 1 == i % 3) { expected += 100; continue; } expected += j + k; }
+                if (output[i] != expected) badNested++;
+            }
+        }
+    }
+    Report("[25] SIMD fixed-loop per-lane break", badBreak == 0, $"mismatch: {badBreak}");
+    Report("[26] SIMD fixed-loop per-lane continue", badContinue == 0, $"mismatch: {badContinue}");
+    Report("[27] SIMD fixed-loop per-lane return", badReturn == 0, $"mismatch: {badReturn}");
+    Report("[28] SIMD nested-loop per-lane continue", badNested == 0, $"mismatch: {badNested}");
+}
+
+{
+    using var output = new NativeArray<int>(19, Allocator.Persistent);
+    int bad = 0;
+    foreach (bool enabled in new[] { false, true })
+    for (int path = 0; path < 2; path++)
+    {
+        var job = new IndexedAdapterJob { Output = output, Enabled = enabled, Bias = 7 };
+        if (path == 0) job.Run(output.Length); else job.Schedule(output.Length, 3).Complete();
+        for (int i = 0; i < output.Length; i++)
+            if (output[i] != (enabled ? i + 7 : 7 - i)) bad++;
+    }
+    Report("[29] IJobFor context ABI and bool variants", bad == 0, $"mismatch: {bad}");
+}
+
+{
+    using var output = new NativeArray<int>(19, Allocator.Persistent);
+    int badMaximum = 0, badMutable = 0, badIncrement = 0;
+    for (int path = 0; path < 2; path++)
+    {
+        var maximum = new SimdMaximumBoundJob { Output = output };
+        if (path == 0) maximum.Run(output.Length); else maximum.Schedule(output.Length, 64).Complete();
+        for (int i = 0; i < output.Length; i++)
+            if (output[i] != i + 2 - i % 2) badMaximum++;
+        var mutable = new SimdMutableMinBoundJob { Output = output };
+        if (path == 0) mutable.Run(output.Length); else mutable.Schedule(output.Length, 64).Complete();
+        for (int i = 0; i < output.Length; i++)
+            if (output[i] != i + 1) badMutable++;
+        var increment = new SimdMaskedIncrementJob { Output = output };
+        if (path == 0) increment.Run(output.Length); else increment.Schedule(output.Length, 64).Complete();
+        for (int i = 0; i < output.Length; i++)
+            if (output[i] != (i % 2 == 0 ? 1 : -1)) badIncrement++;
+    }
+    Report("[30] SIMD inclusive maximum loop bound", badMaximum == 0, $"mismatch: {badMaximum}");
+    Report("[31] SIMD mutable min/max reduction bound", badMutable == 0, $"mismatch: {badMutable}");
+    Report("[32] SIMD conditional increment/decrement", badIncrement == 0, $"mismatch: {badIncrement}");
+}
+
+{
+    using var world = new EntJoy.ECS.World("ClrNativeLayout");
+    var em = world.EntityManager;
+    var entities = em.CreateEntities(130, typeof(ClrFlagData));
+    for (int i = 0; i < entities.Length; i++)
+    {
+        var value = new ClrFlagData { Enabled = i % 2 == 0, Tag = (byte)i, Code = '\u4e2d' };
+        if (i % 2 == 0) em.SetRaw(entities[i], typeof(ClrFlagData), value);
+        else em.SetComponent(entities[i], value);
+    }
+    using var output = new NativeArray<int>(entities.Length, Allocator.Persistent);
+    var query = new EntJoy.ECS.QueryBuilder().WithAll<ClrFlagData>();
+    int bad = 0;
+    var job = new ClrLayoutJob { Output = output };
+    NativeTranspiler.Bindings.NativeExports.RunImmediate_ClrLayoutJob(ref job, query, world);
+    for (int i = 0; i < entities.Length; i++)
+        if (output[i] != (i % 2 == 0 ? 0x4e2d + i : -0x4e2d)) bad++;
+    NativeTranspiler.Bindings.NativeExports.Schedule_ClrLayoutJob(ref job, query, default, world).Complete();
+    for (int i = 0; i < entities.Length; i++)
+        if (output[i] != (i % 2 == 0 ? 0x4e2d + i : -0x4e2d)) bad++;
+    Report("[33] CLR bool/byte/char native chunk layout", bad == 0, $"mismatch: {bad}");
+}
+
 NativeJobScheduler.Shutdown();
 
 Console.WriteLine(failed + Bench.ExtraFailures == 0 ? "\nPASS: all fixture assertions hold." : $"\nFAIL: {failed + Bench.ExtraFailures} assertion(s) failed.");

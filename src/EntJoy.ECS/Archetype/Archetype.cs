@@ -294,7 +294,7 @@ namespace EntJoy.ECS
             const int maxEntitiesPerChunk = 128;
             const int targetChunkBytes = 16 * 1024;
 
-            int entitySize = Marshal.SizeOf<Entity>();
+            int entitySize = Unsafe.SizeOf<Entity>();
             int totalComponentSize = entitySize;
             int enableableCount = 0;
             foreach (var type in types)
@@ -585,7 +585,7 @@ namespace EntJoy.ECS
 
         /// <summary>组件写入后维护变更追踪（递增版本号并标记实体）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void NotifyComponentChanged(int chunkIndex, int slotInChunk)
+        internal void NotifyComponentChanged(int chunkIndex, int slotInChunk)
         {
             _chunkList[chunkIndex].IncrementVersion();
             _chunkList[chunkIndex].MarkEntityChanged(slotInChunk);
@@ -823,7 +823,7 @@ namespace EntJoy.ECS
                 sb.AppendLine($"Chunk: {chunkCounter}/{ChunkCount}");
                 sb.AppendLine($"实体数: {chunk.EntityCount}, 组件数: {ComponentCount}");
                 var entityArray = (Entity*)chunk.MemoryBlock;
-                sb.AppendLine($"  Entity Array: {(long)entityArray:D} 每个size:{Marshal.SizeOf<Entity>()} (Type: {typeof(Entity).Name})");
+                sb.AppendLine($"  Entity Array: {(long)entityArray:D} 每个size:{Unsafe.SizeOf<Entity>()} (Type: {typeof(Entity).Name})");
                 for (int i = 0; i < ComponentCount; i++)
                 {
                     var componentType = types[i].Type;

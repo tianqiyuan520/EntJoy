@@ -8,7 +8,7 @@ namespace EntJoy.ECS
     public struct ComponentType : IEquatable<ComponentType>
     {
         public readonly int Id;  // 记录该组件类型的ID
-        public readonly int Size;  // 组件大小（blittable size）
+        public readonly int Size;  // C# 值布局的元素步长；托管 shared 使用索引大小。
 
         public Type Type => ComponentTypeManager.GetTypeByComponentType(Id);  // 通过查询获取组件类型
         public bool IsEnableable => ComponentTypeManager.GetIsEnableable(Id);

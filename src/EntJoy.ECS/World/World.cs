@@ -117,10 +117,10 @@ namespace EntJoy.ECS
         /// <summary>打印所有 Archetype 概览。</summary>
         public string DumpWorld() => _entityManager.DumpWorld();
 
-        /// <summary>序列化当前 World 状态为字节快照（零拷贝）。</summary>
+        /// <summary>等待已登记作业后保存支持的组件值及布局标识。</summary>
         public WorldSnapshot TakeSnapshot() => _entityManager.TakeSnapshot();
 
-        /// <summary>从快照恢复 World 状态（清空当前内容后重建）。</summary>
+        /// <summary>校验完整快照及布局后，清空当前内容并重建。</summary>
         public void Restore(WorldSnapshot snapshot) => _entityManager.Restore(snapshot);
 
         /// <summary>实体级查询选择器（双组件），支持链式附加过滤条件（WithRelationship/WithEnabled）。</summary>
