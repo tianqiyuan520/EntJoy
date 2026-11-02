@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -435,8 +435,6 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("            {");
                 sb.AppendLine($"                var jobPtr = ({jobTypeFullName}*)context;");
 
-                string batchArgs = BuildBatchCallArgs(jobStruct, "jobPtr");
-                string batchArgsWithComma = string.IsNullOrEmpty(batchArgs) ? "" : ", " + batchArgs;
                 if (hasMultiVersion)
                 {
                     // 生成所有 2^n 个 bool 组合的 if-else 链，与 C++ 端命名一致。
@@ -467,12 +465,12 @@ namespace NativeTranspiler.Analyzer
                             sb.AppendLine("                else");
                         }
 
-                        sb.AppendLine($"                    {jobStruct.Name}_Execute_Batch{suffix}{mtSuffix}(startIndex, count{batchArgsWithComma});");
+                        sb.AppendLine($"                    {jobStruct.Name}_Execute_Batch{suffix}{mtSuffix}(context, startIndex, count);");
                     }
                 }
                 else
                 {
-                    sb.AppendLine($"                {jobStruct.Name}_Execute_Batch{mtSuffix}(startIndex, count{batchArgsWithComma});");
+                    sb.AppendLine($"                {jobStruct.Name}_Execute_Batch{mtSuffix}(context, startIndex, count);");
                 }
                 sb.AppendLine("            };");
                 sb.AppendLine($"            s_{jobStruct.Name}_BatchFuncPtr = Marshal.GetFunctionPointerForDelegate(s_{jobStruct.Name}_BatchFunc);");
@@ -962,9 +960,8 @@ namespace NativeTranspiler.Analyzer
 
         private static List<string> BuildBatchJobDllImportParams(INamedTypeSymbol jobStruct)
         {
-            var parameters = new List<string> { "int __startIndex", "int __count" };
-            AppendFieldDllImportParams(jobStruct, parameters);
-            return parameters;
+            // 批入口只收 job 结构体地址（与 native adapter 的 context 同布局）。
+            return new List<string> { "IntPtr __job", "int __startIndex", "int __count" };
         }
 
         private static void AppendFieldDllImportParams(INamedTypeSymbol jobStruct, List<string> parameters)
@@ -1323,18 +1320,17 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
-                string batchArgs2 = BuildBatchCallArgs(jobStruct, "jobPtr");
-                string batchArgsWithComma2 = string.IsNullOrEmpty(batchArgs2) ? "" : ", " + batchArgs2;
+                // Run 直调同样只传 job 结构体地址。
                 if (hasMultiVersion)
                 {
                     sb.AppendLine($"                if (jobPtr->{boolFieldName})");
-                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_true(startIndex, count{batchArgsWithComma2});");
+                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_true((IntPtr)jobPtr, startIndex, count);");
                     sb.AppendLine($"                else");
-                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_false(startIndex, count{batchArgsWithComma2});");
+                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_false((IntPtr)jobPtr, startIndex, count);");
                 }
                 else
                 {
-                    sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch(startIndex, count{batchArgsWithComma2});");
+                    sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch((IntPtr)jobPtr, startIndex, count);");
                 }
                 sb.AppendLine($"            }}");
                 sb.AppendLine($"        }}");

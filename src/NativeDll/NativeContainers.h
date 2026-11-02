@@ -91,6 +91,21 @@ namespace EntJoy {
 			const T& operator[](int32_t index) const { return data()[index]; }
 		};
 
+		// Non-owning view over a contiguous array or fixed-capacity component columns.
+		template<typename T>
+		struct NativeColumn {
+			T* Flat;
+			T** Chunks;
+			int32_t Capacity, Shift, Length;
+			T* GetElementPtr(int32_t index) const {
+				if (!Chunks) return Flat + index;
+				int32_t chunk = Shift >= 0 ? index >> Shift : index / Capacity;
+				return Chunks[chunk] + (index - chunk * Capacity);
+			}
+			T& operator[](int32_t index) const { return *GetElementPtr(index); }
+		};
+		static_assert(sizeof(NativeColumn<int32_t>) == 32, "NativeColumn ABI");
+
 		// ========== UnsafeList ==========
 		// 非托管堆上的实际列表数据，C# 侧 NativeList<T> 持有 UnsafeList<T>* _listData
 		template<typename T>

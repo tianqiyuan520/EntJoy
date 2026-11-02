@@ -29,7 +29,49 @@ namespace NativeTranspiler.Analyzer
                 foreach (var line in unrolled) _builder.AppendLine(line);
                 return;
             }
+            if (!_enableAutoSIMD && IsSmallFixedLoop(forStmt))
+            {
+                _builder.AppendLine("#if defined(__clang__)");
+                _builder.AppendLine("#pragma clang loop unroll(full)");
+                _builder.AppendLine("#endif");
+            }
             base.TranslateForStatement(forStmt);
+        }
+
+        // 只展开短的最内层固定循环，限制复制量，避免放大外层热循环的寄存器压力。
+        private bool IsSmallFixedLoop(ForStatementSyntax loop)
+        {
+            if (loop.Declaration?.Variables.Count != 1 || loop.Initializers.Count != 0
+                || loop.Incrementors.Count != 1
+                || loop.Condition is not BinaryExpressionSyntax condition
+                || !(condition.IsKind(SyntaxKind.LessThanExpression) || condition.IsKind(SyntaxKind.LessThanOrEqualExpression))
+                || condition.Left is not IdentifierNameSyntax index) return false;
+            var variable = loop.Declaration.Variables[0];
+            if (variable.Initializer == null
+                || _semanticModel.GetDeclaredSymbol(variable) is not ILocalSymbol symbol
+                || symbol.Type.SpecialType != SpecialType.System_Int32
+                || !SymbolEqualityComparer.Default.Equals(_semanticModel.GetSymbolInfo(index).Symbol, symbol)) return false;
+            var first = _semanticModel.GetConstantValue(variable.Initializer.Value);
+            var last = _semanticModel.GetConstantValue(condition.Right);
+            if (!first.HasValue || first.Value is not int start
+                || !last.HasValue || last.Value is not int end || end == int.MaxValue) return false;
+            long count = (long)end - start + (condition.IsKind(SyntaxKind.LessThanOrEqualExpression) ? 1 : 0);
+            if (count < 2 || count > 8) return false;
+            ExpressionSyntax? incremented = loop.Incrementors[0] switch
+            {
+                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression) => p.Operand,
+                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression) => p.Operand,
+                _ => null
+            };
+            if (incremented == null
+                || !SymbolEqualityComparer.Default.Equals(_semanticModel.GetSymbolInfo(incremented).Symbol, symbol)) return false;
+            var nodes = loop.Statement.DescendantNodesAndSelf().ToArray();
+            if (nodes.Any(n => n is ForStatementSyntax || n is WhileStatementSyntax || n is DoStatementSyntax
+                || n is ForEachStatementSyntax || n is RefExpressionSyntax
+                || n is PrefixUnaryExpressionSyntax p && p.IsKind(SyntaxKind.AddressOfExpression))) return false;
+            var flow = _semanticModel.AnalyzeDataFlow(loop.Statement);
+            return flow != null && flow.Succeeded && !flow.WrittenInside.Contains(symbol, SymbolEqualityComparer.Default)
+                && count * nodes.OfType<StatementSyntax>().Count() <= 96;
         }
         public CppPointerStatementTranslator(SemanticModel semanticModel, IMethodSymbol method, bool useFastMath = false, bool enableAutoSIMD = false)
             : base(semanticModel, useFastMath, enableAutoSIMD)
@@ -499,6 +541,15 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateExpression(ExpressionSyntax expr)
         {
+            // 枚举取反保持底层整数位宽，C++ 对窄整数的默认提升会改变结果。
+            if (expr is PrefixUnaryExpressionSyntax complement && complement.IsKind(SyntaxKind.BitwiseNotExpression)
+                && _semanticModel.GetTypeInfo(expr).Type is INamedTypeSymbol { TypeKind: TypeKind.Enum } enumType)
+            {
+                _builder.Append('(').Append(NativeTranspiler.MapCSharpTypeToCpp(enumType)).Append(")(~(");
+                TranslateExpression(complement.Operand);
+                _builder.Append("))");
+                return;
+            }
             if (EnableWrapSafeIntArithmetic
                 && expr is PrefixUnaryExpressionSyntax pre
                 && pre.IsKind(SyntaxKind.UnaryMinusExpression))

@@ -44,6 +44,8 @@
 
 ## 原生内存和容器
 
+Chunk 列对齐和间隔依据硬件缓存参数确定，信息不可用时默认采用 64 字节缓存行、4096 字节检测周期。参数来源、容量计算与适用边界见 [ECS Chunk 缓存布局](ECS-Chunk-Cache-Layout.md)。
+
 - `NativeArray`、`NativeList`、`UnsafeList` 和 `DeferredCommandBuffer` 的长度、索引、容量和字节数必须是非负且不发生整数溢出；复制区间必须完全落在源/目标范围内。
 - 拥有内存的容器必须由其拥有者准确调用一次 `Dispose()`；视图不会延长底层内存生命周期。
 - `PersistentAllocator.Free` 只应接收 `PersistentAllocator.Alloc` 返回的 payload 指针。其他 allocator、CRT 或第三方 DLL 的指针必须使用其对应的释放函数。

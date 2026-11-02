@@ -72,6 +72,23 @@
   **嵌套循环里的 `return;` 无法表达** ⇒ 写 `__ENTJOY_UNSUPPORTED_STMT__ISPC_ReturnInsideNestedLoopInBatch`
   让构建失败（旧行为是静默跳过整批剩余 index）。
 
+标量 C++ 的 `IJobParallelFor` / `IJobFor` 批内核会识别逐元素拷贝的一对
+`NativeArray<T>`。数组句柄仅用于索引、读取 `Length` 或 `GetUnsafePtr()` 时，
+生成器在批入口缓存这两个数据指针，减少循环中的句柄读取。
+每个作业最多缓存一对，零掩码特化优先；数组保留独立长度以及同址、分离、部分重叠时的数据访问语义。
+
+标量 C++ 的 `IJobParallelFor` / `IJobFor` 批循环以及 `IJobChunk` 适配入口支持零掩码特化。
+当稳定的整数或枚举字段在含循环的作业体中控制至少三组非零位掩码时，每个作业选择一个字段，
+在入口判断一次零值，分别调用零值特化与原始非零路径。`IJobChunk` 的单块、块区间和实体批入口
+使用相同规则，保留原函数签名与上下文字段偏移。字段写入、传出 `this`、间接实例访问等不能证明
+稳定的用法保持原路径；`IJobEntity`、ISPC 和自动 SIMD 入口不应用此特化。
+
+标量 C++ 的 `IJobChunk` 单块、块区间和实体批入口会为可证明只读且不超过 1 KiB 的 Job
+复制一份入口元数据。字段布局按现有 ABI 计算，组件和容器数据仍通过原指针访问，允许数据同址。
+字段及嵌套成员写入、引用或地址传出、`this` 逃逸、未证明的成员调用、volatile 或固定缓冲区
+以及更大的上下文均保留原绑定。每次入口复制的元数据上限为 1 KiB；`IJobEntity`、ISPC 和自动 SIMD
+入口保持原绑定。
+
 ## 3. `IJobParallelForBatch` 的支持范围
 
 - 支持：`Target = Cpp` + `AutoSIMD.Disabled`（默认）。调度走 `ScheduleParallelForBatchRaw`，
@@ -99,6 +116,7 @@
 | **NT030** | warning | 编译未引用 `EntJoy.ECS`，但生成的 bindings 仍出现 ECS 符号（`EntJoy.ECS`/`World`/`QueryBuilder`/`ArchetypeChunk`/`EntityManager`/`ChunkJobScheduler`/`ChunkJobData`/`ChunkEnabledMask`）⇒ 某个 ECS 相关发射点漏了条件化。消息里列出具体符号；若这些名字是你自己的类型，改名即可（词边界匹配，`MyWorldJob` 不误报） |
 | **NT028** | warning | 本批有 `[NativeTranspile]` job 未通过校验、已从绑定生成中排除：其余 job 照常产出，被排除的 job 不会生成 `Schedule` 绑定（调用点报 `CS0103`，而不是整包 `CS0234`）。消息里列出被排除的 job，按各自的 error 诊断逐个修即可 |
 | **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
+| **NT033** | error | `NativeColumn<T>` job fields require the C++ backend and `AutoSIMD.Disabled`; indexed access and `GetElementPtr` use the native column ABI. |
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
 > 反过来说，**已经实测负收益/不生效的模式一律用 error**、不用 warning：NT024（AutoSIMD 实测慢 ~10%）、

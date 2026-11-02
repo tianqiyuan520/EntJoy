@@ -257,8 +257,11 @@ namespace NativeTranspiler.Analyzer
         // 局部变量声明：仅保留 NativeList 引用，移除 NativeArray 包装。
         // 标量字段的绑定形式见下方 typeOk 判据；字段用途按符号解析（无语义模型时退回名字兜底）。
         private static void AppendLocalVariableDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
-            SemanticModel? semanticModel = null, Compilation? compilation = null)
+            SemanticModel? semanticModel = null, Compilation? compilation = null, bool contextAbi = false,
+            IFieldSymbol? zeroMaskField = null,
+            HashSet<IFieldSymbol>? stableArrays = null)
         {
+            if (contextAbi) AppendContextFieldDeclarations(jobStruct, sb, stableArrays);
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
@@ -293,10 +296,56 @@ namespace NativeTranspiler.Analyzer
                 // 其余一律按引用。形参仍是 `T*` ⇒ 不动 ABI，只是函数体内的局部绑定形式。
                 string scalarSrc = $"{field.Name}_ptr";
                 bool typeOk = ValueBindTypeOk(field.Type);
+                if (SymbolEqualityComparer.Default.Equals(field, zeroMaskField))
+                {
+                    sb.AppendLine($"    static constexpr {cppType} __ejZeroMaskValue = 0;");
+                    string reference = bindByValue ? "" : "&";
+                    sb.AppendLine($"    const {cppType}{reference} {field.Name} = __ejZeroMask ? __ejZeroMaskValue : *{scalarSrc};");
+                    continue;
+                }
                 if (bindByValue && typeOk && loopUse.Used.Contains(field.Name) && !loopUse.Written.Contains(field.Name))
                     sb.AppendLine($"    const {cppType} {field.Name} = *{scalarSrc};");
                 else
                     sb.AppendLine($"    const {cppType}& {field.Name} = *{scalarSrc};");
+            }
+        }
+
+        /// <summary>
+        /// 批入口的字段取址：从 job 结构体地址按常量偏移取指针/长度，取代逐字段形参。
+        /// 句柄稳定的数组按值缓存指针，其余指针槽按引用绑定。
+        /// </summary>
+        internal static void AppendContextFieldDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
+            HashSet<IFieldSymbol>? stableArrays = null)
+        {
+            int currentOffset = 0;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            {
+                int offset = CalculateFieldOffset(field, ref currentOffset);
+                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                {
+                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
+                    {
+                        var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(((INamedTypeSymbol)field.Type).TypeArguments[0]);
+                        sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>*& {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElementType}>**)((char*)__job + {offset});");
+                    }
+                    else
+                    {
+                        var cppElementType = GetCppElementType(field.Type);
+                        string binding = stableArrays?.Contains(field) == true ? "* const " : "*& ";
+                        sb.AppendLine($"    {cppElementType}{binding}{field.Name}_ptr = *({cppElementType}**)((char*)__job + {offset});");
+                        sb.AppendLine($"    int& {field.Name}_length = *(int*)((char*)__job + {offset + 8});");
+                    }
+                }
+                else if (field.Type is IPointerTypeSymbol)
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    sb.AppendLine($"    {cppType}& {field.Name}_ptr = *({cppType}*)((char*)__job + {offset});");
+                }
+                else
+                {
+                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                    sb.AppendLine($"    {cppType}* {field.Name}_ptr = ({cppType}*)((char*)__job + {offset});");
+                }
             }
         }
 
@@ -385,7 +434,11 @@ namespace NativeTranspiler.Analyzer
             // 记录"字段本身被写"（不是写它的元素）：赋值左值 / `++` `--` 的操作数 / `ref`|`out` 实参。
             void TakeWrite(SyntaxNode? node)
             {
-                if (!(node is IdentifierNameSyntax id)) return;
+                while (node is ParenthesizedExpressionSyntax parentheses) node = parentheses.Expression;
+                var id = node as IdentifierNameSyntax;
+                if (id == null && node is MemberAccessExpressionSyntax access && access.Expression is ThisExpressionSyntax)
+                    id = access.Name as IdentifierNameSyntax;
+                if (id == null) return;
                 var name = id.Identifier.Text;
                 if (!fields.Contains(name)) return;
                 if (semanticModel != null)
@@ -432,7 +485,8 @@ namespace NativeTranspiler.Analyzer
                         TakeWrite(a.Left);
                         break;
                     case PrefixUnaryExpressionSyntax pu:
-                        TakeWrite(pu.Operand);
+                        if (pu.IsKind(SyntaxKind.PreIncrementExpression) || pu.IsKind(SyntaxKind.PreDecrementExpression)
+                            || pu.IsKind(SyntaxKind.AddressOfExpression)) TakeWrite(pu.Operand);
                         break;
                     case PostfixUnaryExpressionSyntax po:
                         TakeWrite(po.Operand);
@@ -611,6 +665,9 @@ namespace NativeTranspiler.Analyzer
         {
             string funcName = GetCppJobFunctionName(jobStruct, isBatch: true);
             string paramsStr = BuildBatchJobParameters(jobStruct);
+            var zeroMaskField = !isRangeJob && autoSIMD == NativeTranspiler.AutoSIMD.Disabled
+                ? FindZeroMaskField(jobStruct, semanticModel, methodSyntax) : null;
+            var stableArrays = FindStableArrayFields(jobStruct, semanticModel, methodSyntax);
             // 无条件把 batch 入口内联进它的 Adapter。
             // 对齐档 cs=1 时每个元素多付「一帧 + 一次 26 实参搬迁」。
             // Melee 1.0509（8/9）、Integrate 1.0726（6/9）；默认档 JCC=0 1.013、JCC=1 1.022（各 3 轮…
@@ -633,9 +690,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE");
             sb.AppendLine("#  endif");
             sb.AppendLine("#endif");
-            sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
+            if (zeroMaskField != null)
+                sb.AppendLine("template<bool __ejZeroMask>");
+            string linkage = zeroMaskField == null ? "GENERATED_API" : "static";
+            string bodyName = zeroMaskField == null ? funcName : funcName + "_MaskImpl";
+            sb.AppendLine($"{linkage} EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {bodyName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
+            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel, contextAbi: true,
+                zeroMaskField: zeroMaskField, stableArrays: stableArrays);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // IJobParallelForBatch：Execute(startIndex, count) 就是一次区间调用 ⇒ 不生成 index 循环，
@@ -690,6 +752,24 @@ namespace NativeTranspiler.Analyzer
             EmitElementLoop(sb, indexParamName, scalarLoopEnd, scalarBody, bodyHasReturn);
             sb.AppendLine("}");
             sb.AppendLine();
+            if (zeroMaskField != null)
+            {
+                int offset = 0, currentOffset = 0;
+                foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                {
+                    offset = CalculateFieldOffset(field, ref currentOffset);
+                    if (SymbolEqualityComparer.Default.Equals(field, zeroMaskField)) break;
+                }
+                sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
+                sb.AppendLine("{");
+                var maskType = NativeTranspiler.MapCSharpTypeToCpp(zeroMaskField.Type);
+                sb.AppendLine($"    if (*({maskType}*)((char*)__job + {offset}) == 0)");
+                sb.AppendLine($"        {bodyName}<true>(__job, __startIndex, __count);");
+                sb.AppendLine("    else");
+                sb.AppendLine($"        {bodyName}<false>(__job, __startIndex, __count);");
+                sb.AppendLine("}");
+                sb.AppendLine();
+            }
         }
 
         private static void GenerateBatchFunctionVariant(INamedTypeSymbol jobStruct, List<IFieldSymbol> boolFields, List<bool> values, SemanticModel semanticModel, MethodDeclarationSyntax methodSyntax, StringBuilder sb, bool useFastMath, NativeTranspiler.AutoSIMD autoSIMD = NativeTranspiler.AutoSIMD.Disabled, NativeTranspiler.SimdMathPrecision simdMathPrecision = NativeTranspiler.SimdMathPrecision.Fastest, bool isRangeJob = false)
@@ -721,7 +801,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("#endif");
             sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
             sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel);
+            AppendLocalVariableDeclarations(jobStruct, sb, semanticModel: semanticModel, contextAbi: true);
             var indexParamName = methodSyntax.ParameterList.Parameters[0].Identifier.Text;
 
             // IJobParallelForBatch：与 GenerateBatchFunctionStandard 的 isRangeJob 分支同构（不生成 index 循环）。
@@ -1206,7 +1286,7 @@ namespace NativeTranspiler.Analyzer
                         // NativeArray: _buffer 在偏移 0, _length 在偏移 8
                         var cppElemType = GetCppElementType(field.Type);
                         fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                        fieldReads.AppendLine($"    int {field.Name}_length = *(int*)((char*)context + {offset + 8});");
+                        fieldReads.AppendLine($"    int& {field.Name}_length = *(int*)((char*)context + {offset + 8});");
                         callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
                     }
                 }
@@ -1232,8 +1312,8 @@ namespace NativeTranspiler.Analyzer
         /// 参数顺序必须与适配器侧的调用参数顺序一致（适配器由同一份字段遍历生成）。</summary>
         private static string BuildBatchJobParameters(INamedTypeSymbol jobStruct)
         {
-            var parameters = new List<string> { "int __startIndex", "int __count" };
-            AppendFieldParameters(jobStruct, parameters);
+            // 批入口只收 job 结构体地址，字段在函数体内按常量偏移取（AppendContextFieldDeclarations）。
+            var parameters = new List<string> { "void* __job", "int __startIndex", "int __count" };
             return string.Join(", ", parameters);
         }
 
@@ -1584,6 +1664,7 @@ namespace NativeTranspiler.Analyzer
 
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
+            sb.AppendLine("#include <cstring>");
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 sb.AppendLine("#include \"SimdValue.h\"");
             if (IsChunkScheduledJob(jobStruct))
@@ -1669,20 +1750,24 @@ namespace NativeTranspiler.Analyzer
 
                 bool isEntityJob = IsEntityJob(jobStruct);
                 bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
+                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
+                var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
+                var scalarModel = !isEntityJob && !isIspcJob && autoSIMD == NativeTranspiler.AutoSIMD.Disabled && methodSyntax?.Body != null
+                    ? compilation.GetSemanticModel(methodSyntax.SyntaxTree) : null;
+                var adapterMask = scalarModel != null ? FindZeroMaskField(jobStruct, scalarModel, methodSyntax!) : null;
+                int contextSnapshotSize = scalarModel != null ? GetReadOnlyContextSize(jobStruct, scalarModel, methodSyntax!) : 0;
 
                 // IJobEntity 和 IJobChunk 统一走 ChunkAdapter 路径
                 {
-                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
+                AppendMaskAdapterHeader(sb, adapterFuncName, "void* context, const ChunkJobData* __chunkData", adapterMask);
                 sb.AppendLine("{");
                 sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
                 sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
                 sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
                 sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
                 sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
+                AppendReadOnlyContextSnapshot(sb, contextSnapshotSize);
                 sb.AppendLine("    const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;");
-
-                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-                var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
 
                 // IJobEntity：轻量 ChunkData 路径（将 ChunkJobData 转换为 ChunkData，跳过冗余字段）
                 if (isEntityJob)
@@ -1716,7 +1801,7 @@ namespace NativeTranspiler.Analyzer
                             {
                                 var cppElemType = GetCppElementType(field.Type);
                                 sb.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)(__jobContext + {offset});");
-                                sb.AppendLine($"    int {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
+                                sb.AppendLine($"    int& {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
                             }
                         }
                         else if (field.Type is IPointerTypeSymbol)
@@ -1749,8 +1834,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type)) continue;
                         if (field.Type is IPointerTypeSymbol) continue;
-                        var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                        sb.AppendLine($"    const {cppType}& {field.Name} = *{field.Name}_ptr;");
+                        AppendMaskFieldBinding(sb, field, adapterMask);
                     }
 
                     // IJobEntity 或 Auto-SIMD: 调用独立函数而非内联
@@ -1824,6 +1908,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("}");
                 sb.AppendLine();
 
+                AppendMaskAdapterDispatch(sb, jobStruct, adapterMask, adapterFuncName,
+                    "void* context, const ChunkJobData* __chunkData", "context, __chunkData");
                 sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{adapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){adapterFuncName};");
@@ -1831,7 +1917,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine();
 
                 var rangeAdapterFuncName = GetRangeAdapterFunctionName(jobStruct);
-                sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {rangeAdapterFuncName}(void* context, const ChunkJobData* __chunks, int __startIndex, int __count)");
+                AppendMaskAdapterHeader(sb, rangeAdapterFuncName, "void* context, const ChunkJobData* __chunks, int __startIndex, int __count", adapterMask);
                 sb.AppendLine("{");
                 // 内联 Adapter：将 header + job 字段提至循环外
                 sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
@@ -1839,6 +1925,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
                 sb.AppendLine("    int __requiredTypesDataSize = __header->requiredComponentTypeIdCount * (int)sizeof(int);");
                 sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
+                AppendReadOnlyContextSnapshot(sb, contextSnapshotSize);
                 sb.AppendLine("    const int* __requiredComponentTypeIds = (const int*)__header->requiredComponentTypeIds;");
                 // job field 指针
                 int rOff = 0;
@@ -1875,7 +1962,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type)) continue;
                     if (f.Type is IPointerTypeSymbol) continue;
-                    sb.AppendLine($"    const {NativeTranspiler.MapCSharpTypeToCpp(f.Type)}& {f.Name} = *{f.Name}_ptr;");
+                    AppendMaskFieldBinding(sb, f, adapterMask);
                 }
                 sb.AppendLine("    const int __endIndex = __startIndex + __count;");
                 sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
@@ -1932,6 +2019,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
                 sb.AppendLine();
+                AppendMaskAdapterDispatch(sb, jobStruct, adapterMask, rangeAdapterFuncName,
+                    "void* context, const ChunkJobData* __chunks, int __startIndex, int __count", "context, __chunks, __startIndex, __count");
                 sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{rangeAdapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
@@ -1947,7 +2036,9 @@ namespace NativeTranspiler.Analyzer
                 // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
                 // 比 ChunkJobData（72 字节）更紧凑，cache 效率更高
                 var entityBatchAdapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
-                var entityBatchHeader = $@"GENERATED_API void CALLINGCONVENTION {entityBatchAdapterFuncName}(void* context, const EntityBatchData* __batches, int __startIndex, int __count)
+                AppendMaskAdapterHeader(sb, entityBatchAdapterFuncName,
+                    "void* context, const EntityBatchData* __batches, int __startIndex, int __count", adapterMask);
+                var entityBatchHeader = $@"
 {{
     auto* __header = (__EntJoyChunkContextHeader*)context;
     int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);
@@ -1956,6 +2047,7 @@ namespace NativeTranspiler.Analyzer
     char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;";
                 sb.Append(entityBatchHeader);
                 sb.AppendLine();
+                AppendReadOnlyContextSnapshot(sb, contextSnapshotSize);
                 // job field 指针（从 RangeAdapter 复制）
                 rOff = 0;
                 foreach (var f in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
@@ -1991,7 +2083,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type)) continue;
                     if (f.Type is IPointerTypeSymbol) continue;
-                    sb.AppendLine($"    const {NativeTranspiler.MapCSharpTypeToCpp(f.Type)}& {f.Name} = *{f.Name}_ptr;");
+                    AppendMaskFieldBinding(sb, f, adapterMask);
                 }
                 sb.AppendLine("    const int __endIndex = __startIndex + __count;");
                 sb.AppendLine("    for (int __batchIndex = __startIndex; __batchIndex < __endIndex; ++__batchIndex)");
@@ -2130,6 +2222,8 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
                 sb.AppendLine();
+                AppendMaskAdapterDispatch(sb, jobStruct, adapterMask, entityBatchAdapterFuncName,
+                    "void* context, const EntityBatchData* __batches, int __startIndex, int __count", "context, __batches, __startIndex, __count");
                 sb.AppendLine($"GENERATED_API void* CALLINGCONVENTION Get_{entityBatchAdapterFuncName}Ptr()");
                 sb.AppendLine("{");
                 sb.AppendLine($"    return (void*){entityBatchAdapterFuncName};");
@@ -2151,11 +2245,8 @@ namespace NativeTranspiler.Analyzer
                 // 生成字段读取代码
                 // 抽成 BuildAdapterFieldAccess 复用 —— 批形 adapter
                 // 与（IJobFor 专用的）index 形 adapter 的字段解包逐字相同，只是前缀实参不同。
-                var fieldReads = new StringBuilder();
-                var callArgs = new List<string> { "__startIndex", "__count" };
-                BuildAdapterFieldAccess(jobStruct, fieldReads, callArgs);
-                sb.Append(fieldReads);
-                sb.AppendLine();
+                // 批入口收 job 结构体地址 ⇒ adapter 只转发，不再逐字段解包。
+                var callArgs = new List<string> { "context", "__startIndex", "__count" };
 
                 // 调用 Batch 函数（根据所有 bool 条件字段的值选择变体）
                 string batchFuncName = GetCppJobFunctionName(jobStruct, isBatch: true);
@@ -2259,7 +2350,7 @@ namespace NativeTranspiler.Analyzer
                         {
                             var cppElemType = GetCppElementType(field.Type);
                             fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                            fieldReads.AppendLine($"    int {field.Name}_length = *(int*)((char*)context + {offset + 8});");
+                            fieldReads.AppendLine($"    int& {field.Name}_length = *(int*)((char*)context + {offset + 8});");
                             callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
                         }
                     }

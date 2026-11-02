@@ -91,6 +91,10 @@ namespace NativeTranspiler.Analyzer
             "用 <EntJoyJobIntent>（off 默认 | warn | strict）控制本诊断，当前 {3}。",
             "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
+        public static readonly DiagnosticDescriptor ColumnRequiresScalarCppError = new("NT033", "NativeColumn requires scalar Cpp",
+            "[NativeTranspile] job '{0}' uses NativeColumn fields, which require Target=Cpp and AutoSIMD=Disabled.",
+            "NativeTranspiler", DiagnosticSeverity.Error, true);
+
         /// <summary>
         /// 解析局部声明的类型（修复）：优先类型语法节点的语义类型；为 null 时回退到声明符号的类型
         /// —— `ref T x = ref expr;` 在 `Nullable=enable` 下 `GetTypeInfo(Type).Type` 返回 null，
@@ -218,6 +222,12 @@ namespace NativeTranspiler.Analyzer
                 if (!IsUnmanagedType(field.Type))
                     diagnostics.Add(Diagnostic.Create(InvalidJobFieldError, field.Locations.FirstOrDefault(), structSymbol.Name, field.Name, field.Type.ToDisplayString()));
             }
+
+            var columnAttribute = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
+            if (structSymbol.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic && NativeApiSurface.IsNativeColumn(f.Type, compilation))
+                && (AttributeHelper.GetBackendTarget(structSymbol, columnAttribute) != NativeTranspiler.BackendTarget.Cpp
+                    || AttributeHelper.GetAutoSIMD(structSymbol, columnAttribute) != NativeTranspiler.AutoSIMD.Disabled))
+                diagnostics.Add(Diagnostic.Create(ColumnRequiresScalarCppError, structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
 
             var executeMethod = structSymbol.GetMembers().OfType<IMethodSymbol>().FirstOrDefault(m => m.Name == Config.Execute);
             if (executeMethod == null)
@@ -512,6 +522,7 @@ namespace NativeTranspiler.Analyzer
                 var containingType = method.ContainingType;
                 if (containingType != null && NativeTranspiler.IsEntJoyNativeContainerType(containingType))
                     return true;
+                if (NativeApiSurface.IsAllowedColumnMethod(method, compilation)) return true;
                 if (allowChunkMethods && NativeApiSurface.IsAllowedChunkMethod(method, compilation))
                     return true;
                 return false;

@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using NativeTranspiler.Analyzer.Common;
 
@@ -74,7 +75,7 @@ namespace NativeTranspiler.Analyzer
         }
 
     /// <summary>
-    /// 助手（非入口）的头内联发射：函数体直接进 .h 并标 `static __forceinline`，不再发 dllexport 独立 TU。
+    /// 助手（非入口）的头内联发射：函数体直接进 .h；保留默认内联策略并尊重 MethodImpl 提示。
     /// 动机（实测，见 ` x(j)(h)`）：助手原为 `EXTERNC __declspec(dllexport)`，
     /// 入口方法（`[NativeTranspile]` 标记的）仍走 `GenerateHeader`/`GenerateImplementation`（dllexport）。
     /// </summary>
@@ -84,7 +85,18 @@ namespace NativeTranspiler.Analyzer
     {
         var functionName = GetCppFunctionName(method);
         var exportSig = GenerateCppFunctionSignature(method, fullyQualified: true);
-        var inlineSig = "static __forceinline " + exportSig
+        var methodImpl = method.GetAttributes().FirstOrDefault(a =>
+            a.AttributeClass?.ToDisplayString() == "System.Runtime.CompilerServices.MethodImplAttribute");
+        var options = methodImpl?.ConstructorArguments.Length > 0
+            ? (MethodImplOptions)System.Convert.ToInt32(methodImpl.ConstructorArguments[0].Value)
+            : default;
+        // 默认策略不变；NoInlining 优先于 AggressiveInlining。
+        string prefix = "static __forceinline ";
+        if ((options & MethodImplOptions.NoInlining) != 0)
+            prefix = "#if defined(_MSC_VER)\nstatic __declspec(noinline)\n#else\nstatic __attribute__((noinline))\n#endif\n";
+        else if ((options & MethodImplOptions.AggressiveInlining) != 0)
+            prefix = "#if defined(_MSC_VER)\nstatic __forceinline\n#else\nstatic inline __attribute__((always_inline))\n#endif\n";
+        var inlineSig = prefix + exportSig
             .Replace("GENERATED_API ", string.Empty)
             .Replace("CALLINGCONVENTION ", string.Empty);
         var body = GenerateImplementation(method, compilation, userStructs, autoSIMD);

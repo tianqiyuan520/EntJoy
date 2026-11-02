@@ -75,11 +75,16 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 计算 Chunk 内存布局并创建元数据。每个 Archetype 只调用一次。
+        /// 计算指定容量的完整布局。Archetype 保存最终元数据并供其所有 Chunk 共享。
         /// </summary>
         public static ChunkMetadata Create(Archetype archetype, int entityCapacity, ComponentType[] componentTypes, bool enableChangeTracking = true)
+            => Create(archetype, entityCapacity, componentTypes, enableChangeTracking, ChunkCacheLayout.Current);
+
+        internal static ChunkMetadata Create(Archetype archetype, int entityCapacity, ComponentType[] componentTypes,
+            bool enableChangeTracking, ChunkCacheLayout cacheLayout)
         {
-            const int cacheLineSize = 64;
+            int cacheLineSize = cacheLayout.LineSize;
+            int conflictPeriod = cacheLayout.ConflictPeriod;
 
             int componentCount = componentTypes.Length;
             var componentOffsets = new int[componentCount];
@@ -99,6 +104,7 @@ namespace EntJoy.ECS
             // Entity 数组（置于偏移 0）
             int entityArraySize = entityCapacity * Marshal.SizeOf<Entity>();
             int offset = entityArraySize;
+            int previousColumnOffset = 0;
 
             // 组件数组，每个都缓存行对齐
             for (int i = 0; i < componentCount; i++)
@@ -107,6 +113,13 @@ namespace EntJoy.ECS
 
                 // 对齐
                 offset = offset + cacheLineSize - 1 & ~(cacheLineSize - 1);
+                // 相邻列起点对缓存检测周期取余相同时，错开一条缓存行以分散组索引。
+                if (componentSize > 0)
+                {
+                    if (offset % conflictPeriod == previousColumnOffset % conflictPeriod)
+                        offset += cacheLineSize;
+                    previousColumnOffset = offset;
+                }
 
                 componentOffsets[i] = offset;
                 componentSizes[i] = componentSize;

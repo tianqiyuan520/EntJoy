@@ -30,7 +30,11 @@ namespace EntJoy.ECS
         public int GlobalVersion => _globalVersion;
 
         public Archetype(ComponentType[] ts)
+            : this(ts, ChunkCacheLayout.Current) { }
+
+        internal Archetype(ComponentType[] ts, ChunkCacheLayout cacheLayout)
         {
+            _cacheLayout = cacheLayout;
             types = ts;
             ComponentCount = ts.Length;
             componentTypeRecorder = new Dictionary<ComponentType, int>(ts.Length);
@@ -39,9 +43,9 @@ namespace EntJoy.ECS
                 componentTypeRecorder.Add(types[i], i);
             }
             _chunkCapacity = ChunkCapacityOverride > 0
-                ? Math.Max(64, ChunkCapacityOverride)   // 64 = 缓存行，位图/遍历以 64 为自然边界
+                ? Math.Max(64, ChunkCapacityOverride)   // 位图/遍历以 64 个实体为自然边界。
                 : CalculateOptimalChunkCapacity(types);
-            _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types);
+            _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types, true, _cacheLayout);
             _chunkOffsetsNative = NativeLocateStorage.AllocateOffsets(_sharedMetadata.ComponentOffsets);
         }
 
@@ -157,6 +161,7 @@ namespace EntJoy.ECS
         private readonly List<Chunk> _chunkList = new();
         private readonly int _chunkCapacity;
         private readonly ChunkMetadata _sharedMetadata;
+        private readonly ChunkCacheLayout _cacheLayout;
 
         /// <summary>本 Archetype 在 EntityManager 中的稳定编号（由 EntityManager 分配；blittable 定位表/原生内核用）。</summary>
         public int ArchetypeId;
@@ -280,11 +285,13 @@ namespace EntJoy.ECS
             }
         }
 
-        private static int CalculateOptimalChunkCapacity(ComponentType[] types)
+        private int CalculateOptimalChunkCapacity(ComponentType[] types)
         {
             // Unity 风格的小物理 Chunk：Chunk 只负责存储和结构变化，
             // Job 的执行粒度由调度器的 BatchRange 独立决定。
-            const int cacheLineSize = 64;
+            int cacheLineSize = _cacheLayout.LineSize;
+            const int entityBlockSize = 64;
+            const int maxEntitiesPerChunk = 128;
             const int targetChunkBytes = 16 * 1024;
 
             int entitySize = Marshal.SizeOf<Entity>();
@@ -301,13 +308,18 @@ namespace EntJoy.ECS
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
             int stride = totalComponentSize + bitmapOverheadPerEntity;
-            int capacity = Math.Max(cacheLineSize,
+            int capacity = Math.Max(entityBlockSize,
                 (targetChunkBytes - alignmentOverhead) / Math.Max(1, stride));
 
-            // Bitmap 和 SIMD 遍历都以 64 个实体为自然边界。向下对齐，避免
-            // 因为容量取整反而突破 16 KiB 目标。
-            capacity &= ~(cacheLineSize - 1);
-            return Math.Clamp(capacity, cacheLineSize, 131072);
+            // 默认最多 128 个实体，与 Unity 的普通 Chunk 上限一致。
+            // 按 64 个实体向下对齐并核算完整布局，较大的组件仍可降低容量。
+            capacity &= ~(entityBlockSize - 1);
+            capacity = Math.Clamp(capacity, entityBlockSize, maxEntitiesPerChunk);
+            // 复用完整布局校验，把列间隔、位图和 shared 区计入 16 KiB 目标；最少保留 64 个实体。
+            while (capacity > entityBlockSize
+                && ChunkMetadata.Create(this, capacity, types, true, _cacheLayout).TotalSize > targetChunkBytes)
+                capacity -= entityBlockSize;
+            return capacity;
         }
 
         public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
@@ -367,11 +379,9 @@ namespace EntJoy.ECS
 
         private int ComputeChunkStride()
         {
-            // 单一真值来源：ChunkMetadata.Create 计算 Entity + 组件数组 + enableable 位图 +
-            // 变更位掩码 + Shared values 区的完整布局，stride 必须覆盖 TotalSize（64 对齐）。
-            //   共享值写入损坏下一 chunk 的 Entity 数组（实体引用错乱）。
-            var meta = ChunkMetadata.Create(this, _chunkCapacity, types);
-            return (meta.TotalSize + 63) & ~63;
+            // stride 覆盖完整布局并按缓存行对齐，使 slab 中每个 Chunk 的底地址保持对齐。
+            int alignment = _cacheLayout.LineSize;
+            return (_sharedMetadata.TotalSize + alignment - 1) & ~(alignment - 1);
         }
 
         private nint AllocateFromSlab()

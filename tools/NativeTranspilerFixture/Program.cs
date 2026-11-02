@@ -11,6 +11,13 @@ using NativeTranspilerFixture;
 //   [3] EarlyReturnJob 单批：Mark[0] == 0，且 Mark[i] == i+1 (i>=1)
 //       ← 旧实现：批内 `return;` 退出整个批 ⇒ [1..N-1] 全为 0
 //   [4] EarlyReturnDeepJob：Before[i] == 1 全部；After[i] == 2 仅当 i%3 != 0
+//   [5-6] HelperInliningJob：内联提示在 Schedule / Run 下保持相同结果
+//   [7] ZeroMaskJob：零值与非零掩码保持各自的计算结果
+//   [8] ArrayAliasJob：同址、分离、部分重叠、不同长度与空视图保持数据访问语义
+//   [9] SmallFixedLoopJob：最内层固定循环保留 continue / break 与三数组读写语义
+//   [10-16] 整数与枚举掩码：零值、符号位、高位与字段对齐保持 Schedule / Run 结果
+//   [18] Chunk 掩码：零值与非零值保持 Run / Schedule 的计算结果
+//   [19] 只读 Chunk 上下文：同址列数据与多块遍历保持 Run / Schedule 的计算结果
 //
 // 退出码：0 = 全部通过；1 = 有断言失败。
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,6 +27,12 @@ int failed = 0;
 
 NativeJobScheduler.Initialize();
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+if (args.Length > 0 && args[0] == "jobs")
+{
+    try { SchedulerDispatchProbe.Run(args.Length > 1 ? args[1] : "jobsystem.csv"); }
+    finally { NativeJobScheduler.Shutdown(); }
+    return 0;
+}
 Console.WriteLine("=== NativeTranspiler fixture: generated-code semantics (F-4 / F-5) ===");
 
 // ── [1] BatchFillJob 单批：batchSize == N ──
@@ -100,9 +113,246 @@ Console.WriteLine("=== NativeTranspiler fixture: generated-code semantics (F-4 /
     before.Dispose(); after.Dispose();
 }
 
+// Helpers with ordinary, forced and forbidden inlining must work through both native entries.
+{
+    var values = new NativeArray<int>(N, Allocator.Persistent);
+    var job = new HelperInliningJob { Values = values };
+    job.Schedule(N, 64).Complete();
+    int bad = 0;
+    for (int i = 0; i < N; i++)
+        if (values[i] != (i * 2 + 7) * 3 + 1) bad++;
+    Report("[5] helper inlining: Schedule", bad == 0, $"mismatch: {bad}/{N}");
+
+    for (int i = 0; i < N; i++) values[i] = -1;
+    job.Run(N);
+    bad = 0;
+    for (int i = 0; i < N; i++)
+        if (values[i] != (i * 2 + 7) * 3 + 1) bad++;
+    Report("[6] helper inlining: Run", bad == 0, $"mismatch: {bad}/{N}");
+    values.Dispose();
+}
+
+// Zero specialization and the dynamic fallback must agree for every tested bit pattern.
+{
+    var values = new NativeArray<int>(N, Allocator.Persistent);
+    int bad = 0;
+    foreach (int flags in new[] { 0, 1, 2, 4, 7, 128, -1, int.MinValue })
+    {
+        var job = new ZeroMaskJob { Values = values, Flags = flags,
+            B0 = 1, B1 = 2, B2 = 3, B3 = 4, B4 = 5, B5 = 6, B6 = 7, B7 = 8 };
+        for (int path = 0; path < 2; path++)
+        {
+            for (int i = 0; i < N; i++) values[i] = int.MinValue;
+            if (path == 0) job.Schedule(N, 63).Complete();
+            else job.Run(N);
+            for (int i = 0; i < N; i++)
+            {
+                int expected = 36;
+                for (int k = 0; k < 8; k++)
+                {
+                    if ((flags & 1) == 0) expected += k;
+                    if ((flags & 2) == 0) expected += 2;
+                    if ((flags & 4) == 0) expected += 3;
+                }
+                if (values[i] != ((i & 15) == 0 ? -i : expected)) bad++;
+            }
+        }
+    }
+    Report("[7] zero mask and fallback: Schedule / Run", bad == 0, $"mismatch: {bad}");
+    values.Dispose();
+}
+
+// Compare native access with a sequential reference for equal, distinct and overlapping views.
+{
+    int bad = 0;
+    for (int scenario = 0; scenario < 6; scenario++)
+    {
+        bool partial = scenario == 2 || scenario == 4;
+        int count = partial ? 17 : N;
+        int inputStart = scenario == 4 ? 1 : 0;
+        int outputStart = scenario == 0 ? N + 1 : scenario == 2 ? 1 : 0;
+        int inputLength = scenario == 5 ? 0 : count;
+        int outputLength = scenario == 3 ? count - 3 : inputLength;
+        var storage = new NativeArray<int>(2 * N + 2, Allocator.Persistent);
+        var job = new ArrayAliasJob {
+            Input = storage.GetSubArray(inputStart, inputLength),
+            Output = storage.GetSubArray(outputStart, outputLength)
+        };
+        // Partial overlap is exercised serially; its cross-index dependencies require Run.
+        for (int path = partial ? 1 : 0; path < 2; path++)
+        {
+            var expected = new int[storage.Length];
+            for (int i = 0; i < storage.Length; i++) storage[i] = expected[i] = i % 17 + 1;
+            for (int i = 0; i < count; i++)
+            {
+                if (i >= inputLength || i >= outputLength) continue;
+                if ((i & 3) == 0) expected[outputStart + i] = expected[inputStart + i];
+                else
+                {
+                    expected[outputStart + i] = expected[inputStart + i] + 1;
+                    expected[outputStart + i] += expected[inputStart + i];
+                }
+            }
+            if (path == 0) job.Schedule(count, 63).Complete();
+            else job.Run(count);
+            job.Run(0);
+            for (int i = 0; i < storage.Length; i++)
+                if (storage[i] != expected[i]) bad++;
+        }
+        storage.Dispose();
+    }
+    Report("[8] array alias: equal / distinct / overlap / lengths", bad == 0, $"mismatch: {bad}");
+}
+
+{
+    var input = new NativeArray<int>(N, Allocator.Persistent);
+    var output = new NativeArray<int>(N, Allocator.Persistent);
+    var visits = new NativeArray<int>(N, Allocator.Persistent);
+    var job = new SmallFixedLoopJob { Input = input, Output = output, Visits = visits };
+    for (int i = 0; i < N; i++) input[i] = i % 5 - 2;
+    int bad = 0;
+    for (int path = 0; path < 2; path++)
+    {
+        if (path == 0) job.Schedule(N, 63).Complete();
+        else job.Run(N);
+        for (int i = 0; i < N; i++)
+        {
+            int value = input[i];
+            int expectedSum = value == -1 ? 0 : value == 1 ? 0 : 2 * value;
+            int expectedVisits = value == -1 ? 0 : value == 1 ? 1 : 2;
+            if (output[i] != expectedSum || visits[i] != expectedVisits) bad++;
+        }
+    }
+    Report("[9] fixed loop: continue / break / three arrays", bad == 0, $"mismatch: {bad}");
+    input.Dispose(); output.Dispose(); visits.Dispose();
+}
+
+CheckTypedMask("[10] short mask", 0x8000, (flags, values, run) => {
+    var job = new SmallZeroMaskJob { Values = values, Padding = 0xCC, Flags = unchecked((short)flags), Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[11] uint mask", 0x80000000, (flags, values, run) => {
+    var job = new UnsignedZeroMaskJob { Values = values, Padding = 0xCC, Flags = (uint)flags, Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[12] long mask", 1UL << 63, (flags, values, run) => {
+    var job = new SignedWideZeroMaskJob { Values = values, Padding = 0xCC, Flags = unchecked((long)flags), Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[13] ulong mask", 1UL << 63, (flags, values, run) => {
+    var job = new WideZeroMaskJob { Values = values, Padding = 0xCC, Flags = flags, Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[14] byte enum mask", 128, (flags, values, run) => {
+    var job = new SmallEnumZeroMaskJob { Values = values, Padding = 0xCC, Flags = (SmallMask)flags, Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[15] ulong enum mask", 1UL << 63, (flags, values, run) => {
+    var job = new WideEnumZeroMaskJob { Values = values, Padding = 0xCC, Flags = (WideMask)flags, Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+CheckTypedMask("[16] native unsigned mask", 4, (flags, values, run) => {
+    var job = new NativeZeroMaskJob { Values = values, Padding = 0xCC, Flags = (nuint)flags, Sentinel = 0xFFFFFFFF };
+    if (run) job.Run(N); else job.Schedule(N, 63).Complete();
+});
+
+{
+    int bad = 0;
+    foreach (int capacity in new[] { 3, 4, 192 })
+    {
+        var storage = new NativeArray<int>(capacity + 2, Allocator.Persistent);
+        var table = new NativeArray<nint>(2, Allocator.Persistent);
+        try
+        {
+            unsafe
+            {
+                table[0] = (nint)storage.GetUnsafePtr();
+                table[1] = (nint)((int*)storage.GetUnsafePtr() + capacity);
+                var job = new ColumnViewJob {
+                    Values = NativeColumn<int>.CreateView((void**)table.GetUnsafePtr(), capacity, storage.Length), Addend = 6
+                };
+                job.Run(storage.Length);
+                job.Schedule(storage.Length, 2).Complete();
+            }
+            for (int i = 0; i < storage.Length; i++) if (storage[i] != 14) bad++;
+        }
+        finally { table.Dispose(); storage.Dispose(); }
+    }
+    Report("[17] segmented columns: Run / Schedule / pointer atomics", bad == 0, $"mismatch: {bad}");
+}
+
 if (args.Length > 0 && args[0] == "bench")
 {
     Bench.Run();          // 必须早于 Shutdown：基准要用真实调度器
+}
+
+// Chunk masks exercise the zero specialization and nonzero fallback through both native APIs.
+unsafe
+{
+    using var world = new EntJoy.ECS.World("ChunkMaskFixture");
+    world.CreateEntities(4097, typeof(MaskValue));
+    var query = new EntJoy.ECS.QueryBuilder().WithAll<MaskValue>();
+    int bad = 0;
+    foreach (uint flags in new uint[] { 0, 1, 2, 4, 7, 0x80000000u })
+    {
+        var job = new ChunkMaskJob { Flags = flags };
+        for (int mode = 0; mode < 2; mode++)
+        {
+            if (mode == 0) NativeTranspiler.Bindings.NativeExports.RunImmediate_ChunkMaskJob(ref job, query, world);
+            else NativeTranspiler.Bindings.NativeExports.Schedule_ChunkMaskJob(ref job, query, default, world).Complete();
+            int visited = 0;
+            foreach (var archetype in world.EntityManager.GetAllArchetypes())
+            foreach (var chunk in archetype.GetChunks())
+            {
+                var values = new Span<MaskValue>((void*)chunk.GetComponentArrayPointer(archetype.GetComponentTypeIndex<MaskValue>()), chunk.EntityCount);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    int expected = ((flags & 1u) == 0 ? i : 0) + ((flags & 2u) == 0 ? 10 : 0) + ((flags & 4u) == 0 ? 100 : 0);
+                    if (values[i].Number != expected) bad++;
+                }
+                visited += values.Length;
+            }
+            if (visited != 4097) bad++;
+        }
+    }
+    Report("[18] chunk mask Run / Schedule zero and nonzero semantics", bad == 0, $"mismatch: {bad}");
+}
+
+// Snapshot descriptors retain aliasing of their external data across multiple chunks.
+unsafe
+{
+    const int count = 4097;
+    using var world = new EntJoy.ECS.World("ChunkSnapshotFixture");
+    world.CreateEntities(count, typeof(SnapshotValue));
+    using var data = new NativeArray<int>(count, Allocator.Persistent);
+    var query = new EntJoy.ECS.QueryBuilder().WithAll<SnapshotValue>();
+    int bad = 0;
+    for (int mode = 0; mode < 2; mode++)
+    {
+        int slot = 0;
+        foreach (var archetype in world.EntityManager.GetAllArchetypes())
+        foreach (var chunk in archetype.GetChunks())
+        {
+            var values = new Span<SnapshotValue>((void*)chunk.GetComponentArrayPointer(archetype.GetComponentTypeIndex<SnapshotValue>()), chunk.EntityCount);
+            for (int i = 0; i < values.Length; i++, slot++)
+            {
+                values[i].Slot = slot;
+                ((int*)data.GetUnsafePtr())[slot] = slot * 3;
+            }
+        }
+        var job = new ChunkSnapshotJob { Source = data, Destination = data, Bias = 17 };
+        if (mode == 0) NativeTranspiler.Bindings.NativeExports.RunImmediate_ChunkSnapshotJob(ref job, query, world);
+        else NativeTranspiler.Bindings.NativeExports.Schedule_ChunkSnapshotJob(ref job, query, default, world).Complete();
+        foreach (var archetype in world.EntityManager.GetAllArchetypes())
+        foreach (var chunk in archetype.GetChunks())
+        {
+            var values = new Span<SnapshotValue>((void*)chunk.GetComponentArrayPointer(archetype.GetComponentTypeIndex<SnapshotValue>()), chunk.EntityCount);
+            foreach (var value in values)
+                if (value.Number != value.Slot * 3 + 17 || data[value.Slot] != value.Number) bad++;
+        }
+        if (slot != count) bad++;
+    }
+    Report("[19] read-only chunk context preserves aliased data Run / Schedule", bad == 0, $"mismatch: {bad}");
 }
 
 NativeJobScheduler.Shutdown();
@@ -114,6 +364,28 @@ void Report(string name, bool ok, string detail)
 {
     if (!ok) failed++;
     Console.WriteLine($"  {name,-52}: {(ok ? "✅ PASS" : "❌ FAIL")}{(ok || detail.Length == 0 ? "" : "  " + detail)}");
+}
+
+void CheckTypedMask(string name, ulong highMask, Action<ulong, NativeArray<int>, bool> execute)
+{
+    var values = new NativeArray<int>(N, Allocator.Persistent);
+    int bad = 0;
+    try
+    {
+        foreach (ulong flags in new[] { 0UL, 1UL, 2UL, highMask, highMask | 3, highMask - 1 })
+        {
+            int expected = ((flags & 1) == 0 ? 3 : 0) + ((flags & 2) == 0 ? 6 : 0)
+                + ((flags & highMask) == 0 ? 12 : 0) + (flags != 0 ? 8 : 0);
+            for (int path = 0; path < 2; path++)
+            {
+                for (int i = 0; i < N; i++) values[i] = int.MinValue;
+                execute(flags, values, path == 1);
+                for (int i = 0; i < N; i++) if (values[i] != i + expected) bad++;
+            }
+        }
+    }
+    finally { values.Dispose(); }
+    Report(name + ": Schedule / Run", bad == 0, $"mismatch: {bad}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

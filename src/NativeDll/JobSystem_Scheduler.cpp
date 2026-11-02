@@ -275,7 +275,7 @@ namespace JobSystem
     // ============================================================
     // Scheduler
     // ============================================================
-    // 注意：worker 线程被显式设为 NORMAL 优先级，进程 PriorityClass 不影响它们。
+    // Windows 工作线程的 NORMAL 优先级相对于进程优先级类计算。
     static bool ResolveWorkerAffinityEnabled() noexcept
     {        // 默认关闭 CPU 亲和性：worker 交 OS 自由调度（避免 SMT 双线程死绑共享执行单元）。
         // ENTJOY_WORKER_AFFINITY=1 可显式开启（无 SMT / 独占机器场景）。
@@ -306,8 +306,8 @@ namespace JobSystem
         // E1 忙比诊断：清计数并记起点（`ENTJOY_DIAG_E1=1` 时才真的做，否则空操作）。
         E1::Reset();
 #if defined(_WIN32)
-        // 提升进程优先级，减少 worker 与 OS/其他进程竞争时被降权。
-        ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        // 进程使用 Normal 优先级，工作线程使用该类的正常基础优先级。
+        ::SetPriorityClass(::GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
 #endif
             int resolved;
             int envWorkers = 0;

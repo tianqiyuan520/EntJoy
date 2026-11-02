@@ -556,7 +556,9 @@ namespace NativeTranspiler.Analyzer.Common
             GenerateResizeCallbacks(sb, fields);
 
             bool hasBatch = CppJobGenerator.IsParallelForJob(jobStruct) || CppJobGenerator.IsForJob(jobStruct);
-            string cppParamList = BuildCppWrapperParamList(fields, hasBatch);
+            string cppParamList = hasBatch
+                ? "void* __job, int __startIndex, int __count"
+                : BuildCppWrapperParamList(fields, hasBatch);
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -570,6 +572,7 @@ namespace NativeTranspiler.Analyzer.Common
                 string implName = ispcBase + ispcImplSuffix;
                 sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({cppParamList})");
                 sb.AppendLine("{");
+                if (hasBatch) CppJobGenerator.AppendContextFieldDeclarations(jobStruct, sb);
                 sb.Append(GenerateContextFillCode(fields, isFill: true));
                 sb.AppendLine($"    ispc::{implName}({BuildIspcCallArgsForWrapper(fields, hasBatch)});");
                 sb.Append(GenerateContextFillCode(fields, isFill: false));
@@ -1067,7 +1070,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine();
 
             GenerateResizeCallbacks(sb, fields);
-            string cppParamList = BuildCppWrapperParamList(fields, true);
+            string cppParamList = "void* __job, int __startIndex, int __count";
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -1081,6 +1084,7 @@ namespace NativeTranspiler.Analyzer.Common
                 string implName = ispcBase + ispcImplSuffix;
                 sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {funcName}({cppParamList})");
                 sb.AppendLine("{");
+                CppJobGenerator.AppendContextFieldDeclarations(jobStruct, sb);
                 sb.Append(GenerateContextFillCode(fields, isFill: true));
                 sb.AppendLine("    int numTasks = std::thread::hardware_concurrency();");
                 sb.AppendLine($"    ispc::{implName}({BuildIspcCallArgsForWrapper(fields, true)}, numTasks);");

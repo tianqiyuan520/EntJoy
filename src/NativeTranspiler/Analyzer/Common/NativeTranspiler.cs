@@ -82,12 +82,18 @@ namespace NativeTranspiler.Analyzer
             if (type is IPointerTypeSymbol pointerType)
                 return MapCSharpTypeToCpp(pointerType.PointedAtType) + "*";
 
+            // 枚举按底层整数表示，保留字段的大小、符号和对齐。
+            if (type is INamedTypeSymbol { EnumUnderlyingType: { } underlying })
+                return MapCSharpTypeToCpp(underlying);
+
             // 引用字段（object/string/class）无法跨语言：C++ 侧映射为 void* 8B 槽位（零填充，Execute 不应访问）
             if (type.IsReferenceType) return "void*";
 
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
                 var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                if (fullName == "global::EntJoy.Collections.NativeColumn<T>")
+                    return $"EntJoy::Collections::NativeColumn<{MapCSharpTypeToCpp(named.TypeArguments[0])}>";
                 if (fullName == "EntJoy.Collections.NativeArray<T>" || fullName == "global::EntJoy.Collections.NativeArray<T>")
                 {
                     var elem = named.TypeArguments[0];

@@ -97,7 +97,7 @@ doc10 时代的 `ab-aligned.ps1` 则显式 pin 关；Unity 侧无对应物（B �
 的**唯一定义器件**。此前它们只出现在 gridsearch 的战役文档中，不在本契约表里 ⇒ 引用"对齐档"读数时
 **必须同时给出这两个 env**，否则无法复现。
 
-⚠ **`=0` 不是"Unity 粒度"（2026-10-11，依据 [doc18](../gridsearch/18-两栈差距定位-子趟分解与细粒度代价.md) §3.1）**：
+⚠ **`=0` 不是"Unity 粒度"（2026-10-11，依据 [doc18](../archive/gridsearch-campaign//18-两栈差距定位-子趟分解与细粒度代价.md) §3.1）**：
 Unity 的 `IJobParallelFor.Schedule(n, 0)` 里那个 `0` 是**再平衡粒度**参数——其 C# 层**每个 CPU 核只调度一个 native job**，
 batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](https://docs.unity3d.com/2020.1/Documentation/Manual/JobSystemParallelForJobs.html)），
 所以 `0` **不等于** `innerloopBatchCount=1`。用本开关把内批钉成 `1`（"对齐档"的旧做法）会让 EntJoy 的 work item 数
