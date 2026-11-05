@@ -64,7 +64,7 @@ namespace NativeTranspiler.Analyzer
                     return;
                 }
 
-                // NT032/NT033：把"漏写 [NativeTranspile]"从静默降级变成可判定的第三种状态（判据与策略见 JobIntentChecker）。
+                // NT032：把"漏写 [NativeTranspile]"从静默降级变成可判定的第三种状态（判据与策略见 JobIntentChecker）。
                 JobIntentChecker.Report(spc, ctx.Compilation, ctx.Options.GlobalOptions, ctx.JobStructSymbols);
 
                 var methodsToGenerate = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
@@ -133,8 +133,7 @@ namespace NativeTranspiler.Analyzer
                 var cppFiles = new List<string>();
                 var fastMathCppFiles = new HashSet<string>();
                 // AutoSIMD 生成单元：需要 IEEE-754 精确浮点语义（454229d EC2/EC8/E5/E8/E11），
-                // 全局 NativeTranspiled 恢复 fast-math 提速，但这些文件编译进独立 precise 静态库
-                //（无 fast-math），再链回 NativeTranspiled.dll。
+                // 精确单元独立编译为对象库，按名称查找的导出也会完整链接进 NativeTranspiled.dll。
                 var autoSimdCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
                 var attrSymbol = ctx.Compilation.GetTypeByMetadataName($"{RuntimeApi.AttributeNamespace}.{RuntimeApi.AttributeName}Attribute");
@@ -314,6 +313,9 @@ namespace NativeTranspiler.Analyzer
                     var ispcBase = IspcGenerator.GetIspcBaseName(job);
                     var plainBase = CppJobGenerator.GetCppJobFunctionName(job);
                     var mathLib = GetMathLib(job, attrSymbol);
+                    var jobAutoSIMD = AttributeHelper.GetAutoSIMD(job, attrSymbol);
+                    bool preciseVectorize = target == NativeTranspiler.BackendTarget.Cpp
+                        && jobAutoSIMD == NativeTranspiler.AutoSIMD.Vectorize && !HasFastCppMathLib(job, attrSymbol);
 
                     if (target == NativeTranspiler.BackendTarget.Ispc)
                     {
@@ -388,8 +390,7 @@ namespace NativeTranspiler.Analyzer
                         }
                         var cppFile = plainBase + ".cpp";
                         cppFiles.Add(cppFile);
-                        var jobAutoSIMD = AttributeHelper.GetAutoSIMD(job, attrSymbol);
-                        if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                        if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled || preciseVectorize)
                             autoSimdCppFiles.Add(cppFile);
                         if (HasFastCppMathLib(job, attrSymbol) || jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                             fastMathCppFiles.Add(cppFile);
@@ -410,6 +411,8 @@ namespace NativeTranspiler.Analyzer
                             CodeGenIo.WriteAllTextWithRetry(adapterPath, adapterCode);
                         }
                         cppFiles.Add($"{plainBase}_Adapter.cpp");
+                        if (preciseVectorize || jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                            autoSimdCppFiles.Add($"{plainBase}_Adapter.cpp");
 
                         // SendEvent: 收集事件类型元数据
                         if (evtTypes.Count > 0)
@@ -461,7 +464,7 @@ namespace NativeTranspiler.Analyzer
                         // 并行编译：后台启动 ispc，输出重定向到日志
                         string ispcExtraOpts = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                         batContent.AppendLine($"echo Compiling {ispc}... ({mathLibStr})");
-                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -O3 -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx2-i32x8 --math-lib={mathLibStr}{ispcExtraOpts} > \"build\\{baseName}.log\" 2>&1");
+                        batContent.AppendLine($"start /b /min \"ISPC_{baseName}\" \"%ISPC%\" \"{ispc}\" -O3 --wrap-signed-int -o \"build\\{baseName}.obj\" -h \"{baseName}_ispc.h\" --target=avx2-i32x8 --math-lib={mathLibStr}{ispcExtraOpts} > \"build\\{baseName}.log\" 2>&1");
                         batContent.AppendLine();
                         batContent.AppendLine($":skip_{baseName}");
                         batContent.AppendLine();
@@ -1243,6 +1246,24 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             return found;
         }
 
+        // ISPC 对象同时依赖被 include 的帮助函数和类型定义。
+        private static IEnumerable<string> GetIspcDependencies(string outputDir, string source)
+        {
+            var pending = new Queue<string>();
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            pending.Enqueue(source);
+            while (pending.Count > 0)
+            {
+                string name = pending.Dequeue();
+                string fullPath = Path.GetFullPath(Path.Combine(outputDir, name));
+                if (!visited.Add(fullPath) || !File.Exists(fullPath)) continue;
+                yield return name;
+                foreach (System.Text.RegularExpressions.Match include in System.Text.RegularExpressions.Regex.Matches(
+                    File.ReadAllText(fullPath), @"(?m)^[ \t]*#[ \t]*include[ \t]+""([^""]+)"""))
+                    pending.Enqueue(Path.Combine(Path.GetDirectoryName(name) ?? "", include.Groups[1].Value));
+            }
+        }
+
         private static string GenerateCMakeLists(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
                                   string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
                                   List<string>? existingCppOrder = null, string? prebuiltNativeDir = null)
@@ -1361,7 +1382,7 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             sb.AppendLine("add_library(NativeTranspiled SHARED");
             foreach (var file in OrderCppSourcesStable(cppFiles, existingCppOrder))
             {
-                // AutoSIMD 单元改由 NativeTranspiledPrecise 静态库编译（无 fast-math），
+                // AutoSIMD 单元由 NativeTranspiledPrecise 对象库编译（无 fast-math），
                 // 此处必须排除，避免同一符号在 fast-math 与 precise 两处重复定义（LNK2005）。
                 if (autoSimdCppFiles.Contains(file)) continue;
                 sb.AppendLine($"    {file}");
@@ -1373,19 +1394,19 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                 : "target_link_libraries(NativeTranspiled PRIVATE NativeDll)");
             sb.AppendLine();
 
-            // AutoSIMD precise 静态库（fast-math OFF — IEEE-754 NaN/±0）
+            // 对象库保留全部按名称解析的导出，同时隔离精确浮点编译选项。
             //   454229d EC2/EC8/E5/E8/E11：AutoSIMD batch 控制流依赖 NaN/±0 精确语义，
             //   precise 库同样继承 CMAKE_UNITY_BUILD（与主库一致：单 TU）。
             if (autoSimdCppFiles.Count > 0)
             {
                 // 确定性排序：precise 库的 unity 成员稳定（单 TU ⇒ 全库一个 TU，排序只为发射文本确定）。
                 var autoSimdSorted = autoSimdCppFiles.OrderBy(f => f, StringComparer.Ordinal).ToList();
-                sb.AppendLine("# --- AutoSIMD precise static lib (fast-math OFF) ---");
+                sb.AppendLine("# --- AutoSIMD precise objects (fast-math OFF) ---");
                 sb.AppendLine("set(AUTOSIMD_SOURCES");
                 foreach (var file in autoSimdSorted)
                     sb.AppendLine($"    {file}");
                 sb.AppendLine(")");
-                sb.AppendLine("add_library(NativeTranspiledPrecise STATIC ${AUTOSIMD_SOURCES})");
+                sb.AppendLine("add_library(NativeTranspiledPrecise OBJECT ${AUTOSIMD_SOURCES})");
                 sb.AppendLine("target_compile_options(NativeTranspiledPrecise PRIVATE");
                 sb.AppendLine("    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob2 /Oi /Ot /Qpar /MP>");      // MSVC default, no /fp:fast
                 // ClangCL: 禁用自动 FMA 融合（clang: 前缀是 clang-cl 正确语法；裸 -ffp-contract 被忽略）。
@@ -1519,8 +1540,10 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
                     string fmaOpt = mathLib == NativeTranspiler.IspcMathLib.fast ? "" : " --opt=disable-fma";
                     sb.AppendLine("    add_custom_command(");
                     sb.AppendLine($"        OUTPUT \"{objectPath}\" \"{headerPath}\"");
-                    sb.AppendLine($"        COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -O3 -o \"{objectPath}\" -h \"{headerPath}\" --target=avx2-i32x8 --math-lib={mathLibStr}{fmaOpt}");
-                    sb.AppendLine($"        DEPENDS \"{sourcePath}\"");
+                    sb.AppendLine($"        COMMAND \"${{ISPC_EXECUTABLE}}\" \"{sourcePath}\" -O3 --wrap-signed-int -o \"{objectPath}\" -h \"{headerPath}\" --target=avx2-i32x8 --math-lib={mathLibStr}{fmaOpt}");
+                    var dependencies = GetIspcDependencies(outputDir, ispc)
+                        .Select(path => "\"${CMAKE_CURRENT_SOURCE_DIR}/" + path.Replace("\\", "/") + "\"");
+                    sb.AppendLine($"        DEPENDS {string.Join(" ", dependencies)}");
                     sb.AppendLine("        WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"");
                     sb.AppendLine($"        COMMENT \"Compiling ISPC {ispc}\"");
                     sb.AppendLine("        VERBATIM");
@@ -1555,7 +1578,6 @@ static struct float2 lerp(struct float2 a, struct float2 b, float t) {
             var kernelOpt = System.Environment.GetEnvironmentVariable("ENTJOY_KERNEL_O2") == "1"
                 ? ""
                 : " /clang:-O3 /clang:-ffp-contract=fast"
-                  + " /clang:-fno-trapping-math /clang:-fno-signed-zeros /clang:-fomit-frame-pointer"
                   + " /clang:-fno-unroll-loops";
             var schedOpt = kernelOpt + " /clang:-funroll-loops";
             if (!prebuiltNative)

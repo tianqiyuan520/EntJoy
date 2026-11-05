@@ -176,6 +176,7 @@ namespace
     void PhaseA_AllParkedSingleWork()
     {
         constexpr int rounds = 12;
+        int slowPathRounds = 0;
         for (int r = 0; r < rounds; ++r)
         {
             // 先确认前置状态真的成立（全体停靠 + 无人登记），否则测的不是要测的那个形态。
@@ -189,11 +190,12 @@ namespace
             // 采样与那次读之间还有窗口（提交侧要 flush 计数 + 从池里取任务），窗口里刚执行完上一趟的
             // worker 可以合法地重新登记进搜索区 ⇒ 那时走快路径是设计允许的，不代表丢唤醒。
             // （只在 N12 打开时才有这个计数；关掉开关时走的是基线路径，两个计数都不动。）
-            if (JobSystem::WakePollEnabled())
-                RequireCoverage(Wakes() > wakesBefore,
-                    "phase A: no slow-path wake while every worker was parked (fast path taken?)");
+            if (Wakes() > wakesBefore) ++slowPathRounds;
         }
-        std::cout << "  phase A ok (" << rounds << " rounds, all-parked dispatch took the slow path)" << std::endl;
+        if (JobSystem::WakePollEnabled())
+            RequireCoverage(slowPathRounds > 0,
+                "phase A: no slow-path wake observed across all parked dispatches");
+        std::cout << "  phase A ok (" << rounds << " rounds, slow-path=" << slowPathRounds << ")" << std::endl;
     }
 
     // ---------- 形态 B：全体停靠 + 真并行批 ----------

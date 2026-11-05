@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS.JobSystem;
+using EntJoy.ECS.JobSystem;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using System.Diagnostics;
@@ -552,9 +552,9 @@ public class GridSearch2D : IDisposable
         }
     }
 
-    // 优化的最近点查询 Job (AoS, ISPC, 无全局回退)
-    [NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
-    //[NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    // 最近点查询：合并同一行的相邻网格候选。
+    //[NativeTranspiler.NativeTranspile(Target = NativeTranspiler.BackendTarget.Ispc)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
 
     public struct ClosestPointJobPointer : IJobParallelFor
     {
@@ -581,34 +581,34 @@ public class GridSearch2D : IDisposable
             float bestDistSq = float.MaxValue;
             int bestIdx = -1;
 
-            for (int dx = -1; dx <= 1; dx++)
+            int minX = cell.x > 0 ? cell.x - 1 : 0;
+            int maxX = cell.x + 1 < GridDimensions.x ? cell.x + 1 : GridDimensions.x - 1;
+            for (int dy = -1; dy <= 1; dy++)
             {
-                int nx = cell.x + dx;
-                if ((uint)nx >= (uint)GridDimensions.x) continue;
-                for (int dy = -1; dy <= 1; dy++)
+                int ny = cell.y + dy;
+                if ((uint)ny >= (uint)GridDimensions.y) continue;
+                // 相邻列在排序数组中连续，合并为一段候选区间。
+                int row = ny * GridDimensions.x;
+                int2 left = CellStartEnd[row + minX];
+                int2 middle = CellStartEnd[row + cell.x];
+                int2 right = CellStartEnd[row + maxX];
+                int start = left.x;
+                if (start < 0) start = middle.x;
+                if (start < 0) start = right.x;
+                int end = math.max(left.y, middle.y);
+                end = math.max(end, right.y);
+                for (int i = start; i < end; i++)
                 {
-                    int ny = cell.y + dy;
-                    if ((uint)ny >= (uint)GridDimensions.y) continue;
-                    int cellHash = ny * GridDimensions.x + nx;
-                    int2 range = CellStartEnd[cellHash];
-                    int start = range.x;
-                    int end = range.y;
-                    if (start < 0) continue;
-
-                    for (int i = start; i < end; i++)
+                    float2 pos = SortedPositions[i];
+                    float distSq = math.distancesq(q, pos);
+                    if (IgnoreSelf && distSq < SquaredEpsilonSelf) continue;
+                    if (distSq < bestDistSq)
                     {
-                        float2 pos = SortedPositions[i];
-                        float distSq = math.distancesq(q, pos);
-                        if (IgnoreSelf && distSq < SquaredEpsilonSelf) continue;
-                        if (distSq < bestDistSq)
-                        {
-                            bestDistSq = distSq;
-                            bestIdx = i;
-                        }
+                        bestDistSq = distSq;
+                        bestIdx = i;
                     }
                 }
             }
-
             if (bestIdx != -1)
             {
                 Results[index] = HashIndex[bestIdx].y;

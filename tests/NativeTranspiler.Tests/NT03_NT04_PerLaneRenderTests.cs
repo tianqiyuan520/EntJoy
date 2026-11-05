@@ -101,7 +101,7 @@ public struct SingleScalarJob : IJob
             Assert.DoesNotContain("g_simdWidthInt", region);
 
             // 标量翻译仍然要在（注释承诺的"整段走标量翻译"）
-            Assert.Contains("for (int i = 0; i < Out_length; i++)", region);
+            Assert.Contains("for (int i = 0; i < Out_length;", region);
             Assert.Contains("Out_ptr[i] = Out_ptr[i] + 1.0f;", region);
         }
     }

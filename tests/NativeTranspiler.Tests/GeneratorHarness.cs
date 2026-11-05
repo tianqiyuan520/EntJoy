@@ -92,15 +92,6 @@ namespace EntJoy.Collections
         public int Length => _length;
         public T this[int index] { get { return default; } set { } }
     }
-    public unsafe struct NativeColumn<T> where T : unmanaged
-    {
-        private T* _flat;
-        private T** _chunks;
-        private int _capacity, _shift;
-        public int Length;
-        public ref T this[int index] => ref _flat[index];
-        public T* GetElementPtr(int index) => _flat + index;
-    }
 }
 namespace EntJoy.JobSystem
 {

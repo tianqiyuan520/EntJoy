@@ -15,6 +15,11 @@
 # Exit code: 0 = guard holds; 1 = coupling regression or a bypassed guard.
 # ASCII only on purpose: Windows PowerShell 5.1 reads non-BOM UTF-8 as ANSI and mangles it.
 
+param(
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release'
+)
+
 $ErrorActionPreference = 'Continue'
 
 $root = $PSScriptRoot
@@ -30,7 +35,7 @@ if ($ecsRefs) {
 }
 
 # ---- [1] must compile without ECS ----
-$output = & dotnet build $proj -c Release --nologo 2>&1 | Out-String
+$output = & dotnet build $proj -c $Configuration "-p:CompilerGeneratedFilesOutputPath=obj/$Configuration/gen" --nologo 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'FAIL[1]: jobs-only build failed -- generated bindings likely need an ECS reference again:'
     Write-Host $output
@@ -49,7 +54,7 @@ if ($output -match '(?m)(warning|error)\s+NT0(29|30)\b') {
 }
 
 # ---- locate the generated bindings ----
-$gen = Get-ChildItem -Path (Join-Path $root 'obj') -Recurse -Filter 'NativeTranspiler.Bindings.g.cs' -ErrorAction SilentlyContinue |
+$gen = Get-ChildItem -Path (Join-Path $root "obj/$Configuration/gen") -Recurse -Filter 'NativeTranspiler.Bindings.g.cs' -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if (-not $gen) {
     Write-Host 'FAIL: NativeTranspiler.Bindings.g.cs was not emitted -- nothing was verified.'

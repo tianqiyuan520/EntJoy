@@ -86,7 +86,7 @@ public struct NT10NegJob : IJobParallelFor {
                 GeneratorHarness.Fail(r, "int×uint 被发成 32 位无符号回绕 ⇒ 静默错值: " + stmt));
             Assert.False(stmt.Contains("(unsigned)("),
                 GeneratorHarness.Fail(r, "int×uint 的任一操作数被 32 位无符号重解释 ⇒ C++ 侧仍是 32 位算术: " + stmt));
-            Assert.True(stmt.Contains("(long)(i)") && stmt.Contains("(long)(U)"),
+            Assert.True(stmt.Contains("(unsigned long long)(i)") && stmt.Contains("(unsigned long long)(U)"),
                 GeneratorHarness.Fail(r, "int×uint 未把两侧提升到 64 位: " + stmt));
             Assert.Contains("*", stmt);
         }
@@ -128,7 +128,7 @@ public struct NT10NegJob : IJobParallelFor {
 
             Assert.False(stmt.Contains("(int)(0u - "),
                 GeneratorHarness.Fail(r, "-uint 被发成 32 位回绕 ⇒ 静默错值: " + stmt));
-            Assert.Contains("(long)", stmt);
+            Assert.Contains("(long long)", stmt);
         }
     }
 }

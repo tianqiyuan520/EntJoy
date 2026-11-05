@@ -68,22 +68,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine();
 
             var fields = GetFieldsFromMethod(method);
-            var includes = CollectIncludesFromFields(fields);
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
-
-            if (methodSyntax?.Body != null)
-            {
-                var localModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                foreach (var localDecl in methodSyntax.Body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
-                {
-                    var localType = localModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-                    if (localType != null) CollectTypeInclude(localType, includes);
-                }
-            }
-            // 依赖的其它 helper（同目录 {name}_helper.ispc）
-            foreach (var dep in CollectIspcHelperClosure(method, compilation))
-                includes.Add(GetIspcHelperFileName(dep));
-
+            var includes = CollectMethodIncludes(method, compilation, fields);
             WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
 
             if (methodSyntax == null)
@@ -93,7 +79,7 @@ namespace NativeTranspiler.Analyzer.Common
                 return sb.ToString();
             }
 
-            string ispcReturn = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(method.ReturnType));
+            string ispcReturn = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(method.ReturnType));
             sb.AppendLine($"static {ispcReturn} {baseName}({BuildIspcHelperParamList(method)})");
             sb.AppendLine("{");
 
@@ -102,7 +88,7 @@ namespace NativeTranspiler.Analyzer.Common
 
             if (methodSyntax.Body != null)
             {
-                sb.Append(translator.Translate(methodSyntax.Body));
+                AppendIspcBody(sb, translator.Translate(methodSyntax.Body));
             }
             else if (methodSyntax.ExpressionBody != null)
             {
@@ -135,7 +121,7 @@ namespace NativeTranspiler.Analyzer.Common
                 if (NativeTranspiler.IsEntJoyNativeContainerType(p.Type))
                 {
                     var elemType = ((INamedTypeSymbol)p.Type).TypeArguments[0];
-                    var ispcElem = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(elemType));
+                    var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
                     if (NativeTranspiler.IsEntJoyContainerNamed(p.Type, Config.NativeList))
                         pars.Add($"uniform UnsafeList_Context_{ispcElem}* uniform {p.Name}");
                     else
@@ -143,24 +129,20 @@ namespace NativeTranspiler.Analyzer.Common
                 }
                 else if (p.Type is IPointerTypeSymbol ptrType)
                 {
-                    var baseIspc = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(ptrType.PointedAtType));
-                    // ISPC 不接受 "uniform void"（void 不能带 uniform 限定）→ void* 单独处理
-                    pars.Add(baseIspc == "void"
-                        ? $"void * varying {p.Name}_ptr"
-                        : $"uniform {baseIspc} * varying {p.Name}_ptr");
+                    pars.Add($"{IspcTypeMapper.PointerTo(NativeTranspiler.MapCSharpTypeToCpp(ptrType.PointedAtType), false)} {p.Name}_ptr");
                 }
                 else if (p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out)
                 {
-                    var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(p.Type));
+                    var ispcType = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(p.Type));
                     pars.Add($"varying {ispcType} * uniform {p.Name}_ptr");
                 }
                 else
                 {
-                    var ispcType = ToIspcType(NativeTranspiler.MapCSharpTypeToCpp(p.Type));
+                    var ispcType = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(p.Type));
                     pars.Add($"{ispcType} {p.Name}");
                 }
             }
-            return string.Join(", ", pars);
+            return string.Join(",\n    ", pars);
         }
 
         /// <summary>
@@ -179,6 +161,10 @@ namespace NativeTranspiler.Analyzer.Common
                     .Where(p => p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out)
                     .Select(p => p.Name));
             }
+
+            // helper 由每个活动 lane 调用，循环迭代不能再分配给其它 lane。
+            protected override void TranslateForStatement(ForStatementSyntax forStmt)
+                => EmitUniformFor(forStmt);
 
             protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
             {

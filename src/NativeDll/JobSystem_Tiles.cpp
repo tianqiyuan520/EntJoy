@@ -1450,12 +1450,15 @@ namespace JobSystem
             }
             if (storage)
             {
-                // 未提交：剥离本地 cleanup（打包内存由提交侧 DropOwner 释放）。
+                // 未提交：剥离 cleanup，打包内存由本地回滚释放。
                 storage->batch.context = nullptr;
                 storage->batch.cleanup = nullptr;
                 ReleaseBatchStorage(storage);
             }
-            PackedPlainDropOwner(pack);
+            // Submission failed before execution took ownership; both references
+            // still belong to this rollback path.
+            delete[] pack->jobs;
+            delete pack;
             return 0;
         }
     }

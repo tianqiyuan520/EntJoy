@@ -3,8 +3,9 @@
 
 #include "../NativeDll/MPMCInjector.h"
 
+#include <algorithm>
 #include <atomic>
-#include <cassert>
+#include <cstdlib>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -15,9 +16,11 @@ namespace
 {
     using namespace JobSystem;
 
-    // 本 target 的 CMakeLists 定义了 NDEBUG ⇒ 标准 `assert` 是**空操作**（既有用例因此只能捕获
-    // 崩溃/挂起，捕获不到数值错误）。PopMany 用例一律用下面的 Check（不受 NDEBUG 影响），
-    // 失败时打印并让 main 返回非零。
+    // Every assertion evaluates its expression in Debug and Release.
+#define REQUIRE(condition) do { if (!(condition)) { \
+    std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); \
+    std::abort(); } } while (false)
+
     int g_failures = 0;
     void Check(bool cond, const char* what)
     {
@@ -34,15 +37,15 @@ namespace
 
         // 空队列 Pop 应失败
         int val = -1;
-        assert(!q.Pop(val));
+        REQUIRE(!q.Pop(val));
 
         // Push 一个值
-        assert(q.Push(42));
-        assert(q.Pop(val));
-        assert(val == 42);
+        REQUIRE(q.Push(42));
+        REQUIRE(q.Pop(val));
+        REQUIRE(val == 42);
 
         // 再次 Pop 应失败
-        assert(!q.Pop(val));
+        REQUIRE(!q.Pop(val));
 
         printf("[PASS] TestPushPop\n");
     }
@@ -52,13 +55,13 @@ namespace
         MPMCInjector<int, 16> q;
 
         for (int i = 0; i < 10; ++i)
-            assert(q.Push(i));
+            REQUIRE(q.Push(i));
 
         for (int i = 0; i < 10; ++i)
         {
             int val = -1;
-            assert(q.Pop(val));
-            assert(val == i);
+            REQUIRE(q.Pop(val));
+            REQUIRE(val == i);
         }
 
         printf("[PASS] TestFIFO\n");
@@ -70,16 +73,16 @@ namespace
 
         // 填满
         for (int i = 0; i < 8; ++i)
-            assert(q.Push(i));
+            REQUIRE(q.Push(i));
 
         // 第 9 个应失败
-        assert(!q.Push(999));
+        REQUIRE(!q.Push(999));
 
         // 弹出一个后应能再推入
         int val;
-        assert(q.Pop(val));
-        assert(val == 0);
-        assert(q.Push(999));
+        REQUIRE(q.Pop(val));
+        REQUIRE(val == 0);
+        REQUIRE(q.Push(999));
 
         printf("[PASS] TestFull\n");
     }
@@ -92,9 +95,9 @@ namespace
         // 多轮 push/pop 测试回绕
         for (int round = 0; round < 100; ++round)
         {
-            assert(q.Push(round));
-            assert(q.Pop(val));
-            assert(val == round);
+            REQUIRE(q.Push(round));
+            REQUIRE(q.Pop(val));
+            REQUIRE(val == round);
         }
 
         printf("[PASS] TestWrapAround\n");
@@ -110,17 +113,17 @@ namespace
 
         int batch[5] = { 10, 20, 30, 40, 50 };
         uint32_t pushed = q.PushMany(batch, 5);
-        assert(pushed == 5);   // 容量足够全入
+        REQUIRE(pushed == 5);   // 容量足够全入
 
         // 与逐个 Push 混排后 FIFO 顺序：10,20,30,40,50, 1, 2
-        assert(q.Push(1));
-        assert(q.Push(2));
+        REQUIRE(q.Push(1));
+        REQUIRE(q.Push(2));
 
         int val;
         for (int expected : { 10, 20, 30, 40, 50, 1, 2 })
         {
-            assert(q.Pop(val));
-            assert(val == expected);
+            REQUIRE(q.Pop(val));
+            REQUIRE(val == expected);
         }
 
         printf("[PASS] TestPushManyBasic\n");
@@ -131,22 +134,26 @@ namespace
         MPMCInjector<int, 8> q;  // 容量 8
         // 先塞 6 个 → 剩 2 槽
         int fill[6] = { 0, 1, 2, 3, 4, 5 };
-        assert(q.PushMany(fill, 6) == 6);
+        REQUIRE(q.PushMany(fill, 6) == 6);
 
         int batch[4] = { 100, 101, 102, 103 };
         uint32_t pushed = q.PushMany(batch, 4);   // 只能入 2 个
-        assert(pushed == 2);
+        REQUIRE(pushed == 2);
 
-        // 剩余 2 个逐个补推（对应 SubmitBatch 的 fallback 路径）
-        assert(q.Push(batch[2]));
-        assert(q.Push(batch[3]));
-
+        // The queue is full: remaining values require consumer progress first.
+        REQUIRE(!q.Push(batch[2]));
         int val;
-        for (int expected = 0; expected < 8; ++expected)
+        REQUIRE(q.Pop(val)); REQUIRE(val == 0);
+        REQUIRE(q.Pop(val)); REQUIRE(val == 1);
+        REQUIRE(q.Push(batch[2]));
+        REQUIRE(q.Push(batch[3]));
+
+        for (int expected : { 2, 3, 4, 5, 100, 101, 102, 103 })
         {
-            assert(q.Pop(val));
-            assert(val == (expected < 6 ? expected : 100 + (expected - 6)));
+            REQUIRE(q.Pop(val));
+            REQUIRE(val == expected);
         }
+        REQUIRE(!q.Pop(val));
 
         printf("[PASS] TestPushManyFullPartial\n");
     }
@@ -155,19 +162,19 @@ namespace
     {
         MPMCInjector<int, 4> q;  // 小容量回绕
         // 先填满再弹出，制造回绕态
-        assert(q.Push(1));
-        assert(q.Push(2));
+        REQUIRE(q.Push(1));
+        REQUIRE(q.Push(2));
         int val;
-        assert(q.Pop(val)); assert(val == 1);
-        assert(q.Pop(val)); assert(val == 2);
+        REQUIRE(q.Pop(val)); REQUIRE(val == 1);
+        REQUIRE(q.Pop(val)); REQUIRE(val == 2);
 
         // 回绕后 PushMany 跨槽
         int batch[2] = { 7, 8 };
-        assert(q.PushMany(batch, 2) == 2);
-        assert(q.Push(9));
-        assert(q.Pop(val)); assert(val == 7);
-        assert(q.Pop(val)); assert(val == 8);
-        assert(q.Pop(val)); assert(val == 9);
+        REQUIRE(q.PushMany(batch, 2) == 2);
+        REQUIRE(q.Push(9));
+        REQUIRE(q.Pop(val)); REQUIRE(val == 7);
+        REQUIRE(q.Pop(val)); REQUIRE(val == 8);
+        REQUIRE(q.Pop(val)); REQUIRE(val == 9);
 
         printf("[PASS] TestPushManyWrapAround\n");
     }
@@ -188,7 +195,7 @@ namespace
                 if (id & 1)   // 每隔生产者用 PushMany（随机批 1..8）
                 {
                     int batch[8];
-                    uint32_t n = static_cast<uint32_t>((local % 8) + 1);
+                    uint32_t n = static_cast<uint32_t>(std::min<int64_t>((local % 8) + 1, kItems - local));
                     for (uint32_t i = 0; i < n; ++i) batch[i] = id * 1000000 + local + i;
                     uint32_t got = q.PushMany(batch, n);
                     while (got < n)
@@ -221,7 +228,8 @@ namespace
 
         for (auto& t : threads) t.join();
 
-        assert(popped.load() == static_cast<int64_t>(2 * kItems));
+        REQUIRE(popped.load() == static_cast<int64_t>(2 * kItems));
+        REQUIRE(q.IsEmpty());
         printf("[PASS] TestPushManyConcurrentMix (popped=%lld)\n", (long long)popped.load());
     }
 
@@ -434,8 +442,8 @@ namespace
 
         int64_t totalPushed = pushCount.load();
         int64_t totalPopped = popCount.load();
-        assert(totalPushed == static_cast<int64_t>(kProducers) * kItemsPerProducer);
-        assert(totalPopped == static_cast<int64_t>(kProducers) * kItemsPerProducer);
+        REQUIRE(totalPushed == static_cast<int64_t>(kProducers) * kItemsPerProducer);
+        REQUIRE(totalPopped == static_cast<int64_t>(kProducers) * kItemsPerProducer);
 
         printf("[PASS] TestConcurrentMPMC (pushed=%lld, popped=%lld)\n",
             (long long)totalPushed, (long long)totalPopped);

@@ -72,12 +72,12 @@ ISPC / AutoSIMD / 标量 C++ 三后端在 8 个用例上的性能与正确性对
 
 ## `13_HotReload`
 
-热重载**可跑样例**。入口：`13_HotReload/Program.cs`（**本工程缺省入口**）—— `Initialize()` + 一个 `while` 跑
+热重载样例。入口：`13_HotReload/Program.cs`（当前入口整体注释停用）—— `Initialize()` + 一个 `while` 跑
 `HotReloadAddJob`，并在安全点用 `NativeHotReloadWatcher` 检查**新构建的 `bin\NativeTranspiled.dll`**。
 `HotReloadJob.cs` 的 `Execute` 体就是要手改的内核。
 
 - 值由内核常量决定：`Values[index] += Delta + 1;` ⇒ `values[0]=101`，改成 `+ 2` ⇒ `102`（**不重启**）。
-- 三条命令（一次性准备 + 常驻宿主 + 日常构建，**不用手动拷任何文件**）：
+- 解除入口注释后，以下构建命令另加 `-p:ENTJOY_STARTUP=EntJoySample.HotReload.Program`。三条命令分别准备宿主、运行宿主和重新构建，无需手动拷文件：
 
   ```powershell
   # ① 一次性：准备宿主目录（= 把整套搬过去，MSBuild 自动做，含 NativeTranspiled.layout.json）
@@ -103,9 +103,18 @@ ISPC / AutoSIMD / 标量 C++ 三后端在 8 个用例上的性能与正确性对
 ② `[NativeTranspile(Cpp)]` 标量 C++ 内核、③ `[NativeTranspile(Cpp, AutoSIMD)]` 真 SIMD 内核。
 判据：② 与 ① 必须**逐实体完全相等**；③ 与 ① 允许 ≤1 ulp 级误差但不得有结构错位。入口：`AutoSimdChunkWritebackDemo.cs`。
 
+## `16_NativeExecution`
+
+列视图、原生依赖合并、复制上下文与池化清理、位开关及固定循环写法、CLR 组件布局与快照的可运行示例。使用方法、拥有关系和内部优化说明见 [README](16_NativeExecution/README.md)。
+
+```powershell
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release --no-incremental -p:ENTJOY_STARTUP=EntJoySample.NativeExecution.Program
+.\bin\EntJoySample.exe
+```
+
 ## 入口切换约定
 
-- 入口由 `EntJoySample.csproj` 的 `StartupObject` 决定：缺省 `EntJoySample.HotReload.Program`，用 `-p:ENTJOY_STARTUP=<全限定类型名>` 覆盖。
+- 入口由 `EntJoySample.csproj` 的 `StartupObject` 决定：缺省 `TestGridSearch`，用 `-p:ENTJOY_STARTUP=<全限定类型名>` 覆盖。
 - 因此**允许多个非注释 `Main`**，直接 Build 即可（不传属性也不会 `CS0017`）。
 - ⚠ 指定的类型必须有非注释的 `Main`，否则报 `CS1555`；该错误在增量构建下可能不出现（CSC 未重跑），必要时加 `--no-incremental`。
 - 切换样例时，若目标 `Main` 处于注释态，需先把该文件的注释解除。

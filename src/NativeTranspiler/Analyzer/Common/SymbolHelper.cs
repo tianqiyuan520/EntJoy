@@ -1,7 +1,9 @@
+using System;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using NativeTranspiler.Analyzer.Common;
 
@@ -9,6 +11,14 @@ namespace NativeTranspiler.Analyzer
 {
     public static class SymbolHelper
     {
+        // 有来源的改写节点回到原树查询；新建节点由调用方的变量表解析。
+        public static ISymbol? GetBoundSymbol(SemanticModel model, SyntaxNode node)
+            => SourceSyntax.Original(model, node) is SyntaxNode source && source.RawKind == node.RawKind
+                ? model.GetSymbolInfo(source).Symbol : null;
+
+        public static ITypeSymbol? GetBoundType(SemanticModel model, SyntaxNode node)
+            => SourceSyntax.Original(model, node) is SyntaxNode source ? model.GetTypeInfo(source).Type : null;
+
         // C++/ISPC 保留关键字，用作标识符时会编译错误
         private static readonly HashSet<string> CppKeywords = new()
         {
@@ -65,6 +75,17 @@ namespace NativeTranspiler.Analyzer
             }
             return string.Join(".", parts);
         }
+
+        // 闭合泛型实例各自生成定义；按完整签名生成稳定后缀，区分不同类型实参。
+        internal static string GetSpecializationSuffix(ISymbol symbol)
+        {
+            using var sha = SHA256.Create();
+            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(symbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
+            return "__" + BitConverter.ToString(hash, 0, 16).Replace("-", "").ToLowerInvariant();
+        }
+
+        internal static string GetCppStructName(INamedTypeSymbol type)
+            => type.Name + (type.IsGenericType ? GetSpecializationSuffix(type) : "");
 
         /// <summary>
         /// 将 C# 标识符转为安全的 C++/ISPC 标识符。

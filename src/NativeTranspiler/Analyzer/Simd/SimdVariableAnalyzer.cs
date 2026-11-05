@@ -89,8 +89,7 @@ namespace NativeTranspiler.Analyzer
             if (method.Body == null)
                 return _variables;
 
-            try
-            {
+
                 // Step 1: 种子分类
                 // 1a: Execute 参数（保守：直接用参数名判断，避免 GetDeclaredSymbol 在 source gen 上下文中抛异常）
                 foreach (var param in method.ParameterList.Parameters)
@@ -128,13 +127,6 @@ namespace NativeTranspiler.Analyzer
 
                 // 应用 reduction 标记
                 ApplyReductionMarkers();
-            }
-            catch
-            {
-                // Any error in variable analysis → return empty (fallback to per-lane)
-                _variables.Clear();
-            }
-
             return _variables;
         }
 
@@ -154,16 +146,7 @@ namespace NativeTranspiler.Analyzer
         /// 供 SimdControlFlowGenerator 在表达式翻译时使用。
         /// </summary>
         public VarKind ClassifyExpression(ExpressionSyntax expr)
-        {
-            try
-            {
-                return ClassifyExpressionInternal(expr, new HashSet<string>());
-            }
-            catch
-            {
-                return VarKind.Uniform;
-            }
-        }
+            => ClassifyExpressionInternal(expr);
 
         // 内部实现
 
@@ -244,6 +227,14 @@ namespace NativeTranspiler.Analyzer
                     else if (typeText == "float") cppType = "float";
                     else if (typeText == "bool") cppType = "bool";
                     else if (localDecl.Declaration.Type is PointerTypeSyntax) cppType = "int*";
+                    if (SymbolHelper.GetBoundType(_semanticModel, localDecl.Declaration.Type) is ITypeSymbol boundType)
+                    {
+                        cppType = NativeTranspiler.MapCSharpTypeToCpp(boundType);
+                        if (boundType.SpecialType is SpecialType.System_UInt32 or SpecialType.System_Int16
+                            or SpecialType.System_UInt16 or SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Char)
+                            cppType = "int";
+                        typeText = boundType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                    }
                     AddVariable(name, cppType, VarKind.Uniform, null, csharpType: typeText);
                 }
             }
@@ -302,7 +293,7 @@ namespace NativeTranspiler.Analyzer
                 changed = false;
                 foreach (var ifStmt in node.DescendantNodes().OfType<IfStatementSyntax>())
                 {
-                    if (ClassifyExpressionInternal(ifStmt.Condition, new HashSet<string>()) < VarKind.Varying)
+                    if (ClassifyExpressionInternal(ifStmt.Condition) < VarKind.Varying)
                         continue;
                     if (PromoteWritesInVaryingCtx(ifStmt.Statement)) changed = true;
                     if (ifStmt.Else != null && PromoteWritesInVaryingCtx(ifStmt.Else.Statement)) changed = true;
@@ -342,7 +333,7 @@ namespace NativeTranspiler.Analyzer
         {
             if (!_variables.TryGetValue(varName, out var lhsInfo))
                 return;
-            VarKind rhsKind = ClassifyExpressionInternal(initValue, new HashSet<string>());
+            VarKind rhsKind = ClassifyExpressionInternal(initValue);
             if (rhsKind > lhsInfo.Kind)
                 lhsInfo.Kind = rhsKind;
         }
@@ -353,7 +344,7 @@ namespace NativeTranspiler.Analyzer
             if (lhsName == null || !_variables.TryGetValue(lhsName, out var lhsInfo))
                 return;
 
-            VarKind rhsKind = ClassifyExpressionInternal(assignment.Right, new HashSet<string>());
+            VarKind rhsKind = ClassifyExpressionInternal(assignment.Right);
 
             bool isCompound = assignment.IsKind(SyntaxKind.AddAssignmentExpression)
                 || assignment.IsKind(SyntaxKind.SubtractAssignmentExpression)
@@ -438,7 +429,7 @@ namespace NativeTranspiler.Analyzer
 
         // 表达式分类
 
-        private VarKind ClassifyExpressionInternal(ExpressionSyntax expr, HashSet<string> visiting)
+        private VarKind ClassifyExpressionInternal(ExpressionSyntax expr)
         {
             switch (expr)
             {
@@ -455,34 +446,34 @@ namespace NativeTranspiler.Analyzer
                     return ClassifyElementAccess(elementAccess);
 
                 case BinaryExpressionSyntax binary:
-                    return ClassifyBinary(binary, visiting);
+                    return ClassifyBinary(binary);
 
                 case InvocationExpressionSyntax invocation:
-                    return ClassifyInvocation(invocation, visiting);
+                    return ClassifyInvocation(invocation);
 
                 case PrefixUnaryExpressionSyntax prefix:
-                    return ClassifyExpressionInternal(prefix.Operand, visiting);
+                    return ClassifyExpressionInternal(prefix.Operand);
 
                 case ParenthesizedExpressionSyntax paren:
-                    return ClassifyExpressionInternal(paren.Expression, visiting);
+                    return ClassifyExpressionInternal(paren.Expression);
 
                 case CastExpressionSyntax cast:
-                    return ClassifyExpressionInternal(cast.Expression, visiting);
+                    return ClassifyExpressionInternal(cast.Expression);
 
                 case ConditionalExpressionSyntax ternary:
-                    var cond = ClassifyExpressionInternal(ternary.Condition, visiting);
-                    var whenTrue = ClassifyExpressionInternal(ternary.WhenTrue, visiting);
-                    var whenFalse = ClassifyExpressionInternal(ternary.WhenFalse, visiting);
+                    var cond = ClassifyExpressionInternal(ternary.Condition);
+                    var whenTrue = ClassifyExpressionInternal(ternary.WhenTrue);
+                    var whenFalse = ClassifyExpressionInternal(ternary.WhenFalse);
                     return Max(cond, Max(whenTrue, whenFalse));
 
                 case AssignmentExpressionSyntax assign:
                     // 处理链式赋值 a = b = c
-                    return ClassifyExpressionInternal(assign.Right, visiting);
+                    return ClassifyExpressionInternal(assign.Right);
 
                 case CheckedExpressionSyntax checkedExpr:
                     // `unchecked(x + y)` / `checked(x + y)` — classification flows
                     //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
-                    return ClassifyExpressionInternal(checkedExpr.Expression, visiting);
+                    return ClassifyExpressionInternal(checkedExpr.Expression);
 
                 case ObjectCreationExpressionSyntax _:
                     // new float2(x, y) — 看参数
@@ -497,17 +488,9 @@ namespace NativeTranspiler.Analyzer
         private VarKind ClassifyIdentifier(IdentifierNameSyntax identifier)
         {
             string name = identifier.Identifier.Text;
+            if (SymbolHelper.GetBoundSymbol(_semanticModel, identifier) is IFieldSymbol)
+                return VarKind.Uniform;
             if (_variables.TryGetValue(name, out var info)) return info.Kind;
-            if (_jobStruct != null)
-            {
-                try
-                {
-                    var members = _jobStruct.GetMembers(name);
-                    if (members.Length > 0 && members[0] is IFieldSymbol field && !field.IsStatic)
-                        return NativeTranspiler.IsEntJoyNativeContainerType(field.Type) ? VarKind.Uniform : VarKind.Uniform;
-                }
-                catch { }
-            }
             return VarKind.Uniform;
         }
 
@@ -526,7 +509,7 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
             if (IsStructElementFieldRead(memberAccess))
                 return VarKind.Uniform;
 
-            var exprKind = ClassifyExpressionInternal(memberAccess.Expression, new HashSet<string>());
+            var exprKind = ClassifyExpressionInternal(memberAccess.Expression);
 
             // 如果是 .x / .y 成员访问且 source 是 varying，则分量也是 varying
             if ((memberName == "x" || memberName == "y") && exprKind >= VarKind.Varying)
@@ -556,14 +539,13 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
         private VarKind ClassifyElementAccess(ElementAccessExpressionSyntax elementAccess)
         {
             // arr[index] — 如果 arr 是 NativeArray 且 index 是 varying → varying
-            var arrKind = ClassifyExpressionInternal(elementAccess.Expression, new HashSet<string>());
+            var arrKind = ClassifyExpressionInternal(elementAccess.Expression);
 
             // 索引表达式分类
             VarKind indexKind = VarKind.Uniform;
             if (elementAccess.ArgumentList?.Arguments.Count > 0)
             {
-                indexKind = ClassifyExpressionInternal(
-                    elementAccess.ArgumentList.Arguments[0].Expression, new HashSet<string>());
+                indexKind = ClassifyExpressionInternal(elementAccess.ArgumentList.Arguments[0].Expression);
             }
 
             // NativeArray[varying_index] → varying
@@ -577,71 +559,21 @@ private VarKind ClassifyMemberAccess(MemberAccessExpressionSyntax memberAccess)
             return VarKind.Uniform;
         }
 
-        private VarKind ClassifyBinary(BinaryExpressionSyntax binary, HashSet<string> visiting)
+        private VarKind ClassifyBinary(BinaryExpressionSyntax binary)
+            => Max(ClassifyExpressionInternal(binary.Left), ClassifyExpressionInternal(binary.Right));
+
+        private VarKind ClassifyInvocation(InvocationExpressionSyntax invocation)
         {
-            var leftKind = ClassifyExpressionInternal(binary.Left, visiting);
-            var rightKind = ClassifyExpressionInternal(binary.Right, visiting);
+            var symbol = SymbolHelper.GetBoundSymbol(_semanticModel, invocation) as IMethodSymbol;
+            bool isMathCall = symbol?.ContainingType?.ToDisplayString() is "EntJoy.Mathematics.math" or "System.MathF";
+            if (!isMathCall && !(invocation.Expression is MemberAccessExpressionSyntax member
+                && IsKnownMathFunction(member.Name.Identifier.Text)))
+                return VarKind.Uniform;
 
-            // 比较运算（&lt;, &gt;, ==, !=, &amp;&amp;, ||）→ 结果用于 mask
-            if (binary.IsKind(SyntaxKind.LessThanExpression)
-                || binary.IsKind(SyntaxKind.GreaterThanExpression)
-                || binary.IsKind(SyntaxKind.LessThanOrEqualExpression)
-                || binary.IsKind(SyntaxKind.GreaterThanOrEqualExpression)
-                || binary.IsKind(SyntaxKind.EqualsExpression)
-                || binary.IsKind(SyntaxKind.NotEqualsExpression)
-                || binary.IsKind(SyntaxKind.LogicalAndExpression)
-                || binary.IsKind(SyntaxKind.LogicalOrExpression))
-            {
-                // mask 的分类：operand 的 max
-                return Max(leftKind, rightKind);
-            }
-
-            // 算术运算：结果分类 = operand 的 max
-            return Max(leftKind, rightKind);
-        }
-
-        
-        private VarKind ClassifyInvocation(InvocationExpressionSyntax invocation, HashSet<string> visiting)
-        {
-            try
-            {
-                var symbol = _semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-                if (symbol != null)
-                {
-                    string ct = symbol.ContainingType?.ToDisplayString() ?? "";
-                    if (ct == "EntJoy.Mathematics.math" || ct == "System.MathF")
-                    {
-                        VarKind mk = VarKind.Uniform;
-                        foreach (var arg in invocation.ArgumentList.Arguments)
-                        {
-                            var ak = ClassifyExpressionInternal(arg.Expression, visiting);
-                            if (ak > mk) mk = ak;
-                        }
-                        return mk;
-                    }
-                }
-
-                // Fallback: when GetSymbolInfo fails (e.g. on SyntaxFactory-created AST nodes),
-                //   try name-based matching for known math functions. If the function name matches
-                //   a known math function (Sin, Cos, Sqrt, etc.) and any argument is Varying,
-                //   return Varying — this keeps inner-loop SIMD propagation alive.
-                if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-                {
-                    string fnName = memberAccess.Name.Identifier.Text;
-                    if (IsKnownMathFunction(fnName))
-                    {
-                        VarKind mk = VarKind.Uniform;
-                        foreach (var arg in invocation.ArgumentList.Arguments)
-                        {
-                            var ak = ClassifyExpressionInternal(arg.Expression, visiting);
-                            if (ak > mk) mk = ak;
-                        }
-                        return mk;
-                    }
-                }
-            }
-            catch { }
-            return VarKind.Uniform;
+            VarKind kind = VarKind.Uniform;
+            foreach (var argument in invocation.ArgumentList.Arguments)
+                kind = Max(kind, ClassifyExpressionInternal(argument.Expression));
+            return kind;
         }
 
         private static bool IsKnownMathFunction(string name)

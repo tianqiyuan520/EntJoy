@@ -207,33 +207,6 @@ namespace EntJoy.Collections
 #endif
         }
 
-        //        public JobHandle Dispose(JobHandle deps)
-        //        {
-        //            if (_buffer == null) return deps;
-        //            if (_isOwner)
-        //            {
-        //                // 直接释放内存，而不是使用Job
-        //                SafetyHandleManager.Release(ref _safety);
-        //                UnsafeUtility.Free(_buffer, _allocator);
-        //#if DEBUG
-        //                _sentinel?.Dispose();
-        //#endif
-        //                _buffer = null;
-        //                _length = 0;
-        //                _safety = default;
-        //#if DEBUG
-        //                _sentinel = null;
-        //#endif
-        //            }
-        //            else
-        //            {
-        //                _buffer = null;
-        //                _length = 0;
-        //                _safety = default;
-        //            }
-        //            return deps;
-        //        }
-
         // 复制方法
         public void CopyTo(T[] array)
         {

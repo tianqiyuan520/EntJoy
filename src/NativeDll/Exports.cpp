@@ -49,6 +49,20 @@ static void* toHandle(JobSystem::JobHandle& handle)
 }
 
 namespace {
+    // C ABI 的四条 ECS 入口使用同一映射；未知值保持协助调度语义。
+    JobSystem::ChunkScheduleMode ResolveChunkScheduleMode(int mode) noexcept
+    {
+        switch (mode)
+        {
+        case 0: return JobSystem::ChunkScheduleMode::PublishNoAssist;
+        case 2: return JobSystem::ChunkScheduleMode::DeferTinyOnly;
+        case 3: return JobSystem::ChunkScheduleMode::ImmediateNative;
+        case 4: return JobSystem::ChunkScheduleMode::DeferredPublish;
+        case 5: return JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        default: return JobSystem::ChunkScheduleMode::PublishAssist;
+        }
+    }
+
     // The C ABI takes context ownership on entry, including rejected submissions.
     void CleanupFailedSchedule(ContextCleanupFunc cleanup, void* context) noexcept
     {
@@ -631,17 +645,7 @@ extern "C"
             JobSystem::JobHandle dep;
             if (dependency)
                 dep = JobSystem::JobHandle(fromHandle(dependency), true);
-            auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-            if (scheduleMode == 0)
-                mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-            else if (scheduleMode == 2)
-                mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-            else if (scheduleMode == 3)
-                mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-            else if (scheduleMode == 4)
-                mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-            else if (scheduleMode == 5)
-                mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+            const auto mode = ResolveChunkScheduleMode(scheduleMode);
             auto handle = JobSystem::Scheduler::ScheduleChunks(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
             return toHandle(handle);
         }
@@ -665,17 +669,7 @@ extern "C"
             JobSystem::JobHandle dep;
             if (dependency)
                 dep = JobSystem::JobHandle(fromHandle(dependency), true);
-            auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-            if (scheduleMode == 0)
-                mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-            else if (scheduleMode == 2)
-                mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-            else if (scheduleMode == 3)
-                mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-            else if (scheduleMode == 4)
-                mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-            else if (scheduleMode == 5)
-                mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+            const auto mode = ResolveChunkScheduleMode(scheduleMode);
             auto handle = JobSystem::Scheduler::ScheduleChunkRanges(func, context, cleanup, chunks, chunkCount, dep, mode, workerCap, rangeSize, unitGeneration);
             return toHandle(handle);
         }
@@ -698,17 +692,7 @@ extern "C"
         JobSystem::JobHandle dep;
         if (dependency)
             dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-        if (scheduleMode == 0)
-            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-        else if (scheduleMode == 2)
-            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-        else if (scheduleMode == 3)
-            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-        else if (scheduleMode == 4)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-        else if (scheduleMode == 5)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        const auto mode = ResolveChunkScheduleMode(scheduleMode);
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk
             : JobSystem::EcsJobKind::Entity;
@@ -736,17 +720,7 @@ extern "C"
         JobSystem::JobHandle dep;
         if (dependency)
             dep = JobSystem::JobHandle(fromHandle(dependency), true);
-        auto mode = JobSystem::ChunkScheduleMode::PublishAssist;
-        if (scheduleMode == 0)
-            mode = JobSystem::ChunkScheduleMode::PublishNoAssist;
-        else if (scheduleMode == 2)
-            mode = JobSystem::ChunkScheduleMode::DeferTinyOnly;
-        else if (scheduleMode == 3)
-            mode = JobSystem::ChunkScheduleMode::ImmediateNative;
-        else if (scheduleMode == 4)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublish;
-        else if (scheduleMode == 5)
-            mode = JobSystem::ChunkScheduleMode::DeferredPublishNoAssist;
+        const auto mode = ResolveChunkScheduleMode(scheduleMode);
         // 一步完成 Schedule+Complete，消除 P/Invoke 往返（主线程尽早进入 assist）
         const auto kind = jobKind == 0
             ? JobSystem::EcsJobKind::Chunk

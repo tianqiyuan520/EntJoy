@@ -25,6 +25,7 @@ namespace EntJoy.JobSystem
             }
             try
             {
+                NativeJobCore.ResetShutdownGate();
                 if (NativeJobCore.JobSystem_Initialize(numThreads) != 0)
                     throw new InvalidOperationException("Native JobSystem failed to initialize (worker creation/OOM).");
                 UseNative = true;

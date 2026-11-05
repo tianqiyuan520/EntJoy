@@ -128,12 +128,5 @@ namespace NativeTranspiler.Analyzer.Common
                    || method.Name == Config.GetComponentDataSpan
                    || method.Name == Config.GetEnableBitMapPtr);
 
-        internal static bool IsAllowedColumnMethod(IMethodSymbol method, Compilation compilation)
-            => method.Name == "GetElementPtr"
-               && IsNativeColumn(method.ContainingType, compilation);
-
-        internal static bool IsNativeColumn(ITypeSymbol type, Compilation compilation)
-            => SymbolEqualityComparer.Default.Equals(type.OriginalDefinition,
-                compilation.GetTypeByMetadataName("EntJoy.Collections.NativeColumn`1"));
     }
 }

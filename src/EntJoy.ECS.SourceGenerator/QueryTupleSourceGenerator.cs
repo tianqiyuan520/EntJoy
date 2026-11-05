@@ -1,13 +1,10 @@
 #nullable enable
 using System;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading;
 
 namespace EntJoy.ECS.SourceGenerator
 {
@@ -27,8 +24,8 @@ namespace EntJoy.ECS.SourceGenerator
         {
             var arityProvider = context.SyntaxProvider
                 .CreateSyntaxProvider(
-                    predicate: static (node, _) => IsCandidate(node),
-                    transform: static (ctx, ct) => GetArity(ctx, ct))
+                    predicate: static (node, _) => TupleQuerySyntax.IsCandidate(node, Config.QueryMethod),
+                    transform: static (ctx, ct) => TupleQuerySyntax.GetArity(ctx, ct, Config.WorldFullName))
                 .Where(static n => n > 0);
 
             var collected = arityProvider.Collect();
@@ -45,45 +42,6 @@ namespace EntJoy.ECS.SourceGenerator
                     spc.AddSource($"QueryTuple_{n}.g.cs", SourceText.From(source, Encoding.UTF8));
                 }
             });
-        }
-
-        private static bool IsCandidate(SyntaxNode node)
-        {
-            // 语法预筛：形如 <expr>.Query<T0, T1, ...>() 的调用（语义确认在 GetArity 做）
-            return node is InvocationExpressionSyntax inv &&
-                   inv.Expression is MemberAccessExpressionSyntax ma &&
-                   ma.Name is GenericNameSyntax gen &&
-                   gen.Identifier.Text == Config.QueryMethod &&
-                   gen.TypeArgumentList.Arguments.Count >= Config.MinTupleArity &&
-                   ma.Expression is ExpressionSyntax;
-        }
-
-        private static int GetArity(GeneratorSyntaxContext context, CancellationToken ct)
-        {
-            if (context.Node is not InvocationExpressionSyntax inv)
-                return -1;
-            if (inv.Expression is not MemberAccessExpressionSyntax ma)
-                return -1;
-            if (ma.Name is not GenericNameSyntax genName)
-                return -1;
-
-            var typeArgs = genName.TypeArgumentList.Arguments;
-            if (typeArgs.Count < Config.MinTupleArity)
-                return -1;
-
-            var model = context.SemanticModel;
-
-            // 符号匹配：接收者表达式类型必须是 EntJoy.ECS.World（防同名方法/改名误判）。
-            // 注意：不能依赖方法符号（N 元组重载首次编译时尚不存在），只解析接收者类型。
-            // ToDisplayString(FullyQualifiedFormat) 输出可能带 global:: 前缀，统一归一后比较。
-            var receiverType = model.GetTypeInfo(ma.Expression, ct).Type;
-            string receiverFullName = receiverType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? "";
-            if (receiverFullName.StartsWith("global::", StringComparison.Ordinal))
-                receiverFullName = receiverFullName.Substring("global::".Length);
-            if (receiverFullName != Config.WorldFullName)
-                return -1;
-
-            return typeArgs.Count;
         }
 
         private static string GenerateTuple(int n)

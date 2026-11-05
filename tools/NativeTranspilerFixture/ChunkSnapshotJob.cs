@@ -11,19 +11,20 @@ public struct SnapshotValue : IComponentData
 }
 
 [NativeTranspile]
-public struct ChunkSnapshotJob : IJobChunk
+public unsafe struct ChunkSnapshotJob : IJobChunk
 {
-    public NativeColumn<int> Source;
+    public UserColumnView<int> Source;
     public NativeArray<int> Destination;
     public int Bias;
 
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
     {
         var values = chunk.GetComponentDataNativeArray<SnapshotValue>();
+        var source = Source;
         for (int i = 0; i < values.Length; i++)
         {
             SnapshotValue value = values[i];
-            Destination[value.Slot] = Source[value.Slot] + Bias;
+            Destination[value.Slot] = *UserColumnAccess.ElementPtr(ref source, value.Slot) + Bias;
             value.Number = Destination[value.Slot];
             values[i] = value;
         }

@@ -15,10 +15,12 @@ namespace NativeTranspiler.Analyzer
         protected readonly HashSet<string> _pointerParameterNames;
         protected readonly HashSet<string> _nativeArrayListNames;
         protected readonly HashSet<string> _nativeListNames;
+        private readonly HashSet<ISymbol> _boundSymbols = new(SymbolEqualityComparer.Default);
+        protected virtual bool EmitLoopUnrollHints => true;
 
         protected override void TranslateForStatement(ForStatementSyntax forStmt)
         {
-            if (!_enableAutoSIMD && IsSmallFixedLoop(forStmt))
+            if (EmitLoopUnrollHints && !_enableAutoSIMD && IsSmallFixedLoop(forStmt))
             {
                 _builder.AppendLine("#if defined(__clang__)");
                 _builder.AppendLine("#pragma clang loop unroll(full)");
@@ -30,37 +32,13 @@ namespace NativeTranspiler.Analyzer
         // 只展开短的最内层固定循环，限制复制量，避免放大外层热循环的寄存器压力。
         private bool IsSmallFixedLoop(ForStatementSyntax loop)
         {
-            if (loop.Declaration?.Variables.Count != 1 || loop.Initializers.Count != 0
-                || loop.Incrementors.Count != 1
-                || loop.Condition is not BinaryExpressionSyntax condition
-                || !(condition.IsKind(SyntaxKind.LessThanExpression) || condition.IsKind(SyntaxKind.LessThanOrEqualExpression))
-                || condition.Left is not IdentifierNameSyntax index) return false;
-            var variable = loop.Declaration.Variables[0];
-            if (variable.Initializer == null
-                || _semanticModel.GetDeclaredSymbol(variable) is not ILocalSymbol symbol
-                || symbol.Type.SpecialType != SpecialType.System_Int32
-                || !SymbolEqualityComparer.Default.Equals(_semanticModel.GetSymbolInfo(index).Symbol, symbol)) return false;
-            var first = _semanticModel.GetConstantValue(variable.Initializer.Value);
-            var last = _semanticModel.GetConstantValue(condition.Right);
-            if (!first.HasValue || first.Value is not int start
-                || !last.HasValue || last.Value is not int end || end == int.MaxValue) return false;
-            long count = (long)end - start + (condition.IsKind(SyntaxKind.LessThanOrEqualExpression) ? 1 : 0);
-            if (count < 2 || count > 8) return false;
-            ExpressionSyntax? incremented = loop.Incrementors[0] switch
-            {
-                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression) => p.Operand,
-                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression) => p.Operand,
-                _ => null
-            };
-            if (incremented == null
-                || !SymbolEqualityComparer.Default.Equals(_semanticModel.GetSymbolInfo(incremented).Symbol, symbol)) return false;
+            if (!IntForLoop.TryAnalyze(loop, _semanticModel, out var control)
+                || !control.TryGetTripCount(_semanticModel, 8, out _, out int count) || count < 2) return false;
             var nodes = loop.Statement.DescendantNodesAndSelf().ToArray();
             if (nodes.Any(n => n is ForStatementSyntax || n is WhileStatementSyntax || n is DoStatementSyntax
                 || n is ForEachStatementSyntax || n is RefExpressionSyntax
                 || n is PrefixUnaryExpressionSyntax p && p.IsKind(SyntaxKind.AddressOfExpression))) return false;
-            var flow = _semanticModel.AnalyzeDataFlow(loop.Statement);
-            return flow != null && flow.Succeeded && !flow.WrittenInside.Contains(symbol, SymbolEqualityComparer.Default)
-                && count * nodes.OfType<StatementSyntax>().Count() <= 96;
+            return count * nodes.OfType<StatementSyntax>().Count() <= 96;
         }
         public CppPointerStatementTranslator(SemanticModel semanticModel, IMethodSymbol method, bool useFastMath = false, bool enableAutoSIMD = false)
             : base(semanticModel, useFastMath, enableAutoSIMD)
@@ -69,6 +47,7 @@ namespace NativeTranspiler.Analyzer
             _pointerParameterNames = new HashSet<string>();
             _nativeArrayListNames = new HashSet<string>();
             _nativeListNames = new HashSet<string>();
+            _boundSymbols.UnionWith(method.Parameters);
 
             foreach (var p in method.Parameters)
             {
@@ -95,6 +74,7 @@ namespace NativeTranspiler.Analyzer
             _nativeListNames = new HashSet<string>();
 
             var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic);
+            _boundSymbols.UnionWith(fields);
             foreach (var f in fields)
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(f.Type))
@@ -111,6 +91,10 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
+        protected bool IsBoundSymbol(SyntaxNode expression)
+            => expression.SyntaxTree != _semanticModel.SyntaxTree
+                || SymbolHelper.GetBoundSymbol(_semanticModel, expression) is ISymbol symbol && _boundSymbols.Contains(symbol);
+
         protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
         {
             string name = identifier.Identifier.Text;
@@ -126,7 +110,7 @@ namespace NativeTranspiler.Analyzer
                 _builder.Append(name);
                 return;
             }
-            if (_pointerParameterNames.Contains(name))
+            if (_pointerParameterNames.Contains(name) && IsBoundSymbol(identifier))
             {
                 _builder.Append(name + "_ptr");
                 return;
@@ -136,6 +120,18 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
         {
+            string op = assignment.OperatorToken.Text;
+            if (EnableWrapSafeIntArithmetic && op is "+=" or "-=" or "*="
+                && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(assignment.Left), out var signed, out var unsigned))
+            {
+                _builder.Append("([&]() { auto&& __ej_target = (");
+                TranslateExpression(assignment.Left);
+                _builder.Append("); ").Append(signed).Append(" __ej_old = __ej_target; auto __ej_rhs = (");
+                TranslateExpression(assignment.Right);
+                _builder.Append("); return __ej_target = (").Append(signed).Append(")((").Append(unsigned)
+                    .Append(")__ej_old ").Append(op[0]).Append(" (").Append(unsigned).Append(")__ej_rhs); }())");
+                return;
+            }
             if (assignment.Left is IdentifierNameSyntax id)
             {
                 string name = id.Identifier.Text;
@@ -143,7 +139,7 @@ namespace NativeTranspiler.Analyzer
                     _builder.Append(name);
                 else if (_valueParameterNames.Contains(name))
                     _builder.Append(name);
-                else if (_pointerParameterNames.Contains(name))
+                else if (_pointerParameterNames.Contains(name) && IsBoundSymbol(id))
                     _builder.Append(name + "_ptr");
                 else
                     TranslateExpression(assignment.Left);
@@ -306,6 +302,14 @@ namespace NativeTranspiler.Analyzer
             // `/*__ENTJOY_UNSUPPORTED_EXPR__ThisExpression*/`（构建失败，独立验收 C21）。
             if (memberAccess.Expression is ThisExpressionSyntax && memberAccess.Name is IdentifierNameSyntax thisMember)
             {
+                if (_valueParameterNames.Contains(thisMember.Identifier.ValueText) && IsBoundSymbol(thisMember)
+                    && memberAccess.SyntaxTree == _semanticModel.SyntaxTree
+                    && _semanticModel.LookupSymbols(memberAccess.SpanStart, name: thisMember.Identifier.ValueText)
+                        .Any(symbol => symbol is ILocalSymbol or IParameterSymbol))
+                {
+                    _builder.Append("(*").Append(thisMember.Identifier.ValueText).Append("_ptr)");
+                    return;
+                }
                 TranslateIdentifier(thisMember);
                 return;
             }
@@ -517,19 +521,27 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>C# 表达式类型（解析失败返回 <see cref="SpecialType.None"/>）。</summary>
         private SpecialType GetExpressionSpecialType(ExpressionSyntax expr)
-        {
-            try
-            {
-                return _semanticModel.GetTypeInfo(expr).Type?.SpecialType ?? SpecialType.None;
-            }
-            catch { return SpecialType.None; }
-        }
-
-        private bool Is32BitIntType(SpecialType t)
-            => t == SpecialType.System_Int32 || t == SpecialType.System_UInt32;
+            => SymbolHelper.GetBoundType(_semanticModel, expr)?.SpecialType ?? SpecialType.None;
 
         protected override void TranslateExpression(ExpressionSyntax expr)
         {
+            ExpressionSyntax? incremented = expr switch
+            {
+                PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.PreIncrementExpression) || prefix.IsKind(SyntaxKind.PreDecrementExpression) => prefix.Operand,
+                PostfixUnaryExpressionSyntax postfix when postfix.IsKind(SyntaxKind.PostIncrementExpression) || postfix.IsKind(SyntaxKind.PostDecrementExpression) => postfix.Operand,
+                _ => null
+            };
+            if (EnableWrapSafeIntArithmetic && incremented != null
+                && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(incremented), out var signed, out var unsigned))
+            {
+                bool adding = expr.IsKind(SyntaxKind.PreIncrementExpression) || expr.IsKind(SyntaxKind.PostIncrementExpression);
+                _builder.Append("([&]() { auto&& __ej_target = (");
+                TranslateExpression(incremented);
+                _builder.Append("); ").Append(signed).Append(" __ej_old = __ej_target; __ej_target = (").Append(signed)
+                    .Append(")((").Append(unsigned).Append(")__ej_old ").Append(adding ? "+" : "-").Append(" 1u); return ")
+                    .Append(expr is PrefixUnaryExpressionSyntax ? "__ej_target" : "__ej_old").Append("; }())");
+                return;
+            }
             // 枚举取反保持底层整数位宽，C++ 对窄整数的默认提升会改变结果。
             if (expr is PrefixUnaryExpressionSyntax complement && complement.IsKind(SyntaxKind.BitwiseNotExpression)
                 && _semanticModel.GetTypeInfo(expr).Type is INamedTypeSymbol { TypeKind: TypeKind.Enum } enumType)
@@ -543,21 +555,9 @@ namespace NativeTranspiler.Analyzer
                 && expr is PrefixUnaryExpressionSyntax pre
                 && pre.IsKind(SyntaxKind.UnaryMinusExpression))
             {
-                var operandType = GetExpressionSpecialType(pre.Operand);
-                // C# `-uint`：结果类型是 long（不是 uint、更不是 int）。按 32 位回绕发出
-                //   会得到 `1` 而不是 `-4294967295L`（uint.MaxValue 取负）。uint 的最大值取负
-                //   一定能放进 int64 ⇒ 直接 64 位取负，无溢出。
-                if (operandType == SpecialType.System_UInt32)
+                if (CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(pre), out var negativeType, out var negativeUnsigned))
                 {
-                    _builder.Append("(-(long)(");
-                    TranslateExpression(pre.Operand);
-                    _builder.Append("))");
-                    return;
-                }
-                // 一元负号 int → (int)(0u - (unsigned)x) — wrap-safe（C# 的 `-int.MinValue` 仍是 int）。
-                if (operandType == SpecialType.System_Int32)
-                {
-                    _builder.Append("(int)(0u - (unsigned)(");
+                    _builder.Append('(').Append(negativeType).Append(")((").Append(negativeUnsigned).Append(")0 - (").Append(negativeUnsigned).Append(")(");
                     TranslateExpression(pre.Operand);
                     _builder.Append("))");
                     return;
@@ -569,33 +569,15 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateBinaryExpression(BinaryExpressionSyntax binary)
         {
             string op = binary.OperatorToken.Text;
-            if (EnableWrapSafeIntArithmetic && (op == "*" || op == "+" || op == "-"))
+            if (EnableWrapSafeIntArithmetic && op is "+" or "-" or "*"
+                && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(binary), out var signed, out var unsigned))
             {
-                var leftType = GetExpressionSpecialType(binary.Left);
-                var rightType = GetExpressionSpecialType(binary.Right);
-                if (Is32BitIntType(leftType) && Is32BitIntType(rightType))
-                {
-                    // C# 二元数值提升（spec 12.4.7）：一边 int、一边 uint ⇒ 两侧都提升为 long
-                    //   32 位无符号算术 ⇒ 静默错值：
-                    //   二阶后果：回绕后的节点类型成了 int，随后的 `>>` / `%` 变成有符号语义。
-                    if (leftType != rightType)
-                    {
-                        _builder.Append("(long)(");
-                        TranslateExpression(binary.Left);
-                        _builder.Append(") ").Append(op).Append(" (long)(");
-                        TranslateExpression(binary.Right);
-                        _builder.Append(')');
-                        return;
-                    }
-                    // 同号 32 位（int op int / uint op uint）的 C# 结果仍是 32 位：
-                    // 回绕不是 UB ⇒ 保留无符号回绕写法。
-                    _builder.Append("(int)((unsigned)(");
-                    TranslateExpression(binary.Left);
-                    _builder.Append(") ").Append(op).Append(" (unsigned)(");
-                    TranslateExpression(binary.Right);
-                    _builder.Append("))");
-                    return;
-                }
+                _builder.Append('(').Append(signed).Append(")((").Append(unsigned).Append(")(");
+                TranslateExpression(binary.Left);
+                _builder.Append(") ").Append(op).Append(" (").Append(unsigned).Append(")(");
+                TranslateExpression(binary.Right);
+                _builder.Append("))");
+                return;
             }
             base.TranslateBinaryExpression(binary);
         }

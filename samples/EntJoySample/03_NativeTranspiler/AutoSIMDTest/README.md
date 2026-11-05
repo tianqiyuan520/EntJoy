@@ -24,7 +24,7 @@
 
 ## LLVM IR 分析
 
-ISPC → LLVM IR 文件参考归档：`docs/archive/simd/closestpoint_ispc.ll`。
+ISPC 的执行模型与翻译边界见 [ISPC 翻译说明](../../../../docs/public/ISPC-Translation.md)。
 
 生成方法：
 ```bash

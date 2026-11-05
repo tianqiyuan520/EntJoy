@@ -66,7 +66,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"{(mask == null ? "GENERATED_API" : "static")} void CALLINGCONVENTION {MaskAdapterName(name, mask)}({parameters})");
         }
 
-        private static void AppendMaskFieldBinding(StringBuilder sb, IFieldSymbol field, IFieldSymbol? mask)
+        private static void AppendMaskFieldBinding(StringBuilder sb, IFieldSymbol field, IFieldSymbol? mask, bool writable)
         {
             string type = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
             if (SymbolEqualityComparer.Default.Equals(field, mask))
@@ -74,7 +74,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"    static constexpr {type} __ejZeroMaskValue{{}};");
                 sb.AppendLine($"    const {type}& {field.Name} = __ejZeroMask ? __ejZeroMaskValue : *{field.Name}_ptr;");
             }
-            else sb.AppendLine($"    const {type}& {field.Name} = *{field.Name}_ptr;");
+            else sb.AppendLine($"    {(writable ? "" : "const ")}{type}& {field.Name} = *{field.Name}_ptr;");
         }
 
         // Dispatch once per adapter call; the original signature and nonzero path remain available.

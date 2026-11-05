@@ -164,7 +164,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
     public struct SimpleArith_SIMD_Entity : IJobEntity
     {
         public void Execute(ref SimpleArithCompResult result, in SimpleArithCompA a, in SimpleArithCompB b, in SimpleArithCompC c)

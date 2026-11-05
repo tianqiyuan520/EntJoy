@@ -45,8 +45,26 @@
     </ItemGroup>
     <!-- 用 Path.Combine：`-o <dir>` / `-p:OutputPath=<dir>` 是全局属性，不带结尾分隔符，拼接会得到畸形路径 -->
     <Copy SourceFiles="@(_EntJoyLayoutManifest)"
-          DestinationFiles="$([System.IO.Path]::Combine('$(OutputPath)', 'NativeTranspiled.layout.json'))"
+          DestinationFiles="$(TargetDir)NativeTranspiled.layout.json"
           SkipUnchangedFiles="true" Condition="'@(_EntJoyLayoutManifest)' != ''" />
+  </Target>
+
+  <!-- Generated native code and its layout manifest travel with published applications. -->
+  <Target Name="EntJoyPublishGeneratedNative" AfterTargets="ComputeFilesToPublish" Condition="'$(EnableNativeCompile)' != 'false'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(TargetDir)NativeTranspiled.dll" Condition="Exists('$(TargetDir)NativeTranspiled.dll')">
+        <RelativePath>NativeTranspiled.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(TargetDir)NativeTranspiled.layout.json" Condition="Exists('$(TargetDir)NativeTranspiled.layout.json')">
+        <RelativePath>NativeTranspiled.layout.json</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(TargetDir)NativeDll.dll" Condition="'$(EntJoyConsumeMode)' == 'Source' And Exists('$(TargetDir)NativeDll.dll')">
+        <RelativePath>NativeDll.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
   </Target>
 
   <!-- Package 模式：运行时 NativeDll.dll 随包提供，纯托管消费者零工具链即可运行 -->

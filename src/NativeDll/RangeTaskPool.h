@@ -89,6 +89,7 @@ namespace JobSystem
         }
 
         // 归还一个 RangeTask 对象（压回空闲栈，真正回收；堆分配任务 delete）。
+        // 借用描述符须在发布复制后的任务或退役其 batch 之前归还，此后只使用本地副本。
         void Release(RangeTask* task) noexcept
         {
             if (!task) return;

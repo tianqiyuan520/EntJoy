@@ -18,12 +18,12 @@ public struct LoopContractJob : IJobParallelFor {
 }");
 
         [Theory]
-        [InlineData("for (int k=0; k<4; k+=2) sum += k+1;")]
-        [InlineData("for (int k=3; k>=0; k--) sum += k+1;")]
-        [InlineData("for (int k=0; 4>k; k++) sum += k+1;")]
         [InlineData("for (int k=0; k<4; k++) { sum += k+1; k++; }")]
         [InlineData("for (int k=0; k<4; k++) { sum += k+1; k=4; }")]
         [InlineData("for (uint k=0; k<4; k++) sum += (int)k+1;")]
+        [InlineData("for (int k=0; k<4; k+=index) sum += k;")]
+        [InlineData("for (int k=0; k<4; k*=2) sum += k;")]
+        [InlineData("for (int k=0; k<4; k+=0) { sum++; break; }")]
         public void UnsupportedLoopControl_ReportsDiagnostic(string loop)
         {
             var result = Emit(loop);
@@ -50,6 +50,8 @@ public struct LoopContractJob : IJobParallelFor {
         [Theory]
         [InlineData("for (int k=-2; k<=1; ++k) sum += k;")]
         [InlineData("for (int k=0; k<4; k++) sum += k;")]
+        [InlineData("for (int k=3; k>=0; k--) sum += k;")]
+        [InlineData("for (int k=0; 4>k; k++) sum += k;")]
         public void CanonicalFixedLoop_RemainsVectorized(string loop)
         {
             var result = Emit(loop);

@@ -292,6 +292,12 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
+            if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol property
+                && property.Name == "Count" && property.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
+            {
+                _builder.Append("__chunkData->entityCount");
+                return;
+            }
             if (memberAccess.Expression is IdentifierNameSyntax identifier &&
                 _chunkArrayLocalNames.Contains(identifier.Identifier.Text) &&
                 memberAccess.Name.Identifier.Text == "Length")
@@ -400,6 +406,20 @@ namespace NativeTranspiler.Analyzer
 
             if (!writeBack && BlockWritesAnyIdentifier(block, new[] { aliasName }))
                 return false;
+
+            if (writeBack && BlockWritesAnyIdentifier(block, new[] { aliasName }))
+            {
+                if (block.DescendantNodes().OfType<ReturnStatementSyntax>().Any()) return false;
+                foreach (var access in block.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+                {
+                    if (!TargetsAliasStorage(access, alias)) continue;
+                    bool initializer = access.Parent is EqualsValueClauseSyntax initial
+                        && initial.Parent is VariableDeclaratorSyntax variable && variable.Identifier.ValueText == aliasName;
+                    bool write = access.Parent is AssignmentExpressionSyntax assignment && assignment.Left == access
+                        && assignment.Right is IdentifierNameSyntax right && right.Identifier.ValueText == aliasName;
+                    if (!initializer && !write) return false;
+                }
+            }
 
             return true;
         }

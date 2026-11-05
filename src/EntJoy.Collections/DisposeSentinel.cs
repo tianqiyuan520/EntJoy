@@ -26,7 +26,6 @@ public class DisposeSentinel
     private readonly int _safetyIndex;
     private volatile bool _disposed;
 
-    [ThreadStatic] private static string? s_lastCallSite;
 
     public DisposeSentinel(int safetyIndex)
     {

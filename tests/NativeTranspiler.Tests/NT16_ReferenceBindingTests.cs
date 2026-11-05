@@ -130,7 +130,7 @@ public struct LoopBodyFieldJob : IJob {
             return sb.ToString();
         }
 
-        /// <summary>热环活值 = 预算上限（8）⇒ 全部按值绑定。</summary>
+        /// <summary>合格字段数达到启发式上限（8）时仍采用按值绑定。</summary>
         [Fact]
         public void LiveScalarsAtBudget_ByValue()
         {
@@ -139,7 +139,7 @@ public struct LoopBodyFieldJob : IJob {
             MustNotContain(cpp, "const int& S7 = *S7_ptr;", "预算内不得按引用绑定");
         }
 
-        /// <summary>热环活值超出预算（9）⇒ 该 job 全部按引用：持活值会溢出，而溢出的存取比重算一次装载更贵。</summary>
+        /// <summary>合格字段数超过启发式上限（9）时采用引用绑定；寄存器分配留给后端。</summary>
         [Fact]
         public void LiveScalarsOverBudget_AllByReference()
         {
@@ -207,8 +207,10 @@ public struct WrittenFieldJob : IJobParallelFor {
         public void BodyWrittenField_StaysByReference()
         {
             var cpp = Emit(WrittenFieldJob);
-            MustContain(cpp, "const int& Accum = *Accum_ptr;",
-                "被直接写（赋值 / ref 实参）的字段必须按引用绑定");
+            MustContain(cpp, "int& Accum = *Accum_ptr;",
+                "被直接写（赋值 / ref 实参）的字段必须按可写引用绑定");
+            MustNotContain(cpp, "const int& Accum = *Accum_ptr;",
+                "被写字段的引用不得添加 const");
             MustNotContain(cpp, "const int Accum = *Accum_ptr;",
                 "被直接写的字段不得按值绑定");
             MustContain(cpp, "const int Factor = *Factor_ptr;",

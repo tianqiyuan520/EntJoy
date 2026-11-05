@@ -26,25 +26,33 @@ class Program
     static int _timeoutSec = 60;
     static int _rounds = 1;
     static bool _longMode = false;
+    static int _workers = 0;
+    static bool _contractsOnly;
     static readonly Stopwatch _wallClock = new();
 
     static void Main(string[] args)
     {
+        Console.OutputEncoding = new System.Text.UTF8Encoding(false);
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--timeout" && i + 1 < args.Length)
                 _timeoutSec = int.Parse(args[++i]);
             if (args[i] == "--rounds" && i + 1 < args.Length)
                 _rounds = int.Parse(args[++i]);
+            if (args[i] == "--workers" && i + 1 < args.Length)
+                _workers = int.Parse(args[++i]);
+            if (args[i] == "--contracts-only") _contractsOnly = true;
         }
         if (Environment.GetEnvironmentVariable("STRESS_ROUNDS") is { Length: > 0 } r)
             _rounds = Math.Max(1, int.Parse(r));
         if (Environment.GetEnvironmentVariable("STRESS_LONG") == "1")
             _longMode = true;
+        if (_workers < 0 || _rounds < 1 || _timeoutSec < 1)
+            throw new ArgumentOutOfRangeException(nameof(args));
 
         Console.WriteLine("============================================================");
         Console.WriteLine("EntJoy C# JobSystem Stress Test");
-        Console.WriteLine($"Timeout: {_timeoutSec}s | Rounds: {_rounds} | Long: {_longMode}");
+        Console.WriteLine($"Timeout: {_timeoutSec}s | Rounds: {_rounds} | Long: {_longMode} | Workers: {_workers} (0 = default) | ContractsOnly: {_contractsOnly}");
         Console.WriteLine("============================================================\n");
 
         _wallClock.Start();
@@ -57,15 +65,16 @@ class Program
             // Part A: ManagedJobScheduler（纯 C# 路径）
             // ═══════════════════════════════════════════════════════
             Console.WriteLine("── Part A: ManagedJobScheduler (Pure C#) ──");
-            ManagedStressTests.RunAll(_timeoutSec, _longMode);
-            ManagedJobScheduler.Shutdown();
+            try { ManagedStressTests.RunAll(_timeoutSec, _longMode, _workers, _contractsOnly); }
+            finally { ManagedJobScheduler.Shutdown(); }
 
             // ═══════════════════════════════════════════════════════
             // Part B: NativeJobScheduler（C# → C++ P/Invoke）
             // ═══════════════════════════════════════════════════════
             Console.WriteLine("\n── Part B: NativeJobScheduler (C# → C++) ──");
-            NativeStressTests.RunAll(_timeoutSec, _longMode);
-            EntJoy.JobSystem.NativeJobScheduler.Shutdown();
+            try { NativeStressTests.RunAll(_timeoutSec, _longMode, _workers, _contractsOnly); }
+            finally { EntJoy.JobSystem.NativeJobScheduler.Shutdown(); }
+            NativeStressTests.VerifyDrained();
         }
 
         _wallClock.Stop();

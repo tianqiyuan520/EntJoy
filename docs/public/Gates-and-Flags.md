@@ -4,8 +4,7 @@
 能否关闭、以及证据在哪**。改动任何一个默认值都属于**行为变更**，必须走等价性断言
 （原生 20 跑 + 转译器单测 + 夹具全断言 + 默认档发射产物逐字节比对）。
 
-> 完整清单、逐条证据与历次"原判错误"的更正见
-> [gridsearch/13-门控清单-缺陷清单与清理计划.md](../gridsearch/13-门控清单-缺陷清单与清理计划.md)。
+> 运行时约束见 [运行时契约与已知边界](Runtime-Contracts-and-Known-Limitations.md)。
 > 清理后当前运行期 env 共 **43 个** = 原 41 个 + **2026-10-07 补登的 2 个**
 > （`ENTJOY_JOB_COST_CACHE`、`ENTJOY_JOB_BATCH_BY_NAME`，见 D 节 —— 它们是"对齐档"的定义开关，
 > 此前只散落在 gridsearch 的战役文档里，未进契约表）。
@@ -46,7 +45,7 @@
 | `ENTJOY_CLAIM_BATCH` | 0 = ECS 1、其余 4 | 每次认领的 tile 上限；显式值优先于默认，`step = clamp(tileCount/workers, 1, cap)` |
 | `ENTJOY_TILES_PER_WORKER` | **512** | flat parallel-for 的默认 tiles/worker（**只影响 flat 路**）。64 → 512：8 worker、1e6 元素交替配对整步 −2.8～−3.5% |
 | `ENTJOY_TILES_UNIFORM_ALL` | 开 | 等宽边界推导与批内快照覆盖任意 cs；`=0` 收窄到 cs <= 16 |
-| `ENTJOY_KERNEL_O2` | 关 | 构建期：`=1` 把 `NativeDll`/`NativeTranspiled` 退回纯 `/O2`（对照用）。默认给 ClangCL 追加 `-O3 -funroll-loops -ffp-contract=fast -fno-trapping-math -fno-signed-zeros -fomit-frame-pointer`——**CLANGCL 分支此前一直是 `/O2`**（那组 `-O3 ...` 只写在非 MSVC 分支），修正后对齐档 Σ5 0.936 → 0.995 |
+| `ENTJOY_KERNEL_O2` | 关 | 构建期：`=1` 关闭 ClangCL 的附加 O3 优化选项，保留基础 `/O2 /fp:fast`。默认追加 `-O3 -ffp-contract=fast`；转译内核使用 `-fno-unroll-loops`，调度器使用 `-funroll-loops`。AutoSIMD 精度目标保留独立配置 |
 | `ENTJOY_JCC_TARGET_US` | 6400 | `ResolveChunkSize` 的 `two_factor` 分支唯一消费者（目标每 tile 串行量，µs） |
 | `ENTJOY_SPIN_BUSY` | 8192 | busy 自旋窗（pause 次数）。**只改自旋时长，不改变语义** |
 | `ENTJOY_STATS` | 开 | 诊断统计总开关（`=0` 旁路全部纯诊断 RMW）。⚠ `g_backendBatchesOutstanding` **不**受它门控 |
@@ -96,7 +95,7 @@ doc10 时代的 `ab-aligned.ps1` 则显式 pin 关；Unity 侧无对应物（B �
 的**唯一定义器件**。此前它们只出现在 gridsearch 的战役文档中，不在本契约表里 ⇒ 引用"对齐档"读数时
 **必须同时给出这两个 env**，否则无法复现。
 
-⚠ **`=0` 不是"Unity 粒度"（2026-10-11，依据 [doc18](../archive/gridsearch-campaign//18-两栈差距定位-子趟分解与细粒度代价.md) §3.1）**：
+⚠ **`=0` 不是"Unity 粒度"**：
 Unity 的 `IJobParallelFor.Schedule(n, 0)` 里那个 `0` 是**再平衡粒度**参数——其 C# 层**每个 CPU 核只调度一个 native job**，
 batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](https://docs.unity3d.com/2020.1/Documentation/Manual/JobSystemParallelForJobs.html)），
 所以 `0` **不等于** `innerloopBatchCount=1`。用本开关把内批钉成 `1`（"对齐档"的旧做法）会让 EntJoy 的 work item 数
@@ -110,7 +109,6 @@ batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](
 
 | 开关 | 默认 | 语义 |
 |---|---|---|
-| `ENTJOY_GUARD_FOLD` | 开（`!= "0"`） | G 守卫折叠（消越界 UB 的等价变换；`=0` 回到未折叠） |
 | `ENTJOY_LTO` | 关（`== "1"` 才开） | 给 `NativeTranspiled` 开 LTO（MSVC `/GL`+`/LTCG` 等价物）；生成器把开关写进 CMake |
 | `ENTJOY_NT_SNAP_DIR` | — | 发射面快照目录（夹具的 emit-snapshot 基线） |
 | `EntJoyAutoSimdMeasured` | error | AutoSIMD 显式放行（默认对未测量内核报错） |
@@ -133,7 +131,7 @@ batch 在核内顺序执行、空闲核按"偷一半"再平衡（[Unity 手册](
 而 `SharpNative_*_ispc.h` 是 **`ispc.exe -h` 的产物**（CMake `add_custom_command` 的 OUTPUT）、生成器从不写它
 ⇒ 每次生成把这 31 个头删光 ⇒ CMake 判定 31 个 ISPC 步骤输出缺失、全部重跑（≈13 s）。
 修复后：生成后头数 0 → **31**，原生 **15.9 s → 2.80 s**，端到端 **19.8–22.8 s → 9.5 s**。
-逐条证据见 [热重载实现规划.md](../热重载实现规划.md) §39。
+增量生成与构建检查见 [NativeTranspiler 翻译边界与诊断](NativeTranspiler-Boundaries-and-Diagnostics.md)。
 
 > **codegen 的三个开关已删除、行为已固定**（2026-10-04，不再是可配置项）：
 > · `ENTJOY_VALUE_BIND` → 固定为"字段**参与某处循环的行程数**则按值绑定"；

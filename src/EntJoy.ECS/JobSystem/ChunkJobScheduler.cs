@@ -754,21 +754,7 @@ namespace EntJoy.ECS.JobSystem
         {
             var chunkList = new List<Chunk>(128);
             var matchingArchetypes = new List<Archetype>(8);
-            for (int i = 0; i < entityManager.ArchetypeCount; i++)
-            {
-                var archetype = entityManager.Archetypes[i];
-                if (archetype != null && archetype.IsMatch(query))
-                {
-                    matchingArchetypes.Add(archetype);
-                    foreach (var chunk in archetype.ChunkSpan)
-                    {
-                        if (chunk.EntityCount > 0 && MatchesChunkFilters(entityManager, query, chunk))
-                        {
-                            chunkList.Add(chunk);
-                        }
-                    }
-                }
-            }
+            CollectMatchingChunks(entityManager, query, chunkList, matchingArchetypes);
 
             int chunkCount = chunkList.Count;
             if (chunkCount == 0)
@@ -848,21 +834,7 @@ namespace EntJoy.ECS.JobSystem
         {
             var chunkList = new List<Chunk>(128);
             var matchingArchetypes = new List<Archetype>(8);
-            for (int i = 0; i < entityManager.ArchetypeCount; i++)
-            {
-                var archetype = entityManager.Archetypes[i];
-                if (archetype != null && archetype.IsMatch(query))
-                {
-                    matchingArchetypes.Add(archetype);
-                    foreach (var chunk in archetype.ChunkSpan)
-                    {
-                        if (chunk.EntityCount > 0 && MatchesChunkFilters(entityManager, query, chunk))
-                        {
-                            chunkList.Add(chunk);
-                        }
-                    }
-                }
-            }
+            CollectMatchingChunks(entityManager, query, chunkList, matchingArchetypes);
 
             int chunkCount = chunkList.Count;
             if (chunkCount == 0)

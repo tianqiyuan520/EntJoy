@@ -34,16 +34,24 @@ public struct PointData { public float x; public float y; }
         }
 
         [Fact]
-        public void NativeColumnElementWrites_SnapshotMetadata()
-            => Assert.Contains("__jobSnapshot", Adapter("Column[i] = Values[i] + Count;", fields: "public NativeColumn<int> Column;"));
+        public void UserViewElementWrites_SnapshotMetadata()
+            => Assert.Contains("__jobSnapshot", Adapter("var view = Column; *Access.At(view, i) = Values[i] + Count;",
+                UserViewDeclarations, fields: "public View Column;"));
 
         [Fact]
-        public void NativeColumnElementPointerWrites_SnapshotMetadata()
-            => Assert.Contains("__jobSnapshot", Adapter("System.Threading.Interlocked.Add(ref *Column.GetElementPtr(i), Count);", fields: "public NativeColumn<int> Column;"));
+        public void UserViewElementPointerWrites_SnapshotMetadata()
+            => Assert.Contains("__jobSnapshot", Adapter("var view = Column; System.Threading.Interlocked.Add(ref *Access.At(view, i), Count);",
+                UserViewDeclarations, fields: "public View Column;"));
 
         [Fact]
-        public void NativeColumnLengthWrite_UsesOriginalContext()
-            => Assert.DoesNotContain("__jobSnapshot", Adapter("Column.Length = Count;", fields: "public NativeColumn<int> Column;"));
+        public void UserViewLengthWrite_UsesOriginalContext()
+            => Assert.DoesNotContain("__jobSnapshot", Adapter("Column.Length = Count;",
+                UserViewDeclarations, fields: "public View Column;"));
+
+        private const string UserViewDeclarations = @"
+public unsafe struct View { public int* Data; public int Length; }
+public static unsafe class Access { public static int* At(View v, int i) { return v.Data + i; } }
+";
 
         [Theory]
         [InlineData("Count++;")]

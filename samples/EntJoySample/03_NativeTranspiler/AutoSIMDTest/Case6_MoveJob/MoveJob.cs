@@ -62,7 +62,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
     public struct MoveJobEntity_SIMD : IJobEntity
     {
         public float DeltaTime;
@@ -292,7 +292,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Enabled)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
     public struct HeavyJobEntity_SIMD : IJobEntity
     {
         public float DeltaTime;

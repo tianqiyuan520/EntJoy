@@ -1320,6 +1320,7 @@ namespace
     {
         constexpr int chunkCount = 64;
         std::vector<ChunkJobData> chunks(chunkCount);
+        for (auto& chunk : chunks) chunk.entityCount = 1;
         std::atomic<int> executions{ 0 };
 
         JobSystem::TraceSetEnabled(false);
@@ -1334,6 +1335,11 @@ namespace
             },
             &executions, nullptr, chunks.data(), chunkCount, {},
             JobSystem::ChunkScheduleMode::PublishAssist, 2, 1);
+        // Observe a worker callback before Complete can claim the remaining work.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (executions.load(std::memory_order_acquire) == 0 &&
+            std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
         handle.Complete();
         JobSystem::TraceSetEnabled(false);
 
@@ -2613,22 +2619,13 @@ void TestJccConcurrentHeterogeneous()
     const JccJobFn fns[4] = { JccJobLight0, JccJobLight1, JccJobHeavy0, JccJobHeavy1 };
 
     const int kThreads = 8;
-    // ⚠ 2026-10-05：原来写死"每线程 30 轮"，等于赌"固定次数一定够收敛"。CI 上**偶发失败**
-    //   （同一提交重跑即过）证明那确实是运气：某个 key 是否被 JCC 播种，取决于该 job 实际走到的
-    //   路径与计时样本，跟机器核数/负载有关，不由轮数保证。
-    //   ⇒ 改成**以收敛为退出条件**的并发驱动：线程持续调度，主线程轮询"4 个 key 是否都已学到"，
-    //     全学到即置 done 收工；另设安全上限（时长 + 每线程轮数）以免永久空转 —— 到点仍未收敛时
-    //     判据照旧执行（给出可诊断的失败，而不是悄悄放过或降级）。
-    const auto allLearned = [&]() {
-        for (int j = 0; j < 4; ++j)
-        {
-            const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
-            if (JobSystem::g_jobCostCache.GetPerElemCost(h) <= 0.0 &&
-                JobSystem::g_jobCostCache.GetCoarseCost(h) <= 0.0)
-                return false;
-        }
-        return true;
-    };
+    // The direct-mapped cache permits collisions and eviction. Observe learning after
+    // each completion; four hashes need not remain resident at the same time.
+    uint32_t hashes[4];
+    for (int j = 0; j < 4; ++j)
+        hashes[j] = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
+    std::atomic<uint32_t> learned{ 0 };
+    const auto allLearned = [&]() { return learned.load(std::memory_order_acquire) == 0xFu; };
     std::atomic<bool> done{ false };
     std::atomic<int> rounds{ 0 };            // 参与线程的总调度次数（仅诊断）
     const int kMaxRoundsPerThread = 4000;    // 安全上限：不再赌次数，但绝不允许无限空转
@@ -2645,6 +2642,9 @@ void TestJccConcurrentHeterogeneous()
                 auto h = JobSystem::Scheduler::ScheduleParallelForBatch(
                     fns[jobIdx], out.data(), N, 0);
                 h.Complete();   // 死锁/悬挂会卡在这里（无超时即失败）
+                if (JobSystem::g_jobCostCache.GetPerElemCost(hashes[jobIdx]) > 0.0 ||
+                    JobSystem::g_jobCostCache.GetCoarseCost(hashes[jobIdx]) > 0.0)
+                    learned.fetch_or(1u << jobIdx, std::memory_order_release);
                 rounds.fetch_add(1, std::memory_order_relaxed);
             }
         });
@@ -2655,25 +2655,16 @@ void TestJccConcurrentHeterogeneous()
     done.store(true, std::memory_order_relaxed);
     for (auto& th : threads) th.join();
 
-    // 每个 job 必须学到**独立**成本（4 个不同 hash → 4 个正成本）。
-    // ⚠ 学到的成本落在哪个通道取决于分类器给出的档：
-    //   · 默认分类器（`TryClassify`）：UNKNOWN 期按粗/细**交错**采样 ⇒ 细通道 `GetPerElemCost` 会被播种。
-    //   · `ENTJOY_JCC_ROBUST=1`：被判 **mem-bound** 的 job 走 tpw 粗粒度 ⇒ 只写**粗**通道
-    //     （`GetCoarseCost`），细通道保持 0 是**该档的设计行为**，不是学习失败。
-    // 因此判据按"**该 job 在任一通道上学到了正成本**"来写，这样两种分类器下都验证同一个不变量
-    // （并发下 4 个异构 job 各自独立学到自己的成本、互不串扰），而不会把"档位不同"误报成失败。
-    // 覆盖判据：非 sanitizer 腿硬失败；sanitizer 腿降级为诊断（策略集中在 TestGuards.h）。
-    // 依据（CI 实测）：sanitizer 环境下 `[JOBPHYS] physicalCores=0`、`[JOBF6] nokey=5000`
-    // （大量批走表命中/旁路、未进学习路径）⇒ 本用例"8 线程 × 30 轮足以收敛"的前提不成立。
-    // ⚠ 2026-10-05：驱动已改为"以收敛为退出条件 + 20 s 安全上限"（见上），所以非 sanitizer 腿上的
-    //   失败现在确实意味着**长时间并发也没能学到**，是可信的缺陷信号，而不是"给的轮数不够"。
+    // Every key must have a positive fine or coarse observation during the run.
+    // Later eviction is valid; the collision-reuse test checks that invalidation.
     std::cout << "JccConcurrentHeterogeneous: rounds=" << rounds.load(std::memory_order_relaxed) << "\n";
     for (int j = 0; j < 4; ++j)
     {
-        const uint32_t h = JobSystem::HashFuncPtr(reinterpret_cast<void (*)() noexcept>(fns[j]));
-        const double fine = JobSystem::g_jobCostCache.GetPerElemCost(h);
-        const double coarse = JobSystem::g_jobCostCache.GetCoarseCost(h);
-        RequireCoverage(fine > 0.0 || coarse > 0.0,
+        bool observed = (learned.load(std::memory_order_acquire) & (1u << j)) != 0;
+        std::cout << "  key=" << j << " hash=" << hashes[j]
+                  << " slot=" << JobSystem::JobCostCache::SlotOf(hashes[j])
+                  << " learned=" << observed << "\n";
+        RequireCoverage(observed,
             "concurrent job must learn its per-element cost (fine or coarse channel)");
     }
     JobSystem::g_jobCostCacheEnabled.store(false, std::memory_order_relaxed);

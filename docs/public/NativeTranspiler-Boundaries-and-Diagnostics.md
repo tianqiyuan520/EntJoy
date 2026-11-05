@@ -116,12 +116,32 @@
 | **NT030** | warning | 编译未引用 `EntJoy.ECS`，但生成的 bindings 仍出现 ECS 符号（`EntJoy.ECS`/`World`/`QueryBuilder`/`ArchetypeChunk`/`EntityManager`/`ChunkJobScheduler`/`ChunkJobData`/`ChunkEnabledMask`）⇒ 某个 ECS 相关发射点漏了条件化。消息里列出具体符号；若这些名字是你自己的类型，改名即可（词边界匹配，`MyWorldJob` 不误报） |
 | **NT028** | warning | 本批有 `[NativeTranspile]` job 未通过校验、已从绑定生成中排除：其余 job 照常产出，被排除的 job 不会生成 `Schedule` 绑定（调用点报 `CS0103`，而不是整包 `CS0234`）。消息里列出被排除的 job，按各自的 error 诊断逐个修即可 |
 | **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
-| **NT033** | error | `NativeColumn<T>` job fields require the C++ backend and `AutoSIMD.Disabled`; indexed access and `GetElementPtr` use the native column ABI. |
 | **NT034** | error | 原生 Job 的 `Execute` 使用块函数体；表达式体 `Execute => ...` 在生成前报错。 |
+| **NT035** | error | 已识别但不支持的 ISPC 语法，例如 `ref` 局部；不会因类型解析失败而崩溃。 |
 
-AutoSIMD 的 `for` 控制使用单个已初始化的 `int` 计数器、`counter < end` 或 `counter <= end` 条件，以及 `counter++` / `++counter`。循环体保持计数器本身不变且不传出其引用或地址；不符合时报告 NT031，可使用 `AutoSIMD.Disabled` 保留标量循环。固定循环展开使用 64 位行程数计算，带 `int.MaxValue` 包含上界的循环保留原条件；运行时标量计数器按 32 位无检查语义递增。均匀上界的归约循环保留原比较运算，并在每次迭代重新求值上界。SIMD 的 `break` 只移除命中的 lane，`continue` 只跳过该 lane 当前迭代的剩余语句；分支中的 `++` / `--` 使用活动掩码写回。
+AutoSIMD 的 `for` 控制使用单个已初始化的 `int` 计数器、`<` / `<=` / `>` / `>=` 条件及常量非零步长。支持前后置 `++` / `--`、`+=` / `-=` 常量、`counter = counter ± 常量` 和 `counter = 常量 + counter`；比较两侧可交换，可加括号。边界表达式独立于计数器；循环体保持计数器不变且不传出其引用或地址。不符合时报告 NT031，可使用 `AutoSIMD.Disabled` 保留标量循环。
+
+循环控制分析由原生路径共用。ISPC 保留循环、比较及步长，按语义标注 `uniform/varying`，由 ISPC 编译器决定循环展开；该路径及其帮助函数不生成展开提示。AutoSIMD 最多展开 64 次，嵌套展开次数乘积也受此上限约束；标量 C++ 对最多 8 次且体积受限的最内层循环请求展开。这两种 C++ 路径的固定行程分析支持 Roslyn 可折叠的常量表达式，用 64 位数值核对每次计数及最后一次增量；超过次数上限或发生 `int` 溢出时保留循环。展开收益由实际负载测量确定。
+
+运行时 uniform 边界共享标量计数器，按 32 位无检查语义递增或递减；varying 边界使用逐 lane 活动掩码，普通掩码循环逐轮重算边界。`break` 移除该 lane 后续迭代，`continue` 只跳过本轮剩余语句，循环结束后恢复外层掩码。带 `return` 的 varying 非归约循环保留逐 lane 返回路径。均匀上界的归约循环保留比较运算，并在每次迭代重新求值上界。
+
+ISPC 的 `IJobParallelFor` / `IJobFor` 按调度器传入的起点和数量处理索引，数组字段的长度仅用于源表达式中的访问。普通批次使用外层 `foreach` 分配索引，内层 `for/while` 保留逐索引的执行顺序。常量、uniform 标量字段、类型转换和直接传入的 `NativeArray` 字段或形参的 `Length` 可作为 uniform 循环边界；读取逐索引数据的边界保持 varying。批索引层的裸 `return` 结束该索引；嵌套循环中的 `return` 产生明确的不支持标记。
+
+方法顶层的单变量标量声明，在初始化表达式为常量或已知 uniform、后续无写入、取址、捕获或引用传参时标为 uniform。由这些局部变量组成的边界及长度别名保留 uniform 信息。分支和循环内声明、多变量声明、逐索引数据及累加器保持原有存储类型。ISPC 编译使用 `--wrap-signed-int` 保留无检查的有符号整数回绕语义，包含溢出的否定、加减和乘法。
+
+lane 可调用的 ISPC 帮助函数保留完整的循环迭代。固定或 uniform 边界使用共享计数器，varying 形参边界保留逐 lane 计数器。ISPC 编译步骤声明源文件及其递归 include 为依赖，帮助函数或类型定义修改后重新编译引用它们的对象文件。
+
+ISPC 的入口执行模型、模块职责、Chunk 支持条件及扩展流程见 [ISPC 转译](ISPC-Translation.md)。
 
 `IJobFor` 的单索引入口通过批适配器执行一个元素，共用上下文 ABI 和布尔变体选择。
+
+普通批入口与 bool 特化入口共用签名、区间和循环发射；稳定数组、零掩码及 SIMD bool 常量表保留各自的适用条件。布局计算和字段写入使用既有公共路径。
+
+标量逐元素批次保留 Execute 体内条件及前后语句。整个体仅为一个无 else 的 if、首个合取项为 `index < 稳定 int 字段` 时，循环终点可取该字段与原终点的较小值；边界字段被修改、取地址或通过未知 Job 实例操作逃逸时保持完整区间。生成器保留原始 if 条件，由 C++ 编译器处理重复比较。
+
+C++ 后端按具体类型实参为用户泛型结构体和泛型静态助手生成独立名称，结构定义、头文件和调用符号保持对应。消费方可以用普通非托管结构体保存分段地址，并通过同程序集静态助手进行字段读取和指针运算，无需注册为框架容器。该路径的实例方法、索引器和其他语法仍遵循各自现有边界；原生运行验证见 `tools/NativeTranspilerFixture/UserColumnFixture.cs`。
+
+Job 字段本体或其嵌套值成员被写入、或通过 `ref` / `out` 传出时，C++ 字段绑定保留可写引用；只读字段沿用按值快照或 const 引用。数组元素和指针指向的数据写入与字段本体写入分别判断。
 
 
 > warning 不阻断生成：`NativeTranspilerGenerator` 只在存在 **error** 时终止（否则会把"事实告知"变成全员停工）。
@@ -193,27 +213,36 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 ## 7. CI 与回归夹具
 
 - **CI job `native-transpiler-regression`**（`.github/workflows/jobsystem-ci.yml`）：
-  `dotnet run tools/NativeTranspilerFixture -c Release`（真做一次生成 → 标记扫描 → CMake/ClangCL(或 MSVC 回退)
-  → 原生编译 → 运行时语义断言）+ `negative-check.ps1`（负向门禁自检）。
-  ⚠ 尚未挂进 `release-gate`：GitHub runner 上 clang-cl 组件是否存在未验证，先观察若干轮。
+  `dotnet run --project tools/NativeTranspilerFixture -c Release -p:FixtureIspc=true`（生成 → 标记扫描 → CMake/ClangCL(或 MSVC 回退)
+  → 原生编译 → 运行时语义断言），并执行 `copy`、`alloc` 契约与 `negative-check.ps1` 负向门禁自检。
+  此 job 是 `release-gate` 的必需检查；缺少 ClangCL 时回退 MSVC。
+- **触发与汇总**：`dev`、`main` 的 push/PR 和手动运行执行常规门禁；`release-gate` 要求全部必需检查成功，失败与意外跳过均阻断。
+- **框架配置**：`framework-test` 分别执行 Debug、Release 构建和转译器、热重载、ECS 测试；ECS Managed 每档两轮，Native 每档覆盖 assist 关/开。TRX 与挂起诊断保留 14 天，单测试挂起 90 秒中止。
+- **ECS 参考模型**：固定种子在容量 17、128、192 下混合增删组件、写入、ECB、Run/Schedule、压缩与快照恢复；每步检查组件值、缓存查询和 slab 不变式。
+- **原生测试清单**：`tests/NativeDll.Tests/CMakeLists.txt` 自动注册当前目录全部可执行测试，Windows Release、Linux GCC Debug、Clang ASAN/UBSAN/TSAN 与真实 ARM64 共用清单；单项超时 180 秒，空清单视为失败。公开仓库的 ARM64 检查为必需项，另重复唤醒检查 20 次；发行包仍为 win-x64。
+  队列测试的断言在 Debug、Release 均求值，不受 `NDEBUG` 影响；满队列先拒绝入队，消费释放槽位后再验证剩余批次的 FIFO 顺序。
+- **调度组合**：C# JobSystem 每次运行完整压力用例，再以 `--contracts-only` 在 1、2、4、8 worker 与 assist 关/开下验证依赖、并发、异常、扇入扇出和批次边界；Native 后端必须实际加载，关闭后原生句柄计数必须归零。单项超时 180 秒。生成码夹具以 1、4 worker 和 assist 关/开运行。复制、句柄代次、依赖释放、公共入口重启与零分配有独立契约断言。
+- **ISPC 生成码**：除宽度测试外，夹具实际编译并执行 ISPC 数组和实体 Job；Run、Schedule 对照标量参考，覆盖 SIMD 尾部、跨 Chunk 与末块实体。
+- **ISPC 宽度检查**：SSE4 与 AVX2 测试失败会阻断门禁；AVX512 SKX 先检查 CPU 和操作系统支持，支持时测试失败同样阻断门禁。
 - **CI job `nuget-consumer-test`**（2026-09-17 新增，**已进 release-gate**）：跑
   `tests/NuGetConsumer/run.ps1` —— stage 预编译原生制品 → `dotnet pack` 四包 → 清 NuGet 缓存 →
-  两个 `PackageReference`-only 消费者 build+run（`tests/NuGetConsumer` ECS 侧、`tests/NuGetJobsConsumer` Jobs-only 侧）。
+  两个 `PackageReference`-only 消费者 build+run，并 publish 到仓库外的临时目录后运行（`tests/NuGetConsumer` ECS 侧、`tests/NuGetJobsConsumer` Jobs-only 侧）。生成的原生 DLL 和布局清单进入发布文件列表。包版本读取当前 `EntJoyVersion`，原生制品从当前源码增量构建。
   这是 CI 里唯一覆盖"**消费者从包消费**"的 job；不依赖 ISPC / clang-cl（只编 Cpp 后端，缺 ClangCL 回退 MSVC）。
 - **发布 workflow `Publish NuGet`**（`.github/workflows/publish-nuget.yml`，2026-09-17 新增）：**仅由 `push v* tag` 触发**，
-  没有手动入口（失败的 tag run 可在页面上 Re-run jobs）。顺序 = 先跑 `tests/NuGetConsumer/run.ps1` 当发布门禁 →
+  没有手动入口（失败的 tag run 可在页面上 Re-run jobs）。顺序 = 调用同一提交的完整 Release Gate（含长压测），通过后校验 tag 等于 `v$(EntJoyVersion)`，再跑 `tests/NuGetConsumer/run.ps1` →
   推 GitHub Packages（`GITHUB_TOKEN` + `packages: write`，带 `--skip-duplicate`，作为镜像源）→ `NuGet/login@v1`
   用 OIDC 换一次性临时 API key → 推 nuget.org（**不带** `--skip-duplicate`：版本号忘提时必须让 workflow 失败，
   该开关会静默跳过并返回 0）。nuget.org 侧依赖仓库外的 Trusted Publishing 策略（Repository Owner / Repository /
   Workflow File = `tianqiyuan520` / `EntJoy` / `publish-nuget.yml`，Glob `EntJoy.*`，Scope "Push new packages and package versions"）。
   发版流程：改 `src/Directory.Build.props` 的 `EntJoyVersion`（四包 lockstep）→ 提交推分支 → 打并推 `v*` tag。
-  ⚠ 未加"tag 名必须等于 `v$(EntJoyVersion)`"的守卫：打错 tag 会晚到 nuget.org 推送步骤才失败。
   ⚠ **`dotnet nuget push` 的通配符在 Windows 下只认反斜杠**：`"artifacts/packages/*.nupkg"`（正斜杠）会直接报
   `error: File does not exist (…)` 而**不推送任何包**（v1.0.0 首次发布即因此失败：门禁绿、GH Packages 步骤红、
   OIDC 与 nuget.org 步骤被跳过）。必须写 `"artifacts\packages\*.nupkg"`（本机对照实测确认，与绝对/相对路径无关）。
 - **CI 步骤 `Jobs-only transpiler guard`**（在必检 `framework-test` 内）：跑 `tests/JobsOnlyTranspilerCheck/check.ps1`，
   断言"无 ECS 引用的工程能用 `[NativeTranspile]` 数组 job"（4 条断言 + 含 NT029/NT030 不得出现），
   并做过负向自证（耦合回退 → `FAIL[1]`；加 ECS 引用绕过 → `FAIL[3]`）。
+- **长压测**：手动运行设 `extended=true`，或每周定期运行，启用 C++、Managed、Native bridge 压测各 5 轮及每轮 30 秒并发稳定性段。每个元素都有结果断言，Native bridge 同时经历关闭/重启。长压测失败阻断该次汇总与发布；日志保留 14 天。GitHub 定期任务从默认分支执行，配置合入默认分支后生效。
+- **边界**：这些检查覆盖支持范围内的代表组合；热重载原生卸载端到端、真实引擎长时间运行和任意用户算法仍需对应项目验收。长压测为有限时长测试，不代替持续数小时的业务运行。
 - 背景：`framework-test` 用 `-p:EnableNativeCompile=false` 构建，`NativeCompileTask` 被条件跳过
   ⇒ **生成的 C++/ISPC 从不被编译、静默降级标记也从不被扫描**（由上面两个 job 补齐）。
 - 夹具 `tools/NativeTranspilerFixture`（带原生编译目标，可直接 `dotnet run`）当前断言：
@@ -222,6 +251,14 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
   3. `IJobParallelFor` 批内 `return;` **只跳过本次 index**；
   4. `return;` 前后语句的可见性（前面执行、后面跳过）。
 - 相关既有工具：`tools/AutoSIMDVerify`（AutoSIMD 与 C# 基线的逐值对照，23/23）——改 SIMD 生成器后**必跑**。
+
+**后续验收（暂缓执行）**
+
+以下事项仅记录，当前暂缓执行，恢复后按顺序推进：
+
+1. **原生热重载端到端验收**：检查活动 Job 完成后再卸载旧 DLL、重新加载后执行正确、组件布局不兼容时明确拒绝，以及重载失败后当前实例仍可继续运行。验收关注旧代码回调的生命周期、资源回收与失败后的状态一致性。
+2. **Godot 真实业务长稳验收**：保持游戏算法不变，持续数小时运行，并反复创建、销毁实体和 Job；观察预热后的内存、原生句柄和线程是否持续增长，核对回收、死锁与计算结果。通过标准是资源使用有界、任务可完成和回收、业务结果正确。
+3. **合入默认分支与发布准备**：前两项通过后再合入 `main`，使定期 CI 生效；按已验证的支持范围整理发布说明，并通过现有 tag 发布门禁。
 
 ## 7.1 Jobs-only 解耦与包分发（2026-09-17）
 

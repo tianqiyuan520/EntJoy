@@ -14,6 +14,7 @@ public static unsafe class NativeHandleContractProbe
         using var proof = new NativeArray<int>(1024, Allocator.Persistent);
         nint module = NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "NativeDll.dll"));
         var live = (delegate* unmanaged[Cdecl]<long>)NativeLibrary.GetExport(module, "JobSystem_GetLiveHandleCount");
+        var drain = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(module, "JobSystem_DrainAll");
 
         foreach (int bytes in new[] { 1, 8, 16, 96, 4096 })
         {
@@ -98,7 +99,7 @@ public static unsafe class NativeHandleContractProbe
         var chain = default(JobHandle);
         for (int i = 0; i < 4096; i++) chain = new DispatchParallelJob { Proof = proof }.Schedule(1, 1, chain);
         chain.Complete();
-        if (live() != 0) throw new Exception("Dependency chain was not reclaimed.");
+        CheckReclaimed("dependency chain");
 
         CheckBorrowedLifetime();
 
@@ -114,7 +115,7 @@ public static unsafe class NativeHandleContractProbe
             first.Complete();
             second.Complete();
         }
-        if (live() != 0) throw new Exception("Shared dependency graph was not reclaimed.");
+        CheckReclaimed("shared dependency graph");
 
         CheckAssistedShutdown();
 
@@ -125,6 +126,19 @@ public static unsafe class NativeHandleContractProbe
         beforeShutdown.Complete();
         if (!afterRestart._nativeHandle.IsValid) throw new Exception("Shutdown token reached a restarted scheduler.");
         afterRestart.Complete();
+
+        // The public facade must reopen handle admission on every restart too.
+        for (int restart = 0; restart < 3; restart++)
+        {
+            JobScheduler.Shutdown();
+            JobScheduler.Initialize(2);
+            if (!JobScheduler.IsNative) throw new Exception("Restart silently fell back to Managed.");
+            long before = Sum();
+            var restarted = new DispatchSerialJob { Proof = proof }.Schedule();
+            if (restarted.IsNull) throw new Exception("Public scheduler restart left handle admission closed.");
+            restarted.Complete();
+            if (Sum() != before + 1) throw new Exception("Restarted job was not completed exactly once.");
+        }
 
         void CheckBorrowedLifetime()
         {
@@ -156,6 +170,10 @@ public static unsafe class NativeHandleContractProbe
 
         void CheckAssistedShutdown()
         {
+            // One occupied worker is sufficient to force the waiting caller to
+            // execute the probe; scheduling does not promise eager pool saturation.
+            NativeJobScheduler.Shutdown();
+            NativeJobScheduler.Initialize(1);
             NativeJobScheduler.SetMainThreadAssistEnabled(true);
             int workers = NativeJobScheduler.JobWorkerCount;
             var contexts = (GateContext*)NativeMemory.AllocZeroed((nuint)((workers + 1) * sizeof(GateContext)));
@@ -204,9 +222,16 @@ public static unsafe class NativeHandleContractProbe
             long allBytes = GC.GetTotalAllocatedBytes(true) - beforeAll;
             long localBytes = GC.GetAllocatedBytesForCurrentThread() - beforeLocal;
             if (Sum() - beforeProof != repetitions * jobs) throw new Exception("Execution proof failed: " + name);
-            if (live() != 0) throw new Exception("Unreclaimed handles: " + name);
+            CheckReclaimed(name);
             Console.WriteLine($"[ALLOC] {name} local={localBytes} all={allBytes} us/call={Stopwatch.GetElapsedTime(t0, t1).TotalMicroseconds / repetitions:F3}");
             if (localBytes != 0 || allBytes != 0) throw new Exception("Managed allocations in " + name);
+        }
+
+        void CheckReclaimed(string name)
+        {
+            // Combined completion precedes backend retirement and the worker's final reference release.
+            if (!SpinWait.SpinUntil(() => { drain(); return live() == 0; }, 5000))
+                throw new Exception($"Unreclaimed handles after draining {name}: {live()}");
         }
 
         long Sum() { long total = 0; for (int i = 0; i < proof.Length; i++) total += proof[i]; return total; }

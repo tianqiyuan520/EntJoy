@@ -43,22 +43,37 @@ struct ThrowingNativeJob : IJob
 static class NativeStressTests
 {
     static int _timeoutSec;
+    public static unsafe void VerifyDrained()
+    {
+        nint library = NativeLibrary.Load(System.IO.Path.Combine(AppContext.BaseDirectory, "NativeDll.dll"));
+        try
+        {
+            var liveCount = (delegate* unmanaged[Cdecl]<long>)NativeLibrary.GetExport(library, "JobSystem_GetLiveHandleCount");
+            var drain = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(library, "JobSystem_DrainAll");
+            Require(SpinWait.SpinUntil(() => { drain(); return liveCount() == 0; }, 5000),
+                "Native ownership remained live after backend retirement");
+        }
+        finally { NativeLibrary.Free(library); }
+    }
+
     static void RunWithTimeout(string name, Action fn)
     {
         Console.Write($"[RUN ] {name}..."); Console.Out.Flush();
         var sw = Stopwatch.StartNew();
-        var task = Task.Run(fn);
+        var task = Task.Run(() => { fn(); VerifyDrained(); });
         if (task.Wait(TimeSpan.FromSeconds(_timeoutSec)))
             Console.WriteLine($" PASS ({sw.ElapsedMilliseconds}ms)");
         else { Console.WriteLine($" FAIL (timeout)"); Environment.FailFast($"TIMEOUT: {name}"); }
     }
     static void Require(bool c, string m) { if (!c) throw new Exception($"[FAIL] {m}"); }
 
-    public static void RunAll(int timeoutSec, bool longMode)
+    public static void RunAll(int timeoutSec, bool longMode, int workers, bool contractsOnly)
     {
         _timeoutSec = timeoutSec;
-        JobScheduler.Initialize(0);
-        RunWithTimeout("N1. MassiveScheduleComplete (50K)", Test_MassiveScheduleComplete);
+        JobScheduler.Initialize(workers);
+        Require(JobScheduler.IsNative, "Native stress tests must not fall back to Managed");
+        if (workers > 0) Require(NativeJobScheduler.JobWorkerCount == workers, "Native worker count differs from the requested configuration");
+        if (!contractsOnly) RunWithTimeout("N1. MassiveScheduleComplete (50K)", Test_MassiveScheduleComplete);
         RunWithTimeout("N2. DeepDependencyChain (500)", Test_DependencyChain);
         RunWithTimeout("N3. ConcurrentSchedule (8 threads)", Test_ConcurrentSchedule);
         RunWithTimeout("N4. ParallelFor (50K)", Test_ParallelFor);
@@ -67,10 +82,14 @@ static class NativeStressTests
         RunWithTimeout("N7. DiamondDependency (100)", Test_DiamondDependency);
         RunWithTimeout("N8. FanOutFanIn (8x8)", Test_FanOutFanIn);
         RunWithTimeout("N9. ZeroLength (3K)", Test_ZeroLength);
-        RunWithTimeout("N10. TinyJobStorm (200K)", Test_TinyJobStorm);
-        RunWithTimeout("N11. MixedJobTypes (30K)", Test_MixedJobTypes);
+        if (!contractsOnly)
+        {
+            RunWithTimeout("N10. TinyJobStorm (200K)", Test_TinyJobStorm);
+            RunWithTimeout("N11. MixedJobTypes (30K)", Test_MixedJobTypes);
+        }
         RunWithTimeout("N12. CombineDependencies (100)", Test_CombineDependencies);
         RunWithTimeout("N13. VariousBatchSizes", Test_VariousBatchSizes);
+        RunWithTimeout("N15. GatedDependencyOrder", () => DependencyOrderStress.Run(native: true));
         if (longMode) RunWithTimeout("N14. LongRunning (30s)", Test_LongRunning);
     }
 
@@ -105,7 +124,7 @@ static class NativeStressTests
     static void Test_ConcurrentSchedule()
     {
         long[] counter = [0];
-        var barrier = new Barrier(8);
+        using var barrier = new Barrier(8);
         Parallel.For(0, 8, _ =>
         {
             barrier.SignalAndWait();
@@ -116,6 +135,7 @@ static class NativeStressTests
                 NativeJobScheduler.Complete(ref h);
             }
         });
+        Require(counter[0] == 40_000, $"N3: executed {counter[0]}/40000 jobs");
     }
 
     static void Test_ParallelFor()
@@ -153,10 +173,12 @@ static class NativeStressTests
         }
         for (int i = 0; i < handles.Length; i++)
         {
+            bool threw = false;
             try { NativeJobScheduler.Complete(ref handles[i]); }
-            catch { caught++; }
+            catch (InvalidOperationException) { caught++; threw = true; }
+            Require(threw == (i % 2 == 0), $"N6: exception attributed to the wrong handle {i}");
         }
-        Require(caught >= 125, $"N6: {caught}/500");
+        Require(caught == 250, $"N6: expected 250 throwing handles, observed {caught}");
     }
 
     static void Test_DiamondDependency()
@@ -213,6 +235,7 @@ static class NativeStressTests
             var j = new NativeParallelForJob { Hits = [0] };
             var h = NativeJobScheduler.ScheduleParallelFor(ref j, 0, 0);
             NativeJobScheduler.Complete(ref h);
+            Require(j.Hits[0] == 0, "N9: zero-length work executed");
         }
     }
 
@@ -230,15 +253,27 @@ static class NativeStressTests
 
     static void Test_MixedJobTypes()
     {
+        long[] counter = [0];
         for (int i = 0; i < 30_000; i++)
         {
             switch (i % 3)
             {
-                case 0: var j0 = new NativeIncJob { Counter = [0] }; var h0 = NativeJobScheduler.Schedule(ref j0); NativeJobScheduler.Complete(ref h0); break;
-                case 1: var j1 = new NativeParallelForJob { Hits = new int[100] }; var h1 = NativeJobScheduler.ScheduleParallelFor(ref j1, 100, 0); NativeJobScheduler.Complete(ref h1); break;
-                case 2: var j2 = new NativeBatchJob { Hits = new int[500] }; var h2 = NativeJobScheduler.ScheduleParallelForBatch(ref j2, 500, 50); NativeJobScheduler.Complete(ref h2); break;
+                case 0: var j0 = new NativeIncJob { Counter = counter }; var h0 = NativeJobScheduler.Schedule(ref j0); NativeJobScheduler.Complete(ref h0); break;
+                case 1:
+                    var j1 = new NativeParallelForJob { Hits = new int[100] };
+                    var h1 = NativeJobScheduler.ScheduleParallelFor(ref j1, j1.Hits.Length, 0);
+                    NativeJobScheduler.Complete(ref h1);
+                    foreach (int visits in j1.Hits) Require(visits == 1, "N11: indexed element missed or repeated");
+                    break;
+                case 2:
+                    var j2 = new NativeBatchJob { Hits = new int[500] };
+                    var h2 = NativeJobScheduler.ScheduleParallelForBatch(ref j2, j2.Hits.Length, 50);
+                    NativeJobScheduler.Complete(ref h2);
+                    foreach (int visits in j2.Hits) Require(visits == 1, "N11: batched element missed or repeated");
+                    break;
             }
         }
+        Require(counter[0] == 10_000, $"N11: serial={counter[0]}");
     }
 
     static void Test_CombineDependencies()
@@ -289,10 +324,13 @@ static class NativeStressTests
                     int[] h = new int[len]; var j = new NativeParallelForJob { Hits = h };
                     var handle = NativeJobScheduler.ScheduleParallelFor(ref j, len, 0);
                     NativeJobScheduler.Complete(ref handle);
+                    for (int i = 0; i < len; i++) Require(h[i] == 1, $"N14: index {i} executed {h[i]} times");
                     Interlocked.Increment(ref total);
                 }
             });
         Thread.Sleep(30_000); stop.Cancel(); Task.WaitAll(tasks);
+        stop.Dispose();
+        Require(total > 0, "N14: no completed work during the long run");
         Console.WriteLine($"  LongRunning: {total} rounds in 30s");
     }
 }

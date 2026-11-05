@@ -311,7 +311,11 @@ namespace JobSystem
         }
 
         BatchState* batch = task->batch;
-        const uint32_t end = std::min(task->firstTile + task->tileCount, batch->tileCount);
+        const uint32_t firstTile = task->firstTile;
+        const uint32_t tileCount = task->tileCount;
+        const uint32_t batchGen = task->batchGen;
+        s_taskPool_.Release(task); // Batch retirement can reuse a borrowed descriptor.
+        const uint32_t end = std::min(firstTile + tileCount, batch->tileCount);
 
         // 调试面板
         DebugBeginExec(batch->diagnosticId, batch->tileCount, batch->workerCount, false);
@@ -322,7 +326,7 @@ namespace JobSystem
             workerCurrentBatch[workerIndex].store(batch->diagnosticId, std::memory_order_relaxed);
 
         // 执行 tile 范围
-        for (uint32_t t = task->firstTile; t < end; ++t)
+        for (uint32_t t = firstTile; t < end; ++t)
             executor_(batch, t);
 
         if (workerIndex < kMaxTrackedWorkers)
@@ -338,21 +342,18 @@ namespace JobSystem
         // tile 计数按执行者口径（local/stolen/assist）
         switch (account)
         {
-        case TileAccount::Local:  RecordStatCount(g_localTiles, task->tileCount); break;
-        case TileAccount::Stolen: RecordStatCount(g_stolenTiles, task->tileCount); break;
-        case TileAccount::Assist: RecordStatCount(g_assistTiles, task->tileCount); break;
+        case TileAccount::Local:  RecordStatCount(g_localTiles, tileCount); break;
+        case TileAccount::Stolen: RecordStatCount(g_stolenTiles, tileCount); break;
+        case TileAccount::Assist: RecordStatCount(g_assistTiles, tileCount); break;
         }
 
         // 任务完成：pendingTasks--（可能触发退役）；携带本令牌的代次做迟到校验
         if (taskDone_)
         {
             activeTasks.fetch_sub(1, std::memory_order_acq_rel);
-            taskDone_(batch, task->batchGen);
+            taskDone_(batch, batchGen);
             RecordStatCount(totalTasksDone, 1);
         }
-
-        // 释放 RangeTask 回池
-        s_taskPool_.Release(task);
     }
 
     // ============================================================
@@ -1372,18 +1373,18 @@ namespace JobSystem
                     RunWorkTask(rangeTask);
                     continue;
                 }
-                // 推入自己 deque（保持可窃取性 + LIFO 本地执行）：Injector → PushBottom → PopBottom
-                myDeque->PushBottom(TileTask{
+                // Copy and release the descriptor before publishing stealable work.
+                // A thief can retire and reuse its batch storage immediately.
+                const TileTask queuedTask{
                     rangeTask->batch,
                     rangeTask->firstTile,
                     rangeTask->tileCount,
                     rangeTask->batchGen
-                });
+                };
+                s_taskPool_.Release(rangeTask);
+                myDeque->PushBottom(queuedTask);
                 if (workerIndex < kMaxTrackedWorkers)
                     RecordStatCount(dequePushed[workerIndex], 1);
-
-                // 释放 RangeTask 对象（已推入 deque，不再需要）
-                s_taskPool_.Release(rangeTask);
 
                 // 继续循环，下一轮 PopBottom 会取出执行
                 continue;

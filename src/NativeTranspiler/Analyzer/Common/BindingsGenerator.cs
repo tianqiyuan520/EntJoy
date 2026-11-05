@@ -216,7 +216,6 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine();
             }
 
-            sb.AppendLine(GenerateCleanupFactoryMethod());
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
@@ -232,7 +231,7 @@ namespace NativeTranspiler.Analyzer
                 foreach (var jobStruct in nonChunkJobs)
                 {
                     GenerateJobExtensionMethod(sb, jobStruct);
-                    GenerateJobRunMethod(sb, jobStruct, compilation);
+                    GenerateJobRunMethod(sb, jobStruct);
                 }
                 sb.AppendLine("}");
             }
@@ -404,7 +403,6 @@ namespace NativeTranspiler.Analyzer
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             bool hasMultiVersion = false;
-            string boolFieldName = null;
             List<IFieldSymbol> boolFields = new List<IFieldSymbol>();
 
             var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
@@ -415,11 +413,7 @@ namespace NativeTranspiler.Analyzer
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
                 boolFields = conditionalFields.Where(f => f.Type.SpecialType == SpecialType.System_Boolean).ToList();
-                if (boolFields.Count > 0)
-                {
-                    hasMultiVersion = true;
-                    boolFieldName = boolFields[0].Name;
-                }
+                hasMultiVersion = boolFields.Count > 0;
             }
 
             if (isChunk)
@@ -441,15 +435,11 @@ namespace NativeTranspiler.Analyzer
                 {
                     // 生成所有 2^n 个 bool 组合的 if-else 链，与 C++ 端命名一致。
                     int totalVariants = 1 << boolFields.Count;
-                    var boolVarNames = boolFields.Select(f => $"jobPtr->{f.Name}").ToList();
 
-                    for (int mask = 0; mask < totalVariants; mask++)
+                    foreach (var (mask, values) in BoolVariants.Enumerate(boolFields.Count))
                     {
-                        var values = new List<bool>();
-                        for (int i = 0; i < boolFields.Count; i++)
-                            values.Add((mask & (1 << i)) != 0);
 
-                        string suffix = "_" + string.Join("_", values.Select(v => v ? "true" : "false"));
+                        string suffix = BoolVariants.Suffix(values);
 
                         bool isLast = (mask == totalVariants - 1);
                         if (mask == 0)
@@ -530,43 +520,23 @@ namespace NativeTranspiler.Analyzer
 
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-                bool hasMultiVersion = false;
-                if (methodSyntax != null)
-                {
-                    var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                    var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
-                    hasMultiVersion = conditionalFields.Any(f => f.Type.SpecialType == SpecialType.System_Boolean);
-                }
+                var boolFields = methodSyntax == null ? new List<IFieldSymbol>()
+                    : NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, compilation.GetSemanticModel(methodSyntax.SyntaxTree))
+                        .Where(field => field.Type.SpecialType == SpecialType.System_Boolean).ToList();
 
-                if (hasMultiVersion)
+                foreach (var (_, values) in BoolVariants.Enumerate(boolFields.Count))
                 {
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_true\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch_true({string.Join(", ", batchParams)});");
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_false\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch_false({string.Join(", ", batchParams)});");
-                }
-                else
-                {
-                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}\", CallingConvention = CallingConvention.Cdecl)]");
-                    sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch({string.Join(", ", batchParams)});");
-                }
-
-                if (useMT)
-                {
-                    if (hasMultiVersion)
+                    string suffix = BoolVariants.Suffix(values);
+                    sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}{suffix}\", CallingConvention = CallingConvention.Cdecl)]");
+                    sb.AppendLine($"        public static extern void {jobStruct.Name}_Execute_Batch{suffix}({string.Join(", ", batchParams)});");
+                    if (useMT)
                     {
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_true_mt\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_true_mt({string.Join(", ", batchParams)});");
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_false_mt\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_false_mt({string.Join(", ", batchParams)});");
-                    }
-                    else
-                    {
-                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}_mt\", CallingConvention = CallingConvention.Cdecl)]");
-                        sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch_mt({string.Join(", ", batchParams)});");
+                        sb.AppendLine($"        [DllImport(\"{NativeLibraryName}\", EntryPoint = \"{batchFuncName}{suffix}_mt\", CallingConvention = CallingConvention.Cdecl)]");
+                        sb.AppendLine($"        private static extern void {jobStruct.Name}_Execute_Batch{suffix}_mt({string.Join(", ", batchParams)});");
                     }
                 }
-                else
+
+                if (!useMT)
                 {
                     // 走原生 adapter 直调：声明 Adapter 指针 getter（按名向当前句柄取导出）
                     EmitAdapterGetter(sb, $"Get_{jobStruct.Name}_Execute_AdapterPtr", CppJobGenerator.GetAdapterPtrGetterName(jobStruct));
@@ -1068,34 +1038,6 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static string BuildBatchCallArgs(INamedTypeSymbol jobStruct, string jobPtrPrefix)
-        {
-            var args = new List<string>();
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
-            {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
-                {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                        args.Add($"{jobPtrPrefix}->{field.Name}.GetListData()");
-                    else
-                    {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
-                        var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                        args.Add($"({csElementType}*){jobPtrPrefix}->{field.Name}.GetUnsafePtr(), {jobPtrPrefix}->{field.Name}.Length");
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    args.Add($"{jobPtrPrefix}->{field.Name}");
-                }
-                else
-                {
-                    args.Add($"&{jobPtrPrefix}->{field.Name}");
-                }
-            }
-            return string.Join(", ", args);
-        }
-
         // 显式逐字段 marshalling（Debug sentinel 布局修复共用）
 
         /// <summary>
@@ -1340,7 +1282,7 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        private static void GenerateJobRunMethod(StringBuilder sb, INamedTypeSymbol jobStruct, Compilation compilation)
+        private static void GenerateJobRunMethod(StringBuilder sb, INamedTypeSymbol jobStruct)
         {
             bool isChunk = CppJobGenerator.IsChunkScheduledJob(jobStruct);
             bool isParallelFor = CppJobGenerator.IsRangeScheduledJob(jobStruct);
@@ -1368,43 +1310,13 @@ namespace NativeTranspiler.Analyzer
             }
             else if (isParallelFor || isFor)
             {
-                sb.AppendLine($"        int startIndex = 0;");
-                sb.AppendLine($"        int count = arrayLength;");
-                sb.AppendLine($"        unsafe");
-                sb.AppendLine($"        {{");
+                string getter = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
+                sb.AppendLine("        unsafe");
+                sb.AppendLine("        {");
                 sb.AppendLine($"            {jobTypeName}* jobPtr = &job;");
-                sb.AppendLine($"            {{");
-
-                var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-                var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-                bool hasMultiVersion = false;
-                string boolFieldName = null;
-                if (methodSyntax != null)
-                {
-                    var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                    var conditionalFields = NativeTranspileValidator.GetConditionalReadOnlyFields(jobStruct, semanticModel);
-                    var boolField = conditionalFields.FirstOrDefault(f => f.Type.SpecialType == SpecialType.System_Boolean);
-                    if (boolField != null)
-                    {
-                        hasMultiVersion = true;
-                        boolFieldName = boolField.Name;
-                    }
-                }
-
-                // Run 直调同样只传 job 结构体地址。
-                if (hasMultiVersion)
-                {
-                    sb.AppendLine($"                if (jobPtr->{boolFieldName})");
-                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_true((IntPtr)jobPtr, startIndex, count);");
-                    sb.AppendLine($"                else");
-                    sb.AppendLine($"                    NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch_false((IntPtr)jobPtr, startIndex, count);");
-                }
-                else
-                {
-                    sb.AppendLine($"                NativeTranspiler.Bindings.NativeExports.{jobStruct.Name}_Execute_Batch((IntPtr)jobPtr, startIndex, count);");
-                }
-                sb.AppendLine($"            }}");
-                sb.AppendLine($"        }}");
+                sb.AppendLine($"            var execute = (delegate* unmanaged[Cdecl]<void*, int, int, void>)NativeJobScheduler.GetNativeExportPtr(\"{getter}\");");
+                sb.AppendLine("            execute(jobPtr, 0, arrayLength);");
+                sb.AppendLine("        }");
             }
             else
             {
@@ -1460,19 +1372,6 @@ namespace NativeTranspiler.Analyzer
                 RefKind.Out => "out " + typeName,
                 _ => typeName
             };
-        }
-
-        private static string GenerateCleanupFactoryMethod()
-        {
-            return @"
-        private static CleanupFuncDelegate CreateCleanup<T>(int size) where T : struct
-        {
-            return context =>
-            {
-                IntPtr native = (IntPtr)context;
-                Marshal.FreeHGlobal(native);
-            };
-        }";
         }
     }
 }

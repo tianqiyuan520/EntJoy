@@ -16,6 +16,7 @@
          GeneratorHarness. This test-only opt-in makes no throughput claim. -->
     <EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>
     <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <DefineConstants Condition="'$(FixtureIspc)' == 'true'">$(DefineConstants);ENTJOY_FIXTURE_ISPC</DefineConstants>
   </PropertyGroup>
 
   <!-- 负向夹具：默认排除。用 -p:FixtureMarkerGate=true 编进来时，构建**必须失败**
@@ -23,11 +24,14 @@
        见 negative-check.ps1。 -->
   <ItemGroup>
     <Compile Remove="Negative\**" />
+    <Compile Remove="IspcBackendFixture.cs" />
+    <Compile Include="IspcBackendFixture.cs" Condition="'$(FixtureIspc)' == 'true'" />
     <Compile Include="Negative\MarkerGateJob.cs" Condition="'$(FixtureMarkerGate)' == 'true'" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\EntJoy.ECS\EntJoy.ECS.csproj" />
+    <ProjectReference Include="..\..\src\EntJoy.ECS.SourceGenerator\EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\EntJoy.Jobs\EntJoy.Jobs.csproj" />
     <ProjectReference Include="..\..\src\EntJoy.Collections\EntJoy.Collections.csproj" />
     <ProjectReference Include="..\..\src\EntJoy.Mathematics\EntJoy.Mathematics.csproj" />

@@ -92,8 +92,6 @@ namespace NativeTranspiler.Analyzer
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
                 var fullName = named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fullName == "global::EntJoy.Collections.NativeColumn<T>")
-                    return $"EntJoy::Collections::NativeColumn<{MapCSharpTypeToCpp(named.TypeArguments[0])}>";
                 if (fullName == "EntJoy.Collections.NativeArray<T>" || fullName == "global::EntJoy.Collections.NativeArray<T>")
                 {
                     var elem = named.TypeArguments[0];
@@ -154,7 +152,8 @@ namespace NativeTranspiler.Analyzer
                 containingType = containingType.ContainingType;
             }
             var containerScope = containerParts.Count > 0 ? $"{string.Join("::", containerParts)}::" : "";
-            return string.IsNullOrEmpty(ns) ? $"{containerScope}{type.Name}" : $"{ns.Replace(".", "::")}::{containerScope}{type.Name}";
+            var cppName = type is INamedTypeSymbol structType ? SymbolHelper.GetCppStructName(structType) : type.Name;
+            return string.IsNullOrEmpty(ns) ? $"{containerScope}{cppName}" : $"{ns.Replace(".", "::")}::{containerScope}{cppName}";
         }
 
         private static string GetNamespace(ITypeSymbol type)
@@ -209,7 +208,8 @@ namespace NativeTranspiler.Analyzer
             var typePath = SymbolHelper.BuildFullTypePath(structSymbol);
             var safeNamespace = SymbolHelper.Sanitize(containingNamespace);
             var safeTypePath = SymbolHelper.Sanitize(typePath);
-            return $"{safeNamespace}_{safeTypePath}";
+            var suffix = structSymbol.IsGenericType ? SymbolHelper.GetSpecializationSuffix(structSymbol) : "";
+            return $"{safeNamespace}_{safeTypePath}{suffix}";
         }
 
         /// <summary>判断是否为内置非托管类型（基础类型或数学类型）</summary>
@@ -425,7 +425,8 @@ namespace NativeTranspiler.Analyzer
             foreach (var part in containerParts)
                 sb.AppendLine($"namespace {part} {{");
 
-            sb.AppendLine($"struct {structSymbol.Name} {{");
+            var cppStructName = SymbolHelper.GetCppStructName(structSymbol);
+            sb.AppendLine($"struct {cppStructName} {{");
             foreach (var f in structSymbol.GetMembers().OfType<IFieldSymbol>()
                 .Where(f => !f.IsStatic))
             {
@@ -434,7 +435,7 @@ namespace NativeTranspiler.Analyzer
             }
             sb.AppendLine("};");
             // static_assert 确保 C++ 布局与 C# 计算大小一致
-            sb.AppendLine($"static_assert(sizeof({structSymbol.Name}) == {totalSize}, \"Size mismatch for {structSymbol.Name}: check struct layout\");");
+            sb.AppendLine($"static_assert(sizeof({cppStructName}) == {totalSize}, \"Size mismatch for {structSymbol.Name}: check struct layout\");");
 
             // 关闭嵌套类 namespace
             foreach (var part in containerParts)

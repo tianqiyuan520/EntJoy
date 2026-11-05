@@ -20,7 +20,9 @@ namespace NativeTranspiler.Analyzer
             var safeNamespace = SymbolHelper.Sanitize(containingNamespace);
             var safeTypePath = SymbolHelper.Sanitize(typePath);
             var safeMethod = SymbolHelper.Sanitize(methodName);
-            return $"SharpNative_{safeNamespace}_{safeTypePath}_{safeMethod}";
+            var suffix = method.IsGenericMethod || method.ContainingType.IsGenericType
+                ? SymbolHelper.GetSpecializationSuffix(method) : "";
+            return $"SharpNative_{safeNamespace}_{safeTypePath}_{safeMethod}{suffix}";
         }
 
         public static string GenerateHeader(IMethodSymbol method)

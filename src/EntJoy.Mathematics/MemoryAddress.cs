@@ -44,19 +44,7 @@ namespace EntJoy.Debugger
         /// 获取数组的首元素地址（会 pin 住数组直到 ReleasePinned 调用）
         /// </summary>
         public static IntPtr GetArrayAddress(Array array)
-        {
-            if (array == null || array.Length == 0)
-                return IntPtr.Zero;
-
-            lock (_pinned)
-            {
-                if (_pinned.TryGetValue(array, out var existing) && existing.IsAllocated)
-                    return existing.AddrOfPinnedObject();
-                var handle = GCHandle.Alloc(array, GCHandleType.Pinned);
-                _pinned[array] = handle;
-                return handle.AddrOfPinnedObject();
-            }
-        }
+            => array == null || array.Length == 0 ? IntPtr.Zero : GetAddress(array);
 
         public static void ReleasePinned(object obj)
         {

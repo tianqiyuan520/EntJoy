@@ -33,7 +33,7 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.2" />
 </ItemGroup>
 ```
 
@@ -82,7 +82,7 @@ The bundled **ECS source generator** emits code for `IJobEntity`, the native bin
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.2" />
 </ItemGroup>
 ```
 

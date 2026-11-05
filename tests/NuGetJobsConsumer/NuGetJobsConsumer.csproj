@@ -14,7 +14,7 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <NuGetAudit>false</NuGetAudit>
-    <EntJoyPackageVersion Condition="'$(EntJoyPackageVersion)' == ''">1.0.1</EntJoyPackageVersion>
+    <EntJoyPackageVersion Condition="'$(EntJoyPackageVersion)' == ''">1.0.2</EntJoyPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>

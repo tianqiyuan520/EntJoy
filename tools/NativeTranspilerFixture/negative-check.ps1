@@ -11,11 +11,16 @@
 # Usage: powershell -File tools/NativeTranspilerFixture/negative-check.ps1
 # Exit code: 0 = gate works (build failed as expected); 1 = gate is broken or failed for another reason.
 
+param(
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release'
+)
+
 $ErrorActionPreference = 'Continue'
 $proj = Join-Path $PSScriptRoot 'NativeTranspilerFixture.csproj'
 
 Write-Host '--- negative check: marker gate must reject the build ---'
-$output = & dotnet build $proj -c Release -p:FixtureMarkerGate=true 2>&1 | Out-String
+$output = & dotnet build $proj -c $Configuration -p:FixtureMarkerGate=true 2>&1 | Out-String
 $exit = $LASTEXITCODE
 
 if ($exit -eq 0) {

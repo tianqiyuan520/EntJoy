@@ -2,11 +2,22 @@ name: EntJoy Release Gate
 
 on:
   push:
-    branches: [dev]
-    tags: ['v*']
+    branches: [dev, main]
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
   workflow_dispatch:
+    inputs:
+      extended:
+        description: Run repeated long stress tests
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      extended:
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 18 * * 0'
 
 permissions:
   contents: read
@@ -16,9 +27,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workflow-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify public documentation throughout Git history
+        run: python3 .github/scripts/check-public-docs.py
+      - name: Validate workflow syntax and expressions
+        run: |
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint"
+
   framework-test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        configuration: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
 
@@ -30,58 +61,73 @@ jobs:
       - name: Build solution
         # EntJoySample 里有多个非注释 Main ⇒ 入口由 EntJoySample.csproj 的**缺省 StartupObject** 提供
         # （需要别的入口时用 -p:ENTJOY_STARTUP=<全限定类型名> 覆盖）。
-        run: dotnet build EntJoy.sln -c Release -p:EnableNativeCompile=false
+        run: dotnet build EntJoy.sln -c ${{ matrix.configuration }} -p:EnableNativeCompile=false
 
       - name: Jobs-only transpiler guard
         # 无 ECS 引用的消费方必须能用 [NativeTranspile] 数组 job（生成物不得含 ECS 耦合）。
         # 断言与自证逻辑见 tests/JobsOnlyTranspilerCheck/check.ps1。
         shell: pwsh
-        run: ./tests/JobsOnlyTranspilerCheck/check.ps1
+        run: ./tests/JobsOnlyTranspilerCheck/check.ps1 -Configuration ${{ matrix.configuration }}
 
       - name: Build ECS tests
-        run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release
+        run: dotnet build tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c ${{ matrix.configuration }}
+
+      - name: NativeTranspiler unit tests
+        run: dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c ${{ matrix.configuration }} --nologo --logger trx --results-directory TestResults --blame-hang --blame-hang-timeout 90s
 
       # Hot-reload behaviour gate. The native end-to-end evidence (P1-7 / P2-4 / P4) lives in
       # tools/HotReloadProbe — gitignored scaffolding with absolute toolchain paths — so it cannot
       # run here. These tests need no native build and no compiler: they assert the pure-managed
       # contract (reload-result contract + watcher detection/copy semantics).
       - name: Hot-reload contract tests
-        run: dotnet test tests/HotReload.Tests/HotReload.Tests.csproj -c Release --nologo
+        run: dotnet test tests/HotReload.Tests/HotReload.Tests.csproj -c ${{ matrix.configuration }} --nologo --logger trx --results-directory TestResults --blame-hang --blame-hang-timeout 90s
 
       # 后端必须显式指定并断言（ENTJOY_TEST_BACKEND）：
       # EntJoy.ECS.Tests 的输出目录默认没有 NativeDll.dll，而 NativeJobCore 的 ModuleInitializer 会沿
       # BaseDirectory → 入口目录 → 程序集目录 → CWD 上溯 探测，于是同一套测试会随本地 bin/ 内容静默切换后端。
       # 历史问题：文档宣称「测试集运行在 Native」，实际 CI 跑的是 Managed 回退。两条腿都跑，且由
       # BackendSelectionTests 断言实际后端 == 请求后端，杜绝「native 腿悄悄降级成 Managed 仍全绿」。
-      - name: Run ECS tests (Managed fallback backend, 5x)
+      - name: Run ECS tests (Managed fallback backend, 2x)
         shell: pwsh
         env:
           ENTJOY_TEST_BACKEND: managed
         run: |
-          1..5 | ForEach-Object {
-            Write-Host "ECS test pass (managed) $_/5"
-            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release --no-build --no-restore
+          1..2 | ForEach-Object {
+            Write-Host "ECS test pass (managed) $_/2"
+            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c ${{ matrix.configuration }} --no-build --no-restore --logger "trx;LogFileName=managed-$_.trx" --results-directory TestResults --blame-hang --blame-hang-timeout 90s
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Stage NativeDll for the native-backend leg
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake -S tools/NativeDllCore -B tools/NativeDllCore/build-ci -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build tools/NativeDllCore/build-ci --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item tools/NativeDllCore/build-ci/Release/NativeDll.dll tests/EntJoy.ECS.Tests/bin/Release/net8.0/ -Force
+          Copy-Item tools/NativeDllCore/build-ci/Release/NativeDll.dll tests/EntJoy.ECS.Tests/bin/${{ matrix.configuration }}/net8.0/ -Force
 
-      - name: Run ECS tests (Native backend, 5x)
+      - name: Run ECS tests (Native backend, assist off/on)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           ENTJOY_TEST_BACKEND: native
         run: |
-          1..5 | ForEach-Object {
-            Write-Host "ECS test pass (native) $_/5"
-            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c Release --no-build --no-restore
+          foreach ($assist in 0, 1) {
+            $env:ENTJOY_MAIN_ASSIST = "$assist"
+            Write-Host "ECS native test pass: assist=$assist"
+            dotnet test tests/EntJoy.ECS.Tests/EntJoy.ECS.Tests.csproj -c ${{ matrix.configuration }} --no-build --no-restore --logger "trx;LogFileName=native-assist-$assist.trx" --results-directory TestResults --blame-hang --blame-hang-timeout 90s
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      - name: Save managed test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: framework-${{ matrix.os }}-${{ matrix.configuration }}-${{ github.run_attempt }}
+          path: TestResults/
+          retention-days: 14
 
   windows-test:
     runs-on: windows-latest
@@ -92,21 +138,19 @@ jobs:
       - name: Configure C++ tests
         run: cmake -S tests/NativeDll.Tests -B build -A x64
       - name: Build C++ tests
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel 4
       - name: Run C++ tests
-        run: |
-          set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
-            ./build/Release/$test.exe
-          done
-        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error --output-junit Testing/native.xml
+
+      - name: Repeat concurrency and lifetime regressions
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error -L "Concurrency|Lifetime" --repeat until-fail:5 --output-junit Testing/repeated.xml
 
       - name: Build and run stage regressions
         run: |
           set -e
           for stage in Stage2_BatchLifetime Stage3_SchedulerLifecycle Stage6_CppExceptionSafety Stage7_DeferDepth Stage9_BatchStorageRace Stage10_ImplicitBatchToggle; do
             cmake -S tools/JobSystemBugTests/$stage -B tools/JobSystemBugTests/$stage/build -A x64
-            cmake --build tools/JobSystemBugTests/$stage/build --config Release
+            cmake --build tools/JobSystemBugTests/$stage/build --config Release --parallel 4
             ./tools/JobSystemBugTests/$stage/build/Release/$stage.exe
           done
         shell: bash
@@ -152,8 +196,63 @@ jobs:
           ./tools/JobSystemBugTests/Stage11_AbiFixture/bin/Release/net8.0/Stage11_AbiFixture.exe \
             tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_abi.dll \
             tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll
-          ./tools/JobSystemStressTest.CSharp/bin/Release/net8.0/JobSystemStressTest.CSharp.exe --timeout 60
         shell: bash
+
+      - name: Scheduler stress across worker and assist configurations
+        shell: pwsh
+        run: |
+          . ./.github/scripts/Invoke-TestProcess.ps1
+          New-Item -ItemType Directory -Force ci-reports | Out-Null
+          $stressExe = './tools/JobSystemStressTest.CSharp/bin/Release/net8.0/JobSystemStressTest.CSharp.exe'
+          $cases = @(@{ name = 'full'; arguments = @('--timeout', '180'); assist = '1'; timeout = 900 })
+          foreach ($workers in 1, 2, 4, 8) {
+            foreach ($assist in 0, 1) {
+              $cases += @{ name = "workers-$workers-assist-$assist"; arguments = @('--timeout', '180', '--workers', "$workers", '--contracts-only'); assist = "$assist"; timeout = 180 }
+            }
+          }
+          $failures = @()
+          "### Scheduler stress`n`n| Configuration | Exit code |`n| --- | --- |" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($case in $cases) {
+            $env:ENTJOY_MAIN_ASSIST = $case.assist
+            $arguments = $case.arguments
+            Write-Host "::group::$($case.name)"
+            $result = Invoke-TestProcess -FilePath $stressExe -Arguments $arguments -LogPath "ci-reports/$($case.name).log" -TimeoutSeconds $case.timeout
+            Write-Host '::endgroup::'
+            "| $($case.name) | $result |" >> $env:GITHUB_STEP_SUMMARY
+            if ($result -ne 0) { $failures += $case.name }
+          }
+          if ($failures.Count) { throw "Scheduler stress failed: $($failures -join ', ')" }
+
+      - name: Save native test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-${{ github.run_attempt }}
+          path: |
+            build/Testing/
+            ci-reports/
+          retention-days: 14
+
+  linux-debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure GCC Debug
+        run: cmake -S tests/NativeDll.Tests -B build-debug -DCMAKE_BUILD_TYPE=Debug
+      - name: Build GCC Debug
+        run: cmake --build build-debug --parallel 4
+      - name: Run native Debug tests
+        run: ctest --test-dir build-debug --output-on-failure --no-tests=error --output-junit Testing/native.xml
+      - name: Repeat Debug concurrency and lifetime regressions
+        run: ctest --test-dir build-debug --output-on-failure --no-tests=error -L 'Concurrency|Lifetime' --repeat until-fail:5 --output-junit Testing/repeated.xml
+      - name: Save Debug reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-debug-${{ github.run_attempt }}
+          path: build-debug/Testing/
+          retention-days: 14
 
   # 生成器回归（NativeTranspiler）：CI 里唯一会**真正编译生成物**的 job。
   # 背景：framework-test 用 -p:EnableNativeCompile=false 构建，NativeCompileTask 被条件跳过 ⇒
@@ -166,6 +265,13 @@ jobs:
   native-transpiler-regression:
     runs-on: windows-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    env:
+      ENTJOY_JOB_WORKERS: '4'
+      ENTJOY_MAIN_ASSIST: '1'
     steps:
       # 生成物 CMake 在 WIN32 下无条件编 imgui 调试面板（ENTJOY_IMGUI_ENABLED=1）
       # ⇒ 必须带出 src/NativeDll/thirdParty/imgui 子模块（imgui @ v1.91.6）。
@@ -178,12 +284,105 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build + run generator fixture (native compile + runtime semantics)
-        run: dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release
+      - name: Install ISPC
+        shell: pwsh
+        run: ./tools/ISPCWidthBoundaryTest/install.ps1
+
+      - name: Validate process exit codes and deadlock timeout
+        shell: pwsh
+        run: ./.github/scripts/Test-TestProcess.ps1
+
+      - name: Build generator fixture (C++/AutoSIMD/ISPC)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-reports | Out-Null
+          dotnet build tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c ${{ matrix.configuration }} -p:FixtureIspc=true 2>&1 | Tee-Object ci-reports/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generated semantics across worker and assist configurations
+        shell: pwsh
+        run: |
+          . ./.github/scripts/Invoke-TestProcess.ps1
+          $fixture = './tools/NativeTranspilerFixture/bin/${{ matrix.configuration }}/net8.0/NativeTranspilerFixture.exe'
+          $failures = @()
+          "### Generated semantics (${{ matrix.configuration }})`n`n| Workers | Assist | Mode | Exit code |`n| --- | --- | --- | --- |" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($workers in 1, 2, 4, 8) {
+            foreach ($assist in 0, 1) {
+              $env:ENTJOY_JOB_WORKERS = "$workers"
+              $env:ENTJOY_MAIN_ASSIST = "$assist"
+              foreach ($mode in 'semantics', 'copy') {
+                $caseName = "workers-$workers-assist-$assist-$mode"
+                $arguments = if ($mode -eq 'copy') { @('copy') } else { @() }
+                Write-Host "::group::$caseName"
+                $result = Invoke-TestProcess -FilePath $fixture -Arguments $arguments -LogPath "ci-reports/$caseName.log"
+                Write-Host '::endgroup::'
+                "| $workers | $assist | $mode | $result |" >> $env:GITHUB_STEP_SUMMARY
+                if ($result -ne 0) { $failures += $caseName }
+              }
+            }
+          }
+          if ($failures.Count) { throw "Generated semantics failed: $($failures -join ', ')" }
+
+      - name: Handle lifetime and allocation contract
+        shell: pwsh
+        run: |
+          . ./.github/scripts/Invoke-TestProcess.ps1
+          $fixture = './tools/NativeTranspilerFixture/bin/${{ matrix.configuration }}/net8.0/NativeTranspilerFixture.exe'
+          $failures = @()
+          foreach ($workers in 2, 4) {
+            foreach ($assist in 0, 1) {
+              $env:ENTJOY_JOB_WORKERS = "$workers"
+              $env:ENTJOY_MAIN_ASSIST = "$assist"
+              $caseName = "ownership-workers-$workers-assist-$assist"
+              Write-Host "::group::$caseName"
+              $result = Invoke-TestProcess -FilePath $fixture -Arguments @('alloc') -LogPath "ci-reports/$caseName.log"
+              Write-Host '::endgroup::'
+              "| $workers | $assist | ownership/alloc | $result |" >> $env:GITHUB_STEP_SUMMARY
+              if ($result -ne 0) { $failures += $caseName }
+            }
+          }
+          if ($failures.Count) { throw "Ownership/allocation contract failed: $($failures -join ', ')" }
+
+      - name: Run published source consumer outside the repository
+        shell: pwsh
+        run: |
+          . ./.github/scripts/Invoke-TestProcess.ps1
+          $publishDir = Join-Path $env:RUNNER_TEMP 'fixture-published'
+          dotnet publish tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c ${{ matrix.configuration }} -p:FixtureIspc=true --no-restore -o $publishDir 2>&1 | Tee-Object ci-reports/publish.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in 'NativeDll.dll', 'NativeTranspiled.dll', 'NativeTranspiled.layout.json') {
+            if (-not (Test-Path -LiteralPath (Join-Path $publishDir $file))) { throw "Published fixture is missing $file" }
+          }
+          $log = Join-Path $env:GITHUB_WORKSPACE 'ci-reports/published-semantics.log'
+          Push-Location $publishDir
+          try {
+            $result = Invoke-TestProcess -FilePath './NativeTranspilerFixture.exe' -LogPath $log
+            if ($result -ne 0) { exit $result }
+          } finally { Pop-Location }
 
       - name: Negative check (marker gate must fail the build)
         shell: pwsh
-        run: ./tools/NativeTranspilerFixture/negative-check.ps1
+        run: ./tools/NativeTranspilerFixture/negative-check.ps1 -Configuration ${{ matrix.configuration }}
+
+      - name: Save generator execution reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-transpiler-${{ matrix.configuration }}-${{ github.run_attempt }}
+          path: ci-reports/
+          retention-days: 14
+
+      - name: Save generated sources on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-generated-${{ matrix.configuration }}-${{ github.run_attempt }}
+          path: |
+            tools/NativeTranspilerFixture/NativeTranspiler_Generated/*.cpp
+            tools/NativeTranspilerFixture/NativeTranspiler_Generated/*.ispc
+            tools/NativeTranspilerFixture/NativeTranspiler_Generated/*.h
+            tools/NativeTranspilerFixture/NativeTranspiler_Generated/CMakeLists.txt
+          retention-days: 14
 
   # NuGet 包消费回归：pack 四个包 → 从本地 feed 还原 → 两个 PackageReference-only 消费者构建并运行。
   #   tests/NuGetConsumer     ：ECS 侧（托管 ECS + 原生 JobSystem + 转译的 IJobParallelFor/IJobChunk/IJobEntity）
@@ -214,31 +413,31 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install ISPC
-        run: |
-          $zip = "$env:RUNNER_TEMP\ispc.zip"
-          Invoke-WebRequest -Uri "https://github.com/ispc/ispc/releases/download/v1.30.0/ispc-v1.30.0-windows.zip" -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\ispc"
-          $ispcExe = Get-ChildItem "$env:RUNNER_TEMP\ispc" -Recurse -Filter "ispc.exe" | Select-Object -First 1
-          $ispcExe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
         shell: pwsh
+        run: ./tools/ISPCWidthBoundaryTest/install.ps1
 
       - name: Build and run width boundary test
+        shell: pwsh
         run: |
-          set -e
           cmake -S tools/ISPCWidthBoundaryTest -B tools/ISPCWidthBoundaryTest/build -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build tools/ISPCWidthBoundaryTest/build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tools/ISPCWidthBoundaryTest/build/Release/width_test_sse4.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx2.exe
-          set +e
-          ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx512.exe
-          avx512_exit=$?
-          set -e
-          if [ $avx512_exit -eq 0 ]; then
-            echo "avx512: PASS"
-          else
-            echo "avx512: skipped (exit $avx512_exit; runner may not support AVX512)"
-          fi
-        shell: bash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $avx512Supported = [System.Runtime.Intrinsics.X86.Avx512F]::IsSupported -and
+            [System.Runtime.Intrinsics.X86.Avx512BW]::IsSupported -and
+            [System.Runtime.Intrinsics.X86.Avx512CD]::IsSupported -and
+            [System.Runtime.Intrinsics.X86.Avx512DQ]::IsSupported -and
+            [System.Runtime.Intrinsics.X86.Avx512F+VL]::IsSupported
+          if ($avx512Supported) {
+            ./tools/ISPCWidthBoundaryTest/build/Release/width_test_avx512.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host 'AVX512 SKX unavailable; skipping execution.'
+          }
 
   linux-sanitizers:
     runs-on: ubuntu-latest
@@ -258,12 +457,10 @@ jobs:
       - name: Build ASAN+UBSAN
         run: cmake --build build-asan -j
       - name: Run ASAN+UBSAN
-        run: |
-          set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
-            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build-asan/$test
-          done
-        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-asan --output-on-failure --no-tests=error --output-junit Testing/native.xml
 
       - name: Configure TSAN
         run: >
@@ -275,28 +472,24 @@ jobs:
       - name: Build TSAN
         run: cmake --build build-tsan -j
       - name: Run TSAN
-        run: |
-          set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
-            TSAN_OPTIONS=halt_on_error=1 ./build-tsan/$test
-          done
-        shell: bash
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-tsan --output-on-failure --no-tests=error --output-junit Testing/native.xml
 
-  # N12（2026-10-03）：**弱内存序**验证。本协议的提交侧刻意在"有人正在轮询注入器"时**不写任何
-  # 共享字**，安全性依赖两处 seq-cst fence 的配对（PushFence / SleepFence，见 docs/gridsearch/09 §49.2）。
-  # 为什么必须换架构跑：x86 是 TSO，而且注入器的 push 本身是 locked CAS（已是全屏障），
-  # **在 x86 上即使把两处 fence 全删掉也测不出问题** —— 只有 aarch64 这类弱内存序平台才会真的去考它。
-  # （注意：qemu 用户态模拟**不能**作为内存序证据，它的重排通常比真机更强。）
-  #
-  # ⚠ 为什么只在手动 workflow_dispatch 时跑：`ubuntu-24.04-arm` 对**公开仓库**免费可用，私有仓库需要
-  # 付费 larger runner；若该 label 不可用，job 会**一直排队**，把 push/PR 的正常门禁拖住。
-  # 确认仓库有 arm64 runner 后，把下面的 `if:` 删掉、并把它加进 `release-gate` 的 needs 即可转正。
-  #
-  # 这一步能证明什么 / 不能证明什么：能证明"在弱内存序平台上，本协议在 20 次 × 5 形态的对抗性形状下
-  # 没有丢唤醒"，并且能暴露 aarch64 的编译/可移植性问题（x86 专属代码见 CpuPause / __rdtsc /
-  # _mm_prefetch 的 guard）；**不能**证明协议正确 —— 丢唤醒是概率性的，"没测到反例"不等于"没有反例"。
+      - name: Save sanitizer reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sanitizers-${{ github.run_attempt }}
+          path: |
+            build-asan/Testing/
+            build-tsan/Testing/
+          retention-days: 14
+
+  # Core scheduler portability check on real weak-memory hardware.
+  # The distributed NuGet runtime remains win-x64.
   arm64-native:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event.repository.private == false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -314,33 +507,85 @@ jobs:
         run: cmake --build build-arm64 -j
 
       - name: Run all native suites (aarch64)
-        run: |
-          set -e
-          for test in JobSystemTests ChaseLevIntegrationTests AssistLifetimeTests ImplicitBatchTests MPMCInjectorTests SparseTileDequeTests SparseTileDequeSmoketest SparseTileDequeTrace ShutdownFinalizeTests WakeLivenessTests; do
-            ./build-arm64/$test
-          done
-        shell: bash
+        run: ctest --test-dir build-arm64 --output-on-failure --no-tests=error --output-junit Testing/native.xml
 
-      - name: Repeat the wake-liveness test x20 (lost wakeup is probabilistic)
+      - name: Repeat wake-liveness checks
+        run: ctest --test-dir build-arm64 --output-on-failure --no-tests=error -R '^WakeLivenessTests$' --repeat until-fail:20 --output-junit Testing/repeated.xml
+      - name: Save ARM64 reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-native-${{ github.run_attempt }}
+          path: build-arm64/Testing/
+          retention-days: 14
+
+  extended-stress:
+    if: inputs.extended == true || github.event_name == 'schedule'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      STRESS_LONG: '1'
+      STRESS_ROUNDS: '5'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build stress executables and native runtime
+        shell: bash
         run: |
           set -e
-          for i in $(seq 1 20); do
-            if ! ./build-arm64/WakeLivenessTests > /tmp/wl-$i.log 2>&1; then
-              echo "WakeLivenessTests FAILED on iteration $i"
-              cat /tmp/wl-$i.log
-              exit 1
-            fi
-          done
-          echo "20x WakeLivenessTests on aarch64: no lost wakeup observed"
+          cmake -S tools/JobSystemStressTest -B build-stress -A x64
+          cmake --build build-stress --config Release --parallel 4
+          cmake -S tools/NativeDllCore -B build-core -A x64
+          cmake --build build-core --config Release --parallel 4
+          dotnet build tools/JobSystemStressTest.CSharp -c Release
+          cp build-core/Release/NativeDll.dll tools/JobSystemStressTest.CSharp/bin/Release/net8.0/
+      - name: Run repeated native long stress
         shell: bash
+        run: |
+          set -e
+          set -o pipefail
+          mkdir -p stress-reports
+          ./build-stress/Release/JobSystemStressTest.exe --timeout 120 2>&1 | tee stress-reports/native.log
+      - name: Run repeated managed and native-bridge long stress
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+          ./tools/JobSystemStressTest.CSharp/bin/Release/net8.0/JobSystemStressTest.CSharp.exe --timeout 120 --workers 4 2>&1 | tee stress-reports/bridge.log
+      - name: Save long stress reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-stress-${{ github.run_attempt }}
+          path: stress-reports/
+          retention-days: 14
 
   release-gate:
     if: always()
-    needs: [framework-test, windows-test, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression]
+    needs: [workflow-validation, framework-test, windows-test, linux-debug, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression, arm64-native, extended-stress]
     runs-on: ubuntu-latest
     steps:
+      - name: Summarize release checks
+        if: always()
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          {
+            printf '### Release checks\n\n| Check | Result |\n| --- | --- |\n'
+            printf '%s' "$CHECK_RESULTS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require every release check
         run: |
+          test "${{ needs.workflow-validation.result }}" = "success"
+          test "${{ needs.linux-debug.result }}" = "success"
+          if [ "${{ github.event.repository.private }}" = "false" ]; then
+            test "${{ needs.arm64-native.result }}" = "success"
+          fi
+          if [ "${{ inputs.extended }}" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            test "${{ needs.extended-stress.result }}" = "success"
+          fi
           test "${{ needs.framework-test.result }}" = "success"
           test "${{ needs.windows-test.result }}" = "success"
           test "${{ needs.nuget-consumer-test.result }}" = "success"

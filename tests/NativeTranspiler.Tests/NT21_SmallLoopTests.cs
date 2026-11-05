@@ -21,6 +21,7 @@ using NativeTranspiler; using EntJoy.Collections; using EntJoy.JobSystem;
         [Theory]
         [InlineData("for(int k=-1;k<=1;k++) { if(k==0) continue; Values[index] += k; }")]
         [InlineData("for(int k=0;k<8;++k) { if(Values[index]<k) break; Values[index] = k; }")]
+        [InlineData("for(int k=0;k<8;k+=2) { if(Values[index]<k) break; Values[index] = k; }")]
         public void ShortFixedLoop_PreservesControlFlowAndAddsCompilerHint(string body)
         {
             var cpp = Emit(body);
@@ -32,7 +33,6 @@ using NativeTranspiler; using EntJoy.Collections; using EntJoy.JobSystem;
         [InlineData("for(int k=0;k<Limit;k++) Values[index] = k;")]
         [InlineData("for(int k=0;k<64;k++) Values[index] = k;")]
         [InlineData("for(int k=0;k<8;k++) { if(k==2) k++; Values[index] = k; }")]
-        [InlineData("for(int k=0;k<8;k+=2) Values[index] = k;")]
         public void DynamicLargeOrMutableLoop_UsesDefaultPolicy(string body)
             => Assert.DoesNotContain("#pragma clang loop unroll", Emit(body));
 

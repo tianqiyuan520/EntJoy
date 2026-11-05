@@ -53,8 +53,7 @@ namespace NativeTranspiler.Analyzer
             bool IsDataView(ExpressionSyntax expression)
             {
                 var type = model.GetTypeInfo(expression).Type;
-                return type is IPointerTypeSymbol || (type != null && (NativeTranspiler.IsEntJoyNativeContainerType(type)
-                    || NativeApiSurface.IsNativeColumn(type, model.Compilation)));
+                return type is IPointerTypeSymbol || (type != null && NativeTranspiler.IsEntJoyNativeContainerType(type));
             }
 
             foreach (var node in nodes)
@@ -70,8 +69,8 @@ namespace NativeTranspiler.Analyzer
                     && IsMetadata(receiver.Expression))
                 {
                     var symbol = model.GetSymbolInfo(call).Symbol as IMethodSymbol;
-                    if (symbol == null || !(NativeApiSurface.IsAllowedColumnMethod(symbol, model.Compilation)
-                        || (IsDataView(receiver.Expression) && symbol.Name == "GetUnsafePtr" && symbol.Parameters.Length == 0))) return 0;
+                    if (symbol == null || !(IsDataView(receiver.Expression) && symbol.Name == "GetUnsafePtr"
+                        && symbol.Parameters.Length == 0)) return 0;
                 }
                 if (node is MemberAccessExpressionSyntax member && IsMetadata(member.Expression)
                     && model.GetSymbolInfo(member).Symbol is IPropertySymbol property

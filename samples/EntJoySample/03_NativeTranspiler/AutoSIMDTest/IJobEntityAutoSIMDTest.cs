@@ -1,5 +1,5 @@
-// IJobEntity + AutoSIMD=Enabled 正确性测试
-// 验证：AutoSIMD 走 ChunkRange 路径后，IJobEntity 的 SIMD 计算结果与 C# 标量版本一致。
+// IJobEntity + AutoSIMD=Vectorize 正确性测试
+// 验证：请求编译器自动向量化的 IJobEntity 计算结果与 C# 标量版本一致。
 // 覆盖 Light（纯乘加，无 fast-math 容差）与 Heavy（16×sin/cos，_n_sin_avx2 ~3.5ULP）两种场景。
 // 同时覆盖无 AutoSIMD 的 CPP IJobEntity 与 IJobChunk（对照 baseline）。
 
@@ -47,8 +47,8 @@ namespace EntJoySample.AutoSIMDTest
         public float2 Value;
     }
 
-    // Light IJobEntity: AutoSIMD=Enabled（被测目标）
-    [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+    // Light IJobEntity: AutoSIMD=Vectorize（被测目标）
+    [NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
     public struct LightJobEntityAutoSIMD : IJobEntity
     {
         public float DeltaTime;
@@ -58,8 +58,8 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // Heavy IJobEntity: AutoSIMD=Enabled（被测目标）
-    [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+    // Heavy IJobEntity: AutoSIMD=Vectorize（被测目标）
+    [NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
     public struct HeavyJobEntityAutoSIMD : IJobEntity
     {
         public float DeltaTime;
@@ -194,7 +194,7 @@ namespace EntJoySample.AutoSIMDTest
             Console.WriteLine($"=== IJobEntity / IJobChunk Test (N={N}) ===\n");
             int passed = 0, failed = 0;
 
-            // AutoSIMD IJobEntity（ChunkRange 真 SIMD）
+            // IJobEntity：请求编译器自动向量化。
             RunCase("Light IJobEntity AutoSIMD", false, LightEpsilon, q => new LightJobEntityAutoSIMD { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
             RunCase("Heavy IJobEntity AutoSIMD", true, HeavyEpsilon, q => new HeavyJobEntityAutoSIMD { DeltaTime = Dt }.Schedule(q).Complete(), ref passed, ref failed);
 

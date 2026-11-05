@@ -146,7 +146,7 @@ dotnet build samples\EntJoySample\EntJoySample.csproj -c Release -p:ENTJOY_START
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.2" />
 </ItemGroup>
 ```
 
@@ -463,7 +463,7 @@ NativeTranspiler 不是完整的 C# 编译器。被转译的 Job 应遵守以下
 
 - [`03_NativeTranspiler`](samples/EntJoySample/03_NativeTranspiler)
 - [`IJobChunkMoveCompareSample.cs`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/IJobChunkMoveCompareSample.cs)
-- [`NativeTranspiler_Generated`](samples/EntJoySample/NativeTranspiler_Generated)
+- `samples/EntJoySample/NativeTranspiler_Generated/`：构建时生成的原生代码目录。
 
 ## 样例项目
 
@@ -740,7 +740,7 @@ See [Using NuGet Packages](#using-nuget-packages) for the packages and toolchain
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="EntJoy.ECS" Version="1.0.1" />
+  <PackageReference Include="EntJoy.ECS" Version="1.0.2" />
 </ItemGroup>
 ```
 
@@ -1051,7 +1051,7 @@ Working sources:
 
 - [`03_NativeTranspiler`](samples/EntJoySample/03_NativeTranspiler)
 - [`IJobChunkMoveCompareSample.cs`](samples/EntJoySample/02_IJobChunkECS/IJobChunkMoveCompareTest/IJobChunkMoveCompareSample.cs)
-- [`NativeTranspiler_Generated`](samples/EntJoySample/NativeTranspiler_Generated)
+- `samples/EntJoySample/NativeTranspiler_Generated/`: native code emitted during the build.
 
 ## Samples
 

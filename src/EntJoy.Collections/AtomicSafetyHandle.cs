@@ -35,7 +35,6 @@ namespace EntJoy.Collections
     internal static class SafetyHandleManager
     {
         private const int MaxHandles = 1024 * 1024;
-        private const int StateFree = 0;
         private const int StateActive = 1;
         private const int StateReleased = 2;
 

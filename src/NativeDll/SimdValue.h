@@ -288,6 +288,21 @@ struct simd_value<int> {
     friend simd_value operator>>(simd_value a, int shift) { return simd_value{ n_srai_epi32(a.v, shift) }; }
     friend simd_value operator>>(simd_value a, unsigned int shift) { return simd_value{ n_srli_epi32(a.v, shift) }; }
     friend simd_value operator<<(simd_value a, int shift) { return simd_value{ n_slli_epi32(a.v, shift) }; }
+    friend simd_value operator<<(simd_value a, simd_value shift) {
+        n_int counts = n_and_epi32(shift.v, n_set1_epi32(31));
+#if defined(NSIMD_AVX512)
+        return simd_value{ _mm512_sllv_epi32(a.v, counts) };
+#elif defined(NSIMD_AVX2)
+        return simd_value{ _mm256_sllv_epi32(a.v, counts) };
+#else
+        int values[NSIMD_WIDTH], shifts[NSIMD_WIDTH], result[NSIMD_WIDTH];
+        n_store_epi32(values, a.v);
+        n_store_epi32(shifts, counts);
+        for (int i = 0; i < NSIMD_WIDTH; i++)
+            result[i] = static_cast<int>(static_cast<unsigned int>(values[i]) << shifts[i]);
+        return simd_value{ n_load_epi32(result) };
+#endif
+    }
 
     // Modulo（per-lane 标量回退，无 SIMD 指令）
     friend simd_value operator%(simd_value a, simd_value b) {

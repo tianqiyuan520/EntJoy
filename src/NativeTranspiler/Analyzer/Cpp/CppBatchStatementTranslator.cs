@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -26,24 +27,21 @@ namespace NativeTranspiler.Analyzer
         protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
         {
             string name = identifier.Identifier.Text;
-            if (name == _originalIndexName)
+            if (name == _originalIndexName && (identifier.SyntaxTree != _semanticModel.SyntaxTree
+                || SymbolHelper.GetBoundSymbol(_semanticModel, identifier) is IParameterSymbol))
             {
                 _builder.Append(_newIndexName);
                 return;
             }
-            if (_originalCountName != null && name == _originalCountName)
+            if (_originalCountName != null && name == _originalCountName
+                && (identifier.SyntaxTree != _semanticModel.SyntaxTree
+                    || SymbolHelper.GetBoundSymbol(_semanticModel, identifier) is IParameterSymbol))
             {
                 _builder.Append(_newCountName);
                 return;
             }
             // 委托给基类处理常量内联、指针字段和值字段
             base.TranslateIdentifier(identifier);
-        }
-
-        protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
-        {
-            // 批处理中赋值语句的处理与基类完全相同，直接调用基类
-            base.TranslateAssignment(assignment);
         }
     }
 }

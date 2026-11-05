@@ -176,7 +176,6 @@ namespace EntJoy.ECS
 
         /// <summary>非托管列偏移表首址（只读；与 <see cref="ChunkMetadata.ComponentOffsets"/> 逐项一致）。</summary>
         public int* GetChunkOffsetsNative() => _chunkOffsetsNative;
-        private const int _chunkHeaderSize = 64;
 
         // Contiguous memory slab: 64 KB per slab. Multiple chunks are carved
         // from each slab so their component arrays are physically adjacent.

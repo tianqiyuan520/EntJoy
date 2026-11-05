@@ -24,11 +24,6 @@ samples/Godot/Godot.zip
 # Scripts (local-only tooling, not part of library sources)
 /scripts/
 
-# Docs 顶层工作笔记（本地 .md）不入库；archive/gridsearch/research/public 子目录正常跟踪
-/docs/*.md
-# 例外：文档总索引（对外入口，须入库）
-!/docs/README.md
-
 # Native/CMake/MSVC artifacts
 **/build/
 **/build-*/

@@ -57,11 +57,11 @@ static class ManagedStressTests
     }
     static void Require(bool c, string m) { if (!c) throw new Exception($"[FAIL] {m}"); }
 
-    public static void RunAll(int timeoutSec, bool longMode)
+    public static void RunAll(int timeoutSec, bool longMode, int workers, bool contractsOnly)
     {
         _timeoutSec = timeoutSec;
-        ManagedJobScheduler.Initialize(0);
-        RunWithTimeout("M1. MassiveScheduleComplete (100K)", Test_MassiveScheduleComplete);
+        ManagedJobScheduler.Initialize(workers);
+        if (!contractsOnly) RunWithTimeout("M1. MassiveScheduleComplete (100K)", Test_MassiveScheduleComplete);
         RunWithTimeout("M2. DeepDependencyChain (1000)", Test_DependencyChain);
         RunWithTimeout("M3. ConcurrentSchedule (8 threads)", Test_ConcurrentSchedule);
         RunWithTimeout("M4. ParallelFor (100K)", Test_ParallelFor);
@@ -70,10 +70,14 @@ static class ManagedStressTests
         RunWithTimeout("M7. DiamondDependency (200)", Test_DiamondDependency);
         RunWithTimeout("M8. FanOutFanIn (8x10)", Test_FanOutFanIn);
         RunWithTimeout("M9. ZeroLength (5K)", Test_ZeroLength);
-        RunWithTimeout("M10. TinyJobStorm (500K)", Test_TinyJobStorm);
-        RunWithTimeout("M11. MixedJobTypes (50K)", Test_MixedJobTypes);
-        RunWithTimeout("M12. HeavyParallelFor (50K)", Test_HeavyParallelFor);
+        if (!contractsOnly)
+        {
+            RunWithTimeout("M10. TinyJobStorm (500K)", Test_TinyJobStorm);
+            RunWithTimeout("M11. MixedJobTypes (50K)", Test_MixedJobTypes);
+            RunWithTimeout("M12. HeavyParallelFor (50K)", Test_HeavyParallelFor);
+        }
         RunWithTimeout("M13. CombineDependencies (200)", Test_CombineDependencies);
+        RunWithTimeout("M15. GatedDependencyOrder", () => DependencyOrderStress.Run(native: false));
         if (longMode) RunWithTimeout("M14. LongRunning (30s)", Test_LongRunning);
     }
 
@@ -105,7 +109,7 @@ static class ManagedStressTests
     static void Test_ConcurrentSchedule()
     {
         long[] counter = [0];
-        var barrier = new Barrier(8);
+        using var barrier = new Barrier(8);
         Parallel.For(0, 8, _ =>
         {
             barrier.SignalAndWait();
@@ -115,6 +119,7 @@ static class ManagedStressTests
                 ManagedJobScheduler.Schedule(ref j).Complete();
             }
         });
+        Require(counter[0] == 80_000, $"M3: executed {counter[0]}/80000 jobs");
     }
 
     static void Test_ParallelFor()
@@ -148,8 +153,14 @@ static class ManagedStressTests
             if (i % 2 == 0) { var j = new ThrowingJob(); handles[i] = ManagedJobScheduler.Schedule(ref j); }
             else { var j = new IncJob { Counter = [0] }; handles[i] = ManagedJobScheduler.Schedule(ref j); }
         }
-        foreach (var h in handles) try { h.Complete(); } catch { caught++; }
-        Require(caught >= 250, $"M6: {caught}/1000");
+        for (int i = 0; i < handles.Length; i++)
+        {
+            bool threw = false;
+            try { handles[i].Complete(); }
+            catch (InvalidOperationException) { caught++; threw = true; }
+            Require(threw == (i % 2 == 0), $"M6: exception attributed to the wrong handle {i}");
+        }
+        Require(caught == 500, $"M6: expected 500 throwing handles, observed {caught}");
         long[] c = [0]; var j2 = new IncJob { Counter = c };
         ManagedJobScheduler.Schedule(ref j2).Complete();
         Require(c[0] == 1, "M6: broken");
@@ -232,16 +243,27 @@ static class ManagedStressTests
 
     static void Test_MixedJobTypes()
     {
+        long[] counter = [0];
+        int caught = 0;
         for (int i = 0; i < 50_000; i++)
         {
             switch (i % 4)
             {
-                case 0: var j0 = new IncJob { Counter = [0] }; ManagedJobScheduler.Schedule(ref j0).Complete(); break;
-                case 1: var j1 = new ParallelForIncJob { Hits = new int[100] }; ManagedJobScheduler.Schedule(ref j1, 100, 0).Complete(); break;
-                case 2: var j2 = new ParallelForIncJob { Hits = new int[1000] }; ManagedJobScheduler.Schedule(ref j2, 1000, 50).Complete(); break;
-                case 3: var j3 = new ThrowingJob(); try { ManagedJobScheduler.Schedule(ref j3).Complete(); } catch { } break;
+                case 0: var j0 = new IncJob { Counter = counter }; ManagedJobScheduler.Schedule(ref j0).Complete(); break;
+                case 1:
+                    var j1 = new ParallelForIncJob { Hits = new int[100] };
+                    ManagedJobScheduler.Schedule(ref j1, j1.Hits.Length, 0).Complete();
+                    foreach (int visits in j1.Hits) Require(visits == 1, "M11: small element missed or repeated");
+                    break;
+                case 2:
+                    var j2 = new ParallelForIncJob { Hits = new int[1000] };
+                    ManagedJobScheduler.Schedule(ref j2, j2.Hits.Length, 50).Complete();
+                    foreach (int visits in j2.Hits) Require(visits == 1, "M11: large element missed or repeated");
+                    break;
+                case 3: var j3 = new ThrowingJob(); try { ManagedJobScheduler.Schedule(ref j3).Complete(); } catch (InvalidOperationException) { caught++; } break;
             }
         }
+        Require(counter[0] == 12_500 && caught == 12_500, $"M11: serial={counter[0]}, exceptions={caught}");
     }
 
     static void Test_HeavyParallelFor()
@@ -282,10 +304,13 @@ static class ManagedStressTests
                     int len = 1 + (Environment.CurrentManagedThreadId * 137 % 10000);
                     int[] h = new int[len]; var j = new ParallelForIncJob { Hits = h };
                     ManagedJobScheduler.Schedule(ref j, len, 0).Complete();
+                    for (int i = 0; i < len; i++) Require(h[i] == 1, $"M14: index {i} executed {h[i]} times");
                     Interlocked.Increment(ref total);
                 }
             });
         Thread.Sleep(30_000); stop.Cancel(); Task.WaitAll(tasks);
+        stop.Dispose();
+        Require(total > 0, "M14: no completed work during the long run");
         Console.WriteLine($"  LongRunning: {total} rounds in 30s");
     }
 }

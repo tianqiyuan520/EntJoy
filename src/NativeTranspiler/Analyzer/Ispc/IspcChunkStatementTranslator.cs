@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
+using System.Linq;
 using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
@@ -12,13 +13,6 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, string> _chunkNativeArrayLengthAliases = new();
         private readonly string? _foreachStartName;
         private readonly string? _foreachEndName;
-
-        /// <summary>
-        /// 跟踪从 ChunkNativeArray 元素初始化的局部 struct 变量。
-        /// T var = positions[index] 模式的 var 会被映射到 positions_ptr[index] 的直接访问。
-        /// Key: 局部变量名，Value: 完整的 ISPC 替换文本（如 "positions_ptr[index]"）
-        /// </summary>
-        private readonly Dictionary<string, string> _chunkProxyLocalVars = new();
 
         public IspcChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct)
             : base(semanticModel, jobStruct, null, false)
@@ -32,59 +26,26 @@ namespace NativeTranspiler.Analyzer
             _foreachEndName = foreachEndName;
         }
 
-        protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
+        protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax declaration)
         {
-            bool emittedAny = false;
-            foreach (var variable in localDecl.Declaration.Variables)
+            if (declaration.Declaration.Variables.All(variable => IsChunkNativeArrayInitializer(variable.Initializer?.Value)))
             {
-                if (IsChunkNativeArrayInitializer(variable.Initializer?.Value))
+                foreach (var variable in declaration.Declaration.Variables)
                 {
-                    _chunkNativeArrayNames.Add(variable.Identifier.Text);
-                    _nativeArrayListNames.Add(variable.Identifier.Text);
-                    continue;
+                    _chunkNativeArrayNames.Add(variable.Identifier.ValueText);
+                    _nativeArrayListNames.Add(variable.Identifier.ValueText);
                 }
-
-                if (TryGetChunkNativeArrayLengthAlias(variable.Initializer?.Value, out var arrayName))
-                {
-                    _chunkNativeArrayLengthAliases[variable.Identifier.Text] = arrayName;
-                }
-
-                // 检测 T var = positions[index] 模式，将 var 标记为数组代理
-                // 后续 var.field 的访问将被翻译为 positions_ptr[index].field
-                // 从而消除 struct copy-in/copy-out 开销
-                if (IsChunkNativeArrayElementAccess(variable.Initializer?.Value, out var proxyArrayName, out var proxyIndexExpr))
-                {
-                    string indexText = CaptureExpressionText(proxyIndexExpr);
-                    _chunkProxyLocalVars[variable.Identifier.Text] = $"{proxyArrayName}_ptr[{indexText}]";
-                    continue; // 跳过此局部变量的声明和拷贝
-                }
-
-                if (!emittedAny)
-                {
-                    AppendIndent();
-                    var type = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
-                    _builder.Append(ToIspcTypeName(cppType));
-                    emittedAny = true;
-                }
-                else
-                {
-                    _builder.Append(", ");
-                }
-
-                _builder.Append(' ').Append(variable.Identifier.Text);
-                if (variable.Initializer != null)
-                {
-                    _builder.Append(" = ");
-                    TranslateExpression(variable.Initializer.Value);
-                }
+                return;
             }
-
-            if (emittedAny)
-            {
-                _builder.AppendLine(";");
-            }
+            foreach (var variable in declaration.Declaration.Variables)
+                if (TryGetChunkNativeArrayLengthAlias(variable.Initializer?.Value, out var array)
+                    && CanDeclareUniformLocal(declaration, variable))
+                    _chunkNativeArrayLengthAliases[variable.Identifier.ValueText] = array;
+            base.TranslateLocalDeclaration(declaration);
         }
+
+        protected override bool IsUniformArrayReceiver(IdentifierNameSyntax array)
+            => _chunkNativeArrayNames.Contains(array.Identifier.ValueText) || base.IsUniformArrayReceiver(array);
 
         protected override void TranslateForStatement(ForStatementSyntax forStmt)
         {
@@ -92,24 +53,64 @@ namespace NativeTranspiler.Analyzer
             {
                 return;
             }
+            if (!_insideForeach && UsesChunkView(forStmt))
+            {
+                AppendIndent();
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkLoopRequiresEntityLengthBound");
+                return;
+            }
 
             base.TranslateForStatement(forStmt);
         }
 
-        protected override void TranslateIdentifier(IdentifierNameSyntax identifier)
+        protected override void TranslateWhileStatement(WhileStatementSyntax statement)
         {
-            string name = identifier.Identifier.Text;
-            // 结构体代理变量：直接替换为 array_ptr[index] 消除 struct copy
-            if (_chunkProxyLocalVars.TryGetValue(name, out string proxyReplacement))
-            {
-                _builder.Append(proxyReplacement);
-                return;
-            }
-            base.TranslateIdentifier(identifier);
+            if (!_insideForeach && UsesChunkView(statement))
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkLoopRequiresEntityLengthBound");
+            else base.TranslateWhileStatement(statement);
+        }
+
+        protected override void TranslateDoStatement(DoStatementSyntax statement)
+        {
+            if (!_insideForeach && UsesChunkView(statement))
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkLoopRequiresEntityLengthBound");
+            else base.TranslateDoStatement(statement);
+        }
+
+        private bool UsesChunkView(SyntaxNode statement) => statement.DescendantNodes().OfType<ElementAccessExpressionSyntax>()
+            .Any(access => access.Expression is IdentifierNameSyntax array && _chunkNativeArrayNames.Contains(array.Identifier.ValueText));
+
+        protected override void TranslateExpressionStatement(ExpressionStatementSyntax statement)
+        {
+            if (!_insideForeach && statement.Expression is InvocationExpressionSyntax call && !IsScalarMetadataCall(call))
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkScalarCall");
+            else base.TranslateExpressionStatement(statement);
+        }
+
+        protected override void TranslateInvocation(InvocationExpressionSyntax invocation)
+        {
+            if (!_insideForeach && !IsScalarMetadataCall(invocation))
+                _builder.Append($"/*{UnsupportedMarkers.Expr}ISPC_ChunkScalarCall*/");
+            else base.TranslateInvocation(invocation);
+        }
+
+        private bool IsScalarMetadataCall(InvocationExpressionSyntax invocation)
+        {
+            if (_semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method) return false;
+            if (method.ContainingType.ToDisplayString() is "System.Math" or "System.MathF"
+                || method.ContainingNamespace.ToDisplayString() == Config.NamespaceEntJoyMathematics) return true;
+            return NativeTranspiler.IsEntJoyNativeContainerType(method.ContainingType)
+                && method.Name is "GetUnsafePtr" or "GetUnsafeReadOnlyPtr";
         }
 
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
+            if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol property
+                && property.Name == "Count" && property.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
+            {
+                _builder.Append("__entity_count");
+                return;
+            }
             if (memberAccess.Expression is IdentifierNameSyntax id &&
                 _chunkNativeArrayNames.Contains(id.Identifier.Text) &&
                 memberAccess.Name.Identifier.Text == "Length")
@@ -138,48 +139,6 @@ namespace NativeTranspiler.Analyzer
             base.TranslateElementAccess(elementAccess);
         }
 
-        protected override void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
-        {
-            // 检测并跳过冗余的 struct writeback 语句: positions[index] = position;
-            if (exprStmt.Expression is AssignmentExpressionSyntax assignment &&
-                assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
-                assignment.Right is IdentifierNameSyntax rightId &&
-                _chunkProxyLocalVars.ContainsKey(rightId.Identifier.Text) &&
-                assignment.Left is ElementAccessExpressionSyntax leftElem &&
-                leftElem.Expression is IdentifierNameSyntax leftArrayId &&
-                _chunkNativeArrayNames.Contains(leftArrayId.Identifier.Text))
-            {
-                if (_chunkProxyLocalVars.TryGetValue(rightId.Identifier.Text, out string proxyReplacement) &&
-                    proxyReplacement.StartsWith(leftArrayId.Identifier.Text + "_ptr["))
-                {
-                    return; // 跳过整个语句（不 emit 分号）
-                }
-            }
-            base.TranslateExpressionStatement(exprStmt);
-        }
-
-        protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
-        {
-            // 检测并消除 struct writeback 模式: nativeArray[index] = proxyVar
-            // 因为 proxyVar 的所有 per-field 写入已经通过 TranslateIdentifier 重定向直接写入了数组，
-            // 这里的整 struct 回写是冗余拷贝，可以安全跳过。
-            if (assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
-                assignment.Right is IdentifierNameSyntax rightId &&
-                _chunkProxyLocalVars.ContainsKey(rightId.Identifier.Text) &&
-                assignment.Left is ElementAccessExpressionSyntax leftElem &&
-                leftElem.Expression is IdentifierNameSyntax leftArrayId &&
-                _chunkNativeArrayNames.Contains(leftArrayId.Identifier.Text))
-            {
-                // 确认代理变量对应的数组与 LHS 数组匹配（避免误跳过 cross-array 赋值）
-                if (_chunkProxyLocalVars.TryGetValue(rightId.Identifier.Text, out string proxyReplacement) &&
-                    proxyReplacement.StartsWith(leftArrayId.Identifier.Text + "_ptr["))
-                {
-                    return; // 跳过冗余的 struct writeback
-                }
-            }
-            base.TranslateAssignment(assignment);
-        }
-
         private bool TryTranslateChunkArrayForEach(ForStatementSyntax forStmt)
         {
             if (forStmt.Declaration == null ||
@@ -198,6 +157,44 @@ namespace NativeTranspiler.Analyzer
                 return false;
             }
 
+
+            if (!IntForLoop.TryAnalyze(forStmt, _semanticModel, out var loop)
+                || loop.Step != 1 || loop.Comparison != SyntaxKind.LessThanExpression
+                || _semanticModel.GetConstantValue(loop.Start).Value is not int start || start != 0)
+            {
+                AppendIndent();
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkLoopRequiresZeroBasedUnitStride");
+                return true;
+            }
+            if (forStmt.Statement.DescendantNodesAndSelf().OfType<BreakStatementSyntax>().Any(statement =>
+                statement.Ancestors().FirstOrDefault(node => node is ForStatementSyntax or WhileStatementSyntax or DoStatementSyntax) == forStmt))
+            {
+                AppendIndent();
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkLoopBreak");
+                return true;
+            }
+            var counter = _semanticModel.GetDeclaredSymbol(forStmt.Declaration.Variables[0]);
+            foreach (var access in forStmt.Statement.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (access.Expression is not IdentifierNameSyntax array || !_chunkNativeArrayNames.Contains(array.Identifier.ValueText)) continue;
+                ExpressionSyntax index = access.ArgumentList.Arguments[0].Expression;
+                while (index is ParenthesizedExpressionSyntax parentheses) index = parentheses.Expression;
+                if (!SymbolEqualityComparer.Default.Equals(_semanticModel.GetSymbolInfo(index).Symbol, counter))
+                {
+                    AppendIndent();
+                    _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkCrossIndexAccess");
+                    return true;
+                }
+            }
+            var flow = _semanticModel.AnalyzeDataFlow(forStmt.Statement);
+            if (flow == null || !flow.Succeeded || flow.WrittenInside.OfType<ILocalSymbol>().Any(local =>
+                !flow.VariablesDeclared.Contains(local, SymbolEqualityComparer.Default)
+                && !_chunkNativeArrayNames.Contains(local.Name)))
+            {
+                AppendIndent();
+                _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_ChunkOuterLocalWrite");
+                return true;
+            }
             // 注：SendEvent 场景保持 foreach_tiled（SIMD）。
             // ISPC atomic_add_global 是 fetch-add，对 uniform 地址 + varying 值每个 active lane 独立原子，
             // 返回各自唯一旧值 → SIMD 下 per-lane 槽位分配正确（实测 PASS），无需退化为标量。
@@ -206,6 +203,8 @@ namespace NativeTranspiler.Analyzer
             string endName2 = _foreachEndName ?? "__entity_count";
             _builder.Append("foreach_tiled (").Append(indexName).Append(" = ").Append(startName2).Append(" ... ").Append(endName2).Append(") ");
             var savedForeach = _insideForeach;
+            var savedBatch = _insideBatchIndexLoop;
+            _insideBatchIndexLoop = true;
             _insideForeach = true;
             if (forStmt.Statement is BlockSyntax block)
             {
@@ -229,6 +228,7 @@ namespace NativeTranspiler.Analyzer
                 _builder.AppendLine("}");
             }
             _insideForeach = savedForeach;
+            _insideBatchIndexLoop = savedBatch;
 
             return true;
         }
@@ -265,38 +265,6 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
-        /// <summary>
-        /// 将表达式翻译为 ISPC 文本并返回，不影响 _builder 的当前状态。
-        /// </summary>
-        private string CaptureExpressionText(ExpressionSyntax expr)
-        {
-            int savedLen = _builder.Length;
-            TranslateExpression(expr);
-            string text = _builder.ToString(savedLen, _builder.Length - savedLen);
-            _builder.Length = savedLen;
-            return text;
-        }
-
-        /// <summary>
-        /// 检测表达式是否为 ChunkNativeArray 的元素访问（如 positions[index]）。
-        /// 用于 struct proxy 模式的检测。
-        /// </summary>
-        private bool IsChunkNativeArrayElementAccess(ExpressionSyntax? expression, out string arrayName, out ExpressionSyntax indexExpr)
-        {
-            arrayName = string.Empty;
-            indexExpr = null!;
-            if (expression is ElementAccessExpressionSyntax elemAccess &&
-                elemAccess.Expression is IdentifierNameSyntax id &&
-                _chunkNativeArrayNames.Contains(id.Identifier.Text) &&
-                elemAccess.ArgumentList.Arguments.Count >= 1)
-            {
-                arrayName = id.Identifier.Text;
-                indexExpr = elemAccess.ArgumentList.Arguments[0].Expression;
-                return true;
-            }
-            return false;
-        }
-
         private bool IsChunkNativeArrayInitializer(ExpressionSyntax? expression)
         {
             if (expression is not InvocationExpressionSyntax invocation)
@@ -307,22 +275,6 @@ namespace NativeTranspiler.Analyzer
             return _semanticModel.GetSymbolInfo(invocation).Symbol is IMethodSymbol methodSymbol &&
                    methodSymbol.ContainingType?.ToDisplayString() == Config.TypeArchetypeChunk &&
                    methodSymbol.Name == Config.GetComponentDataNativeArray;
-        }
-
-        private static string ToIspcTypeName(string cppType)
-        {
-            return cppType switch
-            {
-                "EntJoy::Mathematics::float2" => "float2",
-                "EntJoy::Mathematics::int2" => "int2",
-                "EntJoy::Mathematics::uint2" => "uint2",
-                "unsigned int" => "unsigned int",
-                "float" => "float",
-                "int" => "int",
-                "bool" => "bool",
-                _ when cppType.Contains("::") => cppType.Substring(cppType.LastIndexOf("::") + 2),
-                _ => cppType
-            };
         }
     }
 }

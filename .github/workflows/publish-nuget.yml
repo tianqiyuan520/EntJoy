@@ -1,7 +1,7 @@
 name: Publish NuGet
 
 # 发布入口：只由 v* tag 推送触发，无手动入口（失败的 tag run 可在页面上 Re-run jobs）。
-# 门禁 = tests/NuGetConsumer/run.ps1（stage 预编译原生 → pack 四包 → 两个消费者断言），
+# 发布先调用完整 Release Gate，再打包并运行消费者断言；
 # 通过后双推：GitHub Packages（GITHUB_TOKEN）+ nuget.org（OIDC 换一次性临时 key，仓库内无长期密钥）。
 # 前提：nuget.org 已建 Trusted Publishing 策略，其中 Workflow File 填 publish-nuget.yml。
 
@@ -13,7 +13,13 @@ permissions:
   contents: read
 
 jobs:
+  release-checks:
+    uses: ./.github/workflows/jobsystem-ci.yml
+    with:
+      extended: true
+
   publish:
+    needs: release-checks
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
@@ -22,6 +28,12 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify release tag matches package version
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content src/Directory.Build.props -Raw)).Project.PropertyGroup.EntJoyVersion
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag must be v$version" }
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4

@@ -614,7 +614,8 @@ public struct SideEffectIndexJob : IJobChunk
 
             // 别名会把 `cursor++` 推迟到每次使用 ⇒ 副作用重复求值
             Assert.DoesNotContain("arr_ptr[cursor++].V", text);
-            Assert.Contains("e = arr_ptr[cursor++];", text);
+            Assert.Contains("e = arr_ptr[([&]()", text);
+            Assert.Contains("auto&& __ej_target = (cursor)", text);
         }
     }
 }

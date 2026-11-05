@@ -9,16 +9,8 @@ using NativeTranspiler.Analyzer.Common;
 namespace NativeTranspiler.Analyzer
 {
     /// <summary>
-    /// 通用 ISPC 风格 SIMD 控制流生成器。
-    /// 从 C# AST 直接生成 mask-managed SIMD C++ 代码。
-    ///
-    /// 设计原则：
-    /// - 所有循环统一使用 for(iter) 计数循环模式（已验证 e2d27a4）
-    /// - 表达式翻译根据 uniform/varying 分类选择 SIMD 或标量操作
-    ///
-    /// 本类以 partial class 拆分到三个文件：
-    /// - SimdControlFlowGenerator.cs （本文件：状态、构造函数、主流程编排）
-    /// - SimdLoopGenerator.cs （循环/控制流产生）
+    /// 从 C# 语法树生成 SIMD 值与活动掩码，按 uniform/varying 分类选择标量或向量操作。
+    /// 本文件负责生成状态、语句分派及 lane 退出；分支、局部变量、循环与表达式各自位于对应 partial 文件。
     /// </summary>
     public partial class SimdControlFlowGenerator
     {
@@ -29,7 +21,8 @@ namespace NativeTranspiler.Analyzer
         private readonly INamedTypeSymbol _jobStruct;
         private readonly Dictionary<string, SimdVariableInfo> _variables;
         private readonly SimdVariableAnalyzer _varAnalyzer;
-        private readonly string _indexParamName;        private readonly string _simdIndexVar; // "v_i" — the SIMD index variable from outer loop
+        private readonly string _indexParamName;
+        private readonly string _simdIndexVar; // "v_i" — the SIMD index variable from outer loop
         private readonly bool _useFastMath;
         private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
@@ -78,13 +71,8 @@ namespace NativeTranspiler.Analyzer
         private readonly Dictionary<string, string> _nativeArrayParams;
         // Batch loop variable name (e.g. "si") for contiguous access optimization
         private readonly string _batchLoopVar;
-        // Early-exit sentinel for reduction loops (from scalar body write pattern, e.g. "bestIdx"/"-1")
-        internal string _sentinelVar = "";
-        internal string _sentinelVal = "";
         // Track goto targets for dead label elimination (suppress labels in hot paths)
         private readonly HashSet<string> _gotoTargets = new();
-        // Reduction folding: when set, TranslateAssignment uses n_min_ps/n_max_ps instead of blend
-        private string _foldReduceFn = null;
         // Variables whose last value came from a clamped gather — skip redundant clamp
         private readonly HashSet<string> _clampedVars = new();
         // Per-batch return mask: when a lane executes `return` (exit-Execute for that lane),
@@ -93,15 +81,6 @@ namespace NativeTranspiler.Analyzer
         //   Avoids the old bug: one lane hits return → goto __simd_exit → all lanes skip
         //   the default store → non-returning lanes output 0 instead of 777 (EC5/FZ4 E7).
         private string _returnedMaskVar = "";
-
-        // E7 helpers: check C# expression type via SemanticModel.
-        //   Used to detect int expressions being stored into float arrays.
-        private bool IsInt32Type(ExpressionSyntax expr)
-        {
-            try { var t = _semanticModel.GetTypeInfo(expr).Type; return t != null && (t.SpecialType == SpecialType.System_Int32 || t.SpecialType == SpecialType.System_UInt32); }
-            catch { return false; }
-        }
-        private bool IsInt32Expr(ExpressionSyntax expr) => IsInt32Type(expr);
         // Struct varying locals: localName → (arrayName, elemCppType, indexExpr)
         // These are struct-typed locals initialized from array[idx] where array is a struct-typed NativeArray.
         // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
@@ -163,8 +142,7 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>
         /// 从 Execute 方法体生成 SIMD C++ 代码。
-        /// varying-bound 循环 → per-lane full body（已验证正确）
-        /// uniform 循环 → 全 SIMD mask 模式
+        /// uniform 循环共享计数器；varying 循环使用逐 lane 活动掩码。
         /// </summary>
         public string Generate(BlockSyntax body)
         {
@@ -189,9 +167,8 @@ namespace NativeTranspiler.Analyzer
             // IJob 的 Execute() 没有索引形参：整个实体体就是"整批标量循环"，per-lane 分组没有意义
             //   （si 无处可去，还会把体里自己的循环变量改名）。整段走标量翻译。
             // P0 兜底：体内出现「无法向量化」的调用（原子操作/取引用/用户静态辅助函数被喂 varying 实参）
-            // Enhanced: reduction loops use count-loop, only non-reduction varying → per-lane
             if (string.IsNullOrEmpty(_indexParamName)
-                || HasVaryingNonReductionLoop(body) || SimdVectorizability.HasNonVectorizableCall(body, _varAnalyzer))
+                || RequiresPerLaneLoopReturn(body) || SimdVectorizability.HasNonVectorizableCall(body, _varAnalyzer))
             {
                 GeneratePerLaneFullBody(body);
             }
@@ -217,39 +194,15 @@ namespace NativeTranspiler.Analyzer
         /// <summary>SIMD 路径原生支持（可向量化）的方法名——不属于这些名字且实参含 varying 的调用一律视为不可向量化。</summary>
         private static HashSet<string> VectorizableCallNames => SimdVectorizability.VectorizableCallNames;
 
-        // 「无法向量化」的判据已抽到 SimdVectorizability.HasNonVectorizableCall（唯一一份实现：
-        // 发射侧与校验侧共用；校验侧命中即报 NT031，让"以为开了向量化、实际跑 per-lane 标量"不再静默）。
-
-        /// <summary>裸指针变量（局部/形参）指向的元素 C++ 类型；不是裸指针返回 null。</summary>
-        private string PointerElemCpp(string name)
+        // 带 return 的 varying 非归约循环沿用逐 lane 返回路径。
+        private bool RequiresPerLaneLoopReturn(SyntaxNode body)
         {
-            if (_varAnalyzer.LocalPointerElemCpp.TryGetValue(name, out var le)) return le;
-            if (_varAnalyzer.ParamPointerElemCpp.TryGetValue(name, out var pe)) return pe;
-            return null;
-        }
-
-        /// <summary>
-        /// 检查方法体中是否有 varying-bound 且非 reduction 的 for 循环。
-        /// reduction 循环可用 count-loop / broadcast 优化。
-        /// </summary>
-        private bool HasVaryingNonReductionLoop(SyntaxNode node)
-        {
-            foreach (var fs in node.DescendantNodes().OfType<ForStatementSyntax>())
-            {
-                if (fs.Declaration == null || fs.Declaration.Variables.Count != 1) continue;
-                var decl = fs.Declaration.Variables[0];
-                bool hasVaryingBounds = false;
-                if (decl.Initializer != null && _varAnalyzer.ClassifyExpression(decl.Initializer.Value) >= VarKind.Varying)
-                    hasVaryingBounds = true;
-                if (fs.Condition is BinaryExpressionSyntax cond)
-                {
-                    if (_varAnalyzer.ClassifyExpression(cond.Right) >= VarKind.Varying)
-                        hasVaryingBounds = true;
-                }
-                if (hasVaryingBounds && !IsReductionLoop(fs))
-                    return true;
-            }
-            return false;
+            if (!body.DescendantNodes().OfType<ReturnStatementSyntax>().Any()) return false;
+            return body.DescendantNodes().OfType<ForStatementSyntax>().Any(statement =>
+                IntForLoop.TryAnalyze(statement, _semanticModel, out var loop)
+                && (_varAnalyzer.ClassifyExpression(loop.Start) >= VarKind.Varying
+                    || _varAnalyzer.ClassifyExpression(loop.Bound) >= VarKind.Varying)
+                && !IsReductionLoop(statement));
         }
 
         /// <summary>
@@ -299,10 +252,6 @@ namespace NativeTranspiler.Analyzer
                 _useFastMath, false);
             string scalarBody = scalarTranslator.Translate(body);
 
-            foreach (var kvp in _boolFields)
-                scalarBody = System.Text.RegularExpressions.Regex.Replace(
-                    scalarBody, $@"\b{System.Text.RegularExpressions.Regex.Escape(kvp.Key)}\b", kvp.Value);
-
             bool hasReturn = scalarBody.Contains("return;");
 
             // NT-04：`Execute()`（IJob，无索引形参）根本没有 lane 可分 —— 索引形参名是空的，
@@ -338,105 +287,6 @@ namespace NativeTranspiler.Analyzer
             if (hasReturn) { _indent--; AppendLine("} while(false);"); }
             _indent--;
             AppendLine("}");
-        }
-
-        // Variable Declarations
-
-        private void GenerateVariableDeclarations()
-        {
-            foreach (var kvp in _variables)
-            {
-                string name = kvp.Key;
-                var info = kvp.Value;
-
-                // Skip index parameter (it maps to v_i from outer loop)
-                if (name == _indexParamName) continue;
-                if (_forLoopVars.Contains(name)) continue;
-
-                // Skip uniform variables (handled as scalar by outer scope)
-                if (info.Kind == VarKind.Uniform) continue;
-
-                // Varying or Reduction
-                string varType = GetSIMDTypeString(info.CppType);
-                if (varType == null) continue;
-
-                // Default construct: all variables are immediately overwritten
-                // (v_q=gather, v_cell=convert, v_bestDistSq=max, etc.)
-                // broadcast(0) was wasted instructions & register pressure.
-                if (info.InitSIMDExpr != null)
-                {
-                    AppendLine($"{varType} v_{name} = {info.InitSIMDExpr};");
-                    _varDeclEmitted.Add(name);
-                }
-                else
-                {
-                    // Scope narrowing: defer declaration to first assignment site
-                    // (reduces live-range overlap -> less register pressure -> better stability)
-                }
-                // Track for per-lane save/merge
-                _simdVaryingVarNames.Add(name);
-                _simdVaryingCppType[name] = info.CppType;
-            }
-        }
-
-        // Uniform Broadcast Hoisting (generic, no hardcoded field names)
-
-        /// <summary>
-        /// Pre-scan body for .x/.y access on uniform int2/float2 job struct fields.
-        /// These should be pre-broadcast once and reused, instead of re-broadcast at each use.
-        /// Fully generic: applies to ANY job with ANY uniform int2/float2 fields.
-        /// </summary>
-        private void PreScanUniformHoists(SyntaxNode body)
-        {
-            _uniformHoistMap.Clear();
-            _uniformHoistPending.Clear();
-
-            foreach (var ma in body.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
-            {
-                string memberName = ma.Name.Identifier.Text;
-                if (memberName != "x" && memberName != "y") continue;
-                if (!(ma.Expression is IdentifierNameSyntax id)) continue;
-
-                string fieldName = id.Identifier.Text;
-                if (_jobStruct == null) continue;
-
-                try
-                {
-                    var members = _jobStruct.GetMembers(fieldName);
-                    if (members.Length == 0) continue;
-                    if (!(members[0] is IFieldSymbol field) || field.IsStatic) continue;
-
-                    string typeName = field.Type.Name;
-                    string simdType, key;
-                    if (typeName == "int2")
-                    {
-                        simdType = "simd_value<int>";
-                        key = $"{fieldName}.{memberName}";
-                    }
-                    else if (typeName == "float2")
-                    {
-                        simdType = "simd_value<float>";
-                        key = $"{fieldName}.{memberName}";
-                    }
-                    else continue;
-
-                    if (_uniformHoistMap.ContainsKey(key)) continue;
-
-                    string varName = $"__uni_{fieldName}_{memberName}";
-                    _uniformHoistMap[key] = varName;
-                    _uniformHoistPending[varName] = $"{simdType} {varName} = {simdType}::broadcast({fieldName}.{memberName}());";
-                }
-                catch { }
-            }
-        }
-
-        /// <summary>Emit all hoisted uniform broadcasts in the prologue</summary>
-        private void EmitUniformHoistPrologue()
-        {
-            if (_uniformHoistPending.Count == 0) return;
-            AppendLine("// Hoisted uniform broadcasts");
-            foreach (var kvp in _uniformHoistPending)
-                AppendLine(kvp.Value);
         }
 
         // Statement Generators
@@ -515,439 +365,6 @@ namespace NativeTranspiler.Analyzer
                 _indent--;
                 AppendLine("}");
             }
-        }
-
-        // IfStatement → mask push/pop
-
-        private void GenerateIfStatement(IfStatementSyntax stmt)
-        {
-            var conditions = new List<string>();
-            var current = stmt;
-            StatementSyntax? elseBody = null;
-            string savedMask = "";
-            bool savedMaskEmitted = false;
-            // 递推"已排除条件"组合掩码。excludedMaskVar 持有 ~c0 & ~c1 & ... & ~c_{k-1}，
-            //   每个分支只在前一个变量上增量 AND 一个 ~c_k（O(1) 深度），替代 BuildNotChain 的
-            //   O(N) 嵌套内联 —— 5+ 分支链会生成 5 层 n_and_mask 嵌套，寄存器压力剧增。
-            string excludedMaskVar = null;
-            // excludedCount = excludedMaskVar 已包含的条件个数（= conditions.Count 在上一分支时的值）
-            int excludedCount = 0;
-
-            // Pre-declaration needed when the chain writes a varying variable (regardless of
-            // else). 赋值的掩码已由 TranslateAssignment 完成（纯赋值与复合赋值都 blend），
-            // 无需再 save-blend——那会叠加一次冗余 blend + save。
-            bool hasElseClause = HasElseClause(stmt);
-            HashSet<string> modifiedVars = AnalyzeModifiedVars(stmt);
-            bool needsPredeclare = hasElseClause || modifiedVars.Count > 0;
-            if (needsPredeclare)
-            {
-                // Pre-declare branch-written varying variables at the outer scope.
-                //   The "declare at first assignment" rule would put the declaration
-                //   inside the first branch block, making it invisible to later
-                //   branches (e.g. float v; if (a>40) v=...; else if ... v=...;).
-                foreach (var name in modifiedVars)
-                    PredeclareBranchVar(name);
-            }
-
-            while (true)
-            {
-                string condExpr = TranslateCondition(current.Condition);
-
-                // Dead condition detection (通用, 适用所有上下文)
-                bool isDeadFalse = condExpr.Contains("n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0))");
-                bool isDeadTrue = condExpr == "simd_mask::all_true()";
-
-                if (isDeadFalse)
-                {
-                    // 条件永远假 → 跳过整个 if-body
-                    if (current.Else != null)
-                    {
-                        if (current.Else.Statement is IfStatementSyntax elseif)
-                        {
-                            current = elseif;
-                            continue;
-                        }
-                        elseBody = current.Else.Statement;
-                    }
-                    break;
-                }
-
-                if (isDeadTrue)
-                {
-                    // 条件永远真 → 执行 if-body, 跳过所有 else
-                    GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                    break;
-                }
-
-                // 空 if-true + else (非 else-if) → 反转条件, 直接走 else
-                if (IsEmptyBlock(current.Statement) && current.Else != null
-                    && !(current.Else.Statement is IfStatementSyntax))
-                {
-                    string negCond;
-                    if (condExpr.Contains("n_cmp_ne_epi32"))
-                        negCond = condExpr.Replace("n_cmp_ne_epi32", "n_cmp_eq_epi32");
-                    else if (condExpr.Contains("n_cmp_eq_epi32"))
-                        negCond = condExpr.Replace("n_cmp_eq_epi32", "n_cmp_ne_epi32");
-                    else
-                        negCond = $"simd_mask{{ n_not_mask({condExpr}.m) }}";
-
-                    string cm = $"__cm_{_maskCounter++}";
-                    if (_currentMask != "simd_mask::all_true()")
-                        AppendLine($"simd_mask {cm} = simd_mask{{ n_and_mask({_currentMask}.m, {negCond}.m) }};");
-                    else
-                        AppendLine($"simd_mask {cm} = {negCond};");
-                    string entryMask = _currentMask;
-                    _currentMask = cm;
-                    GenerateBlock(EnsureBlock(current.Else.Statement), skipBraces: false);
-                    _currentMask = entryMask;
-                    return;
-                }
-
-                // Docs-style uniform scalar: invert bad condition, narrow mask, continue when all dead.
-                //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
-                if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
-                {
-                    // Dead conditions already handled above — condition is always non-trivial here
-                    // De Morgan negation: flip comparisons AND swap AND/OR.
-                    //   replaced the le created by step 3).
-                    string goodExpr = condExpr
-                        .Replace("n_cmp_lt_", "##T_LT##")
-                        .Replace("n_cmp_ge_", "##T_GE##")
-                        .Replace("n_cmp_gt_", "##T_GT##")
-                        .Replace("n_cmp_le_", "##T_LE##")
-                        .Replace("n_cmp_eq_", "##T_EQ##")
-                        .Replace("n_cmp_ne_", "##T_NE##")
-                        .Replace("##T_LT##", "n_cmp_ge_")
-                        .Replace("##T_GE##", "n_cmp_lt_")
-                        .Replace("##T_GT##", "n_cmp_le_")
-                        .Replace("##T_LE##", "n_cmp_gt_")
-                        .Replace("##T_EQ##", "n_cmp_ne_")
-                        .Replace("##T_NE##", "n_cmp_eq_")
-                        // De Morgan: !(A && B) = !A || !B
-                        .Replace("n_and_mask(", "##OR##(")
-                        .Replace("n_or_mask(", "n_and_mask(")
-                        .Replace("##OR##(", "n_or_mask(");
-                    string goodName = $"__good_{_labelCounter++}";
-                    AppendLine($"simd_mask {goodName} = {goodExpr};");
-                    // Combine with previous mask to narrow unfound lanes
-                    string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
-                    if (prev != "simd_mask::all_true()")
-                    {
-                        string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
-                        AppendLine($"{goodName} = {combined};");
-                    }
-                    _currentMask = goodName;
-                    // inside an UNROLLED loop there is no real C++ loop, so a
-                    //   `continue;` would jump to the outermost batch loop (for si), skipping
-                    //   the remaining unrolled iterations AND the final store — output all zeros.
-                    //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
-                    //   real scalar-for frames carry a non-empty saved-mask tracker.
-                    if (_loopStack.Count > 0 && string.IsNullOrEmpty(_loopStack.Peek().TrackerVar))
-                    {
-                        string contTarget = _loopStack.Peek().ContinueLabel;
-                        _gotoTargets.Add(contTarget);
-                        AppendLine($"if (!{_currentMask}.any_true()) {{ goto {contTarget}; }}");
-                    }
-                    else
-                    {
-                        AppendLine($"if (!{_currentMask}.any_true()) {{ continue; }}");
-                    }
-                    savedMask = goodName;
-                }
-                else
-                {
-                    bool isAllTrue = _currentMask == "simd_mask::all_true()";
-
-                    // When all_true: skip emitting savedMask, but register it for restore
-                    if (!isAllTrue)
-                    {
-                        if (!savedMaskEmitted)
-                        {
-                            if (_currentMask.StartsWith("v_") || _currentMask.StartsWith("__"))
-                            {
-                                savedMask = _currentMask;
-                            }
-                            else
-                            {
-                                savedMask = $"__mask_{_maskCounter++}";
-                                AppendLine($"simd_mask {savedMask} = {_currentMask};");
-                            }
-                            savedMaskEmitted = true;
-                        }
-                    }
-                    else
-                    {
-                        // Sentinel: no emit needed, but restore will set _currentMask=all_true()
-                        savedMask = "simd_mask::all_true()";
-                    }
-
-                    bool simpleCmp = condExpr.Contains("n_cmp_") && !condExpr.Contains("n_and_mask(") && !condExpr.Contains("n_not_mask(");
-
-                    string trueMask;
-                    if (isAllTrue)
-                    {
-                        // All lanes active on entry: the branch mask is JUST the condition
-                        // (no savedMask AND needed). The condition MUST still be emitted —
-                        // combine as all_true & !c0 & c1 (not c0 & !c0 & c1 = false).
-                        savedMask = "simd_mask::all_true()";
-                        savedMaskEmitted = true;
-                        // 通解：全活跃 lane 时也折叠归约（if (v<best) best=v → n_min_ps），
-                        //   否则 unroll 后的归约循环会退化成 cmp+blend（每轮多 1 次比较）。
-                        if (TryFoldReduction(condExpr, current.Statement, out var foldFnAllTrue))
-                        {
-                            _foldReduceFn = foldFnAllTrue;
-                            GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                            _foldReduceFn = null;
-                            current = null;
-                            break; // skip mask push/pop
-                        }
-                        string condVar = $"__cond_{_maskCounter++}";
-                        AppendLine($"simd_mask {condVar} = {condExpr};");
-                        trueMask = condVar;
-                        conditions.Add(condVar);
-                        _currentMask = trueMask;
-                    }
-                    else if (conditions.Count == 0 && simpleCmp && savedMask.Contains("v_act"))
-                    {
-                        // Inline simple condition into __cm_N, skip __cond_N
-                        string cm = $"__cm_{_maskCounter++}";
-                        AppendLine($"simd_mask {cm} = simd_mask{{ n_and_mask({savedMask}.m, {condExpr}.m) }};");
-                        trueMask = cm;
-                        _currentMask = cm;
-                        // Register the raw condition for NOT chain computation by subsequent
-                        //   branches. Without this, conditions stays empty and the else/elif
-                        //   this condition (EC6 bug: else mask = v_active AND all_true).
-                        string inlineCondVar = $"__cond_{_maskCounter++}";
-                        AppendLine($"simd_mask {inlineCondVar} = {condExpr};");
-                        conditions.Add(inlineCondVar);
-                    }
-                    else
-                    {
-                        // Folding: if (d < best) best = d → n_min_ps / n_max_ps
-                        if ((isAllTrue || savedMaskEmitted)
-                            && TryFoldReduction(condExpr, current.Statement, out var foldFn))
-                        {
-                            _foldReduceFn = foldFn;
-                            GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                            _foldReduceFn = null;
-                            current = null;
-                            break; // skip mask push/pop
-                        }
-
-                        string condVar = $"__cond_{_maskCounter++}";
-                        AppendLine($"simd_mask {condVar} = {condExpr};");
-
-                        if (isAllTrue)
-                            trueMask = condVar;
-                        else if (conditions.Count == 0)
-                            trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
-                        else
-                        {
-                            // 引用递推排除变量（已含 ~c0 & ... & ~c_{k-1}），
-                            //   不再内联 BuildNotChain 的 O(N) 嵌套。
-                            EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                            string notPrev = excludedMaskVar ?? BuildNotChain(conditions);
-                            trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
-                            // Skip redundant AND when savedMask is all_true: all_true & X == X
-                            if (savedMask != "simd_mask::all_true()")
-                                trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
-                        }
-
-                        conditions.Add(condVar);
-                        _currentMask = trueMask;
-                        if (trueMask.Contains("n_and_mask("))
-                        {
-                            string cm = $"__cm_{_maskCounter++}";
-                            AppendLine($"simd_mask {cm} = {trueMask};");
-                            _currentMask = cm;
-                        }
-                    }
-                    bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
-                    bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
-                    bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement, maskContinue);
-                    if (bodyHasGoto)
-                        AppendLine($"if ({trueMask}.any_true())");
-                    if (!bodyEmpty)
-                    {
-                        GenerateBlock(EnsureBlock(current.Statement), skipBraces: false);
-                    }
-                }
-
-                if (current.Else == null) break;
-
-                if (current.Else.Statement is IfStatementSyntax nextIf)
-                {
-                    current = nextIf;
-                }
-                else
-                {
-                    elseBody = current.Else.Statement;
-                    break;
-                }
-            }
-
-            // Final else: precompute else mask and emit as variable
-            if (elseBody != null)
-            {
-                string elseMaskExpr;
-                // 优先复用递推排除变量（~c0 & ... & ~c_{k-1}），避免内联 O(N) 嵌套。
-                //   else 分支需排除全部条件 → 确保递推变量覆盖到 conditions.Count。
-                EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                string notChain = excludedMaskVar ?? BuildNotChain(conditions);
-                if (savedMaskEmitted)
-                {
-                    // Skip redundant AND when savedMask is all_true: all_true & X == X
-                    if (savedMask == "simd_mask::all_true()")
-                        elseMaskExpr = notChain;
-                    else
-                        elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {notChain}.m) }}";
-                }
-                else if (savedMask == "simd_mask::all_true()")
-                    elseMaskExpr = notChain;
-                else
-                    elseMaskExpr = _currentMask;
-
-                // Precompute else mask as a variable (avoids repeated inline computation)
-                string elseMaskVar = $"__else_mask_{_maskCounter++}";
-                AppendLine($"simd_mask {elseMaskVar} = {elseMaskExpr};");
-                _currentMask = elseMaskVar;
-
-                bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
-                bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
-                bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody, maskContinue);
-                if (elseHasGoto)
-                    AppendLine($"if ({elseMaskVar}.any_true())");
-                if (!elseBodyEmpty)
-                {
-                    GenerateBlock(EnsureBlock(elseBody), skipBraces: false);
-                }
-            }
-
-            // Restore (skip if mask was never saved — e.g., dead-false continue)
-            if (savedMaskEmitted || !string.IsNullOrEmpty(savedMask))
-                _currentMask = savedMask;
-            // A branch may have removed lanes through break/continue. Restoring
-            // its entry mask must not reactivate those lanes for later statements.
-            if (_loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar)
-                && _currentMask != _loopStack.Peek().BodyMaskVar)
-            {
-                string bodyMask = _loopStack.Peek().BodyMaskVar;
-                string postMask = $"__post_if_{_maskCounter++}";
-                AppendLine($"simd_mask {postMask} = simd_mask{{ n_and_mask({_currentMask}.m, {bodyMask}.m) }};");
-                _currentMask = postMask;
-            }
-        }
-
-        /// <summary>
-        /// 构建 ~c0 & ~c1 & ~c2 链
-        /// </summary>
-        private string BuildNotChain(List<string> condVars)
-        {
-            if (condVars.Count == 0)
-                return "simd_mask::all_true()";
-            if (condVars.Count == 1)
-                return $"simd_mask{{ n_not_mask({condVars[0]}.m) }}";
-
-            // ~c0 & ~c1 = n_and_mask(n_not_mask(c0), n_not_mask(c1))
-            string expr = $"simd_mask{{ n_not_mask({condVars[0]}.m) }}";
-            for (int i = 1; i < condVars.Count; i++)
-                expr = $"simd_mask{{ n_and_mask({expr}.m, simd_mask{{ n_not_mask({condVars[i]}.m) }}.m) }}";
-            return expr;
-        }
-
-        /// <summary>
-        /// 确保递推排除变量 excludedMaskVar 已覆盖 ~c0 & ~c1 & ... & ~c_{k-1}
-        /// （conditions 中的全部历史条件 —— 调用时 conditions 为已加入条件，不含当前分支条件；
-        /// else 分支时含全部条件，语义相同：排除它们全部）。增量式：每个条件只生成一次
-        /// n_and_mask，分支掩码深度从 O(N) 降到 O(1)，总生成量保持 O(N)。
-        /// </summary>
-        private void EnsureExcludedMaskUpTo(List<string> conditions, ref string excludedMaskVar, ref int excludedCount)
-        {
-            int target = conditions.Count;
-            if (target <= 0)
-            {
-                if (target < 0) { excludedMaskVar = null; excludedCount = 0; }
-                return;
-            }
-
-            if (excludedCount == 0)
-            {
-                // 首次：生成 ~c0
-                excludedMaskVar = $"__excl_{_maskCounter++}";
-                AppendLine($"simd_mask {excludedMaskVar} = simd_mask{{ n_not_mask({conditions[0]}.m) }};");
-                excludedCount = 1;
-            }
-            // 增量扩展：从 excludedCount 到 target，逐个 AND ~c_i
-            for (int i = excludedCount; i < target; i++)
-            {
-                string newExcl = $"__excl_{_maskCounter++}";
-                AppendLine($"simd_mask {newExcl} = simd_mask{{ n_and_mask({excludedMaskVar}.m, simd_mask{{ n_not_mask({conditions[i]}.m) }}.m) }};");
-                excludedMaskVar = newExcl;
-                excludedCount = i + 1;
-            }
-        }
-
-        /// <summary>检查 if 语句体是否是单条的 continue;</summary>
-        private static bool IsSingleContinue(StatementSyntax stmt)
-        {
-            if (stmt is ContinueStatementSyntax) return true;
-            if (stmt is BlockSyntax blk && blk.Statements.Count == 1
-                && blk.Statements[0] is ContinueStatementSyntax) return true;
-            return false;
-        }
-
-        /// <summary>检查 if 语句体是否为空</summary>
-        private static bool IsEmptyBlock(StatementSyntax stmt)
-        {
-            if (stmt is BlockSyntax blk && blk.Statements.Count == 0) return true;
-            if (stmt is EmptyStatementSyntax) return true;
-            return false;
-        }
-
-        /// <summary>Check if an if-statement has an else clause (else-if or plain else).</summary>
-        private static bool HasElseClause(IfStatementSyntax stmt)
-        {
-            var current = stmt;
-            while (true)
-            {
-                if (current.Else == null) return false;
-                if (current.Else.Statement is IfStatementSyntax nextIf)
-                    current = nextIf;
-                else
-                    return true;
-            }
-        }
-
-        /// <summary>
-        /// Detect if this if-statement is a simple reduction pattern like if(d<best) best=d
-        /// that can be folded to n_min_ps/n_max_ps instead of mask+blend.
-        /// </summary>
-        private static bool TryFoldReduction(string condExpr, StatementSyntax body, out string foldFn)
-        {
-            foldFn = null;
-            // Condition must be simple comparison: simd_mask{ n_cmp_lt_ps(lhs.v, rhs.v) }
-            bool isLt = condExpr.Contains("n_cmp_lt_ps(");
-            bool isGt = condExpr.Contains("n_cmp_gt_ps(");
-            if (!isLt && !isGt) return false;
-            foldFn = isLt ? "n_min_ps" : "n_max_ps";
-
-            // Body must be a block with single statement that is an assignment
-            var stmts = body is BlockSyntax blk ? blk.Statements : new SyntaxList<StatementSyntax>(body);
-            if (stmts.Count != 1) return false;
-            if (!(stmts[0] is ExpressionStatementSyntax ess) || !(ess.Expression is AssignmentExpressionSyntax assign))
-                return false;
-            // Reduction recognition: only fold `if (x < y) x = y` or `if (x > y) x = y`
-            //   (and mirror patterns where target is the RHS of the condition).
-            //   to n_max_ps(acc, 1000) — producing completely wrong results (EC9 regression).
-            if (!assign.IsKind(SyntaxKind.SimpleAssignmentExpression)) return false;
-            if (!(assign.Left is IdentifierNameSyntax assignTarget)) return false;
-            string assignTargetV = $"v_{assignTarget.Identifier.Text}";
-            if (!condExpr.Contains(assignTargetV)) return false;
-            if (!(assign.Right is IdentifierNameSyntax rhsId)) return false;
-            string rhsV = $"v_{rhsId.Identifier.Text}";
-            if (rhsV == assignTargetV) return false;
-            if (!condExpr.Contains(rhsV)) return false;
-            return true;
         }
 
         /// <summary>
@@ -1087,111 +504,6 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        // Local Declaration
-
-        private void GenerateLocalDeclaration(LocalDeclarationStatementSyntax stmt)
-        {
-            foreach (var variable in stmt.Declaration.Variables)
-            {
-                string name = variable.Identifier.Text;
-
-                                // [Priority] Struct-typed local initialized from chunk array element access.
-                //   e.g., MoveVelocity velocity = velocities[index];
-                //   → defer to _structVaryingLocals for field-level decomposition.
-                //   Check BEFORE the general Varying check because the variable analyzer
-                //   may classify it as Varying (via PropagateAssignments from the index)
-                //   but with wrong CppType ("int" for unknown struct types).
-                if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
-                    && structInitEA.Expression is IdentifierNameSyntax structInitArrId
-                    && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
-                    && structInitElemType != "float" && structInitElemType != "int"
-                    && !structInitElemType.Contains("float2") && !structInitElemType.Contains("int2"))
-                {
-                    string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
-                        ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
-                        : "0";
-                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
-                    continue;
-                }
-
-                if (_variables.TryGetValue(name, out var info) && info.Kind >= VarKind.Varying)
-                {
-                    string varType = GetSIMDTypeString(info.CppType);
-                    if (varType == null) continue;
-
-                    if (variable.Initializer != null)
-                    {
-                        string initExpr = TranslateExpression(variable.Initializer.Value);
-                        {
-                            _varDeclEmitted.Add(name);
-                            _simdVaryingVarNames.Add(name);
-                            _simdVaryingCppType[name] = info.CppType;
-                            if (initExpr.Contains("simd_min") && initExpr.Contains("simd_max"))
-                                _clampedVars.Add($"v_{name}");
-                            AppendLine($"{varType} v_{name} = {initExpr};");
-                        }
-                    }
-                }
-                else
-                {
-                    // Uniform local — emit as scalar// Uniform local — emit as scalar
-                    // Try semantic model first (may fail on SyntaxFactory-created AST nodes)
-                    string cppType = "float";
-                    try
-                    {
-                        var typeInfo = _semanticModel.GetTypeInfo(stmt.Declaration.Type);
-                        if (typeInfo.Type != null)
-                            cppType = NativeTranspiler.MapCSharpTypeToCpp(typeInfo.Type);
-                    }
-                    catch
-                    {
-                        // Fallback: use type from variable analyzer or default to "float"
-                        if (_variables.TryGetValue(name, out var vInfo) && !string.IsNullOrEmpty(vInfo.CppType))
-                            cppType = vInfo.CppType;
-                        else if (stmt.Declaration.Type is PredefinedTypeSyntax pts)
-                            cppType = pts.Keyword.Text; // "float", "int", "double", etc.
-                    }
-
-                    if (variable.Initializer != null)
-                    {
-                        string initExpr = TranslateExpression(variable.Initializer.Value);
-                        // ISPC-style SIMD promotion: when a Uniform local is initialized from a
-                        //   SIMD register expression (e.g. gather result), promote to Varying and
-                        //   This keeps the data in SIMD registers throughout the computation chain.
-                        bool isSimdExpr = initExpr.StartsWith("simd_")
-                            || initExpr.StartsWith("(simd_")
-                            || initExpr.StartsWith("(v_")
-                            || (initExpr.Contains("simd_value<") && initExpr.Contains("n_"))
-                            || initExpr.Contains("n_gather_ps<")
-                            || initExpr.Contains("n_sin_ps")
-                            || initExpr.Contains("n_cos_ps")
-                            || initExpr.Contains("n_sqrt_ps");
-                        if (isSimdExpr)
-                        {
-                            string simdType = GetSIMDTypeString(cppType);
-                            if (simdType != null)
-                            {
-                                _varDeclEmitted.Add(name);
-                                _simdVaryingVarNames.Add(name);
-                                _simdVaryingCppType[name] = cppType;
-                                if (!_variables.ContainsKey(name))
-                                    _variables[name] = new SimdVariableInfo { Name = name, Kind = VarKind.Varying, CppType = cppType };
-                                else
-                                    _variables[name].Kind = VarKind.Varying;
-                                AppendLine($"{simdType} v_{name} = {initExpr};");
-                                continue;
-                            }
-                        }
-                        AppendLine($"{cppType} {name} = {initExpr};");
-                    }
-                    else
-                    {
-                        AppendLine($"{cppType} {name};");
-                    }
-                }
-            }
-        }
-
         // Expression Statement
 
         private void GenerateExpressionStatement(ExpressionStatementSyntax stmt)
@@ -1230,70 +542,6 @@ namespace NativeTranspiler.Analyzer
             {
                 return Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Block(stmt);
             }
-        }
-
-        // Save-blend: precise variable modification analysis
-
-        /// <summary>
-        /// Analyze an if-else chain and collect all variables that are written in any branch.
-        /// </summary>
-        private HashSet<string> AnalyzeModifiedVars(IfStatementSyntax ifStmt)
-        {
-            var modified = new HashSet<string>();
-            var current = ifStmt;
-
-            while (true)
-            {
-                CollectWrites(current.Statement, modified);
-                if (current.Else == null) break;
-                if (current.Else.Statement is IfStatementSyntax nextIf)
-                    current = nextIf;
-                else
-                {
-                    CollectWrites(current.Else.Statement, modified);
-                    break;
-                }
-            }
-            return modified;
-        }
-
-        /// <summary>
-        /// Recursively collect variable write targets from a statement.
-        /// Handles: assignments (a = ..., a += ..., a ^= ...), ++/--, ref parameters (conservative).
-        /// </summary>
-        private static void CollectWrites(StatementSyntax stmt, HashSet<string> vars)
-        {
-            foreach (var node in stmt.DescendantNodesAndSelf())
-            {
-                if (node is AssignmentExpressionSyntax assign && assign.Left is IdentifierNameSyntax id)
-                    vars.Add(id.Identifier.Text);
-                else if (node is PostfixUnaryExpressionSyntax postfix && postfix.Operand is IdentifierNameSyntax id2)
-                    vars.Add(id2.Identifier.Text);
-                // Prefix unary: ONLY ++a / --a are writes. Unary minus (-a) / !a / ~a are reads —
-                //   treating them as writes caused redundant save/blend (e.g. else v = -a * 3f
-                //   wrongly saved+blended v_a even though a is never modified).
-                else if (node is PrefixUnaryExpressionSyntax prefix
-                    && prefix.Operand is IdentifierNameSyntax id3
-                    && (prefix.OperatorToken.IsKind(SyntaxKind.PlusPlusToken)
-                        || prefix.OperatorToken.IsKind(SyntaxKind.MinusMinusToken)))
-                    vars.Add(id3.Identifier.Text);
-            }
-        }
-
-        /// <summary>Pre-declare a branch-written varying var at the outer scope.</summary>
-        private void PredeclareBranchVar(string name)
-        {
-            if (name == _indexParamName || _forLoopVars.Contains(name)) return;
-            if (!_variables.TryGetValue(name, out var mInfo)) return;
-            if (mInfo.Kind < VarKind.Varying || _varDeclEmitted.Contains(name)) return;
-            string vType = GetSIMDTypeString(mInfo.CppType);
-            if (vType == null) return;
-            // 初始化为 broadcast(0)：移除 save-blend 后，首个分支的 blend 会读旧值；
-            //   未初始化的 varying 局部变量（float r; 由 if/else 定值）需先归零避免读垃圾。
-            AppendLine($"{vType} v_{name} = {(mInfo.CppType == "float" ? "0.0f" : "0")};");
-            _varDeclEmitted.Add(name);
-            _simdVaryingVarNames.Add(name);
-            _simdVaryingCppType[name] = mInfo.CppType;
         }
     }
 }

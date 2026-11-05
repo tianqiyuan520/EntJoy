@@ -46,21 +46,6 @@ namespace NativeTranspiler.Analyzer
             IsChunkJob(jobStruct) || IsEntityJob(jobStruct);
 
         /// <summary>
-        /// 为 bool 条件字段组合生成变体函数名后缀
-        /// 使用索引而非字段名，避免不同 Job 中相同字段名冲突
-        /// 例如: boolFields=[a,b], values=[true,false] => "_0_true_1_false"
-        /// </summary>
-        public static string BuildBoolVariantSuffix(List<IFieldSymbol> boolFields, List<bool> values)
-        {
-            var parts = new List<string>();
-            for (int i = 0; i < boolFields.Count; i++)
-            {
-                parts.Add($"{(values[i] ? "true" : "false")}");
-            }
-            return "_" + string.Join("_", parts);
-        }
-
-        /// <summary>
         /// 获取容器类型的元素类型的 C++ 表示
         /// </summary>
         private static string GetCppElementType(ITypeSymbol containerType)

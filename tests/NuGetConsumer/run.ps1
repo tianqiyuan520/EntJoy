@@ -11,7 +11,7 @@
 #
 # Requires: .NET 8 SDK, CMake + MSVC (path 3 compiles NativeTranspiled.dll locally).
 
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $repoRoot
 
@@ -20,18 +20,17 @@ function Step($text) { Write-Host "`n=== $text ===" }
 $stageDir = Join-Path $repoRoot 'artifacts\native\win-x64'
 $packDir = Join-Path $repoRoot 'artifacts\packages'
 $cmakeBuild = Join-Path $repoRoot 'artifacts\native\cmake-build'
+$packageVersion = ([xml](Get-Content (Join-Path $repoRoot 'src\Directory.Build.props') -Raw)).Project.PropertyGroup.EntJoyVersion
 
-# ---- 1) stage prebuilt native artifacts if missing ----
-if (-not (Test-Path (Join-Path $stageDir 'NativeDll.dll')) -or -not (Test-Path (Join-Path $stageDir 'NativeDll.lib'))) {
-    Step 'staging prebuilt NativeDll (tools/NativeDllCore)'
-    cmake -S tools/NativeDllCore -B $cmakeBuild -A x64 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: cmake configure failed'; exit 1 }
-    cmake --build $cmakeBuild --config Release | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: cmake build failed'; exit 1 }
-    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-    Copy-Item (Join-Path $cmakeBuild 'Release\NativeDll.dll') $stageDir -Force
-    Copy-Item (Join-Path $cmakeBuild 'Release\NativeDll.lib') $stageDir -Force
-}
+# ---- 1) incrementally build and stage native artifacts from this revision ----
+Step 'staging prebuilt NativeDll (tools/NativeDllCore)'
+cmake -S tools/NativeDllCore -B $cmakeBuild -A x64 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: cmake configure failed'; exit 1 }
+cmake --build $cmakeBuild --config Release | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: cmake build failed'; exit 1 }
+New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+Copy-Item (Join-Path $cmakeBuild 'Release\NativeDll.dll') $stageDir -Force
+Copy-Item (Join-Path $cmakeBuild 'Release\NativeDll.lib') $stageDir -Force
 
 # ---- 2) pack the four packages ----
 Step 'packing EntJoy packages'
@@ -66,12 +65,36 @@ foreach ($rel in $consumers) {
     Remove-Item -Recurse -Force (Join-Path $consumerDir 'bin'), (Join-Path $consumerDir 'obj') -ErrorAction SilentlyContinue
     Push-Location $consumerDir
     try {
-        dotnet build -c Release --nologo | Select-String -Pattern '个错误|error' | ForEach-Object { Write-Host "  $_" }
+        dotnet build -c Release --nologo "-p:EntJoyPackageVersion=$packageVersion" | Select-String -Pattern '个错误|error' | ForEach-Object { Write-Host "  $_" }
         if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: build failed for $rel"; $failed += $rel; continue }
 
         $exe = Join-Path $consumerDir ("bin\Release\net8.0\" + (Split-Path $rel -Leaf) + '.exe')
         & $exe
         if ($LASTEXITCODE -ne 0) { $failed += $rel }
+
+        # Publish outside the repository: native resolution must use the shipped files.
+        $publishDir = Join-Path ([IO.Path]::GetTempPath()) ('EntJoyConsumer_' + [Guid]::NewGuid().ToString('N'))
+        try {
+            dotnet publish -c Release --no-restore --nologo "-p:EntJoyPackageVersion=$packageVersion" -o $publishDir
+            if ($LASTEXITCODE -ne 0) { $failed += $rel; continue }
+            foreach ($library in 'NativeDll.dll', 'NativeTranspiled.dll') {
+                if (-not (Test-Path -LiteralPath (Join-Path $publishDir $library))) {
+                    throw "Published consumer is missing $library"
+                }
+            }
+            Push-Location $publishDir
+            try {
+                & (Join-Path $publishDir ((Split-Path $rel -Leaf) + '.exe'))
+                if ($LASTEXITCODE -ne 0) { $failed += $rel }
+            } finally { Pop-Location }
+        } finally {
+            $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            $resolvedPublish = [IO.Path]::GetFullPath($publishDir)
+            if (-not $resolvedPublish.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Publish cleanup escaped the temporary directory.'
+            }
+            if (Test-Path -LiteralPath $resolvedPublish) { Remove-Item -LiteralPath $resolvedPublish -Recurse -Force }
+        }
     } finally {
         Pop-Location
     }

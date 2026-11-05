@@ -2,6 +2,7 @@ using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using NativeTranspiler.Analyzer.Common;
 
 namespace NativeTranspiler.Analyzer
 {
@@ -121,41 +122,12 @@ namespace NativeTranspiler.Analyzer
             return false;
         }
 
-        // SIMD loop emitters synthesize an ascending int counter with unit stride.
-        // Validate that contract before either emitting SIMD or accepting the job.
+        // 校验与发射共用循环控制分析，避免接受后被改写成不同的计数序列。
         private static bool HasUnsupportedLoopControl(ForStatementSyntax loop, SemanticModel model, out string? reason)
         {
-            reason = "for loop requires an int counter, < or <=, and ++ on that counter";
-            if (loop.Declaration?.Variables.Count != 1 || loop.Initializers.Count != 0
-                || loop.Incrementors.Count != 1) return true;
-            var variable = loop.Declaration.Variables[0];
-            if (variable.Initializer == null
-                || model.GetDeclaredSymbol(variable) is not ILocalSymbol symbol
-                || symbol.Type.SpecialType != SpecialType.System_Int32
-                || loop.Condition is not BinaryExpressionSyntax condition
-                || !(condition.IsKind(SyntaxKind.LessThanExpression) || condition.IsKind(SyntaxKind.LessThanOrEqualExpression))
-                || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(condition.Left).Symbol, symbol)) return true;
-            ExpressionSyntax? incremented = loop.Incrementors[0] switch
-            {
-                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression) => p.Operand,
-                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression) => p.Operand,
-                _ => null
-            };
-            if (incremented == null
-                || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(incremented).Symbol, symbol)) return true;
-
-            var flow = model.AnalyzeDataFlow(loop.Statement);
-            if (flow == null || !flow.Succeeded
-                || flow.WrittenInside.Contains(symbol, SymbolEqualityComparer.Default)
-                || flow.UnsafeAddressTaken.Contains(symbol, SymbolEqualityComparer.Default)
-                || loop.Statement.DescendantNodes().OfType<RefExpressionSyntax>().Any(r =>
-                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(r.Expression).Symbol, symbol)))
-            {
-                reason = "for loop modifies or aliases its counter inside the body";
-                return true;
-            }
-            reason = null;
-            return false;
+            bool supported = IntForLoop.TryAnalyze(loop, model, out _);
+            reason = supported ? null : "for loop requires a body-readonly int counter, a relational bound, and a constant nonzero additive step";
+            return !supported;
         }
 
         /// <summary>裸指针变量/形参名 → 元素 C++ 类型（无则 null）。</summary>

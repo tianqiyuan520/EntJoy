@@ -27,6 +27,18 @@ int failed = 0;
 
 NativeJobScheduler.Initialize();
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+if (args.Length > 0 && args[0] == "columns")
+{
+    try { UserColumnFixture.Run(); }
+    finally { NativeJobScheduler.Shutdown(); }
+    return 0;
+}
+if (args.Length > 0 && args[0] == "guards")
+{
+    try { GuardedElementFixture.Run(); }
+    finally { NativeJobScheduler.Shutdown(); }
+    return 0;
+}
 if (args.Length > 0 && args[0] == "alloc")
 {
     try { NativeHandleContractProbe.Run(); }
@@ -46,6 +58,14 @@ if (args.Length > 0 && args[0] == "jobs")
     return 0;
 }
 Console.WriteLine("=== NativeTranspiler fixture: generated-code semantics (F-4 / F-5) ===");
+GuardedElementFixture.Run();
+UserColumnFixture.Run();
+TranslationSemanticsFixture.Run();
+DifferentialTranslationFixture.Run();
+ChunkLoopBindingsFixture.Run();
+#if ENTJOY_FIXTURE_ISPC
+IspcBackendFixture.Run();
+#endif
 
 // ── [1] BatchFillJob 单批：batchSize == N ──
 {
@@ -268,31 +288,6 @@ CheckTypedMask("[16] native unsigned mask", 4, (flags, values, run) => {
     if (run) job.Run(N); else job.Schedule(N, 63).Complete();
 });
 
-{
-    int bad = 0;
-    foreach (int capacity in new[] { 3, 4, 192 })
-    {
-        var storage = new NativeArray<int>(capacity + 2, Allocator.Persistent);
-        var table = new NativeArray<nint>(2, Allocator.Persistent);
-        try
-        {
-            unsafe
-            {
-                table[0] = (nint)storage.GetUnsafePtr();
-                table[1] = (nint)((int*)storage.GetUnsafePtr() + capacity);
-                var job = new ColumnViewJob {
-                    Values = NativeColumn<int>.CreateView((void**)table.GetUnsafePtr(), capacity, storage.Length), Addend = 6
-                };
-                job.Run(storage.Length);
-                job.Schedule(storage.Length, 2).Complete();
-            }
-            for (int i = 0; i < storage.Length; i++) if (storage[i] != 14) bad++;
-        }
-        finally { table.Dispose(); storage.Dispose(); }
-    }
-    Report("[17] segmented columns: Run / Schedule / pointer atomics", bad == 0, $"mismatch: {bad}");
-}
-
 if (args.Length > 0 && args[0] == "bench")
 {
     Bench.Run();          // 必须早于 Shutdown：基准要用真实调度器
@@ -352,7 +347,10 @@ unsafe
                 ((int*)data.GetUnsafePtr())[slot] = slot * 3;
             }
         }
-        var job = new ChunkSnapshotJob { Source = data, Destination = data, Bias = 17 };
+        var job = new ChunkSnapshotJob {
+            Source = new UserColumnView<int> { Flat = (int*)data.GetUnsafePtr(), Length = count },
+            Destination = data, Bias = 17
+        };
         if (mode == 0) NativeTranspiler.Bindings.NativeExports.RunImmediate_ChunkSnapshotJob(ref job, query, world);
         else NativeTranspiler.Bindings.NativeExports.Schedule_ChunkSnapshotJob(ref job, query, default, world).Complete();
         foreach (var archetype in world.EntityManager.GetAllArchetypes())
