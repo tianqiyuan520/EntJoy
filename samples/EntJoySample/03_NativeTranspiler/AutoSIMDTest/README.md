@@ -1,50 +1,24 @@
-# Auto-SIMD 基准测试套件
+# AutoSIMD
 
-跨后端性能对比：C# (managed) / C++ (scalar) / C++ SIMD (Auto-SIMD) / ISPC
+**中文** · [English](README.en.md)
 
-## 测试案例
-
-| Case | 计算模式 | 测试重点 |
-|------|---------|---------|
-| 1_SimpleArith | `a[i]*b[i]+c[i]` | 纯算术吞吐 |
-| 2_MathFunctions | `sqrt+sin*cos+log` | 数学库 SIMD 质量 |
-| 3_SimpleReduce | `if(v<best)best=v` | SIMD blend/归约 |
-| 4_ComplexFlow | `if/else if/else` | mask 管理+多分支 |
-| 5_GatherReduce | `gather+dist+reduce` | gather+inner loop+mask |
-
-## Job 变体（每个 Case 5 个）
-
-| 变体 | Job 类型 | 后端 | 当前状态 |
-|------|---------|------|---------|
-| `_CSharp` | IJobParallelFor | C# managed | ✅ 可用 |
-| `_Cpp` | IJobParallelFor | C++ scalar | ✅ 可用 |
-| `_SIMD` | IJobFor | Auto-SIMD | ✅ 可用 |
-| `_SIMD_IJob` | IJob | Auto-SIMD (无 batch) | ✅ 可用（2026-07-23 新增） |
-| `_ISPC` | IJobParallelFor | ISPC | ✅ 可用 |
-
-## LLVM IR 分析
-
-ISPC 的执行模型与翻译边界见 [ISPC 翻译说明](../../../../docs/public/ISPC-Translation.md)。
-
-生成方法：
-```bash
-cd src/EntJoySample/03_NativeTranspiler/AutoSIMDTest
-gen_llvm_ir.bat
-```
-
-分析重点：
-- **mask 传播**：ISPC 如何通过 phi+select 实现无分支 mask 管理
-- **gather 模式**：`llvm.x86.avx2.gather.d.ps.256` vs `_mm256_i32gather_ps`
-- **blend 指令**：`llvm.x86.avx.blendv.ps.256` 的生成条件
-- **循环展开**：ISPC 的 `foreach` 和 `for(uniform)` 如何映射到 LLVM IR
-- **FMA 融合**：`fmadd` 指令的生成情况
+比较 C#、标量 C++、AutoSIMD 与 ISPC。包含算术、数学函数、归约、分支、Gather、移动、压力与边界八组案例，以及 Entity / Chunk 验证。
 
 ## 运行
 
-```bash
-# 1. 构建 NativeDll
-dotnet build src/EntJoySample
+入口 `EntJoySample.AutoSIMDTest.Program` 当前以注释形式保存。启用对应源码和入口后，在仓库根目录执行：
 
-# 2. 运行基准测试
-# （待集成到主 Program.cs）
+```powershell
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release --no-incremental -p:ENTJOY_STARTUP=EntJoySample.AutoSIMDTest.Program
+.\bin\EntJoySample.exe
 ```
+
+需要 .NET 8、CMake、Visual Studio C++ 工具链与 ISPC；当前 ISPC 目标要求 AVX2。默认入口调用 Entity / Chunk 验证；各 Case 的测量由 `BenchmarkSuite` 组织，内容以对应源码为准。
+
+## 注意事项
+
+- `ENTJOY_SAMPLE_SET=movecompare` 会排除此目录；使用默认样例集构建。
+- AutoSIMD 的属性组合与 Job 形态受生成器校验，向量化请求不保证生成 SIMD；以诊断和机器码为准。
+- [gen_llvm_ir.bat](gen_llvm_ir.bat) 用于生成前五组 ISPC 的文本 IR，运行前将脚本内 ISPC 路径改为本机位置。
+
+[C++ / AutoSIMD 规则](../../../../docs/public/Cpp-AutoSIMD-Translation.md) · [ISPC 规则](../../../../docs/public/ISPC-Translation.md) · [诊断](../../../../docs/public/NativeTranspiler-Boundaries-and-Diagnostics.md)

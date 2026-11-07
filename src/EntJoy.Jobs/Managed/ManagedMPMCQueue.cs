@@ -82,6 +82,7 @@ namespace EntJoy.JobSystem.Managed
                     if (Interlocked.CompareExchange(ref _dequeuePos, pos + 1, pos) == pos)
                     {
                         item = _data[idx];
+                        _data[idx] = default;
                         // 释放槽位供下一圈（pos + capacity）的生产者写。
                         // 必须写 pos + capacity（而非 pos + 1 + capacity）：生产者在第 pos+capacity 轮
                         // 写 pos+1+capacity 会让生产者落入 seq > pos 分支无限自旋。

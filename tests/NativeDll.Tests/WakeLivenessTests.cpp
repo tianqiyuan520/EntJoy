@@ -7,12 +7,16 @@
 // **全体 worker 都已在 futex 上停靠**时的那一次派发 —— 那是唯一必须走慢路径（bump+notify_all）
 // 的时刻，也是本测试专门制造的形态。
 //
-// 五个形态（每个都断言"每个 job 恰好执行一次"，并把超时变成失败而不是挂住）：
+// 覆盖形态（断言每个 job 恰好执行一次，并将停滞转为超时失败）：
 //   A 全体停靠 + 单个小 job（`SubmitWork`，need=1）
 //   B 全体停靠 + 真并行批（`SubmitBatch`，need=tokenCount）
 //   C 池子叫热后连发突发（worker 都在搜索区 ⇒ 应当走快路径、一个字节都不写）
 //   D "登记中的人都在执行"（长 job 占满 worker）+ 新小 job ⇒ 不得搁浅
 //   E 随机形状 + 随机空隙（连发 / round-trip / 批 混合）
+//   F 全体停靠后的后台独立完成（调用方不通过 Complete 提供 assist）
+//   G 不可拆分任务接力展开到全部后台 worker
+//   H 多生产者竞争通知，关闭调用方 assist 验证后台进展
+//   I 已有执行者忙碌、其余停靠时，新任务仍能由后台接手
 // 另外断言**两条路径都被走到**（`skips>0` 且 `wakes>0`）：否则"新代码没生效"会让测试假通过。
 //
 // 与死锁判定配套：`RunWithTimeout` 复用 ChaseLevIntegrationTests.cpp 的做法（超时 →
@@ -311,6 +315,160 @@ namespace
         std::cout << "  phase E ok (" << iterations << " randomized shapes with random gaps)" << std::endl;
     }
 
+    void PhaseF_BackgroundProgress()
+    {
+        std::atomic<int> completed{ 0 };
+        constexpr int rounds = 32;
+        for (int round = 0; round < rounds; ++round)
+        {
+            Require(WaitAllParkedUnregistered(kWorkers, kStateWaitMs),
+                "phase F: workers did not reach the parked state");
+            auto handle = JobSystem::Scheduler::Schedule([](void* raw)
+            {
+                static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+            }, &completed);
+            const auto deadline = Clock::now() + std::chrono::milliseconds(kStateWaitMs);
+            while (!handle.IsCompleted() && Clock::now() < deadline)
+                std::this_thread::yield();
+            const bool backgroundFinished = handle.IsCompleted();
+            // Cleanup may assist after the observation, so a failing test still retires its context.
+            handle.Complete();
+            Require(backgroundFinished, "phase F: background work required caller assist");
+            Require(completed.load() == round + 1, "phase F: work did not execute exactly once");
+        }
+        std::cout << "  phase F ok (" << rounds << " background-only cold submissions)" << std::endl;
+    }
+
+    void PhaseG_IndependentWorkerBudget()
+    {
+        constexpr int rounds = 8;
+        for (int round = 0; round < rounds; ++round)
+        {
+            Require(WaitAllParkedUnregistered(kWorkers, kStateWaitMs),
+                "phase G: workers did not reach the parked state");
+            struct Gate
+            {
+                std::atomic<int> started{ 0 };
+                std::atomic<bool> release{ false };
+                std::vector<JobSystem::JobHandle> handles;
+                ~Gate()
+                {
+                    release.store(true, std::memory_order_release);
+                    release.notify_all();
+                    for (auto& handle : handles) handle.Complete();
+                }
+            } gate;
+            gate.handles.reserve(kWorkers);
+            for (int i = 0; i < kWorkers; ++i)
+            {
+                gate.handles.push_back(JobSystem::Scheduler::Schedule([](void* raw)
+                {
+                    auto& g = *static_cast<Gate*>(raw);
+                    g.started.fetch_add(1, std::memory_order_release);
+                    while (!g.release.load(std::memory_order_acquire))
+                        g.release.wait(false, std::memory_order_relaxed);
+                }, &gate));
+            }
+            const auto deadline = Clock::now() + std::chrono::milliseconds(kStateWaitMs);
+            while (gate.started.load(std::memory_order_acquire) < kWorkers && Clock::now() < deadline)
+                std::this_thread::yield();
+            Require(gate.started.load(std::memory_order_acquire) == kWorkers,
+                "phase G: independent tasks did not wake the full background worker budget");
+        }
+        std::cout << "  phase G ok (" << rounds << " full-worker independent waves)" << std::endl;
+    }
+
+    void PhaseH_ConcurrentBackgroundSubmissions()
+    {
+        const bool previousAssist = JobSystem::g_mainThreadAssistEnabled.exchange(false);
+        struct RestoreAssist
+        {
+            bool enabled;
+            ~RestoreAssist() { JobSystem::g_mainThreadAssistEnabled.store(enabled); }
+        } restore{ previousAssist };
+        std::atomic<int> completed{ 0 };
+        constexpr int producers = 4, count = 128;
+        std::vector<std::jthread> threads;
+        for (int producer = 0; producer < producers; ++producer)
+        {
+            threads.emplace_back([&]
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    auto handle = JobSystem::Scheduler::Schedule([](void* raw)
+                    {
+                        static_cast<std::atomic<int>*>(raw)->fetch_add(1, std::memory_order_relaxed);
+                    }, &completed);
+                    handle.Complete();
+                    if ((i & 7) == 0) std::this_thread::yield();
+                }
+            });
+        }
+        threads.clear();
+        Require(completed.load() == producers * count,
+            "phase H: concurrent background submissions lost or duplicated work");
+        std::cout << "  phase H ok (" << producers * count << " background-only producer submissions)" << std::endl;
+    }
+
+    void PhaseI_BusyRegistrantDoesNotHideSleepers()
+    {
+        if (!JobSystem::WakePollEnabled()) return;
+        for (int attempt = 0; attempt < 32; ++attempt)
+        {
+            Require(WaitAllParkedUnregistered(kWorkers, kStateWaitMs),
+                "phase I: workers did not reach the parked state");
+            std::atomic<bool> warmed{ false };
+            auto warm = JobSystem::Scheduler::Schedule([](void* raw)
+            {
+                static_cast<std::atomic<bool>*>(raw)->store(true);
+            }, &warmed);
+            const auto warmDeadline = Clock::now() + std::chrono::milliseconds(kStateWaitMs);
+            while (!warm.IsCompleted() && Clock::now() < warmDeadline) std::this_thread::yield();
+            warm.Complete();
+            while (Idle() == 0 && Parked() < kWorkers && Clock::now() < warmDeadline) {}
+            if (Idle() == 0) continue;
+            struct Gate
+            {
+                std::atomic<bool> started{ false }, release{ false }, finished{ false };
+                JobSystem::JobHandle handle;
+                ~Gate()
+                {
+                    release.store(true, std::memory_order_release);
+                    release.notify_all();
+                    handle.Complete();
+                }
+            } gate;
+            gate.handle = JobSystem::Scheduler::Schedule([](void* raw)
+            {
+                auto& g = *static_cast<Gate*>(raw);
+                g.started.store(true, std::memory_order_release);
+                while (!g.release.load(std::memory_order_acquire))
+                    g.release.wait(false, std::memory_order_relaxed);
+            }, &gate);
+            const auto deadline = Clock::now() + std::chrono::milliseconds(kStateWaitMs);
+            while (!gate.started.load(std::memory_order_acquire) && Clock::now() < deadline)
+                std::this_thread::yield();
+            Require(gate.started.load(), "phase I: busy callback did not start");
+            Require(WaitAllParked(kWorkers - 1, kStateWaitMs), "phase I: other workers did not park");
+            // 停靠登记早于内核等待；给最后一次复查窗口留出时间。
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if (Idle() == 0) continue; // 重试直到忙回调确实持有粘性登记。
+            auto next = JobSystem::Scheduler::Schedule([](void* raw)
+            {
+                static_cast<Gate*>(raw)->finished.store(true);
+            }, &gate);
+            const auto nextDeadline = Clock::now() + std::chrono::milliseconds(kStateWaitMs);
+            while (!next.IsCompleted() && Clock::now() < nextDeadline) std::this_thread::yield();
+            const bool backgroundFinished = next.IsCompleted();
+            next.Complete();
+            Require(backgroundFinished && gate.finished.load(),
+                "phase I: a busy registrant suppressed a necessary background wake");
+            std::cout << "  phase I ok (busy registrant with parked peers)" << std::endl;
+            return;
+        }
+        RequireCoverage(false, "phase I: busy registrant shape was not observed");
+    }
+
     void Body()
     {
         g_executed.store(0, std::memory_order_relaxed);
@@ -322,6 +480,10 @@ namespace
         PhaseC_BurstTakesFastPath();
         PhaseD_BusyRegistrantsThenSmallJob();
         PhaseE_Randomized();
+        PhaseF_BackgroundProgress();
+        PhaseG_IndependentWorkerBudget();
+        PhaseH_ConcurrentBackgroundSubmissions();
+        PhaseI_BusyRegistrantDoesNotHideSleepers();
 
         // 生效证据：两条路径都被走到（否则"新代码没生效"会让上面的形态测试假通过）。
         if (JobSystem::WakePollEnabled())

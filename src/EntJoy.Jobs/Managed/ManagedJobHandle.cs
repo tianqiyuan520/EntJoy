@@ -32,7 +32,7 @@ namespace EntJoy.JobSystem.Managed
         {
             var c = Completion;
             if (c == null || IsExpired) return; // 槽位已复用 → 本 handle 过期，避免误操作新 job（防 ABA）
-            ManagedJobScheduler.CompleteSchedule(c);
+            ManagedJobScheduler.CompleteSchedule(c, Gen);
             // 等待期间本 completion 可能已被“自动归还”并立即被另一 job 重租（代际已 +1）。
             // 二次代际校验：若已过期则绝不再归还，杜绝双重释放/误操作新 job（防 ABA 双重归还）。
             if (IsExpired) return;
@@ -158,25 +158,25 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
-        /// <summary>任务片段完成；Remaining 减到 0 时触发完成信号，并（若标记自动归还）回池。</summary>
+        /// <summary>最后一个片段释放声明并发布完成；回调派发与槽位回收串行化。</summary>
         internal void Signal()
         {
             if (Interlocked.Decrement(ref Remaining) == 0)
             {
-                int completedGeneration = Volatile.Read(ref Generation);
-                if (HostCtx != 0)
+                lock (SyncRoot)
                 {
-                    // job 完整结束（所有 tile 之后）：先释放写声明、再释放读声明，最后才发布"已完成"。
-                    // 三者顺序都是正确性前提：声明若晚于发布点，Complete() 后的主线程访问会被误拦。
-                    SafetyHandleManager.ReleaseWritesForContext(HostCtx);
-                    SafetyHandleManager.ReleaseReadsForContext(HostCtx);
+                    int completedGeneration = Volatile.Read(ref Generation);
+                    if (HostCtx != 0)
+                    {
+                        SafetyHandleManager.ReleaseWritesForContext(HostCtx);
+                        SafetyHandleManager.ReleaseReadsForContext(HostCtx);
+                    }
+                    Volatile.Write(ref _declReleased, 1);
+                    _done.Set();
+                    DispatchComplete();
+                    if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0)
+                        ManagedJobScheduler.AutoReturnCompletion(this, completedGeneration);
                 }
-                Volatile.Write(ref _declReleased, 1);                      // 释放之后才发布"已完成"
-                _done.Set();
-                DispatchComplete();
-                // 依赖链中间 handle：完成后由完成线程自动归还，避免只等末端 handle 导致的连中部 completion 泄漏。
-                if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0)
-                    ManagedJobScheduler.AutoReturnCompletion(this, completedGeneration);
             }
         }
 

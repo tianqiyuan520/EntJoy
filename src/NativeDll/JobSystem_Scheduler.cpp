@@ -214,7 +214,11 @@ namespace JobSystem
         RecordPublishedJob(id, 1);
         auto* ds = dep.State();
         if (!ds || ds->completed.load(std::memory_order_acquire))
-        { SubmitDirect(kind, func, ctx, length, cleanup, state); return JobHandle(state); }
+        {
+            state->directWithoutDependency = true;
+            SubmitDirect(kind, func, ctx, length, cleanup, state);
+            return JobHandle(state);
+        }
         AcquireState(state);
         RetainDependency(state, ds);
         try

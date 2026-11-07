@@ -737,7 +737,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<uint64_t> g_claimProbeMax{ 0 };
     std::atomic<uint64_t> g_batchStorageCreated{ 0 };
     std::atomic<uint64_t> g_batchStorageReused{ 0 };
-    std::atomic<uint64_t> g_statePoolHit{ 0 };
+    PaddedAtomic<uint64_t> g_statePoolHit;
     std::atomic<uint64_t> g_statePoolRefill{ 0 };
     std::atomic<uint64_t> g_statePoolNew{ 0 };
     std::atomic<uint64_t> g_stateRecycled{ 0 };
@@ -756,7 +756,7 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     std::atomic<int64_t> g_wakeLatencyEwmaNs{ 300'000 };
     std::atomic<uint64_t> g_publishToCompletionEwmaNs{ 0 };
     std::atomic<uint64_t> g_perRangeExecEwmaNs{ 0 };
-    std::atomic<uint64_t> g_nextDiagnosticBatchId{ 0 };
+    PaddedAtomic<uint64_t> g_nextDiagnosticBatchId;
     std::atomic<bool> g_shuttingDown{ false };
     std::thread::id g_mainThreadId{};
     std::atomic<bool> g_timingDiagnosticsEnabled{ [] {

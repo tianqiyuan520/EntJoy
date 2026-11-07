@@ -202,13 +202,8 @@ namespace JobSystem
     static bool WakePollDecideAfterPush(ChaseLevScheduler& sched, int needWorkers, bool isBatch) noexcept
     {
         std::atomic_thread_fence(std::memory_order_seq_cst);   // PushFence
-        const uint32_t idle = static_cast<uint32_t>(
+        const uint32_t registered = static_cast<uint32_t>(
             sched.wakeIdlePollers.load(std::memory_order_seq_cst));
-        if (idle >= static_cast<uint32_t>(needWorkers > 0 ? needWorkers : 1))
-        {
-            WakePollAccount(/*woke=*/false, isBatch);
-            return false;
-        }
         const int sleepers = sched.parkedWorkers.load(std::memory_order_seq_cst);
         if (sleepers <= 0)
         {
@@ -216,10 +211,23 @@ namespace JobSystem
             WakePollAccount(/*woke=*/false, isBatch);
             return false;
         }
-        WakePollAccount(/*woke=*/true, isBatch);
-        sched.wakeEpoch.fetch_add(1, std::memory_order_seq_cst);
-        sched.wakeEpoch.notify_all();
-        return true;
+        // work 不进入本地 deque；队列已空时，它已被执行者领取，无需再通知。
+        if (!isBatch && sched.injector_.IsEmpty())
+        {
+            WakePollAccount(/*woke=*/false, isBatch);
+            return false;
+        }
+        const auto demand = static_cast<uint32_t>(std::max(1, needWorkers));
+        const auto idle = registered > 0 ? sched.SearchingWorkers(demand) : 0u;
+        if (idle >= demand || (!isBatch && sched.injector_.IsEmpty()))
+        {
+            WakePollAccount(/*woke=*/false, isBatch);
+            return false;
+        }
+        const uint32_t needed = demand - idle;
+        const bool woke = sched.WakeWorkers(needed);
+        WakePollAccount(woke, isBatch);
+        return woke;
     }
 
     // ============================================================
@@ -362,12 +370,13 @@ namespace JobSystem
     // ============================================================
 
     bool ChaseLevScheduler::StealAndExecute(uint32_t stealStart, uint32_t accountIndex,
-        bool scanAllWorkers) noexcept
+        bool scanAllWorkers, bool scanDeques) noexcept
     {
         // 1. 从 Injector 窃取（FIFO，1 CAS）
         RangeTask* task = nullptr;
         if (injector_.Pop(task))
         {
+            WakeForQueuedWork();
             if (task->batch == nullptr)
             {
                 RunWorkTask(task);   // 通用 work：直接执行（内部 Release）
@@ -379,6 +388,8 @@ namespace JobSystem
             RecordStatCount(g_assistExecuted, 1);
             return true;
         }
+
+        if (!scanDeques) return false;
 
         // 2. 从其他 worker deque 窃取（FIFO，1 CAS per victim）
         RecordStatCount(g_stealAttempts, 1);
@@ -473,7 +484,7 @@ namespace JobSystem
     bool ChaseLevScheduler::Start(uint32_t workerCount, TileExecutor executor,
         TaskDoneFn taskDone, bool bindThreads)
     {
-        if (workerCount == 0 || !executor) return false;
+        if (workerCount == 0 || workerCount > kMaxTrackedWorkers || !executor) return false;
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
         if (running_) return workers_.size() == workerCount;
         if (!workers_.empty()) return false;
@@ -494,6 +505,7 @@ namespace JobSystem
             dequePopped[i].store(0, std::memory_order_relaxed);
             dequeStolen[i].store(0, std::memory_order_relaxed);
             tasksExecuted[i].store(0, std::memory_order_relaxed);
+            searchingWorkers_[i].store(false, std::memory_order_relaxed);
         }
 
         wakeEpoch.store(0, std::memory_order_relaxed);
@@ -501,6 +513,7 @@ namespace JobSystem
         // 这里是防御性的 —— 一个残留的 >0 会让提交侧永久跳过广播。
         wakeIdlePollers.store(0, std::memory_order_relaxed);
         parkedWorkers.store(0, std::memory_order_relaxed);
+        pendingWakes_.store(0, std::memory_order_relaxed);
 
         try
         {
@@ -534,8 +547,7 @@ namespace JobSystem
             // 异常回滚：此时已持有 lifecycleMutex_，不能调 Stop()（会二次加锁死锁）。
             // 直接置 quit + 唤醒 + join 已创建的线程 + clear。
             quit_.store(true, std::memory_order_release);
-            wakeEpoch.fetch_add(1, std::memory_order_release);
-            wakeEpoch.notify_all();
+            WakePending();
             for (auto& ctx : workers_)
             {
                 if (ctx->thread.joinable())
@@ -563,9 +575,8 @@ namespace JobSystem
 
         quit_.store(true, std::memory_order_release);
 
-        // 唤醒所有 worker 退出（单 epoch 广播：1 次 syscall 唤醒全部 waiter）
-        wakeEpoch.fetch_add(1, std::memory_order_release);
-        wakeEpoch.notify_all();
+        // 强制通知全部等待者，退出不依赖其他提交线程完成通知。
+        WakePending();
 
         for (auto& ctx : workers_)
         {
@@ -1147,8 +1158,7 @@ namespace JobSystem
         {
             if (WakePollEnabled())
             {
-                // 本路径只有这一条是无条件唤醒，是 `ENTJOY_WAKE_POLL` 的主要对象。
-                // 小 job 一次只需要 1 个 worker 推进 ⇒ need=1（"有一个登记中的人"就够）。
+                // 不可拆分 work 的初始需求为一个执行者；积压由接手者补足通知。
                 WakePollDecideAfterPush(*this, /*needWorkers=*/1, /*isBatch=*/false);
             }
             else
@@ -1160,23 +1170,80 @@ namespace JobSystem
         return true;
     }
 
-    // 提交窗口统一唤醒（deferNotify 的 Flush）：一次 bump + notify_all。
-    // defer 期 SubmitBatch 跳过 per-batch 唤醒；本方法在窗口关闭时执行唯一一次广播。
+    // 通知额度只在停靠冷路径中修改；覆盖同一份需求的通知在等待者恢复前合并。
+    bool ChaseLevScheduler::WakeWorkers(uint32_t needed) noexcept
+    {
+        const auto hint = parkedWorkers.load(std::memory_order_acquire);
+        if (hint <= 0) return false;
+        needed = std::min(needed, static_cast<uint32_t>(hint));
+        if (pendingWakes_.load(std::memory_order_seq_cst) >= needed) return false;
+        uint32_t additional;
+        bool wakeAll;
+        {
+            std::lock_guard<std::mutex> lock(parkMutex_);
+            const auto waiting = static_cast<uint32_t>(parkedWorkers.load(std::memory_order_relaxed));
+            needed = std::min(needed, waiting);
+            const auto pending = pendingWakes_.load(std::memory_order_relaxed);
+            if (pending >= needed) return false;
+            additional = needed - pending;
+            pendingWakes_.store(needed, std::memory_order_seq_cst);
+            wakeAll = needed == waiting;
+        }
+        if (wakeAll) parkCv_.notify_all();
+        else
+        {
+            for (uint32_t i = 0; i < additional; ++i) parkCv_.notify_one();
+        }
+        return true;
+    }
+
+    uint32_t ChaseLevScheduler::SearchingWorkers(uint32_t limit) const noexcept
+    {
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < kMaxTrackedWorkers && found < limit; ++i)
+            if (searchingWorkers_[i].load(std::memory_order_relaxed)) ++found;
+        return found;
+    }
+
+    void ChaseLevScheduler::WakeForQueuedWork() noexcept
+    {
+        if (!WakePollEnabled()) return;
+        const auto registered = static_cast<uint32_t>(wakeIdlePollers.load(std::memory_order_seq_cst));
+        const bool worker = ChaseLevScheduler_IsWorkerThread();
+        if (!worker && registered > 0) return;
+        if (parkedWorkers.load(std::memory_order_acquire) <= 0 ||
+            g_submitDeferDepth.load(std::memory_order_relaxed) > 0) return;
+        const auto ready = injector_.ApproxSize();
+        // 后台执行者已接手工作后，再按实际积压展开并行度。
+        // 调用线程只补首个通知，让已在途的执行者继续承接积压。
+        const auto covered = worker && registered > 0 ? SearchingWorkers(ready) : 0u;
+        if (ready > covered) WakeWorkers(worker ? ready - covered : 1u);
+    }
+
     void ChaseLevScheduler::WakePending() noexcept
     {
         wakeEpoch.fetch_add(1, std::memory_order_release);
-        wakeEpoch.notify_all();
+        if (WakePollEnabled())
+        {
+            {
+                std::lock_guard<std::mutex> lock(parkMutex_);
+                pendingWakes_.store(static_cast<uint32_t>(parkedWorkers.load(std::memory_order_relaxed)),
+                    std::memory_order_seq_cst);
+            }
+            parkCv_.notify_all();
+        }
+        else wakeEpoch.notify_all();
     }
 
     // ============================================================
     // TryAssistOne — 主线程协助执行：从 Injector 或其他 worker 窃取
     // ============================================================
 
-    bool ChaseLevScheduler::TryAssistOne() noexcept
+    bool ChaseLevScheduler::TryAssistOne(bool scanDeques) noexcept
     {
         if (!running_.load(std::memory_order_acquire)) return false;
         // 主线程没有 worker 槽位：窃取仍从 deque 0 起扫，计账走 main 分支（accountIndex 越界即跳过数组写入）
-        return StealAndExecute(0, kMaxTrackedWorkers, true);
+        return StealAndExecute(0, kMaxTrackedWorkers, true, scanDeques);
     }
 
     // ============================================================
@@ -1242,7 +1309,7 @@ namespace JobSystem
     //   1. PopBottom(myDeque)           — LIFO，owner-only，零竞争
     //   2. injector_.Pop → PushBottom   — 从 Injector 拉取推入 deque
     //   3. StealTop(otherDeque)         — 从其他 worker 窃取
-    //   4. Park                         — atomic::wait epoch
+    //   4. Park                         — 停靠登记、复查、等待通知额度
     //   5. quit_ → 排空 deque 后退出
     // ============================================================
 
@@ -1284,9 +1351,26 @@ namespace JobSystem
         // `ENTJOY_WAKE_POLL`：本 worker 是否已登记在"搜索区"里（粘性，见第 5 步的注释）。
         const bool wakePoll = WakePollEnabled();
         bool idleRegistered = false;
+        bool searching = false;
+        auto workFound = [&]
+        {
+            if (wakePoll)
+            {
+                searchingWorkers_[workerIndex].store(false, std::memory_order_relaxed);
+                searching = false;
+                // 发布者若观察到此前的搜索状态，本次复查会接手其已发布工作。
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+            }
+            WakeForQueuedWork();
+        };
 
         while (true)
         {
+            if (wakePoll && !searching)
+            {
+                searchingWorkers_[workerIndex].store(true, std::memory_order_relaxed);
+                searching = true;
+            }
             bool got = false;
 
             // ---- 1. 本地 PopBottom（LIFO，owner-only，零竞争）----
@@ -1296,6 +1380,7 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                workFound();
                 spinBudget = kSpinMax;   // 有活：拉高自旋预算
                 // workerCap 令牌（firstTile==kClaimTokenMarker）：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
@@ -1366,6 +1451,7 @@ namespace JobSystem
             RangeTask* rangeTask = nullptr;
             if (injector_.Pop(rangeTask))
             {
+                workFound();
                 spinBudget = kSpinMax;   // 有活：拉高自旋预算
                 // 通用 work（batch==nullptr）直接执行：TileTask 无 work 回调，入 deque 会丢失 work。
                 if (rangeTask->batch == nullptr)
@@ -1414,6 +1500,7 @@ namespace JobSystem
 
             if (got && task.batch && task.tileCount > 0)
             {
+                workFound();
                 spinBudget = kSpinMax;   // 有活（窃取成功）：拉高自旋预算
                 // workerCap 令牌：认领循环执行，内部已 taskDone
                 if (task.firstTile == kClaimTokenMarker)
@@ -1466,6 +1553,8 @@ namespace JobSystem
         drain_quit:   // Stop 竞态入口：spin/park 期检测到 quit 直接进入排空退出
             if (quit_.load(std::memory_order_acquire))
             {
+                searchingWorkers_[workerIndex].store(false, std::memory_order_relaxed);
+                searching = false;
                 // 这是"离开搜索区登记"的第二个出口（第一个是停靠协议入口）。注意必须写在
                 // quit 分支里：本标签每轮都会经过（正常"没找到活"也落到这里），写在标签下会每轮
                 // 清一次登记，退化成"每 job 一次共享行 RMW"。
@@ -1549,6 +1638,11 @@ namespace JobSystem
                 // 安全性：登记中的 worker 要么在搜索区里读注入器、要么在执行任务，执行完必然回主循环
                 // 读注入器，而离开登记态的唯一出口是停靠协议入口——那里紧接着就是 fence + 最后一次
                 // 读注入器（不变量 I2）。所以"提交侧看到有人在登记"⇒ 那个人的下一次读必然在 push 之后。
+                if (wakePoll)
+                {
+                    searchingWorkers_[workerIndex].store(true, std::memory_order_relaxed);
+                    searching = true;
+                }
                 if (wakePoll && !idleRegistered)
                 {
                     wakeIdlePollers.fetch_add(1, std::memory_order_seq_cst);
@@ -1583,40 +1677,40 @@ namespace JobSystem
                 }
             }
 
-// ---- 5b. Park — wait(共享 epoch) ----
-            // 所有 worker wait 同一 epoch：一次 notify_all 唤醒全部（1 次 futex）。
-            // 快照必须早于 quit/队列复查：否则 producer 在「检查空」与「读快照」之间
-            // bump epoch + notify，worker 读到新 epoch 后 wait 会永久睡眠（lost-wakeup）。
+// ---- 5b. Park ----
+            // 快照早于停靠登记与队列复查，保证显式 Flush/退出能被观察到。
             seenStamp = wakeEpoch.load(std::memory_order_acquire);
             if (WakePollEnabled())
             {
-                // 停靠协议：先退出"搜索区"登记 → 再登记 sleepers → 再 fence → 最后复查（不变量 I2）。
-                // 退出登记必须在这里（而不是搜索区出口）：粘性登记期间 worker 可能在执行任务，
-                // 而"离开登记态"的这一刻起，它下面紧接的最后一次注入器复查就是提交侧依赖的那次读。
+                searchingWorkers_[workerIndex].store(false, std::memory_order_relaxed);
+                searching = false;
                 if (idleRegistered)
                 {
                     wakeIdlePollers.fetch_sub(1, std::memory_order_seq_cst);
                     idleRegistered = false;
                 }
-                parkedWorkers.fetch_add(1, std::memory_order_seq_cst);
-                std::atomic_thread_fence(std::memory_order_seq_cst);   // SleepFence
-                if (quit_.load(std::memory_order_acquire))
+                bool waited = false;
                 {
+                    std::unique_lock<std::mutex> lock(parkMutex_);
+                    parkedWorkers.fetch_add(1, std::memory_order_seq_cst);
+                    std::atomic_thread_fence(std::memory_order_seq_cst); // SleepFence，与发布侧配对
+                    if (!quit_.load(std::memory_order_acquire) && injector_.IsEmpty() && myDeque->IsEmpty() &&
+                        wakeEpoch.load(std::memory_order_acquire) == seenStamp)
+                    {
+                        waited = true;
+                        parkCv_.wait(lock, [this] {
+                            return quit_.load(std::memory_order_acquire) ||
+                                pendingWakes_.load(std::memory_order_relaxed) > 0;
+                        });
+                    }
+                    // 恢复与复查后取消停靠都消费一次额度，防止通知积累。
+                    const auto pending = pendingWakes_.load(std::memory_order_relaxed);
+                    if (pending > 0) pendingWakes_.store(pending - 1, std::memory_order_seq_cst);
                     parkedWorkers.fetch_sub(1, std::memory_order_seq_cst);
-                    goto drain_quit;
                 }
-                // 最后一次复查：注入器 / 本线程 deque / epoch 三者任一有变化 ⇒ 不睡。
-                if (!injector_.IsEmpty() || !myDeque->IsEmpty() ||
-                    wakeEpoch.load(std::memory_order_acquire) != seenStamp)
-                {
-                    parkedWorkers.fetch_sub(1, std::memory_order_seq_cst);
-                    continue;
-                }
-                wakeEpoch.wait(seenStamp, std::memory_order_relaxed);
-                parkedWorkers.fetch_sub(1, std::memory_order_seq_cst);
-                // 真的在 futex 上睡过并被唤醒（`[M-16] 唤醒=`）。
-                g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
-                continue; // 唤醒后回到主循环
+                if (waited) g_parkWakeCount.fetch_add(1, std::memory_order_relaxed);
+                if (quit_.load(std::memory_order_acquire)) goto drain_quit;
+                continue;
             }
             if (quit_.load(std::memory_order_acquire))
                 goto drain_quit;
@@ -1666,11 +1760,9 @@ namespace JobSystem
 
     void ChaseLevScheduler::DumpState(const char* tag) const noexcept
     {
-        // 把唤醒决策所依赖的两个量也打出来（idlePollers / parkedWorkers）。丢唤醒的诊断
-        // 全在这两个数上：`idle>0` 说明提交侧认为"有人会自己领到"，`parked==W` 说明那一刻其实
-        // 全员在 futex 上（此时不写唤醒字就是丢唤醒）。
+        // 停靠登记与通知额度分别记录，便于核对等待协议。
         std::fprintf(stderr, "[ChaseLev:%s] workers=%zu quit=%d running=%d pushed=%llu done=%llu injector=%u"
-            " idlePollers=%llu parked=%d wakePoll=%d\n",
+            " idlePollers=%llu parked=%d pendingWake=%u wakePoll=%d\n",
             tag, workers_.size(),
             (int)quit_.load(std::memory_order_acquire),
             (int)running_.load(std::memory_order_acquire),
@@ -1679,6 +1771,7 @@ namespace JobSystem
             injector_.ApproxSize(),
             (unsigned long long)wakeIdlePollers.load(std::memory_order_acquire),
             parkedWorkers.load(std::memory_order_acquire),
+            static_cast<unsigned>(pendingWakes_.load(std::memory_order_relaxed)),
             (int)WakePollEnabled());
         for (uint32_t i = 0; i < workers_.size(); ++i)
         {

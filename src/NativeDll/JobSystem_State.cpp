@@ -643,6 +643,7 @@ namespace JobSystem
             }
         }
         if (!state) state = new HandleState(completed);
+        state->directWithoutDependency = false;
         state->refCount.store(1, std::memory_order_relaxed);
         state->completed.store(completed, std::memory_order_relaxed);
         state->backendRetired.store(true, std::memory_order_relaxed);
@@ -1368,8 +1369,30 @@ namespace JobSystem
             if (auto scheduler = LoadChaseLevScheduler())
                 scheduler->WakePending();
         }
+        int idleSpins = 0;
         while (!state->backendRetired.load(std::memory_order_acquire))
-            state->backendRetired.wait(false, std::memory_order_relaxed);
+        {
+            // 逻辑完成后仍可能有未消费令牌；assist 保持到退役，支持执行者占满时的嵌套等待。
+            if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed))
+            {
+                if ((idleSpins & 15) == 0)
+                {
+                    if (auto scheduler = LoadChaseLevScheduler(); scheduler && scheduler->TryAssistOne())
+                    {
+                        idleSpins = 0;
+                        continue;
+                    }
+                }
+                CpuPause();
+                if (++idleSpins == 256)
+                {
+                    std::this_thread::yield();
+                    idleSpins = 0;
+                }
+            }
+            else
+                state->backendRetired.wait(false, std::memory_order_relaxed);
+        }
     }
 
     // C++ 异常协议：Complete 的每个退出点在等退役后调用；异常通过冷路径
@@ -1432,8 +1455,8 @@ namespace JobSystem
             return;
         }
 
-        // 主线程在等待期参与认领：assist 打开时先从 Injector 取令牌，取不到再扫各 worker
-        // deque 窃取；批的完成仍由持有令牌的执行者计数，主线程不额外改 pendingTasks。
+        // 等待期先从 Injector 取任务；并行批和提交时依赖未完成的任务还会扫描 worker deque。
+        // 就绪直通任务由 Injector 消费者直接执行，等待它时只需协助 Injector。
 
         // Phase 2: 先密集 spin（过早 yield 触发完整 OS 上下文切换）。
         // Chase-Lev：主线程 spin 期间即协助认领执行，消除"慢 worker 被抢占
@@ -1451,7 +1474,7 @@ namespace JobSystem
             // Chase-Lev：spin 期间协助认领（每 16 次，更积极兜底慢 worker）
             if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && (i & 15) == 0)
             {
-                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne()) { /* 无可认领，继续 spin */ }
+                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne(!_state->directWithoutDependency)) { /* 无可认领，继续 spin */ }
             }
             CpuPause();
         }
@@ -1474,7 +1497,7 @@ namespace JobSystem
             }
             if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed) && (i & 15) == 0)
             {
-                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne()) { /* 无可认领 */ }
+                if (auto scheduler = LoadChaseLevScheduler(); scheduler && !scheduler->TryAssistOne(!_state->directWithoutDependency)) { /* 无可认领 */ }
             }
             CpuPause();
         }
@@ -1501,7 +1524,7 @@ namespace JobSystem
                 for (int assistN = 0; assistN < 16; ++assistN)
                 {
                     if (_state->completed.load(std::memory_order_acquire)) break;
-                    if (!scheduler->TryAssistOne()) break;
+                    if (!scheduler->TryAssistOne(!_state->directWithoutDependency)) break;
                 }
             }
 

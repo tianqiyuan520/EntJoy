@@ -156,7 +156,7 @@ namespace JobSystem
     // JobCostCache export flag：用户显式启用（C# JobSystem_SetJobCostCacheEnabled(1)）后，
     // worker 按 per-job 每元素成本 EWMA 自动求解最优 tile 数；热路径 relaxed 读取足够（延迟生效无害）。
     extern std::atomic<bool> g_jobCostCacheEnabled;
-    // 提交期"延迟唤醒"深度：>0 时 SubmitBatch 跳过末尾 notify_all，由显式 Flush 在提交窗口结束时统一唤醒。
+    // 提交期"延迟唤醒"深度：>0 时跳过逐批通知，由显式 Flush 在提交窗口结束时统一唤醒。
     // 安全：任务已入注入器，worker 自旋自取；全 park 时由 Flush 的 notify_all 唤醒。
     extern std::atomic<int> g_submitDeferDepth;
     // 隐式批（native 收集）：开启时主线程直接提交的 tile 路径 job 挂入 pending，
@@ -393,8 +393,8 @@ namespace JobSystem
     extern std::atomic<uint64_t> g_claimProbeMax;
     extern std::atomic<uint64_t> g_batchStorageCreated;
     extern std::atomic<uint64_t> g_batchStorageReused;
-    // State 池命中分布（用于分解 CreateState 的耗时构成）。
-    extern std::atomic<uint64_t> g_statePoolHit;
+    // State 池命中计数独占缓存行，隔开 worker 空扫描计数的写入。
+    extern PaddedAtomic<uint64_t> g_statePoolHit;
     extern std::atomic<uint64_t> g_statePoolRefill;
     extern std::atomic<uint64_t> g_statePoolNew;
     // 回收侧：RecycleState 总次数 + 其中发生在 worker 线程的比例（worker 的 TLS 缓存会吃掉回收，
@@ -421,7 +421,8 @@ namespace JobSystem
     extern std::atomic<int64_t> g_wakeLatencyEwmaNs;
     extern std::atomic<uint64_t> g_publishToCompletionEwmaNs;
     extern std::atomic<uint64_t> g_perRangeExecEwmaNs;
-    extern std::atomic<uint64_t> g_nextDiagnosticBatchId;
+    // 提交 ID 独占缓存行，隔开执行侧回调指针等只读数据。
+    extern PaddedAtomic<uint64_t> g_nextDiagnosticBatchId;
     extern std::atomic<bool> g_shuttingDown;
     // 主线程 id：Initialize 时记录。Shutdown 用它 + `ChaseLevScheduler_IsWorkerThread()` 判定调用者
     // 是否为本调度器的 worker —— 只有 worker 调 Shutdown 会 join 自身死锁；其余线程（含 ProcessExit）允许。
@@ -932,36 +933,22 @@ namespace JobSystem
     void SubmitOrPending(BatchState* batch);
     // 隐式批 force point：defer 窗口内提交全部 pending + 单次唤醒（EndFrame / Complete 自动触发）。
     void FlushPendingSubmits();
-    // ── `ENTJOY_WAKE_POLL`（默认开；`=0` 关闭）：提交侧的"需求感知"唤醒决策 ──
-    // 问题：生产者每条派发都写一条被 W 个 worker 轮询的 cacheline，每次写都要把它从 W 个共享者
-    //   手里抢回独占 ⇒ per-job 成本随 worker 数增长。正确的省法不是"少叫人"，而是
-    //   "有人正在轮询注入器、自己就能领到"时一个字节都不写。
-    //   区分两个量：parkedWorkers = 已登记停靠（含 futex 等待）的人数；
-    //              idlePollers   = 登记在"搜索区"（每轮都读注入器；或刚领到任务，执行完必然回主循环）的人数。
-    // 协议（rayon-core `sleep` 模块的 posted-without-storing 快路径，README 的
-    //   "Using seq-cst fences to prevent deadlock" 证明骨架）：
-    //     提交侧：token 入注入器（release）→ fence(seq_cst) → 读 idlePollers → 读 sleepers
-    //             · idlePollers >= need ⇒ 一个字节都不写（登记者的下一次读必然在 push 之后）；
-    //             · 不足且 sleepers > 0 ⇒ bump epoch + notify_all（真有人在 futex 上等）；
-    //             · 不足且 sleepers == 0 ⇒ 不写（其余 worker 正在执行，执行完的下一轮会读注入器）。
-    //     停靠侧：退"搜索区登记"（idlePollers--）→ 登记停靠（sleepers++）→ fence(seq_cst)
-    //             → 最后一次读注入器/本线程 deque → 才 futex wait。
-    //   ⚠ 关键顺序：登记必须在最后复查之前，两处 fence 才是配对的
-    //     （rayon README: PushFence / SleepFence）。顺序写反就会丢唤醒。
-    //   ⚠ `need` 必须分入口：小 job（`SubmitWork`）需要 1 个 worker，真并行趟（`SubmitBatch`）
-    //     需要本趟真实令牌数 `tokenCount`（= min(workerCap, workerCount_, tileCount)，不是
-    //     `batch->workerCount` 这个上限）。用同一个谓词套两条入口会让一整趟只被 1~2 个 worker 拖着跑。
-    //   ⚠ 搜索区登记必须粘性（只在"进停靠协议"与"退出主循环"两处递减）：每次进出都写会让
-    //     连发的每个 job 多付共享行 RMW。
-    //   ⚠ 与 rayon 的一处有意偏离：rayon 把 [sleeping, inactive, JEC] 打包进同一个字；我们不能把
-    //     JEC 与被频繁写的线程计数同放一字 —— 我们的 futex 原语是
-    //     `std::atomic::wait(wakeEpoch, stamp)`（按值比较），线程计数的任何写入都会让全部等待者
-    //     立刻"被唤醒"（虚假唤醒风暴）。故"搜索区人数"与既有的 `parkedWorkers`(sleepers) 分字存放，
-    //     读序固定为 idle 先、sleepers 后，安全性见 .cpp。
-    //   ⚠ 计数不得在派发热路径上写全局原子（那正是本改动要消除的模式）：走 thread_local 累加 +
-    //     每 1024 次合并（`WakePollFlushCurrentThread`），读取侧先 flush 本线程尾巴。
-    //   ⚠ 未做：rayon 的"找到活的人顺手叫醒 1~2 个睡着的人"级联（`work_found → wake_any_threads`）。
-    //     需求感知谓词已覆盖当前两个入口；若将来有入口低报 need，那才是正确的下一步补丁。
+    // ENTJOY_WAKE_POLL 默认开启需求感知通知；关闭时使用共享 epoch 的原子等待。
+    // 发布侧：任务入队（release）→ PushFence(seq_cst) → 读登记者 → 读停靠数。
+    // 有停靠者时核对每个执行者的真实搜索状态；不足时补足所需的通知额度。
+    // 不可拆分的 work 需要一个执行者，并行批按其已发布令牌数计算需求。
+    //
+    // 停靠侧：退出搜索区登记 → 在 parkMutex_ 内登记停靠 → SleepFence(seq_cst)
+    // → 复查队列、退出标记和 epoch → 等待通知额度。发布与停靠两侧栅栏配对，
+    // 防止任务入队与执行者入睡互相漏看；队列复查后等待与通知共用一把锁。
+    //
+    // pendingWakes_ 是已发出但尚未接收的通知，始终不超过停靠登记数。
+    // 恢复和取消停靠均消费额度；重复提交先复用在途通知，避免积累信号。
+    // 后台执行者按就绪积压补足通知；调用线程只保证首个通知，已有额度继续覆盖需求。
+    // 显式 Flush/退出强制通知全部已登记等待者，支持独立完成关停。
+    //
+    // 搜索区登记保持粘性，覆盖搜索与执行；仅停靠和退出时注销，避免每个微任务
+    // 修改共享计数。纯诊断使用 TLS 聚合，读取前合并当前线程尾数。
     bool WakePollEnabled() noexcept;
     // 生效证据计数：把当前线程的 thread_local 累加值合并进全局计数（见 ChaseLevScheduler.cpp
     // 的说明；读取侧必须先调一次，否则 <1024 的尾巴读不到）。worker 退出主循环时也会自己调一次。

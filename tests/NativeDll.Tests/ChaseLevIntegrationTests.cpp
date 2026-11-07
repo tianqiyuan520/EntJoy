@@ -65,6 +65,83 @@ namespace
         if (ctx.cleanup) ctx.cleanup->fetch_add(1, std::memory_order_relaxed);
     }
 
+    void TestDirectJobsWithOccupiedWorkers()
+    {
+        struct WorkerGate
+        {
+            std::atomic<int> started{ 0 };
+            std::atomic<bool> release{ false };
+            std::vector<JobSystem::JobHandle> handles;
+
+            ~WorkerGate()
+            {
+                release.store(true, std::memory_order_release);
+                release.notify_all();
+                for (auto& handle : handles) handle.Complete();
+            }
+        } gate;
+        const int workers = JobSystem::CurrentWorkerCount();
+        for (int i = 0; i < workers; ++i)
+        {
+            gate.handles.push_back(JobSystem::Scheduler::Schedule([](void* raw)
+            {
+                auto& g = *static_cast<WorkerGate*>(raw);
+                g.started.fetch_add(1, std::memory_order_release);
+                while (!g.release.load(std::memory_order_acquire))
+                    g.release.wait(false, std::memory_order_relaxed);
+            }, &gate));
+        }
+        // 门控回调会阻塞执行者；显式唤醒全部 worker，建立占满执行者的测试条件。
+        JobSystem::LoadChaseLevScheduler()->WakePending();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (gate.started.load(std::memory_order_acquire) != workers &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        Require(gate.started.load(std::memory_order_acquire) == workers,
+            "workers did not reach the gate");
+
+        struct Context
+        {
+            std::atomic<int> hits{ 0 }, cleanup{ 0 };
+            std::atomic<bool> nestedCompleted{ false };
+        } context;
+        auto cleanup = [](void* raw) { static_cast<Context*>(raw)->cleanup.fetch_add(1); };
+        auto scalar = JobSystem::Scheduler::Schedule([](void* raw)
+        {
+            static_cast<Context*>(raw)->hits.fetch_add(1);
+        }, &context, cleanup);
+        Require(context.hits.load() == 0, "Schedule executed on the submitting thread");
+        auto copy = scalar;
+        scalar = {};
+        copy.Complete();
+        copy.Complete();
+
+        auto indexed = JobSystem::Scheduler::ScheduleFor([](void* raw, int)
+        {
+            static_cast<Context*>(raw)->hits.fetch_add(1);
+        }, &context, 7, cleanup);
+        indexed.Complete();
+        auto batch = JobSystem::Scheduler::ScheduleParallelForBatch([](void* raw, int, int count)
+        {
+            static_cast<Context*>(raw)->hits.fetch_add(count);
+        }, &context, 19, 19, cleanup);
+        batch.Complete();
+        auto nested = JobSystem::Scheduler::Schedule([](void* raw)
+        {
+            auto child = JobSystem::Scheduler::ScheduleParallelFor([](void* data, int)
+            {
+                static_cast<Context*>(data)->hits.fetch_add(1);
+            }, raw, 4099, 1);
+            child.Complete();
+            static_cast<Context*>(raw)->nestedCompleted.store(true);
+        }, &context, cleanup);
+        nested.Complete();
+        Require(context.hits.load() == 1 + 7 + 19 + 4099,
+            "caller assist lost or duplicated direct or nested work");
+        Require(context.cleanup.load() == 4, "direct cleanup did not run exactly once");
+        Require(context.nestedCompleted.load(), "nested parallel wait did not complete");
+    }
+
     // ============================================================
     // Test 1: Chunk 路径 + Complete（复现 TestTraceLifecycleOrder 死锁）
     // ============================================================
@@ -251,6 +328,7 @@ int main()
     JobSystem::Scheduler::Initialize();
     try
     {
+        RunWithTimeout("TestDirectJobsWithOccupiedWorkers", TestDirectJobsWithOccupiedWorkers);
         RunWithTimeout("TestParallelForComplete", TestParallelForComplete);
         RunWithTimeout("TestChunkComplete", TestChunkComplete);
         RunWithTimeout("TestDependencyChainComplete", TestDependencyChainComplete);

@@ -56,6 +56,8 @@ namespace JobSystem {
         // C# HandleStateView 仅读前 8 字节（refCount/completed），此布局不破坏托管侧 ABI。
         std::atomic<ContinuationNode*> continuationSlot{ nullptr };
         std::atomic<bool> hasExtraContinuations{ false };
+        // 发布句柄前固定；就绪直通任务只在 Injector 执行，无需等待方扫描 worker deque。
+        bool directWithoutDependency{ false };
         struct ColdState
         {
             std::vector<std::function<void()>> continuations;

@@ -173,10 +173,11 @@ namespace EntJoy.JobSystem.Managed
                     return false;
                 }
 
-                // CAS 抢占 top → t+1
+                // 先复制 payload；认领成功后 owner 即可复用环形槽位。
+                var candidate = _buffer[idx];
                 if (Interlocked.CompareExchange(ref _top, t + 1, t) == t)
                 {
-                    task = _buffer[idx];
+                    task = candidate;
                     return true;
                 }
                 // CAS 失败：其他 thief 抢先，重试

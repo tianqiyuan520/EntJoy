@@ -22,6 +22,7 @@
 #include "JobSystemInternal.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -74,10 +75,14 @@ namespace JobSystem
         // 提交窗口统一唤醒（deferNotify 的 Flush）：bump epoch + notify_all 一次。
         // 供 JobSystem_SubmitDeferFlush 调用；defer 期 SubmitBatch 跳过 per-batch 唤醒。
         void WakePending() noexcept;
+        // 只补足尚未覆盖的通知；等待者接收或取消停靠时消费额度。
+        bool WakeWorkers(uint32_t needed) noexcept;
+        uint32_t SearchingWorkers(uint32_t limit) const noexcept;
 
         // 主线程协助执行：从 Injector 或其他 worker deque 窃取一个任务并执行。
+        // scanDeques=false 时只消费 Injector，用于等待无未完成依赖的直通任务。
         // 返回是否执行了任务。
-        bool TryAssistOne() noexcept;
+        bool TryAssistOne(bool scanDeques = true) noexcept;
 
         // 运行时切换 worker CPU 亲和性（enabled=true 绑定核心 1+i；false 清除）。
         // 应用到所有已启动的 worker 线程。主线程绑定核心 0 由调用方处理。
@@ -107,18 +112,17 @@ namespace JobSystem
         // worker park 前读它：>0 说明仍有未认领任务，短自旋后再 park。
         std::atomic<int64_t> activeTasks{ 0 };
 
-        // 唤醒纪元（C++20 atomic::wait）：单一共享 epoch，一次 fetch_add + notify_all 唤醒全部 waiter。
-        // 保持 wake-all 语义：绝不做选择性唤醒。
+        // 显式 Flush/退出的唤醒纪元，也供自旋和停靠复查观察。
+        // 关闭需求感知通知时，worker 使用该原子的 wait/notify_all。
         std::atomic<uint64_t> wakeEpoch{ 0 };
 
-        // 停靠等待者计数（只用于判断"这次广播有没有必要"，不做选择性唤醒目标指定）。
-        // 提交侧据此在"无人等待 / 已醒人数已够本批名额"时安全跳过广播。
-        // 丢失唤醒防护：唤醒者先 bump epoch 再读计数；停靠者先登记计数再复查 epoch（见 .cpp park 段）。
+        // 已进入停靠协议的执行者数量，包含已通知但尚未恢复的执行者。
+        // 需求感知路径在 parkMutex_ 内登记和退出，并以 pendingWakes_ 合并通知。
         std::atomic<int> parkedWorkers{ 0 };
 
         // `ENTJOY_WAKE_POLL`：搜索区人数 —— "登记中"的 worker 数（在搜索区里读注入器，或刚领到
-        // 任务正在执行、执行完必然回主循环读注入器）。提交侧据此决定"要不要写 wakeEpoch"：>0 ⇒ 一个
-        // 字节都不写。登记是粘性的：只在"进入停靠协议"与"退出主循环"两处增减（见 .cpp），
+        // 任务正在执行、执行完必然回主循环读注入器）。有停靠者时核对真实搜索状态。
+        // 登记是粘性的：只在"进入停靠协议"与"退出主循环"两处增减（见 .cpp），
         // 两处严格配平 —— 残留 >0 会让提交侧永久跳过广播。
         // 独占一条 cacheline：与 `wakeEpoch` 同线会让提交侧的 epoch 写入更拥挤（那正是要消除的流量）。
         PaddedAtomic<uint64_t> wakeIdlePollers;
@@ -189,7 +193,8 @@ namespace JobSystem
         // 主线程没有 worker 槽位，用 kMaxTrackedWorkers 作 accountIndex 让所有数组写入跳过、
         // 认领计数落进 main 分支；同时 stealStart 仍从 0 起扫全部 deque。
         // scanAllWorkers 区分调用者：worker 跳过自己，主线程 assist 扫描全部 worker。
-        bool StealAndExecute(uint32_t stealStart, uint32_t accountIndex, bool scanAllWorkers) noexcept;
+        bool StealAndExecute(uint32_t stealStart, uint32_t accountIndex,
+            bool scanAllWorkers, bool scanDeques) noexcept;
 
         // 排空 Injector + 各 worker deque 残留 task：通用 work 调 workCleanup，tile 收集 batch 到
         // drainedBatches，RangeTask 回池。仅 Stop() join 后调用（单线程、worker 已退出）。
@@ -197,6 +202,14 @@ namespace JobSystem
 
         void WorkerLoop(uint32_t workerIndex, WorkerContext& ctx) noexcept;
 
+        void WakeForQueuedWork() noexcept;
+        // 每个执行者独占缓存行；取得任务后清除、搜索时设置，避免全局逐任务登记写入。
+        PaddedAtomic<bool> searchingWorkers_[kMaxTrackedWorkers];
+        // 登记、复查、等待以及通知额度的发放/消费在同一把锁内完成。
+        std::mutex parkMutex_;
+        std::condition_variable parkCv_;
+        // 0 <= pendingWakes_ <= parkedWorkers；原子读用于已有通知覆盖需求时的快速返回。
+        PaddedAtomic<uint32_t> pendingWakes_;
         std::mutex lifecycleMutex_;
         std::vector<std::unique_ptr<WorkerContext>> workers_;
         std::atomic<bool> running_{ false };
