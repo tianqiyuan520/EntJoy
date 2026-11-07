@@ -61,7 +61,7 @@ jobs:
       - name: Build solution
         # EntJoySample 里有多个非注释 Main ⇒ 入口由 EntJoySample.csproj 的**缺省 StartupObject** 提供
         # （需要别的入口时用 -p:ENTJOY_STARTUP=<全限定类型名> 覆盖）。
-        run: dotnet build EntJoy.sln -c ${{ matrix.configuration }} -p:EnableNativeCompile=false
+        run: dotnet build EntJoy.sln -c ${{ matrix.configuration }} -p:EnableNativeCompile=false -p:ENTJOY_STARTUP=EntJoySample.Relationship.Program
 
       - name: Jobs-only transpiler guard
         # 无 ECS 引用的消费方必须能用 [NativeTranspile] 数组 job（生成物不得含 ECS 耦合）。
@@ -127,6 +127,50 @@ jobs:
         with:
           name: framework-${{ matrix.os }}-${{ matrix.configuration }}-${{ github.run_attempt }}
           path: TestResults/
+          retention-days: 14
+
+  relationship-test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            backend: managed
+          - os: windows-latest
+            backend: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build relationship validation
+        run: dotnet build tools/RelationshipValidation/RelationshipValidation.csproj -c Release
+      - name: Stage NativeDll for relationship validation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S tools/NativeDllCore -B tools/NativeDllCore/build-relationship-ci -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build tools/NativeDllCore/build-relationship-ci --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item tools/NativeDllCore/build-relationship-ci/Release/NativeDll.dll tools/RelationshipValidation/bin/Release/net8.0/ -Force
+      - name: Verify process and result gate failure detection
+        shell: pwsh
+        run: |
+          ./.github/scripts/Test-TestProcess.ps1
+          ./.github/scripts/Test-RelationshipResults.ps1
+      - name: M:N scale, steady and batch allocation budgets
+        shell: pwsh
+        run: ./.github/scripts/Invoke-RelationshipChecks.ps1 -Backend '${{ matrix.backend }}' -Extended:('${{ inputs.extended || github.event_name == 'schedule' }}' -eq 'true')
+      - name: Save relationship measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relationships-${{ matrix.os }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: ci-reports/relationships/
+          if-no-files-found: error
           retention-days: 14
 
   windows-test:
@@ -360,6 +404,17 @@ jobs:
             if ($result -ne 0) { exit $result }
           } finally { Pop-Location }
 
+      - name: Build and run Relationship sample (C++/ISPC)
+        shell: pwsh
+        run: |
+          . ./.github/scripts/Invoke-TestProcess.ps1
+          $sampleDir = Join-Path $env:RUNNER_TEMP 'relationship-sample'
+          dotnet build samples/EntJoySample/EntJoySample.csproj -c ${{ matrix.configuration }} -p:ENTJOY_STARTUP=EntJoySample.Relationship.Program -o $sampleDir 2>&1 | Tee-Object ci-reports/relationship-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = Invoke-TestProcess -FilePath (Join-Path $sampleDir 'EntJoySample.exe') -LogPath 'ci-reports/relationship-sample.log' -TimeoutSeconds 180
+          if ($result -ne 0) { exit $result }
+          if (-not (Select-String -LiteralPath ci-reports/relationship-sample.log -SimpleMatch 'PASS: all Relationship scenarios.' -Quiet)) { throw 'Relationship sample did not finish its scenarios.' }
+
       - name: Negative check (marker gate must fail the build)
         shell: pwsh
         run: ./tools/NativeTranspilerFixture/negative-check.ps1 -Configuration ${{ matrix.configuration }}
@@ -564,7 +619,7 @@ jobs:
 
   release-gate:
     if: always()
-    needs: [workflow-validation, framework-test, windows-test, linux-debug, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression, arm64-native, extended-stress]
+    needs: [workflow-validation, framework-test, relationship-test, windows-test, linux-debug, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression, arm64-native, extended-stress]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize release checks
@@ -587,6 +642,7 @@ jobs:
             test "${{ needs.extended-stress.result }}" = "success"
           fi
           test "${{ needs.framework-test.result }}" = "success"
+          test "${{ needs.relationship-test.result }}" = "success"
           test "${{ needs.windows-test.result }}" = "success"
           test "${{ needs.nuget-consumer-test.result }}" = "success"
           test "${{ needs.ispc-width-test.result }}" = "success"

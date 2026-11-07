@@ -56,7 +56,7 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 if (!NativeTranspiler.IsEntJoyNativeContainerType(type) || type.Name != Config.NativeList)
                     continue;
-                var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                var elemType = NativeTranspiler.GetContainerElementType(type);
                 var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
                 sb.AppendLine($"struct UnsafeList_Context_{ispcElem} {{");
                 sb.AppendLine($"{Indent}void* uniform _data;");

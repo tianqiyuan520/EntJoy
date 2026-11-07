@@ -37,15 +37,16 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeList))
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
                         pars.Append($"uniform UnsafeList_Context_{ispcElem}* uniform {name}");
                     }
                     else
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
-                        pars.Append($"uniform {ispcElem} {name}_ptr[], uniform int {name}_length");
+                        string qualifier = NativeTranspiler.IsReadOnlyNativeArray(type) ? "const " : "";
+                        pars.Append($"uniform {qualifier}{ispcElem} {name}_ptr[], uniform int {name}_length");
                     }
                 }
                 else if (type is IPointerTypeSymbol ptrType)
@@ -103,15 +104,16 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeList))
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
                         pars.Append($"EntJoy::Collections::UnsafeList<{cppElem}>* {name}_listData");
                     }
                     else
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
-                        pars.Append($"{cppElem}* {name}_ptr, int {name}_length");
+                        string qualifier = NativeTranspiler.IsReadOnlyNativeArray(type) ? "const " : "";
+                        pars.Append($"{qualifier}{cppElem}* {name}_ptr, int {name}_length");
                     }
                 }
                 else if (type is IPointerTypeSymbol)
@@ -146,15 +148,15 @@ namespace NativeTranspiler.Analyzer.Common
                         args.Append($"&{name}_ctx");
                     else
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
                         if (IsVectorType(cppElem))
                         {
                             var ispcType = IspcTypeMapper.FromCpp(cppElem);
-                            args.Append($"reinterpret_cast<ispc::{ispcType}*>({name}_ptr), {name}_length");
+                            args.Append($"reinterpret_cast<{(NativeTranspiler.IsReadOnlyNativeArray(type) ? "const " : "")}ispc::{ispcType}*>({name}_ptr), {name}_length");
                         }
                         else if (IsUserStructType(elemType))
-                            args.Append($"reinterpret_cast<ispc::{elemType.Name}*>({name}_ptr), {name}_length");
+                            args.Append($"reinterpret_cast<{(NativeTranspiler.IsReadOnlyNativeArray(type) ? "const " : "")}ispc::{elemType.Name}*>({name}_ptr), {name}_length");
                         else
                             args.Append($"{name}_ptr, {name}_length");
                     }

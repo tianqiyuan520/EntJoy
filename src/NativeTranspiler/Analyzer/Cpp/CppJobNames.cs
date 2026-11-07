@@ -52,8 +52,8 @@ namespace NativeTranspiler.Analyzer
         {
             if (containerType is INamedTypeSymbol named && named.IsGenericType)
             {
-                var elemType = named.TypeArguments[0];
-                return NativeTranspiler.MapCSharpTypeToCpp(elemType);
+                var elemType = NativeTranspiler.GetContainerElementType(named);
+                return (NativeTranspiler.IsReadOnlyNativeArray(named) ? "const " : "") + NativeTranspiler.MapCSharpTypeToCpp(elemType);
             }
             return "void";
         }

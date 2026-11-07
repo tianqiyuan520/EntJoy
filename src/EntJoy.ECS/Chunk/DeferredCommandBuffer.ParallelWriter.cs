@@ -47,8 +47,26 @@ namespace EntJoy.ECS
                 DeferredCommandBuffer.SingleRelationTypeId<TRel>(), sortKey, source, target);
 
         public void RemoveRelationship<TRel>(int sortKey, Entity source) where TRel : struct, IRelationComponent
-            => RecordRelationship(DeferredCommandBuffer.OP_REMOVE_RELATIONSHIP,
-                DeferredCommandBuffer.SingleRelationTypeId<TRel>(), sortKey, source, default);
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            RecordRelationship(type.IsMultiRelation ? DeferredCommandBuffer.OP_CLEAR_MULTI_RELATIONSHIPS : DeferredCommandBuffer.OP_REMOVE_RELATIONSHIP,
+                type.Id, sortKey, source, default);
+        }
+
+        public void AddRelationship<TRel>(int sortKey, Entity source, Entity target) where TRel : struct, IRelationComponent
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            RecordRelationship(type.IsMultiRelation ? DeferredCommandBuffer.OP_ADD_MULTI_RELATIONSHIP : DeferredCommandBuffer.OP_SET_RELATIONSHIP_TARGET,
+                type.Id, sortKey, source, target);
+        }
+
+        public void RemoveRelationship<TRel>(int sortKey, Entity source, Entity target) where TRel : struct, IRelationComponent
+            => RecordRelationship(DeferredCommandBuffer.OP_REMOVE_MULTI_RELATIONSHIP,
+                DeferredCommandBuffer.MultiRelationTypeId<TRel>(), sortKey, source, target);
+
+        public void ClearRelationships<TRel>(int sortKey, Entity source) where TRel : struct, IRelationComponent
+            => RecordRelationship(DeferredCommandBuffer.OP_CLEAR_MULTI_RELATIONSHIPS,
+                DeferredCommandBuffer.MultiRelationTypeId<TRel>(), sortKey, source, default);
 
         private void RecordRelationship(int opcode, int typeId, int sortKey, Entity source, Entity target)
         {

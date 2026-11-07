@@ -120,6 +120,8 @@
 | **NT035** | error | 已识别但不支持的 ISPC 语法，例如 `ref` 局部；不会因类型解析失败而崩溃。 |
 | **NT036** | error | 关系列的可写访问：原生 IJobEntity 关系参数使用值或 in，IJobChunk 使用只读 Span/NativeArray getter；关系变更经主线程或托管 Job 记录 ECB 后提交。 |
 
+`NativeArray<T>.ReadOnly` 可作为 C++/ISPC 数组 Job 字段，按元素指针和长度绑定，保留元素只读属性；嵌套类型的元素参数取自 NativeArray 外层。关系列表通过 CopyRelationships/CopyRelationsOf 生成调用方拥有的原生快照后使用该路径。原始托管多目标列表不进入内核，WithRelationship 筛选在收集时生成原生位图。
+
 AutoSIMD 的 `for` 控制使用单个已初始化的 `int` 计数器、`<` / `<=` / `>` / `>=` 条件及常量非零步长。支持前后置 `++` / `--`、`+=` / `-=` 常量、`counter = counter ± 常量` 和 `counter = 常量 + counter`；比较两侧可交换，可加括号。边界表达式独立于计数器；循环体保持计数器不变且不传出其引用或地址。不符合时报告 NT031，可使用 `AutoSIMD.Disabled` 保留标量循环。
 
 循环控制分析由原生路径共用。ISPC 保留循环、比较及步长，按语义标注 `uniform/varying`，由 ISPC 编译器决定循环展开；该路径及其帮助函数不生成展开提示。AutoSIMD 最多展开 64 次，嵌套展开次数乘积也受此上限约束；标量 C++ 对最多 8 次且体积受限的最内层循环请求展开。这两种 C++ 路径的固定行程分析支持 Roslyn 可折叠的常量表达式，用 64 位数值核对每次计数及最后一次增量；超过次数上限或发生 `int` 溢出时保留循环。展开收益由实际负载测量确定。

@@ -1553,7 +1553,17 @@ namespace EntJoy.ECS
             var metadata = ComponentTypeManager.GetComponentType(componentType);
             if (metadata.IsRelation && !relationStorageOnly)
             {
-                if (metadata.IsMultiRelation) throw new InvalidOperationException($"Use ClearRelationships for '{componentType}'.");
+                if (metadata.IsMultiRelation)
+                {
+                    if (!IsAlive(entity)) return;
+                    var source = GetEntityInfoRef(entity.Id).Archetype;
+                    bool hasColumn = source.Has(componentType);
+                    nint destination = hasColumn ? PrepareRelationSlot(GetComponentDestination(source, metadata, false), entity) : 0;
+                    if (hasColumn) source.PrepareEntityRemoval();
+                    ClearMultiRelationshipsRaw(entity, metadata);
+                    if (hasColumn) RemoveComponentRawCore(entity, componentType, relationStorageOnly: true, preparedChunk: destination);
+                    return;
+                }
                 RemoveRelationCore(entity, metadata);
                 return;
             }
@@ -1909,8 +1919,6 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             CompleteActiveJobs();
-            if (_relationListStore.HasRelationships)
-                throw new NotSupportedException("Snapshots cannot serialize managed relationship side-table state.");
             using var ms = new System.IO.MemoryStream();
             using var w = new System.IO.BinaryWriter(ms);
             w.Write(SnapshotMagic.ToCharArray());
@@ -1962,6 +1970,7 @@ namespace EntJoy.ECS
                 }
             }
 
+            WriteManagedRelations(w);
             w.Flush();
             return new WorldSnapshot(ms.ToArray());
         }

@@ -23,22 +23,46 @@ namespace EntJoy.ECS
                         var type = arch.Types[c];
                         if (!type.IsRelation) continue;
                         ValidateSnapshotComponent(type);
-                        var target = *(RelationSlot*)((byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
-                        if (!target.IsValid)
+                        var targets = (RelationSlot*)((byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
+                        int count = Math.Max(1, type.MultiRelationMaxSlots);
+                        for (int i = 0; i < count; i++)
                         {
-                            if (!target.Matches(RelationSlot.Default)) throw new InvalidDataException("Snapshot contains a noncanonical empty relationship.");
-                            continue;
-                        }
-                        if (!IsAlive(target.ToEntity())) throw new InvalidDataException("Snapshot relationship target is missing or has a different version.");
-                        var sources = index.PrepareAdd(type.Id, target.ToEntity());
-                        if (type.IsExclusiveRelation && sources.Count != 0) throw new InvalidDataException("Snapshot contains conflicting 1:1 relationships.");
-                        sources.Add(source);
-                        if (type.IsAcyclicRelation)
-                        {
-                            if (!acyclic.TryGetValue(type.Id, out var edges)) acyclic[type.Id] = edges = new();
-                            edges.Add(source, target.ToEntity());
+                            var target = targets[i];
+                            if (!target.IsValid)
+                            {
+                                if (!target.Matches(RelationSlot.Default)) throw new InvalidDataException("Snapshot contains a noncanonical empty relationship.");
+                                continue;
+                            }
+                            if (type.IsMultiRelation && type.MultiRelationMaxSlots == 0)
+                                throw new InvalidDataException("A managed relationship column must remain empty; its edges belong to the side table.");
+                            for (int prior = 0; prior < i; prior++)
+                                if (targets[prior].Matches(target)) throw new InvalidDataException("Snapshot contains duplicate relationship targets.");
+                            if (!IsAlive(target.ToEntity())) throw new InvalidDataException("Snapshot relationship target is missing or stale.");
+                            var sources = index.PrepareAdd(type.Id, target.ToEntity());
+                            if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && sources.Count != 0)
+                                throw new InvalidDataException("Snapshot contains conflicting exclusive relationships.");
+                            sources.Add(source);
+                            if (type.IsAcyclicRelation)
+                            {
+                                if (!acyclic.TryGetValue(type.Id, out var edges)) acyclic[type.Id] = edges = new();
+                                edges.Add(source, target.ToEntity());
+                            }
                         }
                     }
+                }
+            }
+            foreach (var entry in _relationListStore.Entries)
+            {
+                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(entry.TypeId));
+                if (!IsAlive(entry.Source)) throw new InvalidDataException("Managed relationship source is missing or stale.");
+                var seen = new HashSet<Entity>();
+                foreach (var target in entry.Targets)
+                {
+                    if (!target.IsValid || !IsAlive(target.ToEntity()) || !seen.Add(target.ToEntity()))
+                        throw new InvalidDataException("Managed relationship target is missing, stale or duplicated.");
+                    var sources = index.PrepareAdd(type.Id, target.ToEntity());
+                    if (type.IsExclusiveTarget && sources.Count != 0) throw new InvalidDataException("Managed relationship has conflicting exclusive owners.");
+                    sources.Add(entry.Source);
                 }
             }
             foreach (var edges in acyclic.Values)
@@ -74,11 +98,13 @@ namespace EntJoy.ECS
             using var reader = new BinaryReader(stream);
             ComponentType[][] signatures;
             long entityData;
+            List<ManagedSnapshotEdges> managed;
             try
             {
                 signatures = ReadSnapshotSignatures(reader);
                 entityData = stream.Position;
                 ValidateSnapshotPayload(reader, signatures);
+                managed = ReadManagedRelations(reader);
             }
             catch (Exception error) when (error is EndOfStreamException || error is FormatException)
             { throw new InvalidDataException("Snapshot is malformed or truncated.", error); }
@@ -107,6 +133,7 @@ namespace EntJoy.ECS
                 }
                 CheckRelationshipPreparation("restore-row-loaded");
             }
+            prepared.LoadManagedRelations(managed);
             prepared._relationIndex = prepared.ValidateSnapshotRelationships();
             CheckRelationshipPreparation("restore-prepared");
             lock (_structuralLock)

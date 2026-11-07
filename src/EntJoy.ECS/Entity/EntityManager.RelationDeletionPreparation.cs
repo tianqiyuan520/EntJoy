@@ -14,10 +14,19 @@ namespace EntJoy.ECS
             public int Index, Reserved;
         }
 
-        private sealed class DeletionUnlink
+        private struct DeletionUnlink
         {
             public Entity Source;
-            public List<(ComponentType Type, RelationSlot Target)> Edges = new();
+            private (ComponentType Type, RelationSlot Target) _first;
+            private List<(ComponentType Type, RelationSlot Target)> _additional;
+            public int EdgeCount { get; private set; }
+            public void AddEdge((ComponentType Type, RelationSlot Target) edge)
+            {
+                if (EdgeCount == 0) _first = edge;
+                else (_additional ??= new()).Add(edge);
+                EdgeCount++;
+            }
+            public (ComponentType Type, RelationSlot Target) EdgeAt(int index) => index == 0 ? _first : _additional[index - 1];
             public DeletionDestination Destination;
         }
 
@@ -34,24 +43,77 @@ namespace EntJoy.ECS
                 var chunk = arch.ChunkList[info.ChunkIndex];
                 byte* value = type.IsShared ? (byte*)chunk.GetSharedValuePointer(column)
                     : (byte*)chunk.GetComponentArrayPointer(column) + info.SlotInChunk * type.Size;
+                if (type.IsMultiRelation)
+                {
+                    if (type.MultiRelationMaxSlots == 0) continue;
+                    foreach (var target in GetMultiTargets(entity, type))
+                    {
+                        var edge = CaptureMultiNotification(entity, type, ObserverEvents.Destroyed, target);
+                        if (edge.Value != null) (notifications ??= new()).Add(edge);
+                    }
+                    continue;
+                }
                 if (type.IsRelation && !((RelationSlot*)value)->IsValid) continue;
                 var notification = CaptureRelationNotification(entity, type, ObserverEvents.Destroyed, value);
                 if (notification.Value != null) (notifications ??= new()).Add(notification);
             }
+            if (_relationListStore.HasRelationshipsForSource(entity))
+                foreach (var entry in _relationListStore.ForSource(entity))
+                {
+                    var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(entry.TypeId));
+                    foreach (var target in entry.Targets)
+                    {
+                        var edge = CaptureMultiNotification(entity, type, ObserverEvents.Destroyed, target);
+                        if (edge.Value != null) (notifications ??= new()).Add(edge);
+                    }
+                }
             return notifications;
         }
 
         private int CommitPreparedDeletion(List<Entity> order, List<(Entity Source, Entity Target, int TypeId)> incoming)
         {
-            var unlinks = new Dictionary<Entity, DeletionUnlink>();
+            int singleCount = 0, firstType = -1;
+            bool groupSources = false;
+            foreach (var edge in incoming)
+            {
+                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(edge.TypeId));
+                if (type.IsMultiRelation) continue;
+                singleCount++;
+                if (firstType < 0) firstType = type.Id;
+                else if (firstType != type.Id) groupSources = true;
+            }
+            var unlinks = new List<DeletionUnlink>(singleCount);
+            var sourcePlans = groupSources ? new Dictionary<Entity, int>() : null;
             var multi = new List<(Entity Source, Entity Target, int TypeId)>();
+            Dictionary<(Entity Source, int TypeId), HashSet<Entity>> bulkLists = null;
             var notifications = new List<RelationNotification>();
             foreach (var edge in incoming)
             {
                 var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(edge.TypeId));
-                if (type.IsMultiRelation) { multi.Add(edge); continue; }
-                if (!unlinks.TryGetValue(edge.Source, out var plan)) unlinks[edge.Source] = plan = new DeletionUnlink { Source = edge.Source };
-                plan.Edges.Add((type, RelationSlot.From(edge.Target)));
+                if (type.IsMultiRelation)
+                {
+                    multi.Add(edge);
+                    if (order.Count > 1 && type.MultiRelationMaxSlots == 0
+                        && _relationListStore.GetCount(type.Id, edge.Source) > 32)
+                    {
+                        bulkLists ??= new();
+                        var key = (edge.Source, type.Id);
+                        if (!bulkLists.TryGetValue(key, out var targets)) bulkLists.Add(key, targets = new());
+                        targets.Add(edge.Target);
+                    }
+                    var removed = CaptureMultiNotification(edge.Source, type, ObserverEvents.Removed, RelationSlot.From(edge.Target));
+                    if (removed.Value != null) notifications.Add(removed);
+                    continue;
+                }
+                int position;
+                if (sourcePlans == null || !sourcePlans.TryGetValue(edge.Source, out position))
+                {
+                    position = unlinks.Count;
+                    unlinks.Add(new DeletionUnlink { Source = edge.Source });
+                    sourcePlans?.Add(edge.Source, position);
+                }
+                ref var plan = ref CollectionsMarshal.AsSpan(unlinks)[position];
+                plan.AddEdge((type, RelationSlot.From(edge.Target)));
                 var notification = CaptureRelationNotification(edge.Source, type, ObserverEvents.Removed, GetRelationValue(edge.Source, type));
                 if (notification.Value != null) notifications.Add(notification);
             }
@@ -59,23 +121,25 @@ namespace EntJoy.ECS
             var reservedChunks = new HashSet<nint>();
             var layouts = new Dictionary<Archetype, List<(int[] Removed, Archetype Target)>>();
             var affected = new HashSet<Archetype>();
-            foreach (var plan in unlinks.Values)
+            for (int planIndex = 0; planIndex < unlinks.Count; planIndex++)
             {
+                ref var plan = ref CollectionsMarshal.AsSpan(unlinks)[planIndex];
                 var info = GetEntityInfoRef(plan.Source.Id);
                 var source = info.Archetype;
                 if (!layouts.TryGetValue(source, out var choices)) layouts[source] = choices = new();
                 Archetype target = null;
                 foreach (var choice in choices)
                 {
-                    if (choice.Removed.Length != plan.Edges.Count) continue;
+                    if (choice.Removed.Length != plan.EdgeCount) continue;
                     bool same = true;
-                    foreach (var edge in plan.Edges) if (Array.IndexOf(choice.Removed, edge.Type.Id) < 0) { same = false; break; }
+                    for (int i = 0; i < plan.EdgeCount; i++) if (Array.IndexOf(choice.Removed, plan.EdgeAt(i).Type.Id) < 0) { same = false; break; }
                     if (same) { target = choice.Target; break; }
                 }
                 if (target == null)
                 {
-                    var removed = plan.Edges.Select(edge => edge.Type.Id).ToArray();
-                    target = plan.Edges.Count == 1 ? GetComponentDestination(source, plan.Edges[0].Type, false)
+                    var removed = new int[plan.EdgeCount];
+                    for (int i = 0; i < removed.Length; i++) removed[i] = plan.EdgeAt(i).Type.Id;
+                    target = plan.EdgeCount == 1 ? GetComponentDestination(source, plan.EdgeAt(0).Type, false)
                         : GetOrCreateArchetype(source.Types.ToArray().Where(type => Array.IndexOf(removed, type.Id) < 0).ToArray());
                     choices.Add((removed, target));
                 }
@@ -119,7 +183,7 @@ namespace EntJoy.ECS
                 _relationNotifications.EnsureCapacity(checked(_relationNotifications.Count + total));
             }
             CheckRelationshipPreparation("delete-storage-prepared");
-            foreach (var plan in unlinks.Values)
+            foreach (var plan in unlinks)
             {
                 var location = GetEntityInfoRef(plan.Source.Id);
                 var source = location.Archetype;
@@ -143,11 +207,27 @@ namespace EntJoy.ECS
                 }
                 RemoveAndFixup(source, location.ChunkIndex, location.SlotInChunk, skipDisposal: true);
                 UpdateEntityLocation(plan.Source.Id, destination.Archetype, destination.Index, slot);
-                foreach (var edge in plan.Edges) _relationIndex.RemoveRelTypeId(edge.Type.Id, plan.Source, edge.Target);
+                for (int i = 0; i < plan.EdgeCount; i++)
+                {
+                    var edge = plan.EdgeAt(i);
+                    _relationIndex.RemoveRelTypeId(edge.Type.Id, plan.Source, edge.Target);
+                }
                 structuralVersion++;
-                _relationshipVersion += plan.Edges.Count;
+                _relationshipVersion += plan.EdgeCount;
             }
-            foreach (var edge in multi) UnlinkDeletedTarget(edge.Source, edge.Target, edge.TypeId);
+            foreach (var edge in multi)
+                if (bulkLists == null || !bulkLists.ContainsKey((edge.Source, edge.TypeId)))
+                    UnlinkDeletedTarget(edge.Source, edge.Target, edge.TypeId);
+            if (bulkLists != null)
+                foreach (var entry in bulkLists)
+                {
+                    int removed = _relationListStore.RemoveMany(entry.Key.TypeId, entry.Key.Source, entry.Value);
+                    foreach (var target in entry.Value)
+                        _relationIndex.RemoveRelTypeId(entry.Key.TypeId, entry.Key.Source, RelationSlot.From(target));
+                    ref var location = ref GetEntityInfoRef(entry.Key.Source.Id);
+                    location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
+                    _relationshipVersion += removed;
+                }
             foreach (var notification in notifications) CommitRelationNotification(notification);
             for (int i = 0; i < order.Count; i++) DestroyEntityCore(order[i], destroyed[i], notificationsPrepared: true);
             return order.Count;

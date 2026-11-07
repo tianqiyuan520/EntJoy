@@ -7,15 +7,30 @@ namespace EntJoy.ECS
 {
     public unsafe partial class EntityManager
     {
-        private sealed class CloneSource
+        private sealed class CloneLayout
         {
-            public Entity Entity;
             public ComponentType[] Types;
             public int[] Offsets, SharedIndices;
             public bool[] Enabled, Shared;
             public object[] SharedValues;
-            public int Width, Alignment = 1, SnapshotOffset;
+            public int Width, Alignment = 1;
+        }
+
+        private struct CloneSource
+        {
+            public Entity Entity;
+            public CloneLayout Layout;
+            public int SnapshotOffset;
             public nint SharedKey;
+            public List<(ComponentType Type, RelationSlot[] Targets)> Managed;
+            public ComponentType[] Types => Layout.Types;
+            public int[] Offsets => Layout.Offsets;
+            public int[] SharedIndices => Layout.SharedIndices;
+            public bool[] Enabled => Layout.Enabled;
+            public bool[] Shared => Layout.Shared;
+            public object[] SharedValues => Layout.SharedValues;
+            public int Width => Layout.Width;
+            public int Alignment => Layout.Alignment;
         }
 
         private struct CloneItem
@@ -33,7 +48,8 @@ namespace EntJoy.ECS
         {
             public readonly int TypeId;
             public readonly Entity Source, Target;
-            public CloneEdge(int type, Entity source, Entity target) { TypeId = type; Source = source; Target = target; }
+            public readonly bool Managed;
+            public CloneEdge(int type, Entity source, Entity target, bool managed = false) { TypeId = type; Source = source; Target = target; Managed = managed; }
         }
 
         /// <summary>按输入顺序复制实体，去除 Prefab 标记，重映射集合内部的关系 Target。</summary>
@@ -55,7 +71,8 @@ namespace EntJoy.ECS
             var sourceIndices = new Dictionary<Entity, int>(sources.Length);
             var layouts = new CloneSource[sources.Length];
             var acyclicRoots = new Dictionary<ComponentType, List<Entity>>();
-            int bytes = 0;
+            var layoutTemplates = new Dictionary<Archetype, CloneLayout>();
+            int bytes = 0, edgeCount = 0;
             for (int i = 0; i < sources.Length; i++)
             {
                 ValidateEntity(sources[i]);
@@ -67,22 +84,32 @@ namespace EntJoy.ECS
                 var info = GetEntityInfoRef(entity.Id);
                 var arch = info.Archetype;
                 if (requirePrefab && !arch.Has(typeof(Prefab))) throw new InvalidOperationException($"Entity {entity} is not a Prefab.");
-                if (_relationListStore.HasRelationshipsForSource(entity)) throw new NotSupportedException("Cloning managed multi-relationship state is not supported.");
-                var types = arch.Types.ToArray().Where(type => type.Type != typeof(Prefab)).ToArray();
+                bool reusable = true;
+                foreach (var type in arch.Types) if (type.IsShared || type.IsEnableable) { reusable = false; break; }
+                CloneLayout template = null;
+                if (reusable) layoutTemplates.TryGetValue(arch, out template);
+                var types = template?.Types ?? arch.Types.ToArray().Where(type => type.Type != typeof(Prefab)).ToArray();
                 var layout = new CloneSource
                 {
-                    Entity = entity, Types = types, Offsets = new int[types.Length], Enabled = new bool[types.Length],
-                    Shared = new bool[types.Length], SharedIndices = new int[types.Length], SharedValues = new object[types.Length]
+                    Entity = entity,
+                    Layout = template ?? new CloneLayout
+                    {
+                        Types = types, Offsets = new int[types.Length], Enabled = new bool[types.Length],
+                        Shared = new bool[types.Length], SharedIndices = new int[types.Length], SharedValues = new object[types.Length]
+                    }
                 };
                 var chunk = arch.ChunkList[info.ChunkIndex];
                 for (int c = 0; c < types.Length; c++)
                 {
                     var type = types[c];
                     ComponentTypeManager.ValidateCopySupport(type);
-                    int alignment = Math.Min(64, type.Size & -type.Size);
-                    layout.Alignment = Math.Max(layout.Alignment, alignment);
-                    layout.Offsets[c] = AlignCloneOffset(layout.Width, alignment);
-                    layout.Width = checked(layout.Offsets[c] + type.Size);
+                    if (template == null)
+                    {
+                        int alignment = Math.Min(64, type.Size & -type.Size);
+                        layout.Layout.Alignment = Math.Max(layout.Alignment, alignment);
+                        layout.Offsets[c] = AlignCloneOffset(layout.Width, alignment);
+                        layout.Layout.Width = checked(layout.Offsets[c] + type.Size);
+                    }
                     int column = arch.GetComponentTypeIndex(type);
                     layout.Enabled[c] = !type.IsEnableable || chunk.GetComponentEnabled(column, info.SlotInChunk);
                     layout.Shared[c] = type.IsShared;
@@ -101,19 +128,34 @@ namespace EntJoy.ECS
                             if (!target.Matches(RelationSlot.Default)) throw new InvalidOperationException("Clone source has a noncanonical empty relationship.");
                             continue;
                         }
-                        if (type.IsMultiRelation) throw new NotSupportedException("Cloning active multi-relationship columns is not supported.");
                         ValidateRelationshipEntity(target.ToEntity(), type, "target");
+                        edgeCount = checked(edgeCount + copies);
                         if (type.IsAcyclicRelation)
                         {
                             if (!acyclicRoots.TryGetValue(type, out var roots)) acyclicRoots[type] = roots = new();
                             roots.Add(entity);
                         }
-                        if (type.IsExclusiveRelation && !sourceIndices.ContainsKey(target.ToEntity()))
-                            throw new InvalidOperationException("Cloning an occupied external 1:1 target would displace its existing owner.");
+                        if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && !sourceIndices.ContainsKey(target.ToEntity()))
+                            throw new InvalidOperationException("Cloning an occupied external exclusive target would displace its existing owner.");
                     }
                 }
-                layout.Width = AlignCloneOffset(layout.Width, layout.Alignment);
-                layout.SharedKey = layout.Shared.Any(shared => shared) ? chunk.MemoryBlock : 0;
+                if (template == null) layout.Layout.Width = AlignCloneOffset(layout.Width, layout.Alignment);
+                if (_relationListStore.HasRelationshipsForSource(entity))
+                    foreach (var entry in _relationListStore.ForSource(entity))
+                    {
+                        var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(entry.TypeId));
+                        var targets = entry.Targets.ToArray();
+                        edgeCount = checked(edgeCount + checked(targets.Length * copies));
+                        foreach (var target in targets)
+                        {
+                            ValidateRelationshipEntity(target.ToEntity(), type, "target");
+                            if (type.IsExclusiveTarget && !sourceIndices.ContainsKey(target.ToEntity()))
+                                throw new InvalidOperationException("Cloning an occupied external exclusive target would displace its existing owner.");
+                        }
+                        (layout.Managed ??= new()).Add((type, targets));
+                    }
+                if (reusable && template == null) layoutTemplates.Add(arch, layout.Layout);
+                layout.SharedKey = HasSharedColumns(arch) ? chunk.MemoryBlock : 0;
                 layout.SnapshotOffset = AlignCloneOffset(bytes, layout.Alignment);
                 bytes = checked(layout.SnapshotOffset + layout.Width);
                 layouts[i] = layout;
@@ -167,7 +209,7 @@ namespace EntJoy.ECS
                 result[i] = entity;
             }
 
-            var edges = new List<CloneEdge>();
+            var edges = new List<CloneEdge>(edgeCount);
             var destinations = new Dictionary<(int Type, Entity Target), HashSet<Entity>>();
             var rollbackChunks = new Dictionary<nint, int>();
             bool committed = false, storageTouched = false;
@@ -201,14 +243,36 @@ namespace EntJoy.ECS
                         item.CopiedColumns = c + 1;
                         if (type.IsShared) Buffer.MemoryCopy(source, target, type.Size, type.Size);
                         else ComponentTypeManager.CopyComponentValue(type, source, target);
-                        if (!type.IsRelation || !((RelationSlot*)target)->IsValid) continue;
-                        var old = ((RelationSlot*)target)->ToEntity();
-                        if (sourceIndices.TryGetValue(old, out int mapped))
-                            *(RelationSlot*)target = RelationSlot.From(result[i / layouts.Length * layouts.Length + mapped]);
-                        edges.Add(new CloneEdge(type.Id, item.Entity, ((RelationSlot*)target)->ToEntity()));
+                        if (!type.IsRelation) continue;
+                        for (int slot = 0; slot < Math.Max(1, type.MultiRelationMaxSlots); slot++)
+                        {
+                            var relation = (RelationSlot*)target + slot;
+                            if (!relation->IsValid) continue;
+                            var old = relation->ToEntity();
+                            if (sourceIndices.TryGetValue(old, out int mapped))
+                                *relation = RelationSlot.From(result[i / layouts.Length * layouts.Length + mapped]);
+                            edges.Add(new CloneEdge(type.Id, item.Entity, relation->ToEntity()));
+                        }
                     }
+                    if (layout.Managed != null)
+                        foreach (var group in layout.Managed)
+                            foreach (var target in group.Targets)
+                            {
+                                var mapped = sourceIndices.TryGetValue(target.ToEntity(), out int index)
+                                    ? result[i / layouts.Length * layouts.Length + index] : target.ToEntity();
+                                edges.Add(new CloneEdge(group.Type.Id, item.Entity, mapped, managed: true));
+                            }
                 }
                 var notifications = PrepareCloneNotifications(layouts, items, result, copies, values);
+                if (_observerCount > 0)
+                    foreach (var edge in edges)
+                        if (edge.Managed)
+                        {
+                            var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(edge.TypeId));
+                            var notification = CaptureMultiNotification(edge.Source, type, ObserverEvents.Added, RelationSlot.From(edge.Target));
+                            if (notification.Value != null) notifications.Add(notification);
+                        }
+                EnsureRelationNotificationCapacity(notifications.Count);
                 CheckRelationshipPreparation("clone-values-prepared");
                 storageTouched = true;
                 int capacity = Math.Max(nextId, result.Max(entity => checked(entity.Id + 1)));
@@ -247,17 +311,27 @@ namespace EntJoy.ECS
                     destinationCache[key] = chunkIndex;
                     item.Archetype = arch; item.ChunkIndex = chunkIndex; item.ChunkMemory = memory;
                     arches.Add(arch);
+                    if (layout.Managed != null)
+                        foreach (var group in layout.Managed)
+                            _relationListStore.PrepareAdd(group.Type.Id, item.Entity, group.Targets.Length);
                 }
                 foreach (var arch in arches)
                 {
                     arch.GetChunkOffsetsNative(); arch.PrepareEntityRemoval(arch.ChunkCount);
                     for (int c = 0; c < arch.ChunkCount; c++) rollbackChunks.Add(arch.ChunkList[c].MemoryBlock, c);
                 }
-                foreach (var group in edges.GroupBy(edge => (edge.TypeId, edge.Target)))
+                var reverseCounts = new Dictionary<(int TypeId, Entity Target), int>();
+                foreach (var edge in edges)
                 {
-                    var set = _relationIndex.PrepareAdd(group.Key.TypeId, group.Key.Target);
-                    set.EnsureCapacity(checked(set.Count + group.Count()));
-                    destinations.Add(group.Key, set);
+                    var key = (edge.TypeId, edge.Target);
+                    reverseCounts.TryGetValue(key, out int count);
+                    reverseCounts[key] = checked(count + 1);
+                }
+                foreach (var entry in reverseCounts)
+                {
+                    var set = _relationIndex.PrepareAdd(entry.Key.TypeId, entry.Key.Target);
+                    set.EnsureCapacity(checked(set.Count + entry.Value));
+                    destinations.Add(entry.Key, set);
                 }
                 CheckRelationshipPreparation("clone-storage-prepared");
                 foreach (ref var item in items.AsSpan())
@@ -285,7 +359,11 @@ namespace EntJoy.ECS
                     entities[item.Entity.Id].Version = item.Entity.Version;
                     SetLocateBVersion(item.Entity.Id, item.Entity.Version);
                 }
-                foreach (var edge in edges) destinations[(edge.TypeId, edge.Target)].Add(edge.Source);
+                foreach (var edge in edges)
+                {
+                    destinations[(edge.TypeId, edge.Target)].Add(edge.Source);
+                    if (edge.Managed) _relationListStore.CommitAdd(edge.TypeId, edge.Source, RelationSlot.From(edge.Target));
+                }
                 CheckRelationshipPreparation("clone-indexed");
                 _recycleCount -= recycled;
                 entityCount = nextId;
@@ -301,7 +379,15 @@ namespace EntJoy.ECS
                 {
                     if (!committed)
                     {
-                        foreach (var edge in edges) _relationIndex.RemoveRelTypeId(edge.TypeId, edge.Source, RelationSlot.From(edge.Target));
+                        foreach (var edge in edges)
+                        {
+                            _relationIndex.RemoveRelTypeId(edge.TypeId, edge.Source, RelationSlot.From(edge.Target));
+                            if (edge.Managed)
+                            {
+                                _relationListStore.Remove(edge.TypeId, edge.Source, RelationSlot.From(edge.Target));
+                                _relationListStore.DiscardEmpty(edge.TypeId, edge.Source);
+                            }
+                        }
                         for (int i = items.Length - 1; i >= 0; i--)
                         {
                             ref var item = ref items[i];
@@ -344,6 +430,17 @@ namespace EntJoy.ECS
                 {
                     var type = layout.Types[c];
                     if (type.IsManagedShared || !_observers.TryGetValue(type.Id, out var registry) || registry.Added.Count == 0) continue;
+                    if (type.IsMultiRelation)
+                    {
+                        for (int copy = 0; copy < copies; copy++)
+                        {
+                            int i = copy * layouts.Length + s;
+                            var slots = (RelationSlot*)(values + items[i].Offset + layout.Offsets[c]);
+                            for (int slot = 0; slot < type.MultiRelationMaxSlots; slot++)
+                                if (slots[slot].IsValid) notifications.Add(CaptureMultiNotification(entities[i], type, ObserverEvents.Added, slots[slot]));
+                        }
+                        continue;
+                    }
                     if (type.IsRelation && !((RelationSlot*)(values + items[s].Offset + layout.Offsets[c]))->IsValid) continue;
                     var batch = new Entity[copies];
                     var data = new byte[checked(copies * type.Size)];

@@ -7,36 +7,34 @@ function Invoke-TestProcess {
     )
     $fullLogPath = [IO.Path]::GetFullPath($LogPath)
     New-Item -ItemType Directory -Force (Split-Path $fullLogPath -Parent) | Out-Null
-    $stdout = "$fullLogPath.stdout"
-    $stderr = "$fullLogPath.stderr"
-    $process = $null
+    $process = [Diagnostics.Process]::new()
+    $started = $false
     try {
-        $parameters = @{
-            FilePath = $FilePath
-            WindowStyle = 'Hidden'
-            PassThru = $true
-            RedirectStandardOutput = $stdout
-            RedirectStandardError = $stderr
-        }
-        if ($Arguments.Count) { $parameters.ArgumentList = $Arguments }
-        $process = Start-Process @parameters
-        # Retain the handle so ExitCode remains available for short-lived children.
+        $process.StartInfo.WorkingDirectory = (Get-Location).ProviderPath
+        $process.StartInfo.FileName = if (-not [IO.Path]::IsPathRooted($FilePath) -and ($FilePath.Contains('/') -or $FilePath.Contains('\'))) {
+            [IO.Path]::GetFullPath($FilePath, $process.StartInfo.WorkingDirectory)
+        } else { $FilePath }
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        foreach ($argument in $Arguments) { $process.StartInfo.ArgumentList.Add($argument) }
+        if (-not $process.Start()) { throw "Could not start $FilePath" }
+        $started = $true
         $processHandle = $process.Handle
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
-        if ($timedOut) { $process.Kill(); $process.WaitForExit() }
+        if ($timedOut) { $process.Kill($true); $process.WaitForExit() }
         $result = if ($timedOut) { 124 } else { $process.ExitCode }
-        $lines = @(Get-Content -LiteralPath $stdout -Encoding UTF8 -ErrorAction SilentlyContinue)
-        $lines += @(Get-Content -LiteralPath $stderr -Encoding UTF8 -ErrorAction SilentlyContinue)
-        if ($timedOut) { $lines += "TIMEOUT: $FilePath $($Arguments -join ' ') after ${TimeoutSeconds}s" }
-        $lines | Set-Content -LiteralPath $fullLogPath -Encoding UTF8
-        foreach ($line in $lines) { Write-Host $line }
+        $content = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+        if ($timedOut) { $content += "`nTIMEOUT: $FilePath $($Arguments -join ' ') after ${TimeoutSeconds}s`n" }
+        $content | Set-Content -LiteralPath $fullLogPath -Encoding UTF8
+        Write-Host $content
         return [int]$result
     }
     finally {
-        if ($null -ne $process) {
-            if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
-            $process.Dispose()
-        }
-        Remove-Item -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue
+        if ($started -and -not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+        $process.Dispose()
     }
 }

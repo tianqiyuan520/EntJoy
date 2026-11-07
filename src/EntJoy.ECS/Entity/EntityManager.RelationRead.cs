@@ -21,8 +21,9 @@ namespace EntJoy.ECS
             chunk.Archetype.CheckReadable();
             if (!IsRelationshipTargetAlive(query.RelationshipFilterTarget)) return false;
             var type = ComponentTypeManager.GetComponentType(query.RelationshipFilterType.Type);
-            if (!type.IsRelation || (type.IsMultiRelation && type.MultiRelationMaxSlots < 2))
-                throw new NotSupportedException("Chunk relationship queries require a column-backed relationship; use GetRelationsOf for managed multi-relations.");
+            if (!type.IsRelation) throw new ArgumentException("Relationship filter requires a relationship type.");
+            if (type.IsMultiRelation && type.MultiRelationMaxSlots == 0)
+                return _relationListStore.Has(type.Id, chunk.GetEntity(entityIndex), query.RelationshipFilterTarget);
             if (!chunk.Archetype.Has(type.Type)) return false;
             int column = chunk.Archetype.GetComponentTypeIndex(type);
             byte* value = (byte*)chunk.GetComponentArrayPointer(column) + entityIndex * type.Size;

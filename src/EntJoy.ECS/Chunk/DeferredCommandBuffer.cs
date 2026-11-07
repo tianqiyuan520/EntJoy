@@ -551,6 +551,9 @@ namespace EntJoy.ECS
                         {
                             case OP_SET_RELATIONSHIP_TARGET:
                             case OP_REMOVE_RELATIONSHIP:
+                            case OP_ADD_MULTI_RELATIONSHIP:
+                            case OP_REMOVE_MULTI_RELATIONSHIP:
+                            case OP_CLEAR_MULTI_RELATIONSHIPS:
                                 ReplayRelationship(entityManager, batchStaging + offset - sizeof(int));
                                 offset += RelationshipCommandSize - sizeof(int);
                                 break;

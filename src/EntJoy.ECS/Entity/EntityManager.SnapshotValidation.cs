@@ -6,16 +6,16 @@ namespace EntJoy.ECS
 {
     public unsafe partial class EntityManager
     {
-        private const string SnapshotMagic = "EJSNAP02";
+        private const string SnapshotMagic = "EJSNAP03";
 
         private static void ValidateSnapshotComponent(ComponentType type)
         {
             if (type.Size <= 0 || type.Size != ComponentTypeManager.GetComponentType(type.Type).Size)
                 throw new InvalidDataException($"Snapshot layout is incompatible with {type.Type}.");
             // These states need ownership/side-table serialization, not raw bytes.
-            if (type.IsShared || type.IsEnableable || type.IsMultiRelation
+            if (type.IsShared || type.IsEnableable
                 || type.IsDisposable || type.IsCopyable)
-                throw new NotSupportedException($"Snapshots cannot serialize shared, enabled, multi-relation or owned-resource state for {type.Type}.");
+                throw new NotSupportedException($"Snapshots cannot serialize shared, enabled or owned-resource state for {type.Type}.");
         }
 
         private static ComponentType[][] ReadSnapshotSignatures(BinaryReader reader)
@@ -74,8 +74,6 @@ namespace EntJoy.ECS
                     throw new InvalidDataException("Truncated snapshot component data.");
                 reader.BaseStream.Position += bytes;
             }
-            if (reader.BaseStream.Position != reader.BaseStream.Length)
-                throw new InvalidDataException("Unexpected trailing snapshot data.");
         }
     }
 }

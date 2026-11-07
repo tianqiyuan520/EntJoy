@@ -109,7 +109,8 @@ namespace EntJoy.ECS
                     }
                     _currentArch = arch;
                     _t0Idx = arch.GetComponentTypeIndex<T0>();
-                    _t1Idx = arch.GetComponentTypeIndex<T1>();
+                    _t1Idx = _hasRelFilter && _relType.IsMultiRelation && _relMaxSlots == 0 && _relType.Type == typeof(T1)
+                        ? -1 : arch.GetComponentTypeIndex<T1>();
                     _chunkIndex = 0;
                     return MoveNextChunk();
                 }
@@ -135,10 +136,10 @@ namespace EntJoy.ECS
                     _currentChunk = chunk;
                     _count = chunk.EntityCount;
                     _t0Base = (T0*)chunk.GetComponentArrayPointer(_t0Idx);
-                    _t1Base = (T1*)chunk.GetComponentArrayPointer(_t1Idx);
+                    _t1Base = _t1Idx < 0 ? null : (T1*)chunk.GetComponentArrayPointer(_t1Idx);
 
                     // 关系过滤——解析关系列基址（RelationSlot*，8B/槽）
-                    if (_hasRelFilter)
+                    if (_hasRelFilter && !(_relType.IsMultiRelation && _relMaxSlots == 0))
                     {
                         int relIdx = _currentArch.GetComponentTypeIndex(_relType);
                         _relBase = (RelationSlot*)chunk.GetComponentArrayPointer(relIdx);
@@ -347,6 +348,8 @@ namespace EntJoy.ECS
         {
             if (!_hasRelFilter) return true;
             if (!_relTargetAlive) return false;
+            if (_relType.IsMultiRelation && _relMaxSlots == 0)
+                return _entityManager.MatchesRelationshipFilter(_builder, _currentChunk, _slotIndex);
             if (_relBase == null) return false;
             // 关系列可能宽于 8B（TRel 带数据 / 定长多槽列）：按列宽步进，再重解释槽位。
             var col = (byte*)_relBase + _slotIndex * _relStride;
@@ -371,7 +374,7 @@ namespace EntJoy.ECS
             {
                 _readState.Validate();
                 if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
-                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex, _readState);            }
+                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base == null ? null : _t1Base + _slotIndex, _readState);            }
         }
     }
 
@@ -413,7 +416,12 @@ namespace EntJoy.ECS
         public ref readonly T1 ReadOnlyComp1
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get { _readState.Validate(); return ref *_c1; }
+            get
+            {
+                _readState.Validate();
+                if (_c1 == null) throw new NotSupportedException("Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.");
+                return ref *_c1;
+            }
         }
 
         public ref T1 Comp1

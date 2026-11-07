@@ -156,7 +156,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (NativeTranspiler.IsEntJoyContainerNamed(param.Type, Config.NativeList))
                 {
-                    var elementType = ((INamedTypeSymbol)param.Type).TypeArguments[0];
+                    var elementType = NativeTranspiler.GetContainerElementType(param.Type);
                     var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
                     sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>& {param.Name} = *{param.Name}_listData;");
                 }

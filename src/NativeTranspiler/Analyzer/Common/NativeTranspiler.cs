@@ -165,6 +165,7 @@ namespace NativeTranspiler.Analyzer
 
         public static bool IsEntJoyNativeContainerType(ITypeSymbol? type)
         {
+            if (IsReadOnlyNativeArray(type)) return true;
             if (type is INamedTypeSymbol named && named.IsGenericType)
             {
                 var ns = named.ContainingNamespace?.ToDisplayString();
@@ -185,9 +186,19 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         public static bool IsEntJoyContainerNamed(ITypeSymbol? type, string memberName)
         {
+            if (IsReadOnlyNativeArray(type)) return memberName == Config.NativeArray;
             return IsEntJoyNativeContainerType(type) &&
                    (type as INamedTypeSymbol)?.Name == memberName;
         }
+
+        public static bool IsReadOnlyNativeArray(ITypeSymbol? type)
+            => type is INamedTypeSymbol { Name: "ReadOnly", ContainingType: { } owner }
+                && owner.Name == Config.NativeArray && owner.IsGenericType
+                && owner.ContainingNamespace?.ToDisplayString() == Config.NamespaceEntJoyCollections;
+
+        public static ITypeSymbol GetContainerElementType(ITypeSymbol type)
+            => IsReadOnlyNativeArray(type) ? ((INamedTypeSymbol)type).ContainingType.TypeArguments[0]
+                : ((INamedTypeSymbol)type).TypeArguments[0];
 
         /// <summary>
         /// 所有在 EntJoy.Collections 命名空间下的类型（无论是否泛型）都视为"预定义"，不应生成头文件。

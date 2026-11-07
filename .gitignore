@@ -75,6 +75,7 @@ imgui.ini
 !/tools/JobSystemStressTest.CSharp/
 !/tools/ISPCWidthBoundaryTest/
 !/tools/NativeTranspilerFixture/
+!/tools/RelationshipValidation/
 !/tools/SafetyInterceptProbe/
 
 # Local offline NuGet package-source config (machine-specific)

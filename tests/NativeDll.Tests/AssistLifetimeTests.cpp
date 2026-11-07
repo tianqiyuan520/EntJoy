@@ -1,5 +1,6 @@
 #include "../NativeDll/JobSystem.h"
 #include "../NativeDll/ChunkJobData.h"
+#include "../NativeDll/ChaseLevScheduler.h"
 
 #include <atomic>
 #include <chrono>
@@ -31,6 +32,42 @@ namespace
     {
         static_cast<AssistLifetimeContext*>(raw)->cleanupCount.fetch_add(
             1, std::memory_order_relaxed);
+    }
+
+    void TestStopWaitsForExternalAssist()
+    {
+        JobSystem::ChaseLevScheduler scheduler;
+        auto unused = [](JobSystem::BatchState*, uint32_t) noexcept {};
+        if (!scheduler.Start(1, unused, nullptr, false)) throw std::runtime_error("local scheduler start failed");
+        struct Gate
+        {
+            std::atomic<bool> entered{ false };
+            std::atomic<bool> release{ false };
+        } worker, assist;
+        auto block = [](void* raw)
+        {
+            auto& gate = *static_cast<Gate*>(raw);
+            gate.entered.store(true, std::memory_order_release);
+            gate.entered.notify_all();
+            while (!gate.release.load(std::memory_order_acquire)) gate.release.wait(false);
+        };
+        scheduler.SubmitWork(block, &worker, nullptr);
+        worker.entered.wait(false);
+        scheduler.SubmitWork(block, &assist, nullptr);
+        std::jthread caller([&] { scheduler.TryAssistOne(false); });
+        assist.entered.wait(false);
+        std::atomic<bool> stopped{ false };
+        std::jthread stopper([&] { scheduler.Stop(); stopped.store(true, std::memory_order_release); });
+        while (scheduler.IsRunning()) std::this_thread::yield();
+        worker.release.store(true, std::memory_order_release);
+        worker.release.notify_all();
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        const bool premature = stopped.load(std::memory_order_acquire);
+        assist.release.store(true, std::memory_order_release);
+        assist.release.notify_all();
+        caller.join(); stopper.join();
+        if (premature) throw std::runtime_error("Stop returned while an external assist still owned scheduler storage");
+        if (scheduler.TryAssistOne()) throw std::runtime_error("stopped scheduler accepted an assist");
     }
 }
 
@@ -82,6 +119,7 @@ int main()
         throw std::runtime_error("cleanup did not run exactly once");
 
     JobSystem::Scheduler::Shutdown();
+    TestStopWaitsForExternalAssist();
     std::cout << "PASS AssistLifetime\n";
     return 0;
 }

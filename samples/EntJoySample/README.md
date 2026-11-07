@@ -22,6 +22,7 @@
 | [13 Hot Reload](13_HotReload) | 原生 Job 热重载 |
 | [14 AutoSIMD Writeback](14_AutoSimdChunkWriteback) | 多组件 SIMD 写回 |
 | [16 Native Execution](16_NativeExecution/README.md) | 列视图、依赖合并、上下文与布局 |
+| [17 Relationship](17_Relationship/README.md) | 背包、装备、M:N、带数据的边实体、C++/ISPC、ECB、复制恢复及生命周期 |
 
 ## 构建与入口
 
@@ -34,11 +35,11 @@ dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
 
 用 `-p:ENTJOY_STARTUP=<全限定入口类型>` 切换入口，加 `--no-incremental` 确保重新编译。部分样例以注释形式保存，运行前需启用对应源码与 Main。
 
-例如，运行 Native Execution：
+关系样例可直接指定入口：
 
 ```powershell
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release --no-incremental -p:ENTJOY_STARTUP=EntJoySample.NativeExecution.Program
-.\bin\EntJoySample.exe
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release --no-incremental -p:ENTJOY_STARTUP=EntJoySample.Relationship.Program -o artifacts/relationship-sample
+dotnet artifacts/relationship-sample/EntJoySample.dll
 ```
 
 `IJobChunkMoveCompareTest` 还需 `-p:ENTJOY_SAMPLE_SET=movecompare`；工程默认编译 AutoSIMD 样例集，这两个集合互斥。

@@ -32,14 +32,7 @@ namespace EntJoy.ECS
             CheckDisposed();
             var type = ComponentTypeManager.GetComponentType(typeof(TRel));
             if (!type.IsMultiRelation) { SetRelationshipTargetRaw(entity, target, type); return; }
-            CompleteRelationWriteJobs(entity, type);
-            using var changes = BeginRelationChanges();
-            lock (_structuralLock)
-            {
-                ValidateRelationshipEntity(entity, type, "source");
-                ValidateRelationshipEntity(target, type, "target");
-                AddMultiRelationshipCore<TRel>(entity, target, type.Id);
-            }
+            AddMultiRelationshipRaw(entity, target, type);
         }
 
         /// <summary>移除单目标关系列；多目标类型清空全部边。</summary>

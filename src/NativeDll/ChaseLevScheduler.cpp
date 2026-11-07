@@ -558,6 +558,7 @@ namespace JobSystem
         }
 
         running_.store(true, std::memory_order_release);
+        assistGate_.store(0, std::memory_order_release);
         return true;
     }
 
@@ -570,6 +571,7 @@ namespace JobSystem
         {
             std::lock_guard<std::mutex> lock(lifecycleMutex_);
             if (workers_.empty()) { running_.store(false); return; }
+            assistGate_.fetch_or(kAssistClosed, std::memory_order_acq_rel);
             running_.store(false);
         }
 
@@ -584,17 +586,23 @@ namespace JobSystem
                 ctx->thread.join();
         }
 
-        // 排空残留 task 并收集未退役 batch 到 drainedBatches，消除 shutdown 泄漏（worker 已 join，单线程安全）。
+        // 已登记的 assist 可以完成当前调用，队列在其退出前保持存活。
+        drainedBatches.clear();
         DrainRemaining();
-
+        uint32_t assists = assistGate_.load(std::memory_order_acquire);
+        while (assists != kAssistClosed)
+        {
+            assistGate_.wait(assists, std::memory_order_acquire);
+            assists = assistGate_.load(std::memory_order_acquire);
+        }
+        // 处理已经进入的执行者在首次排空期间发布的尾部任务。
+        DrainRemaining();
         workers_.clear();
     }
 
     // 排空 Injector 与各 worker deque 的残留 task（仅 Stop 内 join 后调用）。
     void ChaseLevScheduler::DrainRemaining() noexcept
     {
-        drainedBatches.clear();
-
         // 1. Injector 残留（RangeTask：tile 令牌或通用 work）
         RangeTask* task = nullptr;
         while (injector_.Pop(task))
@@ -1241,9 +1249,17 @@ namespace JobSystem
 
     bool ChaseLevScheduler::TryAssistOne(bool scanDeques) noexcept
     {
-        if (!running_.load(std::memory_order_acquire)) return false;
+        uint32_t state = assistGate_.load(std::memory_order_acquire);
+        do
+        {
+            if (state & kAssistClosed) return false;
+        } while (!assistGate_.compare_exchange_weak(state, state + 1,
+            std::memory_order_acquire, std::memory_order_relaxed));
         // 主线程没有 worker 槽位：窃取仍从 deque 0 起扫，计账走 main 分支（accountIndex 越界即跳过数组写入）
-        return StealAndExecute(0, kMaxTrackedWorkers, true, scanDeques);
+        const bool executed = StealAndExecute(0, kMaxTrackedWorkers, true, scanDeques);
+        if (assistGate_.fetch_sub(1, std::memory_order_release) == (kAssistClosed | 1u))
+            assistGate_.notify_all();
+        return executed;
     }
 
     // ============================================================

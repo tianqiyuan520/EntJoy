@@ -86,6 +86,12 @@ namespace EntJoy.ECS
             where TRel : struct, IRelationComponent
             => _entityManager.GetRelationships<TRel>(entity);
 
+        public int GetRelationships<TRel>(Entity source, System.Span<Entity> destination) where TRel : struct, IRelationComponent
+            => _entityManager.GetRelationships<TRel>(source, destination);
+
+        public void CopyRelationships<TRel>(Entity source, EntJoy.Collections.NativeList<Entity> destination) where TRel : struct, IRelationComponent
+            => _entityManager.CopyRelationships<TRel>(source, destination);
+
         /// <summary>多值关系：entity 的关系条数。</summary>
         public int GetRelationshipCount<TRel>(Entity entity)
             where TRel : struct, IRelationComponent

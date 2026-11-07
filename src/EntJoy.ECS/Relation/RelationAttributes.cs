@@ -22,7 +22,7 @@ namespace EntJoy.ECS
     /// 多值关系（出边 1:N / M:N）：source 可持有多个 target。
     ///
     /// 两种存储模式，按是否指定 <see cref="MaxSlots"/> 路由：
-    /// - <c>[MultiRelation]</c>（MaxSlots = 0，默认）：托管列表（RelationListStore），无界、主线程、不进 Job（NT017 拦截）。
+    /// - <c>[MultiRelation]</c>（MaxSlots = 0，默认）：主线程托管列表；Job 使用筛选位图或显式复制的目标快照。
     /// - <c>[MultiRelation(MaxSlots = N)]</c>（N ≥ 2）：定长多槽列（chunk 列，宽 N×8B），有界、Job 可读
     /// 源生成器注入 Slot1..SlotN-1 字段。
     ///
@@ -47,7 +47,7 @@ namespace EntJoy.ECS
     /// <summary>
     /// 声明式级联：标记的关系类型在 target 被销毁时自动级联销毁所有指向它的 source
     /// （Flecs OnDeleteTarget=EcsDelete 语义）。作用于单值列关系与多值关系。
-    /// 不标记的类型保持现状：DestroyEntity 不级联（S24 决策），关系自动失效。
+    /// 未声明级联时只解除存活 source 的对应边。
     /// </summary>
     [AttributeUsage(AttributeTargets.Struct)]
     public sealed class OnTargetDeletedAttribute : Attribute

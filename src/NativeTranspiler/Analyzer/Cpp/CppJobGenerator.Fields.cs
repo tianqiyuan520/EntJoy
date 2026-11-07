@@ -27,7 +27,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
                         sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>& {field.Name} = *{field.Name}_listData;");
                     }
@@ -86,7 +86,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
-                        var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(((INamedTypeSymbol)field.Type).TypeArguments[0]);
+                        var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(NativeTranspiler.GetContainerElementType(field.Type));
                         sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>*& {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElementType}>**)((char*)__job + {offset});");
                     }
                     else
@@ -370,7 +370,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
                         // NativeList 的 `_listData` 形参：当该表的长度决定某个循环的行程数时加 `__restrict`。
                         // 机理（clang-cl /O2 微实验，）：`UnsafeList<T>& L = *L_listData;` +
@@ -385,8 +385,8 @@ namespace NativeTranspiler.Analyzer
                     }
                     else // NativeArray
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
-                        var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(elementType);
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
+                        var cppElementType = (NativeTranspiler.IsReadOnlyNativeArray(field.Type) ? "const " : "") + NativeTranspiler.MapCSharpTypeToCpp(elementType);
                         // 数组形参不加 `__restrict`：job 的数组字段可能互为别名（读邻居/写自身），
                         // 无别名证据时不能声明 noalias。
                         parameters.Add($"{cppElementType}* {field.Name}_ptr, int {field.Name}_length");

@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -917,13 +917,13 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(param.Type, Config.NativeList))
                     {
-                        var elementType = ((INamedTypeSymbol)param.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(param.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                         parameters.Add($"EntJoy.Collections.UnsafeList<{csElementType}>* {param.Name}_listData");
                     }
                     else
                     {
-                        var elementType = ((INamedTypeSymbol)param.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(param.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                         parameters.Add($"{csElementType}* {param.Name}_ptr, int {param.Name}_length");
                     }
@@ -962,9 +962,10 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        var elementType = ((INamedTypeSymbol)param.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(param.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                        args.Add($"({csElementType}*){param.Name}.GetUnsafePtr(), {param.Name}.Length");
+                        string getter = NativeTranspiler.IsReadOnlyNativeArray(param.Type) ? "GetUnsafeReadOnlyPtr" : "GetUnsafePtr";
+                        args.Add($"({csElementType}*){param.Name}.{getter}(), {param.Name}.Length");
                     }
                 }
                 else if (param.Type is IPointerTypeSymbol)
@@ -1010,13 +1011,13 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                         parameters.Add($"EntJoy.Collections.UnsafeList<{csElementType}>* {field.Name}_listData");
                     }
                     else
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                         parameters.Add($"{csElementType}* {field.Name}_ptr, int {field.Name}_length");
                     }
@@ -1135,7 +1136,8 @@ namespace NativeTranspiler.Analyzer
                     if (NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeArray))
                     {
                         // NativeArray：显式写 buffer@off / length@off+8（与 Adapter 读取一致）
-                        sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.GetUnsafePtr();");
+                        string getter = NativeTranspiler.IsReadOnlyNativeArray(type) ? "GetUnsafeReadOnlyPtr" : "GetUnsafePtr";
+                        sb.AppendLine($"            *((void**)({dstExpr} + {off})) = (void*){srcExpr}.{accessor}.{getter}();");
                         sb.AppendLine($"            *((int*)({dstExpr} + {off + 8})) = {srcExpr}.{accessor}.Length;");
                     }
                     else if (NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeList))
@@ -1346,9 +1348,10 @@ namespace NativeTranspiler.Analyzer
                     }
                     else
                     {
-                        var elementType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elementType = NativeTranspiler.GetContainerElementType(field.Type);
                         var csElementType = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                        args.Add($"({csElementType}*)jobPtr->{field.Name}.GetUnsafePtr(), jobPtr->{field.Name}.Length");
+                        string getter = NativeTranspiler.IsReadOnlyNativeArray(field.Type) ? "GetUnsafeReadOnlyPtr" : "GetUnsafePtr";
+                        args.Add($"({csElementType}*)jobPtr->{field.Name}.{getter}(), jobPtr->{field.Name}.Length");
                     }
                 }
                 else

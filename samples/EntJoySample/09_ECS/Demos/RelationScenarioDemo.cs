@@ -55,7 +55,8 @@ namespace EntJoySample.ECS
         {
             Console.WriteLine("=== Relation Scenario Demo ===\n");
 
-            _world = new World("RelationScenario");
+            using var world = new World("RelationScenario");
+            _world = world;
             var em = _world.EntityManager;
 
             TestHierarchy(em);
@@ -64,7 +65,6 @@ namespace EntJoySample.ECS
             TestFixedSlotSkills(em);
             TestInventory(em);
 
-            _world.Dispose();
             Console.WriteLine("\n=== Relation Scenario Demo Complete ===\n");
         }
 
@@ -149,7 +149,16 @@ namespace EntJoySample.ECS
             Console.WriteLine($"  mage skills: {mageSkills.Length} (expect 2: fireball, shield)");
             Console.WriteLine($"  fireball users: {fireballUsers.Length} (expect 2: mage, knight)");
 
-            Check(mageSkills.Length == 2 && fireballUsers.Length == 2, "M:N skills");
+            Check(mageSkills.Length == 2 && mageSkills.Contains(fireball) && mageSkills.Contains(shield)
+                && fireballUsers.Length == 2 && fireballUsers.Contains(mage) && fireballUsers.Contains(knight), "M:N skills");
+            em.AddRelationship<KnowsSkill>(mage, fireball);
+            Check(em.GetRelationshipCount<KnowsSkill>(mage) == 2, "M:N duplicate edge is a no-op");
+            em.RemoveRelationship<KnowsSkill>(mage, shield);
+            Check(em.GetRelationships<KnowsSkill>(mage).SequenceEqual(new[] { fireball })
+                && em.GetRelationsOf<KnowsSkill>(shield).Length == 0, "M:N remove one edge");
+            em.ClearRelationships<KnowsSkill>(knight);
+            Check(em.GetRelationshipCount<KnowsSkill>(knight) == 0
+                && em.GetRelationsOf<KnowsSkill>(fireball).SequenceEqual(new[] { mage }), "M:N clear one source");
         }
 
         /// <summary>场景 3b：定长多槽列技能（[MultiRelation(MaxSlots=4)]）——主线程 API 演示。</summary>
@@ -223,16 +232,20 @@ namespace EntJoySample.ECS
             Check(entityIspc == totalExpected, "fixed-slot IJobEntity ISPC");
 
             // 槽满溢出演示：第 5 个技能应抛异常
+            em.AddRelationship<HotSkillSlot>(mage, blink);
             var fifth = em.NewEntity(typeof(Position));
+            bool rejected = false;
             try
             {
                 em.AddRelationship<HotSkillSlot>(mage, fifth);
-                Check(false, "column full should throw");
             }
             catch (InvalidOperationException)
             {
+                rejected = true;
                 Console.WriteLine("  column full: AddRelationship threw (expect)");
             }
+            Check(rejected && em.GetRelationships<HotSkillSlot>(mage).ToHashSet().SetEquals(new[] { fireball, shield, heal, blink })
+                && em.GetRelationsOf<HotSkillSlot>(fifth).Length == 0, "full column preserves its edges");
         }
 
         private static long ReadCdSum(EntityManager em, Entity e)
@@ -281,7 +294,9 @@ namespace EntJoySample.ECS
             Console.WriteLine($"  hero items after transfer: {heroAfter.Length} (expect 2)");
             Console.WriteLine($"  sword owner count: {swordOwner.Length} (expect 1)");
 
-            Check(villagerItems.Length == 1 && heroAfter.Length == 2 && swordOwner.Length == 1, "exclusive target inventory");
+            Check(villagerItems.SequenceEqual(new[] { sword })
+                && heroAfter.Length == 2 && heroAfter.Contains(potion) && heroAfter.Contains(bow)
+                && swordOwner.SequenceEqual(new[] { villager }), "exclusive target inventory");
         }
 
         private static void Check(bool condition, string name)
@@ -303,7 +318,7 @@ namespace EntJoySample.ECS
     {
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
         {
-            EntJoy.Collections.NativeArray<HotSkillSlot> skills = chunk.GetComponentDataNativeArray<HotSkillSlot>();
+            var skills = chunk.GetComponentReadOnlyDataNativeArray<HotSkillSlot>();
             EntJoy.Collections.NativeArray<SkillCdSum> sums = chunk.GetComponentDataNativeArray<SkillCdSum>();
             for (int i = 0; i < skills.Length; i++)
             {
@@ -337,7 +352,7 @@ namespace EntJoySample.ECS
     {
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
         {
-            EntJoy.Collections.NativeArray<HotSkillSlot> skills = chunk.GetComponentDataNativeArray<HotSkillSlot>();
+            var skills = chunk.GetComponentReadOnlyDataNativeArray<HotSkillSlot>();
             EntJoy.Collections.NativeArray<SkillCdSum> sums = chunk.GetComponentDataNativeArray<SkillCdSum>();
             for (int i = 0; i < skills.Length; i++)
             {

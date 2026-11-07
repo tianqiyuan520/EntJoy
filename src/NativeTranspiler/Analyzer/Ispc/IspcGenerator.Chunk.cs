@@ -344,7 +344,7 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
-                        var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(field.Type);
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
                         var ispcElem = IspcTypeMapper.FromCpp(cppElem);
                         sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElem}>**)(__jobContext + {offset});");
@@ -358,10 +358,11 @@ namespace NativeTranspiler.Analyzer.Common
                     }
                     else
                     {
-                        var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(field.Type);
                         var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
                         var ispcElem = IspcTypeMapper.FromCpp(cppElem);
-                        sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcElem}*>(*({cppElem}**)(__jobContext + {offset}));");
+                        string qualifier = NativeTranspiler.IsReadOnlyNativeArray(field.Type) ? "const " : "";
+                        sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<{qualifier}ispc::{ispcElem}*>(*({qualifier}{cppElem}**)(__jobContext + {offset}));");
                         sb.AppendLine($"    int {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
                         callArgs.Add($"{field.Name}_ptr");
                         callArgs.Add($"{field.Name}_length");
@@ -418,7 +419,7 @@ namespace NativeTranspiler.Analyzer.Common
                     continue;
                 }
 
-                var elemType = ((INamedTypeSymbol)field.Type).TypeArguments[0];
+                var elemType = NativeTranspiler.GetContainerElementType(field.Type);
                 var cppElem = NativeTranspiler.MapCSharpTypeToCpp(elemType);
                 sb.AppendLine($"    {field.Name}_listData->Length = {field.Name}_ctx._length;");
                 sb.AppendLine($"    {field.Name}_listData->Capacity = {field.Name}_ctx._capacity;");
@@ -552,15 +553,16 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeList))
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
                         pars.Append($"uniform UnsafeList_Context_{ispcElem}* uniform {name}");
                     }
                     else
                     {
-                        var elemType = ((INamedTypeSymbol)type).TypeArguments[0];
+                        var elemType = NativeTranspiler.GetContainerElementType(type);
                         var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
-                        pars.Append($"uniform {ispcElem} {name}_ptr[], uniform int {name}_length");
+                        string qualifier = NativeTranspiler.IsReadOnlyNativeArray(type) ? "const " : "";
+                        pars.Append($"uniform {qualifier}{ispcElem} {name}_ptr[], uniform int {name}_length");
                     }
                 }
                 else if (type is IPointerTypeSymbol ptrType)

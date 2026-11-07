@@ -25,7 +25,8 @@ using NativeTranspilerFixture;
 const int N = 1024;
 int failed = 0;
 
-NativeJobScheduler.Initialize();
+JobScheduler.Initialize();
+if (!JobScheduler.IsNative) throw new InvalidOperationException("The native generator fixture requires the Native backend.");
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 if (args.Length > 0 && args[0] == "columns")
 {

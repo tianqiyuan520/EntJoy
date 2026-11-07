@@ -99,7 +99,8 @@ namespace EntJoy.ECS
             // 关系过滤要求拥有 TRel 列（不拆 Archetype，仅过滤）
             if (builder.HasRelationshipFilter)
             {
-                if (!componentTypeRecorder.ContainsKey(builder.RelationshipFilterType))
+                if (!(builder.RelationshipFilterType.IsMultiRelation && builder.RelationshipFilterType.MultiRelationMaxSlots == 0)
+                    && !componentTypeRecorder.ContainsKey(builder.RelationshipFilterType))
                     return false;
             }
             // 共享值过滤要求拥有 SharedFilterType 列（与关系列同策略）。

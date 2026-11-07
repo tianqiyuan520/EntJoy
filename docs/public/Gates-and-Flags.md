@@ -9,6 +9,12 @@
 > （`ENTJOY_JOB_COST_CACHE`、`ENTJOY_JOB_BATCH_BY_NAME`，见 D 节 —— 它们是"对齐档"的定义开关，
 > 此前只散落在 gridsearch 的战役文档里，未进契约表）。
 
+## Relationship 验证
+
+Release Gate 包含必需的 relationship-test：Linux 显式 Managed、Windows 显式 Native，运行 M:N 规模、三种形态长稳及批量分配预算。每次提交使用短规模，extended 输入或周期性运行使用百万边压力及每形态百万轮。实际后端、运行规模、结束标志、样本与内存上界均核对，结果作为 artifact 保存。
+
+NativeTranspiler 回归另实际编译、运行 Debug/Release 的 Relationship C++/ISPC 样例。参数、复跑入口和预算见 [RelationshipValidation](../../tools/RelationshipValidation/README.md)。
+
 ## 约定
 
 - 解析时机：原生侧 `getenv` 一律在**首次调用时锁存**（函数内 `static`）⇒ 进程启动后改 env 无效。

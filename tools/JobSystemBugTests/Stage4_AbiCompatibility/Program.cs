@@ -16,10 +16,8 @@ unsafe static class Program
                 if (!NativeLibrary.TryGetExport(dll, "JobSystem_GetAbiVersion", out var ptr))
                     throw new Exception("ABI export missing");
                 uint version = ((delegate* unmanaged[Cdecl]<uint>)ptr)();
-                // ABI 3：删除了 6 个死 stats 字段（stats 结构体布局已变）。本用例断言
-                // "随包发布的 NativeDll 报告的正是 C# 侧期望的版本"，故此处必须与
-                // src/EntJoy.Jobs/Native/NativeJobCore.cs 的 ExpectedAbiVersion 同步。
-                if (version != 3) throw new Exception($"ABI version {version}");
+                // ECS 实体过滤使用 ABI 4，与 NativeJobCore.ExpectedAbiVersion 一致。
+                if (version != 4) throw new Exception($"ABI version {version}");
                 Console.WriteLine("PASS ABI version"); passed++;
             }
             finally { NativeLibrary.Free(dll); }

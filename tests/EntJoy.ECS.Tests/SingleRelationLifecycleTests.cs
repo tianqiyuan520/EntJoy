@@ -186,7 +186,7 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void RelationPrefabClone_AndUnsupportedSideTableSnapshot_PreserveState()
+        public void RelationPrefabClone_AndSideTableSnapshot_PreserveState()
         {
             using var world = NewWorld();
             var em = world.EntityManager;
@@ -200,7 +200,9 @@ namespace EntJoy.ECS.Tests
             Assert.All(copies, copy => Assert.Equal(target, em.GetRelationship<LifecycleRelation>(copy)));
             var source = New(em);
             em.AddRelationship<Skill>(source, target);
-            Assert.Throws<NotSupportedException>(() => em.TakeSnapshot());
+            var snapshot = em.TakeSnapshot();
+            em.ClearRelationships<Skill>(source);
+            em.Restore(snapshot);
             Assert.Equal(target, Assert.Single(em.GetRelationships<Skill>(source)));
             var plainPrefab = em.NewEntity(typeof(Position), typeof(Prefab));
             Assert.Single(em.SpawnFrom(plainPrefab, 1));

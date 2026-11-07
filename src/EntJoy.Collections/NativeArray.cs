@@ -281,6 +281,9 @@ namespace EntJoy.Collections
 
             public int Length => _length;
 
+            /// <summary>借用原始地址；调用方保证拥有者存活、访问同步并遵守只读约定。</summary>
+            public void* GetUnsafeReadOnlyPtr() => _bufferRO;
+
             public T this[int index]
             {
                 [MethodImpl(MethodImplOptions.AggressiveInlining)]

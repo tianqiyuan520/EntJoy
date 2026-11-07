@@ -111,6 +111,11 @@ namespace NativeTranspiler.Analyzer
             var includes = new HashSet<string>();
             void AddType(ITypeSymbol type)
             {
+                if (NativeTranspiler.IsReadOnlyNativeArray(type))
+                {
+                    AddType(NativeTranspiler.GetContainerElementType(type));
+                    return;
+                }
                 if (type is IPointerTypeSymbol ptr)
                 {
                     AddType(ptr.PointedAtType);

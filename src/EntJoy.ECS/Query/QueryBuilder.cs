@@ -147,8 +147,6 @@ namespace EntJoy.ECS
         public QueryBuilder WithRelationship<T>(Entity target) where T : struct, IRelationComponent
         {
             RelationshipFilterType = ComponentTypeManager.GetComponentType(typeof(T));
-            if (RelationshipFilterType.IsMultiRelation && RelationshipFilterType.MultiRelationMaxSlots < 2)
-                throw new NotSupportedException("Managed multi-relations have no chunk column; use GetRelationsOf instead.");
             RelationshipFilterTarget = RelationSlot.From(target);
             HasRelationshipFilter = true;
             return this;

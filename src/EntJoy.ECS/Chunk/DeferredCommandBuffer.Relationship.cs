@@ -17,6 +17,9 @@ namespace EntJoy.ECS
     {
         internal const int OP_SET_RELATIONSHIP_TARGET = 7;
         internal const int OP_REMOVE_RELATIONSHIP = 8;
+        internal const int OP_ADD_MULTI_RELATIONSHIP = 9;
+        internal const int OP_REMOVE_MULTI_RELATIONSHIP = 10;
+        internal const int OP_CLEAR_MULTI_RELATIONSHIPS = 11;
         internal static readonly int RelationshipCommandSize = sizeof(int) * 3 + sizeof(Entity) * 2;
         private bool _playingBack;
         private List<ComponentType[]> _spareTypeSets = new();
@@ -33,7 +36,31 @@ namespace EntJoy.ECS
             => RecordRelationship(OP_SET_RELATIONSHIP_TARGET, SingleRelationTypeId<TRel>(), source, target);
 
         public void RemoveRelationship<TRel>(Entity source) where TRel : struct, IRelationComponent
-            => RecordRelationship(OP_REMOVE_RELATIONSHIP, SingleRelationTypeId<TRel>(), source, default);
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            RecordRelationship(type.IsMultiRelation ? OP_CLEAR_MULTI_RELATIONSHIPS : OP_REMOVE_RELATIONSHIP, type.Id, source, default);
+        }
+
+        internal static int MultiRelationTypeId<TRel>() where TRel : struct, IRelationComponent
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            if (!type.IsMultiRelation) throw new ArgumentException("Multi-target commands require a multi-target relationship.");
+            return type.Id;
+        }
+
+        public void AddRelationship<TRel>(Entity source, Entity target) where TRel : struct, IRelationComponent
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            RecordRelationship(type.IsMultiRelation ? OP_ADD_MULTI_RELATIONSHIP : OP_SET_RELATIONSHIP_TARGET, type.Id, source, target);
+        }
+
+        public void RemoveRelationship<TRel>(Entity source, Entity target) where TRel : struct, IRelationComponent
+            => RecordRelationship(OP_REMOVE_MULTI_RELATIONSHIP, MultiRelationTypeId<TRel>(), source, target);
+
+        public void ClearRelationships<TRel>(Entity source) where TRel : struct, IRelationComponent
+            => RecordRelationship(OP_CLEAR_MULTI_RELATIONSHIPS, MultiRelationTypeId<TRel>(), source, default);
+
+        internal static bool IsRelationshipOpcode(int opcode) => opcode >= OP_SET_RELATIONSHIP_TARGET && opcode <= OP_CLEAR_MULTI_RELATIONSHIPS;
 
         private void RecordRelationship(int opcode, int typeId, Entity source, Entity target)
         {
@@ -62,9 +89,16 @@ namespace EntJoy.ECS
             if (!manager.IsRelationshipTargetAlive(RelationSlot.From(source))) return;
             int typeId = *(int*)(command + 8);
             var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(typeId));
-            if (*(int*)command == OP_SET_RELATIONSHIP_TARGET)
-                manager.SetRelationshipTargetRaw(source, *(Entity*)(command + 12 + sizeof(Entity)), type);
-            else manager.RemoveRelationshipRaw(source, type);
+            var target = *(Entity*)(command + 12 + sizeof(Entity));
+            switch (*(int*)command)
+            {
+                case OP_SET_RELATIONSHIP_TARGET: manager.SetRelationshipTargetRaw(source, target, type); break;
+                case OP_REMOVE_RELATIONSHIP: manager.RemoveRelationshipRaw(source, type); break;
+                case OP_ADD_MULTI_RELATIONSHIP: manager.AddMultiRelationshipRaw(source, target, type); break;
+                case OP_REMOVE_MULTI_RELATIONSHIP: manager.RemoveMultiRelationshipRaw(source, target, type); break;
+                case OP_CLEAR_MULTI_RELATIONSHIPS: manager.ClearMultiRelationshipsRaw(source, type); break;
+                default: throw new InvalidOperationException("Invalid relationship opcode.");
+            }
         }
     }
 }

@@ -911,8 +911,7 @@ namespace NativeTranspiler.Analyzer
             // 且报错落在生成目录里极易被误判为构建缓存问题。
             if (type is INamedTypeSymbol container && NativeTranspiler.IsEntJoyNativeContainerType(container))
             {
-                foreach (var arg in container.TypeArguments)
-                    CollectFromType(arg, collected);
+                CollectFromType(NativeTranspiler.GetContainerElementType(container), collected);
                 return;
             }
             if (NativeTranspiler.IsEntJoyPredefinedType(type))

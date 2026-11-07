@@ -32,7 +32,7 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 附加关系过滤：只遍历持有 T1 关系且 target == <paramref name="target"/> 的实体。
-        /// T1 是关系组件（IRelationComponent），遍历结果中 Comp1 为该关系槽位值（一般无需读取）。
+        /// 列关系通过 ReadOnlyComp1 读取；托管列表只用于筛选，目标通过 GetRelationships/CopyRelationships 读取。
         /// </summary>
         public QueryEnumerable<T0, T1> WithRelationship<T1>(Entity target)
             where T1 : struct, IRelationComponent

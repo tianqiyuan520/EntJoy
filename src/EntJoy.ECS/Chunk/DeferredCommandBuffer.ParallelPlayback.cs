@@ -21,7 +21,7 @@ namespace EntJoy.ECS
                 OP_DESTROY_RANGE => checked(offset + sizeof(int) * 3),
                 OP_SET_COMPONENT_SINGLE => checked(offset + sizeof(int) * 3 + sizeof(Entity)
                     + *(int*)(state.Staging + offset + sizeof(int) * 2 + sizeof(Entity))),
-                OP_SET_RELATIONSHIP_TARGET or OP_REMOVE_RELATIONSHIP => checked(offset + RelationshipCommandSize),
+                >= OP_SET_RELATIONSHIP_TARGET and <= OP_CLEAR_MULTI_RELATIONSHIPS => checked(offset + RelationshipCommandSize),
                 _ => throw new InvalidOperationException($"Unsupported ParallelWriter opcode {opcode}.")
             };
         }
@@ -41,7 +41,7 @@ namespace EntJoy.ECS
                 for (int offset = 0; offset < batch[writer].Offset; offset = NextWriterCommand(ref batch[writer], offset))
                 {
                     int opcode = *(int*)(batch[writer].Staging + offset);
-                    int key = opcode == OP_SET_RELATIONSHIP_TARGET || opcode == OP_REMOVE_RELATIONSHIP
+                    int key = IsRelationshipOpcode(opcode)
                         ? *(int*)(batch[writer].Staging + offset + sizeof(int)) : 0;
                     commands.Add(new ParallelCommand(writer, offset, key));
                 }
@@ -74,7 +74,10 @@ namespace EntJoy.ECS
                     break;
                 case OP_SET_COMPONENT_SINGLE: WriteInlineComponent(manager, command); break;
                 case OP_SET_RELATIONSHIP_TARGET:
-                case OP_REMOVE_RELATIONSHIP: ReplayRelationship(manager, command); break;
+                case OP_REMOVE_RELATIONSHIP:
+                case OP_ADD_MULTI_RELATIONSHIP:
+                case OP_REMOVE_MULTI_RELATIONSHIP:
+                case OP_CLEAR_MULTI_RELATIONSHIPS: ReplayRelationship(manager, command); break;
                 default: throw new InvalidOperationException("Unsupported ParallelWriter command.");
             }
         }

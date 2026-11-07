@@ -213,6 +213,9 @@ namespace JobSystem
         std::mutex lifecycleMutex_;
         std::vector<std::unique_ptr<WorkerContext>> workers_;
         std::atomic<bool> running_{ false };
+        static constexpr uint32_t kAssistClosed = uint32_t{1} << 31;
+        // 高位关闭新 assist，低位保留已进入调用；队列释放前等待归零。
+        std::atomic<uint32_t> assistGate_{ kAssistClosed };
         std::atomic<bool> quit_{ false };
         uint32_t workerCount_{ 0 };
         bool bindThreads_{ false };

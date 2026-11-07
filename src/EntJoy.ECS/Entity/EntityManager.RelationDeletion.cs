@@ -38,7 +38,10 @@ namespace EntJoy.ECS
             }
 
             // Collect before modifying the index; sources may move between chunks as edges are removed.
-            var toUnlink = new List<(Entity Source, Entity Target, int TypeId)>();
+            int incomingCapacity = 0;
+            if (order.Count == 1 && _relationIndex.TryGetSources(order[0], out var incomingTypes))
+                foreach (var sources in incomingTypes.Values) incomingCapacity = checked(incomingCapacity + sources.Count);
+            var toUnlink = new List<(Entity Source, Entity Target, int TypeId)>(incomingCapacity);
             foreach (var target in order)
             {
                 if (!_relationIndex.TryGetSources(target, out var byType)) continue;
@@ -55,19 +58,7 @@ namespace EntJoy.ECS
         {
             var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(typeId));
             if (!type.IsMultiRelation) { RemoveRelationCore(source, type); return; }
-            var slot = RelationSlot.From(target);
-            if (type.MultiRelationMaxSlots < 2)
-            {
-                RemoveListTarget(source, typeId, slot);
-                return;
-            }
-            var values = (RelationSlot*)GetRelationValue(source, type);
-            for (int i = 0; i < type.MultiRelationMaxSlots; i++)
-                if (values[i].Matches(slot)) values[i] = RelationSlot.Default;
-            _relationIndex.RemoveRelTypeId(typeId, source, slot);
-            ref var info = ref GetEntityInfoRef(source.Id);
-            info.Archetype.NotifyComponentChanged(info.ChunkIndex, info.SlotInChunk);
-            _relationshipVersion++;
+            CommitRemoveMultiEdge(source, type, RelationSlot.From(target));
         }
     }
 }

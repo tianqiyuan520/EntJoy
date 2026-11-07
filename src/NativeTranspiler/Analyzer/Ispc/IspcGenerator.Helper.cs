@@ -120,7 +120,7 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 if (NativeTranspiler.IsEntJoyNativeContainerType(p.Type))
                 {
-                    var elemType = ((INamedTypeSymbol)p.Type).TypeArguments[0];
+                    var elemType = NativeTranspiler.GetContainerElementType(p.Type);
                     var ispcElem = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(elemType));
                     if (NativeTranspiler.IsEntJoyContainerNamed(p.Type, Config.NativeList))
                         pars.Add($"uniform UnsafeList_Context_{ispcElem}* uniform {p.Name}");
