@@ -10,7 +10,7 @@ namespace EntJoySample.ECS
     ///
     /// 关键链路：
     /// 1. CollectUserStructTypes 递归收集 ChildOf → RelationSlot → 生成两者 C++ 头文件
-    /// 2. GetComponentDataNativeArray&lt;ChildOf&gt;() 翻译为 C++ 数组指针（元素 = ChildOf 8B）
+    /// 2. GetComponentReadOnlyDataNativeArray&lt;ChildOf&gt;() 翻译为只读数组指针（元素 = ChildOf 8B）
     /// 3. .Target.TargetId 翻译为 C++ 字段访问（EntJoy::ECS::RelationSlot 需有 C++ 定义）
     /// 4. C++ 编译通过 + static_assert(8B) 通过 → 运行结果与 C# 一致
     ///
@@ -30,7 +30,7 @@ namespace EntJoySample.ECS
         {
             public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
             {
-                EntJoy.Collections.NativeArray<ChildOf> rels = chunk.GetComponentDataNativeArray<ChildOf>();
+                var rels = chunk.GetComponentReadOnlyDataNativeArray<ChildOf>();
                 EntJoy.Collections.NativeArray<SumComponent> sums = chunk.GetComponentDataNativeArray<SumComponent>();
                 for (int i = 0; i < rels.Length; i++)
                 {
@@ -56,7 +56,7 @@ namespace EntJoySample.ECS
         {
             public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
             {
-                EntJoy.Collections.NativeArray<ChildOf> rels = chunk.GetComponentDataNativeArray<ChildOf>();
+                var rels = chunk.GetComponentReadOnlyDataNativeArray<ChildOf>();
                 EntJoy.Collections.NativeArray<SumComponent> sums = chunk.GetComponentDataNativeArray<SumComponent>();
                 for (int i = 0; i < rels.Length; i++)
                 {

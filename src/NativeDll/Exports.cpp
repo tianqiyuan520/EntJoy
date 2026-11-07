@@ -108,7 +108,7 @@ extern "C"
         //        scheduleToPublishEwmaNs / publishToFirstMainClaimEwmaNs /
         //        publishToFirstWorkerClaimEwmaNs / queueLockWaitEwmaNs）—— 布局已变，
         //        故必须升版本，使旧二进制在加载期被拒绝，而不是按错位偏移静默读错。
-        return 3u;
+        return 4u;
     }
 
     int JobSystem_Initialize(int numThreads)

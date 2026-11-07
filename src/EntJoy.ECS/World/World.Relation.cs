@@ -5,7 +5,7 @@ namespace EntJoy.ECS
     /// </summary>
     public partial class World
     {
-        /// <summary>建立关系：entity --TRel--> target（首次结构变更，已有则覆盖写 8B）。</summary>
+        /// <summary>建立或重绑关系，已有单目标关系保留附带数据；重复目标不改变状态。</summary>
         public void AddRelationship<TRel>(Entity entity, Entity target)
             where TRel : struct, IRelationComponent
             => _entityManager.AddRelationship<TRel>(entity, target);
@@ -19,6 +19,11 @@ namespace EntJoy.ECS
         public Entity GetRelationship<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
             => _entityManager.GetRelationship<TRel>(entity);
+
+        /// <summary>读取有效目标；无边或端点失效时返回 false。</summary>
+        public bool TryGetRelationship<TRel>(Entity entity, out Entity target)
+            where TRel : struct, IRelationComponent
+            => _entityManager.TryGetRelationship<TRel>(entity, out target);
 
         /// <summary>是否持有有效关系（列存在 + 槽位有效 + target 存活版本匹配）。</summary>
         public bool HasRelationship<TRel>(Entity entity)
@@ -36,6 +41,14 @@ namespace EntJoy.ECS
         public Entity[] GetRelationsOf<TRel>(Entity target)
             where TRel : struct, IRelationComponent
             => _entityManager.GetRelationsOf<TRel>(target);
+
+        public int GetRelationsOf<TRel>(Entity target, System.Span<Entity> destination)
+            where TRel : struct, IRelationComponent
+            => _entityManager.GetRelationsOf<TRel>(target, destination);
+
+        public void CopyRelationsOf<TRel>(Entity target, EntJoy.Collections.NativeList<Entity> destination)
+            where TRel : struct, IRelationComponent
+            => _entityManager.CopyRelationsOf<TRel>(target, destination);
 
         /// <summary>获取所有指向 target 的关系源（跨所有关系类型，O(1)）。</summary>
         public Entity[] GetRelationsOfAll(Entity target)

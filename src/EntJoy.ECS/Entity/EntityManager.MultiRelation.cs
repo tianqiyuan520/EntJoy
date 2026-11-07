@@ -63,10 +63,18 @@ namespace EntJoy.ECS
             var slotValue = RelationSlot.From(target);
             int maxSlots = compType.MultiRelationMaxSlots;
             bool isColumn = maxSlots >= 2;
+            ValidateEntity(target);
+            if (isColumn && entityInfoRef.Archetype.Has(compType.Type))
+            {
+                ref var existing = ref entityInfoRef.Archetype.ChunkList[entityInfoRef.ChunkIndex]
+                    .GetComponentStorage<TRel>(entityInfoRef.SlotInChunk, entityInfoRef.Archetype.GetComponentTypeIndex(compType));
+                if (!ColumnHasTarget(ref existing, maxSlots, slotValue) && FindEmptySlot(ref existing, maxSlots) < 0)
+                    throw new InvalidOperationException($"Multi-relation '{typeof(TRel).Name}' column full (MaxSlots={maxSlots}).");
+            }
 
             // [ExclusiveTarget]：target 已被其他 source 持有 → 解绑旧 source 的该 target 条目（背包语义）
             if (compType.IsExclusiveTarget &&
-                _relationIndex.TryGetSources(target.Id, out var byTypeEx) &&
+                _relationIndex.TryGetSources(target, out var byTypeEx) &&
                 byTypeEx.TryGetValue(relTypeId, out var setEx))
             {
                 foreach (var oldSource in setEx)
@@ -88,13 +96,12 @@ namespace EntJoy.ECS
 
             _relationIndex.Add(relTypeId, entity, target);
 
-            // Observer：Added（对齐单值关系；多值关系值 = RelationSlot）
-            if (added && _observerCount > 0 && _observers != null &&
-                _observers.TryGetValue(relTypeId, out var reg) && reg.Added.Count > 0)
+            if (added)
             {
-                var handle = System.Runtime.InteropServices.GCHandle.Alloc(slotValue, System.Runtime.InteropServices.GCHandleType.Pinned);
-                try { DispatchAdded(reg.Added, &entity, (void*)handle.AddrOfPinnedObject(), 1); }
-                finally { handle.Free(); }
+                _relationshipVersion++;
+                void* value = isColumn ? GetRelationValue(entity, compType) : &slotValue;
+                var notification = CaptureRelationNotification(entity, compType, ObserverEvents.Added, value);
+                CommitRelationNotification(notification);
             }
         }
 
@@ -111,13 +118,13 @@ namespace EntJoy.ECS
                 for (int i = 0; i < maxSlots; i++)
                     SetSlot(ref relValue, i, RelationSlot.Default);
                 SetSlot(ref relValue, 0, target);
-                AddComponentRawCore(entity, compType.Type, relValue);
+                AddComponentRawCore(entity, compType.Type, relValue, relationStorageOnly: true);
                 return true;
             }
 
             int compIdx = arch.GetComponentTypeIndex(compType);
             var chunk = arch.ChunkList[info.ChunkIndex];
-            ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+            ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
 
             if (ColumnHasTarget(ref col, maxSlots, in target))
                 return false;   // 幂等
@@ -152,7 +159,7 @@ namespace EntJoy.ECS
 
             int compIdx = arch.GetComponentTypeIndex(compType);
             var chunk = arch.ChunkList[info.ChunkIndex];
-            ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+            ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
 
             for (int i = 0; i < maxSlots; i++)
             {
@@ -161,6 +168,7 @@ namespace EntJoy.ECS
                     SetSlot(ref col, i, RelationSlot.Default);
                     arch.NotifyComponentChangedPublic(info.ChunkIndex, info.SlotInChunk);
                     _relationIndex.RemoveRelTypeId(relTypeId, entity, in target);
+                    _relationshipVersion++;
                     return true;
                 }
             }
@@ -174,6 +182,7 @@ namespace EntJoy.ECS
             if (_relationListStore.Remove(relTypeId, entity, in target))
             {
                 _relationIndex.RemoveRelTypeId(relTypeId, entity, in target);
+                _relationshipVersion++;
                 return true;
             }
             return false;
@@ -222,7 +231,7 @@ namespace EntJoy.ECS
                 if (!arch.Has(compType.Type)) return false;
                 int compIdx = arch.GetComponentTypeIndex(compType);
                 var chunk = arch.ChunkList[info.ChunkIndex];
-                ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+                ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
                 return ColumnHasTarget(ref col, compType.MultiRelationMaxSlots, in slotValue);
             }
             return _relationListStore.Has(compType.Id, entity, in slotValue);
@@ -246,7 +255,7 @@ namespace EntJoy.ECS
                 if (!arch.Has(compType.Type)) return Array.Empty<Entity>();
                 int compIdx = arch.GetComponentTypeIndex(compType);
                 var chunk = arch.ChunkList[info.ChunkIndex];
-                ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+                ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
 
                 int maxSlots = compType.MultiRelationMaxSlots;
                 var temp = new Entity[maxSlots];
@@ -300,7 +309,7 @@ namespace EntJoy.ECS
                 if (!arch.Has(compType.Type)) return 0;
                 int compIdx = arch.GetComponentTypeIndex(compType);
                 var chunk = arch.ChunkList[info.ChunkIndex];
-                ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+                ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
                 int count = 0;
                 for (int i = 0; i < compType.MultiRelationMaxSlots; i++)
                 {
@@ -333,7 +342,7 @@ namespace EntJoy.ECS
                     if (!arch.Has(compType.Type)) return;
                     int compIdx = arch.GetComponentTypeIndex(compType);
                     var chunk = arch.ChunkList[info.ChunkIndex];
-                    ref var col = ref chunk.GetComponent<TRel>(info.SlotInChunk, compIdx);
+                    ref var col = ref chunk.GetComponentStorage<TRel>(info.SlotInChunk, compIdx);
                     for (int i = 0; i < compType.MultiRelationMaxSlots; i++)
                     {
                         var slot = GetSlot(ref col, i);
@@ -344,6 +353,7 @@ namespace EntJoy.ECS
                         }
                     }
                     arch.NotifyComponentChangedPublic(info.ChunkIndex, info.SlotInChunk);
+                    _relationshipVersion++;
                     return;
                 }
 
@@ -352,6 +362,7 @@ namespace EntJoy.ECS
                 foreach (var slot in list)
                     _relationIndex.RemoveRelTypeId(compType.Id, entity, in slot);
                 _relationListStore.ClearSource(compType.Id, entity);
+                _relationshipVersion++;
             }
         }
 

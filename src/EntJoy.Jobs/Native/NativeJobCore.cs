@@ -173,10 +173,8 @@ namespace EntJoy.JobSystem
         // 被运行时按 (程序集, 库名) 缓存，换不掉）。
         private static IntPtr _nativeTranspiledDll = IntPtr.Zero;
         private static int _shutdownRequested;
-        // ABI 2: JobSystem_Initialize now returns an int status code.
-        // ABI 3: 删除 6 个死 stats 字段（stats 结构体布局已变）⇒ 旧的 NativeDll.dll 必须被拒绝，
-        //        否则会按错位偏移静默读错诊断值。与 Exports.cpp 的 JobSystem_GetAbiVersion 同步。
-        private const uint ExpectedAbiVersion = 3;
+        // NativeDll 与生成内核均须匹配此 ABI（包含 ECS 逐实体过滤数据布局）。
+        private const uint ExpectedAbiVersion = 4;
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
@@ -465,10 +463,10 @@ namespace EntJoy.JobSystem
             string beside = Path.Combine(AppContext.BaseDirectory, "NativeTranspiled.dll");
             if (File.Exists(beside))
             {
-                _nativeTranspiledDll = NativeLibrary.Load(beside);
+                _nativeTranspiledDll = LoadNativeTranspiledModule(beside);
                 return _nativeTranspiledDll;
             }
-            _nativeTranspiledDll = NativeLibrary.Load("NativeTranspiled");
+            _nativeTranspiledDll = LoadNativeTranspiledModule("NativeTranspiled");
             return _nativeTranspiledDll;
         }
 
@@ -959,6 +957,12 @@ namespace EntJoy.JobSystem
         private static IntPtr LoadNativeTranspiledModule(string path)
         {
             IntPtr handle = NativeLibrary.Load(path);
+            if (!NativeLibrary.TryGetExport(handle, "NativeTranspiled_GetAbiVersion", out var abi)
+                || ((delegate* unmanaged[Cdecl]<uint>)abi)() != ExpectedAbiVersion)
+            {
+                NativeLibrary.Free(handle);
+                throw new InvalidOperationException("NativeTranspiled ABI mismatch; rebuild the generated native kernels.");
+            }
             string size = "n/a", sha = "n/a";
             try { if (File.Exists(path)) { size = new FileInfo(path).Length.ToString(); sha = ShortHash(FileSha256(path)); } } catch { }
             Console.Error.WriteLine($"[NativeJobScheduler] NativeTranspiled self-proof: path={path} size={size} sha256={sha}");

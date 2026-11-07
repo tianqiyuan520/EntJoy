@@ -170,7 +170,7 @@ namespace EntJoySample.ECS
 
         /// <summary>
         /// IJobEntity 直接访问关系列验证（步长一致性）。
-        /// Execute(ref Position, in ChildOf) → adapter 生成 GetComponentDataSpan&lt;ChildOf&gt;()，
+        /// Execute(ref Position, in ChildOf) → adapter 生成 GetComponentReadOnlyDataSpan&lt;ChildOf&gt;()，
         /// 若 ChildOf 是空 struct（1B）则步长错位，Target 读错；含 RelationSlot 字段（8B）则正确。
         /// </summary>
         public static void VerifyIJobEntityRelationAccess()
@@ -212,7 +212,7 @@ namespace EntJoySample.ECS
 
         /// <summary>
         /// IJobChunk 直接访问关系列验证（步长一致性）。
-        /// Execute(ArchetypeChunk) → chunk.GetComponentDataSpan&lt;ChildOf&gt;()，
+        /// Execute(ArchetypeChunk) → chunk.GetComponentReadOnlyDataSpan&lt;ChildOf&gt;()，
         /// 逐槽读 ChildOf.Target.TargetId 累加；步长错位则 sum 错。
         /// </summary>
         public static void VerifyIJobChunkRelationAccess()
@@ -271,7 +271,7 @@ namespace EntJoySample.ECS
 
         public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask enabledMask)
         {
-            var childOfs = chunk.GetComponentDataSpan<ChildOf>();
+            var childOfs = chunk.GetComponentReadOnlyDataSpan<ChildOf>();
             for (int i = 0; i < chunk.Count; i++)
             {
                 *SumPtr += childOfs[i].Target.TargetId;

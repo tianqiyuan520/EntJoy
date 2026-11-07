@@ -190,7 +190,7 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void SingleValueApi_OnMultiRelation_NoHarm()
+        public void SingleValueApi_OnMultiRelation_RejectsReadsAndClearsAllEdges()
         {
             using var world = NewWorld();
             var em = world.EntityManager;
@@ -200,11 +200,12 @@ namespace EntJoy.ECS.Tests
 
             em.AddRelationship<Skill>(player, fireball);
 
-            // 单参 API（列语义）对多值类型静默返回默认值（多值关系不占列），不误伤双参 API
-            Assert.Equal(default, em.GetRelationship<Skill>(player));
-            Assert.False(em.HasRelationship<Skill>(player));
-            em.RemoveRelationship<Skill>(player);   // no-op，不抛异常
-            Assert.True(em.HasRelationship<Skill>(player, fireball));   // 双参 API 不受影响
+            Assert.Throws<InvalidOperationException>(() => em.GetRelationship<Skill>(player));
+            Assert.Throws<InvalidOperationException>(() => em.HasRelationship<Skill>(player));
+            Assert.True(em.HasRelationship<Skill>(player, fireball));
+            em.RemoveRelationship<Skill>(player);
+            Assert.Empty(em.GetRelationships<Skill>(player));
+            Assert.Empty(em.GetRelationsOf<Skill>(fireball));
         }
     }
 }

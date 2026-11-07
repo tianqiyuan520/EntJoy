@@ -139,6 +139,7 @@ namespace EntJoy.ECS
         private readonly List<Archetype> _matchingArchetypes = new();
         private readonly List<Chunk> _chunks = new();
         private int _cachedStructuralVersion = -1;
+        private long _cachedRelationshipVersion = -1;
         // 已扫描过的 Archetype 总数（判定是否需要重扫签名匹配集合）
         private int _scannedArchetypeCount = 0;
         private int _scannedArchetypeVersion = -1;
@@ -214,6 +215,7 @@ namespace EntJoy.ECS
             _scannedArchetypeCount = entityManager.ArchetypeCount;
             _scannedArchetypeVersion = entityManager.ArchetypeSetVersion;
             _cachedStructuralVersion = entityManager.StructuralVersion;
+            _cachedRelationshipVersion = entityManager.RelationshipVersion;
         }
 
         /// <summary>
@@ -253,6 +255,7 @@ namespace EntJoy.ECS
             }
 
             _cachedStructuralVersion = entityManager.StructuralVersion;
+            _cachedRelationshipVersion = entityManager.RelationshipVersion;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -261,58 +264,73 @@ namespace EntJoy.ECS
             // 带变更过滤（WithChanged）的查询必须每次访问都重评 chunk 过滤：
             // 变更位是帧级数据态（Set/SetSharedComponent 就地改值、ClearAllChangedBitMasks
             // 都不 bump 结构版本），仅靠结构版本检查会导致结果陈旧。
+            _world.EntityManager.CheckDisposed();
             if (_cachedStructuralVersion != _world.EntityManager.StructuralVersion
+                || (_builder.HasRelationshipFilter && _cachedRelationshipVersion != _world.EntityManager.RelationshipVersion)
+                || _builder.HasSharedFilter
                 || (_builder.ChangedComponents != null && _builder.ChangedComponents.Length > 0))
             {
                 RefreshIncremental();
             }
         }
 
+        private bool NeedsEntityFilter => _builder.HasRelationshipFilter || (_builder.AllEnabled != null && _builder.AllEnabled.Length > 0);
+
+        private bool MatchesEntity(Chunk chunk, int slot)
+        {
+            if (!_world.EntityManager.MatchesRelationshipFilter(_builder, chunk, slot)) return false;
+            if (_builder.AllEnabled != null)
+                foreach (var type in _builder.AllEnabled)
+                    if (!chunk.GetComponentEnabled(chunk.Archetype.GetComponentTypeIndex(type), slot)) return false;
+            return true;
+        }
+
         public int CalculateEntityCount()
         {
             EnsureUpToDate();
             int total = 0;
-            for (int i = 0; i < _chunks.Count; i++)
+            foreach (var chunk in _chunks)
             {
-                total += _chunks[i].EntityCount;
+                if (!NeedsEntityFilter) { total = checked(total + chunk.EntityCount); continue; }
+                for (int slot = 0; slot < chunk.EntityCount; slot++)
+                    if (MatchesEntity(chunk, slot)) total++;
             }
-
             return total;
         }
 
+        /// <summary>返回独立副本；关系和 Enabled 条件按实体应用，不暴露原列的写入视图。</summary>
         public NativeArray<T> ToComponentDataArray<T>(Allocator allocator = Allocator.Persistent) where T : unmanaged
         {
             EnsureUpToDate();
-            // ⚠ 不能直接用 CalculateEntityCount()：它统计的是全部匹配实体，而下面的拷贝会对
-            // 缺少 T 的 chunk `continue` ⇒ 数组尾部会留下一段未初始化数据（静默错值 + 误导调用方）。
-            // 这里只统计真正提供 T 的 chunk，保证 Length == 实际拷贝数。
             int total = 0;
-            for (int i = 0; i < _chunks.Count; i++)
+            foreach (var chunk in _chunks)
             {
-                if (TryGetComponentTypeIndex<T>(_chunks[i].Archetype, out _))
-                    total += _chunks[i].EntityCount;
+                if (!TryGetComponentTypeIndex<T>(chunk.Archetype, out _)) continue;
+                if (!NeedsEntityFilter) { total = checked(total + chunk.EntityCount); continue; }
+                for (int slot = 0; slot < chunk.EntityCount; slot++)
+                    if (MatchesEntity(chunk, slot)) total++;
             }
-
             var result = new NativeArray<T>(total, allocator);
-            int dstIndex = 0;
-            int elementSize = Unsafe.SizeOf<T>();
-
-            for (int chunkIdx = 0; chunkIdx < _chunks.Count; chunkIdx++)
+            int destination = 0;
+            int size = Unsafe.SizeOf<T>();
+            foreach (var chunk in _chunks)
             {
-                var chunk = _chunks[chunkIdx];
-                int count = chunk.EntityCount;
-                if (count == 0) continue;
-
-                var arch = chunk.Archetype;
-                if (!TryGetComponentTypeIndex<T>(arch, out int componentIndex))
+                if (!TryGetComponentTypeIndex<T>(chunk.Archetype, out int column)) continue;
+                byte* source = (byte*)chunk.GetComponentArrayPointer(column);
+                byte* target = (byte*)result.GetUnsafePtr();
+                if (!NeedsEntityFilter)
+                {
+                    Unsafe.CopyBlock(target + (long)destination * size, source, (uint)(chunk.EntityCount * size));
+                    destination += chunk.EntityCount;
                     continue;
-
-                var srcPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex);
-                var dstPtr = (byte*)result.GetUnsafePtr() + dstIndex * elementSize;
-                Unsafe.CopyBlock(dstPtr, srcPtr, (uint)(count * elementSize));
-                dstIndex += count;
+                }
+                for (int slot = 0; slot < chunk.EntityCount; slot++)
+                {
+                    if (!MatchesEntity(chunk, slot)) continue;
+                    Unsafe.CopyBlock(target + (long)destination * size, source + (long)slot * size, (uint)size);
+                    destination++;
+                }
             }
-
             return result;
         }
 

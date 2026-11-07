@@ -1,16 +1,39 @@
 using System;
 using System.Runtime.CompilerServices;
 using EntJoy.Collections;
+using EntJoy.JobSystem;
 
 namespace EntJoy.ECS
 {
     public struct ArchetypeChunk
     {
         private readonly Chunk _chunk;
+        private readonly QueryReadState _readState;
 
-        internal ArchetypeChunk(Chunk chunk) => _chunk = chunk;
+        internal ArchetypeChunk(Chunk chunk)
+        {
+            _chunk = chunk;
+            if (NativeJobScheduler.IsExecutingJob)
+            {
+                // Registered Job dependencies protect this chunk; unrelated archetypes may change.
+                _readState = default;
+                return;
+            }
+            bool relationships = false;
+            if (chunk.MemoryBlock != 0)
+                foreach (var type in chunk.Archetype.Types) relationships |= type.IsRelation;
+            _readState = new QueryReadState(chunk.MemoryBlock != 0 ? chunk.Archetype.Owner : null, relationships);
+        }
 
-        public int Count => _chunk.MemoryBlock != nint.Zero ? _chunk.EntityCount : 0;
+        public int Count
+        {
+            get
+            {
+                if (_chunk.MemoryBlock == nint.Zero) return 0;
+                ThrowIfNull();
+                return _chunk.EntityCount;
+            }
+        }
 
         // 安全句柄在应用域生命周期内持续有效，无需显式释放。
         // 共享句柄（多 chunk view 复用同一句柄）豁免并行写冲突检测——chunk 并行 tile 写不同 chunk 同列是合法场景。
@@ -28,6 +51,8 @@ namespace EntJoy.ECS
         {
             if (_chunk.MemoryBlock == nint.Zero)
                 throw new InvalidOperationException("ArchetypeChunk is not initialized (default constructed or chunk was disposed).");
+            _readState.Validate();
+            _chunk.Archetype.CheckReadable();
         }
 
         // Span 访问（原有）
@@ -36,6 +61,7 @@ namespace EntJoy.ECS
         public unsafe Span<T> GetComponentDataSpan<T>() where T : struct
         {
             ThrowIfNull();
+            ComponentTypeManager.CheckWritableAccess<T>();
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             T* ptr = (T*)((byte*)_chunk.MemoryBlock + _chunk.GetComponentOffset(idx));
             return new Span<T>(ptr, Count);
@@ -45,9 +71,26 @@ namespace EntJoy.ECS
         public unsafe NativeArray<T> GetComponentDataNativeArray<T>() where T : unmanaged
         {
             ThrowIfNull();
+            ComponentTypeManager.CheckWritableAccess<T>();
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             void* ptr = (void*)_chunk.GetComponentArrayPointer(idx);
             return NativeArray<T>.CreateView(ptr, Count, s_chunkViewSafety, Allocator.None);
+        }
+
+        /// <summary>只读借用；Job 完成或结构/关系改变后不得继续持有该 Span。</summary>
+        public unsafe ReadOnlySpan<T> GetComponentReadOnlyDataSpan<T>() where T : struct
+        {
+            ThrowIfNull();
+            int index = _chunk.Archetype.GetComponentTypeIndex<T>();
+            return new ReadOnlySpan<T>((void*)_chunk.GetComponentArrayPointer(index), Count);
+        }
+
+        public unsafe NativeArray<T>.ReadOnly GetComponentReadOnlyDataNativeArray<T>() where T : unmanaged
+        {
+            ThrowIfNull();
+            int index = _chunk.Archetype.GetComponentTypeIndex<T>();
+            return NativeArray<T>.CreateView((void*)_chunk.GetComponentArrayPointer(index), Count,
+                s_chunkViewSafety, Allocator.None).AsReadOnly();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

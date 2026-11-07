@@ -86,6 +86,6 @@ public struct BoundChunkJob : IJobChunk {
         var snapshot = Emit("value.Value += 1; var saved = values[index].Value; for (int k = 0; k < 3; k++) value.Value += saved;");
         Assert.Contains("LoopValue value = values_ptr[index];", snapshot.Cpp);
         var exit = Emit("for (int k = 0; k < 3; k++) { if (value.Limit == k) return; value.Value += k; }");
-        Assert.Matches(@"const EntityBatchData\* __batchData[^\n]*\r?\n\s*\[&\]\(\) \{", exit.Cpp);
+        Assert.Matches(@"const EntityBatchData\* __batchData[^\n]*\r?\n\s*EntityMatchMask[^\n]*\r?\n\s*if \(!__queryMask.HasMatches\(\)\) continue;\r?\n\s*\[&\]\(\) \{", exit.Cpp);
     }
 }

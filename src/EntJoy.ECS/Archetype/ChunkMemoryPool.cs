@@ -28,6 +28,9 @@ namespace EntJoy.ECS
         private static readonly object _lock = new();
         private static readonly List<nint> _pool = new(256);
         private static int s_allocs, s_frees, s_hits, s_misses;
+        private static long s_reservedBytes;
+        internal static long ReservedBytes => Volatile.Read(ref s_reservedBytes);
+        internal static long PooledBytes { get { lock (_lock) return (long)_pool.Count * (kBlockSize + kOverAlloc); } }
 
         /// <summary>
         /// 分配一个 64KB 对齐的块（≥ <see cref="kBlockSize"/> 可用空间）。
@@ -43,9 +46,11 @@ namespace EntJoy.ECS
         {
             if (minBytes > kBlockSize)
             {
+                var large = Marshal.AllocHGlobal(checked(minBytes + kOverAlloc));
+                Interlocked.Add(ref s_reservedBytes, (long)minBytes + kOverAlloc);
                 Interlocked.Increment(ref s_misses);
                 Interlocked.Increment(ref s_allocs);
-                return Marshal.AllocHGlobal(minBytes + kOverAlloc);
+                return large;
             }
             nint raw;
             lock (_lock)
@@ -60,9 +65,11 @@ namespace EntJoy.ECS
                 }
             }
             // 池空：直通 OS
+            var allocated = Marshal.AllocHGlobal(kBlockSize + kOverAlloc);
+            Interlocked.Add(ref s_reservedBytes, kBlockSize + kOverAlloc);
             Interlocked.Increment(ref s_misses);
             Interlocked.Increment(ref s_allocs);
-            return Marshal.AllocHGlobal(kBlockSize + kOverAlloc);
+            return allocated;
         }
 
         /// <summary>
@@ -80,6 +87,7 @@ namespace EntJoy.ECS
             if (bytes > kBlockSize)
             {
                 Marshal.FreeHGlobal(raw);
+                Interlocked.Add(ref s_reservedBytes, -((long)bytes + kOverAlloc));
                 return;
             }
 
@@ -93,6 +101,7 @@ namespace EntJoy.ECS
                 }
             }
             Marshal.FreeHGlobal(raw);
+            Interlocked.Add(ref s_reservedBytes, -(kBlockSize + kOverAlloc));
         }
 
         /// <summary>帧末/场景切换时释放所有池中空闲块（归还 OS）。</summary>
@@ -101,18 +110,25 @@ namespace EntJoy.ECS
             List<nint> taken;
             lock (_lock)
             {
-                taken = _pool;
+                taken = new List<nint>(_pool);
                 _pool.Clear();
             }
             foreach (var ptr in taken)
+            {
                 Marshal.FreeHGlobal(ptr);
+                Interlocked.Add(ref s_reservedBytes, -(kBlockSize + kOverAlloc));
+            }
         }
 
         /// <summary>预热：向池中注入指定数量的空闲块。</summary>
         public static void Prewarm(int count)
         {
             for (int i = 0; i < count; i++)
-                Free(Marshal.AllocHGlobal(kBlockSize + kOverAlloc));
+            {
+                var raw = Marshal.AllocHGlobal(kBlockSize + kOverAlloc);
+                Interlocked.Add(ref s_reservedBytes, kBlockSize + kOverAlloc);
+                Free(raw);
+            }
         }
 
         public static (int allocs, int frees, int hits, int misses) GetStats()

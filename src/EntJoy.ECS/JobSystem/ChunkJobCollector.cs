@@ -15,8 +15,9 @@ namespace EntJoy.ECS.JobSystem
     {
         internal static void ValidateJobQuery(QueryBuilder query)
         {
-            if (query.HasRelationshipFilter)
-                throw new NotSupportedException("Job relationship filters require per-entity matching; use QuerySelection for this query.");
+            if (query.HasRelationshipFilter && (query.RelationshipFilterType.Size < sizeof(RelationSlot)
+                || !query.RelationshipFilterType.IsRelation))
+                throw new ArgumentException("A relationship query requires a registered relationship type.", nameof(query));
         }
 
         private static int CheckedBytes(long count, int elementSize)
@@ -99,7 +100,7 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // Native/ISPC 路径：完整 payload（所有组件指针）
-        internal static ChunkJobData* BuildNativePayload(Chunk[] chunks, int count, int[]? requiredIds, GCHandle[]? gcHandles)
+        internal static ChunkJobData* BuildNativePayload(Chunk[] chunks, int count, int[]? requiredIds, GCHandle[]? gcHandles, QueryBuilder query = default)
         {
             var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(ChunkJobData)));
             Unsafe.InitBlockUnaligned(tablePtr, 0, (uint)CheckedBytes(count, sizeof(ChunkJobData)));
@@ -164,6 +165,7 @@ namespace EntJoy.ECS.JobSystem
                     requiredEnableBitMaps = reqBitmaps,
                     sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
                     };
+                    tablePtr[ci].filter = ChunkJobScheduler.BuildNativeFilter(chunk, query);
                 }
                 return tablePtr;
             }
@@ -174,11 +176,12 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
-        private static void FreeChunkJobDataPayload(ChunkJobData* tablePtr, int count)
+        internal static void FreeChunkJobDataPayload(ChunkJobData* tablePtr, int count)
         {
             if (tablePtr == null) return;
             for (int i = 0; i < count; i++)
             {
+                ChunkJobScheduler.FreeNativeFilter(tablePtr[i].filter);
                 if (tablePtr[i].componentArrays != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentArrays);
                 if (tablePtr[i].componentSizes != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].componentSizes);
                 if (tablePtr[i].enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)tablePtr[i].enableBitMaps);
@@ -192,7 +195,7 @@ namespace EntJoy.ECS.JobSystem
 
         // Cpp entity batch 路径：EntityBatchData*
         internal static void BuildEntityBatchPayload(Chunk[] chunks, int count, int[]? requiredIds,
-            out EntityBatchData* batchesPtr, out int batchCount, out void* compArraysBlock, out void* enableBitMapsBlock)
+            out EntityBatchData* batchesPtr, out int batchCount, out void* compArraysBlock, out void* enableBitMapsBlock, QueryBuilder query = default)
         {
             enableBitMapsBlock = null;
             if (count == 0) { batchesPtr = null; batchCount = 0; compArraysBlock = null; return; }
@@ -209,6 +212,7 @@ namespace EntJoy.ECS.JobSystem
                     var chunk = chunks[ci];
                     var arch = chunk.Archetype;
                     batchesPtr[ci].entityCount = chunk.EntityCount;
+                    batchesPtr[ci].filter = ChunkJobScheduler.BuildNativeFilter(chunk, query);
                     if (compArraysBlock != null)
                     {
                         void** arraysBase = (void**)compArraysBlock + ci * reqCount;
@@ -228,6 +232,7 @@ namespace EntJoy.ECS.JobSystem
             }
             catch
             {
+                for (int i = 0; i < count; i++) ChunkJobScheduler.FreeNativeFilter(batchesPtr[i].filter);
                 if (compArraysBlock != null) Marshal.FreeHGlobal((IntPtr)compArraysBlock);
                 Marshal.FreeHGlobal((IntPtr)batchesPtr);
                 batchesPtr = null;
@@ -269,7 +274,7 @@ namespace EntJoy.ECS.JobSystem
             s_archetypeBuffer.Clear();
             chunkCount = CollectMatchingChunks(em, query, s_archetypeBuffer);
             if (chunkCount == 0) { ptr = null; archetypes = Array.Empty<Archetype>(); return; }
-            ptr = BuildNativePayload(s_chunkBuffer, chunkCount, requiredIds, gcHandles: null);
+            ptr = BuildNativePayload(s_chunkBuffer, chunkCount, requiredIds, gcHandles: null, query: query);
             archetypes = s_archetypeBuffer.ToArray();
         }
 
@@ -280,7 +285,7 @@ namespace EntJoy.ECS.JobSystem
             s_archetypeBuffer.Clear();
             int chunkCount = CollectMatchingChunks(em, query, s_archetypeBuffer);
             if (chunkCount == 0) { ptr = null; batchCount = 0; archetypes = Array.Empty<Archetype>(); return; }
-            BuildEntityBatchPayload(s_chunkBuffer, chunkCount, requiredIds, out ptr, out batchCount, out _, out _);
+            BuildEntityBatchPayload(s_chunkBuffer, chunkCount, requiredIds, out ptr, out batchCount, out _, out _, query);
             archetypes = s_archetypeBuffer.ToArray();
         }
 

@@ -42,7 +42,7 @@ namespace EntJoy.ECS.Tests
             // 数据字段初始为 default(0)
             var info = em.GetEntityInfoRef(player.Id);
             var chunk = info.Archetype.ChunkList[info.ChunkIndex];
-            ref var owns = ref chunk.GetComponent<Owns>(info.SlotInChunk, info.Archetype.GetComponentTypeIndex(typeof(Owns)));
+            ref readonly var owns = ref chunk.GetComponentReadOnly<Owns>(info.SlotInChunk, info.Archetype.GetComponentTypeIndex(typeof(Owns)));
             Assert.Equal(0, owns.Count);
             Assert.Equal(sword.Id, owns.Target.TargetId);
         }
@@ -57,12 +57,12 @@ namespace EntJoy.ECS.Tests
             var sword = em.NewEntity(typeof(Position));
             var bow = em.NewEntity(typeof(Position));
             em.AddRelationship<Owns>(player, sword);
-            em.AddRelationship<Owns>(player, bow);   // 覆盖：target 变，Count 归零（新值构造）
+            em.AddRelationship<Owns>(player, bow);   // 重绑目标，保留初始业务数据
 
             Assert.Equal(bow.Id, em.GetRelationship<Owns>(player).Id);
             var info = em.GetEntityInfoRef(player.Id);
             var chunk = info.Archetype.ChunkList[info.ChunkIndex];
-            ref var owns = ref chunk.GetComponent<Owns>(info.SlotInChunk, info.Archetype.GetComponentTypeIndex(typeof(Owns)));
+            ref readonly var owns = ref chunk.GetComponentReadOnly<Owns>(info.SlotInChunk, info.Archetype.GetComponentTypeIndex(typeof(Owns)));
             Assert.Equal(bow.Id, owns.Target.TargetId);
             Assert.Equal(0, owns.Count);
         }
@@ -72,25 +72,15 @@ namespace EntJoy.ECS.Tests
         {
             using var world = NewWorld();
             var em = world.EntityManager;
-
             var player = em.NewEntity(typeof(Position));
             var sword = em.NewEntity(typeof(Position));
             em.AddRelationship<Owns>(player, sword);
-
-            // 用户代码修改数据字段（非关系 API，直接组件访问）
-            var info = em.GetEntityInfoRef(player.Id);
-            var arch = info.Archetype;
-            var chunk = arch.ChunkList[info.ChunkIndex];
-            int compIdx = arch.GetComponentTypeIndex(typeof(Owns));
-            ref var owns = ref chunk.GetComponent<Owns>(info.SlotInChunk, compIdx);
-            owns.Count = 3;
-
-            // 重新读回
-            var info2 = em.GetEntityInfoRef(player.Id);
-            var chunk2 = info2.Archetype.ChunkList[info2.ChunkIndex];
-            ref var owns2 = ref chunk2.GetComponent<Owns>(info2.SlotInChunk, info2.Archetype.GetComponentTypeIndex(typeof(Owns)));
-            Assert.Equal(3, owns2.Count);
-            Assert.Equal(sword.Id, owns2.Target.TargetId);
+            var value = em.GetComponentReadOnly<Owns>(player);
+            value.Count = 3;
+            em.SetComponent(player, value);
+            var actual = em.GetComponentReadOnly<Owns>(player);
+            Assert.Equal(3, actual.Count);
+            Assert.Equal(sword.Id, actual.Target.TargetId);
         }
 
         [Fact]

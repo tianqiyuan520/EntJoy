@@ -23,6 +23,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string IJobParallelForBatch = "IJobParallelForBatch";
         public const string IJobChunk = "IJobChunk";
         public const string IJobEntity = "IJobEntity";
+        public const string TypeChunkEnabledMask = "EntJoy.ECS.ChunkEnabledMask";
 
         // 方法名
         public const string Execute = "Execute";
@@ -37,6 +38,12 @@ namespace NativeTranspiler.Analyzer.Common
         public const string ArrayElementAsRef = "ArrayElementAsRef";
         public const string GetComponentDataNativeArray = "GetComponentDataNativeArray";
         public const string GetComponentDataSpan = "GetComponentDataSpan";
+        public const string GetComponentReadOnlyDataSpan = "GetComponentReadOnlyDataSpan";
+        public const string GetComponentReadOnlyDataNativeArray = "GetComponentReadOnlyDataNativeArray";
+        public static bool IsChunkArrayAccess(string name) => name == GetComponentDataNativeArray
+            || name == GetComponentDataSpan || IsReadOnlyChunkArrayAccess(name);
+        public static bool IsReadOnlyChunkArrayAccess(string name) => name == GetComponentReadOnlyDataSpan
+            || name == GetComponentReadOnlyDataNativeArray;
         public const string GetComponentDataPtr = "GetComponentDataPtr";
         public const string GetSharedComponent = "GetSharedComponent";
         public const string GetEnableBitMapPtr = "GetEnableBitMapPtr";

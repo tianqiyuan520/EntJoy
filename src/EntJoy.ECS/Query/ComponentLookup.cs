@@ -63,15 +63,9 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private ref T Resolve(Entity entity, bool validate)
         {
+            if (_em == null) throw new InvalidOperationException("Component lookup is not initialized.");
+            if (validate) _em.ValidateEntity(entity);
             ref var info = ref _em.GetEntityInfoRef(entity.Id);
-
-            if (validate)
-            {
-                if (info.Archetype == null)
-                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
-                if (info.Version != entity.Version)
-                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
-            }
 
             EnsureResolved(info.Archetype, info.ChunkIndex);
             return ref Unsafe.AsRef<T>(_base + info.SlotInChunk * _stride);
@@ -80,12 +74,22 @@ namespace EntJoy.ECS
         public ref T this[Entity entity]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => ref Resolve(entity, validate: true);
+            get
+            {
+                ComponentTypeManager.CheckWritableAccess<T>();
+                return ref Resolve(entity, validate: true);
+            }
         }
 
         /// <summary>跳过 null/version 校验的快速变体（调用方保证句柄有效）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public ref T UnsafeRef(Entity entity) => ref Resolve(entity, validate: false);
+        public ref T UnsafeRef(Entity entity)
+        {
+            ComponentTypeManager.CheckWritableAccess<T>();
+            return ref Resolve(entity, validate: false);
+        }
+
+        internal ref readonly T ReadOnly(Entity entity) => ref Resolve(entity, validate: true);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool IsEnabled(Entity entity)

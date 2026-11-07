@@ -22,8 +22,11 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ExpressionBodiedJobError = new("NT034", "Execute requires a block body",
             "[NativeTranspile] struct '{0}' uses an expression-bodied Execute. Use a block body for native job translation.",
             "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor RelationshipWriteError = new("NT036", "Relationship columns are read-only",
+            "[NativeTranspile] '{0}' cannot request writable access to relationship '{1}'. Use in/value parameters or GetComponentReadOnlyDataNativeArray/GetComponentReadOnlyDataSpan; submit changes through ECB.",
+            "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor DisallowedChunkDataAccessError = new("NT012", "Disallowed chunk data access", "[NativeTranspile] IJobChunk method '{0}' cannot call '{1}'. Use ArchetypeChunk.GetComponentDataNativeArray<T>() for native chunk data access.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' only supports C++/ISPC backend and Execute(ref/in unmanaged component) parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor InvalidJobEntityError = new("NT013", "Invalid IJobEntity", "[NativeTranspile] IJobEntity struct '{0}' requires C++/ISPC and unmanaged ref/in components, by-value relationships, or Entity parameters.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UnsupportedStructLayoutError = new("NT016", "Unsupported struct layout for ISPC", "[NativeTranspile] struct '{0}' uses {1} which ISPC cannot represent (ISPC does not support #pragma pack); NativeArray<{0}> layout would misalign. Use Sequential default layout (no Pack < 8, no Explicit).", "NativeTranspiler", DiagnosticSeverity.Error, true);
@@ -260,6 +263,8 @@ namespace NativeTranspiler.Analyzer
                 {
                     if (IsManagedMultiRelationType(p.Type, compilation))
                         diagnostics.Add(Diagnostic.Create(MultiRelationAccessError, p.Locations.FirstOrDefault(), executeMethod.Name, p.Type.ToDisplayString()));
+                    else if (IsRelationComponentType(p.Type) && (p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out))
+                        diagnostics.Add(Diagnostic.Create(RelationshipWriteError, p.Locations.FirstOrDefault(), executeMethod.Name, p.Type.ToDisplayString()));
                 }
             }
             else
@@ -369,12 +374,16 @@ namespace NativeTranspiler.Analyzer
                                         diagnostics.Add(Diagnostic.Create(ManagedSharedComponentError, invocation.GetLocation(), sharedType.ToDisplayString()));
                                 }
                                 else if (isChunkJob && calledMethod.IsGenericMethod && calledMethod.TypeArguments.Length == 1 &&
-                                         (calledMethod.Name == Config.GetComponentDataSpan || calledMethod.Name == Config.GetComponentDataNativeArray || calledMethod.Name == Config.GetComponentDataPtr) &&
+                                         (Config.IsChunkArrayAccess(calledMethod.Name) || calledMethod.Name == Config.GetComponentDataPtr) &&
                                          IsManagedMultiRelationType(calledMethod.TypeArguments[0], compilation))
                                 {
                                     // 托管列表模式多值关系不占 chunk 列 → IJobChunk 无法按列读取；定长多槽列模式可读，不拦截
                                     diagnostics.Add(Diagnostic.Create(MultiRelationAccessError, invocation.GetLocation(), executeMethod.Name, calledMethod.TypeArguments[0].ToDisplayString()));
                                 }
+                                else if (isChunkJob && calledMethod.ContainingType?.ToDisplayString() == Config.TypeArchetypeChunk
+                                    && Config.IsChunkArrayAccess(calledMethod.Name) && calledMethod.TypeArguments.Length == 1
+                                    && IsRelationComponentType(calledMethod.TypeArguments[0]) && !Config.IsReadOnlyChunkArrayAccess(calledMethod.Name))
+                                    diagnostics.Add(Diagnostic.Create(RelationshipWriteError, invocation.GetLocation(), executeMethod.Name, calledMethod.TypeArguments[0].ToDisplayString()));
                                 else if (!IsAllowedMethodCall(calledMethod, compilation, isChunkJob))
                                     diagnostics.Add(Diagnostic.Create(DisallowedMethodCallError, invocation.GetLocation(), executeMethod.Name, calledMethod.ToDisplayString()));
                             }
@@ -428,7 +437,14 @@ namespace NativeTranspiler.Analyzer
                         var varAnalyzer = new SimdVariableAnalyzer(
                             semanticModelSimd, structSymbol, executeMethod.Parameters.FirstOrDefault()?.Name ?? "index");
                         varAnalyzer.Analyze(methodSyntax);
-                        if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason))
+                        if (isChunkJob && autoSimdBody == NativeTranspiler.AutoSIMD.Enabled
+                            && methodSyntax.Body.DescendantNodes().OfType<IdentifierNameSyntax>().Any(identifier =>
+                                semanticModelSimd.GetSymbolInfo(identifier).Symbol is IParameterSymbol parameter
+                                && parameter.Type.ToDisplayString() == Config.TypeChunkEnabledMask))
+                            diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError, executeMethod.Locations.FirstOrDefault(),
+                                structSymbol.Name, autoSimdBody, "explicit ChunkEnabledMask access requires the scalar or compiler Vectorize path"));
+                        else if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason,
+                            compilerVectorize: autoSimdBody == NativeTranspiler.AutoSIMD.Vectorize))
                         {
                             diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
                                 executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
@@ -452,7 +468,8 @@ namespace NativeTranspiler.Analyzer
         {
             if (NativeTranspiler.IsEntityType(p.Type))
                 return false;   // Entity 参数按值传合法
-            return (p.RefKind != RefKind.Ref && p.RefKind != RefKind.In) || !IsUnmanagedType(p.Type);
+            return (p.RefKind != RefKind.Ref && p.RefKind != RefKind.In
+                && !(p.RefKind == RefKind.None && IsRelationComponentType(p.Type))) || !IsUnmanagedType(p.Type);
         }
 
         public static bool IsUnmanagedType(ITypeSymbol type)
@@ -509,6 +526,9 @@ namespace NativeTranspiler.Analyzer
             if (!namedType.AllInterfaces.Any(i => i.ToDisplayString() == Config.TypeIRelationComponent)) return false;
             return namedType.GetAttributes().Any(ad => ad.AttributeClass?.ToDisplayString() == Config.TypeMultiRelationAttribute);
         }
+
+        public static bool IsRelationComponentType(ITypeSymbol type) =>
+            type.AllInterfaces.Any(value => value.ToDisplayString() == Config.TypeIRelationComponent);
 
         /// <summary>
         /// 判断是否为「托管列表模式」多值关系（[MultiRelation] 且未指定 MaxSlots 或 MaxSlots &lt; 2）。
@@ -591,7 +611,7 @@ namespace NativeTranspiler.Analyzer
         private static bool IsAllowedChunkSpanLocal(LocalDeclarationStatementSyntax localDecl, SemanticModel semanticModel)
         {
             var localType = semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-            if (localType?.Name != Config.Span || localType.ContainingNamespace?.ToDisplayString() != "System")
+            if (localType?.Name is not ("Span" or "ReadOnlySpan") || localType.ContainingNamespace?.ToDisplayString() != "System")
                 return false;
 
             foreach (var variable in localDecl.Declaration.Variables)
@@ -600,7 +620,8 @@ namespace NativeTranspiler.Analyzer
                     return false;
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
                     return false;
-                if (method.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk || method.Name != Config.GetComponentDataSpan)
+                if (method.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk
+                    || (method.Name != Config.GetComponentDataSpan && method.Name != Config.GetComponentReadOnlyDataSpan))
                     return false;
             }
 

@@ -89,6 +89,14 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateInvocation(InvocationExpressionSyntax invocation)
         {
+            if (_semanticModel.GetSymbolInfo(invocation).Symbol is IMethodSymbol maskMethod
+                && maskMethod.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask && maskMethod.Name == "IsEnabled")
+            {
+                string index = CaptureExpressionText(invocation.ArgumentList.Arguments[0].Expression);
+                _builder.Append("((__query_bits[(").Append(index).Append(") >> 6] & ((uint64)1 << ((")
+                    .Append(index).Append(") & 63))) != 0)");
+                return;
+            }
             if (!_insideForeach && !IsScalarMetadataCall(invocation))
                 _builder.Append($"/*{UnsupportedMarkers.Expr}ISPC_ChunkScalarCall*/");
             else base.TranslateInvocation(invocation);
@@ -105,6 +113,13 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
+            if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol maskProperty
+                && maskProperty.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask)
+            {
+                _builder.Append(maskProperty.Name == "Length" ? "__query_length"
+                    : maskProperty.Name == "UlongCount" ? "((__query_length + 63) / 64)" : "__query_bits");
+                return;
+            }
             if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol property
                 && property.Name == "Count" && property.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
             {
@@ -236,6 +251,10 @@ namespace NativeTranspiler.Analyzer
         private bool TryGetChunkNativeArrayLengthAlias(ExpressionSyntax? expression, out string arrayName)
         {
             arrayName = string.Empty;
+            if (expression is MemberAccessExpressionSyntax countAccess
+                && SymbolHelper.GetBoundSymbol(_semanticModel, countAccess) is IPropertySymbol count
+                && count.Name == "Count" && count.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
+                return true;
             if (expression is MemberAccessExpressionSyntax memberAccess &&
                 memberAccess.Name.Identifier.Text == "Length" &&
                 memberAccess.Expression is IdentifierNameSyntax id &&
@@ -274,7 +293,7 @@ namespace NativeTranspiler.Analyzer
 
             return _semanticModel.GetSymbolInfo(invocation).Symbol is IMethodSymbol methodSymbol &&
                    methodSymbol.ContainingType?.ToDisplayString() == Config.TypeArchetypeChunk &&
-                   methodSymbol.Name == Config.GetComponentDataNativeArray;
+                   Config.IsChunkArrayAccess(methodSymbol.Name);
         }
     }
 }

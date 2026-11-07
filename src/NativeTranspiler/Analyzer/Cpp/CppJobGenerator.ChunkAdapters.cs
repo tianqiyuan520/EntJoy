@@ -70,6 +70,8 @@ namespace NativeTranspiler.Analyzer
             {
             AppendMaskAdapterHeader(sb, adapterFuncName, "void* context, const ChunkJobData* __chunkData", adapterMask);
             sb.AppendLine("{");
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
             sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
@@ -82,7 +84,8 @@ namespace NativeTranspiler.Analyzer
             if (isEntityJob)
             {
                 sb.AppendLine("    // 轻量 ChunkData：只保留 Execute 实际需要的字段");
-                sb.AppendLine("    ChunkData __chunkDataLite;");
+                sb.AppendLine("    ChunkData __chunkDataLite{};");
+                sb.AppendLine("    __chunkDataLite.filter = __chunkData->filter;");
                 sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                 sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                 sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
@@ -191,11 +194,14 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
             sb.AppendLine("    {");
             sb.AppendLine("        auto* __chunkData = &__chunks[__chunkIndex];");
+            sb.AppendLine("        EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("        if (!__queryMask.HasMatches()) continue;");
             // inline the adapter body into range loop
             if (isEntityJob)
             {
                 // IJobEntity：走轻量 ChunkData 路径（转换 ChunkJobData → ChunkData）
-                sb.AppendLine("        ChunkData __chunkDataLite;");
+                sb.AppendLine("        ChunkData __chunkDataLite{};");
+                sb.AppendLine("        __chunkDataLite.filter = __chunkData->filter;");
                 sb.AppendLine("        __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                 sb.AppendLine("        __chunkDataLite.entityCount = __chunkData->entityCount;");
                 sb.AppendLine("        __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
@@ -255,9 +261,7 @@ namespace NativeTranspiler.Analyzer
             var sharedTypesForBatch = CollectSharedComponentTypes(jobStruct, compilation);
             if (!isEntityJob && sharedTypesForBatch.Count == 0 && !isIspcJob)
             {
-            // 接收 EntityBatchData* 而非 ChunkJobData*，消除 requiredComponentArrays 指针追访
-            // EntityBatchData 只含 componentArrays + entityCount，共 16 字节
-            // 比 ChunkJobData（72 字节）更紧凑，cache 效率更高
+            // 紧凑批次保存组件数组与查询过滤数据，按物理 Chunk 派发。
             var entityBatchAdapterFuncName = GetEntityBatchAdapterFunctionName(jobStruct);
             AppendMaskAdapterHeader(sb, entityBatchAdapterFuncName,
                 "void* context, const EntityBatchData* __batches, int __startIndex, int __count", adapterMask);
@@ -276,6 +280,8 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
             sb.AppendLine("    for (int __batchIndex = __startIndex; __batchIndex < __endIndex; ++__batchIndex)");
             sb.AppendLine("    {");
             sb.AppendLine("        const EntityBatchData* __batchData = &__batches[__batchIndex];");
+            sb.AppendLine("        EntityMatchMask __queryMask(__batchData->filter, __batchData->entityCount);");
+            sb.AppendLine("        if (!__queryMask.HasMatches()) continue;");
             bool returnsFromChunk = methodSyntax?.Body?.DescendantNodes().OfType<ReturnStatementSyntax>().Any() == true;
             if (returnsFromChunk) sb.AppendLine("        [&]() {");
 

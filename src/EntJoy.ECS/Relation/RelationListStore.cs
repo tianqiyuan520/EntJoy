@@ -10,8 +10,33 @@ namespace EntJoy.ECS
     /// </summary>
     public sealed class RelationListStore
     {
+        internal void PrepareSourceRemoval(Entity source, List<(int relTypeId, RelationSlot slot)> removed)
+        {
+            int count = 0;
+            foreach (var sources in _forward.Values)
+                if (sources.TryGetValue(source.Id, out var values)) count = checked(count + values.Count);
+            removed.EnsureCapacity(count);
+            _emptyKeysBuffer.EnsureCapacity(_forward.Count);
+        }
         // relTypeId → sourceId → targets（追加式 List，保持插入顺序）
         private readonly Dictionary<int, Dictionary<int, List<RelationSlot>>> _forward = new();
+
+        internal bool HasRelationships
+        {
+            get
+            {
+                foreach (var sources in _forward.Values)
+                    if (sources.Count > 0) return true;
+                return false;
+            }
+        }
+
+        internal bool HasRelationshipsForSource(Entity source)
+        {
+            foreach (var sources in _forward.Values)
+                if (sources.ContainsKey(source.Id)) return true;
+            return false;
+        }
 
         /// <summary>ClearAllForSource 的复用缓冲：原先每次调用 <c>new List&lt;int&gt;()</c>
         /// ⇒ 每次销毁实体 32B 分配（实测 100k 批量销毁 3.2MB），即使该实体没有任何多值关系。</summary>

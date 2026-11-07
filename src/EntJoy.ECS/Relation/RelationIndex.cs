@@ -6,28 +6,38 @@ namespace EntJoy.ECS
 {
     /// <summary>
     /// 关系反向索引（级联删除 target index）。
-    /// target.Id → (relTypeId → sources)。sources 用 HashSet（增删 O(1)）。
-    /// 所有操作在 EntityManager 的 _structuralLock 保护下调用（与关系操作同一锁域）。
+    /// target 的 ID/Version → (relTypeId → sources)。sources 用 HashSet（增删 O(1)）。
+    /// 写入由 EntityManager 的 _structuralLock 保护；只读查询在主线程使用。
     /// </summary>
     public sealed class RelationIndex
     {
-        // target.Id → (relTypeId → sources)
-        private readonly Dictionary<int, Dictionary<int, HashSet<Entity>>> _index = new();
+        private readonly Dictionary<ulong, Dictionary<int, HashSet<Entity>>> _index = new();
+        internal bool IsEmpty => _index.Count == 0;
+
+        private static ulong Key(Entity entity) => ((ulong)(uint)entity.Version << 32) | (uint)entity.Id;
 
         /// <summary>记录关系：source --TRel--> target。覆盖语义由调用方保证（先 RemoveRelTypeId 旧值）。</summary>
         public void Add(int relTypeId, Entity source, Entity target)
         {
-            if (!_index.TryGetValue(target.Id, out var byType))
+            PrepareAdd(relTypeId, target).Add(source);
+        }
+
+        /// <summary>提交前准备索引容量；返回的集合在本次结构锁内有效。</summary>
+        internal HashSet<Entity> PrepareAdd(int relTypeId, Entity target)
+        {
+            ulong key = Key(target);
+            if (!_index.TryGetValue(key, out var byType))
             {
                 byType = new Dictionary<int, HashSet<Entity>>();
-                _index[target.Id] = byType;
+                _index[key] = byType;
             }
             if (!byType.TryGetValue(relTypeId, out var set))
             {
                 set = new HashSet<Entity>();
                 byType[relTypeId] = set;
             }
-            set.Add(source);
+            set.EnsureCapacity(set.Count + 1);
+            return set;
         }
 
         /// <summary>
@@ -36,7 +46,8 @@ namespace EntJoy.ECS
         public void RemoveRelTypeId(int relTypeId, Entity source, in RelationSlot oldTarget)
         {
             if (!oldTarget.IsValid) return;
-            if (!_index.TryGetValue(oldTarget.TargetId, out var byType)) return;
+            ulong key = Key(oldTarget.ToEntity());
+            if (!_index.TryGetValue(key, out var byType)) return;
             if (!byType.TryGetValue(relTypeId, out var set)) return;
 
             set.Remove(source);
@@ -44,30 +55,39 @@ namespace EntJoy.ECS
             {
                 byType.Remove(relTypeId);
                 if (byType.Count == 0)
-                    _index.Remove(oldTarget.TargetId);
+                    _index.Remove(key);
             }
         }
 
+        internal void DiscardEmpty(int relTypeId, Entity target)
+        {
+            ulong key = Key(target);
+            if (!_index.TryGetValue(key, out var byType)) return;
+            if (byType.TryGetValue(relTypeId, out var sources) && sources.Count == 0) byType.Remove(relTypeId);
+            if (byType.Count == 0) _index.Remove(key);
+        }
+
         /// <summary>
-        /// 获取指向 target 的所有关系源（按关系类型分组）。返回 false 表示无关系。
+        /// 获取指向完整 target 身份的关系源（按关系类型分组）。
         /// 返回的内部 HashSet 不得修改。
         /// </summary>
-        public bool TryGetSources(int targetId, out Dictionary<int, HashSet<Entity>> byType)
-            => _index.TryGetValue(targetId, out byType);
+        public bool TryGetSources(Entity target, out Dictionary<int, HashSet<Entity>> byType)
+            => _index.TryGetValue(Key(target), out byType);
 
-        /// <summary>获取直接指向 target 的关系源实体总数（跨类型，诊断/测试用）。</summary>
+        /// <summary>按 target ID 统计跨类型关系条目数（诊断用，不用于实体身份校验）。</summary>
         public int GetSourceCount(int targetId)
         {
-            if (!_index.TryGetValue(targetId, out var byType)) return 0;
             int total = 0;
-            foreach (var set in byType.Values) total += set.Count;
+            foreach (var entry in _index)
+                if ((int)(uint)entry.Key == targetId)
+                    foreach (var set in entry.Value.Values) total += set.Count;
             return total;
         }
 
         /// <summary>清理：删除指定 target 的整个索引条目（实体销毁后调用）。</summary>
-        public void ClearTarget(int targetId)
+        public void ClearTarget(Entity target)
         {
-            _index.Remove(targetId);
+            _index.Remove(Key(target));
         }
 
         /// <summary>清空整个索引（World 恢复/重建前调用）。</summary>

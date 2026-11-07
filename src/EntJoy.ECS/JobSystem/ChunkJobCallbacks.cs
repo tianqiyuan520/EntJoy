@@ -27,10 +27,12 @@ namespace EntJoy.ECS.JobSystem
                 {
                     var header = (ChunkContextHeader*)ctx;
                     ref var job = ref ResolveJob<T>(ctx, header);
+                    var query = header->jobIsBoxed != 0 ? GetJobBox<T>(ctx, header).Query : default;
                     // 单 GCHandle 保活收集期 Chunk[]（ChunkId 索引 O(1)）
                     Chunk[]? chunkTable = ChunkJobScheduler.ChunkArrayTable.TryGetValue(ctx, out var _t) ? _t : null;
 
                     int end = startIndex + count;
+                    Span<ulong> scratch = stackalloc ulong[64];
                     for (int index = startIndex; index < end; index++)
                     {
                         var cd = chunks + index;
@@ -38,13 +40,10 @@ namespace EntJoy.ECS.JobSystem
                         var chunk = chunkTable[cd->chunkHandle.ToInt32()];
                         if (chunk.MemoryBlock == nint.Zero) continue;
                         // Phase C：mask 委托给共享工具（ResolveCombinedMask 已删）
-                        ChunkEnabledMask mask;
-                        if (header->hasEnabledFilter != 0 && header->allEnabledCount > 0)
-                        {
-                            var enabledTypes = ChunkJobScheduler.ResolveEnabledTypes(header, chunk);
-                            mask = ChunkJobScheduler.ComputeChunkMask(chunk, enabledTypes);
-                        }
-                        else mask = default;
+                        var enabledTypes = ChunkJobScheduler.ResolveEnabledTypes(header, chunk);
+                        int words = (enabledTypes.Length > 0 || query.HasRelationshipFilter) ? (chunk.EntityCount + 63) / 64 : 0;
+                        var mask = ChunkJobScheduler.ComputeChunkMask(chunk, enabledTypes, query, words <= scratch.Length ? scratch : new ulong[words]);
+                        if (!mask.HasMatches) continue;
                         job.Execute(new ArchetypeChunk(chunk), mask);
                     }
                 }
@@ -72,12 +71,14 @@ namespace EntJoy.ECS.JobSystem
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private unsafe static ref T GetBoxedJobFromContext<T>(IntPtr ctx, ChunkContextHeader* header) where T : struct
+            => ref GetJobBox<T>(ctx, header).Job;
+
+        private unsafe static ManagedJobBox<T> GetJobBox<T>(IntPtr ctx, ChunkContextHeader* header) where T : struct
         {
             int typesDataSize = header->allEnabledCount * sizeof(int);
             int requiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
             byte* jobPtr = (byte*)ctx + Unsafe.SizeOf<ChunkContextHeader>() + typesDataSize + requiredTypesDataSize;
-            var box = (ManagedJobBox<T>)GCHandle.FromIntPtr(*(IntPtr*)jobPtr).Target;
-            return ref box.Job;
+            return (ManagedJobBox<T>)GCHandle.FromIntPtr(*(IntPtr*)jobPtr).Target;
         }
 
         /// <summary>从 context block 解析裸字节 job 引用。</summary>

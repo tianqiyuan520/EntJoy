@@ -44,7 +44,7 @@ namespace EntJoy.ECS
         private int _t1Idx;
         private T0* _t0Base;
         private T1* _t1Base;
-        private int _startStructuralVersion;   // 迭代开始时的结构版本，检测迭代期间结构变更
+        private readonly QueryReadState _readState;   // 迭代开始时的结构版本，检测迭代期间结构变更
 
         // AllEnabled 组合位图（无过滤时为 null）。用托管数组（GC 追踪 byref），避免嵌套查询互相覆盖。
         private ulong[] _combinedMask;
@@ -76,7 +76,7 @@ namespace EntJoy.ECS
             _t1Idx = -1;
             _t0Base = null;
             _t1Base = null;
-            _startStructuralVersion = entityManager.StructuralVersion;
+            _readState = new QueryReadState(entityManager, builder.HasRelationshipFilter || ComponentTypeManager.IsRelationType<T0>() || ComponentTypeManager.IsRelationType<T1>());
             _combinedMask = null;
             _ulongCount = 0;
             _hasRelFilter = builder.HasRelationshipFilter;
@@ -90,13 +90,7 @@ namespace EntJoy.ECS
 
         /// <summary>校验过滤目标实体是否仍存活（Id 范围内且 Archetype 非空）。</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool IsRelTargetAlive()
-        {
-            var em = _entityManager;
-            if ((uint)_relTarget.TargetId >= (uint)em.EntityCount) return false;
-            var info = em.GetEntityInfoRef(_relTarget.TargetId);
-            return info.Archetype != null;
-        }
+        private bool IsRelTargetAlive() => _entityManager.IsRelationshipTargetAlive(_relTarget);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool MoveNextArchetype()
@@ -264,8 +258,7 @@ namespace EntJoy.ECS
         {
             // 迭代期间结构变更（DestroyEntity/AddComponent 等 swap-pop）会使实体槽位移动，
             // 静默读死槽/重复处理。对齐 DOTS 的 structural change 检测：版本不一致即抛。
-            if (_entityManager.StructuralVersion != _startStructuralVersion)
-                throw new InvalidOperationException("Structural change detected during query iteration.");
+            _readState.Validate();
 
             // 已有当前 Chunk：从 slot+1 继续；否则从位置 0 开始
             if (_currentChunk.MemoryBlock != nint.Zero)
@@ -376,8 +369,9 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
+                _readState.Validate();
                 if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
-                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex);            }
+                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base + _slotIndex, _readState);            }
         }
     }
 
@@ -387,23 +381,50 @@ namespace EntJoy.ECS
     {
         private readonly T0* _c0;
         private readonly T1* _c1;
+        private readonly QueryReadState _readState;
 
-        public EntityQueryResult(T0* c0, T1* c1)
+        /// <summary>裸指针构造由调用方保证寿命，不附带 World 借用版本。</summary>
+        public EntityQueryResult(T0* c0, T1* c1) : this(c0, c1, default) { }
+
+        internal EntityQueryResult(T0* c0, T1* c1, QueryReadState readState)
         {
             _c0 = c0;
             _c1 = c1;
+            _readState = readState;
+        }
+
+        public ref readonly T0 ReadOnlyComp0
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get { _readState.Validate(); return ref *_c0; }
         }
 
         public ref T0 Comp0
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => ref *_c0;
+            get
+            {
+                _readState.ValidateRelationshipView();
+                ComponentTypeManager.CheckWritableAccess<T0>();
+                return ref *_c0;
+            }
+        }
+
+        public ref readonly T1 ReadOnlyComp1
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get { _readState.Validate(); return ref *_c1; }
         }
 
         public ref T1 Comp1
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => ref *_c1;
+            get
+            {
+                _readState.ValidateRelationshipView();
+                ComponentTypeManager.CheckWritableAccess<T1>();
+                return ref *_c1;
+            }
         }
     }
 

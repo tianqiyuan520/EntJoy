@@ -103,6 +103,18 @@ namespace NativeTranspiler.Analyzer.Common
             }
             // NativeArray<T>/NativeList<T> 自身是 EntJoy 预定义类型（无头文件），
             // 但元素类型 T 是用户结构体，必须递归收集，否则 ISPC 侧 T 未声明。
+            if (type is INamedTypeSymbol view && view.ContainingNamespace.ToDisplayString() == Config.NamespaceSystem
+                && (view.Name == Config.Span || view.Name == "ReadOnlySpan"))
+            {
+                foreach (var argument in view.TypeArguments) CollectTypeInclude(argument, includes);
+                return;
+            }
+            if (type.Name == "ReadOnly" && type.ContainingType is INamedTypeSymbol container
+                && NativeTranspiler.IsEntJoyContainerNamed(container, Config.NativeArray))
+            {
+                foreach (var argument in container.TypeArguments) CollectTypeInclude(argument, includes);
+                return;
+            }
             if (NativeTranspiler.IsEntJoyNativeContainerType(type))
             {
                 foreach (var arg in ((INamedTypeSymbol)type).TypeArguments)

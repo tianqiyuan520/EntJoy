@@ -81,7 +81,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>将表达式翻译为 ISPC 文本并返回，不影响 _builder 的当前状态。</summary>
-        private string CaptureExpressionText(ExpressionSyntax expr)
+        protected string CaptureExpressionText(ExpressionSyntax expr)
         {
             int savedLen = _builder.Length;
             TranslateExpression(expr);

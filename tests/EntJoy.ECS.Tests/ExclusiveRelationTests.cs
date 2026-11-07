@@ -49,7 +49,7 @@ namespace EntJoy.ECS.Tests
             var cell = em.NewEntity(typeof(Position));
 
             em.AddRelationship<OccupiedBy>(player, cell);
-            em.AddRelationship<OccupiedBy>(player, cell);  // 自身重复 Add → 覆盖路径，不解绑
+            em.AddRelationship<OccupiedBy>(player, cell);  // 重复目标保持原状态。
 
             Assert.True(em.HasRelationship<OccupiedBy>(player));
             Assert.Equal(cell.Id, em.GetRelationship<OccupiedBy>(player).Id);

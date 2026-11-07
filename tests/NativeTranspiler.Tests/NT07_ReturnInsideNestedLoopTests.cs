@@ -173,7 +173,7 @@ public struct PlainEarlyExitEntityJob : IJobEntity
             Assert.Contains("do {", body);
             Assert.Contains("} while(false);", body);
             Assert.Contains("break;", body);
-            Assert.DoesNotContain("return;", body);
+            Assert.DoesNotContain("return;", body.Replace("if (!__queryMask.HasMatches()) return;", ""));
             Assert.DoesNotContain(Marker, body);
         }
 

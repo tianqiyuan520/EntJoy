@@ -13,7 +13,7 @@ namespace EntJoy.ECS
     public interface ICopyable<T> : ICopyable
         where T : unmanaged, ICopyable<T>
     {
-        /// <summary>把 src 复制到 dst（dst 约定为已销毁/空状态）。</summary>
+        /// <summary>把 src 复制到空的 dst；抛异常时 dst 须可安全析构。钩子不得同步修改 ECS。</summary>
         void OnCopy(in T src, ref T dst);
     }
 }

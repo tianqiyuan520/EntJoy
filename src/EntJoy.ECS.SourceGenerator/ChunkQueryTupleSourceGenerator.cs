@@ -82,6 +82,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine("    private readonly EntityManager _entityManager;");
             sb.AppendLine("    private readonly QueryBuilder _builder;");
+            sb.AppendLine("    private readonly QueryReadState _readState;");
             sb.AppendLine("    private int _archIndex;");
             sb.AppendLine("    private int _chunkIndex;");
             sb.AppendLine("    private Archetype _currentArch;");
@@ -93,6 +94,9 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    {");
             sb.AppendLine("        _entityManager = em;");
             sb.AppendLine("        _builder = builder;");
+            sb.AppendLine("        if (builder.HasRelationshipFilter) throw new NotSupportedException(\"Chunk queries require entity-level relationship masks; use an entity query.\");");
+            string relationTypes = string.Join(" || ", genParams.Select(g => $"ComponentTypeManager.IsRelationType<{g}>()"));
+            sb.AppendLine($"        _readState = new QueryReadState(em, {relationTypes});");
             sb.AppendLine("        _archIndex = 0;");
             sb.AppendLine("        _chunkIndex = 0;");
             sb.AppendLine("        _currentArch = null;");
@@ -138,6 +142,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine();
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
+            sb.AppendLine("        _readState.Validate();");
             sb.AppendLine("        if (_currentArch == null)");
             sb.AppendLine("        {");
             sb.AppendLine("            return MoveNextArchetype();");
@@ -157,11 +162,12 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    {");
             sb.AppendLine("        get");
             sb.AppendLine("        {");
+            sb.AppendLine("            _readState.Validate();");
             sb.AppendLine("            if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();");
             sb.Append($"            return new ChunkResult<{genList}>(_currentChunk");
             for (int i = 0; i < n; i++)
                 sb.Append($", _t{i}Idx");
-            sb.AppendLine(");");
+            sb.AppendLine(", _readState);");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -175,25 +181,28 @@ namespace EntJoy.ECS.SourceGenerator
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"    private readonly int _t{i}Idx;");
             sb.AppendLine();
+            sb.AppendLine("    private readonly QueryReadState _readState;");
             sb.Append($"    internal ChunkResult(Chunk chunk");
             for (int i = 0; i < n; i++)
                 sb.Append($", int t{i}Idx");
-            sb.AppendLine(")");
+            sb.AppendLine(", QueryReadState readState = default)");
             sb.AppendLine("    {");
             sb.AppendLine("        _chunk = chunk;");
+            sb.AppendLine("        _readState = readState;");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"        _t{i}Idx = t{i}Idx;");
             sb.AppendLine("    }");
             sb.AppendLine();
-            sb.AppendLine("    public int Length => _chunk.EntityCount;");
+            sb.AppendLine("    public int Length { get { _readState.Validate(); return _chunk.EntityCount; } }");
             sb.AppendLine();
             for (int i = 0; i < n; i++)
             {
-                sb.AppendLine($"    public {genParams[i]}* GetPtr{i}() => ({genParams[i]}*)_chunk.GetComponentArrayPointer(_t{i}Idx);");
+                sb.AppendLine($"    public {genParams[i]}* GetPtr{i}() {{ _readState.Validate(); return ({genParams[i]}*)_chunk.GetComponentArrayPointer(_t{i}Idx); }}");
             }
             for (int i = 0; i < n; i++)
             {
-                sb.AppendLine($"    public Span<{genParams[i]}> GetSpan{i}() => new Span<{genParams[i]}>(GetPtr{i}(), Length);");
+                sb.AppendLine($"    public Span<{genParams[i]}> GetSpan{i}() {{ ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(); return new Span<{genParams[i]}>(GetPtr{i}(), Length); }}");
+                sb.AppendLine($"    public ReadOnlySpan<{genParams[i]}> GetReadOnlySpan{i}() => new ReadOnlySpan<{genParams[i]}>(GetPtr{i}(), Length);");
             }
             sb.AppendLine();
             sb.AppendLine("    /// <summary>获取指定 enableable 组件的位图掩码。</summary>");

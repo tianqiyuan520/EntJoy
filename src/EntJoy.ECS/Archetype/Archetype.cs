@@ -17,6 +17,12 @@ namespace EntJoy.ECS
         public int ComponentCount { get; private set; }
         public int EntityCount { get; private set; }
         private bool _disposed;
+        internal EntityManager Owner { get; set; }
+
+        internal void CheckReadable()
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Archetype));
+        }
 
         // Prefab 标记组件类型（查询默认排除用）
         private static readonly ComponentType s_prefabType = typeof(Prefab);
@@ -472,11 +478,11 @@ namespace EntJoy.ECS
                 // 从空洞列表移除该 slab 的 Chunk（已随 slab 归还，不能再复用）
                 long start = slab.AlignedPtr.ToInt64();
                 long end = start + slab.Bytes;
-                _freeChunks.RemoveAll(c =>
+                for (int i = _freeChunks.Count - 1; i >= 0; i--)
                 {
-                    long a = c.ToInt64();
-                    return a >= start && a < end;
-                });
+                    long address = _freeChunks[i].ToInt64();
+                    if (address >= start && address < end) _freeChunks.RemoveAt(i);
+                }
             }
             else
             {
@@ -499,7 +505,13 @@ namespace EntJoy.ECS
             }
         }
 
+        internal void PrepareEntityRemoval(int count = 1)
+            => _freeChunks.EnsureCapacity(checked(_freeChunks.Count + count));
+
         public RemovalResult Remove(int chunkIndex, int slotInChunk)
+            => Remove(chunkIndex, slotInChunk, continueOnDisposeError: false);
+
+        internal RemovalResult Remove(int chunkIndex, int slotInChunk, bool continueOnDisposeError, bool skipDisposal = false)
         {
             int movedEntityId = -1, movedEntitySlot = -1, compactedChunkIndex = -1;
             var span = CollectionsMarshal.AsSpan(_chunkList);
@@ -507,7 +519,7 @@ namespace EntJoy.ECS
 
             if (chunk.EntityCount == 1)
             {
-                chunk.RemoveEntity(slotInChunk);
+                chunk.RemoveEntity(slotInChunk, continueOnDisposeError, skipDisposal);
                 if (chunk.EntityCount == 0 && _chunkList.Count > 1)
                 {
                     // 至少保留 1 个 chunk，避免边界场景频繁创建/销毁抖动
@@ -531,7 +543,7 @@ namespace EntJoy.ECS
                     movedEntityId = chunk.GetEntity(lastEntitySlot).Id;
                     movedEntitySlot = slotInChunk;
                 }
-                chunk.RemoveEntity(slotInChunk);
+                chunk.RemoveEntity(slotInChunk, continueOnDisposeError, skipDisposal);
             }
 
             EntityCount--;
@@ -543,6 +555,13 @@ namespace EntJoy.ECS
         {
             var componentIndex = componentTypeRecorder[typeof(T)];
             return ref _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex);
+        }
+
+        public ref readonly T GetComponentReadOnly<T>(int chunkIndex, int slotInChunk) where T : struct
+        {
+            CheckReadable();
+            int componentIndex = componentTypeRecorder[typeof(T)];
+            return ref _chunkList[chunkIndex].GetComponentReadOnly<T>(slotInChunk, componentIndex);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -558,6 +577,13 @@ namespace EntJoy.ECS
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe void SetRaw(int chunkIndex, int slotInChunk, Type componentType, object value)
+        {
+            if (ComponentTypeManager.GetComponentType(componentType).IsRelation)
+                throw new InvalidOperationException("Relationship writes must use EntityManager or DeferredCommandBuffer.");
+            SetStorageRaw(chunkIndex, slotInChunk, componentType, value);
+        }
+
+        internal unsafe void SetStorageRaw(int chunkIndex, int slotInChunk, Type componentType, object value)
         {
             var componentIndex = componentTypeRecorder[componentType];
             var chunk = _chunkList[chunkIndex];
@@ -603,10 +629,11 @@ namespace EntJoy.ECS
         public unsafe void CopyComponentsTo(int sourceChunkIndex, int sourceSlot, Archetype target, int targetChunkIndex, int targetSlot)
         {
             var sourceChunk = _chunkList[sourceChunkIndex];
-            var targetChunk = target._chunkList[targetChunkIndex];
+            ref var targetChunk = ref CollectionsMarshal.AsSpan(target._chunkList)[targetChunkIndex];
 
             foreach (var type in types)
             {
+                if (type.IsShared) continue;
                 if (target.componentTypeRecorder.TryGetValue(type, out int targetComponentIndex))
                 {
                     int sourceComponentIndex = componentTypeRecorder[type];
@@ -615,6 +642,7 @@ namespace EntJoy.ECS
                     // move 转移所有权：IDisposable 组件拷贝后清空源（避免源随后被 RemoveEntity 销毁时
                     // 释放掉目标槽位仍在引用的同一块原生内存）；普通组件纯位拷贝。
                     ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
+                    if (type.IsEnableable) targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(sourceComponentIndex, sourceSlot));
                 }
             }
         }

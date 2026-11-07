@@ -38,6 +38,30 @@
 - `World.Dispose()`、`EntityManager.Dispose()`、`Archetype.Dispose()` 不得与查询、调度、事件 drain 或其他销毁操作并发执行。
 - `EntityManager.GetAllArchetypes()` 返回当前 Archetype 的快照数组；后续结构变更不会更新该快照。
 
+## 单目标关系
+
+- 普通 `IRelationComponent` 为 N:1：每个 source 在同一种关系下至多一个 target，target 可以被多个 source 指向。`ExclusiveRelation` 再要求入边唯一，形成 1:1；新 source 接管时解除旧 source。`AcyclicRelation` 拒绝同类型的自环与间接环。
+- 关系类型是 sequential unmanaged struct，首字段为偏移 0 的 `RelationSlot Target`，可以附带业务数据。Shared、Enableable、资源所有权 hook 及矛盾的关系属性组合在注册时拒绝；多槽字段数量、类型、偏移与总宽度必须匹配声明。
+- 空列使用 `RelationSlot.Default`，不能用全零槽表示无边。`HasComponent<TRel>` 只检查列存在；`TryGetRelationship<TRel>` 与 `HasRelationship` 检查两端完整 ID/Version。`GetRelationship` 无边时返回 default Entity，调用方需要区分实体 0 时使用 TryGet。
+- `AddRelationship` 建立或重绑目标并保留已有业务数据，相同目标重复 Add 是 no-op。普通 Add/Set/RemoveComponent、SetRaw、ECB 和 ParallelWriter 的组件写入走同一单目标关系维护逻辑；目标重绑不改变 Archetype，但更新变更标记。
+- 目标删除默认解除存活 source 的关系并移除对应关系列；`OnTargetDeleted(Cascade = true)` 将 source 纳入销毁闭包。单删、批删、Archetype 清空与 ECB 使用相同规则；批量返回数包含级联销毁。显式 `DestroyEntityCascade` 沿全部关系类型级联，迭代防环。
+- 单目标图删除先准备目的存储、共享头、通知和回收容量，再提交解除与销毁；同一存活 source 的多列解除合并为一次迁移。关系增删与删除迁移保留其他组件的共享分组、Enabled 位和资源所有权。准备阶段失败保持原图；空准备 Chunk 由存储复用。普通无关系批删、M:N 和任意进程级内存耗尽不提供整批回滚保证。
+- 关系 Observer 在完整提交后、结构锁外通知：空边变有效边为 Added，重绑/整体替换为 Set，解除为 Removed，source 销毁只发 Destroyed。预建空列与重复 Add 不发关系事件；值快照使用完整 TRel。Observer 与组件 Dispose 中的同步 ECS 变更会拒绝，请记录 ECB。销毁中的 Dispose 异常会记录并继续清理已提交状态。
+- 托管安全入口拒绝关系列的可写 ref、Span 和 NativeArray 视图，包括 ComponentLookup、QueryResult 与 Chunk/Archetype；普通组件继续可写。关系值使用 `GetComponentReadOnly`、`GetReadOnlyComponentLookup`、`ReadOnlyCompN`、`GetComponentReadOnlyDataSpan/NativeArray` 或 Chunk 查询的 `GetReadOnlySpanN` 读取，更新使用 EntityManager 或 ECB。
+- 关系写入递增 RelationshipVersion；重复 Add 相同目标不改变它。带关系的查询与 lookup 在重绑、结构变化、恢复或释放后检查过期，调用方重新获取后继续使用。已取出的 ref readonly、Span、NativeArray.ReadOnly 和原始指针仍是借用，不能跨这些边界保留；原始 Chunk/独立 Archetype 的寿命由调用方保证。
+- 已登记 Job 的 Chunk 借用由调度依赖保护；无关 Archetype 的结构变更不会仅因全局版本变化中断这个 Job。主线程检查型视图与只读 lookup 按其捕获版本校验，lookup 不作为跨线程的通用读句柄。
+- `EntityQuery.CalculateEntityCount` 和 `ToComponentDataArray` 逐实体应用关系与 Enabled 条件；MatchingArchetypes/Chunks 是候选集合。复制的组件数组与反向 NativeList 归调用方所有；`GetRelationsOf(target, Span)` 返回所需总数并写入可容纳前缀，`GetRelationsOfAll` 跨类型去重。
+- 托管 IJobEntity/IJobChunk 的 Run/Schedule 精确匹配关系类型、target ID/Version，并与 Enabled 位图取交集。零匹配 Chunk 不执行，部分匹配携带实际长度掩码，尾部无效 bit 清零；IJobEntity 自动应用掩码，IJobChunk 使用传入掩码遍历。重绑后重新计算匹配结果；关系筛选 Job 保守登记为全局读者，保护 source、target 及定位表寿命。原生调度器的托管回调遵循同一规则。
+- C++/ISPC 内核支持只读关系列；IJobEntity 关系参数接受值或 in，值参数使用局部副本，ref/out 在编译期拒绝（EJ2021/NT036）。IJobChunk 使用只读 Span/NativeArray getter，原生转译拒绝可写关系 getter。
+- 原生关系筛选在 Chunk、Range 和紧凑 EntityBatch 入口按实体匹配，并与 Enabled 条件取交集。关系位图在调度时复制，Enabled 位图在依赖完成后读取；本次过滤缓冲保留到 Job 完成。零匹配 Chunk 不执行，IJobChunk 每个非空物理 Chunk 调用一次并读取传入掩码，IJobEntity 自动过滤。含关系的原生查询保守登记生命周期依赖；重绑后重新构建过滤数据。
+- 手写原生 IJobChunk 支持 Length/IsEnabled/位图读取，C++ 支持范围遍历，ISPC 使用受支持的实体循环。显式掩码访问与 AutoSIMD.Enabled 的组合报 NT031；使用 Disabled 或编译器 Vectorize。NativeDll 与 NativeTranspiled 的 ABI 均为 4，生成内核必须与运行时一致，不匹配时拒绝加载。
+- ECB 提供 SetRelationshipTarget/RemoveRelationship，主线程及托管 Job 可记录；ParallelWriter 版本要求 sortKey。目标设置保留已有业务数据，解除移除列；回放重新校验端点及约束，已失效的 source 跳过。普通并行命令的 key 为 0；同 writer、同 key 保持记录顺序，相同 key 的跨 writer 冲突不承诺胜者。C++/ISPC 内核的 ParallelWriter 方法不做自动转译。
+- Playback/PlaybackParallel 先在记录锁外等待 EntityManager 已跟踪的 Job，再捕获并消费一批记录；外部 Task 或独立记录 Job 由调用方先完成。命令失败抛 CommandPlaybackException，报告失败下标、writer 下标及后续未执行数；已提交前缀不隐式重放。Observer 新记录的命令留到下一次回放；禁止嵌套回放、在回放中释放 ECB 或移动 writer 表。
+- `SpawnFrom(prefab, count)` 与 `CloneEntities(sources)` 共用复制核心，结果去除 Prefab 标记并保留共享值、启用状态及业务数据。源集合须有效且无重复；集合内的关系 Target 映射到副本，外部普通目标保持不变，外部已占用的 1:1 目标在复制前拒绝。其他业务字段中的 Entity 值按值复制；有效 M:N 关系状态及含所有权 hook 的共享组件不支持复制。
+- 复制的资源组件须注册 ICopyable 与 IDisposable hook；OnCopy 接收空目标值，抛异常时目标须可安全析构。钩子中拒绝同步 ECS 变更和可写组件借用，准备失败回收本次资源。整组实体与索引发布后才通知 Added；存储准备导致地址或布局变化时，失败也会保守使旧视图失效。
+- 托管多关系旁表存在有效条目时 TakeSnapshot 报 NotSupportedException；不把未序列化的旁表静默丢弃。单目标快照沿用受支持值组件的布局与资源边界。
+- 当前成本基线覆盖 1万/10万/100万 source。百万规模整组复制与宽目标删除存在较高的临时托管分配；随机图与长稳通过不表示这些操作适合每帧执行。基线只描述本机构建，不构成跨框架性能对比。
+
 ## ECS 查询和组件布局
 
 - 查询缓存以完整条件区分身份，哈希相同仍比较条件及所需组件的有序列表。缓存项保存条件数组快照；缓存命中的查找借用调用参数，不复制数组。
@@ -50,7 +74,9 @@
 
 - `TakeSnapshot` 等待已登记作业，保存普通值组件和单关系组件的字节；共享旁表、启用状态、多关系旁表及拥有资源/复制钩子的组件报 `NotSupportedException`。外部指针所指对象不做深拷贝，也不转移其所有权。
 - 格式为 `EJSNAP02`，记录指针宽度及组件的类型 ID、大小、程序集类型名和模块标识。恢复要求这些标识匹配；旧格式及不兼容组件布局明确拒绝，不做自动迁移。
-- 恢复在清空 World 前校验全部签名及实体数据；格式、布局、重复身份或数据长度校验失败时，保留现有 World。恢复后的实体代次同步到托管索引和原生定位表。
+- 创建和恢复都验证关系端点完整身份、规范空值、1:1 唯一性及声明的无环约束；普通关系环保留。恢复先装载独立临时存储并构建索引，校验成功后切换；拒绝非法输入时保留当前实体、资源、索引和视图版本。
+- Restore 不逐边重放 Observer；成功后推进结构、关系和 Archetype 集合版本。旧存储在切换后释放，析构错误记录后继续清理。World 释放在改变自身状态前等待读者，并拒绝复制/析构钩子内的同步释放。
+- 恢复后的实体代次在托管索引和原生定位表中保持一致；外部 Entity 缓存不因此成为跨快照稳定身份。
 
 ## EventStream
 
@@ -162,13 +188,14 @@ System.AggregateException: One or more scheduled C# jobs failed.
 ### ECB 并行记录（`ParallelWriter`）
 
 - **单线程形态**（`CreateParallelWriter(index)`）：一个 writer 同一时刻只能被一个线程使用，违反抛异常；
-  staging 可扩容；只支持自包含命令（`DestroyEntity` / `SetComponent<T>`）。
+  staging 可扩容；支持销毁、组件写入及单目标关系设置/解除命令。
 - **跨 tile 共享形态**（`CreateSharedParallelWriter(index, stagingCapacityBytes, destroyCapacity)`）：
   预留在短自旋临界区内完成（无需线程独占）；**不扩容**（并发下无法安全搬移整块 staging）
   ⇒ 两个容量必须一次给足。统一预留保证两个不变式：`Offset ≤ Capacity`、`DestroyCount ≤ DestroyCapacity`；
   占位失败发生在写字节之前 ⇒ 失败只抛异常，既不越界写、回放也不会越界读。
-- **命令顺序**：同一 writer 内跨 lane 的顺序不确定（与 DOTS 的 `EntityCommandBuffer.ParallelWriter` 同语义）；
-  回放按 staging 顺序，并把**连续销毁槽**合并回一次批量销毁（遇非销毁命令先落地，保证命令序不被重排）。
+- **命令顺序**：关系命令按 sortKey 回放，普通命令的 key 为 0；同一 writer、同 key 保持记录顺序。
+  共享 writer 同 key 的跨 lane 记录顺序由预留先后决定，相同 key 的跨 writer 冲突不承诺胜者。
+  仅含普通命令的批次按 writer 索引及记录顺序回放，并合并连续销毁槽。
 - 记录期不得做结构变更；回放由主线程调用 `PlaybackParallel`。
 
 ### `DeferredCommandBuffer` 的值回放路径
@@ -225,14 +252,13 @@ System.AggregateException: One or more scheduled C# jobs failed.
   - 回退开关：`ENTJOY_SYSTEM_READ_WRITE_ORDER=0`（或 `SystemRunner.ReadWriteOrderingEnabled = false`）恢复旧行为。
   - 代价实测（交错 A/B，8 对；本机 4 worker）：**读多写少**图（3 组件 × 3 读 + 1 写，读系统排在写系统之前 = 真正会命中的形状）ON 中位 1.643 ms / p95 1.807 ms，OFF 中位 1.644 ms / p95 1.773 ms，成对中位比值 OFF/ON = 0.9996 ~ 1.00；把单系统 Job 加重到 ~1.9 ms（8192 实体 × 512 轮，22.5 ms/帧）后成对中位比值仍是 0.9996。**结论：本机/workload 上测不出代价** —— 帧末尾的全量等待（`TempAllocator.Reset → CompleteActiveJobs`）与"每帧系统数 × 每系统 Job 时长"决定了关键路径，读→写串行边落在这条路径之外。⚠ 未测场景：并行度**未饱和**（读 Job 比 worker 少）且读 Job 很长时，写 Job 原本能挤上空闲 worker，此时串行化代价会显现（理论上限 ≈ 写 Job 时长占帧时间的比例）。
   回归：`SystemReadWriteOrderTests`（`WriterSystem_WaitsForReaderSystemJob` 红→绿主用例 + 读读并行反向守卫 + 开关回退 + 读表生命周期）。
-- Job 路径的 `WithRelationship` 尚不支持逐实体 target/version 筛选；Run、Schedule 和原生入口明确抛出 `NotSupportedException`。精确关系筛选使用 `QuerySelection`。
 - **`JobHandle.CombineDependencies` 组合句柄已确定性回收（2026-09-27 修复）**：三条回收路径——① 单个依赖不再组合（R11）；② `SystemRunner` 自己组合出的入站句柄"用后即释"（未 adopted 进写表时）；③ `EntityManager` 在"剪枝已完成 Job""覆盖依赖表旧值""全量等待后清空依赖表"三处，对**已完成**句柄显式 `Release`。未完成的句柄**绝不**提前释放（所有 `JobHandle` 拷贝共享同一槽位和代次，提前释放所有权 会让 `_activeJobs` 记账项与用户手里那份拷贝的 `Complete` 双双退化成空操作 ⇒ 等待/结构变更屏障静默消失）。原生侧新增 `JobSystem_GetLiveHandleCount`（`CreateState - RecycleState`）作为断言口径：1000 帧 + 无 GC 区域下 `EntJoy.ECS.Tests` 的 `TwoDependencyGraph_NativeHandlesDoNotGrowAcrossFrames` 实测增长 **0**（关掉上述任一路径分别增长 2997 / 2996）。
 - **`ScheduleGraph` 的对称读写冲突，边方向取决于注册顺序**：当两个系统互相冲突（A 写 X 读 Y、B 写 Y 读 X）时，单一冲突边的方向按注册先后决定，因此提交顺序随注册顺序变化；层内顺序用 `Order` 排序但排序不稳定（同 Order 时）。需要确定顺序时请显式使用 `[OrderBefore]/[OrderAfter]`。
 - **Managed 回退后端的完成协议（2026-09-16 已修复，此处保留记录）**：此前的缺陷是「完成态发布」与「安全声明释放」不在同一同步点 —— `IsCompleted` 只看 `Remaining == 0`，而读写声明在计数归零之后才释放，主线程可能在声明释放前观察到「已完成」→ `Complete()` 后的合法访问被误拦；另一个成因是托管路径的 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，而 box 被 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx。现实现为：`ManagedCompletion.Signal()` 按「释放写声明 → 释放读声明 → 置 `_declReleased` → `_done.Set()` → 派发回调」的顺序发布，`IsCompleted` 要求 `Remaining == 0 && _declReleased == 1`（`EntJoy.Jobs/Managed/ManagedJobHandle.cs`），且每次调度由 `ManagedJobScheduler.NextCtx()` 分配唯一 ctx。回归证据：`tools/SafetyLockOverheadBench/repro`（隐藏 `NativeDll.dll` 强制 Managed）**触发=0、残留状态为空、正常退出**；守卫用例见 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak`。
 - **两条后端都必须被测试覆盖，且不得隐式切换**：`EntJoy.ECS.Tests` 的运行后端取决于进程能否找到 `NativeDll.dll`（`AppContext.BaseDirectory` → 入口目录 → 程序集目录 → CWD 上溯）。历史上因此出现过「同一套测试本地跑 Native、CI 跑 Managed」的静默差异。现在测试用环境变量 `ENTJOY_TEST_BACKEND=native|managed` 显式指定，并由 `BackendSelectionTests` 断言实际后端与请求一致；CI 对两条后端分别跑一遍。
 - IJobEntity 的 DOTS 式 `Entity` 参数（`Execute(ref T0 c0, Entity e)`）的 `Execute` 方法体必须是**块体 `{ }`**，不支持表达式体 `=>`（ISPC 生成器只识别块体）。`e.Id` 即全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组（无该参数零开销）。
-- **并行创建未提供**：`ParallelWriter` 只支持自包含命令（销毁 + 写单个组件）。并行 `CreateEntitiesRange`
-  （DOTS 的 placeholder 机制）未实现；创建/结构变更仍限主线程。
+- **并行创建未提供**：`ParallelWriter` 支持销毁、组件写入及关系目标设置/解除。
+  `CreateEntitiesRange` 由主线程记录；所有结构变更在主线程回放。
 - **ISPC 后端未接逐组件 enable 位图 API**：`ArchetypeChunk.GetEnableBitMapPtr<T>()` 目前只有 C++ 后端转译
   （ISPC job 使用它会得到 ISPC/C++ 编译错误，不会静默错值）。
 - **`IJobChunk` + `AutoSIMD` 的收益未证明**：双组件整结构体回写的正确性已逐实体验证（不一致=0），

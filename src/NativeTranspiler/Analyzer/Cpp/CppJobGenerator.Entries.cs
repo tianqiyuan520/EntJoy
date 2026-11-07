@@ -204,6 +204,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             if (methodSyntax?.Body != null)
@@ -231,6 +233,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
             if (methodSyntax?.Body != null)
@@ -256,69 +260,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         private static void GenerateEntityFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
-        {
-            // Flat scalar loop for IJobEntity — compiler auto-vectorizes across entities
-            var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
-            var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
-            sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
-
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            for (int i = 0; i < executeMethod.Parameters.Length; i++)
-            {
-                var param = executeMethod.Parameters[i];
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                sb.AppendLine($"    auto* __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
-                sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
-            }
-
-            // Pre-translate scalar body
-            string scalarBody = "";
-            if (methodSyntax?.Body != null)
-            {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var translator = new CppEntityStatementTranslator(semanticModel, jobStruct, useFastMath);
-                scalarBody = translator.Translate(methodSyntax.Body);
-            }
-
-            // Replace param.Name references with array indexing
-            for (int i = 0; i < executeMethod.Parameters.Length; i++)
-            {
-                var param = executeMethod.Parameters[i];
-                scalarBody = scalarBody.Replace(param.Name + ".", $"__entity_param_{i}_ptr[__entity_index].");
-            }
-
-            // NT-02（Critical）：旧实现直接 `scalarBody.Replace("return;", "")` ⇒ 无括号写法
-            //   `if (p.X < 0) return; p.Marker += 1;` 变成 `if (p.X < 0) p.Marker += 1;`
-            //   ——控制流反转、静默错值。
-            // NT-07：嵌在循环里的 `return;` 降级为 `break;` 只跳出内层循环 ⇒ 必须写唯一标记
-            //   让构建期（NativeCompileTask.CheckGeneratedMarkers）失败，而不是静默错执行。
-            // index 层级则用 do-while + `break;` 表达"结束本次实体"。
-            bool hasReturn = scalarBody.Contains("return;");
-            if (hasReturn)
-                scalarBody = ReturnStatementRewriter.Rewrite(scalarBody, methodSyntax?.Body, "break;");
-
-            // Flat scalar loop with auto-vectorize pragma (must be directly before the for)
-            sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-            sb.AppendLine("#ifdef __clang__");
-            sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
-            sb.AppendLine("#endif");
-            sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-            sb.AppendLine("    {");
-            if (hasReturn) sb.AppendLine("        do {");
-            string bodyIndent = hasReturn ? "            " : "        ";
-            foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                if (line.Length == 0) continue;
-                sb.Append(bodyIndent).AppendLine(line);
-            }
-            if (hasReturn) sb.AppendLine("        } while(false);");
-            sb.AppendLine("    }");
-            sb.AppendLine("}");
-        }
-
+            => GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath, vectorize: true);
         private static void GenerateEntityFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
@@ -326,6 +268,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -333,6 +277,7 @@ namespace NativeTranspiler.Analyzer
             {
                 var param = executeMethod.Parameters[i];
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
+                if (NativeTranspileValidator.IsRelationComponentType(param.Type)) cppType = "const " + cppType;
                 sb.AppendLine($"    auto* __entity_param_{i}_ptr = reinterpret_cast<{cppType}*>(__chunkData->componentArrays[{i}]);");
                 sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
             }
@@ -364,9 +309,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("                int __entity_index = si + lane;");
             foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
             {
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"                {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+                AppendEntityParameterLocal(sb, param.p, param.i, "                ");
             }
             if (hasReturn)
             {
@@ -395,9 +338,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    {");
             foreach (var param in executeMethod.Parameters.Select((p, i) => (p, i)))
             {
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.p.Type);
-                string constPrefix = param.p.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"        {constPrefix}{cppType}& {param.p.Name} = __entity_param_{param.i}_ptr[__entity_index];");
+                AppendEntityParameterLocal(sb, param.p, param.i, "        ");
             }
             if (hasReturn)
             {
@@ -427,13 +368,15 @@ namespace NativeTranspiler.Analyzer
         /// void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
         /// 使用 ChunkData 轻量结构（不含 __requiredComponentTypeIds），componentArrays 直接索引。
         /// </summary>
-        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
+        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath, bool vectorize = false)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
 
             var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
             var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
@@ -445,7 +388,7 @@ namespace NativeTranspiler.Analyzer
                 var param = executeMethod.Parameters[i];
                 if (NativeTranspiler.IsEntityType(param.Type)) continue;
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(param.Type);
-                string constPrefix = param.RefKind == RefKind.In ? "const " : "";
+                string constPrefix = param.RefKind == RefKind.In || NativeTranspileValidator.IsRelationComponentType(param.Type) ? "const " : "";
                 sb.AppendLine($"    {constPrefix}auto* __entity_param_{i}_ptr = reinterpret_cast<{constPrefix}{cppType}*>(__chunkData->componentArrays[{compIdx}]);");
                 sb.AppendLine($"    (void)((intptr_t)__entity_param_{i}_ptr % 64 == 0);");
                 compIdx++;
@@ -477,8 +420,15 @@ namespace NativeTranspiler.Analyzer
             // 实体循环
             sb.AppendLine();
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
+            if (vectorize)
+            {
+                sb.AppendLine("#ifdef __clang__");
+                sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
+                sb.AppendLine("#endif");
+            }
             sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
             sb.AppendLine("    {");
+            sb.AppendLine("        if (__queryMask.Length != 0 && !__queryMask.IsEnabled(__entity_index)) continue;");
             foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
             {
                 if (NativeTranspiler.IsEntityType(p.Type))
@@ -486,9 +436,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"        __EntJoyEntity {p.Name} = ((__EntJoyEntity*)__chunkData->entityArray)[__entity_index];");
                     continue;
                 }
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(p.Type);
-                string constPrefix = p.RefKind == RefKind.In ? "const " : "";
-                sb.AppendLine($"        {constPrefix}{cppType}& {p.Name} = __entity_param_{i}_ptr[__entity_index];");
+                AppendEntityParameterLocal(sb, p, i, "        ");
             }
 
             if (hasReturn)
@@ -515,6 +463,13 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
+        }
+        private static void AppendEntityParameterLocal(StringBuilder sb, IParameterSymbol parameter, int index, string indent)
+        {
+            string type = NativeTranspiler.MapCSharpTypeToCpp(parameter.Type);
+            string qualifier = parameter.RefKind == RefKind.In ? "const " : "";
+            string reference = parameter.RefKind == RefKind.None && NativeTranspileValidator.IsRelationComponentType(parameter.Type) ? "" : "&";
+            sb.AppendLine($"{indent}{qualifier}{type}{reference} {parameter.Name} = __entity_param_{index}_ptr[__entity_index];");
         }
     }
 }

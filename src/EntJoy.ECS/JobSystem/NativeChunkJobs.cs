@@ -8,6 +8,14 @@ using System.Threading;
 
 namespace EntJoy.ECS.JobSystem
 {
+    /// <summary>关系位图为调度快照，启用位图在依赖完成后读取。缓冲由调度器持有到 Job 完成。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct EntityFilterData
+    {
+        public ulong* relationshipBits;
+        public void** enabledBitMaps;
+        public int enabledCount;
+    }
 
     // Chunk 任务数据结构（与 C++ 一一对应）
     // 命名空间级（非嵌套）：调度层/回调层/transpiler 生成代码均可裸用。
@@ -31,6 +39,7 @@ namespace EntJoy.ECS.JobSystem
         public void** sharedValuePtrs;          // SharedComponent blittable 值指针 [sharedValueCount]
         public int sharedValueCount;            // sharedValuePtrs 数量，0 = 无 shared 组件
         public void** requiredEnableBitMaps;    // 与 requiredComponentArrays 同序的逐组件 enable 位图（元素可为 null）
+        public EntityFilterData filter;
     }
 
     /// <summary>
@@ -43,10 +52,11 @@ namespace EntJoy.ECS.JobSystem
         public void** componentArrays;      // 组件数组指针 [requiredCount]
         public int entityCount;             // 实体数量
         public int requiredComponentCount;  // 组件数组数量
-        public void** enableBitMaps;        // enable 位图 [enableCount]，无过滤时为 null（预留）
-        public int enableBitmapCount;       // enable 位图数量，0 表示无过滤（预留）
+        public void** enableBitMaps;        // 与 componentArrays 同序的逐组件启用位图，元素可为 null
+        public int enableBitmapCount;       // enableBitMaps 项数
         public void** sharedValuePtrs;      // SharedComponent blittable 值指针 [sharedValueCount]
         public int sharedValueCount;        // sharedValuePtrs 数量，0 = 无 shared 组件
+        public EntityFilterData filter;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -56,6 +66,7 @@ namespace EntJoy.ECS.JobSystem
         public void** enableBitMaps;
         public int entityCount;
         public int enableBitmapCount;
+        public EntityFilterData filter;
     }
 
     /// <summary>
@@ -100,6 +111,7 @@ namespace EntJoy.ECS.JobSystem
     internal sealed class ManagedJobBox<T> where T : struct
     {
         public T Job;
+        public QueryBuilder Query;
     }
 
     // 回调委托签名
@@ -246,6 +258,7 @@ namespace EntJoy.ECS.JobSystem
                         if (chunksPtr != null)
                         {
                             var cd = chunksPtr[i];
+                            ChunkJobScheduler.FreeNativeFilter(cd.filter);
                             if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
                             if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
                             if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);

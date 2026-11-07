@@ -26,21 +26,13 @@ namespace EntJoy.ECS
         /// 不做线程独占守卫（DOTS <c>EntityCommandBuffer.ParallelWriter</c> 语义）。0 = 单线程 writer。</summary>
         public int Shared;
         public int ReservationGate;
+        public bool HasRelationshipCommands;
     }
 
     /// <summary>
-    /// 并行记录句柄：值语义，只含一个非托管指针 ⇒ 可直接作为 job 字段。
-    ///
-    /// 与主线程记录（<see cref="DeferredCommandBuffer"/> 的 <c>lock(_sync)</c> 单实例）的区别：
-    /// - 普通 writer 拥有独立 staging 与销毁表；共享 writer 在短临界区统一预留空间，随后独立写入。
-    /// 约定：一个 writer 索引同一时刻只被一个 worker/lane 使用。
-    /// - 回放由主线程按 writer 索引顺序进行（确定性），见 <c>PlaybackParallel</c>。
-    ///
-    /// ⚠ 覆盖范围（诚实声明）：并行 writer 只支持自包含的两类命令 ——
-    /// <see cref="DestroyEntity"/>（进该 writer 的销毁表）与 <see cref="SetComponent{T}"/>（值内联在命令里）。
-    /// 需要"共享类型集合池 / 本轮新建实体表"的 `CreateEntitiesRange` + `SetComponentRange` 仍限主线程
-    /// （DOTS 的并行 create 也依赖专门的 placeholder 机制）。本次百万单位改造的实际用法正是：
-    /// 主线程做生成/结构变更，并行 job 只做"标记死亡 + 写组件"。
+    /// 非托管记录句柄，可作为 Job 字段。支持销毁、组件写入及单目标关系设置/解除。
+    /// 普通 writer 线程独占；共享 writer 在短临界区预留空间后独立写入。
+    /// 关系命令按 sortKey 回放，普通命令的 key 为 0；创建与批次写入由主线程 ECB 记录。
     /// </summary>
     public unsafe struct ParallelWriter
     {
@@ -48,6 +40,33 @@ namespace EntJoy.ECS
         public void* State;
 
         private bool Ready => State != null;
+
+        /// <summary>按 sortKey 回放；相同 key 的跨 writer 冲突不承诺胜者。普通命令的 key 为 0。</summary>
+        public void SetRelationshipTarget<TRel>(int sortKey, Entity source, Entity target) where TRel : struct, IRelationComponent
+            => RecordRelationship(DeferredCommandBuffer.OP_SET_RELATIONSHIP_TARGET,
+                DeferredCommandBuffer.SingleRelationTypeId<TRel>(), sortKey, source, target);
+
+        public void RemoveRelationship<TRel>(int sortKey, Entity source) where TRel : struct, IRelationComponent
+            => RecordRelationship(DeferredCommandBuffer.OP_REMOVE_RELATIONSHIP,
+                DeferredCommandBuffer.SingleRelationTypeId<TRel>(), sortKey, source, default);
+
+        private void RecordRelationship(int opcode, int typeId, int sortKey, Entity source, Entity target)
+        {
+            if (!Ready) throw new InvalidOperationException("ParallelWriter is not initialized.");
+            ref var state = ref *(EcbWriterState*)State;
+            int offset;
+            if (state.Shared != 0) offset = state.ReserveShared(DeferredCommandBuffer.RelationshipCommandSize);
+            else
+            {
+                state.ClaimThread();
+                state.EnsureCapacity(DeferredCommandBuffer.RelationshipCommandSize);
+                offset = state.Offset;
+                state.Offset += DeferredCommandBuffer.RelationshipCommandSize;
+            }
+            DeferredCommandBuffer.WriteRelationship(state.Staging + offset, opcode, sortKey, typeId, source, target);
+            state.HasRelationshipCommands = true;
+            state.DestroyRunOpen = false;
+        }
 
         /// <summary>记录一次销毁（同一 writer 内连续的销毁会在回放期合并成一次批量销毁）。
         /// 共享 writer（<see cref="DeferredCommandBuffer.CreateSharedParallelWriter"/>）下统一预留命令和销毁槽位：
@@ -127,7 +146,7 @@ namespace EntJoy.ECS
             if (additionalBytes < 0) throw new ArgumentOutOfRangeException(nameof(additionalBytes));
             if (st.Offset < 0 || st.Capacity < 0 || st.Offset > st.Capacity) throw new InvalidOperationException("Invalid writer byte cursor.");
             int required = checked(st.Offset + additionalBytes);
-            if (required <= st.Capacity) return;
+            if (required <= st.Capacity && st.Staging != null) return;
             int newCapacity = st.Capacity > 0 ? st.Capacity : 4096;
             while (newCapacity < required) newCapacity = newCapacity > int.MaxValue / 2 ? required : newCapacity * 2;
             var next = (byte*)Marshal.AllocHGlobal(newCapacity);
@@ -143,7 +162,7 @@ namespace EntJoy.ECS
         public static void EnsureDestroyCapacity(this ref EcbWriterState st, int needed)
         {
             if (needed < 0) throw new ArgumentOutOfRangeException(nameof(needed));
-            if (needed <= st.DestroyCapacity) return;
+            if (needed <= st.DestroyCapacity && st.Destroys != null) return;
             int newCapacity = st.DestroyCapacity > 0 ? st.DestroyCapacity : 256;
             while (newCapacity < needed) newCapacity = newCapacity > int.MaxValue / 2 ? needed : newCapacity * 2;
             var next = (Entity*)Marshal.AllocHGlobal(checked(newCapacity * sizeof(Entity)));
@@ -171,6 +190,7 @@ namespace EntJoy.ECS
             int current = st.Offset;
             if (bytes <= 0 || current < 0 || current > st.Capacity || bytes > st.Capacity - current)
                 throw new InvalidOperationException("Shared ParallelWriter staging capacity exceeded.");
+            if (st.Staging == null) st.Staging = (byte*)Marshal.AllocHGlobal(st.Capacity);
             st.Offset = current + bytes;
             return current;
         }
@@ -190,6 +210,7 @@ namespace EntJoy.ECS
             {
                 if (st.DestroyCount < 0 || st.DestroyCount >= st.DestroyCapacity)
                     throw new InvalidOperationException("Shared ParallelWriter destroy capacity exceeded.");
+                if (st.Destroys == null) st.Destroys = (Entity*)Marshal.AllocHGlobal(checked(st.DestroyCapacity * sizeof(Entity)));
                 // Reserve both resources together. Failure consumes neither cursor.
                 start = ReserveBytesLocked(ref st, sizeof(int) * 3);
                 slot = st.DestroyCount++;

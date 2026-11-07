@@ -84,6 +84,12 @@ namespace EntJoy.Collections
         public int Length => _length;
         public T this[int index] { get { return default; } set { } }
         public void* GetUnsafePtr() => _buffer;
+        public readonly struct ReadOnly
+        {
+            public int Length => 0;
+            public T this[int index] => default;
+            public void* GetUnsafeReadOnlyPtr() => null;
+        }
     }
     public unsafe struct NativeList<T> where T : unmanaged
     {
@@ -108,13 +114,21 @@ namespace EntJoy.ECS
     // SendEvent stub: 生成器按 命名空间+名字 识别，这里只需让测试源码能编译出可解析的方法符号
     // （类型实参由泛型推断）。用于 IspcMarkerGateTests 的 ISPC 标记缺口回归。
     public static class SystemAPI { public static void SendEvent<T>(T evt) where T : unmanaged { } }
-    public struct ChunkEnabledMask { public unsafe ulong* Bits; }
+    public ref struct ChunkEnabledMask {
+        public Span<ulong> Bits => default;
+        public int Length => 0;
+        public int UlongCount => 0;
+        public bool IsEnabled(int index) => false;
+        public bool TryGetNextRange(ref int start, out int first, out int end) { first = end = 0; return false; }
+    }
     public unsafe struct ArchetypeChunk
     {
         private int _count;
         public int Count => _count;
         public NativeArray<T> GetComponentDataNativeArray<T>() where T : unmanaged => default;
         public Span<T> GetComponentDataSpan<T>() where T : unmanaged => default;
+        public ReadOnlySpan<T> GetComponentReadOnlyDataSpan<T>() where T : unmanaged => default;
+        public NativeArray<T>.ReadOnly GetComponentReadOnlyDataNativeArray<T>() where T : unmanaged => default;
         public T* GetComponentDataPtr<T>() where T : unmanaged => null;
     }
     public interface IJobChunk { }

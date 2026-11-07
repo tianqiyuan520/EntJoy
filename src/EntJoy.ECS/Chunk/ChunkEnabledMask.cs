@@ -22,6 +22,21 @@ namespace EntJoy.ECS
         /// <summary>组合位图 ulong 数量（实体数按 64 向上取整）。</summary>
         public int UlongCount => _ulongCount;
 
+        internal bool HasMatches
+        {
+            get
+            {
+                if (_length == 0) return true;
+                for (int i = 0; i < _ulongCount; i++)
+                {
+                    ulong word = _bits[i];
+                    if (i == _ulongCount - 1 && (_length & 63) != 0) word &= (1UL << (_length & 63)) - 1;
+                    if (word != 0) return true;
+                }
+                return false;
+            }
+        }
+
         /// <summary>
         /// 组合位图（每 bit 一个实体，位 0 = 实体 0）。
         /// 供生成代码/用户内联 BitOperations 遍历；无过滤时为 default（Length 为 0，应遍历全部实体）。
@@ -35,6 +50,7 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryGetNextRange(ref int start, out int rangeStart, out int rangeEnd)
         {
+            if (start < 0) throw new ArgumentOutOfRangeException(nameof(start));
             if (start >= _length)
             {
                 rangeStart = rangeEnd = 0;
@@ -70,12 +86,18 @@ namespace EntJoy.ECS
             // 找到第一个启用位的位置
             int firstOne = BitOperations.TrailingZeroCount(current);
             pos += firstOne;
+            if (pos >= _length)
+            {
+                start = _length;
+                rangeStart = rangeEnd = 0;
+                return false;
+            }
             rangeStart = pos;
 
             // 找到连续启用的结束
             current >>= firstOne;
             int ones = BitOperations.TrailingZeroCount(~current);
-            rangeEnd = pos + ones;
+            rangeEnd = Math.Min(pos + ones, _length);
 
             start = rangeEnd;
             return true;

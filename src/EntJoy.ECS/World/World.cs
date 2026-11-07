@@ -108,6 +108,9 @@ namespace EntJoy.ECS
             return _entityManager.SpawnFrom(prefabEntity, count);
         }
 
+        /// <summary>复制指定实体集合，并重映射集合内部的关系 Target。</summary>
+        public Entity[] CloneEntities(ReadOnlySpan<Entity> sources) => _entityManager.CloneEntities(sources);
+
         /// <summary>打印单个实体的所有组件字段值（用组件元数据，非反射）。</summary>
         public string DumpEntity(Entity entity) => _entityManager.DumpEntity(entity);
 
@@ -120,7 +123,7 @@ namespace EntJoy.ECS
         /// <summary>等待已登记作业后保存支持的组件值及布局标识。</summary>
         public WorldSnapshot TakeSnapshot() => _entityManager.TakeSnapshot();
 
-        /// <summary>校验完整快照及布局后，清空当前内容并重建。</summary>
+        /// <summary>在临时状态装载并校验完整快照，再切换当前存储。</summary>
         public void Restore(WorldSnapshot snapshot) => _entityManager.Restore(snapshot);
 
         /// <summary>实体级查询选择器（双组件），支持链式附加过滤条件（WithRelationship/WithEnabled）。</summary>
@@ -262,6 +265,7 @@ namespace EntJoy.ECS
         public void Dispose()
         {
             if (_disposed) return;
+            _entityManager?.CompleteActiveJobs();
             _disposed = true;
             // 先解除 DefaultWorld：避免 TempAllocator.Reset 的 OnBeforeReset 回调访问已释放的 World
             lock (_defaultLock)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "EntityFilterData.h"
 
 // 跨语言共享的 Chunk 任务数据结构
 // C# 端必须使用 [StructLayout(LayoutKind.Sequential)] 保证内存布局一致
@@ -18,19 +19,23 @@ struct ChunkJobData {
     void**  sharedValuePtrs;     // SharedComponent blittable 值指针 [sharedValueCount]
     int     sharedValueCount;    // sharedValuePtrs 数量，0 = 无 shared 组件
     void**  requiredEnableBitMaps; // 与 requiredComponentArrays 同序的逐组件 enable 位图（uint64 字数组，元素可为 nullptr）
+    EntityFilterData filter{};
 };
 
 // NativeTranspile 轻量 Chunk 数据结构
 // 只包含 NativeTranspile 作业实际需要的字段，跳过 ChunkJobData 的冗余信息。
-// enableBitMaps 预留为将来支持 IEnableComponent 使用。
 // sharedValuePtrs: 每个 blittable SharedComponent 的单值指针（per-chunk，非 per-entity）。
 struct ChunkData {
     void*   entityArray;        // Entity 数组首地址（IJobEntity 的 Entity 参数需要；无该参数时为 nullptr）
     void**  componentArrays;    // 组件数组指针 [requiredCount]，编译时已知索引
     int     entityCount;        // 实体数量
     int     requiredComponentCount; // 组件数组数量
-    void**  enableBitMaps;      // enable 位图 [enableCount]，无过滤时为 nullptr（预留）
-    int     enableBitmapCount;  // enable 位图数量，0 表示无过滤（预留）
+    void**  enableBitMaps;      // 与 componentArrays 同序的逐组件启用位图，元素可为 nullptr
+    int     enableBitmapCount;  // enableBitMaps 项数
     void**  sharedValuePtrs;    // SharedComponent blittable 值指针 [sharedValueCount]
     int     sharedValueCount;   // sharedValuePtrs 数量，0 = 无 shared 组件
+    EntityFilterData filter{};
 };
+
+static_assert(sizeof(ChunkJobData) == 120, "ChunkJobData must match the managed x64 layout.");
+static_assert(sizeof(ChunkData) == 80, "ChunkData must match the managed x64 layout.");

@@ -10,3 +10,4 @@ EJ2002 | EntJoy.ECS.SourceGenerator | Error | Component contains managed referen
 EJ2003 | EntJoy.ECS.SourceGenerator | Error | [ECSComponent] cannot be applied to generic struct
 EJ2011 | EntJoy.ECS.SourceGenerator | Error | [Reactive] handler must define a static Execute method
 EJ2012 | EntJoy.ECS.SourceGenerator | Error | [Reactive] Execute must have the signature (in ReadOnlySpan<Entity>, in ReadOnlySpan<TComponent>)
+EJ2021 | EntJoy.ECS.SourceGenerator | Error | Relationship parameters must be passed by value or in

@@ -9,7 +9,7 @@ using System.Threading;
 namespace EntJoy.ECS.JobSystem
 {
 
-    public static unsafe class ChunkJobScheduler
+    public static unsafe partial class ChunkJobScheduler
     {
         // Event Buffer 元数据缓存（Job 类型 → 查询结果）
         public struct EventBufferMeta
@@ -145,8 +145,7 @@ namespace EntJoy.ECS.JobSystem
 
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
-            bool canUseRawCache = funcPtr != IntPtr.Zero &&
-                                  !hasEnabledFilter;
+            bool canUseRawCache = funcPtr != IntPtr.Zero;
             if (canUseRawCache &&
                 TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
                 rawCache.ChunkCount > 0)
@@ -161,19 +160,19 @@ namespace EntJoy.ECS.JobSystem
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize, (uint)rawCache.StructuralVersion);
                     if (handle == IntPtr.Zero) { NativeChunkJobs.ChunkCleanup(rawContextBlock); return default; }
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, FromNative(handle), rawCache.MatchingArchetypes, writtenComponents);
+                    return TrackEntityJob(entityManager, FromNative(handle), query.HasRelationshipFilter ? null : rawCache.MatchingArchetypes, writtenComponents);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
 
-            bool jobHasManagedReferences = NativeJobCore.JobHasManagedReferences<T>();
+            bool jobIsBoxed = NativeJobCore.JobHasManagedReferences<T>() || query.HasRelationshipFilter;
 
             // 托管路径（唯一）：区间回调，blittable → job blob、托管引用 job → GCHandle box
             if (funcPtr == IntPtr.Zero &&
                 TryGetManagedChunkScheduleCache(entityManager, query, out var managedCache, out var managedCacheLease) &&
                 managedCache.ChunkCount > 0)
             {
-                var managedContextBlock = CreateChunkContextBlock(ref job, managedCache.ChunksPtr, managedCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, false, null, managedCacheLease, jobBoxed: jobHasManagedReferences, chunkArray: managedCache.ManagedChunkArray);
+                var managedContextBlock = CreateChunkContextBlock(ref job, managedCache.ChunksPtr, managedCache.ChunkCount, hasEnabledFilter, allEnabledTypes, -1, false, null, managedCacheLease, jobBoxed: jobIsBoxed, chunkArray: managedCache.ManagedChunkArray, query: query);
                 try
                 {
                     var cache = NativeJobCore.GetOrCreateDelegateCache<T, ChunkRangeJobFuncDelegate>(() => ChunkJobCallbacks.CreateChunkRangeCallback<T>());
@@ -181,7 +180,7 @@ namespace EntJoy.ECS.JobSystem
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(cache.FuncPtr, managedContextBlock, NativeChunkJobs.ChunkCleanupPtr, managedCache.ChunksPtr, managedCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, (uint)managedCache.StructuralVersion);
                     if (handle == IntPtr.Zero) { NativeChunkJobs.ChunkCleanup(managedContextBlock); return default; }
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, FromNative(handle), managedCache.MatchingArchetypes, writtenComponents);
+                    return TrackEntityJob(entityManager, FromNative(handle), query.HasRelationshipFilter ? null : managedCache.MatchingArchetypes, writtenComponents);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(managedContextBlock); throw; }
             }
@@ -200,8 +199,7 @@ namespace EntJoy.ECS.JobSystem
 
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
-            if (!hasEnabledFilter &&
-                TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
+            if (TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
                 rawCache.ChunkCount > 0)
             {
                 var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease);
@@ -211,7 +209,7 @@ namespace EntJoy.ECS.JobSystem
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, ChunkScheduleMode.PublishAssist, workerCap, rangeSize, (uint)rawCache.StructuralVersion);
                     if (handle == IntPtr.Zero) { NativeChunkJobs.ChunkCleanup(rawContextBlock); return default; }
                     NativeJobCore.RegisterScheduledJobName(handle, typeof(T).Name);
-                    return TrackEntityJob(entityManager, FromNative(handle), rawCache.MatchingArchetypes);
+                    return TrackEntityJob(entityManager, FromNative(handle), query.HasRelationshipFilter ? null : rawCache.MatchingArchetypes);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
@@ -226,7 +224,7 @@ namespace EntJoy.ECS.JobSystem
             var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
             const int gcHandleStartIndex = -1;
 
-            FillChunkJobDataList(chunksPtr, chunkList, requiredComponentTypeIds, gcHandles: null);
+            FillChunkJobDataList(chunksPtr, chunkList, requiredComponentTypeIds, gcHandles: null, query: query);
 
             var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds);
             try
@@ -269,7 +267,7 @@ namespace EntJoy.ECS.JobSystem
         /// gcHandles 为 null 时 chunkHandle 为 IntPtr.Zero（纯原生回调）；否则从 GCHandle[] 取句柄（托管回调）。
         /// 调用方负责释放各 chunk 分配的 compPtrs/compSizes/bitmaps/typeIndices/requiredArrays。
         /// </summary>
-        private unsafe static void FillChunkJobDataList(ChunkJobData* chunksPtr, List<Chunk> chunkList, int[]? requiredComponentTypeIds, GCHandle[]? gcHandles)
+        private unsafe static void FillChunkJobDataList(ChunkJobData* chunksPtr, List<Chunk> chunkList, int[]? requiredComponentTypeIds, GCHandle[]? gcHandles, QueryBuilder query = default)
         {
             for (int ci = 0; ci < chunkList.Count; ci++)
             {
@@ -330,7 +328,8 @@ namespace EntJoy.ECS.JobSystem
                     requiredComponentCount = requiredCount,
                     sharedValuePtrs = FillSharedValuePtrs(chunk, arch, compCount),
                     sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(arch, compCount) : 0,
-                    requiredEnableBitMaps = requiredBitmaps
+                    requiredEnableBitMaps = requiredBitmaps,
+                    filter = BuildNativeFilter(chunk, query)
                 };
             }
         }
@@ -385,8 +384,7 @@ namespace EntJoy.ECS.JobSystem
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
             var mode = forcedMode ?? ChunkScheduleMode.PublishAssist;
-            if (!hasEnabledFilter &&
-                TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
+            if (TryGetRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds, out var rawCache, out var rawCacheLease) &&
                 rawCache.ChunkCount > 0)
             {
                 var rawContextBlock = CreateChunkContextBlock(ref job, rawCache.ChunksPtr, rawCache.ChunkCount, false, null, -1, false, requiredComponentTypeIds, rawCacheLease, eventBufferHeaders: evtHeaders, world: world);
@@ -397,7 +395,7 @@ namespace EntJoy.ECS.JobSystem
                     using var dependencyLease = new NativeJobCore.RetainedNativeDependency(dependsOn);
                     IntPtr handle = NativeChunkJobs.JobSystem_ScheduleChunkRangeJobEx(funcPtr, rawContextBlock, NativeChunkJobs.ChunkCleanupPtr, rawCache.ChunksPtr, rawCache.ChunkCount, dependencyLease.Handle, mode, workerCap, rangeSize, (uint)rawCache.StructuralVersion);
                     if (handle == IntPtr.Zero) { NativeChunkJobs.ChunkCleanup(rawContextBlock); return default; }
-                    return TrackEntityJob(entityManager, FromNative(handle), rawCache.MatchingArchetypes);
+                    return TrackEntityJob(entityManager, FromNative(handle), query.HasRelationshipFilter ? null : rawCache.MatchingArchetypes);
                 }
                 catch { NativeChunkJobs.ChunkCleanup(rawContextBlock); throw; }
             }
@@ -417,7 +415,7 @@ namespace EntJoy.ECS.JobSystem
             var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
             const int gcHandleStartIndex = -1;
 
-            FillChunkJobDataList(chunksPtr, chunkList, requiredComponentTypeIds, gcHandles: null);
+            FillChunkJobDataList(chunksPtr, chunkList, requiredComponentTypeIds, gcHandles: null, query: query);
 
             var contextBlock = CreateChunkContextBlock(ref job, chunksPtr, chunkCount, hasEnabledFilter, allEnabledTypes, gcHandleStartIndex, true, requiredComponentTypeIds, eventBufferHeaders: evtHeaders, world: world);
             if (evtHeaders != null) StoreLiveEventBuffers(contextBlock, evtHeaders,
@@ -450,8 +448,6 @@ namespace EntJoy.ECS.JobSystem
 
             var allEnabledTypes = query.AllEnabled;
             bool hasEnabledFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
-            if (hasEnabledFilter)
-                throw new NotSupportedException("Native IJobEntity DirectEntityBatch does not support AllEnabled filters yet.");
 
             if (!TryGetEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds, out var cache, out var cacheLease) ||
                 cache.BatchCount == 0)
@@ -548,6 +544,13 @@ namespace EntJoy.ECS.JobSystem
         private static bool TryGetRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out RawChunkScheduleCache cache, out IDisposable lease)
         {
             lease = null;
+            if (query.HasRelationshipFilter || query.AllEnabled?.Length > 0)
+            {
+                cache = BuildRawChunkScheduleCache(entityManager, query, requiredComponentTypeIds);
+                if (cache.ChunkCount > 0) lease = cache.RetainLease();
+                cache.Dispose();
+                return true;
+            }
             var key = new RawChunkScheduleCacheKey(entityManager, query, requiredComponentTypeIds, 0);
             lock (_rawChunkScheduleCacheLock)
             {
@@ -618,6 +621,13 @@ namespace EntJoy.ECS.JobSystem
         private static bool TryGetEntityBatchScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds, out EntityBatchScheduleCache cache, out IDisposable lease)
         {
             lease = null;
+            if (query.HasRelationshipFilter || query.AllEnabled?.Length > 0)
+            {
+                cache = BuildEntityBatchScheduleCache(entityManager, query, requiredComponentTypeIds);
+                if (cache.BatchCount > 0) lease = cache.RetainLease();
+                cache.Dispose();
+                return true;
+            }
             var key = new RawChunkScheduleCacheKey(entityManager, query, requiredComponentTypeIds, 3);
             lock (_rawChunkScheduleCacheLock)
             {
@@ -682,72 +692,82 @@ namespace EntJoy.ECS.JobSystem
             // 过滤查询时非 0，避免改变既有"按 enableBitmapCount 决定是否过滤"的语义。
             int enableBitmapStride = requiredCount;
 
-            var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(batchCount * sizeof(EntityBatchData));
+            var batchesPtr = (EntityBatchData*)Marshal.AllocHGlobal(checked(batchCount * sizeof(EntityBatchData)));
+            Unsafe.InitBlockUnaligned(batchesPtr, 0, (uint)checked(batchCount * sizeof(EntityBatchData)));
             void* componentArraysBlock = null;
-            if (requiredCount > 0)
-                componentArraysBlock = (void*)Marshal.AllocHGlobal(batchCount * requiredCount * sizeof(void*));
             void* enableBitMapsBlock = null;
-            if (enableBitmapStride > 0)
-                enableBitMapsBlock = (void*)Marshal.AllocHGlobal(batchCount * enableBitmapStride * sizeof(void*));
-
-            for (int batchIndex = 0; batchIndex < batchCount; batchIndex++)
+            try
             {
-                var chunk = chunkList[batchIndex];
-                var archetype = chunk.Archetype;
+                if (requiredCount > 0)
+                    componentArraysBlock = (void*)Marshal.AllocHGlobal(checked(batchCount * requiredCount * sizeof(void*)));
+                if (enableBitmapStride > 0)
+                    enableBitMapsBlock = (void*)Marshal.AllocHGlobal(checked(batchCount * enableBitmapStride * sizeof(void*)));
 
-                if (componentArraysBlock != null)
+                for (int batchIndex = 0; batchIndex < batchCount; batchIndex++)
                 {
-                    void** arraysBase = (void**)componentArraysBlock + batchIndex * requiredCount;
-                    for (int r = 0; r < requiredCount; r++)
+                    var chunk = chunkList[batchIndex];
+                    var archetype = chunk.Archetype;
+
+                    if (componentArraysBlock != null)
                     {
-                        arraysBase[r] = null;
-                        int requiredTypeId = requiredComponentTypeIds[r];
-                        for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
+                        void** arraysBase = (void**)componentArraysBlock + batchIndex * requiredCount;
+                        for (int r = 0; r < requiredCount; r++)
                         {
-                            if (archetype.Types[componentIndex].Id == requiredTypeId)
+                            arraysBase[r] = null;
+                            int requiredTypeId = requiredComponentTypeIds[r];
+                            for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
                             {
-                                arraysBase[r] = (void*)chunk.GetComponentArrayPointer(componentIndex);
-                                break;
+                                if (archetype.Types[componentIndex].Id == requiredTypeId)
+                                {
+                                    arraysBase[r] = (void*)chunk.GetComponentArrayPointer(componentIndex);
+                                    break;
+                                }
+                            }
+                        }
+
+                        batchesPtr[batchIndex].componentArrays = arraysBase;
+                    }
+                    else
+                    {
+                        batchesPtr[batchIndex].componentArrays = null;
+                    }
+
+                    if (enableBitMapsBlock != null)
+                    {
+                        void** bitmapsBase = (void**)enableBitMapsBlock + batchIndex * enableBitmapStride;
+                        batchesPtr[batchIndex].enableBitMaps = bitmapsBase;
+                        batchesPtr[batchIndex].enableBitmapCount = enableBitmapCount;
+                        for (int e = 0; e < enableBitmapStride; e++)
+                        {
+                            bitmapsBase[e] = null;
+                            int requiredTypeId = requiredComponentTypeIds[e];
+                            for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
+                            {
+                                if (archetype.Types[componentIndex].Id == requiredTypeId)
+                                {
+                                    bitmapsBase[e] = chunk.GetEnableBitMapPointer(componentIndex);
+                                    break;
+                                }
                             }
                         }
                     }
-
-                    batchesPtr[batchIndex].componentArrays = arraysBase;
-                }
-                else
-                {
-                    batchesPtr[batchIndex].componentArrays = null;
-                }
-
-                if (enableBitMapsBlock != null)
-                {
-                    void** bitmapsBase = (void**)enableBitMapsBlock + batchIndex * enableBitmapStride;
-                    batchesPtr[batchIndex].enableBitMaps = bitmapsBase;
-                    batchesPtr[batchIndex].enableBitmapCount = enableBitmapCount;
-                    for (int e = 0; e < enableBitmapStride; e++)
+                    else
                     {
-                        bitmapsBase[e] = null;
-                        int requiredTypeId = requiredComponentTypeIds[e];
-                        for (int componentIndex = 0; componentIndex < chunk.ComponentCount; componentIndex++)
-                        {
-                            if (archetype.Types[componentIndex].Id == requiredTypeId)
-                            {
-                                bitmapsBase[e] = chunk.GetEnableBitMapPointer(componentIndex);
-                                break;
-                            }
-                        }
+                        batchesPtr[batchIndex].enableBitMaps = null;
+                        batchesPtr[batchIndex].enableBitmapCount = 0;
                     }
-                }
-                else
-                {
-                    batchesPtr[batchIndex].enableBitMaps = null;
-                    batchesPtr[batchIndex].enableBitmapCount = 0;
+
+                    batchesPtr[batchIndex].entityCount = chunk.EntityCount;
+                    batchesPtr[batchIndex].filter = BuildNativeFilter(chunk, query);
                 }
 
-                batchesPtr[batchIndex].entityCount = chunk.EntityCount;
+                return new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount, componentArraysBlock, enableBitMapsBlock);
             }
-
-            return new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount, componentArraysBlock, enableBitMapsBlock);
+            catch
+            {
+                new EntityBatchScheduleCache(entityManager.StructuralVersion, batchesPtr, batchCount, componentArraysBlock, enableBitMapsBlock).Dispose();
+                throw;
+            }
         }
 
         private static RawChunkScheduleCache BuildRawChunkScheduleCache(EntityManager entityManager, QueryBuilder query, int[] requiredComponentTypeIds)
@@ -762,72 +782,84 @@ namespace EntJoy.ECS.JobSystem
                 return new RawChunkScheduleCache(entityManager.StructuralVersion, null, 0);
             }
 
-            var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(chunkCount * sizeof(ChunkJobData));
-            int requiredCount = requiredComponentTypeIds?.Length ?? 0;
-
-            for (int ci = 0; ci < chunkCount; ci++)
+            var chunksPtr = (ChunkJobData*)Marshal.AllocHGlobal(checked(chunkCount * sizeof(ChunkJobData)));
+            Unsafe.InitBlockUnaligned(chunksPtr, 0, (uint)checked(chunkCount * sizeof(ChunkJobData)));
+            var cache = new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, matchingArchetypes: matchingArchetypes.ToArray());
+            try
             {
-                var chunk = chunkList[ci];
-                var archetype = chunk.Archetype;
-                int componentCount = chunk.ComponentCount;
-                var componentArrays = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
-                var componentTypeIndices = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
-                // 逐组件 enable 位图（非 enableable 组件为 null）。原生 IJobChunk/IJobEntity 经
-                // 生成的 C++ 包装把它拷进轻量 ChunkData.enableBitMaps，内核据此读写存活/启用状态。
-                var enableBitmaps = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
-                void** requiredArrays = null;
-                void** requiredBitmaps = null;
+                int requiredCount = requiredComponentTypeIds?.Length ?? 0;
 
-                if (requiredCount > 0)
+                for (int ci = 0; ci < chunkCount; ci++)
                 {
-                    requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                    requiredBitmaps = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
-                    for (int r = 0; r < requiredCount; r++) { requiredArrays[r] = null; requiredBitmaps[r] = null; }
-                }
+                    var chunk = chunkList[ci];
+                    var archetype = chunk.Archetype;
+                    int componentCount = chunk.ComponentCount;
+                    var componentArrays = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
+                    chunksPtr[ci].componentArrays = componentArrays;
+                    var componentTypeIndices = (int*)Marshal.AllocHGlobal(componentCount * sizeof(int));
+                    chunksPtr[ci].componentTypeIndices = componentTypeIndices;
+                    // 逐组件 enable 位图（非 enableable 组件为 null）。原生 IJobChunk/IJobEntity 经
+                    // 生成的 C++ 包装把它拷进轻量 ChunkData.enableBitMaps，内核据此读写存活/启用状态。
+                    var enableBitmaps = (void**)Marshal.AllocHGlobal(componentCount * sizeof(void*));
+                    chunksPtr[ci].enableBitMaps = enableBitmaps;
+                    void** requiredArrays = null;
+                    void** requiredBitmaps = null;
 
-                for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
-                {
-                    componentArrays[componentIndex] = (void*)chunk.GetComponentArrayPointer(componentIndex);
-                    componentTypeIndices[componentIndex] = archetype.Types[componentIndex].Id;
-                    enableBitmaps[componentIndex] = chunk.GetEnableBitMapPointer(componentIndex);
-                }
-
-                if (requiredArrays != null)
-                {
-                    for (int r = 0; r < requiredCount; r++)
+                    if (requiredCount > 0)
                     {
-                        int requiredTypeId = requiredComponentTypeIds[r];
-                        for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
+                        requiredArrays = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                        chunksPtr[ci].requiredComponentArrays = requiredArrays;
+                        requiredBitmaps = (void**)Marshal.AllocHGlobal(requiredCount * sizeof(void*));
+                        chunksPtr[ci].requiredEnableBitMaps = requiredBitmaps;
+                        for (int r = 0; r < requiredCount; r++) { requiredArrays[r] = null; requiredBitmaps[r] = null; }
+                    }
+
+                    for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
+                    {
+                        componentArrays[componentIndex] = (void*)chunk.GetComponentArrayPointer(componentIndex);
+                        componentTypeIndices[componentIndex] = archetype.Types[componentIndex].Id;
+                        enableBitmaps[componentIndex] = chunk.GetEnableBitMapPointer(componentIndex);
+                    }
+
+                    if (requiredArrays != null)
+                    {
+                        for (int r = 0; r < requiredCount; r++)
                         {
-                            if (componentTypeIndices[componentIndex] == requiredTypeId)
+                            int requiredTypeId = requiredComponentTypeIds[r];
+                            for (int componentIndex = 0; componentIndex < componentCount; componentIndex++)
                             {
-                                requiredArrays[r] = componentArrays[componentIndex];
-                                requiredBitmaps[r] = enableBitmaps[componentIndex];
-                                break;
+                                if (componentTypeIndices[componentIndex] == requiredTypeId)
+                                {
+                                    requiredArrays[r] = componentArrays[componentIndex];
+                                    requiredBitmaps[r] = enableBitmaps[componentIndex];
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    chunksPtr[ci] = new ChunkJobData
+                    {
+                        entityArray = (void*)chunk.GetEntityPointer(),
+                        entityCount = chunk.EntityCount,
+                        componentCount = componentCount,
+                        componentArrays = componentArrays,
+                        componentSizes = null,
+                        enableBitMaps = enableBitmaps,
+                        componentTypeIndices = componentTypeIndices,
+                        chunkHandle = IntPtr.Zero,
+                        requiredComponentArrays = requiredArrays,
+                        requiredComponentCount = requiredCount,
+                        sharedValuePtrs = FillSharedValuePtrs(chunk, archetype, componentCount),
+                        sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(archetype, componentCount) : 0,
+                        requiredEnableBitMaps = requiredBitmaps
+                    };
+                    chunksPtr[ci].filter = BuildNativeFilter(chunk, query);
                 }
 
-                chunksPtr[ci] = new ChunkJobData
-                {
-                    entityArray = (void*)chunk.GetEntityPointer(),
-                    entityCount = chunk.EntityCount,
-                    componentCount = componentCount,
-                    componentArrays = componentArrays,
-                    componentSizes = null,
-                    enableBitMaps = enableBitmaps,
-                    componentTypeIndices = componentTypeIndices,
-                    chunkHandle = IntPtr.Zero,
-                    requiredComponentArrays = requiredArrays,
-                    requiredComponentCount = requiredCount,
-                    sharedValuePtrs = FillSharedValuePtrs(chunk, archetype, componentCount),
-                    sharedValueCount = chunk.HasSharedValues ? CountBlittableShared(archetype, componentCount) : 0,
-                    requiredEnableBitMaps = requiredBitmaps
-                };
+                return cache;
             }
-
-            return new RawChunkScheduleCache(entityManager.StructuralVersion, chunksPtr, chunkCount, matchingArchetypes: matchingArchetypes.ToArray());
+            catch { cache.Dispose(); throw; }
         }
 
         private static RawChunkScheduleCache BuildManagedChunkScheduleCache(EntityManager entityManager, QueryBuilder query)
@@ -1096,6 +1128,7 @@ namespace EntJoy.ECS.JobSystem
                 for (int i = 0; i < ChunkCount; i++)
                 {
                     var chunkData = ChunksPtr[i];
+                    FreeNativeFilter(chunkData.filter);
                     if (chunkData.componentArrays != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentArrays);
                     if (chunkData.componentSizes != null) Marshal.FreeHGlobal((IntPtr)chunkData.componentSizes);
                     if (chunkData.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)chunkData.enableBitMaps);
@@ -1209,6 +1242,7 @@ namespace EntJoy.ECS.JobSystem
                     Marshal.FreeHGlobal((IntPtr)_componentArraysBlock);
                 if (_enableBitMapsBlock != null)
                     Marshal.FreeHGlobal((IntPtr)_enableBitMapsBlock);
+                for (int i = 0; i < BatchCount; i++) FreeNativeFilter(BatchesPtr[i].filter);
                 Marshal.FreeHGlobal((IntPtr)BatchesPtr);
             }
 
@@ -1388,7 +1422,7 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // 上下文块创建 / 清理
-        private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null, bool jobBoxed = false, Chunk[]? chunkArray = null, List<EventBufferHeader>? eventBufferHeaders = null, World world = null) where T : struct
+        private unsafe static IntPtr CreateChunkContextBlock<T>(ref T job, ChunkJobData* chunksPtr, int chunkCount, bool hasEnabledFilter, ComponentType[] allEnabledTypes, int gcHandleStartIndex, bool ownsChunkData, int[] requiredComponentTypeIds = null, IDisposable cacheLease = null, bool jobBoxed = false, Chunk[]? chunkArray = null, List<EventBufferHeader>? eventBufferHeaders = null, World world = null, QueryBuilder query = default) where T : struct
         {
             int jobSize = jobBoxed ? sizeof(IntPtr) : Unsafe.SizeOf<T>();
             int headerSize = Unsafe.SizeOf<ChunkContextHeader>();
@@ -1465,7 +1499,7 @@ namespace EntJoy.ECS.JobSystem
             byte* jobPtr = (byte*)block + headerSize + typesDataSize + requiredTypesDataSize;
             if (jobBoxed)
             {
-                *(IntPtr*)jobPtr = GCHandle.ToIntPtr(GCHandle.Alloc(new ManagedJobBox<T> { Job = job }, GCHandleType.Normal));
+                *(IntPtr*)jobPtr = GCHandle.ToIntPtr(GCHandle.Alloc(new ManagedJobBox<T> { Job = job, Query = query }, GCHandleType.Normal));
             }
             else if (NativeJobScheduler.TryGetJobFieldWriter(typeof(T), out var __fieldWriter))
             {
@@ -1501,11 +1535,11 @@ namespace EntJoy.ECS.JobSystem
 
             var parallelJob = new ManagedChunkParallelJob<T>
             {
-                Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes, World = world
+                Job = job, Chunks = chunkArray, ChunkCount = chunkCount, AllEnabledTypes = allEnabledTypes, World = world, Query = query
             };
             var mhandle = JobScheduler.ScheduleParallelFor(ref parallelJob, chunkCount, innerBatchCount: 1, dependsOn);
             // 托管路径也需 TrackEntityJob：用于 Selective Wait（结构变更时只等影响的 archetype 的 job）
-            TrackEntityJob(entityManager, mhandle, archetypes, writtenComponents);
+            TrackEntityJob(entityManager, mhandle, query.HasRelationshipFilter ? null : archetypes, writtenComponents);
             return mhandle;
         }
 
@@ -1517,6 +1551,7 @@ namespace EntJoy.ECS.JobSystem
             public int ChunkCount;
             public ComponentType[]? AllEnabledTypes;
             public World World;
+            public QueryBuilder Query;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Execute(int index)
@@ -1524,9 +1559,10 @@ namespace EntJoy.ECS.JobSystem
                 if ((uint)index >= (uint)ChunkCount) return;
                 var chunk = Chunks[index];
                 if (chunk.EntityCount == 0) return;
-                var mask = (AllEnabledTypes?.Length > 0)
-                    ? ChunkJobScheduler.ComputeChunkMask(chunk, AllEnabledTypes)
-                    : default;
+                int words = (AllEnabledTypes?.Length > 0 || Query.HasRelationshipFilter) ? (chunk.EntityCount + 63) / 64 : 0;
+                Span<ulong> scratch = words <= 64 ? stackalloc ulong[words] : new ulong[words];
+                var mask = ComputeChunkMask(chunk, AllEnabledTypes, Query, scratch);
+                if (!mask.HasMatches) return;
                 // 绑定 job 所属 World：worker 线程内 SystemAPI.SendEvent/DefaultWorld 访问不串写到其他 World
                 var prev = World.DefaultWorld;
                 if (World != null) World.DefaultWorld = World;
@@ -1547,7 +1583,7 @@ namespace EntJoy.ECS.JobSystem
         {
             ChunkJobCollector.ValidateJobQuery(query);
             var allEnabledTypes = query.AllEnabled;
-            bool hasFilter = allEnabledTypes != null && allEnabledTypes.Length > 0;
+            Span<ulong> scratch = stackalloc ulong[64];
             for (int archIdx = 0; archIdx < entityManager.ArchetypeCount; archIdx++)
             {
                 var archetype = entityManager.Archetypes[archIdx];
@@ -1559,7 +1595,9 @@ namespace EntJoy.ECS.JobSystem
                     if (chunk.EntityCount == 0) continue;
                     // job.Run(query) 同样必须应用 Shared / Changed 过滤
                     if (!MatchesChunkFilters(entityManager, query, chunk)) continue;
-                    var mask = hasFilter ? ComputeChunkMask(chunk, allEnabledTypes) : default;
+                    int words = (allEnabledTypes?.Length > 0 || query.HasRelationshipFilter) ? (chunk.EntityCount + 63) / 64 : 0;
+                    var mask = ComputeChunkMask(chunk, allEnabledTypes, query, words <= scratch.Length ? scratch : new ulong[words]);
+                    if (!mask.HasMatches) continue;
                     job.Execute(new ArchetypeChunk(chunk), mask);
                 }
             }
@@ -1567,35 +1605,31 @@ namespace EntJoy.ECS.JobSystem
 
         // Phase C：共享 mask 工具（单一真值来源）
         /// <summary>
-        /// 对 chunk 的 enabled 组件的位图做 AND，返回组合掩码（null = 全禁用或无过滤）。
-        /// 单组件零拷贝（直传位图），多组件走 ulong AND。
+        /// 关系条件与 Enabled 位图取交集；default 仅表示无过滤，空结果保留实际长度。
         /// </summary>
-        internal static unsafe ChunkEnabledMask ComputeChunkMask(Chunk chunk, ComponentType[] allEnabledTypes)
+        internal static unsafe ChunkEnabledMask ComputeChunkMask(Chunk chunk, ComponentType[] allEnabledTypes, QueryBuilder query, Span<ulong> scratch)
         {
-            if (allEnabledTypes == null || allEnabledTypes.Length == 0) return default;
+            if ((allEnabledTypes == null || allEnabledTypes.Length == 0) && !query.HasRelationshipFilter) return default;
             var archetype = chunk.Archetype;
             int entityCount = chunk.EntityCount;
             int ulongCount = (entityCount + 63) / 64;
-            if (allEnabledTypes.Length == 1)
-            {
-                int idx = archetype.GetComponentTypeIndex(allEnabledTypes[0]);
-                if (idx < 0) return default;
-                ulong* bitmap = chunk.GetEnableBitMapPointer(idx);
-                if (bitmap == null) return default;
-                return new ChunkEnabledMask(new Span<ulong>(bitmap, ulongCount), entityCount);
-            }
-            var combined = new ulong[ulongCount];
-            bool first = false;
-            for (int i = 0; i < allEnabledTypes.Length; i++)
+            var combined = scratch.Slice(0, ulongCount);
+            combined.Fill(ulong.MaxValue);
+            for (int i = 0; i < (allEnabledTypes?.Length ?? 0); i++)
             {
                 int idx = archetype.GetComponentTypeIndex(allEnabledTypes[i]);
-                if (idx < 0) continue;
+                if (idx < 0) { combined.Clear(); break; }
                 ulong* bitmap = chunk.GetEnableBitMapPointer(idx);
                 if (bitmap == null) continue;
-                if (!first) { for (int b = 0; b < ulongCount; b++) combined[b] = bitmap[b]; first = true; }
-                else { for (int b = 0; b < ulongCount; b++) combined[b] &= bitmap[b]; }
+                for (int b = 0; b < ulongCount; b++) combined[b] &= bitmap[b];
             }
-            return first ? new ChunkEnabledMask(combined, entityCount) : default;
+            if (query.HasRelationshipFilter)
+                for (int i = 0; i < entityCount; i++)
+                    if (!archetype.Owner.MatchesRelationshipFilter(query, chunk, i))
+                        combined[i >> 6] &= ~(1UL << (i & 63));
+            if (ulongCount > 0 && (entityCount & 63) != 0)
+                combined[ulongCount - 1] &= (1UL << (entityCount & 63)) - 1;
+            return new ChunkEnabledMask(combined, entityCount);
         }
 
         internal static unsafe ComponentType[] ResolveEnabledTypes(ChunkContextHeader* header, Chunk chunk)

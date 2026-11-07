@@ -6,7 +6,7 @@ namespace EntJoy.ECS
 {
     /// <summary>
     /// 实体关系操作（单实例 SoA 列）+ 级联删除。
-    /// 关系类型 = 组件类型（IRelationComponent 空 struct），列值 = RelationSlot（target + version）。
+    /// 关系值首字段为 RelationSlot（target + version），后续字段保存业务数据。
     /// 反向索引（RelationIndex）：Add/Remove/覆盖时同步维护，DestroyEntityCascade 时 O(1) 查索引。
     /// </summary>
     public unsafe partial class EntityManager
@@ -30,142 +30,25 @@ namespace EntJoy.ECS
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
-            // 多实例关系（[MultiRelation]）：走 RelationListStore（正向列表）+ RelationIndex（反向）
-            if (compType.IsMultiRelation)
-            {
-                CompleteActiveJobs();   // 列表路径也含结构变更（列表在托管侧，但 Observer/级联纪律统一全等待）
-                lock (_structuralLock)
-                {
-                    AddMultiRelationshipCore<TRel>(entity, target, compType.Id);
-                }
-                return;
-            }
-            // 独占关系（[ExclusiveRelation]）可能解绑其他 archetype 上的旧 source → 需等待全部 jobs
-            if (compType.IsExclusiveRelation)
-                CompleteActiveJobs();
-            else
-                CompleteEntityJobs(entity);
-
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            if (!type.IsMultiRelation) { SetRelationshipTargetRaw(entity, target, type); return; }
+            CompleteRelationWriteJobs(entity, type);
+            using var changes = BeginRelationChanges();
             lock (_structuralLock)
             {
-                ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-                if (entityInfoRef.Archetype == null)
-                    throw new InvalidOperationException($"Entity {entity} has been destroyed.");
-                if (entityInfoRef.Version != entity.Version)
-                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
-
-                int relTypeId = compType.Id;
-                var arch = entityInfoRef.Archetype;
-
-                // 独占语义（[ExclusiveRelation]，真 1:1）：target 已被其他 source 指向时，
-                // 先解绑旧 source（Flecs EcsExclusive 原位替换）。锁内复用移除核心。
-                if (compType.IsExclusiveRelation &&
-                    _relationIndex.TryGetSources(target.Id, out var byTypeEx) &&
-                    byTypeEx.TryGetValue(relTypeId, out var setEx) && setEx.Count > 0)
-                {
-                    foreach (var oldSource in setEx)
-                    {
-                        if (oldSource.Id == entity.Id && oldSource.Version == entity.Version) continue;  // 自身已指向 → 跳过（覆盖路径处理）
-                        if (!IsAlive(oldSource)) continue;
-                        RemoveExclusiveSource<TRel>(oldSource, relTypeId);
-                    }
-                }
-
-                // 覆盖语义：已有关系 → 先移除旧索引条目，再 SetRaw 写新值
-                if (arch.Has(compType.Type))
-                {
-                    int compIdx = arch.GetComponentTypeIndex(compType);
-                    var chunk = arch.ChunkList[entityInfoRef.ChunkIndex];
-                    var oldSlot = chunk.GetComponent<RelationSlot>(entityInfoRef.SlotInChunk, compIdx);
-                    _relationIndex.RemoveRelTypeId(relTypeId, entity, in oldSlot);
-                    var slotValue = RelationSlot.From(target);
-                    // 构造完整 TRel 值（Target 首字段偏移 0）：SetRaw 按列宽（真实 SizeOf<TRel>）拷贝，
-                    // 传 8B RelationSlot 会在列宽 >8B（关系带数据）时越界读。
-                    var relValue = default(TRel);
-                    Unsafe.As<TRel, RelationSlot>(ref relValue) = slotValue;
-                    arch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, compType.Type, relValue);
-
-                    // Observer：Set（覆盖写也派发，对齐 EntityManager.SetComponentRaw）
-                    if (_observerCount > 0 && _observers != null &&
-                        _observers.TryGetValue(relTypeId, out var reg) && reg.Set.Count > 0)
-                    {
-                        var handle = System.Runtime.InteropServices.GCHandle.Alloc(relValue, System.Runtime.InteropServices.GCHandleType.Pinned);
-                        try { DispatchAdded(reg.Set, &entity, (void*)handle.AddrOfPinnedObject(), 1); }
-                        finally { handle.Free(); }
-                    }
-                }
-                else
-                {
-                    // 首次：复用组件添加核心（锁内调用，含 edge 快路径 + 迁移 + Observer）。
-                    // 传完整 TRel 值（boxed），列宽 >8B 时 SetRaw 拷贝不越界。
-                    var relValue = default(TRel);
-                    Unsafe.As<TRel, RelationSlot>(ref relValue) = RelationSlot.From(target);
-                    AddComponentRawCore(entity, compType.Type, relValue);
-                }
-
-                // 维护反向索引：source → target
-                _relationIndex.Add(relTypeId, entity, target);
+                ValidateRelationshipEntity(entity, type, "source");
+                ValidateRelationshipEntity(target, type, "target");
+                AddMultiRelationshipCore<TRel>(entity, target, type.Id);
             }
         }
 
-        /// <summary>
-        /// 移除关系：entity 上的 TRel 列（无则 no-op）。同步维护反向索引。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void RemoveRelationship<TRel>(Entity entity)
-            where TRel : struct, IRelationComponent
+        /// <summary>移除单目标关系列；多目标类型清空全部边。</summary>
+        public void RemoveRelationship<TRel>(Entity entity) where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            if ((uint)entity.Id >= (uint)entities.Length) return;
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null) return;
-            if (info.Version != entity.Version) return;
-
-            var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
-            if (!info.Archetype.Has(compType.Type)) return;
-
-            // 结构变更前等待访问该 archetype 的 job（对齐 RemoveComponentRaw 的纪律），
-            // 否则 RemoveComponentRawCore 的 chunk 迁移/释放会与在飞 job 并发读写 → use-after-free。
-            CompleteArchetypeJobs(new[] { info.Archetype });
-            lock (_structuralLock)
-            {
-                // 二次确认（锁内重读）
-                ref var info2 = ref GetEntityInfoRef(entity.Id);
-                if (info2.Archetype == null) return;
-                if (info2.Version != entity.Version) return;
-                var arch = info2.Archetype;
-                if (!arch.Has(compType.Type)) return;
-
-                int compIdx = arch.GetComponentTypeIndex(compType);
-                var chunk = arch.ChunkList[info2.ChunkIndex];
-                var oldSlot = chunk.GetComponent<RelationSlot>(info2.SlotInChunk, compIdx);
-                _relationIndex.RemoveRelTypeId(compType.Id, entity, in oldSlot);
-
-                // 锁内复用移除核心（含 edge 快路径 + 迁移 + Observer）
-                RemoveComponentRawCore(entity, compType.Type);
-            }
-        }
-
-        /// <summary>
-        /// 独占关系解绑：移除 oldSource 上的 TRel 关系列 + 反向索引条目。
-        /// 调用方必须已持有 _structuralLock 且已 CompleteArchetypeJobs（AddRelationship 独占路径）
-        /// 或由 RemoveRelationship 的锁纪律覆盖（直接调用独占分支时需自行保证）。
-        /// </summary>
-        private void RemoveExclusiveSource<TRel>(Entity oldSource, int relTypeId)
-            where TRel : struct, IRelationComponent
-        {
-            ref var info = ref GetEntityInfoRef(oldSource.Id);
-            if (info.Archetype == null || info.Version != oldSource.Version) return;
-            var arch = info.Archetype;
-            var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
-            if (!arch.Has(compType.Type)) return;
-
-            int compIdx = arch.GetComponentTypeIndex(compType);
-            var chunk = arch.ChunkList[info.ChunkIndex];
-            var oldSlot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-            _relationIndex.RemoveRelTypeId(relTypeId, oldSource, in oldSlot);
-            RemoveComponentRawCore(oldSource, compType.Type);
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            if (type.IsMultiRelation) { ClearRelationships<TRel>(entity); return; }
+            RemoveRelationshipRaw(entity, type);
         }
 
         /// <summary>
@@ -173,82 +56,40 @@ namespace EntJoy.ECS
         /// 有组件但槽位无效 / target 已销毁 / Id 复用版本不匹配 → default(Entity)。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Entity GetRelationship<TRel>(Entity entity)
-            where TRel : struct, IRelationComponent
+        public Entity GetRelationship<TRel>(Entity entity) where TRel : struct, IRelationComponent
+            => TryGetRelationship<TRel>(entity, out var target) ? target : default;
+
+        /// <summary>读取有效目标，同时检查两端完整身份。</summary>
+        public bool TryGetRelationship<TRel>(Entity entity, out Entity target) where TRel : struct, IRelationComponent
         {
             CheckDisposed();
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null) return default;
-            if (info.Version != entity.Version) return default;  // 自身句柄已过期
-
-            var arch = info.Archetype;
-            if (!arch.Has(typeof(TRel))) return default;
-
-            int compIdx = arch.GetComponentTypeIndex<TRel>();
-            var chunk = arch.ChunkList[info.ChunkIndex];
-            var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-            if (!slot.IsValid) return default;
-
-            // 存活 + 版本校验：target 销毁（Archetype=null）或 Id 复用（version+1）均视为无效关系
-            if ((uint)slot.TargetId >= (uint)entities.Length) return default;
-            var targetInfo = GetEntityInfoRef(slot.TargetId);
-            return (targetInfo.Archetype != null && targetInfo.Version == slot.TargetVersion)
-                ? slot.ToEntity()
-                : default;
+            var type = ComponentTypeManager.GetComponentType(typeof(TRel));
+            if (type.IsMultiRelation)
+                throw new InvalidOperationException($"Use GetRelationships for multi-relation '{type.Type}'.");
+            target = default;
+            if (!IsAlive(entity) || !GetEntityInfoRef(entity.Id).Archetype.Has(type.Type)) return false;
+            var slot = *(RelationSlot*)GetRelationValue(entity, type);
+            if (!slot.IsValid || !IsAlive(slot.ToEntity())) return false;
+            target = slot.ToEntity();
+            return true;
         }
 
-        /// <summary>
-        /// 是否持有有效关系（有 TRel 列 且 槽位匹配 target 的当前 Id+Version）。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool HasRelationship<TRel>(Entity entity)
-            where TRel : struct, IRelationComponent
-        {
-            CheckDisposed();
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null) return false;
-            if (info.Version != entity.Version) return false;
-
-            var arch = info.Archetype;
-            if (!arch.Has(typeof(TRel))) return false;
-
-            int compIdx = arch.GetComponentTypeIndex<TRel>();
-            var chunk = arch.ChunkList[info.ChunkIndex];
-            var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-            if (!slot.IsValid) return false;
-
-            // 版本校验：target 实体仍存活且版本一致（防 Id 回收后误命中）
-            if ((uint)slot.TargetId >= (uint)entities.Length) return false;
-            var targetInfo = GetEntityInfoRef(slot.TargetId);
-            return targetInfo.Archetype != null && targetInfo.Version == slot.TargetVersion;
-        }
-
-        // 反向查询 GetRelationsOf（利用关系索引 O(1)）
+        public bool HasRelationship<TRel>(Entity entity) where TRel : struct, IRelationComponent
+            => TryGetRelationship<TRel>(entity, out _);
 
         /// <summary>
         /// 获取所有与 target 建立 TRel 关系的 source 实体（target ←TRel-- sources）。
-        /// 走反向索引 O(1)，不扫描任何 chunk。结果按插入顺序去重。
+        /// 走反向索引 O(1)，不扫描任何 chunk；同类型的 source 去重，顺序不保证。
         /// 返回数组（新分配，调用方可安全持有）。
         /// </summary>
         public Entity[] GetRelationsOf<TRel>(Entity target)
             where TRel : struct, IRelationComponent
         {
-            CheckDisposed();
-            var relTypeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
-            if (!_relationIndex.TryGetSources(target.Id, out var byType) ||
-                !byType.TryGetValue(relTypeId, out var set) || set.Count == 0)
-                return Array.Empty<Entity>();
-
-            var result = new Entity[set.Count];
-            int i = 0;
-            foreach (var source in set)
-            {
-                // 防御性过滤：source 已销毁（Archetype=null）或句柄过期 → 跳过
-                if (IsAlive(source))
-                    result[i++] = source;
-            }
-            if (i != result.Length)
-                Array.Resize(ref result, i);
+            var sources = GetRelationSources<TRel>(target);
+            if (sources == null || sources.Count == 0) return Array.Empty<Entity>();
+            var result = new Entity[sources.Count];
+            int count = GetRelationsOf<TRel>(target, result.AsSpan());
+            if (count != result.Length) Array.Resize(ref result, count);
             return result;
         }
 
@@ -257,16 +98,17 @@ namespace EntJoy.ECS
         public Entity[] GetRelationsOfAll(Entity target)
         {
             CheckDisposed();
-            if (!_relationIndex.TryGetSources(target.Id, out var byType))
+            if (!IsAlive(target) || !_relationIndex.TryGetSources(target, out var byType))
                 return Array.Empty<Entity>();
 
             var result = _relBufferA;
             result.Clear();
-            foreach (var set in byType.Values)
+            _relVisited.Clear();
+            foreach (var typed in byType)
             {
-                foreach (var source in set)
+                foreach (var source in typed.Value)
                 {
-                    if (IsAlive(source))
+                    if (StillPointsToRelation(source, target, typed.Key) && _relVisited.Add(source.Id))
                         result.Add(source);
                 }
             }
@@ -289,29 +131,7 @@ namespace EntJoy.ECS
         /// 后者的 Id=0 会与真实实体 0 冲突，遍历场景必须用本方法）。
         /// </summary>
         private bool TryGetRelationshipTarget<TRel>(Entity entity, out Entity target)
-            where TRel : struct, IRelationComponent
-        {
-            target = default;
-            if ((uint)entity.Id >= (uint)entities.Length) return false;
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null || info.Version != entity.Version) return false;
-
-            var arch = info.Archetype;
-            if (!arch.Has(typeof(TRel))) return false;
-
-            int compIdx = arch.GetComponentTypeIndex<TRel>();
-            var chunk = arch.ChunkList[info.ChunkIndex];
-            var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-            if (!slot.IsValid) return false;
-
-            // target 存活 + 版本校验
-            if ((uint)slot.TargetId >= (uint)entities.Length) return false;
-            var targetInfo = GetEntityInfoRef(slot.TargetId);
-            if (targetInfo.Archetype == null || targetInfo.Version != slot.TargetVersion) return false;
-
-            target = slot.ToEntity();
-            return true;
-        }
+            where TRel : struct, IRelationComponent => TryGetRelationship<TRel>(entity, out target);
 
         /// <summary>
         /// 获取 entity 的全部祖先（沿 TRel 链向上）：最近的祖先在前，根在后。
@@ -348,6 +168,7 @@ namespace EntJoy.ECS
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
+            if (!IsAlive(entity)) return Array.Empty<Entity>();
             var result = _relBufferA;
             result.Clear();
             var visited = _relVisited;
@@ -368,13 +189,13 @@ namespace EntJoy.ECS
                 foreach (var node in frontier)
                 {
                     // 查反向索引：所有 --TRel--> node 的 sources（直接子）
-                    if (!_relationIndex.TryGetSources(node.Id, out var byType) ||
+                    if (!_relationIndex.TryGetSources(node, out var byType) ||
                         !byType.TryGetValue(relTypeId, out var set))
                         continue;
 
                     foreach (var source in set)
                     {
-                        if (!IsAlive(source)) continue;        // 防御：已销毁
+                        if (!StillPointsToRelation(source, node, relTypeId)) continue;
                         if (!visited.Add(source.Id)) continue; // 防环/防重复
                         result.Add(source);
                         next.Add(source);
@@ -399,7 +220,7 @@ namespace EntJoy.ECS
 
             // 父的所有其他子
             var relTypeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
-            if (!_relationIndex.TryGetSources(parent.Id, out var byType) ||
+            if (!_relationIndex.TryGetSources(parent, out var byType) ||
                 !byType.TryGetValue(relTypeId, out var set))
                 return Array.Empty<Entity>();
 
@@ -408,7 +229,7 @@ namespace EntJoy.ECS
             foreach (var source in set)
             {
                 if (source.Id == entity.Id) continue;    // 排除自身
-                if (!IsAlive(source)) continue;
+                if (!StillPointsToRelation(source, parent, relTypeId)) continue;
                 result.Add(source);
             }
             return result.ToArray();
@@ -424,110 +245,17 @@ namespace EntJoy.ECS
         public void DestroyEntityCascade(Entity entity)
         {
             CheckDisposed();
-            // 先等所有 Job（级联可能跨多个 Archetype）
             CompleteActiveJobs();
+            using var changes = BeginRelationChanges();
             lock (_structuralLock)
             {
-                if ((uint)entity.Id >= (uint)entities.Length)
-                    throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
-                ref var info = ref GetEntityInfoRef(entity.Id);
-                if (info.Archetype == null) return;  // 已销毁
-                if (info.Version != entity.Version)
-                    throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
-
-                // 收集待销毁集合（DFS，防环）
-                var toDestroy = new List<Entity>();
-                var visited = new HashSet<int>();
-                CollectCascade(entity, toDestroy, visited);
-
-                // 按"子实体先于父实体"销毁（子实体可能是父实体的 target，先销毁子避免悬垂）
-                foreach (var e in toDestroy)
-                {
-                    DestroyEntityInternal(e);
-                }
+                ValidateEntityForDestruction(entity);
+                if (!IsAlive(entity)) return;
+                DestroyRelationGraph(System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref entity, 1), forceCascade: true);
             }
         }
 
-        /// <summary>
-        /// 收集级联销毁集合（实体 + 所有关系指向它的实体）。
-        /// 迭代 DFS（显式栈）：深链（长所有权链/场景图，数千~数万级）会让递归版
-        /// <c>StackOverflowException</c> —— 该异常不可捕获，直接终止进程，
-        /// 所以不能用"调用栈更深一点"来容忍，必须改成显式栈。
-        /// </summary>
-        private void CollectCascade(Entity entity, List<Entity> toDestroy, HashSet<int> visited)
-        {
-            var stack = new Stack<Entity>();
-            stack.Push(entity);
-
-            while (stack.Count > 0)
-            {
-                Entity cur = stack.Pop();
-                if (!visited.Add(cur.Id)) continue;  // 防环
-                toDestroy.Add(cur);
-
-                // 查反向索引：所有指向本实体的 sources
-                if (!_relationIndex.TryGetSources(cur.Id, out var byType)) continue;
-                foreach (var kv in byType)
-                {
-                    foreach (var source in kv.Value)
-                    {
-                        // 槽位校验：source 仍指向本实体（防止索引滞后误伤）
-                        if (StillPointsTo(source, cur))
-                            stack.Push(source);
-                    }
-                }
-            }
-        }
-
-        /// <summary>校验 source 实体的任一关系列仍指向 target（防止索引滞后/实体已改关系）。</summary>
-        private bool StillPointsTo(Entity source, Entity target)
-        {
-            if ((uint)source.Id >= (uint)entities.Length) return false;
-            ref var info = ref GetEntityInfoRef(source.Id);
-            if (info.Archetype == null) return false;   // source 已销毁，跳过
-            if (info.Version != source.Version) return false;
-
-            foreach (var t in info.Archetype.Types)
-            {
-                if (!t.IsRelation) continue;
-                int compIdx = info.Archetype.GetComponentTypeIndex(t);
-                var chunk = info.Archetype.ChunkList[info.ChunkIndex];
-
-                if (t.MultiRelationMaxSlots >= 2)
-                {
-                    // 定长多槽列：任一槽指向 target 即命中
-                    ref var col = ref chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-                    // 注意：多槽列宽于 8B，GetComponent<RelationSlot> 只取首槽；改用逐槽指针访问
-                    int stride = t.Size;
-                    var basePtr = (byte*)chunk.GetComponentArrayPointer(compIdx) + info.SlotInChunk * stride;
-                    for (int i = 0; i < t.MultiRelationMaxSlots; i++)
-                    {
-                        if (((RelationSlot*)(basePtr + i * 8))->TargetId == target.Id &&
-                            ((RelationSlot*)(basePtr + i * 8))->TargetVersion == target.Version)
-                            return true;
-                    }
-                    continue;
-                }
-
-                var slot = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
-                if (slot.TargetId == target.Id && slot.TargetVersion == target.Version)
-                    return true;
-            }
-            return false;
-        }
-
-        /// <summary>内部销毁（锁内调用，不重新上锁/等待；含 Observer + 索引清理）。</summary>
-        private void DestroyEntityInternal(Entity entity)
-        {
-            if ((uint)entity.Id >= (uint)entities.Length) return;
-            ref var info = ref GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null) return;
-            if (info.Version != entity.Version) return;
-
-            DestroyEntityCore(entity);
-        }
-
-        /// <summary>清理实体的关系索引条目（作为 source 的所有 TRel 列）。锁内调用。</summary>
+        /// <summary>清理 source 的关系列对应的反向条目。</summary>
         private void CleanupSourceRelations(Entity entity, in EntityIndexInWorld info, Archetype archetype)
         {
             foreach (var t in archetype.Types)
@@ -550,7 +278,7 @@ namespace EntJoy.ECS
                     continue;
                 }
 
-                var slot0 = chunk.GetComponent<RelationSlot>(info.SlotInChunk, compIdx);
+                var slot0 = chunk.GetComponentReadOnly<RelationSlot>(info.SlotInChunk, compIdx);
                 _relationIndex.RemoveRelTypeId(t.Id, entity, in slot0);
             }
         }

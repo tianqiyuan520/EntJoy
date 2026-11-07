@@ -16,6 +16,7 @@ namespace EntJoy.ECS
         public int MultiRelationMaxSlots;
         public bool IsExclusiveTarget;
         public bool CascadeOnTargetDeleted;
+        public bool IsAcyclicRelation;
         public bool IsDisposable;
         public bool IsCopyable;
         public delegate*<void*, void> DisposeFn;
@@ -34,6 +35,31 @@ namespace EntJoy.ECS
 
         // 用于保护所有静态状态的锁。Component 注册是稀有操作，锁开销可忽略。
         private static readonly object _typeLock = new();
+        [ThreadStatic] private static int _disposalDepth;
+        internal static bool IsDisposingComponent => _disposalDepth != 0;
+        [ThreadStatic] private static int _copyDepth;
+        internal static bool IsCopyingComponent => _copyDepth != 0;
+        internal readonly struct CopyPreparationScope : IDisposable
+        {
+            public void Dispose() => _copyDepth--;
+        }
+        internal static CopyPreparationScope BeginCopyPreparation() { _copyDepth++; return default; }
+
+        private static class Access<T> where T : struct
+        {
+            internal static readonly bool IsRelation = typeof(IRelationComponent).IsAssignableFrom(typeof(T));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsRelationType<T>() where T : struct => Access<T>.IsRelation;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void CheckWritableAccess<T>() where T : struct
+        {
+            if (IsCopyingComponent) throw new InvalidOperationException("Writable ECS views are not allowed inside component copy hooks.");
+            if (Access<T>.IsRelation)
+                throw new InvalidOperationException($"Relationship '{typeof(T)}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.");
+        }
 
         /// <summary>泛型 Dispose 函数指针（AOT 安全：泛型实例化，无反射）。</summary>
         private static class DisposableHooks<T> where T : unmanaged, IDisposable
@@ -72,6 +98,9 @@ namespace EntJoy.ECS
 
                 int id = idAllocator;
                 bool isShared = typeof(ISharedComponentData).IsAssignableFrom(type);
+                bool isRelation = typeof(IRelationComponent).IsAssignableFrom(type);
+                if (isRelation)
+                    ValidateRelationDefinition(type);
                 int size;
                 try
                 {
@@ -87,7 +116,6 @@ namespace EntJoy.ECS
                 if (id >= _componentTypeInfos.Length)
                     Array.Resize(ref _componentTypeInfos, _componentTypeInfos.Length * 2);
 
-                bool isRelation = typeof(IRelationComponent).IsAssignableFrom(type);
                 bool isMultiRelation = isRelation && Attribute.IsDefined(type, typeof(MultiRelationAttribute));
 
                 _componentTypeInfos[id] = new ComponentTypeInfo
@@ -107,6 +135,7 @@ namespace EntJoy.ECS
                     CascadeOnTargetDeleted = isRelation
                         && Attribute.IsDefined(type, typeof(OnTargetDeletedAttribute))
                         && ((OnTargetDeletedAttribute)Attribute.GetCustomAttribute(type, typeof(OnTargetDeletedAttribute)))!.Cascade,
+                    IsAcyclicRelation = isRelation && Attribute.IsDefined(type, typeof(AcyclicRelationAttribute)),
                     IsDisposable = typeof(IDisposable).IsAssignableFrom(type),
                     IsCopyable = typeof(ICopyable).IsAssignableFrom(type),
                 };
@@ -157,6 +186,40 @@ namespace EntJoy.ECS
             return ManagedValueLayout.SizeOf(type);
         }
 
+        private static void ValidateRelationDefinition(Type type)
+        {
+            bool multi = Attribute.IsDefined(type, typeof(MultiRelationAttribute));
+            bool exclusive = Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute));
+            bool exclusiveTarget = Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute));
+            bool acyclic = Attribute.IsDefined(type, typeof(AcyclicRelationAttribute));
+            bool copyable = false;
+            foreach (var implemented in type.GetInterfaces())
+                if (implemented.IsGenericType && implemented.GetGenericTypeDefinition() == typeof(ICopyable<>))
+                    copyable = true;
+            if (!type.IsLayoutSequential || typeof(ISharedComponentData).IsAssignableFrom(type)
+                || typeof(IEnableableComponent).IsAssignableFrom(type) || typeof(IDisposable).IsAssignableFrom(type)
+                || copyable)
+                throw new InvalidOperationException($"Relation '{type.FullName}' must be a sequential unmanaged value without shared, enableable or resource hooks.");
+            if ((multi && (exclusive || acyclic)) || (!multi && exclusiveTarget))
+                throw new InvalidOperationException($"Relation '{type.FullName}' has incompatible relationship attributes.");
+
+            if (!multi) return;
+            int slots = ((MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute)))!.MaxSlots;
+            if (slots < 0 || slots == 1)
+                throw new InvalidOperationException($"Relation '{type.FullName}' MaxSlots must be zero or at least two.");
+            int expected = slots == 0 ? sizeof(RelationSlot) : checked(slots * sizeof(RelationSlot));
+            if (ManagedValueLayout.SizeOf(type) != expected)
+                throw new InvalidOperationException($"Relation '{type.FullName}' requires exactly {expected} bytes for its slots.");
+            for (int i = 1; i < slots; i++)
+            {
+                string name = $"Slot{i}";
+                var field = type.GetField(name, System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (field?.FieldType != typeof(RelationSlot) || Marshal.OffsetOf(type, name).ToInt64() != i * sizeof(RelationSlot))
+                    throw new InvalidOperationException($"Relation '{type.FullName}' requires RelationSlot {name} at byte {i * sizeof(RelationSlot)}.");
+            }
+        }
+
         /// <summary>
         /// 计算 shared 组件类型的大小：
         /// blittable struct → 实际大小（内联存储于 chunk 内存块）；
@@ -178,6 +241,8 @@ namespace EntJoy.ECS
 
         /// <summary>该组件类型是否为关系组件（IRelationComponent）。</summary>
         public static bool GetIsRelation(int id) => _componentTypeInfos[id].IsRelation;
+
+        public static bool GetIsAcyclicRelation(int id) => _componentTypeInfos[id].IsAcyclicRelation;
 
         /// <summary>该关系组件类型是否标记 [ExclusiveRelation]（真 1:1，入边唯一）。</summary>
         public static bool GetIsExclusiveRelation(int id) => _componentTypeInfos[id].IsExclusiveRelation;
@@ -246,7 +311,9 @@ namespace EntJoy.ECS
             var info = _componentTypeInfos[type.Id];
             if (info.DisposeFn != null)
             {
-                info.DisposeFn(ptr);
+                _disposalDepth++;
+                try { info.DisposeFn(ptr); }
+                finally { _disposalDepth--; }
             }
             else if (info.IsDisposable)
             {
@@ -265,6 +332,7 @@ namespace EntJoy.ECS
             var info = _componentTypeInfos[type.Id];
             if (info.CopyFn != null)
             {
+                using var preparation = BeginCopyPreparation();
                 info.CopyFn(src, dst);
             }
             else if (info.IsCopyable)
@@ -277,6 +345,19 @@ namespace EntJoy.ECS
             {
                 Unsafe.CopyBlock(dst, src, (uint)type.Size);
             }
+        }
+
+        internal static void ValidateCopySupport(ComponentType type)
+        {
+            if (type.Size <= 0 || type.Size != GetComponentType(type.Type).Size)
+                throw new InvalidOperationException($"Clone source layout is incompatible with '{type.Type}'.");
+            var info = _componentTypeInfos[type.Id];
+            if (info.IsDisposable && (!info.IsCopyable || info.DisposeFn == null))
+                throw new InvalidOperationException($"Component '{type.Type}' requires registered copy and disposal hooks to clone.");
+            if (info.IsCopyable && info.CopyFn == null)
+                throw new InvalidOperationException($"Component '{type.Type}' requires a registered copy hook.");
+            if (type.IsShared && (info.IsCopyable || info.IsDisposable))
+                throw new NotSupportedException("Cloning shared components with ownership hooks is not supported.");
         }
 
         /// <summary>按 id 反查类型（布局指纹登记时要拿 owner 程序集；找不到返回 false）。</summary>

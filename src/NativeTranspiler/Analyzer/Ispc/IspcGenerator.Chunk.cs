@@ -62,7 +62,7 @@ namespace NativeTranspiler.Analyzer.Common
             string mtParams = $"{paramsList}, uniform int numTasks";
             sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
             sb.AppendLine("{");
-            string callArgs = $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count";
+            string callArgs = $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count, __query_bits, __query_length";
             if (usesSendEvent)
                 callArgs += ", __eventBufferHeaders, __eventBufferCount";
             sb.AppendLine($"{Indent}launch[max(1, numTasks)] {baseName}_task({callArgs});");
@@ -296,6 +296,8 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine();
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
             sb.AppendLine("{");
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
             sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
@@ -305,7 +307,8 @@ namespace NativeTranspiler.Analyzer.Common
             // IJobEntity：轻量 ChunkData 路径（转换 ChunkJobData → ChunkData）
             if (CppJobGenerator.IsEntityJob(jobStruct))
             {
-                sb.AppendLine("    ChunkData __chunkDataLite;");
+                sb.AppendLine("    ChunkData __chunkDataLite{};");
+                sb.AppendLine("    __chunkDataLite.filter = __chunkData->filter;");
                 sb.AppendLine("    __chunkDataLite.componentArrays = __chunkData->requiredComponentArrays;");
                 sb.AppendLine("    __chunkDataLite.entityCount = __chunkData->entityCount;");
                 sb.AppendLine("    __chunkDataLite.requiredComponentCount = __chunkData->requiredComponentCount;");
@@ -392,12 +395,11 @@ namespace NativeTranspiler.Analyzer.Common
             callArgs.Add(CppJobGenerator.IsEntityJob(jobStruct)
                 ? "__chunkDataLite.entityCount"
                 : "__chunkData->entityCount");
+            callArgs.Add("__queryMask.Bits");
+            callArgs.Add("__queryMask.Length");
             // DOTS 式 Entity 参数：实体数组指针（ispc::__EntJoyEntity*，与 ISPC 签名 uniform __EntJoyEntity {name}_ptr[] 对应）
             foreach (var epName in entityParamNames)
                 callArgs.Add($"reinterpret_cast<ispc::__EntJoyEntity*>(__chunkDataLite.entityArray)");
-            // ISPC MT for non-entity jobs uses a separate _mt_impl that takes numTasks
-            if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
-                callArgs.Add("std::thread::hardware_concurrency()");
             // SendEvent: 传递 EventBuffer 元数据（无事件时传 0/null，非 event job 零开销）
             bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
             if (usesSendEvent)
@@ -405,6 +407,8 @@ namespace NativeTranspiler.Analyzer.Common
                 callArgs.Add("(void*)__header->eventBufferHeaders");
                 callArgs.Add("__header->eventBufferCount");
             }
+            if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
+                callArgs.Add("std::thread::hardware_concurrency()");
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
 
             foreach (var field in fields)
@@ -484,7 +488,8 @@ namespace NativeTranspiler.Analyzer.Common
                 if (scalar) sb.AppendLine($"{Indent}if (programIndex != 0) return;");
                 var entityTranslator = new IspcStatementTranslator(semanticModel, jobStruct, null, false, useUniformVars: scalar);
                 foreach (var parameter in executeMethod.Parameters)
-                    if (!NativeTranspiler.IsEntityType(parameter.Type))
+                    if (!NativeTranspiler.IsEntityType(parameter.Type)
+                        && !(NativeTranspileValidator.IsRelationComponentType(parameter.Type) && parameter.RefKind == RefKind.None))
                         entityTranslator.AddEntityRefParam(parameter.Name);
                 entityTranslator.SetInsideForeach(!scalar);
                 entityTranslator.SetInsideBatchIndexLoop(true);
@@ -494,9 +499,13 @@ namespace NativeTranspiler.Analyzer.Common
                 var bodyCode = entityTranslator.Translate(methodSyntax.Body);
                 sb.AppendLine(scalar ? "    for (uniform int __entity_index = 0; __entity_index < __entity_count; ++__entity_index) {"
                     : "    foreach_tiled (__entity_index = 0 ... __entity_count) {");
+                sb.AppendLine("        if (__query_length != 0 && (__query_bits[__entity_index >> 6] & ((uint64)1 << (__entity_index & 63))) == 0) continue;");
                 // Entity 参数解引用为局部结构体（body 内通过 entity.Id / entity.Version 访问）
                 foreach (var ep in entityParams)
                     sb.AppendLine($"{Indent}{Indent}{(scalar ? "uniform " : "")}__EntJoyEntity {ep.Name} = {ep.Name}_ptr[__entity_index];");
+                foreach (var parameter in executeMethod.Parameters)
+                    if (NativeTranspileValidator.IsRelationComponentType(parameter.Type) && parameter.RefKind == RefKind.None)
+                        sb.AppendLine($"{Indent}{Indent}{(scalar ? "uniform " : "")}{IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type))} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
                 foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
                 {
                     if (line.Length == 0) continue;
@@ -532,7 +541,8 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 if (pars.Length > 0) pars.Append(", ");
                 var ispcType = IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(type));
-                pars.Append($"uniform {ispcType} {name}_ptr[]");
+                string readOnly = NativeTranspileValidator.IsRelationComponentType(type) ? "const " : "";
+                pars.Append($"uniform {readOnly}{ispcType} {name}_ptr[]");
             }
 
             foreach (var (type, name) in fields)
@@ -567,7 +577,7 @@ namespace NativeTranspiler.Analyzer.Common
 
             if (pars.Length > 0)
                 pars.Append(", ");
-            pars.Append("uniform int __entity_count");
+            pars.Append("uniform int __entity_count, uniform const uint64 __query_bits[], uniform int __query_length");
 
             return pars.ToString();
         }
@@ -589,7 +599,7 @@ namespace NativeTranspiler.Analyzer.Common
                     if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                         continue;
                     if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
-                        methodSymbol.Name != Config.GetComponentDataNativeArray ||
+                        !Config.IsChunkArrayAccess(methodSymbol.Name) ||
                         methodSymbol.TypeArguments.Length == 0 ||
                         methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)
                     {

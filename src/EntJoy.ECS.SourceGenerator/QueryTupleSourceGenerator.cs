@@ -103,7 +103,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    private ulong[] _combinedMask;");
             sb.AppendLine("    private ulong[] _maskBuffer;");
             sb.AppendLine("    private int _ulongCount;");
-            sb.AppendLine("    private int _startStructuralVersion;");
+            sb.AppendLine("    private readonly QueryReadState _readState;");
             sb.AppendLine();
             sb.AppendLine($"    internal QueryEnumerator(EntityManager entityManager, QueryBuilder builder)");
             sb.AppendLine("    {");
@@ -123,7 +123,8 @@ namespace EntJoy.ECS.SourceGenerator
             }
             sb.AppendLine("        _combinedMask = null;");
             sb.AppendLine("        _ulongCount = 0;");
-            sb.AppendLine("        _startStructuralVersion = entityManager.StructuralVersion;");
+            string relationTypes = string.Join(" || ", genParams.Select(g => $"ComponentTypeManager.IsRelationType<{g}>()"));
+            sb.AppendLine($"        _readState = new QueryReadState(entityManager, builder.HasRelationshipFilter || {relationTypes});");
             sb.AppendLine("    }");
             sb.AppendLine();
 
@@ -261,8 +262,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
-            sb.AppendLine("        if (_entityManager.StructuralVersion != _startStructuralVersion)");
-            sb.AppendLine("            throw new InvalidOperationException(\"Structural change detected during query iteration.\");");
+            sb.AppendLine("        _readState.Validate();");
             sb.AppendLine("        if (_currentChunk.MemoryBlock != nint.Zero)");
             sb.AppendLine("            _slotIndex++;");
             sb.AppendLine("        return Advance();");
@@ -300,7 +300,11 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("                        int bitIndex = BitOperations.TrailingZeroCount(mask);");
             sb.AppendLine("                        _slotIndex += bitIndex;");
             sb.AppendLine("                        if (_slotIndex < _count)");
-            sb.AppendLine("                            return true;");
+            sb.AppendLine("                        {");
+            sb.AppendLine("                            if (!_builder.HasRelationshipFilter || _entityManager.MatchesRelationshipFilter(_builder, _currentChunk, _slotIndex)) return true;");
+            sb.AppendLine("                            _slotIndex++;");
+            sb.AppendLine("                            continue;");
+            sb.AppendLine("                        }");
             sb.AppendLine("                        break;");
             sb.AppendLine("                    }");
             sb.AppendLine("                    _slotIndex = (ulongIdx + 1) << 6;");
@@ -309,7 +313,11 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("            else");
             sb.AppendLine("            {");
             sb.AppendLine("                if (_slotIndex < _count)");
-            sb.AppendLine("                    return true;");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (!_builder.HasRelationshipFilter || _entityManager.MatchesRelationshipFilter(_builder, _currentChunk, _slotIndex)) return true;");
+            sb.AppendLine("                    _slotIndex++;");
+            sb.AppendLine("                    continue;");
+            sb.AppendLine("                }");
             sb.AppendLine("            }");
             sb.AppendLine("            _currentChunk = default;");
             sb.AppendLine("        }");
@@ -320,6 +328,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("        get");
             sb.AppendLine("        {");
+            sb.AppendLine("            _readState.Validate();");
             sb.AppendLine("            if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();");
             sb.Append($"            return new EntityQueryResult<{genList}>(");
             for (int i = 0; i < n; i++)
@@ -327,7 +336,7 @@ namespace EntJoy.ECS.SourceGenerator
                 if (i > 0) sb.Append(", ");
                 sb.Append($"_t{i}Base + _slotIndex");
             }
-            sb.AppendLine(");");
+            sb.AppendLine(", _readState);");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -340,18 +349,24 @@ namespace EntJoy.ECS.SourceGenerator
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"    private readonly {genParams[i]}* _c{i};");
             sb.AppendLine();
-            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))})");
+            sb.AppendLine("    private readonly QueryReadState _readState;");
+            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))}, QueryReadState readState = default)");
             sb.AppendLine("    {");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"        _c{i} = c{i};");
+            sb.AppendLine("        _readState = readState;");
             sb.AppendLine("    }");
             sb.AppendLine();
             for (int i = 0; i < n; i++)
             {
+                sb.AppendLine($"    public ref readonly {genParams[i]} ReadOnlyComp{i}");
+                sb.AppendLine("    {");
+                sb.AppendLine($"        get {{ _readState.Validate(); return ref *_c{i}; }}");
+                sb.AppendLine("    }");
                 sb.AppendLine($"    public ref {genParams[i]} Comp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get => ref *_c{i};");
+                sb.AppendLine($"        get {{ _readState.ValidateRelationshipView(); ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(); return ref *_c{i}; }}");
                 sb.AppendLine("    }");
             }
             sb.AppendLine("}");

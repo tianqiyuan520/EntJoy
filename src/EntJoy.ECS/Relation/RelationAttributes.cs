@@ -4,11 +4,17 @@ namespace EntJoy.ECS
 {
     /// <summary>
     /// 独占关系（真 1:1）：标记的关系类型在 AddRelationship 时，若 target 已被其他 source 指向，
-    /// 自动解绑旧 source（Flecs EcsExclusive 语义）。出边单值（列存储），入边唯一。
+    /// 自动解绑旧 source。出边单值（列存储），入边唯一。
     /// 与 <see cref="MultiRelationAttribute"/> 互斥。
     /// </summary>
     [AttributeUsage(AttributeTargets.Struct)]
     public sealed class ExclusiveRelationAttribute : Attribute
+    {
+    }
+
+    /// <summary>单目标关系必须无环；建立或重绑前校验同类型的目标链。</summary>
+    [AttributeUsage(AttributeTargets.Struct)]
+    public sealed class AcyclicRelationAttribute : Attribute
     {
     }
 

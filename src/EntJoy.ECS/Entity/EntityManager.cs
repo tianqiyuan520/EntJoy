@@ -14,7 +14,7 @@ namespace EntJoy.ECS
 {
     public unsafe partial class EntityManager : IDisposable
     {
-        private readonly Dictionary<int, List<Archetype>> archetypeMap;  // 原型映射表（哈希 -> Archetype 列表，防碰撞）
+        private Dictionary<int, List<Archetype>> archetypeMap;  // 原型映射表（哈希 -> Archetype 列表，防碰撞）
         private Archetype[] allArchetypes;  // 所有原型数组
 
         private int archetypeCount;
@@ -155,20 +155,22 @@ namespace EntJoy.ECS
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
         // 多实例关系（[MultiRelation]）正向存储（source → targets 列表）；反向复用 _relationIndex
-        private readonly RelationListStore _relationListStore = new();
+        private RelationListStore _relationListStore = new();
 
 
         public EntityManager()
         {
-            _recycleCapacity = 0;
-            _recycleCount = 0;
-            _recycleStack = (Entity*)System.Runtime.InteropServices.Marshal.AllocHGlobal(1024 * sizeof(Entity));
-            _recycleCapacity = 1024;
             entities = new EntityIndexInWorld[32];  // 初始实体数组
-            _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
-            _locateBCapacity = entities.Length;
             archetypeMap = new Dictionary<int, List<Archetype>>();  // 初始化原型映射（哈希 -> Archetype 列表）
             allArchetypes = new Archetype[8];  // 初始原型数组
+            _recycleStack = (Entity*)Marshal.AllocHGlobal(1024 * sizeof(Entity));
+            _recycleCapacity = 1024;
+            try
+            {
+                _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
+                _locateBCapacity = entities.Length;
+            }
+            catch { Marshal.FreeHGlobal((nint)_recycleStack); _recycleStack = null; throw; }
         }
 
         /// <summary>
@@ -192,7 +194,7 @@ namespace EntJoy.ECS
                 archetypeMap[hash] = archetypeList;
             }
             // 不存在具体匹配的 Archetype，创建新原型
-            var archetype = new Archetype(types.ToArray());
+            var archetype = new Archetype(types.ToArray()) { Owner = this };
             archetype.ArchetypeId = _nextArchetypeId++;
             archetypeList.Add(archetype);
             //检查原型数组容量
@@ -259,7 +261,7 @@ namespace EntJoy.ECS
             entityCount = 0;
         }
 
-        private void CheckDisposed()
+        internal void CheckDisposed()
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(EntityManager));
@@ -289,6 +291,10 @@ namespace EntJoy.ECS
 
         internal void CompleteActiveJobs()
         {
+            if (ComponentTypeManager.IsCopyingComponent)
+                throw new InvalidOperationException("ECS changes are not allowed inside component copy hooks.");
+            if (ComponentTypeManager.IsDisposingComponent)
+                throw new InvalidOperationException("ECS changes are not allowed inside component Dispose. Use DeferredCommandBuffer.");
             if (NativeJobScheduler.IsExecutingJob)
             {
                 throw new InvalidOperationException("Structural changes are not allowed while a scheduled job is executing. Complete the job before modifying entities or components.");
@@ -456,6 +462,10 @@ namespace EntJoy.ECS
         /// </summary>
         private void CompleteEntityJobs(Entity entity, Archetype? extra = null)
         {
+            if (ComponentTypeManager.IsCopyingComponent)
+                throw new InvalidOperationException("ECS changes are not allowed inside component copy hooks.");
+            if (ComponentTypeManager.IsDisposingComponent)
+                throw new InvalidOperationException("ECS changes are not allowed inside component Dispose. Use DeferredCommandBuffer.");
             // Observer 重入保护（与 CompleteActiveJobs 同一契约）：
             // Added/Set 派发把指向 chunk 组件列的值指针直接交给回调（零拷贝 span），
             // 不加这道闸门根本拦不住。约定：回调内结构变更请走 DeferredCommandBuffer。
@@ -488,9 +498,10 @@ namespace EntJoy.ECS
         }
 
         /// <summary>从 Archetype 移除实体槽位，并修正 swap-pop 搬移实体与空 chunk 压缩后的位置索引。</summary>
-        private void RemoveAndFixup(Archetype arch, int chunkIndex, int slotInChunk)
+        private void RemoveAndFixup(Archetype arch, int chunkIndex, int slotInChunk,
+            bool continueOnDisposeError = false, bool skipDisposal = false)
         {
-            var result = arch.Remove(chunkIndex, slotInChunk);
+            var result = arch.Remove(chunkIndex, slotInChunk, continueOnDisposeError, skipDisposal);
             if (result.MovedEntityId >= 0)
                 UpdateEntityLocation(result.MovedEntityId, arch, chunkIndex, result.MovedEntitySlot);
             if (result.CompactedChunkIndex >= 0)
@@ -817,8 +828,9 @@ namespace EntJoy.ECS
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ValidateEntity(Entity entity)
+        internal void ValidateEntity(Entity entity)
         {
+            CheckDisposed();
             if ((uint)entity.Id >= (uint)entities.Length)
                 throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
             ref var info = ref GetEntityInfoRef(entity.Id);
@@ -900,6 +912,7 @@ namespace EntJoy.ECS
                 {
                     foreach (var t in types)
                     {
+                        if (t.IsRelation) continue;
                         if (_observers.TryGetValue(t.Id, out var reg) && reg.Added.Count > 0)
                         {
                             int compIdx = targetArch.GetComponentTypeIndex(t);
@@ -969,8 +982,21 @@ namespace EntJoy.ECS
         public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
         {
             CheckDisposed();
-            CompleteEntityJobs(entity);
             var componentType = ComponentTypeManager.GetComponentType(typeof(T));
+            if (componentType.IsRelation)
+            {
+                CompleteRelationWriteJobs(entity, componentType);
+                using var changes = BeginRelationChanges();
+                lock (_structuralLock)
+                {
+                    ValidateEntity(entity);
+                    if (!GetEntityInfoRef(entity.Id).Archetype.Has(componentType.Type))
+                        throw new InvalidOperationException($"Entity {entity} has no '{componentType.Type}' column.");
+                    SetSingleRelationCore(entity, componentType, (byte*)Unsafe.AsPointer(ref value), sizeof(T));
+                }
+                return;
+            }
+            CompleteEntityJobs(entity);
             int typeId = componentType.Id;
             if (!TryGetComponentPointer(entity, typeId, sizeof(T), out void* ptr))
                 throw new InvalidOperationException(
@@ -1016,6 +1042,24 @@ namespace EntJoy.ECS
         {
             if (count <= 0 || elemSize <= 0 || srcEntities == null || srcValues == null) return 0;
             if (_locateB == null) return 0;
+            var metadata = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(componentTypeId));
+            if (metadata.IsRelation)
+            {
+                if (metadata.Size != elemSize) throw new ArgumentException("Relationship value size does not match its column.");
+                CompleteActiveJobs();
+                using var changes = BeginRelationChanges();
+                lock (_structuralLock)
+                {
+                    int updated = 0;
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (!IsAlive(srcEntities[i]) || !GetEntityInfoRef(srcEntities[i].Id).Archetype.Has(metadata.Type)) continue;
+                        SetSingleRelationCore(srcEntities[i], metadata, srcValues + (long)i * elemSize, elemSize);
+                        updated++;
+                    }
+                    return updated;
+                }
+            }
             int written = 0;
             int cachedArchetypeId = -1;
             int compIdx = -1;
@@ -1104,6 +1148,7 @@ namespace EntJoy.ECS
         {
             foreach (var t in types)
             {
+                if (t.IsRelation) continue;
                 if (!_observers!.TryGetValue(t.Id, out var reg) || reg.Added.Count == 0) continue;
 
                 int compIdx = targetArch.GetComponentTypeIndex(t);
@@ -1166,64 +1211,37 @@ namespace EntJoy.ECS
             CheckDisposed();
             if (targets == null || count <= 0) return 0;
             CompleteActiveJobs();
-            lock (_structuralLock)
-            {
-                int destroyed = 0;
-                for (int i = 0; i < count; i++)
-                {
-                    int id = targets[i].Id;
-                    if ((uint)id >= (uint)entities.Length) continue;
-                    ref var info = ref entities[id];
-                    if (info.Archetype == null) continue;
-                    if (info.Version != targets[i].Version) continue;
-                    DestroyEntityInternal(targets[i]);   // 锁内版本：含 Observer 与关系索引清理
-                    destroyed++;
-                }
-                return destroyed;
-            }
+            using var changes = BeginRelationChanges();
+            lock (_structuralLock) return DestroyRelationGraph(new ReadOnlySpan<Entity>(targets, count));
         }
 
         /// <summary>
         /// 清空某 Archetype 的全部实体（ClearAll 快路径）：代价 O(Chunk 数) 而非 O(实体数)——
         /// 逐实体只做"清两表 + Id 回池"，Chunk/slab 整批释放（不做 swap-pop 与空 chunk 压缩）。
         ///
-        /// ⚠ 含关系列的 Archetype 会自动退回逐实体 <see cref="DestroyEntityInternal"/> 路径
-        /// （关系反向索引需要逐实体清理），此时退化为 O(实体数)。
+        /// 关系、资源和 Observer 走统一生命周期；返回数包含级联销毁的实体。
         /// </summary>
         public unsafe long DestroyAllInArchetype(Archetype archetype)
         {
             CheckDisposed();
             if (archetype == null) return 0;
             CompleteActiveJobs();
+            using var changes = BeginRelationChanges();
             lock (_structuralLock)
             {
-                // 关系列存在时不能用快路径（反向索引/多值关系需要逐实体清理）
-                bool hasRelation = false;
                 var types = archetype.Types;
-                for (int i = 0; i < types.Length; i++)
-                    if (types[i].IsRelation) { hasRelation = true; break; }
-
-                long destroyed = 0;
+                bool needsLifecycle = !_relationIndex.IsEmpty || _observerCount > 0;
+                foreach (var type in types) needsLifecycle |= type.IsRelation || type.IsDisposable;
                 var chunks = archetype.ChunkList;
-                if (hasRelation)
+                if (needsLifecycle)
                 {
-                    for (int c = 0; c < chunks.Count; c++)
-                    {
-                        var chunk = chunks[c];
-                        int ec = chunk.EntityCount;
-                        for (int slot = 0; slot < ec; slot++)
-                        {
-                            var e = chunk.GetEntity(slot);
-                            if ((uint)e.Id >= (uint)entities.Length) continue;
-                            ref var info = ref entities[e.Id];
-                            if (info.Archetype == null || info.Version != e.Version) continue;
-                            DestroyEntityInternal(e);
-                            destroyed++;
-                        }
-                    }
-                    return destroyed;
+                    var targets = new Entity[checked((int)archetype.EntityCount)];
+                    int index = 0;
+                    foreach (var chunk in chunks)
+                        for (int slot = 0; slot < chunk.EntityCount; slot++) targets[index++] = chunk.GetEntity(slot);
+                    return DestroyRelationGraph(targets);
                 }
-
+                long destroyed = 0;
                 for (int c = 0; c < chunks.Count; c++)
                 {
                     var chunk = chunks[c];
@@ -1240,7 +1258,7 @@ namespace EntJoy.ECS
                         // 本 archetype 没有关系列，但这些实体可能被别人指向（target 侧）：
                         // 必须清掉反向索引条目，否则死 id 的索引永久残留，
                         // （本 archetype 无关系列 ⇒ 实体自身没有出边，故不需要 CleanupSourceRelations。）
-                        _relationIndex.ClearTarget(e.Id);
+                        _relationIndex.ClearTarget(e);
                         PushRecycled(e);   // Id 回池，后续 Spawn 复用（Version+1 防悬垂）
                         destroyed++;
                     }
@@ -1254,77 +1272,24 @@ namespace EntJoy.ECS
         public void DestroyEntity(Entity entity)
         {
             CheckDisposed();
-            // 声明式级联（[OnTargetDeleted(Cascade=true)]）会销毁其他 archetype 的 sources → 需全量等待 jobs
-            bool hasCascadeSources = (uint)entity.Id < (uint)entities.Length
-                && _relationIndex.TryGetSources(entity.Id, out var cascadeByType)
-                && HasCascadeDeclaredSources(cascadeByType);
-
-            // 声明式级联会销毁其他 archetype 的 sources → 需全量等待 jobs；否则只等实体所属 Archetype。
-            if (hasCascadeSources)
-                CompleteActiveJobs();
-            else
-                CompleteEntityJobs(entity);
+            if (_relationIndex.TryGetSources(entity, out _)) CompleteActiveJobs();
+            else CompleteEntityJobs(entity);
+            using var changes = BeginRelationChanges();
             lock (_structuralLock)
             {
-                // 锁内二次确认后执行声明式级联（target 销毁 → 级联销毁其 sources，递归防环）
-                if (hasCascadeSources &&
-                    _relationIndex.TryGetSources(entity.Id, out var byType) &&
-                    HasCascadeDeclaredSources(byType))
-                {
-                    var visited = new HashSet<int>();
-                    var toDestroy = new List<Entity>();
-                    CollectDeclaredCascade(entity, visited, toDestroy);
-                    foreach (var e in toDestroy)
-                    {
-                        if (e.Id != entity.Id)   // entity 本身由下方 DestroyEntityCore 统一处理
-                            DestroyEntityInternal(e);
-                    }
-                }
-                DestroyEntityCore(entity);
+                ValidateEntityForDestruction(entity);
+                if (!IsAlive(entity)) return;
+                DestroyRelationGraph(System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref entity, 1));
             }
         }
 
-        /// <summary>是否存在声明了 [OnTargetDeleted(Cascade=true)] 的关系类型指向该实体。</summary>
-        private static bool HasCascadeDeclaredSources(Dictionary<int, HashSet<Entity>> byType)
+        private void ValidateEntityForDestruction(Entity entity)
         {
-            foreach (var kv in byType)
-            {
-                if (ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) return true;
-            }
-            return false;
+            if ((uint)entity.Id >= (uint)entities.Length || GetEntityInfoRef(entity.Id).Version != entity.Version)
+                throw new InvalidOperationException($"Entity {entity} has an invalid ID or stale version.");
         }
 
-        /// <summary>
-        /// 收集声明级联子树（仅沿 CascadeOnTargetDeleted 关系类型向下，防环）。
-        /// 迭代 DFS（显式栈）：理由同 <see cref="CollectCascade"/> —— 递归版在深链上
-        /// <c>StackOverflowException</c> 会直接终止进程。
-        /// </summary>
-        private void CollectDeclaredCascade(Entity entity, HashSet<int> visited, List<Entity> toDestroy)
-        {
-            var stack = new Stack<Entity>();
-            stack.Push(entity);
-
-            while (stack.Count > 0)
-            {
-                Entity cur = stack.Pop();
-                if (!visited.Add(cur.Id)) continue;  // 防环
-                toDestroy.Add(cur);
-
-                if (!_relationIndex.TryGetSources(cur.Id, out var byType)) continue;
-                foreach (var kv in byType)
-                {
-                    if (!ComponentTypeManager.GetCascadeOnTargetDeleted(kv.Key)) continue;   // 仅沿声明级联的关系类型
-                    foreach (var source in kv.Value)
-                    {
-                        if (!IsAlive(source)) continue;
-                        if (!StillPointsToRelation(source, cur, kv.Key)) continue;   // 槽位校验：防索引滞后误伤
-                        stack.Push(source);
-                    }
-                }
-            }
-        }
-
-        /// <summary>校验 source 是否通过指定关系类型 relTypeId 指向 target（列或多值列表）。</summary>
+        /// <summary>校验 source 是否通过指定关系类型指向 target。</summary>
         private bool StillPointsToRelation(Entity source, Entity target, int relTypeId)
         {
             if ((uint)source.Id >= (uint)entities.Length) return false;
@@ -1358,59 +1323,29 @@ namespace EntJoy.ECS
             if (!info.Archetype.Has(type)) return false;
             int compIdx1 = info.Archetype.GetComponentTypeIndex(compType);
             var chunk1 = info.Archetype.ChunkList[info.ChunkIndex];
-            var slot1 = chunk1.GetComponent<RelationSlot>(info.SlotInChunk, compIdx1);
+            var slot1 = chunk1.GetComponentReadOnly<RelationSlot>(info.SlotInChunk, compIdx1);
             return slot1.TargetId == target.Id && slot1.TargetVersion == target.Version;
         }
 
         /// <summary>
         /// 销毁实体核心（调用方必须已持有 _structuralLock）。含 Observer Destroyed 派发。
         /// </summary>
-        private unsafe void DestroyEntityCore(Entity entity)
+        private unsafe void DestroyEntityCore(Entity entity, List<RelationNotification> preparedNotifications = null, bool notificationsPrepared = false)
         {
             if ((uint)entity.Id >= (uint)entities.Length)
                 throw new InvalidOperationException($"Entity {entity} has an invalid ID.");
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
-            // 版本不匹配：旧句柄指向已回收再生的实体
             if (entityInfoRef.Version != entity.Version)
                 throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             var archetype = entityInfoRef.Archetype;
-            if (archetype == null)
-            {
-                return;
-            }
-
+            if (archetype == null) return;
             int oldChunkIndex = entityInfoRef.ChunkIndex;
-            var oldArchetype = archetype;
-
-            // 清理本实体作为 source 的所有关系索引条目（遍历其关系列）
-            CleanupSourceRelations(entity, entityInfoRef, oldArchetype);
-            // 清理本实体作为 source 的多值关系（[MultiRelation] 正向列表 + 反向索引）
+            var notifications = notificationsPrepared ? preparedNotifications : CaptureDestroyedNotifications(entity);
+            CleanupSourceRelations(entity, entityInfoRef, archetype);
             CleanupMultiSourceRelations(entity);
-            // 清理本实体作为 target 的反向索引条目（否则已销毁 target 的索引残留 → 泄漏 + 失效关系误返回）
-            _relationIndex.ClearTarget(entity.Id);
+            _relationIndex.ClearTarget(entity);
 
-            // Observer：Destroyed（销毁前快照已订阅组件值；派发在销毁后，实体仍可解析）
-            List<(int typeId, IntPtr snapshotPtr)>? destroyedSnapshots = null;
-            if (_observerCount > 0 && _observers != null && oldArchetype != null)
-            {
-                destroyedSnapshots = new List<(int, IntPtr)>();
-                foreach (var t in oldArchetype.Types)
-                {
-                    // IDisposable 组件持有原生内存，销毁后其快照会悬垂（缓冲区已释放），跳过快照
-                    if (t.IsDisposable) continue;
-                    if (_observers.TryGetValue(t.Id, out var reg) && reg.Destroyed.Count > 0)
-                    {
-                        int compIdx = oldArchetype.GetComponentTypeIndex(t);
-                        var chunk = oldArchetype.ChunkList[oldChunkIndex];
-                        void* srcPtr = (void*)(chunk.GetComponentArrayPointer(compIdx) + entityInfoRef.SlotInChunk * t.Size);
-                        var snapshot = (byte*)System.Runtime.InteropServices.Marshal.AllocHGlobal(t.Size);
-                        System.Runtime.CompilerServices.Unsafe.CopyBlock(snapshot, srcPtr, (uint)t.Size);
-                        destroyedSnapshots.Add((t.Id, (IntPtr)snapshot));
-                    }
-                }
-            }
-
-            RemoveAndFixup(archetype, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+            RemoveAndFixup(archetype, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, continueOnDisposeError: true);
 
             entityInfoRef.Archetype = null;
             entityInfoRef.ChunkIndex = -1;
@@ -1418,23 +1353,9 @@ namespace EntJoy.ECS
             ClearLocateB(entity.Id);
             PushRecycled(entity);
             structuralVersion++;
-
-            // Observer：派发 Destroyed（销毁后派发，实体仍可解析；用销毁前快照）
-            if (destroyedSnapshots != null)
-            {
-                foreach (var (typeId, snapshotPtr) in destroyedSnapshots)
-                {
-                    try
-                    {
-                        if (_observers!.TryGetValue(typeId, out var reg) && reg.Destroyed.Count > 0)
-                            DispatchRemoved(reg.Destroyed, &entity, (void*)snapshotPtr, 1);
-                    }
-                    finally
-                    {
-                        System.Runtime.InteropServices.Marshal.FreeHGlobal(snapshotPtr);
-                    }
-                }
-            }
+            _relationshipVersion++;
+            if (notifications != null)
+                foreach (var notification in notifications) CommitRelationNotification(notification);
         }
 
     }
@@ -1469,6 +1390,9 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             var componentType = ComponentTypeManager.GetTypeByComponentType(componentTypeId);
+            bool relationship = ComponentTypeManager.GetComponentType(componentType).IsRelation;
+            if (relationship) CompleteRelationWriteJobs(entity, ComponentTypeManager.GetComponentType(componentType));
+            using var relationChanges = relationship ? BeginRelationChanges() : default;
             Archetype? targetArch = null;
             if ((uint)entity.Id < (uint)entities.Length)
             {
@@ -1489,6 +1413,9 @@ namespace EntJoy.ECS
         public unsafe void AddComponentRaw(Entity entity, Type componentType, object value)
         {
             CheckDisposed();
+            bool relationship = ComponentTypeManager.GetComponentType(componentType).IsRelation;
+            if (relationship) CompleteRelationWriteJobs(entity, ComponentTypeManager.GetComponentType(componentType));
+            using var relationChanges = relationship ? BeginRelationChanges() : default;
             // 组件不存在时才解析迁移目标 Archetype（存在时原地 SetRaw，只等实体所属 Archetype）。
             Archetype? targetArch = null;
             if ((uint)entity.Id < (uint)entities.Length)
@@ -1514,12 +1441,43 @@ namespace EntJoy.ECS
             Buffer.MemoryCopy(src, colBase + (long)slotInChunk * elemSize, elemSize, elemSize);
         }
 
+        /// <summary>解析并缓存增删组件后的目标 Archetype。</summary>
+        private Archetype GetComponentDestination(Archetype source, ComponentType type, bool adding)
+        {
+            var target = adding ? source.GetAddEdge(type) : source.GetRemoveEdge(type);
+            if (target != null) return target;
+            Span<ComponentType> types = stackalloc ComponentType[source.ComponentCount + (adding ? 1 : -1)];
+            int count = 0;
+            foreach (var item in source.Types)
+                if (adding || item.Id != type.Id) types[count++] = item;
+            if (adding) types[count] = type;
+            target = GetOrCreateArchetype(types);
+            if (adding) source.SetAddEdge(type, target);
+            else source.SetRemoveEdge(type, target);
+            return target;
+        }
+
         /// <summary>
         /// 添加组件核心（调用方必须已持有 _structuralLock）。
         /// <paramref name="rawValue"/> 非 null 时走原始字节写入（值以字节为准，忽略 <paramref name="value"/>）。
         /// </summary>
-        private unsafe void AddComponentRawCore(Entity entity, Type componentType, object value, byte* rawValue = null, int rawSize = 0)
+        private unsafe void AddComponentRawCore(Entity entity, Type componentType, object value, byte* rawValue = null, int rawSize = 0,
+            bool relationStorageOnly = false, nint preparedChunk = 0)
         {
+            var metadata = ComponentTypeManager.GetComponentType(componentType);
+            if (metadata.IsRelation && !relationStorageOnly)
+            {
+                if (rawValue != null) SetSingleRelationCore(entity, metadata, rawValue, rawSize);
+                else
+                {
+                    if (value == null) throw new ArgumentNullException(nameof(value));
+                    if (value.GetType() != componentType) throw new ArgumentException("Relation value type does not match its column.", nameof(value));
+                    var pinned = GCHandle.Alloc(value, GCHandleType.Pinned);
+                    try { SetSingleRelationCore(entity, metadata, (byte*)pinned.AddrOfPinnedObject(), metadata.Size); }
+                    finally { pinned.Free(); }
+                }
+                return;
+            }
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
             if (entityInfoRef.Archetype == null)
                 throw new InvalidOperationException($"Entity {entity} has been destroyed.");
@@ -1531,38 +1489,30 @@ namespace EntJoy.ECS
                 if (rawValue != null)
                     WriteColumnBytes(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, rawValue, rawSize);
                 else
-                    oldArch.SetRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
+                    oldArch.SetStorageRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, componentType, value);
                 return;
             }
 
             // Phase 2.1: 走 Add Edge 快路径
-            var compType = ComponentTypeManager.GetComponentType(componentType);
-            var targetArch = oldArch.GetAddEdge(compType);
-            if (targetArch == null)
-            {
-                Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount + 1];
-                oldArch.Types.CopyTo(targetComponents);
-                targetComponents[^1] = compType;
-                targetArch = GetOrCreateArchetype(targetComponents);
-                oldArch.SetAddEdge(compType, targetArch);
-            }
-            targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
+            var compType = metadata;
+            var targetArch = GetComponentDestination(oldArch, compType, adding: true);
+            AddToPreparedChunk(targetArch, entity, preparedChunk, out var chunkIndex, out var slotInChunk);
 
             // 复制组件数据
             oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
 
             // 从旧原型移除（含 swap-pop 搬移实体与空 chunk 压缩的位置修正）
-            RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+            RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, skipDisposal: metadata.IsRelation);
 
             UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
             if (rawValue != null)
                 WriteColumnBytes(targetArch, chunkIndex, slotInChunk, componentType, rawValue, rawSize);
             else
-                targetArch.SetRaw(chunkIndex, slotInChunk, componentType, value);
+                targetArch.SetStorageRaw(chunkIndex, slotInChunk, componentType, value);
             structuralVersion++;
 
             // Observer：Added（迁移完成后派发，回调内实体可查、新组件已存在；count=1）
-            if (_observerCount > 0 && _observers != null &&
+            if (!metadata.IsRelation && _observerCount > 0 && _observers != null &&
                 _observers.TryGetValue(compType.Id, out var reg) && reg.Added.Count > 0)
             {
                 int compIdx = targetArch.GetComponentTypeIndex(compType);
@@ -1577,6 +1527,9 @@ namespace EntJoy.ECS
         public void RemoveComponentRaw(Entity entity, Type componentType)
         {
             CheckDisposed();
+            bool relationship = ComponentTypeManager.GetComponentType(componentType).IsRelation;
+            if (relationship) CompleteActiveJobs();
+            using var relationChanges = relationship ? BeginRelationChanges() : default;
             // 组件存在时才解析迁移目标 Archetype（不存在时核心直接 return，只等实体所属 Archetype）。
             Archetype? targetArch = null;
             if ((uint)entity.Id < (uint)entities.Length)
@@ -1595,8 +1548,15 @@ namespace EntJoy.ECS
         /// <summary>
         /// 移除组件核心（调用方必须已持有 _structuralLock）。
         /// </summary>
-        private unsafe void RemoveComponentRawCore(Entity entity, Type componentType)
+        private unsafe void RemoveComponentRawCore(Entity entity, Type componentType, bool relationStorageOnly = false, nint preparedChunk = 0)
         {
+            var metadata = ComponentTypeManager.GetComponentType(componentType);
+            if (metadata.IsRelation && !relationStorageOnly)
+            {
+                if (metadata.IsMultiRelation) throw new InvalidOperationException($"Use ClearRelationships for '{componentType}'.");
+                RemoveRelationCore(entity, metadata);
+                return;
+            }
             ref var entityInfoRef = ref GetEntityInfoRef(entity.Id);
                 if (entityInfoRef.Archetype == null)
                     throw new InvalidOperationException($"Entity {entity} has been destroyed.");
@@ -1608,7 +1568,7 @@ namespace EntJoy.ECS
 
                 // Observer：Removed（迁移前快照旧值；派发在迁移完成后，回调内实体仍可查）
                 byte* oldValueSnapshot = null;
-                if (_observerCount > 0 && _observers != null)
+                if (!metadata.IsRelation && _observerCount > 0 && _observers != null)
                 {
                     var compTypeForObs = ComponentTypeManager.GetComponentType(componentType);
                     // IDisposable 组件持有原生内存，移除后其快照会悬垂（缓冲区已释放），跳过快照
@@ -1625,24 +1585,12 @@ namespace EntJoy.ECS
                 }
 
                 // Phase 2.1: 走 Remove Edge 快路径
-                var compType = ComponentTypeManager.GetComponentType(componentType);
-                var targetArch = oldArch.GetRemoveEdge(compType);
-                if (targetArch == null)
-                {
-                    Span<ComponentType> targetComponents = stackalloc ComponentType[oldArch.ComponentCount - 1];
-                    int idx = 0;
-                    foreach (var t in oldArch.Types)
-                    {
-                        if (t.Id != compType.Id)
-                            targetComponents[idx++] = t;
-                    }
-                    targetArch = GetOrCreateArchetype(targetComponents);
-                    oldArch.SetRemoveEdge(compType, targetArch);
-                }
-                targetArch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
+                var compType = metadata;
+                var targetArch = GetComponentDestination(oldArch, compType, adding: false);
+                AddToPreparedChunk(targetArch, entity, preparedChunk, out var chunkIndex, out var slotInChunk);
 
                 oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
-                RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+                RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, skipDisposal: metadata.IsRelation);
 
                 UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
                 targetArch.ChunkList[chunkIndex].MarkEntityChanged(slotInChunk);
@@ -1842,90 +1790,16 @@ namespace EntJoy.ECS
         /// <summary>
         /// 从 Prefab 模板实体复制创建 count 个实例（对齐 Unity EntityManager.Instantiate）。
         /// 复制 blittable 组件值（prefab 与实例为独立副本），实例不含 Prefab 标记；
-        /// 含持有原生资源（IDisposable）的组件无法复制，抛异常。
+        /// 持有资源的组件须注册复制与析构 hook；整批准备完成后发布实体与关系。
         /// </summary>
-        public unsafe Entity[] SpawnFrom(Entity prefabEntity, int count)
+        public Entity[] SpawnFrom(Entity prefabEntity, int count)
         {
             CheckDisposed();
             if (count <= 0) return Array.Empty<Entity>();
             CompleteActiveJobs();
-            lock (_structuralLock)
-            {
-                ref var prefabInfo = ref GetEntityInfoRef(prefabEntity.Id);
-                if (prefabInfo.Archetype == null)
-                    throw new InvalidOperationException($"Entity {prefabEntity} has been destroyed.");
-                if (prefabInfo.Version != prefabEntity.Version)
-                    throw new InvalidOperationException($"Entity {prefabEntity} is a stale reference (version mismatch).");
-                var prefabArch = prefabInfo.Archetype;
-                var prefabType = ComponentTypeManager.GetComponentType(typeof(Prefab));
-                if (!prefabArch.HasComponent(prefabType))
-                    throw new InvalidOperationException($"Entity {prefabEntity} is not a Prefab.");
-
-                // 实例 archetype = prefab 去掉 Prefab 标记
-                var instanceTypes = new ComponentType[prefabArch.ComponentCount - 1];
-                int idx = 0;
-                foreach (var t in prefabArch.Types)
-                    if (t.Id != prefabType.Id)
-                        instanceTypes[idx++] = t;
-
-                // 持有原生资源且无复制钩子的组件无法复制（有 ICopyable 钩子的组件走 OnCopy）
-                for (int i = 0; i < instanceTypes.Length; i++)
-                    if (instanceTypes[i].IsDisposable && !instanceTypes[i].IsCopyable)
-                        throw new InvalidOperationException(
-                            $"Prefab 含持有原生资源且无复制钩子的组件 '{instanceTypes[i].Type.Name}'，无法复制。");
-
-                var instanceArch = GetOrCreateArchetype(instanceTypes);
-
-                var prefabChunk = prefabArch.ChunkList[prefabInfo.ChunkIndex];
-                int prefabSlot = prefabInfo.SlotInChunk;
-                var result = new Entity[count];
-
-                for (int i = 0; i < count; i++)
-                {
-                    var newEntity = new Entity();
-                    bool isRecycled = TryPopRecycled(out var recycledEnt);
-                    if (isRecycled)
-                    {
-                        newEntity.Id = recycledEnt.Id;
-                        newEntity.Version = recycledEnt.Version + 1;
-                    }
-                    else
-                    {
-                        newEntity.Id = entityCount++;
-                        if (newEntity.Id >= entities.Length)
-                            Array.Resize(ref entities, entities.Length * 2);
-                            EnsureLocateCapacity(entities.Length);
-                    }
-
-                    instanceArch.AddEntity(newEntity, out var chunkIndex, out var slotInChunk);
-                    UpdateEntityLocation(newEntity.Id, instanceArch, chunkIndex, slotInChunk);
-                    GetEntityInfoRef(newEntity.Id).Version = newEntity.Version;
-                    SetLocateBVersion(newEntity.Id, newEntity.Version);
-
-                    // 复制组件值（ICopyable 走 OnCopy 如 SharedBlob refcount++；普通走位拷贝）
-                    var instanceChunk = instanceArch.ChunkList[chunkIndex];
-                    for (int c = 0; c < instanceTypes.Length; c++)
-                    {
-                        var t = instanceTypes[c];
-                        int prefabCompIdx = prefabArch.GetComponentTypeIndex(t);
-                        int instCompIdx = instanceArch.GetComponentTypeIndex(t);
-                        byte* src = (byte*)prefabChunk.GetComponentArrayPointer(prefabCompIdx) + prefabSlot * t.Size;
-                        byte* dst = (byte*)instanceChunk.GetComponentArrayPointer(instCompIdx) + slotInChunk * t.Size;
-                        ComponentTypeManager.CopyComponentValue(t, src, dst);
-                    }
-
-                    result[i] = newEntity;
-                }
-
-                structuralVersion++;
-
-                if (_observerCount > 0 && _observers != null)
-                    DispatchCreateEntitiesAdded(instanceArch, instanceTypes, result, count);
-
-                return result;
-            }
+            using var changes = BeginRelationChanges();
+            lock (_structuralLock) return CloneEntitiesCore(new[] { prefabEntity }, count, requirePrefab: true);
         }
-
         // 数据导航（调试 dump）
 
         /// <summary>打印单个实体的所有组件字段值（用组件元数据，非反射）。</summary>
@@ -2035,6 +1909,8 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             CompleteActiveJobs();
+            if (_relationListStore.HasRelationships)
+                throw new NotSupportedException("Snapshots cannot serialize managed relationship side-table state.");
             using var ms = new System.IO.MemoryStream();
             using var w = new System.IO.BinaryWriter(ms);
             w.Write(SnapshotMagic.ToCharArray());
@@ -2046,6 +1922,7 @@ namespace EntJoy.ECS
                 if (allArchetypes[i] != null && allArchetypes[i].EntityCount > 0)
                     archetypes.Add(allArchetypes[i]);
 
+            ValidateSnapshotRelationships();
             w.Write(archetypes.Count);
             foreach (var arch in archetypes)
             {
@@ -2090,125 +1967,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>完整校验后恢复组件值，拒绝不兼容快照时保留当前 World。</summary>
-        public unsafe void Restore(WorldSnapshot snapshot)
-        {
-            CheckDisposed();
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
-            if (snapshot.Data == null) throw new System.IO.InvalidDataException("Snapshot data is missing.");
-            using var ms = new System.IO.MemoryStream(snapshot.Data);
-            using var r = new System.IO.BinaryReader(ms);
-
-            ComponentType[][] signatures;
-            long entityData;
-            try
-            {
-                signatures = ReadSnapshotSignatures(r);
-                entityData = ms.Position;
-                ValidateSnapshotPayload(r, signatures);
-            }
-            catch (System.IO.EndOfStreamException error)
-            { throw new System.IO.InvalidDataException("Snapshot is truncated.", error); }
-
-            ms.Position = entityData;
-            ClearWorldInternal();
-
-            int entCount = r.ReadInt32();
-            for (int i = 0; i < entCount; i++)
-            {
-                int id = r.ReadInt32();
-                int version = r.ReadInt32();
-                int archIdx = r.ReadInt32();
-
-                var arch = GetOrCreateArchetype(signatures[archIdx]);
-                if (id >= entities.Length)
-                    Array.Resize(ref entities, Math.Max(entities.Length * 2, id + 1));
-                    EnsureLocateCapacity(entities.Length);
-                if (id >= entityCount) entityCount = id + 1;
-
-                var entity = new Entity { Id = id, Version = version };
-                arch.AddEntity(entity, out var chunkIndex, out var slotInChunk);
-                UpdateEntityLocation(id, arch, chunkIndex, slotInChunk);
-                GetEntityInfoRef(id).Version = version;
-                SetLocateBVersion(id, version);
-
-                for (int c = 0; c < arch.ComponentCount; c++)
-                {
-                    var t = arch.Types[c];
-                    byte* compPtr = (byte*)arch.ChunkList[chunkIndex].GetComponentArrayPointer(c) + slotInChunk * t.Size;
-                    ms.ReadExactly(new Span<byte>(compPtr, t.Size));
-                }
-            }
-
-            structuralVersion++;
-            RebuildRelationIndexes();
-        }
-
-        private void ClearWorldInternal()
-        {
-            CompleteActiveJobs();
-            for (int i = 0; i < archetypeCount; i++)
-            {
-                allArchetypes[i]?.Dispose();
-                allArchetypes[i] = null;
-            }
-            archetypeMap.Clear();
-            ClearRecycled();
-            _relationIndex.Clear();
-            _relationListStore.Clear();
-            _managedLookup.Clear();
-            _managedSharedValues = new object[16];
-            _managedSharedValueCount = 0;
-            _lastChunkPerSharedValue.Clear();
-            entities = new EntityIndexInWorld[Math.Max(256, entities.Length)];
-            // blittable 定位表随实体表一起重建（旧内容全部作废：Archetype 已全部清空）
-            NativeLocateStorage.Free(_locateB);
-            _locateB = NativeLocateStorage.AllocateLocate(entities.Length);
-            _locateBCapacity = entities.Length;
-            archetypeCount = 0;
-            archetypeSetVersion++;   // 整体清空/Restore ⇒ 之前缓存的匹配集合（持有旧 Archetype）全部作废
-            entityCount = 0;
-            structuralVersion++;
-        }
-
-        /// <summary>重建关系反向索引（Restore 恢复实体后调用，遍历所有关系列槽位）。</summary>
-        private unsafe void RebuildRelationIndexes()
-        {
-            _relationIndex.Clear();
-            _relationListStore.Clear();
-            for (int i = 0; i < archetypeCount; i++)
-            {
-                var arch = allArchetypes[i];
-                if (arch == null) continue;
-                foreach (var chunk in arch.ChunkList)
-                {
-                    int entityCount = chunk.EntityCount;
-                    for (int slot = 0; slot < entityCount; slot++)
-                    {
-                        var source = chunk.GetEntity(slot);
-                        for (int c = 0; c < arch.ComponentCount; c++)
-                        {
-                            var ct = arch.Types[c];
-                            if (!ct.IsRelation) continue;
-                            var basePtr = (byte*)chunk.GetComponentArrayPointer(c) + slot * ct.Size;
-                            if (ct.MultiRelationMaxSlots >= 2)
-                            {
-                                for (int s = 0; s < ct.MultiRelationMaxSlots; s++)
-                                {
-                                    var relSlot = ((RelationSlot*)(basePtr + s * 8))[0];
-                                    if (relSlot.IsValid) _relationIndex.Add(ct.Id, source, relSlot.ToEntity());
-                                }
-                            }
-                            else if (!ct.IsMultiRelation)
-                            {
-                                var relSlot = ((RelationSlot*)basePtr)[0];
-                                if (relSlot.IsValid) _relationIndex.Add(ct.Id, source, relSlot.ToEntity());
-                            }
-                            // 托管列表模式（IsMultiRelation && MaxSlots < 2）：RelationListStore 不随快照序列化，跳过
-                        }
-                    }
-                }
-            }
-        }
+        public void Restore(WorldSnapshot snapshot) => RestorePreparedSnapshot(snapshot);
 
         /// <summary>
         /// 设置组件值（泛型版本，调用 SetRaw）
@@ -2226,6 +1985,14 @@ namespace EntJoy.ECS
         public unsafe void SetRaw(Entity entity, Type componentType, object value)
         {
             CheckDisposed();
+            if (ComponentTypeManager.GetComponentType(componentType).IsRelation)
+            {
+                ValidateEntity(entity);
+                if (!GetEntityInfoRef(entity.Id).Archetype.Has(componentType))
+                    throw new InvalidOperationException($"Entity {entity} has no '{componentType}' column.");
+                AddComponentRaw(entity, componentType, value);
+                return;
+            }
             CompleteEntityJobs(entity);
             lock (_structuralLock)
             {
@@ -2288,6 +2055,19 @@ namespace EntJoy.ECS
         /// </summary>
         public unsafe ComponentLookup<T> GetComponentLookup<T>() where T : struct
             => new ComponentLookup<T>(this);
+
+        public ReadOnlyComponentLookup<T> GetReadOnlyComponentLookup<T>() where T : struct
+            => new ReadOnlyComponentLookup<T>(this);
+
+        /// <summary>读取当前组件值副本，不暴露关系列的写入引用。</summary>
+        public T GetComponentReadOnly<T>(Entity entity) where T : struct
+        {
+            CheckDisposed();
+            ValidateEntity(entity);
+            ref var info = ref GetEntityInfoRef(entity.Id);
+            return info.Archetype.ChunkList[info.ChunkIndex]
+                .GetComponentReadOnly<T>(info.SlotInChunk, info.Archetype.GetComponentTypeIndex<T>());
+        }
     }
 
     public unsafe partial class EntityManager

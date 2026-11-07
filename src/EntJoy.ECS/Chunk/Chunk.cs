@@ -98,13 +98,12 @@ namespace EntJoy.ECS
                 Unsafe.InitBlock(compPtr, 0, (uint)compSize);
             }
 
-            // 定长多槽关系列：槽位必须初始化为 RelationSlot.Default（TargetId = -1），而非 {0,0}——
-            // 否则 FindEmptySlot 的"空槽 = TargetId < 0"判定会把未写入槽误判为占用（{0,0} 也是合法 target id 0）。
+            // 每个关系列的空槽使用 -1；全零对应真实实体 0/v0。
             for (int i = 0; i < Meta.ComponentCount; i++)
             {
                 var t = Meta.Archetype.Types[i];
-                if (!t.IsRelation || t.MultiRelationMaxSlots < 2) continue;
-                int maxSlots = t.MultiRelationMaxSlots;
+                if (!t.IsRelation) continue;
+                int maxSlots = Math.Max(1, t.MultiRelationMaxSlots);
                 byte* compPtr = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + _entityCount * Meta.ComponentSizes[i];
                 for (int s = 0; s < maxSlots; s++)
                 {
@@ -132,6 +131,9 @@ namespace EntJoy.ECS
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void RemoveEntity(int index)
+            => RemoveEntity(index, continueOnDisposeError: false);
+
+        internal void RemoveEntity(int index, bool continueOnDisposeError, bool skipDisposal = false)
         {
             if (index < 0 || index >= _entityCount)
                 throw new IndexOutOfRangeException();
@@ -140,10 +142,14 @@ namespace EntJoy.ECS
             var types = Meta.Archetype.Types;
 
             // 销毁离开实体的组件（持有原生内存的组件在此释放资源）
-            for (int i = 0; i < Meta.ComponentCount; i++)
+            for (int i = 0; !skipDisposal && i < Meta.ComponentCount; i++)
             {
                 byte* ptr = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + index * Meta.ComponentSizes[i];
-                ComponentTypeManager.DestroyComponentValue(types[i], ptr);
+                try { ComponentTypeManager.DestroyComponentValue(types[i], ptr); }
+                catch (Exception exception) when (continueOnDisposeError)
+                {
+                    Console.Error.WriteLine($"[ECS] Dispose failed for '{types[i].Type}': {exception}");
+                }
             }
 
             if (lastIndex > index)
@@ -203,6 +209,18 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
+            ref var value = ref GetComponentStorage<T>(entityIndex, componentIndex);
+            if (Meta.Archetype.Types[componentIndex].IsRelation)
+                throw new InvalidOperationException("Relationship columns require GetComponentReadOnly; change values through EntityManager or DeferredCommandBuffer.");
+            return ref value;
+        }
+
+        public ref readonly T GetComponentReadOnly<T>(int entityIndex, int componentIndex) where T : struct
+            => ref GetComponentStorage<T>(entityIndex, componentIndex);
+
+        internal ref T GetComponentStorage<T>(int entityIndex, int componentIndex) where T : struct
+        {
+            Meta.Archetype.CheckReadable();
             if ((uint)entityIndex >= (uint)_entityCount)
                 throw new IndexOutOfRangeException($"Entity index {entityIndex} out of range (count={_entityCount}).");
             if ((uint)componentIndex >= (uint)Meta.ComponentCount)

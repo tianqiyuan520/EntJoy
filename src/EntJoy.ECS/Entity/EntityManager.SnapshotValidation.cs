@@ -10,6 +10,8 @@ namespace EntJoy.ECS
 
         private static void ValidateSnapshotComponent(ComponentType type)
         {
+            if (type.Size <= 0 || type.Size != ComponentTypeManager.GetComponentType(type.Type).Size)
+                throw new InvalidDataException($"Snapshot layout is incompatible with {type.Type}.");
             // These states need ownership/side-table serialization, not raw bytes.
             if (type.IsShared || type.IsEnableable || type.IsMultiRelation
                 || type.IsDisposable || type.IsCopyable)

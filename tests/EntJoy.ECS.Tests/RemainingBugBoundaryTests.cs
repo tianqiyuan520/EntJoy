@@ -115,12 +115,12 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void RawJobRelationshipFilter_IsAlsoRejectedForAnEmptyQuery()
+        public void MalformedRelationshipQuery_IsRejectedBeforeNativeSubmission()
         {
             using var world = new World("RawRelationshipBoundary");
             var query = new QueryBuilder { HasRelationshipFilter = true };
             var job = new SharedFilterProbeJob();
-            Assert.Throws<NotSupportedException>(() => ChunkJobScheduler.ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize(
+            Assert.Throws<ArgumentException>(() => ChunkJobScheduler.ScheduleChunkEntityBatchRawWithWorkerCapAndRangeSize(
                 ref job, world.EntityManager, query, new IntPtr(1), Array.Empty<int>(), 2, 1));
         }
 
@@ -137,7 +137,7 @@ namespace EntJoy.ECS.Tests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void JobRelationshipFilter_RejectsBeforeExecuting(bool schedule)
+        public void JobRelationshipFilter_WithNoSources_DoesNotExecute(bool schedule)
         {
             TestBackend.EnsureInitialized(2);
             using var world = new World("RelationshipJobBoundary");
@@ -145,8 +145,8 @@ namespace EntJoy.ECS.Tests
             var parent = world.EntityManager.NewEntity(typeof(Position));
             var query = new QueryBuilder().WithAll<Position>().WithRelationship<ChildOf>(parent);
             SharedFilterProbeJob.Visited = 0;
-            if (schedule) Assert.Throws<NotSupportedException>(() => new SharedFilterProbeJob().Schedule(query));
-            else Assert.Throws<NotSupportedException>(() => new SharedFilterProbeJob().Run(query));
+            if (schedule) new SharedFilterProbeJob().Schedule(query).Complete();
+            else new SharedFilterProbeJob().Run(query);
             Assert.Equal(0, SharedFilterProbeJob.Visited);
         }
 

@@ -63,6 +63,10 @@ UserColumnFixture.Run();
 TranslationSemanticsFixture.Run();
 DifferentialTranslationFixture.Run();
 ChunkLoopBindingsFixture.Run();
+RelationshipReadFixture.Run();
+RelationshipMaskFixture.Run();
+RelationshipDependencyFixture.Run();
+RelationshipCommandFixture.Run();
 #if ENTJOY_FIXTURE_ISPC
 IspcBackendFixture.Run();
 #endif

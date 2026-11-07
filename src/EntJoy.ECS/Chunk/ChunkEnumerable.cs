@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.ECS
@@ -22,6 +22,7 @@ namespace EntJoy.ECS
     {
         private readonly EntityManager _entityManager;
         private readonly QueryBuilder _builder;
+        private readonly QueryReadState _readState;
         private int _archIndex;
         private int _chunkIndex;
         private Archetype _currentArch;
@@ -39,6 +40,8 @@ namespace EntJoy.ECS
             _currentChunk = default;
             _t0Idx = -1;
             _t1Idx = -1;
+            if (builder.HasRelationshipFilter) throw new NotSupportedException("Chunk queries do not expose per-entity relationship masks; use an entity query.");
+            _readState = new QueryReadState(em, ComponentTypeManager.IsRelationType<T0>() || ComponentTypeManager.IsRelationType<T1>());
         }
 
         private bool MoveNextArchetype()
@@ -78,6 +81,7 @@ namespace EntJoy.ECS
 
         public bool MoveNext()
         {
+            _readState.Validate();
             if (_currentArch == null)
             {
                 return MoveNextArchetype();
@@ -97,8 +101,9 @@ namespace EntJoy.ECS
         {
             get
             {
+                _readState.Validate();
                 if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
-                return new ChunkResult<T0, T1>(_currentChunk, _t0Idx, _t1Idx);
+                return new ChunkResult<T0, T1>(_currentChunk, _t0Idx, _t1Idx, _readState);
             }
         }
 
@@ -110,20 +115,32 @@ namespace EntJoy.ECS
         private readonly Chunk _chunk;
         private readonly int _t0Idx;
         private readonly int _t1Idx;
+        private readonly QueryReadState _readState;
 
-        internal ChunkResult(Chunk chunk, int t0Idx, int t1Idx)
+        internal ChunkResult(Chunk chunk, int t0Idx, int t1Idx, QueryReadState readState = default)
         {
             _chunk = chunk;
             _t0Idx = t0Idx;
             _t1Idx = t1Idx;
+            _readState = readState;
         }
 
-        public int Length => _chunk.EntityCount;
+        public int Length { get { _readState.Validate(); return _chunk.EntityCount; } }
 
-        public T0* GetPtr0() => (T0*)_chunk.GetComponentArrayPointer(_t0Idx);
-        public T1* GetPtr1() => (T1*)_chunk.GetComponentArrayPointer(_t1Idx);
-        public Span<T0> GetSpan0() => new Span<T0>(GetPtr0(), Length);
-        public Span<T1> GetSpan1() => new Span<T1>(GetPtr1(), Length);
+        public T0* GetPtr0() { _readState.Validate(); return (T0*)_chunk.GetComponentArrayPointer(_t0Idx); }
+        public T1* GetPtr1() { _readState.Validate(); return (T1*)_chunk.GetComponentArrayPointer(_t1Idx); }
+        public Span<T0> GetSpan0()
+        {
+            ComponentTypeManager.CheckWritableAccess<T0>();
+            return new Span<T0>(GetPtr0(), Length);
+        }
+        public ReadOnlySpan<T0> GetReadOnlySpan0() => new ReadOnlySpan<T0>(GetPtr0(), Length);
+        public Span<T1> GetSpan1()
+        {
+            ComponentTypeManager.CheckWritableAccess<T1>();
+            return new Span<T1>(GetPtr1(), Length);
+        }
+        public ReadOnlySpan<T1> GetReadOnlySpan1() => new ReadOnlySpan<T1>(GetPtr1(), Length);
 
         /// <summary>
         /// 获取指定 enableable 组件的位图掩码。

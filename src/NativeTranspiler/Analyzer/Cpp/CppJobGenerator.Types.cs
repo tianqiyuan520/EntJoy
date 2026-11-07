@@ -45,7 +45,7 @@ namespace NativeTranspiler.Analyzer
                 if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol methodSymbol)
                     continue;
                 if (methodSymbol.ContainingType?.ToDisplayString() != Config.TypeArchetypeChunk ||
-                    (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan
+                    (!Config.IsChunkArrayAccess(methodSymbol.Name)
                      && methodSymbol.Name != Config.GetEnableBitMapPtr))
                     continue;
                 if (methodSymbol.TypeArguments.Length == 0 || methodSymbol.TypeArguments[0] is not INamedTypeSymbol componentType)

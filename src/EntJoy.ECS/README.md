@@ -12,8 +12,8 @@ EntJoy 的 Archetype ECS（headless）。这是**唯一需要直接引用的包*
 | Entity | `Entity`、`EntityManager`（partial：共享组件 / 关系 / 多关系 / Observer）、`EntityBuilder`、`EntityIndexInWorld`。 |
 | Archetype / Chunk | `Archetype`（含 `RemovalResult`）、`ArchetypeChunk`、`Chunk`、`ChunkMetadata`、`ChunkMemoryPool`、`ChunkEnabledMask`、`ChunkEnumerable` / `ChunkEnumerator` / `ChunkResult<T0,T1>`、`DeferredCommandBuffer`（含 `ParallelWriter`）。 |
 | Component | `IComponentData`、`ISharedComponentData`、`IEnableableComponent`、`ICopyable` / `ICopyable<T>`、`ECSComponentAttribute`、`Prefab`、`ComponentType`、`ComponentTypeManager`、`ComponentMeta` / `ComponentFieldMeta` / `ComponentMetaRegistry`。 |
-| Query | `EntityQuery`、`QueryKey`、`QueryBuilder`、`QuerySelection<T0>` / `QuerySelection<T0,T1>`、`ComponentLookup<T>`、`QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`。 |
-| Relation | `RelationIndex`、`RelationListStore`、`RelationSlot`、`IRelationComponent`，属性 `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted`。 |
+| Query | `EntityQuery`、`QueryKey`、`QueryBuilder`、`QuerySelection<T0>` / `QuerySelection<T0,T1>`、`ComponentLookup<T>` / `ReadOnlyComponentLookup<T>`、`QueryReadState`、`QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`。 |
+| Relation | `RelationIndex`、`RelationListStore`、`RelationSlot`、`IRelationComponent`，属性 `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted` / `AcyclicRelation`。 |
 | Observer | `ComponentObserver`、`ObserverHandle`、`ObserverEvents`、`ReactiveAttribute`。 |
 | Event | `SystemAPI`、`EventStream<T>`、`EventBuffer`。 |
 | System | `ISystem`、`ISystemWithState` / `SystemState`、`SystemRunner`、`ScheduleGraph` / `SystemSlot`，调度属性 `Read` / `Write` / `Order` / `RunWhen` / `OrderBefore` / `OrderAfter`，`DisableAutoCreationAttribute`，`PerformanceReport` / `SystemTiming`、`EventCounter`。 |
@@ -61,8 +61,8 @@ EntJoy's Archetype ECS (headless). This is **the only package you need to refere
 | Entity | `Entity`, `EntityManager` (partial: shared components / relations / multi-relations / observer), `EntityBuilder`, `EntityIndexInWorld`. |
 | Archetype / Chunk | `Archetype` (with `RemovalResult`), `ArchetypeChunk`, `Chunk`, `ChunkMetadata`, `ChunkMemoryPool`, `ChunkEnabledMask`, `ChunkEnumerable` / `ChunkEnumerator` / `ChunkResult<T0,T1>`, `DeferredCommandBuffer` (with `ParallelWriter`). |
 | Component | `IComponentData`, `ISharedComponentData`, `IEnableableComponent`, `ICopyable` / `ICopyable<T>`, `ECSComponentAttribute`, `Prefab`, `ComponentType`, `ComponentTypeManager`, `ComponentMeta` / `ComponentFieldMeta` / `ComponentMetaRegistry`. |
-| Query | `EntityQuery`, `QueryKey`, `QueryBuilder`, `QuerySelection<T0>` / `QuerySelection<T0,T1>`, `ComponentLookup<T>`, `QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`. |
-| Relation | `RelationIndex`, `RelationListStore`, `RelationSlot`, `IRelationComponent`, and the `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted` attributes. |
+| Query | `EntityQuery`, `QueryKey`, `QueryBuilder`, `QuerySelection<T0>` / `QuerySelection<T0,T1>`, `ComponentLookup<T>` / `ReadOnlyComponentLookup<T>`, `QueryReadState`, `QueryEnumerable` / `QueryEnumerator` / `EntityQueryResult<T0,T1>`. |
+| Relation | `RelationIndex`, `RelationListStore`, `RelationSlot`, `IRelationComponent`, and the `ExclusiveRelation` / `MultiRelation` / `ExclusiveTarget` / `OnTargetDeleted` / `AcyclicRelation` attributes. |
 | Observer | `ComponentObserver`, `ObserverHandle`, `ObserverEvents`, `ReactiveAttribute`. |
 | Event | `SystemAPI`, `EventStream<T>`, `EventBuffer`. |
 | System | `ISystem`, `ISystemWithState` / `SystemState`, `SystemRunner`, `ScheduleGraph` / `SystemSlot`, the scheduling attributes `Read` / `Write` / `Order` / `RunWhen` / `OrderBefore` / `OrderAfter`, `DisableAutoCreationAttribute`, `PerformanceReport` / `SystemTiming`, `EventCounter`. |

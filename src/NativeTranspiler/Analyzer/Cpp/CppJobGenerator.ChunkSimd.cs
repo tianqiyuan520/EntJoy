@@ -43,7 +43,7 @@ namespace NativeTranspiler.Analyzer
                         var symbol = semanticModel.GetSymbolInfo(inv).Symbol as IMethodSymbol;
                         if (symbol != null &&
                             symbol.ContainingType?.ToDisplayString() == Config.TypeArchetypeChunk &&
-                            (symbol.Name == Config.GetComponentDataNativeArray || symbol.Name == Config.GetComponentDataSpan) &&
+                            Config.IsChunkArrayAccess(symbol.Name) &&
                             symbol.TypeArguments.Length > 0)
                         {
                             string varName = variable.Identifier.Text;
@@ -52,6 +52,7 @@ namespace NativeTranspiler.Analyzer
                             {
                                 int idx = requiredTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, compType));
                                 string elemCppType = NativeTranspiler.MapCSharpTypeToCpp(compType);
+                                if (Config.IsReadOnlyChunkArrayAccess(symbol.Name)) elemCppType = "const " + elemCppType;
                                 chunkArrays.Add((varName, elemCppType, idx));
                                 chunkArrayNames.Add(varName);
                             }
@@ -61,6 +62,10 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 2. Find entity for-loop
+            if (methodSyntax.Body?.DescendantNodes().OfType<IdentifierNameSyntax>().Any(identifier =>
+                semanticModel.GetSymbolInfo(identifier).Symbol is IParameterSymbol parameter
+                && parameter.Type.ToDisplayString() == Config.TypeChunkEnabledMask) == true)
+                return (chunkArrays, "", methodSyntax.Body);
             string entityLoopIv = "";
             ForStatementSyntax? entityLoop = null;
             if (methodSyntax.Body != null)
@@ -409,6 +414,8 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
             sb.AppendLine("{");
             AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
+            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
 
                 var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
                 var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);

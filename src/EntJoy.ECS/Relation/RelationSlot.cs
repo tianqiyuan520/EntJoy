@@ -2,9 +2,8 @@ namespace EntJoy.ECS
 {
     /// <summary>
     /// 关系组件标记接口：声明"此组件类型用于实体间关系"。
-    /// 关系类型是空 struct（如 <c>struct ChildOf : IRelationComponent</c>），
-    /// 列值存放在 <see cref="RelationSlot"/>（target + version）。
-    /// 与普通组件同路径注册（ComponentTypeManager），一实体每关系类型最多一个 target（单实例语义）。
+    /// 关系类型以 RelationSlot Target 字段开头，可附带无托管引用的数据。
+    /// 普通类型为单目标，多目标类型通过 MultiRelationAttribute 声明。
     /// </summary>
     public interface IRelationComponent
     {
@@ -12,7 +11,7 @@ namespace EntJoy.ECS
 
     /// <summary>
     /// 关系槽位值：指向 target 实体（含版本防 ID 回收）。8B blittable。
-    /// 实体无关系时槽位为 <see cref="Default"/>（TargetId = -1），不触发结构变更。
+    /// 预建关系列的空槽为 <see cref="Default"/>（TargetId = -1）；增删关系列属于结构变更。
     /// 查询/读取时校验 <see cref="Matches"/>（Id 相等且 Version 相等），
     /// 实体销毁后 Id 复用（version+1）时旧关系自动失效。
     /// </summary>
@@ -23,7 +22,7 @@ namespace EntJoy.ECS
 
         public static readonly RelationSlot Default = new() { TargetId = -1, TargetVersion = -1 };
 
-        /// <summary>是否持有有效关系（槽位已写入，非默认）。</summary>
+        /// <summary>是否写入了目标 ID；存活与版本另由 EntityManager 检查。</summary>
         public readonly bool IsValid => TargetId >= 0;
 
         /// <summary>校验：槽位指向的实体就是 target（Id + Version 双匹配）。</summary>

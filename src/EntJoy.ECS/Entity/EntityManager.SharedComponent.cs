@@ -25,14 +25,14 @@ namespace EntJoy.ECS
         private int _managedSharedValueCount;
 
         /// <summary>per-type 查找表：typeId → (value → globalIndex)。Dictionary 简洁可靠，值种类通常 &lt;200。</summary>
-        private readonly Dictionary<int, Dictionary<object, int>> _managedLookup = new();
+        private Dictionary<int, Dictionary<object, int>> _managedLookup = new();
 
         /// <summary>
         /// per-value 最近使用缓存：shared 值 → 最近一次命中的 chunk 索引（Archetype 内）。
         /// key = (Archetype, 组件索引, 值)。managed 的值为全局 index（int box）；blittable 为 boxed 值。
         /// 导致验证失败时移除条目并回退全扫描。删除路径零维护。
         /// </summary>
-        private readonly Dictionary<(Archetype, int, object), int> _lastChunkPerSharedValue = new();
+        private Dictionary<(Archetype, int, object), int> _lastChunkPerSharedValue = new();
 
         /// <summary>查找或添加 managed shared 值（O(1)，去重）。index 只增不减。</summary>
         private int FindOrAddManagedValue(int typeId, object value)
@@ -339,7 +339,8 @@ namespace EntJoy.ECS
         /// <summary>查找所有 slotSet 槽位与目标值匹配的未满 chunk；无返回 -1。
         /// 单 shared 列走缓存路径（复用 FindChunkWithManagedValue/BlittableBoxed，O(1) 期望）；
         /// 多列组合保持线性扫描（组合 key 无法复用单值缓存，且场景低频）。</summary>
-        private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object?[] slotValue)
+        private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object?[] slotValue,
+            Dictionary<nint, int> reserved = null, nint excluded = 0)
         {
             // 统计已设置的 shared 列数；单列时走缓存路径
             int setCount = 0, singleIdx = -1;
@@ -352,7 +353,7 @@ namespace EntJoy.ECS
                 }
             }
 
-            if (setCount == 1)
+            if (setCount == 1 && reserved == null && excluded == 0)
             {
                 var singleCt = arch.Types[singleIdx];
                 return singleCt.IsManagedShared
@@ -363,7 +364,9 @@ namespace EntJoy.ECS
             var list = arch.ChunkList;
             for (int i = 0; i < list.Count; i++)
             {
-                if (list[i].EntityCount >= list[i].Capacity) continue;
+                if (list[i].MemoryBlock == excluded) continue;
+                int pending = reserved != null && reserved.TryGetValue(list[i].MemoryBlock, out int reservedCount) ? reservedCount : 0;
+                if (list[i].EntityCount + pending >= list[i].Capacity) continue;
                 bool match = true;
                 for (int c = 0; c < arch.ComponentCount; c++)
                 {

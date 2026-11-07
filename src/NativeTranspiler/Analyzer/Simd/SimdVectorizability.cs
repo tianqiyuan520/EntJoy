@@ -48,7 +48,7 @@ namespace NativeTranspiler.Analyzer
             => HasNonVectorizableCall(node, varAnalyzer, out _);
 
         /// <summary>同上，并给出触发原因（供 NT031 报错信息指名道姓，而不是只说"不可向量化"）。</summary>
-        public static bool HasNonVectorizableCall(SyntaxNode node, SimdVariableAnalyzer varAnalyzer, out string? reason)
+        public static bool HasNonVectorizableCall(SyntaxNode node, SimdVariableAnalyzer varAnalyzer, out string? reason, bool compilerVectorize = false)
         {
             reason = null;
             foreach (var loop in node.DescendantNodesAndSelf().OfType<ForStatementSyntax>())
@@ -58,6 +58,8 @@ namespace NativeTranspiler.Analyzer
             }
             foreach (var inv in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
+                if (compilerVectorize && varAnalyzer.SemanticModel.GetSymbolInfo(inv).Symbol is IMethodSymbol intrinsic
+                    && intrinsic.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask && intrinsic.Name == "IsEnabled") continue;
                 string name = null;
                 if (inv.Expression is MemberAccessExpressionSyntax ma)
                     name = ma.Name.Identifier.Text;

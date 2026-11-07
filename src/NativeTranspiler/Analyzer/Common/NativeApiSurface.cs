@@ -123,9 +123,10 @@ namespace NativeTranspiler.Analyzer.Common
 
         /// <summary>ArchetypeChunk 上允许在原生内核里调用的方法。</summary>
         internal static bool IsAllowedChunkMethod(IMethodSymbol method, Compilation compilation)
-            => SymbolEqualityComparer.Default.Equals(method.ContainingType, compilation.GetTypeByMetadataName(Config.TypeArchetypeChunk))
-               && (method.Name == Config.GetComponentDataNativeArray
-                   || method.Name == Config.GetComponentDataSpan
+            => method.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask
+                   && (method.Name == "IsEnabled" || method.Name == "TryGetNextRange")
+               || SymbolEqualityComparer.Default.Equals(method.ContainingType, compilation.GetTypeByMetadataName(Config.TypeArchetypeChunk))
+               && (Config.IsChunkArrayAccess(method.Name)
                    || method.Name == Config.GetEnableBitMapPtr);
 
     }

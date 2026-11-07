@@ -118,6 +118,7 @@
 | **NT032** | warning | 本编译单元的**托管内核清单**：`{N}` 个 job 实现了接口但没有 `[NativeTranspile]`（会静默走托管内核，语义正确、性能量级不同），另有 `{M}` 个原生 job。本意原生却漏写属性的，补上属性即可 |
 | **NT034** | error | 原生 Job 的 `Execute` 使用块函数体；表达式体 `Execute => ...` 在生成前报错。 |
 | **NT035** | error | 已识别但不支持的 ISPC 语法，例如 `ref` 局部；不会因类型解析失败而崩溃。 |
+| **NT036** | error | 关系列的可写访问：原生 IJobEntity 关系参数使用值或 in，IJobChunk 使用只读 Span/NativeArray getter；关系变更经主线程或托管 Job 记录 ECB 后提交。 |
 
 AutoSIMD 的 `for` 控制使用单个已初始化的 `int` 计数器、`<` / `<=` / `>` / `>=` 条件及常量非零步长。支持前后置 `++` / `--`、`+=` / `-=` 常量、`counter = counter ± 常量` 和 `counter = 常量 + counter`；比较两侧可交换，可加括号。边界表达式独立于计数器；循环体保持计数器不变且不传出其引用或地址。不符合时报告 NT031，可使用 `AutoSIMD.Disabled` 保留标量循环。
 

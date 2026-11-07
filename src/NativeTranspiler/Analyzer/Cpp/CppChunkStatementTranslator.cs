@@ -180,8 +180,10 @@ namespace NativeTranspiler.Analyzer
                 return false;
 
             var localType = _semanticModel.GetTypeInfo(localDecl.Declaration.Type).Type;
-            bool isSpan = localType?.Name == Config.Span && localType.ContainingNamespace?.ToDisplayString() == Config.NamespaceSystem;
-            bool isNativeArray = localType != null && NativeTranspiler.IsEntJoyContainerNamed(localType, Config.NativeArray);
+            bool isSpan = (localType?.Name == Config.Span || localType?.Name == "ReadOnlySpan") && localType.ContainingNamespace?.ToDisplayString() == Config.NamespaceSystem;
+            bool isNativeArray = localType != null && (NativeTranspiler.IsEntJoyContainerNamed(localType, Config.NativeArray)
+                || localType.Name == "ReadOnly" && localType.ContainingType != null
+                    && NativeTranspiler.IsEntJoyContainerNamed(localType.ContainingType, Config.NativeArray));
             if (!isSpan && !isNativeArray)
                 return false;
 
@@ -217,6 +219,18 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateInvocation(InvocationExpressionSyntax invocation)
         {
+            if (_semanticModel.GetSymbolInfo(invocation).Symbol is IMethodSymbol maskMethod
+                && maskMethod.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask)
+            {
+                _builder.Append("__queryMask.").Append(maskMethod.Name).Append('(');
+                for (int i = 0; i < invocation.ArgumentList.Arguments.Count; i++)
+                {
+                    if (i > 0) _builder.Append(", ");
+                    TranslateExpression(invocation.ArgumentList.Arguments[i].Expression);
+                }
+                _builder.Append(')');
+                return;
+            }
             if (TryTranslateChunkArrayUnsafePtr(invocation))
                 return;
 
@@ -269,7 +283,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             // 原有：GetComponentDataNativeArray / GetComponentDataSpan → 数组指针
-            if (methodSymbol.Name != Config.GetComponentDataNativeArray && methodSymbol.Name != Config.GetComponentDataSpan)
+            if (!Config.IsChunkArrayAccess(methodSymbol.Name))
                 return false;
             if (methodSymbol.TypeArguments.Length == 0)
                 return false;
@@ -285,6 +299,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             cppType = NativeTranspiler.MapCSharpTypeToCpp(componentType);
+            if (Config.IsReadOnlyChunkArrayAccess(methodSymbol.Name)) cppType = "const " + cppType;
             expression = $"__chunkData->requiredComponentArrays[{componentIndex}]";
             storageKey = $"component:{componentIndex}";
             return true;
@@ -292,6 +307,19 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateMemberAccess(MemberAccessExpressionSyntax memberAccess)
         {
+            if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol maskProperty
+                && maskProperty.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask)
+            {
+                _builder.Append("__queryMask.").Append(maskProperty.Name);
+                return;
+            }
+            if (memberAccess.Name.Identifier.Text == "Length" && memberAccess.Expression is MemberAccessExpressionSyntax bits
+                && _semanticModel.GetSymbolInfo(bits).Symbol is IPropertySymbol bitsProperty
+                && bitsProperty.ContainingType.ToDisplayString() == Config.TypeChunkEnabledMask && bitsProperty.Name == "Bits")
+            {
+                _builder.Append("__queryMask.UlongCount");
+                return;
+            }
             if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol property
                 && property.Name == "Count" && property.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
             {

@@ -423,6 +423,12 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
 
+                const string abiFile = "NativeTranspiledAbi.cpp";
+                cppFiles.Add(abiFile);
+                CodeGenIo.WriteAllTextWithRetry(Path.Combine(outputDir, abiFile),
+                    "#include <cstdint>\n" + CodeTemplates.GenerateExportMacros()
+                    + "\nGENERATED_API uint32_t CALLINGCONVENTION NativeTranspiled_GetAbiVersion() { return 4u; }\n");
+
                 // 生成 run_ispc.bat：增量检测 + 并行编译
                 if (ispcFiles.Count > 0)
                 {
