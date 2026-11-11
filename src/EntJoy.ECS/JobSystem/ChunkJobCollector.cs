@@ -6,12 +6,9 @@ using EntJoy.ECS;
 
 namespace EntJoy.ECS.JobSystem
 {
-    /// <summary>
-    /// 共同收集器：archetype 扫描 + chunk 收集 + 三种 payload 填充。
-    /// 托管路径（轻量）/ Native/ISPC 路径（全指针）/ Cpp entity batch 路径 都从这里构建。
-    /// 与 ChunkJobScheduler（调度编排）和 ChunkJobCallbacks（回调层）分离。
-    /// </summary>
-    internal static unsafe class ChunkJobCollector
+    /// <summary>共同收集器：archetype 扫描 + chunk 收集 + 三种 payload 填充；
+    /// 托管（轻量）/ Native/ISPC（全指针）/ Cpp entity batch 四条路径都从这里构建。</summary>
+    public static unsafe partial class ChunkJobCollector
     {
         internal static void ValidateJobQuery(QueryBuilder query)
         {
@@ -28,8 +25,8 @@ namespace EntJoy.ECS.JobSystem
         }
 
         // 共享缓冲
-        [ThreadStatic] private static Chunk[] s_chunkBuffer = new Chunk[64];
-        [ThreadStatic] private static List<Archetype> s_archetypeBuffer = new();
+        [ThreadStatic] private static Chunk[] s_chunkBuffer;
+        [ThreadStatic] private static List<Archetype> s_archetypeBuffer;
 
         // 核心：archetype 扫描 + chunk 收集
         /// <summary>
@@ -38,7 +35,7 @@ namespace EntJoy.ECS.JobSystem
         private static int CollectMatchingChunks(EntityManager entityManager, QueryBuilder query, List<Archetype> matchingArchetypes)
         {
             ValidateJobQuery(query);
-            if (s_chunkBuffer.Length < 64) s_chunkBuffer = new Chunk[64];
+            s_chunkBuffer ??= new Chunk[64];
             int count = 0;
             for (int i = 0; i < entityManager.ArchetypeCount; i++)
             {
@@ -102,70 +99,15 @@ namespace EntJoy.ECS.JobSystem
         // Native/ISPC 路径：完整 payload（所有组件指针）
         internal static ChunkJobData* BuildNativePayload(Chunk[] chunks, int count, int[]? requiredIds, GCHandle[]? gcHandles, QueryBuilder query = default)
         {
-            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(CheckedBytes(count, sizeof(ChunkJobData)));
-            Unsafe.InitBlockUnaligned(tablePtr, 0, (uint)CheckedBytes(count, sizeof(ChunkJobData)));
+            int bytes = CheckedBytes(count, sizeof(ChunkJobData));
+            var tablePtr = (ChunkJobData*)Marshal.AllocHGlobal(bytes);
+            Unsafe.InitBlockUnaligned(tablePtr, 0, (uint)bytes);
             try
             {
                 for (int ci = 0; ci < count; ci++)
                 {
-                    var chunk = chunks[ci];
-                var arch = chunk.Archetype;
-                int compCount = chunk.ComponentCount;
-                var compPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
-                var compSizes = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
-                var bitmaps = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
-                var typeIndices = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
-                int reqCount = requiredIds?.Length ?? 0;
-                void** reqArrays = reqCount > 0 ? (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*))) : null;
-                void** reqBitmaps = reqCount > 0 ? (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*))) : null;
-                if (reqArrays != null) for (int r = 0; r < reqCount; r++) { reqArrays[r] = null; reqBitmaps[r] = null; }
-                for (int c = 0; c < compCount; c++)
-                {
-                    compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
-                    compSizes[c] = arch.Types[c].Size;
-                    bitmaps[c] = chunk.GetEnableBitMapPointer(c);
-                    typeIndices[c] = arch.Types[c].Id;
-                }
-                if (reqArrays != null)
-                {
-                    for (int r = 0; r < reqCount; r++)
-                    {
-                        int reqId = requiredIds![r];
-                        for (int c = 0; c < compCount; c++)
-                            if (typeIndices[c] == reqId) { reqArrays[r] = compPtrs[c]; reqBitmaps[r] = bitmaps[c]; break; }
-                    }
-                }
-                // SharedComponent blittable 值指针（per-chunk，非 per-entity）
-                int sharedCount = 0;
-                void** sharedPtrs = null;
-                if (chunk.HasSharedValues)
-                {
-                    for (int c = 0; c < compCount; c++)
-                        if (arch.Types[c].IsShared && !arch.Types[c].IsManagedShared)
-                            sharedCount++;
-                    if (sharedCount > 0)
-                    {
-                        sharedPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(sharedCount, sizeof(void*)));
-                        int si = 0;
-                        for (int c = 0; c < compCount; c++)
-                        {
-                            if (!arch.Types[c].IsShared || arch.Types[c].IsManagedShared) continue;
-                            sharedPtrs[si++] = (void*)chunk.GetSharedValuePointer(c);
-                        }
-                    }
-                }
-                    tablePtr[ci] = new ChunkJobData
-                    {
-                    entityArray = (void*)chunk.GetEntityPointer(),
-                    entityCount = chunk.EntityCount, componentCount = compCount,
-                    componentArrays = compPtrs, componentSizes = compSizes,
-                    enableBitMaps = bitmaps, componentTypeIndices = typeIndices,
-                    chunkHandle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero,
-                    requiredComponentArrays = reqArrays, requiredComponentCount = reqCount,
-                    requiredEnableBitMaps = reqBitmaps,
-                    sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
-                    };
-                    tablePtr[ci].filter = ChunkJobScheduler.BuildNativeFilter(chunk, query);
+                    IntPtr handle = gcHandles != null ? (IntPtr)gcHandles[ci] : IntPtr.Zero;
+                    tablePtr[ci] = BuildChunkPayload(chunks[ci], handle, requiredIds, query);
                 }
                 return tablePtr;
             }
@@ -173,6 +115,85 @@ namespace EntJoy.ECS.JobSystem
             {
                 FreeChunkJobDataPayload(tablePtr, count);
                 throw;
+            }
+        }
+
+        // 单块 payload：组件列指针/大小/位图/类型 id、required 列、shared 值指针，以及块过滤条件。
+        private static ChunkJobData BuildChunkPayload(Chunk chunk, IntPtr chunkHandle, int[]? requiredIds, QueryBuilder query)
+        {
+            var arch = chunk.Archetype;
+            int compCount = chunk.ComponentCount;
+            var compPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
+            var compSizes = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
+            var bitmaps = (void**)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(void*)));
+            var typeIndices = (int*)Marshal.AllocHGlobal(CheckedBytes(compCount, sizeof(int)));
+            for (int c = 0; c < compCount; c++)
+            {
+                compPtrs[c] = (void*)chunk.GetComponentArrayPointer(c);
+                compSizes[c] = arch.Types[c].Size;
+                bitmaps[c] = chunk.GetEnableBitMapPointer(c);
+                typeIndices[c] = arch.Types[c].Id;
+            }
+
+            int reqCount = requiredIds?.Length ?? 0;
+            ResolveRequiredColumns(requiredIds, typeIndices, compPtrs, bitmaps, compCount,
+                out void** reqArrays, out void** reqBitmaps);
+            ResolveSharedValuePointers(chunk, arch, compCount, out void** sharedPtrs, out int sharedCount);
+
+            var data = new ChunkJobData
+            {
+                entityArray = (void*)chunk.GetEntityPointer(),
+                entityCount = chunk.EntityCount, componentCount = compCount,
+                componentArrays = compPtrs, componentSizes = compSizes,
+                enableBitMaps = bitmaps, componentTypeIndices = typeIndices,
+                chunkHandle = chunkHandle,
+                requiredComponentArrays = reqArrays, requiredComponentCount = reqCount,
+                requiredEnableBitMaps = reqBitmaps,
+                sharedValuePtrs = sharedPtrs, sharedValueCount = sharedCount
+            };
+            data.filter = ChunkJobScheduler.BuildNativeFilter(chunk, query);
+            return data;
+        }
+
+        // 把 required 类型 id 映射成对应的列指针与位图指针；类型不在该块里时留 null。
+        private static void ResolveRequiredColumns(int[]? requiredIds, int* typeIndices, void** compPtrs, void** bitmaps,
+            int compCount, out void** reqArrays, out void** reqBitmaps)
+        {
+            int reqCount = requiredIds?.Length ?? 0;
+            if (reqCount == 0)
+            {
+                reqArrays = null;
+                reqBitmaps = null;
+                return;
+            }
+            reqArrays = (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*)));
+            reqBitmaps = (void**)Marshal.AllocHGlobal(CheckedBytes(reqCount, sizeof(void*)));
+            for (int r = 0; r < reqCount; r++)
+            {
+                reqArrays[r] = null;
+                reqBitmaps[r] = null;
+                int reqId = requiredIds![r];
+                for (int c = 0; c < compCount; c++)
+                    if (typeIndices[c] == reqId) { reqArrays[r] = compPtrs[c]; reqBitmaps[r] = bitmaps[c]; break; }
+            }
+        }
+
+        // SharedComponent blittable 值指针（per-chunk，非 per-entity）；managed shared 只存索引，不在这里。
+        private static void ResolveSharedValuePointers(Chunk chunk, Archetype arch, int compCount,
+            out void** sharedPtrs, out int sharedCount)
+        {
+            sharedPtrs = null;
+            sharedCount = 0;
+            if (!chunk.HasSharedValues) return;
+            for (int c = 0; c < compCount; c++)
+                if (arch.Types[c].IsShared && !arch.Types[c].IsManagedShared) sharedCount++;
+            if (sharedCount == 0) return;
+            sharedPtrs = (void**)Marshal.AllocHGlobal(CheckedBytes(sharedCount, sizeof(void*)));
+            int si = 0;
+            for (int c = 0; c < compCount; c++)
+            {
+                if (!arch.Types[c].IsShared || arch.Types[c].IsManagedShared) continue;
+                sharedPtrs[si++] = (void*)chunk.GetSharedValuePointer(c);
             }
         }
 
@@ -241,17 +262,14 @@ namespace EntJoy.ECS.JobSystem
             }
         }
 
-        // 对外接口：收集 + 构建托管 payload
-        /// <summary>
-        /// 收集匹配 chunk 并（可选）构建托管 payload。
-        /// ⚠ `chunkArray` 必须是本次调度的独立快照：`s_chunkBuffer` 是 [ThreadStatic] 复用缓冲，
-        /// 下一次收集会原地覆盖它的前 count 项，job 就会遍历到别的查询的 chunk（静默错值）。
-        /// </summary>
+        /// <summary>收集匹配 chunk 并（可选）构建托管 payload。
+        /// `chunkArray` 必须是本次调度的独立快照：`s_chunkBuffer` 是 [ThreadStatic] 复用缓冲，
+        /// 下一次收集会原地覆盖它的前 count 项，job 就会遍历到别的查询的 chunk。</summary>
         internal static void CollectAndBuildManaged(EntityManager em, QueryBuilder query, bool fillBitmaps, bool hasEnabledFilter,
             out ChunkJobData* ptr, out Chunk[] chunkArray, out int chunkCount, out Archetype[] archetypes,
             bool buildPayload = true)
         {
-            s_archetypeBuffer.Clear();
+            (s_archetypeBuffer ??= new()).Clear();
             int count = CollectMatchingChunks(em, query, s_archetypeBuffer);
             chunkCount = count;
             if (count == 0) { ptr = null; chunkArray = Array.Empty<Chunk>(); archetypes = Array.Empty<Archetype>(); return; }
@@ -271,7 +289,7 @@ namespace EntJoy.ECS.JobSystem
         internal static void CollectAndBuildNative(EntityManager em, QueryBuilder query, int[]? requiredIds,
             out ChunkJobData* ptr, out int chunkCount, out Archetype[] archetypes)
         {
-            s_archetypeBuffer.Clear();
+            (s_archetypeBuffer ??= new()).Clear();
             chunkCount = CollectMatchingChunks(em, query, s_archetypeBuffer);
             if (chunkCount == 0) { ptr = null; archetypes = Array.Empty<Archetype>(); return; }
             ptr = BuildNativePayload(s_chunkBuffer, chunkCount, requiredIds, gcHandles: null, query: query);
@@ -282,7 +300,7 @@ namespace EntJoy.ECS.JobSystem
         internal static void CollectAndBuildEntityBatch(EntityManager em, QueryBuilder query, int[]? requiredIds,
             out EntityBatchData* ptr, out int batchCount, out Archetype[] archetypes)
         {
-            s_archetypeBuffer.Clear();
+            (s_archetypeBuffer ??= new()).Clear();
             int chunkCount = CollectMatchingChunks(em, query, s_archetypeBuffer);
             if (chunkCount == 0) { ptr = null; batchCount = 0; archetypes = Array.Empty<Archetype>(); return; }
             BuildEntityBatchPayload(s_chunkBuffer, chunkCount, requiredIds, out ptr, out batchCount, out _, out _, query);

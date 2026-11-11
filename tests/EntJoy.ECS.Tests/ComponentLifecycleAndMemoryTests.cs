@@ -60,6 +60,9 @@ namespace EntJoy.ECS.Tests
             for (int i = 0; i < n; i++)
                 world.EntityManager.DestroyEntity(entities[i]);
 
+            // 销毁不即时回收 Chunk 与 slab：空块留在原地，内存由显式整理归还。
+            world.EntityManager.CompactChunks();
+
             long slabsAfter = world.GetMemoryReport().TotalSlabBytes;
             Assert.True(slabsAfter < slabsBefore, $"slab 未回收: {slabsBefore} -> {slabsAfter}");
             world.Dispose();

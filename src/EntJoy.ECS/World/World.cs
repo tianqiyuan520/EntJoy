@@ -26,11 +26,6 @@ namespace EntJoy.ECS
         // Event Channel
         private readonly ConcurrentDictionary<Type, object> _eventStreams = new();
 
-        // EntityQuery 注册表：相同规则指纹共享实例，结构变更统一刷新
-        private readonly Dictionary<QueryKey, EntityQuery> _queryCache = new();
-        private readonly object _queryCacheLock = new();
-
-
         public World(string worldName = "Default")
         {
             Name = worldName;
@@ -57,56 +52,27 @@ namespace EntJoy.ECS
             }
         }
 
-        public EntityQuery CreateEntityQuery(QueryBuilder builder)
-        {
-            return new EntityQuery(this, builder);
-        }
+        public EntityQuery CreateEntityQuery(QueryBuilder builder) => new EntityQuery(this, builder);
 
-        /// <summary>
-        /// 获取（或创建）共享查询：相同规则指纹返回同一实例，跨调用复用匹配集合，
-        /// 避免重复构造 + 全量重扫。刷新为惰性（访问时版本检查），结构变更后
-        /// <see cref="EntityQuery.EnsureUpToDate"/> 自动增量刷新。
-        /// 注意：返回实例被 World 持有，World.Dispose 时释放。
-        /// </summary>
+        /// <summary>获取（或创建）共享查询：相同规则返回同一实例，跨调用复用匹配集合。
+        /// 刷新是惰性的（访问时做版本检查），实例由 World 持有并在 Dispose 时释放。</summary>
         public EntityQuery GetOrCreateEntityQuery(QueryBuilder builder)
-        {
-            var key = new QueryKey(builder);
-            lock (_queryCacheLock)
-            {
-                if (_queryCache.TryGetValue(key, out var cached))
-                {
-                    cached.EnsureUpToDate();
-                    return cached;
-                }
-                var query = new EntityQuery(this, builder);
-                _queryCache[key] = query;
-                return query;
-            }
-        }
+            => _entityManager.GetOrCreateEntityQuery(builder);
 
         /// <summary>当前注册的共享查询数量（诊断用）。</summary>
-        public int QueryCacheCount => _queryCache.Count;
+        public int QueryCacheCount => _entityManager.QueryCacheCount;
 
-        /// <summary>
-        /// 批量创建实体。一次 Archetype 查找、一次 CompleteActiveJobs、一次返回。
-        /// 比逐个 NewEntity 快 N 倍。
-        /// </summary>
+        /// <summary>批量创建：一次原型查找、一次等待在飞 Job、一次返回。</summary>
         public Entity[] CreateEntities(int count, params ComponentType[] types)
-        {
-            return _entityManager.CreateEntities(count, types);
-        }
+            => _entityManager.CreateEntities(count, types);
 
         /// <summary>生成内存分析报告（原生分配/释放/泄漏、Chunk 数、碎片率、slab 占用）。</summary>
         public MemoryReport GetMemoryReport(float thinThresholdPercent = 30f)
-        {
-            return _entityManager.GetMemoryReport(thinThresholdPercent);
-        }
+            => _entityManager.GetMemoryReport(thinThresholdPercent);
 
         /// <summary>从 Prefab 模板实体复制创建实例（对齐 Unity Instantiate）。</summary>
         public Entity[] SpawnFrom(Entity prefabEntity, int count)
-        {
-            return _entityManager.SpawnFrom(prefabEntity, count);
-        }
+            => _entityManager.SpawnFrom(prefabEntity, count);
 
         /// <summary>复制指定实体集合，并重映射集合内部的关系 Target。</summary>
         public Entity[] CloneEntities(ReadOnlySpan<Entity> sources) => _entityManager.CloneEntities(sources);
@@ -169,11 +135,8 @@ namespace EntJoy.ECS
             _eventStreams.GetOrAdd(typeof(T), _ => new EventStream<T>());
         }
 
-        /// <summary>
-        /// 生产者：发送事件（零结构变更，写入双缓冲）。
-        /// 返回 false 表示事件流已满（容量 <see cref="EventStream{T}.Capacity"/>），事件被丢弃；
-        /// 可通过 <see cref="EventStream{T}.OverflowCount"/> 观察累计丢弃数。
-        /// </summary>
+        /// <summary>生产者：发送事件（零结构变更，写入双缓冲）。返回 false 表示事件流已满、事件被丢弃，
+        /// 累计丢弃数见 <see cref="EventStream{T}.OverflowCount"/>。</summary>
         public bool SendEvent<T>(in T evt) where T : unmanaged
         {
             if (_disposed) throw new ObjectDisposedException(nameof(World));
@@ -224,13 +187,8 @@ namespace EntJoy.ECS
                 counter.Add(kv.Key, ((IEventStream)kv.Value).ReadCount);
         }
 
-        /// <summary>
-        /// Drain Native EventBuffer → EventStream（Run/Complete 后调用）。
-        /// </summary>
-        /// <summary>
-        /// 完成所有 pending 的 Native 事件 buffer drain（异步 Schedule 后必须调用）。
-        /// 等价于内部的 EntityManager.CompleteActiveJobs()。
-        /// </summary>
+        /// <summary>完成所有在飞的 Native 事件 buffer：等价于 CompleteActiveJobs。
+        /// 异步 Schedule 之后必须调用一次，否则事件不会写进 EventStream。</summary>
         public void CompletePendingNativeEvents()
         {
             _entityManager.CompleteActiveJobs();
@@ -243,15 +201,11 @@ namespace EntJoy.ECS
 
         // Observer 门面（注册表在 EntityManager，见 EntityManager.Observer.cs）
 
-        /// <summary>
-        /// 注册组件生命周期 observer。回调在主线程执行（立即或 ECB Playback 派发）。
-        /// 批量签名：一次回调拿整批实体 + 组件值（零拷贝 span）；同一结构变更调用内自动合并。
-        /// </summary>
+        /// <summary>注册组件生命周期 observer，回调在主线程执行；同一结构变更内自动按类型合并成一次批量回调。</summary>
         public ObserverHandle AddObserver<TComponent>(ObserverEvents events, ObserverCallback<TComponent> callback)
             where TComponent : unmanaged
             => _entityManager.AddObserver(events, callback);
 
-        /// <summary>移除指定句柄的 observer。</summary>
         public void RemoveObserver<TComponent>(ObserverHandle handle) where TComponent : unmanaged
             => _entityManager.RemoveObserver<TComponent>(handle);
 
@@ -273,7 +227,6 @@ namespace EntJoy.ECS
                 if (ReferenceEquals(DefaultWorld, this))
                     DefaultWorld = null;
             }
-            _queryCache.Clear();
             foreach (var kv in _eventStreams)
             {
                 if (kv.Value is IDisposable d) d.Dispose();

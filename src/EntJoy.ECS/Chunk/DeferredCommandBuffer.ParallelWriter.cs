@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace EntJoy.ECS
 {
@@ -18,9 +19,8 @@ namespace EntJoy.ECS
         public bool DestroyRunOpen;
         public int DestroyRunStart;
         public int DestroyCountFieldOffset;
-        /// <summary>首次使用该 writer 的托管线程 Id（0 = 未使用）。用于契约守卫：
-        /// 一个 writer 同一时刻只能被一个线程使用 —— 违反时抛错，而不是静默写坏非托管内存
-        /// （实测：把一个 job 切多 tile 分发到多 worker 时，共享 writer 会把堆写坏 0xC0000374）。</summary>
+        /// <summary>首次使用该 writer 的托管线程 Id（0 = 未使用）。一个 writer 同一时刻只能被一个线程使用，
+        /// 违反时抛错而非静默写坏非托管内存。</summary>
         public int OwnerThread;
         /// <summary>1 = 跨 tile 共享 writer（<c>CreateSharedParallelWriter</c>）：预留区短临界区、不扩容、
         /// 不做线程独占守卫（DOTS <c>EntityCommandBuffer.ParallelWriter</c> 语义）。0 = 单线程 writer。</summary>
@@ -39,7 +39,11 @@ namespace EntJoy.ECS
         /// <summary>内部状态指针（<c>EcbWriterState*</c>；以 <c>void*</c> 暴露，避免把实现细节变成公开类型）。</summary>
         public void* State;
 
-        private bool Ready => State != null;
+        private void EnsureReady()
+        {
+            if (State == null)
+                throw new InvalidOperationException("ParallelWriter 未初始化（请用 DeferredCommandBuffer.CreateParallelWriter 获取）。");
+        }
 
         /// <summary>按 sortKey 回放；相同 key 的跨 writer 冲突不承诺胜者。普通命令的 key 为 0。</summary>
         public void SetRelationshipTarget<TRel>(int sortKey, Entity source, Entity target) where TRel : struct, IRelationComponent
@@ -70,7 +74,7 @@ namespace EntJoy.ECS
 
         private void RecordRelationship(int opcode, int typeId, int sortKey, Entity source, Entity target)
         {
-            if (!Ready) throw new InvalidOperationException("ParallelWriter is not initialized.");
+            EnsureReady();
             ref var state = ref *(EcbWriterState*)State;
             int offset;
             if (state.Shared != 0) offset = state.ReserveShared(DeferredCommandBuffer.RelationshipCommandSize);
@@ -91,7 +95,7 @@ namespace EntJoy.ECS
         /// 每条命令 = 一个销毁槽（回放期把连续槽合并成批量销毁）。</summary>
         public void DestroyEntity(Entity entity)
         {
-            if (!Ready) throw new InvalidOperationException("ParallelWriter 未初始化（请用 DeferredCommandBuffer.CreateParallelWriter 获取）。");
+            EnsureReady();
             ref var st = ref *(EcbWriterState*)State;
             if (st.Shared != 0)
             {
@@ -117,10 +121,10 @@ namespace EntJoy.ECS
             *(int*)(st.Staging + st.DestroyCountFieldOffset) = st.DestroyCount - st.DestroyRunStart;
         }
 
-        /// <summary>记录一次单实体组件写入（值内联进命令 ⇒ 自包含、并行安全）。</summary>
+        /// <summary>记录一次单实体组件写入（值内联进命令，自包含、并行安全）。</summary>
         public void SetComponent<T>(Entity entity, T value) where T : unmanaged
         {
-            if (!Ready) throw new InvalidOperationException("ParallelWriter 未初始化（请用 DeferredCommandBuffer.CreateParallelWriter 获取）。");
+            EnsureReady();
             ref var st = ref *(EcbWriterState*)State;
             if (st.Shared != 0)
             {
@@ -128,21 +132,30 @@ namespace EntJoy.ECS
                 return;
             }
             st.ClaimThread();
-            int elemSize = sizeof(T);
+            int size = InlineComponentCommandSize<T>();
             int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            st.EnsureCapacity(checked(sizeof(int) + sizeof(Entity) + sizeof(int) * 2 + elemSize));
-            *(int*)(st.Staging + st.Offset) = DeferredCommandBuffer.OP_SET_COMPONENT_SINGLE;
-            st.Offset += sizeof(int);
-            *(Entity*)(st.Staging + st.Offset) = entity;
-            st.Offset += sizeof(Entity);
-            *(int*)(st.Staging + st.Offset) = typeId;
-            st.Offset += sizeof(int);
-            *(int*)(st.Staging + st.Offset) = elemSize;
-            st.Offset += sizeof(int);
-            *(T*)(st.Staging + st.Offset) = value;
-            st.Offset += elemSize;
+            st.EnsureCapacity(size);
+            WriteInlineComponentCommand(st.Staging + st.Offset, entity, typeId, value);
+            st.Offset += size;
             // 销毁段需闭合：SetComponent 之后的 DestroyEntity 要另起一段（staging 里命令序 = 回放序）
             st.DestroyRunOpen = false;
+        }
+
+        // 命令布局：opcode | entity | typeId | elemSize | 值。
+        internal static int InlineComponentCommandSize<T>() where T : unmanaged
+            => sizeof(int) + sizeof(Entity) + sizeof(int) * 2 + sizeof(T);
+
+        internal static void WriteInlineComponentCommand<T>(byte* p, Entity entity, int typeId, T value) where T : unmanaged
+        {
+            *(int*)p = DeferredCommandBuffer.OP_SET_COMPONENT_SINGLE;
+            p += sizeof(int);
+            *(Entity*)p = entity;
+            p += sizeof(Entity);
+            *(int*)p = typeId;
+            p += sizeof(int);
+            *(int*)p = sizeof(T);
+            p += sizeof(int);
+            *(T*)p = value;
         }
     }
 
@@ -152,7 +165,7 @@ namespace EntJoy.ECS
         public static void ClaimThread(this ref EcbWriterState st)
         {
             int tid = Environment.CurrentManagedThreadId;
-            int owner = System.Threading.Interlocked.CompareExchange(ref st.OwnerThread, tid, 0);
+            int owner = Interlocked.CompareExchange(ref st.OwnerThread, tid, 0);
             if (owner != 0 && owner != tid)
                 throw new InvalidOperationException(
                     $"ParallelWriter 被多线程同时使用（首次线程 {owner}，当前 {tid}）："
@@ -196,12 +209,12 @@ namespace EntJoy.ECS
         // ranges and playback starts after every producer has completed.
         private static void EnterReservation(ref EcbWriterState st)
         {
-            var spin = new System.Threading.SpinWait();
-            while (System.Threading.Interlocked.CompareExchange(ref st.ReservationGate, 1, 0) != 0) spin.SpinOnce();
+            var spin = new SpinWait();
+            while (Interlocked.CompareExchange(ref st.ReservationGate, 1, 0) != 0) spin.SpinOnce();
         }
 
         private static void ExitReservation(ref EcbWriterState st)
-            => System.Threading.Volatile.Write(ref st.ReservationGate, 0);
+            => Volatile.Write(ref st.ReservationGate, 0);
 
         private static int ReserveBytesLocked(ref EcbWriterState st, int bytes)
         {
@@ -243,20 +256,9 @@ namespace EntJoy.ECS
         /// <summary>共享 writer 的组件写入：值内联进命令，预留范围后由该生产者独立写入。</summary>
         public static void SetComponentShared<T>(this ref EcbWriterState st, Entity entity, T value) where T : unmanaged
         {
-            int elemSize = sizeof(T);
-            int size = checked(sizeof(int) + sizeof(Entity) + sizeof(int) * 2 + elemSize);
             int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            int start = st.ReserveShared(size);
-            byte* p = st.Staging + start;
-            *(int*)p = DeferredCommandBuffer.OP_SET_COMPONENT_SINGLE;
-            p += sizeof(int);
-            *(Entity*)p = entity;
-            p += sizeof(Entity);
-            *(int*)p = typeId;
-            p += sizeof(int);
-            *(int*)p = elemSize;
-            p += sizeof(int);
-            *(T*)p = value;
+            int start = st.ReserveShared(ParallelWriter.InlineComponentCommandSize<T>());
+            ParallelWriter.WriteInlineComponentCommand(st.Staging + start, entity, typeId, value);
         }
     }
 }

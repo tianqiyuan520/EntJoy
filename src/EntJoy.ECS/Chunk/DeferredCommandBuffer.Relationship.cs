@@ -74,22 +74,26 @@ namespace EntJoy.ECS
             }
         }
 
+        // 布局：opcode | sortKey | typeId | source | target。
+        private static readonly int FieldSource = sizeof(int) * 3;
+        private static readonly int FieldTarget = FieldSource + sizeof(Entity);
+
         internal static void WriteRelationship(byte* command, int opcode, int sortKey, int typeId, Entity source, Entity target)
         {
             *(int*)command = opcode;
-            *(int*)(command + 4) = sortKey;
-            *(int*)(command + 8) = typeId;
-            *(Entity*)(command + 12) = source;
-            *(Entity*)(command + 12 + sizeof(Entity)) = target;
+            *(int*)(command + sizeof(int)) = sortKey;
+            *(int*)(command + sizeof(int) * 2) = typeId;
+            *(Entity*)(command + FieldSource) = source;
+            *(Entity*)(command + FieldTarget) = target;
         }
 
         private static void ReplayRelationship(EntityManager manager, byte* command)
         {
-            var source = *(Entity*)(command + 12);
+            var source = *(Entity*)(command + FieldSource);
             if (!manager.IsRelationshipTargetAlive(RelationSlot.From(source))) return;
-            int typeId = *(int*)(command + 8);
-            var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(typeId));
-            var target = *(Entity*)(command + 12 + sizeof(Entity));
+            int typeId = *(int*)(command + sizeof(int) * 2);
+            var type = ComponentTypeManager.GetComponentType(typeId);
+            var target = *(Entity*)(command + FieldTarget);
             switch (*(int*)command)
             {
                 case OP_SET_RELATIONSHIP_TARGET: manager.SetRelationshipTargetRaw(source, target, type); break;

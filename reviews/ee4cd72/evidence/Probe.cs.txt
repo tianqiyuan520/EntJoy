@@ -1,0 +1,80 @@
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Reflection;
+using EntJoy.ECS;
+using EntJoy.JobSystem;
+using EntJoy.JobSystem.Managed;
+
+class Program
+{
+    static void Main()
+    {
+        typeof(JobScheduler).GetProperty("UseNative", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, false);
+        typeof(NativeJobScheduler).GetProperty("UseFallback", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!.SetValue(null, true);
+        ManagedJobScheduler.Initialize(2);
+        Console.WriteLine($"ENV runtime={Environment.Version} cpu={Environment.ProcessorCount} native={JobScheduler.IsNative}");
+        const int n = 50000, rounds = 12;
+        using (var world = new World("probe"))
+        {
+            var em = world.EntityManager;
+            var types = new ComponentType[] { typeof(A), typeof(B) };
+            var entities = new Entity[n];
+            var values = new double[4][];
+            for (int op = 0; op < 4; op++) values[op] = new double[rounds - 2];
+            var watch = new Stopwatch();
+            long checksum = 0;
+            for (int round = 0; round < rounds; round++)
+            {
+                watch.Restart();
+                for (int i = 0; i < n; i++) entities[i] = em.NewEntity(types);
+                watch.Stop(); Record(0);
+                watch.Restart();
+                for (int i = 0; i < n; i++) em.AddComponent(entities[i], new C { Value = i });
+                watch.Stop(); Record(1);
+                for (int i = 0; i < n; i++) checksum += em.GetComponent<C>(entities[i]).Value;
+                if (em.VerifyLocateTable(out int seen) != 0 || seen != n) throw new Exception("locations");
+                watch.Restart();
+                for (int i = 0; i < n; i++) em.RemoveComponent<C>(entities[i]);
+                watch.Stop(); Record(2);
+                watch.Restart();
+                for (int i = 0; i < n; i++) em.DestroyEntity(entities[i]);
+                watch.Stop(); Record(3);
+                void Record(int op) { if (round >= 2) values[op][round - 2] = watch.Elapsed.TotalNanoseconds / n; }
+            }
+            string[] names = { "create", "add", "remove", "destroy" };
+            for (int op = 0; op < 4; op++)
+            {
+                Array.Sort(values[op]);
+                Console.WriteLine($"TIMING {names[op]} median_ns={(values[op][4] + values[op][5]) / 2:F2} min_ns={values[op][0]:F2} max_ns={values[op][9]:F2}");
+            }
+            Console.WriteLine($"CHECK checksum={checksum} expected={(long)n * (n - 1) / 2 * rounds}");
+        }
+        int savedCapacity = Archetype.ChunkCapacityOverride;
+        Archetype.ChunkCapacityOverride = 64;
+        try
+        {
+            using var world = new World("churn");
+            var em = world.EntityManager;
+            var live = new Entity[128];
+            for (int i = 0; i < live.Length; i++) live[i] = em.NewEntity(typeof(A));
+            var arch = em.GetEntityInfoRef(live[0].Id).Archetype;
+            for (int round = 0; round < 20; round++)
+            {
+                int offset = round % 2 * 64;
+                for (int i = offset; i < offset + 64; i++) em.DestroyEntity(live[i]);
+                for (int i = offset; i < offset + 64; i++) live[i] = em.NewEntity(typeof(A));
+            }
+            int before = arch.ChunkCount;
+            em.CompactChunks();
+            long mismatches = em.VerifyLocateTable(out int checkedEntities);
+            Console.WriteLine($"CHURN live={checkedEntities} chunks_before={before} chunks_after={arch.ChunkCount} mismatches={mismatches}");
+            if (mismatches != 0 || checkedEntities != 128) throw new Exception("churn invariant");
+        }
+        finally { Archetype.ChunkCapacityOverride = savedCapacity; }
+        JobScheduler.Shutdown();
+    }
+}
+struct A : IComponentData { public int Value; }
+struct B : IComponentData { public int Value; }
+struct C : IComponentData { public int Value; }

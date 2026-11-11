@@ -1,0 +1,22 @@
+Test project E:/GODOT/Project/EntJoy-review-ee4cd72/tests/NativeDll.Tests/build-review
+    Start  2: AssistLifetimeTests
+1/5 Test  #2: AssistLifetimeTests ..............   Passed    0.57 sec
+    Start  9: EntityMatchMaskTests
+2/5 Test  #9: EntityMatchMaskTests .............   Passed    0.15 sec
+    Start 11: ImplicitBatchTests
+3/5 Test #11: ImplicitBatchTests ...............   Passed    0.22 sec
+    Start 12: ShutdownFinalizeTests
+4/5 Test #12: ShutdownFinalizeTests ............   Passed    0.52 sec
+    Start 15: WakeLivenessTests
+5/5 Test #15: WakeLivenessTests ................   Passed    0.82 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Label Time Summary:
+Concurrency    =   1.39 sec*proc (2 tests)
+Deadlock       =   1.39 sec*proc (2 tests)
+JobSystem      =   2.13 sec*proc (4 tests)
+Lifetime       =   0.74 sec*proc (2 tests)
+Memory         =   0.74 sec*proc (2 tests)
+
+Total Test time (real) =   2.30 sec

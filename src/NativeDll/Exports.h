@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include "WorkerSnapshot.h"
 
@@ -61,6 +63,7 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     typedef void* (*PersistentAllocCallback)(int32_t size);
     typedef void  (*PersistentFreeCallback)(void* ptr);
     JOB_API void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free);
+    JOB_API void JobSystem_RegisterAllocator(int32_t label, PersistentAllocCallback alloc, PersistentFreeCallback free);
 
     // 注册"当前 batch"回调。每次 job 执行窗口入口调 cb(batchId)、出口 cb(0)，
     // C# 异常按 batch 归属。
@@ -167,102 +170,142 @@ JOB_API uint32_t JobSystem_GetAbiVersion();
     JOB_API void JobSystem_SetTuning(const JobSystemTuningNative* tuning);
     JOB_API void JobSystem_GetTuning(JobSystemTuningNative* tuning);
 
+    // 字段表即结构体定义：改字段只改这一处，offsetof 与布局指纹都从它派生。
+#define JOB_STATS_FIELDS(X) \
+        X(unsigned long long, completeWaitLoops) \
+        X(unsigned long long, assistAttempts) \
+        X(unsigned long long, assistExecuted) \
+        X(unsigned long long, frameTasksSubmitted) \
+        X(unsigned long long, frameTasksCompleted) \
+        X(unsigned long long, workerExecutedRanges) \
+        X(unsigned long long, mainExecutedRanges) \
+        X(unsigned long long, stealCount) \
+        X(unsigned long long, parkWakeCount) \
+        X(unsigned long long, deferredRuns) \
+        X(unsigned long long, publishedJobs) \
+        X(unsigned long long, prewakeCount) \
+        X(unsigned long long, hotSpinHits) \
+        X(unsigned long long, waitFallbacks) \
+        X(unsigned long long, notifiedWorkers) \
+        X(unsigned long long, workerClaimedTokens) \
+        X(unsigned long long, mainClaimedTokens) \
+        X(unsigned long long, coldBatches) \
+        X(unsigned long long, activeWorkersPeak) \
+        X(unsigned long long, wakeLatencyEwmaNs) \
+        X(unsigned long long, scheduleModePublishNoAssist) \
+        X(unsigned long long, scheduleModePublishAssist) \
+        X(unsigned long long, scheduleModeDeferTinyOnly) \
+        X(unsigned long long, scheduleModeImmediateNative) \
+        X(unsigned long long, scheduleModeDeferredPublish) \
+        X(unsigned long long, scheduleModeDeferredPublishNoAssist) \
+        X(int, frameQueueDepthPeak) \
+        X(unsigned long long, publishToCompletionEwmaNs) /* ABI = 3。C# 与 Unity 侧 port 必须与本结构体同序同步。 */ \
+        X(unsigned long long, perRangeExecEwmaNs) \
+        X(unsigned long long, assistExecPctEwma) \
+        X(unsigned long long, completionOverheadUs) \
+        X(unsigned long long, workerTargetTotal) /* Tile/partition fields; keep order in sync with C#. */ \
+        X(unsigned long long, totalTilesPublished) \
+        X(unsigned long long, localTiles) \
+        X(unsigned long long, stolenTiles) \
+        X(unsigned long long, assistTiles) \
+        X(unsigned long long, stealAttempts) \
+        X(unsigned long long, stealSuccesses) \
+        X(unsigned long long, permitsReleased) \
+        X(unsigned long long, victimScans) \
+        X(unsigned long long, stealEmptyExits) \
+        X(unsigned long long, batchStorageCreated) \
+        X(unsigned long long, batchStorageReused) \
+        X(unsigned long long, batchStorageReturned) \
+        X(unsigned long long, batchStorageDropped) \
+        X(unsigned long long, submitToFirstWorkerEwmaNs) \
+        X(unsigned long long, workerStartSpreadEwmaNs) \
+        X(unsigned long long, lastTileToTopologyDoneEwmaNs) \
+        X(unsigned long long, completeWakeToReturnEwmaNs) \
+        X(unsigned long long, nativeBatches) \
+        X(unsigned long long, invalidBackendSelections) \
+        X(unsigned long long, timingSampleCount) /* Exact per-batch timing distribution; keep order in sync with C#. */ \
+        X(unsigned long long, timingSamplesDropped) \
+        X(unsigned long long, batchTotalP50Ns) \
+        X(unsigned long long, batchTotalP95Ns) \
+        X(unsigned long long, batchTotalP99Ns) \
+        X(unsigned long long, batchTotalMaxNs) \
+        X(unsigned long long, submitToFirstWorkerP50Ns) \
+        X(unsigned long long, submitToFirstWorkerP95Ns) \
+        X(unsigned long long, submitToFirstWorkerP99Ns) \
+        X(unsigned long long, submitToFirstWorkerMaxNs) \
+        X(unsigned long long, workerStartSpreadP50Ns) \
+        X(unsigned long long, workerStartSpreadP95Ns) \
+        X(unsigned long long, workerStartSpreadP99Ns) \
+        X(unsigned long long, workerStartSpreadMaxNs) \
+        X(unsigned long long, executionSpanP50Ns) \
+        X(unsigned long long, executionSpanP95Ns) \
+        X(unsigned long long, executionSpanP99Ns) \
+        X(unsigned long long, executionSpanMaxNs) \
+        X(unsigned long long, maxRangeP50Ns) \
+        X(unsigned long long, maxRangeP95Ns) \
+        X(unsigned long long, maxRangeP99Ns) \
+        X(unsigned long long, maxRangeMaxNs) \
+        X(unsigned long long, slowBatchId) \
+        X(unsigned long long, slowBatchTotalNs) \
+        X(unsigned long long, slowSubmitToFirstWorkerNs) \
+        X(unsigned long long, slowWorkerStartSpreadNs) \
+        X(unsigned long long, slowExecutionSpanNs) \
+        X(unsigned long long, slowMaxRangeNs) \
+        X(unsigned long long, slowCoreMigrations) \
+        X(unsigned long long, slowAssistTiles) \
+        X(unsigned long long, slowRangeThreadCpuNs) \
+        X(unsigned long long, slowRangeThreadCycles) \
+        X(unsigned long long, slowBatchMinRangeThreadCycles) \
+        X(unsigned long long, slowBatchAverageRangeThreadCycles) \
+        X(int, slowRangeIndex) \
+        X(int, slowRangeWorker) \
+        X(int, slowRangeStartLogicalCore) \
+        X(int, slowRangeEndLogicalCore) \
+        X(int, slowRangeStartPhysicalCore) \
+        X(int, slowRangeEndPhysicalCore)
+
     typedef struct JobSystemStatsNative {
-        unsigned long long completeWaitLoops;
-        unsigned long long assistAttempts;
-        unsigned long long assistExecuted;
-        unsigned long long frameTasksSubmitted;
-        unsigned long long frameTasksCompleted;
-        unsigned long long workerExecutedRanges;
-        unsigned long long mainExecutedRanges;
-        unsigned long long stealCount;
-        unsigned long long parkWakeCount;
-        unsigned long long deferredRuns;
-        unsigned long long publishedJobs;
-        unsigned long long prewakeCount;
-        unsigned long long hotSpinHits;
-        unsigned long long waitFallbacks;
-        unsigned long long notifiedWorkers;
-        unsigned long long workerClaimedTokens;
-        unsigned long long mainClaimedTokens;
-        unsigned long long coldBatches;
-        unsigned long long activeWorkersPeak;
-        unsigned long long wakeLatencyEwmaNs;
-        unsigned long long scheduleModePublishNoAssist;
-        unsigned long long scheduleModePublishAssist;
-        unsigned long long scheduleModeDeferTinyOnly;
-        unsigned long long scheduleModeImmediateNative;
-        unsigned long long scheduleModeDeferredPublish;
-        unsigned long long scheduleModeDeferredPublishNoAssist;
-        int frameQueueDepthPeak;
-        // ABI = 3。C# 与 Unity 侧 port 必须与本结构体同序同步。
-        unsigned long long publishToCompletionEwmaNs;
-        unsigned long long perRangeExecEwmaNs;
-        unsigned long long assistExecPctEwma;
-        unsigned long long completionOverheadUs;
-        // Tile/partition fields; keep order in sync with C#.
-        unsigned long long workerTargetTotal;
-        unsigned long long totalTilesPublished;
-        unsigned long long localTiles;
-        unsigned long long stolenTiles;
-        unsigned long long assistTiles;
-        unsigned long long stealAttempts;
-        unsigned long long stealSuccesses;
-        unsigned long long permitsReleased;
-        unsigned long long victimScans;
-        unsigned long long stealEmptyExits;
-        unsigned long long batchStorageCreated;
-        unsigned long long batchStorageReused;
-        unsigned long long batchStorageReturned;
-        unsigned long long batchStorageDropped;
-        unsigned long long submitToFirstWorkerEwmaNs;
-        unsigned long long workerStartSpreadEwmaNs;
-        unsigned long long lastTileToTopologyDoneEwmaNs;
-        unsigned long long completeWakeToReturnEwmaNs;
-        unsigned long long nativeBatches;
-        unsigned long long invalidBackendSelections;
-        // Exact per-batch timing distribution; keep order in sync with C#.
-        unsigned long long timingSampleCount;
-        unsigned long long timingSamplesDropped;
-        unsigned long long batchTotalP50Ns;
-        unsigned long long batchTotalP95Ns;
-        unsigned long long batchTotalP99Ns;
-        unsigned long long batchTotalMaxNs;
-        unsigned long long submitToFirstWorkerP50Ns;
-        unsigned long long submitToFirstWorkerP95Ns;
-        unsigned long long submitToFirstWorkerP99Ns;
-        unsigned long long submitToFirstWorkerMaxNs;
-        unsigned long long workerStartSpreadP50Ns;
-        unsigned long long workerStartSpreadP95Ns;
-        unsigned long long workerStartSpreadP99Ns;
-        unsigned long long workerStartSpreadMaxNs;
-        unsigned long long executionSpanP50Ns;
-        unsigned long long executionSpanP95Ns;
-        unsigned long long executionSpanP99Ns;
-        unsigned long long executionSpanMaxNs;
-        unsigned long long maxRangeP50Ns;
-        unsigned long long maxRangeP95Ns;
-        unsigned long long maxRangeP99Ns;
-        unsigned long long maxRangeMaxNs;
-        unsigned long long slowBatchId;
-        unsigned long long slowBatchTotalNs;
-        unsigned long long slowSubmitToFirstWorkerNs;
-        unsigned long long slowWorkerStartSpreadNs;
-        unsigned long long slowExecutionSpanNs;
-        unsigned long long slowMaxRangeNs;
-        unsigned long long slowCoreMigrations;
-        unsigned long long slowAssistTiles;
-        unsigned long long slowRangeThreadCpuNs;
-        unsigned long long slowRangeThreadCycles;
-        unsigned long long slowBatchMinRangeThreadCycles;
-        unsigned long long slowBatchAverageRangeThreadCycles;
-        int slowRangeIndex;
-        int slowRangeWorker;
-        int slowRangeStartLogicalCore;
-        int slowRangeEndLogicalCore;
-        int slowRangeStartPhysicalCore;
-        int slowRangeEndPhysicalCore;
+#define JOB_STATS_LOCAL_DECL(type, name) type name;
+        JOB_STATS_FIELDS(JOB_STATS_LOCAL_DECL)
+#undef JOB_STATS_LOCAL_DECL
     } JobSystemStatsNative;
+
+    // 布局指纹用的 FNV-1a 常量：托管侧 NativeJobCore.cs 必须使用同值。
+    inline constexpr uint64_t kLayoutFnvBasis = 1469598103934665603ull;
+    inline constexpr uint64_t kLayoutFnvPrime = 1099511628211ull;
+    inline constexpr uint64_t kLayoutSalt = 0x9e3779b97f4a7c15ull;
+
+    // 单个字段的指纹：名字（忽略大小写）+ 偏移 + 大小。
+    // 忽略大小写是因为 C# 侧字段是 PascalCase、C++ 侧是 camelCase。
+    inline constexpr uint64_t JobStatsFieldHash(const char* name, uint64_t offset, uint64_t size)
+    {
+        uint64_t hash = kLayoutFnvBasis;
+        for (const char* p = name; *p != '\0'; ++p)
+        {
+            const auto lower = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(*p)));
+            hash ^= lower;
+            hash *= kLayoutFnvPrime;
+        }
+        hash = (hash ^ offset) * kLayoutFnvPrime;
+        hash = (hash ^ size) * kLayoutFnvPrime;
+        return hash;
+    }
+
+    // 整个结构体的指纹：字段指纹按加法合成，所以与字段遍历顺序无关，两端可按各自方便的顺序枚举。
+    inline constexpr uint64_t JobStatsLayoutFingerprint()
+    {
+        uint64_t sum = 0;
+#define JOB_STATS_LOCAL_HASH(type, name) \
+        sum += JobStatsFieldHash(#name, offsetof(JobSystemStatsNative, name), sizeof(JobSystemStatsNative{}.name));
+        JOB_STATS_FIELDS(JOB_STATS_LOCAL_HASH)
+#undef JOB_STATS_LOCAL_HASH
+        return sum + (kLayoutSalt ^ static_cast<uint64_t>(sizeof(JobSystemStatsNative)));
+    }
+
+#undef JOB_STATS_FIELDS
+
+    /** 布局指纹：托管侧按自己的结构体反射算出同值，Initialize 时比对（同宽换序也能抓到）。*/
+    JOB_API uint64_t JobSystem_GetStatsLayoutFingerprint();
 
     JOB_API void JobSystem_GetStats(JobSystemStatsNative* stats);
     JOB_API void JobSystem_ResetStats();

@@ -239,7 +239,8 @@ jobs:
           ./tools/JobSystemBugTests/Stage8_CompleteRetain/bin/Release/net8.0/Stage8_CompleteRetain.exe
           ./tools/JobSystemBugTests/Stage11_AbiFixture/bin/Release/net8.0/Stage11_AbiFixture.exe \
             tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_abi.dll \
-            tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll
+            tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_wrong_version.dll \
+            tools/JobSystemBugTests/Stage11_AbiFixture/build/Release/stub_no_allocator.dll
         shell: bash
 
       - name: Scheduler stress across worker and assist configurations
@@ -499,8 +500,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+      # runner 镜像自带 clang；apt 只在缺失时兜底，避免镜像源不可达拖垮本 job。
+      - name: Ensure clang
+        run: |
+          if command -v clang++ >/dev/null 2>&1; then
+            clang++ --version | head -n1
+          else
+            sudo apt-get update && sudo apt-get install -y clang
+          fi
 
       - name: Configure ASAN+UBSAN
         run: >
@@ -549,8 +556,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+      # runner 镜像自带 clang；apt 只在缺失时兜底，避免镜像源不可达拖垮本 job。
+      - name: Ensure clang
+        run: |
+          if command -v clang++ >/dev/null 2>&1; then
+            clang++ --version | head -n1
+          else
+            sudo apt-get update && sudo apt-get install -y clang
+          fi
 
       - name: Configure
         run: >

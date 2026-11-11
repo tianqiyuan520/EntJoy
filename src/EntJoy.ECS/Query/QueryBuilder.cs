@@ -1,5 +1,3 @@
-
-
 using System;
 using System.Collections.Generic;
 
@@ -62,41 +60,28 @@ namespace EntJoy.ECS
         public QueryBuilder WithAll<T>()
             where T : struct
         {
-            // 单组件首调：直接引用静态 Share，零分配（v3 Phase 1.5）。
-            if (All == null)
-            {
-                All = ComponentTypes<T>.Share;
-                return this;
-            }
-            All = Merge(All, ComponentTypes<T>.Share);
+            Append(ref All, ComponentTypes<T>.Share);
             return this;
         }
+
         public QueryBuilder WithAll<T, T2>()
             where T : struct
             where T2 : struct
         {
-            if (All == null)
-            {
-                All = ComponentTypes<T, T2>.Share;
-                return this;
-            }
-            All = Merge(All, ComponentTypes<T, T2>.Share);
+            Append(ref All, ComponentTypes<T, T2>.Share);
             return this;
         }
-
-        //TODO
 
         public QueryBuilder WithAny<T>()
             where T : struct
         {
-            if (Any == null) { Any = ComponentTypes<T>.Share; return this; }
-            Any = Merge(Any, ComponentTypes<T>.Share);
+            Append(ref Any, ComponentTypes<T>.Share);
             return this;
         }
+
         public QueryBuilder WithNone<T>() where T : struct
         {
-            if (None == null) { None = ComponentTypes<T>.Share; return this; }
-            None = Merge(None, ComponentTypes<T>.Share);
+            Append(ref None, ComponentTypes<T>.Share);
             return this;
         }
 
@@ -105,15 +90,7 @@ namespace EntJoy.ECS
         /// <summary>只返回指定组件被修改过的实体。</summary>
         public QueryBuilder WithChanged<T>() where T : struct
         {
-            var compType = ComponentTypeManager.GetComponentType(typeof(T));
-            if (ChangedComponents == null || ChangedComponents.Length == 0)
-            {
-                ChangedComponents = new ComponentType[] { compType };
-            }
-            else
-            {
-                ChangedComponents = Merge(ChangedComponents, new ComponentType[] { compType });
-            }
+            Append(ref ChangedComponents, new[] { ComponentTypeManager.GetComponentType(typeof(T)) });
             return this;
         }
 
@@ -152,9 +129,11 @@ namespace EntJoy.ECS
             return this;
         }
 
-        /// <summary>
-        /// 合并两个只读类型数组（链式条件追加）：单次数组分配，避免 List+ToArray 两次分配。
-        /// </summary>
+        /// <summary>追加过滤类型：首次直接引用静态数组，之后合并出新数组。</summary>
+        private static void Append(ref ComponentType[] target, ComponentType[] types)
+            => target = target == null || target.Length == 0 ? types : Merge(target, types);
+
+        /// <summary>合并两个类型数组（单次分配）。</summary>
         private static ComponentType[] Merge(ComponentType[] a, ComponentType[] b)
         {
             var merged = new ComponentType[a.Length + b.Length];
@@ -163,5 +142,4 @@ namespace EntJoy.ECS
             return merged;
         }
     }
-
 }

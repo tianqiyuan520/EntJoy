@@ -71,6 +71,10 @@ imgui.ini
 # Benchmarks & tooling (local-only; not part of library sources)
 # 例外：CI 依赖的工具必须入库（本地专属的不要加进来）。
 /tools/*
+!/tools/EcsComparison/
+!/tools/JobSystemBugTests/
+/tools/JobSystemBugTests/*
+!/tools/JobSystemBugTests/Stage11_AbiFixture/
 !/tools/JobSystemStressTest/
 !/tools/JobSystemStressTest.CSharp/
 !/tools/ISPCWidthBoundaryTest/
@@ -88,3 +92,7 @@ NuGet.Offline.config
 /docs/*
 !/docs/public/
 !/docs/public/**
+
+# CMake 构建产物与基准运行产物
+/tests/NativeDll.Tests/AllocatorFixture/build/
+BenchmarkDotNet.Artifacts/

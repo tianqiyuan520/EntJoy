@@ -1,0 +1,25 @@
+-- Building for: Visual Studio 17 2022
+-- The CXX compiler identification is MSVC 19.44.35228.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: D:/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (3.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: E:/GODOT/Project/EntJoy/tools/NativeDllCore/build-review
+适用于 .NET Framework MSBuild 版本 17.14.51+25f168cee
+
+  1>Checking Build System
+  Building Custom Rule E:/GODOT/Project/EntJoy/tools/NativeDllCore/CMakeLists.txt
+  Exports.cpp
+  JobSystem.cpp
+  JobSystem_State.cpp
+  JobSystem_Tiles.cpp
+  JobSystem_Scheduler.cpp
+  ChaseLevScheduler.cpp
+  JobProfiler.cpp
+  JobDebuggerGUI.cpp
+    正在创建库 E:/GODOT/Project/EntJoy/tools/NativeDllCore/build-review/Release/NativeDll.lib 和对象 E:/GODOT/Project/EntJoy/tools/NativeDllCore/build-review/Release/NativeDll.exp
+  NativeDll.vcxproj -> E:\GODOT\Project\EntJoy\tools\NativeDllCore\build-review\Release\NativeDll.dll
+  Building Custom Rule E:/GODOT/Project/EntJoy/tools/NativeDllCore/CMakeLists.txt

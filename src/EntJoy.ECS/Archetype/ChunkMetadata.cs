@@ -22,6 +22,9 @@ namespace EntJoy.ECS
         public readonly int[] EnableBitOffsets;
         public readonly int[] EnableStrideBytes;
 
+        /// <summary>是否存在 enableable 列：为假时追加/移除实体无需遍历位图。</summary>
+        public readonly bool HasEnableables;
+
         // 实体级变更位掩码在块内的偏移与字节数（-1/0 表示不启用变更追踪）
         public readonly int ChangedBitMaskOffset;
         public readonly int ChangedBitMaskSize;
@@ -66,6 +69,7 @@ namespace EntJoy.ECS
             ComponentSizes = componentSizes;
             EnableBitOffsets = enableBitOffsets;
             EnableStrideBytes = enableStrideBytes;
+            HasEnableables = System.Array.IndexOf(enableBitOffsets, -1) != enableBitOffsets.Length;
             ChangedBitMaskOffset = changedBitMaskOffset;
             ChangedBitMaskSize = changedBitMaskSize;
             SharedValuesOffset = sharedValuesOffset;
@@ -83,9 +87,7 @@ namespace EntJoy.ECS
         internal static ChunkMetadata Create(Archetype archetype, int entityCapacity, ComponentType[] componentTypes,
             bool enableChangeTracking, ChunkCacheLayout cacheLayout)
         {
-            int cacheLineSize = cacheLayout.LineSize;
-            int conflictPeriod = cacheLayout.ConflictPeriod;
-
+            int lineSize = cacheLayout.LineSize;
             int componentCount = componentTypes.Length;
             var componentOffsets = new int[componentCount];
             var componentSizes = new int[componentCount];
@@ -93,96 +95,20 @@ namespace EntJoy.ECS
             var enableStrideBytes = new int[componentCount];
             var sharedValueOffsets = new int[componentCount];
             var sharedValueSizes = new int[componentCount];
-
             for (int i = 0; i < componentCount; i++)
             {
                 enableBitOffsets[i] = -1;
                 sharedValueOffsets[i] = -1;
-                sharedValueSizes[i] = 0;
             }
 
-            // Entity 数组（置于偏移 0）
-            int entityArraySize = entityCapacity * Unsafe.SizeOf<Entity>();
-            int offset = entityArraySize;
-            int previousColumnOffset = 0;
-
-            // 组件数组，每个都缓存行对齐
-            for (int i = 0; i < componentCount; i++)
-            {
-                int componentSize = componentTypes[i].Size;
-
-                // 对齐
-                offset = offset + cacheLineSize - 1 & ~(cacheLineSize - 1);
-                // 相邻列起点对缓存检测周期取余相同时，错开一条缓存行以分散组索引。
-                if (componentSize > 0)
-                {
-                    if (offset % conflictPeriod == previousColumnOffset % conflictPeriod)
-                        offset += cacheLineSize;
-                    previousColumnOffset = offset;
-                }
-
-                componentOffsets[i] = offset;
-                componentSizes[i] = componentSize;
-                offset += entityCapacity * componentSize;
-
-                // enableable 位图
-                if (componentTypes[i].IsEnableable)
-                {
-                    int ulongCount = (entityCapacity + 63) / 64;
-                    int bitMapBytes = ulongCount * 8;
-                    enableBitOffsets[i] = offset;
-                    enableStrideBytes[i] = bitMapBytes;
-                    offset += bitMapBytes;
-                }
-            }
-
-            // 实体级变更位掩码（每实体 1 bit）
-            int changedBitMaskOffset = -1;
-            int changedBitMaskSize = 0;
-            if (enableChangeTracking)
-            {
-                offset = (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
-                changedBitMaskOffset = offset;
-                int ulongCount = (entityCapacity + 63) / 64;
-                changedBitMaskSize = ulongCount * 8;
-                offset += changedBitMaskSize;
-            }
-
-            // Shared values 区
-            // blittable shared → 内联存值；managed shared → 存 int 索引（值在 EntityManager 哈希桶数组）
-            int sharedValuesOffset = -1;
-            int managedSharedCount = 0;
-            bool hasShared = false;
-            for (int i = 0; i < componentCount; i++)
-            {
-                if (!componentTypes[i].IsShared) continue;
-                hasShared = true;
-                if (componentTypes[i].IsManagedShared) managedSharedCount++;
-            }
-
-            if (hasShared)
-            {
-                offset = (offset + cacheLineSize - 1) & ~(cacheLineSize - 1);
-                sharedValuesOffset = offset;
-                for (int i = 0; i < componentCount; i++)
-                {
-                    if (!componentTypes[i].IsShared) continue;
-
-                    sharedValueOffsets[i] = offset;
-                    if (componentTypes[i].IsManagedShared)
-                    {
-                        // managed shared 槽位只存 int 索引（指向 EntityManager _managedSharedValues）
-                        sharedValueSizes[i] = sizeof(int);
-                        offset += sizeof(int);
-                    }
-                    else
-                    {
-                        // blittable shared 内联存值
-                        sharedValueSizes[i] = componentTypes[i].Size;
-                        offset += componentTypes[i].Size;
-                    }
-                }
-            }
+            // Entity 数组固定在偏移 0，其后依次是组件列、各 enableable 位图、变更位图、shared 区。
+            int offset = entityCapacity * Unsafe.SizeOf<Entity>();
+            offset = LayoutColumns(componentTypes, entityCapacity, cacheLayout, componentOffsets, componentSizes,
+                enableBitOffsets, enableStrideBytes, offset);
+            LayoutChangedBitMask(entityCapacity, lineSize, enableChangeTracking, ref offset,
+                out int changedBitMaskOffset, out int changedBitMaskSize);
+            int sharedValuesOffset = LayoutSharedValues(componentTypes, lineSize, ref offset,
+                sharedValueOffsets, sharedValueSizes, out int managedSharedCount);
 
             return new ChunkMetadata(
                 archetype,
@@ -198,6 +124,81 @@ namespace EntJoy.ECS
                 sharedValueOffsets,
                 sharedValueSizes,
                 managedSharedCount);
+        }
+
+        // 每列按缓存行对齐；相邻列起点对缓存检测周期取余相同时再错开一行，分散组索引。返回新的游标。
+        private static int LayoutColumns(ComponentType[] componentTypes, int entityCapacity, ChunkCacheLayout cacheLayout,
+            int[] componentOffsets, int[] componentSizes, int[] enableBitOffsets, int[] enableStrideBytes, int offset)
+        {
+            int lineSize = cacheLayout.LineSize;
+            int conflictPeriod = cacheLayout.ConflictPeriod;
+            int previousColumnOffset = 0;
+            for (int i = 0; i < componentTypes.Length; i++)
+            {
+                int componentSize = componentTypes[i].Size;
+                offset = (offset + lineSize - 1) & ~(lineSize - 1);
+                if (componentSize > 0)
+                {
+                    if (offset % conflictPeriod == previousColumnOffset % conflictPeriod)
+                        offset += lineSize;
+                    previousColumnOffset = offset;
+                }
+
+                componentOffsets[i] = offset;
+                componentSizes[i] = componentSize;
+                offset += entityCapacity * componentSize;
+
+                if (componentTypes[i].IsEnableable)
+                {
+                    int bitMapBytes = (entityCapacity + 63) / 64 * 8;
+                    enableBitOffsets[i] = offset;
+                    enableStrideBytes[i] = bitMapBytes;
+                    offset += bitMapBytes;
+                }
+            }
+            return offset;
+        }
+
+        // 实体级变更位掩码占每实体 1 bit；不启用变更追踪时两个输出都是 -1 / 0。
+        private static void LayoutChangedBitMask(int entityCapacity, int lineSize, bool enabled, ref int offset,
+            out int maskOffset, out int maskSize)
+        {
+            if (!enabled)
+            {
+                maskOffset = -1;
+                maskSize = 0;
+                return;
+            }
+            offset = (offset + lineSize - 1) & ~(lineSize - 1);
+            maskOffset = offset;
+            maskSize = (entityCapacity + 63) / 64 * 8;
+            offset += maskSize;
+        }
+
+        // blittable shared 内联存值；managed shared 只存 int 索引（值在 EntityManager 哈希桶数组）。
+        private static int LayoutSharedValues(ComponentType[] componentTypes, int lineSize, ref int offset,
+            int[] sharedValueOffsets, int[] sharedValueSizes, out int managedSharedCount)
+        {
+            managedSharedCount = 0;
+            bool hasShared = false;
+            for (int i = 0; i < componentTypes.Length; i++)
+            {
+                if (!componentTypes[i].IsShared) continue;
+                hasShared = true;
+                if (componentTypes[i].IsManagedShared) managedSharedCount++;
+            }
+            if (!hasShared) return -1;
+
+            offset = (offset + lineSize - 1) & ~(lineSize - 1);
+            int sharedValuesOffset = offset;
+            for (int i = 0; i < componentTypes.Length; i++)
+            {
+                if (!componentTypes[i].IsShared) continue;
+                sharedValueOffsets[i] = offset;
+                sharedValueSizes[i] = componentTypes[i].IsManagedShared ? sizeof(int) : componentTypes[i].Size;
+                offset += sharedValueSizes[i];
+            }
+            return sharedValuesOffset;
         }
     }
 }

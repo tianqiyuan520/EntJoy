@@ -60,7 +60,7 @@ namespace EntJoy.ECS
             if (_relationListStore.HasRelationshipsForSource(entity))
                 foreach (var entry in _relationListStore.ForSource(entity))
                 {
-                    var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(entry.TypeId));
+                    var type = ComponentTypeManager.GetComponentType(entry.TypeId);
                     foreach (var target in entry.Targets)
                     {
                         var edge = CaptureMultiNotification(entity, type, ObserverEvents.Destroyed, target);
@@ -70,76 +70,112 @@ namespace EntJoy.ECS
             return notifications;
         }
 
-        private int CommitPreparedDeletion(List<Entity> order, List<(Entity Source, Entity Target, int TypeId)> incoming)
+
+        private sealed class DeletionPlan
         {
-            int singleCount = 0, firstType = -1;
-            bool groupSources = false;
+            public List<DeletionUnlink> Unlinks = new();
+            public List<(Entity Source, Entity Target, int TypeId)> Multi = new();
+            public Dictionary<(Entity Source, int TypeId), HashSet<Entity>> BulkLists;
+            public List<RelationNotification> Notifications = new();
+        }
+
+        // 把入边分成「单值关系要搬去新原型」与「多值关系只需解绑」两类，并预先取好观察者通知。
+        private DeletionPlan BuildDeletionPlan(List<Entity> order, List<(Entity Source, Entity Target, int TypeId)> incoming)
+        {
+            var plan = new DeletionPlan();
+            int singleCount = CountSingleRelationEdges(incoming, out bool groupSources);
+            var unlinks = new List<DeletionUnlink>(singleCount);
+            var sourcePlans = groupSources ? new Dictionary<Entity, int>() : null;
             foreach (var edge in incoming)
             {
-                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(edge.TypeId));
+                var type = ComponentTypeManager.GetComponentType(edge.TypeId);
+                if (type.IsMultiRelation)
+                {
+                    PlanMultiUnlink(plan, order, edge, type);
+                    continue;
+                }
+                PlanSingleUnlink(plan, unlinks, sourcePlans, edge, type);
+            }
+            plan.Unlinks = unlinks;
+            return plan;
+        }
+
+        // 单值边数决定 unlink 列表的初始容量；多个关系类型混在同一批时才需要按 source 去重。
+        private static int CountSingleRelationEdges(List<(Entity Source, Entity Target, int TypeId)> incoming, out bool groupSources)
+        {
+            int singleCount = 0, firstType = -1;
+            groupSources = false;
+            foreach (var edge in incoming)
+            {
+                var type = ComponentTypeManager.GetComponentType(edge.TypeId);
                 if (type.IsMultiRelation) continue;
                 singleCount++;
                 if (firstType < 0) firstType = type.Id;
                 else if (firstType != type.Id) groupSources = true;
             }
-            var unlinks = new List<DeletionUnlink>(singleCount);
-            var sourcePlans = groupSources ? new Dictionary<Entity, int>() : null;
-            var multi = new List<(Entity Source, Entity Target, int TypeId)>();
-            Dictionary<(Entity Source, int TypeId), HashSet<Entity>> bulkLists = null;
-            var notifications = new List<RelationNotification>();
-            foreach (var edge in incoming)
+            return singleCount;
+        }
+
+        // 多值边只需解绑；托管多值关系的 source 边数超过阈值时改用整批摘除。
+        private void PlanMultiUnlink(DeletionPlan plan, List<Entity> order, (Entity Source, Entity Target, int TypeId) edge, ComponentType type)
+        {
+            plan.Multi.Add(edge);
+            if (order.Count > 1 && type.MultiRelationMaxSlots == 0
+                && _relationListStore.GetCount(type.Id, edge.Source) > 32)
             {
-                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(edge.TypeId));
-                if (type.IsMultiRelation)
-                {
-                    multi.Add(edge);
-                    if (order.Count > 1 && type.MultiRelationMaxSlots == 0
-                        && _relationListStore.GetCount(type.Id, edge.Source) > 32)
-                    {
-                        bulkLists ??= new();
-                        var key = (edge.Source, type.Id);
-                        if (!bulkLists.TryGetValue(key, out var targets)) bulkLists.Add(key, targets = new());
-                        targets.Add(edge.Target);
-                    }
-                    var removed = CaptureMultiNotification(edge.Source, type, ObserverEvents.Removed, RelationSlot.From(edge.Target));
-                    if (removed.Value != null) notifications.Add(removed);
-                    continue;
-                }
-                int position;
-                if (sourcePlans == null || !sourcePlans.TryGetValue(edge.Source, out position))
-                {
-                    position = unlinks.Count;
-                    unlinks.Add(new DeletionUnlink { Source = edge.Source });
-                    sourcePlans?.Add(edge.Source, position);
-                }
-                ref var plan = ref CollectionsMarshal.AsSpan(unlinks)[position];
-                plan.AddEdge((type, RelationSlot.From(edge.Target)));
-                var notification = CaptureRelationNotification(edge.Source, type, ObserverEvents.Removed, GetRelationValue(edge.Source, type));
-                if (notification.Value != null) notifications.Add(notification);
+                plan.BulkLists ??= new();
+                var key = (edge.Source, type.Id);
+                if (!plan.BulkLists.TryGetValue(key, out var targets)) plan.BulkLists.Add(key, targets = new());
+                targets.Add(edge.Target);
             }
+            var removed = CaptureMultiNotification(edge.Source, type, ObserverEvents.Removed, RelationSlot.From(edge.Target));
+            if (removed.Value != null) plan.Notifications.Add(removed);
+        }
+
+        // 单值边要按 source 归组：同一 source 的全部出边要一起搬去新原型。
+        private void PlanSingleUnlink(DeletionPlan plan, List<DeletionUnlink> unlinks, Dictionary<Entity, int> sourcePlans,
+            (Entity Source, Entity Target, int TypeId) edge, ComponentType type)
+        {
+            int position;
+            if (sourcePlans == null || !sourcePlans.TryGetValue(edge.Source, out position))
+            {
+                position = unlinks.Count;
+                unlinks.Add(new DeletionUnlink { Source = edge.Source });
+                sourcePlans?.Add(edge.Source, position);
+            }
+            ref var unlink = ref CollectionsMarshal.AsSpan(unlinks)[position];
+            unlink.AddEdge((type, RelationSlot.From(edge.Target)));
+            var notification = CaptureRelationNotification(edge.Source, type, ObserverEvents.Removed, GetRelationValue(edge.Source, type));
+            if (notification.Value != null) plan.Notifications.Add(notification);
+        }
+
+        // 为每个解绑计划选定目标原型与目标块：优先复用空块，shared 列从源块拷入。
+        private Dictionary<(Archetype, nint), DeletionDestination> AssignDeletionDestinations(
+            List<DeletionUnlink> unlinks, out HashSet<Archetype> affected)
+        {
+            affected = new HashSet<Archetype>();
             var destinations = new Dictionary<(Archetype, nint), DeletionDestination>();
             var reservedChunks = new HashSet<nint>();
             var layouts = new Dictionary<Archetype, List<(int[] Removed, Archetype Target)>>();
-            var affected = new HashSet<Archetype>();
             for (int planIndex = 0; planIndex < unlinks.Count; planIndex++)
             {
-                ref var plan = ref CollectionsMarshal.AsSpan(unlinks)[planIndex];
-                var info = GetEntityInfoRef(plan.Source.Id);
+                ref var unlink = ref CollectionsMarshal.AsSpan(unlinks)[planIndex];
+                var info = GetEntityInfoRef(unlink.Source.Id);
                 var source = info.Archetype;
                 if (!layouts.TryGetValue(source, out var choices)) layouts[source] = choices = new();
                 Archetype target = null;
                 foreach (var choice in choices)
                 {
-                    if (choice.Removed.Length != plan.EdgeCount) continue;
+                    if (choice.Removed.Length != unlink.EdgeCount) continue;
                     bool same = true;
-                    for (int i = 0; i < plan.EdgeCount; i++) if (Array.IndexOf(choice.Removed, plan.EdgeAt(i).Type.Id) < 0) { same = false; break; }
+                    for (int i = 0; i < unlink.EdgeCount; i++) if (Array.IndexOf(choice.Removed, unlink.EdgeAt(i).Type.Id) < 0) { same = false; break; }
                     if (same) { target = choice.Target; break; }
                 }
                 if (target == null)
                 {
-                    var removed = new int[plan.EdgeCount];
-                    for (int i = 0; i < removed.Length; i++) removed[i] = plan.EdgeAt(i).Type.Id;
-                    target = plan.EdgeCount == 1 ? GetComponentDestination(source, plan.EdgeAt(0).Type, false)
+                    var removed = new int[unlink.EdgeCount];
+                    for (int i = 0; i < removed.Length; i++) removed[i] = unlink.EdgeAt(i).Type.Id;
+                    target = unlink.EdgeCount == 1 ? GetComponentDestination(source, unlink.EdgeAt(0).Type, false)
                         : GetOrCreateArchetype(source.Types.ToArray().Where(type => Array.IndexOf(removed, type.Id) < 0).ToArray());
                     choices.Add((removed, target));
                 }
@@ -162,9 +198,30 @@ namespace EntJoy.ECS
                     destinations[key] = slot = new DeletionDestination { Archetype = target, Index = index, Memory = chunk.MemoryBlock };
                 }
                 slot.Reserved++;
-                plan.Destination = slot;
+                unlink.Destination = slot;
                 affected.Add(source); affected.Add(target);
             }
+            return destinations;
+        }
+
+        private int CommitPreparedDeletion(List<Entity> order, List<(Entity Source, Entity Target, int TypeId)> incoming)
+        {
+            var deletion = BuildDeletionPlan(order, incoming);
+            var destinations = AssignDeletionDestinations(deletion.Unlinks, out var affected);
+            var destroyed = PrepareDestroyedNotifications(order, affected);
+            ReserveDeletionNotifications(deletion, destroyed);
+            CheckRelationshipPreparation("delete-storage-prepared");
+
+            foreach (var unlink in deletion.Unlinks) MoveUnlinkedSource(unlink);
+            RemoveSurvivingEdges(deletion);
+            foreach (var notification in deletion.Notifications) CommitRelationNotification(notification);
+            for (int i = 0; i < order.Count; i++) DestroyEntityCore(order[i], destroyed[i], notificationsPrepared: true);
+            return order.Count;
+        }
+
+        // 待删实体的销毁通知先收集，并让它们的原型准备好本轮批量移除。
+        private List<RelationNotification>[] PrepareDestroyedNotifications(List<Entity> order, HashSet<Archetype> affected)
+        {
             var destroyed = new List<RelationNotification>[order.Count];
             for (int i = 0; i < order.Count; i++)
             {
@@ -174,63 +231,69 @@ namespace EntJoy.ECS
                 _relationListStore.PrepareSourceRemoval(order[i], _multiRelRemovedBuffer);
             }
             foreach (var arch in affected) { arch.PrepareEntityRemoval(arch.ChunkCount); arch.GetChunkOffsetsNative(); }
-            EnsureRecycleCapacity(checked(_recycleCount + order.Count));
-            int total = notifications.Count;
+            GrowRecycleStack(checked(_recycleCount + order.Count));
+            return destroyed;
+        }
+
+        private void ReserveDeletionNotifications(DeletionPlan deletion, List<RelationNotification>[] destroyed)
+        {
+            int total = deletion.Notifications.Count;
             foreach (var list in destroyed) total = checked(total + (list?.Count ?? 0));
-            if (total > 0)
+            if (total == 0) return;
+            _relationNotifications ??= new();
+            _relationNotifications.EnsureCapacity(checked(_relationNotifications.Count + total));
+        }
+
+        // 集合外的 source 要搬到它的关系列所在原型，再消掉指向待删实体的边。
+        private void MoveUnlinkedSource(DeletionUnlink unlink)
+        {
+            var location = GetEntityInfoRef(unlink.Source.Id);
+            var source = location.Archetype;
+            var oldChunk = source.ChunkList[location.ChunkIndex];
+            var destination = unlink.Destination;
+            if (destination.Index >= destination.Archetype.ChunkCount
+                || destination.Archetype.ChunkList[destination.Index].MemoryBlock != destination.Memory)
+                destination.Index = destination.Archetype.ChunkList.FindIndex(chunk => chunk.MemoryBlock == destination.Memory);
+            int slot = destination.Archetype.ChunkList[destination.Index].EntityCount;
+            destination.Archetype.AddEntityToChunk(unlink.Source, destination.Index);
+            ref var chunk = ref CollectionsMarshal.AsSpan(destination.Archetype.ChunkList)[destination.Index];
+            for (int c = 0; c < destination.Archetype.ComponentCount; c++)
             {
-                _relationNotifications ??= new();
-                _relationNotifications.EnsureCapacity(checked(_relationNotifications.Count + total));
+                var type = destination.Archetype.Types[c];
+                if (type.IsShared) continue;
+                int from = source.GetComponentTypeIndex(type);
+                ComponentTypeManager.MoveComponentValue(type,
+                    (byte*)oldChunk.GetComponentArrayPointer(from) + location.SlotInChunk * type.Size,
+                    (byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
+                if (type.IsEnableable) chunk.SetComponentEnabled(c, slot, oldChunk.GetComponentEnabled(from, location.SlotInChunk));
             }
-            CheckRelationshipPreparation("delete-storage-prepared");
-            foreach (var plan in unlinks)
+            RemoveAndFixup(source, location.ChunkIndex, location.SlotInChunk, skipDisposal: true);
+            UpdateEntityLocation(unlink.Source.Id, destination.Archetype, destination.Index, slot);
+            for (int i = 0; i < unlink.EdgeCount; i++)
             {
-                var location = GetEntityInfoRef(plan.Source.Id);
-                var source = location.Archetype;
-                var oldChunk = source.ChunkList[location.ChunkIndex];
-                var destination = plan.Destination;
-                if (destination.Index >= destination.Archetype.ChunkCount
-                    || destination.Archetype.ChunkList[destination.Index].MemoryBlock != destination.Memory)
-                    destination.Index = destination.Archetype.ChunkList.FindIndex(chunk => chunk.MemoryBlock == destination.Memory);
-                int slot = destination.Archetype.ChunkList[destination.Index].EntityCount;
-                destination.Archetype.AddEntityToChunk(plan.Source, destination.Index);
-                ref var chunk = ref CollectionsMarshal.AsSpan(destination.Archetype.ChunkList)[destination.Index];
-                for (int c = 0; c < destination.Archetype.ComponentCount; c++)
-                {
-                    var type = destination.Archetype.Types[c];
-                    if (type.IsShared) continue;
-                    int from = source.GetComponentTypeIndex(type);
-                    ComponentTypeManager.MoveComponentValue(type,
-                        (byte*)oldChunk.GetComponentArrayPointer(from) + location.SlotInChunk * type.Size,
-                        (byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
-                    if (type.IsEnableable) chunk.SetComponentEnabled(c, slot, oldChunk.GetComponentEnabled(from, location.SlotInChunk));
-                }
-                RemoveAndFixup(source, location.ChunkIndex, location.SlotInChunk, skipDisposal: true);
-                UpdateEntityLocation(plan.Source.Id, destination.Archetype, destination.Index, slot);
-                for (int i = 0; i < plan.EdgeCount; i++)
-                {
-                    var edge = plan.EdgeAt(i);
-                    _relationIndex.RemoveRelTypeId(edge.Type.Id, plan.Source, edge.Target);
-                }
-                structuralVersion++;
-                _relationshipVersion += plan.EdgeCount;
+                var edge = unlink.EdgeAt(i);
+                _relationIndex.RemoveRelTypeId(edge.Type.Id, unlink.Source, edge.Target);
             }
-            foreach (var edge in multi)
-                if (bulkLists == null || !bulkLists.ContainsKey((edge.Source, edge.TypeId)))
+            InvalidateStructuralQueries();
+            InvalidateRelationshipQueries(unlink.EdgeCount);
+        }
+
+        // 存活实体的多值关系边：没进批量列表的逐条解绑，进了的整批摘除。
+        private void RemoveSurvivingEdges(DeletionPlan deletion)
+        {
+            foreach (var edge in deletion.Multi)
+                if (deletion.BulkLists == null || !deletion.BulkLists.ContainsKey((edge.Source, edge.TypeId)))
                     UnlinkDeletedTarget(edge.Source, edge.Target, edge.TypeId);
-            if (bulkLists != null)
-                foreach (var entry in bulkLists)
-                {
-                    int removed = _relationListStore.RemoveMany(entry.Key.TypeId, entry.Key.Source, entry.Value);
-                    foreach (var target in entry.Value)
-                        _relationIndex.RemoveRelTypeId(entry.Key.TypeId, entry.Key.Source, RelationSlot.From(target));
-                    ref var location = ref GetEntityInfoRef(entry.Key.Source.Id);
-                    location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
-                    _relationshipVersion += removed;
-                }
-            foreach (var notification in notifications) CommitRelationNotification(notification);
-            for (int i = 0; i < order.Count; i++) DestroyEntityCore(order[i], destroyed[i], notificationsPrepared: true);
-            return order.Count;
+            if (deletion.BulkLists == null) return;
+            foreach (var entry in deletion.BulkLists)
+            {
+                int removed = _relationListStore.RemoveMany(entry.Key.TypeId, entry.Key.Source, entry.Value);
+                foreach (var target in entry.Value)
+                    _relationIndex.RemoveRelTypeId(entry.Key.TypeId, entry.Key.Source, RelationSlot.From(target));
+                ref var location = ref GetEntityInfoRef(entry.Key.Source.Id);
+                location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
+                InvalidateRelationshipQueries(removed);
+            }
         }
     }
 }

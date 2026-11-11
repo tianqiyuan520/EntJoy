@@ -1,53 +1,49 @@
-using EntJoy.ECS;
 using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 using System;
-using System.Runtime.CompilerServices;
 
 namespace EntJoy.ECS.JobSystem
 {
-
     /// <summary>
-    /// IJobChunk（依赖 ECS）调度扩展。因依赖 World/EntityManager/QueryBuilder/NativeEcsScheduler，
-    /// 必须留在 EntJoy.ECS；纯 IJob 族调度见 EntJoy.Jobs 的 JobExtensions。
-    /// 与 JobExtensions 同命名空间、不同类名，调用方通过 using 与泛型约束自动解析。
+    /// IJobChunk 的调度扩展：依赖 World/EntityManager/QueryBuilder，因此留在 EntJoy.ECS；
+    /// 纯 IJob 族的调度见 EntJoy.Jobs 的 JobExtensions。
     /// </summary>
     public static class ChunkJobExtensions
     {
-        /// <summary>调度 IJobChunk（world 默认 DefaultWorld，多 World 可显式传入）。
-        /// 未显式传 dependsOn 时自动继承系统执行上下文的 Dependency（DOTS SystemState.Dependency 语义）。</summary>
+        /// <summary>调度 IJobChunk（world 默认 <see cref="World.DefaultWorld"/>）。</summary>
         public static JobHandle Schedule<T>(this T job, QueryBuilder query,
             World world = null,
             JobHandle dependsOn = default,
             ComponentType[]? writtenComponents = null) where T : struct, IJobChunk
-        {
-            world ??= World.DefaultWorld;
-            if (world == null) throw new InvalidOperationException("No active World found.");
-            if (dependsOn.IsNull && SystemExecutionContext.IsActive)
-                dependsOn = SystemExecutionContext.Dependency;
-            var result = ChunkJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, dependsOn, writtenComponents: writtenComponents);
-            if (SystemExecutionContext.IsActive)
-                SystemExecutionContext.Dependency = result;
-            return result;
-        }
+            => ScheduleCore(ref job, query, world, dependsOn, writtenComponents, workerCap: 0);
 
-        /// <summary>调度 IJobChunk（带 workerCap，world 默认 DefaultWorld）。依赖注入语义同 <see cref="Schedule{T}"/>。</summary>
+        /// <summary>调度 IJobChunk 并限制 worker 数（world 默认 <see cref="World.DefaultWorld"/>）。</summary>
         public static JobHandle ScheduleWithWorkerCap<T>(this T job, QueryBuilder query, int workerCap,
             World world = null,
             JobHandle dependsOn = default,
             ComponentType[]? writtenComponents = null) where T : struct, IJobChunk
+            => ScheduleCore(ref job, query, world, dependsOn, writtenComponents, workerCap);
+
+        // 未显式传 dependsOn 时继承系统执行上下文的依赖（对齐 DOTS SystemState.Dependency），
+        // 提交后再把本 Job 写回上下文，后续系统才能串在前面。
+        private static JobHandle ScheduleCore<T>(ref T job, QueryBuilder query, World world,
+            JobHandle dependsOn, ComponentType[]? writtenComponents, int workerCap) where T : struct, IJobChunk
         {
             world ??= World.DefaultWorld;
             if (world == null) throw new InvalidOperationException("No active World found.");
             if (dependsOn.IsNull && SystemExecutionContext.IsActive)
                 dependsOn = SystemExecutionContext.Dependency;
-            var result = ChunkJobScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, dependsOn, writtenComponents: writtenComponents);
+
+            var result = workerCap > 0
+                ? ChunkJobScheduler.ScheduleChunkWithWorkerCap(ref job, world.EntityManager, query, workerCap, dependsOn, writtenComponents: writtenComponents)
+                : ChunkJobScheduler.ScheduleChunk(ref job, world.EntityManager, query, dependsOn, writtenComponents: writtenComponents);
+
             if (SystemExecutionContext.IsActive)
                 SystemExecutionContext.Dependency = result;
             return result;
         }
 
-        /// <summary>Run IJobChunk：同步执行（无调度开销），由 ChunkJobScheduler 直接遍历执行。</summary>
+        /// <summary>同步执行 IJobChunk（无调度开销）。</summary>
         public static unsafe void Run<T>(this T job, QueryBuilder query, World world = null) where T : struct, IJobChunk
         {
             ChunkJobCollector.ValidateJobQuery(query);
@@ -56,6 +52,5 @@ namespace EntJoy.ECS.JobSystem
             world.EntityManager.CompleteActiveJobs();
             ChunkJobScheduler.ExecuteOnQuery(ref job, world.EntityManager, query);
         }
-
     }
 }

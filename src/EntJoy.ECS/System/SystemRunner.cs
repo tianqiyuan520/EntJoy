@@ -24,8 +24,8 @@ namespace EntJoy.ECS
         public double LastFrameSystemMsSum => _lastFrameSystemMs;
 
         // 系统间"读→写"依赖。默认开启：读系统结束后把 outgoing 写进读依赖表，
-        //   写系统入站时合并读表 ⇒ [Read(X)] 的 Job 仍在飞时，后续 [Write(X)] 的 Job 必须等它
-        //   （消掉唯一的静默竞态：撕裂/陈旧读）。读系统不合并读表 ⇒ 读读仍并行。
+        //   写系统入站时合并读表 ， [Read(X)] 的 Job 仍在飞时，后续 [Write(X)] 的 Job 必须等它
+        //   （消掉唯一的静默竞态：撕裂/陈旧读）。读系统不合并读表 ， 读读仍并行。
         //   `ENTJOY_SYSTEM_READ_WRITE_ORDER=0` 回退旧行为（读依赖表整体不参与）。
         private static readonly bool s_readWriteOrderFromEnv = ReadReadWriteOrderFromEnv();
         private bool _readWriteOrdering = s_readWriteOrderFromEnv;
@@ -93,17 +93,25 @@ namespace EntJoy.ECS
             // ISystem 以装箱引用存储：struct 系统的字段修改在 OnUpdate 内写入 box，天然跨帧持久。
             var system = _systemInstances[slot.SystemType];
 
-            // 入站依赖：按 [Read]/[Write] 查 per-type 表合并冲突依赖（读等写、写等写，读读不冲突）。
             var incoming = ComputeIncomingDependency(slot, out bool incomingIsCombined);
             // 每帧重建 SystemState：Dependency 由系统可改写（ISystemWithState），无跨帧字段。
             var state = new SystemState { Dependency = incoming };
 
-            // 多 World 隔离：临时指向所属 World（ThreadStatic DefaultWorld 每线程独立，执行后恢复）。
+            long start = Stopwatch.GetTimestamp();
+            InvokeOnUpdate(system, ref state, incoming);
+            long end = Stopwatch.GetTimestamp();
+
+            PublishDependencies(slot, incoming, incomingIsCombined);
+            RecordTiming(slot, (end - start) * 1000.0 / Stopwatch.Frequency);
+        }
+
+        // 多 World 隔离：临时指向所属 World（ThreadStatic 的 DefaultWorld 每线程独立，执行后恢复）。
+        private void InvokeOnUpdate(ISystem system, ref SystemState state, JobHandle incoming)
+        {
             var prevWorld = World.DefaultWorld;
             World.DefaultWorld = _world;
             SystemExecutionContext.IsActive = true;
             SystemExecutionContext.Dependency = incoming;
-            long start = Stopwatch.GetTimestamp();
             try
             {
                 if (system is ISystemWithState withState)
@@ -121,35 +129,33 @@ namespace EntJoy.ECS
                 SystemExecutionContext.IsActive = false;
                 World.DefaultWorld = prevWorld;
             }
-            long end = Stopwatch.GetTimestamp();
+        }
 
-            // 出站：按 [Write] 把本系统累积依赖写回 per-type 表（供后续系统合并）
+        // 出站按 [Write] 写回 per-type 表；读→写串行只在开关打开时参与。
+        private void PublishDependencies(SystemSlot slot, JobHandle incoming, bool incomingIsCombined)
+        {
             var outgoing = SystemExecutionContext.Dependency;
             foreach (var t in slot.WriteComponents)
                 _world.EntityManager.SetLastWriter(ComponentTypeManager.GetComponentType(t), outgoing);
 
-            // 读→写串行（读表只在开关打开时参与）
             if (_readWriteOrdering)
             {
-                // 写系统：这次写已经等过所有读 ⇒ 清掉这些组件的读依赖
+                // 写系统：这次写已经等过所有读，清掉这些组件的读依赖。
                 foreach (var t in slot.WriteComponents)
                     _world.EntityManager.ClearLastReader(ComponentTypeManager.GetComponentType(t));
-                // 读系统：把 outgoing 并入读依赖表（merge；同组件既读又写时写表已记录，无需重复）
+                // 读系统：把 outgoing 并入读依赖表；同组件既读又写时写表已记录，无需重复。
                 foreach (var t in slot.ReadComponents)
                     if (!slot.WriteComponents.Contains(t))
                         _world.EntityManager.SetLastReader(ComponentTypeManager.GetComponentType(t), outgoing);
             }
 
-            // 本系统入站依赖是运行器自己组合出来的句柄时，用后即释。
-            //   组合句柄只作为"入站依赖聚合器"存在：任何用它 Schedule 出去的 Job 在提交时都已
-            //   RetainedNativeDependency 持引用（CombineDependencies 内部也对父依赖持引用，直到
-            //   全部完成才 ReleaseState），故此处释放不会提前回收在飞依赖；系统若一个 Job 都没调度、
-            //   不释放的后果：每个多依赖 system 每帧留一个 HandleState 到 GC 终结器成批回收。
+            // 组合入站句柄只充当依赖聚合器：提交出去的 Job 已各自持有引用，提前释放不会回收在飞依赖。
             if (incomingIsCombined && !IsAdoptedByWriteTable(incoming, outgoing, slot))
                 NativeJobScheduler.Release(incoming._nativeHandle);
+        }
 
-            // 累计 System 耗时（性能分析器）
-            double ms = (end - start) * 1000.0 / Stopwatch.Frequency;
+        private void RecordTiming(SystemSlot slot, double ms)
+        {
             _lastFrameSystemMs += ms;
             if (!_timings.TryGetValue(slot.SystemType, out var timing))
                 timing = new SystemTiming { SystemName = slot.SystemType.Name };
@@ -167,7 +173,7 @@ namespace EntJoy.ECS
             CollectConflictDependencies(slot.ReadComponents, deps);
             CollectConflictDependencies(slot.WriteComponents, deps);
             // 写系统还要等"读过这些组件的系统"留下的 Job（读表只在此处、且仅在写侧参与；
-            //   读系统不合并读表 ⇒ 读读仍并行）。开关关闭时整表不参与，等价旧行为。
+            //   读系统不合并读表 ， 读读仍并行）。开关关闭时整表不参与，等价旧行为。
             if (_readWriteOrdering && slot.WriteComponents.Count > 0)
                 CollectLastReaderDependencies(slot.WriteComponents, deps);
             // 单个依赖直接返回，不构造组合句柄。

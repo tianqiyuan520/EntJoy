@@ -17,17 +17,7 @@ namespace EntJoy {
 			Persistent = 4,
 		};
 
-		// ---------- 托管 Persistent 分配器回调（由 C# 经 JobSystem_RegisterPersistentAllocator 注册） ----------
-		// UnsafeList 扩容/释放必须走托管分配器，避免原生 free 内部指针：
-		// C# 池化块布局是 header+payload（payload = base+16），原生 free(Ptr) 是内部指针释放 → 堆损坏 (0xc0000374)。
-		// 回调未注册时回退 malloc/free（原生独立构建/列表由原生创建场景，保持自洽）。
-		//
-		// 跨 DLL 关键设计（DLL 分离）：PersistentAllocFn/PersistentFreeFn 的存储必须唯一归属
-		// NativeDll.dll。若用 (inline + static 局部) 实现，NativeDll 与 NativeTranspiled 各持一份
-		// COMDAT 副本 → 生成代码在 NativeTranspiled 中看到的回调为 null → UnsafeList::Resize 回退
-		// free/malloc 释放由 C# 池化器分配的内存 → 堆损坏。故此处经 NativeDll 导出访问器读取：
-		//   - NativeDll 编译本头：JOB_SYSTEM_EXPORT 已定义 → dllexport（实现定义在 Exports.cpp）
-		//   - NativeTranspiled 编译本头：JOB_SYSTEM_EXPORT 未定义 → dllimport（导入表访问同一存储）
+		// 原生容器按标签调用托管分配器；回调存储由 NativeDll 共享。
 		using PersistentAllocCallback = void* (*)(int32_t size);
 		using PersistentFreeCallback  = void  (*)(void* ptr);
 
@@ -45,17 +35,9 @@ namespace EntJoy {
 #endif
 #endif
 
-		// 返回 NativeDll 内唯一持有的回调槽的引用（指针）。Exports.cpp 定义。
-		ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback* EntJoy_GetPersistentAllocRef();
-		ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback*  EntJoy_GetPersistentFreeRef();
-
-		inline PersistentAllocCallback& PersistentAllocFn() { return *EntJoy_GetPersistentAllocRef(); }
-		inline PersistentFreeCallback&  PersistentFreeFn()  { return *EntJoy_GetPersistentFreeRef(); }
-
-		inline void RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free) {
-			PersistentAllocFn() = alloc;
-			PersistentFreeFn()  = free;
-		}
+		// 回调表由 NativeDll 持有，生成的 DLL 通过导出函数访问同一份表。
+		ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback EntJoy_GetAllocatorAlloc(int32_t label);
+		ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback EntJoy_GetAllocatorFree(int32_t label);
 
 		// ---------- 原子安全句柄（布局与 C# AtomicSafetyHandle 一致） ----------
 		struct AtomicSafetyHandle {
@@ -115,6 +97,7 @@ namespace EntJoy {
 				if (newSize > Capacity) {
 					EnsureCapacity(newSize);
 				}
+				if (newSize > Capacity) return;
 				if (newSize > Length && options == NativeArrayOptions::ClearMemory && Ptr) {
 					size_t clearBytes = static_cast<size_t>(newSize - Length) * sizeof(T);
 					uint8_t* start = reinterpret_cast<uint8_t*>(Ptr + Length);
@@ -132,32 +115,17 @@ namespace EntJoy {
 					newCapacity64 = INT32_MAX;  // 最大容量上限
 				if (newCapacity64 < minCapacity) newCapacity64 = minCapacity;
 				int32_t newCapacity = static_cast<int32_t>(newCapacity64);
-				// 优先走托管分配器回调（C# 池化块，payload = base+16；free 必须由托管侧完成，
-				// 否则 free(Ptr) 是内部指针释放 → 堆损坏）。未注册时回退 malloc/free。
-				PersistentAllocCallback alloc = PersistentAllocFn();
-				PersistentFreeCallback fre = PersistentFreeFn();
-				// fail-fast（#1）：Persistent 列表必须已注册托管分配器。若未注册（Initialize()
-				// 未调用/回调为空），扩容回退 malloc 会与 C# 池化器分配混用 → 释放时堆损坏。
-				// Debug 断言暴露编程错误；Release 记日志避免静默损坏。
-				if ((alloc == nullptr || fre == nullptr) && Allocator == Allocator::Persistent) {
-#if defined(_DEBUG) || defined(ENTJOY_ENABLE_SENTINEL)
-					std::abort();  // 或 __debugbreak()；明确失败而非静默堆损坏
-#else
-					std::fprintf(stderr,
-						"[UnsafeList] ERROR: Persistent list without registered allocator (Initialize() not called?); capacity %d->%d. Aborting.\n",
-						Capacity, newCapacity);
-					std::abort();
-#endif
-				}
-				T* newPtr = (alloc != nullptr)
-					? static_cast<T*>(alloc(static_cast<int32_t>(static_cast<size_t>(newCapacity) * sizeof(T))))
-					: static_cast<T*>(malloc(static_cast<size_t>(newCapacity) * sizeof(T)));
+				PersistentAllocCallback alloc = EntJoy_GetAllocatorAlloc(Allocator);
+				PersistentFreeCallback fre = EntJoy_GetAllocatorFree(Allocator);
+				if (!alloc || !fre) std::abort();
+				if (static_cast<size_t>(newCapacity) > INT32_MAX / sizeof(T)) return;
+				T* newPtr = static_cast<T*>(alloc(static_cast<int32_t>(static_cast<size_t>(newCapacity) * sizeof(T))));
 				if (!newPtr) return;  // 分配失败时保持原状
 				if (Ptr) {
 					for (int32_t i = 0; i < Length; ++i) {
 						newPtr[i] = Ptr[i];
 					}
-					if (fre != nullptr) fre(Ptr); else free(Ptr);
+					fre(Ptr);
 				}
 				Ptr = newPtr;
 				Capacity = newCapacity;
@@ -167,24 +135,16 @@ namespace EntJoy {
 			void Add(const T& value) {
 				if (Length >= INT32_MAX) return;  // 防止 Length+1 溢出
 				EnsureCapacity(Length + 1);
+				if (Length >= Capacity) return;
 				Ptr[Length++] = value;
 			}
 
 			// 释放内部缓冲区
 			void Dispose() {
 				if (Ptr) {
-					PersistentFreeCallback fre = PersistentFreeFn();
-					// fail-fast（#1）：Persistent 列表未注册分配器时禁止回退 free（混用堆损坏）。
-					if (fre == nullptr && Allocator == Allocator::Persistent) {
-#if defined(_DEBUG) || defined(ENTJOY_ENABLE_SENTINEL)
-						std::abort();
-#else
-						std::fprintf(stderr,
-							"[UnsafeList] ERROR: Persistent list Dispose without registered allocator. Aborting.\n");
-						std::abort();
-#endif
-					}
-					if (fre != nullptr) fre(Ptr); else free(Ptr);
+					PersistentFreeCallback fre = EntJoy_GetAllocatorFree(Allocator);
+					if (!fre) std::abort();
+					fre(Ptr);
 					Ptr = nullptr;
 					Length = 0;
 					Capacity = 0;

@@ -10,7 +10,7 @@ namespace EntJoy.ECS
             if (!type.IsRelation || type.IsMultiRelation) throw new ArgumentException("A target-set command requires a single-target relationship.");
             CompleteRelationWriteJobs(source, type);
             using var changes = BeginRelationChanges();
-            lock (_structuralLock)
+            using (EnterStructural())
             {
                 ValidateRelationshipEntity(source, type, "source");
                 ValidateRelationshipEntity(target, type, "target");
@@ -35,7 +35,7 @@ namespace EntJoy.ECS
             if (!type.IsRelation || type.IsMultiRelation) throw new ArgumentException("An unlink command requires a single-target relationship.");
             CompleteActiveJobs();
             using var changes = BeginRelationChanges();
-            lock (_structuralLock) RemoveRelationCore(source, type);
+            using (EnterStructural()) RemoveRelationCore(source, type);
         }
     }
 }

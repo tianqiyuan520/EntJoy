@@ -7,14 +7,9 @@ using System.Threading;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// EntityManager 的 Shared Component 支持（per-chunk 存储，对齐 Unity DOTS）。
-    ///
-    /// 双类型策略：
-    /// - blittable shared：值内联存储于 Chunk 内存块 Shared values 区。
-    /// 值只增不减，World.Dispose 时整体清空 → GC 回收。
-    ///
-    /// 核心不变式：同一 Chunk 的所有实体共享相同的 SharedComponent 值组合。
-    /// 改变 shared 值 → 实体在 Archetype 内部移动到持有目标值的 Chunk（无 Archetype 变更）。
+    /// EntityManager 的 Shared Component 支持（per-chunk 存储）。核心不变式：同一块的所有实体共享相同的值组合。
+    /// blittable 值内联存在块的 Shared values 区，只增不减，World.Dispose 时整体清空；
+    /// managed 值走引用计数与去重表。改变 shared 值会让实体在原型内部换块，不换原型。
     /// </summary>
     public unsafe partial class EntityManager
     {
@@ -83,7 +78,7 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             CompleteActiveJobs();
-            lock (_structuralLock)
+            using (EnterStructural())
             {
                 ValidateEntity(entity);
                 ref var info = ref GetEntityInfoRef(entity.Id);
@@ -97,43 +92,37 @@ namespace EntJoy.ECS
                 {
                     int oldIdx = srcChunk.GetSharedValueIndex(compIdx);
                     int newIdx = FindOrAddManagedValue(ct.Id, value);
-
-                    // 值相同 → 无操作
                     if (oldIdx == newIdx) return;
-
-                    // 单实体 chunk → 就地改索引
                     if (srcChunk.EntityCount == 1)
                     {
                         srcChunk.SetSharedValueIndex(compIdx, newIdx);
-                        srcChunk.MarkEntityChanged(info.SlotInChunk);
-                        // 就地改值同样改变「该 chunk 匹配哪个 shared 过滤」⇒ 必须推进结构版本：
-                        // EntityQuery / 调度缓存只在 StructuralVersion 变化时刷新匹配集合，
-                        // 否则 WithShared(旧值) 的查询会继续把这个 chunk 当成匹配项返回（静默错值）。
-                        structuralVersion++;
+                        CommitInPlaceSharedChange(srcChunk, info.SlotInChunk);
                         return;
                     }
-
-                    // 多实体：按完整 shared 组合找/建目标 chunk（否则其他 shared 组件值丢失）
+                    // 多实体：按完整 shared 组合找/建目标块，否则其他 shared 组件值会丢。
                     MoveEntityWithShared(arch, entity, srcChunkIndex, compIdx, newIdx, null);
                 }
                 else
                 {
-                    // blittable shared
                     object curVal = ReadBlittableSharedBoxed(srcChunk, compIdx, ct.Type);
                     if (EqualityComparer<object>.Default.Equals(curVal, value)) return;
-
                     if (srcChunk.EntityCount == 1)
                     {
                         WriteBlittableSharedBoxed(srcChunk, compIdx, value, ct.Size);
-                        srcChunk.MarkEntityChanged(info.SlotInChunk);
-                        // 理由同上：就地改值必须让 WithShared 过滤/调度缓存失效
-                        structuralVersion++;
+                        CommitInPlaceSharedChange(srcChunk, info.SlotInChunk);
                         return;
                     }
-
                     MoveEntityWithShared(arch, entity, srcChunkIndex, compIdx, null, value);
                 }
             }
+        }
+
+        // 单实体块就地改值：标记实体已变更，并推进结构版本。后者不可省——EntityQuery 与调度缓存
+        // 只在结构版本变化时刷新匹配集合，否则 WithShared(旧值) 的查询仍会返回这个块（静默错值）。
+        private void CommitInPlaceSharedChange(Chunk chunk, int slotInChunk)
+        {
+            chunk.MarkEntityChanged(slotInChunk);
+            InvalidateStructuralQueries();
         }
 
         /// <summary>在 Archetype 内查找持有指定 managed index 的未满 chunk；无返回 -1。
@@ -174,8 +163,7 @@ namespace EntJoy.ECS
             var list = arch.ChunkList;
             var key = (arch, compIdx, value);
 
-            // 缓存命中路径：验证 chunk 仍存在、未满、值匹配。
-            // 越界（chunk 被回收收缩）或验证失败均移除条目，避免残留导致永久失去缓存命中。
+            // 缓存命中路径同上：验证存活、未满、值匹配，失败则移除该条目。
             if (_lastChunkPerSharedValue.TryGetValue(key, out int cached))
             {
                 if (cached < list.Count)
@@ -218,7 +206,7 @@ namespace EntJoy.ECS
             RemoveAndFixup(arch, srcChunkIndex, srcSlot);
 
             UpdateEntityLocation(entity.Id, arch, dstChunkIndex, dstSlot);
-            structuralVersion++;
+            InvalidateStructuralQueries();
         }
 
         /// <summary>按完整 shared 组合移动实体（SetSharedComponent 多实体路径）：收集源实体全部 shared 值，
@@ -259,132 +247,6 @@ namespace EntJoy.ECS
             arch.ChunkList[targetChunk].MarkEntityChanged(arch.ChunkList[targetChunk].EntityCount - 1);
         }
 
-        // 创建带初始共享值的实体
-
-        /// <summary>
-        /// 创建实体并指定初始共享值（per-chunk 分组）。
-        /// <paramref name="sharedValues"/>：每个元素为 (shared 组件类型, 值)；类型必须是 ISharedComponentData。
-        /// 实体进入持有相同值组合的未满 chunk；不存在则新建 chunk（写入初始值）。
-        /// </summary>
-        public Entity NewEntity(Span<ComponentType> types, params (Type type, object value)[] sharedValues)
-        {
-            CheckDisposed();
-            CompleteActiveJobs();
-            lock (_structuralLock)
-            {
-                var targetArch = GetOrCreateArchetype(types);
-
-                if (sharedValues == null || sharedValues.Length == 0)
-                {
-                    var e = AllocateEntityId();
-                    targetArch.AddEntity(e, out var cIdx, out var slot);
-                    UpdateEntityLocation(e.Id, targetArch, cIdx, slot);
-                    GetEntityInfoRef(e.Id).Version = e.Version;
-                    structuralVersion++;
-                    return e;
-                }
-
-                // 解析每个 shared 槽位的目标值
-                int[] managedIdx = new int[targetArch.ComponentCount];
-                Array.Fill(managedIdx, -1);
-                object[] slotValue = new object[targetArch.ComponentCount];
-                bool[] slotSet = new bool[targetArch.ComponentCount];
-
-                for (int s = 0; s < sharedValues.Length; s++)
-                {
-                    var (stype, svalue) = sharedValues[s];
-                    if (svalue == null)
-                        throw new ArgumentNullException(nameof(sharedValues), $"Shared value for {stype} cannot be null.");
-
-                    int compIdx = targetArch.GetComponentTypeIndex(ComponentTypeManager.GetComponentType(stype));
-                    var ct = targetArch.Types[compIdx];
-                    if (!ct.IsShared)
-                        throw new ArgumentException(
-                            $"Type {stype.FullName} is not an ISharedComponentData. Only shared components can take an initial value.",
-                            nameof(sharedValues));
-                    slotSet[compIdx] = true;
-                    slotValue[compIdx] = svalue;
-
-                    if (ct.IsManagedShared)
-                        managedIdx[compIdx] = FindOrAddManagedValue(ct.Id, svalue);
-                }
-
-                // 找已有 chunk：所有槽位匹配且未满
-                int chunkIdx = FindExistingChunkForShared(targetArch, slotSet, managedIdx, slotValue);
-
-                if (chunkIdx == -1)
-                {
-                    // 新建 chunk：写入所有槽位
-                    chunkIdx = targetArch.CreateChunk();
-                    var newChunk = targetArch.ChunkList[chunkIdx];
-                    for (int i = 0; i < targetArch.ComponentCount; i++)
-                    {
-                        if (!slotSet[i]) continue;
-                        if (targetArch.Types[i].IsManagedShared)
-                            newChunk.SetSharedValueIndex(i, managedIdx[i]);
-                        else
-                            WriteBlittableSharedBoxed(newChunk, i, slotValue[i], targetArch.Types[i].Size);
-                    }
-                }
-
-                var entity = AllocateEntityId();
-                targetArch.AddEntityToChunk(entity, chunkIdx);
-                UpdateEntityLocation(entity.Id, targetArch, chunkIdx, targetArch.ChunkList[chunkIdx].EntityCount - 1);
-                GetEntityInfoRef(entity.Id).Version = entity.Version;
-                structuralVersion++;
-                return entity;
-            }
-        }
-
-        /// <summary>查找所有 slotSet 槽位与目标值匹配的未满 chunk；无返回 -1。
-        /// 单 shared 列走缓存路径（复用 FindChunkWithManagedValue/BlittableBoxed，O(1) 期望）；
-        /// 多列组合保持线性扫描（组合 key 无法复用单值缓存，且场景低频）。</summary>
-        private int FindExistingChunkForShared(Archetype arch, bool[] slotSet, int[] managedIdx, object?[] slotValue,
-            Dictionary<nint, int> reserved = null, nint excluded = 0)
-        {
-            // 统计已设置的 shared 列数；单列时走缓存路径
-            int setCount = 0, singleIdx = -1;
-            for (int c = 0; c < arch.ComponentCount; c++)
-            {
-                if (slotSet[c])
-                {
-                    setCount++;
-                    singleIdx = c;
-                }
-            }
-
-            if (setCount == 1 && reserved == null && excluded == 0)
-            {
-                var singleCt = arch.Types[singleIdx];
-                return singleCt.IsManagedShared
-                    ? FindChunkWithManagedValue(arch, singleIdx, managedIdx[singleIdx])
-                    : FindChunkWithBlittableBoxed(arch, singleIdx, slotValue[singleIdx], singleCt.Type);
-            }
-
-            var list = arch.ChunkList;
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (list[i].MemoryBlock == excluded) continue;
-                int pending = reserved != null && reserved.TryGetValue(list[i].MemoryBlock, out int reservedCount) ? reservedCount : 0;
-                if (list[i].EntityCount + pending >= list[i].Capacity) continue;
-                bool match = true;
-                for (int c = 0; c < arch.ComponentCount; c++)
-                {
-                    if (!slotSet[c]) continue;
-                    if (arch.Types[c].IsManagedShared)
-                    {
-                        if (list[i].GetSharedValueIndex(c) != managedIdx[c]) { match = false; break; }
-                    }
-                    else
-                    {
-                        object existing = ReadBlittableSharedBoxed(list[i], c, arch.Types[c].Type);
-                        if (!EqualityComparer<object>.Default.Equals(existing, slotValue[c])) { match = false; break; }
-                    }
-                }
-                if (match) return i;
-            }
-            return -1;
-        }
 
         // 工具方法
 
@@ -412,12 +274,6 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>读取 chunk 槽位的 blittable shared 值（boxed，查询过滤用）。</summary>
-        internal object ReadBlittableShared(Chunk chunk, int compIdx, Type compType)
-        {
-            return ReadBlittableSharedBoxed(chunk, compIdx, compType);
-        }
-
         /// <summary>按 typeId + index 读取 managed shared 值（查询过滤用）。</summary>
         internal object GetManagedSharedValueById(int typeId, int index)
         {
@@ -431,7 +287,7 @@ namespace EntJoy.ECS
         /// 无过滤器恒 true；有则 chunk 的 shared 值与过滤值相等才通过。
         /// EntityQuery（托管查询）与 ChunkJobCollector（Job 收集）共用。
         /// </summary>
-        internal bool MatchesSharedFilter(QueryBuilder query, Chunk chunk)
+        public bool MatchesSharedFilter(QueryBuilder query, Chunk chunk)
         {
             if (!query.HasSharedFilter) return true;
             var arch = chunk.Archetype;
@@ -444,7 +300,7 @@ namespace EntJoy.ECS
                 object value = GetManagedSharedValueById(ct.Id, idx);
                 return value != null && Equals(value, query.SharedFilterValue);
             }
-            return Equals(ReadBlittableShared(chunk, compIdx, ct.Type), query.SharedFilterValue);
+            return Equals(ReadBlittableSharedBoxed(chunk, compIdx, ct.Type), query.SharedFilterValue);
         }
 
         /// <summary>
@@ -452,7 +308,7 @@ namespace EntJoy.ECS
         /// 无 ChangedComponents 恒 true；有则 chunk 内任何实体被标记即通过。
         /// EntityQuery（托管查询）与 ChunkJobCollector（Job 收集）共用。
         /// </summary>
-        internal bool MatchesChangedFilter(QueryBuilder query, Chunk chunk)
+        public bool MatchesChangedFilter(QueryBuilder query, Chunk chunk)
         {
             if (query.ChangedComponents == null || query.ChangedComponents.Length == 0) return true;
             return chunk.HasAnyEntityChanged();

@@ -7,14 +7,9 @@ using System.Threading;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 64KB 对齐块池化器：为 Archetype 的 chunk 数据块提供池化分配，
-    /// 避免每帧 AllocHGlobal/FreeHGlobal 带来的堆碎片与缺页抖动。
-    ///
-    /// 分配：每个块超分配 <see cref="kOverAlloc"/> 字节以保证 64KB 对齐（与 Archetype SLAB_ALIGNMENT 一致）。
-    /// 回池：每个块 free 时进入 per-size class free-list；池满时直通 OS。
-    /// 帧末清理：无（块在 Archetype.Dispose 时回池；Prewarm 可预热）。
-    ///
-    /// 设计对齐 v3 Phase 1.2"ChunkPool：保留对齐的池化"目标。
+    /// 64 KiB 对齐块池化器：为 Archetype 的 chunk 数据块提供池化分配，避免每次 AllocHGlobal 造成堆碎片。
+    /// 每块超分配 <see cref="kOverAlloc"/> 字节以保证对齐；free 时进 per-size free-list，池满直通 OS。
+    /// 块在 Archetype.Dispose 时回池，没有帧末清理。
     /// </summary>
     public static class ChunkMemoryPool
     {

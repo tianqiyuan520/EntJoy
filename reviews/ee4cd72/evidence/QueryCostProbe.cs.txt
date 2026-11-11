@@ -1,0 +1,76 @@
+using System;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using EntJoy.ECS;
+
+static class QueryProbe
+{
+    public static void Run()
+    {
+        const int n = 100000, rounds = 12, repeats = 32;
+        using var world = new World("query-cost");
+        var em = world.EntityManager;
+        var entities = em.CreateEntities(n, typeof(A), typeof(B), typeof(C));
+        foreach (var e in entities)
+        {
+            em.Set(e, new B { Value = 1 });
+            em.Set(e, new C { Value = 2 });
+        }
+        Action<World>[] kernels = { Pair, Triple, ChunkPair, ChunkTriple };
+        string[] names = { "pair", "triple", "chunk-pair", "chunk-triple" };
+        for (int arm = 0; arm < kernels.Length; arm++)
+        {
+            foreach (var e in entities) em.Set(e, new A());
+            var samples = new double[rounds - 2];
+            for (int round = 0; round < rounds; round++)
+            {
+                var watch = Stopwatch.StartNew();
+                for (int repeat = 0; repeat < repeats; repeat++) kernels[arm](world);
+                watch.Stop();
+                if (round >= 2) samples[round - 2] = watch.Elapsed.TotalNanoseconds / (n * repeats);
+            }
+            Array.Sort(samples);
+            long sum = 0;
+            foreach (var e in entities) sum += em.GetComponent<A>(e).Value;
+            long expected = (long)n * rounds * repeats * (arm % 2 == 0 ? 1 : 3);
+            Console.WriteLine($"QUERY {names[arm]} median_ns={(samples[4] + samples[5]) / 2:F3} min_ns={samples[0]:F3} max_ns={samples[9]:F3} checksum={sum} expected={expected}");
+            if (sum != expected) throw new Exception("query checksum");
+        }
+        if (em.VerifyLocateTable(out int count) != 0 || count != n) throw new Exception("query locations");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Pair(World world)
+    {
+        foreach (var row in world.Query<A, B>()) row.Comp0.Value += row.ReadOnlyComp1.Value;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Triple(World world)
+    {
+        foreach (var row in world.Query<A, B, C>()) row.Comp0.Value += row.ReadOnlyComp1.Value + row.ReadOnlyComp2.Value;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void ChunkPair(World world)
+    {
+        foreach (var chunk in world.QueryChunks<A, B>())
+        {
+            var a = chunk.GetSpan0();
+            var b = chunk.GetReadOnlySpan1();
+            for (int i = 0; i < a.Length; i++) a[i].Value += b[i].Value;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void ChunkTriple(World world)
+    {
+        foreach (var chunk in world.QueryChunks<A, B, C>())
+        {
+            var a = chunk.GetSpan0();
+            var b = chunk.GetReadOnlySpan1();
+            var c = chunk.GetReadOnlySpan2();
+            for (int i = 0; i < a.Length; i++) a[i].Value += b[i].Value + c[i].Value;
+        }
+    }
+}

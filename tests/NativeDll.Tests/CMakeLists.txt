@@ -54,6 +54,7 @@ add_executable(MPMCInjectorTests
 )
 
 add_executable(JobContextPoolTests JobContextPoolTests.cpp)
+add_executable(EntityMatchMaskTests EntityMatchMaskTests.cpp)
 target_include_directories(JobContextPoolTests PRIVATE ../../src/NativeDll)
 if(MSVC)
     target_compile_options(JobContextPoolTests PRIVATE /utf-8 /O2)

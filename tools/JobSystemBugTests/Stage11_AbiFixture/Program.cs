@@ -8,7 +8,7 @@ using EntJoy.JobSystem;
 // 能安全回退 Managed（而非崩溃），且 fallback 后 job 正常执行。
 //
 // 用法：
-//   Stage11_AbiFixture <stub_no_abi.dll> <stub_wrong_version.dll>
+//   Stage11_AbiFixture <stub_no_abi.dll> <stub_wrong_version.dll> <stub_no_allocator.dll>
 //     主模式：用 stub 覆盖输出目录的 NativeDll.dll，spawn 子进程验证 fallback。
 //   Stage11_AbiFixture --probe
 //     探针模式：Initialize → Schedule → Complete，验证 job 执行（Native 或 fallback）。
@@ -19,12 +19,12 @@ static class Program
         if (args.Length > 0 && args[0] == "--probe")
             return RunProbe();
 
-        if (args.Length < 2)
+        if (args.Length < 3)
         {
-            Console.WriteLine("usage: Stage11_AbiFixture <stub_no_abi.dll> <stub_wrong_version.dll>");
+            Console.WriteLine("usage: Stage11_AbiFixture <stub_no_abi.dll> <stub_wrong_version.dll> <stub_no_allocator.dll>");
             return 1;
         }
-        return RunFixture(Path.GetFullPath(args[0]), Path.GetFullPath(args[1]));
+        return RunFixture(Path.GetFullPath(args[0]), Path.GetFullPath(args[1]), Path.GetFullPath(args[2]));
     }
 
     // 探针：ModuleInitializer 已加载（真实或 stub）NativeDll.dll。无论 Native 还是
@@ -50,7 +50,7 @@ static class Program
     }
 
     // 主模式：覆盖输出目录的 NativeDll.dll → spawn --probe → 验证返回 0 → 恢复。
-    static int RunFixture(string stubNoAbi, string stubWrongVersion)
+    static int RunFixture(string stubNoAbi, string stubWrongVersion, string stubNoAllocator)
     {
         string exe = Environment.ProcessPath!;
         string nativeDll = Path.Combine(AppContext.BaseDirectory, "NativeDll.dll");
@@ -73,6 +73,11 @@ static class Program
             rc = RunChild(exe, "--probe");
             if (rc == 0) { Console.WriteLine("PASS version-mismatch fallback"); passed++; }
             else Console.WriteLine($"FAIL version-mismatch fallback (exit {rc})");
+
+            File.Copy(stubNoAllocator, nativeDll, true);
+            rc = RunChild(exe, "--probe");
+            if (rc == 0) { Console.WriteLine("PASS missing-allocator-export fallback"); passed++; }
+            else Console.WriteLine($"FAIL missing-allocator-export fallback (exit {rc})");
         }
         finally
         {
@@ -80,8 +85,8 @@ static class Program
             else File.Delete(nativeDll);
         }
 
-        Console.WriteLine($"PASS Stage11: {passed}/2");
-        return passed == 2 ? 0 : 1;
+        Console.WriteLine($"PASS Stage11: {passed}/3");
+        return passed == 3 ? 0 : 1;
     }
 
     static int RunChild(string exe, string arg)

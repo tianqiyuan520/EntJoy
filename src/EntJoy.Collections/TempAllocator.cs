@@ -128,7 +128,7 @@ namespace EntJoy.Collections
                 Interlocked.Increment(ref s_allocs);
                 Interlocked.Increment(ref s_toOS);
                 idx = kOsMarker;
-                basePtr = Marshal.AllocHGlobal(size + HeaderSize);
+                basePtr = Marshal.AllocHGlobal((nint)size + HeaderSize);
                 WriteHeader(basePtr, idx);
                 payload = basePtr + HeaderSize;
             }

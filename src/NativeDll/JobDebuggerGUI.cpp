@@ -556,7 +556,7 @@ namespace JobSystem
                 // ---------- Stats tab ----------
                 if (ImGui::BeginTabItem("Stats"))
                 {
-                    JobSystemStatsSnapshot s;
+                    JobSystemStatsSnapshot s{};
                     GetStatsSnapshot(&s);
 
                     ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "JobSystem Statistics");
@@ -986,6 +986,8 @@ namespace JobSystem
         if (g_guiLaunched.exchange(true, std::memory_order_acq_rel)) return;
         if (g_guiRunning.load(std::memory_order_acquire)) return;
 
+        // 关停后再 Launch 必须清掉停止标志，否则新线程首轮就退出（窗口闪一下即消失）。
+        g_guiStopRequested.store(false, std::memory_order_release);
         g_nativeActivityCaptureEnabled.store(true, std::memory_order_release); // 开启原生发布事件采集
 
         try

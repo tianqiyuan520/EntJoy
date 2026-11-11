@@ -5,33 +5,47 @@ using EntJoy.JobSystem;
 
 namespace EntJoy.ECS
 {
-    public struct ArchetypeChunk
+    public readonly struct ArchetypeChunk
     {
         private readonly Chunk _chunk;
+        private readonly int _count;
         private readonly QueryReadState _readState;
+        private readonly bool _trusted;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal ArchetypeChunk(Chunk chunk)
         {
             _chunk = chunk;
+            _count = chunk.MemoryBlock != 0 ? chunk.EntityCount : 0;
             if (NativeJobScheduler.IsExecutingJob)
             {
                 // Registered Job dependencies protect this chunk; unrelated archetypes may change.
                 _readState = default;
                 return;
             }
-            bool relationships = false;
-            if (chunk.MemoryBlock != 0)
-                foreach (var type in chunk.Archetype.Types) relationships |= type.IsRelation;
+            bool relationships = chunk.MemoryBlock != 0 && chunk.Archetype.HasRelationships;
+            _trusted = false;
             _readState = new QueryReadState(chunk.MemoryBlock != 0 ? chunk.Archetype.Owner : null, relationships);
+        }
+
+        /// <summary>复用调用方已借用的读状态：同一批 Chunk 只借用一次，不再逐 Chunk 取令牌。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ArchetypeChunk(Chunk chunk, in QueryReadState readState)
+        {
+            _chunk = chunk;
+            _count = chunk.MemoryBlock != 0 ? chunk.EntityCount : 0;
+            _readState = readState;
+            _trusted = true;
         }
 
         public int Count
         {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
                 if (_chunk.MemoryBlock == nint.Zero) return 0;
                 ThrowIfNull();
-                return _chunk.EntityCount;
+                return _count;
             }
         }
 
@@ -51,7 +65,7 @@ namespace EntJoy.ECS
         {
             if (_chunk.MemoryBlock == nint.Zero)
                 throw new InvalidOperationException("ArchetypeChunk is not initialized (default constructed or chunk was disposed).");
-            _readState.Validate();
+            if (!_trusted) _readState.Validate();
             _chunk.Archetype.CheckReadable();
         }
 
@@ -64,7 +78,7 @@ namespace EntJoy.ECS
             ComponentTypeManager.CheckWritableAccess<T>();
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             T* ptr = (T*)((byte*)_chunk.MemoryBlock + _chunk.GetComponentOffset(idx));
-            return new Span<T>(ptr, Count);
+            return new Span<T>(ptr, _count);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -74,22 +88,24 @@ namespace EntJoy.ECS
             ComponentTypeManager.CheckWritableAccess<T>();
             int idx = _chunk.Archetype.GetComponentTypeIndex<T>();
             void* ptr = (void*)_chunk.GetComponentArrayPointer(idx);
-            return NativeArray<T>.CreateView(ptr, Count, s_chunkViewSafety, Allocator.None);
+            return NativeArray<T>.CreateView(ptr, _count, s_chunkViewSafety, Allocator.None);
         }
 
         /// <summary>只读借用；Job 完成或结构/关系改变后不得继续持有该 Span。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe ReadOnlySpan<T> GetComponentReadOnlyDataSpan<T>() where T : struct
         {
             ThrowIfNull();
             int index = _chunk.Archetype.GetComponentTypeIndex<T>();
-            return new ReadOnlySpan<T>((void*)_chunk.GetComponentArrayPointer(index), Count);
+            return new ReadOnlySpan<T>((void*)_chunk.GetComponentArrayPointer(index), _count);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe NativeArray<T>.ReadOnly GetComponentReadOnlyDataNativeArray<T>() where T : unmanaged
         {
             ThrowIfNull();
             int index = _chunk.Archetype.GetComponentTypeIndex<T>();
-            return NativeArray<T>.CreateView((void*)_chunk.GetComponentArrayPointer(index), Count,
+            return NativeArray<T>.CreateView((void*)_chunk.GetComponentArrayPointer(index), _count,
                 s_chunkViewSafety, Allocator.None).AsReadOnly();
         }
 
@@ -108,15 +124,14 @@ namespace EntJoy.ECS
         {
             ThrowIfNull();
             Entity* ptr = (Entity*)_chunk.MemoryBlock;
-            return new Span<Entity>(ptr, Count);
+            return new Span<Entity>(ptr, _count);
         }
 
         // Shared Component 访问
 
         /// <summary>
         /// 读取该 chunk 的 blittable SharedComponent 值（per-chunk 共享，非 per-entity）。
-        /// 翻译器（CppChunkStatementTranslator）会将此调用转换为 C++ 的
-        /// reinterpret_cast&lt;T*&gt;(__chunkData->sharedValuePtrs[sharedIdx])
+        /// 转译器把本调用翻成 <c>reinterpret_cast&lt;T*&gt;(__chunkData-&gt;sharedValuePtrs[sharedIdx])</c>。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe T GetSharedComponent<T>() where T : unmanaged
@@ -147,7 +162,7 @@ namespace EntJoy.ECS
             ulong* ptr = _chunk.GetEnableBitMapPointer(idx);
             if (ptr == null)
                 throw new InvalidOperationException($"Component {typeof(T).Name} is not enableable.");
-            return new BitMask(ptr, Count);
+            return new BitMask(ptr, _count);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -167,14 +182,9 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 该 chunk 内组件 T 的 逐实体 enable 位图指针（每实体 1 bit，64 位字；位 i 对应 chunk 内第 i 个实体）。
-        /// 组件非 enableable 时返回 null。
-        ///
-        /// 原生路径：转译器把本调用翻成
-        /// <c>reinterpret_cast&lt;unsigned long long*&gt;(__chunkData-&gt;requiredEnableBitMaps[requiredIdx])</c>，
-        /// requiredIdx 按 `GetComponentDataNativeArray&lt;T&gt;()` 的 required 序号对齐 ⇒ 原生 job 内
-        /// 必须同时访问该组件的组件列（否则该类型不在 required 列表里，生成期直接报错）。
-        /// 并发纪律：位图是 chunk 内存的一部分，同一 chunk 的位图只应由一个 worker 写。
+        /// 该 chunk 内组件 T 的逐实体启用位图指针（每实体 1 bit；位 i 对应 chunk 内第 i 个实体），
+        /// 组件非 enableable 时返回 null。原生侧按 <c>GetComponentDataNativeArray&lt;T&gt;()</c> 的 required
+        /// 序号取用，因此必须同时访问该组件列，否则生成期报错。位图属于 chunk 内存，同一 chunk 只应由一个 worker 写。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe ulong* GetEnableBitMapPtr<T>() where T : struct, IEnableableComponent

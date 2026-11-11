@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // 实时 Worker 状态快照（供调试面板读取）。
@@ -11,3 +12,6 @@ struct WorkerSnapshot {
     uint32_t tileCount;        // 总 tile 数
     bool     isActive;         // 是否正在执行 batch
 };
+
+static_assert(sizeof(WorkerSnapshot) == 32, "托管侧按 32 字节映射 WorkerSnapshot");
+static_assert(offsetof(WorkerSnapshot, currentBatchId) == 8, "托管侧按偏移 8 读 currentBatchId");

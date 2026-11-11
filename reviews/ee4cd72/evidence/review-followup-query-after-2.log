@@ -1,0 +1,14 @@
+[NativeJobScheduler] dll self-proof: intended=E:\GODOT\Project\EntJoy\bin\NativeDll.dll attempts=1 fallback=none size=1133568 sha256=01901A106D933C5F
+[NativeJobScheduler] NativeTranspiled self-proof: path=E:\GODOT\Project\EntJoy\bin\NativeTranspiled.dll size=359936 sha256=FAF3FD2C87720534
+ENV runtime=8.0.30 cpu=16 native=False
+QUERY pair median_ns=1.833 min_ns=1.660 max_ns=2.489 checksum=38400000 expected=38400000
+QUERY triple median_ns=1.767 min_ns=1.701 max_ns=1.966 checksum=115200000 expected=115200000
+QUERY chunk-pair median_ns=0.380 min_ns=0.378 max_ns=0.699 checksum=38400000 expected=38400000
+QUERY chunk-triple median_ns=0.551 min_ns=0.516 max_ns=0.593 checksum=115200000 expected=115200000
+[JOBPHYS] physicalCores=0 workerThreads=0 smalljobPhysCap=ON(default) cappedJobs=0
+[JOBGEN] staleSettleDropped=0 pendingTasksWrap=0
+[JOBF6] claimAdapt=ON(default) nokey=0 nosample=0 sliced=0 interleaved=0 flips=0
+[JOBGEOM] declared spread=0 adjacent=0 auto=0
+[JOBF2F4] uniformTiles=ON applied=0 | tileFastPath=ON applied=0 (uniformAll=ON)
+[JOBWAKE] notify_all skipped=0
+[JOBWAKEPOLL] wakePoll=ON skips=0 wakes=0 parkWake=0 | work skips=0 wakes=0 | batch skips=0 wakes=0

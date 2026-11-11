@@ -674,8 +674,18 @@ namespace JobSystem
 
     void ReleaseState(HandleState* state) noexcept
     {
-        if (state && state->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        if (!state) return;
+        const uint32_t previous = state->refCount.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous == 1)
+        {
             RecycleState(state);
+        }
+        else if (previous == 0)
+        {
+            // 重复释放（C ABI 没有句柄校验）：下溢会把同一 state 二次入池/二次回收并破坏堆。
+            // 这里回填计数并忽略这一次释放——宁可泄漏一个 state，也不要堆损坏。
+            state->refCount.fetch_add(1, std::memory_order_acq_rel);
+        }
     }
 
     void RecordStateException(HandleState* state, std::exception_ptr exception) noexcept
@@ -1016,7 +1026,13 @@ namespace JobSystem
         {
             auto scheduler = LoadChaseLevScheduler();
             if (!scheduler || !scheduler->IsRunning())
+            {
+                // 关停竞态：gate 读到「开」、提交时后端已停 ⇒ 取消（不记异常）。调用时后端本就
+                // 停着则是可观测的拒绝，仍按异常上报。
+                if (g_shuttingDown.load(std::memory_order_acquire))
+                    return CancelSubmittedState(state, failureCleanup, failureContext);
                 throw std::runtime_error("JobSystem backend is not running");
+            }
 
             context = AcquireAsyncContext();
             if (!context)
@@ -1030,6 +1046,8 @@ namespace JobSystem
             {
                 CompleteBackendAsync(context);
                 context = nullptr;
+                if (g_shuttingDown.load(std::memory_order_acquire))
+                    return CancelSubmittedState(state, failureCleanup, failureContext);
                 throw std::runtime_error("JobSystem backend rejected asynchronous work");
             }
             // Ownership of context and the acquired state reference now belongs
@@ -1519,12 +1537,15 @@ namespace JobSystem
             // 防止链条级联时主线程无限 assist 不回查 completed。
             if (g_mainThreadAssistEnabled.load(std::memory_order_relaxed))
             {
-                auto scheduler = LoadChaseLevScheduler();
-                if (!scheduler) continue;
-                for (int assistN = 0; assistN < 16; ++assistN)
+                // 调度器已关（Stop 进行中/已停）时没有可认领的任务，直接落到下面的阻塞等待：
+                // 早退 continue 会跳过带超时的 wait，变成 100% 占核空转。
+                if (auto scheduler = LoadChaseLevScheduler())
                 {
-                    if (_state->completed.load(std::memory_order_acquire)) break;
-                    if (!scheduler->TryAssistOne(!_state->directWithoutDependency)) break;
+                    for (int assistN = 0; assistN < 16; ++assistN)
+                    {
+                        if (_state->completed.load(std::memory_order_acquire)) break;
+                        if (!scheduler->TryAssistOne(!_state->directWithoutDependency)) break;
+                    }
                 }
             }
 

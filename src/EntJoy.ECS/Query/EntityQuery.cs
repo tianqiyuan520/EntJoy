@@ -7,16 +7,16 @@ namespace EntJoy.ECS
 {
     /// <summary>
     /// 查询规则指纹：区分组件条件、共享/关系过滤、变更过滤和数量限制。
-    /// 相同指纹的查询共享同一个 <see cref="EntityQuery"/> 实例（World 注册表复用）。
+    /// 相同指纹的查询共享同一个 <see cref="EntityQuery"/> 实例（EntityManager 注册表复用）。
     /// 基于 ComponentType.Id 计算，与匹配语义一致（Id 全局唯一映射 Type）。
     /// </summary>
     public readonly struct QueryKey : IEquatable<QueryKey>
     {
-        private readonly int[] _allIds;
-        private readonly int[] _anyIds;
-        private readonly int[] _noneIds;
-        private readonly int[] _allEnabledIds;
-        private readonly int[] _changedIds;
+        private readonly ComponentType[] _allIds;
+        private readonly ComponentType[] _anyIds;
+        private readonly ComponentType[] _noneIds;
+        private readonly ComponentType[] _allEnabledIds;
+        private readonly ComponentType[] _changedIds;
         private readonly int _minChangedVersion;
         private readonly int _limitCount;
         private readonly int _sharedTypeId;
@@ -31,13 +31,15 @@ namespace EntJoy.ECS
         private readonly bool _hasRelationshipFilter;
         private readonly int _hash;
 
-        public QueryKey(QueryBuilder builder)
+        public QueryKey(QueryBuilder builder) : this(builder, true) { }
+
+        internal QueryKey(QueryBuilder builder, bool snapshot)
         {
-            _allIds = ExtractIds(builder.All);
-            _anyIds = ExtractIds(builder.Any);
-            _noneIds = ExtractIds(builder.None);
-            _allEnabledIds = ExtractIds(builder.AllEnabled);
-            _changedIds = ExtractIds(builder.ChangedComponents);
+            _allIds = snapshot ? Snapshot(builder.All) : builder.All;
+            _anyIds = snapshot ? Snapshot(builder.Any) : builder.Any;
+            _noneIds = snapshot ? Snapshot(builder.None) : builder.None;
+            _allEnabledIds = snapshot ? Snapshot(builder.AllEnabled) : builder.AllEnabled;
+            _changedIds = snapshot ? Snapshot(builder.ChangedComponents) : builder.ChangedComponents;
             _minChangedVersion = builder.MinChangedVersion;
             _limitCount = builder.LimitCount;
             _sharedTypeId = builder.SharedFilterType.Id;
@@ -70,34 +72,33 @@ namespace EntJoy.ECS
             }
         }
 
-        private static int[] ExtractIds(ComponentType[] types)
+        private static ComponentType[] Snapshot(ComponentType[] types)
+            => types == null || types.Length == 0 ? Array.Empty<ComponentType>() : (ComponentType[])types.Clone();
+
+        private static int HashIds(ComponentType[] types)
         {
-            if (types == null || types.Length == 0) return Array.Empty<int>();
-            var ids = new int[types.Length];
-            for (int i = 0; i < types.Length; i++) ids[i] = types[i].Id;
-            // 排序归一：匹配语义与顺序无关（HasAllOf/HasAnyOf/HasNoneOf 均不依赖顺序），
-            // 排序后相同集合不同声明顺序 → 同一指纹 → 共享实例。
-            Array.Sort(ids);
-            return ids;
+            int hash = 0;
+            if (types != null)
+                foreach (var type in types) hash = unchecked(hash + HashCode.Combine(type.Id));
+            return hash;
         }
 
-        private static int HashIds(int[] ids)
-        {
-            unchecked
-            {
-                int h = 0;
-                for (int i = 0; i < ids.Length; i++) h = h * 31 + ids[i];
-                return h;
-            }
-        }
-
-        private static bool SequenceEquals(int[] a, int[] b)
+        private static bool SequenceEquals(ComponentType[] a, ComponentType[] b)
         {
             if (ReferenceEquals(a, b)) return true;
-            if (a == null || b == null) return false;
-            if (a.Length != b.Length) return false;
-            for (int i = 0; i < a.Length; i++)
-                if (a[i] != b[i]) return false;
+            int length = a?.Length ?? 0;
+            if (length != (b?.Length ?? 0)) return false;
+            for (int i = 0; i < length; i++)
+            {
+                if (a[i].Id == b[i].Id) continue;
+                int occurrences = 0;
+                for (int j = 0; j < length; j++)
+                {
+                    if (a[j].Id == a[i].Id) occurrences++;
+                    if (b[j].Id == a[i].Id) occurrences--;
+                }
+                if (occurrences != 0) return false;
+            }
             return true;
         }
 
@@ -125,19 +126,18 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// 实体查询：按规则匹配 Archetype 并收集非空 Chunk。
-    /// 支持共享模式（World 注册表按 <see cref="QueryKey"/> 复用实例）：
-    /// 结构变更时由 World 统一标记刷新，查询访问时无锁版本检查。
-    /// 优化：archetype 签名匹配集合跨版本复用（仅新建 Archetype 时重扫），
-    /// 结构变更只重收 chunk，避免每次全量重扫所有 Archetype。
+    /// 实体查询：按规则匹配 Archetype 并收集非空 Chunk；EntityManager 按 <see cref="QueryKey"/> 复用实例。
+    /// Archetype 匹配集合跨版本复用（仅新建原型时重扫），结构变更只重收 chunk。
+    /// 查询访问时检查管理器版本，版本不符即重建。
     /// </summary>
     public sealed unsafe class EntityQuery
     {
-        private readonly World _world;
+        private readonly EntityManager _entityManager;
         private readonly QueryBuilder _builder;
         private readonly QueryKey _key;
         private readonly List<Archetype> _matchingArchetypes = new();
         private readonly List<Chunk> _chunks = new();
+        private readonly Dictionary<ComponentType[], QueryTraversalPlan> _traversalPlans = new();
         private int _cachedStructuralVersion = -1;
         private long _cachedRelationshipVersion = -1;
         // 已扫描过的 Archetype 总数（判定是否需要重扫签名匹配集合）
@@ -147,9 +147,42 @@ namespace EntJoy.ECS
         /// <summary>当前查询的规则指纹（共享注册表键）。</summary>
         public QueryKey Key => _key;
 
-        public EntityQuery(World world, QueryBuilder builder)
+        internal QueryTraversalPlan GetTraversalPlan(ComponentType[] columns)
         {
-            _world = world ?? throw new ArgumentNullException(nameof(world));
+            lock (_traversalPlans)
+            {
+                if (!_traversalPlans.TryGetValue(columns, out var plan))
+                {
+                    plan = new QueryTraversalPlan(this, _entityManager, _builder, columns);
+                    _traversalPlans.Add(columns, plan);
+                }
+                plan.Refresh();
+                return plan;
+            }
+        }
+
+        /// <summary>用当前枚举器的共享值筛选候选 Chunk。</summary>
+        public bool MatchesSharedValue(Chunk chunk, object value)
+        {
+            var builder = _builder;
+            builder.SharedFilterValue = value;
+            return _entityManager.MatchesSharedFilter(builder, chunk);
+        }
+
+        /// <summary>用当前枚举器的关系目标筛选候选实体。</summary>
+        public bool MatchesRelationshipTarget(Chunk chunk, int slot, RelationSlot target)
+        {
+            var builder = _builder;
+            builder.RelationshipFilterTarget = target;
+            return _entityManager.MatchesRelationshipFilter(builder, chunk, slot);
+        }
+
+        public EntityQuery(World world, QueryBuilder builder)
+            : this((world ?? throw new ArgumentNullException(nameof(world))).EntityManager, builder) { }
+
+        internal EntityQuery(EntityManager entityManager, QueryBuilder builder)
+        {
+            _entityManager = entityManager;
             _builder = builder;
             _key = new QueryKey(builder);
             Refresh();
@@ -169,7 +202,9 @@ namespace EntJoy.ECS
         {
             get
             {
-                EnsureUpToDate();
+                _entityManager.CheckDisposed();
+                if (_scannedArchetypeVersion != _entityManager.ArchetypeSetVersion)
+                    Refresh();
                 return _matchingArchetypes;
             }
         }
@@ -191,7 +226,7 @@ namespace EntJoy.ECS
             _matchingArchetypes.Clear();
             _chunks.Clear();
 
-            var entityManager = _world.EntityManager;
+            var entityManager = _entityManager;
             for (int archetypeIndex = 0; archetypeIndex < entityManager.ArchetypeCount; archetypeIndex++)
             {
                 var archetype = entityManager.Archetypes[archetypeIndex];
@@ -201,15 +236,7 @@ namespace EntJoy.ECS
                 }
 
                 _matchingArchetypes.Add(archetype);
-                foreach (var chunk in archetype.ChunkSpan)
-                {
-                    if (chunk.EntityCount > 0
-                        && entityManager.MatchesSharedFilter(_builder, chunk)
-                        && entityManager.MatchesChangedFilter(_builder, chunk))
-                    {
-                        _chunks.Add(chunk);
-                    }
-                }
+                CollectChunks(archetype);
             }
 
             _scannedArchetypeCount = entityManager.ArchetypeCount;
@@ -218,39 +245,41 @@ namespace EntJoy.ECS
             _cachedRelationshipVersion = entityManager.RelationshipVersion;
         }
 
+        // 收集该原型中满足 shared 与变更过滤的非空块。
+        private void CollectChunks(Archetype archetype)
+        {
+            var entityManager = _entityManager;
+            foreach (var chunk in archetype.ChunkSpan)
+            {
+                if (chunk.EntityCount > 0
+                    && entityManager.MatchesSharedFilter(_builder, chunk)
+                    && entityManager.MatchesChangedFilter(_builder, chunk))
+                {
+                    _chunks.Add(chunk);
+                }
+            }
+        }
+
         /// <summary>
         /// 增量刷新（结构变更后调用）：若 Archetype 集合无变化（没有新建/删除 Archetype），
         /// 复用签名匹配集合，只重新收集各 Archetype 的 chunk；否则退回全量刷新。
         /// </summary>
         public void RefreshIncremental()
         {
-            var entityManager = _world.EntityManager;
+            var entityManager = _entityManager;
             int archCount = entityManager.ArchetypeCount;
 
-            // ⚠ 判据必须是 Archetype 集合身份（新建/清空/Restore 都会递增），不能只比数量：
-            //   数量恰好相同（Restore 后整体重建、或一增一删抵消）时复用缓存会继续引用已释放的
-            //   Archetype ⇒ 静默返回 0 个实体。
+            // 判据必须是 Archetype 集合身份：只比数量时，Restore 后重建或一增一删抵消会复用已释放的
+            // Archetype，查询静默返回 0 个实体。
             if (archCount == _scannedArchetypeCount
                 && entityManager.ArchetypeSetVersion == _scannedArchetypeVersion)
             {
                 _chunks.Clear();
                 for (int i = 0; i < _matchingArchetypes.Count; i++)
-                {
-                    var archetype = _matchingArchetypes[i];
-                    foreach (var chunk in archetype.ChunkSpan)
-                    {
-                        if (chunk.EntityCount > 0
-                            && entityManager.MatchesSharedFilter(_builder, chunk)
-                            && entityManager.MatchesChangedFilter(_builder, chunk))
-                        {
-                            _chunks.Add(chunk);
-                        }
-                    }
-                }
+                    CollectChunks(_matchingArchetypes[i]);
             }
             else
             {
-                // Archetype 新增/删除 → 全量重扫
                 Refresh();
             }
 
@@ -264,9 +293,9 @@ namespace EntJoy.ECS
             // 带变更过滤（WithChanged）的查询必须每次访问都重评 chunk 过滤：
             // 变更位是帧级数据态（Set/SetSharedComponent 就地改值、ClearAllChangedBitMasks
             // 都不 bump 结构版本），仅靠结构版本检查会导致结果陈旧。
-            _world.EntityManager.CheckDisposed();
-            if (_cachedStructuralVersion != _world.EntityManager.StructuralVersion
-                || (_builder.HasRelationshipFilter && _cachedRelationshipVersion != _world.EntityManager.RelationshipVersion)
+            _entityManager.CheckDisposed();
+            if (_cachedStructuralVersion != _entityManager.StructuralVersion
+                || (_builder.HasRelationshipFilter && _cachedRelationshipVersion != _entityManager.RelationshipVersion)
                 || _builder.HasSharedFilter
                 || (_builder.ChangedComponents != null && _builder.ChangedComponents.Length > 0))
             {
@@ -278,7 +307,7 @@ namespace EntJoy.ECS
 
         private bool MatchesEntity(Chunk chunk, int slot)
         {
-            if (!_world.EntityManager.MatchesRelationshipFilter(_builder, chunk, slot)) return false;
+            if (!_entityManager.MatchesRelationshipFilter(_builder, chunk, slot)) return false;
             if (_builder.AllEnabled != null)
                 foreach (var type in _builder.AllEnabled)
                     if (!chunk.GetComponentEnabled(chunk.Archetype.GetComponentTypeIndex(type), slot)) return false;

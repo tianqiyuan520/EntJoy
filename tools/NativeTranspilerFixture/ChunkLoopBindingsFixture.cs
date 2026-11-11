@@ -123,8 +123,10 @@ public struct ChunkLoopSnapshotJob : IJobChunk
 
 public static unsafe class ChunkLoopBindingsFixture
 {
+    // 取「只收 Chunk」的那个内部构造：ArchetypeChunk 另有一个带 QueryReadState 的重载。
     private static readonly ConstructorInfo ViewConstructor = typeof(ArchetypeChunk)
-        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
+        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+        .Single(c => c.GetParameters().Length == 1);
 
     public static void Run()
     {

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <stdexcept>
 #include <thread>
 
 #if defined(_WIN32)
@@ -294,6 +295,7 @@ namespace JobSystem
             ReleaseState(state);
         }
         else ChaseLevScheduler::s_taskPool_.Release(task);
+        ChaseLevScheduler::pendingWorkTasks.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     void ChaseLevScheduler::ExecuteAndRelease(RangeTask* task, uint32_t workerIndex, TileAccount account) noexcept
@@ -489,7 +491,12 @@ namespace JobSystem
         if (running_) return workers_.size() == workerCount;
         if (!workers_.empty()) return false;
 
+        // 上一代若有残留 work 任务，其 workCtx/state 已随 Shutdown 释放；重启会执行到已释放内存。
+        // 用精确计数 fail-closed：拒绝启动（上层回退），而不是带病运行。
+        if (pendingWorkTasks.load(std::memory_order_acquire) != 0)
+            return false;
         quit_.store(false, std::memory_order_relaxed);
+        closed_.store(false, std::memory_order_seq_cst);
         bindThreads_ = bindThreads;
         workerCount_ = workerCount;
         executor_ = executor;
@@ -570,9 +577,10 @@ namespace JobSystem
     {
         {
             std::lock_guard<std::mutex> lock(lifecycleMutex_);
-            if (workers_.empty()) { running_.store(false); return; }
+            if (workers_.empty()) { running_.store(false); closed_.store(true, std::memory_order_seq_cst); return; }
             assistGate_.fetch_or(kAssistClosed, std::memory_order_acq_rel);
             running_.store(false);
+            closed_.store(true, std::memory_order_seq_cst);
         }
 
         quit_.store(true, std::memory_order_release);
@@ -586,6 +594,13 @@ namespace JobSystem
                 ctx->thread.join();
         }
 
+        // 等已进入的提交把入队做完，再排空：closed 之后的新提交不会入队。
+        // closed_ 与 publishers_ 是 Dekker 配对：两侧都 seq_cst，否则 StoreLoad 重排会让
+        // 关窗读成 0 而漏过仍在入队的发布者（任务滞留、句柄永不完成）。
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        while (publishers_.load(std::memory_order_seq_cst) != 0)
+            std::this_thread::yield();
+
         // 已登记的 assist 可以完成当前调用，队列在其退出前保持存活。
         drainedBatches.clear();
         DrainRemaining();
@@ -595,7 +610,11 @@ namespace JobSystem
             assistGate_.wait(assists, std::memory_order_acquire);
             assists = assistGate_.load(std::memory_order_acquire);
         }
-        // 处理已经进入的执行者在首次排空期间发布的尾部任务。
+        // 处理已经进入的执行者在首次排空期间发布的尾部任务；再收一次窗，排空后仍可能有迟到发布者。
+        DrainRemaining();
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        while (publishers_.load(std::memory_order_seq_cst) != 0)
+            std::this_thread::yield();
         DrainRemaining();
         workers_.clear();
     }
@@ -668,11 +687,30 @@ namespace JobSystem
                 std::this_thread::yield();
             else
                 CpuPause();
-            if (backoff > 4096) { std::this_thread::yield(); backoff = 0; }
+            if (backoff > 4096)
+            {
+                std::this_thread::yield();
+                // 队列已满且可能没人在消费：defer 窗口不逐批唤醒，worker 睡死后注入器永远腾不空
+                // （隐式批 Flush 会在这里 100% 单核空转）。每轮退避强制补一次唤醒。
+                WakePending();
+                backoff = 0;
+            }
         }
         return true;
     }
 
+
+    // JobSystem_Tiles 的提交入口已 AcquireState + g_backendBatchesOutstanding++ 后才进到这里；
+    // 未能真正入队时必须平掉这两笔账，否则 state 引用与全局计数永久泄漏（DrainAll/统计会永久等）。
+    static void AbortSubmittedBatch(BatchState* batch, std::exception_ptr exception) noexcept
+    {
+        HandleState* state = batch ? batch->handle : nullptr;
+        AbortUnsubmittedBatch(batch, std::move(exception));
+        if (!state) return;
+        g_backendBatchesOutstanding.fetch_sub(1, std::memory_order_acq_rel);
+        g_backendBatchesOutstanding.notify_all();
+        ReleaseState(state);
+    }
 
     void ChaseLevScheduler::SubmitBatch(BatchState* batch) noexcept
     {
@@ -680,9 +718,15 @@ namespace JobSystem
         const uint32_t wc = workerCount_;
         if (wc == 0)
         {
+            // 关停竞态（Stop 已把 worker 清零）按取消收尾；非关停期的拒绝仍可观测。
+            if (g_shuttingDown.load(std::memory_order_acquire))
+            {
+                AbortSubmittedBatch(batch, {});
+                return;
+            }
             try
             {
-                AbortUnsubmittedBatch(
+                AbortSubmittedBatch(
                     batch,
                     std::make_exception_ptr(std::runtime_error(
                         "JobSystem has no workers")));
@@ -691,10 +735,22 @@ namespace JobSystem
             {
                 // If constructing the diagnostic exception itself fails,
                 // still publish a terminal state through the no-throw path.
-                AbortUnsubmittedBatch(batch, {});
+                AbortSubmittedBatch(batch, {});
             }
             return;
         }
+
+        // 提交窗口：Stop 先置 closed 再等它归零，之后才排空 ⇒ 入队不会落在排空之后。
+        if (!BeginPublish())
+        {
+            AbortSubmittedBatch(batch, {});
+            return;
+        }
+        struct PublishScope
+        {
+            ChaseLevScheduler* self;
+            ~PublishScope() { self->EndPublish(); }
+        } publishScope{ this };
 
         const uint32_t tileCount = batch->tileCount;
         const bool spDiag = SchedPhase::Enabled();
@@ -837,6 +893,9 @@ namespace JobSystem
             else
             {
                 wakeEpoch.fetch_add(1, std::memory_order_release);
+                // 与停靠侧的「记停靠 → 复查 epoch」构成 Dekker 配对：两侧都要 seq_cst 栅栏，
+                // 否则 ARM64 允许 StoreLoad 重排，双方都读到旧值 ⇒ 唤醒丢失、worker 睡死。
+                std::atomic_thread_fence(std::memory_order_seq_cst);
                 // 只有"确有等待者、且已醒人数不够本批名额"时才付 futex 广播（+ IPI）。
                 //   已醒的 worker 在自旋区会看到注入器里的 token；睡着的 worker 不必为用不上的名额被叫醒。
                 const int parked = parkedWorkers.load(std::memory_order_acquire);
@@ -1150,14 +1209,42 @@ namespace JobSystem
         return PublishWorkTask(task);
     }
 
+    std::atomic<int64_t> ChaseLevScheduler::pendingWorkTasks{ 0 };
+
+    bool ChaseLevScheduler::BeginPublish() noexcept
+    {
+        publishers_.fetch_add(1, std::memory_order_seq_cst);
+        if (closed_.load(std::memory_order_seq_cst))
+        {
+            publishers_.fetch_sub(1, std::memory_order_seq_cst);
+            return false;
+        }
+        return true;
+    }
+
+    void ChaseLevScheduler::EndPublish() noexcept
+    {
+        publishers_.fetch_sub(1, std::memory_order_seq_cst);
+    }
+
     bool ChaseLevScheduler::PublishWorkTask(RangeTask* task) noexcept
     {
 
-        if (!PushTaskBackoff(task))
+        // 先记账再入队：否则 worker 可能在入队后、记账前跑完并先减，出现「计数为 0 但仍在执行」。
+        if (!BeginPublish())
         {
             if (!task->workState) s_taskPool_.Release(task);
             return false;
         }
+        pendingWorkTasks.fetch_add(1, std::memory_order_acq_rel);
+        if (!PushTaskBackoff(task))
+        {
+            pendingWorkTasks.fetch_sub(1, std::memory_order_acq_rel);
+            EndPublish();
+            if (!task->workState) s_taskPool_.Release(task);
+            return false;
+        }
+        EndPublish();
 
         // 与 SubmitBatch 保持同一守卫：defer 窗口内（depth>0）跳过逐 job 广播。
         // 窗口关闭处会无条件 WakePending 一次 ⇒ 不会丢唤醒；任务已进入注入器，仍在自旋的 worker
@@ -1734,7 +1821,9 @@ namespace JobSystem
                 goto main_loop;
             // 登记"我在停靠"，随后复查 epoch 防丢失唤醒
             // （唤醒者先 bump epoch 再读本计数；若它读到 0 而跳过了广播，这里必能看到 epoch 已变 ⇒ 不睡）。
+            // 两侧都有 seq_cst 栅栏：缺它时 ARM64 会把下面的 epoch 读提到登记之前，两侧同时看空。
             parkedWorkers.fetch_add(1, std::memory_order_acq_rel);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
             if (wakeEpoch.load(std::memory_order_acquire) != seenStamp)
             {
                 parkedWorkers.fetch_sub(1, std::memory_order_acq_rel);
@@ -1766,6 +1855,22 @@ namespace JobSystem
     uint32_t ChaseLevScheduler::WorkerCount() const noexcept
     {
         return workerCount_;
+    }
+
+    void ChaseLevScheduler::WaitIdle() noexcept
+    {
+        // activeTasks 覆盖 batch 令牌，pendingWorkTasks 覆盖 work/direct 任务；两者归零即无排队且无在跑。
+        // worker 调用会等自己 ⇒ 直接返回。
+        if (ChaseLevScheduler_IsWorkerThread()) return;
+        uint32_t backoff = 0;
+        while (activeTasks.load(std::memory_order_acquire) > 0 ||
+               pendingWorkTasks.load(std::memory_order_acquire) > 0)
+        {
+            if ((++backoff & 63u) == 0)
+                std::this_thread::yield();
+            else
+                CpuPause();
+        }
     }
 
     SparseTileDeque* ChaseLevScheduler::GetWorkerDeque(uint32_t workerIndex) noexcept

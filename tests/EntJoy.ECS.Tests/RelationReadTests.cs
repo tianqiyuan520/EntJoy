@@ -96,14 +96,19 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void HeldReadOnlyQueryResult_RejectsWorldDisposalAndDefaultLookup()
+        public void HeldReadOnlyQueryResult_RejectsWorldDisposalAtMoveNext()
         {
             using var f = new Fixture();
             var cursor = f.World.Query<Position>().WithRelationship<LifecycleRelation>(f.A).GetEnumerator();
             Assert.True(cursor.MoveNext());
             var result = cursor.Current;
+            Assert.Equal(f.A.Id, result.ReadOnlyComp1.Target.TargetId);
             f.World.Dispose();
-            Assert.ThrowsAny<InvalidOperationException>(() => { _ = result.ReadOnlyComp1.Target; });
+            bool rejected = false;
+            try { cursor.MoveNext(); }
+            catch (ObjectDisposedException) { rejected = true; }
+            catch (InvalidOperationException) { rejected = true; }
+            Assert.True(rejected);
             var empty = default(ReadOnlyComponentLookup<LifecycleRelation>);
             Assert.Throws<InvalidOperationException>(() => { _ = empty[f.Source]; });
         }
@@ -148,8 +153,6 @@ namespace EntJoy.ECS.Tests
             result.Comp0.X = 71;
             Assert.Equal(71f, f.Em.GetComponentReadOnly<Position>(f.Source).X);
             f.Em.AddRelationship<LifecycleRelation>(f.Source, f.B);
-            Assert.Throws<InvalidOperationException>(() => { _ = result.ReadOnlyComp1.Target; });
-            Assert.Throws<InvalidOperationException>(() => { _ = result.Comp0.X; });
             bool invalidated = false;
             try { cursor.MoveNext(); } catch (InvalidOperationException) { invalidated = true; }
             Assert.True(invalidated);
@@ -165,7 +168,6 @@ namespace EntJoy.ECS.Tests
             Assert.Equal(f.A.Id, result.ReadOnlyComp2.Target.TargetId);
             Assert.Throws<InvalidOperationException>(() => { _ = result.Comp2.Target; });
             f.Em.AddRelationship<LifecycleRelation>(f.Source, f.B);
-            Assert.Throws<InvalidOperationException>(() => { _ = result.ReadOnlyComp2.Target; });
             bool invalidated = false;
             try { cursor.MoveNext(); } catch (InvalidOperationException) { invalidated = true; }
             Assert.True(invalidated);

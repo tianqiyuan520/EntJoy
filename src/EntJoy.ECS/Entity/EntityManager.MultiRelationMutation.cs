@@ -40,7 +40,7 @@ namespace EntJoy.ECS
             CheckDisposed(); RequireMultiRelation(type);
             CompleteActiveJobs();
             using var changes = BeginRelationChanges();
-            lock (_structuralLock) AddMultiRelationCore(source, target, type);
+            using (EnterStructural()) AddMultiRelationCore(source, target, type);
         }
 
         private void AddMultiRelationCore(Entity source, Entity target, ComponentType type)
@@ -49,40 +49,79 @@ namespace EntJoy.ECS
             ValidateRelationshipEntity(target, type, "target");
             var slot = RelationSlot.From(target);
             if (HasMultiEdge(source, type, slot)) return;
-            Entity previous = default;
-            bool displaced = false;
-            if (type.IsExclusiveTarget && _relationIndex.TryGetSources(target, out var types)
-                && types.TryGetValue(type.Id, out var owners))
-                foreach (var owner in owners)
-                    if (!owner.Equals(source) && HasMultiEdge(owner, type, slot))
-                    {
-                        if (displaced) throw new InvalidOperationException("Exclusive target has multiple owners.");
-                        previous = owner; displaced = true;
-                    }
 
+            Entity previous = default;
+            bool displaced = type.IsExclusiveTarget
+                && FindDisplacedOwner(source, type, slot, out previous);
             var notification = CaptureMultiNotification(source, type, ObserverEvents.Added, slot);
             var removed = displaced ? CaptureMultiNotification(previous, type, ObserverEvents.Removed, slot) : default;
+
             var arch = GetEntityInfoRef(source.Id).Archetype;
             bool column = type.MultiRelationMaxSlots > 0;
             bool hasColumn = arch.Has(type.Type);
-            int empty = 0;
-            if (column && hasColumn)
+            int empty = column && hasColumn ? FindEmptyColumnSlot(source, type) : 0;
+            nint prepared = column && !hasColumn ? PrepareNewRelationColumn(arch, source, type) : 0;
+
+            HashSet<Entity> reverse = PrepareMultiRelationStorage(source, target, type, column,
+                out RelationListStore.RelationTargets list);
+            WriteMultiEdge(source, type, slot, column, hasColumn, empty, prepared, list);
+            reverse.Add(source);
+
+            if (displaced) CommitRemoveMultiEdge(previous, type, slot);
+            ref var location = ref GetEntityInfoRef(source.Id);
+            location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
+            InvalidateRelationshipQueries();
+            CommitRelationNotification(removed);
+            CommitRelationNotification(notification);
+        }
+
+        // 入边唯一约束：找出当前持有该 target 的其他 source；出现多个说明索引已损坏。
+        private bool FindDisplacedOwner(Entity source, ComponentType type, RelationSlot slot, out Entity previous)
+        {
+            previous = default;
+            var owners = _relationIndex.GetSourcesOfType(slot.ToEntity(), type.Id);
+            if (owners == null) return false;
+            bool displaced = false;
+            foreach (var owner in owners)
             {
-                var values = (RelationSlot*)GetRelationValue(source, type);
-                while (empty < type.MultiRelationMaxSlots && values[empty].IsValid) empty++;
-                if (empty == type.MultiRelationMaxSlots)
-                    throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxSlots={type.MultiRelationMaxSlots}).");
+                if (owner.Equals(source) || !HasMultiEdge(owner, type, slot)) continue;
+                if (displaced) throw new InvalidOperationException("Exclusive target has multiple owners.");
+                previous = owner;
+                displaced = true;
             }
-            nint prepared = column && !hasColumn ? PrepareRelationSlot(GetComponentDestination(arch, type, true), source) : 0;
-            if (column && !hasColumn) arch.PrepareEntityRemoval();
-            byte[] large = column && !hasColumn && type.Size > 1024 ? new byte[type.Size] : null;
-            RelationListStore.RelationTargets list = null;
-            HashSet<Entity> reverse;
+            return displaced;
+        }
+
+        // 定长多槽列里第一个空槽；列满时直接失败，不做静默覆盖。
+        private int FindEmptyColumnSlot(Entity source, ComponentType type)
+        {
+            var values = (RelationSlot*)GetRelationValue(source, type);
+            int empty = 0;
+            while (empty < type.MultiRelationMaxSlots && values[empty].IsValid) empty++;
+            if (empty == type.MultiRelationMaxSlots)
+                throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxSlots={type.MultiRelationMaxSlots}).");
+            return empty;
+        }
+
+        // source 首次获得定长多槽列：预留槽位并让原型准备好本轮移除。
+        private nint PrepareNewRelationColumn(Archetype arch, Entity source, ComponentType type)
+        {
+            nint prepared = PrepareRelationSlot(GetComponentDestination(arch, type, true), source);
+            arch.PrepareEntityRemoval();
+            return prepared;
+        }
+
+        // 预留列表条目与反向索引条目；任一失败都丢弃刚建的空桶，保持两侧一致。
+        private HashSet<Entity> PrepareMultiRelationStorage(Entity source, Entity target, ComponentType type, bool column,
+            out RelationListStore.RelationTargets list)
+        {
+            list = null;
             try
             {
                 if (!column) list = _relationListStore.PrepareAdd(type.Id, source);
-                reverse = _relationIndex.PrepareAdd(type.Id, target);
+                var reverse = _relationIndex.PrepareAdd(type.Id, target);
                 CheckRelationshipPreparation("multi-relation-prepared");
+                return reverse;
             }
             catch
             {
@@ -90,26 +129,24 @@ namespace EntJoy.ECS
                 _relationIndex.DiscardEmpty(type.Id, target);
                 throw;
             }
-            byte* small = stackalloc byte[column && !hasColumn && type.Size <= 1024 ? type.Size : 0];
+        }
+
+        // 三条写入路径：托管列表追加、定长列的空槽、首次建列（整列初始化为空再写首槽）。
+        private void WriteMultiEdge(Entity source, ComponentType type, RelationSlot slot,
+            bool column, bool hasColumn, int empty, nint prepared, RelationListStore.RelationTargets list)
+        {
+            if (!column) { list.Add(slot); return; }
+            if (hasColumn) { ((RelationSlot*)GetRelationValue(source, type))[empty] = slot; return; }
+
+            byte[] large = type.Size > 1024 ? new byte[type.Size] : null;
+            byte* small = stackalloc byte[large == null ? type.Size : 0];
             fixed (byte* heap = large)
             {
-                if (!column) list.Add(slot);
-                else if (hasColumn) ((RelationSlot*)GetRelationValue(source, type))[empty] = slot;
-                else
-                {
-                    var values = (RelationSlot*)(heap != null ? heap : small);
-                    for (int i = 0; i < type.MultiRelationMaxSlots; i++) values[i] = RelationSlot.Default;
-                    values[0] = slot;
-                    AddComponentRawCore(source, type.Type, null, (byte*)values, type.Size, relationStorageOnly: true, preparedChunk: prepared);
-                }
+                var values = (RelationSlot*)(large != null ? heap : small);
+                for (int i = 0; i < type.MultiRelationMaxSlots; i++) values[i] = RelationSlot.Default;
+                values[0] = slot;
+                AddComponentRawCore(source, type.Type, null, (byte*)values, type.Size, relationStorageOnly: true, preparedChunk: prepared);
             }
-            reverse.Add(source);
-            if (displaced) CommitRemoveMultiEdge(previous, type, slot);
-            ref var location = ref GetEntityInfoRef(source.Id);
-            location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
-            _relationshipVersion++;
-            CommitRelationNotification(removed);
-            CommitRelationNotification(notification);
         }
 
         private void CommitRemoveMultiEdge(Entity source, ComponentType type, RelationSlot target)
@@ -124,14 +161,14 @@ namespace EntJoy.ECS
             _relationIndex.RemoveRelTypeId(type.Id, source, target);
             ref var location = ref GetEntityInfoRef(source.Id);
             location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
-            _relationshipVersion++;
+            InvalidateRelationshipQueries();
         }
 
         internal void RemoveMultiRelationshipRaw(Entity source, Entity target, ComponentType type)
         {
             CheckDisposed(); RequireMultiRelation(type); CompleteActiveJobs();
             using var changes = BeginRelationChanges();
-            lock (_structuralLock)
+            using (EnterStructural())
             {
                 var slot = RelationSlot.From(target);
                 if (!HasMultiEdge(source, type, slot)) return;
@@ -146,7 +183,7 @@ namespace EntJoy.ECS
         {
             CheckDisposed(); RequireMultiRelation(type); CompleteActiveJobs();
             using var changes = BeginRelationChanges();
-            lock (_structuralLock)
+            using (EnterStructural())
             {
                 if (!IsAlive(source)) return;
                 var targets = GetMultiTargets(source, type);
@@ -167,7 +204,7 @@ namespace EntJoy.ECS
                 }
                 ref var location = ref GetEntityInfoRef(source.Id);
                 location.Archetype.NotifyComponentChanged(location.ChunkIndex, location.SlotInChunk);
-                _relationshipVersion += targets.Length;
+                InvalidateRelationshipQueries(targets.Length);
                 if (notifications != null) foreach (var notification in notifications) CommitRelationNotification(notification);
             }
         }

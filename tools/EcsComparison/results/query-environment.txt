@@ -1,0 +1,4 @@
+﻿[NativeJobScheduler] dll self-proof: intended=E:\GODOT\Project\EntJoy\tools\EcsComparison\bin\Release\net8.0\NativeDll.dll attempts=1 fallback=none size=1096192 sha256=FDD6B340EE357AA7
+[NativeJobScheduler] NativeTranspiled self-proof: path=E:\GODOT\Project\EntJoy\tools\EcsComparison\bin\Release\net8.0\NativeTranspiled.dll size=25088 sha256=062842FF3E2EF2E1
+MATRIX_ENV framework=dotnet runtime=.NET_8.0.30 os=Microsoft_Windows_10.0.26100 arch_package=1.2.8.1-alpha chunk_override=0 tiered_compilation=0
+MATRIX_ENV framework=Unity editor=2022.3.62f3 entities_package=1.4.6 burst_package=1.8.28 cpu=AMD_Ryzen_7_8845H_w/_Radeon_780M_Graphics_ safety_checks=True force_safety_checks=False

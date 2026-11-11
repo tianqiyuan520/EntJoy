@@ -70,8 +70,11 @@ namespace NativeTranspiler.Analyzer
             {
             AppendMaskAdapterHeader(sb, adapterFuncName, "void* context, const ChunkJobData* __chunkData", adapterMask);
             sb.AppendLine("{");
-            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
-            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
+            if (!isEntityJob || isIspcJob)
+            {
+                sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+                sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
+            }
             sb.AppendLine("    auto* __header = (__EntJoyChunkContextHeader*)context;");
             sb.AppendLine("    int __headerSize = (int)sizeof(__EntJoyChunkContextHeader);");
             sb.AppendLine("    int __typesDataSize = __header->allEnabledCount * (int)sizeof(int);");
@@ -194,8 +197,11 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    for (int __chunkIndex = __startIndex; __chunkIndex < __endIndex; ++__chunkIndex)");
             sb.AppendLine("    {");
             sb.AppendLine("        auto* __chunkData = &__chunks[__chunkIndex];");
-            sb.AppendLine("        EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
-            sb.AppendLine("        if (!__queryMask.HasMatches()) continue;");
+            if (!isEntityJob || isIspcJob)
+            {
+                sb.AppendLine("        EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
+                sb.AppendLine("        if (!__queryMask.HasMatches()) continue;");
+            }
             // inline the adapter body into range loop
             if (isEntityJob)
             {
@@ -354,6 +360,9 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     remBody = remBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     remBody = remBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                     remBody = remBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
+                    // 计数快照由批级预置提供：先删它自己的声明，再把剩余引用指向批级计数
+                    remBody = Regex.Replace(remBody, @"const int __chunk_entity_count = __batchData->entityCount;\r?\n?", "");
+                    remBody = remBody.Replace("__chunk_entity_count", "__batchData->entityCount");
                     // 移除 SIMD prelude 已声明的 ptr/length/entityCount
                     remBody = Regex.Replace(remBody, @"auto\* \w+_ptr = reinterpret_cast<[^>]+>\(__batchData->componentArrays\[\d+\]\);\r?\n?", "");
                     remBody = Regex.Replace(remBody, @"int \w+_length = __batchData->entityCount;\r?\n?", "");

@@ -10,8 +10,11 @@
 #include "NativeContainers.h"
 #include "JobContextPool.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <atomic>
+#include <mutex>
 
 // 加载期输出当前 SIMD 配置（DLL 加载时执行）
 //
@@ -171,7 +174,7 @@ extern "C"
 
     void JobSystem_RegisterPersistentAllocator(PersistentAllocCallback alloc, PersistentFreeCallback free)
     {
-        EntJoy::Collections::RegisterPersistentAllocator(alloc, free);
+        JobSystem_RegisterAllocator(4, alloc, free);
     }
 
     // 托管 Persistent 回调槽单一存储归属 NativeDll.dll：跨 DLL 经这两个导出访问器共享同一槽，
@@ -179,9 +182,29 @@ extern "C"
     namespace {
         PersistentAllocCallback g_persistentAlloc = nullptr;
         PersistentFreeCallback  g_persistentFree  = nullptr;
+        std::once_flag g_allocatorOnce[5];
+        std::atomic<PersistentAllocCallback> g_allocators[5]{};
+        std::atomic<PersistentFreeCallback> g_deallocators[5]{};
     }
     ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback* EntJoy_GetPersistentAllocRef() { return &g_persistentAlloc; }
     ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback*  EntJoy_GetPersistentFreeRef()  { return &g_persistentFree; }
+    ENTJOY_PERSISTENT_ALLOC_API PersistentAllocCallback EntJoy_GetAllocatorAlloc(int32_t label) {
+        return label >= 2 && label <= 4 ? g_allocators[label].load(std::memory_order_acquire) : nullptr;
+    }
+    ENTJOY_PERSISTENT_ALLOC_API PersistentFreeCallback EntJoy_GetAllocatorFree(int32_t label) {
+        return label >= 2 && label <= 4 ? g_deallocators[label].load(std::memory_order_acquire) : nullptr;
+    }
+    void JobSystem_RegisterAllocator(int32_t label, PersistentAllocCallback alloc, PersistentFreeCallback free)
+    {
+        if (label < 2 || label > 4 || !alloc || !free) return;
+        std::call_once(g_allocatorOnce[label], [=] {
+            if (label == 4) { g_persistentAlloc = alloc; g_persistentFree = free; }
+            g_deallocators[label].store(free, std::memory_order_release);
+            g_allocators[label].store(alloc, std::memory_order_release);
+        });
+        if (g_allocators[label].load(std::memory_order_acquire) != alloc ||
+            g_deallocators[label].load(std::memory_order_acquire) != free) std::abort();
+    }
 
     void JobSystem_RegisterCurrentBatchId(CurrentBatchIdCallback cb)
     {
@@ -739,6 +762,11 @@ extern "C"
         // 布局防御：必须与 C# NativeJobSystemStats（Marshal.SizeOf）相等。
         // 新增统计字段时若不同步，C# GetStats 会越界写 → 堆损坏。
         return static_cast<uint32_t>(sizeof(JobSystemStatsNative));
+    }
+
+    uint64_t JobSystem_GetStatsLayoutFingerprint()
+    {
+        return JobStatsLayoutFingerprint();
     }
 
     void JobSystem_GetStats(JobSystemStatsNative* stats)

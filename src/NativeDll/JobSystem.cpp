@@ -1326,8 +1326,15 @@ std::atomic<uint64_t> g_notifySkipped{ 0 };   // 跳过广播次数（自证）
     // 用的是与 ResetStatsSnapshot 读统计前同一段序列。
     void DrainAll() noexcept
     {
+        // 先提交隐式批：pending 里的 batch 不在 g_backendBatchesOutstanding 里，
+        // 不先 flush 就会在"任务还没跑"时判定排空完成。
+        FlushPendingSubmits();
         ConsumeLongBatchBarriers();
         WaitForBackendBatches();
+        // batch 计数不含 work/direct 任务；热重载换模块前必须连它们一起等，
+        // 否则会在旧 adapter 仍在执行时提交新模块。
+        if (auto scheduler = LoadChaseLevScheduler())
+            scheduler->WaitIdle();
     }
 
     void ResetStatsSnapshot() noexcept

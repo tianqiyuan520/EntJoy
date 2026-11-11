@@ -174,7 +174,9 @@ namespace EntJoy.JobSystem.Managed
                     Volatile.Write(ref _declReleased, 1);
                     _done.Set();
                     DispatchComplete();
-                    if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0)
+                    // 有异常时不自动归还：槽位留给持有它的句柄，Complete() 才能取出并重抛（与 native 语义一致）。
+                    if (Volatile.Read(ref _autoReturn) == 1 && Volatile.Read(ref _returned) == 0 &&
+                        Volatile.Read(ref _exception) == null)
                         ManagedJobScheduler.AutoReturnCompletion(this, completedGeneration);
                 }
             }

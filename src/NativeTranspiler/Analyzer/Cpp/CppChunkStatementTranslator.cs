@@ -38,6 +38,7 @@ namespace NativeTranspiler.Analyzer
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly List<INamedTypeSymbol> _requiredSharedTypes;  // SharedComponent 类型（blittable，per-chunk 值指针）
         private readonly HashSet<string> _chunkArrayLocalNames = new();
+        private bool _hasCountSnapshot;
         /// <summary>局部数组名 → 存储身份（见 <see cref="NativeArrayElementAlias.StorageKey"/>）。</summary>
         private readonly Dictionary<string, string> _chunkArrayStorageKeys = new();
         /// <summary>局部变量符号 → 存储身份（预扫描填充，符号优先 ⇒ 遮蔽/顺序安全）。</summary>
@@ -61,6 +62,12 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
         {
+            if (skipOuterBraces)
+            {
+                // ArchetypeChunk is a value view; its count is fixed for this invocation.
+                _builder.AppendLine("const int __chunk_entity_count = __chunkData->entityCount;");
+                _hasCountSnapshot = true;
+            }
             var previousAliases = new Dictionary<string, NativeArrayElementAlias>(_nativeArrayElementAliases);
             RegisterNativeArrayElementAliases(block);
 
@@ -209,7 +216,7 @@ namespace NativeTranspiler.Analyzer
                 lines.Append(new string(' ', _indentLevel * 4));
                 lines.Append("int ");
                 lines.Append(variable.Identifier.Text);
-                lines.Append("_length = __chunkData->entityCount");
+                lines.Append("_length = ").Append(_hasCountSnapshot ? "__chunk_entity_count" : "__chunkData->entityCount");
                 lines.AppendLine(";");
             }
 
@@ -323,7 +330,7 @@ namespace NativeTranspiler.Analyzer
             if (SymbolHelper.GetBoundSymbol(_semanticModel, memberAccess) is IPropertySymbol property
                 && property.Name == "Count" && property.ContainingType.ToDisplayString() == Config.TypeArchetypeChunk)
             {
-                _builder.Append("__chunkData->entityCount");
+                _builder.Append(_hasCountSnapshot ? "__chunk_entity_count" : "__chunkData->entityCount");
                 return;
             }
             if (memberAccess.Expression is IdentifierNameSyntax identifier &&

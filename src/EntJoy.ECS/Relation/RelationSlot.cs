@@ -10,10 +10,9 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// 关系槽位值：指向 target 实体（含版本防 ID 回收）。8B blittable。
-    /// 预建关系列的空槽为 <see cref="Default"/>（TargetId = -1）；增删关系列属于结构变更。
-    /// 查询/读取时校验 <see cref="Matches"/>（Id 相等且 Version 相等），
-    /// 实体销毁后 Id 复用（version+1）时旧关系自动失效。
+    /// 关系槽位值：指向 target 实体（含版本防 Id 回收），8B blittable；空槽为 <see cref="Default"/>。
+    /// 查询时用 <see cref="Matches"/> 校验 Id 与 Version，实体销毁后 Id 复用（version+1）时旧关系自动失效。
+    /// 增删关系列属于结构变更。
     /// </summary>
     public unsafe struct RelationSlot
     {

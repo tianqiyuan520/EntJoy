@@ -1,0 +1,13 @@
+﻿framework,api,backend,entities,components,chunks,round1_us,round2_us,mean_median_us,round_ratio,bytes_per_call
+EntJoy,foreach,CSharp,1024,2,8,1.877,1.895,1.886,1.010,0.0
+Arch,InlineQuery,CSharp,1024,2,2,0.54,0.54,0.540,1.000,0.0
+EntJoy,foreach,CSharp,1024,3,8,2.274,2.235,2.255,1.017,0.0
+Arch,InlineQuery,CSharp,1024,3,2,2.074,2.023,2.048,1.025,0.0
+EntJoy,foreach,CSharp,100000,2,782,210.663,196.393,203.528,1.073,0.0
+Arch,InlineQuery,CSharp,100000,2,100,46.551,47.397,46.974,1.018,0.0
+EntJoy,foreach,CSharp,100000,3,782,243.717,257.558,250.637,1.057,0.0
+Arch,InlineQuery,CSharp,100000,3,125,196.99,200.288,198.639,1.017,0.0
+Unity,SystemAPI.Query,Burst,1024,2,8,1.545,1.136,1.341,1.360,0.0
+Unity,SystemAPI.Query,Burst,1024,3,8,2.359,1.478,1.918,1.596,0.0
+Unity,SystemAPI.Query,Burst,100000,2,782,164.259,179.183,171.721,1.091,0.0
+Unity,SystemAPI.Query,Burst,100000,3,782,192.567,161.317,176.942,1.194,0.0

@@ -74,6 +74,10 @@ namespace EntJoy.ECS
         public bool TryGetSources(Entity target, out Dictionary<int, HashSet<Entity>> byType)
             => _index.TryGetValue(Key(target), out byType);
 
+        /// <summary>取指向 target、关系类型为 <paramref name="relTypeId"/> 的源集合；没有则返回 null。</summary>
+        public HashSet<Entity> GetSourcesOfType(Entity target, int relTypeId)
+            => _index.TryGetValue(Key(target), out var byType) && byType.TryGetValue(relTypeId, out var set) ? set : null;
+
         /// <summary>按 target ID 统计跨类型关系条目数（诊断用，不用于实体身份校验）。</summary>
         public int GetSourceCount(int targetId)
         {

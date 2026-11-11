@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Runtime.InteropServices;
 
 namespace EntJoy.ECS
@@ -32,33 +34,71 @@ namespace EntJoy.ECS
         private static readonly ConcurrentDictionary<Type, ComponentType> ComponentTypeRegistries = new();
         public static readonly ConcurrentDictionary<int, Type> idToTpyeMap = new();
         private static ComponentTypeInfo[] _componentTypeInfos = new ComponentTypeInfo[100];
+        private static ComponentType[] _componentTypesById = new ComponentType[100];
 
         // 用于保护所有静态状态的锁。Component 注册是稀有操作，锁开销可忽略。
         private static readonly object _typeLock = new();
         [ThreadStatic] private static int _disposalDepth;
         internal static bool IsDisposingComponent => _disposalDepth != 0;
         [ThreadStatic] private static int _copyDepth;
-        internal static bool IsCopyingComponent => _copyDepth != 0;
+        private static int _activeCopyScopes;
+        internal static bool IsCopyingComponent
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => Volatile.Read(ref _activeCopyScopes) != 0 && IsCurrentThreadCopying();
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool IsCurrentThreadCopying() => _copyDepth != 0;
+
         internal readonly struct CopyPreparationScope : IDisposable
         {
-            public void Dispose() => _copyDepth--;
+            public void Dispose()
+            {
+                _copyDepth--;
+                Interlocked.Decrement(ref _activeCopyScopes);
+            }
         }
-        internal static CopyPreparationScope BeginCopyPreparation() { _copyDepth++; return default; }
-
-        private static class Access<T> where T : struct
+        internal static CopyPreparationScope BeginCopyPreparation()
         {
-            internal static readonly bool IsRelation = typeof(IRelationComponent).IsAssignableFrom(typeof(T));
+            // 先登记全局作用域，再进入本线程；无复制时的组件访问只读全局计数。
+            Interlocked.Increment(ref _activeCopyScopes);
+            _copyDepth++;
+            return default;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool IsRelationType<T>() where T : struct => Access<T>.IsRelation;
+        public static bool IsRelationType<T>() where T : struct => default(T) is IRelationComponent;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void CheckWritableAccess<T>() where T : struct
         {
-            if (IsCopyingComponent) throw new InvalidOperationException("Writable ECS views are not allowed inside component copy hooks.");
-            if (Access<T>.IsRelation)
-                throw new InvalidOperationException($"Relationship '{typeof(T)}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.");
+            if (IsRelationType<T>() || (Volatile.Read(ref _activeCopyScopes) != 0 && _copyDepth != 0))
+                throw WritableAccessException<T>();
+        }
+
+        /// <summary>在返回查询的可写引用前校验借用和当前线程的写权限。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void CheckWritableAccess<T>(QueryReadState state) where T : struct
+        {
+            if (IsRelationType<T>() || (Volatile.Read(ref _activeCopyScopes) != 0 && _copyDepth != 0))
+                ThrowTrackedWritableAccess<T>(state);
+            state.ValidateTracked();
+        }
+
+        [DoesNotReturn]
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowTrackedWritableAccess<T>(QueryReadState state) where T : struct
+        {
+            state.ValidateTracked();
+            throw WritableAccessException<T>();
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static InvalidOperationException WritableAccessException<T>() where T : struct
+        {
+            if (IsCopyingComponent) return new InvalidOperationException("Writable ECS views are not allowed inside component copy hooks.");
+            return new InvalidOperationException($"Relationship '{typeof(T)}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.");
         }
 
         /// <summary>泛型 Dispose 函数指针（AOT 安全：泛型实例化，无反射）。</summary>
@@ -80,83 +120,100 @@ namespace EntJoy.ECS
             }
         }
 
-        /// <summary>
-        /// 获取该类型对应的组件
-        /// <br>查询该<paramref name="type"/>的对应组件类型，若查询无果则注册该类型</br>
-        /// </summary>
+        /// <summary>泛型入口：按 T 静态缓存组件类型，每次调用不再查字典。</summary>
+        public static ComponentType GetComponentType<T>() where T : struct => ComponentTypeByType<T>.Value;
+
+        private static class ComponentTypeByType<T> where T : struct
+        {
+            internal static readonly ComponentType Value = GetComponentType(typeof(T));
+        }
+
+        /// <summary>取该类型对应的组件；未注册则在此注册并分配 id。</summary>
         public static ComponentType GetComponentType(Type type)
         {
-            // 先无锁快速路径检查（读多写少的优化）
-            if (ComponentTypeRegistries.TryGetValue(type, out var componentType))
-                return componentType;
+            // 读多写少：命中时无锁。
+            if (ComponentTypeRegistries.TryGetValue(type, out var registered))
+                return registered;
 
             lock (_typeLock)
             {
-                // 二次检查：可能在锁竞争期间被其它线程注册了
-                if (ComponentTypeRegistries.TryGetValue(type, out componentType))
-                    return componentType;
-
-                int id = idAllocator;
-                bool isShared = typeof(ISharedComponentData).IsAssignableFrom(type);
-                bool isRelation = typeof(IRelationComponent).IsAssignableFrom(type);
-                if (isRelation)
-                    ValidateRelationDefinition(type);
-                int size;
-                try
-                {
-                    size = isShared ? ComputeSharedSize(type) : ComputeComponentSize(type);
-                }
-                catch (ArgumentException ex)
-                {
-                    throw new InvalidOperationException(
-                        $"Type {type.FullName} is not blittable. ECS components must be blittable structs "
-                        + $"(managed references only allowed in {nameof(ISharedComponentData)}).", ex);
-                }
-
-                if (id >= _componentTypeInfos.Length)
-                    Array.Resize(ref _componentTypeInfos, _componentTypeInfos.Length * 2);
-
-                bool isMultiRelation = isRelation && Attribute.IsDefined(type, typeof(MultiRelationAttribute));
-
-                _componentTypeInfos[id] = new ComponentTypeInfo
-                {
-                    IsEnableable = typeof(IEnableableComponent).IsAssignableFrom(type),
-                    IsShared = isShared,
-                    IsRelation = isRelation,
-                    IsExclusiveRelation = isRelation && Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute)),
-                    IsMultiRelation = isMultiRelation,
-                    // 定长槽位数：[MultiRelation(MaxSlots=N)]，N≥2 走定长多槽列；0 = 托管列表模式
-                    MultiRelationMaxSlots = isMultiRelation
-                        ? ((MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute)))!.MaxSlots
-                        : 0,
-                    // 入边唯一约束（[ExclusiveTarget]，背包场景）
-                    IsExclusiveTarget = isMultiRelation && Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute)),
-                    // 声明级联（[OnTargetDeleted(Cascade=true)]，target 销毁时级联销毁 sources）
-                    CascadeOnTargetDeleted = isRelation
-                        && Attribute.IsDefined(type, typeof(OnTargetDeletedAttribute))
-                        && ((OnTargetDeletedAttribute)Attribute.GetCustomAttribute(type, typeof(OnTargetDeletedAttribute)))!.Cascade,
-                    IsAcyclicRelation = isRelation && Attribute.IsDefined(type, typeof(AcyclicRelationAttribute)),
-                    IsDisposable = typeof(IDisposable).IsAssignableFrom(type),
-                    IsCopyable = typeof(ICopyable).IsAssignableFrom(type),
-                };
-
-                var newComponentType = new ComponentType(id, size);
-                idToTpyeMap[id] = type;
-                // Publish the reverse map before the type registry. A reader that observes
-                // the registry entry must be able to resolve ComponentType.Type immediately.
-                ComponentTypeRegistries[type] = newComponentType;
-                idAllocator = id + 1;
-                return newComponentType;
+                // 二次检查：可能在等锁期间被其它线程注册。
+                if (ComponentTypeRegistries.TryGetValue(type, out registered))
+                    return registered;
+                return RegisterComponentTypeLocked(type);
             }
         }
 
+        private static ComponentType RegisterComponentTypeLocked(Type type)
+        {
+            int id = idAllocator;
+            var info = DescribeType(type);
+            var componentType = new ComponentType(id, info.Size);
+
+            int required = id + 1;
+            if (required > _componentTypeInfos.Length)
+                Array.Resize(ref _componentTypeInfos, Math.Max(required, _componentTypeInfos.Length * 2));
+            if (required > _componentTypesById.Length)
+                Array.Resize(ref _componentTypesById, Math.Max(required, _componentTypesById.Length * 2));
+
+            _componentTypeInfos[id] = info.Info;
+            _componentTypesById[id] = componentType;
+            idToTpyeMap[id] = type;
+            // 先发布 id 反查，再发布类型注册表：读到注册表项的线程必须能立刻反查出类型。
+            ComponentTypeRegistries[type] = componentType;
+            idAllocator = required;
+            return componentType;
+        }
+
+        /// <summary>注册时算出的组件元数据与字节宽度。</summary>
+        private readonly struct TypeDescription
+        {
+            public readonly ComponentTypeInfo Info;
+            public readonly int Size;
+            public TypeDescription(ComponentTypeInfo info, int size) { Info = info; Size = size; }
+        }
+
+        private static TypeDescription DescribeType(Type type)
+        {
+            bool isShared = typeof(ISharedComponentData).IsAssignableFrom(type);
+            bool isRelation = typeof(IRelationComponent).IsAssignableFrom(type);
+            if (isRelation) ValidateRelationDefinition(type);
+
+            int size;
+            try
+            {
+                size = isShared ? ComputeSharedSize(type) : ComputeComponentSize(type);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Type {type.FullName} is not blittable. ECS components must be blittable structs "
+                    + $"(managed references only allowed in {nameof(ISharedComponentData)}).", ex);
+            }
+
+            var multi = (MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute));
+            var cascade = (OnTargetDeletedAttribute)Attribute.GetCustomAttribute(type, typeof(OnTargetDeletedAttribute));
+
+            var info = new ComponentTypeInfo
+            {
+                IsEnableable = typeof(IEnableableComponent).IsAssignableFrom(type),
+                IsShared = isShared,
+                IsRelation = isRelation,
+                IsExclusiveRelation = isRelation && Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute)),
+                IsMultiRelation = isRelation && multi != null,
+                MultiRelationMaxSlots = isRelation && multi != null ? multi.MaxSlots : 0,
+                IsExclusiveTarget = isRelation && multi != null && Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute)),
+                CascadeOnTargetDeleted = isRelation && cascade != null && cascade.Cascade,
+                IsAcyclicRelation = isRelation && Attribute.IsDefined(type, typeof(AcyclicRelationAttribute)),
+                IsDisposable = typeof(IDisposable).IsAssignableFrom(type),
+                IsCopyable = typeof(ICopyable).IsAssignableFrom(type),
+            };
+            return new TypeDescription(info, size);
+        }
+
         /// <summary>
-        /// 计算组件类型的大小：
-        /// 使用 C# 的无引用值类型布局，关系组件允许携带关系数据。
-        /// 要求首个字段必须是 RelationSlot Target（偏移 0，LayoutKind.Sequential），
-        /// 使列前 8B 重解释为 RelationSlot 的正确性与 GetComponentDataSpan&lt;TRel&gt; 步长一致。
-        /// 注册时校验；否则抛异常（防空 struct / 缺 Target 字段误用导致越界或步长错位）。
-        /// 普通组件与 typed span、sizeof(T) 和原生转译使用相同的步长。
+        /// 组件字节宽度。关系组件要求首个字段是偏移 0 的 RelationSlot Target：
+        /// 列前 8 字节会被重解释为 RelationSlot，target 不在首位会让步长错位。
         /// </summary>
         private static int ComputeComponentSize(Type type)
         {
@@ -166,7 +223,6 @@ namespace EntJoy.ECS
                     | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
                 if (target == null || target.FieldType != typeof(RelationSlot))
                     throw new InvalidOperationException($"Relation component '{type.FullName}' requires a RelationSlot Target field.");
-                // 校验 Target 首字段（偏移 0）。Marshal.OffsetOf 对缺失字段抛 ArgumentException。
                 IntPtr targetOffset;
                 try
                 {
@@ -267,6 +323,9 @@ namespace EntJoy.ECS
 
         /// <summary>通过该组件类型的ID获取对应的类型</summary>
         public static Type GetTypeByComponentType(int id) => idToTpyeMap[id];
+
+        /// <summary>按组件 id 直接取组件类型元数据（数组索引，不查字典）。</summary>
+        public static ComponentType GetComponentType(int id) => _componentTypesById[id];
 
         public static bool GetIsEnableable(int id) => _componentTypeInfos[id].IsEnableable;
 

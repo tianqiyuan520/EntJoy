@@ -1,171 +1,15 @@
-using EntJoy.Debugger;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
 
 namespace EntJoy.ECS
 {
-    // Archetype 主要
-    public unsafe sealed partial class Archetype
-    {
-        private ComponentType[] types;
-        public ReadOnlySpan<ComponentType> Types => types;
-        private Dictionary<ComponentType, int> componentTypeRecorder;
-        public int ComponentCount { get; private set; }
-        public int EntityCount { get; private set; }
-        private bool _disposed;
-        internal EntityManager Owner { get; set; }
-
-        internal void CheckReadable()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(Archetype));
-        }
-
-        // Prefab 标记组件类型（查询默认排除用）
-        private static readonly ComponentType s_prefabType = typeof(Prefab);
-
-        // Phase 2.1: Archetype Edges — 缓存 Add/Remove 目标 Archetype
-        private readonly Dictionary<ComponentType, Archetype> _addEdges = new();
-        private readonly Dictionary<ComponentType, Archetype> _removeEdges = new();
-
-        // 全局变更版本号（组件修改/结构变更时递增）
-        private int _globalVersion;
-        public int GlobalVersion => _globalVersion;
-
-        public Archetype(ComponentType[] ts)
-            : this(ts, ChunkCacheLayout.Current) { }
-
-        internal Archetype(ComponentType[] ts, ChunkCacheLayout cacheLayout)
-        {
-            _cacheLayout = cacheLayout;
-            types = ts;
-            ComponentCount = ts.Length;
-            componentTypeRecorder = new Dictionary<ComponentType, int>(ts.Length);
-            for (int i = 0; i < ComponentCount; i++)
-            {
-                componentTypeRecorder.Add(types[i], i);
-            }
-            _chunkCapacity = ChunkCapacityOverride > 0
-                ? Math.Max(64, ChunkCapacityOverride)   // 位图/遍历以 64 个实体为自然边界。
-                : CalculateOptimalChunkCapacity(types);
-            _sharedMetadata = ChunkMetadata.Create(this, _chunkCapacity, types, true, _cacheLayout);
-            _chunkOffsetsNative = NativeLocateStorage.AllocateOffsets(_sharedMetadata.ComponentOffsets);
-        }
-
-        /// <summary>
-        /// 查询匹配检查：是否符合 QueryBuilder 条件
-        /// </summary>
-        public bool IsMatch(QueryBuilder builder)
-        {
-            // 默认排除 Prefab 模板实体（对齐 Unity）：除非查询显式 WithAll<Prefab>
-            if (componentTypeRecorder.ContainsKey(s_prefabType))
-            {
-                bool includesPrefab = false;
-                if (builder.All != null)
-                {
-                    for (int i = 0; i < builder.All.Length; i++)
-                        if (builder.All[i].Id == s_prefabType.Id) { includesPrefab = true; break; }
-                }
-                if (!includesPrefab)
-                    return false;
-            }
-
-            if (builder.All != null && builder.All.Length > 0)
-            {
-                if (!HasAllOf(builder.All.AsSpan()))
-                    return false;
-            }
-            if (builder.Any != null && builder.Any.Length > 0)
-            {
-                if (!HasAnyOf(builder.Any.AsSpan()))
-                    return false;
-            }
-            if (builder.None != null && builder.None.Length > 0)
-            {
-                if (!HasNoneOf(builder.None.AsSpan()))
-                    return false;
-            }
-            if (builder.AllEnabled != null)
-            {
-                foreach (var ct in builder.AllEnabled)
-                {
-                    if (!componentTypeRecorder.ContainsKey(ct))
-                        return false;
-                }
-            }
-            // 关系过滤要求拥有 TRel 列（不拆 Archetype，仅过滤）
-            if (builder.HasRelationshipFilter)
-            {
-                if (!(builder.RelationshipFilterType.IsMultiRelation && builder.RelationshipFilterType.MultiRelationMaxSlots == 0)
-                    && !componentTypeRecorder.ContainsKey(builder.RelationshipFilterType))
-                    return false;
-            }
-            // 共享值过滤要求拥有 SharedFilterType 列（与关系列同策略）。
-            // 缺失时 MatchesSharedFilter 的 GetComponentTypeIndex 会字典 miss——三个收集路径
-            // （EntityQuery.Refresh / ChunkJobCollector / QueryEnumerator）都依赖此处先行排除。
-            if (builder.HasSharedFilter)
-            {
-                if (!componentTypeRecorder.ContainsKey(builder.SharedFilterType))
-                    return false;
-            }
-            return true;
-        }
-    }
-
-    // 组件类型判定
-    public unsafe sealed partial class Archetype
-    {
-        public bool HasAllOf(Span<ComponentType> spanTypes)
-        {
-            int len = spanTypes.Length;
-            for (int i = 0; i < len; i++)
-            {
-                if (!componentTypeRecorder.ContainsKey(spanTypes[i]))
-                    return false;
-            }
-            return true;
-        }
-
-        public bool HasAnyOf(Span<ComponentType> spanTypes)
-        {
-            int len = spanTypes.Length;
-            for (int i = 0; i < len; i++)
-            {
-                if (componentTypeRecorder.ContainsKey(spanTypes[i]))
-                    return true;
-            }
-            return false;
-        }
-
-        public bool HasNoneOf(Span<ComponentType> spanTypes)
-        {
-            int len = spanTypes.Length;
-            for (int i = 0; i < len; i++)
-            {
-                if (componentTypeRecorder.ContainsKey(spanTypes[i]))
-                    return false;
-            }
-            return true;
-        }
-
-        public bool Has(Type type)
-        {
-            for (int i = 0; i < types.Length; i++)
-            {
-                if (types[i] == type)
-                    return true;
-            }
-            return false;
-        }
-    }
-
-    // Archetype Chunk 管理
     public unsafe sealed partial class Archetype : IDisposable
     {
         private readonly List<Chunk> _chunkList = new();
+        // 此索引之前的块已满；移除实体时回退，新增时向前扫描。
+        private int _firstChunkWithRoom;
         private readonly int _chunkCapacity;
         private readonly ChunkMetadata _sharedMetadata;
         private readonly ChunkCacheLayout _cacheLayout;
@@ -174,32 +18,27 @@ namespace EntJoy.ECS
         public int ArchetypeId;
 
         /// <summary>
-        /// 组件列字节偏移的非托管镜像（长度 = ComponentCount，按 componentIndex 索引）。
-        /// 作用：让 job / NativeTranspile 原生内核在拿到 <see cref="EntityLocateB.ChunkMemory"/> 后
-        /// 直接算出某组件列的基址，无需经托管 <see cref="ChunkMetadata.ComponentOffsets"/>（int[]）。
-        /// 生命周期 = Archetype，构造时分配、Dispose 时释放，内容不可变。
+        /// 组件列字节偏移的非托管镜像（按 componentIndex 索引）：原生内核拿到 ChunkMemory 后
+        /// 直接算出列基址，不经托管 int[]。生命周期 = Archetype，内容不可变。
         /// </summary>
         private int* _chunkOffsetsNative;
 
         /// <summary>非托管列偏移表首址（只读；与 <see cref="ChunkMetadata.ComponentOffsets"/> 逐项一致）。</summary>
         public int* GetChunkOffsetsNative() => _chunkOffsetsNative;
 
-        // Contiguous memory slab: 64 KB per slab. Multiple chunks are carved
-        // from each slab so their component arrays are physically adjacent.
+        // slab 为 64 KB 连续内存，多个 Chunk 从中切出，使各组件列物理相邻。
         private const int SLAB_SIZE = 64 * 1024;
         private const int SLAB_ALIGNMENT = 64 * 1024;
         private List<SlabInfo> _slabs = new();
         private SlabInfo _currentSlab;
         private int _currentSlabOffset;
         private int _chunkStride;
-        // 已移除 Chunk 的空洞（复用：新 Chunk 优先从这里取，避免 slab 无限增长）
+        // 已移除 Chunk 的空洞：新 Chunk 优先从这里取，避免 slab 无限增长
         private readonly List<nint> _freeChunks = new();
 
         /// <summary>
-        /// 显式指定所有 Archetype 的 Chunk 容量（0 = 用 <see cref="CalculateOptimalChunkCapacity"/> 自动值）。
-        /// 用途：需要"整个 Archetype 只有 1 个 Chunk、组件列连续"的场景（如百万单位 SoA 视图）。
-        /// ⚠ 必须在创建 Archetype（<c>World.CreateEntities</c> 等）之前设置；超大容量会让
-        /// Chunk stride 超过 <see cref="SLAB_SIZE"/>，此时每个 Chunk 独占一个按 stride 大小分配的 slab。
+        /// 显式指定所有 Archetype 的 Chunk 容量（0 = 自动值），用于需要单块连续列的 SoA 视图。
+        /// 必须在创建 Archetype 之前设置；容量过大时 stride 超过 SLAB_SIZE，每块独占一个 slab。
         /// </summary>
         public static int ChunkCapacityOverride;
 
@@ -213,16 +52,21 @@ namespace EntJoy.ECS
             public int ReleasedCount; // 已释放（移除）的 Chunk 数
         }
 
+        /// <summary>找出包含该地址的 slab；不属于任何现存 slab 时返回 null。</summary>
+        private SlabInfo FindSlab(long addr)
+        {
+            for (int i = 0; i < _slabs.Count; i++)
+            {
+                long start = _slabs[i].AlignedPtr.ToInt64();
+                if (addr >= start && addr < start + _slabs[i].Bytes) return _slabs[i];
+            }
+            return null;
+        }
+
         /// <summary>
-        /// 自检 slab 账本不变式（诊断/测试用；返回违例数，0 = 健康）。
-        ///
-        /// 不变式：
-        /// 1) 每个存活 Chunk 的 <c>MemoryBlock</c> 必须落在某个现存 slab 的范围内
-        /// —— 复用空洞后必须把「已释放」还回去，否则 <c>ReleasedCount == ChunkCount</c> 会提前成立；
-        /// 3) <c>ReleasedCount &lt;= ChunkCount</c>。
-        ///
-        /// 这三条同时是 <see cref="ReleaseChunkMemory"/> 归还整块 slab 的前提；违反任意一条都可能
-        /// 让「含活 chunk 的 slab」被归还（跨 Archetype/World 内存别名）。
+        /// 自检 slab 账本（诊断/测试用，返回违例数，0 = 健康）：每个存活块的 <c>MemoryBlock</c> 落在某个现存 slab 内，
+        /// 每个 slab 的 <c>ReleasedCount</c> 等于 <c>ChunkCount</c> 减存活数且不超过它。
+        /// 任一条不成立，归还整块 slab 时可能连带别人仍在用的内存。
         /// </summary>
         internal int VerifySlabInvariants()
         {
@@ -230,14 +74,7 @@ namespace EntJoy.ECS
 
             for (int c = 0; c < _chunkList.Count; c++)
             {
-                long addr = _chunkList[c].MemoryBlock.ToInt64();
-                bool backed = false;
-                for (int i = 0; i < _slabs.Count; i++)
-                {
-                    long start = _slabs[i].AlignedPtr.ToInt64();
-                    if (addr >= start && addr < start + _slabs[i].Bytes) { backed = true; break; }
-                }
-                if (!backed) violations++;
+                if (FindSlab(_chunkList[c].MemoryBlock.ToInt64()) == null) violations++;
             }
 
             for (int i = 0; i < _slabs.Count; i++)
@@ -259,6 +96,9 @@ namespace EntJoy.ECS
         }
 
         public int ChunkCount => _chunkList.Count;
+
+
+
         public ref readonly List<Chunk> ChunkList => ref _chunkList;
 
         /// <summary>本 Archetype 已分配的 slab 数量（内存分析器用）。</summary>
@@ -275,10 +115,8 @@ namespace EntJoy.ECS
             }
         }
         /// <summary>
-        /// 内部 _chunkList 的零拷贝只读视图（v3 Phase 1.4：调度/查询热路径遍历
-        /// 不再经 GetChunks() 每次 new List&lt;Chunk&gt; 拷贝）。
-        /// 使用前提：同线程顺序模型——构建快照期间主线程不会并发结构变更；
-        /// job 并行执行期间对列表的后续修改不影响已构建的 ChunkJobData/EntityBatchData 快照。
+        /// _chunkList 的零拷贝只读视图，供调度与查询热路径遍历（不再每次 new List 拷贝）。
+        /// 前提是同线程顺序模型：构建快照期间主线程不做结构变更。
         /// </summary>
         public ReadOnlySpan<Chunk> ChunkSpan
         {
@@ -295,9 +133,7 @@ namespace EntJoy.ECS
         {
             // Unity 风格的小物理 Chunk：Chunk 只负责存储和结构变化，
             // Job 的执行粒度由调度器的 BatchRange 独立决定。
-            int cacheLineSize = _cacheLayout.LineSize;
             const int entityBlockSize = 64;
-            const int maxEntitiesPerChunk = 128;
             const int targetChunkBytes = 16 * 1024;
 
             int entitySize = Unsafe.SizeOf<Entity>();
@@ -309,18 +145,17 @@ namespace EntJoy.ECS
                 if (type.IsEnableable) enableableCount++;
             }
 
-            int alignmentOverhead = types.Length * cacheLineSize;
             const int bitmapBytesPer64Entities = 8;
             int bitmapOverheadPerEntity = (enableableCount * bitmapBytesPer64Entities + 63) / 64;
 
             int stride = totalComponentSize + bitmapOverheadPerEntity;
             int capacity = Math.Max(entityBlockSize,
-                (targetChunkBytes - alignmentOverhead) / Math.Max(1, stride));
+                targetChunkBytes / Math.Max(1, stride));
 
-            // 默认最多 128 个实体，与 Unity 的普通 Chunk 上限一致。
+            // 先按纯字节和取容量，再用完整布局复核并下调，不夹到固定实体数。
             // 按 64 个实体向下对齐并核算完整布局，较大的组件仍可降低容量。
             capacity &= ~(entityBlockSize - 1);
-            capacity = Math.Clamp(capacity, entityBlockSize, maxEntitiesPerChunk);
+            capacity = Math.Max(capacity, entityBlockSize);
             // 复用完整布局校验，把列间隔、位图和 shared 区计入 16 KiB 目标；最少保留 64 个实体。
             while (capacity > entityBlockSize
                 && ChunkMetadata.Create(this, capacity, types, true, _cacheLayout).TotalSize > targetChunkBytes)
@@ -328,183 +163,6 @@ namespace EntJoy.ECS
             return capacity;
         }
 
-        public void AddEntity(Entity entity, out int chunkIndex, out int slotInChunk)
-        {
-            if (ChunkCount > 0)
-            {
-                var span = CollectionsMarshal.AsSpan(_chunkList);
-                ref var lastChunk = ref span[^1];
-                if (lastChunk.EntityCount < lastChunk.Capacity)
-                {
-                    slotInChunk = lastChunk.EntityCount;
-                    lastChunk.AddEntity(entity);
-                    chunkIndex = _chunkList.Count - 1;
-                    EntityCount++;
-                    return;
-                }
-            }
-
-            // 需要新建 chunk
-            nint chunkMem = AllocateFromSlab();
-            var newChunk = new Chunk(_sharedMetadata, chunkMem);
-            newChunk.AddEntity(entity);
-            _chunkList.Add(newChunk);
-            slotInChunk = newChunk.EntityCount - 1;
-            chunkIndex = _chunkList.Count - 1;
-            EntityCount++;
-        }
-
-        // Shared values 支持
-
-        /// <summary>
-        /// chunk 被回收（空 chunk 从列表移除）时的回调。EntityManager 用它释放
-        /// 该 chunk 槽位引用的 managed shared 值（refcount 递减）。无 shared 时恒为 null。
-        /// </summary>
-        /// <summary>SharedChunkRetired callback removed — managed shared values are never released during World lifetime (World.Dispose clears all).</summary>
-
-        /// <summary>创建新 chunk（不添加实体），返回其索引。Shared values 区由调用方写入。</summary>
-        public int CreateChunk()
-        {
-            nint chunkMem = AllocateFromSlab();
-            var newChunk = new Chunk(_sharedMetadata, chunkMem);
-            _chunkList.Add(newChunk);
-            return _chunkList.Count - 1;
-        }
-
-        /// <summary>将实体添加到指定 chunk（SharedComponent 路径：目标 chunk 已按 shared 值选定）。</summary>
-        public void AddEntityToChunk(Entity entity, int chunkIndex)
-        {
-            if ((uint)chunkIndex >= (uint)_chunkList.Count)
-                throw new IndexOutOfRangeException($"Chunk index {chunkIndex} out of range (count={_chunkList.Count}).");
-            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
-            if (chunk.EntityCount >= chunk.Capacity)
-                throw new InvalidOperationException("Chunk is full");
-            chunk.AddEntity(entity);
-            EntityCount++;
-        }
-
-        private int ComputeChunkStride()
-        {
-            // stride 覆盖完整布局并按缓存行对齐，使 slab 中每个 Chunk 的底地址保持对齐。
-            int alignment = _cacheLayout.LineSize;
-            return (_sharedMetadata.TotalSize + alignment - 1) & ~(alignment - 1);
-        }
-
-        private nint AllocateFromSlab()
-        {
-            // 复用已移除 Chunk 的空洞，避免 slab 无限增长
-            if (_freeChunks.Count > 0)
-            {
-                int last = _freeChunks.Count - 1;
-                nint reused = _freeChunks[last];
-                _freeChunks.RemoveAt(last);
-
-                // 复用 = 该 chunk 重新变为「存活」，必须把它的「已释放」还回去。
-                // 否则 slab 账本会把活 chunk 记成已释放 ⇒ ReleasedCount == ChunkCount 提前成立 ⇒
-                // 注意：能进 _freeChunks 的空洞必定属于仍存活的 slab —— 归还 slab 时已把其空洞整体移除。
-                long reusedAddr = reused.ToInt64();
-                for (int i = 0; i < _slabs.Count; i++)
-                {
-                    long start = _slabs[i].AlignedPtr.ToInt64();
-                    if (reusedAddr >= start && reusedAddr < start + _slabs[i].Bytes)
-                    {
-                        if (_slabs[i].ReleasedCount > 0) _slabs[i].ReleasedCount--;
-                        break;
-                    }
-                }
-                return reused;
-            }
-
-            if (_chunkStride == 0) _chunkStride = ComputeChunkStride();
-
-            // 每个 slab 的可用字节数：常规 64KB；stride 超过 64KB（超大容量 Chunk）时按 stride 给，
-            // 使该 Chunk 独占一个 slab（此时一个 slab 只有一个 chunk）。
-            int slabBytes = _chunkStride > SLAB_SIZE ? _chunkStride : SLAB_SIZE;
-            // 不变式：slab 必须容得下一个 chunk，否则 chunk 会跨出 slab 边界并静默踩坏相邻内存
-            // （`_currentSlabOffset + _chunkStride > slabBytes` 只保证"放不下就换新 slab"，
-            //   而 stride > slabBytes 时换多少 slab 都放不下 ⇒ 必须在这里响亮失败）。
-            if (slabBytes < _chunkStride)
-                throw new InvalidOperationException(
-                    $"Chunk stride {_chunkStride} 超过 slab {slabBytes}：容量/组件布局把 chunk 撑过了 slab。"
-                    + "请调小 ChunkCapacityOverride 或增大 slab。");
-
-            // Ensure slab allocation
-            if (_currentSlab == null || _currentSlabOffset + _chunkStride > _currentSlab.Bytes)
-            {
-                // ChunkMemoryPool.Allocate 返回 申请字节 + kOverAlloc（64KB），
-                // 下面的对齐计算保证返回的 _currentSlab 满足 SLAB_ALIGNMENT（64KB）。
-                nint raw = ChunkMemoryPool.Allocate(slabBytes);
-                long addr = raw.ToInt64();
-                long aligned = (addr + SLAB_ALIGNMENT - 1) & ~(SLAB_ALIGNMENT - 1);
-                _currentSlab = new SlabInfo { RawPtr = raw, AlignedPtr = new nint(aligned), Bytes = slabBytes };
-                _slabs.Add(_currentSlab);
-                _currentSlabOffset = 0;
-            }
-
-            nint chunkMem = _currentSlab.AlignedPtr + _currentSlabOffset;
-            _currentSlabOffset += _chunkStride;
-            _currentSlab.ChunkCount++;
-            return chunkMem;
-        }
-
-        /// <summary>
-        /// 释放 Chunk 内存（复用或压缩）。Chunk 从列表移除时调用。
-        /// 空洞进入复用列表；当某个 slab 的所有 Chunk 都释放时，整个 slab 归还（压缩回收）。
-        /// </summary>
-        internal void ReleaseChunkMemory(nint chunkMem)
-        {
-            long addr = chunkMem.ToInt64();
-            SlabInfo slab = null;
-            for (int i = 0; i < _slabs.Count; i++)
-            {
-                long start = _slabs[i].AlignedPtr.ToInt64();
-                if (addr >= start && addr < start + _slabs[i].Bytes)
-                {
-                    slab = _slabs[i];
-                    break;
-                }
-            }
-            if (slab == null)
-                return;
-
-            slab.ReleasedCount++;
-            if (slab.ReleasedCount == slab.ChunkCount)
-            {
-                // 该 slab 所有 Chunk 都已释放 → 归还整个 slab（压缩）
-                ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes);
-                _slabs.Remove(slab);
-                // 重置 current slab：否则 _currentSlab 仍指向已归还内存，后续 AllocateFromSlab
-                // 会继续在已释放的 slab 上切 chunk（use-after-free）。
-                if (_currentSlab == slab) { _currentSlab = null; _currentSlabOffset = 0; }
-                // 从空洞列表移除该 slab 的 Chunk（已随 slab 归还，不能再复用）
-                long start = slab.AlignedPtr.ToInt64();
-                long end = start + slab.Bytes;
-                for (int i = _freeChunks.Count - 1; i >= 0; i--)
-                {
-                    long address = _freeChunks[i].ToInt64();
-                    if (address >= start && address < end) _freeChunks.RemoveAt(i);
-                }
-            }
-            else
-            {
-                _freeChunks.Add(chunkMem);
-            }
-        }
-
-        /// <summary>实体移除结果：swap-pop 搬移的实体与空 chunk 压缩信息（-1 = 无）。</summary>
-        public readonly struct RemovalResult
-        {
-            public readonly int MovedEntityId;
-            public readonly int MovedEntitySlot;
-            public readonly int CompactedChunkIndex;
-
-            public RemovalResult(int movedEntityId, int movedEntitySlot, int compactedChunkIndex)
-            {
-                MovedEntityId = movedEntityId;
-                MovedEntitySlot = movedEntitySlot;
-                CompactedChunkIndex = compactedChunkIndex;
-            }
-        }
 
         internal void PrepareEntityRemoval(int count = 1)
             => _freeChunks.EnsureCapacity(checked(_freeChunks.Count + count));
@@ -514,139 +172,25 @@ namespace EntJoy.ECS
 
         internal RemovalResult Remove(int chunkIndex, int slotInChunk, bool continueOnDisposeError, bool skipDisposal = false)
         {
-            int movedEntityId = -1, movedEntitySlot = -1, compactedChunkIndex = -1;
+            int movedEntityId = -1, movedEntitySlot = -1;
             var span = CollectionsMarshal.AsSpan(_chunkList);
             ref var chunk = ref span[chunkIndex];
 
-            if (chunk.EntityCount == 1)
+            // 空 Chunk 留在列表里：搬移 Chunk 会让它里面每个实体都要重写位置索引。
+            // 内存与空洞由 EntityManager.CompactChunks 显式回收。
+            int lastEntitySlot = chunk.EntityCount - 1;
+            chunk.RemoveEntity(slotInChunk, continueOnDisposeError, skipDisposal);
+            _firstChunkWithRoom = Math.Min(_firstChunkWithRoom, chunkIndex);
+            if (chunk.EntityCount > 0 && slotInChunk != lastEntitySlot)
             {
-                chunk.RemoveEntity(slotInChunk, continueOnDisposeError, skipDisposal);
-                if (chunk.EntityCount == 0 && _chunkList.Count > 1)
-                {
-                    // 至少保留 1 个 chunk，避免边界场景频繁创建/销毁抖动
-                    int lastChunkIndex = _chunkList.Count - 1;
-                    // 空 chunk 的内存块（swap 前记录：swap 后 chunkIndex 位置被 last 覆盖）
-                    nint freedChunk = chunk.MemoryBlock;
-                    if (chunkIndex != lastChunkIndex)
-                    {
-                        _chunkList[chunkIndex] = _chunkList[lastChunkIndex];
-                        compactedChunkIndex = chunkIndex;
-                    }
-                    _chunkList.RemoveAt(lastChunkIndex);
-                    ReleaseChunkMemory(freedChunk);  // 复用空洞 / 归还空 slab
-                }
-            }
-            else
-            {
-                int lastEntitySlot = chunk.EntityCount - 1;
-                if (slotInChunk != lastEntitySlot)
-                {
-                    movedEntityId = chunk.GetEntity(lastEntitySlot).Id;
-                    movedEntitySlot = slotInChunk;
-                }
-                chunk.RemoveEntity(slotInChunk, continueOnDisposeError, skipDisposal);
+                movedEntityId = chunk.GetEntity(lastEntitySlot).Id;
+                movedEntitySlot = slotInChunk;
             }
 
             EntityCount--;
-            return new RemovalResult(movedEntityId, movedEntitySlot, compactedChunkIndex);
+            return new RemovalResult(movedEntityId, movedEntitySlot);
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public ref T GetComponent<T>(int chunkIndex, int slotInChunk) where T : struct
-        {
-            var componentIndex = componentTypeRecorder[typeof(T)];
-            return ref _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex);
-        }
-
-        public ref readonly T GetComponentReadOnly<T>(int chunkIndex, int slotInChunk) where T : struct
-        {
-            CheckReadable();
-            int componentIndex = componentTypeRecorder[typeof(T)];
-            return ref _chunkList[chunkIndex].GetComponentReadOnly<T>(slotInChunk, componentIndex);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Set<T>(int chunkIndex, int slotInChunk, T value) where T : struct
-        {
-            var componentIndex = componentTypeRecorder[typeof(T)];
-            _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex) = value;
-            NotifyComponentChanged(chunkIndex, slotInChunk);
-        }
-
-        /// <summary>
-        /// 设置组件值（非泛型版本，避免反射）
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public unsafe void SetRaw(int chunkIndex, int slotInChunk, Type componentType, object value)
-        {
-            if (ComponentTypeManager.GetComponentType(componentType).IsRelation)
-                throw new InvalidOperationException("Relationship writes must use EntityManager or DeferredCommandBuffer.");
-            SetStorageRaw(chunkIndex, slotInChunk, componentType, value);
-        }
-
-        internal unsafe void SetStorageRaw(int chunkIndex, int slotInChunk, Type componentType, object value)
-        {
-            var componentIndex = componentTypeRecorder[componentType];
-            var chunk = _chunkList[chunkIndex];
-            var compType = ComponentTypeManager.GetComponentType(componentType);
-            var compSize = compType.Size;
-            var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
-
-            // 覆盖写：先销毁旧值（持有原生资源的组件释放旧资源），再转移新值进来。
-            // 非 IDisposable 组件此调用为 no-op。
-            ComponentTypeManager.DestroyComponentValue(compType, compPtr);
-
-            var handle = System.Runtime.InteropServices.GCHandle.Alloc(value, System.Runtime.InteropServices.GCHandleType.Pinned);
-            try
-            {
-                var srcPtr = handle.AddrOfPinnedObject();
-                ComponentTypeManager.MoveComponentValue(compType, (void*)srcPtr, compPtr);
-            }
-            finally
-            {
-                handle.Free();
-            }
-            NotifyComponentChanged(chunkIndex, slotInChunk);
-        }
-
-        /// <summary>组件写入后维护变更追踪（递增版本号并标记实体）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal void NotifyComponentChanged(int chunkIndex, int slotInChunk)
-        {
-            _chunkList[chunkIndex].IncrementVersion();
-            _chunkList[chunkIndex].MarkEntityChanged(slotInChunk);
-            Interlocked.Increment(ref _globalVersion);
-        }
-
-        /// <summary>
-        /// 公开变更追踪入口：供直接写列的场景（如定长多槽列槽位更新）调用，
-        /// 与 Set/SetRaw 的变更追踪语义一致（递增 chunk 版本 + 标记实体 + 全局版本）。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void NotifyComponentChangedPublic(int chunkIndex, int slotInChunk)
-            => NotifyComponentChanged(chunkIndex, slotInChunk);
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public unsafe void CopyComponentsTo(int sourceChunkIndex, int sourceSlot, Archetype target, int targetChunkIndex, int targetSlot)
-        {
-            var sourceChunk = _chunkList[sourceChunkIndex];
-            ref var targetChunk = ref CollectionsMarshal.AsSpan(target._chunkList)[targetChunkIndex];
-
-            foreach (var type in types)
-            {
-                if (type.IsShared) continue;
-                if (target.componentTypeRecorder.TryGetValue(type, out int targetComponentIndex))
-                {
-                    int sourceComponentIndex = componentTypeRecorder[type];
-                    var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(sourceComponentIndex) + sourceSlot * type.Size;
-                    var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
-                    // move 转移所有权：IDisposable 组件拷贝后清空源（避免源随后被 RemoveEntity 销毁时
-                    // 释放掉目标槽位仍在引用的同一块原生内存）；普通组件纯位拷贝。
-                    ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
-                    if (type.IsEnableable) targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(sourceComponentIndex, sourceSlot));
-                }
-            }
-        }
 
         public List<Chunk> GetChunks()
         {
@@ -657,17 +201,41 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int GetComponentTypeIndex<T>()
         {
-            return componentTypeRecorder[typeof(T)];
+            return GetComponentTypeIndex(ComponentTypeCache<T>.Type);
+        }
+
+        private static class ComponentTypeCache<T>
+        {
+            internal static readonly ComponentType Type = ComponentTypeManager.GetComponentType(typeof(T));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int GetComponentTypeIndex(ComponentType componentType)
         {
-            return componentTypeRecorder[componentType];
+            return TryGetComponentTypeIndex(componentType, out int column) ? column : throw new KeyNotFoundException($"Component type {componentType.Id} is not in this archetype.");
         }
 
-        // Phase 2.1: Archetype Edges
+        /// <summary>按 id 查列索引；不在本原型时返回 false，不抛异常。</summary>
+        public bool TryGetComponentTypeIndex(ComponentType componentType, out int column)
+        {
+            int id = componentType.Id;
+            if ((uint)id < (uint)_componentColumns.Length)
+            {
+                column = _componentColumns[id] - 1;
+                if (column >= 0) return true;
+            }
+            return componentTypeRecorder.TryGetValue(componentType, out column);
+        }
 
+        // 增删组件的目标原型缓存：按组件 id 索引，null 表示未缓存。
+
+        /// <summary>按组件 id 写入边表，超出容量时扩容。</summary>
+        private static void SetEdgeSlot(ref Archetype[] edges, int id, Archetype target)
+        {
+            if ((uint)id >= (uint)edges.Length)
+                Array.Resize(ref edges, Math.Max(id + 1, edges.Length * 2));
+            edges[id] = target;
+        }
         /// <summary>
         /// 获取 Add edge：从当前 Archetype 添加 componentType 后的目标 Archetype。
         /// 返回 null 表示未缓存（miss）。
@@ -675,8 +243,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Archetype? GetAddEdge(ComponentType componentType)
         {
-            _addEdges.TryGetValue(componentType, out var target);
-            return target;
+            var edges = _addEdgeByTypeId;
+            return (uint)componentType.Id < (uint)edges.Length ? edges[componentType.Id] : null;
         }
 
         /// <summary>
@@ -685,7 +253,7 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetAddEdge(ComponentType componentType, Archetype target)
         {
-            _addEdges[componentType] = target;
+            SetEdgeSlot(ref _addEdgeByTypeId, componentType.Id, target);
         }
 
         /// <summary>
@@ -695,8 +263,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Archetype? GetRemoveEdge(ComponentType componentType)
         {
-            _removeEdges.TryGetValue(componentType, out var target);
-            return target;
+            var edges = _removeEdgeByTypeId;
+            return (uint)componentType.Id < (uint)edges.Length ? edges[componentType.Id] : null;
         }
 
         /// <summary>
@@ -705,162 +273,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetRemoveEdge(ComponentType componentType, Archetype target)
         {
-            _removeEdges[componentType] = target;
+            SetEdgeSlot(ref _removeEdgeByTypeId, componentType.Id, target);
         }
 
-        /// <summary>
-        /// 检查当前 Archetype 是否包含指定组件。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool HasComponent(ComponentType componentType)
-        {
-            return componentTypeRecorder.ContainsKey(componentType);
-        }
-
-        // 变更追踪
-
-        /// <summary>递增全局版本号（结构变更或组件修改时调用）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void IncrementGlobalVersion()
-        {
-            Interlocked.Increment(ref _globalVersion);
-        }
-
-        /// <summary>递增所有 Chunk 的组件修改版本号（结构变更时调用）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void IncrementChunkVersions()
-        {
-            foreach (var chunk in _chunkList)
-            {
-                chunk.IncrementVersion();
-            }
-        }
-
-        /// <summary>清除所有 Chunk 的实体变更标记（帧末调用）。</summary>
-        public void ClearAllChangedBitMasks()
-        {
-            foreach (var chunk in _chunkList)
-            {
-                chunk.ClearChangedBitMask();
-            }
-        }
-
-        /// <summary>
-        /// 清空本 Archetype 的全部实体与 Chunk（配合 <c>EntityManager.DestroyAllInArchetype</c>）。
-        ///
-        /// 与逐个 <c>DestroyEntity</c> 的区别：这里不做逐实体移除（不会触发 swap-pop 与空 chunk 压缩），
-        /// 直接析构组件值（IDisposable 组件持有原生内存，必须逐个析构）后整批释放 slab ⇒ 代价 O(Chunk 数) 而非 O(实体数)。
-        /// 含关系列的 Archetype 不能用本方法（关系反向索引需要逐实体清理）。
-        /// </summary>
-        public void ClearAllEntities()
-        {
-            if (_chunkList.Count == 0)
-            {
-                EntityCount = 0;
-                return;
-            }
-            // 组件析构钩子：必须在释放 slab 之前（析构里会读 chunk 内存）
-            DestroyAllEntityComponents(null);
-            foreach (var slab in _slabs)
-            {
-                try { ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes); }
-                catch { /* ClearAll 语义下不因单个 slab 释放失败中断 */ }
-            }
-            _slabs.Clear();
-            _freeChunks.Clear();
-            _chunkList.Clear();
-            _currentSlab = null;
-            _currentSlabOffset = 0;
-            EntityCount = 0;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            var errors = new List<Exception>();
-            DestroyAllEntityComponents(errors);
-            foreach (var slab in _slabs)
-            {
-                try { ChunkMemoryPool.Free(slab.RawPtr, slab.Bytes); }
-                catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
-            }
-            _slabs.Clear();
-            _freeChunks.Clear();
-            _chunkList.Clear();
-            if (_chunkOffsetsNative != null)
-            {
-                NativeLocateStorage.Free(_chunkOffsetsNative);
-                _chunkOffsetsNative = null;
-            }
-            GC.SuppressFinalize(this);
-            if (errors.Count > 0) throw new AggregateException("Archetype disposal failed.", errors);
-        }
-
-        /// <summary>销毁所有存活实体的生命周期组件（Archetype.Dispose 前调用，无 hook 组件 no-op）。</summary>
-        private unsafe void DestroyAllEntityComponents(List<Exception> errors = null)
-        {
-            var types = Types;
-            foreach (var chunk in _chunkList)
-            {
-                int count = chunk.EntityCount;
-                for (int slot = 0; slot < count; slot++)
-                {
-                    for (int i = 0; i < ComponentCount; i++)
-                    {
-                        byte* ptr = (byte*)chunk.GetComponentArrayPointer(i) + slot * types[i].Size;
-                        try { ComponentTypeManager.DestroyComponentValue(types[i], ptr); }
-                        catch (Exception ex) { (errors ??= new List<Exception>()).Add(ex); }
-                    }
-                }
-            }
-        }
-
-        ~Archetype()
-        {
-            try { Dispose(); }
-            catch { }
-        }
-    }
-
-    // debug 部分
-    public unsafe partial class Archetype
-    {
-        private IntPtr _cachedAddress;
-
-        public IntPtr GetAddress()
-        {
-            if (_cachedAddress == IntPtr.Zero)
-            {
-                _cachedAddress = MemoryAddress.GetAddress(this);
-            }
-            return _cachedAddress;
-        }
-
-        public unsafe string GetMemoryLayoutInfo()
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine($"=== Archetype 内存布局 ===");
-            sb.AppendLine($"Archetype Address: {GetAddress().ToInt64():D}");
-            sb.AppendLine($"实体数: {EntityCount}, 组件数: {ComponentCount}");
-
-            int chunkCounter = 0;
-            foreach (var chunk in _chunkList)
-            {
-                chunkCounter++;
-                sb.AppendLine($"Chunk: {chunkCounter}/{ChunkCount}");
-                sb.AppendLine($"实体数: {chunk.EntityCount}, 组件数: {ComponentCount}");
-                var entityArray = (Entity*)chunk.MemoryBlock;
-                sb.AppendLine($"  Entity Array: {(long)entityArray:D} 每个size:{Unsafe.SizeOf<Entity>()} (Type: {typeof(Entity).Name})");
-                for (int i = 0; i < ComponentCount; i++)
-                {
-                    var componentType = types[i].Type;
-                    string typeName = componentType.Name;
-                    IntPtr componentArrayPtr = chunk.MemoryBlock + chunk.GetComponentOffset(i);
-                    sb.AppendLine($"  Component {i} 地址: {componentArrayPtr.ToInt64():D} 每个size:{types[i].Size} (Type: {typeName})");
-                }
-            }
-            return sb.ToString();
-        }
     }
 }

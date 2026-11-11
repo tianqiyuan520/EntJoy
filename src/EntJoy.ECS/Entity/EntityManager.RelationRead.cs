@@ -36,9 +36,8 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             int typeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
-            if (!IsAlive(target) || !_relationIndex.TryGetSources(target, out var byType)
-                || !byType.TryGetValue(typeId, out var sources)) return null;
-            return sources;
+            if (!IsAlive(target)) return null;
+            return _relationIndex.GetSourcesOfType(target, typeId);
         }
 
         /// <summary>写入有效 source，返回所需总数；缓冲不足时仅写入可容纳的前缀。</summary>

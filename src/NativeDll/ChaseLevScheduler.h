@@ -91,6 +91,15 @@ namespace JobSystem
         bool IsRunning() const noexcept;
         uint32_t WorkerCount() const noexcept;
 
+        // 提交窗口：Begin/End 包住外部提交的入队段。Stop 先置 closed 再等归零，最后才排空，
+        // 保证「入队成功但落在排空之后」不会发生（否则任务永远无人执行，句柄永不完成）。
+        bool BeginPublish() noexcept;
+        void EndPublish() noexcept;
+
+        // 等待"无排队/在跑任务"：activeTasks 归零。调用方不得是 worker（会等自己）。
+        // 只用于冷路径（热重载排空），等待期不上报、不参与执行。
+        void WaitIdle() noexcept;
+
         // 获取指定 worker 的持久 deque（供调试/诊断）。
         SparseTileDeque* GetWorkerDeque(uint32_t workerIndex) noexcept;
 
@@ -111,6 +120,14 @@ namespace JobSystem
         // 全局在飞任务计数（park 谓词）：SubmitBatch +=，taskDone -=；
         // worker park 前读它：>0 说明仍有未认领任务，短自旋后再 park。
         std::atomic<int64_t> activeTasks{ 0 };
+
+        // work/direct 任务（batch==nullptr）不计入 activeTasks：PublishWorkTask +=，RunWorkTask -=。
+        // 调度器实例进程内唯一，故与 s_taskPool_ 一样用静态计数（RunWorkTask 是自由函数）。
+        static std::atomic<int64_t> pendingWorkTasks;
+
+        // 提交窗口计数（提交线程）与关闭标志（Stop 置位）。
+        std::atomic<uint32_t> publishers_{ 0 };
+        std::atomic<bool> closed_{ false };
 
         // 显式 Flush/退出的唤醒纪元，也供自旋和停靠复查观察。
         // 关闭需求感知通知时，worker 使用该原子的 wait/notify_all。

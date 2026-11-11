@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="UnityComparison/**/*.cs" />
+    <Compile Include="UnityComparison/Assets/Editor/ComparisonTiming.cs" />
+    <Compile Include="UnityComparison/Assets/Editor/TraversalProtocol.cs" />
+    <PackageReference Include="Arch" Version="1.2.8.1-alpha" />
+    <PackageReference Include="BenchmarkDotNet" Version="0.13.12" />
+    <ProjectReference Include="../../src/EntJoy.ECS/EntJoy.ECS.csproj" />
+    <ProjectReference Include="../../src/EntJoy.ECS.SourceGenerator/EntJoy.ECS.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="NativeTranspiler_Generated/build/Release/NativeDll.dll" Link="NativeDll.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="NativeTranspiler_Generated/build/Release/NativeTranspiled.dll" Link="NativeTranspiled.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="NativeTranspiler_Generated/LayoutFingerprint.json" Link="NativeTranspiled.layout.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Import Project="../../src/EntJoy.Jobs/msbuild/EntJoy.Jobs.props" />
+  <Import Project="../../src/EntJoy.Jobs/msbuild/EntJoy.Jobs.targets" />
+</Project>

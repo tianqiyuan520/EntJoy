@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(stub_no_abi SHARED stub_no_abi.cpp)
 add_library(stub_wrong_version SHARED stub_wrong_version.cpp)
+add_library(stub_no_allocator SHARED stub_no_allocator.cpp)
 
 if(MSVC)
   target_compile_options(stub_no_abi PRIVATE /utf-8)

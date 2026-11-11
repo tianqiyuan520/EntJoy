@@ -17,7 +17,8 @@ namespace EntJoy.JobSystem
     ///
     /// 语义：
     /// - 与 BatchScope 同构（同一收集/提交路径），只是全局单例 + 帧语义命名；
-    /// - 仅 Native 后端（Managed 回退后端不支持批，Add 抛 NotSupportedException）。
+    /// - 两个后端都支持，但语义不同：native 把一帧的多个 job 攒到 EndFrame 一次 ScheduleBatch 提交；
+    ///   managed 没有跨语言调用可摊薄，Add 即调度，EndFrame 只收集句柄。
     /// </summary>
     public static unsafe class ImplicitBatch
     {

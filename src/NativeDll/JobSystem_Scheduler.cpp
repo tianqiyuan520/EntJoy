@@ -193,6 +193,12 @@ namespace JobSystem
         AcquireState(state); // queued work owns this reference through cleanup and completion
         auto* scheduler = LoadChaseLevScheduler();
         if (scheduler && scheduler->SubmitDirectWork(kind, func, ctx, length, cleanup, state)) return;
+        // 关停竞态按取消收尾（不记 job 异常）；调用时后端本就停着则仍是可观测的拒绝。
+        if (g_shuttingDown.load(std::memory_order_acquire))
+        {
+            CancelSubmittedState(state, cleanup, ctx);
+            return;
+        }
         try { throw std::runtime_error("JobSystem backend rejected asynchronous work"); }
         catch (...) { RecordStateException(state, std::current_exception()); }
         try { if (cleanup) cleanup(ctx); }

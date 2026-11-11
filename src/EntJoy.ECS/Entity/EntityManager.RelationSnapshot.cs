@@ -7,6 +7,38 @@ namespace EntJoy.ECS
 {
     public unsafe partial class EntityManager
     {
+        // 校验一条 source 行的全部关系槽：空槽必须规范、目标必须存活、同类型内不得重复、
+        // 独占关系不得有第二个持有者；有环约束的关系同时记下边供后续检测。
+        private void ValidateSnapshotRow(ComponentType type, Entity source, RelationSlot* targets, RelationIndex index,
+            Dictionary<int, Dictionary<Entity, Entity>> acyclic)
+        {
+            int count = Math.Max(1, type.MultiRelationMaxSlots);
+            for (int i = 0; i < count; i++)
+            {
+                var target = targets[i];
+                if (!target.IsValid)
+                {
+                    if (!target.Matches(RelationSlot.Default))
+                        throw new InvalidDataException("Snapshot contains a noncanonical empty relationship.");
+                    continue;
+                }
+                if (type.IsMultiRelation && type.MultiRelationMaxSlots == 0)
+                    throw new InvalidDataException("A managed relationship column must remain empty; its edges belong to the side table.");
+                for (int prior = 0; prior < i; prior++)
+                    if (targets[prior].Matches(target))
+                        throw new InvalidDataException("Snapshot contains duplicate relationship targets.");
+                if (!IsAlive(target.ToEntity()))
+                    throw new InvalidDataException("Snapshot relationship target is missing or stale.");
+                var sources = index.PrepareAdd(type.Id, target.ToEntity());
+                if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && sources.Count != 0)
+                    throw new InvalidDataException("Snapshot contains conflicting exclusive relationships.");
+                sources.Add(source);
+                if (!type.IsAcyclicRelation) continue;
+                if (!acyclic.TryGetValue(type.Id, out var edges)) acyclic[type.Id] = edges = new();
+                edges.Add(source, target.ToEntity());
+            }
+        }
+
         private RelationIndex ValidateSnapshotRelationships()
         {
             var index = new RelationIndex();
@@ -15,45 +47,22 @@ namespace EntJoy.ECS
             {
                 var arch = allArchetypes[a];
                 foreach (var chunk in arch.ChunkList)
-                for (int slot = 0; slot < chunk.EntityCount; slot++)
-                {
-                    var source = chunk.GetEntity(slot);
-                    for (int c = 0; c < arch.ComponentCount; c++)
+                    for (int slot = 0; slot < chunk.EntityCount; slot++)
                     {
-                        var type = arch.Types[c];
-                        if (!type.IsRelation) continue;
-                        ValidateSnapshotComponent(type);
-                        var targets = (RelationSlot*)((byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
-                        int count = Math.Max(1, type.MultiRelationMaxSlots);
-                        for (int i = 0; i < count; i++)
+                        var source = chunk.GetEntity(slot);
+                        for (int c = 0; c < arch.ComponentCount; c++)
                         {
-                            var target = targets[i];
-                            if (!target.IsValid)
-                            {
-                                if (!target.Matches(RelationSlot.Default)) throw new InvalidDataException("Snapshot contains a noncanonical empty relationship.");
-                                continue;
-                            }
-                            if (type.IsMultiRelation && type.MultiRelationMaxSlots == 0)
-                                throw new InvalidDataException("A managed relationship column must remain empty; its edges belong to the side table.");
-                            for (int prior = 0; prior < i; prior++)
-                                if (targets[prior].Matches(target)) throw new InvalidDataException("Snapshot contains duplicate relationship targets.");
-                            if (!IsAlive(target.ToEntity())) throw new InvalidDataException("Snapshot relationship target is missing or stale.");
-                            var sources = index.PrepareAdd(type.Id, target.ToEntity());
-                            if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && sources.Count != 0)
-                                throw new InvalidDataException("Snapshot contains conflicting exclusive relationships.");
-                            sources.Add(source);
-                            if (type.IsAcyclicRelation)
-                            {
-                                if (!acyclic.TryGetValue(type.Id, out var edges)) acyclic[type.Id] = edges = new();
-                                edges.Add(source, target.ToEntity());
-                            }
+                            var type = arch.Types[c];
+                            if (!type.IsRelation) continue;
+                            ValidateSnapshotComponent(type);
+                            var targets = (RelationSlot*)((byte*)chunk.GetComponentArrayPointer(c) + slot * type.Size);
+                            ValidateSnapshotRow(type, source, targets, index, acyclic);
                         }
                     }
-                }
             }
             foreach (var entry in _relationListStore.Entries)
             {
-                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(entry.TypeId));
+                var type = ComponentTypeManager.GetComponentType(entry.TypeId);
                 if (!IsAlive(entry.Source)) throw new InvalidDataException("Managed relationship source is missing or stale.");
                 var seen = new HashSet<Entity>();
                 foreach (var target in entry.Targets)
@@ -96,22 +105,47 @@ namespace EntJoy.ECS
             if (snapshot.Data == null) throw new InvalidDataException("Snapshot data is missing.");
             using var stream = new MemoryStream(snapshot.Data, writable: false);
             using var reader = new BinaryReader(stream);
-            ComponentType[][] signatures;
-            long entityData;
-            List<ManagedSnapshotEdges> managed;
-            try
-            {
-                signatures = ReadSnapshotSignatures(reader);
-                entityData = stream.Position;
-                ValidateSnapshotPayload(reader, signatures);
-                managed = ReadManagedRelations(reader);
-            }
-            catch (Exception error) when (error is EndOfStreamException || error is FormatException)
-            { throw new InvalidDataException("Snapshot is malformed or truncated.", error); }
+            var (signatures, entityData, managed) = ReadSnapshotHeader(stream, reader);
 
             CompleteActiveJobs();
+            // 先装进临时管理器并自检，通过后才把存储整体换过来；失败时旧数据仍在。
             using var prepared = new EntityManager();
             stream.Position = entityData;
+            LoadSnapshotRows(stream, reader, prepared, signatures);
+            prepared.LoadManagedRelations(managed);
+            prepared._relationIndex = prepared.ValidateSnapshotRelationships();
+            CheckRelationshipPreparation("restore-prepared");
+
+            using (EnterStructural())
+            {
+                ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
+                SwapStorageWith(prepared);
+                InvalidateStructuralQueries();
+                archetypeSetVersion++;
+                InvalidateRelationshipQueries();
+            }
+            DisposeReplacedStorage(prepared);
+        }
+
+        // 签名表、实体数据起点、托管关系边都要在动存储之前读完并校验。
+        private (ComponentType[][] Signatures, long EntityData, List<ManagedSnapshotEdges> Managed) ReadSnapshotHeader(
+            Stream stream, BinaryReader reader)
+        {
+            try
+            {
+                var signatures = ReadSnapshotSignatures(reader);
+                long entityData = stream.Position;
+                ValidateSnapshotPayload(reader, signatures);
+                return (signatures, entityData, ReadManagedRelations(reader));
+            }
+            catch (Exception error) when (error is EndOfStreamException || error is FormatException)
+            {
+                throw new InvalidDataException("Snapshot is malformed or truncated.", error);
+            }
+        }
+
+        private void LoadSnapshotRows(Stream stream, BinaryReader reader, EntityManager prepared, ComponentType[][] signatures)
+        {
             int count = reader.ReadInt32();
             for (int i = 0; i < count; i++)
             {
@@ -133,35 +167,35 @@ namespace EntJoy.ECS
                 }
                 CheckRelationshipPreparation("restore-row-loaded");
             }
-            prepared.LoadManagedRelations(managed);
-            prepared._relationIndex = prepared.ValidateSnapshotRelationships();
-            CheckRelationshipPreparation("restore-prepared");
-            lock (_structuralLock)
-            {
-                ChunkJobScheduler.ClearRawChunkScheduleCaches(this);
-                (archetypeMap, prepared.archetypeMap) = (prepared.archetypeMap, archetypeMap);
-                (allArchetypes, prepared.allArchetypes) = (prepared.allArchetypes, allArchetypes);
-                (archetypeCount, prepared.archetypeCount) = (prepared.archetypeCount, archetypeCount);
-                (_nextArchetypeId, prepared._nextArchetypeId) = (prepared._nextArchetypeId, _nextArchetypeId);
-                (entities, prepared.entities) = (prepared.entities, entities);
-                (entityCount, prepared.entityCount) = (prepared.entityCount, entityCount);
-                var oldLocate = _locateB; _locateB = prepared._locateB; prepared._locateB = oldLocate;
-                (_locateBCapacity, prepared._locateBCapacity) = (prepared._locateBCapacity, _locateBCapacity);
-                var oldRecycle = _recycleStack; _recycleStack = prepared._recycleStack; prepared._recycleStack = oldRecycle;
-                (_recycleCount, prepared._recycleCount) = (prepared._recycleCount, _recycleCount);
-                (_recycleCapacity, prepared._recycleCapacity) = (prepared._recycleCapacity, _recycleCapacity);
-                (_relationIndex, prepared._relationIndex) = (prepared._relationIndex, _relationIndex);
-                (_relationListStore, prepared._relationListStore) = (prepared._relationListStore, _relationListStore);
-                (_managedLookup, prepared._managedLookup) = (prepared._managedLookup, _managedLookup);
-                (_managedSharedValues, prepared._managedSharedValues) = (prepared._managedSharedValues, _managedSharedValues);
-                (_managedSharedValueCount, prepared._managedSharedValueCount) = (prepared._managedSharedValueCount, _managedSharedValueCount);
-                (_lastChunkPerSharedValue, prepared._lastChunkPerSharedValue) = (prepared._lastChunkPerSharedValue, _lastChunkPerSharedValue);
-                for (int i = 0; i < archetypeCount; i++) allArchetypes[i].Owner = this;
-                for (int i = 0; i < prepared.archetypeCount; i++) prepared.allArchetypes[i].Owner = prepared;
-                structuralVersion++;
-                archetypeSetVersion++;
-                _relationshipVersion++;
-            }
+        }
+
+        // 两边存储逐项互换，prepared 随后持有旧数据并负责释放。
+        private void SwapStorageWith(EntityManager prepared)
+        {
+            (archetypeMap, prepared.archetypeMap) = (prepared.archetypeMap, archetypeMap);
+            (allArchetypes, prepared.allArchetypes) = (prepared.allArchetypes, allArchetypes);
+            (archetypeCount, prepared.archetypeCount) = (prepared.archetypeCount, archetypeCount);
+            (_nextArchetypeId, prepared._nextArchetypeId) = (prepared._nextArchetypeId, _nextArchetypeId);
+            (entities, prepared.entities) = (prepared.entities, entities);
+            (entityCount, prepared.entityCount) = (prepared.entityCount, entityCount);
+            var oldLocate = _locateB; _locateB = prepared._locateB; prepared._locateB = oldLocate;
+            (_locateBCapacity, prepared._locateBCapacity) = (prepared._locateBCapacity, _locateBCapacity);
+            var oldRecycle = _recycleStack; _recycleStack = prepared._recycleStack; prepared._recycleStack = oldRecycle;
+            (_recycleCount, prepared._recycleCount) = (prepared._recycleCount, _recycleCount);
+            (_recycleCapacity, prepared._recycleCapacity) = (prepared._recycleCapacity, _recycleCapacity);
+            (_relationIndex, prepared._relationIndex) = (prepared._relationIndex, _relationIndex);
+            (_relationListStore, prepared._relationListStore) = (prepared._relationListStore, _relationListStore);
+            (_managedLookup, prepared._managedLookup) = (prepared._managedLookup, _managedLookup);
+            (_managedSharedValues, prepared._managedSharedValues) = (prepared._managedSharedValues, _managedSharedValues);
+            (_managedSharedValueCount, prepared._managedSharedValueCount) = (prepared._managedSharedValueCount, _managedSharedValueCount);
+            (_lastChunkPerSharedValue, prepared._lastChunkPerSharedValue) = (prepared._lastChunkPerSharedValue, _lastChunkPerSharedValue);
+            for (int i = 0; i < archetypeCount; i++) allArchetypes[i].Owner = this;
+            for (int i = 0; i < prepared.archetypeCount; i++) prepared.allArchetypes[i].Owner = prepared;
+        }
+
+        // 旧存储的实体已随互换搬到 prepared，逐个释放；单个失败不阻断其余。
+        private static void DisposeReplacedStorage(EntityManager prepared)
+        {
             for (int i = 0; i < prepared.archetypeCount; i++)
             {
                 try { prepared.allArchetypes[i].Dispose(); }

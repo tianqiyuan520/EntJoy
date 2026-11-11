@@ -169,14 +169,12 @@ static class ManagedStressTests
         var failedHandle = ManagedJobScheduler.Schedule(ref failed);
         var dependent = new IncJob { Counter = c };
         var dependentHandle = ManagedJobScheduler.Schedule(ref dependent, failedHandle);
-        try
-        {
-            dependentHandle.Complete();
-            throw new Exception("M6: dependency exception was not propagated");
-        }
-        catch (InvalidOperationException)
-        {
-        }
+        // 异常归属抛出它的 job：依赖方不继承（与 native 后端同一语义）。
+        bool upstreamThrew = false;
+        try { failedHandle.Complete(); }
+        catch (InvalidOperationException) { upstreamThrew = true; }
+        Require(upstreamThrew, "M6: upstream exception did not surface on its own handle");
+        dependentHandle.Complete();
     }
 
     static void Test_DiamondDependency()

@@ -37,6 +37,55 @@ namespace EntJoy.ECS.Tests
     /// </summary>
     public class ManagedChunkCollectionTests
     {
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ChunkView_RejectsInvalidatedCountAndSpans(bool disposeArchetype)
+        {
+            using var world = new World("ChunkViewLifetime");
+            var em = world.EntityManager;
+            var entity = em.NewEntity(typeof(Position), typeof(RelActiveComponent));
+            var info = em.GetEntityInfoRef(entity.Id);
+            var chunk = new ArchetypeChunk(info.Archetype.ChunkList[info.ChunkIndex]);
+            Assert.Equal(1, chunk.Count);
+            Assert.Equal(chunk.Count, chunk.GetComponentDataSpan<Position>().Length);
+            Assert.Equal(chunk.Count, chunk.GetComponentReadOnlyDataSpan<Position>().Length);
+            Assert.Equal(chunk.Count, chunk.GetEntitySpan().Length);
+
+            if (disposeArchetype) info.Archetype.Dispose();
+            else em.NewEntity(typeof(Position));
+
+            Assert.ThrowsAny<InvalidOperationException>(() => { _ = chunk.Count; });
+            Assert.ThrowsAny<InvalidOperationException>(() => { chunk.GetComponentDataSpan<Position>(); });
+            Assert.ThrowsAny<InvalidOperationException>(() => { chunk.GetComponentReadOnlyDataSpan<Position>(); });
+            Assert.ThrowsAny<InvalidOperationException>(() => { chunk.GetEntitySpan(); });
+            Assert.ThrowsAny<InvalidOperationException>(() => { chunk.GetEnabledMask<RelActiveComponent>(); });
+        }
+
+        [Fact]
+        public void Collection_InitializesBuffersOnEachThread()
+        {
+            Exception error = null;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    using var world = new World("ThreadCollection" + Guid.NewGuid().ToString("N"));
+                    world.EntityManager.NewEntity(typeof(Position));
+                    unsafe
+                    {
+                        ChunkJobCollector.CollectAndBuildManaged(world.EntityManager, new QueryBuilder().WithAll<Position>(),
+                            false, false, out _, out _, out int count, out _, buildPayload: false);
+                        Assert.Equal(1, count);
+                    }
+                }
+                catch (Exception ex) { error = ex; }
+            });
+            thread.Start();
+            thread.Join();
+            Assert.Null(error);
+        }
+
         [Fact]
         public unsafe void AsyncChunkJobs_MustNotAliasTheSharedCollectionBuffer()
         {

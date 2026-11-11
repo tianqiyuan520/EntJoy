@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace EntJoy.ECS
@@ -11,13 +12,21 @@ namespace EntJoy.ECS
         private long _relationshipVersion;
         public long RelationshipVersion => _relationshipVersion;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void ValidateQueryReadState(int structuralVersion, long relationshipVersion)
         {
-            CheckDisposed();
-            if (structuralVersion != StructuralVersion)
-                throw new InvalidOperationException("Structural change invalidated the query or read-only view.");
-            if (relationshipVersion >= 0 && relationshipVersion != _relationshipVersion)
-                throw new InvalidOperationException("Relationship change invalidated the query or read-only view.");
+            if (_disposed || structuralVersion != StructuralVersion ||
+                (relationshipVersion >= 0 && relationshipVersion != _relationshipVersion))
+                throw InvalidatedQueryException(structuralVersion);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private Exception InvalidatedQueryException(int structuralVersion)
+        {
+            if (_disposed) return new ObjectDisposedException(nameof(EntityManager));
+            return new InvalidOperationException(structuralVersion != StructuralVersion
+                ? "Structural change invalidated the query or read-only view."
+                : "Relationship change invalidated the query or read-only view.");
         }
 
         private readonly struct RelationNotification
@@ -60,18 +69,23 @@ namespace EntJoy.ECS
                 CompleteActiveJobs();
         }
 
-        private RelationNotification CaptureRelationNotification(Entity entity, ComponentType type,
-            ObserverEvents kind, void* value)
-        {
-            if (_observerCount == 0 || _observers == null || kind == ObserverEvents.None
-                || !_observers.TryGetValue(type.Id, out var registry)) return default;
-            var observers = kind switch
+        // 按事件类型取该组件注册的观察者列表。
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static List<IComponentObserver> SelectObservers(in ObserverRegistry registry, ObserverEvents kind)
+            => kind switch
             {
                 ObserverEvents.Added => registry.Added,
                 ObserverEvents.Set => registry.Set,
                 ObserverEvents.Removed => registry.Removed,
                 _ => registry.Destroyed
             };
+
+        private RelationNotification CaptureRelationNotification(Entity entity, ComponentType type,
+            ObserverEvents kind, void* value)
+        {
+            if (_observerCount == 0 || _observers == null || kind == ObserverEvents.None
+                || !_observers.TryGetValue(type.Id, out var registry)) return default;
+            var observers = SelectObservers(registry, kind);
             if (observers.Count == 0) return default;
             _relationNotifications ??= new List<RelationNotification>();
             _relationNotifications.EnsureCapacity(_relationNotifications.Count + 2);
@@ -95,13 +109,7 @@ namespace EntJoy.ECS
                 foreach (var notification in notifications)
                 {
                     if (_observers == null || !_observers.TryGetValue(notification.TypeId, out var registry)) continue;
-                    var observers = notification.Event switch
-                    {
-                        ObserverEvents.Added => registry.Added,
-                        ObserverEvents.Set => registry.Set,
-                        ObserverEvents.Removed => registry.Removed,
-                        _ => registry.Destroyed
-                    };
+                    var observers = SelectObservers(registry, notification.Event);
                     Entity entity = notification.Entity;
                     fixed (Entity* batch = notification.Batch)
                     fixed (byte* value = notification.Value)
@@ -160,11 +168,7 @@ namespace EntJoy.ECS
         }
 
         // A prepared chunk may move within the list during swap-pop; its native address stays stable.
-        private static bool HasSharedColumns(Archetype archetype)
-        {
-            foreach (var type in archetype.Types) if (type.IsShared) return true;
-            return false;
-        }
+        private static bool HasSharedColumns(Archetype archetype) => archetype.HasSharedColumns;
 
         private nint PrepareRelationSlot(Archetype target, Entity source, nint excluded = 0)
         {
@@ -240,21 +244,10 @@ namespace EntJoy.ECS
             bool hadColumn = sourceArch.Has(type.Type);
             var old = hadColumn ? *(RelationSlot*)GetRelationValue(source, type) : RelationSlot.Default;
             bool hadEdge = old.IsValid && IsAlive(old.ToEntity());
-            Entity previousOwner = default;
-            bool hasPreviousOwner = false;
-            if (target.IsValid && type.IsExclusiveRelation
-                && _relationIndex.TryGetSources(target.ToEntity(), out var byType)
-                && byType.TryGetValue(type.Id, out var sources))
-            {
-                foreach (var candidate in sources)
-                {
-                    if (candidate.Id == source.Id || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
-                    if (hasPreviousOwner) throw new InvalidOperationException("Exclusive relationship index contains multiple owners.");
-                    previousOwner = candidate;
-                    hasPreviousOwner = true;
-                }
-            }
 
+            Entity previousOwner = default;
+            bool hasPreviousOwner = type.IsExclusiveRelation && target.IsValid
+                && FindExclusiveOwner(source, type, target, out previousOwner);
             var eventKind = hadEdge ? (target.IsValid ? ObserverEvents.Set : ObserverEvents.Removed)
                 : (target.IsValid ? ObserverEvents.Added : ObserverEvents.None);
             var notification = CaptureRelationNotification(source, type, eventKind,
@@ -262,30 +255,72 @@ namespace EntJoy.ECS
             var ownerNotification = hasPreviousOwner
                 ? CaptureRelationNotification(previousOwner, type, ObserverEvents.Removed, GetRelationValue(previousOwner, type))
                 : default;
+
+            var (sourceSlot, ownerSlot) = PrepareRelationSlots(
+                source, type, sourceArch, hadColumn, sourceInfo.ChunkIndex, previousOwner, hasPreviousOwner);
+
+            HashSet<Entity> newSources = PrepareIndexEntry(type, target);
+            ApplyRelationChange(source, type, value, size, target, old, previousOwner, hasPreviousOwner,
+                newSources, sourceSlot, ownerSlot, notification, ownerNotification);
+        }
+
+        // 独占关系下找当前持有该 target 的 source；索引里出现多个时说明索引已损坏。
+        private bool FindExclusiveOwner(Entity source, ComponentType type, RelationSlot target, out Entity previousOwner)
+        {
+            previousOwner = default;
+            var sources = _relationIndex.GetSourcesOfType(target.ToEntity(), type.Id);
+            if (sources == null) return false;
+            bool found = false;
+            foreach (var candidate in sources)
+            {
+                if (candidate.Id == source.Id || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
+                if (found) throw new InvalidOperationException("Exclusive relationship index contains multiple owners.");
+                previousOwner = candidate;
+                found = true;
+            }
+            return found;
+        }
+
+        // 预留写入槽位：source 若还没有关系列则建列；旧主需要从它自己的关系列里移除。
+        private (nint SourceSlot, nint OwnerSlot) PrepareRelationSlots(Entity source, ComponentType type,
+            Archetype sourceArch, bool hadColumn, int sourceChunkIndex, Entity previousOwner, bool hasPreviousOwner)
+        {
             nint sourceSlot = hadColumn ? 0 : PrepareRelationSlot(GetComponentDestination(sourceArch, type, true), source);
             if (!hadColumn) sourceArch.PrepareEntityRemoval();
-            nint ownerSlot = 0;
-            if (hasPreviousOwner)
-            {
-                var ownerArch = GetEntityInfoRef(previousOwner.Id).Archetype;
-                ownerArch.PrepareEntityRemoval();
-                var ownerDestination = GetComponentDestination(ownerArch, type, false);
-                nint excluded = !hadColumn && ownerDestination == sourceArch
-                    ? sourceArch.ChunkList[sourceInfo.ChunkIndex].MemoryBlock : 0;
-                ownerSlot = PrepareRelationSlot(ownerDestination, previousOwner, excluded);
-            }
-            HashSet<Entity> newSources;
+            if (!hasPreviousOwner) return (sourceSlot, 0);
+
+            var ownerArch = GetEntityInfoRef(previousOwner.Id).Archetype;
+            ownerArch.PrepareEntityRemoval();
+            var ownerDestination = GetComponentDestination(ownerArch, type, false);
+            // 旧主可能被搬进 source 刚腾出的那一块，避免把同一块既当来源又当目的。
+            nint excluded = !hadColumn && ownerDestination == sourceArch
+                ? sourceArch.ChunkList[sourceChunkIndex].MemoryBlock : 0;
+            nint ownerSlot = PrepareRelationSlot(ownerDestination, previousOwner, excluded);
+            return (sourceSlot, ownerSlot);
+        }
+
+        // 预留反向索引条目；失败时把刚建的空桶丢掉，保持索引与实体状态一致。
+        private HashSet<Entity> PrepareIndexEntry(ComponentType type, RelationSlot target)
+        {
+            if (!target.IsValid) return null;
             try
             {
-                newSources = target.IsValid ? _relationIndex.PrepareAdd(type.Id, target.ToEntity()) : null;
+                var newSources = _relationIndex.PrepareAdd(type.Id, target.ToEntity());
                 CheckRelationshipPreparation("relation-prepared");
+                return newSources;
             }
             catch
             {
-                if (target.IsValid) _relationIndex.DiscardEmpty(type.Id, target.ToEntity());
+                _relationIndex.DiscardEmpty(type.Id, target.ToEntity());
                 throw;
             }
+        }
 
+        // 落盘：写新关系列、摘掉旧主的列、维护反向索引，最后派发通知。
+        private void ApplyRelationChange(Entity source, ComponentType type, byte* value, int size, RelationSlot target,
+            RelationSlot old, Entity previousOwner, bool hasPreviousOwner, HashSet<Entity> newSources,
+            nint sourceSlot, nint ownerSlot, RelationNotification notification, RelationNotification ownerNotification)
+        {
             AddComponentRawCore(source, type.Type, null, value, size, relationStorageOnly: true, preparedChunk: sourceSlot);
             if (hasPreviousOwner)
                 RemoveComponentRawCore(previousOwner, type.Type, relationStorageOnly: true, preparedChunk: ownerSlot);
@@ -294,10 +329,11 @@ namespace EntJoy.ECS
             if (hasPreviousOwner) _relationIndex.RemoveRelTypeId(type.Id, previousOwner, target);
             ref var updated = ref GetEntityInfoRef(source.Id);
             updated.Archetype.NotifyComponentChanged(updated.ChunkIndex, updated.SlotInChunk);
-            _relationshipVersion++;
+            InvalidateRelationshipQueries();
             CommitRelationNotification(ownerNotification);
             CommitRelationNotification(notification);
         }
+
 
         private void RemoveRelationCore(Entity source, ComponentType type)
         {
@@ -316,7 +352,7 @@ namespace EntJoy.ECS
             CheckRelationshipPreparation("unlink-prepared");
             RemoveComponentRawCore(source, type.Type, relationStorageOnly: true, preparedChunk: prepared);
             foreach (var target in slots) _relationIndex.RemoveRelTypeId(type.Id, source, target);
-            _relationshipVersion++;
+            InvalidateRelationshipQueries();
             CommitRelationNotification(notification);
         }
     }

@@ -1,17 +1,13 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 稀疏随机访问句柄（对齐 Unity <c>ComponentLookup</c> / <c>EntityStorageInfoLookup</c>）。
-    /// 缓存上次 archetype 的组件列索引与 chunk 组件基址，<c>lookup[entity]</c> 稳态退化为
-    /// 「位置表 1 次加载 + 指针比较 + base[slot]」。
-    ///
-    /// 纪律：持有 EntityManager/Archetype/Chunk 强引用，Dispose 后失效；main-thread only。
-    /// 结构变更（NewEntity/DestroyEntity/Add/Remove）会 bump StructuralVersion，缓存据此失效
-    /// （Set/SetEnabled 不 bump——它们不移 chunk，缓存仍有效）。
+    /// 稀疏随机访问句柄：缓存上次原型的列下标与块基址，<c>lookup[entity]</c> 稳态退化为一次位置表加载加指针比较。
+    /// 持有 EntityManager/Archetype/Chunk 强引用，Dispose 后失效；仅限主线程。
+    /// 结构变更推进 StructuralVersion 使缓存失效，Set/SetEnabled 不推进。
     /// </summary>
     public unsafe struct ComponentLookup<T> where T : struct
     {
@@ -94,11 +90,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool IsEnabled(Entity entity)
         {
+            _em.ValidateEntity(entity);
             ref var info = ref _em.GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null)
-                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
-            if (info.Version != entity.Version)
-                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             EnsureResolved(info.Archetype, info.ChunkIndex);
             return _chunk.GetComponentEnabled(_componentIndex, info.SlotInChunk);
         }
@@ -106,11 +99,8 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SetEnabled(Entity entity, bool enabled)
         {
+            _em.ValidateEntity(entity);
             ref var info = ref _em.GetEntityInfoRef(entity.Id);
-            if (info.Archetype == null)
-                throw new InvalidOperationException($"Entity {entity} has been destroyed.");
-            if (info.Version != entity.Version)
-                throw new InvalidOperationException($"Entity {entity} is a stale reference (version mismatch).");
             EnsureResolved(info.Archetype, info.ChunkIndex);
             _chunk.SetComponentEnabled(_componentIndex, info.SlotInChunk, enabled);
         }

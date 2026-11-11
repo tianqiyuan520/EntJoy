@@ -5,13 +5,8 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 实体构造器：链式 API 消灭 CreateEntity + Set 样板代码
-    /// 
-    /// 使用方式：
-    /// var entity = world.Spawn()
-    /// .With(new Position { X = 1, Y = 1 })
-    /// .With(new Velocity { X = 0.1f, Y = 0.1f })
-    /// .Build();
+    /// 实体构造器：链式 API 省掉 CreateEntity + Set 的样板代码。
+    /// 用法：<c>world.Spawn().With(new Position { X = 1 }).Build()</c>
     /// </summary>
     public struct EntityBuilder
     {

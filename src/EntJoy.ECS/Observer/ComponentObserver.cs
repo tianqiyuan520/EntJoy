@@ -5,10 +5,8 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// Observer 批量回调：一次回调拿整批实体 + 组件值（零拷贝 span）。
-    /// 事件位由注册桶决定（Added 桶 = Added 事件），values 即对应语义的值。
-    /// 用自定义委托而非 <see cref="Action{T1,T2}"/>：ReadOnlySpan 是 ref struct，
-    /// 不能作为 Action 的泛型类型参数（CS9244），但可直接作委托签名参数。
+    /// Observer 批量回调：一次回调拿整批实体 + 组件值（零拷贝 span），事件位由注册桶决定。
+    /// 用自定义委托而非 <see cref="Action{T1,T2}"/>：ReadOnlySpan 是 ref struct，不能作泛型类型参数。
     /// </summary>
     public delegate void ObserverCallback<TComponent>(ReadOnlySpan<Entity> entities, ReadOnlySpan<TComponent> values) where TComponent : unmanaged;
 

@@ -16,6 +16,15 @@ namespace EntJoy.ECS
             }
 
             var visited = new HashSet<int>();
+            var order = CollectDeletionClosure(roots, forceCascade, visited);
+            var toUnlink = CollectIncomingEdges(order, visited);
+            CheckRelationshipPreparation("delete-closure-prepared");
+            return CommitPreparedDeletion(order, toUnlink);
+        }
+
+        // 后序收集待删集合：先推 Exit 标记，再推它的入边 source，出栈顺序即"子先父后"。
+        private List<Entity> CollectDeletionClosure(ReadOnlySpan<Entity> roots, bool forceCascade, HashSet<int> visited)
+        {
             var order = new List<Entity>();
             var stack = new Stack<(Entity Entity, bool Exit)>();
             foreach (var root in roots)
@@ -36,12 +45,17 @@ namespace EntJoy.ECS
                     }
                 }
             }
+            return order;
+        }
 
-            // Collect before modifying the index; sources may move between chunks as edges are removed.
-            int incomingCapacity = 0;
+        // 待删集合之外的、仍指向它们的入边要在删之前收集：撤边过程会让 source 在块间迁移。
+        private List<(Entity Source, Entity Target, int TypeId)> CollectIncomingEdges(List<Entity> order, HashSet<int> visited)
+        {
+            int capacity = 0;
             if (order.Count == 1 && _relationIndex.TryGetSources(order[0], out var incomingTypes))
-                foreach (var sources in incomingTypes.Values) incomingCapacity = checked(incomingCapacity + sources.Count);
-            var toUnlink = new List<(Entity Source, Entity Target, int TypeId)>(incomingCapacity);
+                foreach (var sources in incomingTypes.Values) capacity = checked(capacity + sources.Count);
+
+            var toUnlink = new List<(Entity Source, Entity Target, int TypeId)>(capacity);
             foreach (var target in order)
             {
                 if (!_relationIndex.TryGetSources(target, out var byType)) continue;
@@ -50,13 +64,12 @@ namespace EntJoy.ECS
                         if (!visited.Contains(source.Id) && StillPointsToRelation(source, target, edges.Key))
                             toUnlink.Add((source, target, edges.Key));
             }
-            CheckRelationshipPreparation("delete-closure-prepared");
-            return CommitPreparedDeletion(order, toUnlink);
+            return toUnlink;
         }
 
         private void UnlinkDeletedTarget(Entity source, Entity target, int typeId)
         {
-            var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(typeId));
+            var type = ComponentTypeManager.GetComponentType(typeId);
             if (!type.IsMultiRelation) { RemoveRelationCore(source, type); return; }
             CommitRemoveMultiEdge(source, type, RelationSlot.From(target));
         }

@@ -5,10 +5,9 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// Observer 注册表 + 主线程结构变更挂钩（single funnel）。
-    /// 零订阅者 fast path：<see cref="_observerCount"/> 为 0 时所有挂钩点零额外分支。
-    /// 回调统一在主线程执行（立即或 ECB Playback 派发）；回调内结构变更请走 ECB（<see cref="s_observerDepth"/> 检测）。
-    /// 批量语义：同一结构变更 API 调用内对同一 observer 的连续触发 → 一次回调（ReadOnlySpan）。
+    /// Observer 注册表 + 主线程结构变更挂钩（single funnel）：<see cref="_observerCount"/> 为 0 时所有挂钩点零额外分支。
+    /// 回调统一在主线程执行；回调内结构变更必须走 ECB（由 <see cref="s_observerDepth"/> 检测）。
+    /// 同一结构变更 API 调用内对同一 observer 的连续触发合并成一次回调（ReadOnlySpan）。
     /// </summary>
     public unsafe partial class EntityManager
     {
@@ -77,7 +76,7 @@ namespace EntJoy.ECS
             var compType = ComponentTypeManager.GetComponentType(typeof(TComponent));
             if (!_observers.TryGetValue(compType.Id, out var reg)) return;
 
-            // 一个 observer 可订阅多个事件、占多个桶；须按唯一 handle 数扣减，避免 _observerCount 下溢
+            // 一个 observer 可订阅多个事件、占多个桶；须按唯一 handle 数扣减，避免 _observerCount 下溢。
             var unique = new HashSet<ObserverHandle>();
             foreach (var o in reg.Added) unique.Add(o.Handle);
             foreach (var o in reg.Removed) unique.Add(o.Handle);
@@ -101,13 +100,6 @@ namespace EntJoy.ECS
         }
 
         // 派发工具（批量，锁外调用）
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal bool HasObservers(int typeId)
-        {
-            if (_observerCount == 0) return false;
-            return _observers != null && _observers.ContainsKey(typeId);
-        }
 
         /// <summary>
         /// 批量派发 Added/Set（新值语义）：对注册表快照逐 observer 调用，值指针零拷贝转 span。

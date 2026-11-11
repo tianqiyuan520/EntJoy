@@ -7,21 +7,9 @@ using EntJoy.Collections;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 手动延迟命令缓冲区（ECB）。
-    /// 在 Job 或主线程中记录结构变更命令，帧末在主线程统一 Playback。
-    ///
-    /// 用法：
-    /// var ecb = new DeferredCommandBuffer();
-    /// ecb.CreateEntity(typeof(Position), typeof(Velocity));
-    /// ecb.DestroyEntity(entity);
-    /// ecb.AddComponent(entity, new Position { X = 1 });
-    /// ecb.RemoveComponent<Velocity>(entity);
-    /// // ... Job 完成后 ...
-    /// ecb.Playback(world.EntityManager);
-    /// ecb.Dispose();
-    ///
-    /// Observer 集成：Playback 内部调用 EntityManager 主入口（NewEntity/DestroyEntity/AddComponentRaw/
-    /// RemoveComponentRaw），主线程结构变更入口统一挂 observer 派发 → ECB Playback 天然触发事件，无需额外扩展。
+    /// 手动延迟命令缓冲区（ECB）：在 Job 或主线程记录结构变更命令，帧末在主线程统一 Playback。
+    /// Playback 走 EntityManager 的主入口（NewEntity/DestroyEntity/AddComponentRaw/RemoveComponentRaw），
+    /// 因此 observer 派发天然生效，无需额外扩展。
     /// </summary>
     public unsafe partial class DeferredCommandBuffer : IDisposable
     {
@@ -44,7 +32,7 @@ namespace EntJoy.ECS
                                                           // [op][entity][typeId][elemSize][payload]
 
         /// <summary>组件类型集合池：记录期存下 <c>ComponentType[]</c>，回放期按下标取用
-        /// ⇒ 回放期不再 per-command <c>new ComponentType[]</c>（去分配关键）。</summary>
+        /// ， 回放期不再 per-command <c>new ComponentType[]</c>（去分配关键）。</summary>
         private List<ComponentType[]> _typeSets = new();
 
         /// <summary>记录期分配的 batch 计数（回放期用同样的序 push 到 <see cref="_batchStarts"/>）。</summary>
@@ -78,169 +66,6 @@ namespace EntJoy.ECS
         /// <summary>已分配的并行 writer 数量（见 <see cref="EnsureParallelWriters"/>）。</summary>
         public int ParallelWriterCount => _writerCount;
 
-        /// <summary>
-        /// 预分配 <paramref name="count"/> 个并行 writer（幂等）。必须在任何 <see cref="CreateParallelWriter"/>
-        /// 之前、且在任何 job 开始记录之前由主线程调用。
-        /// </summary>
-        public void EnsureParallelWriters(int count)
-        {
-            if (count <= 0 || count <= _writerCount) return;
-            if (_playingBack) throw new InvalidOperationException("Cannot move ParallelWriter storage during playback.");
-            int old = _writerCount;
-            var next = (EcbWriterState*)Marshal.AllocHGlobal(CheckedSize((long)count * sizeof(EcbWriterState)));
-            if (_writers != null)
-            {
-                Buffer.MemoryCopy(_writers, next, (long)count * sizeof(EcbWriterState), (long)old * sizeof(EcbWriterState));
-                Marshal.FreeHGlobal((IntPtr)_writers);
-            }
-            for (int i = old; i < count; i++) next[i] = default;
-            _writers = next;
-            _writerCount = count;
-        }
-
-        /// <summary>取第 <paramref name="index"/> 个并行 writer（值语义，可作 job 字段）。</summary>
-        public ParallelWriter CreateParallelWriter(int index)
-        {
-            if (_writers == null || index < 0 || index >= _writerCount)
-                throw new ArgumentOutOfRangeException(nameof(index),
-                    $"并行 writer 索引 {index} 超出范围（已分配 {_writerCount} 个；先调用 EnsureParallelWriters）。");
-            return new ParallelWriter { State = _writers + index };
-        }
-
-        /// <summary>
-        /// 取第 <paramref name="index"/> 个跨 tile 共享 writer（补完，对齐 DOTS 语义）：
-        /// 同一个 job 被切成多个 tile 分发到多个 worker 时可以共享同一个 writer ——
-        /// 预留在短临界区内完成，不需要"一个 writer 一个线程"的约定。
-        ///
-        /// 与 <see cref="CreateParallelWriter"/> 的差别：
-        /// - 记录期允许并发（无 <c>ClaimThread</c> 守卫）；
-        /// - staging / 销毁表必须一次给足容量（并发下不能扩容）⇒ 超限抛明确异常；
-        /// - 同一 writer 内跨 lane 的命令顺序不确定（销毁之间无序、销毁与写组件之间以回放序为准）。
-        /// </summary>
-        public ParallelWriter CreateSharedParallelWriter(int index, int stagingCapacityBytes, int destroyCapacity)
-        {
-            if (_writers == null || index < 0 || index >= _writerCount)
-                throw new ArgumentOutOfRangeException(nameof(index),
-                    $"并行 writer 索引 {index} 超出范围（已分配 {_writerCount} 个；先调用 EnsureParallelWriters）。");
-            if (stagingCapacityBytes <= 0) throw new ArgumentOutOfRangeException(nameof(stagingCapacityBytes));
-            if (destroyCapacity <= 0) throw new ArgumentOutOfRangeException(nameof(destroyCapacity));
-            ref var st = ref _writers[index];
-            if (st.Staging != null || st.Destroys != null)
-                throw new InvalidOperationException(
-                    $"并行 writer {index} 已被占用（共享 writer 需在每轮记录前一次性分配，PlaybackParallel 只清空内容、不释放缓冲）。");
-            int destroyBytes = CheckedSize((long)destroyCapacity * sizeof(Entity));
-            var staging = (byte*)Marshal.AllocHGlobal(stagingCapacityBytes);
-            Entity* destroys;
-            try { destroys = (Entity*)Marshal.AllocHGlobal(destroyBytes); }
-            catch { Marshal.FreeHGlobal((IntPtr)staging); throw; }
-            st.Staging = staging;
-            st.Capacity = stagingCapacityBytes;
-            st.Offset = 0;
-            st.Destroys = destroys;
-            st.DestroyCapacity = destroyCapacity;
-            st.DestroyCount = 0;
-            st.Shared = 1;
-            return new ParallelWriter { State = _writers + index };
-        }
-
-        /// <summary>回放并消费当前 writer 批次。关系命令按 sortKey 排序，普通命令的 key 为 0。</summary>
-        public void PlaybackParallel(EntityManager entityManager)
-        {
-            if (_playingBack) throw new InvalidOperationException("ECB playback cannot be nested.");
-            entityManager.CompleteActiveJobs();
-            lock (_sync) PlaybackWriterBatch(entityManager);
-        }
-        /// <summary>回放仅含普通命令的 writer，保留连续销毁段合并。
-        /// <c>OP_DESTROY_RANGE</c> 在连续销毁槽上合并（共享 writer 里每条销毁命令只带一个槽），
-        /// 且遇到非销毁命令前先落地，保证命令序不被重排。</summary>
-        private void ReplayWriterBuffer(EntityManager entityManager, ref EcbWriterState st, ref int completed)
-        {
-            int offset = 0;
-            int runStart = 0, runCount = 0, pendingCommands = 0;
-            while (offset + sizeof(int) <= st.Offset)
-            {
-                int opCode = *(int*)(st.Staging + offset);
-                offset += sizeof(int);
-
-                if (opCode == OP_DESTROY_RANGE)
-                {
-                    int startIndex = *(int*)(st.Staging + offset);
-                    offset += sizeof(int);
-                    int count = *(int*)(st.Staging + offset);
-                    offset += sizeof(int);
-                    if (count > 0)
-                    {
-                        if (runCount > 0 && runStart + runCount == startIndex)
-                        {
-                            runCount += count;
-                        }
-                        else
-                        {
-                            if (runCount > 0) { entityManager.DestroyEntities(st.Destroys + runStart, runCount); completed += pendingCommands; pendingCommands = 0; }
-                            runStart = startIndex;
-                            runCount = count;
-                        }
-                        pendingCommands++;
-                    }
-                    else completed++;
-                    continue;
-                }
-
-                if (runCount > 0)
-                {
-                    entityManager.DestroyEntities(st.Destroys + runStart, runCount);
-                    completed += pendingCommands;
-                    pendingCommands = 0;
-                    runCount = 0;
-                }
-
-                switch (opCode)
-                {
-                    case OP_SET_COMPONENT_SINGLE:
-                    {
-                        Entity entity = *(Entity*)(st.Staging + offset);
-                        offset += sizeof(Entity);
-                        int typeId = *(int*)(st.Staging + offset);
-                        offset += sizeof(int);
-                        int elemSize = *(int*)(st.Staging + offset);
-                        offset += sizeof(int);
-                        byte* payload = st.Staging + offset;
-                        if (new ComponentType(typeId).IsRelation)
-                            entityManager.WriteComponentRange(typeId, elemSize, &entity, payload, 1);
-                        else if (entityManager.TryGetComponentPointer(entity, typeId, elemSize, out void* dst))
-                            Buffer.MemoryCopy(payload, dst, elemSize, elemSize);
-                        offset += elemSize;
-                        completed++;
-                        break;
-                    }
-                    default:
-                        throw new InvalidOperationException(
-                            $"普通 writer 回放路径中出现不支持的 opcode {opCode}。");
-                }
-            }
-
-            if (runCount > 0)
-            {
-                entityManager.DestroyEntities(st.Destroys + runStart, runCount);
-                completed += pendingCommands;
-            }
-        }
-
-        private void DisposeParallelWriters()
-        {
-            if (_writers == null) return;
-            for (int i = 0; i < _writerCount; i++)
-            {
-                ref var st = ref _writers[i];
-                if (st.Staging != null) Marshal.FreeHGlobal((IntPtr)st.Staging);
-                if (st.Destroys != null) Marshal.FreeHGlobal((IntPtr)st.Destroys);
-                st.Staging = null;
-                st.Destroys = null;
-            }
-            Marshal.FreeHGlobal((IntPtr)_writers);
-            _writers = null;
-            _writerCount = 0;
-        }
 
         private unsafe void EnsureDestroyCapacity(int needed)
         {
@@ -271,7 +96,7 @@ namespace EntJoy.ECS
         public int CreatedEntityCount => _createdEntityCount;
 
         /// <summary>已记录的 <see cref="DestroyEntity"/> 实体条数。
-        /// ⚠ 与 <see cref="CommandCount"/> 不同：连续的 destroy 会合并成一个连续段 = 一条命令
+        /// 与 <see cref="CommandCount"/> 不同：连续的 destroy 会合并成一个连续段 = 一条命令
         /// （见 <see cref="DestroyEntity"/>），故 3200 次并发 `DestroyEntity` 时
         /// `DestroyedEntityCount = 3200` 而 `CommandCount = 1`。要断言"写得没丢"用本属性。</summary>
         public int DestroyedEntityCount => _destroyEntityCount;
@@ -319,196 +144,6 @@ namespace EntJoy.ECS
             return (int)size;
         }
 
-        /// <summary>记录 CreateEntity 命令（单实体；等价于 <c>CreateEntitiesRange(1, types)</c>）。</summary>
-        public void CreateEntity(params ComponentType[] componentTypes)
-        {
-            CreateEntitiesRange(1, componentTypes);
-        }
-
-        /// <summary>
-        /// 批量创建命令：一次记录 N 个同 archetype 实体，回放期走
-        /// <see cref="EntityManager.CreateEntities(int, ComponentType[], Entity*, int)"/> 的零分配批量路径
-        /// （一次 <c>CompleteActiveJobs</c> + 一次锁 + 无逐实体托管分配）。
-        /// </summary>
-        /// <returns>batchId（供 <see cref="SetComponentRange{T}"/> 引用本批实体）。</returns>
-        public int CreateEntitiesRange(int count, params ComponentType[] types)
-        {
-            if (count <= 0 || types == null || types.Length == 0) return -1;
-            lock (_sync)
-            {
-                CloseDestroyRun();
-                int typeSetIndex = GetOrAddTypeSet(types);
-                int batchId = _recordedBatchCount++;
-                EnsureCapacity(sizeof(int) * 4);
-                *(int*)(_staging + _stagingOffset) = OP_CREATE_ENTITIES_RANGE;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = typeSetIndex;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = count;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = batchId;
-                _stagingOffset += sizeof(int);
-                CommandCount++;
-                return batchId;
-            }
-        }
-
-        /// <summary>
-        /// 批量写组件列命令：把 <paramref name="values"/> 逐元素写进第 <paramref name="batchId"/>
-        /// 批创建的实体的该组件列。取值在记录期就拷进 staging（调用方缓冲随后可自由释放/复用），
-        /// 回放期经 blittable 定位表直接落列 ⇒ 无反射、无装箱、无 per-command 分配。
-        /// </summary>
-        public unsafe void SetComponentRange<T>(int batchId, NativeArray<T> values) where T : unmanaged
-        {
-            if (batchId < 0) return;
-            int elemSize = Unsafe.SizeOf<T>();
-            int n = values.Length;
-            if (n <= 0) return;
-            long payload = (long)n * elemSize;
-            int total = CheckedSize(sizeof(int) * 5 + payload);
-            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            lock (_sync)
-            {
-                CloseDestroyRun();
-                EnsureCapacity(total);
-                *(int*)(_staging + _stagingOffset) = OP_SET_COMPONENT_RANGE;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = batchId;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = typeId;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = elemSize;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = n;
-                _stagingOffset += sizeof(int);
-                Buffer.MemoryCopy(values.GetUnsafePtr(), _staging + _stagingOffset, payload, payload);
-                _stagingOffset += (int)payload;
-                CommandCount++;
-            }
-        }
-
-        /// <summary>取某 batch 在 <see cref="CreatedEntities"/> 中的区间（回放期产出）。</summary>
-        public void GetBatch(int batchId, out int start, out int count)
-        {
-            if (batchId >= 0 && batchId < _batchStarts.Count)
-            {
-                start = _batchStarts[batchId];
-                count = _batchCounts[batchId];
-                return;
-            }
-            start = -1;
-            count = 0;
-        }
-
-        /// <summary>组件类型集合去重池（集合种类很少，线性比较足够）。</summary>
-        private int GetOrAddTypeSet(ComponentType[] types)
-        {
-            for (int i = 0; i < _typeSets.Count; i++)
-            {
-                var set = _typeSets[i];
-                if (set.Length != types.Length) continue;
-                bool same = true;
-                for (int k = 0; k < set.Length; k++)
-                    if (set[k].Id != types[k].Id) { same = false; break; }
-                if (same) return i;
-            }
-            _typeSets.Add(types);
-            return _typeSets.Count - 1;
-        }
-
-        private unsafe void EnsureCreatedEntityCapacity(int needed)
-        {
-            if (needed <= _createdEntityCapacity) return;
-            int newCapacity = _createdEntityCapacity > 0 ? _createdEntityCapacity : 1024;
-            while (newCapacity < needed)
-            {
-                if (newCapacity > int.MaxValue / 2) throw new OverflowException("ECB entity capacity exceeds Int32.MaxValue.");
-                newCapacity *= 2;
-            }
-            var next = (Entity*)Marshal.AllocHGlobal(CheckedSize((long)newCapacity * sizeof(Entity)));
-            if (_createdEntities != null)
-            {
-                Buffer.MemoryCopy(_createdEntities, next, (long)newCapacity * sizeof(Entity), (long)_createdEntityCount * sizeof(Entity));
-                Marshal.FreeHGlobal((IntPtr)_createdEntities);
-            }
-            _createdEntities = next;
-            _createdEntityCapacity = newCapacity;
-        }
-
-        /// <summary>
-        /// 记录 DestroyEntity 命令。连续的 destroy 会在回放期合并成一次批量销毁：
-        /// 记录期把实体 append 到非托管表，staging 里只留 `[OP_DESTROY_RANGE][startIndex][count]` 一条
-        /// <c>EntityManager.DestroyEntities</c>（每批一次 job 等待 + 一次锁）。
-        /// </summary>
-        public void DestroyEntity(Entity entity)
-        {
-            lock (_sync)
-            {
-                EnsureDestroyCapacity(checked(_destroyEntityCount + 1));
-                if (!_destroyRunOpen)
-                {
-                    EnsureCapacity(sizeof(int) * 3);
-                    *(int*)(_staging + _stagingOffset) = OP_DESTROY_RANGE;
-                    _stagingOffset += sizeof(int);
-                    _destroyRunStart = _destroyEntityCount;
-                    *(int*)(_staging + _stagingOffset) = _destroyRunStart;
-                    _stagingOffset += sizeof(int);
-                    _destroyCountFieldOffset = _stagingOffset;
-                    *(int*)(_staging + _stagingOffset) = 0;
-                    _stagingOffset += sizeof(int);
-                    _destroyRunOpen = true;
-                    CommandCount++;   // 一条命令 = 一个连续段
-                }
-                _destroyEntities[_destroyEntityCount++] = entity;
-                *(int*)(_staging + _destroyCountFieldOffset) = _destroyEntityCount - _destroyRunStart;
-            }
-        }
-
-        /// <summary>记录 AddComponent 命令</summary>
-        public void AddComponent<T>(Entity entity, T value) where T : struct, IComponentData
-        {
-            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            lock (_sync)
-            {
-                CloseDestroyRun();
-                int compSize = Unsafe.SizeOf<T>();
-                int totalSize = CheckedSize((long)sizeof(int) * 3 + sizeof(Entity) + compSize);
-                EnsureCapacity(totalSize);
-
-                *(int*)(_staging + _stagingOffset) = OP_ADD_COMPONENT;
-                _stagingOffset += sizeof(int);
-                *(Entity*)(_staging + _stagingOffset) = entity;
-                _stagingOffset += sizeof(Entity);
-                *(int*)(_staging + _stagingOffset) = typeId;
-                _stagingOffset += sizeof(int);
-                *(int*)(_staging + _stagingOffset) = compSize;
-                _stagingOffset += sizeof(int);
-                Unsafe.CopyBlock(_staging + _stagingOffset, &value, (uint)compSize);
-                _stagingOffset += compSize;
-                CommandCount++;
-            }
-        }
-
-        /// <summary>记录 RemoveComponent 命令</summary>
-        public void RemoveComponent<T>(Entity entity) where T : struct
-        {
-            int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
-            lock (_sync)
-            {
-                CloseDestroyRun();
-                int totalSize = sizeof(int) + sizeof(Entity) + sizeof(int);
-                EnsureCapacity(totalSize);
-
-                *(int*)(_staging + _stagingOffset) = OP_REMOVE_COMPONENT;
-                _stagingOffset += sizeof(int);
-                *(Entity*)(_staging + _stagingOffset) = entity;
-                _stagingOffset += sizeof(Entity);
-                *(int*)(_staging + _stagingOffset) = typeId;
-                _stagingOffset += sizeof(int);
-                CommandCount++;
-            }
-        }
-
         /// <summary>
         /// 主线程回放所有命令。无需注册，直接调用 EntityManager 的非泛型方法。
         /// </summary>
@@ -520,151 +155,200 @@ namespace EntJoy.ECS
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_playingBack) throw new InvalidOperationException("ECB playback cannot be nested.");
-                var batchStaging = _staging;
-                int batchLength = _stagingOffset, batchCapacity = _stagingCapacity, total = CommandCount;
-                var batchDestroys = _destroyEntities;
-                int batchDestroyCapacity = _destroyEntityCapacity;
-                var batchTypes = _typeSets;
-                _typeSets = _spareTypeSets;
-                _spareTypeSets = null;
-                _staging = null;
-                _stagingOffset = _stagingCapacity = 0;
-                _destroyEntities = null;
-                _destroyEntityCount = _destroyEntityCapacity = 0;
-                _destroyRunOpen = false;
-                _recordedBatchCount = 0;
-                CommandCount = 0;
+
+                PlaybackBatch batch = DetachBatch();
                 _playingBack = true;
-                int completed = 0;
                 try
                 {
                     _batchStarts.Clear();
                     _batchCounts.Clear();
                     _createdEntityCount = 0;
-                    int offset = 0;
-                    while (offset < batchLength)
-                    {
-                        int opCode = *(int*)(batchStaging + offset);
-                        offset += sizeof(int);
-
-                        switch (opCode)
-                        {
-                            case OP_SET_RELATIONSHIP_TARGET:
-                            case OP_REMOVE_RELATIONSHIP:
-                            case OP_ADD_MULTI_RELATIONSHIP:
-                            case OP_REMOVE_MULTI_RELATIONSHIP:
-                            case OP_CLEAR_MULTI_RELATIONSHIPS:
-                                ReplayRelationship(entityManager, batchStaging + offset - sizeof(int));
-                                offset += RelationshipCommandSize - sizeof(int);
-                                break;
-                            case OP_CREATE_ENTITIES_RANGE:
-                            {
-                                int typeSetIndex = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int count = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int batchId = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                EnsureCreatedEntityCapacity(checked(_createdEntityCount + count));
-                                int created = entityManager.CreateEntities(count, batchTypes[typeSetIndex],
-                                    _createdEntities + _createdEntityCount, _createdEntityCapacity - _createdEntityCount);
-                                // batch 表按记录顺序 push；batchId 由记录期分配、与推入顺序一致
-                                _batchStarts.Add(_createdEntityCount);
-                                _batchCounts.Add(created);
-                                _createdEntityCount += created;
-                                break;
-                            }
-                            case OP_SET_COMPONENT_RANGE:
-                            {
-                                int batchId = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int typeId = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int elemSize = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int elemCount = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                byte* payload = batchStaging + offset;
-                                if (elemSize > 0 && elemCount > 0
-                                    && batchId >= 0 && batchId < _batchStarts.Count && batchId < _batchCounts.Count)
-                                {
-                                    int start = _batchStarts[batchId];
-                                    int have = _batchCounts[batchId];
-                                    int n = elemCount < have ? elemCount : have;
-                                    if (n > 0)
-                                        entityManager.WriteComponentRange(typeId, elemSize, _createdEntities + start, payload, n);
-                                }
-                                offset += elemCount * elemSize;
-                                break;
-                            }
-                            case OP_DESTROY_RANGE:
-                            {
-                                int startIndex = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int count = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                if (count > 0)
-                                    entityManager.DestroyEntities(batchDestroys + startIndex, count);
-                                break;
-                            }
-                            case OP_ADD_COMPONENT:
-                            {
-                                var entity = *(Entity*)(batchStaging + offset);
-                                offset += sizeof(Entity);
-                                int typeId = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-                                int compSize = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-
-                                // 去反射（收尾）：直接按原始字节落列（无 PtrToStructure / 无装箱 / 无 Type 解析）
-                                entityManager.AddComponentRaw(entity, typeId, batchStaging + offset, compSize);
-
-                                offset += compSize;
-                                break;
-                            }
-                            case OP_REMOVE_COMPONENT:
-                            {
-                                var entity = *(Entity*)(batchStaging + offset);
-                                offset += sizeof(Entity);
-                                int typeId = *(int*)(batchStaging + offset);
-                                offset += sizeof(int);
-
-                                // 获取组件类型
-                                var compType = ComponentTypeManager.GetTypeByComponentType(typeId);
-                                entityManager.RemoveComponentRaw(entity, compType);
-                                break;
-                            }
-                            default: throw new InvalidOperationException("Invalid ECB command opcode.");
-                        }
-                        completed++;
-                    }
-                }
-                catch (Exception cause)
-                {
-                    throw new CommandPlaybackException(completed, Math.Max(0, total - completed - 1), -1, cause);
+                    ReplayAll(entityManager, batch);
                 }
                 finally
                 {
-                    if (_stagingOffset == 0)
-                    {
-                        if (_staging != null) Marshal.FreeHGlobal((IntPtr)_staging);
-                        _staging = batchStaging;
-                        _stagingCapacity = batchCapacity;
-                    }
-                    else if (batchStaging != null) Marshal.FreeHGlobal((IntPtr)batchStaging);
-                    if (_destroyEntityCount == 0)
-                    {
-                        if (_destroyEntities != null) Marshal.FreeHGlobal((IntPtr)_destroyEntities);
-                        _destroyEntities = batchDestroys;
-                        _destroyEntityCapacity = batchDestroyCapacity;
-                    }
-                    else if (batchDestroys != null) Marshal.FreeHGlobal((IntPtr)batchDestroys);
-                    batchTypes.Clear();
-                    _spareTypeSets = batchTypes;
-                    _playingBack = false;
+                    ReturnBatchBuffers(batch);
                 }
             }
         }
+
+        // 本批要回放的原始字节与随附数据；取走时缓冲从实例上摘下，避免回放期间被复用。
+        private readonly struct PlaybackBatch
+        {
+            public readonly byte* Staging;
+            public readonly int Length;
+            public readonly int Capacity;
+            public readonly Entity* Destroys;
+            public readonly int DestroyCapacity;
+            public readonly List<ComponentType[]> TypeSets;
+            public readonly int CommandTotal;
+
+            public PlaybackBatch(byte* staging, int length, int capacity, Entity* destroys, int destroyCapacity,
+                List<ComponentType[]> typeSets, int commandTotal)
+            {
+                Staging = staging;
+                Length = length;
+                Capacity = capacity;
+                Destroys = destroys;
+                DestroyCapacity = destroyCapacity;
+                TypeSets = typeSets;
+                CommandTotal = commandTotal;
+            }
+        }
+
+        private unsafe PlaybackBatch DetachBatch()
+        {
+            var batch = new PlaybackBatch(_staging, _stagingOffset, _stagingCapacity,
+                _destroyEntities, _destroyEntityCapacity, _typeSets, CommandCount);
+
+            _typeSets = _spareTypeSets;
+            _spareTypeSets = null;
+            _staging = null;
+            _stagingOffset = _stagingCapacity = 0;
+            _destroyEntities = null;
+            _destroyEntityCount = _destroyEntityCapacity = 0;
+            _destroyRunOpen = false;
+            _recordedBatchCount = 0;
+            CommandCount = 0;
+            return batch;
+        }
+
+        // 回放结束后把缓冲归还实例；整批命令都消费完（offset 归零）才保留，否则直接释放。
+        private unsafe void ReturnBatchBuffers(PlaybackBatch batch)
+        {
+            if (_stagingOffset == 0)
+            {
+                if (_staging != null) Marshal.FreeHGlobal((IntPtr)_staging);
+                _staging = batch.Staging;
+                _stagingCapacity = batch.Capacity;
+            }
+            else if (batch.Staging != null) Marshal.FreeHGlobal((IntPtr)batch.Staging);
+
+            if (_destroyEntityCount == 0)
+            {
+                if (_destroyEntities != null) Marshal.FreeHGlobal((IntPtr)_destroyEntities);
+                _destroyEntities = batch.Destroys;
+                _destroyEntityCapacity = batch.DestroyCapacity;
+            }
+            else if (batch.Destroys != null) Marshal.FreeHGlobal((IntPtr)batch.Destroys);
+
+            batch.TypeSets.Clear();
+            _spareTypeSets = batch.TypeSets;
+            _playingBack = false;
+        }
+
+        private unsafe void ReplayAll(EntityManager entityManager, in PlaybackBatch batch)
+        {
+            byte* staging = batch.Staging;
+            int completed = 0;
+            int offset = 0;
+            try
+            {
+                while (offset < batch.Length)
+                {
+                    int opCode = *(int*)(staging + offset);
+                    offset += sizeof(int);
+                    offset = opCode switch
+                    {
+                        OP_SET_RELATIONSHIP_TARGET or OP_REMOVE_RELATIONSHIP or OP_ADD_MULTI_RELATIONSHIP
+                            or OP_REMOVE_MULTI_RELATIONSHIP or OP_CLEAR_MULTI_RELATIONSHIPS
+                            => ReplayRelationshipCommand(entityManager, staging, offset),
+                        OP_CREATE_ENTITIES_RANGE => ReplayCreateEntities(entityManager, batch, staging, offset),
+                        OP_SET_COMPONENT_RANGE => ReplaySetComponentRange(entityManager, batch, staging, offset),
+                        OP_DESTROY_RANGE => ReplayDestroyRange(entityManager, batch, staging, offset),
+                        OP_ADD_COMPONENT => ReplayAddComponent(entityManager, staging, offset),
+                        OP_REMOVE_COMPONENT => ReplayRemoveComponent(entityManager, staging, offset),
+                        _ => throw new InvalidOperationException("Invalid ECB command opcode.")
+                    };
+                    completed++;
+                }
+            }
+            catch (Exception cause)
+            {
+                throw new CommandPlaybackException(completed, Math.Max(0, batch.CommandTotal - completed - 1), -1, cause);
+            }
+        }
+
+        // 各分支都接收 opcode 之后的偏移，返回下一条命令的偏移。
+        private static unsafe int ReplayRelationshipCommand(EntityManager entityManager, byte* staging, int offset)
+        {
+            ReplayRelationship(entityManager, staging + offset - sizeof(int));
+            return offset + RelationshipCommandSize - sizeof(int);
+        }
+
+        private unsafe int ReplayCreateEntities(EntityManager entityManager, in PlaybackBatch batch, byte* staging, int offset)
+        {
+            int typeSetIndex = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int count = *(int*)(staging + offset);
+            offset += sizeof(int);
+            offset += sizeof(int);   // batchId：批次下标由推入顺序决定，此处不用
+            EnsureCreatedEntityCapacity(checked(_createdEntityCount + count));
+            int created = entityManager.CreateEntities(count, batch.TypeSets[typeSetIndex],
+                _createdEntities + _createdEntityCount, _createdEntityCapacity - _createdEntityCount);
+            _batchStarts.Add(_createdEntityCount);
+            _batchCounts.Add(created);
+            _createdEntityCount += created;
+            return offset;
+        }
+
+        private unsafe int ReplaySetComponentRange(EntityManager entityManager, in PlaybackBatch batch, byte* staging, int offset)
+        {
+            int batchId = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int typeId = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int elemSize = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int elemCount = *(int*)(staging + offset);
+            offset += sizeof(int);
+            byte* payload = staging + offset;
+            if (elemSize > 0 && elemCount > 0
+                && batchId >= 0 && batchId < _batchStarts.Count && batchId < _batchCounts.Count)
+            {
+                int start = _batchStarts[batchId];
+                int have = _batchCounts[batchId];
+                int n = elemCount < have ? elemCount : have;
+                if (n > 0)
+                    entityManager.WriteComponentRange(typeId, elemSize, _createdEntities + start, payload, n);
+            }
+            return offset + elemCount * elemSize;
+        }
+
+        private static unsafe int ReplayDestroyRange(EntityManager entityManager, in PlaybackBatch batch, byte* staging, int offset)
+        {
+            int startIndex = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int count = *(int*)(staging + offset);
+            offset += sizeof(int);
+            if (count > 0)
+                entityManager.DestroyEntities(batch.Destroys + startIndex, count);
+            return offset;
+        }
+
+        // 按原始字节直接落列：不装箱、不解析 Type。
+        private static unsafe int ReplayAddComponent(EntityManager entityManager, byte* staging, int offset)
+        {
+            var entity = *(Entity*)(staging + offset);
+            offset += sizeof(Entity);
+            int typeId = *(int*)(staging + offset);
+            offset += sizeof(int);
+            int compSize = *(int*)(staging + offset);
+            offset += sizeof(int);
+            entityManager.AddComponentRaw(entity, typeId, staging + offset, compSize);
+            return offset + compSize;
+        }
+
+        private static unsafe int ReplayRemoveComponent(EntityManager entityManager, byte* staging, int offset)
+        {
+            var entity = *(Entity*)(staging + offset);
+            offset += sizeof(Entity);
+            int typeId = *(int*)(staging + offset);
+            offset += sizeof(int);
+            entityManager.RemoveComponentRaw(entity, ComponentTypeManager.GetTypeByComponentType(typeId));
+            return offset;
+        }
+
         public void Dispose()
         {
             if (_playingBack) throw new InvalidOperationException("Cannot dispose an ECB during playback.");

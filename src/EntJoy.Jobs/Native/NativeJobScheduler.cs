@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -312,14 +312,37 @@ public static unsafe partial class NativeJobScheduler
 
     // 持久分配器（托管回调注册到 native）
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static void* PersistentAllocUnmanaged(int size) => PersistentAllocator.Alloc(size);
+    private static void* PersistentAllocUnmanaged(int size)
+    {
+        // 异常不得穿越原生边界（fail-fast 终止进程）；分配失败按原生契约返回 nullptr。
+        try { return PersistentAllocator.Alloc(size); }
+        catch { return null; }
+    }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static void PersistentFreeUnmanaged(void* ptr) => PersistentAllocator.Free(ptr);
+    private static void PersistentFreeUnmanaged(void* ptr)
+    {
+        try { PersistentAllocator.Free(ptr); } catch { }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void* TempAllocUnmanaged(int size)
+    {
+        try { return (void*)TempAllocator.Alloc(size, -1); }
+        catch { return null; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void TempFreeUnmanaged(void* ptr)
+    {
+        try { TempAllocator.Free((IntPtr)ptr); } catch { }
+    }
 
     internal static void RegisterPersistentAllocator()
     {
-        NativeJobCore.JobSystem_RegisterPersistentAllocator(&PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
+        NativeJobCore.JobSystem_RegisterAllocator((int)Allocator.Persistent, &PersistentAllocUnmanaged, &PersistentFreeUnmanaged);
+        NativeJobCore.JobSystem_RegisterAllocator((int)Allocator.Temp, &TempAllocUnmanaged, &TempFreeUnmanaged);
+        NativeJobCore.JobSystem_RegisterAllocator((int)Allocator.TempJob, &TempAllocUnmanaged, &TempFreeUnmanaged);
     }
 
     // 直调面板

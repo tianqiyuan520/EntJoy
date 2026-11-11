@@ -1,0 +1,5 @@
+E:\GODOT\Project\EntJoy\tests\EntJoy.ECS.Tests\bin\Release\net8.0\EntJoy.ECS.Tests.dll (.NETCoreApp,Version=v8.0)的测试运行
+总共 1 个测试文件与指定模式相匹配。
+结果文件: E:\GODOT\Project\EntJoy\tests\EntJoy.ECS.Tests\TestResults\review-current-native.trx
+
+已通过! - 失败:     0，通过:   607，已跳过:     0，总计:   607，持续时间: 8 s - EntJoy.ECS.Tests.dll (net8.0)

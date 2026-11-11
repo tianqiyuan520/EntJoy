@@ -61,7 +61,9 @@ int main() {
         std::cout << "PASS ReinitializeManyTimes\n";
         CompleteAndShutdownConcurrently();
         std::cout << "PASS CompleteAndShutdownConcurrently\n";
-        ScheduleWhileShutdownGateCloses();
+        // 关停竞态窗口很短：单次调用几乎撞不上，连跑多次才能把「提交失败被记成 job 异常」暴露出来。
+        for (int i = 0; i < 500; ++i)
+            ScheduleWhileShutdownGateCloses();
         std::cout << "PASS ScheduleWhileShutdownGateCloses\nPASS Stage3: 3/3\n";
         return 0;
     } catch (const std::exception& ex) {

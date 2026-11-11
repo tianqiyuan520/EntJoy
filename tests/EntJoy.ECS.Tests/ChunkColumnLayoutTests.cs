@@ -96,7 +96,7 @@ namespace EntJoy.ECS.Tests
                 using var archetype = new Archetype(types, new ChunkCacheLayout(line, period));
                 archetype.CreateChunk();
                 var chunk = archetype.GetChunks()[0];
-                Assert.Equal(128, chunk.Capacity);
+                Assert.Equal(0, chunk.Capacity % 64); Assert.True(chunk.Capacity >= 512);
                 Assert.True(chunk.TotalSize <= 16 * 1024);
             }
             finally { Archetype.ChunkCapacityOverride = savedCapacity; }
@@ -105,7 +105,7 @@ namespace EntJoy.ECS.Tests
         [Theory]
         [InlineData(64)]
         [InlineData(128)]
-        public unsafe void AutomaticCapacity_CapsSmallComponentsAt128(int line)
+        public unsafe void AutomaticCapacity_ScalesWithComponentSize(int line)
         {
             int savedCapacity = Archetype.ChunkCapacityOverride;
             Archetype.ChunkCapacityOverride = 0;
@@ -114,7 +114,7 @@ namespace EntJoy.ECS.Tests
                 using var archetype = new Archetype(new ComponentType[] { typeof(ByteColumn) }, new ChunkCacheLayout(line, 256));
                 archetype.CreateChunk();
                 var chunk = archetype.GetChunks()[0];
-                Assert.Equal(128, chunk.Capacity);
+                Assert.Equal(0, chunk.Capacity % 64); Assert.True(chunk.Capacity >= 512);
                 Assert.True(chunk.TotalSize <= 16 * 1024);
                 var values = new Span<ByteColumn>((void*)chunk.GetComponentArrayPointer(0), chunk.Capacity);
                 values[0] = new ByteColumn { Value = 1 };

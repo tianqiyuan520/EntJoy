@@ -105,12 +105,9 @@ namespace EntJoy.ECS
             }
         }
 
-        private void PlaybackWriterBatch(EntityManager manager)
+        // 把各 writer 的缓冲摘进本批快照，同时清空 writer 供下一轮复用；返回是否需要按关系键排序。
+        private bool PrepareWriterBatch(EcbWriterState[] batch)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_playingBack) throw new InvalidOperationException("ECB playback cannot be nested.");
-            if (_writerPlaybackBatch.Length != _writerCount) _writerPlaybackBatch = new EcbWriterState[_writerCount];
-            var batch = _writerPlaybackBatch;
             bool ordered = false;
             for (int i = 0; i < batch.Length; i++)
             {
@@ -118,6 +115,16 @@ namespace EntJoy.ECS
                 ordered |= batch[i].HasRelationshipCommands;
                 _writers[i] = new EcbWriterState { Capacity = batch[i].Capacity, DestroyCapacity = batch[i].DestroyCapacity, Shared = batch[i].Shared };
             }
+            return ordered;
+        }
+
+        private void PlaybackWriterBatch(EntityManager manager)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_playingBack) throw new InvalidOperationException("ECB playback cannot be nested.");
+            if (_writerPlaybackBatch.Length != _writerCount) _writerPlaybackBatch = new EcbWriterState[_writerCount];
+            var batch = _writerPlaybackBatch;
+            bool ordered = PrepareWriterBatch(batch);
             _playingBack = true;
             int completed = 0, writerIndex = -1;
             List<ParallelCommand> commands = null;

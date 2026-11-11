@@ -87,7 +87,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>获取所有指向 target 的关系源（跨所有关系类型）。O(1) 索引查表。
-        /// 复用容器（P1）：结果 List 复用，返回值数组独立 new。</summary>
+        /// 复用容器：结果 List 复用，返回值数组独立 new。</summary>
         public Entity[] GetRelationsOfAll(Entity target)
         {
             CheckDisposed();
@@ -129,17 +129,14 @@ namespace EntJoy.ECS
         /// <summary>
         /// 获取 entity 的全部祖先（沿 TRel 链向上）：最近的祖先在前，根在后。
         /// 单实例语义（每实体每关系类型最多 1 target），链式向上；visited 防环（含起始实体）。
-        /// 复用容器（P1）：内部 List/HashSet 复用，返回值数组独立 new。
+        /// 复用容器：内部 List/HashSet 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetAncestors<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
         {
             CheckDisposed();
             var result = _relBufferA;
-            result.Clear();
-            var visited = _relVisited;
-            visited.Clear();
-            visited.Add(entity.Id);  // 含起始实体：环闭合时立即终止
+            var visited = ResetTraversalBuffers(result, entity);
 
             var current = entity;
             while (IsAlive(current))
@@ -152,10 +149,20 @@ namespace EntJoy.ECS
             return result.ToArray();
         }
 
+        // 链表遍历的共用起点：结果缓冲清空，visited 置为只含起始实体（环闭合时立即终止）。
+        private HashSet<int> ResetTraversalBuffers(List<Entity> result, Entity origin)
+        {
+            result.Clear();
+            var visited = _relVisited;
+            visited.Clear();
+            visited.Add(origin.Id);
+            return visited;
+        }
+
         /// <summary>
         /// 获取 entity 的全部后代（沿 TRel 链向下，BFS 广度优先）：直接子在前，孙层次随深度。
         /// 走反向索引 O(1) 逐层查 sources，不扫描 chunk；visited 防环（含起始实体）。
-        /// 复用容器（P1）：frontier/next 双缓冲 + visited 复用，返回值数组独立 new。
+        /// 复用容器：frontier/next 双缓冲 + visited 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetDescendants<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
@@ -163,10 +170,7 @@ namespace EntJoy.ECS
             CheckDisposed();
             if (!IsAlive(entity)) return Array.Empty<Entity>();
             var result = _relBufferA;
-            result.Clear();
-            var visited = _relVisited;
-            visited.Clear();
-            visited.Add(entity.Id);  // 含起始实体：环闭合时立即终止
+            var visited = ResetTraversalBuffers(result, entity);
 
             var frontier = _relBufferB;
             frontier.Clear();
@@ -182,10 +186,8 @@ namespace EntJoy.ECS
                 foreach (var node in frontier)
                 {
                     // 查反向索引：所有 --TRel--> node 的 sources（直接子）
-                    if (!_relationIndex.TryGetSources(node, out var byType) ||
-                        !byType.TryGetValue(relTypeId, out var set))
-                        continue;
-
+                    var set = _relationIndex.GetSourcesOfType(node, relTypeId);
+                    if (set == null) continue;
                     foreach (var source in set)
                     {
                         if (!StillPointsToRelation(source, node, relTypeId)) continue;
@@ -202,7 +204,7 @@ namespace EntJoy.ECS
         /// <summary>
         /// 获取 entity 的全部兄弟：与 entity 共享同一 TRel target 的其他实体（不含自身）。
         /// entity 无 TRel 关系 → 空数组。
-        /// 复用容器（P1）：结果 List 复用，返回值数组独立 new。
+        /// 复用容器：结果 List 复用，返回值数组独立 new。
         /// </summary>
         public Entity[] GetSiblings<TRel>(Entity entity)
             where TRel : struct, IRelationComponent
@@ -213,9 +215,8 @@ namespace EntJoy.ECS
 
             // 父的所有其他子
             var relTypeId = ComponentTypeManager.GetComponentType(typeof(TRel)).Id;
-            if (!_relationIndex.TryGetSources(parent, out var byType) ||
-                !byType.TryGetValue(relTypeId, out var set))
-                return Array.Empty<Entity>();
+            var set = _relationIndex.GetSourcesOfType(parent, relTypeId);
+            if (set == null) return Array.Empty<Entity>();
 
             var result = _relBufferA;
             result.Clear();
@@ -240,7 +241,7 @@ namespace EntJoy.ECS
             CheckDisposed();
             CompleteActiveJobs();
             using var changes = BeginRelationChanges();
-            lock (_structuralLock)
+            using (EnterStructural())
             {
                 ValidateEntityForDestruction(entity);
                 if (!IsAlive(entity)) return;

@@ -5,19 +5,15 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// Group 反向索引：Entity → 匹配的 EntityQuery 集合。
-    ///
-    /// 设计：惰性构建，不在结构变更路径上增量维护（结构变更零额外成本）。
-    /// 索引结构 = Archetype → List&lt;EntityQuery&gt;（Archetype 匹配哪些查询）。
-    /// 反向查询 = 实体定位 Archetype（O(1)，EntityManager 正向索引）+ Archetype→查询查表。
-    ///
-    /// 刷新时机：注册新查询或查询匹配集合变化时重建（结构变更罕见，重建成本可忽略）。
+    /// Group 反向索引：Entity → 匹配的 EntityQuery 集合，结构为 Archetype → List&lt;EntityQuery&gt;。
+    /// 惰性构建，不在结构变更路径上增量维护；注册新查询或匹配集合变化时整体重建。
+    /// 反向查询 = 定位实体的 Archetype（O(1)）+ Archetype→查询查表。
     /// </summary>
     public partial class World
     {
         // Archetype → 匹配该 Archetype 的查询集合（Group 正向索引，反向查询的中间层）
         private Dictionary<Archetype, List<EntityQuery>> _archetypeToQueries;
-        // 反向索引缓存版本：_queryCache 的变更计数（判断是否需要重建）
+        // 反向索引缓存版本：_entityManager.QueryCache 的变更计数（判断是否需要重建）
         private int _groupIndexVersion = -1;
 
         /// <summary>
@@ -50,14 +46,14 @@ namespace EntJoy.ECS
         /// </summary>
         private void RebuildGroupIndexIfDirty()
         {
-            lock (_queryCacheLock)
+            lock (_entityManager.QueryCacheLock)
             {
                 int currentVersion = ComputeGroupIndexVersion();
                 if (currentVersion == _groupIndexVersion && _archetypeToQueries != null)
                     return;
 
                 var map = new Dictionary<Archetype, List<EntityQuery>>();
-                foreach (var query in _queryCache.Values)
+                foreach (var query in _entityManager.QueryCache.Values)
                 {
                     query.EnsureUpToDate(); // 确保匹配集合为最新
                     foreach (var arch in query.MatchingArchetypes)
@@ -81,8 +77,8 @@ namespace EntJoy.ECS
         /// </summary>
         private int ComputeGroupIndexVersion()
         {
-            int v = _queryCache.Count;
-            foreach (var query in _queryCache.Values)
+            int v = _entityManager.QueryCache.Count;
+            foreach (var query in _entityManager.QueryCache.Values)
                 v += query.StructuralVersion;
             return v;
         }

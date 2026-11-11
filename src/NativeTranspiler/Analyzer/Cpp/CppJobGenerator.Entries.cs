@@ -420,46 +420,48 @@ namespace NativeTranspiler.Analyzer
             // 实体循环
             sb.AppendLine();
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
-            if (vectorize)
+            void AppendLoop(bool filtered)
             {
-                sb.AppendLine("#ifdef __clang__");
-                sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
-                sb.AppendLine("#endif");
-            }
-            sb.AppendLine("    for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
-            sb.AppendLine("    {");
-            sb.AppendLine("        if (__queryMask.Length != 0 && !__queryMask.IsEnabled(__entity_index)) continue;");
-            foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
-            {
-                if (NativeTranspiler.IsEntityType(p.Type))
+                if (vectorize && !filtered)
                 {
-                    sb.AppendLine($"        __EntJoyEntity {p.Name} = ((__EntJoyEntity*)__chunkData->entityArray)[__entity_index];");
-                    continue;
+                    sb.AppendLine("#ifdef __clang__");
+                    sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
+                    sb.AppendLine("#endif");
                 }
-                AppendEntityParameterLocal(sb, p, i, "        ");
-            }
+                sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
+                sb.AppendLine("        {");
+                if (filtered)
+                    sb.AppendLine("            if (!__queryMask.IsEnabled(__entity_index)) continue;");
+                foreach (var (p, i) in executeMethod.Parameters.Select((p, i) => (p, i)))
+                {
+                    if (NativeTranspiler.IsEntityType(p.Type))
+                    {
+                        sb.AppendLine($"            __EntJoyEntity {p.Name} = ((__EntJoyEntity*)__chunkData->entityArray)[__entity_index];");
+                        continue;
+                    }
+                    AppendEntityParameterLocal(sb, p, i, "            ");
+                }
 
-            if (hasReturn)
-            {
-                sb.AppendLine("        do {");
-                foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
-                {
-                    string trimmed = line.TrimEnd();
-                    if (trimmed.Length == 0) continue;
-                    sb.AppendLine($"            {trimmed}");
-                }
-                sb.AppendLine("        } while(false);");
-            }
-            else
-            {
+                if (hasReturn)
+                    sb.AppendLine("            do {");
                 foreach (var line in scalarBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                 {
                     string trimmed = line.TrimEnd();
                     if (trimmed.Length == 0) continue;
-                    sb.AppendLine($"        {trimmed}");
+                    sb.Append(hasReturn ? "                " : "            ").AppendLine(trimmed);
                 }
+                if (hasReturn)
+                    sb.AppendLine("            } while(false);");
+                sb.AppendLine("        }");
             }
 
+            sb.AppendLine("    if (__queryMask.Length == 0)");
+            sb.AppendLine("    {");
+            AppendLoop(filtered: false);
+            sb.AppendLine("    }");
+            sb.AppendLine("    else");
+            sb.AppendLine("    {");
+            AppendLoop(filtered: true);
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();

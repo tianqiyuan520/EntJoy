@@ -69,10 +69,9 @@ namespace EntJoy.ECS
             var inDegree = new int[n];
             for (int i = 0; i < n; i++) graph[i] = new List<int>();
 
-            // 边去重：OrderBefore 与 OrderAfter 可能对同一对系统重复加边（如 A.OrderBefore[B] 且 B.OrderAfter[A]），
-            // 重复边会使 inDegree 多次递增但出队只减一次 → 误判环。用 HashSet 记录已加边。
+            // OrderBefore 与 OrderAfter 可能对同一对系统重复加边；重复边会让 inDegree 多加一次、出队只减一次，
+            // 从而误判成环。
             var edgeSet = new HashSet<(int, int)>();
-
             void AddEdge(int from, int to)
             {
                 if (from == to || !edgeSet.Add((from, to))) return;
@@ -80,58 +79,66 @@ namespace EntJoy.ECS
                 inDegree[to]++;
             }
 
-            for (int i = 0; i < n; i++)
+            AddManualOrderEdges(AddEdge);
+            AddConflictEdges(graph, AddEdge);
+            LayerByKahn(graph, inDegree);
+        }
+
+        private void AddManualOrderEdges(Action<int, int> addEdge)
+        {
+            for (int i = 0; i < _systems.Count; i++)
             {
                 foreach (var targetType in _systems[i].OrderBefore)
                 {
                     int targetIdx = FindSystemIndex(targetType);
-                    if (targetIdx >= 0) AddEdge(i, targetIdx);
+                    if (targetIdx >= 0) addEdge(i, targetIdx);
                 }
                 foreach (var targetType in _systems[i].OrderAfter)
                 {
                     int targetIdx = FindSystemIndex(targetType);
-                    if (targetIdx >= 0) AddEdge(targetIdx, i);
+                    if (targetIdx >= 0) addEdge(targetIdx, i);
                 }
             }
+        }
 
+        // 组件冲突边：谁写谁阻塞谁，双向冲突按类型全名定方向，使执行顺序与注册顺序无关。
+        private void AddConflictEdges(List<int>[] graph, Action<int, int> addEdge)
+        {
+            int n = _systems.Count;
             for (int i = 0; i < n; i++)
             {
                 for (int j = i + 1; j < n; j++)
                 {
                     if (HasManualOrder(i, j)) continue;
-                    if (HasConflict(_systems[i], _systems[j]))
-                    {
-                        // 已达可达关系（手动顺序的传递闭包，如 First→Middle→Last）时不再加自动边，
-                        // 否则自动冲突边可能与手动顺序形成环（First→Middle→Last→First）误报 cyclic dependency。
-                        if (IsReachable(i, j, graph) || IsReachable(j, i, graph)) continue;
-                        bool iBlocksJ = _systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents)
-                                     || _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents);
-                        bool jBlocksI = _systems[j].WriteComponents.Overlaps(_systems[i].ReadComponents)
-                                     || _systems[j].WriteComponents.Overlaps(_systems[i].WriteComponents);
-                        if (iBlocksJ && !jBlocksI)
-                        {
-                            AddEdge(i, j);
-                        }
-                        else if (jBlocksI && !iBlocksJ)
-                        {
-                            AddEdge(j, i);
-                        }
-                        else
-                        {
-                            // 双向冲突（A 写 X 读 Y / B 写 Y 读 X）与写-写冲突时，旧实现按
-                            //   注册顺序（i<j 就取 i→j）定边 ⇒ 同一组 system 换个注册顺序就得到
-                            //   不同的执行顺序（提交顺序不可复现）。改为按类型全名的稳定判据定方向。
-                            if (string.CompareOrdinal(_systems[i].SystemType.FullName, _systems[j].SystemType.FullName) <= 0)
-                                AddEdge(i, j);
-                            else
-                                AddEdge(j, i);
-                        }
-                    }
+                    if (!HasConflict(_systems[i], _systems[j])) continue;
+
+                    // 手动顺序已建立可达关系时不再加自动边，否则可能与手动顺序互指成环。
+                    if (IsReachable(i, j, graph) || IsReachable(j, i, graph)) continue;
+
+                    bool iBlocksJ = _systems[i].WriteComponents.Overlaps(_systems[j].ReadComponents)
+                                 || _systems[i].WriteComponents.Overlaps(_systems[j].WriteComponents);
+                    bool jBlocksI = _systems[j].WriteComponents.Overlaps(_systems[i].ReadComponents)
+                                 || _systems[j].WriteComponents.Overlaps(_systems[i].WriteComponents);
+                    if (iBlocksJ && !jBlocksI) addEdge(i, j);
+                    else if (jBlocksI && !iBlocksJ) addEdge(j, i);
+                    else if (string.CompareOrdinal(_systems[i].SystemType.FullName, _systems[j].SystemType.FullName) <= 0)
+                        addEdge(i, j);
+                    else
+                        addEdge(j, i);
                 }
             }
+        }
 
+        // Kahn 分层。层内按 Order 排序，Order 相等时用类型全名做 tiebreak（List.Sort 不稳定）。
+        private void LayerByKahn(List<int>[] graph, int[] inDegree)
+        {
+            int n = _systems.Count;
             var queue = new Queue<int>();
-            for (int i = 0; i < n; i++) { if (inDegree[i] == 0) queue.Enqueue(i); }
+            for (int i = 0; i < n; i++)
+            {
+                if (inDegree[i] == 0) queue.Enqueue(i);
+            }
+
             int scheduled = 0;
             while (queue.Count > 0)
             {
@@ -144,33 +151,26 @@ namespace EntJoy.ECS
                     layer.Add(_systems[idx]);
                     foreach (int next in graph[idx])
                     {
-                        inDegree[next]--;
-                        if (inDegree[next] == 0) queue.Enqueue(next);
+                        if (--inDegree[next] == 0) queue.Enqueue(next);
                     }
                 }
-                // 同 layer 内按 Order 优先级排序（Order 越小越先执行）。
-                // Order 相等时必须有与注册顺序无关的 tiebreak（List.Sort 是不稳定排序，
-                //   否则同 Order 的提交顺序会跟着注册顺序走 ⇒ 不可复现）。
                 layer.Sort((a, b) =>
                 {
                     int byOrder = a.Order.CompareTo(b.Order);
-                    return byOrder != 0
-                        ? byOrder
-                        : string.CompareOrdinal(a.SystemType.FullName, b.SystemType.FullName);
+                    return byOrder != 0 ? byOrder : string.CompareOrdinal(a.SystemType.FullName, b.SystemType.FullName);
                 });
                 _layers.Add(layer);
             }
 
-            // 环检测：Kahn 排序后仍有 inDegree>0 的节点即为循环依赖（OrderBefore/OrderAfter 互指），
-            // 直接抛错而非静默丢弃——否则这些 system 永不执行且无任何提示。
-            if (scheduled != n)
+            // 排序后仍有入度未消的节点即为环：必须抛错，否则这些 system 永不执行且无任何提示。
+            if (scheduled == n) return;
+            var cyclic = new List<string>();
+            for (int i = 0; i < n; i++)
             {
-                var cyclic = new List<string>();
-                for (int i = 0; i < n; i++)
-                    if (inDegree[i] > 0) cyclic.Add(_systems[i].Name);
-                throw new InvalidOperationException(
-                    $"ScheduleGraph detected a cyclic dependency among systems: {string.Join(", ", cyclic)}.");
+                if (inDegree[i] > 0) cyclic.Add(_systems[i].Name);
             }
+            throw new InvalidOperationException(
+                $"ScheduleGraph detected a cyclic dependency among systems: {string.Join(", ", cyclic)}.");
         }
 
         private bool HasManualOrder(int i, int j)

@@ -218,99 +218,103 @@ namespace EntJoy.ECS.JobSystem
 
             try
             {
-                // Event Buffer: 自动 drain 到 World.EventStream
-                if (header->eventBufferCount > 0 && header->eventWorldHandle != IntPtr.Zero)
-                {
-                    var world = (World)GCHandle.FromIntPtr(header->eventWorldHandle).Target!;
-                    ChunkJobScheduler.DrainEventBuffersFromCleanup(contextBlock, world);
-                    // 释放 eventBufferHeaders 指针数组
-                    if (header->eventBufferHeaders != IntPtr.Zero)
-                    {
-                        var ptrArr = (IntPtr*)header->eventBufferHeaders;
-                        for (int ei = 0; ei < header->eventBufferCount; ei++)
-                            if (ptrArr[ei] != IntPtr.Zero) Marshal.FreeHGlobal(ptrArr[ei]);
-                        Marshal.FreeHGlobal(header->eventBufferHeaders);
-                    }
-                    // 释放 World GCHandle
-                    GCHandle.FromIntPtr(header->eventWorldHandle).Free();
-                }
-
-                if (chunksPtr != null && gcHandleStartIndex >= 0)
-                {
-                    lock (ChunkGCHandlesLock)
-                    {
-                        for (int i = 0; i < chunkCount && (gcHandleStartIndex + i) < ChunkGCHandles.Count; i++)
-                        {
-                            int index = gcHandleStartIndex + i;
-                            if (ChunkGCHandles[index].IsAllocated) { ChunkGCHandles[index].Free(); ChunkGCHandles[index] = default; }
-                        }
-                        while (ChunkGCHandles.Count > 0 && !ChunkGCHandles[ChunkGCHandles.Count - 1].IsAllocated)
-                            ChunkGCHandles.RemoveAt(ChunkGCHandles.Count - 1);
-                        if (ChunkGCHandles.Capacity > 8192 && ChunkGCHandles.Capacity > ChunkGCHandles.Count * 4)
-                            ChunkGCHandles.TrimExcess();
-                    }
-                }
-
+                ReleaseEventBuffers(header);
+                ReleaseChunkGCHandles(gcHandleStartIndex, chunkCount);
                 if (ownsChunkData)
                 {
                     for (int i = 0; i < chunkCount; i++)
                     {
-                        if (chunksPtr != null)
-                        {
-                            var cd = chunksPtr[i];
-                            ChunkJobScheduler.FreeNativeFilter(cd.filter);
-                            if (cd.componentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.componentArrays);
-                            if (cd.componentSizes != null) Marshal.FreeHGlobal((IntPtr)cd.componentSizes);
-                            if (cd.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.enableBitMaps);
-                            if (cd.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)cd.componentTypeIndices);
-                            if (cd.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)cd.requiredComponentArrays);
-                            if (cd.requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)cd.requiredEnableBitMaps);
-                            if (cd.sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)cd.sharedValuePtrs);
-                        }
+                        if (chunksPtr != null) ChunkJobScheduler.FreeChunkJobData(chunksPtr[i]);
                     }
+                    if (chunksPtr != null) Marshal.FreeHGlobal((IntPtr)chunksPtr);
                 }
-
-                if (chunksPtr != null && ownsChunkData) Marshal.FreeHGlobal((IntPtr)chunksPtr);
             }
             finally
             {
-                // 托管回调路径：移除 Chunk[] 引用（由 ChunkArrayTable 管理，无 GCHandle）
                 ChunkJobScheduler.ChunkArrayTable.TryRemove(contextBlock, out _);
-
-                // 托管引用 job：释放 job 区域的 GCHandle（box）
-                if (header->jobIsBoxed != 0)
-                {
-                    try
-                    {
-                        int jobTypesDataSize = header->allEnabledCount * sizeof(int);
-                        int jobRequiredTypesDataSize = header->requiredComponentTypeIdCount * sizeof(int);
-                        byte* jobPtr = (byte*)contextBlock + Unsafe.SizeOf<ChunkContextHeader>() + jobTypesDataSize + jobRequiredTypesDataSize;
-                        var jobBoxHandle = GCHandle.FromIntPtr(*(IntPtr*)jobPtr);
-                        if (jobBoxHandle.IsAllocated) jobBoxHandle.Free();
-                    }
-                    catch { }
-                }
-
-                if (ChunkContextLeases.TryRemove(contextBlock, out var leaseHandle))
-                {
-                    try
-                    {
-                        if (leaseHandle.Target is IDisposable lease)
-                            lease.Dispose();
-                    }
-                    catch { }
-                    try { leaseHandle.Free(); } catch { }
-                }
-
+                ReleaseJobBoxHandle(header, contextBlock);
+                ReleaseLease(contextBlock);
                 Interlocked.Exchange(ref header->cleanupInProgress, 0);
-                try
-                {
-                    var pooledBlock = contextBlock - IntPtr.Size;
-                    int pooledSize = *(int*)pooledBlock;
-                    NativeJobCore.ContextPool.Return(pooledBlock, pooledSize);
-                }
-                catch { }
+                ReturnContextBlock(contextBlock);
             }
+        }
+
+        // 把缓冲里的事件 drain 进 World.EventStream，再释放缓冲头指针数组与 World 的 GCHandle。
+        private static unsafe void ReleaseEventBuffers(ChunkContextHeader* header)
+        {
+            if (header->eventBufferCount <= 0 || header->eventWorldHandle == IntPtr.Zero) return;
+
+            var world = (World)GCHandle.FromIntPtr(header->eventWorldHandle).Target!;
+            ChunkJobScheduler.DrainEventBuffersFromCleanup((IntPtr)header, world);
+
+            if (header->eventBufferHeaders != IntPtr.Zero)
+            {
+                var ptrArr = (IntPtr*)header->eventBufferHeaders;
+                for (int ei = 0; ei < header->eventBufferCount; ei++)
+                {
+                    if (ptrArr[ei] != IntPtr.Zero) Marshal.FreeHGlobal(ptrArr[ei]);
+                }
+                Marshal.FreeHGlobal(header->eventBufferHeaders);
+            }
+            GCHandle.FromIntPtr(header->eventWorldHandle).Free();
+        }
+
+        // 释放本批占用的 Chunk 保活句柄，并把表尾的空洞回收掉。
+        private static void ReleaseChunkGCHandles(int startIndex, int count)
+        {
+            if (startIndex < 0) return;
+            lock (ChunkGCHandlesLock)
+            {
+                for (int i = 0; i < count && (startIndex + i) < ChunkGCHandles.Count; i++)
+                {
+                    int index = startIndex + i;
+                    if (!ChunkGCHandles[index].IsAllocated) continue;
+                    ChunkGCHandles[index].Free();
+                    ChunkGCHandles[index] = default;
+                }
+                while (ChunkGCHandles.Count > 0 && !ChunkGCHandles[ChunkGCHandles.Count - 1].IsAllocated)
+                    ChunkGCHandles.RemoveAt(ChunkGCHandles.Count - 1);
+                if (ChunkGCHandles.Capacity > 8192 && ChunkGCHandles.Capacity > ChunkGCHandles.Count * 4)
+                    ChunkGCHandles.TrimExcess();
+            }
+        }
+
+        // 托管 job 以 box 形式存放在上下文尾部：跳过类型 id 数据后取出释放。
+        private static unsafe void ReleaseJobBoxHandle(ChunkContextHeader* header, IntPtr contextBlock)
+        {
+            if (header->jobIsBoxed == 0) return;
+            try
+            {
+                int typesSize = header->allEnabledCount * sizeof(int);
+                int requiredSize = header->requiredComponentTypeIdCount * sizeof(int);
+                byte* jobPtr = (byte*)contextBlock + sizeof(ChunkContextHeader) + typesSize + requiredSize;
+                var handle = GCHandle.FromIntPtr(*(IntPtr*)jobPtr);
+                if (handle.IsAllocated) handle.Free();
+            }
+            catch { }
+        }
+
+        private static void ReleaseLease(IntPtr contextBlock)
+        {
+            if (!ChunkContextLeases.TryRemove(contextBlock, out var leaseHandle)) return;
+            try
+            {
+                if (leaseHandle.Target is IDisposable lease) lease.Dispose();
+            }
+            catch { }
+            try { leaseHandle.Free(); } catch { }
+        }
+
+        // 上下文块前有一个 int 记录池化尺寸，归还时一并带回。
+        private static unsafe void ReturnContextBlock(IntPtr contextBlock)
+        {
+            try
+            {
+                var pooledBlock = contextBlock - IntPtr.Size;
+                int pooledSize = *(int*)pooledBlock;
+                NativeJobCore.ContextPool.Return(pooledBlock, pooledSize);
+            }
+            catch { }
         }
     }
 }

@@ -21,6 +21,8 @@ namespace JobSystem
     // trace 开关（命名空间可见）：调用方编译单元用它做快速守卫，
     // trace 关闭时跳过 PushTraceEvent 的跨 TU 调用（内联 relaxed load）。
     std::atomic<bool> g_traceEnabled{ false };
+    // 清空与推送的静默期握手：只统计已进入 PushTraceEvent 的线程（tracing 关闭时无流量）。
+    std::atomic<int> g_traceInFlight{ 0 };
 
     namespace
     {
@@ -142,11 +144,16 @@ namespace JobSystem
 
     void TraceClear() noexcept
     {
+        // 先关门再等在飞推送退场：否则它们会把清空前的 publishedCount 写回（事件复活）。
+        const bool wasEnabled = g_traceEnabled.exchange(false, std::memory_order_acq_rel);
+        while (g_traceInFlight.load(std::memory_order_acquire) != 0)
+            std::this_thread::yield();
         std::lock_guard lock(g_traceRegistryMutex);
         for (const auto& buffer : g_traceBuffers)
             buffer->publishedCount.store(0, std::memory_order_release);
         g_traceDroppedEvents.store(0, std::memory_order_release);
         g_traceSequence.store(0, std::memory_order_release);
+        g_traceEnabled.store(wasEnabled, std::memory_order_release);
     }
 
     void PushTraceEvent(
@@ -156,7 +163,10 @@ namespace JobSystem
         int entityStart,
         int entityCount) noexcept
     {
-        if (!g_traceEnabled.load(std::memory_order_relaxed)) return;
+        // 先登记再读开关：与 TraceClear 的「关门 → 等在飞归零」配对，登记晚于关门的推送必然读到 false。
+        g_traceInFlight.fetch_add(1, std::memory_order_acq_rel);
+        struct InFlightGuard { std::atomic<int>& n; ~InFlightGuard() { n.fetch_sub(1, std::memory_order_acq_rel); } } inFlight{ g_traceInFlight };
+        if (!g_traceEnabled.load(std::memory_order_acquire)) return;
         TraceThreadBuffer* buffer = EnsureCurrentThreadBuffer();
         if (buffer == nullptr) return;
         const int index = buffer->publishedCount.load(std::memory_order_relaxed);

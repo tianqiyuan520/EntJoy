@@ -19,6 +19,8 @@ namespace EntJoy.JobSystem.Managed
         private static Thread[]? _workers;
         private static int _workerCount;
         private static volatile bool _shutdown;
+        // 在途提交计数：Shutdown 置 _shutdown 后等它归零，保证排空一定能看到这些任务。
+        private static int _publishers;
         private static bool _isInitialized;
         private static readonly object _stateLock = new object();
         private static int _epoch;
@@ -102,6 +104,8 @@ namespace EntJoy.JobSystem.Managed
                 // 通知所有等待者，让 worker 排空任务后退出。
                 lock (_wakeLock) Monitor.PulseAll(_wakeLock);
             }
+            // 等在途提交落位（它们要么已入队，要么已就地执行）：之后 worker 的 DrainOnQuit 一定能看到。
+            while (Volatile.Read(ref _publishers) != 0) Thread.Sleep(0);
             if (_workers == null) return;
             foreach (var w in _workers)
                 if (w != null && w.IsAlive) w.Join();
@@ -268,15 +272,15 @@ namespace EntJoy.JobSystem.Managed
             }
             void Propagate()
             {
-                var ex = dep.ReadException();
-                if (ex != null && dependent != null) dependent.RecordException(ex);
+                // 异常归属抛出它的 job：依赖方不继承（与 native 后端同一语义）。
                 enqueue();
             }
             if (dep.IsCompleted)
             {
                 // 依赖在调度前就已就绪：立即传播 + 启动，并当场归还（Signal 已跑过，不会自动归还，否则泄漏槽位）。
                 Propagate();
-                ManagedJobScheduler.AutoReturnCompletion(dep, depGen);
+                // 有异常时不归还：槽位留给持有它的句柄，Complete() 才能取出并重抛。
+                if (dep.ReadException() == null) AutoReturnCompletion(dep, depGen);
             }
             else
             {
@@ -516,6 +520,21 @@ namespace EntJoy.JobSystem.Managed
             }
         }
 
+        /// <summary>入队；已进入关停则就地执行（此后无人再消费队列，不能让任务滞留）。</summary>
+        private static bool TryEnqueueOrRunInline(ManagedTileTask task)
+        {
+            Interlocked.Increment(ref _publishers);
+            if (_shutdown)
+            {
+                Interlocked.Decrement(ref _publishers);
+                ExecuteTileTask(task);
+                return false;
+            }
+            while (!_injector!.TryEnqueue(task)) Thread.Yield();
+            Interlocked.Decrement(ref _publishers);
+            return true;
+        }
+
         // Chase-Lev Schedule 入口
 
         /// <summary>Chase-Lev 单任务调度。</summary>
@@ -542,10 +561,8 @@ namespace EntJoy.JobSystem.Managed
                 t.Start = 0;
                 t.Count = 1;
 
-                while (!_injector!.TryEnqueue(t))
-                    Thread.Yield();
-
-                PublishChaseLev(1);
+                if (TryEnqueueOrRunInline(t))
+                    PublishChaseLev(1);
             }
 
             if (dependsOn.Completion == null)
@@ -593,6 +610,7 @@ namespace EntJoy.JobSystem.Managed
 
             void EnqueueTokens()
             {
+                int publishedTokens = 0;
                 for (int i = 0; i < tokens; i++)
                 {
                     var task = new ManagedTileTask
@@ -603,9 +621,9 @@ namespace EntJoy.JobSystem.Managed
                         Start = work == null ? 0 : i,
                         Count = work == null ? arrayLength : 1
                     };
-                    while (!_injector!.TryEnqueue(task)) Thread.Yield();
+                    if (TryEnqueueOrRunInline(task)) publishedTokens++;
                 }
-                PublishChaseLev(tokens);
+                if (publishedTokens > 0) PublishChaseLev(publishedTokens);
             }
             if (dependsOn.Completion == null)
                 EnqueueTokens();

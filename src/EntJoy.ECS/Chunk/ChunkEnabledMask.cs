@@ -51,57 +51,43 @@ namespace EntJoy.ECS
         public bool TryGetNextRange(ref int start, out int rangeStart, out int rangeEnd)
         {
             if (start < 0) throw new ArgumentOutOfRangeException(nameof(start));
-            if (start >= _length)
+            if (start >= _length || !TryFindEnabledBit(start, out int pos))
             {
-                rangeStart = rangeEnd = 0;
-                return false;
-            }
-
-            // 找到第一个启用的实体
-            int pos = start;
-            int ulongIdx = pos >> 6;
-            int bitOffset = pos & 63;
-            ulong current = _bits[ulongIdx] >> bitOffset;
-
-            // 跳过当前 ulong 中从 pos 开始的连续禁用位
-            if (current == 0)
-            {
-                // 当前剩余部分全为 0，直接跳到下一个 ulong
-                pos = (ulongIdx + 1) * 64;
-                ulongIdx++;
-                while (ulongIdx < _ulongCount && _bits[ulongIdx] == 0)
-                {
-                    ulongIdx++;
-                }
-                if (ulongIdx >= _ulongCount)
-                {
-                    rangeStart = rangeEnd = 0;
-                    return false;
-                }
-                pos = ulongIdx * 64;
-                bitOffset = 0;
-                current = _bits[ulongIdx];
-            }
-
-            // 找到第一个启用位的位置
-            int firstOne = BitOperations.TrailingZeroCount(current);
-            pos += firstOne;
-            if (pos >= _length)
-            {
-                start = _length;
+                start = Math.Min(start, _length);
                 rangeStart = rangeEnd = 0;
                 return false;
             }
             rangeStart = pos;
-
-            // 找到连续启用的结束
-            current >>= firstOne;
-            int ones = BitOperations.TrailingZeroCount(~current);
-            rangeEnd = Math.Min(pos + ones, _length);
-
+            rangeEnd = Math.Min(pos + CountTrailingOnes(_bits[pos >> 6] >> (pos & 63)), _length);
             start = rangeEnd;
             return true;
         }
+
+        // 从 pos 起找第一个启用位；跨过整字为 0 的区间，找不到时返回 false。
+        private bool TryFindEnabledBit(int pos, out int found)
+        {
+            int ulongIdx = pos >> 6;
+            ulong current = _bits[ulongIdx] >> (pos & 63);
+            if (current == 0)
+            {
+                if (!TrySkipEmptyWords(ref ulongIdx, out current)) { found = 0; return false; }
+                pos = ulongIdx * 64;
+            }
+            found = pos + BitOperations.TrailingZeroCount(current);
+            return found < _length;
+        }
+
+        // 前进到下一个非零字；越过最后一个字表示后面没有任何启用位。
+        private bool TrySkipEmptyWords(ref int ulongIdx, out ulong word)
+        {
+            ulongIdx++;
+            while (ulongIdx < _ulongCount && _bits[ulongIdx] == 0) ulongIdx++;
+            word = ulongIdx < _ulongCount ? _bits[ulongIdx] : 0;
+            return ulongIdx < _ulongCount;
+        }
+
+        private static int CountTrailingOnes(ulong value)
+            => BitOperations.TrailingZeroCount(~value);
 
         // 逐位访问
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

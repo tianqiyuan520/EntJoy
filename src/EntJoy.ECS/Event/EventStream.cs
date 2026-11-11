@@ -13,11 +13,8 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// 双缓冲事件流：零结构变更的系统间消息传递。
-    ///
-    /// 生命周期：
-    /// 帧 N：SendEvent 写 buffer[0]（writeBuffer），writeCount++
-    /// 帧 N+1：ReadBuffer 读 buffer[1]（readBuffer），取 readCount 条
+    /// 双缓冲事件流：零结构变更的系统间消息传递。帧 N 的 <c>SendEvent</c> 写 writeBuffer，
+    /// 帧 N+1 的 <c>ReadBuffer</c> 从 readBuffer 取，两帧后交换。
     /// </summary>
     public sealed class EventStream<T> : IEventStream, IDisposable where T : unmanaged
     {
@@ -95,10 +92,8 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 从 Native EventBuffer drain：将 count 个 T 从 dataPtr 复制到写入缓冲区。
-        /// expectedElementSize：C# 分配 buffer 时记录的实际内存步长。
-        /// 若与 T 的真实步长（Unsafe.SizeOf&lt;T&gt;()）不一致，说明 native 侧写的 stride 与 C# 布局
-        /// 错位（ISPC uniform struct 对齐 vs C# Sequential），立即失败而不是静默读到错位数据。
+        /// 从 Native EventBuffer drain 到写入缓冲区。expectedElementSize 与 <c>Unsafe.SizeOf&lt;T&gt;()</c>
+        /// 不一致说明原生侧步长与 C# 布局错位（ISPC uniform struct 对齐 vs Sequential），立即失败。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public unsafe int DrainFromBuffer(void* dataPtr, int count, int expectedElementSize)

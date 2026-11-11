@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace EntJoy.ECS
 {
@@ -19,13 +19,8 @@ namespace EntJoy.ECS
     }
 
     /// <summary>
-    /// 多值关系（出边 1:N / M:N）：source 可持有多个 target。
-    ///
-    /// 两种存储模式，按是否指定 <see cref="MaxSlots"/> 路由：
-    /// - <c>[MultiRelation]</c>（MaxSlots = 0，默认）：主线程托管列表；Job 使用筛选位图或显式复制的目标快照。
-    /// - <c>[MultiRelation(MaxSlots = N)]</c>（N ≥ 2）：定长多槽列（chunk 列，宽 N×8B），有界、Job 可读
-    /// 源生成器注入 Slot1..SlotN-1 字段。
-    ///
+    /// 多值关系（出边 1:N / M:N）：source 可持有多个 target，两种存储模式按是否指定 <see cref="MaxSlots"/> 路由。
+    /// <c>MaxSlots = 0</c>（默认）走主线程托管列表；<c>MaxSlots = N</c> 走定长多槽列，有界且 Job 可读。
     /// 两种模式共用反向索引（RelationIndex，target → sources O(1)）。
     /// </summary>
     [AttributeUsage(AttributeTargets.Struct)]

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -482,7 +482,7 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<int, void> _jobSystem_SetJobCostCacheEnabled;
         // 可选导出（老 DLL 没有 ⇒ null ⇒ 按名批表绑不上，行为 = 该 env 无效）。
         private static delegate* unmanaged[Cdecl]<byte*, IntPtr, int> _jobSystem_BindBatchName;
-        private static delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterPersistentAllocator;
+        private static delegate* unmanaged[Cdecl]<int, delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void> _jobSystem_RegisterAllocator;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> _jobSystem_Schedule;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForBatch;
         private static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, int, IntPtr, IntPtr> _jobSystem_ScheduleParallelForRange;
@@ -512,6 +512,8 @@ namespace EntJoy.JobSystem
         private static delegate* unmanaged[Cdecl]<IntPtr*, int, IntPtr> _jobSystem_CombineDependencies;
         private static delegate* unmanaged[Cdecl]<NativeJobSystemStats*, void> _jobSystem_GetStats;
         private static delegate* unmanaged[Cdecl]<uint> _jobSystem_GetStatsSize;
+        // 布局指纹（可选导出，老 DLL 为 null）：比字节数更能抓「同宽字段换序」。
+        private static delegate* unmanaged[Cdecl]<ulong> _jobSystem_GetStatsLayoutFingerprint;
         // 诊断（句柄是否被确定性回收）：老 NativeDll.dll 无此导出 ⇒ 用 TryGetExport，缺失时上层报告"不可用"。
         private static delegate* unmanaged[Cdecl]<long> _jobSystem_GetLiveHandleCount;
         // N12 `ENTJOY_WAKE_POLL` 生效证据（可选导出，老 DLL 为 null）。
@@ -796,8 +798,6 @@ namespace EntJoy.JobSystem
                 }
             }
 
-            TryLoadNativeTranspiled(loadedPath);
-
             // Validate the stable ABI before resolving the rest of the table:
             // incompatible DLLs must not fail the process; release and fall back to Managed.
             if (!NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetAbiVersion", out IntPtr abiPtr))
@@ -816,6 +816,16 @@ namespace EntJoy.JobSystem
                 Console.Error.WriteLine("[NativeJobScheduler] NativeDll ABI mismatch; using Managed fallback.");
                 return;
             }
+            if (!NativeLibrary.TryGetExport(dllHandle, "JobSystem_RegisterAllocator", out IntPtr registerAllocatorPtr))
+            {
+                NativeLibrary.Free(dllHandle);
+                _nativeDll = IntPtr.Zero;
+                _jobSystem_GetAbiVersion = null;
+                Console.Error.WriteLine("[NativeJobScheduler] NativeDll allocator export missing; using Managed fallback.");
+                return;
+            }
+
+            TryLoadNativeTranspiled(loadedPath);
 
             _jobSystem_Initialize = (delegate* unmanaged[Cdecl]<int, int>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Initialize");
@@ -836,8 +846,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_SetJobCostCacheEnabled");
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_BindBatchName", out IntPtr bindBatchNamePtr))
                 _jobSystem_BindBatchName = (delegate* unmanaged[Cdecl]<byte*, IntPtr, int>)bindBatchNamePtr;
-            _jobSystem_RegisterPersistentAllocator = (delegate* unmanaged[Cdecl]<delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
-                NativeLibrary.GetExport(dllHandle, "JobSystem_RegisterPersistentAllocator");
+            _jobSystem_RegisterAllocator = (delegate* unmanaged[Cdecl]<int, delegate* unmanaged[Cdecl]<int, void*>, delegate* unmanaged[Cdecl]<void*, void>, void>)
+                registerAllocatorPtr;
             _jobSystem_Schedule = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_Schedule");
             _jobSystem_ScheduleParallelForBatch = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int, int, IntPtr, IntPtr>)
@@ -903,6 +913,8 @@ namespace EntJoy.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStats");
             _jobSystem_GetStatsSize = (delegate* unmanaged[Cdecl]<uint>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_GetStatsSize");
+            if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetStatsLayoutFingerprint", out IntPtr statsFingerprintPtr))
+                _jobSystem_GetStatsLayoutFingerprint = (delegate* unmanaged[Cdecl]<ulong>)statsFingerprintPtr;
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetLiveHandleCount", out IntPtr fnLiveHandleCount))
                 _jobSystem_GetLiveHandleCount = (delegate* unmanaged[Cdecl]<long>)fnLiveHandleCount;
             if (NativeLibrary.TryGetExport(dllHandle, "JobSystem_GetWakePollCounters", out IntPtr fnWakePollCounters))
@@ -1103,10 +1115,10 @@ namespace EntJoy.JobSystem
             return _jobSystem_GetWorkerCount();
         }
 
-        internal static void JobSystem_RegisterPersistentAllocator(delegate* unmanaged[Cdecl]<int, void*> alloc, delegate* unmanaged[Cdecl]<void*, void> free)
+        internal static void JobSystem_RegisterAllocator(int label, delegate* unmanaged[Cdecl]<int, void*> alloc, delegate* unmanaged[Cdecl]<void*, void> free)
         {
-            if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterPersistentAllocator == null) return;
-            _jobSystem_RegisterPersistentAllocator(alloc, free);
+            if (_nativeDll == IntPtr.Zero || _jobSystem_RegisterAllocator == null) return;
+            _jobSystem_RegisterAllocator(label, alloc, free);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1290,6 +1302,48 @@ namespace EntJoy.JobSystem
                 throw new InvalidOperationException(
                     $"NativeJobSystemStats 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 Exports.h 与 NativeJobScheduler.cs 字段。");
             }
+            if (_jobSystem_GetStatsLayoutFingerprint != null)
+            {
+                ulong nativeFingerprint = _jobSystem_GetStatsLayoutFingerprint();
+                ulong managedFingerprint = ComputeStatsLayoutFingerprint();
+                if (nativeFingerprint != managedFingerprint)
+                    throw new InvalidOperationException(
+                        $"NativeJobSystemStats 布局指纹不匹配：C++=0x{nativeFingerprint:X16} C#=0x{managedFingerprint:X16}。字段名/顺序/大小必须与 Exports.h 的 JOB_STATS_FIELDS 一致。");
+            }
+        }
+
+        // 布局指纹用的 FNV-1a 常量：与 C++ Exports.h 的 kLayoutFnvBasis / kLayoutFnvPrime / kLayoutSalt 同值。
+        private const ulong LayoutFnvBasis = 1469598103934665603UL;
+        private const ulong LayoutFnvPrime = 1099511628211UL;
+        private const ulong LayoutSalt = 0x9e3779b97f4a7c15UL;
+
+        /// <summary>单个字段的指纹：名字（忽略大小写）+ 偏移 + 大小，与 C++ JobStatsFieldHash 同算法。</summary>
+        private static ulong JobStatsFieldHash(string name, ulong offset, ulong size)
+        {
+            ulong hash = LayoutFnvBasis;
+            foreach (char c in name)
+            {
+                hash ^= (byte)char.ToLowerInvariant(c);
+                hash *= LayoutFnvPrime;
+            }
+            hash = (hash ^ offset) * LayoutFnvPrime;
+            hash = (hash ^ size) * LayoutFnvPrime;
+            return hash;
+        }
+
+        /// <summary>整个结构体的指纹：字段指纹按加法合成，与反射枚举顺序无关。</summary>
+        private static ulong ComputeStatsLayoutFingerprint()
+        {
+            ulong sum = 0;
+            var type = typeof(NativeJobSystemStats);
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                sum += JobStatsFieldHash(
+                    field.Name,
+                    (ulong)Marshal.OffsetOf(type, field.Name),
+                    (ulong)Marshal.SizeOf(field.FieldType));
+            }
+            return sum + (LayoutSalt ^ (ulong)Marshal.SizeOf(type));
         }
         internal static void JobSystem_ResetStats()
         {

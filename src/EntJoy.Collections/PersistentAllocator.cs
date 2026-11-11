@@ -10,21 +10,18 @@ namespace EntJoy.Collections
     /// <summary>
     /// Allocator.Persistent 的 free-list 分配器（参考 Unity AllocatorManager / ContextPool 范式）。
     /// 线程安全（ConcurrentStack），可被 worker 线程 job 内分配/释放。
-    /// [16..] payload 返回给调用者
-    ///
-    /// 外来块安全护栏：存活表 s_live 记录所有本分配器发出的块基址。Free 时先查表——
-    /// 命中 → 本分配器块，按 header 回收/释放；
-    /// 直接按原始指针 FreeHGlobal（LocalAlloc 基址→正确释放；CRT 块→静默泄漏，与改动前行为一致）。
-    /// 这杜绝了"对内部指针减 HeaderSize 再释放"导致的堆损坏（STATUS_HEAP_CORRUPTION 0xc0000374）。
+    /// 存活表按返回指针记录分桶索引；未知指针不会被释放。
     /// </summary>
     public static unsafe class PersistentAllocator
     {
+        // payload 始终从块基址偏移 HeaderSize 开始：这段前缀保留给分配器内部使用，
+        // 记账改由 s_live 承担，因此不得缩小偏移——缩小会让既有调用方的 payload 落点整体前移。
         private const int HeaderSize = 16;
         private const int MaxClassIndex = 30;      // 2^30 = 1GB；超过直通 OS
         private const int MaxPerClass = 64;        // 每类保留块数上限，防内存无限增长
 
         private static readonly ConcurrentStack<IntPtr>[] _classes = new ConcurrentStack<IntPtr>[MaxClassIndex + 1];
-        private static readonly ConcurrentDictionary<IntPtr, byte> s_live = new ConcurrentDictionary<IntPtr, byte>();
+        private static readonly ConcurrentDictionary<IntPtr, int> s_live = new ConcurrentDictionary<IntPtr, int>();
 
         // 统计（Interlocked）
         private static int s_allocs;
@@ -42,9 +39,8 @@ namespace EntJoy.Collections
             if (idx < 0 || idx > MaxClassIndex)
             {
                 // 超大块直通 OS
-                IntPtr basePtr = Marshal.AllocHGlobal(size + HeaderSize);
-                WriteHeader(basePtr, -1, size);
-                s_live.TryAdd(basePtr, 0);
+                IntPtr basePtr = Marshal.AllocHGlobal((nint)size + HeaderSize);
+                s_live.TryAdd(basePtr + HeaderSize, -1);
                 Interlocked.Increment(ref s_allocs);
                 Interlocked.Increment(ref s_misses);
                 return (void*)(basePtr + HeaderSize);
@@ -53,16 +49,14 @@ namespace EntJoy.Collections
             var cls = _classes[idx];
             if (cls != null && cls.TryPop(out IntPtr ptr))
             {
-                WriteHeader(ptr, idx, 1 << idx);
-                s_live.TryAdd(ptr, 0);
+                s_live.TryAdd(ptr + HeaderSize, idx);
                 Interlocked.Increment(ref s_allocs);
                 Interlocked.Increment(ref s_hits);
                 return (void*)(ptr + HeaderSize);
             }
 
             IntPtr newPtr = Marshal.AllocHGlobal((1 << idx) + HeaderSize);
-            WriteHeader(newPtr, idx, 1 << idx);
-            s_live.TryAdd(newPtr, 0);
+            s_live.TryAdd(newPtr + HeaderSize, idx);
             Interlocked.Increment(ref s_allocs);
             Interlocked.Increment(ref s_misses);
             return (void*)(newPtr + HeaderSize);
@@ -75,15 +69,12 @@ namespace EntJoy.Collections
             Interlocked.Increment(ref s_frees);
 
             // 存活表：区分本分配器块与外来块，杜绝内部指针释放
-            if (!s_live.TryRemove(basePtr, out _))
+            if (!s_live.TryRemove((IntPtr)payload, out int idx))
             {
                 // 未登记指针不属于本分配器，不能猜测其 allocator 并释放。
                 Interlocked.Increment(ref s_foreign);
                 return;
             }
-
-            int idx = *(int*)basePtr;
-            int payloadSize = *(int*)(basePtr + 4);
 
             if (idx < 0 || idx > MaxClassIndex)
             {
@@ -102,13 +93,6 @@ namespace EntJoy.Collections
                 Marshal.FreeHGlobal(basePtr);
                 Interlocked.Increment(ref s_toOS);
             }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void WriteHeader(IntPtr basePtr, int idx, int payloadSize)
-        {
-            *(int*)basePtr = idx;
-            *(int*)(basePtr + 4) = payloadSize;
         }
 
         /// <summary>ceil(log2(size)) → 2 的幂 size-class 索引。</summary>

@@ -1,8 +1,5 @@
 using System;
-using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using EntJoy.ECS.JobSystem;
 using EntJoy.JobSystem;
 
@@ -24,347 +21,91 @@ namespace EntJoy.ECS
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
     }
 
-    // 实体级迭代：archetype → chunk → slot。每 chunk 提升组件基址一次（等价 IJobChunk 循环形态），
-    // 循环内逐 slot 产出 ref 组件对，密集 OOD 访问零间接、与 class 持平。
-    // 支持 AllEnabled 过滤（.WithEnabled<T1>()）：构建时计算组合位图，MoveNext 跳过禁用 slot。
-    public unsafe ref struct QueryEnumerator<T0, T1>
-        where T0 : struct
-        where T1 : struct
+    public unsafe ref struct QueryEnumerator<T0, T1> where T0 : struct where T1 : struct
     {
-        private readonly EntityManager _entityManager;
-        private readonly QueryBuilder _builder;
-        private readonly ComponentType[] _allEnabledTypes;
-        private int _archIndex;
-        private int _chunkIndex;
-        private int _slotIndex;
-        private int _count;
-        private Archetype _currentArch;
-        private Chunk _currentChunk;
-        private int _t0Idx;
-        private int _t1Idx;
-        private T0* _t0Base;
-        private T1* _t1Base;
-        private readonly QueryReadState _readState;   // 迭代开始时的结构版本，检测迭代期间结构变更
-
-        // AllEnabled 组合位图（无过滤时为 null）。用托管数组（GC 追踪 byref），避免嵌套查询互相覆盖。
-        private ulong[] _combinedMask;
-        private ulong[] _maskBuffer;
-        private int _ulongCount;
-
-        // 关系过滤（WithRelationship<T>(target)）——逐 slot 校验 RelationSlot.Matches
-        private readonly bool _hasRelFilter;
-        private readonly RelationSlot _relTarget;
-        private readonly ComponentType _relType;
-        private readonly int _relStride;      // 关系列宽（= TRel 真实大小；>8B 时按列宽步进，防错位）
-        private readonly int _relMaxSlots;    // 定长多槽列槽位数（≥2 时逐槽校验；0/1 = 单槽）
-        private RelationSlot* _relBase;   // 关系列基址（仅 _hasRelFilter 时使用）
-        private bool _relTargetAlive;     // 过滤目标存活校验结果（进入首个 Archetype 时计算一次）
-        private bool _relTargetAliveChecked;
-
-        internal QueryEnumerator(EntityManager entityManager, QueryBuilder builder)
-        {
-            _entityManager = entityManager;
-            _builder = builder;
-            _allEnabledTypes = builder.AllEnabled;
-            _archIndex = 0;
-            _chunkIndex = 0;
-            _slotIndex = 0;
-            _count = 0;
-            _currentArch = null;
-            _currentChunk = default;
-            _t0Idx = -1;
-            _t1Idx = -1;
-            _t0Base = null;
-            _t1Base = null;
-            _readState = new QueryReadState(entityManager, builder.HasRelationshipFilter || ComponentTypeManager.IsRelationType<T0>() || ComponentTypeManager.IsRelationType<T1>());
-            _combinedMask = null;
-            _ulongCount = 0;
-            _hasRelFilter = builder.HasRelationshipFilter;
-            _relTarget = builder.RelationshipFilterTarget;
-            _relType = builder.RelationshipFilterType;
-            _relStride = builder.RelationshipFilterType.Size;   // 列宽（真实 TRel 大小）
-            _relMaxSlots = builder.RelationshipFilterType.MultiRelationMaxSlots;   // 定长多槽列槽位数
-            _relTargetAlive = true;
-            _relTargetAliveChecked = false;
-        }
-
-        /// <summary>校验过滤目标实体是否仍存活（Id 范围内且 Archetype 非空）。</summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool IsRelTargetAlive() => _entityManager.IsRelationshipTargetAlive(_relTarget);
+        private static readonly ComponentType[] Columns = ComponentTypes<T0, T1>.Share;
+        private QueryTraversalCursor _cursor;
+        private readonly QueryReadState _readState;
+        // 计划可整块命中时按 Chunk 表推进，不搬动整个游标。
+        private readonly bool _useChunkTable;
+        private int _chunkTableIndex;
+        // 相对连续区间末尾的偏移；有效实体为负数，0 表示区间耗尽。
+        private int _slotOffset;
+        private int _rangeEnd;
+        private T0* _base0;
+        private T1* _base1;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool MoveNextArchetype()
+        internal QueryEnumerator(EntityManager manager, QueryBuilder builder)
         {
-            while (_archIndex < _entityManager.ArchetypeCount)
-            {
-                var arch = _entityManager.Archetypes[_archIndex];
-                _archIndex++;
-                if (arch != null && arch.IsMatch(_builder))
-                {
-                    // 首次进入匹配 Archetype 时做一次过滤目标存活校验（此后不变）
-                    if (_hasRelFilter && !_relTargetAliveChecked)
-                    {
-                        _relTargetAlive = IsRelTargetAlive();
-                        _relTargetAliveChecked = true;
-                    }
-                    _currentArch = arch;
-                    _t0Idx = arch.GetComponentTypeIndex<T0>();
-                    _t1Idx = _hasRelFilter && _relType.IsMultiRelation && _relMaxSlots == 0 && _relType.Type == typeof(T1)
-                        ? -1 : arch.GetComponentTypeIndex<T1>();
-                    _chunkIndex = 0;
-                    return MoveNextChunk();
-                }
-            }
-            return false;
+            _cursor = new QueryTraversalCursor(manager, builder, Columns);
+            _readState = new QueryReadState(manager, builder.HasRelationshipFilter || ComponentTypeManager.IsRelationType<T0>() || ComponentTypeManager.IsRelationType<T1>());
+            _useChunkTable = _cursor.CanUseChunkTable;
+            _chunkTableIndex = -1;
+            _slotOffset = 0;
+            _rangeEnd = 0;
+            _base0 = null;
+            _base1 = null;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool MoveNextChunk()
-        {
-            if (_currentArch == null) return false;
-            var chunks = _currentArch.ChunkList;
-            while (_chunkIndex < chunks.Count)
-            {
-                var chunk = chunks[_chunkIndex];
-                _chunkIndex++;
-                if (chunk.EntityCount > 0)
-                {
-                    // SharedComponent chunk 级过滤——不匹配则跳过整个 chunk
-                    if (_builder.HasSharedFilter && !_entityManager.MatchesSharedFilter(_builder, chunk))
-                        continue;
-
-                    _currentChunk = chunk;
-                    _count = chunk.EntityCount;
-                    _t0Base = (T0*)chunk.GetComponentArrayPointer(_t0Idx);
-                    _t1Base = _t1Idx < 0 ? null : (T1*)chunk.GetComponentArrayPointer(_t1Idx);
-
-                    // 关系过滤——解析关系列基址（RelationSlot*，8B/槽）
-                    if (_hasRelFilter && !(_relType.IsMultiRelation && _relMaxSlots == 0))
-                    {
-                        int relIdx = _currentArch.GetComponentTypeIndex(_relType);
-                        _relBase = (RelationSlot*)chunk.GetComponentArrayPointer(relIdx);
-                    }
-                    else
-                    {
-                        _relBase = null;
-                    }
-
-                    _slotIndex = 0;
-
-                    // 有 AllEnabled 过滤：计算组合位图；无交集则跳过此 Chunk
-                    if (_allEnabledTypes != null && _allEnabledTypes.Length > 0)
-                    {
-                        if (!ComputeCombinedMask(chunk))
-                        {
-                            _combinedMask = null;
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        _combinedMask = null;
-                    }
-
-                    return true;
-                }
-            }
-            _currentChunk = default;
-            return MoveNextArchetype();
-        }
-
-        /// <summary>
-        /// 计算 AllEnabled 组合位图（SIMD AND + 提前退出）。
-        /// 返回 false 表示无交集（Chunk 中没有任何实体同时启用所有 AllEnabled 组件）。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool ComputeCombinedMask(Chunk chunk)
-        {
-            _ulongCount = (chunk.EntityCount + 63) / 64;
-            if (_maskBuffer == null || _maskBuffer.Length < _ulongCount)
-                _maskBuffer = new ulong[_ulongCount];
-            _combinedMask = _maskBuffer;
-            fixed (ulong* combinedMask = _maskBuffer)
-            {
-                for (int i = 0; i < _ulongCount; i++) combinedMask[i] = 0;
-
-                bool firstFound = false;
-                var archetype = chunk.Archetype;
-                foreach (var type in _allEnabledTypes)
-                {
-                    int componentIndex = archetype.GetComponentTypeIndex(type);
-                    if (componentIndex < 0) continue;
-                    ulong* bitmap = chunk.GetEnableBitMapPointer(componentIndex);
-                    if (bitmap == null) continue;
-
-                    if (!firstFound)
-                    {
-                        for (int i = 0; i < _ulongCount; i++)
-                            combinedMask[i] = bitmap[i];
-                        firstFound = true;
-                    }
-                    else
-                    {
-                        // SIMD 批量 AND + 提前退出
-                        if (Avx2.IsSupported && _ulongCount >= 4)
-                        {
-                            int i = 0;
-                            var orResult = Vector256<ulong>.Zero;
-
-                            for (; i <= _ulongCount - 4; i += 4)
-                            {
-                                var a = Avx.LoadVector256(combinedMask + i);
-                                var b = Avx.LoadVector256(bitmap + i);
-                                var andResult = Avx2.And(a, b);
-                                Avx.Store(combinedMask + i, andResult);   // 必须存回 AND 结果，否则 combinedMask 残留首组件位图
-                                orResult = Avx2.Or(orResult, andResult);
-                            }
-
-                            bool hasIntersection = !Avx.TestZ(orResult, orResult);
-
-                            for (; i < _ulongCount && !hasIntersection; i++)
-                            {
-                                combinedMask[i] &= bitmap[i];
-                                hasIntersection = combinedMask[i] != 0;
-                            }
-
-                            if (hasIntersection)
-                            {
-                                for (; i < _ulongCount; i++)
-                                    combinedMask[i] &= bitmap[i];
-                            }
-                            else
-                            {
-                                return false;
-                            }
-                        }
-                        else
-                        {
-                            bool hasAny = false;
-                            for (int i = 0; i < _ulongCount; i++)
-                            {
-                                combinedMask[i] &= bitmap[i];
-                                if (combinedMask[i] != 0) hasAny = true;
-                            }
-                            if (!hasAny) return false;
-                        }
-                    }
-                }
-
-                return firstFound;
-            }
-        }
-
+        [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext()
         {
-            // 迭代期间结构变更（DestroyEntity/AddComponent 等 swap-pop）会使实体槽位移动，
-            // 静默读死槽/重复处理。对齐 DOTS 的 structural change 检测：版本不一致即抛。
-            _readState.Validate();
-
-            // 已有当前 Chunk：从 slot+1 继续；否则从位置 0 开始
-            if (_currentChunk.MemoryBlock != nint.Zero)
-                _slotIndex++;
-
-            return Advance();
-        }
-
-        /// <summary>
-        /// 从当前 _slotIndex 起查找下一个满足条件的实体；跨 Chunk/Archetype 自动推进。
-        /// 有 AllEnabled 过滤时每个 Chunk 的 slot 0 都经过位图检查（无漏查）。
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool Advance()
-        {
-            while (true)
+            _readState.ValidateTracked();
+            _slotOffset++;
+            // 区间内只递增槽位；跨区间时再解析过滤和列基址。
+            if (_slotOffset < 0) return true;
+            if (_useChunkTable)
             {
-                // 定位到有效 Chunk
-                if (_currentArch == null)
+                int next = _chunkTableIndex + 1;
+                if (next < _cursor.ChunkCount)
                 {
-                    if (!MoveNextArchetype())
-                        return false;
-                }
-                else if (_currentChunk.MemoryBlock == nint.Zero)
-                {
-                    if (!MoveNextChunk())
-                        return false;
-                }
-
-                if (_combinedMask != null)
-                {
-                    // 启用过滤：位图遍历
-                    while (_slotIndex < _count)
-                    {
-                        int ulongIdx = _slotIndex >> 6;
-                        if (ulongIdx >= _ulongCount)
-                        {
-                            _slotIndex = _count;
-                            break;
-                        }
-
-                        int bitOffset = _slotIndex & 63;
-                        ulong mask = _combinedMask[ulongIdx] >> bitOffset;
-
-                        if (mask != 0)
-                        {
-                            int bitIndex = BitOperations.TrailingZeroCount(mask);
-                            _slotIndex += bitIndex;
-                            if (_slotIndex < _count)
-                            {
-                                // 位图命中后仍需通过关系过滤（链式过滤：WithEnabled + WithRelationship）
-                                if (PassesRelationFilter())
-                                    return true;
-                                _slotIndex++;
-                                continue;
-                            }
-                            break;
-                        }
-
-                        _slotIndex = (ulongIdx + 1) << 6;
-                    }
+                    _chunkTableIndex = next;
+                    ref readonly var entry = ref _cursor.ChunkEntry(next);
+                    _rangeEnd = entry.Count;
+                    _slotOffset = -entry.Count;
+                    _base0 = (T0*)entry.Base0 + entry.Count;
+                    SetBase1(entry.Base1, entry.Count);
                 }
                 else
                 {
-                    // 无过滤：普通遍历
-                    if (_slotIndex < _count)
-                    {
-                        if (PassesRelationFilter())
-                            return true;
-                        _slotIndex++;
-                        continue;
-                    }
+                    ResetRange();
                 }
-
-                // 当前 Chunk 耗尽 → 下一 Chunk（MoveNextChunk 重置 _slotIndex=0 并重新检查）
-                _currentChunk = default;
             }
+            else
+            {
+                var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);
+                _cursor = cursor;
+                if (cursor.HasChunk)
+                {
+                    _rangeEnd = cursor.RangeEnd;
+                    _slotOffset = cursor.Slot - _rangeEnd;
+                    _base0 = (T0*)cursor.ComponentBase(0) + _rangeEnd;
+                    SetBase1(cursor.ComponentBase(1), _rangeEnd);
+                }
+                else
+                {
+                    ResetRange();
+                }
+            }
+            // 区间内 _slotOffset 恒为负；HasChunk 时 RangeEnd 必大于 0，故该判据与基址判空等价。
+            return _slotOffset < 0;
         }
 
-        /// <summary>
-        /// 关系过滤校验：无过滤恒 true；有过滤时先校验过滤目标存活
-        /// （一次，目标销毁后整个查询为空），再逐 slot 校验槽位匹配。
-        /// </summary>
+        // 关系列可以是托管多目标（无列），此时 Comp1 不可用。
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool PassesRelationFilter()
+        private void SetBase1(nint column1, int count)
         {
-            if (!_hasRelFilter) return true;
-            if (!_relTargetAlive) return false;
-            if (_relType.IsMultiRelation && _relMaxSlots == 0)
-                return _entityManager.MatchesRelationshipFilter(_builder, _currentChunk, _slotIndex);
-            if (_relBase == null) return false;
-            // 关系列可能宽于 8B（TRel 带数据 / 定长多槽列）：按列宽步进，再重解释槽位。
-            var col = (byte*)_relBase + _slotIndex * _relStride;
-            if (_relMaxSlots >= 2)
-            {
-                // 定长多槽列：任一槽匹配即命中
-                for (int i = 0; i < _relMaxSlots; i++)
-                {
-                    if (((RelationSlot*)(col + i * 8))->Matches(_relTarget))
-                        return true;
-                }
-                return false;
-            }
-            // 单值列（8B / 带数据）：首 8B 即 RelationSlot
-            return ((RelationSlot*)col)->Matches(_relTarget);
+            _base1 = column1 == 0 && ComponentTypeManager.IsRelationType<T1>() ? null : (T1*)column1 + count;
+        }
+
+        private void ResetRange()
+        {
+            _rangeEnd = 0;
+            _slotOffset = 0;
+            _base0 = null;
+            _base1 = null;
         }
 
         public EntityQueryResult<T0, T1> Current
@@ -372,14 +113,16 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                _readState.Validate();
-                if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();
-                return new EntityQueryResult<T0, T1>(_t0Base + _slotIndex, _t1Base == null ? null : _t1Base + _slotIndex, _readState);            }
+                _readState.ValidateTracked();
+                // _slotOffset 在区间内恒为负；该检查复用已在寄存器中的值，不额外加载。
+                if (_slotOffset >= 0) throw new InvalidOperationException();
+                return new EntityQueryResult<T0, T1>(_base0 + _slotOffset,
+                    ComponentTypeManager.IsRelationType<T1>() && _base1 == null ? null : _base1 + _slotOffset, _readState);
+            }
         }
     }
 
-    // 直接持有裸指针(非 ref 字段):避免 readonly ref struct 的 ref 存活跟踪,
-    // 让 JIT 能把这 2 个指针放进寄存器、彻底内联进 foreach 循环体。
+    // 获取组件引用时校验借用；已返回的引用由调用方保证使用期间没有结构变更。
     public unsafe readonly struct EntityQueryResult<T0, T1> where T0 : struct where T1 : struct
     {
         private readonly T0* _c0;
@@ -387,7 +130,10 @@ namespace EntJoy.ECS
         private readonly QueryReadState _readState;
 
         /// <summary>裸指针构造由调用方保证寿命，不附带 World 借用版本。</summary>
-        public EntityQueryResult(T0* c0, T1* c1) : this(c0, c1, default) { }
+        public EntityQueryResult(T0* c0, T1* c1)
+            : this(c0, c1, default)
+        {
+        }
 
         internal EntityQueryResult(T0* c0, T1* c1, QueryReadState readState)
         {
@@ -399,7 +145,7 @@ namespace EntJoy.ECS
         public ref readonly T0 ReadOnlyComp0
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get { _readState.Validate(); return ref *_c0; }
+            get { Validate(); return ref Unsafe.AsRef<T0>(_c0); }
         }
 
         public ref T0 Comp0
@@ -407,9 +153,9 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                _readState.ValidateRelationshipView();
+                Validate();
                 ComponentTypeManager.CheckWritableAccess<T0>();
-                return ref *_c0;
+                return ref Unsafe.AsRef<T0>(_c0);
             }
         }
 
@@ -418,9 +164,9 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                _readState.Validate();
+                Validate();
                 if (_c1 == null) throw new NotSupportedException("Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.");
-                return ref *_c1;
+                return ref Unsafe.AsRef<T1>(_c1);
             }
         }
 
@@ -429,10 +175,18 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                _readState.ValidateRelationshipView();
+                Validate();
                 ComponentTypeManager.CheckWritableAccess<T1>();
-                return ref *_c1;
+                if (_c1 == null) throw new NotSupportedException("Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.");
+                return ref Unsafe.AsRef<T1>(_c1);
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void Validate()
+        {
+            _readState.Validate();
+            if (_c0 == null) throw new InvalidOperationException("The query result has not been initialized.");
         }
     }
 

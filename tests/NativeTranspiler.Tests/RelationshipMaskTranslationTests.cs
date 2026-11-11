@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using System.Linq;
+using System.IO;
 using Xunit;
 
 namespace NativeTranspiler.Tests
@@ -77,6 +78,41 @@ public struct SelectedEntity : IJobEntity { public void Execute(ref Value value)
             Assert.DoesNotContain("__ENTJOY_UNSUPPORTED", emitted.Cpp);
             Assert.Contains(backend == "Cpp" ? "!__queryMask.IsEnabled(__entity_index)" : "__query_bits[__entity_index >> 6]", emitted.Cpp);
             Assert.Contains("NativeTranspiled_GetAbiVersion()", emitted.Cpp);
+        }
+
+        [Fact]
+        public void CppEntityLoop_SeparatesUnfilteredAndFilteredPaths()
+        {
+            var emitted = GeneratorHarness.EmitFor(@"
+using EntJoy.ECS; using NativeTranspiler;
+public struct Value { public int Count; }
+[NativeTranspile(Target = BackendTarget.Cpp)]
+public struct SelectedEntity : IJobEntity { public void Execute(ref Value value) { value.Count++; } }");
+            Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+            var start = emitted.Cpp.IndexOf("if (__queryMask.Length == 0)");
+            Assert.True(start >= 0);
+            var maskCheck = emitted.Cpp.IndexOf("!__queryMask.IsEnabled(__entity_index)", start);
+            Assert.True(maskCheck > start);
+            var unfiltered = emitted.Cpp.Substring(start, maskCheck - start);
+            Assert.Contains("for (int __entity_index", unfiltered);
+            Assert.Contains("else", unfiltered);
+            Assert.DoesNotContain("__queryMask.IsEnabled", unfiltered);
+        }
+
+        [Fact]
+        public void CppEntityAdapters_LeaveMaskEvaluationToEntityLoop()
+        {
+            var emitted = GeneratorHarness.EmitForJob(@"
+using EntJoy.ECS; using NativeTranspiler;
+public struct Value { public int Count; }
+[NativeTranspile(Target = BackendTarget.Cpp)]
+public struct SelectedEntity : IJobEntity { public void Execute(ref Value value) { value.Count++; } }");
+            Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+            var adapter = Assert.Single(Directory.GetFiles(emitted.OutputDir, "*SelectedEntity*Adapter.cpp", SearchOption.AllDirectories));
+            var source = File.ReadAllText(adapter);
+            Assert.Contains("_RangeAdapter(", source);
+            Assert.DoesNotContain("EntityMatchMask __queryMask", source);
+            Assert.Contains("EntityMatchMask __queryMask", emitted.Cpp);
         }
 
         [Fact]

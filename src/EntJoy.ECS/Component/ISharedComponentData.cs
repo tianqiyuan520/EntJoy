@@ -1,14 +1,9 @@
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 共享组件标记接口（per-chunk 存储，对齐 Unity DOTS）。
-    /// 同一 Chunk 的所有实体共享相同的 SharedComponent 值组合。
-    ///
-    /// 双类型策略：
-    /// - blittable（无引用字段的 struct）：值内联存储于 Chunk 内存块 Shared values 区，NativeTranspiler 可读。
-    /// refCount 归零自动销毁；NativeTranspiler 不处理（validator 编译期拦截）。
-    ///
-    /// managed 类型建议实现 <see cref="System.IEquatable{T}"/> 与 GetHashCode，以支持值去重。
+    /// 共享组件标记接口（per-chunk 存储）：同一块的所有实体共享相同的值组合。
+    /// blittable 类型的值内联存在块的 Shared values 区；managed 类型走引用计数，原生翻译器不处理。
+    /// managed 类型应实现 <see cref="System.IEquatable{T}"/> 与 GetHashCode 以支持去重。
     /// </summary>
     public interface ISharedComponentData
     {

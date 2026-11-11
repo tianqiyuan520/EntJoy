@@ -10,6 +10,9 @@
 - 在提交任何 Job 之前调用 `JobScheduler.Initialize()`（统一入口：native 优先，不可用时自动回退 managed）；所有 World、JobHandle 和相关资源释放后，再调用 `JobScheduler.Shutdown()`。
 - `ManagedJobScheduler` 具有相同的初始化/关闭顺序要求。
 - `Initialize`、`Shutdown`、调度、`Complete` 和资源销毁不得并发交错。关闭期间不得提交新 Job，也不得在另一个线程继续调用调度器 API。
+- 与 `Shutdown` 竞态（gate 读到开、提交时后端已停）的任务按「取消」收尾：cleanup 照常执行，句柄按完成结束，`Complete()` 不抛异常。调用时后端本就停着属可观测拒绝，异常仍在 `Complete()` 抛出。这是容错行为，不是支持的调用方式。
+- `DrainAll()` 先 flush 隐式批，再等批任务与 work/direct 任务全部结束；热重载换模块前用它确认「旧 adapter 已无人执行」。`Complete()` / `DrainAll()` 不得在 worker 线程调用（会在 worker 上等自己相关任务）。
+- 统计结构体在 `Initialize` 时按字段指纹校验（名字/偏移/大小）；不匹配会告警并回退 managed 后端，不会带着错位布局继续读。
 - `Shutdown` 必须由初始化线程（通常是主线程）调用。worker 线程或其他线程调用关闭会被拒绝。
 - 调度器关闭后不得继续使用旧句柄、旧 World 或旧的原生视图；重新初始化后，旧句柄仍然视为失效句柄。
 
@@ -17,7 +20,7 @@
 
 - 依赖图必须是无环 DAG。循环依赖会使依赖回调永远无法满足。
 - 不得在 Job 执行体内同步 `Complete` 自己、自己的祖先、自己的后继，或包含当前 Job 的组合句柄。
-- Job 抛出的异常只在对应句柄 `Complete` 时传播；调用方必须完成需要观察异常的句柄。
+- Job 抛出的异常只在**抛出它的那个句柄**上 `Complete` 时传播；依赖方不继承该异常（native 与 managed 后端一致）。调用方必须完成需要观察异常的句柄。`JobSystem_Complete` 不向 C ABI 外层抛异常，托管侧经 `ThrowRecordedJobExceptions` 呈现。
 - Managed 完成信号、回调派发与槽位回收使用同一同步边界；仍在派发的完成槽不会交给下一个 Job。
 - Native 句柄是共享所有权的槽位与代次。`Complete` 或 `Release` 使同一所有权的副本失效；完成组合句柄会回收已完成的输入所有权，未完成时释放组合句柄保留输入所有权。
 - `JobHandle` / `NativeJobHandle` 的相等性及哈希描述稳定身份，完成或释放改变有效性，不把历史副本变成默认身份；槽位复用使用代次区分。
@@ -100,6 +103,9 @@ Chunk 列对齐和间隔依据硬件缓存参数确定，信息不可用时默�
 - `NativeArray`、`NativeList`、`UnsafeList` 和 `DeferredCommandBuffer` 的长度、索引、容量和字节数必须是非负且不发生整数溢出；复制区间必须完全落在源/目标范围内。
 - 拥有内存的容器必须由其拥有者准确调用一次 `Dispose()`；视图不会延长底层内存生命周期。
 - `PersistentAllocator.Free` 只应接收 `PersistentAllocator.Alloc` 返回的 payload 指针。其他 allocator、CRT 或第三方 DLL 的指针必须使用其对应的释放函数。
+- Persistent 分配记录保存在独立表中，未登记的指针不会被释放。原生容器按标签调用 `NativeDll` 注册的分配和释放回调，同一标签的回调只能以相同函数重复注册；缺少回调或注册不同回调会终止进程。
+- 原生 Temp 和 TempJob 标签共用 `TempAllocator`，由 `TempAllocator.Reset()` 回收未手动释放的分配。公开的 C# `NativeList` 构造仍只支持 Persistent；原生回调路由不改变该限制。
+- 原生回调调用托管分配器，分配时抛出的异常不能跨原生调用边界传播，内存不足可能终止进程。部署时须使用同版本的托管程序集、`NativeDll`、原生头文件和 `NativeTranspiled`。
 - `NativeArray.FromExternalPtr` 创建的视图不拥有外部内存；调用方必须保证该指针在所有读写和 Job 完成前保持有效。
 
 ## 并行读写冲突检测
@@ -226,6 +232,95 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - **修复判据**：生成产物里应为 `INTERLOCKED_COMPARE_EXCHANGE32(&x, <comparand>, <value>)`；
   运行期用「CAS 自旋最大值」这类探针应能看到非零结果（修复前恒 0）。
 
+## World 调试快照
+
+`EntityManager.ExportDebugJson()` 在宿主线程调用，等待已登记作业后导出当前实体、版本和组件。字段来自组件元数据，仅包含生成器支持的公开字段；私有字段、指针和其他不受支持的字段不会导出。`fieldsAvailable` 表示存在可用的字段元数据，并不表示组件所有字段均已导出。共享托管组件和关系组件只导出类型。非有限浮点数以字符串表示。
+
+`WorldDebugServer` 显式创建后监听本机，宿主线程在安全点调用 `Publish(world)` 发布快照；`GET /world` 返回最近发布的快照，首次发布前返回 503。HTTP 线程不访问 World，调用方负责更新快照和释放服务。此接口只用于可信的本机调试。
+
+## ECS 遍历基准
+
+`tools/EcsComparison/Run-TraversalMatrix.ps1` 构建并串行运行 EntJoy、Arch、Unity 的单线程同步遍历。每条路径独立初始化；实体数为 1,024 和 100,000，组件数为 2 和 3。双组件执行 `A += B`，三组件执行 `A += B + C`，初始 `B=1`、`C=2`。循环只修改 A；EntJoy Query 的 B/C 使用 ReadOnlyComp，Entity Job 使用 in 参数，直接 Chunk 使用 ReadOnlySpan；EntJoy Chunk Job 的 B/C 使用 Span，循环只读。查询无过滤，只有一个匹配 Archetype；初始化和验证不计时。
+
+各框架使用默认 Chunk 容量。100,000 个实体时，EntJoy 和 Unity 均为 782 个 Chunk，Arch 双组件为 100 个、三组件为 125 个。计算算法、计时协议和验证一致；查询、安全检查、存储布局和运行时各自保留。EntJoy 与 Arch 使用 .NET 8 CoreCLR，Unity 使用 Editor Mono；Unity 数据包含系统 Update 入口，不能将两种托管运行时的差距全部归因于框架。
+
+每条路径先运行一次并逐实体验证，再预热 512 次，测量 12 组，每组执行 1,024 次。分配另测 1,024 次，之后验证全部实体的 A 结果及 B/C 输入。共运行两轮，第二轮在各运行批次内反转入口顺序。汇总保留每轮中位数、两轮中位数的均值及轮间比值。`DOTNET_TieredCompilation=0` 固定优化 JIT。本次 Unity 部分早期测量与构建、测试重叠；最终 .NET 测量在本任务的构建、测试结束后单独运行。机器同时存在其他 Unity 进程，结果受后台负载影响，用于定位差距，排名需结合轮间波动判断。
+
+环境为 Windows 11 26100、AMD Ryzen 7 8845H、.NET 8.0.30、Arch 1.2.8.1-alpha、Unity 2022.3.62f3、Entities 1.4.6、Burst 1.8.28。Unity Burst 安全检查保持开启；EntJoy C++ 使用 Release ClangCL。C++ 入口要求实际原生导出存在，缺失即失败。
+
+```powershell
+& tools/EcsComparison/Run-TraversalMatrix.ps1
+```
+
+使用 `-QueryFocus` 可单独运行 Unity Burst Query 与 .NET 遍历矩阵，结果在 [traversal-focused-summary.csv](../../tools/EcsComparison/results/traversal-focused-summary.csv)。该结果按入口、后端和内核分别记录；普通 Query 与 SIMD Job 分开验收。
+
+完整矩阵的 128 条结果（含各组样本）保存在 [traversal-matrix.csv](../../tools/EcsComparison/results/traversal-matrix.csv)，64 条双轮汇总在 [traversal-summary.csv](../../tools/EcsComparison/results/traversal-summary.csv)，环境与原生模块标识在 [traversal-environment.txt](../../tools/EcsComparison/results/traversal-environment.txt)。全部结果逐实体验证通过，预热后当前线程托管分配均为 0 B/次。以下为同一矩阵的结果，单位为 μs/次，取两轮中位数的均值；数值越小越快。
+
+Query 入口分别记录 EntJoy `Query foreach`、Arch `InlineQuery`、Unity `SystemAPI.Query`，另列 Entity Job。Arch InlineQuery 是批量回调入口；EntJoy foreach 当前只有 C# 入口，C++ 数据对应 Job。
+
+数值不写进本文档：读 [traversal-matrix.csv](../../tools/EcsComparison/results/traversal-matrix.csv)，按 `framework`、`api`、`backend`、`kernel`、`entities`、`components` 六个键筛选后再比较。同一入口在不同 `kernel` 下相差可达数倍（`foreach` 有 Scalar 与 AutoSIMD 两个内核），`backend` 不同的行不能互相替代（C#、C++ 转译、Mono、Burst）。更新本节时用 `Run-TraversalMatrix.ps1` 重跑并重新取数，不沿用旧值。
+
+Chunk 分别记录 EntJoy `QueryChunks`、Arch 直接 foreach、Unity Chunk 数组遍历，以及 Chunk Job。数值同样以 CSV 为准，按上述六个键筛选。
+
+Unity 直接遍历在每次调用内执行 `ToArchetypeChunkArray(Allocator.TempJob)`、遍历并释放数组，计时包含数组创建和释放。Unity 也提供复用 NativeList 的 `ToArchetypeChunkList`，该入口未测；当前数组结果不能代表 Unity 所有直接遍历方式的性能上限。
+
+EntJoy 直接遍历用法：
+
+```csharp
+foreach (var chunk in world.QueryChunks<A, B>())
+{
+    var a = chunk.GetSpan0();
+    var b = chunk.GetReadOnlySpan1();
+    int count = chunk.Length;
+    for (int i = 0; i < count; i++) a[i].Value += b[i].Value;
+}
+```
+
+`QueryChunks` 支持直接 C# 遍历；关系过滤会抛出 `NotSupportedException`，需使用实体查询。分配列只统计当前线程的托管分配，不包含原生数组或原生调度内存。预热后，同步无过滤 C++ `IJobEntity.Run` 和 `IJobChunk.Run` 在两个实体规模、双三组件、两轮测量中均为 0 B/次。无依赖的即时同步 Chunk 调用通过缓存引用计数保活，由调用方在 `finally` 中释放；异步调用通过租约对象和完成回调保活。
+
+验收目标：C# Query foreach 耗时不超过 Unity Burst SystemAPI.Query；EntJoy 最快的 C# 遍历耗时不超过 Arch 最快的 C# 遍历。分别比较大小规模和双三组件，并标明 Query、Job 与直接 Chunk 入口及实际内核。预热后托管分配为 0 B/次。
+
+默认容量下 100,000 实体时，EntJoy C# 直接 Chunk 与 Arch 直接 Chunk 的成对比值为 1.03–1.06（双/三组件，同一构建内逐轮交替）。C++ Entity/Chunk Job 与 Unity Burst Job 是分别记录的其他入口，不能代替 C# Query 的验收。
+
+## 结构变更基准
+
+`tools/EcsComparison` 的 `--struct <实体数> <轮数>` 量四项逐实体结构变更：创建实体、销毁实体、添加组件、移除组件。两侧使用相同的逐实体调用语义，且都传**预解析的组件类型**（EntJoy `NewEntity(ComponentType[])`/`DestroyEntity`/`AddComponent`/`RemoveComponent`，Arch `Create`/`Destroy`/`Add`/`Remove`）；EntJoy 的 `NewEntity(params Type[])` 重载会在每次调用解析类型，与 Arch 的入口不同形，不用于对照。复位（预建或销毁）一律在计时之外，单次计时按轮取最小，输出每实体纳秒，并逐操作交错两侧、输出同批比值。轮数取 15：7 轮时同一构建的比值可漂 15%，15 轮稳定。Unity 未纳入，需要 Editor batchmode。
+
+```powershell
+dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 15
+dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --query-snapshot 100000 300
+```
+
+结构变更路径的每次调用包含 Archetype 迁移、实体搬运与借用失效；遍历性能不反映这部分成本，两者需分开验收。`--query-snapshot` 单独量「结构变更后的首次查询」与「紧随其后的查询」：前者重建 Chunk 快照、后者复用，差值即逐帧结构变更世界每查询每帧的重建成本，`--struct` 的批量结构变更看不到它。
+
+当前实现与 Arch 的相对位置：创建约 1.15 倍、添加组件约 1.06 倍、移除组件约 0.88 倍、销毁实体约 1.08 倍（10 万实体、25 轮成对取最小，`tools/EcsComparison/obj/struct-amend.txt`）。剩余差距来自入口的守卫层（空闲判定、结构锁、存活校验）与两套位置表写入（托管表加原生镜像），二者都是线程安全与原生定位所必需的。具体数值随实现变化，用上面的命令重新测量，不引用文档里的旧值。
+
+内存回收时机：销毁实体与移除组件保留空 Chunk 与 slab，避免为了合并 Chunk 而给其中每个实体重写位置索引。普通原型新增实体复用已有未满 Chunk；扫描游标在删除时回退，压缩和整批清空时重置。指定共享值的实体通过共享值匹配器选择未满 Chunk；未指定共享值的入口沿用末块分组。内存通过 `EntityManager.CompactChunks(float thresholdPercent = 30f)` 显式归还：它把利用率低于阈值的 Chunk 合并到前面共享值组合一致的未满 Chunk，并移除、归还空 Chunk。关卡切换、批量卸载后可按内存预算在安全点调用压缩。
+
+## 成对 A/B 与统计口径
+
+`--ab-pair <臂A> <臂B> <轮数> [容量]` 只运行被测两臂并逐轮反转顺序，输出每轮比值与汇总。同一构建内重复该入口时，**最小值**可复现（两次重复相差不到 1%），中位数不可复现（同一构建内两次重复可相差约 18%）。因此判断改动是否有效只用最小值比值，且参与判断的两臂必须来自同一构建：给被测程序集增加测量代码会让对照实现的读数漂移，跨构建的绝对时间不可相减或相除。
+
+同容量对照使用 100,000 实体和相同标量内核。双组件 Chunk 容量为 1,000，EntJoy 两轮中位数为 29.143/26.949 μs，Arch 为 28.046/26.239 μs；三组件容量为 800，EntJoy 为 52.743/61.173 μs，Arch 为 51.722/49.428 μs。三组件轮间波动较大，结果不能证明稳定差距或将差距归因于某一项开销。当前采样未证明 C# Query 追平 Unity Burst Query，也未证明 EntJoy 最快 C# 遍历追平 Arch。
+
+轮间波动仍明显：EntJoy 100,000 实体三组件 Query 的轮间比值为 1.218，Unity 对应 Burst Query 为 1.217；1,024 实体 EntJoy 三组件 C++ Entity Job 为 1.885，Arch 双组件 Chunk 为 1.610。矩阵用于定位差距，不能由这些数据证明稳定排名或复杂工作负载的综合优势。Arch 三组件 InlineQuery 慢于自身 Chunk 的原因尚未定位。
+
+实体 Query 在每次 MoveNext、Current 和结果组件属性访问时执行借用失效检查，失效时抛出 InvalidOperationException，管理器已释放时抛出 ObjectDisposedException；可写访问还检查关系只读限制和 copy hook 状态。已返回的 ref、Span 和裸指针由调用方保证使用期间存储有效，版本检查不提供并发结构修改的同步保护。双组件结果的公开裸指针构造入口由调用方保证寿命。启用过滤按位图连续区间推进，区间可跨多个实体；**关系过滤逐实体匹配，每次推进只前移一个实体**，因此同样工作量下关系过滤的遍历开销显著高于无过滤与启用过滤。Chunk 入口在获取 Span 时执行检查，实体循环使用 Span。默认容量下 Chunk 数量、布局和访问路径均不同，不能仅将差距归因于 Chunk 切换。
+
+对照本地 Entities 1.4.6 的 `Unity.Entities/Internal/InternalEntityQueryEnumerator.cs`，Unity 使用匹配 Chunk 缓存，将槽位递增与连续区间上界比较放在热路径，Chunk 切换放在冷路径。EntJoy 的 JIT 输出仍包含逐实体的 MoveNext、Current、组件访问借用校验及可写访问的线程本地检查，Chunk 切换还包含游标值复制。各项耗时占比尚未单独测量，也未检查 Unity 的机器码，不能据此断言差距来自某一种指令或向量化。
+
+`World.GetOrCreateEntityQuery` 和双组件及生成的多组件 foreach 共用 EntityManager 的查询注册表。规则数组顺序不影响查询身份；首次注册保存键的数组快照，缓存命中不复制数组。显式 EntityQuery 的键包含完整过滤规则；foreach 的 Archetype 匹配键保留组件条件及 Shared/关系类型，动态 Shared 值、关系目标、Changed 条件和数量限制由当前枚举器保存。foreach 复用匹配 Archetype 集合，仅在 Archetype 集合版本改变时刷新；Shared 和 Changed 条件进入 Chunk 时检查，获取匹配 Archetype 不重建动态 Chunk 过滤缓存。
+
+Query 将逐实体推进与 Chunk/Archetype 切换分开编译。枚举器热字段保存槽位、当前连续区间上界、组件基址和 `QueryReadState`，过滤与切换状态保存在游标中。无实体过滤时区间覆盖整个 Chunk；Enabled 过滤逐字合并位图，每个枚举器保存独立的当前 64 位字，按连续启用区间推进，无组合位图数组分配。启用位在读取当前字时采样，枚举期间修改启用状态不保证实时反映到当前枚举。关系过滤逐槽判断。管理器持有结构、关系两个借用版本源；结构变化使两者失效，关系变化只使关系版本源失效，释放管理器使两者失效。`QueryReadState` 保存当前代次的共享借用标记，通过检查标记判断是否失效。Current 和结果沿用同一标记，普通可写结果也执行借用校验。失效检查在热路径内联，异常构造留在独立方法。组件类型元数据按泛型类型缓存，Archetype 用有界稠密索引查找常用类型，稀疏类型 ID 回退到字典。Chunk 视图构建 Span 时校验借用版本；结构失效检测、关系只读限制、copy hook 写保护及 Job 依赖仍然生效。
+
+Chunk 快照按两代缓冲复用：结构变更后的首次查询改写上一代，稳态不分配数组；结构变更使已有查询借用失效；实体枚举器在下一次推进、读取 Current 或访问结果属性时拒绝访问，Chunk 视图在获取列视图时拒绝访问。底层游标不提供独立的生命周期保护，使用方须在读取快照前校验借用。实体位置把槽位放在低 16 位、块号放在高 16 位的正数区：单块实体数不得超过 65536，单原型块数不得超过 32768，超限在建立边界时抛出。`EntityIndexInWorld.ClearLocation` 之后块号读 -1、槽位读 65535，存活判定只看 `Archetype`。
+
+C++ Chunk 转译器在每次 Execute 入口保存实体数量，Count 和组件数组长度使用同一局部值。该调用内禁止结构修改，数量保持固定；编译器可据此优化循环，并自行生成别名检查、向量循环和标量回退。C# IJobEntity 的生成代码逐 Chunk 解析组件列，按参数的读写声明选择 Span 或 ReadOnlySpan，从组件 Span 长度取得循环上界；包含 Entity 参数时缓存实体列并保留真实 Id 和 Version。无启用过滤时整块交给一个非内联方法，该方法内递减迭代，形参以列基址加索引偏移代入；有启用过滤时按位图字推进，连续启用区间达到 8 个实体即整段交给同一方法，更短的区间逐实体内联执行。按值组件参数使用局部副本。C# IJobChunk 同样逐 Chunk 构建视图并检查 Span 边界。矩阵中的 EntJoy 和 Unity Chunk 循环均在循环前缓存 Count。
+
+遍历分两档，按语义选择：`Query<T>()` 逐实体产出结果，在推进、获取结果和组件引用时检查借用；`QueryChunks<T>()` 按 Chunk 产出视图，逐 Chunk 取列地址、由调用方自己写实体循环。前者是便利层，每实体推进需要维护枚举器状态；后者是批量层，在获取列视图时检查借用，适合结构稳定期间的批量计算。上文性能矩阵对应其记录的构建版本和运行条件。
+
+Enabled、关系过滤、多 Archetype、复杂计算和调度依赖不在此矩阵内。现有 `--matched-filtered`、`--matched-dependency`、`--verify-native-filters` 为独立入口；其结果需单独注明协议。
+
 ## SharedBlob 和调试 pin
 
 - `SharedBlob<T>` 是带显式引用计数的值类型。复制其值不会自动增加引用计数；需要共享副本时必须调用 `Clone()`，每个成功的 `Clone()` 对应一次 `Dispose()`。
@@ -238,6 +333,9 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - 依赖图中的环、在 Job 内同步等待自身相关句柄会造成逻辑死锁；调度器不尝试推断或破坏依赖关系。
 - ECS 结构性 API 仍是主线程模型；并发调用属于未定义的应用层行为，即使底层容器本身具备部分线程安全能力。
 - `SharedBlob<T>` 的值复制不增加引用计数，跨系统共享必须使用 `Clone()`。
+- 重复 `JobSystem_ReleaseHandle` 属未定义行为：C ABI 的句柄是不带代次的裸指针，无法区分「已释放」与「已被复用」；托管层用槽位 + 代次拦截，裸 C/C++ 调用方需自行保证只释放一次。
+- 隐式批（`ImplicitBatch` / `BatchScope`）两个后端都支持，但语义不同：native 把一帧的多个 job 攒到 `EndFrame` 一次 `ScheduleBatch` 提交；managed 没有跨语言调用可摊薄，`Add` 即调度，`EndFrame` 只收集句柄。
+- 丢弃未完成、未释放的 `JobHandle` 会泄漏槽位与原生所有权（结构体无终结器，框架无法判定「确定不要了」）；`Shutdown` 的 `ReleaseAll` 只兜底清理仍登记的句柄。
 - 调试 pin 地址只在对象保持存活且未释放 pin 时有效；不得缓存到业务生命周期。
 - Job 之间的冲突检测只覆盖「写-写」：不同 Job 对同一容器的并发读（读读共享）或读-写组合不作为 Job 间冲突检测目标，并行读写同一容器时的确定性需由上层保证。主线程与 Job 的任意读/写组合则由上述「主线程访问拦截」覆盖。
 - **2026-09-27 审计收尾修复（均有可复现 RED → 回归）**：
@@ -263,7 +361,7 @@ System.AggregateException: One or more scheduled C# jobs failed.
 - **`ScheduleGraph` 的对称读写冲突，边方向取决于注册顺序**：当两个系统互相冲突（A 写 X 读 Y、B 写 Y 读 X）时，单一冲突边的方向按注册先后决定，因此提交顺序随注册顺序变化；层内顺序用 `Order` 排序但排序不稳定（同 Order 时）。需要确定顺序时请显式使用 `[OrderBefore]/[OrderAfter]`。
 - **Managed 回退后端的完成协议（2026-09-16 已修复，此处保留记录）**：此前的缺陷是「完成态发布」与「安全声明释放」不在同一同步点 —— `IsCompleted` 只看 `Remaining == 0`，而读写声明在计数归零之后才释放，主线程可能在声明释放前观察到「已完成」→ `Complete()` 后的合法访问被误拦；另一个成因是托管路径的 ctx 取自 `RuntimeHelpers.GetHashCode(box)`，而 box 被 `ParallelCache<T>` 池化复用，相邻两次 Job 可能拿到同一 ctx。现实现为：`ManagedCompletion.Signal()` 按「释放写声明 → 释放读声明 → 置 `_declReleased` → `_done.Set()` → 派发回调」的顺序发布，`IsCompleted` 要求 `Remaining == 0 && _declReleased == 1`（`EntJoy.Jobs/Managed/ManagedJobHandle.cs`），且每次调度由 `ManagedJobScheduler.NextCtx()` 分配唯一 ctx。回归证据：`tools/SafetyLockOverheadBench/repro`（隐藏 `NativeDll.dll` 强制 Managed）**触发=0、残留状态为空、正常退出**；守卫用例见 `MultiTileWriteJob_AfterComplete_MainThreadNotBlocked`、`RepeatedParallelReadJobs_NoReaderCountLeak`。
 - **两条后端都必须被测试覆盖，且不得隐式切换**：`EntJoy.ECS.Tests` 的运行后端取决于进程能否找到 `NativeDll.dll`（`AppContext.BaseDirectory` → 入口目录 → 程序集目录 → CWD 上溯）。历史上因此出现过「同一套测试本地跑 Native、CI 跑 Managed」的静默差异。现在测试用环境变量 `ENTJOY_TEST_BACKEND=native|managed` 显式指定，并由 `BackendSelectionTests` 断言实际后端与请求一致；CI 对两条后端分别跑一遍。
-- IJobEntity 的 DOTS 式 `Entity` 参数（`Execute(ref T0 c0, Entity e)`）的 `Execute` 方法体必须是**块体 `{ }`**，不支持表达式体 `=>`（ISPC 生成器只识别块体）。`e.Id` 即全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组（无该参数零开销）。
+- 托管 `IJobEntity.Execute` 支持块体和表达式体，原生转译要求块体。DOTS 式 `Entity` 参数的 `e.Id` 是全局实体序号（对齐镜像 SoA 槽位），三后端（C# / C++ / ISPC）均支持，且仅当 Execute 声明了 `Entity` 参数时才传递实体数组。
 - **并行创建未提供**：`ParallelWriter` 支持销毁、组件写入及关系目标设置/解除。
   `CreateEntitiesRange` 由主线程记录；所有结构变更在主线程回放。
 - **ISPC 后端未接逐组件 enable 位图 API**：`ArchetypeChunk.GetEnableBitMapPtr<T>()` 目前只有 C++ 后端转译

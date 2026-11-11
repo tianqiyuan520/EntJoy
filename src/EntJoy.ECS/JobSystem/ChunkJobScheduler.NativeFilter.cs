@@ -41,5 +41,18 @@ namespace EntJoy.ECS.JobSystem
             if (filter.relationshipBits != null) Marshal.FreeHGlobal((IntPtr)filter.relationshipBits);
             if (filter.enabledBitMaps != null) Marshal.FreeHGlobal((IntPtr)filter.enabledBitMaps);
         }
+
+        /// <summary>释放单个块的裸数据：过滤器与各列指针数组都由调度方分配。</summary>
+        internal static unsafe void FreeChunkJobData(in ChunkJobData data)
+        {
+            FreeNativeFilter(data.filter);
+            if (data.componentArrays != null) Marshal.FreeHGlobal((IntPtr)data.componentArrays);
+            if (data.componentSizes != null) Marshal.FreeHGlobal((IntPtr)data.componentSizes);
+            if (data.enableBitMaps != null) Marshal.FreeHGlobal((IntPtr)data.enableBitMaps);
+            if (data.componentTypeIndices != null) Marshal.FreeHGlobal((IntPtr)data.componentTypeIndices);
+            if (data.requiredComponentArrays != null) Marshal.FreeHGlobal((IntPtr)data.requiredComponentArrays);
+            if (data.requiredEnableBitMaps != null) Marshal.FreeHGlobal((IntPtr)data.requiredEnableBitMaps);
+            if (data.sharedValuePtrs != null) Marshal.FreeHGlobal((IntPtr)data.sharedValuePtrs);
+        }
     }
 }

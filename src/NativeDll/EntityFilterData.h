@@ -10,6 +10,7 @@ struct EntityFilterData {
 
 // Combined at execution time so dependency jobs can update Enabled bits.
 class EntityMatchMask {
+    uint64_t inlineStorage[4];
     std::vector<uint64_t> storage;
     bool anyMatch = true;
 public:
@@ -22,7 +23,11 @@ public:
         if (filter.relationshipBits == nullptr && filter.enabledCount == 0) return;
         Length = entityCount;
         UlongCount = (entityCount + 63) / 64;
-        storage.resize(UlongCount);
+        uint64_t* words = inlineStorage;
+        if (UlongCount > 4) {
+            storage.resize(UlongCount);
+            words = storage.data();
+        }
         anyMatch = false;
         for (int word = 0; word < UlongCount; ++word) {
             uint64_t value = filter.relationshipBits ? filter.relationshipBits[word] : ~uint64_t(0);
@@ -31,10 +36,10 @@ public:
                 if (enabled) value &= enabled[word];
             }
             if (word == UlongCount - 1 && (entityCount & 63)) value &= (uint64_t(1) << (entityCount & 63)) - 1;
-            storage[word] = value;
+            words[word] = value;
             anyMatch |= value != 0;
         }
-        Bits = storage.data();
+        Bits = words;
     }
 
     bool HasMatches() const { return anyMatch; }

@@ -20,7 +20,7 @@ namespace EntJoy.ECS.JobSystem
             {
                 NativeJobCore.EnterJobExecution();
                 NativeJobCore.RegisterCurrentBatchJobName(typeof(T).Name);
-                // 并行写冲突检测 ctx：同一 job 的 chunk range 共享同一 context block（同 ctx 放行）
+                // 并行写冲突检测按 ctx 分组：同一 job 的 chunk range 共享同一个 context block。
                 nint prevCtx = JobIdentity.CurrentContext;
                 JobIdentity.SetCurrentContext(ctx);
                 try
@@ -28,24 +28,8 @@ namespace EntJoy.ECS.JobSystem
                     var header = (ChunkContextHeader*)ctx;
                     ref var job = ref ResolveJob<T>(ctx, header);
                     var query = header->jobIsBoxed != 0 ? GetJobBox<T>(ctx, header).Query : default;
-                    // 单 GCHandle 保活收集期 Chunk[]（ChunkId 索引 O(1)）
-                    Chunk[]? chunkTable = ChunkJobScheduler.ChunkArrayTable.TryGetValue(ctx, out var _t) ? _t : null;
-
-                    int end = startIndex + count;
-                    Span<ulong> scratch = stackalloc ulong[64];
-                    for (int index = startIndex; index < end; index++)
-                    {
-                        var cd = chunks + index;
-                        if (chunkTable == null) continue;
-                        var chunk = chunkTable[cd->chunkHandle.ToInt32()];
-                        if (chunk.MemoryBlock == nint.Zero) continue;
-                        // Phase C：mask 委托给共享工具（ResolveCombinedMask 已删）
-                        var enabledTypes = ChunkJobScheduler.ResolveEnabledTypes(header, chunk);
-                        int words = (enabledTypes.Length > 0 || query.HasRelationshipFilter) ? (chunk.EntityCount + 63) / 64 : 0;
-                        var mask = ChunkJobScheduler.ComputeChunkMask(chunk, enabledTypes, query, words <= scratch.Length ? scratch : new ulong[words]);
-                        if (!mask.HasMatches) continue;
-                        job.Execute(new ArchetypeChunk(chunk), mask);
-                    }
+                    if (!ChunkJobScheduler.ChunkArrayTable.TryGetValue(ctx, out var chunkTable)) return;
+                    RunChunkRange(chunks, chunkTable, startIndex, count, ref job, header, query);
                 }
                 catch (Exception exception)
                 {
@@ -59,6 +43,25 @@ namespace EntJoy.ECS.JobSystem
                     JobIdentity.SetCurrentContext(prevCtx);
                 }
             };
+        }
+
+        // 逐块求启用位掩码后执行作业；掩码缓冲优先用调用方给的栈空间，超出才分配。
+        private static unsafe void RunChunkRange<T>(ChunkJobData* chunks, Chunk[] chunkTable, int startIndex, int count,
+            ref T job, ChunkContextHeader* header, QueryBuilder query) where T : struct, IJobChunk
+        {
+            int end = startIndex + count;
+            Span<ulong> scratch = stackalloc ulong[64];
+            for (int index = startIndex; index < end; index++)
+            {
+                var cd = chunks + index;
+                var chunk = chunkTable[cd->chunkHandle.ToInt32()];
+                if (chunk.MemoryBlock == nint.Zero) continue;
+                var enabledTypes = ChunkJobScheduler.ResolveEnabledTypes(header, chunk);
+                int words = (enabledTypes.Length > 0 || query.HasRelationshipFilter) ? (chunk.EntityCount + 63) / 64 : 0;
+                var mask = ChunkJobScheduler.ComputeChunkMask(chunk, enabledTypes, query, words <= scratch.Length ? scratch : new ulong[words]);
+                if (!mask.HasMatches) continue;
+                job.Execute(new ArchetypeChunk(chunk), mask);
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

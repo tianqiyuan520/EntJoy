@@ -71,6 +71,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        _builder = builder;");
             sb.AppendLine("    }");
             sb.AppendLine();
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public ChunkEnumerator<{genList}> GetEnumerator()");
             sb.AppendLine($"        => new ChunkEnumerator<{genList}>(_entityManager, _builder);");
             sb.AppendLine("}");
@@ -80,135 +81,76 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine($"public unsafe ref struct ChunkEnumerator<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
-            sb.AppendLine("    private readonly EntityManager _entityManager;");
-            sb.AppendLine("    private readonly QueryBuilder _builder;");
+            sb.AppendLine($"    private static readonly ComponentType[] Columns = {{ {typeOfArgs} }};");
+            sb.AppendLine("    private QueryTraversalCursor _cursor;");
             sb.AppendLine("    private readonly QueryReadState _readState;");
-            sb.AppendLine("    private int _archIndex;");
-            sb.AppendLine("    private int _chunkIndex;");
-            sb.AppendLine("    private Archetype _currentArch;");
-            sb.AppendLine("    private Chunk _currentChunk;");
-            for (int i = 0; i < n; i++)
-                sb.AppendLine($"    private int _t{i}Idx;");
-            sb.AppendLine();
-            sb.AppendLine($"    internal ChunkEnumerator(EntityManager em, QueryBuilder builder)");
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine($"    internal ChunkEnumerator(EntityManager manager, QueryBuilder builder)");
             sb.AppendLine("    {");
-            sb.AppendLine("        _entityManager = em;");
-            sb.AppendLine("        _builder = builder;");
             sb.AppendLine("        if (builder.HasRelationshipFilter) throw new NotSupportedException(\"Chunk queries require entity-level relationship masks; use an entity query.\");");
+            sb.AppendLine("        _cursor = new QueryTraversalCursor(manager, builder, Columns);");
             string relationTypes = string.Join(" || ", genParams.Select(g => $"ComponentTypeManager.IsRelationType<{g}>()"));
-            sb.AppendLine($"        _readState = new QueryReadState(em, {relationTypes});");
-            sb.AppendLine("        _archIndex = 0;");
-            sb.AppendLine("        _chunkIndex = 0;");
-            sb.AppendLine("        _currentArch = null;");
-            sb.AppendLine("        _currentChunk = default;");
-            for (int i = 0; i < n; i++)
-                sb.AppendLine($"        _t{i}Idx = -1;");
+            sb.AppendLine($"        _readState = new QueryReadState(manager, {relationTypes});");
             sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine("    private bool MoveNextArchetype()");
-            sb.AppendLine("    {");
-            sb.AppendLine("        while (_archIndex < _entityManager.Archetypes.Length)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            var arch = _entityManager.Archetypes[_archIndex];");
-            sb.AppendLine("            _archIndex++;");
-            sb.AppendLine("            if (arch != null && arch.IsMatch(_builder))");
-            sb.AppendLine("            {");
-            sb.AppendLine("                _currentArch = arch;");
-            for (int i = 0; i < n; i++)
-                sb.AppendLine($"                _t{i}Idx = arch.GetComponentTypeIndex<{genParams[i]}>();");
-            sb.AppendLine("                _chunkIndex = 0;");
-            sb.AppendLine("                return MoveNextChunk();");
-            sb.AppendLine("            }");
-            sb.AppendLine("        }");
-            sb.AppendLine("        return false;");
-            sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.AppendLine("    private bool MoveNextChunk()");
-            sb.AppendLine("    {");
-            sb.AppendLine("        if (_currentArch == null) return false;");
-            sb.AppendLine("        var chunks = _currentArch.ChunkList;");
-            sb.AppendLine("        while (_chunkIndex < chunks.Count)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            _currentChunk = chunks[_chunkIndex];");
-            sb.AppendLine("            _chunkIndex++;");
-            sb.AppendLine("            if (_currentChunk.EntityCount > 0)");
-            sb.AppendLine("            {");
-            sb.AppendLine("                return true;");
-            sb.AppendLine("            }");
-            sb.AppendLine("        }");
-            sb.AppendLine("        _currentChunk = default;");
-            sb.AppendLine("        return MoveNextArchetype();");
-            sb.AppendLine("    }");
-            sb.AppendLine();
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
-            sb.AppendLine("        _readState.Validate();");
-            sb.AppendLine("        if (_currentArch == null)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            return MoveNextArchetype();");
-            sb.AppendLine("        }");
-            sb.AppendLine("        while (_chunkIndex < _currentArch.ChunkList.Count)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            _currentChunk = _currentArch.ChunkList[_chunkIndex];");
-            sb.AppendLine("            _chunkIndex++;");
-            sb.AppendLine("            if (_currentChunk.EntityCount > 0)");
-            sb.AppendLine("                return true;");
-            sb.AppendLine("        }");
-            sb.AppendLine("        return MoveNextArchetype();");
+            sb.AppendLine("        _readState.ValidateTracked();");
+            sb.AppendLine("        return _cursor.MoveNextChunk(out _);");
             sb.AppendLine("    }");
-            sb.AppendLine();
-            sb.Append($"    public ChunkResult<{genList}> Current");
-            sb.AppendLine();
+            sb.AppendLine($"    public ChunkResult<{genList}> Current");
             sb.AppendLine("    {");
+            sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("        get");
             sb.AppendLine("        {");
-            sb.AppendLine("            _readState.Validate();");
-            sb.AppendLine("            if (_currentChunk.MemoryBlock == nint.Zero) throw new InvalidOperationException();");
-            sb.Append($"            return new ChunkResult<{genList}>(_currentChunk");
-            for (int i = 0; i < n; i++)
-                sb.Append($", _t{i}Idx");
-            sb.AppendLine(", _readState);");
+            sb.AppendLine("            _readState.ValidateTracked();");
+            sb.AppendLine("            if (!_cursor.HasChunk) throw new InvalidOperationException();");
+            sb.AppendLine($"            return new ChunkResult<{genList}>(in _cursor.ChunkReference, {string.Join(", ", Enumerable.Range(0, n).Select(i => $"_cursor.ComponentBase({i})"))}, _readState);");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
-
             // ChunkResult<T0..Tn>
             sb.AppendLine($"public unsafe readonly ref struct ChunkResult<{genList}>");
             sb.AppendLine($"    {whereClause}");
             sb.AppendLine("{");
-            sb.AppendLine("    private readonly Chunk _chunk;");
+            sb.AppendLine("    private readonly ref readonly Chunk _chunk;");
             for (int i = 0; i < n; i++)
-                sb.AppendLine($"    private readonly int _t{i}Idx;");
+                sb.AppendLine($"    private readonly nint _base{i};");
             sb.AppendLine();
             sb.AppendLine("    private readonly QueryReadState _readState;");
-            sb.Append($"    internal ChunkResult(Chunk chunk");
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.Append($"    internal ChunkResult(in Chunk chunk");
             for (int i = 0; i < n; i++)
-                sb.Append($", int t{i}Idx");
-            sb.AppendLine(", QueryReadState readState = default)");
+                sb.Append($", nint base{i}");
+            sb.AppendLine(", QueryReadState readState)");
             sb.AppendLine("    {");
-            sb.AppendLine("        _chunk = chunk;");
+            sb.AppendLine("        _chunk = ref chunk;");
             sb.AppendLine("        _readState = readState;");
             for (int i = 0; i < n; i++)
-                sb.AppendLine($"        _t{i}Idx = t{i}Idx;");
+                sb.AppendLine($"        _base{i} = base{i};");
             sb.AppendLine("    }");
             sb.AppendLine();
-            sb.AppendLine("    public int Length { get { _readState.Validate(); return _chunk.EntityCount; } }");
+            sb.AppendLine("    public int Length { [MethodImpl(MethodImplOptions.AggressiveInlining)] get { _readState.ValidateTracked(); return _chunk.EntityCount; } }");
             sb.AppendLine();
             for (int i = 0; i < n; i++)
             {
-                sb.AppendLine($"    public {genParams[i]}* GetPtr{i}() {{ _readState.Validate(); return ({genParams[i]}*)_chunk.GetComponentArrayPointer(_t{i}Idx); }}");
+                sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+                sb.AppendLine($"    public {genParams[i]}* GetPtr{i}() {{ _readState.ValidateTracked(); return ({genParams[i]}*)_base{i}; }}");
             }
             for (int i = 0; i < n; i++)
             {
-                sb.AppendLine($"    public Span<{genParams[i]}> GetSpan{i}() {{ ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(); return new Span<{genParams[i]}>(GetPtr{i}(), Length); }}");
-                sb.AppendLine($"    public ReadOnlySpan<{genParams[i]}> GetReadOnlySpan{i}() => new ReadOnlySpan<{genParams[i]}>(GetPtr{i}(), Length);");
+                sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+                sb.AppendLine($"    public Span<{genParams[i]}> GetSpan{i}() {{ ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(_readState); return new Span<{genParams[i]}>((void*)_base{i}, _chunk.EntityCount); }}");
+                sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+                sb.AppendLine($"    public ReadOnlySpan<{genParams[i]}> GetReadOnlySpan{i}() {{ _readState.ValidateTracked(); return new ReadOnlySpan<{genParams[i]}>((void*)_base{i}, _chunk.EntityCount); }}");
             }
             sb.AppendLine();
             sb.AppendLine("    /// <summary>获取指定 enableable 组件的位图掩码。</summary>");
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public unsafe BitMask GetEnabledMask<T>() where T : struct, IEnableableComponent");
             sb.AppendLine("    {");
+            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        int idx = _chunk.Archetype.GetComponentTypeIndex<T>();");
             sb.AppendLine("        ulong* ptr = _chunk.GetEnableBitMapPointer(idx);");
             sb.AppendLine("        if (ptr == null)");
@@ -220,6 +162,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool IsComponentEnabled<T>(int entityIndex) where T : struct, IEnableableComponent");
             sb.AppendLine("    {");
+            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        int idx = _chunk.Archetype.GetComponentTypeIndex<T>();");
             sb.AppendLine("        return _chunk.GetComponentEnabled(idx, entityIndex);");
             sb.AppendLine("    }");
@@ -228,6 +171,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public void SetComponentEnabled<T>(int entityIndex, bool enabled) where T : struct, IEnableableComponent");
             sb.AppendLine("    {");
+            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        int idx = _chunk.Archetype.GetComponentTypeIndex<T>();");
             sb.AppendLine("        _chunk.SetComponentEnabled(idx, entityIndex, enabled);");
             sb.AppendLine("    }");
@@ -237,11 +181,15 @@ namespace EntJoy.ECS.SourceGenerator
             // World.QueryChunks<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World）
             sb.AppendLine($"public static class ChunkQueryTupleWorldExtensions{n}");
             sb.AppendLine("{");
+            sb.AppendLine($"    private static class ComponentTypes<{genList}> {whereClause}");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        internal static readonly ComponentType[] All = new ComponentType[] {{ {typeOfArgs} }};");
+            sb.AppendLine("    }");
             sb.AppendLine($"    public static ChunkEnumerable<{genList}> QueryChunks<{genList}>(this World world)");
             sb.AppendLine($"        {whereClause}");
             sb.AppendLine("    {");
             sb.AppendLine("        var builder = new QueryBuilder();");
-            sb.AppendLine($"        builder.All = new ComponentType[] {{ {typeOfArgs} }};");
+            sb.AppendLine($"        builder.All = ComponentTypes<{genList}>.All;");
             sb.AppendLine($"        return new ChunkEnumerable<{genList}>(world._entityManager, builder);");
             sb.AppendLine("    }");
             sb.AppendLine("}");

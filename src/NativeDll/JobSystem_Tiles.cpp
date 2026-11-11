@@ -923,10 +923,14 @@ namespace JobSystem
         auto scheduler = LoadChaseLevScheduler();
         if (!scheduler || !scheduler->IsRunning())
         {
-            AbortUnsubmittedBatch(
-                batch,
-                std::make_exception_ptr(std::runtime_error(
-                    "JobSystem backend is not running")));
+            // 关停竞态按取消收尾；调用时后端本就停着则仍是可观测的拒绝。
+            if (g_shuttingDown.load(std::memory_order_acquire))
+                AbortUnsubmittedBatch(batch, {});
+            else
+                AbortUnsubmittedBatch(
+                    batch,
+                    std::make_exception_ptr(std::runtime_error(
+                        "JobSystem backend is not running")));
             return;
         }
         auto* state = batch->handle;

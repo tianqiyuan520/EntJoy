@@ -15,7 +15,7 @@ namespace EntJoy.ECS
             writer.Write(groups.Length);
             foreach (var group in groups)
             {
-                var type = ComponentTypeManager.GetComponentType(ComponentTypeManager.GetTypeByComponentType(group.Key));
+                var type = ComponentTypeManager.GetComponentType(group.Key);
                 writer.Write(type.Id); writer.Write(type.Size);
                 writer.Write(type.Type.AssemblyQualifiedName);
                 writer.Write(type.Type.Module.ModuleVersionId.ToByteArray());

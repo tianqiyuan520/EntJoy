@@ -1,0 +1,22 @@
+[NativeJobScheduler] ERROR: Cannot find NativeDll.dll. Searched:
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\tools\EcsComparison\obj\review-probe\new\bin\Release\net8.0\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\tools\EcsComparison\obj\review-probe\new\bin\Release\net8.0\Debug\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\tools\EcsComparison\obj\review-probe\new\bin\Release\net8.0\Release\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\tools\EcsComparison\obj\review-probe\new\bin\Release\bin\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\tools\EcsComparison\obj\review-probe\new\bin\bin\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\bin\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\.godot\mono\temp\bin\Debug\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\.godot\mono\temp\bin\Release\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\.godot\mono\temp\bin\ExportDebug\win-x64\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\.godot\mono\temp\bin\ExportRelease\win-x64\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\EntJoy-review-ee4cd72\NativeDll.dll: NOT FOUND
+  - E:\GODOT\Project\bin\NativeDll.dll: NOT FOUND
+  - E:\GODOT\bin\NativeDll.dll: NOT FOUND
+  - CWD: E:\GODOT\Project\EntJoy-review-ee4cd72
+ENV runtime=8.0.30 cpu=16 native=False
+TIMING create median_ns=40.21 min_ns=38.57 max_ns=58.79
+TIMING add median_ns=86.54 min_ns=81.21 max_ns=96.38
+TIMING remove median_ns=73.71 min_ns=68.43 max_ns=84.10
+TIMING destroy median_ns=29.98 min_ns=28.72 max_ns=41.43
+CHECK checksum=14999700000 expected=14999700000
+CHURN live=128 chunks_before=22 chunks_after=2 mismatches=0

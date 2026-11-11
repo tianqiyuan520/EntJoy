@@ -65,6 +65,34 @@ namespace EntJoy.ECS.Tests
             finally { if (owned) ManagedJobScheduler.Shutdown(); }
         }
 
+        private struct FailingDependencyJob : IJob
+        {
+            public void Execute() => throw new InvalidOperationException("dep-boom");
+        }
+
+        private struct NoopJob : IJob
+        {
+            public void Execute() { }
+        }
+
+        // 涓婃父 job 鐨勫紓甯哥暀鍦ㄥ畠鑷繁鐨勫彞鏌勪笂锛氫笅娓镐笉缁ф壙銆佷笂娓镐笉琚悶锛堜笌 native 鍚庣鍚屼竴璇箟锛夈€?
+        [Fact]
+        public void DependencyException_StaysOnThrowingJob()
+        {
+            WithScheduler(() =>
+            {
+                var failing = new FailingDependencyJob();
+                var dep = ManagedJobScheduler.Schedule(ref failing);
+                var noop = new NoopJob();
+                var dependent = ManagedJobScheduler.Schedule(ref noop, dep);
+
+                // 异常归属抛出它的 job：上游自己的句柄抛出，下游不继承。
+                var depEx = Assert.Throws<InvalidOperationException>(() => dep.Complete());
+                Assert.Equal("dep-boom", depEx.Message);
+                dependent.Complete(); // 依赖方不继承上游异常（与 native 后端同一语义）
+            });
+        }
+
         [Theory]
         [InlineData(1)]
         [InlineData(7)]

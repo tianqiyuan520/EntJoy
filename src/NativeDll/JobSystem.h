@@ -153,6 +153,22 @@ namespace JobSystem {
             state->NotifyBlockedWaiters();
         }
     }
+    // 关停竞态的提交取消：任务未提交、未执行。跑 cleanup、记完成、交还在飞引用，不记 job 异常
+    //（记了会让 Complete() 把「后端已停」当 job 失败抛给调用线程）。
+    inline bool CancelSubmittedState(
+        HandleState* state, void (*failureCleanup)(void*), void* failureContext) noexcept
+    {
+        if (failureCleanup)
+        {
+            try { failureCleanup(failureContext); } catch (...) {}
+        }
+        if (state)
+        {
+            try { CompleteState(state); } catch (...) {}
+            ReleaseState(state);
+        }
+        return false;
+    }
     void AddContinuationOrRunNow(HandleState* state, std::function<void()> continuation);
     int CurrentWorkerCount();
 
