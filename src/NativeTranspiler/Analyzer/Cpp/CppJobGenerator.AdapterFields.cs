@@ -16,23 +16,24 @@ namespace NativeTranspiler.Analyzer
             foreach (var field in fields)
             {
                 int offset = CalculateFieldOffset(field, ref currentOffset);
+                string address = CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__jobContext", offset));
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
                 {
                     string elementType = GetCppElementType(field.Type);
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                        sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{elementType}>**)(__jobContext + {offset});");
+                        sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{elementType}>**){address};");
                     else
                     {
-                        sb.AppendLine($"    auto* {field.Name}_ptr = *({elementType}**)(__jobContext + {offset});");
+                        sb.AppendLine($"    auto* {field.Name}_ptr = *({elementType}**){address};");
                         string reference = mutableLengths ? "&" : "";
-                        sb.AppendLine($"    int{reference} {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
+                        sb.AppendLine($"    int{reference} {field.Name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__jobContext", offset + 8))};");
                     }
                 }
                 else
                 {
                     string cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     string dereference = field.Type is IPointerTypeSymbol ? "*" : "";
-                    sb.AppendLine($"    auto* {field.Name}_ptr = {dereference}({cppType}*)(__jobContext + {offset});");
+                    sb.AppendLine($"    auto* {field.Name}_ptr = {dereference}({cppType}*){address};");
                 }
             }
             foreach (var field in fields)

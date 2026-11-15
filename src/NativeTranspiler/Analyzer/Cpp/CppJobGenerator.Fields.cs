@@ -82,30 +82,31 @@ namespace NativeTranspiler.Analyzer
             foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
             {
                 int offset = CalculateFieldOffset(field, ref currentOffset);
+                string address = CppIntegerSemantics.JobAddress("__job", offset);
                 if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
                 {
                     if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
                     {
                         var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(NativeTranspiler.GetContainerElementType(field.Type));
-                        sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>*& {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElementType}>**)((char*)__job + {offset});");
+                        sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>*& {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElementType}>**){CppIntegerSemantics.CastOperand(address)};");
                     }
                     else
                     {
                         var cppElementType = GetCppElementType(field.Type);
                         string binding = stableArrays?.Contains(field) == true ? "* const " : "*& ";
-                        sb.AppendLine($"    {cppElementType}{binding}{field.Name}_ptr = *({cppElementType}**)((char*)__job + {offset});");
-                        sb.AppendLine($"    int& {field.Name}_length = *(int*)((char*)__job + {offset + 8});");
+                        sb.AppendLine($"    {cppElementType}{binding}{field.Name}_ptr = *({cppElementType}**){CppIntegerSemantics.CastOperand(address)};");
+                        sb.AppendLine($"    int& {field.Name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", offset + 8))};");
                     }
                 }
                 else if (field.Type is IPointerTypeSymbol)
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    sb.AppendLine($"    {cppType}& {field.Name}_ptr = *({cppType}*)((char*)__job + {offset});");
+                    sb.AppendLine($"    {cppType}& {field.Name}_ptr = *({cppType}*){CppIntegerSemantics.CastOperand(address)};");
                 }
                 else
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    sb.AppendLine($"    {cppType}* {field.Name}_ptr = ({cppType}*)((char*)__job + {offset});");
+                    sb.AppendLine($"    {cppType}* {field.Name}_ptr = ({cppType}*){CppIntegerSemantics.CastOperand(address)};");
                 }
             }
         }

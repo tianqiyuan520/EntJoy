@@ -18,8 +18,9 @@ public struct PreciseChunk : IJobChunk {
 }");
         string cmake = System.IO.File.ReadAllText(System.IO.Path.Combine(result.OutputDir, "CMakeLists.txt"));
         var precise = System.Text.RegularExpressions.Regex.Match(cmake, @"set\(AUTOSIMD_SOURCES([\s\S]*?)\)").Groups[1].Value;
+        // 适配函数与实现同 TU：精确编译单元里只有这一个 job 文件，没有独立 adapter。
         Assert.Contains("PreciseChunk_Execute.cpp", precise);
-        Assert.Contains("PreciseChunk_Execute_Adapter.cpp", precise);
+        Assert.DoesNotContain("PreciseChunk_Execute_Adapter.cpp", precise);
         Assert.Contains("add_library(NativeTranspiledPrecise OBJECT", cmake);
     }
 
@@ -72,7 +73,7 @@ public struct VectorizePrecisionJob : IJobEntity {
         var precise = System.Text.RegularExpressions.Regex.Match(cmake, @"set\(AUTOSIMD_SOURCES([\s\S]*?)\)").Groups[1].Value;
         const string name = "SharpNative_Job__global_namespace__VectorizePrecisionJob_Execute";
         Assert.Equal(!fastMath, precise.Contains(name + ".cpp"));
-        Assert.Equal(!fastMath, precise.Contains(name + "_Adapter.cpp"));
+        Assert.DoesNotContain(name + "_Adapter.cpp", precise);
     }
 
     [Theory]

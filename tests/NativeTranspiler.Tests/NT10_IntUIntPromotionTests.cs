@@ -86,7 +86,7 @@ public struct NT10NegJob : IJobParallelFor {
                 GeneratorHarness.Fail(r, "int×uint 被发成 32 位无符号回绕 ⇒ 静默错值: " + stmt));
             Assert.False(stmt.Contains("(unsigned)("),
                 GeneratorHarness.Fail(r, "int×uint 的任一操作数被 32 位无符号重解释 ⇒ C++ 侧仍是 32 位算术: " + stmt));
-            Assert.True(stmt.Contains("(unsigned long long)(i)") && stmt.Contains("(unsigned long long)(U)"),
+            Assert.True(stmt.Contains("(unsigned long long)i") && stmt.Contains("(unsigned long long)U"),
                 GeneratorHarness.Fail(r, "int×uint 未把两侧提升到 64 位: " + stmt));
             Assert.Contains("*", stmt);
         }
@@ -110,7 +110,7 @@ public struct NT10NegJob : IJobParallelFor {
         {
             var r = GeneratorHarness.EmitFor(IntIntJob);
             var stmt = StmtWith(r, "Out_ptr[i]");
-            Assert.Contains("(int)((unsigned)(i) * (unsigned)(U))", stmt);
+            Assert.Contains("(int)((unsigned)i * (unsigned)U)", stmt);
         }
 
         /// <summary>一元负号同族缺陷：C# `-uint` 的结果类型是 **long**（旧实现按 32 位回绕发出）。</summary>

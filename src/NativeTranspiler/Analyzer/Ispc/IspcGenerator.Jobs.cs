@@ -163,7 +163,7 @@ namespace NativeTranspiler.Analyzer.Common
             foreach (var include in CppJobGenerator.CollectJobStructIncludes(jobStruct, compilation))
                 sb.AppendLine($"#include \"{include}.h\"");
             sb.AppendLine($"#include \"{ispcBase}_ispc.h\"");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromJob(jobStruct);
@@ -246,7 +246,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{ispcBase}_mt_ispc.h\"");
             sb.AppendLine("#include <thread>");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             GenerateResizeCallbacks(sb, fields);

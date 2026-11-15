@@ -21,7 +21,7 @@ public struct PointData { public float x; public float y; }
   for(int i=0;i<values.Length;i++) { " + statement + @" }
  }
 }");
-            return File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__SnapshotJob_Execute_Adapter.cpp"));
+            return File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__SnapshotJob_Execute.cpp"));
         }
 
         [Fact]

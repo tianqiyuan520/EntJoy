@@ -52,7 +52,6 @@ namespace {AttributeNamespace}
     public sealed class {AttributeName}Attribute : Attribute
     {{
         public BackendTarget Target {{ get; set; }} = BackendTarget.Cpp;
-        public bool DisabledAutoRefresh {{ get; set; }} = false;
         public bool UseISPC_MT {{ get; set; }} = false;
         public IspcMathLib MathLib {{ get; set; }} = IspcMathLib.fast;
         public CppMathLib CppMathLib {{ get; set; }} = CppMathLib.@default;

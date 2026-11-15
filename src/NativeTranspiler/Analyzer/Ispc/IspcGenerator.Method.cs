@@ -163,7 +163,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{baseName}_ispc.h\"");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromMethod(method);
@@ -207,7 +207,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{baseName}_mt_ispc.h\"");
             sb.AppendLine("#include <thread>");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromMethod(method);

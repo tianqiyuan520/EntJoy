@@ -106,16 +106,6 @@ namespace NativeTranspiler.Analyzer.Common
         }
 
         /// <summary>
-        /// 读取 DisableAutoRefresh 参数：
-        /// 为 true 时跳过已存在文件的重新生成（用于增量缓存）
-        /// </summary>
-        public static bool GetDisableAutoRefresh(ISymbol symbol, INamedTypeSymbol? attrSymbol)
-        {
-            if (attrSymbol == null) return false;
-            return TryGetNamedArgument(symbol, attrSymbol, "DisableAutoRefresh", false);
-        }
-
-        /// <summary>
         /// 读取 AutoSIMD 参数：是否启用自动 SIMD 向量化
         /// </summary>
         public static NativeTranspiler.AutoSIMD GetAutoSIMD(ISymbol symbol, INamedTypeSymbol? attrSymbol)

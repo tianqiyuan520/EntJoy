@@ -38,9 +38,7 @@ namespace NativeTranspiler.Analyzer
             foreach (var t in CollectSignatureStructTypes(method))
                 sb.AppendLine($"#include \"{NativeTranspiler.GetStructHeaderFileName(t)}.h\"");
             sb.AppendLine();
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
-            sb.AppendLine();
-            sb.AppendLine(CodeTemplates.GenerateAtomicMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true) + ";");
             return sb.ToString();
@@ -189,7 +187,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
+                    sb.Append(CodeIndent.Shift(bodyCode, 1));
                 }
             }
             else if (methodSyntax?.ExpressionBody != null)

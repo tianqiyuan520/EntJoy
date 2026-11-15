@@ -271,7 +271,7 @@ namespace NativeTranspiler.Analyzer
                 for (int i = 0; i < forStmt.Incrementors.Count; i++)
                 {
                     if (i > 0) _builder.Append(", ");
-                    TranslateExpression(forStmt.Incrementors[i]);
+                    TranslateDiscardedValue(forStmt.Incrementors[i]);
                 }
             }
             _builder.AppendLine(")");
@@ -297,9 +297,12 @@ namespace NativeTranspiler.Analyzer
         protected virtual void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
         {
             AppendIndent();
-            TranslateExpression(exprStmt.Expression);
+            TranslateDiscardedValue(exprStmt.Expression);
             _builder.AppendLine(";");
         }
+
+        /// <summary>转译一个值被丢弃的表达式（语句体、for 增量）：默认与普通转译相同。</summary>
+        protected virtual void TranslateDiscardedValue(ExpressionSyntax expr) => TranslateExpression(expr);
 
         protected virtual void TranslateReturnStatement(ReturnStatementSyntax returnStmt)
         {
@@ -851,9 +854,15 @@ namespace NativeTranspiler.Analyzer
         {
             var type = _semanticModel.GetTypeInfo(cast.Type).Type;
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
-            _builder.Append("((").Append(cppType).Append(')');
-            TranslateExpression(cast.Expression);
-            _builder.Append(')');
+            // 源类型与目标类型相同 ⇒ 恒等转换，直接发操作数。
+            if (SymbolEqualityComparer.Default.Equals(type, _semanticModel.GetTypeInfo(cast.Expression).Type))
+            {
+                TranslateExpression(cast.Expression);
+                return;
+            }
+            // C 风格转换的优先级已高于所有二元运算符，只有复合操作数需要括号。
+            string operand = CaptureExpression(cast.Expression);
+            _builder.Append('(').Append(cppType).Append(')').Append(CppIntegerSemantics.CastOperand(operand));
         }
 
         protected virtual void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)

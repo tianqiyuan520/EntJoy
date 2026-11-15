@@ -44,7 +44,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {loopEnd}; ++{indexParamName})");
             sb.AppendLine("    {");
             if (anyReturn) sb.AppendLine("        [&]() {");
-            sb.Append(body);
+            sb.Append(CodeIndent.Shift(body, 2));
             if (anyReturn) sb.AppendLine("        }();");
             sb.AppendLine("    }");
         }
@@ -61,21 +61,7 @@ namespace NativeTranspiler.Analyzer
             var zeroMaskField = !isVariant && !isRangeJob && autoSIMD == NativeTranspiler.AutoSIMD.Disabled
                 ? FindZeroMaskField(jobStruct, semanticModel, methodSyntax) : null;
             var stableArrays = isVariant ? null : FindStableArrayFields(jobStruct, semanticModel, methodSyntax);
-            // 普通和 bool 特化批次共用签名与内联约定。
-            sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
-            sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
-            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE __forceinline");
-            sb.AppendLine("#  else");
-            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE");
-            sb.AppendLine("#  endif");
-            sb.AppendLine("#endif");
-            sb.AppendLine("#ifndef EJ_BATCH_ALWAYS_INLINE");
-            sb.AppendLine("#  if defined(__clang__)");
-            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE __attribute__((always_inline))");
-            sb.AppendLine("#  else");
-            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE");
-            sb.AppendLine("#  endif");
-            sb.AppendLine("#endif");
+            // 普通和 bool 特化批次共用签名与内联约定（宏定义在 NativeGeneratedSupport.h）。
             if (zeroMaskField != null)
                 sb.AppendLine("template<bool __ejZeroMask>");
             string linkage = zeroMaskField == null ? "GENERATED_API" : "static";
@@ -96,7 +82,7 @@ namespace NativeTranspiler.Analyzer
                 var rangeTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct,
                     indexParamName, "__startIndex", useFastMath, false,
                     countParamName, "__count");
-                sb.Append(rangeTranslator.Translate(methodSyntax.Body));
+                sb.Append(CodeIndent.Shift(rangeTranslator.Translate(methodSyntax.Body), 1));
                 sb.AppendLine("}");
                 sb.AppendLine();
                 return;
@@ -140,7 +126,7 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
                 sb.AppendLine("{");
                 var maskType = NativeTranspiler.MapCSharpTypeToCpp(zeroMaskField.Type);
-                sb.AppendLine($"    if (*({maskType}*)((char*)__job + {offset}) == 0)");
+                sb.AppendLine($"    if (*({maskType}*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", offset))} == 0)");
                 sb.AppendLine($"        {bodyName}<true>(__job, __startIndex, __count);");
                 sb.AppendLine("    else");
                 sb.AppendLine($"        {bodyName}<false>(__job, __startIndex, __count);");
@@ -186,7 +172,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
+                    sb.Append(CodeIndent.Shift(bodyCode, 1));
                 }
             }
             else
@@ -215,7 +201,7 @@ namespace NativeTranspiler.Analyzer
                 var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
                 var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
-                sb.Append(bodyCode);
+                sb.Append(CodeIndent.Shift(bodyCode, 1));
             }
             else
             {
@@ -250,7 +236,7 @@ namespace NativeTranspiler.Analyzer
                 int forPos = bodyCode.IndexOf("for (");
                 if (forPos >= 0)
                     bodyCode = bodyCode.Insert(forPos, pragma);
-                sb.Append(bodyCode);
+                sb.Append(CodeIndent.Shift(bodyCode, 1));
             }
             else
             {

@@ -148,10 +148,12 @@ CMake 编译目标、以及把 `NativeDll.dll`/`NativeTranspiled.dll` 复制到�
 ```
 <项目>/
 ├─ NativeTranspiler_Generated/          # 生成物（不应手工编辑；已默认从编译中排除）
-│  ├─ *.cpp / *.h                       # job wrapper、adapter、结构体头
-│  ├─ *.ispc (+ *_ispc.h)               # 仅 Target=Ispc
+│  ├─ SharpNative_Job_*.cpp             # 每个 job 一个 TU：实现 + adapter + Get_*Ptr 导出
+│  ├─ SharpNative_*.h / *.cpp           # 静态方法入口（dllexport）与内联 helper（static inline）
+│  ├─ <类型>.h / *.ispc                 # 用户结构体定义（ISPC 侧仅 Target=Ispc）
+│  ├─ *.ispc (+ *_ispc.h)               # 仅 Target=Ispc：job 的 ISPC 源与 wrapper
 │  ├─ CMakeLists.txt                    # 原生编译工程（源模式编 NativeDll+NativeTranspiled；prebuilt 模式只编后者）
-│  ├─ run_clangcl.bat / run_ispc.bat    # 手动编译脚本
+│  ├─ run_clangcl.bat                   # 手动编译脚本（ISPC 由 CMakeLists 的规则统一驱动）
 │  ├─ generator.stamp                   # 生成器内容哈希（陈旧门控用）
 │  ├─ native_compile.hash               # 原生依赖内容哈希（增量跳过 CMake 用）
 │  └─ build/Release/                    # NativeDll.dll + NativeTranspiled.dll

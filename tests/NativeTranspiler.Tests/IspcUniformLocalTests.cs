@@ -78,7 +78,8 @@ int sum=index; for(int k=begin;k<end;k+=2) sum+=Input[k%period]; Output[index]=s
  public NativeArray<int> Output; public int Value;
  public void Execute(int index) { Output[index]=-Value; }
 }");
-        foreach (var name in new[] { "CMakeLists.txt", "run_ispc.bat" })
-            Assert.Contains("--wrap-signed-int", File.ReadAllText(Path.Combine(result.OutputDir, name)));
+        // ISPC 命令行只由 CMakeLists 发射（run_ispc.bat 已移除，避免同一批命令写两遍）。
+        Assert.Contains("--wrap-signed-int",
+            File.ReadAllText(Path.Combine(result.OutputDir, "CMakeLists.txt")));
     }
 }
