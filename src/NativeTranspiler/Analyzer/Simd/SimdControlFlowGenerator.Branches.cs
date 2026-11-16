@@ -50,7 +50,7 @@ namespace NativeTranspiler.Analyzer
                     // inside an UNROLLED loop there is no real C++ loop, so a
                     //   `continue;` would jump to the outermost batch loop (for si), skipping
                     //   the remaining unrolled iterations AND the final store — output all zeros.
-                    //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
+                    //   Unrolled-loop frames have an empty TrackerVar (see GenerateUnrolledLoop);
                     //   real scalar-for frames carry a non-empty saved-mask tracker.
                     if (_loopStack.Count > 0 && _loopStack.Peek().TrackerVar.IsEmpty)
                     {
@@ -195,7 +195,7 @@ namespace NativeTranspiler.Analyzer
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
-            if (savedMaskEmitted || !string.IsNullOrEmpty(savedMask))
+            if (savedMaskEmitted || !savedMask.IsEmpty)
                 _currentMask = savedMask;
             // A branch may have removed lanes through break/continue. Restoring
             // its entry mask must not reactivate those lanes for later statements.

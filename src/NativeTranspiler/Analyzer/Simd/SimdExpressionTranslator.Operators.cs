@@ -260,6 +260,7 @@ namespace NativeTranspiler.Analyzer
             // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
             if (innerKind >= VarKind.Varying)
             {
+                // uint2 的算术与 int2 位相同，用 int2 的寄存器类型承载。
                 if (SimdVectorTypes.IsInt2(targetCppType) || SimdVectorTypes.IsUint2(targetCppType))
                     return $"simd_value<EntJoy::Mathematics::int2>::convert({inner})";
                 if (targetSymbol?.SpecialType == SpecialType.System_Int32)
@@ -270,9 +271,8 @@ namespace NativeTranspiler.Analyzer
             }
 
             // (int)floatExpr → scalar convert (uniform path)
-            var targetType = SymbolHelper.GetBoundType(_semanticModel, cast.Type);
-            if (targetType != null)
-                return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType)}){inner}";
+            if (targetSymbol != null)
+                return $"({targetCppType}){inner}";
 
             return $"({cast.Type.ToString().Replace(".", "::")}){inner}";
         }

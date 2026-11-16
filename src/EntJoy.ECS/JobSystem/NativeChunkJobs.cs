@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace EntJoy.ECS.JobSystem
@@ -169,13 +170,33 @@ namespace EntJoy.ECS.JobSystem
 
             // 总大小相同、字段换序或换名时，只有指纹能发现。
             if (!NativeJobCore.TryGetNativeTranspiledExport("NativeTranspiled_GetChunkContextHeaderLayoutFingerprint", out var fingerprintExport))
+            {
+                Console.Error.WriteLine(
+                    "[NativeTranspiled] 未找到 ChunkContextHeader 布局指纹导出，本次只校验了字节数（模块版本旧于 ABI 5）。");
                 return;
-            _getChunkContextHeaderLayoutFingerprint = (delegate* unmanaged[Cdecl]<ulong>)fingerprintExport;
-            ulong nativeFingerprint = _getChunkContextHeaderLayoutFingerprint();
+            }
+            var getFingerprint = (delegate* unmanaged[Cdecl]<ulong>)fingerprintExport;
+            ulong nativeFingerprint = getFingerprint();
             ulong managedFingerprint = ComputeChunkContextHeaderFingerprint();
             if (nativeFingerprint != managedFingerprint)
                 throw new InvalidOperationException(
-                    $"ChunkContextHeader 字段布局不匹配：C++=0x{nativeFingerprint:X16} C#=0x{managedFingerprint:X16}。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
+                    $"ChunkContextHeader 字段布局不匹配：C++=0x{nativeFingerprint:X16} C#=0x{managedFingerprint:X16}。" +
+                    $"托管侧字段（名:偏移:宽度）={DescribeChunkContextHeaderFields()}。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
+        }
+
+        /// <summary>托管侧字段清单，供指纹失配时定位到具体字段。</summary>
+        private static string DescribeChunkContextHeaderFields()
+        {
+            var type = typeof(ChunkContextHeader);
+            var text = new StringBuilder();
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (text.Length > 0) text.Append(", ");
+                text.Append(field.Name).Append(':')
+                    .Append(Marshal.OffsetOf(type, field.Name)).Append(':')
+                    .Append(Marshal.SizeOf(field.FieldType));
+            }
+            return text.ToString();
         }
 
         /// <summary>字段指纹：名字（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成，与 C++ 侧同值。</summary>

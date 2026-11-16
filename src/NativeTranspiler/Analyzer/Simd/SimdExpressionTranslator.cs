@@ -305,11 +305,13 @@ namespace NativeTranspiler.Analyzer
             // 必须早于 scalarReceiver 回退，否则会被原样输出成 `int2.zero`。
             if (memberName == "zero")
             {
-                // 接收者是类型名（`int2.zero`），翻译结果形如 `EntJoy::Mathematics::int2`。
-                string zeroType = SimdVectorTypes.LeafName(objExpr);
-                if (zeroType == "uint2") return "EntJoy::Mathematics::uint2(0u, 0u)";
-                if (zeroType == "int2") return "EntJoy::Mathematics::int2(0, 0)";
-                if (zeroType == "float2") return "EntJoy::Mathematics::float2(0.0f, 0.0f)";
+                // 接收者是类型名；按绑定符号判定，符号不可得时退到归一化后的叶子名（裸名 / 点号限定名 / 包装）。
+                var zeroSymbol = SymbolHelper.GetBoundType(_semanticModel, memberAccess.Expression);
+                string zeroCppType = zeroSymbol != null ? NativeTranspiler.MapCSharpTypeToCpp(zeroSymbol) : "";
+                string zeroLeaf = SimdVectorTypes.LeafName(zeroCppType.Length > 0 ? zeroCppType : objExpr.Replace('.', ':'));
+                if (zeroLeaf == "uint2") return "EntJoy::Mathematics::uint2(0u, 0u)";
+                if (zeroLeaf == "int2") return "EntJoy::Mathematics::int2(0, 0)";
+                if (zeroLeaf == "float2") return "EntJoy::Mathematics::float2(0.0f, 0.0f)";
             }
 
             // .x / .y 的向量成员形式只有真向量才成立；标量接收者走值类型路径（`p.x()`）。

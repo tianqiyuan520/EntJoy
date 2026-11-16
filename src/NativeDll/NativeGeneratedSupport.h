@@ -126,7 +126,7 @@ static_assert(sizeof(__EntJoyEventBuffer) == 24,
 
 #include <cstddef>
 
-// 布局指纹：字段名（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成（与字段枚举顺序无关）。
+// 布局指纹：字段名（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成（与字段枚举顺序无关）。同宽改类型不在覆盖内。
 // 托管侧 NativeChunkJobs.ComputeChunkContextHeaderFingerprint 用同值常量算出同一结果；
 // 只比总大小抓不到"同宽换序"，所以加载时还要比指纹。
 #define __ENTJOY_CHUNK_CONTEXT_FIELDS(X) \
@@ -163,6 +163,7 @@ inline constexpr unsigned long long __EntJoyChunkContextHeaderFingerprint()
         sizeof((static_cast<__EntJoyChunkContextHeader*>(nullptr))->name));
     __ENTJOY_CHUNK_CONTEXT_FIELDS(__ENTJOY_CHUNK_FIELD_HASH)
 #undef __ENTJOY_CHUNK_FIELD_HASH
+#undef __ENTJOY_CHUNK_CONTEXT_FIELDS
     return sum + (__EntJoyLayoutSalt ^ static_cast<unsigned long long>(sizeof(__EntJoyChunkContextHeader)));
 }
 #endif
