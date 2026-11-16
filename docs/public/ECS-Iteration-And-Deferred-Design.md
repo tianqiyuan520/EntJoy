@@ -61,18 +61,20 @@
 | 入口 | 耗时 | 相对 Arch `World.Get` |
 | --- | --- | --- |
 | `GetComponentLookup<T>()[entity]` | 394–402 µs | 1.12–1.15 |
-| `EntityManager.GetComponent<T>(entity)` | 599–633 µs | 1.67–1.70 |
+| `EntityManager.GetComponent<T>(entity)` | 425–439 µs | 1.14–1.18 |
 | Arch `World.Get<T>(entity)` | 350–378 µs | 1.00 |
+
+读路径按句柄校验一次：`GetAliveInfoRef` 通过之后，取组件直接按下标算地址，不再复查块的处置状态与两处越界。这与 Arch、DOTS 的做法一致——它们在句柄层面校验一次，之后给裸引用。改之前每次访问多查三处，读 599–633 µs / 1.67–1.70 倍。
 
 写：
 
 | 入口 | 耗时 | 相对 Arch `World.Set` |
 | --- | --- | --- |
-| `EntityManager.Set<T>(entity, value)` | 1616–1648 µs | 1.45–1.53 |
+| `EntityManager.Set<T>(entity, value)` | 1588–1656 µs | 1.36–1.45 |
 | `EntityManager.SetComponent<T>(entity, value)` | 3404–3455 µs | 3.12–3.16 |
 | Arch `World.Set<T>(entity, value)` | 1092–1128 µs | 1.00 |
 
-两条写入入口语义重叠，耗时差一倍：`Set<T>` 走类型化直写，`SetComponent<T>` 经定位表但每次按 `Type` 查一次类型表、并销毁旧值。两者应收敛到同一实现。
+`Set<T>` 剩下的差额主要在变更位标记与观察者判定，Arch 没有这两项。两条写入入口语义重叠、耗时差一倍：`Set<T>` 走类型化直写，`SetComponent<T>` 经定位表但每次按 `Type` 查一次类型表、并销毁旧值。两者应收敛到同一实现。
 
 启用位翻转：`SetComponentEnabled<T>` 逐实体 930–938 µs（10 万次，每次 9.3 ns）。原先是 3167–3364 µs——完成作业的路径无条件进 `_activeJobLock`，没有 Job 时也照取一次锁；列下标还要先按 `typeof(T)` 查类型表、再查一次原型字典。改成先看记账标记、列下标走按组件 id 索引的数组后落到 9.3 ns。Add / Remove / Destroy 早就用了这个空闲短路，写入与启用位一直漏着。
 
