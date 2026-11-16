@@ -71,6 +71,6 @@ dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
 dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 ```
 
-两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。
+两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
 
 性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
