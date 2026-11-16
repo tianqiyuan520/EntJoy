@@ -2,6 +2,7 @@ using EntJoy.JobSystem;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -153,7 +154,7 @@ namespace EntJoy.ECS.JobSystem
             ValidateChunkContextHeaderLayout();
         }
 
-        /// <summary>布局防御：原生侧报告 chunk 上下文头字节数，与托管 <see cref="ChunkContextHeader"/> 比对。
+        /// <summary>布局防御：原生侧报告 chunk 上下文头的字节数与字段指纹，与托管 <see cref="ChunkContextHeader"/> 比对。
         /// 两边字段必须同步（原生定义在 NativeGeneratedSupport.h）。</summary>
         private static void ValidateChunkContextHeaderLayout()
         {
@@ -165,7 +166,41 @@ namespace EntJoy.ECS.JobSystem
             if (nativeSize != managedSize)
                 throw new InvalidOperationException(
                     $"ChunkContextHeader 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
+
+            // 总大小相同、字段换序或换名时，只有指纹能发现。
+            if (!NativeJobCore.TryGetNativeTranspiledExport("NativeTranspiled_GetChunkContextHeaderLayoutFingerprint", out var fingerprintExport))
+                return;
+            _getChunkContextHeaderLayoutFingerprint = (delegate* unmanaged[Cdecl]<ulong>)fingerprintExport;
+            ulong nativeFingerprint = _getChunkContextHeaderLayoutFingerprint();
+            ulong managedFingerprint = ComputeChunkContextHeaderFingerprint();
+            if (nativeFingerprint != managedFingerprint)
+                throw new InvalidOperationException(
+                    $"ChunkContextHeader 字段布局不匹配：C++=0x{nativeFingerprint:X16} C#=0x{managedFingerprint:X16}。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
         }
+
+        /// <summary>字段指纹：名字（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成，与 C++ 侧同值。</summary>
+        internal static ulong ComputeChunkContextHeaderFingerprint()
+        {
+            ulong sum = 0;
+            var type = typeof(ChunkContextHeader);
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                ulong hash = LayoutFnvBasis;
+                foreach (char c in field.Name)
+                {
+                    hash ^= (byte)char.ToLowerInvariant(c);
+                    hash *= LayoutFnvPrime;
+                }
+                hash = (hash ^ (ulong)Marshal.OffsetOf(type, field.Name)) * LayoutFnvPrime;
+                hash = (hash ^ (ulong)Marshal.SizeOf(field.FieldType)) * LayoutFnvPrime;
+                sum += hash;
+            }
+            return sum + (LayoutSalt ^ (ulong)Marshal.SizeOf(type));
+        }
+
+        private const ulong LayoutFnvBasis = 1469598103934665603UL;
+        private const ulong LayoutFnvPrime = 1099511628211UL;
+        private const ulong LayoutSalt = 0x9e3779b97f4a7c15UL;
 
         /// <summary>热重载换了 NativeTranspiled 句柄后，重新校验 chunk 上下文头布局（导出指针取自 JobSystem 模块，不需要重取）。</summary>
         private static void EnsureReloadHook()

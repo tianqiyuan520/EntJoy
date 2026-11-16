@@ -37,6 +37,7 @@ namespace NativeTranspiler.Analyzer
 
         public bool IsAllTrue => Origin == MaskOrigin.AllTrue;
         public bool IsNamedVar => Origin == MaskOrigin.NamedVar;
+        public bool IsEmpty => string.IsNullOrEmpty(Text);
 
         /// <summary>按文本推断来源：哨兵 / 简单标识符 / 其它表达式。</summary>
         public static SimdMask Of(string text)

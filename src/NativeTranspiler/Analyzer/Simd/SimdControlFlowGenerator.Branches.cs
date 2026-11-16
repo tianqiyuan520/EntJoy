@@ -40,7 +40,7 @@ namespace NativeTranspiler.Analyzer
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
                     // Combine with previous mask to narrow unfound lanes
-                    SimdMask prev = string.IsNullOrEmpty(savedMask.Text) ? _currentMask : savedMask;
+                    SimdMask prev = savedMask.IsEmpty ? _currentMask : savedMask;
                     if (!prev.IsAllTrue)
                     {
                         string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
@@ -52,7 +52,7 @@ namespace NativeTranspiler.Analyzer
                     //   the remaining unrolled iterations AND the final store — output all zeros.
                     //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
                     //   real scalar-for frames carry a non-empty saved-mask tracker.
-                    if (_loopStack.Count > 0 && string.IsNullOrEmpty(_loopStack.Peek().TrackerVar))
+                    if (_loopStack.Count > 0 && _loopStack.Peek().TrackerVar.IsEmpty)
                     {
                         string contTarget = _loopStack.Peek().ContinueLabel;
                         _gotoTargets.Add(contTarget);
@@ -134,7 +134,7 @@ namespace NativeTranspiler.Analyzer
                         }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
-                    bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                    bool maskContinue = _loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty;
                     bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement, maskContinue);
                     if (bodyHasGoto)
                         AppendLine($"if ({trueMask}.any_true())");
@@ -184,7 +184,7 @@ namespace NativeTranspiler.Analyzer
                 _currentMask = elseMaskVar;
 
                 bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
-                bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                bool maskContinue = _loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty;
                 bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody, maskContinue);
                 if (elseHasGoto)
                     AppendLine($"if ({elseMaskVar}.any_true())");
@@ -199,10 +199,10 @@ namespace NativeTranspiler.Analyzer
                 _currentMask = savedMask;
             // A branch may have removed lanes through break/continue. Restoring
             // its entry mask must not reactivate those lanes for later statements.
-            if (_loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar)
+            if (_loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty
                 && _currentMask != _loopStack.Peek().BodyMaskVar)
             {
-                string bodyMask = _loopStack.Peek().BodyMaskVar;
+                SimdMask bodyMask = _loopStack.Peek().BodyMaskVar;
                 string postMask = $"__post_if_{_maskCounter++}";
                 AppendLine($"simd_mask {postMask} = simd_mask{{ n_and_mask({_currentMask}.m, {bodyMask}.m) }};");
                 _currentMask = postMask;

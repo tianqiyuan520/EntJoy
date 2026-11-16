@@ -204,7 +204,7 @@ namespace NativeTranspiler.Analyzer
                         // when _returnedMaskVar is set (batch body has `return`), use per-lane
                         //   masked store to avoid overwriting lanes that already returned with their result.
                         //   Only write to non-returned lanes (complement of _returnedMaskVar).
-                        if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
+                        if (!_returnedMaskVar.IsEmpty && contBase == _batchLoopVar)
                         {
                             string rhsSimdExpr;
                             if (rhsKind < VarKind.Varying && (SimdExprShapes.Of(rhsExpr) & (SimdExprTraits.Intrinsic | SimdExprTraits.LaneAccess)) == 0)

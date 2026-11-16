@@ -245,25 +245,27 @@ namespace NativeTranspiler.Analyzer
         {
             string inner = TranslateExpression(cast.Expression);
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
-            string targetTypeStr = cast.Type.ToString();
+            // 目标类型按类型符号判定（源文本里 `int2` / `EntJoy.Mathematics.int2` 拼写不固定）。
+            var targetSymbol = SymbolHelper.GetBoundType(_semanticModel, cast.Type);
+            string targetCppType = targetSymbol != null ? NativeTranspiler.MapCSharpTypeToCpp(targetSymbol) : "";
 
             // Hoisted broadcasts are already the correct SIMD type — skip cast entirely
             if (inner.StartsWith("__uni_"))
                 return inner;
 
             // For varying int -> unsigned int: keep {inner} as-is (n_cmp_*_epi32 works on raw n_int)
-            if (innerKind >= VarKind.Varying && (targetTypeStr == "uint" || targetTypeStr == "unsigned int"))
+            if (innerKind >= VarKind.Varying && targetSymbol?.SpecialType == SpecialType.System_UInt32)
                 return $"{inner}";
 
             // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
             if (innerKind >= VarKind.Varying)
             {
-                if (targetTypeStr.Contains("int2"))
+                if (SimdVectorTypes.IsInt2(targetCppType) || SimdVectorTypes.IsUint2(targetCppType))
                     return $"simd_value<EntJoy::Mathematics::int2>::convert({inner})";
-                if (targetTypeStr == "int" || targetTypeStr == "System.Int32")
+                if (targetSymbol?.SpecialType == SpecialType.System_Int32)
                     return $"simd_value<int>::convert({inner})";
                 // (float2)simd_value<float2> → just the inner value (identity conversion)
-                if (targetTypeStr.Contains("float2"))
+                if (SimdVectorTypes.IsFloat2(targetCppType))
                     return inner;
             }
 
@@ -272,7 +274,7 @@ namespace NativeTranspiler.Analyzer
             if (targetType != null)
                 return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType)}){inner}";
 
-            return $"({targetTypeStr.Replace(".", "::")}){inner}";
+            return $"({cast.Type.ToString().Replace(".", "::")}){inner}";
         }
 
         /// <summary>
