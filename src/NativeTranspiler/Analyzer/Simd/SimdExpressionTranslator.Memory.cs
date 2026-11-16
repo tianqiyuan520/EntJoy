@@ -421,7 +421,7 @@ namespace NativeTranspiler.Analyzer
             string leaf = elemCppType;
             int sep = leaf.LastIndexOf("::");
             if (sep >= 0) leaf = leaf.Substring(sep + 2);
-            return SimdVectorTypes.IsFloat2(leaf) || SimdVectorTypes.IsInt2(leaf);
+            return SimdVectorTypes.IsPairLeaf(leaf);
         }
 
         /// <summary>

@@ -167,16 +167,16 @@ namespace EntJoy.ECS.JobSystem
                     $"ChunkContextHeader 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
         }
 
-        /// <summary>热重载换了句柄后，chunk 指针缓存与布局校验都要重跑：注册一次回调即可。</summary>
+        /// <summary>热重载换了 NativeTranspiled 句柄后，重新校验 chunk 上下文头布局（导出指针取自 JobSystem 模块，不需要重取）。</summary>
         private static void EnsureReloadHook()
         {
             if (Interlocked.Exchange(ref _reloadHookRegistered, 1) != 0) return;
-            NativeJobCore.RegisterReloadCallback(() => Volatile.Write(ref _chunkPointersLoaded, 0));
+            NativeJobCore.RegisterReloadCallback(ValidateChunkContextHeaderLayout);
         }
         internal static void EnsureChunkPointersLoaded()
         {
-            EnsureReloadHook();
             if (Volatile.Read(ref _chunkPointersLoaded) != 0) return;
+            EnsureReloadHook();
             lock (_chunkPointerLoadLock)
             {
                 if (_chunkPointersLoaded != 0) return;

@@ -426,15 +426,16 @@ namespace NativeTranspiler.Analyzer
         {
             if (SimdVectorTypes.IsFloat2(cppType))
                 return "simd_value<EntJoy::Mathematics::float2>";
-            if (SimdVectorTypes.IsInt2(cppType))
+            // uint2 的算术与 int2 位相同，沿用 int2 的寄存器类型（与旧子串判定行为一致）。
+            if (SimdVectorTypes.IsInt2(cppType) || SimdVectorTypes.IsUint2(cppType))
                 return "simd_value<EntJoy::Mathematics::int2>";
-            if (cppType == "float")
-                return "simd_value<float>";
-            if (cppType == "int")
-                return "simd_value<int>";
-            if (cppType == "bool")
-                return "simd_value<int>";
-            return null;
+            return SimdVectorTypes.LeafName(cppType) switch
+            {
+                "float" => "simd_value<float>",
+                "int" => "simd_value<int>",
+                "bool" => "simd_value<int>",
+                _ => null
+            };
         }
 
         private static bool IsFloat2Type(string cppType)
