@@ -309,7 +309,7 @@ namespace EntJoy.ECS
                 AddComponentRaw(entity, componentType, value);
                 return;
             }
-            CompleteEntityJobs(entity);
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity);
             using (EnterStructural())
             {
                 ref var entityInfoRef = ref GetAliveInfoRef(entity);
@@ -383,7 +383,8 @@ namespace EntJoy.ECS
         public void SetComponentEnabled<T>(Entity entity, bool enabled) where T : struct, IEnableableComponent
         {
             CheckDisposed();
-            CompleteEntityJobs(entity);
+            // 记账标记为 0 时没有要等的 Job；完成路径要取锁，先看标记能整句跳过。
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity);
             using (EnterStructural())
             {
                 ref var info = ref GetAliveInfoRef(entity);
@@ -410,9 +411,9 @@ namespace EntJoy.ECS
         /// <summary>取组件在该实体所属原型中的列下标；实体没有该组件时抛出。</summary>
         private static int RequireComponentIndex<T>(Archetype archetype, Entity entity) where T : struct
         {
-            if (!archetype.Has(typeof(T)))
+            if (!archetype.TryGetComponentTypeIndex(ComponentTypeManager.GetComponentType<T>(), out int componentIndex))
                 throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
-            return archetype.GetComponentTypeIndex<T>();
+            return componentIndex;
         }
     }
 }

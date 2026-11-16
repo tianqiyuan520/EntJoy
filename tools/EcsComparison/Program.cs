@@ -167,6 +167,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("random-set", probe.EntJoyRandomSet),
                 ("random-setcomponent", probe.EntJoyRandomSetComponent),
                 ("arch-random-set", probe.ArchRandomSet),
+                ("enabled-toggle", probe.EntJoyEnabledToggle),
             };
             Action runA = null, runB = null;
             foreach (var arm in arms)
@@ -420,6 +421,7 @@ internal static class StructuralBench
 public struct A : IComponentData { public int Value; }
 public struct B : IComponentData { public int Value; }
 public struct C : IComponentData { public int Value; }
+public struct Flag : IEnableableComponent { public int Value; }
 public struct Enabled : IComponentData, IEnableableComponent { }
 public struct Enabled2 : IComponentData, IEnableableComponent { }
 
@@ -495,6 +497,9 @@ public class SystemComparison
     // 稀疏随机访问基准用：按创建顺序存下句柄，逐次按句柄取组件。
     private EntJoy.ECS.Entity[] entRandom;
     private Arch.Core.Entity[] archRandom;
+    // enableable 启停基准用：独立世界，避免给其它臂的原型多加一条启用位图。
+    private EntWorld enabledWorld;
+    private EntJoy.ECS.Entity[] enabledEntities;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -596,6 +601,10 @@ public class SystemComparison
         }
         entCachedQuery = ent.GetOrCreateEntityQuery(entQuery);
         archCachedQuery = arch.Query(in query);
+        enabledWorld = new EntWorld("enabled", threadSafe: false);
+        enabledEntities = new EntJoy.ECS.Entity[EntityCount];
+        for (int i = 0; i < EntityCount; i++)
+            enabledEntities[i] = enabledWorld.EntityManager.NewEntity(typeof(A), typeof(Flag));
         EntJoy();
         VerifyEnt(1);
         Arch();
@@ -823,6 +832,14 @@ public class SystemComparison
         ent.Query<A, B>().ForEach(ref action);
     }
 
+
+    // enableable 组件启停：逐实体翻转一次，不涉及观察者与 Job。
+    public unsafe void EntJoyEnabledToggle()
+    {
+        var em = enabledWorld.EntityManager;
+        var entities = enabledEntities;
+        for (int i = 0; i < entities.Length; i++) em.SetComponentEnabled<Flag>(entities[i], (i & 1) == 0);
+    }
 
     // 稀疏随机访问：按实体句柄逐次写组件值。两侧都是「设置已有组件的值」这一个语义。
     public unsafe void EntJoyRandomSet()
@@ -1262,6 +1279,7 @@ public class SystemComparison
     public void Cleanup()
     {
         ent.Dispose();
+        enabledWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }
