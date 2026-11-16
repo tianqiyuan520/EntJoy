@@ -21,30 +21,13 @@ namespace EntJoy.ECS
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
 
         /// <summary>
-        /// 块循环 + 内联回调：按 Chunk 取列 Span 后逐实体调用 <paramref name="action"/>。
-        /// 与枚举器路径共用同一份遍历计划，但循环体里没有逐实体游标状态。
+        /// 按段推进 + 内联回调：游标给出连续可用槽位段（块级过滤时是整块，启用位过滤时是连续置位段），
+        /// 段内按列基址指针索引，循环里没有逐实体游标。
         /// </summary>
         public void ForEach<TAction>(ref TAction action)
             where TAction : struct, IQueryForeach<T0, T1>
         {
             var cursor = new QueryTraversalCursor(_entityManager, _builder, ComponentTypes<T0, T1>.Share);
-            if (cursor.CanUseChunkTable)
-            {
-                int count = cursor.ChunkCount;
-                for (int i = 0; i < count; i++)
-                {
-                    ref readonly var entry = ref cursor.ChunkEntry(i);
-                    // 裸指针索引：Span 的逐次边界检查会阻止循环向量化。
-                    var column0 = (T0*)entry.Base0;
-                    var column1 = (T1*)entry.Base1;
-                    for (int slot = 0; slot < entry.Count; slot++)
-                        action.Update(ref column0[slot], ref column1[slot]);
-                }
-                return;
-            }
-
-            // 块级过滤（shared / changed）整块要么全要要么全不要；逐实体过滤（关系目标、启用位）
-            // 由 RangeEnd 给出一段连续可用槽位。两者都按段推进，循环里没有逐实体游标。
             int next = 0;
             while (true)
             {
@@ -70,9 +53,6 @@ namespace EntJoy.ECS
         private static readonly ComponentType[] Columns = ComponentTypes<T0, T1>.Share;
         private QueryTraversalCursor _cursor;
         private readonly QueryReadState _readState;
-        // 计划可整块命中时按 Chunk 表推进，不搬动整个游标。
-        private readonly bool _useChunkTable;
-        private int _chunkTableIndex;
         // 相对连续区间末尾的偏移；有效实体为负数，0 表示区间耗尽。
         private int _slotOffset;
         private int _rangeEnd;
@@ -84,8 +64,6 @@ namespace EntJoy.ECS
         {
             _cursor = new QueryTraversalCursor(manager, builder, Columns);
             _readState = new QueryReadState(manager, builder.HasRelationshipFilter || ComponentTypeManager.IsRelationType<T0>() || ComponentTypeManager.IsRelationType<T1>());
-            _useChunkTable = _cursor.CanUseChunkTable;
-            _chunkTableIndex = -1;
             _slotOffset = 0;
             _rangeEnd = 0;
             _base0 = null;
@@ -102,38 +80,18 @@ namespace EntJoy.ECS
             // 区间内只递增槽位；跨区间时再校验借用并解析过滤和列基址。
             if (_slotOffset < 0) return true;
             _readState.ValidateTracked();
-            if (_useChunkTable)
+            var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);
+            _cursor = cursor;
+            if (cursor.HasChunk)
             {
-                int next = _chunkTableIndex + 1;
-                if (next < _cursor.ChunkCount)
-                {
-                    _chunkTableIndex = next;
-                    ref readonly var entry = ref _cursor.ChunkEntry(next);
-                    _rangeEnd = entry.Count;
-                    _slotOffset = -entry.Count;
-                    _base0 = (T0*)entry.Base0 + entry.Count;
-                    SetBase1(entry.Base1, entry.Count);
-                }
-                else
-                {
-                    ResetRange();
-                }
+                _rangeEnd = cursor.RangeEnd;
+                _slotOffset = cursor.Slot - _rangeEnd;
+                _base0 = (T0*)cursor.ComponentBase(0) + _rangeEnd;
+                SetBase1(cursor.ComponentBase(1), _rangeEnd);
             }
             else
             {
-                var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);
-                _cursor = cursor;
-                if (cursor.HasChunk)
-                {
-                    _rangeEnd = cursor.RangeEnd;
-                    _slotOffset = cursor.Slot - _rangeEnd;
-                    _base0 = (T0*)cursor.ComponentBase(0) + _rangeEnd;
-                    SetBase1(cursor.ComponentBase(1), _rangeEnd);
-                }
-                else
-                {
-                    ResetRange();
-                }
+                ResetRange();
             }
             // 区间内 _slotOffset 恒为负；HasChunk 时 RangeEnd 必大于 0，故该判据与基址判空等价。
             return _slotOffset < 0;

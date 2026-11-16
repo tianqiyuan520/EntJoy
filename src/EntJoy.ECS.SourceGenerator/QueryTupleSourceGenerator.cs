@@ -77,27 +77,11 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public QueryEnumerator<{genList}> GetEnumerator()");
             sb.AppendLine($"        => new QueryEnumerator<{genList}>(_entityManager, _builder);");
-            // 块循环回调：整块命中时按指针推进，循环体交给 JIT 内联，不构造逐实体结果。
+            // 按段推进的回调：段内按列基址指针索引，循环体交给 JIT 内联，不构造逐实体结果。
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public void ForEach<TAction>(ref TAction action) where TAction : struct, IQueryForeach<{genList}>");
             sb.AppendLine("    {");
             sb.AppendLine($"        var cursor = new QueryTraversalCursor(_entityManager, _builder, Columns);");
-            if (n <= 3)
-            {
-                sb.AppendLine("        if (cursor.CanUseChunkTable)");
-                sb.AppendLine("        {");
-                sb.AppendLine("            int count = cursor.ChunkCount;");
-                sb.AppendLine("            for (int i = 0; i < count; i++)");
-                sb.AppendLine("            {");
-                sb.AppendLine("                ref readonly var entry = ref cursor.ChunkEntry(i);");
-                for (int i = 0; i < n; i++)
-                    sb.AppendLine($"                {genParams[i]}* c{i} = ({genParams[i]}*)entry.Base{i};");
-                sb.AppendLine("                for (int s = 0; s < entry.Count; s++)");
-                sb.AppendLine($"                    action.Update({string.Join(", ", genParams.Select((_, i) => $"ref c{i}[s]"))});");
-                sb.AppendLine("            }");
-                sb.AppendLine("            return;");
-                sb.AppendLine("        }");
-            }
             sb.AppendLine("        // 块级过滤整块要么全要要么全不要；逐实体过滤由 RangeEnd 给出一段连续可用槽位。");
             sb.AppendLine("        int next = 0;");
             sb.AppendLine("        while (true)");
@@ -127,13 +111,6 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine($"    private static readonly ComponentType[] Columns = {{ {typeOfArgs} }};");
             sb.AppendLine("    private QueryTraversalCursor _cursor;");
             sb.AppendLine("    private readonly QueryReadState _readState;");
-            // 计划表只内联前 3 列基址；更宽的元组继续走游标路径。
-            bool useChunkTable = n <= 3;
-            if (useChunkTable)
-            {
-                sb.AppendLine("    private readonly bool _useChunkTable;");
-                sb.AppendLine("    private int _chunkTableIndex;");
-            }
             sb.AppendLine("    // 相对连续区间末尾的偏移；有效实体为负数。");
             sb.AppendLine("    private int _slotOffset;");
             sb.AppendLine("    private int _rangeEnd;");
@@ -145,11 +122,6 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        _cursor = new QueryTraversalCursor(manager, builder, Columns);");
             string relationTypes = string.Join(" || ", genParams.Select(g => $"ComponentTypeManager.IsRelationType<{g}>()"));
             sb.AppendLine($"        _readState = new QueryReadState(manager, builder.HasRelationshipFilter || {relationTypes});");
-            if (useChunkTable)
-            {
-                sb.AppendLine("        _useChunkTable = _cursor.CanUseChunkTable;");
-                sb.AppendLine("        _chunkTableIndex = -1;");
-            }
             sb.AppendLine("        _slotOffset = -1;");
             sb.AppendLine("        _rangeEnd = 0;");
             for (int i = 0; i < n; i++) sb.AppendLine($"        _base{i} = null;");
@@ -162,37 +134,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        // 区间内只递增槽位，跨区间时再解析过滤和列基址。");
             sb.AppendLine("        if (_slotOffset < 0) return true;");
             sb.AppendLine("        _readState.ValidateTracked();");
-            sb.AppendLine("        {");
-            if (useChunkTable)
-            {
-                sb.AppendLine("            if (_useChunkTable)");
-                sb.AppendLine("            {");
-                sb.AppendLine("                int next = _chunkTableIndex + 1;");
-                sb.AppendLine("                if (next < _cursor.ChunkCount)");
-                sb.AppendLine("                {");
-                sb.AppendLine("                    _chunkTableIndex = next;");
-                sb.AppendLine("                    ref readonly var entry = ref _cursor.ChunkEntry(next);");
-                sb.AppendLine("                    _rangeEnd = entry.Count;");
-                sb.AppendLine("                    _slotOffset = -entry.Count;");
-                for (int i = 0; i < n; i++) sb.AppendLine($"                    _base{i} = (T{i}*)entry.Base{i} + entry.Count;");
-                sb.AppendLine("                }");
-                sb.AppendLine("                else");
-                sb.AppendLine("                {");
-                sb.AppendLine("                    _rangeEnd = 0;");
-                sb.AppendLine("                    _slotOffset = 0;");
-                for (int i = 0; i < n; i++) sb.AppendLine($"                    _base{i} = null;");
-                sb.AppendLine("                }");
-                sb.AppendLine("            }");
-                sb.AppendLine("            else");
-                sb.AppendLine("            {");
-                AppendCursorChunkPath(sb, n, "                ");
-                sb.AppendLine("            }");
-            }
-            else
-            {
-                AppendCursorChunkPath(sb, n, "            ");
-            }
-            sb.AppendLine("        }");
+            AppendCursorChunkPath(sb, n, "        ");
             sb.AppendLine("        // 区间内 _slotOffset 恒为负；HasChunk 时 RangeEnd 必大于 0，故该判据与基址判空等价。");
             sb.AppendLine("        return _slotOffset < 0;");
             sb.AppendLine("    }");
