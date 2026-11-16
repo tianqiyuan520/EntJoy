@@ -490,9 +490,13 @@ namespace NativeTranspiler.Analyzer
                     //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
                     return ClassifyExpressionInternal(checkedExpr.Expression);
 
-                case ObjectCreationExpressionSyntax _:
-                    // new float2(x, y) — 看参数
-                    return VarKind.Uniform; // 保守
+                case ObjectCreationExpressionSyntax creation:
+                    // new float2(x, y) —— 任一分量 varying 则整体 varying（否则分量会当成标量构造）。
+                    if (creation.ArgumentList == null) return VarKind.Uniform;
+                    var creationKind = VarKind.Uniform;
+                    foreach (var argument in creation.ArgumentList.Arguments)
+                        creationKind = Max(creationKind, ClassifyExpressionInternal(argument.Expression));
+                    return creationKind;
 
                 default:
                     return VarKind.Uniform; // 未知表达式保守返回 uniform

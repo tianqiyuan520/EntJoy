@@ -78,6 +78,10 @@ namespace NativeTranspiler.Analyzer
         {
             string idxExpr = TranslateExpression(indexSyntax ?? assign.Left);
             string rhsExpr = TranslateExpression(assign.Right);
+            // 带对象初始化器的结构体整体赋值（`items[i] = new T { ... }`）没有字段级展开，
+            // 落下去只会得到一条 `static_cast<T>(int())` 之类静默错值；明确标记为不支持。
+            if (assign.Right is ObjectCreationExpressionSyntax { Initializer: not null })
+                return $"/*{UnsupportedMarkers.Expr}SIMD_ObjectInitializerStore*/ 0";
             VarKind idxKind = _varAnalyzer.ClassifyExpression(indexSyntax ?? assign.Left);
             VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
             string extractFn = elemType == "float" ? "n_extract_lane_f32" : "n_extract_lane_epi32";
@@ -88,6 +92,9 @@ namespace NativeTranspiler.Analyzer
             //   float*/int*。这里统一走"逐 lane 标量写"，按元素类型正确转换指针，
             //   掩码语义与其他路径一致（不再生成 `(int*)(byte_ptr)[i] = <float2>` 这类非法赋值）。
             bool isNarrowElem = elemType != "float" && elemType != "int";
+            // 2 分量向量元素：写回要按两个分量各自取 lane 再构造（float2/int2/uint2 同形）。
+            bool pairElem = SimdVectorTypes.IsPair(elemType);
+            string pairExtract = SimdVectorTypes.IsFloat2(elemType) ? "n_extract_lane_f32" : "n_extract_lane_epi32";
 
             // NT-12（Critical）：复合赋值必须"读-改-写"。
             //   若完全忽略 `assign.OperatorToken`，按普通 store 发 `addr = rhs`
@@ -126,6 +133,14 @@ namespace NativeTranspiler.Analyzer
                 // ⚠ 多词类型名（`unsigned char`）不能用 `unsigned char(v)` —— C++ 把它读成
                 //    `unsigned` 后跟 `char(v)`，报 "expected '(' for function-style cast"。
                 bool structElem = IsStructNativeArrayType(elemType);
+                if (pairElem && rhsKind >= VarKind.Varying)
+                {
+                    string pairOperand =
+                        $"{elemType}({pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.x.v,__l), {pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.y.v,__l))";
+                    if (idxKind >= VarKind.Varying)
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] = {pairOperand};}}}}";
+                    return $"{ep}[{idxExpr}] = {elemType}({pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.x.v,0), {pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.y.v,0))";
+                }
                 if (idxKind >= VarKind.Varying)
                 {
                     string rhsOperand = rhsKind >= VarKind.Varying

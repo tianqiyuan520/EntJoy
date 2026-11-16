@@ -409,6 +409,11 @@ namespace NativeTranspiler.Analyzer
             {
                 string args = string.Join(", ",
                     objCreation.ArgumentList.Arguments.Select(a => TranslateExpression(a.Expression)));
+                // 2 分量向量在 varying 上下文里构造的是 simd_value<pair>（两个分量各是 SIMD 值），
+                // 用包装初始化而不是 C++ 标量 pair 构造。
+                if (SimdVectorTypes.IsPair(cppType)
+                    && objCreation.ArgumentList.Arguments.Any(a => _varAnalyzer.ClassifyExpression(a.Expression) >= VarKind.Varying))
+                    return $"{GetSIMDTypeString(cppType)}{{ {args} }}";
                 return $"{cppType}({args})";
             }
 
