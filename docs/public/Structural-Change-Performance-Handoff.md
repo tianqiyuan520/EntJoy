@@ -96,6 +96,6 @@ dotnet run -c Release --project tools/EcsComparison --no-build -- --struct 10000
 - 两条写入入口语义重叠：`Set<T>` 1616–1648 µs，`SetComponent<T>` 3404–3455 µs（同 10 万次按句柄写同一列）。后者经定位表取指针，但每次按 `Type` 查类型表，且完成作业前不判空闲、每次取一次 `_activeJobLock`。两者应收敛到同一实现。
 - 按句柄直读取组件 599–633 µs，句柄索引入口 394–402 µs。差额是直取每次都从实体表重新解析定位，并多付处置、版本与关系列校验。
 - 延迟命令回放没有对照读数，`Change` 一侧还缺这一项基准。
-- 逐实体 `foreach` 与 Arch `InlineQuery` 的差随组件数反向：2 组件 95 对 46 µs，3 组件 77 对 131 µs。2 组件的差额来自逐访问校验与结果构造，属语法形态成本。
+- 逐实体 `foreach` 与 Arch `InlineQuery` 的差随组件数反向：2 组件 95 对 46 µs，3 组件 77 对 131 µs。2 组件的差额不在逐访问校验上——把 `Validate()` 与 `CheckWritableAccess` 全去掉只回收 8%，剩下的是 `foreach` 取结果结构体再经属性取 `ref` 这一形态本身的成本。
 
 读数与口径见 [遍历与延迟设计](ECS-Iteration-And-Deferred-Design.md)。

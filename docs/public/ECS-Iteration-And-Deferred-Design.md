@@ -21,7 +21,7 @@
 `Comp{i}` 每次访问都先 `Validate()` 再 `ComponentTypeManager.CheckWritableAccess<T>()`，后者读两个静态位（关系列标记、拷贝作用域计数）并做一次 `Volatile.Read`：
 
 - 关系列在托管侧是只读的，可写 `ref` 必须拒绝；`QueryResult_CrossThreadCopyScope_PreservesCallingThreadWriteGuard` 要求这个检查逐访问生效，移到块边界会破坏语义。
-- 把那个 `Volatile.Read` 短路掉，10 万实体两组件遍历只快约 5%（实测 129.9 μs → 119.4 μs）。剩余差距是逐实体的 `MoveNext`、`Current` 构造与两次属性访问本身——属语法形态的成本，换检查策略消不掉。
+- 逐条消融 10 万实体两组件遍历（`--ab-pair query arch-query 3`，取轮内最小值）：整条 121.6–126.1 µs，去掉 `Validate()` 后 107.9–118.5，再去掉 `CheckWritableAccess` 后 103.2–119.2（与上一步区间重叠）。两条校验合计约占 8%；把校验全去掉仍是 Arch 的 1.78–1.83 倍，所以差额不在校验，在「`foreach` 取 `Current` 结果结构体、再经属性取 `ref`」与「回调直接收 `ref`」这两种形态本身。
 - 借用校验的位置是**块边界**，不是逐实体：`MoveNext` 的快路径只做 `_slotOffset++` 与符号判断，跨 Chunk 时才校验。单、双、三、四组件四条枚举器都按这一条实现；生成的三/四组件枚举器曾逐 `MoveNext` 与逐 `Current` 各校验一次，10 万实体三组件比现在慢 31%（107.7 → 73.7 μs）。
 - 要 Arch 那种零检查写入，用 `Chunks()` 或 `ForEach`：两条路走块表快路径，裸指针索引，不经过属性。
 
