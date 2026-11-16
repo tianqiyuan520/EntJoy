@@ -123,4 +123,47 @@ static_assert(sizeof(__EntJoyChunkContextHeader) == 88,
     "ChunkContextHeader must match the managed x64 layout (see NativeChunkJobs.cs).");
 static_assert(sizeof(__EntJoyEventBuffer) == 24,
     "EventBufferHeader must match the managed x64 layout.");
+
+#include <cstddef>
+
+// 布局指纹：字段名（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成（与字段枚举顺序无关）。同宽改类型不在覆盖内。
+// 托管侧 NativeChunkJobs.ComputeChunkContextHeaderFingerprint 用同值常量算出同一结果；
+// 只比总大小抓不到"同宽换序"，所以加载时还要比指纹。
+#define __ENTJOY_CHUNK_CONTEXT_FIELDS(X) \
+    X(chunkCount) X(hasEnabledFilter) X(queryAllEnabledTypes) X(allEnabledCount) \
+    X(gcHandleStartIndex) X(chunksPtr) X(cleanupInProgress) X(ownsChunkData) \
+    X(requiredComponentTypeIds) X(requiredComponentTypeIdCount) X(jobIsBoxed) \
+    X(chunkArrayHandle) X(eventBufferCount) X(eventBufferHeaders) X(eventWorldHandle)
+
+inline constexpr unsigned long long __EntJoyLayoutFnvBasis = 1469598103934665603ull;
+inline constexpr unsigned long long __EntJoyLayoutFnvPrime = 1099511628211ull;
+inline constexpr unsigned long long __EntJoyLayoutSalt = 0x9e3779b97f4a7c15ull;
+
+inline constexpr unsigned long long __EntJoyChunkContextFieldHash(
+    const char* name, unsigned long long offset, unsigned long long size)
+{
+    unsigned long long hash = __EntJoyLayoutFnvBasis;
+    for (const char* c = name; *c != '\0'; ++c)
+    {
+        const char lower = (*c >= 'A' && *c <= 'Z') ? static_cast<char>(*c + 32) : *c;
+        hash ^= static_cast<unsigned char>(lower);
+        hash *= __EntJoyLayoutFnvPrime;
+    }
+    hash = (hash ^ offset) * __EntJoyLayoutFnvPrime;
+    hash = (hash ^ size) * __EntJoyLayoutFnvPrime;
+    return hash;
+}
+
+inline constexpr unsigned long long __EntJoyChunkContextHeaderFingerprint()
+{
+    unsigned long long sum = 0;
+#define __ENTJOY_CHUNK_FIELD_HASH(name) \
+    sum += __EntJoyChunkContextFieldHash(#name, \
+        offsetof(__EntJoyChunkContextHeader, name), \
+        sizeof((static_cast<__EntJoyChunkContextHeader*>(nullptr))->name));
+    __ENTJOY_CHUNK_CONTEXT_FIELDS(__ENTJOY_CHUNK_FIELD_HASH)
+#undef __ENTJOY_CHUNK_FIELD_HASH
+#undef __ENTJOY_CHUNK_CONTEXT_FIELDS
+    return sum + (__EntJoyLayoutSalt ^ static_cast<unsigned long long>(sizeof(__EntJoyChunkContextHeader)));
+}
 #endif

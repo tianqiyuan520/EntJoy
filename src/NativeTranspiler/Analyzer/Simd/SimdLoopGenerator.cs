@@ -132,7 +132,7 @@ namespace NativeTranspiler.Analyzer
             _indent--;
             AppendLine("}");
             _currentMask = entryMask;
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
             {
                 string afterMask = $"__after_for_{_maskCounter++}";
                 AppendLine($"simd_mask {afterMask} = simd_mask{{ n_and_mask({entryMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -185,7 +185,7 @@ namespace NativeTranspiler.Analyzer
                 // kill lanes that have already returned (e.g. found their match
                 //   in a previous unrolled j iteration and wrote R[i]=result).
                 //   result because its mask is restored to all_true by savedMask.
-                if (!string.IsNullOrEmpty(_returnedMaskVar))
+                if (!_returnedMaskVar.IsEmpty)
                 {
                     // If savedMask is the all_true literal (not a named variable), we can't
                     // assign to it. Introduce a named variable first.
@@ -250,7 +250,7 @@ namespace NativeTranspiler.Analyzer
             // compute the post-loop mask for the default store.
             //   - ALL lanes returned → no lane needs default → skip store entirely (goto exitLabel)
             //   - NO lanes returned → default store writes 777 for all lanes (post_mask = all lanes)
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
             {
                 // Compute non-returned lanes mask (for the default store)
                 if (savedMask.IsAllTrue)
@@ -273,7 +273,7 @@ namespace NativeTranspiler.Analyzer
             }
             if (hasBreak)
                 AppendLine($"{exitLabel}: ;");
-            else if (!string.IsNullOrEmpty(_returnedMaskVar))
+            else if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"{exitLabel}: ;");
             _unrollProduct = outerUnrollProduct;
         }
@@ -460,7 +460,7 @@ namespace NativeTranspiler.Analyzer
             // kill lanes that have already returned before using as active mask.
             //   Without this, returned lanes would re-activate each count-loop iteration
             //   (v_active is recomputed fresh each iter) and overwrite their result.
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"v_active{sid} = simd_mask{{ n_and_mask(v_active{sid}.m, n_not_mask({_returnedMaskVar}.m)) }};");
 
             // Retain the enclosing branch mask for every reduction iteration.
@@ -521,7 +521,7 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
             // 已退出的 lane 不再参与后续条件求值；每轮 body mask 单独承接 continue。
             AppendLine($"{tracker} = {tracker} & simd_mask{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"{tracker} = {tracker} & simd_mask{{ n_not_mask({_returnedMaskVar}.m) }};");
             AppendLine($"if (!{tracker}.any_true()) {{ break; }}");
             AppendLine($"simd_mask {iterActive} = {tracker};");

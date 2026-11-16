@@ -24,7 +24,7 @@ namespace NativeTranspiler.Analyzer
         public const string AllTrueText = "simd_mask::all_true()";
 
         public static readonly SimdMask AllTrue = new(AllTrueText, MaskOrigin.AllTrue);
-        public static readonly SimdMask Empty = new("", MaskOrigin.Expression);
+        public static readonly SimdMask Empty = new(null, MaskOrigin.Expression);
 
         public SimdMask(string text, MaskOrigin origin)
         {
@@ -37,6 +37,7 @@ namespace NativeTranspiler.Analyzer
 
         public bool IsAllTrue => Origin == MaskOrigin.AllTrue;
         public bool IsNamedVar => Origin == MaskOrigin.NamedVar;
+        public bool IsEmpty => string.IsNullOrEmpty(Text);
 
         /// <summary>按文本推断来源：哨兵 / 简单标识符 / 其它表达式。</summary>
         public static SimdMask Of(string text)
@@ -59,7 +60,7 @@ namespace NativeTranspiler.Analyzer
         public static implicit operator SimdMask(string text) => Of(text);
 
         public bool Equals(SimdMask other)
-            => Origin == other.Origin && string.Equals(Text, other.Text, StringComparison.Ordinal);
+            => Origin == other.Origin && string.Equals(Text ?? "", other.Text ?? "", StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SimdMask other && Equals(other);
 
