@@ -25,7 +25,7 @@ namespace NativeTranspiler.Analyzer.Common
                     sb.Append(trimmed);
                 else
                 {
-                    if (line.Length > 0) sb.Append(pad);
+                    if (line.Trim().Length > 0) sb.Append(pad);
                     sb.Append(line);
                 }
                 if (i < lines.Length - 1) sb.Append(crlf ? "\r\n" : "\n");

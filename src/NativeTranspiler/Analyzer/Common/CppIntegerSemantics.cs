@@ -41,9 +41,12 @@ namespace NativeTranspiler.Analyzer.Common
             while (IsWholeParenthesized(operand))
             {
                 string inner = operand.Substring(1, operand.Length - 2);
-                if (NeedsParensForCast(inner)) break;
+                if (NeedsParensForCast(inner)) return operand;
                 operand = inner;
             }
+            // 前置转换 `(T)x` 与一元运算符（`*p` / `&x` / `-x` / `!x` / `~x`）比成员访问结合得松，必须补括号。
+            if (operand.Length > 0 && (operand[0] == '(' || "+-*&!~".IndexOf(operand[0]) >= 0))
+                return "(" + operand + ")";
             return CastOperand(operand);
         }
 

@@ -118,6 +118,13 @@ namespace NativeTranspiler.Analyzer
             base.TranslateIdentifier(identifier);
         }
 
+        /// <summary>右值译文是否引用了目标这个存储（按目标最内层标识符名判断）。</summary>
+        private static bool MentionsSameStorage(ExpressionSyntax target, string rhsText)
+        {
+            var root = target.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().FirstOrDefault();
+            return root != null && rhsText.Contains(root.Identifier.Text, StringComparison.Ordinal);
+        }
+
         /// <summary>
         /// 左值是否可安全重复发出：译文里出现两次，任何带副作用的子表达式（调用、赋值、自增自减、new、await）
         /// 都会因此求值两遍。
@@ -168,6 +175,9 @@ namespace NativeTranspiler.Analyzer
 
             if (target == null || !IsReEvaluationSafe(target)) return false;
             if (!CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(target), out var signed, out var unsigned)) return false;
+            // 右值提到同一表达式里求值后，读取目标的时机与右值求值不再有先后保证；
+            // 右值引用了目标本身（`x += f(x)` 这类）时退回 lambda（它先把右值求进临时变量）。
+            if (rhs != null && MentionsSameStorage(target, rhs)) return false;
 
             string left = CppIntegerSemantics.CastOperand(CaptureExpression(target));
             _builder.Append(left).Append(" = (").Append(signed).Append(")((").Append(unsigned).Append(')').Append(left);
@@ -628,15 +638,33 @@ namespace NativeTranspiler.Analyzer
             base.TranslateExpression(expr);
         }
 
+        /// <summary>该子表达式是否会由本翻译器发射成同宽度回绕算术（`(int)(…)`）。</summary>
+        private bool IsWrapExpression(ExpressionSyntax expression, string signed)
+        {
+            while (expression is ParenthesizedExpressionSyntax paren) expression = paren.Expression;
+            switch (expression)
+            {
+                case BinaryExpressionSyntax binary when binary.OperatorToken.Text is "+" or "-" or "*":
+                case PrefixUnaryExpressionSyntax unary when unary.IsKind(SyntaxKind.UnaryMinusExpression):
+                    return CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(expression), out var childSigned, out _)
+                        && childSigned == signed;
+                default:
+                    return false;
+            }
+        }
+
         /// <summary>
         /// 把已译好的子表达式变成无符号回绕算术的操作数。
         /// 子表达式本身是同宽度回绕（<c>(int)(…)</c>）时，值已经是无符号算术：去掉外层 `(unsigned)`
         /// 与内层 `(int)` 这一对空转转换，只保留括号组（<paramref name="alreadyUnsigned"/> = true）。
-        /// C# 源码里的括号表达式会多套一层，判定前先剥掉完整包裹的括号。
+        /// 是否回绕由 AST 判定（<paramref name="knownWrap"/>），不能靠文本形状猜：用户写的 `(int)(expr)`
+        /// 与回绕输出同形，靠文本会把它的截断吞掉。
         /// </summary>
-        private static string WrapOperand(string text, string signed, string unsigned, out bool alreadyUnsigned)
+        private static string WrapOperand(string text, string signed, string unsigned, bool knownWrap, out bool alreadyUnsigned)
         {
             alreadyUnsigned = false;
+            if (!knownWrap) return CppIntegerSemantics.CastOperand(text);
+
             string prefix = "(" + signed + ")(";
             string candidate = text;
             while (CppIntegerSemantics.IsWholeParenthesized(candidate))
@@ -673,8 +701,10 @@ namespace NativeTranspiler.Analyzer
             if (EnableWrapSafeIntArithmetic && op is "+" or "-" or "*"
                 && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(binary), out var signed, out var unsigned))
             {
-                string left = WrapOperand(CaptureExpression(binary.Left), signed, unsigned, out bool leftUnsigned);
-                string right = WrapOperand(CaptureExpression(binary.Right), signed, unsigned, out bool rightUnsigned);
+                bool leftWrap = IsWrapExpression(binary.Left, signed);
+                bool rightWrap = IsWrapExpression(binary.Right, signed);
+                string left = WrapOperand(CaptureExpression(binary.Left), signed, unsigned, leftWrap, out bool leftUnsigned);
+                string right = WrapOperand(CaptureExpression(binary.Right), signed, unsigned, rightWrap, out bool rightUnsigned);
                 _builder.Append('(').Append(signed).Append(")(");
                 if (!leftUnsigned) _builder.Append('(').Append(unsigned).Append(')');
                 _builder.Append(left).Append(' ').Append(op).Append(' ');
