@@ -166,7 +166,6 @@ namespace EntJoy.ECS
         private byte* _relationBase;
         private int _relationSize;
         private int _relationSlots;
-        private readonly bool _hasEnabledFilter;
         private int _rangeEnd;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -189,7 +188,6 @@ namespace EntJoy.ECS
             _relationBase = null;
             _relationSize = 0;
             _relationSlots = 0;
-            _hasEnabledFilter = builder.AllEnabled != null && builder.AllEnabled.Length > 0;
             _rangeEnd = 0;
         }
 
@@ -197,8 +195,7 @@ namespace EntJoy.ECS
         public readonly int Slot => _slot;
         public readonly int RangeEnd => !HasChunk ? 0
             : !_plan.HasEntityFilter ? _count
-            : _plan.Filter.HasRelationshipFilter
-                ? (_hasEnabledFilter ? _slot + 1 : _rangeEnd)
+            : _plan.Filter.HasRelationshipFilter ? _rangeEnd
             : QueryEntityRange.End(_enabledWord, _slot, _count);
         public readonly Chunk Chunk => HasChunk
             ? _snapshot.Chunks[_chunkIndex] : default;
@@ -302,7 +299,28 @@ namespace EntJoy.ECS
                         if (mask == 0) { _slot = (wordIndex + 1) << 6; continue; }
                         _slot += BitOperations.TrailingZeroCount(mask);
                         if (_slot >= _count) break;
-                        if (MatchesRelationship()) return;
+                        if (MatchesRelationship())
+                        {
+                            // 只有位图时整段由 RangeEnd 按位图算；关系过滤在场时必须自己扫到不命中处。
+                            if (!_plan.Filter.HasRelationshipFilter) return;
+                            int start = _slot;
+                            while (true)
+                            {
+                                _slot++;
+                                if (_slot >= _count) break;
+                                int nextWord = _slot >> 6;
+                                if (nextWord != _enabledWordIndex)
+                                {
+                                    _enabledWord = QueryEntityRange.EnabledWord(chunk, enabled, nextWord);
+                                    _enabledWordIndex = nextWord;
+                                }
+                                if (((_enabledWord >> (_slot & 63)) & 1UL) == 0) break;
+                                if (!MatchesRelationship()) break;
+                            }
+                            _rangeEnd = _slot;
+                            _slot = start;
+                            return;
+                        }
                         _slot++;
                     }
                 }
