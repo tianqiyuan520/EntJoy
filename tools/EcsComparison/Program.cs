@@ -161,6 +161,9 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             ("absent-destroy", probe.DestroyAbsentOnly),
                 ("arch-chunk-length", probe.ArchChunkLength),
                 ("arch-chunk-movenext", probe.ArchChunkMoveNext),
+                ("random-get", probe.EntJoyRandomGet),
+                ("random-get-direct", probe.EntJoyRandomGetDirect),
+                ("arch-random-get", probe.ArchRandomGet),
             };
             Action runA = null, runB = null;
             foreach (var arm in arms)
@@ -486,6 +489,9 @@ public class SystemComparison
     private UpdateThree updateThree;
     private UpdateTwoCount updateTwoCount;
     private UpdateThreeCount updateThreeCount;
+    // 稀疏随机访问基准用：按创建顺序存下句柄，逐次按句柄取组件。
+    private EntJoy.ECS.Entity[] entRandom;
+    private Arch.Core.Entity[] archRandom;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -572,6 +578,8 @@ public class SystemComparison
         query = new QueryDescription { All = archTypes };
         entQuery = Components == 2 ? new QueryBuilder().WithAll<A, B>() : new QueryBuilder().WithAll<A, B, C>();
         arch.Reserve(archTypes, EntityCount);
+        entRandom = new EntJoy.ECS.Entity[EntityCount];
+        archRandom = new Arch.Core.Entity[EntityCount];
         for (int i = 0; i < EntityCount; i++)
         {
             var e = ent.EntityManager.NewEntity(types);
@@ -580,6 +588,8 @@ public class SystemComparison
             var a = arch.Create(archTypes);
             arch.Set(a, new B { Value = 1 });
             if (Components == 3) arch.Set(a, new C { Value = 2 });
+            entRandom[i] = e;
+            archRandom[i] = a;
         }
         entCachedQuery = ent.GetOrCreateEntityQuery(entQuery);
         archCachedQuery = arch.Query(in query);
@@ -810,6 +820,33 @@ public class SystemComparison
         ent.Query<A, B>().ForEach(ref action);
     }
 
+
+    // 稀疏随机访问：按实体句柄逐次取组件。lookup 缓存上次原型与块基址，直取每次都从实体表重新解析定位。
+    public unsafe void EntJoyRandomGet()
+    {
+        var lookup = ent.EntityManager.GetComponentLookup<A>();
+        int sum = 0;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) sum += lookup[entities[i]].Value;
+        _abSink += sum;
+    }
+
+    public unsafe void EntJoyRandomGetDirect()
+    {
+        var em = ent.EntityManager;
+        int sum = 0;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) sum += em.GetComponent<A>(entities[i]).Value;
+        _abSink += sum;
+    }
+
+    public unsafe void ArchRandomGet()
+    {
+        int sum = 0;
+        var entities = archRandom;
+        for (int i = 0; i < entities.Length; i++) sum += arch.Get<A>(entities[i]).Value;
+        _abSink += sum;
+    }
 
     // Chunk 级查询视图：指针访问，循环体交给 JIT 自动向量化。
     public unsafe void EntJoyChunksTwo()
