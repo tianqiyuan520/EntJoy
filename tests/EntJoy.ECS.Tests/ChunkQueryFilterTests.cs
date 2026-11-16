@@ -53,5 +53,35 @@ namespace EntJoy.ECS.Tests
                     _ = chunk.Count;
             });
         }
+
+        [Fact]
+        public void Chunks_EntitiesAlignWithColumns_AndAllowPerEntityFiltering()
+        {
+            TestBackend.EnsureInitialized();
+            using var world = new World("ChunkEntities");
+            var em = world.EntityManager;
+            var off = em.NewEntity(typeof(ChunkFilterPos), typeof(ChunkFilterVel), typeof(ChunkFilterFlag));
+            var on = em.NewEntity(typeof(ChunkFilterPos), typeof(ChunkFilterVel), typeof(ChunkFilterFlag));
+            em.Set(off, new ChunkFilterPos { X = 1 });
+            em.Set(on, new ChunkFilterPos { X = 2 });
+            em.SetComponentEnabled<ChunkFilterFlag>(off, false);
+
+            int visitedEnabled = 0;
+            foreach (var chunk in world.Query<ChunkFilterPos, ChunkFilterVel>().Chunks())
+            {
+                var entities = chunk.Entities();
+                var positions = chunk.Span<ChunkFilterPos>();
+                Assert.Equal(chunk.Count, entities.Length);
+                Assert.Equal(chunk.Count, positions.Length);
+                for (int i = 0; i < entities.Length; i++)
+                {
+                    float x = em.GetComponent<ChunkFilterPos>(entities[i]).X;
+                    Assert.Equal(x, positions[i].X);
+                    if (em.IsComponentEnabled<ChunkFilterFlag>(entities[i])) visitedEnabled++;
+                }
+            }
+
+            Assert.Equal(1, visitedEnabled);
+        }
     }
 }

@@ -16,6 +16,11 @@ namespace EntJoy.ECS
 
         public int Count => _chunk.EntityCount;
 
+        /// <summary>该块内的实体句柄，下标与 <see cref="Span{T}"/> 的槽位一一对应。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe ReadOnlySpan<Entity> Entities()
+            => new ReadOnlySpan<Entity>((Entity*)_chunk.GetEntityPointer(), _chunk.EntityCount);
+
         /// <summary>取该 Chunk 上 T 列的有效实体区间；T 不在原型里时 <see cref="Archetype.GetComponentTypeIndex{T}"/> 会抛出。
         /// shared 组件每块只有一份值，没有逐实体列，取 Span 直接拒绝。</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -46,7 +51,7 @@ namespace EntJoy.ECS
         internal QueryChunkEnumerator(EntityManager manager, QueryBuilder builder)
         {
             if (builder.HasRelationshipFilter || (builder.AllEnabled != null && builder.AllEnabled.Length > 0))
-                throw new NotSupportedException("Chunk 视图不表达逐实体过滤（关系目标、启用位），请改用 ForEach 或 foreach。");
+                throw new NotSupportedException("Chunk 视图不筛实体（关系目标、启用位）；用 Entities() 逐实体自行判定，或改用 foreach。");
             _entityManager = manager;
             _filter = builder;
             _archetypes = manager.GetMatchingArchetypes(builder);
