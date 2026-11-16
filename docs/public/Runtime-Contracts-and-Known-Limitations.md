@@ -280,20 +280,20 @@ foreach (var chunk in world.QueryChunks<A, B>())
 
 验收目标：C# Query foreach 耗时不超过 Unity Burst SystemAPI.Query；EntJoy 最快的 C# 遍历耗时不超过 Arch 最快的 C# 遍历。分别比较大小规模和双三组件，并标明 Query、Job 与直接 Chunk 入口及实际内核。预热后托管分配为 0 B/次。
 
-默认容量下 100,000 实体时，EntJoy C# 直接 Chunk 与 Arch 直接 Chunk 的成对比值为 1.03–1.06（双/三组件，同一构建内逐轮交替）。C++ Entity/Chunk Job 与 Unity Burst Job 是分别记录的其他入口，不能代替 C# Query 的验收。
+默认容量下 100,000 实体时，EntJoy C# 直接 Chunk 与 Arch 直接 Chunk 的成对读数随构建变化，见 `tools/EcsComparison/results/` 下按入口分档的日志，不在本文档写固定区间。C++ Entity/Chunk Job 与 Unity Burst Job 是分别记录的其他入口，不能代替 C# Query 的验收。
 
 ## 结构变更基准
 
-`tools/EcsComparison` 的 `--struct <实体数> <轮数>` 量四项逐实体结构变更：创建实体、销毁实体、添加组件、移除组件。两侧使用相同的逐实体调用语义，且都传**预解析的组件类型**（EntJoy `NewEntity(ComponentType[])`/`DestroyEntity`/`AddComponent`/`RemoveComponent`，Arch `Create`/`Destroy`/`Add`/`Remove`）；EntJoy 的 `NewEntity(params Type[])` 重载会在每次调用解析类型，与 Arch 的入口不同形，不用于对照。复位（预建或销毁）一律在计时之外，单次计时按轮取最小，输出每实体纳秒，并逐操作交错两侧、输出同批比值。轮数取 15：7 轮时同一构建的比值可漂 15%，15 轮稳定。Unity 未纳入，需要 Editor batchmode。
+`tools/EcsComparison` 的 `--struct <实体数> <轮数>` 量四项逐实体结构变更：创建实体、销毁实体、添加组件、移除组件。两侧使用相同的逐实体调用语义，且都传**预解析的组件类型**（EntJoy `NewEntity(ComponentType[])`/`DestroyEntity`/`AddComponent`/`RemoveComponent`，Arch `Create`/`Destroy`/`Add`/`Remove`）；EntJoy 的 `NewEntity(params Type[])` 重载会在每次调用解析类型，与 Arch 的入口不同形，不用于对照。复位（预建或销毁）一律在计时之外，单次计时按轮取最小，输出每实体纳秒，并逐操作交错两侧、输出同批比值。首轮是预热轮、不计入：首轮既带 JIT 增量，又落在全新建的 Chunk 上（复用槽位无需清槽），与后续轮不是同一份工作。默认 5 轮，同一构建重复三次的比值波动在 ±0.07 内。两侧都用非线程安全 World，EntJoy 的结构锁因此不计入读数。Unity 未纳入，需要 Editor batchmode。
 
 ```powershell
-dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 15
+dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 5
 dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --query-snapshot 100000 300
 ```
 
 结构变更路径的每次调用包含 Archetype 迁移、实体搬运与借用失效；遍历性能不反映这部分成本，两者需分开验收。`--query-snapshot` 单独量「结构变更后的首次查询」与「紧随其后的查询」：前者重建 Chunk 快照、后者复用，差值即逐帧结构变更世界每查询每帧的重建成本，`--struct` 的批量结构变更看不到它。
 
-当前实现与 Arch 的相对位置：创建约 1.15 倍、添加组件约 1.06 倍、移除组件约 0.88 倍、销毁实体约 1.08 倍（10 万实体、25 轮成对取最小，`tools/EcsComparison/obj/struct-amend.txt`）。剩余差距来自入口的守卫层（空闲判定、结构锁、存活校验）与两套位置表写入（托管表加原生镜像），二者都是线程安全与原生定位所必需的。具体数值随实现变化，用上面的命令重新测量，不引用文档里的旧值。
+当前实现与 Arch 的相对位置：创建约 1.00 倍、添加组件约 1.10 倍、移除组件约 0.83 倍、销毁实体约 0.89 倍（10 万实体、5 轮成对取最小，`tools/EcsComparison/results/struct-entjoy-vs-arch-20261116-b.log`）。四项差额全部落在入口层：结构锁、Job 记账、原生镜像位置表写入，三者都是线程安全与原生定位所必需的；搬移本身（迁移、swap-pop、写新组件值）与 Arch 同序同量。具体数值随实现变化，用上面的命令重新测量，不引用文档里的旧值，也不与 `obj/` 下的历史记录混用。
 
 内存回收时机：销毁实体与移除组件保留空 Chunk 与 slab，避免为了合并 Chunk 而给其中每个实体重写位置索引。普通原型新增实体复用已有未满 Chunk；扫描游标在删除时回退，压缩和整批清空时重置。指定共享值的实体通过共享值匹配器选择未满 Chunk；未指定共享值的入口沿用末块分组。内存通过 `EntityManager.CompactChunks(float thresholdPercent = 30f)` 显式归还：它把利用率低于阈值的 Chunk 合并到前面共享值组合一致的未满 Chunk，并移除、归还空 Chunk。关卡切换、批量卸载后可按内存预算在安全点调用压缩。
 
@@ -301,7 +301,7 @@ dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --qu
 
 `--ab-pair <臂A> <臂B> <轮数> [容量]` 只运行被测两臂并逐轮反转顺序，输出每轮比值与汇总。同一构建内重复该入口时，**最小值**可复现（两次重复相差不到 1%），中位数不可复现（同一构建内两次重复可相差约 18%）。因此判断改动是否有效只用最小值比值，且参与判断的两臂必须来自同一构建：给被测程序集增加测量代码会让对照实现的读数漂移，跨构建的绝对时间不可相减或相除。
 
-同容量对照使用 100,000 实体和相同标量内核。双组件 Chunk 容量为 1,000，EntJoy 两轮中位数为 29.143/26.949 μs，Arch 为 28.046/26.239 μs；三组件容量为 800，EntJoy 为 52.743/61.173 μs，Arch 为 51.722/49.428 μs。三组件轮间波动较大，结果不能证明稳定差距或将差距归因于某一项开销。当前采样未证明 C# Query 追平 Unity Burst Query，也未证明 EntJoy 最快 C# 遍历追平 Arch。
+同容量对照使用 100,000 实体和相同标量内核，双组件 Chunk 容量 1,000、三组件 800。三组件轮间波动较大，结果不能证明稳定差距，也不能把差距归因于某一项开销。当前采样未证明 C# Query 追平 Unity Burst Query，也未证明 EntJoy 最快 C# 遍历追平 Arch。具体数值见 `tools/EcsComparison/results/` 下按入口分档的日志，不写进本文档。
 
 轮间波动仍明显：EntJoy 100,000 实体三组件 Query 的轮间比值为 1.218，Unity 对应 Burst Query 为 1.217；1,024 实体 EntJoy 三组件 C++ Entity Job 为 1.885，Arch 双组件 Chunk 为 1.610。矩阵用于定位差距，不能由这些数据证明稳定排名或复杂工作负载的综合优势。Arch 三组件 InlineQuery 慢于自身 Chunk 的原因尚未定位。
 
