@@ -80,7 +80,7 @@ namespace EntJoy.ECS
             if (relationship) CompleteRelationWriteJobs(entity, metadata.Type);
             using var relationChanges = relationship ? BeginRelationChanges() : default;
             Archetype? targetArch = ResolveAddTarget(entity, metadata);
-            CompleteEntityJobs(entity, targetArch);
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity, targetArch);
             using (EnterStructural())
             {
                 AddComponentRawCore(entity, metadata, value);
