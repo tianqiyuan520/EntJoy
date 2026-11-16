@@ -22,7 +22,7 @@
 > `AppContext.BaseDirectory`**。因此运行前必须把仓库 `bin\` 下的这两个 DLL 复制到工具的输出目录
 > （`tools/*/bin/Release/`），否则会**静默**测到构建目录里残留的旧 DLL
 > （实测：工具目录里留着 9/08–9/13 的旧 DLL 时报 `EntryPointNotFoundException`；
-> 刷新后 AutoSIMDVerify 23/23、AutoSIMDEdgeCases 140/140 全过）。
+> 刷新后 AutoSIMDVerify 26/26、AutoSIMDEdgeCases 143/143 全过）。两个工具现由 `CopyNativeArtifacts` 从仓库 `bin/` 拷贝 `Native*.dll`：工具输出目录此前没有原生产物，日志里 `fallback=none` 才说明跑的是原生）。
 
 > **ISPC 后端"静默错值"面审计（2026-09-27，逐条读码而非信注释）**：
 > - **`return` 语义**：foreach 内裸 `return;` → `continue;`（等价跳过当前 lane）；批索引循环内裸 `return;` → `continue;`（等价结束本 index）；**嵌套循环内** `return` → 写 `__ENTJOY_UNSUPPORTED_STMT__ISPC_ReturnInsideNestedLoopInBatch`（构建失败）；foreach 内**带值** `return` → 降级 base，让 ISPC 编译器**报错**（暴露语义问题而非错译）。
@@ -153,8 +153,8 @@ Job 字段本体或其嵌套值成员被写入、或通过 `ref` / `out` 传出�
 > 慢 10%（或干脆没向量化）的模式，只是构建日志里多一行"。
 >
 > 样例项目（`samples/EntJoySample`）显式声明 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`：
-> 它的 AutoSIMD job **就是**被测对象，并由 `tools/AutoSIMDVerify`（23/23）+ `tools/AutoSIMDEdgeCases`
-> （140/140）逐值对照过 C# 标量基线。实测：把该属性关掉后，样例里 **35 处**（distinct 文件:行）
+> 它的 AutoSIMD job **就是**被测对象，并由 `tools/AutoSIMDVerify`（26/26）+ `tools/AutoSIMDEdgeCases`
+> （143/143）逐值对照过 C# 标量基线。实测：把该属性关掉后，样例里 **35 处**（distinct 文件:行）
 > `AutoSIMD = Enabled` 会立刻变成 error；而 NT031 在样例上是 **0 处**（样例的 AutoSIMD job 都可向量化）。
 
 ## 5. 已知边界（当前不打算改）
@@ -253,7 +253,7 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
   2. `IJobParallelForBatch` 多批（64）：批边界长度正确；
   3. `IJobParallelFor` 批内 `return;` **只跳过本次 index**；
   4. `return;` 前后语句的可见性（前面执行、后面跳过）。
-- 相关既有工具：`tools/AutoSIMDVerify`（AutoSIMD 与 C# 基线的逐值对照，23/23）——改 SIMD 生成器后**必跑**。
+- 相关既有工具：`tools/AutoSIMDVerify`（AutoSIMD 与 C# 基线的逐值对照，26/26）——改 SIMD 生成器后**必跑**。
 
 **后续验收（暂缓执行）**
 
