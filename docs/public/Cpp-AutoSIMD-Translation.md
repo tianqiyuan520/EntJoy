@@ -57,10 +57,20 @@ Chunk SIMD 接受单个从 0 开始、步长 1、以组件视图长度或 `chunk
 
 边界诊断见 [NativeTranspiler-Boundaries-and-Diagnostics.md](NativeTranspiler-Boundaries-and-Diagnostics.md)。生成结构测试位于 `tests/NativeTranspiler.Tests`；原生结果对照包括 `TranslationSemanticsFixture` 的掩码、同名绑定、布尔值、求值顺序、整数极值与循环边界。
 
+### 2 分量向量元素
+
+`float2` / `int2` / `uint2` 元素可以进向量路径：整元素按 gather 读、整元素按两个分量各取 lane 写回，寄存器类型统一为 `simd_value<float2>` / `simd_value<int2>`（`uint2` 与 `int2` 同布局，指针按位重新解释）。字段级读写（结构体里的 `uint2` 字段）走 `n_gather_*` 与字段偏移。
+
+`uint2` 的无符号语义由 helper 承担：`/`、`%`、`>>` 在任一侧是无符号时映射到 `simd_div_u32` / `simd_mod_u32` / `simd_shr_u32`，标量与 pair 共用同一组重载。`+`、`-`、`*` 走补码运算，与原语义一致。复合赋值（`Values[i] *= 2`）与带对象初始化器的整体结构体赋值不在支持范围，生成 `SIMD_StructCompoundAssign` / `SIMD_ObjectInitializerStore` 标记，构建期失败而不是静默错值。
+
 ```powershell
 dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release
 dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release -p:FixtureIspc=true
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
+dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
+dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 ```
+
+两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。
 
 性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
