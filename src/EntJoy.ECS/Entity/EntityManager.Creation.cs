@@ -16,6 +16,10 @@ namespace EntJoy.ECS
     {
         public Entity NewEntity(params Type[] componentTypes)
         {
+            // 延迟作用域内创建需要实体句柄重映射（Flecs 的 deferred entity ID），暂不支持。
+            if (_deferring != null)
+                throw new InvalidOperationException(
+                    "延迟作用域内不能创建实体：请在作用域外创建，或用 DeferredCommandBuffer.CreateEntity 记录，回放后从 CreatedEntities 取实际句柄。");
             // 小集合走栈缓冲：这条重载是逐实体创建的热路径，托管数组会变成每实体一次分配。
             Span<ComponentType> componentSpan = componentTypes.Length <= 16
                 ? stackalloc ComponentType[componentTypes.Length]
@@ -96,8 +100,8 @@ namespace EntJoy.ECS
         }
 
         /// <summary>
-        /// 单实体组件写入：经 blittable 定位表直落组件列，无反射/无装箱。
-        /// 与批量路径 <see cref="WriteComponentRange"/> 同源（都走 <see cref="TryGetComponentPointer"/> 的解析规则）。
+        /// 单实体组件写入：关系写入走本方法的关系分支，其余类型转调 <see cref="Set{T}"/>，
+        /// 与 <see cref="WriteComponentRange"/> 一样只保留一条实际写入路径。
         /// </summary>
         public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
         {
@@ -116,15 +120,8 @@ namespace EntJoy.ECS
                 }
                 return;
             }
-            CompleteEntityJobs(entity);
-            int typeId = componentType.Id;
-            if (!TryGetComponentPointer(entity, typeId, sizeof(T), out void* ptr))
-                throw new InvalidOperationException(
-                    $"SetComponent<{typeof(T).Name}> 失败：实体 {entity.Id} 无效/已销毁/版本不匹配，或该实体没有该组件列。");
-            ComponentTypeManager.DestroyComponentValue(componentType, ptr);
-            *(T*)ptr = value;
-            ref var info = ref entities[entity.Id];
-            info.Archetype.NotifyComponentChanged(info.ChunkIndex, info.SlotInChunk);
+            // 非关系写入收敛到 Set<T>：类型化直写、变更位标记、Observable 与可销毁组件的处理都在那条路径上。
+            Set(entity, value);
         }
 
         /// <summary>

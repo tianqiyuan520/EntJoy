@@ -270,7 +270,7 @@ namespace EntJoy.ECS
         /// 关系列（走 Add 语义）、有观察者（要派发新值）、原型含可析构列或 shared 列（要先收拾旧值与分组）时退回对象路径。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Set<T>(Entity entity, T t) where T : struct, IComponentData
+        public void Set<T>(Entity entity, T t) where T : struct
         {
             CheckDisposed();
             var metadata = ComponentTypeManager.GetComponentType<T>();
