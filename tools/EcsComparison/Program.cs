@@ -165,6 +165,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("random-get-direct", probe.EntJoyRandomGetDirect),
                 ("arch-random-get", probe.ArchRandomGet),
                 ("random-set", probe.EntJoyRandomSet),
+                ("random-setcomponent", probe.EntJoyRandomSetComponent),
                 ("arch-random-set", probe.ArchRandomSet),
             };
             Action runA = null, runB = null;
@@ -835,6 +836,14 @@ public class SystemComparison
     {
         var entities = archRandom;
         for (int i = 0; i < entities.Length; i++) arch.Set(entities[i], new A { Value = i });
+    }
+
+    // 定位表直落的写入入口：与 Set<T> 是同一语义的另一个公开面。
+    public unsafe void EntJoyRandomSetComponent()
+    {
+        var em = ent.EntityManager;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) em.SetComponent(entities[i], new A { Value = i });
     }
 
     // 稀疏随机访问：按实体句柄逐次取组件。lookup 缓存上次原型与块基址，直取每次都从实体表重新解析定位。

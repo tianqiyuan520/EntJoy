@@ -42,7 +42,10 @@
 | 入口 | 耗时 | 相对 Arch `World.Set` |
 | --- | --- | --- |
 | `EntityManager.Set<T>(entity, value)` | 1616–1648 µs | 1.45–1.53 |
+| `EntityManager.SetComponent<T>(entity, value)` | 3404–3455 µs | 3.12–3.16 |
 | Arch `World.Set<T>(entity, value)` | 1092–1128 µs | 1.00 |
+
+两条写入入口语义重叠，耗时差一倍：`Set<T>` 走类型化直写，`SetComponent<T>` 经定位表但每次按 `Type` 查一次类型表、并销毁旧值。两者应收敛到同一实现。
 
 句柄缓存上次原型与块基址，稳态只剩一次实体表加载加一次块比较；直取每次都从实体表重新解析定位，并多付处置、版本与关系列校验。热循环用句柄，一次性读取用直取。
 
