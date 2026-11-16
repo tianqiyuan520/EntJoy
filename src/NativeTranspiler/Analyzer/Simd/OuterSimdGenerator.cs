@@ -39,6 +39,22 @@ namespace NativeTranspiler.Analyzer
             return GeneratePerLane(scalarBody);
         }
 
+        /// <summary>
+        /// 作业字段上的容器即 native array：元素类型要按 MapCSharpTypeToCpp 建表，
+        /// 否则翻译器认不出数组元素、元素读退化成 lane0 标量读。
+        /// </summary>
+        private static Dictionary<string, string> BuildNativeArrayParams(INamedTypeSymbol? jobStruct)
+        {
+            var result = new Dictionary<string, string>();
+            if (jobStruct == null) return result;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, "NativeArray")
+                    && field.Type is INamedTypeSymbol container)
+                    result[field.Name] = NativeTranspiler.MapCSharpTypeToCpp(
+                        NativeTranspiler.GetContainerElementType(container));
+            return result;
+        }
+
         private string GenerateFullSIMDFromAST(string scalarBody)
         {
             if (_jobStruct == null || _methodSyntax.Body == null) return "";
@@ -62,6 +78,7 @@ namespace NativeTranspiler.Analyzer
                     indexParamName: _idx, simdIndexVar: "v_i",
                     boolFields: _boolFields,
                     simdMathPrecision: _simdMathPrecision,
+                    nativeArrayParams: BuildNativeArrayParams(_jobStruct),
                     batchLoopVar: "si");   // 启用连续 load/store 优化（v_i → ptr+si）
 
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);

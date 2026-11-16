@@ -319,6 +319,14 @@ namespace NativeTranspiler.Analyzer
                 {
                     var ta = ((INamedTypeSymbol)param.Type).TypeArguments.FirstOrDefault();
                     nap[param.Name] = ta != null ? NativeTranspiler.MapCSharpTypeToCpp(ta) : "float";
+            // 作业结构体字段上的容器同样是 native array：并行作业的数组来自字段而不是方法参数，
+            // 只按参数建表会让 `_nativeArrayParams` 为空，元素读退化成 lane0 标量读。
+            if (method.ContainingType is { TypeKind: TypeKind.Struct } jobType)
+                foreach (var field in jobType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeArray)
+                        && field.Type is INamedTypeSymbol container)
+                        nap[field.Name] = NativeTranspiler.MapCSharpTypeToCpp(
+                            NativeTranspiler.GetContainerElementType(container));
                 }
             var innerFor = (forStmt.Statement is BlockSyntax ob)
                 ? ob.Statements.OfType<ForStatementSyntax>().FirstOrDefault() : null;
