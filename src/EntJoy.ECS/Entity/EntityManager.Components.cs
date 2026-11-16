@@ -100,17 +100,11 @@ namespace EntJoy.ECS
         /// <summary>
         /// 把原始字节写进某实体所在 chunk 的组件列（结构变更后的落值步骤，无反射/无装箱）。
         /// </summary>
-        private static unsafe void WriteColumnBytes(Archetype arch, int chunkIndex, int slotInChunk, Type componentType, byte* src, int elemSize)
-        {
-            WriteColumnBytes(arch, chunkIndex, slotInChunk, ComponentTypeManager.GetComponentType(componentType), src, elemSize);
-        }
-
         private static unsafe void WriteColumnBytes(Archetype arch, int chunkIndex, int slotInChunk, ComponentType componentType, byte* src, int elemSize)
         {
-            int compIdx = arch.GetComponentTypeIndex(componentType);
             ref readonly var chunk = ref CollectionsMarshal.AsSpan(arch.ChunkList)[chunkIndex];
-            byte* colBase = (byte*)chunk.GetComponentArrayPointer(compIdx);
-            Buffer.MemoryCopy(src, colBase + (long)slotInChunk * elemSize, elemSize, elemSize);
+            byte* colBase = (byte*)chunk.GetComponentArrayPointer(arch.GetComponentTypeIndex(componentType));
+            BufferCopy.Copy(colBase + (long)slotInChunk * elemSize, src, elemSize);
         }
 
         /// <summary>解析并缓存增删组件后的目标 Archetype。</summary>

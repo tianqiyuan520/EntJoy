@@ -93,7 +93,9 @@ namespace EntJoy.ECS
                     var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(sourceComponentIndex) + sourceSlot * type.Size;
                     var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
                     // move 转移所有权：可析构组件拷贝后清空源，避免源被销毁时释放目标仍在用的内存。
-                    ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
+                    // 非析构组件（绝大多数）只需位拷贝，不必进 ComponentTypeManager 的 move 分支。
+                    if (type.IsDisposable) ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
+                    else BufferCopy.Copy(targetPtr, sourcePtr, type.Size);
                     if (type.IsEnableable) targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(sourceComponentIndex, sourceSlot));
                 }
             }

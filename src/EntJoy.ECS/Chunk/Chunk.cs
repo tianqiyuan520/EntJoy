@@ -101,7 +101,7 @@ namespace EntJoy.ECS
                 {
                     int size = Meta.ComponentSizes[i];
                     byte* column = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + slot * size;
-                    if (reused) Unsafe.InitBlock(column, 0, (uint)size);
+                    if (reused) BufferCopy.Zero(column, size);
                     if (relations) InitializeRelationSlots(i, column);
                 }
             }
@@ -176,7 +176,7 @@ namespace EntJoy.ECS
                 int size = Meta.ComponentSizes[i];
                 byte* src = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + from * size;
                 byte* dst = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + to * size;
-                Unsafe.CopyBlock(dst, src, (uint)size);
+                BufferCopy.Copy(dst, src, size);
             }
 
             if (!Meta.HasEnableables) return;
