@@ -588,7 +588,7 @@ namespace NativeTranspiler.Analyzer
 
             // uniform 条件必须是纯标量表达式（翻译后不含 simd_value/n_cmp/v_）
             string uniformExpr = TranslateExpression(uniformCond!);
-            if (uniformExpr.Contains("simd_value") || uniformExpr.Contains("n_cmp") || uniformExpr.Contains("v_"))
+            if (SimdExprShapes.Of(uniformExpr) != SimdExprTraits.None)
                 return false;
 
             string tracker = $"__while_tracker_{_maskCounter++}";

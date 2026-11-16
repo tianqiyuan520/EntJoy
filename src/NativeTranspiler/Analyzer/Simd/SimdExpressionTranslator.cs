@@ -363,7 +363,7 @@ namespace NativeTranspiler.Analyzer
             // Struct field gather result: n_gather_ps already returns the component value.
             //   For .x on a float2 field gather, just return the gather (it's already x).
             //   For .y, we need the gather at offset+1 (y is at +4 bytes).
-            if ((memberName == "x" || memberName == "y") && objExpr.Contains("n_gather_ps<"))
+                if ((memberName == "x" || memberName == "y") && SimdExprShapes.Of(objExpr).HasFlag(SimdExprTraits.Gather))
             {
                                 if (memberName == "y")
                 {

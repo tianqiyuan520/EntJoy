@@ -24,7 +24,13 @@ namespace NativeTranspiler.Analyzer
         Intrinsic = 1 << 3,
 
         /// <summary>提升到循环外的广播值 `__uni_*`，用时需要取 `.v`。</summary>
-        HoistedBroadcast = 1 << 4
+        HoistedBroadcast = 1 << 4,
+
+        /// <summary>gather 结果（`n_gather_*`），分量访问按向量成员形式处理。</summary>
+        Gather = 1 << 5,
+
+        /// <summary>生成器分配的 varying 变量名（`v_*`）。</summary>
+        VaryingVar = 1 << 6
     }
 
     internal static class SimdExprShapes
@@ -45,6 +51,10 @@ namespace NativeTranspiler.Analyzer
             }
             if (translated.StartsWith("n_", StringComparison.Ordinal))
                 traits |= SimdExprTraits.Intrinsic;
+            if (translated.StartsWith("n_gather", StringComparison.Ordinal))
+                traits |= SimdExprTraits.Gather;
+            if (translated.StartsWith("v_", StringComparison.Ordinal))
+                traits |= SimdExprTraits.VaryingVar;
             return traits;
         }
 
