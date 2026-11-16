@@ -147,6 +147,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             {
                 ("query", probe.EntJoy),
                 ("chunk", probe.EntJoyChunk),
+                ("foreach", probe.EntJoyForEachTwo),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),

@@ -12,7 +12,7 @@
 
 `Chunks()` 逐块给出 `QueryChunk`，`Span<T>()` 直接返回该块的组件列，封装开销可忽略。`T` 不必是查询条件之一：查 `A,B` 也能取 `Span<C>`。
 
-`ForEach` 接受 `struct` 加 `IQueryForeach<...>` 实现。动作类型是 struct 时 JIT 能内联整个循环体，因此循环内没有逐实体游标状态。
+`ForEach` 接受 `struct` 加 `IQueryForeach<...>` 实现。动作类型是 struct 时 JIT 能内联整个循环体，因此循环内没有逐实体游标状态。但逐实体回调挡住了自动向量化：同样 10 万实体两组件，`ForEach` 72–76 µs，自己写 `Chunks()` 循环 52 µs（1.45 倍），实体级 `foreach` 131–134 µs（2.55 倍）。要让编译器向量化，就在 `Chunks()` 上自己写循环。
 
 `Chunks()` 不带泛型参数，任何组件组合共用一个类型；`QuerySelection<T0>` 与 `QuerySelection<T0,T1>` 已提供，三/四组件形态用 `ForEach` 或 `foreach`。
 
