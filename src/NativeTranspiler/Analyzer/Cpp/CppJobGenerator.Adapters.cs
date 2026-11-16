@@ -19,6 +19,8 @@ namespace NativeTranspiler.Analyzer
         /// 适配函数签名匹配 BatchJobFunc(void* context, int startIndex, int count)，
         /// 内部从 context 中按偏移量读取字段，调用实际的 Batch 函数。
         /// 只返回函数体：调用方把它接在同文件的实现之后，内联时才能看到被调函数的定义。
+        /// 宿主负责给出这些依赖：NativeGeneratedSupport.h（导出/调用约定宏）、NativeContainers.h、NativeMath.h，
+        /// chunk 入口另需 ChunkJobData.h / EntityBatchData.h 与 <cstring>。
         /// </summary>
         public static (string code, List<string> eventTypes) GenerateJobAdapter(INamedTypeSymbol jobStruct, Compilation compilation)
         {

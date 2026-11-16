@@ -131,8 +131,7 @@ namespace NativeTranspiler.Analyzer
                 CodeGenIo.BeginOutputTracking();
 
                 var cppFiles = new List<string>();
-                var fastMathCppFiles = new HashSet<string>();
-                // AutoSIMD 生成单元：需要 IEEE-754 精确浮点语义（454229d EC2/EC8/E5/E8/E11），
+                            // AutoSIMD 生成单元：需要 IEEE-754 精确浮点语义（454229d EC2/EC8/E5/E8/E11），
                 // 精确单元独立编译为对象库，按名称查找的导出也会完整链接进 NativeTranspiled.dll。
                 var autoSimdCppFiles = new HashSet<string>();
                 var ispcFiles = new List<(string fileName, NativeTranspiler.IspcMathLib mathLib)>();
@@ -282,8 +281,6 @@ namespace NativeTranspiler.Analyzer
                             cppFiles.Add(cppFile);
                             if (methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                                 autoSimdCppFiles.Add(cppFile);
-                            if (HasFastCppMathLib(method, attrSymbol) || methodAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                                fastMathCppFiles.Add(cppFile);
                         }
                     }
                 }
@@ -356,8 +353,6 @@ namespace NativeTranspiler.Analyzer
                     cppFiles.Add(cppFile);
                     if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled || preciseVectorize)
                         autoSimdCppFiles.Add(cppFile);
-                    if (HasFastCppMathLib(job, attrSymbol) || jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
-                        fastMathCppFiles.Add(cppFile);
 
                     // SendEvent: 收集事件类型元数据
                     if (evtTypes.Count > 0)
@@ -419,13 +414,12 @@ namespace NativeTranspiler.Analyzer
                 nativeDllDir = Path.GetFullPath(Path.Combine(repoRoot, "src", "NativeDll"));
             }
                     var relativeNativeDllDir = CodeGenIo.GetRelativePath(outputDir, nativeDllDir).Replace("\\", "/");
-                    bool hasFastMath = fastMathCppFiles.Count > 0;
                     string cmakePath = Path.Combine(outputDir, "CMakeLists.txt");
                     // 增量友好排序：保留上一次 CMakeLists.txt 中已有的源文件顺序，新增文件追加到末尾。
                     // 配合 CMake Unity Build（批大小 8），新增 job/method 不会打乱既有批的成员，
                     // 从而 native 侧只需重编新 TU + 末尾批，而不是把所有批重编一遍。
                     var existingCppOrder = CmakeGenerator.ReadExistingCppSourceOrder(cmakePath);
-                    var cmakeContent = CmakeGenerator.Generate(cppFiles, ispcFiles, fastMathCppFiles, autoSimdCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, hasFastMath, existingCppOrder, prebuiltNativeDir);
+                    var cmakeContent = CmakeGenerator.Generate(cppFiles, ispcFiles, autoSimdCppFiles, outputDir, solutionBinDir, relativeNativeDllDir, existingCppOrder, prebuiltNativeDir);
                     // 如果内容未变则不写入，避免时间戳更新触发 CMake 重新 configure
                     if (!File.Exists(cmakePath) || File.ReadAllText(cmakePath) != cmakeContent)
                     {

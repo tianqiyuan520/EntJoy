@@ -16,13 +16,22 @@ namespace NativeTranspiler.Analyzer.Common
 
         /// <summary>
         /// C 风格转换的操作数是否需要再包一层括号：顶层出现运算符、逗号或空白时必须加。
-        /// 逐字符扫描并跟踪 () 与 [] 深度；字符串/字符字面量按普通字符处理（多包一层括号仍然正确）。
+        /// 逐字符扫描并跟踪 ()[]{} 深度；字符串/字符字面量整段跳过。
         /// </summary>
         public static bool NeedsParensForCast(string operand)
         {
             int depth = 0;
-            foreach (char c in operand)
+            for (int i = 0; i < operand.Length; i++)
             {
+                char c = operand[i];
+                // 字面量里的括号/运算符不参与深度与判定。
+                if (c == '"' || c == '\'')
+                {
+                    char quote = c;
+                    for (i++; i < operand.Length && operand[i] != quote; i++)
+                        if (operand[i] == '\\') i++;
+                    continue;
+                }
                 if (c == '(' || c == '[' || c == '{') { depth++; continue; }
                 if (c == ')' || c == ']' || c == '}') { depth--; continue; }
                 if (depth == 0 && (char.IsWhiteSpace(c) || "+-*/%<>=!&|^?:,".IndexOf(c) >= 0))
@@ -41,9 +50,12 @@ namespace NativeTranspiler.Analyzer.Common
             while (IsWholeParenthesized(operand))
             {
                 string inner = operand.Substring(1, operand.Length - 2);
-                if (NeedsParensForCast(inner)) break;
+                if (NeedsParensForCast(inner)) return operand;
                 operand = inner;
             }
+            // 前置转换 `(T)x` 与一元运算符（`*p` / `&x` / `-x` / `!x` / `~x`）比成员访问结合得松，必须补括号。
+            if (operand.Length > 0 && (operand[0] == '(' || "+-*&!~".IndexOf(operand[0]) >= 0))
+                return "(" + operand + ")";
             return CastOperand(operand);
         }
 

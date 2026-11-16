@@ -44,7 +44,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {loopEnd}; ++{indexParamName})");
             sb.AppendLine("    {");
             if (anyReturn) sb.AppendLine("        [&]() {");
-            sb.Append(CodeIndent.Shift(body, 2));
+            sb.Append(CodeIndent.Shift(body, anyReturn ? 3 : 2));
             if (anyReturn) sb.AppendLine("        }();");
             sb.AppendLine("    }");
         }
