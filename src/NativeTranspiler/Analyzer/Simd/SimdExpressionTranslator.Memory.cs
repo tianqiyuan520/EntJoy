@@ -221,10 +221,10 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"for (int __gl = 0; __gl < g_simdWidthInt; __gl++)");
                 AppendLine("{");
                 if (masked)
-                    AppendLine($"    if ((n_mask_to_bitmask(({_currentMask}).m) & (1 << __gl)) == 0) continue;");
+                    AppendLine($"    if ((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m) & (1 << __gl)) == 0) continue;");
                 AppendLine($"    int __gx = n_extract_lane_epi32({idxVar}.v, __gl);");
                 AppendLine($"    simd_value<int> __gb = simd_value<int>::broadcast((int){elemPtr}[__gx]);");
-                AppendLine($"    simd_mask __gm{{ n_cmp_eq_epi32(({seqVar}).v, n_set1_epi32(__gl)) }};");
+                AppendLine($"    simd_mask __gm{{ n_cmp_eq_epi32({CppIntegerSemantics.MemberOperand(seqVar)}.v, n_set1_epi32(__gl)) }};");
                 AppendLine($"    {resVar} = blend({resVar}, __gb, __gm);");
                 AppendLine("}");
                 return resVar;
@@ -243,7 +243,7 @@ namespace NativeTranspiler.Analyzer
             {
                 indexExpr = indexExpr.Contains(".v")
                     ? $"n_extract_lane_epi32({indexExpr}, 0)"
-                    : $"n_extract_lane_epi32(({indexExpr}).v, 0)";
+                    : $"n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(indexExpr)}.v, 0)";
             }
             return $"{baseExpr}[{indexExpr}]";
         }
@@ -404,7 +404,7 @@ namespace NativeTranspiler.Analyzer
                 ? $"simd_min(simd_max({index}, simd_value<int>(0)), simd_value<int>::broadcast({array}_length - 1))" : index;
             string pointer = $"(const {scalar}*)(&{array}_ptr[0].{field})";
             string scale = stride is 1 or 2 or 4 or 8 ? $"sizeof({structure})" : "1";
-            string offsets = scale == "1" ? $"n_mullo_epi32(({safe}).v, n_set1_epi32(sizeof({structure})))" : $"({safe}).v";
+            string offsets = scale == "1" ? $"n_mullo_epi32({CppIntegerSemantics.MemberOperand(safe)}.v, n_set1_epi32(sizeof({structure})))" : $"{CppIntegerSemantics.MemberOperand(safe)}.v";
             string first = $"simd_value<{scalar}>{{ {gather}<{scale}>({pointer}, {offsets}) }}";
             return pair ? $"simd_value<{fieldType}>{{ {first}, simd_value<{scalar}>{{ {gather}<{scale}>(({pointer}) + 1, {offsets}) }} }}" : first;
         }

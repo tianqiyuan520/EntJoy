@@ -50,7 +50,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         if (_varAnalyzer.ClassifyExpression(prefix) < VarKind.Varying)
                             return $"(!({TranslateExpression(prefix.Operand)}))";
-                        return $"simd_mask{{ n_not_mask(({TranslateCondition(prefix.Operand)}).m) }}";
+                        return $"simd_mask{{ n_not_mask({CppIntegerSemantics.MemberOperand(TranslateCondition(prefix.Operand))}.m) }}";
                     }
                     if (prefix.IsKind(SyntaxKind.BitwiseNotExpression))
                     {
@@ -120,7 +120,7 @@ namespace NativeTranspiler.Analyzer
             string result = TranslateExpression(expr);
             if (_varAnalyzer.ClassifyExpression(expr) < VarKind.Varying)
                 return $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({result} ? -1 : 0).v, n_set1_epi32(0)) }}";
-            return ProducesMask(expr) ? result : $"simd_mask{{ n_cmp_ne_epi32(({result}).v, n_set1_epi32(0)) }}";
+            return ProducesMask(expr) ? result : $"simd_mask{{ n_cmp_ne_epi32({CppIntegerSemantics.MemberOperand(result)}.v, n_set1_epi32(0)) }}";
         }
 
         private static bool ProducesMask(ExpressionSyntax expression)

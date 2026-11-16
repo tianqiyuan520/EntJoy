@@ -134,18 +134,18 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
             sb.AppendLine();
 
-            int currentOffset = 0;
             var fieldArgs = new List<string>();
-            foreach (var field in fields)
+            foreach (var slot in CppJobGenerator.BuildFieldLayout(jobStruct))
             {
-                int offset = CppJobGenerator.CalculateFieldOffset(field, ref currentOffset);
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                var cppType = slot.CppType;
                 var ispcType = IspcTypeMapper.FromCpp(cppType);
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("__jobContext", slot.Offset));
                 if (IsVectorType(cppType) || cppType.Contains("::"))
-                    sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*)(__jobContext + {offset}));");
+                    sb.AppendLine($"    auto* {slot.Field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*){address});");
                 else
-                    sb.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)(__jobContext + {offset});");
-                fieldArgs.Add($"{field.Name}_ptr");
+                    sb.AppendLine($"    auto* {slot.Field.Name}_ptr = ({cppType}*){address};");
+                fieldArgs.Add($"{slot.Field.Name}_ptr");
             }
 
             // Per-batch loop: read from EntityBatchData directly (single hop).

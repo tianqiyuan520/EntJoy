@@ -105,13 +105,13 @@ namespace NativeTranspiler.Analyzer
                 {
                     string laneRhs = rhsKind >= VarKind.Varying
                         ? ((elemType == "float" && IsInt32Expr(assign.Right))
-                            ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)"
-                            : $"{extractFn}(({rhsExpr}).v,__l)")
+                            ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)"
+                            : $"{extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)")
                         : rhsExpr;
                     string guardCmp = narrowedCmp
-                        ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)"
+                        ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)"
                         : "";
-                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guardCmp}{elemPtr}[n_extract_lane_epi32(({idxExpr}).v,__l)] {compoundOp} {laneRhs};}}}}";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guardCmp}{elemPtr}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] {compoundOp} {laneRhs};}}}}";
                 }
                 return $"{elemPtr}[{idxExpr}] {compoundOp} {rhsExpr};";
             }
@@ -119,7 +119,7 @@ namespace NativeTranspiler.Analyzer
             if (isNarrowElem)
             {
                 bool narrowed = _currentMask != "simd_mask::all_true()";
-                string guard = narrowed ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)" : "";
+                string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 string ep = $"(({elemType}*)({basePtr}))";
                 // 结构体元素（float2/int2/自定义）用构造语法；内置标量用 static_cast。
                 // ⚠ `(T){v}` 是 C 复合字面量语法，在 C++ 里会被读成"转型到指针类型"而报错。
@@ -129,12 +129,12 @@ namespace NativeTranspiler.Analyzer
                 if (idxKind >= VarKind.Varying)
                 {
                     string rhsOperand = rhsKind >= VarKind.Varying
-                        ? (structElem ? $"{elemType}({extractFn}(({rhsExpr}).v,__l))" : $"static_cast<{elemType}>({extractFn}(({rhsExpr}).v,__l))")
+                        ? (structElem ? $"{elemType}({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l))" : $"static_cast<{elemType}>({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l))")
                         : (structElem ? $"{elemType}({rhsExpr})" : $"static_cast<{elemType}>({rhsExpr})");
-                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32(({idxExpr}).v,__l)] = {rhsOperand};}}}}";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] = {rhsOperand};}}}}";
                 }
                 string uniformRhs = rhsKind >= VarKind.Varying
-                    ? (structElem ? $"{elemType}({extractFn}(({rhsExpr}).v,0))" : $"static_cast<{elemType}>({extractFn}(({rhsExpr}).v,0))")
+                    ? (structElem ? $"{elemType}({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,0))" : $"static_cast<{elemType}>({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,0))")
                     : (structElem ? $"{elemType}({rhsExpr})" : $"static_cast<{elemType}>({rhsExpr})");
                 return $"{ep}[{idxExpr}] = {uniformRhs}";
             }
@@ -157,9 +157,9 @@ namespace NativeTranspiler.Analyzer
                         // E7 int→float store fix: use n_extract_lane_i2f for numeric conversion
                         //   (extract int lane, convert to float — not bit reinterpretation)
                         string extractExpr = (elemType == "float" && IsInt32Expr(assign.Right))
-                            ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)"
+                            ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsSimdExpr)}.v,__l)"
                             : $"{extractFn}({rhsSimdExpr}.v,__l)";
-                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
+                        return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
                     }
                     // NT-01(a)：无掩码连续 store 的前提是"索引可证明等于 SIMD 索引变量本身"
                     //   （`v_i`，或 `<uniform> + v_i` 且批内循环变量已知）。在任意 varying
@@ -211,7 +211,7 @@ namespace NativeTranspiler.Analyzer
                                 rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                             else
                                 rhsSimdExpr = rhsExpr;
-                            return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsSimdExpr)}.v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
                         }
                         string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
                         // 均匀 RHS + 连续索引：整宽 set1 + 无掩码 store（真正的向量化路径）
@@ -225,7 +225,7 @@ namespace NativeTranspiler.Analyzer
 
                     // 非连续 varying 下标：逐 lane scatter。
                     if (rhsKind >= VarKind.Varying)
-                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
                     // 均匀标量 RHS + 非连续 varying 下标：把标量写到每个 lane 各自的地址
                     // （旧代码在这里错误地发整宽连续 store）。
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={rhsExpr};}}}}";
@@ -261,13 +261,13 @@ namespace NativeTranspiler.Analyzer
                 laneValue = pair
                     ? $"{fieldType}{{{extract}(({rhs}).x.v,__l),{extract}(({rhs}).y.v,__l)}}"
                     : fieldType == "float" && IsInt32Expr(assign.Right)
-                        ? $"n_extract_lane_i2f(({rhs}).v,__l)" : $"{extract}(({rhs}).v,__l)";
-            string target = $"{array}_ptr[n_extract_lane_epi32(({index}).v,__l)].{field}";
+                        ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhs)}.v,__l)" : $"{extract}({CppIntegerSemantics.MemberOperand(rhs)}.v,__l)";
+            string target = $"{array}_ptr[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(index)}.v,__l)].{field}";
             string write = fieldType == "int" && op is "+=" or "-=" or "*="
                 ? $"{target} = (int)((unsigned){target} {op[0]} (unsigned)({laneValue}));"
                 : $"{target} {op} {laneValue};";
             string guard = _currentMask == "simd_mask::all_true()" ? ""
-                : $"if(n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))";
+                : $"if(n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))";
             return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{{{write}}}}}}}";
         }
 
@@ -326,7 +326,7 @@ namespace NativeTranspiler.Analyzer
 
                     if (_currentMask != "simd_mask::all_true()")
                     {
-                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
+                        return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
                     }
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}";
                 }
@@ -357,7 +357,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         // Per-lane scatter for struct sub-field write
                         if (_currentMask != "simd_mask::all_true()")
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
                         return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
                     return $"{id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";

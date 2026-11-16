@@ -78,35 +78,27 @@ namespace NativeTranspiler.Analyzer
         internal static void AppendContextFieldDeclarations(INamedTypeSymbol jobStruct, StringBuilder sb,
             HashSet<IFieldSymbol>? stableArrays = null)
         {
-            int currentOffset = 0;
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            foreach (var slot in BuildFieldLayout(jobStruct))
             {
-                int offset = CalculateFieldOffset(field, ref currentOffset);
-                string address = CppIntegerSemantics.JobAddress("__job", offset);
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                string name = slot.Field.Name;
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("__job", slot.Offset));
+                switch (slot.Kind)
                 {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                    {
-                        var cppElementType = NativeTranspiler.MapCSharpTypeToCpp(NativeTranspiler.GetContainerElementType(field.Type));
-                        sb.AppendLine($"    EntJoy::Collections::UnsafeList<{cppElementType}>*& {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{cppElementType}>**){CppIntegerSemantics.CastOperand(address)};");
-                    }
-                    else
-                    {
-                        var cppElementType = GetCppElementType(field.Type);
-                        string binding = stableArrays?.Contains(field) == true ? "* const " : "*& ";
-                        sb.AppendLine($"    {cppElementType}{binding}{field.Name}_ptr = *({cppElementType}**){CppIntegerSemantics.CastOperand(address)};");
-                        sb.AppendLine($"    int& {field.Name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", offset + 8))};");
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    sb.AppendLine($"    {cppType}& {field.Name}_ptr = *({cppType}*){CppIntegerSemantics.CastOperand(address)};");
-                }
-                else
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    sb.AppendLine($"    {cppType}* {field.Name}_ptr = ({cppType}*){CppIntegerSemantics.CastOperand(address)};");
+                    case FieldKind.NativeList:
+                        sb.AppendLine($"    EntJoy::Collections::UnsafeList<{slot.ElementType}>*& {name}_listData = *(EntJoy::Collections::UnsafeList<{slot.ElementType}>**){address};");
+                        break;
+                    case FieldKind.Container:
+                        string binding = stableArrays?.Contains(slot.Field) == true ? "* const " : "*& ";
+                        sb.AppendLine($"    {slot.ElementType}{binding}{name}_ptr = *({slot.ElementType}**){address};");
+                        sb.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", slot.Offset + 8))};");
+                        break;
+                    case FieldKind.Pointer:
+                        sb.AppendLine($"    {slot.CppType}& {name}_ptr = *({slot.CppType}*){address};");
+                        break;
+                    default:
+                        sb.AppendLine($"    {slot.CppType}* {name}_ptr = ({slot.CppType}*){address};");
+                        break;
                 }
             }
         }

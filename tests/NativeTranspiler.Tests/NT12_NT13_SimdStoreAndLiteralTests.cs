@@ -65,9 +65,9 @@ public static class NT13Bits {
             _out.WriteLine(r.Cpp);
 
             // 不依赖"余数循环头"这类易变标记：直接挑出向量化 per-lane store 行
-            // （形如 `...]n_extract_lane_epi32((v_i).v,__l)] = ...`），逐行判定后缀。
+            // （形如 `...]n_extract_lane_epi32(v_i.v,__l)] = ...`），逐行判定后缀。
             var storeLines = r.Cpp.Split('\n')
-                .Where(l => l.Contains("n_extract_lane_epi32((v_i).v,__l)]"))
+                .Where(l => l.Contains("n_extract_lane_epi32(v_i.v,__l)]"))
                 .ToArray();
             Assert.NotEmpty(storeLines);
 

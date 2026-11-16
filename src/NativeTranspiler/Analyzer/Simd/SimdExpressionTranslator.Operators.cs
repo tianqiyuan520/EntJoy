@@ -50,8 +50,8 @@ namespace NativeTranspiler.Analyzer
 
                 // Varying comparison → SIMD compare (detect int vs float)
                 // Wrap complex expressions in parens so .v binds to the whole expression, not just the last term
-                string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : $"{left}";
-                string rightV = rightKind >= VarKind.Varying ? $"({right}).v" : $"{right}";
+                string leftV = leftKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"{left}";
+                string rightV = rightKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"{right}";
 
                 bool cmpIsInt = booleanOperands;
                 bool cmpIsUint = false;   // (uint)x-style comparisons need unsigned semantics
@@ -99,27 +99,27 @@ namespace NativeTranspiler.Analyzer
                 if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
                 {
                     if (leftIsHoisted)
-                        rightV = $"({right}).v";
+                        rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
                     else
                         leftV = $"{bc}({left})";
                 }
                 else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying)
                 {
                     if (rightIsHoisted)
-                        rightV = $"({right}).v";
+                        rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
                     else
                         rightV = $"{bc}({right})";
                 }
                 // If hoisted broadcast ended up on wrong side, correct
-                if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"({right}).v";
-                if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"({left}).v";
+                if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
+                if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"{CppIntegerSemantics.MemberOperand(left)}.v";
 
                 if (useUnsignedCmp) {
                     // Unsigned compare: x^0x80000000 converts two's-complement order to
                     // sign-magnitude order, so the signed compare works on the flipped values.
                     string flipConst = "(int)0x80000000";
-                    string leftUniform = left.StartsWith("__uni_") ? $"({left}).v" : $"n_set1_epi32({left})";
-                    string rightUniform = right.StartsWith("__uni_") ? $"({right}).v" : $"n_set1_epi32({right})";
+                    string leftUniform = left.StartsWith("__uni_") ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"n_set1_epi32({left})";
+                    string rightUniform = right.StartsWith("__uni_") ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"n_set1_epi32({right})";
                     string leftFlip = leftKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({leftV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({leftUniform}, n_set1_epi32({flipConst}))";
                     string rightFlip = rightKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({rightV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({rightUniform}, n_set1_epi32({flipConst}))";
                     string ic2 = op switch {
@@ -150,7 +150,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (!anyVarying) return $"({left} {op} {right})";
                 string maskOp = binary.IsKind(SyntaxKind.LogicalAndExpression) ? "n_and_mask" : "n_or_mask";
-                return $"simd_mask{{ {maskOp}(({TranslateCondition(binary.Left)}).m, ({TranslateCondition(binary.Right)}).m) }}";
+                return $"simd_mask{{ {maskOp}({CppIntegerSemantics.MemberOperand(TranslateCondition(binary.Left))}.m, {CppIntegerSemantics.MemberOperand(TranslateCondition(binary.Right))}.m) }}";
             }
 
             // Arithmetic operators
@@ -217,7 +217,7 @@ namespace NativeTranspiler.Analyzer
 
                 if (leftIsUint)
                 {
-                    string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : left;
+                    string leftV = leftKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : left;
                     return $"simd_value<int>{{ n_srli_epi32({leftV}, {right}) }}";
                 }
             }
@@ -234,10 +234,10 @@ namespace NativeTranspiler.Analyzer
         {
             bool isInt = IsInt32Type(expr);
             if (translated.StartsWith("__uni_"))
-                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+                return isInt ? $"n_cvtepi32_ps({CppIntegerSemantics.MemberOperand(translated)}.v)" : $"{CppIntegerSemantics.MemberOperand(translated)}.v";
             VarKind kind = _varAnalyzer.ClassifyExpression(expr);
             if (kind >= VarKind.Varying)
-                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+                return isInt ? $"n_cvtepi32_ps({CppIntegerSemantics.MemberOperand(translated)}.v)" : $"{CppIntegerSemantics.MemberOperand(translated)}.v";
             return isInt ? $"n_cvtepi32_ps(n_set1_epi32({translated}))" : $"n_set1_ps({translated})";
         }
 
@@ -297,10 +297,10 @@ namespace NativeTranspiler.Analyzer
                 // 裸指针变量本身是指针，同样直接用（不要转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
                 string elemPtr = info.Base;
                 bool narrowed = _currentMask != "simd_mask::all_true()";
-                string guard = narrowed ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)" : "";
+                string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 if (idxKind >= VarKind.Varying)
                 {
-                    string lv = $"{elemPtr}[n_extract_lane_epi32(({idxExpr}).v,__l)]";
+                    string lv = $"{elemPtr}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)]";
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{lv} {op} 1;}}}}";
                 }
                 return $"{elemPtr}[{idxExpr}] {op} 1;";

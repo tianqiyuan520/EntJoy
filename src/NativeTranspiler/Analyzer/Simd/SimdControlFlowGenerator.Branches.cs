@@ -36,7 +36,7 @@ namespace NativeTranspiler.Analyzer
                 //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
-                    string goodExpr = $"simd_mask{{ n_not_mask(({condExpr}).m) }}";
+                    string goodExpr = $"simd_mask{{ n_not_mask({CppIntegerSemantics.MemberOperand(condExpr)}.m) }}";
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
                     // Combine with previous mask to narrow unfound lanes

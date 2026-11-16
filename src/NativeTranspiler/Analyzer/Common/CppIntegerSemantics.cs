@@ -23,8 +23,8 @@ namespace NativeTranspiler.Analyzer.Common
             int depth = 0;
             foreach (char c in operand)
             {
-                if (c == '(' || c == '[') { depth++; continue; }
-                if (c == ')' || c == ']') { depth--; continue; }
+                if (c == '(' || c == '[' || c == '{') { depth++; continue; }
+                if (c == ')' || c == ']' || c == '}') { depth--; continue; }
                 if (depth == 0 && (char.IsWhiteSpace(c) || "+-*/%<>=!&|^?:,".IndexOf(c) >= 0))
                     return true;
             }
@@ -34,6 +34,9 @@ namespace NativeTranspiler.Analyzer.Common
         /// <summary>把操作数整理成可直接跟在转换后面的形式：`x` 或 `(x + 1)`。</summary>
         public static string CastOperand(string operand)
             => NeedsParensForCast(operand) ? "(" + operand + ")" : operand;
+
+        /// <summary>成员访问（`.v` / `.m`）的操作数：复合表达式才加括号。</summary>
+        public static string MemberOperand(string operand) => CastOperand(operand);
 
         /// <summary>字段地址表达式：偏移 0 直接用 job 指针，其余按字节偏移。</summary>
         public static string JobAddress(string jobPointer, int offset)

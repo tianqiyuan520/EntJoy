@@ -106,38 +106,31 @@ namespace NativeTranspiler.Analyzer
 
             var fieldReads = new StringBuilder();
             var callArgs = new List<string>();
-            int currentOffset = 0;
 
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            foreach (var slot in BuildFieldLayout(jobStruct))
             {
-                int offset = CalculateFieldOffset(field, ref currentOffset);
-
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                string name = slot.Field.Name;
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("context", slot.Offset));
+                switch (slot.Kind)
                 {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                    {
-                        fieldReads.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)((char*)context + {offset});");
-                        callArgs.Add($"{field.Name}_listData");
-                    }
-                    else
-                    {
-                        var cppElemType = GetCppElementType(field.Type);
-                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                        fieldReads.AppendLine($"    int& {field.Name}_length = *(int*)((char*)context + {offset + 8});");
-                        callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
-                }
-                else
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
+                    case FieldKind.NativeList:
+                        fieldReads.AppendLine($"    auto* {name}_listData = *(EntJoy::Collections::UnsafeList<{slot.ElementType}>**){address};");
+                        callArgs.Add($"{name}_listData");
+                        break;
+                    case FieldKind.Container:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = *({slot.ElementType}**){address};");
+                        fieldReads.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("context", slot.Offset + 8))};");
+                        callArgs.Add($"{name}_ptr, {name}_length");
+                        break;
+                    case FieldKind.Pointer:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = *({slot.CppType}*){address};");
+                        callArgs.Add($"{name}_ptr");
+                        break;
+                    default:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = ({slot.CppType}*){address};");
+                        callArgs.Add($"{name}_ptr");
+                        break;
                 }
             }
 

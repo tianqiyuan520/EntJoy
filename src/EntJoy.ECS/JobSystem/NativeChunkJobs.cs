@@ -75,6 +75,18 @@ namespace EntJoy.ECS.JobSystem
     [StructLayout(LayoutKind.Sequential)]
     internal unsafe struct ChunkContextHeader
     {
+        /// <summary>C++ 侧 <c>__EntJoyChunkContextHeader</c> 的字节数（NativeGeneratedSupport.h 有同值 static_assert）。</summary>
+        internal const int NativeSize = 88;
+
+        static ChunkContextHeader()
+        {
+            int size = Marshal.SizeOf<ChunkContextHeader>();
+            if (size != NativeSize)
+                throw new InvalidOperationException(
+                    $"ChunkContextHeader 布局漂移：托管 {size} 字节，原生 {NativeSize} 字节。"
+                    + "改字段必须同步 src/NativeDll/NativeGeneratedSupport.h。");
+        }
+
         public int chunkCount;               // Chunk 数量
         public int hasEnabledFilter;         // 是否有 enable 过滤
         public IntPtr queryAllEnabledTypes;  // int[]（类型哈希数组）指针
