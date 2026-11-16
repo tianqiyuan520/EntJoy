@@ -66,7 +66,8 @@ namespace EntJoy.ECS
                 int idx = chunk.GetSharedValueIndex(compIdx);
                 return (T)_managedSharedValues[idx];
             }
-            return (T)ReadBlittableSharedBoxed(chunk, compIdx, ct.Type);
+            // 类型已知就不装箱：boxed 读取要走反射写入后再拆箱。
+            return Unsafe.AsRef<T>((void*)chunk.GetSharedValuePointer(compIdx));
         }
 
         /// <summary>
@@ -77,13 +78,14 @@ namespace EntJoy.ECS
         public void SetSharedComponent<T>(Entity entity, T value) where T : ISharedComponentData
         {
             CheckDisposed();
-            CompleteActiveJobs();
+            var metadata = ComponentTypeManager.GetComponentType(typeof(T));
+            if (!JobBookkeepingIdle()) CompleteActiveJobs();
             using (EnterStructural())
             {
                 ValidateEntity(entity);
                 ref var info = ref GetEntityInfoRef(entity.Id);
                 var arch = info.Archetype;
-                int compIdx = arch.GetComponentTypeIndex(ComponentTypeManager.GetComponentType(typeof(T)));
+                int compIdx = arch.GetComponentTypeIndex(metadata);
                 var ct = arch.Types[compIdx];
                 int srcChunkIndex = info.ChunkIndex;
                 var srcChunk = arch.ChunkList[srcChunkIndex];
@@ -104,11 +106,12 @@ namespace EntJoy.ECS
                 }
                 else
                 {
-                    object curVal = ReadBlittableSharedBoxed(srcChunk, compIdx, ct.Type);
-                    if (EqualityComparer<object>.Default.Equals(curVal, value)) return;
+                    // 类型已知：就地读比较与写入，不装箱、不 pin。
+                    ref var current = ref Unsafe.AsRef<T>((void*)srcChunk.GetSharedValuePointer(compIdx));
+                    if (EqualityComparer<T>.Default.Equals(current, value)) return;
                     if (srcChunk.EntityCount == 1)
                     {
-                        WriteBlittableSharedBoxed(srcChunk, compIdx, value, ct.Size);
+                        current = value;
                         CommitInPlaceSharedChange(srcChunk, info.SlotInChunk);
                         return;
                     }
