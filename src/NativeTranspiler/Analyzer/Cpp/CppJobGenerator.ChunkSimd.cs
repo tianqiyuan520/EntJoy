@@ -571,7 +571,7 @@ namespace NativeTranspiler.Analyzer
             string loopReplacement = $"for (int {entityLoopIv} = __simd_end; {entityLoopIv} <";
             scalarBody = scalarBody.Replace(loopPattern, loopReplacement);
 
-            sb.Append(scalarBody);
+            sb.Append(CodeIndent.Shift(scalarBody, 1));
         }
     }
 }
