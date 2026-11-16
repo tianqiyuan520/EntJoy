@@ -245,36 +245,42 @@ namespace NativeTranspiler.Analyzer
         {
             string inner = TranslateExpression(cast.Expression);
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
-            // 目标类型按类型符号判定（源文本里 `int2` / `EntJoy.Mathematics.int2` 拼写不固定）。
+            // 目标类型优先用类型符号；重写树里的 cast 节点可能没有来源注解，此时用语法名兜底
+            // （语法名只认关键字与限定名，`int2` / `EntJoy.Mathematics.int2` 两种拼写都覆盖）。
             var targetSymbol = SymbolHelper.GetBoundType(_semanticModel, cast.Type);
             string targetCppType = targetSymbol != null ? NativeTranspiler.MapCSharpTypeToCpp(targetSymbol) : "";
+            string targetText = cast.Type.ToString();
+            string targetLeaf = SimdVectorTypes.LeafName(targetCppType.Length > 0 ? targetCppType : targetText.Replace('.', ':'));
+
+            bool targetIsInt = targetSymbol?.SpecialType == SpecialType.System_Int32 || targetLeaf == "int" || targetLeaf == "Int32";
+            bool targetIsUint = targetSymbol?.SpecialType == SpecialType.System_UInt32 || targetLeaf == "uint" || targetLeaf == "UInt32";
 
             // Hoisted broadcasts are already the correct SIMD type — skip cast entirely
             if (inner.StartsWith("__uni_"))
                 return inner;
 
             // For varying int -> unsigned int: keep {inner} as-is (n_cmp_*_epi32 works on raw n_int)
-            if (innerKind >= VarKind.Varying && targetSymbol?.SpecialType == SpecialType.System_UInt32)
+            if (innerKind >= VarKind.Varying && targetIsUint)
                 return $"{inner}";
 
             // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
             if (innerKind >= VarKind.Varying)
             {
                 // uint2 的算术与 int2 位相同，用 int2 的寄存器类型承载。
-                if (SimdVectorTypes.IsInt2(targetCppType) || SimdVectorTypes.IsUint2(targetCppType))
+                if (targetLeaf == "int2" || targetLeaf == "uint2")
                     return $"simd_value<EntJoy::Mathematics::int2>::convert({inner})";
-                if (targetSymbol?.SpecialType == SpecialType.System_Int32)
+                if (targetIsInt)
                     return $"simd_value<int>::convert({inner})";
                 // (float2)simd_value<float2> → just the inner value (identity conversion)
-                if (SimdVectorTypes.IsFloat2(targetCppType))
+                if (targetLeaf == "float2")
                     return inner;
             }
 
             // (int)floatExpr → scalar convert (uniform path)
-            if (targetSymbol != null)
+            if (targetCppType.Length > 0)
                 return $"({targetCppType}){inner}";
 
-            return $"({cast.Type.ToString().Replace(".", "::")}){inner}";
+            return $"({targetText.Replace(".", "::")}){inner}";
         }
 
         /// <summary>
