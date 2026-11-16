@@ -211,6 +211,17 @@ namespace EntJoy.ECS
         public ref readonly T GetComponentReadOnly<T>(int entityIndex, int componentIndex) where T : struct
             => ref GetComponentStorage<T>(entityIndex, componentIndex);
 
+        /// <summary>调用方已校验实体句柄与列下标时使用：省掉处置与两处越界复查，仍拒绝写关系列。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ref T GetComponentUnchecked<T>(int entityIndex, int componentIndex) where T : struct
+        {
+            if (Meta.RelationColumns[componentIndex])
+                throw new InvalidOperationException(
+                    "Relationship columns require GetComponentReadOnly; change values through EntityManager or DeferredCommandBuffer.");
+            return ref Unsafe.AsRef<T>(
+                (byte*)MemoryBlock + Meta.ComponentOffsets[componentIndex] + entityIndex * Meta.ComponentSizes[componentIndex]);
+        }
+
         internal ref T GetComponentStorage<T>(int entityIndex, int componentIndex) where T : struct
         {
             Meta.Archetype.CheckReadable();

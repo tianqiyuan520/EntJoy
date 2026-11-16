@@ -14,6 +14,14 @@ namespace EntJoy.ECS
             return ref chunk.GetComponent<T>(slotInChunk, componentIndex);
         }
 
+        /// <summary>已校验过的实体句柄走这里：省掉块的处置/越界复查与列下标复查，只保留关系列只读判据。</summary>
+        internal ref T GetComponentUnchecked<T>(int chunkIndex, int slotInChunk) where T : struct
+        {
+            var componentIndex = GetComponentTypeIndex<T>();
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponentUnchecked<T>(slotInChunk, componentIndex);
+        }
+
         public ref readonly T GetComponentReadOnly<T>(int chunkIndex, int slotInChunk) where T : struct
         {
             CheckReadable();
@@ -29,6 +37,15 @@ namespace EntJoy.ECS
             ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
             chunk.GetComponent<T>(slotInChunk, componentIndex) = value;
             // 同一个块引用上直接标变更，不再按块号重取一次。
+            chunk.MarkEntityChanged(slotInChunk);
+        }
+
+        /// <summary>已校验过的实体句柄走这里：省掉块的处置/越界复查与列下标复查，只保留关系列只读判据。</summary>
+        internal void SetUnchecked<T>(int chunkIndex, int slotInChunk, T value) where T : struct
+        {
+            var componentIndex = GetComponentTypeIndex<T>();
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.GetComponentUnchecked<T>(slotInChunk, componentIndex) = value;
             chunk.MarkEntityChanged(slotInChunk);
         }
 

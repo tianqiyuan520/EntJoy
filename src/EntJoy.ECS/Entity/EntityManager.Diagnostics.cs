@@ -290,7 +290,7 @@ namespace EntJoy.ECS
                     arch.SetStorageRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, metadata, t);
                     return;
                 }
-                arch.Set(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
+                arch.SetUnchecked(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
             }
         }
 
@@ -350,7 +350,7 @@ namespace EntJoy.ECS
             {
                 ref var entityInfoRef = ref GetAliveInfoRef(entity);
                 var arch = entityInfoRef.Archetype;
-                return ref arch.GetComponent<T>(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+                return ref arch.GetComponentUnchecked<T>(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
             }
         }
 
