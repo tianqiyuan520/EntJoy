@@ -232,6 +232,10 @@ namespace EntJoy.ECS
             }
         }
 
+        /// <summary>按快照下标取 Chunk；调用方保证 index 在 <see cref="ChunkCount"/> 内。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal readonly ref readonly Chunk ChunkAt(int index) => ref _snapshot.Chunks[index];
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public readonly nint ComponentBase(int column)
         {

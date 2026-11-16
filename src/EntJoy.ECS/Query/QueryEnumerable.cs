@@ -19,6 +19,37 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public QueryEnumerator<T0, T1> GetEnumerator()
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
+
+        /// <summary>
+        /// 块循环 + 内联回调：按 Chunk 取列 Span 后逐实体调用 <paramref name="action"/>。
+        /// 与枚举器路径共用同一份遍历计划，但循环体里没有逐实体游标状态。
+        /// </summary>
+        public void ForEach<TAction>(ref TAction action)
+            where TAction : struct, IQueryForeach<T0, T1>
+        {
+            var cursor = new QueryTraversalCursor(_entityManager, _builder, ComponentTypes<T0, T1>.Share);
+            if (cursor.CanUseChunkTable)
+            {
+                int count = cursor.ChunkCount;
+                for (int i = 0; i < count; i++)
+                {
+                    ref readonly var entry = ref cursor.ChunkEntry(i);
+                    // 裸指针索引：Span 的逐次边界检查会阻止循环向量化。
+                    var column0 = (T0*)entry.Base0;
+                    var column1 = (T1*)entry.Base1;
+                    for (int slot = 0; slot < entry.Count; slot++)
+                        action.Update(ref column0[slot], ref column1[slot]);
+                }
+                return;
+            }
+
+            var enumerator = GetEnumerator();
+            while (enumerator.MoveNext())
+            {
+                var result = enumerator.Current;
+                action.Update(ref result.Comp0, ref result.Comp1);
+            }
+        }
     }
 
     public unsafe ref struct QueryEnumerator<T0, T1> where T0 : struct where T1 : struct
@@ -46,16 +77,18 @@ namespace EntJoy.ECS
             _rangeEnd = 0;
             _base0 = null;
             _base1 = null;
+
         }
+
 
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext()
         {
-            _readState.ValidateTracked();
             _slotOffset++;
-            // 区间内只递增槽位；跨区间时再解析过滤和列基址。
+            // 区间内只递增槽位；跨区间时再校验借用并解析过滤和列基址。
             if (_slotOffset < 0) return true;
+            _readState.ValidateTracked();
             if (_useChunkTable)
             {
                 int next = _chunkTableIndex + 1;
@@ -113,8 +146,7 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                _readState.ValidateTracked();
-                // _slotOffset 在区间内恒为负；该检查复用已在寄存器中的值，不额外加载。
+                // 借用校验收敛到 MoveNext 的块边界；这里只拒绝越界读取。
                 if (_slotOffset >= 0) throw new InvalidOperationException();
                 return new EntityQueryResult<T0, T1>(_base0 + _slotOffset,
                     ComponentTypeManager.IsRelationType<T1>() && _base1 == null ? null : _base1 + _slotOffset, _readState);
@@ -122,7 +154,7 @@ namespace EntJoy.ECS
         }
     }
 
-    // 获取组件引用时校验借用；已返回的引用由调用方保证使用期间没有结构变更。
+    // 结果对象只携带指针：借用校验由枚举器在块边界完成，结构变更后继续解引用属未定义行为。
     public unsafe readonly struct EntityQueryResult<T0, T1> where T0 : struct where T1 : struct
     {
         private readonly T0* _c0;
@@ -185,7 +217,6 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void Validate()
         {
-            _readState.Validate();
             if (_c0 == null) throw new InvalidOperationException("The query result has not been initialized.");
         }
     }

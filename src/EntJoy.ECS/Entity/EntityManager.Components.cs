@@ -20,6 +20,11 @@ namespace EntJoy.ECS
         /// </summary>
         public unsafe void AddComponent<T0>(Entity entity, T0 t0) where T0 : struct
         {
+            if (_deferring != null)
+            {
+                _deferring.AddComponent(entity, t0);
+                return;
+            }
             // 走字节路径：泛型值直接取地址，不经 object 装箱，也不重复查类型字典。
             AddComponentRaw(entity, ComponentTypeManager.GetComponentType<T0>(), (byte*)&t0, Unsafe.SizeOf<T0>());
         }
@@ -30,6 +35,11 @@ namespace EntJoy.ECS
         /// </summary>
         public void RemoveComponent<T0>(Entity entity) where T0 : struct
         {
+            if (_deferring != null)
+            {
+                _deferring.RemoveComponent<T0>(entity);
+                return;
+            }
             RemoveComponentRaw(entity, ComponentTypeManager.GetComponentType<T0>());
         }
 
@@ -98,7 +108,8 @@ namespace EntJoy.ECS
         private static unsafe void WriteColumnBytes(Archetype arch, int chunkIndex, int slotInChunk, ComponentType componentType, byte* src, int elemSize)
         {
             int compIdx = arch.GetComponentTypeIndex(componentType);
-            byte* colBase = (byte*)arch.ChunkList[chunkIndex].GetComponentArrayPointer(compIdx);
+            ref readonly var chunk = ref CollectionsMarshal.AsSpan(arch.ChunkList)[chunkIndex];
+            byte* colBase = (byte*)chunk.GetComponentArrayPointer(compIdx);
             Buffer.MemoryCopy(src, colBase + (long)slotInChunk * elemSize, elemSize, elemSize);
         }
 
@@ -229,7 +240,8 @@ namespace EntJoy.ECS
             oldArch.CopyComponentsTo(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, targetArch, chunkIndex, slotInChunk);
             RemoveAndFixup(oldArch, entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, skipDisposal: metadata.IsRelation);
             UpdateEntityLocation(entity.Id, targetArch, chunkIndex, slotInChunk);
-            targetArch.ChunkList[chunkIndex].MarkEntityChanged(slotInChunk);
+            ref var targetChunk = ref CollectionsMarshal.AsSpan(targetArch.ChunkList)[chunkIndex];
+            targetChunk.MarkEntityChanged(slotInChunk);
             InvalidateStructuralQueries();
             DispatchRemovedValue(metadata, entity, oldValueSnapshot);
         }

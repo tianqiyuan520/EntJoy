@@ -10,21 +10,24 @@ namespace EntJoy.ECS
         public ref T GetComponent<T>(int chunkIndex, int slotInChunk) where T : struct
         {
             var componentIndex = GetComponentTypeIndex<T>();
-            return ref _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex);
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponent<T>(slotInChunk, componentIndex);
         }
 
         public ref readonly T GetComponentReadOnly<T>(int chunkIndex, int slotInChunk) where T : struct
         {
             CheckReadable();
             int componentIndex = GetComponentTypeIndex<T>();
-            return ref _chunkList[chunkIndex].GetComponentReadOnly<T>(slotInChunk, componentIndex);
+            ref readonly var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponentReadOnly<T>(slotInChunk, componentIndex);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Set<T>(int chunkIndex, int slotInChunk, T value) where T : struct
         {
             var componentIndex = GetComponentTypeIndex<T>();
-            _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex) = value;
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.GetComponent<T>(slotInChunk, componentIndex) = value;
             NotifyComponentChanged(chunkIndex, slotInChunk);
         }
 
@@ -45,7 +48,7 @@ namespace EntJoy.ECS
         internal unsafe void SetStorageRaw(int chunkIndex, int slotInChunk, ComponentType compType, object value)
         {
             var componentIndex = GetComponentTypeIndex(compType);
-            var chunk = _chunkList[chunkIndex];
+            ref readonly var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
             var compSize = compType.Size;
             var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
 
@@ -70,13 +73,14 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void NotifyComponentChanged(int chunkIndex, int slotInChunk)
         {
-            _chunkList[chunkIndex].MarkEntityChanged(slotInChunk);
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.MarkEntityChanged(slotInChunk);
         }
 
         /// <summary>把本源型某个槽位的全部非 shared 组件搬到另一个原型；可启用组件的启用位同时搬移。</summary>
         public unsafe void CopyComponentsTo(int sourceChunkIndex, int sourceSlot, Archetype target, int targetChunkIndex, int targetSlot)
         {
-            var sourceChunk = _chunkList[sourceChunkIndex];
+            ref readonly var sourceChunk = ref CollectionsMarshal.AsSpan(_chunkList)[sourceChunkIndex];
             ref var targetChunk = ref CollectionsMarshal.AsSpan(target._chunkList)[targetChunkIndex];
 
             foreach (var type in types)

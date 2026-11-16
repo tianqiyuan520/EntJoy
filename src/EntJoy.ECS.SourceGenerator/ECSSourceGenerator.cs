@@ -18,7 +18,7 @@ namespace EntJoy.ECS.SourceGenerator
             new ChunkQueryTupleSourceGenerator().Initialize(context);
             new QueryBuilderTupleSourceGenerator().Initialize(context);
             new ECSComponentSourceGenerator().Initialize(context);
-            new MultiRelationSlotSourceGenerator().Initialize(context);
+            new RelationshipSlotSourceGenerator().Initialize(context);
             new SystemRegistrationSourceGenerator().Initialize(context);
             new ReactiveSystemSourceGenerator().Initialize(context);
             new DisposableRegistrationSourceGenerator().Initialize(context);

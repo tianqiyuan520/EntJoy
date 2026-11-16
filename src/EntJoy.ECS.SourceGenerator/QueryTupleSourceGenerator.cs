@@ -66,6 +66,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine("    private readonly EntityManager _entityManager;");
             sb.AppendLine("    private readonly QueryBuilder _builder;");
+            sb.AppendLine($"    private static readonly ComponentType[] Columns = {{ {typeOfArgs} }};");
             sb.AppendLine();
             sb.AppendLine("    internal QueryEnumerable(EntityManager entityManager, QueryBuilder builder)");
             sb.AppendLine("    {");
@@ -76,6 +77,34 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public QueryEnumerator<{genList}> GetEnumerator()");
             sb.AppendLine($"        => new QueryEnumerator<{genList}>(_entityManager, _builder);");
+            // 块循环回调：整块命中时按指针推进，循环体交给 JIT 内联，不构造逐实体结果。
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine($"    public void ForEach<TAction>(ref TAction action) where TAction : struct, IQueryForeach<{genList}>");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        var cursor = new QueryTraversalCursor(_entityManager, _builder, Columns);");
+            if (n <= 3)
+            {
+                sb.AppendLine("        if (cursor.CanUseChunkTable)");
+                sb.AppendLine("        {");
+                sb.AppendLine("            int count = cursor.ChunkCount;");
+                sb.AppendLine("            for (int i = 0; i < count; i++)");
+                sb.AppendLine("            {");
+                sb.AppendLine("                ref readonly var entry = ref cursor.ChunkEntry(i);");
+                for (int i = 0; i < n; i++)
+                    sb.AppendLine($"                {genParams[i]}* c{i} = ({genParams[i]}*)entry.Base{i};");
+                sb.AppendLine("                for (int s = 0; s < entry.Count; s++)");
+                sb.AppendLine($"                    action.Update({string.Join(", ", genParams.Select((_, i) => $"ref c{i}[s]"))});");
+                sb.AppendLine("            }");
+                sb.AppendLine("            return;");
+                sb.AppendLine("        }");
+            }
+            sb.AppendLine($"        var enumerator = new QueryEnumerator<{genList}>(_entityManager, _builder);");
+            sb.AppendLine("        while (enumerator.MoveNext())");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var result = enumerator.Current;");
+            sb.AppendLine($"            action.Update({string.Join(", ", genParams.Select((_, i) => $"ref result.Comp{i}"))});");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
 
@@ -188,14 +217,19 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    public ref readonly {genParams[i]} ReadOnlyComp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ _readState.ValidateTracked(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine($"        get {{ Validate(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
                 sb.AppendLine("    }");
                 sb.AppendLine($"    public ref {genParams[i]} Comp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(_readState); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine($"        get {{ Validate(); ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
                 sb.AppendLine("    }");
             }
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.AppendLine("    private void Validate()");
+            sb.AppendLine("    {");
+            sb.AppendLine("        if (_c0 == null) throw new InvalidOperationException(\"The query result has not been initialized.\");");
+            sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
 
