@@ -81,6 +81,56 @@ public struct DifferentialPairIspcJob : IJobParallelFor
 }
 #endif
 
+/// <summary>float2 差分基准：标量后端逐元素跑出的结果作为期望值。</summary>
+[NativeTranspile]
+public struct DifferentialFloatCppJob : IJobParallelFor
+{
+    public NativeArray<float2> Input, Output;
+    public int Mode;
+    public void Execute(int index)
+    {
+        float2 a = Input[index];
+        float r = a.x * 3f + a.y;
+        if (Mode == 1) r = r / 7f;
+        else if (Mode == 2 && a.x > 0f) r = a.x - a.y;
+        Output[index] = new float2(r, a.y * 0.5f);
+    }
+}
+
+/// <summary>同一算式走 AutoSIMD（float2 用 simd_value&lt;float2&gt; 承载）。</summary>
+[NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+public struct DifferentialFloatSimdJob : IJobParallelFor
+{
+    public NativeArray<float2> Input, Output;
+    public int Mode;
+    public void Execute(int index)
+    {
+        float2 a = Input[index];
+        float r = a.x * 3f + a.y;
+        if (Mode == 1) r = r / 7f;
+        else if (Mode == 2 && a.x > 0f) r = a.x - a.y;
+        Output[index] = new float2(r, a.y * 0.5f);
+    }
+}
+
+#if ENTJOY_FIXTURE_ISPC
+/// <summary>同一 float2 算式走 ISPC 后端，验证 pair 分量语义与 C++ 侧一致。</summary>
+[NativeTranspile(Target = BackendTarget.Ispc)]
+public struct DifferentialFloatIspcJob : IJobParallelFor
+{
+    public NativeArray<float2> Input, Output;
+    public int Mode;
+    public void Execute(int index)
+    {
+        float2 a = Input[index];
+        float r = a.x * 3f + a.y;
+        if (Mode == 1) r = r / 7f;
+        else if (Mode == 2 && a.x > 0f) r = a.x - a.y;
+        Output[index] = new float2(r, a.y * 0.5f);
+    }
+}
+#endif
+
 public static unsafe class DifferentialPairFixture
 {
     public static void Run()
@@ -91,11 +141,12 @@ public static unsafe class DifferentialPairFixture
         {
             (int pairCases, int pairChecks) = RunPair(library);
             (int fieldCases, int fieldChecks) = RunPairField(library);
-            cases += pairCases + fieldCases;
-            checks += pairChecks + fieldChecks;
+            (int floatCases, int floatChecks) = RunFloat(library);
+            cases += pairCases + fieldCases + floatCases;
+            checks += pairChecks + fieldChecks + floatChecks;
         }
         finally { NativeLibrary.Free(library); }
-        Console.WriteLine($"PASS: differential pair cases={cases}, comparisons={checks}; uint2 arithmetic and field gather/scatter match C#.");
+        Console.WriteLine($"PASS: differential pair cases={cases}, comparisons={checks}; uint2/float2 arithmetic and pair field gather match C#.");
     }
 
     private static (int cases, int checks) RunPair(nint library)
@@ -190,6 +241,54 @@ public static unsafe class DifferentialPairFixture
                 cases++;
             }
             _ = reference;
+        }
+        return (cases, checks);
+    }
+
+    private static (int cases, int checks) RunFloat(nint library)
+    {
+        int cases = 0, checks = 0;
+        float[] seeds = { 0f, -0f, 1f, -1f, 3.5f, 1e-30f, 1e30f, float.MaxValue, float.MinValue };
+        foreach (int length in new[] { 0, 1, 7, 8, 9, 17, 33, 129 })
+        {
+            using var input = new NativeArray<float2>(length);
+            using var output = new NativeArray<float2>(length);
+            using var expected = new NativeArray<float2>(length);
+            var raw = (float2*)input.GetUnsafePtr();
+            for (int i = 0; i < length; i++)
+                raw[i] = new float2(seeds[i % seeds.Length], seeds[(i * 7 + 3) % seeds.Length]);
+
+            foreach (int mode in new[] { 0, 1, 2 })
+            {
+                var reference = new DifferentialFloatCppJob { Input = input, Output = expected, Mode = mode };
+                for (int i = 0; i < length; i++) reference.Execute(i);
+
+                foreach (int batch in new[] { 1, 7, 8, 9, 64 })
+                {
+                    CheckFloatJob(new DifferentialFloatSimdJob { Input = input, Output = output, Mode = mode });
+#if ENTJOY_FIXTURE_ISPC
+                    CheckFloatJob(new DifferentialFloatIspcJob { Input = input, Output = output, Mode = mode });
+#endif
+                    void CheckFloatJob<T>(T job) where T : unmanaged
+                    {
+                        for (int i = 0; i < length; i++) ((float2*)output.GetUnsafePtr())[i] = new float2(0.5f, -0.5f);
+                        var kernel = (delegate* unmanaged[Cdecl]<void*, int, int, void>)NativeLibrary.GetExport(
+                            library, $"SharpNative_Job_NativeTranspilerFixture_{typeof(T).Name}_Execute_Adapter");
+                        for (int start = 0; start < length; start += batch)
+                            kernel(&job, start, Math.Min(batch, length - start));
+                        for (int i = 0; i < length; i++)
+                        {
+                            float2 actual = ((float2*)output.GetUnsafePtr())[i];
+                            float2 want = ((float2*)expected.GetUnsafePtr())[i];
+                            if (actual.x != want.x || actual.y != want.y)
+                                throw new InvalidOperationException(
+                                    $"{typeof(T).Name}: len={length} mode={mode} batch={batch} i={i} actual=({actual.x},{actual.y}) expected=({want.x},{want.y})");
+                            checks++;
+                        }
+                        cases++;
+                    }
+                }
+            }
         }
         return (cases, checks);
     }
