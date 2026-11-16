@@ -2,16 +2,16 @@
 
 ## 当前位置
 
-10 万实体、四项逐实体结构变更，同一进程内两侧逐轮交替、按轮取最小：
+10 万实体、四项逐实体结构变更，同一进程内两侧逐轮交替、按轮取最小。下面是同一构建两次重复：
 
 | 操作 | EntJoy | Arch | 比值 |
 | --- | --- | --- | --- |
-| 创建实体 | 23.6 ns | 23.5 ns | 1.00 |
-| 添加组件 | 64.8 ns | 58.9 ns | 1.10 |
-| 移除组件 | 63.7 ns | 76.4 ns | 0.83 |
-| 销毁实体 | 23.2 ns | 26.2 ns | 0.89 |
+| 创建实体 | 24.2–24.7 ns | 23.8–24.1 ns | 1.02–1.03 |
+| 添加组件 | 62.5–62.8 ns | 59.2–59.5 ns | 1.05–1.06 |
+| 移除组件 | 65.7–66.1 ns | 75.0–76.8 ns | 0.86–0.88 |
+| 销毁实体 | 23.8–24.0 ns | 26.3–26.7 ns | 0.90 |
 
-读数：`tools/EcsComparison/results/struct-entjoy-vs-arch-20261116-b.log`（2026-11-16 12:20）。该目录在 `.gitignore` 内，是本机记录，不入库。含 Flecs、EnTT、Unity 的横向读数与场景位置见 [28 跨框架 ECS 性能对比](../gridsearch/28-跨框架ECS性能对比.md)。
+读数：`tools/EcsComparison/results/final-20261116.log`（2026-11-16 12:52）。该目录在 `.gitignore` 内，是本机记录，不入库。含 Flecs、EnTT、Unity 的横向读数与场景位置见 [28 跨框架 ECS 性能对比](../gridsearch/28-跨框架ECS性能对比.md)。
 
 口径：.NET 8 Release JIT；两侧都用非线程安全 World（EntJoy `new World(name, threadSafe: false)`，Arch 本来没有结构锁）；每项单次计时、按轮取最小；预建与复位都在计时之外；首轮是预热轮、不计入。绝对时间只在同一进程内可比，跨会话、跨构建、跨 World 配置都不可相减。
 
@@ -72,12 +72,15 @@
 ## 复现与判读
 
 ```powershell
-dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 5
+dotnet build tools/EcsComparison -c Release
+dotnet run -c Release --project tools/EcsComparison --no-build -- --struct 100000 5
 ```
 
+- **必须先单独构建 `tools/EcsComparison`**：`dotnet build EntJoy.sln` 不包含它，只建 solution 就会让 `--no-build` 用上一次的工具与库，测出来的还是旧版本。
 - 四项逐轮交错两侧，比值只在同一进程内成立。
 - 轮数 5 够用：同一构建重复三次，添加项的比值波动在 ±0.07 内。
 - 首轮是预热轮，必须保留。没有它时最小值会在「冷 JIT + 全新 Chunk（槽位无需清槽）」与「热 JIT + 复用 Chunk」之间跳，读数不可复现。
+- 单个操作的读数会被一侧的偶发慢轮带偏（某一轮 Arch 添加跑到 86 ns 而非 59 ns，比值会从 1.05 翻成 0.79）。出现这种离群就重跑，不要拿它下结论。
 - `tools/EcsComparison/obj/struct-*.txt` 是历史逐次测量记录，各自协议不同，不互相比较，也不与本表混用。
 
 ## 边界

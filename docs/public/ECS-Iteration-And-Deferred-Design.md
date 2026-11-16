@@ -22,7 +22,8 @@
 
 - 关系列在托管侧是只读的，可写 `ref` 必须拒绝；`QueryResult_CrossThreadCopyScope_PreservesCallingThreadWriteGuard` 要求这个检查逐访问生效，移到块边界会破坏语义。
 - 把那个 `Volatile.Read` 短路掉，10 万实体两组件遍历只快约 5%（实测 129.9 μs → 119.4 μs）。剩余差距是逐实体的 `MoveNext`、`Current` 构造与两次属性访问本身——属语法形态的成本，换检查策略消不掉。
-- 要 arch 那种零检查写入，用 `Chunks()` 或 `ForEach`：两条路走块表快路径，裸指针索引，不经过属性。
+- 借用校验的位置是**块边界**，不是逐实体：`MoveNext` 的快路径只做 `_slotOffset++` 与符号判断，跨 Chunk 时才校验。单、双、三、四组件四条枚举器都按这一条实现；生成的三/四组件枚举器曾逐 `MoveNext` 与逐 `Current` 各校验一次，10 万实体三组件比现在慢 31%（107.7 → 73.7 μs）。
+- 要 Arch 那种零检查写入，用 `Chunks()` 或 `ForEach`：两条路走块表快路径，裸指针索引，不经过属性。
 
 ## 测量陷阱
 
