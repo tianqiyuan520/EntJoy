@@ -195,8 +195,7 @@ namespace EntJoy.ECS
         public readonly int Slot => _slot;
         public readonly int RangeEnd => !HasChunk ? 0
             : !_plan.HasEntityFilter ? _count
-            : _plan.Filter.HasRelationshipFilter ? _rangeEnd
-            : QueryEntityRange.End(_enabledWord, _slot, _count);
+            : _rangeEnd;
         public readonly Chunk Chunk => HasChunk
             ? _snapshot.Chunks[_chunkIndex] : default;
         public ref readonly Chunk ChunkReference
@@ -301,8 +300,23 @@ namespace EntJoy.ECS
                         if (_slot >= _count) break;
                         if (MatchesRelationship())
                         {
-                            // 只有位图时整段由 RangeEnd 按位图算；关系过滤在场时必须自己扫到不命中处。
-                            if (!_plan.Filter.HasRelationshipFilter) return;
+                            // 纯位图过滤：整字启用时区间跨字延伸，全启用块只推进一次。
+                            if (!_plan.Filter.HasRelationshipFilter)
+                            {
+                                int runStart = _slot;
+                                int end = QueryEntityRange.End(_enabledWord, _slot, _count);
+                                while (end < _count && (end & 63) == 0)
+                                {
+                                    _enabledWordIndex = end >> 6;
+                                    _enabledWord = QueryEntityRange.EnabledWord(chunk, enabled, _enabledWordIndex);
+                                    int next = QueryEntityRange.End(_enabledWord, end, _count);
+                                    if (next == end) break;
+                                    end = next;
+                                }
+                                _rangeEnd = end;
+                                _slot = runStart;
+                                return;
+                            }
                             int start = _slot;
                             while (true)
                             {

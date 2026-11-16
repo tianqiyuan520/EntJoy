@@ -107,6 +107,12 @@ else if (args.Length > 0 && args[0] == "--struct")
     int rounds = args.Length > 2 ? int.Parse(args[2]) : 5;
     StructuralBench.Run(n, rounds);
 }
+else if (args.Length > 0 && args[0] == "--relation-churn")
+{
+    // 关系结构变更的规模斜率：逐实体「移除 + 重建」，与普通组件同样操作配对。
+    int crounds = args.Length > 1 ? int.Parse(args[1]) : 5;
+    RelationChurnBench.Run(crounds);
+}
 else if (args.Length > 0 && args[0] == "--query-snapshot")
 {
     // 结构变更后的首次查询会重建 Chunk 快照：成对测量重建与复用两段的耗时和托管分配。
@@ -425,6 +431,74 @@ internal static class StructuralBench
         if (round == 0) return;
         if (us < min) min = us;
         Console.WriteLine($"STRUCT_ROW op={op} framework={framework} round={round} us={us:F1}");
+    }
+}
+
+internal static class RelationChurnBench
+{
+    private static readonly int[] Sizes = { 2_000, 8_000, 32_000, 100_000 };
+
+    // ns/op 随实体数上升即为超线性；第 0 轮是预热轮（带首次 JIT 与全新块），不计入最小值。
+    // 小规模的读数落在 tiered JIT 的未优化代码里，跨规模比较须以 DOTNET_TieredCompilation=0 运行。
+    public static void Run(int rounds)
+    {
+        foreach (int n in Sizes)
+        {
+            using var world = new EntWorld($"relation-churn-{n}", threadSafe: false);
+            var manager = world.EntityManager;
+            var target = manager.NewEntity(typeof(A));
+            var related = new EntJoy.ECS.Entity[n];
+            for (int i = 0; i < n; i++)
+            {
+                related[i] = manager.NewEntity(typeof(A), typeof(B), typeof(RelMark));
+                manager.AddRelationship<RelMark>(related[i], target);
+            }
+            var plain = new EntJoy.ECS.Entity[n];
+            for (int i = 0; i < n; i++) plain[i] = manager.NewEntity(typeof(A), typeof(B), typeof(C));
+
+            double relationMin = double.MaxValue, plainMin = double.MaxValue;
+            var sw = new System.Diagnostics.Stopwatch();
+            for (int round = 0; round <= rounds; round++)
+            {
+                if (round % 2 == 1)
+                {
+                    plainMin = Math.Min(plainMin, Plain(manager, plain, sw));
+                    relationMin = Math.Min(relationMin, Relation(manager, related, target, sw));
+                }
+                else
+                {
+                    relationMin = Math.Min(relationMin, Relation(manager, related, target, sw));
+                    plainMin = Math.Min(plainMin, Plain(manager, plain, sw));
+                }
+            }
+            Console.WriteLine($"RCHURN_SUM entities={n} rel_us={relationMin:F1} plain_us={plainMin:F1} " +
+                $"ratio={relationMin / plainMin:F4} rel_ns={relationMin * 1000.0 / n:F2} plain_ns={plainMin * 1000.0 / n:F2}");
+        }
+    }
+
+    private static double Relation(EntityManager manager, EntJoy.ECS.Entity[] entities,
+        EntJoy.ECS.Entity target, System.Diagnostics.Stopwatch sw)
+    {
+        sw.Restart();
+        for (int i = 0; i < entities.Length; i++)
+        {
+            manager.RemoveRelationship<RelMark>(entities[i]);
+            manager.AddRelationship<RelMark>(entities[i], target);
+        }
+        sw.Stop();
+        return sw.Elapsed.TotalMicroseconds;
+    }
+
+    private static double Plain(EntityManager manager, EntJoy.ECS.Entity[] entities, System.Diagnostics.Stopwatch sw)
+    {
+        sw.Restart();
+        for (int i = 0; i < entities.Length; i++)
+        {
+            manager.RemoveComponent<C>(entities[i]);
+            manager.AddComponent<C>(entities[i], default);
+        }
+        sw.Stop();
+        return sw.Elapsed.TotalMicroseconds;
     }
 }
 
