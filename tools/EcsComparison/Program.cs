@@ -149,6 +149,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("chunk", probe.EntJoyChunk),
                 ("foreach", probe.EntJoyForEachTwo),
                 ("foreach-shared", probe.EntJoyForEachShared),
+                ("foreach-enabled", probe.EntJoyForEachEnabled),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),
@@ -613,8 +614,8 @@ public class SystemComparison
         sharedWorld = new EntWorld("shared", threadSafe: false);
         for (int i = 0; i < EntityCount; i++)
         {
-            var e = sharedWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Material));
-            // 全部同值：过滤命中全部实体，与被测的不过滤臂工作量相同。
+            var e = sharedWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Material), typeof(Flag));
+            // 全部同值、全部启用：两条过滤臂都命中全部实体，与被测的不过滤臂工作量相同。
             sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
         }
         EntJoy();
@@ -849,6 +850,13 @@ public class SystemComparison
     {
         var action = new ForEachTwo();
         sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }).ForEach(ref action);
+    }
+
+    // 带启用位过滤的块循环回调：过滤条件在逐实体粒度。
+    public void EntJoyForEachEnabled()
+    {
+        var action = new ForEachTwo();
+        sharedWorld.Query<A, B>().WithEnabled<Flag>().ForEach(ref action);
     }
 
 

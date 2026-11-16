@@ -98,24 +98,23 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("            return;");
                 sb.AppendLine("        }");
             }
-            sb.AppendLine("        if (!cursor.HasEntityFilter)");
+            sb.AppendLine("        // 块级过滤整块要么全要要么全不要；逐实体过滤由 RangeEnd 给出一段连续可用槽位。");
+            sb.AppendLine("        int next = 0;");
+            sb.AppendLine("        while (true)");
             sb.AppendLine("        {");
-            sb.AppendLine("            // shared 与 changed 是块级条件：整块要么全要要么全不要，不走块表也仍然按块推进。");
-            sb.AppendLine("            while (cursor.MoveNextChunk(out _))");
+            sb.AppendLine("            cursor = QueryTraversalCursor.Next(cursor, next);");
+            sb.AppendLine("            if (!cursor.HasChunk) break;");
+            sb.AppendLine("            int start = cursor.Slot;");
+            sb.AppendLine("            int end = cursor.RangeEnd;");
+            sb.AppendLine("            if (end > start)");
             sb.AppendLine("            {");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"                {genParams[i]}* c{i} = ({genParams[i]}*)cursor.ComponentBase({i});");
-            sb.AppendLine("                int count = cursor.RangeEnd;");
-            sb.AppendLine("                for (int s = 0; s < count; s++)");
+            sb.AppendLine("                for (int s = start; s < end; s++)");
             sb.AppendLine($"                    action.Update({string.Join(", ", genParams.Select((_, i) => $"ref c{i}[s]"))});");
+            sb.AppendLine("                next = end;");
             sb.AppendLine("            }");
-            sb.AppendLine("            return;");
-            sb.AppendLine("        }");
-            sb.AppendLine($"        var enumerator = new QueryEnumerator<{genList}>(_entityManager, _builder);");
-            sb.AppendLine("        while (enumerator.MoveNext())");
-            sb.AppendLine("        {");
-            sb.AppendLine("            var result = enumerator.Current;");
-            sb.AppendLine($"            action.Update({string.Join(", ", genParams.Select((_, i) => $"ref result.Comp{i}"))});");
+            sb.AppendLine("            else next = start + 1;");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");

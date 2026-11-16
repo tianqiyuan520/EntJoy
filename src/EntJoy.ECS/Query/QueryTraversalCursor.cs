@@ -243,11 +243,8 @@ namespace EntJoy.ECS
             return _snapshot.ComponentBases[_baseIndex + column];
         }
 
-        /// <summary>计划能否按预计算表整块推进；为 false 时用 <see cref="Next"/> 逐实体过滤。</summary>
+        /// <summary>计划能否按预计算表整块推进；为 false 时用 <see cref="Next"/> 逐段过滤。</summary>
         public readonly bool CanUseChunkTable => _plan.CanUseChunkTable && !_hasChunkFilter;
-
-        /// <summary>计划里有逐实体过滤（关系目标、启用位）时为 true；这类查询只能逐实体推进，块级过滤按块推进即可。</summary>
-        public readonly bool HasEntityFilter => _plan.HasEntityFilter;
 
         public readonly int ChunkCount => _snapshot.ChunkCount;
 

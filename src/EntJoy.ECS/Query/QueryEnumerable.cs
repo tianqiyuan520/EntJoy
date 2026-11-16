@@ -43,25 +43,24 @@ namespace EntJoy.ECS
                 return;
             }
 
-            // shared 与 changed 都是块级条件，整块要么全要要么全不要：不走块表也仍然按块推进。
-            if (!cursor.HasEntityFilter)
+            // 块级过滤（shared / changed）整块要么全要要么全不要；逐实体过滤（关系目标、启用位）
+            // 由 RangeEnd 给出一段连续可用槽位。两者都按段推进，循环里没有逐实体游标。
+            int next = 0;
+            while (true)
             {
-                while (cursor.MoveNextChunk(out _))
+                cursor = QueryTraversalCursor.Next(cursor, next);
+                if (!cursor.HasChunk) break;
+                int start = cursor.Slot;
+                int end = cursor.RangeEnd;
+                if (end > start)
                 {
                     var column0 = (T0*)cursor.ComponentBase(0);
                     var column1 = (T1*)cursor.ComponentBase(1);
-                    int count = cursor.RangeEnd;
-                    for (int slot = 0; slot < count; slot++)
+                    for (int slot = start; slot < end; slot++)
                         action.Update(ref column0[slot], ref column1[slot]);
+                    next = end;
                 }
-                return;
-            }
-
-            var enumerator = GetEnumerator();
-            while (enumerator.MoveNext())
-            {
-                var result = enumerator.Current;
-                action.Update(ref result.Comp0, ref result.Comp1);
+                else next = start + 1;
             }
         }
     }
