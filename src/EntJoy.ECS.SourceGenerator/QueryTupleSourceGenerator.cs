@@ -29,12 +29,20 @@ namespace EntJoy.ECS.SourceGenerator
                 .Where(static n => n > 0);
 
             var collected = arityProvider.Collect();
+            var withAssembly = context.CompilationProvider.Combine(collected);
 
-            context.RegisterSourceOutput(collected, static (spc, arities) =>
+            context.RegisterSourceOutput(withAssembly, static (spc, input) =>
             {
                 var unique = new SortedSet<int>();
-                foreach (var n in arities)
-                    if (n > 0) unique.Add(n);
+                // ECS 程序集自己承载 1/2 组件形态（QuerySelection 直接引用它们，且消费方不该重复生成）；
+                // 其它程序集只发射语法里真正用到的 3 档以上形态。
+                if (input.Left.AssemblyName == "EntJoy.ECS")
+                {
+                    unique.Add(1);
+                    unique.Add(2);
+                }
+                foreach (var n in input.Right)
+                    if (n > 2) unique.Add(n);
 
                 foreach (var n in unique)
                 {
@@ -120,7 +128,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        get");
             sb.AppendLine("        {");
             sb.AppendLine("            if (_base0 == null) throw new InvalidOperationException();");
-            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} + _slotOffset"))});");
+            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} == null ? null : _base{i} + _slotOffset"))});");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -133,7 +141,7 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    private readonly {genParams[i]}* _c{i};");
             sb.AppendLine();
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))})");
+            sb.AppendLine($"    public EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))})");
             sb.AppendLine("    {");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"        _c{i} = c{i};");
@@ -144,7 +152,11 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    public ref readonly {genParams[i]} ReadOnlyComp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get => ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
+                sb.AppendLine("        get");
+                sb.AppendLine("        {");
+                sb.AppendLine($"            if (_c{i} == null) throw new NotSupportedException(\"Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.\");");
+                sb.AppendLine($"            return ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
+                sb.AppendLine("        }");
                 sb.AppendLine("    }");
                 sb.AppendLine($"    public ref {genParams[i]} Comp{i}");
                 sb.AppendLine("    {");
@@ -154,6 +166,7 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("            // 关系列只能读：直接写会绕过关系索引。这是按类型定死的判据，不随运行期状态变化。");
                 sb.AppendLine($"            if (ComponentTypeManager.IsRelationType<{genParams[i]}>())");
                 sb.AppendLine($"                throw new InvalidOperationException($\"Relationship '{{typeof({genParams[i]})}}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.\");");
+                sb.AppendLine($"            if (_c{i} == null) throw new NotSupportedException(\"Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.\");");
                 sb.AppendLine($"            return ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
@@ -190,7 +203,12 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine(indent + "{");
             sb.AppendLine(indent + "    _rangeEnd = _cursor.RangeEnd;");
             sb.AppendLine(indent + "    _slotOffset = _cursor.Slot - _rangeEnd;");
-            for (int i = 0; i < n; i++) sb.AppendLine(indent + $"    _base{i} = (T{i}*)_cursor.ComponentBase({i}) + _rangeEnd;");
+            for (int i = 0; i < n; i++)
+            {
+                // 托管多目标关系没有列：基址 0 时置空，结果对象的可写属性据此抛出而不是给出野引用。
+                sb.AppendLine(indent + $"    nint column{i} = _cursor.ComponentBase({i});");
+                sb.AppendLine(indent + $"    _base{i} = column{i} == 0 && ComponentTypeManager.IsRelationType<T{i}>() ? null : (T{i}*)column{i} + _rangeEnd;");
+            }
             sb.AppendLine(indent + "}");
             sb.AppendLine(indent + "else");
             sb.AppendLine(indent + "{");
