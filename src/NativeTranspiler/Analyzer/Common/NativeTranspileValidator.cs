@@ -54,7 +54,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor IspcMtEntityUnsupportedError = new("NT037", "IJobEntity does not support UseISPC_MT", "[NativeTranspile] struct '{0}' is an IJobEntity with UseISPC_MT: the multi-task ISPC variant is not generated for entity jobs, so the job registers symbols that never exist and fails at load time. Drop UseISPC_MT, or convert the job to IJobChunk.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>F-6：SimdMathPrecision.High 没有实现（产物与 IEEE 逐字相同），不能让人以为拿到了更快的 1.0ULP 路径。</summary>
-        public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation (the Sleef polynomials were removed): the emitted code is identical to MathPrecision = IEEE. Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+        public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation: the emitted code is identical to MathPrecision = IEEE (per-lane scalar). Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
 
         /// <summary>F-2 / B3：AutoSIMD.Enabled 在 IJobParallelFor/IJobFor/IJob 上实测无收益（更慢）⇒
         /// 默认 error，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
