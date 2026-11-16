@@ -154,6 +154,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-shared", probe.EntJoyShared),
                 ("query-shared-base", probe.EntJoySharedBase),
                 ("query-rel", probe.EntJoyRelationship),
+                ("query-rel-enabled", probe.EntJoyRelationshipEnabled),
+                ("query-combo-base", probe.EntJoyComboBase),
                 ("query-rel-base", probe.EntJoyRelationshipBase),
                 ("query-enabled", probe.EntJoyEnabled),
                 ("query-changed", probe.EntJoyChanged),
@@ -517,6 +519,8 @@ public class SystemComparison
     private EntWorld cleanWorld;
     private EntWorld relWorld;
     private EntJoy.ECS.Entity relTarget;
+    private EntWorld comboWorld;
+    private EntJoy.ECS.Entity comboTarget;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -646,6 +650,13 @@ public class SystemComparison
         {
             var e = relWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(RelMark));
             relWorld.EntityManager.AddRelationship<RelMark>(e, relTarget);
+        }
+        comboWorld = new EntWorld("combo", threadSafe: false);
+        comboTarget = comboWorld.EntityManager.NewEntity(typeof(A));
+        for (int i = 0; i < EntityCount; i++)
+        {
+            var e = comboWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Flag), typeof(RelMark));
+            comboWorld.EntityManager.AddRelationship<RelMark>(e, comboTarget);
         }
         EntJoy();
         VerifyEnt(1);
@@ -911,6 +922,24 @@ public class SystemComparison
     {
         int sum = 0;
         foreach (var result in relWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 启用位与关系同时过滤：两个条件都命中全部实体。
+    public void EntJoyRelationshipEnabled()
+    {
+        int sum = 0;
+        foreach (var result in comboWorld.Query<A, B>().WithEnabled<Flag>().WithRelationship<RelMark>(comboTarget))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // comboWorld 的不过滤基线。
+    public void EntJoyComboBase()
+    {
+        int sum = 0;
+        foreach (var result in comboWorld.Query<A, B>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
     }
@@ -1411,6 +1440,7 @@ public class SystemComparison
         changedWorld?.Dispose();
         cleanWorld?.Dispose();
         relWorld?.Dispose();
+        comboWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }
