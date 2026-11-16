@@ -1,5 +1,12 @@
 namespace EntJoy.ECS
 {
+    /// <summary>单组件形态，语义同 <see cref="IQueryForeach{T0,T1}"/>。</summary>
+    public interface IQueryForeach<T0>
+        where T0 : struct
+    {
+        void Update(ref T0 component0);
+    }
+
     /// <summary>
     /// 块循环内联回调：由 <see cref="QueryEnumerable{T0,T1}.ForEach{TAction}"/> 逐实体调用。
     /// 实现为 struct 时 JIT 可内联整个循环体，避免逐实体游标状态机。
