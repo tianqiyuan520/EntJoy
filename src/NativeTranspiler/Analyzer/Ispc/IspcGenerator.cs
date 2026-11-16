@@ -27,10 +27,7 @@ namespace NativeTranspiler.Analyzer.Common
             public int GetHashCode(ITypeSymbol obj) => SymbolEqualityComparer.Default.GetHashCode(obj);
         }
 
-        private static bool IsVectorType(string cppType) =>
-            cppType == "EntJoy::Mathematics::float2" ||
-            cppType == "EntJoy::Mathematics::int2" ||
-            cppType == "EntJoy::Mathematics::uint2";
+        private static bool IsVectorType(string cppType) => SimdVectorTypes.IsPair(cppType);
 
         /// <summary>用户自定义 struct（非内置、非 EntJoy 预定义容器）。</summary>
         private static bool IsUserStructType(ITypeSymbol? type) =>

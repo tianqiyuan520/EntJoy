@@ -219,7 +219,9 @@ namespace NativeTranspiler.Analyzer
                     string name = variable.Identifier.Text;
                     if (_variables.ContainsKey(name)) continue;
 
-                    // 语义模型拿不到类型时的兜底：按语法类型名的叶子精确匹配，不做子串猜测。
+                    // 契约：语义模型给出类型时一律以 MapCSharpTypeToCpp 为准（唯一权威）。
+                    // 只有在重写树丢失来源注解、GetBoundType 返回 null 时才按声明语法名推断：
+                    // 指针取所指类型的叶子名，其余取类型名叶子，识别不出按 int 处理（与 C++ 侧默认一致）。
                     string typeText = localDecl.Declaration.Type.ToString();
                     string typeLeaf = SimdVectorTypes.LeafName(typeText.Replace('.', ':'));
                     string cppType = typeLeaf switch
@@ -229,7 +231,16 @@ namespace NativeTranspiler.Analyzer
                         "uint2" => SimdVectorTypes.Uint2,
                         "float" => "float",
                         "bool" => "bool",
-                        _ => localDecl.Declaration.Type is PointerTypeSyntax ? "int*" : "int"
+                        _ => localDecl.Declaration.Type is PointerTypeSyntax pointer
+                            ? SimdVectorTypes.LeafName(pointer.ElementType.ToString().Replace('.', ':')) switch
+                            {
+                                "float" => "float*",
+                                "double" => "double*",
+                                "bool" => "bool*",
+                                "byte" => "unsigned char*",
+                                _ => "int*"
+                            }
+                            : "int"
                     };
                     if (SymbolHelper.GetBoundType(_semanticModel, localDecl.Declaration.Type) is ITypeSymbol boundType)
                     {
