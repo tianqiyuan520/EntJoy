@@ -6,14 +6,16 @@
 
 | 操作 | EntJoy | Arch | 比值 |
 | --- | --- | --- | --- |
-| 创建实体 | 24.2–24.7 ns | 23.8–24.1 ns | 1.02–1.03 |
-| 添加组件 | 62.5–62.8 ns | 59.2–59.5 ns | 1.05–1.06 |
-| 移除组件 | 65.7–66.1 ns | 75.0–76.8 ns | 0.86–0.88 |
-| 销毁实体 | 23.8–24.0 ns | 26.3–26.7 ns | 0.90 |
+| 创建实体 | 23.0–23.3 ns | 22.8–23.4 ns | 0.99–1.02 |
+| 添加组件 | 61.5–63.8 ns | 66.6–69.2 ns | 0.92 |
+| 移除组件 | 63.7–64.3 ns | 75.4–75.8 ns | 0.84–0.85 |
+| 销毁实体 | 23.3 ns | 26.2–26.5 ns | 0.88–0.89 |
 
-读数：`tools/EcsComparison/results/final-20261116.log`（2026-11-16 12:52）。该目录在 `.gitignore` 内，是本机记录，不入库。含 Flecs、EnTT、Unity 的横向读数与场景位置见 [28 跨框架 ECS 性能对比](../gridsearch/28-跨框架ECS性能对比.md)。
+读数：`tools/EcsComparison/results/final-20261116-b.log`（2026-11-16 13:10）。该目录在 `.gitignore` 内，是本机记录，不入库。含 Flecs、EnTT、Unity 的横向读数与场景位置见 [28 跨框架 ECS 性能对比](../gridsearch/28-跨框架ECS性能对比.md)。
 
 口径：.NET 8 Release JIT；两侧都用非线程安全 World（EntJoy `new World(name, threadSafe: false)`，Arch 本来没有结构锁）；每项单次计时、按轮取最小；预建与复位都在计时之外；首轮是预热轮、不计入。绝对时间只在同一进程内可比，跨会话、跨构建、跨 World 配置都不可相减。
+
+添加臂两侧都写入组件初始值：EntJoy 只有带值的入口 `AddComponent<T>(entity, value)`，对应 Arch 的 `Add<T>(entity, value)`。拿 Arch 不带值的 `Add<T>(entity)` 对照会把一侧写值、另一侧不写值算成实现差距（实测 Arch 这两条入口相差 7–9 ns）。
 
 ## 一次迁移由什么构成
 
@@ -24,11 +26,11 @@
 - **swap-pop 与清槽同源**：`Chunk.MoveSlot` 用 `BufferCopy.Copy`，追加到复用过的槽位用 `BufferCopy.Zero`；只有高水位以下的槽位需要清。
 - **新组件值最后单独写列**：`WriteColumnBytes` 同样走 `BufferCopy.Copy`。
 
-`BufferCopy` 存在的理由：`Unsafe.CopyBlock` 的长度是运行时值，对任意长度都落到 memmove 调用。逐实体搬列时一个 4 字节组件也付一次调用。改为定长搬运后，同会话配对测得添加 69–75 ns → 64.5–65.2 ns、移除 79–86 ns → 74–78 ns，且轮间波动从 ±6% 收到 ±1%，Arch 侧读数不变。
+`BufferCopy` 存在的理由：`Unsafe.CopyBlock` 的长度是运行时值，对任意长度都落到 memmove 调用。逐实体搬列时一个 4 字节组件也付一次调用。改为定长搬运后，同会话配对测得添加 −5.5 ns、移除 −5 ns（Arch 侧读数不变），轮间波动也从 ±6% 收到 ±1%。
 
 ## 比 Arch 多付的三项
 
-都是能力取舍，不是可以抹掉的实现开销：
+都是能力取舍，不是可以抹掉的实现开销。三项合起来只让创建落在 0.99–1.02，其余三项仍是本篇更快：
 
 1. **结构锁**：`EnterStructural` 只在 `threadSafe: true` 的 World 上取 Monitor，非线程安全 World 整句跳过。Arch 没有等价机制。上表的读数不含这项。
 2. **Job 记账**：`JobBookkeepingIdle` 读一个记账标记加五项状态判定（观察者深度、两个拷贝/析构钩子标记、Job 执行中、原生事件待 drain）；标记为 0 时跳过完成与清理。有在飞 Job 时必须先等到完成。Arch 没有 Job 系统，无从对应。
@@ -85,6 +87,6 @@ dotnet run -c Release --project tools/EcsComparison --no-build -- --struct 10000
 
 ## 边界
 
-- 添加项剩余的几 ns 摊在入口层：去掉结构锁或 Job 记账都是对外契约变更，不是代码优化。
-- 原生镜像的 24 字节写是第三项，去掉需要改原生 ABI。
-- 添加与移除核心同构。添加多一步「写入新组件初始值」，第一次触碰是冷缓存缺页，改数据布局才能动。
+- 创建与 Arch 持平（0.99–1.02），差额在入口层：去掉结构锁或 Job 记账都是对外契约变更，不是代码优化。
+- 原生镜像的 24 字节写是入口层的第三项，去掉需要改原生 ABI。
+- 四条路径的核心搬移（迁移列、swap-pop 搬槽、写新组件值）与 Arch 同序同量，没有可再压的独立环节。

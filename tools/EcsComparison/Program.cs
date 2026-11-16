@@ -380,7 +380,7 @@ internal static class StructuralBench
             case 1:
                 for (int i = 0; i < n; i++) buf[i] = arch.Create(t2);
                 sw.Restart();
-                for (int i = 0; i < n; i++) arch.Add<C>(buf[i]);
+                for (int i = 0; i < n; i++) arch.Add<C>(buf[i], default);
                 sw.Stop();
                 Report("add", "Arch", round, sw.Elapsed.TotalMicroseconds, ref min);
                 for (int i = 0; i < n; i++) arch.Destroy(buf[i]);
