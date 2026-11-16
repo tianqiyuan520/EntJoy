@@ -299,7 +299,9 @@ internal static class StructuralBench
         var entBuffer = new EntJoy.ECS.Entity[n];
         var archBuffer = new Arch.Core.Entity[n];
 
-        for (int r = 1; r <= rounds; r++)
+        // 第 0 轮是预热轮：首轮既带 JIT 增量，又落在全新 Chunk 上（复用槽位无需清槽），
+        // 与后续轮不是同一份工作，让它参与取最小会得到无法复现的读数。
+        for (int r = 0; r <= rounds; r++)
         {
             bool entFirst = r % 2 == 1;
             for (int o = 0; o < Ops.Length; o++)
@@ -403,6 +405,7 @@ internal static class StructuralBench
 
     private static void Report(string op, string framework, int round, double us, ref double min)
     {
+        if (round == 0) return;
         if (us < min) min = us;
         Console.WriteLine($"STRUCT_ROW op={op} framework={framework} round={round} us={us:F1}");
     }
