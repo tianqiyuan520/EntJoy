@@ -219,14 +219,18 @@ namespace NativeTranspiler.Analyzer
                     string name = variable.Identifier.Text;
                     if (_variables.ContainsKey(name)) continue;
 
-                    // Text-based type detection (safe without semantic model)
+                    // 语义模型拿不到类型时的兜底：按语法类型名的叶子精确匹配，不做子串猜测。
                     string typeText = localDecl.Declaration.Type.ToString();
-                    string cppType = "int";
-                    if (typeText.Contains("float2")) cppType = "EntJoy::Mathematics::float2";
-                    else if (typeText.Contains("int2")) cppType = "EntJoy::Mathematics::int2";
-                    else if (typeText == "float") cppType = "float";
-                    else if (typeText == "bool") cppType = "bool";
-                    else if (localDecl.Declaration.Type is PointerTypeSyntax) cppType = "int*";
+                    string typeLeaf = SimdVectorTypes.LeafName(typeText.Replace('.', ':'));
+                    string cppType = typeLeaf switch
+                    {
+                        "float2" => SimdVectorTypes.Float2,
+                        "int2" => SimdVectorTypes.Int2,
+                        "uint2" => SimdVectorTypes.Uint2,
+                        "float" => "float",
+                        "bool" => "bool",
+                        _ => localDecl.Declaration.Type is PointerTypeSyntax ? "int*" : "int"
+                    };
                     if (SymbolHelper.GetBoundType(_semanticModel, localDecl.Declaration.Type) is ITypeSymbol boundType)
                     {
                         cppType = NativeTranspiler.MapCSharpTypeToCpp(boundType);

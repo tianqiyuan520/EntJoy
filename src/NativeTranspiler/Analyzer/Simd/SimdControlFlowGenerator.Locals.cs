@@ -132,6 +132,25 @@ namespace NativeTranspiler.Analyzer
 
         // Local Declaration
 
+        /// <summary>初始化式是否是钳位表达式（clamp / min(max(…), …)）：这类索引已保证在界内，后续 gather 不再钳位。</summary>
+        private static bool IsClampingExpression(ExpressionSyntax? expr)
+        {
+            if (expr is not InvocationExpressionSyntax invocation) return false;
+            string name = invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax member => member.Name.Identifier.Text,
+                IdentifierNameSyntax id => id.Identifier.Text,
+                _ => ""
+            };
+            if (name is "clamp" or "Clamp") return true;
+            if (name is not ("min" or "Min")) return false;
+            foreach (var argument in invocation.ArgumentList.Arguments)
+                if (argument.Expression is InvocationExpressionSyntax inner
+                    && inner.Expression is MemberAccessExpressionSyntax innerMember
+                    && innerMember.Name.Identifier.Text is "max" or "Max")
+                    return true;
+            return false;
+        }
         private void GenerateLocalDeclaration(LocalDeclarationStatementSyntax stmt)
         {
             foreach (var variable in stmt.Declaration.Variables)
@@ -171,8 +190,8 @@ namespace NativeTranspiler.Analyzer
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);
                             _simdVaryingCppType[name] = info.CppType;
-                            if (initExpr.Contains("simd_min") && initExpr.Contains("simd_max"))
-                                _clampedVars.Add($"v_{name}");
+                            if (IsClampingExpression(variable.Initializer?.Value))
+                                _clampedVars.Add(name);
                             AppendLine($"{varType} v_{name} = {initExpr};");
                         }
                     }

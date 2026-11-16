@@ -319,7 +319,7 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD context: per-lane field scatter
                 // For varying index, generate per-lane scatter to arr_ptr[v_i_lane].field
-                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || !_currentMask.IsAllTrue)
+                if (structLocalAssignInfo.varyingIndex || !_currentMask.IsAllTrue)
                 {
                     string extractFn3 = "n_extract_lane_f32";
                     string combineExpr = op3 == "=" ? rhsExpr3 : $"{idxExpr3} {op3.Replace("=", "")} {rhsExpr3}";

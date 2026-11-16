@@ -110,15 +110,20 @@ namespace NativeTranspiler.Analyzer
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
 
+                        bool trueMaskIsCompound = false;
                         if (isAllTrue)
                             trueMask = condVar;
                         else if (conditions.Count == 0)
+                        {
                             trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                            trueMaskIsCompound = true;
+                        }
                         else
                         {
                             EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
                             string notPrev = excludedMaskVar ?? SimdMask.AllTrue;
                             trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
+                            trueMaskIsCompound = true;
                             // Skip redundant AND when savedMask is all_true: all_true & X == X
                             if (!savedMask.IsAllTrue)
                                 trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
@@ -126,7 +131,7 @@ namespace NativeTranspiler.Analyzer
 
                         conditions.Add(condVar);
                         _currentMask = trueMask;
-                        if (trueMask.Contains("n_and_mask("))
+                        if (trueMaskIsCompound)
                         {
                             string cm = $"__cm_{_maskCounter++}";
                             AppendLine($"simd_mask {cm} = {trueMask};");

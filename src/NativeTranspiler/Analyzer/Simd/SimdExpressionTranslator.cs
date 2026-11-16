@@ -265,7 +265,8 @@ namespace NativeTranspiler.Analyzer
                 && _structVaryingLocals.TryGetValue(structLocalId.Identifier.Text, out var structLocalInfo))
             {
                 return TranslateStructFieldAccess(structLocalInfo.arrName, structLocalInfo.elemCppType,
-                    memberName, structLocalInfo.indexExpr, StructFieldType(memberAccess, structLocalInfo.elemCppType, memberName), StructFieldStride(memberAccess));
+                    memberName, structLocalInfo.indexExpr, StructFieldType(memberAccess, structLocalInfo.elemCppType, memberName),
+                    StructFieldStride(memberAccess), structLocalInfo.varyingIndex);
             }
 
             string objExpr = TranslateExpression(memberAccess.Expression);

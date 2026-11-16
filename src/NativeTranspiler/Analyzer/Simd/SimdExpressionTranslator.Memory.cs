@@ -126,7 +126,7 @@ namespace NativeTranspiler.Analyzer
                 string safeIdx;
                 if (elementAccess.ArgumentList?.Arguments.Count > 0
                     && elementAccess.ArgumentList.Arguments[0].Expression is IdentifierNameSyntax idxId
-                    && (_clampedVars.Contains(idxId.Identifier.Text) || _clampedVars.Contains("v_" + idxId.Identifier.Text)))
+                    && _clampedVars.Contains(idxId.Identifier.Text))
                 {
                     safeIdx = indexExpr; // already clamped by prior gather
                 }
@@ -354,7 +354,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var field = csType.GetMembers(fieldName).OfType<IFieldSymbol>().FirstOrDefault();
                     if (field != null)
-                        return field.Type.ToDisplayString().Contains("float2");
+                        return SimdVectorTypes.IsFloat2(NativeTranspiler.MapCSharpTypeToCpp(field.Type));
                 }
             }
             catch { }
@@ -387,8 +387,8 @@ namespace NativeTranspiler.Analyzer
                 : $"{arrName}_ptr[{index}].{fieldName}";
         }
 
-        private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string index, string fieldType, int stride)
-            => !_currentMask.IsAllTrue || index.Contains("v_") || index.Contains("simd_")
+        private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string index, string fieldType, int stride, bool varyingIndex)
+            => !_currentMask.IsAllTrue || varyingIndex
                 ? GatherStructField(arrName, structElemType, fieldName, index, fieldType, stride)
                 : $"{arrName}_ptr[{index}].{fieldName}";
 
