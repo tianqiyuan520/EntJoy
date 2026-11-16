@@ -98,6 +98,19 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("            return;");
                 sb.AppendLine("        }");
             }
+            sb.AppendLine("        if (!cursor.HasEntityFilter)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            // shared 与 changed 是块级条件：整块要么全要要么全不要，不走块表也仍然按块推进。");
+            sb.AppendLine("            while (cursor.MoveNextChunk(out _))");
+            sb.AppendLine("            {");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"                {genParams[i]}* c{i} = ({genParams[i]}*)cursor.ComponentBase({i});");
+            sb.AppendLine("                int count = cursor.RangeEnd;");
+            sb.AppendLine("                for (int s = 0; s < count; s++)");
+            sb.AppendLine($"                    action.Update({string.Join(", ", genParams.Select((_, i) => $"ref c{i}[s]"))});");
+            sb.AppendLine("            }");
+            sb.AppendLine("            return;");
+            sb.AppendLine("        }");
             sb.AppendLine($"        var enumerator = new QueryEnumerator<{genList}>(_entityManager, _builder);");
             sb.AppendLine("        while (enumerator.MoveNext())");
             sb.AppendLine("        {");

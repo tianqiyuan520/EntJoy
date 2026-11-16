@@ -148,6 +148,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query", probe.EntJoy),
                 ("chunk", probe.EntJoyChunk),
                 ("foreach", probe.EntJoyForEachTwo),
+                ("foreach-shared", probe.EntJoyForEachShared),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),
@@ -423,6 +424,7 @@ public struct A : IComponentData { public int Value; }
 public struct B : IComponentData { public int Value; }
 public struct C : IComponentData { public int Value; }
 public struct Flag : IEnableableComponent { public int Value; }
+public struct Material : ISharedComponentData { public int Value; }
 public struct Enabled : IComponentData, IEnableableComponent { }
 public struct Enabled2 : IComponentData, IEnableableComponent { }
 
@@ -501,6 +503,8 @@ public class SystemComparison
     // enableable 启停基准用：独立世界，避免给其它臂的原型多加一条启用位图。
     private EntWorld enabledWorld;
     private EntJoy.ECS.Entity[] enabledEntities;
+    // shared 过滤基准用：独立世界，带 shared 列的查询无法走块表快路径。
+    private EntWorld sharedWorld;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -606,6 +610,13 @@ public class SystemComparison
         enabledEntities = new EntJoy.ECS.Entity[EntityCount];
         for (int i = 0; i < EntityCount; i++)
             enabledEntities[i] = enabledWorld.EntityManager.NewEntity(typeof(A), typeof(Flag));
+        sharedWorld = new EntWorld("shared", threadSafe: false);
+        for (int i = 0; i < EntityCount; i++)
+        {
+            var e = sharedWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Material));
+            // 全部同值：过滤命中全部实体，与被测的不过滤臂工作量相同。
+            sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
+        }
         EntJoy();
         VerifyEnt(1);
         Arch();
@@ -831,6 +842,13 @@ public class SystemComparison
     {
         var action = new ForEachTwo();
         ent.Query<A, B>().ForEach(ref action);
+    }
+
+    // 带 shared 过滤的块循环回调：过滤条件在块粒度，走不到块表快路径。
+    public void EntJoyForEachShared()
+    {
+        var action = new ForEachTwo();
+        sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }).ForEach(ref action);
     }
 
 
@@ -1281,6 +1299,7 @@ public class SystemComparison
     {
         ent.Dispose();
         enabledWorld?.Dispose();
+        sharedWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }

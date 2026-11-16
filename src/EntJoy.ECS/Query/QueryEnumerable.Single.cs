@@ -37,6 +37,19 @@ namespace EntJoy.ECS
                 return;
             }
 
+            // shared 与 changed 都是块级条件，整块要么全要要么全不要：不走块表也仍然按块推进。
+            if (!cursor.HasEntityFilter)
+            {
+                while (cursor.MoveNextChunk(out _))
+                {
+                    var column0 = (T0*)cursor.ComponentBase(0);
+                    int count = cursor.RangeEnd;
+                    for (int slot = 0; slot < count; slot++)
+                        action.Update(ref column0[slot]);
+                }
+                return;
+            }
+
             var enumerator = GetEnumerator();
             while (enumerator.MoveNext())
             {
