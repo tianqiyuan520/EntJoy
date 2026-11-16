@@ -28,7 +28,8 @@ namespace EntJoy.ECS
             var componentIndex = GetComponentTypeIndex<T>();
             ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
             chunk.GetComponent<T>(slotInChunk, componentIndex) = value;
-            NotifyComponentChanged(chunkIndex, slotInChunk);
+            // 同一个块引用上直接标变更，不再按块号重取一次。
+            chunk.MarkEntityChanged(slotInChunk);
         }
 
         /// <summary>按 boxed 值写入组件槽位；关系列必须走 EntityManager 或 DeferredCommandBuffer。</summary>

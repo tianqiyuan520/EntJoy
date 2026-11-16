@@ -164,6 +164,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("random-get", probe.EntJoyRandomGet),
                 ("random-get-direct", probe.EntJoyRandomGetDirect),
                 ("arch-random-get", probe.ArchRandomGet),
+                ("random-set", probe.EntJoyRandomSet),
+                ("arch-random-set", probe.ArchRandomSet),
             };
             Action runA = null, runB = null;
             foreach (var arm in arms)
@@ -820,6 +822,20 @@ public class SystemComparison
         ent.Query<A, B>().ForEach(ref action);
     }
 
+
+    // 稀疏随机访问：按实体句柄逐次写组件值。两侧都是「设置已有组件的值」这一个语义。
+    public unsafe void EntJoyRandomSet()
+    {
+        var em = ent.EntityManager;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) em.Set(entities[i], new A { Value = i });
+    }
+
+    public unsafe void ArchRandomSet()
+    {
+        var entities = archRandom;
+        for (int i = 0; i < entities.Length; i++) arch.Set(entities[i], new A { Value = i });
+    }
 
     // 稀疏随机访问：按实体句柄逐次取组件。lookup 缓存上次原型与块基址，直取每次都从实体表重新解析定位。
     public unsafe void EntJoyRandomGet()
