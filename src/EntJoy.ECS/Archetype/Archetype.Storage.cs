@@ -82,22 +82,25 @@ namespace EntJoy.ECS
         {
             ref readonly var sourceChunk = ref CollectionsMarshal.AsSpan(_chunkList)[sourceChunkIndex];
             ref var targetChunk = ref CollectionsMarshal.AsSpan(target._chunkList)[targetChunkIndex];
+            // shared 列不随实体迁移；可启用位、析构标记按原型定，三者都不必逐列查类型表。
+            bool sharedColumns = HasSharedColumns;
+            bool disposables = HasDisposableComponents;
+            bool enableables = sourceChunk.Meta.HasEnableables;
 
-            foreach (var type in types)
+            // 列序与本原型 types 顺序一致（构造时按同一顺序建 _componentColumns），源列下标即 i。
+            for (int i = 0; i < types.Length; i++)
             {
-                if (type.IsShared) continue;
-                // 两侧都走按 id 的列索引快路径，避免每列两次字典探测。
-                if (target.TryGetComponentTypeIndex(type, out int targetComponentIndex))
-                {
-                    TryGetComponentTypeIndex(type, out int sourceComponentIndex);
-                    var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(sourceComponentIndex) + sourceSlot * type.Size;
-                    var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
-                    // move 转移所有权：可析构组件拷贝后清空源，避免源被销毁时释放目标仍在用的内存。
-                    // 非析构组件（绝大多数）只需位拷贝，不必进 ComponentTypeManager 的 move 分支。
-                    if (type.IsDisposable) ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
-                    else BufferCopy.Copy(targetPtr, sourcePtr, type.Size);
-                    if (type.IsEnableable) targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(sourceComponentIndex, sourceSlot));
-                }
+                var type = types[i];
+                if (sharedColumns && type.IsShared) continue;
+                if (!target.TryGetComponentTypeIndex(type, out int targetComponentIndex)) continue;
+                var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(i) + sourceSlot * type.Size;
+                var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
+                // move 转移所有权：可析构组件拷贝后清空源，避免源被销毁时释放目标仍在用的内存。
+                // 非析构组件（绝大多数）只需位拷贝，不必进 ComponentTypeManager 的 move 分支。
+                if (disposables && type.IsDisposable) ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
+                else BufferCopy.Copy(targetPtr, sourcePtr, type.Size);
+                if (enableables && type.IsEnableable)
+                    targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(i, sourceSlot));
             }
         }
     }
