@@ -24,6 +24,8 @@ EntJoy 的 `foreach` 必须每实体产出一个结果结构体，再经属性�
 
 **已对齐。**
 
+已知缺口：**关系组件**的结构变更（移除后重新添加）在 2 千实体下比普通组件同样的操作慢约 3 倍，10 万实体规模下未能跑完，成本随规模超线性。可疑点是关系存储路径里的按块线性查找——`PrepareRelationSlot` 从块列表尾部找持有同一关系值的块，`AddToPreparedChunk` 又按内存块地址找一遍该块的下标（这个下标在 `PrepareRelationSlot` 里本来就知道）。该路径位于 `EntityManager.RelationMutation.cs` 与 `RelationDeletion.cs`，当前被并行改动占用，未动。
+
 ## 随机访问
 
 参考实现在**句柄层面校验一次**（Arch 的 `Exists`、DOTS 的版本检查），之后取组件直接按已知下标算地址，不做逐次处置检查与越界检查。
