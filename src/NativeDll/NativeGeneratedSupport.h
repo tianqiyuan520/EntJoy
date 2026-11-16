@@ -1,6 +1,6 @@
 #pragma once
 
-// NativeTranspiler 生成代码的公共前导。生成物只 include 本文件，不再各自展开宏与结构体。
+// NativeTranspiler 生成代码的公共前导：导出/原子/内联宏，chunk 上下文与事件缓冲结构体。
 // 与手写代码的分工：本文件只服务生成物；NativeContainers.h / NativeMath.h / ChunkJobData.h
 // 仍由生成物按需 include。
 

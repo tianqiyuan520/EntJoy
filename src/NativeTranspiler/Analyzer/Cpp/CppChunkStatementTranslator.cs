@@ -924,16 +924,8 @@ namespace NativeTranspiler.Analyzer
             string tempVar = $"__evt_{eventType.Name}_{typeIndex}";
 
             _builder.AppendLine("{");
-            if (false) // EnableSendEventDiag
-            {
-                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP] header=%p evtHeaders=%p count=%d\\n\", (void*)__header, __header ? __header->eventBufferHeaders : 0, __header ? __header->eventBufferCount : 0);");
-            }
             _builder.AppendLine($"    if (__header != nullptr && __header->eventBufferHeaders != nullptr) {{");
             _builder.AppendLine($"    auto* {tempVar}_buf = ((__EntJoyEventBuffer**)__header->eventBufferHeaders)[{typeIndex}];");
-            if (false) // EnableSendEventDiag
-            {
-                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP2] buf=%p data=%p countPtr=%p capacity=%d\\n\", (void*){tempVar}_buf, {tempVar}_buf ? {tempVar}_buf->data : 0, {tempVar}_buf ? (void*){tempVar}_buf->count : 0, {tempVar}_buf ? {tempVar}_buf->capacity : 0);");
-            }
             _builder.AppendLine($"    if ({tempVar}_buf != nullptr) {{");
             _builder.AppendLine($"    int {tempVar}_idx = INTERLOCKED_ADD_AND_FETCH32({tempVar}_buf->count, 1) - 1;");
             _builder.AppendLine($"    if ({tempVar}_idx < {tempVar}_buf->capacity) {{");
