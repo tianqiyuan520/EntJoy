@@ -150,10 +150,12 @@ namespace NativeTranspiler.Analyzer
                     && structInitElemType != "float" && structInitElemType != "int"
                     && !SimdVectorTypes.IsFloat2(structInitElemType) && !SimdVectorTypes.IsInt2(structInitElemType))
                 {
-                    string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
-                        ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
-                        : "0";
-                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
+                    ExpressionSyntax? idxSyntax = structInitEA.ArgumentList?.Arguments.Count > 0
+                        ? structInitEA.ArgumentList.Arguments[0].Expression
+                        : null;
+                    string idxExpr = idxSyntax != null ? TranslateExpression(idxSyntax) : "0";
+                    bool varyingIndex = idxSyntax != null && _varAnalyzer.ClassifyExpression(idxSyntax) >= VarKind.Varying;
+                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr, varyingIndex);
                     continue;
                 }
 

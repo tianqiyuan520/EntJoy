@@ -81,10 +81,10 @@ namespace NativeTranspiler.Analyzer
         //   Avoids the old bug: one lane hits return → goto __simd_exit → all lanes skip
         //   the default store → non-returning lanes output 0 instead of 777 (EC5/FZ4 E7).
         private SimdMask _returnedMaskVar = SimdMask.Empty;
-        // Struct varying locals: localName → (arrayName, elemCppType, indexExpr)
+        // Struct varying locals: localName → (arrayName, elemCppType, indexExpr, varyingIndex)
         // These are struct-typed locals initialized from array[idx] where array is a struct-typed NativeArray.
         // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
-        private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr)> _structVaryingLocals = new();
+        private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr, bool varyingIndex)> _structVaryingLocals = new();
 
         // 指针符号 → 元素 C++ 类型：不再在本类拷贝一份，直接用 SimdVariableAnalyzer 的
         // LocalPointerElemCpp / ParamPointerElemCpp（同一份数据，避免"两个真相"）。

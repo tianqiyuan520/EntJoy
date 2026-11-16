@@ -385,10 +385,12 @@ namespace NativeTranspiler.Analyzer
                     && svlElemType != "float" && svlElemType != "int"
                     && !SimdVectorTypes.IsFloat2(svlElemType) && !SimdVectorTypes.IsInt2(svlElemType))
                 {
-                    string svlIdxExpr = svlEA.ArgumentList?.Arguments.Count > 0
-                        ? TranslateExpression(svlEA.ArgumentList.Arguments[0].Expression)
-                        : "0";
-                    _structVaryingLocals[svlId.Identifier.Text] = (svlArrId.Identifier.Text, svlElemType, svlIdxExpr);
+                    ExpressionSyntax? svlIdxSyntax = svlEA.ArgumentList?.Arguments.Count > 0
+                        ? svlEA.ArgumentList.Arguments[0].Expression
+                        : null;
+                    string svlIdxExpr = svlIdxSyntax != null ? TranslateExpression(svlIdxSyntax) : "0";
+                    bool svlVaryingIndex = svlIdxSyntax != null && _varAnalyzer.ClassifyExpression(svlIdxSyntax) >= VarKind.Varying;
+                    _structVaryingLocals[svlId.Identifier.Text] = (svlArrId.Identifier.Text, svlElemType, svlIdxExpr, svlVaryingIndex);
                 }
                 else
                 {
