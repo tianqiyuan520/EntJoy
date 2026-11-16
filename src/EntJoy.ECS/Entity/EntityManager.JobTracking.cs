@@ -184,6 +184,8 @@ namespace EntJoy.ECS
         private void CompleteEntityJobs(Entity entity, Archetype? extra = null)
         {
             EnsureStructuralChangeAllowed();
+            // 没有在册 job、没有原生事件时完成作业是空操作：不取锁，避免每次单实体写入都进一次临界区。
+            if (JobBookkeepingIdle()) return;
 
             if ((uint)entity.Id >= (uint)entities.Length)
             {
