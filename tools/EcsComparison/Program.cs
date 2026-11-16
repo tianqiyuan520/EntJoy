@@ -156,8 +156,6 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-rel", probe.EntJoyRelationship),
                 ("query-rel-enabled", probe.EntJoyRelationshipEnabled),
                 ("query-combo-base", probe.EntJoyComboBase),
-                ("shared-set", probe.EntJoySharedSet),
-                ("shared-set-same", probe.EntJoySharedSetSame),
                 ("query-rel-base", probe.EntJoyRelationshipBase),
                 ("query-enabled", probe.EntJoyEnabled),
                 ("query-changed", probe.EntJoyChanged),
@@ -523,8 +521,6 @@ public class SystemComparison
     private EntJoy.ECS.Entity relTarget;
     private EntWorld comboWorld;
     private EntJoy.ECS.Entity comboTarget;
-    private EntJoy.ECS.Entity[] sharedEntities;
-    private int _sharedFlipEpoch;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -631,11 +627,9 @@ public class SystemComparison
         for (int i = 0; i < EntityCount; i++)
             enabledEntities[i] = enabledWorld.EntityManager.NewEntity(typeof(A), typeof(Flag));
         sharedWorld = new EntWorld("shared", threadSafe: false);
-        sharedEntities = new EntJoy.ECS.Entity[EntityCount];
         for (int i = 0; i < EntityCount; i++)
         {
             var e = sharedWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Material), typeof(Flag));
-            sharedEntities[i] = e;
             // 全部同值、全部启用：两条过滤臂都命中全部实体，与被测的不过滤臂工作量相同。
             sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
         }
@@ -948,26 +942,6 @@ public class SystemComparison
         foreach (var result in comboWorld.Query<A, B>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
-    }
-
-    // shared 值改写会触发实体在块之间迁移。
-    public void EntJoySharedSet()
-    {
-        var em = sharedWorld.EntityManager;
-        var entities = sharedEntities;
-        // 每次调用整体翻转奇偶，保证每个实体的值都变、每次都要迁移。
-        int flip = _sharedFlipEpoch++ & 1;
-        for (int i = 0; i < entities.Length; i++)
-            em.SetSharedComponent(entities[i], new Material { Value = (i & 1) ^ flip });
-    }
-
-    // 同值重写：走「值未变」的早退分支，用于对比迁移成本。
-    public void EntJoySharedSetSame()
-    {
-        var em = sharedWorld.EntityManager;
-        var entities = sharedEntities;
-        for (int i = 0; i < entities.Length; i++)
-            em.SetSharedComponent(entities[i], new Material { Value = 1 });
     }
 
     // 带启用位过滤的实体级遍历：过滤条件在逐实体粒度。
