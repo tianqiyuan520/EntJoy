@@ -118,14 +118,22 @@ namespace NativeTranspiler.Analyzer
             base.TranslateIdentifier(identifier);
         }
 
-        /// <summary>稳定左值：重复出现两次不会重复求值（标识符或 `this.标识符` / 标识符成员）。</summary>
-        private static bool IsStableLValue(ExpressionSyntax target)
-            => target is IdentifierNameSyntax
-               || target is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax or IdentifierNameSyntax };
+        /// <summary>
+        /// 左值是否可安全重复发出：译文里出现两次，任何带副作用的子表达式（调用、赋值、自增自减、new、await）
+        /// 都会因此求值两遍。
+        /// </summary>
+        private static bool IsReEvaluationSafe(ExpressionSyntax target)
+            => !target.DescendantNodesAndSelf().Any(n => n
+                is InvocationExpressionSyntax
+                or AssignmentExpressionSyntax
+                or ObjectCreationExpressionSyntax
+                or AwaitExpressionSyntax
+                or PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PreIncrementExpression or (int)SyntaxKind.PreDecrementExpression }
+                or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PostIncrementExpression or (int)SyntaxKind.PostDecrementExpression });
 
         /// <summary>
-        /// 值被丢弃时不需要 lambda 携带旧值：稳定左值上的自增/自减/复合赋值直接发赋值形态，
-        /// 省掉 `([&]() { … return …; }())` 这一整套包装。目标含副作用时退回普通转译。
+        /// 值被丢弃时不需要 lambda 携带旧值：可安全重复求值的左值上，自增/自减/复合赋值直接发赋值形态，
+        /// 省掉 `([&]() { … return …; }())` 这一整套包装。
         /// </summary>
         protected override void TranslateDiscardedValue(ExpressionSyntax expr)
         {
@@ -158,7 +166,7 @@ namespace NativeTranspiler.Analyzer
                 rhs = CaptureExpression(asg.Right);
             }
 
-            if (target == null || !IsStableLValue(target)) return false;
+            if (target == null || !IsReEvaluationSafe(target)) return false;
             if (!CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(target), out var signed, out var unsigned)) return false;
 
             string left = CppIntegerSemantics.CastOperand(CaptureExpression(target));

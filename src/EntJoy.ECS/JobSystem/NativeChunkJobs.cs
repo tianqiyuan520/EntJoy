@@ -75,18 +75,6 @@ namespace EntJoy.ECS.JobSystem
     [StructLayout(LayoutKind.Sequential)]
     internal unsafe struct ChunkContextHeader
     {
-        /// <summary>C++ 侧 <c>__EntJoyChunkContextHeader</c> 的字节数（NativeGeneratedSupport.h 有同值 static_assert）。</summary>
-        internal const int NativeSize = 88;
-
-        static ChunkContextHeader()
-        {
-            int size = Marshal.SizeOf<ChunkContextHeader>();
-            if (size != NativeSize)
-                throw new InvalidOperationException(
-                    $"ChunkContextHeader 布局漂移：托管 {size} 字节，原生 {NativeSize} 字节。"
-                    + "改字段必须同步 src/NativeDll/NativeGeneratedSupport.h。");
-        }
-
         public int chunkCount;               // Chunk 数量
         public int hasEnabledFilter;         // 是否有 enable 过滤
         public IntPtr queryAllEnabledTypes;  // int[]（类型哈希数组）指针
@@ -142,6 +130,7 @@ namespace EntJoy.ECS.JobSystem
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, uint, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
+        private static delegate* unmanaged[Cdecl]<int> _getChunkContextHeaderSize;
 
         private static readonly object _chunkPointerLoadLock = new();
         private static int _chunkPointersLoaded;
@@ -160,6 +149,21 @@ namespace EntJoy.ECS.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleEntityBatchJobEx");
             _jobSystem_ScheduleAndCompleteEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleAndCompleteEntityBatchJobEx");
+            ValidateChunkContextHeaderLayout();
+        }
+
+        /// <summary>布局防御：原生侧报告 chunk 上下文头字节数，与托管 <see cref="ChunkContextHeader"/> 比对。
+        /// 两边字段必须同步（原生定义在 NativeGeneratedSupport.h）。</summary>
+        private static void ValidateChunkContextHeaderLayout()
+        {
+            if (!NativeJobCore.TryGetNativeTranspiledExport("NativeTranspiled_GetChunkContextHeaderSize", out var export))
+                return;
+            _getChunkContextHeaderSize = (delegate* unmanaged[Cdecl]<int>)export;
+            int nativeSize = _getChunkContextHeaderSize();
+            int managedSize = Marshal.SizeOf<ChunkContextHeader>();
+            if (nativeSize != managedSize)
+                throw new InvalidOperationException(
+                    $"ChunkContextHeader 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
         }
 
         internal static void EnsureChunkPointersLoaded()

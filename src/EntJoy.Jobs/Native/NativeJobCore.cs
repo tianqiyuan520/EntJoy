@@ -452,6 +452,10 @@ namespace EntJoy.JobSystem
             return adapter;
         }
 
+        /// <summary>按名解析 NativeTranspiled 导出地址；导出缺失时返回 false（旧模块没有该导出）。</summary>
+        internal static bool TryGetNativeTranspiledExport(string entryPointName, out IntPtr address)
+            => NativeLibrary.TryGetExport(EnsureNativeTranspiledHandle(), entryPointName, out address);
+
         /// <summary>
         /// 取 NativeTranspiled 的句柄（优先显式路径）。
         /// Windows 加载器按基名匹配已加载模块，裸名 `Load` 可能命中别的目录里的同名件 ⇒ 取不到生成导出。

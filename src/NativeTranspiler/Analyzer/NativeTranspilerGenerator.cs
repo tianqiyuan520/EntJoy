@@ -379,7 +379,8 @@ namespace NativeTranspiler.Analyzer
                 cppFiles.Add(abiFile);
                 CodeGenIo.WriteAllTextWithRetry(Path.Combine(outputDir, abiFile),
                     "#include <cstdint>\n#include \"NativeGeneratedSupport.h\"\n"
-                    + "\nGENERATED_API uint32_t CALLINGCONVENTION NativeTranspiled_GetAbiVersion() { return 4u; }\n");
+                    + "\nGENERATED_API uint32_t CALLINGCONVENTION NativeTranspiled_GetAbiVersion() { return 4u; }\n"
+                    + "GENERATED_API int CALLINGCONVENTION NativeTranspiled_GetChunkContextHeaderSize() { return (int)sizeof(__EntJoyChunkContextHeader); }\n");
                 // run_ispc.bat 由 CMake 的 ISPC 规则取代：同一条 ispc 命令行不再生成两遍。
                 CodeGenIo.DeleteIfExists(Path.Combine(outputDir, "run_ispc.bat"));
 
