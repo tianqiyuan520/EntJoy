@@ -19,7 +19,7 @@ namespace NativeTranspiler.Analyzer
             var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 
             // 生成适配函数
-            // 纯值字段打包：结构体定义必须在本 TU 可见（适配器是独立 TU）⇒ 放在函数之前。
+            // 纯值字段打包：结构体定义必须在本 TU 可见 ⇒ 放在函数之前。
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, int __startIndex, int __count)");
             sb.AppendLine("{");
 
@@ -118,7 +118,7 @@ namespace NativeTranspiler.Analyzer
                         break;
                     case FieldKind.Container:
                         fieldReads.AppendLine($"    auto* {name}_ptr = *({slot.ElementType}**){address};");
-                        fieldReads.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("context", slot.Offset + 8))};");
+                        fieldReads.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("context", slot.LengthOffset))};");
                         callArgs.Add($"{name}_ptr, {name}_length");
                         break;
                     case FieldKind.Pointer:

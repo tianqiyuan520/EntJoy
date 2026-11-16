@@ -160,7 +160,7 @@ namespace EntJoy.ECS.JobSystem
                 return;
             _getChunkContextHeaderSize = (delegate* unmanaged[Cdecl]<int>)export;
             int nativeSize = _getChunkContextHeaderSize();
-            int managedSize = Marshal.SizeOf<ChunkContextHeader>();
+            int managedSize = Unsafe.SizeOf<ChunkContextHeader>();
             if (nativeSize != managedSize)
                 throw new InvalidOperationException(
                     $"ChunkContextHeader 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");

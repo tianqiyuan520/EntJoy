@@ -24,7 +24,7 @@ namespace NativeTranspiler.Analyzer
                     case FieldKind.Container:
                         sb.AppendLine($"    auto* {name}_ptr = *({slot.ElementType}**){address};");
                         string reference = mutableLengths ? "&" : "";
-                        sb.AppendLine($"    int{reference} {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__jobContext", slot.Offset + 8))};");
+                        sb.AppendLine($"    int{reference} {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__jobContext", slot.LengthOffset))};");
                         break;
                     default:
                         string dereference = slot.Kind == FieldKind.Pointer ? "*" : "";

@@ -27,8 +27,8 @@ namespace NativeTranspiler.Analyzer
             }
         }
 
-        public static string Generate(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> fastMathCppFiles, HashSet<string> autoSimdCppFiles,
-                                  string outputDir, string outputBinDir, string relativeNativeDllDir, bool hasFastMath,
+        public static string Generate(List<string> cppFiles, List<(string fileName, NativeTranspiler.IspcMathLib mathLib)> ispcFiles, HashSet<string> autoSimdCppFiles,
+                                  string outputDir, string outputBinDir, string relativeNativeDllDir,
                                   List<string>? existingCppOrder = null, string? prebuiltNativeDir = null)
         {
             var sb = new StringBuilder();

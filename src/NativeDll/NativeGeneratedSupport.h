@@ -118,6 +118,7 @@ struct __EntJoyEventBuffer
 };
 
 #ifdef __cplusplus
+// 布局按 64 位指针假设计算：32 位工具链下这两个断言会直接失败（不支持该目标）。
 static_assert(sizeof(__EntJoyChunkContextHeader) == 88,
     "ChunkContextHeader must match the managed x64 layout (see NativeChunkJobs.cs).");
 static_assert(sizeof(__EntJoyEventBuffer) == 24,

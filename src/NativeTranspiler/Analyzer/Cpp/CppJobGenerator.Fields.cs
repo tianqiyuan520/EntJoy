@@ -90,7 +90,7 @@ namespace NativeTranspiler.Analyzer
                     case FieldKind.Container:
                         string binding = stableArrays?.Contains(slot.Field) == true ? "* const " : "*& ";
                         sb.AppendLine($"    {slot.ElementType}{binding}{name}_ptr = *({slot.ElementType}**){address};");
-                        sb.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", slot.Offset + 8))};");
+                        sb.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", slot.LengthOffset))};");
                         break;
                     case FieldKind.Pointer:
                         sb.AppendLine($"    {slot.CppType}& {name}_ptr = *({slot.CppType}*){address};");

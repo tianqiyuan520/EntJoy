@@ -168,16 +168,17 @@ namespace NativeTranspiler.Analyzer
             }
             else if (expr is AssignmentExpressionSyntax asg && asg.OperatorToken.Text is "+=" or "-=" or "*=")
             {
+                // 短形态把"读目标"和"算右值"塞进同一个表达式，二者无先后保证；
+                // 右值可能有写入（调用/赋值/自增减）或引用目标本身时，退回 lambda（先读旧值再算右值）。
+                if (!IsReEvaluationSafe(asg.Right)) return false;
                 target = asg.Left;
                 op = asg.OperatorToken.Text.Substring(0, 1);
                 rhs = CaptureExpression(asg.Right);
+                if (MentionsSameStorage(target, rhs)) return false;
             }
 
             if (target == null || !IsReEvaluationSafe(target)) return false;
             if (!CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(target), out var signed, out var unsigned)) return false;
-            // 右值提到同一表达式里求值后，读取目标的时机与右值求值不再有先后保证；
-            // 右值引用了目标本身（`x += f(x)` 这类）时退回 lambda（它先把右值求进临时变量）。
-            if (rhs != null && MentionsSameStorage(target, rhs)) return false;
 
             string left = CppIntegerSemantics.CastOperand(CaptureExpression(target));
             _builder.Append(left).Append(" = (").Append(signed).Append(")((").Append(unsigned).Append(')').Append(left);

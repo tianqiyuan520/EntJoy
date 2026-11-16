@@ -56,5 +56,28 @@ public struct NarrowCastJob : IJob
             // (int)(a * b) 是一个 64 位乘法后截断，必须整体作为左操作数，不能退化成 int 加法。
             Assert.Contains("(unsigned)(int)((long long)", cpp);
         }
+        [Fact]
+        public void DiscardedCompoundAssign_WithSideEffectingRhs_KeepsOrderedLambda()
+        {
+            string cpp = Emit(@"
+        int count = 1;
+        count += Next(ref count);");
+            _out.WriteLine(cpp);
+
+            // 右值可能写同一对象 ⇒ 必须保留"先读旧值、再算右值"的顺序
+            Assert.Contains("__ej_old", cpp);
+        }
+
+        [Fact]
+        public void DiscardedCompoundAssign_WithConstantRhs_StaysFlat()
+        {
+            string cpp = Emit(@"
+        int i = 0;
+        i += 2;");
+            _out.WriteLine(cpp);
+
+            Assert.Contains("i = (int)((unsigned)i + (unsigned)2)", cpp);
+            Assert.DoesNotContain("__ej_old", cpp);
+        }
     }
 }

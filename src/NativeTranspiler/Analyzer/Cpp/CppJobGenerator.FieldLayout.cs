@@ -19,10 +19,11 @@ namespace NativeTranspiler.Analyzer
         /// <summary>一个 job 字段的 ABI 槽位：偏移、类别与对应的 C++ 类型名。</summary>
         internal readonly struct FieldSlot
         {
-            public FieldSlot(IFieldSymbol field, int offset, FieldKind kind, string cppType, string elementType)
+            public FieldSlot(IFieldSymbol field, int offset, int lengthOffset, FieldKind kind, string cppType, string elementType)
             {
                 Field = field;
                 Offset = offset;
+                LengthOffset = lengthOffset;
                 Kind = kind;
                 CppType = cppType;
                 ElementType = elementType;
@@ -30,6 +31,8 @@ namespace NativeTranspiler.Analyzer
 
             public IFieldSymbol Field { get; }
             public int Offset { get; }
+            /// <summary>容器字段的长度槽偏移（指针之后 8 字节）；非容器为 -1。</summary>
+            public int LengthOffset { get; }
             public FieldKind Kind { get; }
             public string CppType { get; }
             public string ElementType { get; }
@@ -64,7 +67,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     kind = FieldKind.Scalar;
                 }
-                slots.Add(new FieldSlot(field, offset, kind, cppType, elementType));
+                slots.Add(new FieldSlot(field, offset, kind == FieldKind.Container ? offset + 8 : -1, kind, cppType, elementType));
             }
             return slots;
         }
