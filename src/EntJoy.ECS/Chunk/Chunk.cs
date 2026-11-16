@@ -202,7 +202,7 @@ namespace EntJoy.ECS
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
             ref var value = ref GetComponentStorage<T>(entityIndex, componentIndex);
-            if (Meta.Archetype.Types[componentIndex].IsRelation)
+            if (Meta.RelationColumns[componentIndex])
                 throw new InvalidOperationException(
                     "Relationship columns require GetComponentReadOnly; change values through EntityManager or DeferredCommandBuffer.");
             return ref value;
