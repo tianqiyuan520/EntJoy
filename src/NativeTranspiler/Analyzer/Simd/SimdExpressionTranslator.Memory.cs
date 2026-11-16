@@ -49,7 +49,7 @@ namespace NativeTranspiler.Analyzer
                 // 向量 load/gather 只支持 float/int（n_load_ps / n_load_epi32 / gather）。
                 // byte / uint 等窄或宽元素 → 退回标量下标读，避免把 byte* 当 float*/int* 用。
                 vectorizableElem = elemCppType == "float" || elemCppType == "int"
-                    || elemCppType.Contains("float2") || elemCppType.Contains("int2");
+                    || SimdVectorTypes.IsFloat2(elemCppType) || SimdVectorTypes.IsInt2(elemCppType);
             }
             baseExpr ??= TranslateExpression(elementAccess.Expression);
             string indexExpr = "0";
@@ -78,12 +78,12 @@ namespace NativeTranspiler.Analyzer
                     if (indexKind >= VarKind.Varying)
                     {
                         // Safety clamp: mask ctx → clamp to [0, Length-1] for unmasked gather
-                        string safeIdx = !SimdMaskText.IsAllTrue(_currentMask)
+                        string safeIdx = !_currentMask.IsAllTrue
                             ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}.Length - 1))"
                             : indexExpr;
-                        if (elemCppType.Contains("float2"))
+                        if (SimdVectorTypes.IsFloat2(elemCppType))
                             return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v), simd_value<float>::gathfy(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v) }}";
-                        if (elemCppType.Contains("int2"))
+                        if (SimdVectorTypes.IsInt2(elemCppType))
                             return $"simd_value<EntJoy::Mathematics::int2>::gather(({elemCppType}*){baseExpr}.Ptr, {safeIdx})";
                         return $"simd_value<float>::gathf(({elemCppType}*){baseExpr}.Ptr, {safeIdx}.v)";
                     }
@@ -108,9 +108,9 @@ namespace NativeTranspiler.Analyzer
                         string scalarIdx = rawId.Identifier.Text;
                         // 基址是数组本身（baseExpr = X_ptr），不是下标变量；按下标取基址会生成 `i[i]`。
                         string naBase = baseExpr;
-                        if (elemCppType.Contains("float2"))
+                        if (SimdVectorTypes.IsFloat2(elemCppType))
                             return $"simd_value<{elemCppType}>::broadcast({naBase}[{scalarIdx}])";
-                        if (elemCppType.Contains("int2"))
+                        if (SimdVectorTypes.IsInt2(elemCppType))
                             return $"simd_value<EntJoy::Mathematics::int2>::broadcast({naBase}[{scalarIdx}])";
                         if (elemCppType == "float")
                             return $"simd_value<float>::broadcast({naBase}[{scalarIdx}])";
@@ -135,7 +135,7 @@ namespace NativeTranspiler.Analyzer
                     // Varying reduction loop: index pre-clamped to >=0, use hoisted broadcast
                     safeIdx = $"simd_min({indexExpr}, {_hoistedSafeMaxVar})";
                 }
-                else if (!SimdMaskText.IsAllTrue(_currentMask))
+                else if (!_currentMask.IsAllTrue)
                 {
                     // ⚠ 长度形参名是 `<字段名>_length`，而 baseExpr 是 `<字段名>_ptr` ——
                     //   直接用 baseExpr 拼会生成未声明的 `A_ptr_length`（实测：EdgeCase4_SIMD_For 编译失败）。
@@ -177,7 +177,7 @@ namespace NativeTranspiler.Analyzer
                 }
 
                 // SIMD gather
-                if (elemCppType.Contains("float2"))
+                if (SimdVectorTypes.IsFloat2(elemCppType))
                 {
                     if (safeIdx != indexExpr)
                     {
@@ -187,7 +187,7 @@ namespace NativeTranspiler.Analyzer
                     }
                     return $"simd_value<EntJoy::Mathematics::float2>{{ simd_value<float>::gathf({baseExpr}, {safeIdx}.v), simd_value<float>::gathfy({baseExpr}, {safeIdx}.v) }}";
                 }
-                if (elemCppType.Contains("int2"))
+                if (SimdVectorTypes.IsInt2(elemCppType))
                     return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}, {safeIdx})";
                 if (elemCppType == "float")
                     return $"simd_value<float>::gathf({baseExpr}, {safeIdx}.v)";
@@ -215,7 +215,7 @@ namespace NativeTranspiler.Analyzer
                 string elemPtr = $"(({elemCppType}*)({baseExpr}))";
                 string resVar = $"__gv_{_labelCounter++}";
                 string seqVar = $"__gl_seq_{_labelCounter++}";
-                bool masked = !SimdMaskText.IsAllTrue(_currentMask);
+                bool masked = !_currentMask.IsAllTrue;
                 AppendLine($"simd_value<int> {seqVar} = simd_value<int>::sequence(0, g_simdWidthInt);");
                 AppendLine($"simd_value<int> {resVar} = simd_value<int>::broadcast(0);");
                 AppendLine($"for (int __gl = 0; __gl < g_simdWidthInt; __gl++)");
@@ -388,7 +388,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string index, string fieldType, int stride)
-            => !SimdMaskText.IsAllTrue(_currentMask) || index.Contains("v_") || index.Contains("simd_")
+            => !_currentMask.IsAllTrue || index.Contains("v_") || index.Contains("simd_")
                 ? GatherStructField(arrName, structElemType, fieldName, index, fieldType, stride)
                 : $"{arrName}_ptr[{index}].{fieldName}";
 
@@ -400,7 +400,7 @@ namespace NativeTranspiler.Analyzer
                 return $"/*{UnsupportedMarkers.Expr}SIMD_StructFieldType*/ 0";
             string scalar = integer ? "int" : "float";
             string gather = integer ? "n_gather_epi32" : "n_gather_ps";
-            string safe = !SimdMaskText.IsAllTrue(_currentMask)
+            string safe = !_currentMask.IsAllTrue
                 ? $"simd_min(simd_max({index}, simd_value<int>(0)), simd_value<int>::broadcast({array}_length - 1))" : index;
             string pointer = $"(const {scalar}*)(&{array}_ptr[0].{field})";
             string scale = stride is 1 or 2 or 4 or 8 ? $"sizeof({structure})" : "1";
@@ -421,7 +421,7 @@ namespace NativeTranspiler.Analyzer
             string leaf = elemCppType;
             int sep = leaf.LastIndexOf("::");
             if (sep >= 0) leaf = leaf.Substring(sep + 2);
-            return leaf.Contains("float2") || leaf.Contains("int2");
+            return SimdVectorTypes.IsFloat2(leaf) || SimdVectorTypes.IsInt2(leaf);
         }
 
         /// <summary>
