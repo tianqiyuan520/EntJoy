@@ -27,7 +27,9 @@
 
 ## 稀疏随机访问
 
-按实体句柄取组件有两条入口。10 万实体逐次取一个组件（`--ab-pair random-get* arch-random-get 3`，取轮内最小值）：
+按实体句柄读写组件。10 万实体逐次一个操作（`--ab-pair`，取轮内最小值）。
+
+读：
 
 | 入口 | 耗时 | 相对 Arch `World.Get` |
 | --- | --- | --- |
@@ -35,7 +37,16 @@
 | `EntityManager.GetComponent<T>(entity)` | 599–633 µs | 1.67–1.70 |
 | Arch `World.Get<T>(entity)` | 350–378 µs | 1.00 |
 
+写：
+
+| 入口 | 耗时 | 相对 Arch `World.Set` |
+| --- | --- | --- |
+| `EntityManager.Set<T>(entity, value)` | 1616–1648 µs | 1.45–1.53 |
+| Arch `World.Set<T>(entity, value)` | 1092–1128 µs | 1.00 |
+
 句柄缓存上次原型与块基址，稳态只剩一次实体表加载加一次块比较；直取每次都从实体表重新解析定位，并多付处置、版本与关系列校验。热循环用句柄，一次性读取用直取。
+
+写走类型化直写。关系列、世界里有观察者、原型含可析构列或 shared 列这三种情况退回对象路径——那条路每写一次要装箱并分配一个 GCHandle 钉住值。
 
 关系列标记放在 `ChunkMetadata.RelationColumns` 里：这条标记按列定死，逐次访问只读一次数组，不再回查 `Archetype.Types`（省掉五次依赖加载，实测直取 −7%）。
 
