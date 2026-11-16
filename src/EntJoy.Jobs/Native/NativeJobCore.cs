@@ -452,9 +452,22 @@ namespace EntJoy.JobSystem
             return adapter;
         }
 
-        /// <summary>按名解析 NativeTranspiled 导出地址；导出缺失时返回 false（旧模块没有该导出）。</summary>
+        /// <summary>按名解析 NativeTranspiled 导出地址；模块不存在或导出缺失时返回 false。</summary>
         internal static bool TryGetNativeTranspiledExport(string entryPointName, out IntPtr address)
-            => NativeLibrary.TryGetExport(EnsureNativeTranspiledHandle(), entryPointName, out address);
+        {
+            address = IntPtr.Zero;
+            IntPtr handle;
+            try
+            {
+                handle = EnsureNativeTranspiledHandle();
+            }
+            catch (DllNotFoundException)
+            {
+                // 没有 NativeTranspiled 模块就没有生成内核，调用方按"无此契约"处理。
+                return false;
+            }
+            return NativeLibrary.TryGetExport(handle, entryPointName, out address);
+        }
 
         /// <summary>
         /// 取 NativeTranspiled 的句柄（优先显式路径）。
