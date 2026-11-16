@@ -195,7 +195,7 @@ namespace EntJoy.ECS
         {
             CheckDisposed();
             bool relationship = metadata.IsRelation;
-            if (relationship) CompleteActiveJobs();
+            if (relationship && !JobBookkeepingIdle()) CompleteActiveJobs();
             using var relationChanges = relationship ? BeginRelationChanges() : default;
             // 组件存在时才解析迁移目标 Archetype（不存在时核心直接 return，只等实体所属 Archetype）。
             Archetype? targetArch = null;

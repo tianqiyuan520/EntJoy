@@ -62,7 +62,7 @@ namespace EntJoy.ECS
 
         private void CompleteRelationWriteJobs(Entity source, ComponentType type)
         {
-            if (!type.IsMultiRelation && !type.IsExclusiveRelation && IsAlive(source)
+            if (!type.IsMultiRelation && !type.IsExclusiveTarget && IsAlive(source)
                 && GetEntityInfoRef(source.Id).Archetype.Has(type.Type))
                 CompleteEntityJobs(source);
             else
@@ -153,7 +153,7 @@ namespace EntJoy.ECS
                 return;
             }
             ValidateRelationshipEntity(target.ToEntity(), type, "target");
-            if (!type.IsAcyclicRelation) return;
+            if (!type.IsHierarchy) return;
             _relVisited.Clear();
             Entity current = target.ToEntity();
             while (IsAlive(current))
@@ -171,7 +171,12 @@ namespace EntJoy.ECS
         private static bool HasSharedColumns(Archetype archetype) => archetype.HasSharedColumns;
 
         private nint PrepareRelationSlot(Archetype target, Entity source, nint excluded = 0)
+            => PrepareRelationSlot(target, source, out _, excluded);
+
+        // 同时给出块下标：调用方拿到地址后可以先用下标命中，省掉一次按地址的回扫。
+        private nint PrepareRelationSlot(Archetype target, Entity source, out int chunkIndex, nint excluded = 0)
         {
+            chunkIndex = -1;
             var location = GetEntityInfoRef(source.Id);
             var sourceArch = location.Archetype;
             if (HasSharedColumns(target))
@@ -201,22 +206,36 @@ namespace EntJoy.ECS
                             Buffer.MemoryCopy((void*)sourceChunk.GetSharedValuePointer(from), (void*)chunk.GetSharedValuePointer(c), target.Types[c].Size, target.Types[c].Size);
                         }
                 }
+                chunkIndex = index;
                 return target.ChunkList[index].MemoryBlock;
             }
             var chunks = target.ChunkList;
             for (int i = chunks.Count - 1; i >= 0; i--)
                 if (chunks[i].MemoryBlock != excluded && chunks[i].EntityCount < chunks[i].Capacity)
+                {
+                    chunkIndex = i;
                     return chunks[i].MemoryBlock;
+                }
             chunks.EnsureCapacity(chunks.Count + 1);
-            return chunks[target.CreateChunk()].MemoryBlock;
+            chunkIndex = target.CreateChunk();
+            return chunks[chunkIndex].MemoryBlock;
         }
 
         private void AddToPreparedChunk(Archetype target, Entity entity, nint prepared,
             out int chunkIndex, out int slot)
         {
-            if (prepared == 0 && HasSharedColumns(target)) prepared = PrepareRelationSlot(target, entity);
+            int preparedIndex = -1;
+            if (prepared == 0 && HasSharedColumns(target)) prepared = PrepareRelationSlot(target, entity, out preparedIndex);
             if (prepared == 0) { target.AddEntity(entity, out chunkIndex, out slot); return; }
             var chunks = target.ChunkList;
+            // 地址才是稳定身份（块会在列表里 swap-pop），所以先验证下标仍指向同一个块，对不上才回扫。
+            if ((uint)preparedIndex < (uint)chunks.Count && chunks[preparedIndex].MemoryBlock == prepared)
+            {
+                chunkIndex = preparedIndex;
+                slot = chunks[chunkIndex].EntityCount;
+                target.AddEntityToChunk(entity, chunkIndex);
+                return;
+            }
             for (int offset = 0; offset < chunks.Count; offset++)
             {
                 int i = chunks.Count - 1 - offset;
@@ -246,7 +265,7 @@ namespace EntJoy.ECS
             bool hadEdge = old.IsValid && IsAlive(old.ToEntity());
 
             Entity previousOwner = default;
-            bool hasPreviousOwner = type.IsExclusiveRelation && target.IsValid
+            bool hasPreviousOwner = type.IsExclusiveTarget && target.IsValid
                 && FindExclusiveOwner(source, type, target, out previousOwner);
             var eventKind = hadEdge ? (target.IsValid ? ObserverEvents.Set : ObserverEvents.Removed)
                 : (target.IsValid ? ObserverEvents.Added : ObserverEvents.None);
@@ -273,7 +292,7 @@ namespace EntJoy.ECS
             bool found = false;
             foreach (var candidate in sources)
             {
-                if (candidate.Id == source.Id || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
+                if (candidate.Equals(source) || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
                 if (found) throw new InvalidOperationException("Exclusive relationship index contains multiple owners.");
                 previousOwner = candidate;
                 found = true;
