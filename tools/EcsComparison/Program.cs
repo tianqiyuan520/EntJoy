@@ -153,6 +153,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-read1", probe.EntJoyRead1Only),
                 ("query-shared", probe.EntJoyShared),
                 ("query-shared-base", probe.EntJoySharedBase),
+                ("query-rel", probe.EntJoyRelationship),
+                ("query-rel-base", probe.EntJoyRelationshipBase),
                 ("query-enabled", probe.EntJoyEnabled),
                 ("query-changed", probe.EntJoyChanged),
                 ("query-changed-none", probe.EntJoyChangedNone),
@@ -430,6 +432,7 @@ public struct B : IComponentData { public int Value; }
 public struct C : IComponentData { public int Value; }
 public struct Flag : IEnableableComponent { public int Value; }
 public struct Material : ISharedComponentData { public int Value; }
+public struct RelMark : IRelationComponent, IComponentData { public RelationSlot Target; }
 public struct Enabled : IComponentData, IEnableableComponent { }
 public struct Enabled2 : IComponentData, IEnableableComponent { }
 
@@ -512,6 +515,8 @@ public class SystemComparison
     private EntWorld sharedWorld;
     private EntWorld changedWorld;
     private EntWorld cleanWorld;
+    private EntWorld relWorld;
+    private EntJoy.ECS.Entity relTarget;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -634,6 +639,14 @@ public class SystemComparison
             cleanWorld.EntityManager.NewEntity(typeof(A), typeof(B));
         }
         cleanWorld.EntityManager.ClearAllChangedBitMasks();
+        // 关系过滤世界：全部实体指向同一个目标，过滤臂命中全部实体。
+        relWorld = new EntWorld("relation", threadSafe: false);
+        relTarget = relWorld.EntityManager.NewEntity(typeof(A));
+        for (int i = 0; i < EntityCount; i++)
+        {
+            var e = relWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(RelMark));
+            relWorld.EntityManager.AddRelationship<RelMark>(e, relTarget);
+        }
         EntJoy();
         VerifyEnt(1);
         Arch();
@@ -880,6 +893,24 @@ public class SystemComparison
     {
         int sum = 0;
         foreach (var result in sharedWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 关系过滤的实体级遍历：逐实体比对关系目标，全部指向同一目标。
+    public void EntJoyRelationship()
+    {
+        int sum = 0;
+        foreach (var result in relWorld.Query<A, B>().WithRelationship<RelMark>(relTarget))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // relWorld 的不过滤基线。
+    public void EntJoyRelationshipBase()
+    {
+        int sum = 0;
+        foreach (var result in relWorld.Query<A, B>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
     }
@@ -1379,6 +1410,7 @@ public class SystemComparison
         sharedWorld?.Dispose();
         changedWorld?.Dispose();
         cleanWorld?.Dispose();
+        relWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }
