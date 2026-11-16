@@ -44,13 +44,13 @@
 
 ## 实体关系
 
-- 普通 `IRelationComponent` 为 N:1：每个 source 在同一种关系下至多一个 target，target 可以被多个 source 指向。`ExclusiveRelation` 再要求入边唯一，形成 1:1；新 source 接管时解除旧 source。`AcyclicRelation` 拒绝同类型的自环与间接环。
-- `MultiRelation` 为 M:N；MaxSlots=0 使用按完整 source ID/Version 存储的托管目标列表，MaxSlots≥2 使用定长槽列。重复边保持原状态，定长容量不足在提交前拒绝；`ExclusiveTarget` 约束每个 target 至多一个 source，转移时先准备再统一提交。无环约束用于单目标类型。
+- 普通 `IRelationComponent` 为 N:1：每个 source 在同一种关系下至多一个 target，target 可以被多个 source 指向。`RelationshipComponent(ExclusiveTarget = true)` 再要求目标持有者唯一，形成 1:1；新 source 接管时解除旧 source。`Hierarchy = true` 声明单父级并拒绝同类型的自环与间接环，删除联动由 `DeleteWithTarget` 独立声明。
+- `RelationshipComponent(Multiple = true)` 为 M:N；MaxTargets=0 使用按完整 source ID/Version 存储的托管目标列表，MaxTargets≥2（自动启用多目标） 使用定长槽列。重复边保持原状态，定长容量不足在提交前拒绝；`ExclusiveTarget = true` 约束每个 target 至多一个 source，转移时先准备再统一提交。无环约束用于单目标类型。
 - 目标列表保持插入顺序，超过 32 个目标时在准备阶段建立成员索引；批量删除同一大列表的多个目标使用一次保序压缩。目标列表是正向数据，成员索引随提交、复制与恢复同步维护。
 - 关系类型是 sequential unmanaged struct，首字段为偏移 0 的 `RelationSlot Target`，可以附带业务数据。Shared、Enableable、资源所有权 hook 及矛盾的关系属性组合在注册时拒绝；多槽字段数量、类型、偏移与总宽度必须匹配声明。
 - 空列使用 `RelationSlot.Default`，不能用全零槽表示无边。`HasComponent<TRel>` 只检查列存在；`TryGetRelationship<TRel>` 与 `HasRelationship` 检查两端完整 ID/Version。`GetRelationship` 无边时返回 default Entity，调用方需要区分实体 0 时使用 TryGet。
 - `AddRelationship` 建立或重绑目标并保留已有业务数据，相同目标重复 Add 是 no-op。普通 Add/Set/RemoveComponent、SetRaw、ECB 和 ParallelWriter 的组件写入走同一单目标关系维护逻辑；目标重绑不改变 Archetype，但更新变更标记。
-- 目标删除默认解除存活 source 的关系并移除对应关系列；`OnTargetDeleted(Cascade = true)` 将 source 纳入销毁闭包。单删、批删、Archetype 清空与 ECB 使用相同规则；批量返回数包含级联销毁。显式 `DestroyEntityCascade` 沿全部关系类型级联，迭代防环。
+- 目标删除默认解除存活 source 的关系并移除对应关系列；`RelationshipComponent(DeleteWithTarget = true)` 将 source 纳入销毁闭包。单删、批删、Archetype 清空与 ECB 使用相同规则；批量返回数包含级联销毁。显式 `DestroyEntityCascade` 沿全部关系类型级联，迭代防环。
 - 关系图删除先准备目的存储、共享头、通知和回收容量，再提交解除与销毁；同一存活 source 的多列解除合并为一次迁移，多目标仅解除命中的边。迁移保留其他组件的共享分组、Enabled 位和资源所有权。准备阶段失败保持原图；空准备 Chunk 可复用。普通无关系批删与任意进程级内存耗尽不提供整批回滚保证。
 - 多目标 Observer 以边为单位提供 Added、Removed、Destroyed，TRel.Target 标识该边，其他定长槽为规范空值；Clear 对每条有效边发送 Removed。普通 RemoveComponent 清除多目标正反状态并移除存在的列。source 销毁不重复发送 Removed，回调看到完整提交后的图。
 - 关系 Observer 在完整提交后、结构锁外通知：空边变有效边为 Added，重绑/整体替换为 Set，解除为 Removed，source 销毁只发 Destroyed。预建空列与重复 Add 不发关系事件；值快照使用完整 TRel。Observer 与组件 Dispose 中的同步 ECS 变更会拒绝，请记录 ECB。销毁中的 Dispose 异常会记录并继续清理已提交状态。
@@ -67,9 +67,9 @@
 - ECB 提供 SetRelationshipTarget/RemoveRelationship，主线程及托管 Job 可记录；ParallelWriter 版本要求 sortKey。目标设置保留已有业务数据，解除移除列；回放重新校验端点及约束，已失效的 source 跳过。普通并行命令的 key 为 0；同 writer、同 key 保持记录顺序，相同 key 的跨 writer 冲突不承诺胜者。C++/ISPC 内核的 ParallelWriter 方法不做自动转译。
 - ECB 的 AddRelationship 对单目标建立/重绑，对多目标追加；带 target 的 RemoveRelationship 删除一条多目标边，ClearRelationships 清空全部多目标边。无 target 的 RemoveRelationship 对多目标清空边、保留定长列。ParallelWriter 提供对应的 sortKey 重载，沿用每命令提交和失败批次消费规则。
 - Playback/PlaybackParallel 先在记录锁外等待 EntityManager 已跟踪的 Job，再捕获并消费一批记录；外部 Task 或独立记录 Job 由调用方先完成。命令失败抛 CommandPlaybackException，报告失败下标、writer 下标及后续未执行数；已提交前缀不隐式重放。Observer 新记录的命令留到下一次回放；禁止嵌套回放、在回放中释放 ECB 或移动 writer 表。
-- `SpawnFrom(prefab, count)` 与 `CloneEntities(sources)` 共用复制核心，结果去除 Prefab 标记并保留共享值、启用状态及业务数据。源集合须有效且无重复；单目标、定长槽和托管列表中的内部目标映射到副本，外部普通目标保持不变，外部已占用的 ExclusiveRelation/ExclusiveTarget 在复制前拒绝。其他业务字段中的 Entity 值按值复制；含所有权 hook 的共享组件不支持复制。
+- `SpawnFrom(prefab, count)` 与 `CloneEntities(sources)` 共用复制核心，结果去除 Prefab 标记并保留共享值、启用状态及业务数据。源集合须有效且无重复；单目标、定长槽和托管列表中的内部目标映射到副本，外部普通目标保持不变，外部已占用的 ExclusiveTarget 在复制前拒绝。其他业务字段中的 Entity 值按值复制；含所有权 hook 的共享组件不支持复制。
 - 复制的资源组件须注册 ICopyable 与 IDisposable hook；OnCopy 接收空目标值，抛异常时目标须可安全析构。钩子中拒绝同步 ECS 变更和可写组件借用，准备失败回收本次资源。整组实体与索引发布后才通知 Added；存储准备导致地址或布局变化时，失败也会保守使旧视图失效。
-- 每条关联独立的等级、冷却等可由边实体承载：两个单目标关系指向端点，普通组件保存边数据。两个端点声明 Cascade 时删除任一端点销毁边、保留另一端点。组复制显式包含边和需要重映射的端点；多条业务调用不是整批事务，同端点边的业务唯一性由应用决定。
+- 每条关联独立的等级、冷却等可由边实体承载：两个单目标关系指向端点，普通组件保存边数据。两个端点关系声明 DeleteWithTarget 时删除任一端点销毁边、保留另一端点。组复制显式包含边和需要重映射的端点；多条业务调用不是整批事务，同端点边的业务唯一性由应用决定。
 - 当前成本基线覆盖 1万/10万/100万 source。百万规模整组复制与宽目标删除存在较高的临时托管分配；随机图与长稳通过不表示这些操作适合每帧执行。基线只描述本机构建，不构成跨框架性能对比。
 
 ## ECS 查询和组件布局

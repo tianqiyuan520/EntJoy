@@ -12,28 +12,28 @@ using Microsoft.CodeAnalysis.Text;
 namespace EntJoy.ECS.SourceGenerator
 {
     /// <summary>
-    /// [MultiRelation(MaxSlots = N)]（N ≥ 2）→ 注入 Slot1..SlotN-1 字段的生成器。
+    /// [RelationshipComponent(MaxTargets = N)]（N ≥ 2）→ 注入 Slot1..SlotN-1 字段的生成器。
     /// 定长多槽列：TRel 占 chunk 列，列宽 = N × sizeof(RelationSlot)（如 4 槽 = 32B），
     /// 要求：partial struct + 首字段 RelationSlot Target。
     /// 输出：<c>public partial struct Skill { public RelationSlot Slot1; ... }</c>。
     /// </summary>
-    internal sealed class MultiRelationSlotSourceGenerator : IIncrementalGenerator
+    internal sealed class RelationshipSlotSourceGenerator : IIncrementalGenerator
     {
-        private const string Suffix = "_MultiRelationSlots.g.cs";
+        private const string Suffix = "_RelationshipSlots.g.cs";
 
         private static readonly DiagnosticDescriptor EJ3001 = new(
             "EJ3001", "Multi-relation slot type must be a partial struct",
-            "Type '{0}' marked with [MultiRelation(MaxSlots = N)] (N >= 2) must be a partial struct (add the 'partial' keyword) so the slot fields can be injected",
+            "Type '{0}' marked with [RelationshipComponent(MaxTargets = N)] (N >= 2) must be a partial struct (add the 'partial' keyword) so the slot fields can be injected",
             "EntJoy.ECS.SourceGenerator", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
         private static readonly DiagnosticDescriptor EJ3002 = new(
             "EJ3002", "Multi-relation slot type must have a RelationSlot Target first field",
-            "Type '{0}' marked with [MultiRelation(MaxSlots = N)] (N >= 2) must declare a 'public RelationSlot Target' field as its first field",
+            "Type '{0}' marked with [RelationshipComponent(MaxTargets = N)] (N >= 2) must declare a 'public RelationSlot Target' field as its first field",
             "EntJoy.ECS.SourceGenerator", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
         private static readonly DiagnosticDescriptor EJ3003 = new(
             "EJ3003", "Multi-relation slot type cannot be generic or nested",
-            "Type '{0}' marked with [MultiRelation(MaxSlots = N)] cannot be generic or nested",
+            "Type '{0}' marked with [RelationshipComponent(MaxTargets = N)] cannot be generic or nested",
             "EntJoy.ECS.SourceGenerator", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
@@ -62,11 +62,11 @@ namespace EntJoy.ECS.SourceGenerator
             if (model.GetDeclaredSymbol(structDecl, ct) is not INamedTypeSymbol typeSymbol)
                 return null;
 
-            // 语义确认：[MultiRelation] 特性 + 读取 MaxSlots 参数
+            // 从统一关系声明读取固定容量。
             AttributeData? multiAttr = null;
             foreach (var attr in typeSymbol.GetAttributes())
             {
-                if (attr.AttributeClass?.Name == "MultiRelationAttribute" &&
+                if (attr.AttributeClass?.Name == "RelationshipComponentAttribute" &&
                     attr.AttributeClass.ContainingNamespace?.ToDisplayString() == "EntJoy.ECS")
                 {
                     multiAttr = attr;
@@ -79,14 +79,14 @@ namespace EntJoy.ECS.SourceGenerator
             int maxSlots = 0;
             foreach (var namedArg in multiAttr.NamedArguments)
             {
-                if (namedArg.Key == "MaxSlots" && namedArg.Value.Value is int v)
+                if (namedArg.Key == "MaxTargets" && namedArg.Value.Value is int v)
                 {
                     maxSlots = v;
                     break;
                 }
             }
             if (maxSlots < 2)
-                return null;   // 托管列表模式（MaxSlots=0/1），不注入
+                return null;   // 未声明有效固定容量，不注入。
 
             var result = new SlotResult();
 
@@ -115,7 +115,7 @@ namespace EntJoy.ECS.SourceGenerator
                 return null;
 
             result.HintName = $"{SanitizeHintName(typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))}{Suffix}";
-            result.Source = Generate(typeSymbol, maxSlots);
+            result.Source = Generate(typeSymbol, maxSlots, ct);
             return result;
         }
 
@@ -140,7 +140,7 @@ namespace EntJoy.ECS.SourceGenerator
             return sb.ToString();
         }
 
-        private static string Generate(INamedTypeSymbol typeSymbol, int maxSlots)
+        private static string Generate(INamedTypeSymbol typeSymbol, int maxSlots, CancellationToken ct)
         {
             string accessibility = typeSymbol.DeclaredAccessibility switch
             {
@@ -168,6 +168,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine($"{indent}{{");
             for (int i = 1; i < maxSlots; i++)
             {
+                ct.ThrowIfCancellationRequested();
                 sb.AppendLine($"{indent}    /// <summary>定长多槽列：槽 {i}（{maxSlots} 槽中的第 {i + 1} 个）。空槽 = RelationSlot.Default。</summary>");
                 sb.AppendLine($"{indent}    public global::EntJoy.ECS.RelationSlot Slot{i};");
             }

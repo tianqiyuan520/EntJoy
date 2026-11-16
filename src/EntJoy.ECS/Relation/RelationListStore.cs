@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 多实例关系（[MultiRelation]）正向存储：source → targets（有序列表，幂等去重）。
+    /// 多实例关系（[RelationshipComponent(Multiple = true)]）正向存储：source → targets（有序列表，幂等去重）。
     /// 反向复用 EntityManager._relationIndex（target → (relType → sources)），O(1) 查询。
     /// 所有操作在 EntityManager 的 _structuralLock 保护下调用（与关系操作同一锁域）。
     /// </summary>

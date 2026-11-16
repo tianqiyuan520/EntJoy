@@ -4,14 +4,13 @@ using Xunit;
 
 namespace EntJoy.ECS.Tests
 {
-    /// <summary>定长多槽列多值关系（[MultiRelation(MaxSlots=4)]，热数据，进 Job）。
+    /// <summary>定长多槽列多值关系（[RelationshipComponent(MaxTargets=4)]，热数据，进 Job）。
     /// 源生成器注入 Slot1..Slot3 字段（列宽 32B）。</summary>
-    [MultiRelation(MaxSlots = 4)]
+    [RelationshipComponent(MaxTargets = 4)]
     public partial struct HotSkill : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>定长多槽列 + 入边唯一（背包热数据版）。</summary>
-    [MultiRelation(MaxSlots = 4)]
-    [ExclusiveTarget]
+    [RelationshipComponent(MaxTargets = 4, ExclusiveTarget = true)]
     public partial struct HotCarry : IRelationComponent { public RelationSlot Target; }
 
     public class FixedSlotRelationTests
@@ -221,7 +220,7 @@ namespace EntJoy.ECS.Tests
             using var world = NewWorld();
             var em = world.EntityManager;
 
-            // [OnTargetDeleted] 定长多槽列类型
+            // [RelationshipComponent(DeleteWithTarget = true)] 定长多槽列类型
             var a = em.NewEntity(typeof(Position));
             var hub = em.NewEntity(typeof(Position));
             em.AddRelationship<FixedSlotCascadeSkill>(a, hub);
@@ -275,7 +274,6 @@ namespace EntJoy.ECS.Tests
     }
 
     /// <summary>声明级联的定长多槽列（测试用）。</summary>
-    [MultiRelation(MaxSlots = 4)]
-    [OnTargetDeleted(Cascade = true)]
+    [RelationshipComponent(MaxTargets = 4, DeleteWithTarget = true)]
     public partial struct FixedSlotCascadeSkill : IRelationComponent { public RelationSlot Target; }
 }

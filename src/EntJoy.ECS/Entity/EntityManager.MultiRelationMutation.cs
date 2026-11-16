@@ -52,7 +52,7 @@ namespace EntJoy.ECS
 
             Entity previous = default;
             bool displaced = type.IsExclusiveTarget
-                && FindDisplacedOwner(source, type, slot, out previous);
+                && FindExclusiveOwner(source, type, slot, out previous);
             var notification = CaptureMultiNotification(source, type, ObserverEvents.Added, slot);
             var removed = displaced ? CaptureMultiNotification(previous, type, ObserverEvents.Removed, slot) : default;
 
@@ -75,23 +75,6 @@ namespace EntJoy.ECS
             CommitRelationNotification(notification);
         }
 
-        // 入边唯一约束：找出当前持有该 target 的其他 source；出现多个说明索引已损坏。
-        private bool FindDisplacedOwner(Entity source, ComponentType type, RelationSlot slot, out Entity previous)
-        {
-            previous = default;
-            var owners = _relationIndex.GetSourcesOfType(slot.ToEntity(), type.Id);
-            if (owners == null) return false;
-            bool displaced = false;
-            foreach (var owner in owners)
-            {
-                if (owner.Equals(source) || !HasMultiEdge(owner, type, slot)) continue;
-                if (displaced) throw new InvalidOperationException("Exclusive target has multiple owners.");
-                previous = owner;
-                displaced = true;
-            }
-            return displaced;
-        }
-
         // 定长多槽列里第一个空槽；列满时直接失败，不做静默覆盖。
         private int FindEmptyColumnSlot(Entity source, ComponentType type)
         {
@@ -99,7 +82,7 @@ namespace EntJoy.ECS
             int empty = 0;
             while (empty < type.MultiRelationMaxSlots && values[empty].IsValid) empty++;
             if (empty == type.MultiRelationMaxSlots)
-                throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxSlots={type.MultiRelationMaxSlots}).");
+                throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxTargets={type.MultiRelationMaxSlots}).");
             return empty;
         }
 

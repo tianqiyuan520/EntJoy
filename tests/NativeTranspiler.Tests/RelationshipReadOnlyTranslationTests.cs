@@ -7,6 +7,12 @@ namespace NativeTranspiler.Tests
     {
         private const string Types = @"
 namespace EntJoy.ECS {
+ public sealed class RelationshipComponentAttribute : System.Attribute {
+  public bool Multiple { get; set; }
+  public int MaxTargets { get; set; }
+  public bool Hierarchy { get; set; }
+  public bool ExclusiveTarget { get; set; }
+ }
  public interface IRelationComponent { }
  public struct RelationSlot { public int TargetId; public int TargetVersion; }
 }
@@ -25,6 +31,29 @@ public struct ReadLink : IJobChunk {
   for (int i = 0; i < chunk.Count; i++) output[i].Value = links[i].Target.TargetId;
  }
 }");
+
+        [Theory]
+        [InlineData("", false)]
+        [InlineData("Hierarchy = true", false)]
+        [InlineData("ExclusiveTarget = true", false)]
+        [InlineData("Multiple = true", true)]
+        [InlineData("MaxTargets = 4", false)]
+        [InlineData("Multiple = true, MaxTargets = 4", false)]
+        public void UnifiedDeclaration_RejectsOnlyManagedListReads(string options, bool managedList)
+        {
+            var types = Types.Replace("public struct Link", "[EntJoy.ECS.RelationshipComponent(" + options + ")] public struct Link");
+            foreach (var backend in new[] { "Cpp", "Ispc" })
+            foreach (var chunk in new[] { false, true })
+            {
+                var job = chunk
+                    ? "public struct ReadLink : IJobChunk { public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask) { var links = chunk.GetComponentReadOnlyDataSpan<Link>(); var output = chunk.GetComponentDataSpan<Output>(); for (int i = 0; i < chunk.Count; i++) output[i].Value = links[i].Target.TargetId; } }"
+                    : "public struct ReadLink : IJobEntity { public void Execute(in Link link, ref Output output) { output.Value = link.Target.TargetId; } }";
+                var emitted = GeneratorHarness.EmitFor("using EntJoy.ECS; using NativeTranspiler;" + types
+                    + "[NativeTranspile(Target = BackendTarget." + backend + ")] " + job);
+                Assert.Equal(managedList, emitted.HasDiagnostic("NT017"));
+                if (!managedList) Assert.DoesNotContain(emitted.Diagnostics, value => value.Severity == DiagnosticSeverity.Error);
+            }
+        }
 
         [Theory]
         [InlineData("GetComponentReadOnlyDataSpan", "Disabled")]

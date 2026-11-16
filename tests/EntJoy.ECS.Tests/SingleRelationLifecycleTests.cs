@@ -10,27 +10,34 @@ using Xunit;
 namespace EntJoy.ECS.Tests
 {
     public struct LifecycleRelation : IRelationComponent, IComponentData { public RelationSlot Target; public int Data; }
-    [AcyclicRelation]
+    [RelationshipComponent(Hierarchy = true)]
     public struct LifecycleParent : IRelationComponent { public RelationSlot Target; }
-    [MultiRelation(MaxSlots = 3)]
+    [RelationshipComponent(MaxTargets = 3)]
     public partial struct IncompleteRelationSlots : IRelationComponent
     {
         public RelationSlot Target;
         public RelationSlot Slot1;
     }
-    [MultiRelation(MaxSlots = 2)]
+    [RelationshipComponent(MaxTargets = 2)]
     public partial struct MisalignedRelationSlots : IRelationComponent
     {
         public RelationSlot Target;
         public int Data;
         public RelationSlot Slot1;
     }
-    [MultiRelation(MaxSlots = -1)]
+    [RelationshipComponent(MaxTargets = -1)]
     public struct NegativeRelationSlots : IRelationComponent { public RelationSlot Target; }
-    [ExclusiveRelation, MultiRelation]
+    [RelationshipComponent(Hierarchy = true, Multiple = true)]
     public struct ConflictingRelationModes : IRelationComponent { public RelationSlot Target; }
-    [ExclusiveTarget]
-    public struct SingleRelationWithMultiConstraint : IRelationComponent { public RelationSlot Target; }
+    [RelationshipComponent(MaxTargets = 1)]
+    public struct SingleRelationWithInvalidCapacity : IRelationComponent { public RelationSlot Target; }
+
+    [RelationshipComponent]
+    public struct AnnotatedNonRelation { public RelationSlot Target; }
+    [RelationshipComponent(Hierarchy = true, MaxTargets = 2)]
+    public partial struct MultiParent : IRelationComponent { public RelationSlot Target; public RelationSlot Slot1; }
+    [RelationshipComponent]
+    public struct DefaultRelation : IRelationComponent { public RelationSlot Target; }
 
     public struct RelationOwnedResource : IComponentData, IDisposable
     {
@@ -112,11 +119,32 @@ namespace EntJoy.ECS.Tests
         }
 
         [Theory]
+        [InlineData(typeof(AnnotatedNonRelation))]
+        [InlineData(typeof(MultiParent))]
         [InlineData(typeof(NegativeRelationSlots))]
         [InlineData(typeof(ConflictingRelationModes))]
-        [InlineData(typeof(SingleRelationWithMultiConstraint))]
+        [InlineData(typeof(SingleRelationWithInvalidCapacity))]
         public void TypeRegistration_RejectsContradictoryConstraints(Type type)
             => Assert.Throws<InvalidOperationException>(() => ComponentTypeManager.GetComponentType(type));
+
+        [Fact]
+        public void DefaultAttribute_IsSingleTargetAndHierarchyDoesNotImplyDeletion()
+        {
+            var type = ComponentTypeManager.GetComponentType(typeof(DefaultRelation));
+            Assert.True(type.IsRelation);
+            Assert.False(type.IsMultiRelation);
+            Assert.False(type.IsExclusiveTarget);
+            Assert.False(type.DeleteWithTarget);
+            using var world = NewWorld();
+            var em = world.EntityManager;
+            var parent = New(em);
+            var child = New(em);
+            em.AddRelationship<LifecycleParent>(child, parent);
+            em.DestroyEntity(parent);
+            Assert.True(Alive(em, child));
+            Assert.False(em.HasRelationship<LifecycleParent>(child));
+            Assert.Empty(em.GetRelationsOf<LifecycleParent>(parent));
+        }
 
         [Fact]
         public void ComponentWrites_UpdateTheSameReverseIndexAndPreserveDataOnRetarget()
@@ -212,7 +240,7 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void AcyclicRelation_RejectsCyclesThroughAllWriteEntrypoints()
+        public void Hierarchy_RejectsCyclesThroughAllWriteEntrypoints()
         {
             using var world = NewWorld();
             var em = world.EntityManager;

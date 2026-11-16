@@ -132,12 +132,12 @@ namespace EntJoy.ECS
                         }
                         ValidateRelationshipEntity(target.ToEntity(), type, "target");
                         edgeCount = checked(edgeCount + copies);
-                        if (type.IsAcyclicRelation)
+                        if (type.IsHierarchy)
                         {
                             if (!acyclicRoots.TryGetValue(type, out var roots)) acyclicRoots[type] = roots = new();
                             roots.Add(entity);
                         }
-                        if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && !sourceIndices.ContainsKey(target.ToEntity()))
+                        if (type.IsExclusiveTarget && !sourceIndices.ContainsKey(target.ToEntity()))
                             throw new InvalidOperationException("Cloning an occupied external exclusive target would displace its existing owner.");
                     }
                 }

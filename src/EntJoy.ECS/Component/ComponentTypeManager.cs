@@ -13,12 +13,11 @@ namespace EntJoy.ECS
         public bool IsEnableable;
         public bool IsShared;
         public bool IsRelation;
-        public bool IsExclusiveRelation;
         public bool IsMultiRelation;
         public int MultiRelationMaxSlots;
         public bool IsExclusiveTarget;
-        public bool CascadeOnTargetDeleted;
-        public bool IsAcyclicRelation;
+        public bool DeleteWithTarget;
+        public bool IsHierarchy;
         public bool IsDisposable;
         public bool IsCopyable;
         public delegate*<void*, void> DisposeFn;
@@ -68,12 +67,19 @@ namespace EntJoy.ECS
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool IsRelationType<T>() where T : struct => default(T) is IRelationComponent;
+        public static bool IsRelationType<T>() where T : struct => RelationFlag<T>.Value;
+
+        // 每个 T 只求值一次：default(T) is I 在泛型路径下每次调用都会装箱判定。
+        private static class RelationFlag<T> where T : struct
+        {
+            internal static readonly bool Value = default(T) is IRelationComponent;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void CheckWritableAccess<T>() where T : struct
         {
-            if (IsRelationType<T>() || (Volatile.Read(ref _activeCopyScopes) != 0 && _copyDepth != 0))
+            // 先读全局计数：绝大多数调用在这里短路，避免每次访问付 TLS 读取。
+            if (RelationFlag<T>.Value || (Volatile.Read(ref _activeCopyScopes) != 0 && _copyDepth != 0))
                 throw WritableAccessException<T>();
         }
 
@@ -177,7 +183,10 @@ namespace EntJoy.ECS
         {
             bool isShared = typeof(ISharedComponentData).IsAssignableFrom(type);
             bool isRelation = typeof(IRelationComponent).IsAssignableFrom(type);
-            if (isRelation) ValidateRelationDefinition(type);
+            var relation = (RelationshipComponentAttribute)Attribute.GetCustomAttribute(type, typeof(RelationshipComponentAttribute));
+            if (relation != null && !isRelation)
+                throw new InvalidOperationException($"Relationship component '{type.FullName}' must implement IRelationComponent.");
+            if (isRelation) ValidateRelationDefinition(type, relation);
 
             int size;
             try
@@ -191,20 +200,16 @@ namespace EntJoy.ECS
                     + $"(managed references only allowed in {nameof(ISharedComponentData)}).", ex);
             }
 
-            var multi = (MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute));
-            var cascade = (OnTargetDeletedAttribute)Attribute.GetCustomAttribute(type, typeof(OnTargetDeletedAttribute));
-
             var info = new ComponentTypeInfo
             {
                 IsEnableable = typeof(IEnableableComponent).IsAssignableFrom(type),
                 IsShared = isShared,
                 IsRelation = isRelation,
-                IsExclusiveRelation = isRelation && Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute)),
-                IsMultiRelation = isRelation && multi != null,
-                MultiRelationMaxSlots = isRelation && multi != null ? multi.MaxSlots : 0,
-                IsExclusiveTarget = isRelation && multi != null && Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute)),
-                CascadeOnTargetDeleted = isRelation && cascade != null && cascade.Cascade,
-                IsAcyclicRelation = isRelation && Attribute.IsDefined(type, typeof(AcyclicRelationAttribute)),
+                IsMultiRelation = relation?.IsMultiple == true,
+                MultiRelationMaxSlots = relation?.MaxTargets ?? 0,
+                IsExclusiveTarget = relation?.ExclusiveTarget == true,
+                DeleteWithTarget = relation?.DeleteWithTarget == true,
+                IsHierarchy = relation?.Hierarchy == true,
                 IsDisposable = typeof(IDisposable).IsAssignableFrom(type),
                 IsCopyable = typeof(ICopyable).IsAssignableFrom(type),
             };
@@ -242,12 +247,14 @@ namespace EntJoy.ECS
             return ManagedValueLayout.SizeOf(type);
         }
 
-        private static void ValidateRelationDefinition(Type type)
+        private static void ValidateRelationDefinition(Type type, RelationshipComponentAttribute relation)
         {
-            bool multi = Attribute.IsDefined(type, typeof(MultiRelationAttribute));
-            bool exclusive = Attribute.IsDefined(type, typeof(ExclusiveRelationAttribute));
-            bool exclusiveTarget = Attribute.IsDefined(type, typeof(ExclusiveTargetAttribute));
-            bool acyclic = Attribute.IsDefined(type, typeof(AcyclicRelationAttribute));
+            bool multi = relation?.IsMultiple == true;
+            int slots = relation?.MaxTargets ?? 0;
+            if (slots < 0 || slots == 1)
+                throw new InvalidOperationException($"Relation '{type.FullName}' MaxTargets must be zero or at least two.");
+            if (multi && relation.Hierarchy)
+                throw new InvalidOperationException($"Hierarchy '{type.FullName}' requires a single parent; Multiple and MaxTargets cannot be combined with Hierarchy.");
             bool copyable = false;
             foreach (var implemented in type.GetInterfaces())
                 if (implemented.IsGenericType && implemented.GetGenericTypeDefinition() == typeof(ICopyable<>))
@@ -256,13 +263,8 @@ namespace EntJoy.ECS
                 || typeof(IEnableableComponent).IsAssignableFrom(type) || typeof(IDisposable).IsAssignableFrom(type)
                 || copyable)
                 throw new InvalidOperationException($"Relation '{type.FullName}' must be a sequential unmanaged value without shared, enableable or resource hooks.");
-            if ((multi && (exclusive || acyclic)) || (!multi && exclusiveTarget))
-                throw new InvalidOperationException($"Relation '{type.FullName}' has incompatible relationship attributes.");
 
             if (!multi) return;
-            int slots = ((MultiRelationAttribute)Attribute.GetCustomAttribute(type, typeof(MultiRelationAttribute)))!.MaxSlots;
-            if (slots < 0 || slots == 1)
-                throw new InvalidOperationException($"Relation '{type.FullName}' MaxSlots must be zero or at least two.");
             int expected = slots == 0 ? sizeof(RelationSlot) : checked(slots * sizeof(RelationSlot));
             if (ManagedValueLayout.SizeOf(type) != expected)
                 throw new InvalidOperationException($"Relation '{type.FullName}' requires exactly {expected} bytes for its slots.");
@@ -298,22 +300,19 @@ namespace EntJoy.ECS
         /// <summary>该组件类型是否为关系组件（IRelationComponent）。</summary>
         public static bool GetIsRelation(int id) => _componentTypeInfos[id].IsRelation;
 
-        public static bool GetIsAcyclicRelation(int id) => _componentTypeInfos[id].IsAcyclicRelation;
+        public static bool GetIsHierarchy(int id) => _componentTypeInfos[id].IsHierarchy;
 
-        /// <summary>该关系组件类型是否标记 [ExclusiveRelation]（真 1:1，入边唯一）。</summary>
-        public static bool GetIsExclusiveRelation(int id) => _componentTypeInfos[id].IsExclusiveRelation;
-
-        /// <summary>该关系组件类型是否标记 [MultiRelation]（出边多值，1:N / M:N）。</summary>
+        /// <summary>该关系是否允许多个目标。</summary>
         public static bool GetIsMultiRelation(int id) => _componentTypeInfos[id].IsMultiRelation;
 
-        /// <summary>[MultiRelation(MaxSlots=N)] 的定长槽位数；0 = 托管列表模式。</summary>
+        /// <summary>多目标关系列的固定槽位数；0 表示托管列表。</summary>
         public static int GetMultiRelationMaxSlots(int id) => _componentTypeInfos[id].MultiRelationMaxSlots;
 
-        /// <summary>该多值关系是否标记 [ExclusiveTarget]（入边唯一，背包语义）。</summary>
+        /// <summary>该关系的目标是否只能由一个来源持有。</summary>
         public static bool GetIsExclusiveTarget(int id) => _componentTypeInfos[id].IsExclusiveTarget;
 
-        /// <summary>该关系是否声明级联（[OnTargetDeleted(Cascade=true)]，target 销毁时级联销毁 sources）。</summary>
-        public static bool GetCascadeOnTargetDeleted(int id) => _componentTypeInfos[id].CascadeOnTargetDeleted;
+        /// <summary>目标删除时是否一并删除来源。</summary>
+        public static bool GetDeleteWithTarget(int id) => _componentTypeInfos[id].DeleteWithTarget;
 
         /// <summary>该组件类型是否实现 IDisposable（持有原生资源）。</summary>
         public static bool GetIsDisposable(int id) => _componentTypeInfos[id].IsDisposable;
@@ -354,6 +353,7 @@ namespace EntJoy.ECS
         /// IDisposable 组件 → 位拷贝 dst←src 后清空 src（转移指针，避免双所有权/悬垂）；
         /// 用于跨 archetype 迁移（CopyComponentsTo）。
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void MoveComponentValue(ComponentType type, void* src, void* dst)
         {
             Unsafe.CopyBlock(dst, src, (uint)type.Size);

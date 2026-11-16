@@ -143,7 +143,7 @@ namespace EntJoy.ECS
         }
 
         /// <summary>记录 AddComponent 命令</summary>
-        public void AddComponent<T>(Entity entity, T value) where T : struct, IComponentData
+        public void AddComponent<T>(Entity entity, T value) where T : struct
         {
             int typeId = ComponentTypeManager.GetComponentType(typeof(T)).Id;
             lock (_sync)
