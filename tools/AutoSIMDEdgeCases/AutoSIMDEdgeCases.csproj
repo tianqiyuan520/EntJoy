@@ -15,4 +15,13 @@
     <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
   </ItemGroup>
 
+  <!-- 原生产物由 EntJoySample 构到仓库 bin/；这里的 OutDir 是 tools/*/bin/Release，
+       ProjectReference 只复制托管输出 ⇒ 不显式拷贝，本工具会静默跑托管回退，验证结果失去意义。 -->
+  <Target Name="CopyNativeArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <NativeArtifacts Include="$(MSBuildThisFileDirectory)..\..\bin\Native*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeArtifacts)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

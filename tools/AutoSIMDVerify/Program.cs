@@ -178,6 +178,8 @@ namespace AutoSIMDVerify
             }
 
             // ═══════════ 对抗性压力测试（嵌套×分支×循环×多变量）═══════════
+            // ═══════════ pair 元素（uint2）═══════════
+            RunPairCase(ref passed, ref failed);
             RunStress(passed: ref passed, failed: ref failed);
 
             Console.WriteLine($"\n{'=',-1}{"",-1} PASS {passed} / {passed + failed}");
@@ -185,6 +187,43 @@ namespace AutoSIMDVerify
             Console.WriteLine();
 
             NativeJobScheduler.Shutdown();
+        }
+
+        /// <summary>uint2 pair：C# 逐元素 vs AutoSIMD native，逐元素比对（含无符号 helper 与大值）。</summary>
+        private static unsafe void RunPairCase(ref int passed, ref int failed)
+        {
+            uint[] seeds = { 0u, 1u, 3u, 7u, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x01000001u };
+            using var input = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            using var expect = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            using var actual = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            var raw = (EntJoy.Mathematics.uint2*)input.GetUnsafePtr();
+            for (int i = 0; i < N; i++)
+                raw[i] = new EntJoy.Mathematics.uint2(seeds[i % seeds.Length], seeds[(i * 5 + 2) % seeds.Length]);
+
+            foreach (int mode in new[] { 0, 1, 2 })
+            {
+                var reference = new EntJoySample.AutoSIMDTest.PairArith_CSharp_PF { Input = input, Result = expect, Mode = mode };
+                for (int i = 0; i < N; i++) reference.Execute(i);
+                for (int i = 0; i < N; i++) ((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] = new EntJoy.Mathematics.uint2(0x5A5A5A5Au, 0xA5A5A5A5u);
+
+                var job = new EntJoySample.AutoSIMDTest.PairArith_SIMD_PF { Input = input, Result = actual, Mode = mode };
+                job.Schedule(N, 0).Complete();
+
+                int errs = 0;
+                for (int i = 0; i < N; i++)
+                    if (((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] != ((EntJoy.Mathematics.uint2*)expect.GetUnsafePtr())[i])
+                        errs++;
+                if (errs == 0)
+                {
+                    Console.WriteLine($"  ✅ P14 Pair uint2 (mode={mode})");
+                    passed++;
+                }
+                else
+                {
+                    Console.WriteLine($"  ❌ P14 Pair uint2 (mode={mode}) mismatches={errs}/{N}");
+                    failed++;
+                }
+            }
         }
 
         private static NativeArray<float> RandF(int n, int seed, bool positive = false)

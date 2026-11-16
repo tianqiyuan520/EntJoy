@@ -26,6 +26,7 @@ namespace AutoSIMDEdgeCases
             int passed = 0, failed = 0;
             RunEdgeCases(ref passed, ref failed);
             RunFuzz(ref passed, ref failed);
+            RunPairEdge(ref passed, ref failed);
 
             // ★ Diagnostic: direct extension method call for EC5 (same as normal path)
             Console.WriteLine("  --- Direct batch call diagnostic ---");
@@ -183,6 +184,34 @@ namespace AutoSIMDEdgeCases
         // ════════════════════════════════════════════════════════════════
         // Random fuzz: multiple seeds, random data + random special value injection
         // ════════════════════════════════════════════════════════════════
+        /// <summary>uint2 pair：无符号边界（符号位、最大/次大）与非 2 的幂除数，逐元素与 C# 基线比对。</summary>
+        private static unsafe void RunPairEdge(ref int passed, ref int failed)
+        {
+            const int n = 4093;
+            uint[] seeds = { 0u, 1u, 3u, 7u, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x01000001u };
+            using var input = new NativeArray<EntJoy.Mathematics.uint2>(n, Allocator.Persistent);
+            using var expect = new NativeArray<EntJoy.Mathematics.uint2>(n, Allocator.Persistent);
+            using var actual = new NativeArray<EntJoy.Mathematics.uint2>(n, Allocator.Persistent);
+            for (int i = 0; i < n; i++)
+                ((EntJoy.Mathematics.uint2*)input.GetUnsafePtr())[i] =
+                    new EntJoy.Mathematics.uint2(seeds[i % seeds.Length], seeds[(i * 5 + 2) % seeds.Length]);
+
+            foreach (int mode in new[] { 0, 1, 2 })
+            {
+                var oracle = new PairArith_CSharp_PF { Input = input, Result = expect, Mode = mode };
+                for (int i = 0; i < n; i++) oracle.Execute(i);
+                for (int i = 0; i < n; i++) ((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] = new EntJoy.Mathematics.uint2(1u, 2u);
+                var job = new PairArith_SIMD_PF { Input = input, Result = actual, Mode = mode };
+                job.Schedule(n, 0).Complete();
+                int errs = 0;
+                for (int i = 0; i < n; i++)
+                    if (((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] != ((EntJoy.Mathematics.uint2*)expect.GetUnsafePtr())[i])
+                        errs++;
+                if (errs == 0) { Console.WriteLine($"  ✅ Pair uint2 edge (mode={mode})"); passed++; }
+                else { Console.WriteLine($"  ❌ Pair uint2 edge (mode={mode}) mismatches={errs}/{n}"); failed++; }
+            }
+        }
+
         private static void RunFuzz(ref int passed, ref int failed)
         {
             int seeds = _fastMode ? 6 : 24;
