@@ -48,7 +48,7 @@ namespace EntJoy.ECS
 
         /// <summary>逐列是否关系列（索引同 <see cref="ComponentOffsets"/>）。关系列只能读，
         /// 逐次访问的可写引取用要判它；放元数据里省掉回查 Archetype.Types。</summary>
-        public readonly bool[] RelationColumns;
+        internal readonly bool[] RelationColumns;
 
         public ChunkMetadata(
             Archetype archetype,
