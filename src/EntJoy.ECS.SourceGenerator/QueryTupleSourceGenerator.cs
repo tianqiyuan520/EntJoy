@@ -146,10 +146,10 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
-            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        _slotOffset++;");
             sb.AppendLine("        // 区间内只递增槽位，跨区间时再解析过滤和列基址。");
             sb.AppendLine("        if (_slotOffset < 0) return true;");
+            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        {");
             if (useChunkTable)
             {
@@ -189,9 +189,8 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("        get");
             sb.AppendLine("        {");
-            sb.AppendLine("            _readState.ValidateTracked();");
             sb.AppendLine("            if (_base0 == null) throw new InvalidOperationException();");
-            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} + _slotOffset"))}, _readState);");
+            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} + _slotOffset"))});");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -202,12 +201,10 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"    private readonly {genParams[i]}* _c{i};");
-            sb.AppendLine("    private readonly QueryReadState _readState;");
             sb.AppendLine();
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))}, QueryReadState readState)");
+            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))})");
             sb.AppendLine("    {");
-            sb.AppendLine("        _readState = readState;");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"        _c{i} = c{i};");
             sb.AppendLine("    }");

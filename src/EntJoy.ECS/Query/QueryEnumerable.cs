@@ -149,29 +149,22 @@ namespace EntJoy.ECS
                 // 借用校验收敛到 MoveNext 的块边界；这里只拒绝越界读取。
                 if (_slotOffset >= 0) throw new InvalidOperationException();
                 return new EntityQueryResult<T0, T1>(_base0 + _slotOffset,
-                    ComponentTypeManager.IsRelationType<T1>() && _base1 == null ? null : _base1 + _slotOffset, _readState);
+                    ComponentTypeManager.IsRelationType<T1>() && _base1 == null ? null : _base1 + _slotOffset);
             }
         }
     }
 
-    // 结果对象只携带指针：借用校验由枚举器在块边界完成，结构变更后继续解引用属未定义行为。
+    // 结果对象只携带指针：借用校验由枚举器在 MoveNext 的块边界完成，结构变更后继续解引用属未定义行为。
     public unsafe readonly struct EntityQueryResult<T0, T1> where T0 : struct where T1 : struct
     {
         private readonly T0* _c0;
         private readonly T1* _c1;
-        private readonly QueryReadState _readState;
 
         /// <summary>裸指针构造由调用方保证寿命，不附带 World 借用版本。</summary>
         public EntityQueryResult(T0* c0, T1* c1)
-            : this(c0, c1, default)
-        {
-        }
-
-        internal EntityQueryResult(T0* c0, T1* c1, QueryReadState readState)
         {
             _c0 = c0;
             _c1 = c1;
-            _readState = readState;
         }
 
         public ref readonly T0 ReadOnlyComp0

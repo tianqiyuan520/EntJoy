@@ -128,7 +128,7 @@ namespace EntJoy.ECS
             {
                 // 借用校验收敛到 MoveNext 的块边界；这里只拒绝越界读取。
                 if (_slotOffset >= 0) throw new InvalidOperationException();
-                return new EntityQueryResult<T0>(_base0 + _slotOffset, _readState);
+                return new EntityQueryResult<T0>(_base0 + _slotOffset);
             }
         }
     }
@@ -137,18 +137,11 @@ namespace EntJoy.ECS
     public unsafe readonly struct EntityQueryResult<T0> where T0 : struct
     {
         private readonly T0* _c0;
-        private readonly QueryReadState _readState;
 
         /// <summary>裸指针构造由调用方保证寿命，不附带 World 借用版本。</summary>
         public EntityQueryResult(T0* c0)
-            : this(c0, default)
-        {
-        }
-
-        internal EntityQueryResult(T0* c0, QueryReadState readState)
         {
             _c0 = c0;
-            _readState = readState;
         }
 
         public ref readonly T0 ReadOnlyComp0
