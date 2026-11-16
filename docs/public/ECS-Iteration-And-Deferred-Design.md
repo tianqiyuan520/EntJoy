@@ -71,10 +71,10 @@
 | 入口 | 耗时 | 相对 Arch `World.Set` |
 | --- | --- | --- |
 | `EntityManager.Set<T>(entity, value)` | 1588–1656 µs | 1.36–1.45 |
-| `EntityManager.SetComponent<T>(entity, value)` | 3404–3455 µs | 3.12–3.16 |
+| `EntityManager.SetComponent<T>(entity, value)` | 2457–2839 µs | 2.2–2.45 |
 | Arch `World.Set<T>(entity, value)` | 1092–1128 µs | 1.00 |
 
-`Set<T>` 剩下的差额主要在变更位标记与观察者判定，Arch 没有这两项。两条写入入口语义重叠、耗时差一倍：`Set<T>` 走类型化直写，`SetComponent<T>` 经定位表但每次按 `Type` 查一次类型表、并销毁旧值。两者应收敛到同一实现。
+`Set<T>` 剩下的差额主要在变更位标记与观察者判定，Arch 没有这两项。两条写入入口语义重叠、耗时仍差一半：`Set<T>` 走类型化直写，`SetComponent<T>` 经定位表但每次按 `Type` 查一次类型表、并销毁旧值。收敛方式是让它转调 `Set<T>`。
 
 启用位翻转：`SetComponentEnabled<T>` 逐实体 930–938 µs（10 万次，每次 9.3 ns）。原先是 3167–3364 µs——完成作业的路径无条件进 `_activeJobLock`，没有 Job 时也照取一次锁；列下标还要先按 `typeof(T)` 查类型表、再查一次原型字典。改成先看记账标记、列下标走按组件 id 索引的数组后落到 9.3 ns。Add / Remove / Destroy 早就用了这个空闲短路，写入与启用位一直漏着。
 
