@@ -141,7 +141,7 @@ namespace NativeTranspiler.Analyzer.Common
                 var ispcType = IspcTypeMapper.FromCpp(cppType);
                 string address = CppIntegerSemantics.CastOperand(
                     CppIntegerSemantics.JobAddress("__jobContext", slot.Offset));
-                if (IsVectorType(cppType) || cppType.Contains("::"))
+                if (IsVectorType(cppType) || cppType.Contains("::") || IsUserStructType(slot.Field.Type))
                     sb.AppendLine($"    auto* {slot.Field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*){address});");
                 else
                     sb.AppendLine($"    auto* {slot.Field.Name}_ptr = ({cppType}*){address};");
@@ -327,7 +327,7 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     var ispcType = IspcTypeMapper.FromCpp(cppType);
-                    if (IsVectorType(cppType) || cppType.Contains("::"))
+                    if (IsVectorType(cppType) || cppType.Contains("::") || IsUserStructType(field.Type))
                     {
                         sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*)(__jobContext + {offset}));");
                     }

@@ -132,7 +132,7 @@ namespace NativeTranspiler.Analyzer
                 if (kvp.Value.Kind >= VarKind.Varying)
                 {
                     var cppType = kvp.Value.CppType;
-                    if (cppType.Contains("float2") || cppType.Contains("int2"))
+                    if (cppType is "EntJoy::Mathematics::float2" or "EntJoy::Mathematics::int2")
                         _float2VaryingVars.Add(kvp.Key);
                 }
             }
