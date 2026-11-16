@@ -148,7 +148,7 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__unr_exit_{_labelCounter++}";
             AppendLine($"// Unrolled loop: {count} iterations, step {step}");
             AppendLine($"simd_value<int> simd_{ivName};");
-            string savedMask = _currentMask;
+            var savedMask = _currentMask;
 
             var bodyBlock = stmt.Statement is BlockSyntax bs
                 ? bs
@@ -189,7 +189,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     // If savedMask is the all_true literal (not a named variable), we can't
                     // assign to it. Introduce a named variable first.
-                    if (SimdMaskText.IsAllTrue(savedMask))
+                    if (savedMask.IsAllTrue)
                     {
                         string namedMask = $"__init_mask_{_labelCounter++}";
                         AppendLine($"simd_mask {namedMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -253,7 +253,7 @@ namespace NativeTranspiler.Analyzer
             if (!string.IsNullOrEmpty(_returnedMaskVar))
             {
                 // Compute non-returned lanes mask (for the default store)
-                if (SimdMaskText.IsAllTrue(savedMask))
+                if (savedMask.IsAllTrue)
                 {
                     string postMaskVar = $"__post_mask_{_labelCounter++}";
                     AppendLine($"simd_mask {postMaskVar} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -595,7 +595,7 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__while_exit_{_labelCounter++}";
             string continueLabel = $"__while_continue_{_labelCounter++}";
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = SimdMaskText.IsAllTrue(_currentMask);
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
 
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
@@ -632,7 +632,7 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMaskIsAllTrue ? SimdMaskText.AllTrue : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
             AppendLine("}");
             _indent--;
             if (_gotoTargets.Contains(exitLabel))
@@ -657,7 +657,7 @@ namespace NativeTranspiler.Analyzer
             // savedMask 必须在 while 之前声明：循环结束后的结果 store 会引用它
             //（`_currentMask` 在循环后被恢复为 savedMask），放循环体内会越作用域。
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = SimdMaskText.IsAllTrue(_currentMask);
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             // 循环条件常量提升：`j < 16` 翻译出的 n_set1_epi32(16)/n_set1_ps(常量)
@@ -676,7 +676,7 @@ namespace NativeTranspiler.Analyzer
             //   否则 _currentMask 是 "a & b & c" 复合字符串，`.any_true()`/`.m` 会因运算符
             //   优先级错绑（`!a & b & c.any_true()`、`a & b & c.m`）→ 非法 C++。
             string combined = $"__wm_{_maskCounter++}";
-            if (SimdMaskText.IsAllTrue(_currentMask))
+            if (_currentMask.IsAllTrue)
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({condVar}.m, {tracker}.m) }};");
             else
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask(n_and_mask({_currentMask}.m, {condVar}.m), {tracker}.m) }};");
@@ -700,7 +700,7 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{continueLabel}: ;");
             // 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
             //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter。
-            _currentMask = savedMaskIsAllTrue ? SimdMaskText.AllTrue : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
             AppendLine("}");
             _indent--;
             if (_gotoTargets.Contains(exitLabel))
@@ -742,7 +742,7 @@ namespace NativeTranspiler.Analyzer
 
             // savedMask 必须在 do 之前声明：`} while(...)` 条件在 do 块之后引用它（越作用域）。
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = SimdMaskText.IsAllTrue(_currentMask);
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             AppendLine("do");
@@ -752,7 +752,7 @@ namespace NativeTranspiler.Analyzer
             // 物化组合掩码（current & tracker），避免 _currentMask 变成 "a & b" 复合串
             //   （嵌套 if 里的 `.m`/`.any_true()` 会优先级错绑）。
             string combined = $"__dm_{_maskCounter++}";
-            if (SimdMaskText.IsAllTrue(_currentMask))
+            if (_currentMask.IsAllTrue)
                 AppendLine($"simd_mask {combined} = {tracker};");
             else
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({_currentMask}.m, {tracker}.m) }};");
@@ -773,7 +773,7 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMaskIsAllTrue ? SimdMaskText.AllTrue : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
 
             string condExpr = TranslateCondition(stmt.Condition);
             string condVar = $"__dcond_{_maskCounter++}";

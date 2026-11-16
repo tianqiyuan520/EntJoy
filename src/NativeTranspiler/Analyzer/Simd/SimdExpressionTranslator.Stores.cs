@@ -100,7 +100,7 @@ namespace NativeTranspiler.Analyzer
                     throw new System.NotSupportedException(
                         $"复合赋值不支持结构体元素：`{elemType} {compoundOp}` —— 请拆成两步（先读局部变量、再整体写回）。");
                 string elemPtr = $"(({elemType}*)({basePtr}))";
-                bool narrowedCmp = !SimdMaskText.IsAllTrue(_currentMask);
+                bool narrowedCmp = !_currentMask.IsAllTrue;
                 if (idxKind >= VarKind.Varying)
                 {
                     string laneRhs = rhsKind >= VarKind.Varying
@@ -118,7 +118,7 @@ namespace NativeTranspiler.Analyzer
 
             if (isNarrowElem)
             {
-                bool narrowed = !SimdMaskText.IsAllTrue(_currentMask);
+                bool narrowed = !_currentMask.IsAllTrue;
                 string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 string ep = $"(({elemType}*)({basePtr}))";
                 // 结构体元素（float2/int2/自定义）用构造语法；内置标量用 static_cast。
@@ -144,7 +144,7 @@ namespace NativeTranspiler.Analyzer
                     // Conditional (if/else) store: when the current mask is narrowed,
                     //   ANY store (contiguous or not, uniform or varying rhs) must be
                     //   and later branches overwrite earlier ones.
-                    bool inNarrowedContext = !SimdMaskText.IsAllTrue(_currentMask);
+                    bool inNarrowedContext = !_currentMask.IsAllTrue;
                     if (inNarrowedContext)
                     {
                         // rhs may be uniform (scalar literal) or varying (SIMD expr).
@@ -266,7 +266,7 @@ namespace NativeTranspiler.Analyzer
             string write = fieldType == "int" && op is "+=" or "-=" or "*="
                 ? $"{target} = (int)((unsigned){target} {op[0]} (unsigned)({laneValue}));"
                 : $"{target} {op} {laneValue};";
-            string guard = SimdMaskText.IsAllTrue(_currentMask) ? ""
+            string guard = _currentMask.IsAllTrue ? ""
                 : $"if(n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))";
             return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{{{write}}}}}}}";
         }
@@ -298,7 +298,7 @@ namespace NativeTranspiler.Analyzer
                 string arrName2 = id2.Identifier.Text;
                 if (_nativeArrayParams.TryGetValue(arrName2, out var saElemType)
                     && saElemType != "float" && saElemType != "int"
-                    && !saElemType.Contains("float2") && !saElemType.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(saElemType) && !SimdVectorTypes.IsInt2(saElemType))
                 {
                     return EmitStructFieldStore(assign, ma, ea2, arrName2, saElemType);
                 }
@@ -319,12 +319,12 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD context: per-lane field scatter
                 // For varying index, generate per-lane scatter to arr_ptr[v_i_lane].field
-                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || !SimdMaskText.IsAllTrue(_currentMask))
+                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || !_currentMask.IsAllTrue)
                 {
                     string extractFn3 = "n_extract_lane_f32";
                     string combineExpr = op3 == "=" ? rhsExpr3 : $"{idxExpr3} {op3.Replace("=", "")} {rhsExpr3}";
 
-                    if (!SimdMaskText.IsAllTrue(_currentMask))
+                    if (!_currentMask.IsAllTrue)
                     {
                         return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
                     }
@@ -344,7 +344,7 @@ namespace NativeTranspiler.Analyzer
                 string arrName5 = id5.Identifier.Text;
                 if (_nativeArrayParams.TryGetValue(arrName5, out var saElemType5)
                     && saElemType5 != "float" && saElemType5 != "int"
-                    && !saElemType5.Contains("float2") && !saElemType5.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(saElemType5) && !SimdVectorTypes.IsInt2(saElemType5))
                 {
                     string fieldPath = ma6.Name.Identifier.Text + "." + ma5.Name.Identifier.Text + "()";
                     string idxExpr5 = ea5.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea5.ArgumentList?.Arguments[0]?.Expression) : "0";
@@ -356,7 +356,7 @@ namespace NativeTranspiler.Analyzer
                     if (idxKind5 >= VarKind.Varying)
                     {
                         // Per-lane scatter for struct sub-field write
-                        if (!SimdMaskText.IsAllTrue(_currentMask))
+                        if (!_currentMask.IsAllTrue)
                             return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
                         return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
@@ -383,7 +383,7 @@ namespace NativeTranspiler.Analyzer
                     && svlEA.Expression is IdentifierNameSyntax svlArrId
                     && _nativeArrayParams.TryGetValue(svlArrId.Identifier.Text, out var svlElemType)
                     && svlElemType != "float" && svlElemType != "int"
-                    && !svlElemType.Contains("float2") && !svlElemType.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(svlElemType) && !SimdVectorTypes.IsInt2(svlElemType))
                 {
                     string svlIdxExpr = svlEA.ArgumentList?.Arguments.Count > 0
                         ? TranslateExpression(svlEA.ArgumentList.Arguments[0].Expression)
@@ -417,7 +417,7 @@ namespace NativeTranspiler.Analyzer
                 && _variables.TryGetValue(lhsId.Identifier.Text, out var vector) && vector.Kind >= VarKind.Varying)
             {
                 string value = op == "=" ? rhs : $"{lhs} {op.Substring(0, op.Length - 1)} ({rhs})";
-                return SimdMaskText.IsAllTrue(_currentMask)
+                return _currentMask.IsAllTrue
                     ? $"{lhs} = {value}" : $"{lhs} = blend({lhs}, {value}, {_currentMask})";
             }
 

@@ -296,7 +296,7 @@ namespace NativeTranspiler.Analyzer
                 // 数组字段 `X_ptr` 已是目标元素类型的指针，直接用；
                 // 裸指针变量本身是指针，同样直接用（不要转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
                 string elemPtr = info.Base;
-                bool narrowed = !SimdMaskText.IsAllTrue(_currentMask);
+                bool narrowed = !_currentMask.IsAllTrue;
                 string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 if (idxKind >= VarKind.Varying)
                 {
@@ -309,7 +309,7 @@ namespace NativeTranspiler.Analyzer
             {
                 string target = TranslateExpression(operand);
                 if (target.Contains(UnsupportedMarkers.Prefix)) return marker;
-                if (!SimdMaskText.IsAllTrue(_currentMask)
+                if (!_currentMask.IsAllTrue
                     && (_forLoopVars.Contains(identifier.Identifier.Text)
                         || (_variables.TryGetValue(identifier.Identifier.Text, out var variable)
                             && variable.Kind >= VarKind.Varying)))
