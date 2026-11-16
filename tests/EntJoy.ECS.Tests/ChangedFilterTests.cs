@@ -48,5 +48,29 @@ namespace EntJoy.ECS.Tests
             foreach (var result in world.Query<ChgPos, ChgVel>().WithChanged<ChgPos>()) visited++;
             Assert.Equal(0, visited);
         }
+
+        [Fact]
+        public void Chunks_WithChanged_YieldsOnlyDirtyChunks()
+        {
+            TestBackend.EnsureInitialized();
+            using var world = new World("ChangedFilterChunks");
+            var em = world.EntityManager;
+            var changed = em.NewEntity(typeof(ChgPos), typeof(ChgVel));
+            var clean = em.NewEntity(typeof(ChgPos), typeof(ChgVel), typeof(ChgTag));
+            em.Set(changed, new ChgPos { X = 1 });
+            em.Set(clean, new ChgPos { X = 2 });
+            em.ClearAllChangedBitMasks();
+            em.Set(changed, new ChgPos { X = 3 });
+
+            int chunks = 0;
+            foreach (var chunk in world.Query<ChgPos, ChgVel>().WithChanged<ChgPos>().Chunks())
+            {
+                var positions = chunk.Span<ChgPos>();
+                for (int i = 0; i < chunk.Count; i++) Assert.Equal(3, positions[i].X);
+                chunks++;
+            }
+
+            Assert.Equal(1, chunks);
+        }
     }
 }

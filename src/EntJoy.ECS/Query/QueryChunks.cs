@@ -71,7 +71,9 @@ namespace EntJoy.ECS
                 {
                     ref readonly var chunk = ref _chunks[_chunkIndex++];
                     if (chunk.EntityCount == 0) continue;
-                    if (_filter.HasSharedFilter && !_entityManager.MatchesSharedFilter(_filter, chunk)) continue;
+                    // 块级过滤（shared / changed）走 EntityManager 的单一真值来源，与 EntityQuery、Job 收集同源。
+                    if (!_entityManager.MatchesSharedFilter(_filter, chunk)) continue;
+                    if (!_entityManager.MatchesChangedFilter(_filter, chunk)) continue;
                     _current = new QueryChunk(in chunk);
                     return true;
                 }
