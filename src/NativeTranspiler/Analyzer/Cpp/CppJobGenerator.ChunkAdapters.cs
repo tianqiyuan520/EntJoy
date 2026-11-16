@@ -322,7 +322,7 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     // 标量余量循环（__chunkData → __batchData 替换）
                     var remTr = new CppChunkStatementTranslator(sm, jobStruct,
                         CollectChunkNativeArrayTypes(jobStruct, compilation),
-                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
+                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath, emitAlignmentHints: true);
                     string remBody = remTr.Translate(methodSyntax.Body);
                     remBody = remBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     remBody = remBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
@@ -338,7 +338,7 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     string loopPattern = $"for (int {entityLoopIv} = 0; {entityLoopIv} <";
                     string loopReplacement = $"for (int {entityLoopIv} = __simd_end; {entityLoopIv} <";
                     remBody = remBody.Replace(loopPattern, loopReplacement);
-                    foreach (var l in remBody.Split('\n'))
+                    foreach (var l in remBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                         if (!string.IsNullOrWhiteSpace(l))
                             simdSb.AppendLine($"        {l.TrimEnd()}");
 
@@ -350,12 +350,12 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     // 不满足 SIMD 入口条件时，标量翻译完整实体循环，保持每个实体的执行次数。
                     var fbTr = new CppChunkStatementTranslator(sm, jobStruct,
                         CollectChunkNativeArrayTypes(jobStruct, compilation),
-                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
+                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath, emitAlignmentHints: true);
                     string fbBody = fbTr.Translate(methodSyntax.Body);
                     fbBody = fbBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     fbBody = fbBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                     fbBody = fbBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                    foreach (var l in fbBody.Split('\n'))
+                    foreach (var l in fbBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                         if (!string.IsNullOrWhiteSpace(l))
                             sb.AppendLine($"        {l.TrimEnd()}");
                 }
@@ -366,20 +366,14 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                 var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
                 var st = CollectSharedComponentTypes(jobStruct, compilation);
-                var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
+                var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath, emitAlignmentHints: true);
                 var bodyCode = tr.Translate(methodSyntax.Body);
                 bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                 bodyCode = bodyCode.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                 bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                foreach (var l in bodyCode.Split(new[] { "\n" }, StringSplitOptions.None))
+                foreach (var l in bodyCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                 {
                     if (l.Length > 0) sb.Append("        ").AppendLine(l);
-                    string trimmed = l.TrimStart();
-                    if (trimmed.StartsWith("auto*") && trimmed.Contains("reinterpret_cast<"))
-                    {
-                        string varName = trimmed.Split('=')[0].Trim().Split(' ').Last();
-                        sb.AppendLine($"        (void)((intptr_t){varName} % 64 == 0);");
-                    }
                 }
             }
             if (returnsFromChunk) sb.AppendLine("        }();");

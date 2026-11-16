@@ -38,6 +38,7 @@ namespace NativeTranspiler.Analyzer
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly List<INamedTypeSymbol> _requiredSharedTypes;  // SharedComponent 类型（blittable，per-chunk 值指针）
         private readonly HashSet<string> _chunkArrayLocalNames = new();
+        private readonly bool _emitAlignmentHints;
         private bool _hasCountSnapshot;
         /// <summary>局部数组名 → 存储身份（见 <see cref="NativeArrayElementAlias.StorageKey"/>）。</summary>
         private readonly Dictionary<string, string> _chunkArrayStorageKeys = new();
@@ -53,11 +54,12 @@ namespace NativeTranspiler.Analyzer
         /// <summary>托管事件类型错误（编译时报错）。</summary>
         public List<(INamedTypeSymbol eventType, InvocationExpressionSyntax invocation)> ManagedEventErrors { get; } = new();
 
-        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false, bool enableAutoSIMD = false)
+        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false, bool enableAutoSIMD = false, bool emitAlignmentHints = false)
             : base(semanticModel, jobStruct, useFastMath, enableAutoSIMD)
         {
             _requiredComponentTypes = requiredComponentTypes;
             _requiredSharedTypes = requiredSharedTypes ?? new List<INamedTypeSymbol>();
+            _emitAlignmentHints = emitAlignmentHints;
         }
 
         protected override void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
@@ -212,6 +214,12 @@ namespace NativeTranspiler.Analyzer
                 lines.Append("*>(");
                 lines.Append(expression);
                 lines.AppendLine(");");
+
+                if (_emitAlignmentHints)
+                {
+                    lines.Append(new string(' ', _indentLevel * 4));
+                    lines.Append("(void)((intptr_t)").Append(variable.Identifier.Text).AppendLine("_ptr % 64 == 0);");
+                }
 
                 lines.Append(new string(' ', _indentLevel * 4));
                 lines.Append("int ");
