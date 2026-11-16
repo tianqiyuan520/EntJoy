@@ -6,7 +6,7 @@
 
 参考实现都是两级结构：匹配到的原型（表）列表，每个原型一段连续的块数组；每块给列指针，循环体由调用方写。Arch 是 `query.GetChunkIterator()` + `chunk.GetSpan<T>()`，EnTT 是 `pool.begin()`，Flecs 是 `ecs_query_next` + `ecs_field`，DOTS 是 `ArchetypeChunk` + `GetNativeArray`。
 
-EntJoy 同构：`Chunks()` 按原型列表推进，`QueryChunk.Span<T>()` 给列视图，`Entities()` 给该块的实体句柄。块级过滤（shared / changed）在进入结果前判定。
+EntJoy 同构：`Chunks()` 按原型列表推进，`QueryChunk.Span<T>()` 给列视图。块级过滤（shared / changed）在进入结果前判定；逐实体过滤不在块视图里表达，构造时直接拒绝。
 
 读数：两组件 28.0–30.2 µs，Arch 27.0–27.3 µs。**已对齐。**
 
