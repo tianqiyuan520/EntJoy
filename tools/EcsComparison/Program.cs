@@ -293,7 +293,7 @@ internal static class StructuralBench
         var archMin = new double[Ops.Length];
         for (int i = 0; i < Ops.Length; i++) { entMin[i] = double.MaxValue; archMin[i] = double.MaxValue; }
 
-        using var world = new EntWorld("structural");
+        using var world = new EntWorld("structural", threadSafe: false);
         var m = world.EntityManager;
         var arch = ArchWorld.Create();
         var entBuffer = new EntJoy.ECS.Entity[n];
@@ -558,7 +558,7 @@ public class SystemComparison
     [GlobalSetup]
     public void Setup()
     {
-        ent = new EntWorld("comparison");
+        ent = new EntWorld("comparison", threadSafe: false);
         arch = ArchWorld.Create();
         Type[] types = Components == 2
             ? new Type[] { typeof(A), typeof(B) }
@@ -792,6 +792,32 @@ public class SystemComparison
     {
         if (Components == 2) EntJoyTwo();
         else EntJoyThree();
+    }
+
+    // 块循环内联回调：与 chunk 级同构，但保留实体级 API 形态。
+    public struct ForEachTwo : EntJoy.ECS.IQueryForeach<A, B>
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(ref A a, ref B b) => a.Value += b.Value;
+    }
+
+    public void EntJoyForEachTwo()
+    {
+        var action = new ForEachTwo();
+        ent.Query<A, B>().ForEach(ref action);
+    }
+
+
+    // Chunk 级查询视图：指针访问，循环体交给 JIT 自动向量化。
+    public unsafe void EntJoyChunksTwo()
+    {
+        foreach (var chunk in ent.Query<A, B>().Chunks())
+        {
+            var a = chunk.Span<A>();
+            var b = chunk.Span<B>();
+            for (int i = 0; i < a.Length; i++)
+                a[i].Value += b[i].Value;
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -1089,7 +1115,9 @@ public class SystemComparison
             {
                 var a = (A*)chunk.GetComponentArrayPointer(aIndex);
                 var b = (B*)chunk.GetComponentArrayPointer(bIndex);
-                AddTwoSpans(new Span<A>(a, chunk.EntityCount), new ReadOnlySpan<B>(b, chunk.EntityCount));
+                int n = chunk.EntityCount;
+                for (int i = 0; i < n; i++)
+                    a[i].Value += b[i].Value;
             }
         }
     }
