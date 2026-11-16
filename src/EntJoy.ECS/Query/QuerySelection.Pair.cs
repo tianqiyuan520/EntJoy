@@ -21,11 +21,6 @@ namespace EntJoy.ECS
         public QueryEnumerator<T0, T1> GetEnumerator()
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
 
-        /// <summary>块循环 + 内联回调：按 Chunk 取列 Span 后逐实体调用，循环内没有逐实体游标状态。</summary>
-        public void ForEach<TAction>(ref TAction action)
-            where TAction : struct, IQueryForeach<T0, T1>
-            => new QueryEnumerable<T0, T1>(_entityManager, _builder).ForEach(ref action);
-
         /// <summary>按 Chunk 遍历：每步只推进 Chunk，循环体由调用方写，不构造逐实体结果对象。</summary>
         public QueryChunks Chunks()
             => new QueryChunks(_entityManager, _builder);

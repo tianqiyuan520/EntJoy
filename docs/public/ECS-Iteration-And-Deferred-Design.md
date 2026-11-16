@@ -2,30 +2,27 @@
 
 ## 遍历 API 分层
 
-三层入口，按开销从低到高。三者看到的是同一批原型与 Chunk，差别只在推进粒度：
+两层入口。两者看到的是同一批原型与 Chunk，差别只在推进粒度：
 
 | 层 | 入口 | 逐实体开销 | 可用形态 |
 | --- | --- | --- | --- |
 | 按 Chunk | `world.Query<A,B>().Chunks()` | 无（循环体自己写） | 单/双组件选择器 |
-| 块循环回调 | `world.Query<A,B>().ForEach(ref action)` | 无（指针推进） | 单/双组件手写，其余由生成器发射 |
-| 实体级 | `foreach (var r in world.Query<A,B>())` | 逐实体游标 + 属性检查 | 单/双组件手写，其余由生成器发射 |
+| 实体级 | `foreach (var r in world.Query<A,B>())` | 逐实体游标 + 结果构造 | 单/双组件手写，其余由生成器发射 |
 
-`Chunks()` 逐块给出 `QueryChunk`，`Span<T>()` 直接返回该块的组件列，封装开销可忽略。`T` 不必是查询条件之一：查 `A,B` 也能取 `Span<C>`。
+`Chunks()` 逐块给出 `QueryChunk`，`Span<T>()` 直接返回该块的组件列，封装开销可忽略。`T` 不必是查询条件之一：查 `A,B` 也能取 `Span<C>`。循环体自己写，JIT 能把 `Span` 上的整数运算向量化。
 
-`ForEach` 接受 `struct` 加 `IQueryForeach<...>` 实现。动作类型是 struct 时 JIT 能内联整个循环体，因此循环内没有逐实体游标状态。但逐实体回调挡住了自动向量化：同样 10 万实体两组件，`ForEach` 72–76 µs，自己写 `Chunks()` 循环 52 µs（1.45 倍），实体级 `foreach` 131–134 µs（2.55 倍）。要让编译器向量化，就在 `Chunks()` 上自己写循环。
+`Chunks()` 不带泛型参数，任何组件组合共用一个类型；`QuerySelection<T0>` 与 `QuerySelection<T0,T1>` 已提供，三/四组件形态用 `foreach`。
 
-三种形态共用同一条「按段推进」的遍历：游标给出连续可用槽位段，段内按列基址指针索引。块级过滤（shared / changed）整块要么全要要么全不要，逐实体过滤（关系目标、启用位）给出一段连续可用槽位。10 万实体两组件：块级自写循环 27.5 µs，`ForEach` 回调 58.5，实体级 `foreach` 97.6（对 Arch `InlineQuery` 45.9 是 2.13 倍）。回调与实体级慢在逐实体的 `ref`/属性与结果构造挡住了自动向量化，不是因为多走了别的路径。
-
-`Chunks()` 不带泛型参数，任何组件组合共用一个类型；`QuerySelection<T0>` 与 `QuerySelection<T0,T1>` 已提供，三/四组件形态用 `ForEach` 或 `foreach`。
+两种形态共用同一条「按段推进」的遍历：游标给出连续可用槽位段，段内按列基址指针索引。块级过滤（shared / changed）整块要么全要要么全不要，逐实体过滤（关系目标、启用位）给出一段连续可用槽位。10 万实体两组件：块级自写循环 28.5 µs，实体级 `foreach` 89.3（对 Arch `InlineQuery` 47.9 是 1.87 倍）。实体级慢在逐实体的游标推进与结果结构体，挡住的自动向量化，不是因为多走了别的路径。
 
 ## 实体级遍历的固定成本
 
-`Comp{i}` 每次访问都先 `Validate()` 再 `ComponentTypeManager.CheckWritableAccess<T>()`，后者读两个静态位（关系列标记、拷贝作用域计数）并做一次 `Volatile.Read`：
+`Comp{i}` 直接返回 `ref`，不做逐访问校验：
 
-- 关系列在托管侧是只读的，可写 `ref` 必须拒绝；`QueryResult_CrossThreadCopyScope_PreservesCallingThreadWriteGuard` 要求这个检查逐访问生效，移到块边界会破坏语义。
-- 逐条消融 10 万实体两组件遍历（`--ab-pair query arch-query 3`，取轮内最小值）：整条 121.6–126.1 µs，去掉 `Validate()` 后 107.9–118.5，再去掉 `CheckWritableAccess` 后 103.2–119.2（与上一步区间重叠）。两条校验合计约占 8%；把校验全去掉仍是 Arch 的 1.78–1.83 倍，所以差额不在校验，在「`foreach` 取 `Current` 结果结构体、再经属性取 `ref`」与「回调直接收 `ref`」这两种形态本身。
-- 借用校验的位置是**块边界**，不是逐实体：`MoveNext` 的快路径只做 `_slotOffset++` 与符号判断，跨 Chunk 时才校验。单、双、三、四组件四条枚举器都按这一条实现；生成的三/四组件枚举器曾逐 `MoveNext` 与逐 `Current` 各校验一次，10 万实体三组件比现在慢 31%（107.7 → 73.7 μs）。
-- 要 Arch 那种零检查写入，用 `Chunks()` 或 `ForEach`：两条路按段取列基址，裸指针索引，不经过属性。
+- 关系列仍拒绝可写 `ref`：直接写会绕过关系索引。这是按类型定死的判据（泛型静态标记），不随运行期状态变化。托管多目标关系没有列，`Comp{i}` 据此抛出并指向关系读取 API。
+- 遍历期间发生的结构变更不检查。这一点与 Arch、DOTS 一致：DOTS 在 Release 里没有逐访问 SafetyHandle，结构变更必须走 `EntityCommandBuffer`；Flecs 用 defer 把变更排到迭代结束。EntJoy 对应 `DeferredCommandBuffer` 与 `world.BeginDeferred()`。
+- 借用校验保留在**块边界**：`MoveNext` 的快路径只做 `_slotOffset++` 与符号判断，跨 Chunk 时校验一次。单、双、三、四组件四条枚举器都按这一条实现；生成的三/四组件枚举器曾逐 `MoveNext` 与逐 `Current` 各校验一次，10 万实体三组件比现在慢 31%（107.7 → 73.7 µs）。
+- 逐条消融 10 万实体两组件遍历（`--ab-pair query arch-query 3`）：去掉逐访问校验后 89.3–92.4 µs，此前带校验是 93.5–97.6。校验只占约 5%，差额主要在「`foreach` 取 `Current` 结果结构体、再经属性取 `ref`」这个形态本身。
 
 ## 稀疏随机访问
 
@@ -98,7 +95,7 @@ C# 的 `ref struct` 没有确定性析构。任何依赖枚举器生命周期的
 
 ## 即时改结构与借用失效
 
-作用域外改结构立即生效，并推进结构版本，已有查询借用随之失效：实体枚举器在下一次 `MoveNext`、读取 `Current` 或访问结果属性时抛 `InvalidOperationException`，Chunk 视图在获取列视图时抛。已取出的 `ref`、`Span`、裸指针不做版本校验，调用方负责使用期间存储有效。
+作用域外改结构立即生效，并推进结构版本，已有查询借用随之失效：实体枚举器在跨 Chunk 的下一次 `MoveNext` 时抛 `InvalidOperationException`；同一 Chunk 内的 `Current` 与结果组件属性不做校验。Chunk 视图在获取列视图时抛。已取出的 `ref`、`Span`、裸指针不做版本校验，调用方负责使用期间存储有效。
 
 ## ECB 与 Job
 

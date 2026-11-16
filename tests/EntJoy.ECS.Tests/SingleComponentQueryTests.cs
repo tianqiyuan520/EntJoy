@@ -4,19 +4,14 @@ using Xunit;
 namespace EntJoy.ECS.Tests
 {
     /// <summary>
-    /// 单组件查询（<c>world.Query&lt;T0&gt;()</c>）的三条遍历入口：实体级 foreach、块循环 ForEach、Chunk 视图。
-    /// 三者必须看到同一批实体，且写回生效。
+    /// 单组件查询（<c>world.Query&lt;T0&gt;()</c>）的两条遍历入口：实体级 foreach、Chunk 视图。
+    /// 两者必须看到同一批实体，且写回生效。
     /// </summary>
     public class SingleComponentQueryTests
     {
         private struct ProbePos : IComponentData { public int Value; }
         private struct ProbeVel : IComponentData { public int Value; }
         private struct ProbeAlive : IComponentData, IEnableableComponent { }
-
-        private struct AddOne : IQueryForeach<ProbePos>
-        {
-            public void Update(ref ProbePos component0) => component0.Value += 1;
-        }
 
         private static World CreateWorld(int posOnly, int posAndVel)
         {
@@ -46,15 +41,6 @@ namespace EntJoy.ECS.Tests
             }
             Assert.Equal(5, visited);
             Assert.Equal(35, SumPos(world));
-        }
-
-        [Fact]
-        public void ForEach_VisitsTheSameEntitiesAsForeach()
-        {
-            using var world = CreateWorld(3, 2);
-            var action = new AddOne();
-            world.Query<ProbePos>().ForEach(ref action);
-            Assert.Equal(5, SumPos(world));
         }
 
         [Fact]

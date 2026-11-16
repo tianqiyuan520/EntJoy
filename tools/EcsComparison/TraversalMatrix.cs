@@ -82,8 +82,9 @@ public static class TraversalMatrix
 
     private static void Measure(int round, int count, int components, int method, bool verifyOnly)
     {
-        // ForEach 与 Chunks 目前只有两组件形态。
-        if ((method == 10 || method == 11) && components != 2) return;
+        // Chunks 目前只有两组件形态；10 号臂（内联回调）已随接口删除，编号保留不复用。
+        if (method == 10) return;
+        if (method == 11 && components != 2) return;
         var probe = new SystemComparison { Components = components, EntityCount = count };
         try
         {
@@ -101,8 +102,7 @@ public static class TraversalMatrix
                 case 6: run = probe.EntJoyChunkJobCSharp; layer = "Chunk"; name = "IJobChunk.Run"; break;
                 case 7: run = probe.EntJoyChunkJobCpp; layer = "Chunk"; name = "IJobChunk.Run"; backend = "Cpp"; break;
                 case 8: run = probe.EntJoyRawChunks; layer = "Chunk"; name = "Archetype.ChunkSpan"; break;
-                case 10: run = probe.EntJoyForEachTwo; name = "ForEach"; break;
-                case 11: run = probe.EntJoyChunksTwo; name = "Chunks"; break;
+                case 11: run = probe.EntJoyChunksTwo; layer = "Chunk"; name = "Chunks"; break;
                 default: run = probe.ArchCachedChunks; layer = "Chunk"; framework = "Arch"; name = "CachedQuery.foreach"; break;
             }
             bool entJoy = framework == "EntJoy";

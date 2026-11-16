@@ -147,13 +147,12 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             {
                 ("query", probe.EntJoy),
                 ("chunk", probe.EntJoyChunk),
-                ("foreach", probe.EntJoyForEachTwo),
-                ("foreach-shared", probe.EntJoyForEachShared),
-                ("foreach-enabled", probe.EntJoyForEachEnabled),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),
                 ("query-read1", probe.EntJoyRead1Only),
+                ("query-shared", probe.EntJoyShared),
+                ("query-enabled", probe.EntJoyEnabled),
                 ("arch-query", probe.Arch),
                 ("arch-query-movenext", probe.ArchMoveNextOnly),
                 ("arch-chunk", probe.ArchChunk),
@@ -832,31 +831,22 @@ public class SystemComparison
         else EntJoyThree();
     }
 
-    // 块循环内联回调：与 chunk 级同构，但保留实体级 API 形态。
-    public struct ForEachTwo : EntJoy.ECS.IQueryForeach<A, B>
+    // 带 shared 过滤的实体级遍历：过滤条件在块粒度。
+    public void EntJoyShared()
     {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Update(ref A a, ref B b) => a.Value += b.Value;
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
     }
 
-    public void EntJoyForEachTwo()
+    // 带启用位过滤的实体级遍历：过滤条件在逐实体粒度。
+    public void EntJoyEnabled()
     {
-        var action = new ForEachTwo();
-        ent.Query<A, B>().ForEach(ref action);
-    }
-
-    // 带 shared 过滤的块循环回调：过滤条件在块粒度，走不到块表快路径。
-    public void EntJoyForEachShared()
-    {
-        var action = new ForEachTwo();
-        sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }).ForEach(ref action);
-    }
-
-    // 带启用位过滤的块循环回调：过滤条件在逐实体粒度。
-    public void EntJoyForEachEnabled()
-    {
-        var action = new ForEachTwo();
-        sharedWorld.Query<A, B>().WithEnabled<Flag>().ForEach(ref action);
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>().WithEnabled<Flag>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
     }
 
 

@@ -77,30 +77,6 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public QueryEnumerator<{genList}> GetEnumerator()");
             sb.AppendLine($"        => new QueryEnumerator<{genList}>(_entityManager, _builder);");
-            // 按段推进的回调：段内按列基址指针索引，循环体交给 JIT 内联，不构造逐实体结果。
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine($"    public void ForEach<TAction>(ref TAction action) where TAction : struct, IQueryForeach<{genList}>");
-            sb.AppendLine("    {");
-            sb.AppendLine($"        var cursor = new QueryTraversalCursor(_entityManager, _builder, Columns);");
-            sb.AppendLine("        // 块级过滤整块要么全要要么全不要；逐实体过滤由 RangeEnd 给出一段连续可用槽位。");
-            sb.AppendLine("        int next = 0;");
-            sb.AppendLine("        while (true)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            cursor = QueryTraversalCursor.Next(cursor, next);");
-            sb.AppendLine("            if (!cursor.HasChunk) break;");
-            sb.AppendLine("            int start = cursor.Slot;");
-            sb.AppendLine("            int end = cursor.RangeEnd;");
-            sb.AppendLine("            if (end > start)");
-            sb.AppendLine("            {");
-            for (int i = 0; i < n; i++)
-                sb.AppendLine($"                {genParams[i]}* c{i} = ({genParams[i]}*)cursor.ComponentBase({i});");
-            sb.AppendLine("                for (int s = start; s < end; s++)");
-            sb.AppendLine($"                    action.Update({string.Join(", ", genParams.Select((_, i) => $"ref c{i}[s]"))});");
-            sb.AppendLine("                next = end;");
-            sb.AppendLine("            }");
-            sb.AppendLine("            else next = start + 1;");
-            sb.AppendLine("        }");
-            sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
 
@@ -168,19 +144,20 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    public ref readonly {genParams[i]} ReadOnlyComp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ Validate(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine($"        get => ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
                 sb.AppendLine("    }");
                 sb.AppendLine($"    public ref {genParams[i]} Comp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ Validate(); ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine("        get");
+                sb.AppendLine("        {");
+                sb.AppendLine("            // 关系列只能读：直接写会绕过关系索引。这是按类型定死的判据，不随运行期状态变化。");
+                sb.AppendLine($"            if (ComponentTypeManager.IsRelationType<{genParams[i]}>())");
+                sb.AppendLine($"                throw new InvalidOperationException($\"Relationship '{{typeof({genParams[i]})}}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.\");");
+                sb.AppendLine($"            return ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
+                sb.AppendLine("        }");
                 sb.AppendLine("    }");
             }
-            sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine("    private void Validate()");
-            sb.AppendLine("    {");
-            sb.AppendLine("        if (_c0 == null) throw new InvalidOperationException(\"The query result has not been initialized.\");");
-            sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
 

@@ -19,33 +19,6 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public QueryEnumerator<T0, T1> GetEnumerator()
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
-
-        /// <summary>
-        /// 按段推进 + 内联回调：游标给出连续可用槽位段（块级过滤时是整块，启用位过滤时是连续置位段），
-        /// 段内按列基址指针索引，循环里没有逐实体游标。
-        /// </summary>
-        public void ForEach<TAction>(ref TAction action)
-            where TAction : struct, IQueryForeach<T0, T1>
-        {
-            var cursor = new QueryTraversalCursor(_entityManager, _builder, ComponentTypes<T0, T1>.Share);
-            int next = 0;
-            while (true)
-            {
-                cursor = QueryTraversalCursor.Next(cursor, next);
-                if (!cursor.HasChunk) break;
-                int start = cursor.Slot;
-                int end = cursor.RangeEnd;
-                if (end > start)
-                {
-                    var column0 = (T0*)cursor.ComponentBase(0);
-                    var column1 = (T1*)cursor.ComponentBase(1);
-                    for (int slot = start; slot < end; slot++)
-                        action.Update(ref column0[slot], ref column1[slot]);
-                    next = end;
-                }
-                else next = start + 1;
-            }
-        }
     }
 
     public unsafe ref struct QueryEnumerator<T0, T1> where T0 : struct where T1 : struct
@@ -141,7 +114,7 @@ namespace EntJoy.ECS
         public ref readonly T0 ReadOnlyComp0
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get { Validate(); return ref Unsafe.AsRef<T0>(_c0); }
+            get => ref Unsafe.AsRef<T0>(_c0);
         }
 
         public ref T0 Comp0
@@ -149,8 +122,9 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Validate();
-                ComponentTypeManager.CheckWritableAccess<T0>();
+                // 关系列只能读：直接写会绕过关系索引。这是按类型定死的判据，不随运行期状态变化。
+                if (ComponentTypeManager.IsRelationType<T0>())
+                    throw new InvalidOperationException($"Relationship '{typeof(T0)}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.");
                 return ref Unsafe.AsRef<T0>(_c0);
             }
         }
@@ -160,7 +134,6 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Validate();
                 if (_c1 == null) throw new NotSupportedException("Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.");
                 return ref Unsafe.AsRef<T1>(_c1);
             }
@@ -171,17 +144,11 @@ namespace EntJoy.ECS
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
-                Validate();
-                ComponentTypeManager.CheckWritableAccess<T1>();
+                if (ComponentTypeManager.IsRelationType<T1>())
+                    throw new InvalidOperationException($"Relationship '{typeof(T1)}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.");
                 if (_c1 == null) throw new NotSupportedException("Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.");
                 return ref Unsafe.AsRef<T1>(_c1);
             }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void Validate()
-        {
-            if (_c0 == null) throw new InvalidOperationException("The query result has not been initialized.");
         }
     }
 
