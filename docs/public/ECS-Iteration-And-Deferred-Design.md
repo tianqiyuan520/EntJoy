@@ -7,7 +7,7 @@
 | 层 | 入口 | 逐实体开销 | 可用形态 |
 | --- | --- | --- | --- |
 | 按 Chunk | `world.Query<A,B>().Chunks()` | 无（循环体自己写） | 单/双组件选择器 |
-| 实体级 | `foreach (var r in world.Query<A,B>())` | 逐实体游标 + 结果构造 | 单/双组件手写，其余由生成器发射 |
+| 实体级 | `foreach (var r in world.Query<A,B>())` | 逐实体游标 + 结果构造 | 一至四组件，源生成器统一发射 |
 
 `Chunks()` 逐块给出 `QueryChunk`，`Span<T>()` 直接返回该块的组件列，封装开销可忽略。`T` 不必是查询条件之一：查 `A,B` 也能取 `Span<C>`。循环体自己写，JIT 能把 `Span` 上的整数运算向量化。
 
