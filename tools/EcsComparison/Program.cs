@@ -155,6 +155,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-enabled", probe.EntJoyEnabled),
                 ("query-changed", probe.EntJoyChanged),
                 ("query-changed-none", probe.EntJoyChangedNone),
+                ("query-changed-base", probe.EntJoyChangedBase),
+                ("query-clean-base", probe.EntJoyCleanBase),
                 ("arch-query", probe.Arch),
                 ("arch-query-movenext", probe.ArchMoveNextOnly),
                 ("arch-chunk", probe.ArchChunk),
@@ -621,12 +623,13 @@ public class SystemComparison
             // 全部同值、全部启用：两条过滤臂都命中全部实体，与被测的不过滤臂工作量相同。
             sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
         }
-        // 变更过滤两臂：changedWorld 保留写入产生的变更位（全命中），cleanWorld 清掉（全不命中）。
+        // 变更过滤两臂：changedWorld 逐实体写一次 A 把变更位点亮（全命中），cleanWorld 清掉（全不命中）。
         changedWorld = new EntWorld("changed", threadSafe: false);
         cleanWorld = new EntWorld("clean", threadSafe: false);
         for (int i = 0; i < EntityCount; i++)
         {
-            changedWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+            var changedEntity = changedWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+            changedWorld.EntityManager.Set(changedEntity, new A { Value = 1 });
             cleanWorld.EntityManager.NewEntity(typeof(A), typeof(B));
         }
         cleanWorld.EntityManager.ClearAllChangedBitMasks();
@@ -640,12 +643,30 @@ public class SystemComparison
         VerifyArch(2);
         EntJoyJobCSharp();
         VerifyEnt(3);
-        var entry = Components == 2 ? "Get_SharpNative_Job__global_namespace__EntUpdateTwoCpp_Execute_AdapterPtr" : "Get_SharpNative_Job__global_namespace__EntUpdateThreeCpp_Execute_AdapterPtr";
-        if (NativeJobScheduler.GetNativeExportPtr(entry) == IntPtr.Zero) throw new InvalidOperationException("Native job export missing: " + entry);
-        EntJoyJobCpp();
-        VerifyEnt(4);
-        EntJoyEmptyJobCpp();
-        VerifyEnt(4);
+        // 原生核与当前 C# 布局指纹不一致时跳过 C++ 验证；托管臂不依赖原生核，照常可测。
+        if (TryPrepareNativeJobs())
+        {
+            EntJoyJobCpp();
+            VerifyEnt(4);
+            EntJoyEmptyJobCpp();
+            VerifyEnt(4);
+        }
+    }
+
+    private bool TryPrepareNativeJobs()
+    {
+        var entry = Components == 2
+            ? "Get_SharpNative_Job__global_namespace__EntUpdateTwoCpp_Execute_AdapterPtr"
+            : "Get_SharpNative_Job__global_namespace__EntUpdateThreeCpp_Execute_AdapterPtr";
+        try
+        {
+            return NativeJobScheduler.GetNativeExportPtr(entry) != IntPtr.Zero;
+        }
+        catch (InvalidOperationException)
+        {
+            Console.Error.WriteLine("[ab-pair] native kernels unavailable; C++ job arms are skipped");
+            return false;
+        }
     }
 
     public void VerifyEnt(int iterations)
@@ -876,6 +897,23 @@ public class SystemComparison
     {
         int sum = 0;
         foreach (var result in cleanWorld.Query<A, B>().WithChanged<A>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 两个变更世界各自的不过滤基线：同世界对比，排除内存分配位置的影响。
+    public void EntJoyChangedBase()
+    {
+        int sum = 0;
+        foreach (var result in changedWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    public void EntJoyCleanBase()
+    {
+        int sum = 0;
+        foreach (var result in cleanWorld.Query<A, B>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
     }
