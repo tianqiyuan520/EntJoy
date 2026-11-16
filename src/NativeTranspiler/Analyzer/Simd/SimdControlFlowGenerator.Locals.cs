@@ -187,14 +187,8 @@ namespace NativeTranspiler.Analyzer
                         // ISPC-style SIMD promotion: when a Uniform local is initialized from a
                         //   SIMD register expression (e.g. gather result), promote to Varying and
                         //   This keeps the data in SIMD registers throughout the computation chain.
-                        bool isSimdExpr = initExpr.StartsWith("simd_")
-                            || initExpr.StartsWith("(simd_")
-                            || initExpr.StartsWith("(v_")
-                            || (initExpr.Contains("simd_value<") && initExpr.Contains("n_"))
-                            || initExpr.Contains("n_gather_ps<")
-                            || initExpr.Contains("n_sin_ps")
-                            || initExpr.Contains("n_cos_ps")
-                            || initExpr.Contains("n_sqrt_ps");
+                        bool isSimdExpr = _varAnalyzer.ClassifyExpression(variable.Initializer.Value) >= VarKind.Varying
+                            && SimdExprShapes.Of(initExpr) != SimdExprTraits.None;
                         if (isSimdExpr)
                         {
                             string simdType = GetSIMDTypeString(cppType);

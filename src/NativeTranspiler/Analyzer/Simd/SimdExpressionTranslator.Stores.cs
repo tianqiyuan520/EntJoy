@@ -100,7 +100,7 @@ namespace NativeTranspiler.Analyzer
                     throw new System.NotSupportedException(
                         $"复合赋值不支持结构体元素：`{elemType} {compoundOp}` —— 请拆成两步（先读局部变量、再整体写回）。");
                 string elemPtr = $"(({elemType}*)({basePtr}))";
-                bool narrowedCmp = _currentMask != "simd_mask::all_true()";
+                bool narrowedCmp = !SimdMaskText.IsAllTrue(_currentMask);
                 if (idxKind >= VarKind.Varying)
                 {
                     string laneRhs = rhsKind >= VarKind.Varying
@@ -118,7 +118,7 @@ namespace NativeTranspiler.Analyzer
 
             if (isNarrowElem)
             {
-                bool narrowed = _currentMask != "simd_mask::all_true()";
+                bool narrowed = !SimdMaskText.IsAllTrue(_currentMask);
                 string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 string ep = $"(({elemType}*)({basePtr}))";
                 // 结构体元素（float2/int2/自定义）用构造语法；内置标量用 static_cast。
@@ -144,13 +144,13 @@ namespace NativeTranspiler.Analyzer
                     // Conditional (if/else) store: when the current mask is narrowed,
                     //   ANY store (contiguous or not, uniform or varying rhs) must be
                     //   and later branches overwrite earlier ones.
-                    bool inNarrowedContext = _currentMask != "simd_mask::all_true()";
+                    bool inNarrowedContext = !SimdMaskText.IsAllTrue(_currentMask);
                     if (inNarrowedContext)
                     {
                         // rhs may be uniform (scalar literal) or varying (SIMD expr).
                         // Normalize to a SIMD expression so per-lane extract works.
                         string rhsSimdExpr;
-                        if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                        if (rhsKind < VarKind.Varying && (SimdExprShapes.Of(rhsExpr) & (SimdExprTraits.Intrinsic | SimdExprTraits.LaneAccess)) == 0)
                             rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                         else
                             rhsSimdExpr = rhsExpr;
@@ -207,7 +207,7 @@ namespace NativeTranspiler.Analyzer
                         if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
                         {
                             string rhsSimdExpr;
-                            if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                            if (rhsKind < VarKind.Varying && (SimdExprShapes.Of(rhsExpr) & (SimdExprTraits.Intrinsic | SimdExprTraits.LaneAccess)) == 0)
                                 rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                             else
                                 rhsSimdExpr = rhsExpr;
@@ -266,7 +266,7 @@ namespace NativeTranspiler.Analyzer
             string write = fieldType == "int" && op is "+=" or "-=" or "*="
                 ? $"{target} = (int)((unsigned){target} {op[0]} (unsigned)({laneValue}));"
                 : $"{target} {op} {laneValue};";
-            string guard = _currentMask == "simd_mask::all_true()" ? ""
+            string guard = SimdMaskText.IsAllTrue(_currentMask) ? ""
                 : $"if(n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))";
             return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{{{write}}}}}}}";
         }
@@ -319,12 +319,12 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD context: per-lane field scatter
                 // For varying index, generate per-lane scatter to arr_ptr[v_i_lane].field
-                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || _currentMask != "simd_mask::all_true()")
+                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || !SimdMaskText.IsAllTrue(_currentMask))
                 {
                     string extractFn3 = "n_extract_lane_f32";
                     string combineExpr = op3 == "=" ? rhsExpr3 : $"{idxExpr3} {op3.Replace("=", "")} {rhsExpr3}";
 
-                    if (_currentMask != "simd_mask::all_true()")
+                    if (!SimdMaskText.IsAllTrue(_currentMask))
                     {
                         return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
                     }
@@ -356,7 +356,7 @@ namespace NativeTranspiler.Analyzer
                     if (idxKind5 >= VarKind.Varying)
                     {
                         // Per-lane scatter for struct sub-field write
-                        if (_currentMask != "simd_mask::all_true()")
+                        if (!SimdMaskText.IsAllTrue(_currentMask))
                             return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
                         return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
@@ -417,7 +417,7 @@ namespace NativeTranspiler.Analyzer
                 && _variables.TryGetValue(lhsId.Identifier.Text, out var vector) && vector.Kind >= VarKind.Varying)
             {
                 string value = op == "=" ? rhs : $"{lhs} {op.Substring(0, op.Length - 1)} ({rhs})";
-                return _currentMask == "simd_mask::all_true()"
+                return SimdMaskText.IsAllTrue(_currentMask)
                     ? $"{lhs} = {value}" : $"{lhs} = blend({lhs}, {value}, {_currentMask})";
             }
 

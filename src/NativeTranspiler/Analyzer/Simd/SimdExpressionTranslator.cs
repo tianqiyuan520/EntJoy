@@ -107,7 +107,7 @@ namespace NativeTranspiler.Analyzer
                 if ((SymbolHelper.GetBoundSymbol(_semanticModel, id) is IFieldSymbol
                     || id.SyntaxTree != _semanticModel.SyntaxTree && !_variables.ContainsKey(name))
                     && _boolFields.TryGetValue(name, out var bv))
-                    return bv == "true" ? "simd_mask::all_true()" : "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    return bv == "true" ? SimdMaskText.AllTrue : "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
                 // Uniform bool: broadcast to all lanes then compare !=0 to produce proper n_mask
                 bool isLocalValue = SymbolHelper.GetBoundSymbol(_semanticModel, id) is not IFieldSymbol;
                 if (isLocalValue && _variables.TryGetValue(name, out var info) && info.Kind == VarKind.Uniform)
@@ -275,14 +275,12 @@ namespace NativeTranspiler.Analyzer
             bool isVaryingFloat2 = objName != null && _float2VaryingVars.Contains(objName);
 
             // 标量位置的字段读取：接收者不是向量 → 绝不做 `.v` 包装。
-            //   （`CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath` 的接收者翻译出来是
-            //    `simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种标量 SIMD 包装，本身无 `.v`。）
             //   2 分量向量（变量名或 `simd_value<int2>::gather(...)` 这类表达式）的分量是字段不是方法，
-            //   所以它既不能走标量回退，也不能被 `!objExpr.Contains(".v")` 判成标量。
-            bool twoComponentVectorExpr = objExpr.Contains("simd_value<EntJoy::Mathematics::float2")
-                || objExpr.Contains("simd_value<EntJoy::Mathematics::int2")
-                || objExpr.Contains("simd_value<EntJoy::Mathematics::uint2");
-            bool scalarReceiver = !objExpr.Contains(".v") && !isVaryingFloat2 && !twoComponentVectorExpr;
+            //   所以它既不能走标量回退，也不能被判成标量。
+            var receiverTraits = SimdExprShapes.Of(objExpr);
+            bool scalarReceiver = !receiverTraits.HasFlag(SimdExprTraits.LaneAccess)
+                && !receiverTraits.HasFlag(SimdExprTraits.TwoComponentWrapper)
+                && !isVaryingFloat2;
 
             // .MaxValue / .MinValue — 必须早于 scalarReceiver 的标量回退分支：
             // 接收者是预定义类型（`float.MaxValue` / `int.MaxValue`）时，TranslateExpression(接收者)
@@ -402,7 +400,7 @@ namespace NativeTranspiler.Analyzer
                 //   于是 `.FramesDeath` 被翻成 `simd_value<int>{...}.FramesDeath` → clang 报
                 //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
                 //   真正的向量表达式一定含 `.v`。
-                if (objExpr.Contains(".v") || objExpr.StartsWith("simd_value<"))
+                if ((SimdExprShapes.Of(objExpr) & (SimdExprTraits.LaneAccess | SimdExprTraits.Wrapper)) != 0)
                     return $"{objExpr}.{memberName}";
                 return $"{objExpr}.{memberName}()";
             }

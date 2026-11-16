@@ -27,7 +27,7 @@ namespace NativeTranspiler.Analyzer
         private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
         // Mask management
-        private string _currentMask = "simd_mask::all_true()";
+        private string _currentMask = SimdMaskText.AllTrue;
         private int _maskCounter;
         private int _labelCounter;
         private bool _isUniformScalarLoop;

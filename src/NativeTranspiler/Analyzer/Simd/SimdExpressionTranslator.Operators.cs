@@ -94,8 +94,8 @@ namespace NativeTranspiler.Analyzer
                 bool useUnsignedCmp = cmpIsUint;
                 string bc = useUnsignedCmp || cmpIsInt ? "n_set1_epi32" : "n_set1_ps";
                 // Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
-                bool rightIsHoisted = right.StartsWith("__uni_");
-                bool leftIsHoisted = left.StartsWith("__uni_");
+                bool rightIsHoisted = SimdExprShapes.Of(right).HasFlag(SimdExprTraits.HoistedBroadcast);
+                bool leftIsHoisted = SimdExprShapes.Of(left).HasFlag(SimdExprTraits.HoistedBroadcast);
                 if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
                 {
                     if (leftIsHoisted)
@@ -118,8 +118,8 @@ namespace NativeTranspiler.Analyzer
                     // Unsigned compare: x^0x80000000 converts two's-complement order to
                     // sign-magnitude order, so the signed compare works on the flipped values.
                     string flipConst = "(int)0x80000000";
-                    string leftUniform = left.StartsWith("__uni_") ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"n_set1_epi32({left})";
-                    string rightUniform = right.StartsWith("__uni_") ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"n_set1_epi32({right})";
+                    string leftUniform = leftIsHoisted ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"n_set1_epi32({left})";
+                    string rightUniform = rightIsHoisted ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"n_set1_epi32({right})";
                     string leftFlip = leftKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({leftV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({leftUniform}, n_set1_epi32({flipConst}))";
                     string rightFlip = rightKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({rightV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({rightUniform}, n_set1_epi32({flipConst}))";
                     string ic2 = op switch {
@@ -296,7 +296,7 @@ namespace NativeTranspiler.Analyzer
                 // 数组字段 `X_ptr` 已是目标元素类型的指针，直接用；
                 // 裸指针变量本身是指针，同样直接用（不要转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
                 string elemPtr = info.Base;
-                bool narrowed = _currentMask != "simd_mask::all_true()";
+                bool narrowed = !SimdMaskText.IsAllTrue(_currentMask);
                 string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 if (idxKind >= VarKind.Varying)
                 {
@@ -309,7 +309,7 @@ namespace NativeTranspiler.Analyzer
             {
                 string target = TranslateExpression(operand);
                 if (target.Contains(UnsupportedMarkers.Prefix)) return marker;
-                if (_currentMask != "simd_mask::all_true()"
+                if (!SimdMaskText.IsAllTrue(_currentMask)
                     && (_forLoopVars.Contains(identifier.Identifier.Text)
                         || (_variables.TryGetValue(identifier.Identifier.Text, out var variable)
                             && variable.Kind >= VarKind.Varying)))

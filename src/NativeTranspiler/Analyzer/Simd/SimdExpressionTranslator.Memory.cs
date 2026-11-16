@@ -78,7 +78,7 @@ namespace NativeTranspiler.Analyzer
                     if (indexKind >= VarKind.Varying)
                     {
                         // Safety clamp: mask ctx → clamp to [0, Length-1] for unmasked gather
-                        string safeIdx = _currentMask != "simd_mask::all_true()"
+                        string safeIdx = !SimdMaskText.IsAllTrue(_currentMask)
                             ? $"simd_min(simd_max({indexExpr}, simd_value<int>(0)), simd_value<int>::broadcast({baseExpr}.Length - 1))"
                             : indexExpr;
                         if (elemCppType.Contains("float2"))
@@ -135,7 +135,7 @@ namespace NativeTranspiler.Analyzer
                     // Varying reduction loop: index pre-clamped to >=0, use hoisted broadcast
                     safeIdx = $"simd_min({indexExpr}, {_hoistedSafeMaxVar})";
                 }
-                else if (_currentMask != "simd_mask::all_true()")
+                else if (!SimdMaskText.IsAllTrue(_currentMask))
                 {
                     // ⚠ 长度形参名是 `<字段名>_length`，而 baseExpr 是 `<字段名>_ptr` ——
                     //   直接用 baseExpr 拼会生成未声明的 `A_ptr_length`（实测：EdgeCase4_SIMD_For 编译失败）。
@@ -215,7 +215,7 @@ namespace NativeTranspiler.Analyzer
                 string elemPtr = $"(({elemCppType}*)({baseExpr}))";
                 string resVar = $"__gv_{_labelCounter++}";
                 string seqVar = $"__gl_seq_{_labelCounter++}";
-                bool masked = _currentMask != "simd_mask::all_true()";
+                bool masked = !SimdMaskText.IsAllTrue(_currentMask);
                 AppendLine($"simd_value<int> {seqVar} = simd_value<int>::sequence(0, g_simdWidthInt);");
                 AppendLine($"simd_value<int> {resVar} = simd_value<int>::broadcast(0);");
                 AppendLine($"for (int __gl = 0; __gl < g_simdWidthInt; __gl++)");
@@ -241,7 +241,7 @@ namespace NativeTranspiler.Analyzer
             //     详见 docs  的设计修正。
             if (indexKind >= VarKind.Varying)
             {
-                indexExpr = indexExpr.Contains(".v")
+                indexExpr = SimdExprShapes.Of(indexExpr).HasFlag(SimdExprTraits.LaneAccess)
                     ? $"n_extract_lane_epi32({indexExpr}, 0)"
                     : $"n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(indexExpr)}.v, 0)";
             }
@@ -388,7 +388,7 @@ namespace NativeTranspiler.Analyzer
         }
 
         private string TranslateStructFieldAccess(string arrName, string structElemType, string fieldName, string index, string fieldType, int stride)
-            => _currentMask != "simd_mask::all_true()" || index.Contains("v_") || index.Contains("simd_")
+            => !SimdMaskText.IsAllTrue(_currentMask) || index.Contains("v_") || index.Contains("simd_")
                 ? GatherStructField(arrName, structElemType, fieldName, index, fieldType, stride)
                 : $"{arrName}_ptr[{index}].{fieldName}";
 
@@ -400,7 +400,7 @@ namespace NativeTranspiler.Analyzer
                 return $"/*{UnsupportedMarkers.Expr}SIMD_StructFieldType*/ 0";
             string scalar = integer ? "int" : "float";
             string gather = integer ? "n_gather_epi32" : "n_gather_ps";
-            string safe = _currentMask != "simd_mask::all_true()"
+            string safe = !SimdMaskText.IsAllTrue(_currentMask)
                 ? $"simd_min(simd_max({index}, simd_value<int>(0)), simd_value<int>::broadcast({array}_length - 1))" : index;
             string pointer = $"(const {scalar}*)(&{array}_ptr[0].{field})";
             string scale = stride is 1 or 2 or 4 or 8 ? $"sizeof({structure})" : "1";

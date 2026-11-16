@@ -41,7 +41,7 @@ namespace NativeTranspiler.Analyzer
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
                     // Combine with previous mask to narrow unfound lanes
                     string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
-                    if (prev != "simd_mask::all_true()")
+                    if (!SimdMaskText.IsAllTrue(prev))
                     {
                         string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
                         AppendLine($"{goodName} = {combined};");
@@ -66,14 +66,14 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    bool isAllTrue = _currentMask == "simd_mask::all_true()";
+                    bool isAllTrue = SimdMaskText.IsAllTrue(_currentMask);
 
                     // When all_true: skip emitting savedMask, but register it for restore
                     if (!isAllTrue)
                     {
                         if (!savedMaskEmitted)
                         {
-                            if (_currentMask.StartsWith("v_") || _currentMask.StartsWith("__"))
+                            if (SimdMaskText.IsVariableName(_currentMask))
                             {
                                 savedMask = _currentMask;
                             }
@@ -88,7 +88,7 @@ namespace NativeTranspiler.Analyzer
                     else
                     {
                         // Sentinel: no emit needed, but restore will set _currentMask=all_true()
-                        savedMask = "simd_mask::all_true()";
+                        savedMask = SimdMaskText.AllTrue;
                     }
 
                     string trueMask;
@@ -97,7 +97,7 @@ namespace NativeTranspiler.Analyzer
                         // All lanes active on entry: the branch mask is JUST the condition
                         // (no savedMask AND needed). The condition MUST still be emitted —
                         // combine as all_true & !c0 & c1 (not c0 & !c0 & c1 = false).
-                        savedMask = "simd_mask::all_true()";
+                        savedMask = SimdMaskText.AllTrue;
                         savedMaskEmitted = true;
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
@@ -117,10 +117,10 @@ namespace NativeTranspiler.Analyzer
                         else
                         {
                             EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                            string notPrev = excludedMaskVar ?? "simd_mask::all_true()";
+                            string notPrev = excludedMaskVar ?? SimdMaskText.AllTrue;
                             trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
                             // Skip redundant AND when savedMask is all_true: all_true & X == X
-                            if (savedMask != "simd_mask::all_true()")
+                            if (!SimdMaskText.IsAllTrue(savedMask))
                                 trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
                         }
 
@@ -164,16 +164,16 @@ namespace NativeTranspiler.Analyzer
                 // 优先复用递推排除变量（~c0 & ... & ~c_{k-1}），避免内联 O(N) 嵌套。
                 //   else 分支需排除全部条件 → 确保递推变量覆盖到 conditions.Count。
                 EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                string notChain = excludedMaskVar ?? "simd_mask::all_true()";
+                string notChain = excludedMaskVar ?? SimdMaskText.AllTrue;
                 if (savedMaskEmitted)
                 {
                     // Skip redundant AND when savedMask is all_true: all_true & X == X
-                    if (savedMask == "simd_mask::all_true()")
+                    if (SimdMaskText.IsAllTrue(savedMask))
                         elseMaskExpr = notChain;
                     else
                         elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {notChain}.m) }}";
                 }
-                else if (savedMask == "simd_mask::all_true()")
+                else if (SimdMaskText.IsAllTrue(savedMask))
                     elseMaskExpr = notChain;
                 else
                     elseMaskExpr = _currentMask;
