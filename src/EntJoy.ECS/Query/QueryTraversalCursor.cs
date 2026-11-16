@@ -208,8 +208,9 @@ namespace EntJoy.ECS
             return _snapshot.ComponentBases[_baseIndex + column];
         }
 
+        /// <summary>推进到 slot 所在的下一个可用段并就地更新游标；按引用传参避免逐段复制整个游标。</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static QueryTraversalCursor Next(QueryTraversalCursor cursor, int slot)
+        public static void Next(ref QueryTraversalCursor cursor, int slot)
         {
             cursor._slot = slot;
             if (!cursor._plan.HasEntityFilter)
@@ -217,7 +218,6 @@ namespace EntJoy.ECS
                 if (cursor._count == 0 || slot >= cursor._count) cursor.MoveNextChunk(out _);
             }
             else cursor.Advance();
-            return cursor;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

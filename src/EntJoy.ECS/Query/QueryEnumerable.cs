@@ -53,14 +53,13 @@ namespace EntJoy.ECS
             // 区间内只递增槽位；跨区间时再校验借用并解析过滤和列基址。
             if (_slotOffset < 0) return true;
             _readState.ValidateTracked();
-            var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);
-            _cursor = cursor;
-            if (cursor.HasChunk)
+            QueryTraversalCursor.Next(ref _cursor, _slotOffset + _rangeEnd);
+            if (_cursor.HasChunk)
             {
-                _rangeEnd = cursor.RangeEnd;
-                _slotOffset = cursor.Slot - _rangeEnd;
-                _base0 = (T0*)cursor.ComponentBase(0) + _rangeEnd;
-                SetBase1(cursor.ComponentBase(1), _rangeEnd);
+                _rangeEnd = _cursor.RangeEnd;
+                _slotOffset = _cursor.Slot - _rangeEnd;
+                _base0 = (T0*)_cursor.ComponentBase(0) + _rangeEnd;
+                SetBase1(_cursor.ComponentBase(1), _rangeEnd);
             }
             else
             {

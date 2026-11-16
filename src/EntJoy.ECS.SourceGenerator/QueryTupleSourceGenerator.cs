@@ -185,13 +185,12 @@ namespace EntJoy.ECS.SourceGenerator
         /// <summary>按实体过滤的元组走游标推进：每实体算一次连续启用区间，Chunk 切换时搬动游标。</summary>
         private static void AppendCursorChunkPath(StringBuilder sb, int n, string indent)
         {
-            sb.AppendLine(indent + "var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);");
-            sb.AppendLine(indent + "_cursor = cursor;");
-            sb.AppendLine(indent + "if (cursor.HasChunk)");
+            sb.AppendLine(indent + "QueryTraversalCursor.Next(ref _cursor, _slotOffset + _rangeEnd);");
+            sb.AppendLine(indent + "if (_cursor.HasChunk)");
             sb.AppendLine(indent + "{");
-            sb.AppendLine(indent + "    _rangeEnd = cursor.RangeEnd;");
-            sb.AppendLine(indent + "    _slotOffset = cursor.Slot - _rangeEnd;");
-            for (int i = 0; i < n; i++) sb.AppendLine(indent + $"    _base{i} = (T{i}*)cursor.ComponentBase({i}) + _rangeEnd;");
+            sb.AppendLine(indent + "    _rangeEnd = _cursor.RangeEnd;");
+            sb.AppendLine(indent + "    _slotOffset = _cursor.Slot - _rangeEnd;");
+            for (int i = 0; i < n; i++) sb.AppendLine(indent + $"    _base{i} = (T{i}*)_cursor.ComponentBase({i}) + _rangeEnd;");
             sb.AppendLine(indent + "}");
             sb.AppendLine(indent + "else");
             sb.AppendLine(indent + "{");
