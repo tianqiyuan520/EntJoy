@@ -152,6 +152,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-movenext", probe.EntJoyMoveNextOnly),
                 ("query-read1", probe.EntJoyRead1Only),
                 ("query-shared", probe.EntJoyShared),
+                ("query-shared-base", probe.EntJoySharedBase),
                 ("query-enabled", probe.EntJoyEnabled),
                 ("query-changed", probe.EntJoyChanged),
                 ("query-changed-none", probe.EntJoyChangedNone),
@@ -870,6 +871,15 @@ public class SystemComparison
     {
         int sum = 0;
         foreach (var result in sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // sharedWorld 的不过滤基线：同世界对比，排除分配位置与 archetype 数量的影响。
+    public void EntJoySharedBase()
+    {
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
     }
