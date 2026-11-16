@@ -35,8 +35,34 @@ namespace NativeTranspiler.Analyzer.Common
         public static string CastOperand(string operand)
             => NeedsParensForCast(operand) ? "(" + operand + ")" : operand;
 
-        /// <summary>成员访问（`.v` / `.m`）的操作数：复合表达式才加括号。</summary>
-        public static string MemberOperand(string operand) => CastOperand(operand);
+        /// <summary>成员访问（`.v` / `.m`）的操作数：复合表达式才加括号，多余的外层括号一并去掉。</summary>
+        public static string MemberOperand(string operand)
+        {
+            while (IsWholeParenthesized(operand))
+            {
+                string inner = operand.Substring(1, operand.Length - 2);
+                if (NeedsParensForCast(inner)) break;
+                operand = inner;
+            }
+            return CastOperand(operand);
+        }
+
+        /// <summary>首个字符的 `(` 是否正好收在末尾（整段被一层括号完整包住）。</summary>
+        public static bool IsWholeParenthesized(string text)
+        {
+            if (text.Length < 2 || text[0] != '(' || text[text.Length - 1] != ')') return false;
+            int depth = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] == '(') depth++;
+                else if (text[i] == ')')
+                {
+                    depth--;
+                    if (depth == 0) return i == text.Length - 1;
+                }
+            }
+            return false;
+        }
 
         /// <summary>字段地址表达式：偏移 0 直接用 job 指针，其余按字节偏移。</summary>
         public static string JobAddress(string jobPointer, int offset)

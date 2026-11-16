@@ -628,23 +628,6 @@ namespace NativeTranspiler.Analyzer
             base.TranslateExpression(expr);
         }
 
-        /// <summary>首字符的 `(` 是否正好收在末尾（整段被一层括号包住）。</summary>
-        private static bool IsWholeParenthesized(string text)
-        {
-            if (text.Length < 2 || text[0] != '(' || text[text.Length - 1] != ')') return false;
-            int depth = 0;
-            for (int i = 0; i < text.Length; i++)
-            {
-                if (text[i] == '(') depth++;
-                else if (text[i] == ')')
-                {
-                    depth--;
-                    if (depth == 0) return i == text.Length - 1;
-                }
-            }
-            return false;
-        }
-
         /// <summary>
         /// 把已译好的子表达式变成无符号回绕算术的操作数。
         /// 子表达式本身是同宽度回绕（<c>(int)(…)</c>）时，值已经是无符号算术：去掉外层 `(unsigned)`
@@ -656,7 +639,7 @@ namespace NativeTranspiler.Analyzer
             alreadyUnsigned = false;
             string prefix = "(" + signed + ")(";
             string candidate = text;
-            while (IsWholeParenthesized(candidate))
+            while (CppIntegerSemantics.IsWholeParenthesized(candidate))
                 candidate = candidate.Substring(1, candidate.Length - 2);
 
             if (candidate.StartsWith(prefix, StringComparison.Ordinal) && candidate.EndsWith(")", StringComparison.Ordinal))
