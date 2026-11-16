@@ -126,25 +126,34 @@ static_assert(sizeof(__EntJoyEventBuffer) == 24,
 
 #include <cstddef>
 
-// 布局指纹：字段名（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成（与字段枚举顺序无关）。同宽改类型不在覆盖内。
+// 布局指纹：字段名 + 类型名（都忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成（与字段枚举顺序无关）。
 // 托管侧 NativeChunkJobs.ComputeChunkContextHeaderFingerprint 用同值常量算出同一结果；
 // 只比总大小抓不到"同宽换序"，所以加载时还要比指纹。
 #define __ENTJOY_CHUNK_CONTEXT_FIELDS(X) \
-    X(chunkCount) X(hasEnabledFilter) X(queryAllEnabledTypes) X(allEnabledCount) \
-    X(gcHandleStartIndex) X(chunksPtr) X(cleanupInProgress) X(ownsChunkData) \
-    X(requiredComponentTypeIds) X(requiredComponentTypeIdCount) X(jobIsBoxed) \
-    X(chunkArrayHandle) X(eventBufferCount) X(eventBufferHeaders) X(eventWorldHandle)
+    X(chunkCount, int) X(hasEnabledFilter, int) X(queryAllEnabledTypes, void*) X(allEnabledCount, int) \
+    X(gcHandleStartIndex, int) X(chunksPtr, void*) X(cleanupInProgress, int) X(ownsChunkData, int) \
+    X(requiredComponentTypeIds, void*) X(requiredComponentTypeIdCount, int) X(jobIsBoxed, int) \
+    X(chunkArrayHandle, void*) X(eventBufferCount, int) X(eventBufferHeaders, void*) X(eventWorldHandle, void*)
 
 inline constexpr unsigned long long __EntJoyLayoutFnvBasis = 1469598103934665603ull;
 inline constexpr unsigned long long __EntJoyLayoutFnvPrime = 1099511628211ull;
 inline constexpr unsigned long long __EntJoyLayoutSalt = 0x9e3779b97f4a7c15ull;
 
 inline constexpr unsigned long long __EntJoyChunkContextFieldHash(
-    const char* name, unsigned long long offset, unsigned long long size)
+    const char* name, const char* type, unsigned long long offset, unsigned long long size)
 {
     unsigned long long hash = __EntJoyLayoutFnvBasis;
     for (const char* c = name; *c != '\0'; ++c)
     {
+        const char lower = (*c >= 'A' && *c <= 'Z') ? static_cast<char>(*c + 32) : *c;
+        hash ^= static_cast<unsigned char>(lower);
+        hash *= __EntJoyLayoutFnvPrime;
+    }
+    // 名字与类型之间夹一次空推进，避免两者拼接后产生歧义。
+    hash *= __EntJoyLayoutFnvPrime;
+    for (const char* c = type; *c != '\0'; ++c)
+    {
+        if (*c == ' ') continue;
         const char lower = (*c >= 'A' && *c <= 'Z') ? static_cast<char>(*c + 32) : *c;
         hash ^= static_cast<unsigned char>(lower);
         hash *= __EntJoyLayoutFnvPrime;
@@ -157,8 +166,8 @@ inline constexpr unsigned long long __EntJoyChunkContextFieldHash(
 inline constexpr unsigned long long __EntJoyChunkContextHeaderFingerprint()
 {
     unsigned long long sum = 0;
-#define __ENTJOY_CHUNK_FIELD_HASH(name) \
-    sum += __EntJoyChunkContextFieldHash(#name, \
+#define __ENTJOY_CHUNK_FIELD_HASH(name, type) \
+    sum += __EntJoyChunkContextFieldHash(#name, #type, \
         offsetof(__EntJoyChunkContextHeader, name), \
         sizeof((static_cast<__EntJoyChunkContextHeader*>(nullptr))->name));
     __ENTJOY_CHUNK_CONTEXT_FIELDS(__ENTJOY_CHUNK_FIELD_HASH)

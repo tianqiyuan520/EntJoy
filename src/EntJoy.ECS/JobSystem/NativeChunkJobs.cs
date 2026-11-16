@@ -199,7 +199,7 @@ namespace EntJoy.ECS.JobSystem
             return text.ToString();
         }
 
-        /// <summary>字段指纹：名字（忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成，与 C++ 侧同值。</summary>
+        /// <summary>字段指纹：名字 + 类型名（都忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成，与 C++ 侧同值。</summary>
         internal static ulong ComputeChunkContextHeaderFingerprint()
         {
             ulong sum = 0;
@@ -212,12 +212,31 @@ namespace EntJoy.ECS.JobSystem
                     hash ^= (byte)char.ToLowerInvariant(c);
                     hash *= LayoutFnvPrime;
                 }
+                // 名字与类型之间夹一次空推进，与 C++ 侧一致。
+                hash *= LayoutFnvPrime;
+                foreach (char c in TypeToken(field.FieldType))
+                {
+                    if (c == ' ') continue;
+                    hash ^= (byte)c;
+                    hash *= LayoutFnvPrime;
+                }
                 hash = (hash ^ (ulong)Marshal.OffsetOf(type, field.Name)) * LayoutFnvPrime;
                 hash = (hash ^ (ulong)Marshal.SizeOf(field.FieldType)) * LayoutFnvPrime;
                 sum += hash;
             }
             return sum + (LayoutSalt ^ (ulong)Marshal.SizeOf(type));
         }
+
+        /// <summary>字段类型在指纹里的拼写：与 C++ 侧宏列表逐字一致（托管类型名是 Int32/UInt32，不能直接用）。</summary>
+        private static string TypeToken(Type type) => type switch
+        {
+            _ when type == typeof(IntPtr) => "void*",
+            _ when type == typeof(int) => "int",
+            _ when type == typeof(uint) => "unsigned int",
+            _ when type == typeof(float) => "float",
+            _ when type == typeof(long) => "long long",
+            _ => type.Name.ToLowerInvariant()
+        };
 
         private const ulong LayoutFnvBasis = 1469598103934665603UL;
         private const ulong LayoutFnvPrime = 1099511628211UL;
