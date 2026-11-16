@@ -110,7 +110,7 @@ namespace NativeTranspiler.Analyzer
                         string naBase = baseExpr;
                         if (SimdVectorTypes.IsFloat2(elemCppType))
                             return $"simd_value<{elemCppType}>::broadcast({naBase}[{scalarIdx}])";
-                        if (SimdVectorTypes.IsInt2(elemCppType))
+                        if (SimdVectorTypes.IsInt2(elemCppType) || SimdVectorTypes.IsUint2(elemCppType))
                             return $"simd_value<EntJoy::Mathematics::int2>::broadcast({naBase}[{scalarIdx}])";
                         if (elemCppType == "float")
                             return $"simd_value<float>::broadcast({naBase}[{scalarIdx}])";
@@ -189,6 +189,9 @@ namespace NativeTranspiler.Analyzer
                 }
                 if (SimdVectorTypes.IsInt2(elemCppType))
                     return $"simd_value<EntJoy::Mathematics::int2>::gather({baseExpr}, {safeIdx})";
+                // uint2 与 int2 同寄存器布局：gather 按位重新解释指针即可（元素内容不变）。
+                if (SimdVectorTypes.IsUint2(elemCppType))
+                    return $"simd_value<EntJoy::Mathematics::int2>::gather((const EntJoy::Mathematics::int2*){baseExpr}, {safeIdx})";
                 if (elemCppType == "float")
                     return $"simd_value<float>::gathf({baseExpr}, {safeIdx}.v)";
                 if (elemCppType == "int")
@@ -394,10 +397,13 @@ namespace NativeTranspiler.Analyzer
 
         private string GatherStructField(string array, string structure, string field, string index, string fieldType, int stride)
         {
-            bool integer = fieldType == "int" || fieldType == "unsigned int" || fieldType == "EntJoy::Mathematics::int2";
-            bool pair = fieldType == "EntJoy::Mathematics::float2" || fieldType == "EntJoy::Mathematics::int2";
+            bool pair = SimdVectorTypes.IsPair(fieldType);
+            bool integer = fieldType == "int" || fieldType == "unsigned int"
+                || SimdVectorTypes.IsInt2(fieldType) || SimdVectorTypes.IsUint2(fieldType);
             if (!integer && !pair && fieldType != "float")
                 return $"/*{UnsupportedMarkers.Expr}SIMD_StructFieldType*/ 0";
+            // gather 的基址指针按寄存器元素类型取：uint2 与 int2 同布局，按 int2* 重新解释。
+            string pointerElem = SimdVectorTypes.IsUint2(fieldType) ? SimdVectorTypes.Int2 : fieldType;
             string scalar = integer ? "int" : "float";
             string gather = integer ? "n_gather_epi32" : "n_gather_ps";
             string safe = !_currentMask.IsAllTrue
@@ -406,7 +412,7 @@ namespace NativeTranspiler.Analyzer
             string scale = stride is 1 or 2 or 4 or 8 ? $"sizeof({structure})" : "1";
             string offsets = scale == "1" ? $"n_mullo_epi32({CppIntegerSemantics.MemberOperand(safe)}.v, n_set1_epi32(sizeof({structure})))" : $"{CppIntegerSemantics.MemberOperand(safe)}.v";
             string first = $"simd_value<{scalar}>{{ {gather}<{scale}>({pointer}, {offsets}) }}";
-            return pair ? $"simd_value<{fieldType}>{{ {first}, simd_value<{scalar}>{{ {gather}<{scale}>(({pointer}) + 1, {offsets}) }} }}" : first;
+            return pair ? $"simd_value<{pointerElem}>{{ {first}, simd_value<{scalar}>{{ {gather}<{scale}>(({pointer}) + 1, {offsets}) }} }}" : first;
         }
 
         /// <summary>

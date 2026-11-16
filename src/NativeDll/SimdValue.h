@@ -522,6 +522,8 @@ struct simd_value<EntJoy::Mathematics::int2> {
     friend simd_value operator+(simd_value a, int b) { return simd_value{ a.x + b, a.y + b }; }
     friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
     friend simd_value operator*(simd_value a, int b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator*(simd_value a, unsigned int b) { return simd_value{ a.x * (int)b, a.y * (int)b }; }
+    friend simd_value operator*(unsigned int b, simd_value a) { return a * b; }
     friend simd_value operator/(simd_value a, int b) { return simd_value{ a.x / b, a.y / b }; }
     friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
@@ -597,6 +599,70 @@ static inline simd_value<EntJoy::Mathematics::int2> blend(
     simd_value<EntJoy::Mathematics::int2> f, simd_value<EntJoy::Mathematics::int2> t, simd_mask m) {
     return simd_value<EntJoy::Mathematics::int2>{ blend(f.x, t.x, m), blend(f.y, t.y, m) };
 }
+
+// ============================================================
+// 无符号整数运算（C# 的 uint / uint2 语义）
+//   C++ 的 int 运算是有符号的：/ % >> 都按补码符号解释，直接沿用会静默错值。
+//   这里按"操作数是否无符号"提供同一组 helper 的重载：标量、simd_value<int>、
+//   以及 2 分量 pair（simd_value<int2> / int2），翻译器只按符号性选函数名。
+// ============================================================
+static inline simd_value<int> simd_div_u32(simd_value<int> a, simd_value<int> b) {
+    int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+    a.store(la); b.store(lb);
+    // 必须禁向量化：clang 会把标量无符号除法模拟成超长序列，宽向量下编译爆炸。
+    #pragma clang loop vectorize(disable)
+    for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = (int)((unsigned int)la[i] / (unsigned int)lb[i]);
+    return simd_value<int>::load(lr);
+}
+static inline simd_value<int> simd_div_u32(simd_value<int> a, unsigned int b) {
+    return simd_div_u32(a, simd_value<int>((int)b));
+}
+static inline simd_value<int> simd_mod_u32(simd_value<int> a, simd_value<int> b) {
+    int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+    a.store(la); b.store(lb);
+    #pragma clang loop vectorize(disable)
+    for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = (int)((unsigned int)la[i] % (unsigned int)lb[i]);
+    return simd_value<int>::load(lr);
+}
+static inline simd_value<int> simd_shr_u32(simd_value<int> a, int shift) {
+    return simd_value<int>{ n_srli_epi32(a.v, shift & 31) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_div_u32(
+    simd_value<EntJoy::Mathematics::int2> a, simd_value<EntJoy::Mathematics::int2> b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_div_u32(a.x, b.x), simd_div_u32(a.y, b.y) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_div_u32(
+    simd_value<EntJoy::Mathematics::int2> a, unsigned int b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_div_u32(a.x, b), simd_div_u32(a.y, b) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_mod_u32(
+    simd_value<EntJoy::Mathematics::int2> a, simd_value<EntJoy::Mathematics::int2> b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_mod_u32(a.x, b.x), simd_mod_u32(a.y, b.y) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_mod_u32(
+    simd_value<EntJoy::Mathematics::int2> a, unsigned int b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_mod_u32(a.x, b), simd_mod_u32(a.y, b) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_shr_u32(
+    simd_value<EntJoy::Mathematics::int2> a, int shift) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_shr_u32(a.x, shift), simd_shr_u32(a.y, shift) };
+}
+static inline EntJoy::Mathematics::int2 simd_div_u32(EntJoy::Mathematics::int2 a, EntJoy::Mathematics::int2 b) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() / (unsigned int)b.x()),
+        (int)((unsigned int)a.y() / (unsigned int)b.y()));
+}
+static inline EntJoy::Mathematics::int2 simd_mod_u32(EntJoy::Mathematics::int2 a, EntJoy::Mathematics::int2 b) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() % (unsigned int)b.x()),
+        (int)((unsigned int)a.y() % (unsigned int)b.y()));
+}
+static inline EntJoy::Mathematics::int2 simd_shr_u32(EntJoy::Mathematics::int2 a, int shift) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() >> (shift & 31)),
+        (int)((unsigned int)a.y() >> (shift & 31)));
+}
+
 static inline float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
 static inline float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
 static inline float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }

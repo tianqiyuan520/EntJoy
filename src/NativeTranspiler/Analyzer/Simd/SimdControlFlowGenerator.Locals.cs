@@ -186,6 +186,11 @@ namespace NativeTranspiler.Analyzer
                     if (variable.Initializer != null)
                     {
                         string initExpr = TranslateVaryingValue(variable.Initializer.Value, info.CppType);
+                        // uint2 用 int2 寄存器承载：标量 pair 值（如数组元素）要显式转成 int2，
+                        // 否则 uint2 → int2 → simd_value<int2> 需要两次用户转换，clang 拒绝。
+                        if (SimdVectorTypes.IsUint2(info.CppType)
+                            && SimdExprShapes.Of(initExpr) == SimdExprTraits.None)
+                            initExpr = $"simd_value<EntJoy::Mathematics::int2>(EntJoy::Mathematics::int2({initExpr}))";
                         {
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);

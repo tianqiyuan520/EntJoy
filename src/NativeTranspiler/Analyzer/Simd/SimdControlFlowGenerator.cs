@@ -126,13 +126,13 @@ namespace NativeTranspiler.Analyzer
             _nativeArrayParams = nativeArrayParams ?? new Dictionary<string, string>();
             _batchLoopVar = batchLoopVar;
 
-            // Pre-identify float2/int2 variables that are varying
+            // Pre-identify 2 分量向量变量（float2/int2/uint2）是不是 varying
             foreach (var kvp in _variables)
             {
                 if (kvp.Value.Kind >= VarKind.Varying)
                 {
                     var cppType = kvp.Value.CppType;
-                    if (cppType is "EntJoy::Mathematics::float2" or "EntJoy::Mathematics::int2")
+                    if (SimdVectorTypes.IsPair(cppType))
                         _float2VaryingVars.Add(kvp.Key);
                 }
             }

@@ -144,8 +144,9 @@ namespace NativeTranspiler.Analyzer
                 if (model.GetSymbolInfo(member).Symbol is not IFieldSymbol field || field.IsStatic
                     || SymbolEqualityComparer.Default.Equals(field.ContainingType, jobType)) continue;
                 string type = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                // 标量与 2 分量向量（float2/int2/uint2）可向量化；uint2 与 int2 共用寄存器类型。
                 if (type != "int" && type != "unsigned int" && type != "float"
-                    && type != "EntJoy::Mathematics::float2" && type != "EntJoy::Mathematics::int2") return false;
+                    && !SimdVectorTypes.IsPair(type)) return false;
             }
             foreach (var inner in nodes.OfType<ForStatementSyntax>())
                 if (!IntForLoop.TryAnalyze(inner, model, out var controlFlow)

@@ -184,6 +184,16 @@ namespace NativeTranspiler.Analyzer
                     return $"simd_mod_u32({left}, {modVal}u)";
             }
 
+            // 无符号整数运算通解：C# 的 uint / uint2 的 / % >> 是无符号语义，C++ 的 int 运算是有符号的。
+            // 只要任一侧是无符号整数（含 uint2 分量/pair），就改走 simd_*_u32 helper（标量与 pair 都有重载）。
+            if (op is "/" or "%" or ">>" && AnyUnsignedOperand(binary))
+            {
+                string helper = op switch { "/" => "simd_div_u32", "%" => "simd_mod_u32", _ => "simd_shr_u32" };
+                if (op == ">>")
+                    return $"{helper}({left}, {right})";
+                // 常量模数已有更优的 simd_mod_u32(x, const) 分支，这里处理运行时除数/模数。
+                return $"{helper}({left}, {right})";
+            }
             string simdOp = op switch
             {
                 "+" => "+",
@@ -241,6 +251,30 @@ namespace NativeTranspiler.Analyzer
             return isInt ? $"n_cvtepi32_ps(n_set1_epi32({translated}))" : $"n_set1_ps({translated})";
         }
 
+        /// <summary>
+        /// 操作数是否无符号整数：uint/ushort/byte 标量、uint2 pair、以及 u 后缀字面量。
+        /// 这是 / % >> 选择无符号 helper 的唯一判据（类型符号优先，语法兜底）。
+        /// </summary>
+        private bool AnyUnsignedOperand(BinaryExpressionSyntax binary)
+            => IsUnsignedInteger(binary.Left) || IsUnsignedInteger(binary.Right);
+
+        private bool IsUnsignedInteger(ExpressionSyntax expr)
+        {
+            if (expr is LiteralExpressionSyntax literal && literal.Token.Text.EndsWith("u", System.StringComparison.OrdinalIgnoreCase))
+                return true;
+            // (uint)x / (uint2)x 之类：类型符号或语法名都认。
+            var target = expr is CastExpressionSyntax cast ? cast.Type : expr;
+            var type = SymbolHelper.GetBoundType(_semanticModel, target);
+            if (type != null)
+            {
+                if (type.SpecialType is SpecialType.System_UInt32 or SpecialType.System_UInt16 or SpecialType.System_Byte)
+                    return true;
+                if (SimdVectorTypes.IsUint2(NativeTranspiler.MapCSharpTypeToCpp(type)))
+                    return true;
+            }
+            string leaf = SimdVectorTypes.LeafName(target.ToString().Replace('.', ':'));
+            return leaf is "uint" or "uint2" or "ushort" or "byte";
+        }
         private string TranslateCast(CastExpressionSyntax cast)
         {
             string inner = TranslateExpression(cast.Expression);
