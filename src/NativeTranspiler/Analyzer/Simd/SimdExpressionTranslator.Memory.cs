@@ -49,7 +49,7 @@ namespace NativeTranspiler.Analyzer
                 // 向量 load/gather 只支持 float/int（n_load_ps / n_load_epi32 / gather）。
                 // byte / uint 等窄或宽元素 → 退回标量下标读，避免把 byte* 当 float*/int* 用。
                 vectorizableElem = elemCppType == "float" || elemCppType == "int"
-                    || SimdVectorTypes.IsFloat2(elemCppType) || SimdVectorTypes.IsInt2(elemCppType);
+                    || SimdVectorTypes.IsPair(elemCppType);
             }
             baseExpr ??= TranslateExpression(elementAccess.Expression);
             string indexExpr = "0";

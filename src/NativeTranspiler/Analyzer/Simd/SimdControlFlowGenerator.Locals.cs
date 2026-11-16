@@ -167,7 +167,7 @@ namespace NativeTranspiler.Analyzer
                     && structInitEA.Expression is IdentifierNameSyntax structInitArrId
                     && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
                     && structInitElemType != "float" && structInitElemType != "int"
-                    && !SimdVectorTypes.IsFloat2(structInitElemType) && !SimdVectorTypes.IsInt2(structInitElemType))
+                    && !SimdVectorTypes.IsPair(structInitElemType))
                 {
                     ExpressionSyntax? idxSyntax = structInitEA.ArgumentList?.Arguments.Count > 0
                         ? structInitEA.ArgumentList.Arguments[0].Expression

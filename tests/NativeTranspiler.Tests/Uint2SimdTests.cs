@@ -66,4 +66,27 @@ public struct Uint2ChunkJob : IJobChunk {
         Assert.Contains("simd_mod_u32", result.Cpp);
         Assert.Contains("simd_shr_u32", result.Cpp);
     }
+
+    [Fact]
+    public void ParallelForPairArrayGathersInsteadOfLane0()
+    {
+        var result = GeneratorHarness.EmitFor(@"using NativeTranspiler; using EntJoy.JobSystem; using EntJoy.Collections; using EntJoy.Mathematics;
+[NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+public struct Uint2ParallelJob : IJobParallelFor {
+    public NativeArray<uint2> Input;
+    public NativeArray<int> Output;
+    public void Execute(int index) {
+        uint2 a = Input[index];
+        uint2 b = a * 2u;
+        Output[index] = (int)(b.x + (a.y / 3u));
+    }
+}", extraSource: MathStubs);
+
+        Assert.DoesNotContain(result.Diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain("__ENTJOY_UNSUPPORTED", result.Cpp);
+        // 并行作业的 pair 数组必须按整元素 gather；退化成 lane0 会让所有 lane 读同一元素。
+        Assert.Contains("simd_value<EntJoy::Mathematics::int2>::gather(", result.Cpp);
+        Assert.DoesNotContain("n_extract_lane_epi32(__gi_", result.Cpp);
+        Assert.Contains("simd_div_u32", result.Cpp);
+    }
 }
