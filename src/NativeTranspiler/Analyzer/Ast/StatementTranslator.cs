@@ -184,9 +184,12 @@ namespace NativeTranspiler.Analyzer
             AppendIndent();
             var type = ResolveLocalType(localDecl.Declaration.Type, localDecl.Declaration.Variables);
             if (type == null)
-                throw new InvalidOperationException(
-                    $"无法解析局部声明的类型：{localDecl.Declaration.Type}。"
-                    + "请显式写出类型并避免 `ref` 局部（改用指针局部 T* p = &arr[i]）。");
+            {
+                // 类型解析不出来时不能抛：抛出去只会变成 NT026 生成器崩溃。
+                // 发标记让构建期显式失败，消息里指明改法。
+                _builder.AppendLine($"/*{UnsupportedMarkers.Stmt}LocalTypeUnresolved*/");
+                return;
+            }
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
             // `ref T x = ref expr;` → C++ `T& x = expr;`（通解：引用即引用，无需写回）
             bool byRef = localDecl.Declaration.Type is RefTypeSyntax;
@@ -238,7 +241,11 @@ namespace NativeTranspiler.Analyzer
             {
                 var type = ResolveLocalType(forStmt.Declaration.Type, forStmt.Declaration.Variables);
                 if (type == null)
-                    throw new InvalidOperationException($"无法解析 for 声明中的类型：{forStmt.Declaration.Type}。");
+                {
+                    // 同上：无法解析就发标记，不抛异常。
+                    _builder.AppendLine($"/*{UnsupportedMarkers.Stmt}ForTypeUnresolved*/");
+                    return;
+                }
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
                 for (int i = 0; i < forStmt.Declaration.Variables.Count; i++)
                 {

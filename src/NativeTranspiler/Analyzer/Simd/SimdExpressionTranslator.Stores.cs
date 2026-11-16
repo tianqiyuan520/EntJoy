@@ -104,8 +104,7 @@ namespace NativeTranspiler.Analyzer
             if (compoundOp != "=")
             {
                 if (IsStructNativeArrayType(elemType))
-                    throw new System.NotSupportedException(
-                        $"复合赋值不支持结构体元素：`{elemType} {compoundOp}` —— 请拆成两步（先读局部变量、再整体写回）。");
+                    return $"/*{UnsupportedMarkers.Expr}SIMD_StructCompoundAssign*/ 0";
                 string elemPtr = $"(({elemType}*)({basePtr}))";
                 bool narrowedCmp = !_currentMask.IsAllTrue;
                 if (idxKind >= VarKind.Varying)

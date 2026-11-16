@@ -127,9 +127,11 @@ namespace NativeTranspiler.Analyzer
             var componentType = methodSymbol.TypeArguments[0];
             int requiredIndex = _requiredComponentTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, componentType));
             if (requiredIndex < 0)
-                throw new InvalidOperationException(
-                    $"GetEnableBitMapPtr<{componentType.ToDisplayString()}> 的类型不在 required 组件列表中。" +
-                    "原生 job 内必须同时用 GetComponentDataNativeArray<T>() 访问该组件列，required 序号才能对齐。");
+            {
+                // 用户写法问题（没有同时读该组件列 ⇒ required 序号对不上）：发标记而不是抛异常。
+                expression = $"/*{UnsupportedMarkers.Expr}EnableBitMapTypeNotRequired*/ 0";
+                return true;
+            }
 
             expression = $"reinterpret_cast<unsigned long long*>(__chunkData->requiredEnableBitMaps[{requiredIndex}])";
             return true;
