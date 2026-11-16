@@ -40,5 +40,10 @@ namespace EntJoy.ECS
         public QuerySelection<T0, T1> WithShared<T2>(T2 filterValue)
             where T2 : struct, ISharedComponentData
             => new QuerySelection<T0, T1>(_entityManager, _builder.WithShared(filterValue));
+
+        /// <summary>只遍历 T2 在本帧被改过的 chunk。</summary>
+        public QuerySelection<T0, T1> WithChanged<T2>()
+            where T2 : struct
+            => new QuerySelection<T0, T1>(_entityManager, _builder.WithChanged<T2>());
     }
 }

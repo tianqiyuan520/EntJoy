@@ -43,5 +43,10 @@ namespace EntJoy.ECS
         public QueryEnumerable<T0, T1> WithShared<T1>(T1 filterValue)
             where T1 : struct, ISharedComponentData
             => new QueryEnumerable<T0, T1>(_entityManager, _builder.WithShared(filterValue));
+
+        /// <summary>只遍历 T1 在本帧被改过的 chunk。</summary>
+        public QueryEnumerable<T0, T1> WithChanged<T1>()
+            where T1 : struct
+            => new QueryEnumerable<T0, T1>(_entityManager, _builder.WithChanged<T1>());
     }
 }

@@ -153,6 +153,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("query-read1", probe.EntJoyRead1Only),
                 ("query-shared", probe.EntJoyShared),
                 ("query-enabled", probe.EntJoyEnabled),
+                ("query-changed", probe.EntJoyChanged),
+                ("query-changed-none", probe.EntJoyChangedNone),
                 ("arch-query", probe.Arch),
                 ("arch-query-movenext", probe.ArchMoveNextOnly),
                 ("arch-chunk", probe.ArchChunk),
@@ -505,6 +507,8 @@ public class SystemComparison
     private EntJoy.ECS.Entity[] enabledEntities;
     // shared 过滤基准用：独立世界，带 shared 列的查询无法走块表快路径。
     private EntWorld sharedWorld;
+    private EntWorld changedWorld;
+    private EntWorld cleanWorld;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -617,6 +621,15 @@ public class SystemComparison
             // 全部同值、全部启用：两条过滤臂都命中全部实体，与被测的不过滤臂工作量相同。
             sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
         }
+        // 变更过滤两臂：changedWorld 保留写入产生的变更位（全命中），cleanWorld 清掉（全不命中）。
+        changedWorld = new EntWorld("changed", threadSafe: false);
+        cleanWorld = new EntWorld("clean", threadSafe: false);
+        for (int i = 0; i < EntityCount; i++)
+        {
+            changedWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+            cleanWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+        }
+        cleanWorld.EntityManager.ClearAllChangedBitMasks();
         EntJoy();
         VerifyEnt(1);
         Arch();
@@ -845,6 +858,24 @@ public class SystemComparison
     {
         int sum = 0;
         foreach (var result in sharedWorld.Query<A, B>().WithEnabled<Flag>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 变更过滤全命中：每个块都有实体被改过。
+    public void EntJoyChanged()
+    {
+        int sum = 0;
+        foreach (var result in changedWorld.Query<A, B>().WithChanged<A>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 变更过滤全不命中：所有块都干净，只付块级判定的成本。
+    public void EntJoyChangedNone()
+    {
+        int sum = 0;
+        foreach (var result in cleanWorld.Query<A, B>().WithChanged<A>())
             sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
         _abSink += sum;
     }
@@ -1298,6 +1329,8 @@ public class SystemComparison
         ent.Dispose();
         enabledWorld?.Dispose();
         sharedWorld?.Dispose();
+        changedWorld?.Dispose();
+        cleanWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }
