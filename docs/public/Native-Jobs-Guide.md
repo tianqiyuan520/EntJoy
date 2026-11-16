@@ -80,8 +80,7 @@ new AddJob { Values = values, Delta = 1 }.Schedule(values.Length, 64).Complete()
     MathLib = IspcMathLib.fast,          // system | fast(默认) | @default；仅 Target=Ispc
     CppMathLib = CppMathLib.@default,    // @default(默认) | fast
     AutoSIMD = AutoSIMD.Disabled,        // Disabled(默认) | Enabled | Vectorize
-    MathPrecision = SimdMathPrecision.Fastest, // Fastest(默认) | High | IEEE
-    DisabledAutoRefresh = false)]
+    MathPrecision = SimdMathPrecision.Fastest)] // Fastest(默认) | High | IEEE
 public struct MyJob : IJobParallelFor { … }
 ```
 
