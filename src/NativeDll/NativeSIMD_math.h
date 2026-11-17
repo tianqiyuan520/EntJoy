@@ -1032,7 +1032,7 @@ static N_FORCEINLINE float64x2_t _n_cos_poly2_neon(float64x2_t r) {
 }
 
 static N_FORCEINLINE uint64x2_t _n_not_u64(uint64x2_t m) {
-  return vreinterpretq_u64_s64(vmvnq_s64(vreinterpretq_s64_u64(m)));
+  return vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(m)));
 }
 
 static N_FORCEINLINE float64x2_t _n_quad_mod4_neon(int32x2_t q) {
