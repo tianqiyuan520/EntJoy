@@ -140,7 +140,7 @@ namespace
                 a[k] = (float)(0.01 + 9.99 * t);
                 b[k] = (float)(-3.0 + 6.0 * std::fmod(t * 3.7 + 0.31, 1.0));
             }
-            _mm256_storeu_ps(out, _n_pow_ps(_mm256_loadu_ps(a), _mm256_loadu_ps(b)));
+            _mm256_storeu_ps(out, N_POW(_mm256_loadu_ps(a), _mm256_loadu_ps(b)));
             for (int k = 0; k < 8; k++) st.Add(a[k], out[k], std::pow((double)a[k], (double)b[k]));
         }
         std::printf("%s\n", label);

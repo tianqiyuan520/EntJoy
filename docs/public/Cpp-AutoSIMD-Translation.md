@@ -94,9 +94,9 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 | cosh | [-10, 10] | 1.00 | 1.00 | 0.23 |
 | tanh | [-5, 5] | 2.00 | 2.00 | 0.27 |
 | atan2 | 全象限 | 2.00 | 2.00 | 0.37 |
-| pow | 底数 [0.01,10]，指数 [-3,3] | 12.00 | 7.00 | 0.88 |
+| pow | 底数 [0.01,10]，指数 [-3,3] | 1.00 | 1.00 | 0.02 |
 
-sin/cos 的 `|x|` 归约在 double 里完成（三段 π/2），`|x| > 1e7` 时改走 libm 逐 lane 精确归约。log 在 `|x-1| <= 0.25` 走 `log(1+t)` 级数，其余用尾数归约加两段 ln2。asin/acos 的 `1-x²` 按 `(1-x)(1+x)` 计算，sinh/cosh/tanh 在 `|x| < 0.25` 走 Taylor，pow 由 exp 与 log 组合。
+sin/cos 的 `|x|` 归约在 double 里完成（三段 π/2），`|x| > 1e7` 时改走 libm 逐 lane 精确归约。log 在 `|x-1| <= 0.25` 走 `log(1+t)` 级数，其余用尾数归约加两段 ln2。asin/acos 的 `1-x²` 按 `(1-x)(1+x)` 计算，sinh/cosh/tanh 在 `|x| < 0.25` 走 Taylor，pow 走 SLEEF 的 exp2(y·log2 x) 路线：指数与尾数在 float 域取出，log2 只对 [1,2) 的尾数展开，log2/exp2 都在 double 里算，最后折回 float。
 ```powershell
 dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release
 dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release -p:FixtureIspc=true
@@ -111,7 +111,7 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 
 ### Fastest 档的实测误差
 
-`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+精度档只作用于向量 lane 路径：生成代码的标量尾巴（`::expf(x)` 这类）直接调 libm，同一 job 里向量段与标量段用的不是同一套实现。`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
 
 | 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
 |---|---|---|---|---|

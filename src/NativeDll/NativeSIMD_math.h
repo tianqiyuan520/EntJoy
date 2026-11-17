@@ -200,6 +200,87 @@ static N_FORCEINLINE n_float _n_exp_avx2(n_float d) {
   return result;
 }
 
+// ---- SLEEF 路线的高精度 pow：log2 与 exp2 都在 double 里算，float 只做最后折回 ----
+// log2(m)，m ∈ [1,2)：不需要指数位提取，指数由调用方在 float 域带进来
+static N_FORCEINLINE __m256d _n_log2_mant_pd(__m256d m) {
+  __m256d t = _mm256_div_pd(_mm256_sub_pd(m, _mm256_set1_pd(1.0)), _mm256_add_pd(m, _mm256_set1_pd(1.0)));
+  __m256d z = _mm256_mul_pd(t, t);
+  __m256d s = _mm256_set1_pd(1.0 / 13.0);
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0 / 11.0));
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0 / 9.0));
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0 / 7.0));
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0 / 5.0));
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0 / 3.0));
+  s = _mm256_fmadd_pd(s, z, _mm256_set1_pd(1.0));
+  return _mm256_mul_pd(_mm256_mul_pd(t, s), _mm256_set1_pd(2.8853900817779268));  // 2/ln2
+}
+
+static N_FORCEINLINE __m256d _n_exp2_pd(__m256d v) {
+  __m256d n = _mm256_round_pd(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  __m256d f = _mm256_sub_pd(v, n);
+  __m256d r = _mm256_mul_pd(f, _mm256_set1_pd(0.69314718055994530942));  // f*ln2
+
+  // exp(r)，|r| <= 0.347：12 次 Taylor，截断误差 < 1e-17
+  __m256d p = _mm256_set1_pd(1.0 / 479001600.0);
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 39916800.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 3628800.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 362880.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 40320.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 5040.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 720.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 120.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 24.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 6.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(0.5));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
+  p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
+
+  // 2^n：int32 夹到 [-1022, 1023] 后转 int64 拼指数位
+  __m128i ni32 = _mm256_cvtpd_epi32(_mm256_max_pd(_mm256_min_pd(n, _mm256_set1_pd(1023.0)),
+                                                  _mm256_set1_pd(-1022.0)));
+  __m256i ni64 = _mm256_cvtepi32_epi64(ni32);
+  __m256d scale = _mm256_castsi256_pd(_mm256_slli_epi64(_mm256_add_epi64(ni64, _mm256_set1_epi64x(1023)), 52));
+  return _mm256_mul_pd(p, scale);
+}
+static N_FORCEINLINE n_float _n_pow_avx2_ps(n_float x, n_float y) {
+  __m256d yl = _mm256_cvtps_pd(_mm256_castps256_ps128(y));
+  __m256d yh = _mm256_cvtps_pd(_mm256_extractf128_ps(y, 1));
+
+  // 指数与尾数在 float 域取好，log2 只对尾数 [1,2) 展开
+  n_float ax = n_fabs_ps(x);
+  n_int ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
+  n_float mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
+                                                                 _mm256_set1_epi32(0x3f800000)));
+  __m256d logl = _mm256_add_pd(_mm256_cvtepi32_pd(_mm256_castsi256_si128(ei)),
+                                _n_log2_mant_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(mf))));
+  __m256d logh = _mm256_add_pd(_mm256_cvtepi32_pd(_mm256_extracti128_si256(ei, 1)),
+                                _n_log2_mant_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(mf, 1))));
+  __m256d vl = _mm256_mul_pd(yl, logl);
+  __m256d vh = _mm256_mul_pd(yh, logh);
+  __m128 rlo = _mm256_cvtpd_ps(_n_exp2_pd(vl));
+  __m128 rhi = _mm256_cvtpd_ps(_n_exp2_pd(vh));
+  n_float mag = _mm256_insertf128_ps(_mm256_castps128_ps256(rlo), rhi, 1);
+
+  // 负底数：仅整数指数成立，奇数指数取负；非整数指数为 NaN
+  n_float ay = n_fabs_ps(y);
+  n_mask yInt = n_and_mask(n_cmp_eq_ps(y, n_trunc_ps(y)), n_cmp_lt_ps(ay, n_set1_ps(8388608.0f)));
+  n_float half = n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f)));
+  n_mask yOdd = n_cmp_ne_ps(n_mul_ps(half, n_set1_ps(2.0f)), y);
+  n_float sign = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f),
+                             n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), n_and_mask(yInt, yOdd)));
+  n_float result = n_mul_ps(mag, sign);
+
+  n_mask xNeg = n_cmp_lt_ps(x, n_set1_ps(0.0f));
+  result = n_blendv_ps(result, n_set1_ps(NAN), n_and_mask(xNeg, n_not_mask(yInt)));
+  result = n_blendv_ps(result, n_set1_ps(1.0f), n_cmp_eq_ps(y, n_set1_ps(0.0f)));
+  n_mask xZero = n_cmp_eq_ps(x, n_set1_ps(0.0f));
+  result = n_blendv_ps(result, n_set1_ps(INFINITY),
+                       n_and_mask(xZero, n_cmp_lt_ps(y, n_set1_ps(0.0f))));
+  result = n_blendv_ps(result, n_set1_ps(0.0f),
+                       n_and_mask(xZero, n_cmp_gt_ps(y, n_set1_ps(0.0f))));
+  return n_blendv_ps(result, n_set1_ps(NAN),
+                     n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
+}
 #endif // NSIMD_AVX2
 
 // ================================================================
@@ -324,7 +405,7 @@ static N_FORCEINLINE n_float _n_log_avx512(n_float d) {
     #define N_SINH(a)      _n_sinh_ps(a)
     #define N_COSH(a)      _n_cosh_ps(a)
     #define N_TANH(a)      _n_tanh_ps(a)
-    #define N_POW(a,b)     _n_pow_ps(a, b)
+    #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
   #endif
   // 非 AVX2 平台：Sleef 已移除，由下方 #ifndef N_* 守卫的逐通道标量回退覆盖。
