@@ -1,4 +1,4 @@
-﻿# NativeComparison：Flecs / EnTT 对照臂
+# NativeComparison：Flecs / EnTT 对照臂
 
 与 `tools/EcsComparison` 的 .NET 侧（EntJoy、Arch、Unity DOTS）共用 kernel、实体数、测量协议与输出格式，产出同一套 `MATRIX_RESULT` 行后可合并成一张表。结果按**语言**分组对比：C++ 与 C++、C# 与 C#。
 
@@ -44,7 +44,7 @@ EntJoy / Arch 在 .NET 8.0.30 上由 JIT 编译；Unity 走 IL2CPP Player 构建
 
 EntJoy 的 C++ 转译行仍然由托管进程驱动：`Run` 的调度、ChunkJobData 表构建与完成等待都在托管侧，原生部分只有块循环。这一行的读数因此是"托管驱动 + 原生循环"，与 Flecs / EnTT 的纯原生路径不同层。
 
-Unity 的遍历与结构变更同源：都用 `Builds/PlayerIL2CPP` 的 IL2CPP 播放器（`compiler=il2cpp`）。Mono Player 与 Editor 口径的历史数据留作对照，不进表。
+Unity 的遍历与结构变更同源：都用 `Builds/PlayerIL2CPP` 的 IL2CPP 播放器（`compiler=il2cpp`）。Mono Player（`Builds/PlayerMatrix`）与 Editor 口径不进表。
 
 ## 测量协议
 
@@ -72,7 +72,15 @@ Unity 的遍历与结构变更同源：都用 `Builds/PlayerIL2CPP` 的 IL2CPP �
 
 # 只合并已有 log
 .\Export-NativeMatrix.ps1 -SkipBuild -SkipRun
+
+# Unity 遍历臂：构建 IL2CPP Player，再逐档跑（每档单独一个进程，矩阵档位由 -matrixEntities/-matrixComponents 指定）
+& $env:UNITY -batchmode -quit -nographics -projectPath ..\UnityComparison -executeMethod PlayerBuild.BuildWindowsIl2Cpp
+& ..\UnityComparison\Builds\PlayerIL2CPP\PlayerIL2CPP.exe -batchmode -nographics `
+  -matrixLog ..\..\results\unity-100000x2.log -matrixEntities 100000 -matrixComponents 2
+# 4 档 × 3 进程的 log 一起并入：.\Export-NativeMatrix.ps1 -SkipBuild -SkipRun -UnityTraverseLogs <12 个路径>
 ```
+
+Unity 的 Player 若在 `-batchmode` 下报 Success 而产物哈希不变，是 IL2CPP 缓存命中（输入未变），不必删 `Builds` 重来。
 
 脚本默认取 `D:\llvm23\clang+llvm-23.1.1-x86_64-pc-windows-msvc`，走 `--target=x86_64-w64-windows-gnu --sysroot=C:/msys64/ucrt64`。手动编译：
 
@@ -91,7 +99,7 @@ git clone --depth 1 --branch v4.0.0 https://github.com/skypjack/entt.git third_p
 
 ## 结果
 
-单线程，3 次独立进程取中位（.NET / 原生每次 2 轮共 6 个样本，Unity IL2CPP Player 每次单轮共 3 个样本），AMD Ryzen 7 8845H。单位 µs/次遍历。`results/native-vs-dotnet-clang-o2-summary.csv` 是合并视图：C++ / C# 行来自 2026-11-17 的会话，Unity 行沿用 2026-11-15 的 IL2CPP Player 会话（Player 日志未入库）。
+单线程，3 次独立进程取中位（.NET / 原生每次 2 轮共 6 个样本，Unity IL2CPP Player 每次单轮共 3 个样本），AMD Ryzen 7 8845H。单位 µs/次遍历。`results/native-vs-dotnet-clang-o2-summary.csv` 是合并视图：C++ / C# 行来自 2026-11-17 的会话，Unity 行来自同一轮的 IL2CPP Player（`Builds/PlayerIL2CPP`，3 次进程 × 4 档，各 3 个样本）。
 
 ### C++ 组（10 万，矩阵口径）
 
@@ -147,23 +155,23 @@ Flecs 没有逐实体回调 API，`ecs_query_iter` 是块级实现，所以在 Q
 
 ### C# 组
 
-`results/native-vs-dotnet-clang-o2-summary.csv` 的 C# 行（2026-11-17 会话，`DOTNET_TieredCompilation=0`），单位 µs。Unity 行沿用 2026-11-15 的 IL2CPP Player 会话。
+`results/native-vs-dotnet-clang-o2-summary.csv` 的 C# 行与 Unity 行（2026-11-17 会话，`DOTNET_TieredCompilation=0`），单位 µs。
 
 | 形式 | 框架 | 路径 | 10 万 × 2 | 10 万 × 3 | 1 千 × 2 | 1 千 × 3 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Query | **EntJoy** | `IJobEntity.Run`（C#） | **35.48** | **59.46** | 0.48 | 0.75 |
-| Query | Unity | `SystemAPI.Query`（Burst） | 93.46 | 133.06 | **0.73** | **0.99** |
+| Query | Unity | `SystemAPI.Query`（Burst） | 98.50 | 132.83 | **0.75** | **0.96** |
 | Query | Arch | `InlineQuery` | 126.47 | 135.75 | 1.57 | 1.61 |
 | Query | EntJoy | `foreach`（C#） | 230.93 | 154.39 | 3.50 | 2.20 |
-| Query | Unity | `SystemAPI.Query`（托管臂） | 1216.85 | 1453.97 | 12.67 | 14.28 |
+| Query | Unity | `SystemAPI.Query`（托管臂） | 1304.19 | 1538.98 | 11.83 | 14.80 |
 | Chunk | **Arch** | chunk `foreach` | **32.61** | 60.03 | 0.45 | 0.76 |
 | Chunk | EntJoy | chunk `foreach`（C#） | 33.11 | **58.90** | 0.74 | 0.85 |
 | Chunk | EntJoy | `IJobChunk.Run`（C#） | 34.89 | 63.54 | 0.45 | 0.74 |
 | Chunk | Arch | `CachedQuery.foreach` | 37.90 | 62.04 | 0.41 | 0.59 |
 | Chunk | EntJoy | `Archetype.ChunkSpan` | 57.87 | 59.60 | 0.59 | 0.54 |
-| Chunk | Unity | `IJobChunk`（Burst） | 78.40 | 102.90 | 0.73 | 0.91 |
+| Chunk | Unity | `IJobChunk`（Burst） | 77.34 | 105.38 | 0.74 | 1.18 |
 
-C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（35.48 对 126.47）；chunk 形式 Arch 32.61 与 EntJoy 33.11 差 1.5%，`ChunkSpan` 与 `CachedQuery.foreach` 各偏一侧。Unity Burst 在本机 78.40，比 Arch 慢 2.4 倍，块数是 782 对 100（见"块粒度"）。1 千档列只作固定开销参考，不进排序。
+C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（35.48 对 126.47）；chunk 形式 Arch 32.61 与 EntJoy 33.11 差 1.5%，`ChunkSpan` 与 `CachedQuery.foreach` 各偏一侧。Unity Burst 的 `IJobChunk` 在 77.34，比 Arch 慢 2.4 倍，块数是 782 对 100（见"块粒度"）。1 千档列只作固定开销参考，不进排序。
 
 ## 块粒度
 
@@ -189,7 +197,7 @@ C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（35.48 对 126.47）；chu
 
 ## 结构变更
 
-协议与 .NET 侧 `StructuralBench` 同构：25 轮，每轮内两侧只隔一次复位，复位一律在计时之外，按轮取最小。原生侧在 1024 / 10000 / 100000 三档都稳定到 0.5% 内（`results/struct-vs-native-summary.csv`）。单位 ns/实体。
+协议与 .NET 侧 `StructuralBench` 同构：25 轮，每轮内两侧只隔一次复位，复位一律在计时之外，按轮取最小。原生侧在 1024 / 10000 / 100000 三档都稳定到 0.5% 内（`results/struct-vs-native-summary.csv`，2026-11-15 会话，与遍历表不是同一轮）。单位 ns/实体。
 
 ### C++ 组
 
@@ -260,14 +268,14 @@ EntJoy 默认块数改用 Flecs 的编译档（clang 23.1.1 `-O2` SSE2）重编�
 
 C# 组遍历（相对该组最快者，10 万，同一会话，1 千档不进排序）：
 
-| 场景 | Arch | EntJoy |
-| --- | --- | --- |
-| Query 10 万 × 2 | 3.56 | 1.00 |
-| Query 10 万 × 3 | 2.28 | 1.00 |
-| Chunk 10 万 × 2 | 1.00 | 1.02 |
-| Chunk 10 万 × 3 | 1.02 | 1.00 |
+| 场景 | Arch | EntJoy | Unity |
+| --- | --- | --- | --- |
+| Query 10 万 × 2 | 3.56 | 1.00 | 2.78 |
+| Query 10 万 × 3 | 2.28 | 1.00 | 2.23 |
+| Chunk 10 万 × 2 | 1.00 | 1.02 | 2.37 |
+| Chunk 10 万 × 3 | 1.02 | 1.00 | 1.79 |
 
-结构变更（C# 组，同一会话，含 Unity）：
+结构变更（C# 组，2026-11-15 会话，三方同轮）：
 
 | 操作 | Arch | EntJoy | Unity |
 | --- | --- | --- | --- |
@@ -284,4 +292,4 @@ C# 组遍历（相对该组最快者，10 万，同一会话，1 千档不进排
 - **同框架跨语言**：EntJoy 的 C++ 转译路径比自家托管 chunk 路径快 2–3 倍（10 万×3：15.64–20.93 对 58.90–63.54，同一会话的两侧，只读量级）。
 - **结构变更**：C++ 组 EnTT 拿添加、移除与创建，Flecs 拿销毁，量级差 1.2–4.3 倍；C# 组 Arch 拿创建、添加与销毁，EntJoy 拿移除。
 
-口径：Arch / EntJoy 的托管路径是 .NET JIT（`DOTNET_TieredCompilation=0`），EntJoy 的 C++ 路径是 ClangCL（clang 19.1.5，实际生效 `-O3` + AVX2），Flecs / EnTT 是 clang 23.1.1 `-O2` SSE2，Unity 是 IL2CPP + Burst。框架间的位置只从矩阵口径的 10 万档读，1 千档只作固定开销探针，Unity 的遍历行来自另一个会话、不参与相对值。
+口径：Arch / EntJoy 的托管路径是 .NET JIT（`DOTNET_TieredCompilation=0`），EntJoy 的 C++ 路径是 ClangCL（clang 19.1.5，实际生效 `-O3` + AVX2），Flecs / EnTT 是 clang 23.1.1 `-O2` SSE2，Unity 是 IL2CPP + Burst。框架间的位置只从矩阵口径的 10 万档读，1 千档只作固定开销探针。
