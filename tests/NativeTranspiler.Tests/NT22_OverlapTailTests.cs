@@ -51,10 +51,40 @@ public struct OverlapClampJob : IJobParallelFor
             _out.WriteLine(result.Cpp);
 
             Assert.Contains("total_end_ - g_simdWidthInt", result.Cpp);
+            // 读写两个数组同址时不能走重叠尾部，否则重叠 lane 会读到已写回的值
+            Assert.Contains("(const void*)Dst_ptr != (const void*)Src_ptr", result.Cpp);
             Assert.Contains("__count < g_simdWidthInt && ", result.Cpp);
             Assert.Contains("__simd_exit_tail", result.Cpp);
         }
 
+        private const string PointerAlias = @"
+using System;
+using NativeTranspiler;
+using EntJoy.JobSystem;
+using EntJoy.Collections;
+
+[NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+public struct OverlapPointerJob : IJobParallelFor
+{
+    public NativeArray<float> Value;
+    public void Execute(int index)
+    {
+        unsafe
+        {
+            float* p = (float*)Value.GetUnsafePtr();
+            Value[index] = p[index] + 1f;
+        }
+    }
+}";
+
+        [Fact]
+        public void PointerAliasRead_KeepsScalarTail()
+        {
+            var result = GeneratorHarness.EmitFor(PointerAlias);
+            _out.WriteLine(result.Cpp);
+
+            Assert.DoesNotContain("total_end_ - g_simdWidthInt", result.Cpp);
+        }
         [Fact]
         public void ReadModifyWriteSameArray_KeepsScalarTail()
         {

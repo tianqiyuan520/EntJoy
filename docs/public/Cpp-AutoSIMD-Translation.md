@@ -154,7 +154,7 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | sinh / cosh / tanh | 0.00 | 2.40–3.36× |
 | pow | 1.00 | 2.71× |
 
-表中 0.00 表示该域内全部样本与正确舍入结果的位模式一致。非 AVX2 平台上 High 档回退到逐 lane libm（精确但无加速）。
+表中 0.00 表示该域内全部样本与正确舍入结果的位模式一致。High 档在 AVX2/AVX512/NEON 上是 double lane 实现；SSE4.1 无 FMA 且只有 4 lane，High 档用 float 域实现（1–3 ULP）；AArch32 与其它平台逐 lane libm。
 ### 端到端加速的构成
 
 `tools/AutoSIMDPerf` 用相同调度参数交替运行配对实现（1M 元素 × 9 轮取中位，托管基线同样走并行调度器）。总加速包含两段，必须分开看：

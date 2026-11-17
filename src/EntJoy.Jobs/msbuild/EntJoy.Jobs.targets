@@ -33,9 +33,12 @@
       <_EntJoyBuildOutput Include="$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeTranspiled.dll" Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')" />
     </ItemGroup>
     <Copy SourceFiles="@(_EntJoyBuildOutput)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="false" Condition="'@(_EntJoyBuildOutput)' != ''" />
-    <!-- 产物缺失时必须让构建失败：Copy 的条件写法在找不到文件时静默跳过，问题会推迟到运行期。 -->
-    <Error Condition="'@(_EntJoyBuildOutput)' == '' And '$(EntJoyIsPrebuiltNative)' != 'true'"
-           Text="Native artifacts were not found under $(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\ (expected NativeDll.dll and NativeTranspiled.dll). The build would otherwise ship without native code." />
+    <!-- 产物缺失时必须让构建失败：Copy 的条件写法在找不到文件时静默跳过，问题会推迟到运行期。
+         AfterTargets 在被 hook 的目标因条件未运行时仍会执行，因此这里也要求生成目录确实存在。 -->
+    <Error Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\CMakeLists.txt') And !Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeTranspiled.dll')"
+           Text="NativeTranspiled.dll was not produced under $(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\. Run a clean native build; the application would otherwise fail with DllNotFoundException at runtime." />
+    <Error Condition="Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\CMakeLists.txt') And '$(EntJoyIsPrebuiltNative)' != 'true' And !Exists('$(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\NativeDll.dll')"
+           Text="NativeDll.dll was not produced under $(MSBuildProjectDirectory)\NativeTranspiler_Generated\build\Release\." />
     <!-- 历史遗留：合并前的单 DLL 名，删除避免串旧版本 -->
     <Delete Files="$(OutputPath)NativeTranspiler_Generated.dll" ContinueOnError="true" />
   </Target>

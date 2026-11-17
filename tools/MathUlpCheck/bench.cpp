@@ -12,9 +12,15 @@
 namespace
 {
     using Clock = std::chrono::steady_clock;
-    // qemu 下每轮元素数按 ENTJOY_BENCH_N 缩小，比值仍可比
-    const int N = [] { const char* v = std::getenv("ENTJOY_BENCH_N"); return v ? std::atoi(v) : (1 << 20); }();
-
+    // qemu 下元素数按 ENTJOY_BENCH_N 缩小（比值仍可比）；向上取整到 NSIMD_WIDTH 的整数倍
+    static int BenchN()
+    {
+        const char* v = std::getenv("ENTJOY_BENCH_N");
+        int n = v ? std::atoi(v) : (1 << 20);
+        if (n <= 0) n = 1 << 20;
+        return ((n + NSIMD_WIDTH - 1) / NSIMD_WIDTH) * NSIMD_WIDTH;
+    }
+    static const int N = BenchN();
     double Median(std::vector<double> v)
     {
         std::sort(v.begin(), v.end());

@@ -809,8 +809,12 @@ static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
   p = vfmaq_f32(vdupq_n_f32(0.5f), p, r);
   p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
   p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
-  n_int e = vshlq_n_s32(vaddq_s32(ni, vdupq_n_s32(127)), 23);
-  n_float result = vmulq_f32(p, vreinterpretq_f32_s32(e));
+  // 次正规结果需要两段缩放：先夹到 -126，剩余指数单独乘
+  n_int hi = vmaxq_s32(vminq_s32(ni, vdupq_n_s32(127)), vdupq_n_s32(-126));
+  n_int lo = vsubq_s32(ni, hi);
+  n_float s1 = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(hi, vdupq_n_s32(127)), 23));
+  n_float s2 = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(vmaxq_s32(lo, vdupq_n_s32(-126)), vdupq_n_s32(127)), 23));
+  n_float result = vmulq_f32(vmulq_f32(p, s1), s2);
   result = vbslq_f32(vcgtq_f32(d, vdupq_n_f32(88.722839f)), vdupq_n_f32(INFINITY), result);
   return vbslq_f32(vcltq_f32(d, vdupq_n_f32(-103.972084f)), vdupq_n_f32(0.0f), result);
 }
@@ -919,7 +923,8 @@ static N_FORCEINLINE n_float _n_cosh_neon(n_float a) {
 }
 
 static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
-  n_float e2 = _n_exp_neon(vmulq_f32(vdupq_n_f32(2.0f), a));
+  n_float t2 = vmaxq_f32(vminq_f32(vmulq_f32(vdupq_n_f32(2.0f), a), vdupq_n_f32(88.0f)), vdupq_n_f32(-88.0f));
+  n_float e2 = _n_exp_neon(t2);
   n_float wide = vdivq_f32(vsubq_f32(e2, vdupq_n_f32(1.0f)), vaddq_f32(e2, vdupq_n_f32(1.0f)));
   n_float z = vmulq_f32(a, a);
   n_float sp = vdupq_n_f32(62.0f / 2835.0f);
@@ -1366,8 +1371,15 @@ static N_FORCEINLINE __m128 _n_exp_sse41(__m128 d) {
   p = _n_madd_ps(_mm_set1_ps(0.5f), p, r);
   p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
   p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
-  __m128i e = _mm_slli_epi32(_mm_add_epi32(ni, _mm_set1_epi32(127)), 23);
-  __m128 result = _mm_mul_ps(p, _mm_castsi128_ps(e));
+  // 次正规结果需要两段缩放：先夹到 -126，剩余指数单独乘
+  __m128 nc = _mm_max_ps(_mm_min_ps(n, _mm_set1_ps(127.0f)), _mm_set1_ps(-126.0f));
+  __m128i hi = _mm_cvtps_epi32(nc);
+  __m128i lo = _mm_sub_epi32(ni, hi);
+  __m128 s1 = _mm_castsi128_ps(_mm_slli_epi32(_mm_add_epi32(hi, _mm_set1_epi32(127)), 23));
+  __m128 lof = _mm_cvtepi32_ps(lo);
+  __m128 lc = _mm_max_ps(_mm_min_ps(lof, _mm_set1_ps(127.0f)), _mm_set1_ps(-126.0f));
+  __m128 s2 = _mm_castsi128_ps(_mm_slli_epi32(_mm_add_epi32(_mm_cvtps_epi32(lc), _mm_set1_epi32(127)), 23));
+  __m128 result = _mm_mul_ps(_mm_mul_ps(p, s1), s2);
   result = _n_blend_sse41(result, _mm_set1_ps(INFINITY), _mm_cmpgt_ps(d, _mm_set1_ps(88.722839f)));
   return _n_blend_sse41(result, _mm_setzero_ps(), _mm_cmplt_ps(d, _mm_set1_ps(-103.972084f)));
 }
@@ -1486,7 +1498,8 @@ static N_FORCEINLINE __m128 _n_cosh_sse41(__m128 a) {
 }
 
 static N_FORCEINLINE __m128 _n_tanh_sse41(__m128 a) {
-  __m128 e2 = _n_exp_sse41(_mm_mul_ps(_mm_set1_ps(2.0f), a));
+  __m128 t2 = _mm_max_ps(_mm_min_ps(_mm_mul_ps(_mm_set1_ps(2.0f), a), _mm_set1_ps(88.0f)), _mm_set1_ps(-88.0f));
+  __m128 e2 = _n_exp_sse41(t2);
   __m128 wide = _mm_div_ps(_mm_sub_ps(e2, _mm_set1_ps(1.0f)), _mm_add_ps(e2, _mm_set1_ps(1.0f)));
   __m128 z = _mm_mul_ps(a, a);
   __m128 sp = _mm_set1_ps(62.0f / 2835.0f);
@@ -1564,21 +1577,20 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_SINH(a)      _n_sinh_ps(a)
     #define N_COSH(a)      _n_cosh_ps(a)
     #define N_TANH(a)      _n_tanh_ps(a)
-#if !defined(NSIMD_AVX512)
-#define N_POW(a,b)     _n_pow_avx2_ps(a, b)
-#elif defined(NSIMD_NEON) && defined(__aarch64__)
-#define N_TAN(a)       _n_tan_neon(a)
-#define N_ASIN(a)      _n_asin_neon(a)
-#define N_ACOS(a)      _n_acos_neon(a)
-#define N_ATAN(a)      _n_atan_neon(a)
-#define N_ATAN2(a,b)   _n_atan2_neon(a, b)
-#define N_SINH(a)      _n_sinh_neon(a)
-#define N_COSH(a)      _n_cosh_neon(a)
-#define N_TANH(a)      _n_tanh_neon(a)
-#define N_SINCOS(a,s,c) do { (s) = _n_sin_neon(a); (c) = _n_cos_neon(a); } while (0)
-#endif
+    #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
-  #endif
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+    #define N_TAN(a)       vdivq_f32(_n_sin_neon(a), _n_cos_neon(a))
+    #define N_ASIN(a)      _n_asin_neon(a)
+    #define N_ACOS(a)      _n_acos_neon(a)
+    #define N_ATAN(a)      _n_atan_neon(a)
+    #define N_ATAN2(a,b)   _n_atan2_neon(a, b)
+    #define N_SINH(a)      _n_sinh_neon(a)
+    #define N_COSH(a)      _n_cosh_neon(a)
+    #define N_TANH(a)      _n_tanh_neon(a)
+    #define N_POW(a,b)     _n_pow_neon(a, b)
+    #define N_SINCOS(a,s,c) do { (s) = _n_sin_neon(a); (c) = _n_cos_neon(a); } while (0)
+#endif
   // 闂?AVX2 妤犵偛鍟胯ぐ鎾晬濮濆獥eef 鐎规瓕灏欎簺闂傚嫨鍊х槐婵嬫偨閸欐鐟撻柡?#ifndef N_* 閻庣懓鐗嗗畷濂告儍閸曨垪鍋撻幇鎵冲亾濮樻湹澹曢柡宥呮喘閸ｆ椽宕堕悙琛″亾閳ь剛鎲伴崱娆愮０闁?
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
   // AVX512 闁哄棗鍊诲?exp 闁告劕鎳撴禒鍫⑩偓鍦仧楠炲洭鏁嶇仦鑺ュ€遍柡宥囨焿閾斿寮介崶顒€娅ら柛銉у仱閳ь兘鍋撻柕?

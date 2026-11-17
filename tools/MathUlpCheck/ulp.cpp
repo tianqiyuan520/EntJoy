@@ -56,7 +56,7 @@ namespace
         // 每个函数的上限，留约 1 ulp 余量；只抓数量级劣化，不锁死个案
         static double LimitFor(const char* name)
         {
-            if (!std::strcmp(name, "sin"))   return 2.0;
+        if (!std::strcmp(name, "sin"))   return 3.0;   // SSE4.1 实测 2.00，留 1 ulp 余量
             if (!std::strcmp(name, "cos"))   return 3.0;
             if (!std::strcmp(name, "tan"))   return 4.0;
             if (!std::strcmp(name, "log"))   return 2.0;
@@ -91,7 +91,7 @@ namespace
                double lo, double hi, int samples)
     {
         Stat st{ name };
-        alignas(64) float in[NSIMD_WIDTH], out[8];
+        alignas(64) float in[NSIMD_WIDTH], out[NSIMD_WIDTH];
         for (int i = 0; i < samples; i += NSIMD_WIDTH)
         {
             for (int k = 0; k < NSIMD_WIDTH; k++)

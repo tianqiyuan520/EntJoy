@@ -100,13 +100,13 @@ namespace NativeTranspiler.Analyzer
         /// 重叠部分重算出同样的值，因此不需要掩码访问。返回是否覆盖了尾部。</summary>
         private bool EmitOverlapTail(StringBuilder sb, string simdBody)
         {
-            if (!BodyIsIdempotent()) return false;
+            if (!BodyIsIdempotent(out var written)) return false;
 
             // 尾部是同一段向量体的第二份拷贝：内部所有合成标签都要改名，避免重定义
             string tailBody = Regex.Replace(simdBody, @"\bgoto\s+(__[A-Za-z0-9_]+)", m => "goto " + m.Groups[1].Value + "_tail");
             tailBody = Regex.Replace(tailBody, @"(?m)^(\s*)(__[A-Za-z0-9_]+)\s*:", m => m.Groups[1].Value + m.Groups[2].Value + "_tail:");
             sb.AppendLine("    int total_end_ = __startIndex + __count;");
-            sb.AppendLine("    if (__count >= g_simdWidthInt && total_end_ > simd_end_)");
+            sb.AppendLine("    if (__count >= g_simdWidthInt && total_end_ > simd_end_" + AliasGuard(written) + ")");
             sb.AppendLine("    {");
             sb.AppendLine("        int si = total_end_ - g_simdWidthInt;");
             sb.AppendLine("        simd_value<int> v_i = simd_value<int>::sequence(0, g_simdWidthInt) + si;");
@@ -120,11 +120,10 @@ namespace NativeTranspiler.Analyzer
 
         /// <summary>重叠尾部的前提：每个写入的数组元素只依赖自身下标，且该数组不被读取；
         /// 这样重算重叠 lane 得到同一结果，重复写入无副作用。</summary>
-        private bool BodyIsIdempotent()
+        private bool BodyIsIdempotent(out HashSet<ISymbol> written)
         {
+            written = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             if (_jobStruct == null || _methodSyntax.Body == null) return false;
-
-            var written = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             foreach (var assign in _methodSyntax.Body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
             {
                 if (assign.Left is not ElementAccessExpressionSyntax target) return false;
@@ -137,6 +136,11 @@ namespace NativeTranspiler.Analyzer
                 written.Add(sym);
             }
             if (written.Count == 0) return false;
+            // 只有 job 字段的数组才能安全地做别名判定：指针局部/参数无法在运行时比较基址
+            foreach (var access in _methodSyntax.Body.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is not IFieldSymbol) return false;
+            }
             foreach (var unary in _methodSyntax.Body.DescendantNodes().OfType<PrefixUnaryExpressionSyntax>()
                          .Concat<ExpressionSyntax>(_methodSyntax.Body.DescendantNodes().OfType<PostfixUnaryExpressionSyntax>()))
             {
@@ -153,6 +157,22 @@ namespace NativeTranspiler.Analyzer
             return true;
         }
 
+        /// <summary>别名守卫：读取数组与写入数组同址时不能走重叠尾部（重叠 lane 会读到已写回的值）。</summary>
+        private string AliasGuard(HashSet<ISymbol> written)
+        {
+            var reads = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            foreach (var access in _methodSyntax.Body!.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (IsAssignmentTarget(access)) continue;
+                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is IFieldSymbol f) reads.Add(f);
+            }
+            var sb = new StringBuilder();
+            foreach (var w in written)
+                foreach (var r in reads)
+                    if (!SymbolEqualityComparer.Default.Equals(w, r))
+                        sb.Append(" && (const void*)").Append(w.Name).Append("_ptr != (const void*)").Append(r.Name).Append("_ptr");
+            return sb.ToString();
+        }
         private static bool IsAssignmentTarget(ElementAccessExpressionSyntax access)
             => access.Parent is AssignmentExpressionSyntax assign && assign.Left == access;
         private string GeneratePerLane(string scalarBody)
