@@ -137,6 +137,9 @@ static N_FORCEINLINE __m256 _n_cos_avx2(__m256 d) {
   return rl;
 }
 static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
+  // 次正规输入先放大 2^24 再取对数，末尾补回 24*ln2
+  __m256 sub = _mm256_cmp_ps(d, _mm256_set1_ps(1.17549435e-38f), _CMP_LT_OQ);
+  d = _mm256_blendv_ps(d, _mm256_mul_ps(d, _mm256_set1_ps(16777216.0f)), sub);
   // |x - 1| <= 0.25闁挎稒姘ㄥú鍧楀箳閵夈儳娼旂€殿喒鍋?log(1+t)闁挎稑鐭傛导鈺呭礂瀹ュ懐鍟查柡渚€顣︾粭宀勫箰閸ャ劍娈堕柟宄板悑鐢挳宕烽妸銊х 1 濠㈣泛瀚☉顏嗙磼濠靛棭鍤犵紒顔藉劤鐎?
   __m256 t = _mm256_sub_ps(d, _mm256_set1_ps(1.0f));
   __m256 at = _mm256_and_ps(t, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
@@ -180,7 +183,12 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
                                _mm256_mul_ps(ef, _mm256_set1_ps(1.428606765330187045e-6f)));
   wide = _mm256_add_ps(wide, _mm256_mul_ps(x, p));
 
-  return _mm256_blendv_ps(wide, near, _mm256_cmp_ps(at, _mm256_set1_ps(0.25f), _CMP_LE_OQ));
+  __m256 res = _mm256_blendv_ps(wide, near, _mm256_cmp_ps(at, _mm256_set1_ps(0.25f), _CMP_LE_OQ));
+  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(-INFINITY), _n256_eq(d, _mm256_setzero_ps()));
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(NAN), _n256_lt(d, _mm256_setzero_ps()));
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(INFINITY), _n256_eq(d, _mm256_set1_ps(INFINITY)));
+  return _mm256_sub_ps(res, _mm256_and_ps(sub, _mm256_set1_ps(16.635532333438687f)));
 }
 static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
   // exp(d) = 2^n * exp(r)闁挎稑顔?= round(d/ln2)闁挎稑顔?= d - n*ln2闁挎稑鐗呯悮鍗炩枔?ln2 闁硅泛鐏氱粔鐑藉礄韫囨梻銆婇悹鍥跺灠濡﹪鏁嶆径鍫氬亾?
@@ -288,7 +296,7 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
   // 闁圭娲﹂弳鐔哥▔鎼达紕鍟查柡浣规緲濠€?float 闁糕晝鍠庤ぐ鍥ㄧ附閺傘倗绀塴og2 闁告瑯浜滈顔句焊閻愵剚娈?[1,2) 閻忕偞娲栫槐?
   __m256 ax = _n256_abs(x);
   __m256i ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
-  __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
+  __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(ax), _mm256_set1_epi32(0x807fffff)),
                                                                  _mm256_set1_epi32(0x3f800000)));
   __m256d logl = _mm256_add_pd(_mm256_cvtepi32_pd(_mm256_castsi256_si128(ei)),
                                 _n_log2_mant_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(mf))));
@@ -820,6 +828,9 @@ static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
 }
 
 static N_FORCEINLINE n_float _n_log_neon(n_float d) {
+  // 次正规输入先放大 2^24 再取对数，末尾补回 24*ln2
+  n_float sub = vcltq_f32(d, vdupq_n_f32(1.17549435e-38f));
+  d = vbslq_f32(sub, vmulq_f32(d, vdupq_n_f32(16777216.0f)), d);
   n_float t = vsubq_f32(d, vdupq_n_f32(1.0f));
   n_float at = vabsq_f32(t);
 
@@ -854,7 +865,12 @@ static N_FORCEINLINE n_float _n_log_neon(n_float d) {
   n_float wide = vmulq_f32(ef, vdupq_n_f32(0.693145751953125f));
   wide = vfmaq_f32(wide, ef, vdupq_n_f32(1.428606765330187045e-6f));
   wide = vfmaq_f32(wide, x, p);
-  return vbslq_f32(vcleq_f32(at, vdupq_n_f32(0.25f)), near, wide);
+  n_float res = vbslq_f32(vcleq_f32(at, vdupq_n_f32(0.25f)), near, wide);
+  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
+  res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(-INFINITY), res);
+  res = vbslq_f32(vcltq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(NAN), res);
+  res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(INFINITY)), vdupq_n_f32(INFINITY), res);
+  return vsubq_f32(res, vbslq_f32(sub, vdupq_n_f32(16.635532333438687f), vdupq_n_f32(0.0f)));
 }
 
 static N_FORCEINLINE n_float _n_atan_neon(n_float a) {
@@ -1385,6 +1401,9 @@ static N_FORCEINLINE __m128 _n_exp_sse41(__m128 d) {
 }
 
 static N_FORCEINLINE __m128 _n_log_sse41(__m128 d) {
+  // 次正规输入先放大 2^24 再取对数，末尾补回 24*ln2
+  __m128 sub = _mm_cmplt_ps(d, _mm_set1_ps(1.17549435e-38f));
+  d = _n_blend_sse41(d, _mm_mul_ps(d, _mm_set1_ps(16777216.0f)), sub);
   __m128 t = _mm_sub_ps(d, _mm_set1_ps(1.0f));
   __m128 at = _n_abs_sse41(t);
 
@@ -1419,7 +1438,12 @@ static N_FORCEINLINE __m128 _n_log_sse41(__m128 d) {
   __m128 wide = _mm_mul_ps(ef, _mm_set1_ps(0.693145751953125f));
   wide = _n_madd_ps(wide, ef, _mm_set1_ps(1.428606765330187045e-6f));
   wide = _n_madd_ps(wide, x, p);
-  return _n_blend_sse41(wide, near, _mm_cmple_ps(at, _mm_set1_ps(0.25f)));
+  __m128 res = _n_blend_sse41(wide, near, _mm_cmple_ps(at, _mm_set1_ps(0.25f)));
+  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
+  res = _n_blend_sse41(res, _mm_set1_ps(-INFINITY), _mm_cmpeq_ps(d, _mm_setzero_ps()));
+  res = _n_blend_sse41(res, _mm_set1_ps(NAN), _mm_cmplt_ps(d, _mm_setzero_ps()));
+  res = _n_blend_sse41(res, _mm_set1_ps(INFINITY), _mm_cmpeq_ps(d, _mm_set1_ps(INFINITY)));
+  return _mm_sub_ps(res, _mm_and_ps(sub, _mm_set1_ps(16.635532333438687f)));
 }
 
 static N_FORCEINLINE __m128 _n_log10_sse41(__m128 d) {
@@ -1649,7 +1673,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_EXP(a)       _n_high_exp_neon(a)
     #define N_LOG(a)       _n_high_log_neon(a)
     #define N_LOG10(a)     _n_high_log10_neon(a)
-    #define N_POW(a,b)     _n_high_pow_neon(a, b)
+    // pow 在 NEON High 上走 libm 回退：double lane 版尚未处理负底数/零底数定义域
     #define N_SINCOS(a,s,c) _n_high_sincos_neon(a, s, c)
   #elif defined(NSIMD_AVX2)
     #define N_SIN(a)       _n_high_sin(a)
