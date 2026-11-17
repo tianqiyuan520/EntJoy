@@ -77,6 +77,40 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 
 ### Fastest 档的实测误差
 
+口径与 libm 测试一致：`err = |bits(out) - bits(ref)|`，`ref` 是 double 参考值按 round-to-nearest 折回的 float；结果次正规或为 0 时按 2^-149 的绝对误差计（AVX2、`NSIMD_WIDTH=8`、`/fp:precise`，`tools/MathUlpCheck`）。
+
+| 函数 | 输入域 | max ULP | p99.9 | 均值 |
+|---|---|---|---|---|
+| sin | [-π, π] | 1.00 | 1.00 | 0.12 |
+| sin | 到 ±1e4、1e6..1e7 | 1.00 | 1.00 | 0.16 |
+| cos | [-π, π] / ±1e4 / 1e6..1e7 | 2.00 | 1.00 | 0.16 |
+| log | [1e-37, 1e38] | 1.00 | 1.00 | 0.31 |
+| exp | [-87, 88] | 1.00 | 1.00 | 0.06 |
+| tan | [-1.5, 1.5] | 3.00 | 2.00 | 0.41 |
+| atan | [-20, 20] | 2.00 | 1.00 | 0.36 |
+| asin | [-1, 1] | 2.00 | 2.00 | 0.34 |
+| acos | [-1, 1] | 3.00 | 2.00 | 0.44 |
+| sinh | [-10, 10] | 2.00 | 1.00 | 0.27 |
+| cosh | [-10, 10] | 1.00 | 1.00 | 0.23 |
+| tanh | [-5, 5] | 2.00 | 2.00 | 0.27 |
+| atan2 | 全象限 | 2.00 | 2.00 | 0.37 |
+| pow | 底数 [0.01,10]，指数 [-3,3] | 12.00 | 7.00 | 0.88 |
+
+sin/cos 的 `|x|` 归约在 double 里完成（三段 π/2），`|x| > 1e7` 时改走 libm 逐 lane 精确归约。log 在 `|x-1| <= 0.25` 走 `log(1+t)` 级数，其余用尾数归约加两段 ln2。asin/acos 的 `1-x²` 按 `(1-x)(1+x)` 计算，sinh/cosh/tanh 在 `|x| < 0.25` 走 Taylor，pow 由 exp 与 log 组合。
+```powershell
+dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release
+dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release -p:FixtureIspc=true
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
+dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
+dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
+```
+
+两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
+
+性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
+
+### Fastest 档的实测误差
+
 `NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
 
 | 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
