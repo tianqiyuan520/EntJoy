@@ -930,6 +930,75 @@ static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
   return vbslq_f32(vcltq_f32(vabsq_f32(a), vdupq_n_f32(0.25f)), vmulq_f32(a, sp), wide);
 }
 
+// NEON pow：log2/exp2 在 double lane 里算（同 AVX2 路线），最后折回 float
+static N_FORCEINLINE float64x2_t _n_log2_mant_neon(float64x2_t m) {
+  float64x2_t t = vdivq_f64(vsubq_f64(m, vdupq_n_f64(1.0)), vaddq_f64(m, vdupq_n_f64(1.0)));
+  float64x2_t z = vmulq_f64(t, t);
+  float64x2_t s = vdupq_n_f64(1.0 / 13.0);
+  s = vfmaq_f64(vdupq_n_f64(1.0 / 11.0), s, z);
+  s = vfmaq_f64(vdupq_n_f64(1.0 / 9.0), s, z);
+  s = vfmaq_f64(vdupq_n_f64(1.0 / 7.0), s, z);
+  s = vfmaq_f64(vdupq_n_f64(1.0 / 5.0), s, z);
+  s = vfmaq_f64(vdupq_n_f64(1.0 / 3.0), s, z);
+  s = vfmaq_f64(vdupq_n_f64(1.0), s, z);
+  return vmulq_f64(vmulq_f64(t, s), vdupq_n_f64(2.8853900817779268));
+}
+
+static N_FORCEINLINE float64x2_t _n_exp2_neon(float64x2_t v) {
+  float64x2_t n = vrndnq_f64(v);
+  float64x2_t f = vsubq_f64(v, n);
+  float64x2_t r = vmulq_f64(f, vdupq_n_f64(0.69314718055994530942));
+
+  float64x2_t p = vdupq_n_f64(1.0 / 479001600.0);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 39916800.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 3628800.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 362880.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 40320.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 5040.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 720.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 120.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 24.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0 / 6.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(0.5), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0), p, r);
+  p = vfmaq_f64(vdupq_n_f64(1.0), p, r);
+
+  float64x2_t nc = vmaxq_f64(vminq_f64(n, vdupq_n_f64(1023.0)), vdupq_n_f64(-1022.0));
+  int64x2_t ni = vcvtq_s64_f64(nc);
+  float64x2_t scale = vreinterpretq_f64_s64(vshlq_n_s64(vaddq_s64(ni, vdupq_n_s64(1023)), 52));
+  return vmulq_f64(p, scale);
+}
+
+static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
+  // 指数与尾数在 float 域取出，log2 只对 [1,2) 的尾数展开
+  n_int ki = vreinterpretq_s32_f32(x);
+  n_int ei = vsubq_s32(vshrq_n_s32(vandq_s32(ki, vdupq_n_s32(0x7fffffff)), 23), vdupq_n_s32(127));
+  n_float mf = vreinterpretq_f32_s32(vorrq_s32(vandq_s32(ki, vdupq_n_s32(0x807fffff)), vdupq_n_s32(0x3f800000)));
+
+  float64x2_t elo = vcvtq_f64_s64(vmovl_s32(vget_low_s32(ei)));
+  float64x2_t ehi = vcvtq_f64_s64(vmovl_s32(vget_high_s32(ei)));
+  float64x2_t llo = vaddq_f64(elo, _n_log2_mant_neon(vcvt_f64_f32(vget_low_f32(mf))));
+  float64x2_t lhi = vaddq_f64(ehi, _n_log2_mant_neon(vcvt_f64_f32(vget_high_f32(mf))));
+  float64x2_t vlo = vmulq_f64(llo, vcvt_f64_f32(vget_low_f32(y)));
+  float64x2_t vhi = vmulq_f64(lhi, vcvt_f64_f32(vget_high_f32(y)));
+  n_float mag = vcombine_f32(vcvt_f32_f64(_n_exp2_neon(vlo)), vcvt_f32_f64(_n_exp2_neon(vhi)));
+
+  // 负底数：仅整数指数成立，奇数指数取负；非整数指数为 NaN
+  n_float ay = vabsq_f32(y);
+  uint32x4_t yInt = vandq_u32(vceqq_f32(y, vrndq_f32(y)), vcltq_f32(ay, vdupq_n_f32(8388608.0f)));
+  n_float half = vrndq_f32(vmulq_f32(y, vdupq_n_f32(0.5f)));
+  uint32x4_t yOdd = vcltq_f32(vsubq_f32(vmulq_f32(half, vdupq_n_f32(2.0f)), y), vdupq_n_f32(0.0f));
+  uint32x4_t negSign = vandq_u32(vcltq_f32(x, vdupq_n_f32(0.0f)), vandq_u32(yInt, yOdd));
+  n_float result = vbslq_f32(negSign, vnegq_f32(mag), mag);
+
+  uint32x4_t xNeg = vcltq_f32(x, vdupq_n_f32(0.0f));
+  result = vbslq_f32(vandq_u32(xNeg, vornq_u32(yInt, yInt)), vdupq_n_f32(0.0f / 0.0f), result);
+  result = vbslq_f32(vceqq_f32(y, vdupq_n_f32(0.0f)), vdupq_n_f32(1.0f), result);
+  uint32x4_t xZero = vceqq_f32(x, vdupq_n_f32(0.0f));
+  result = vbslq_f32(vandq_u32(xZero, vcltq_f32(y, vdupq_n_f32(0.0f))), vdupq_n_f32(INFINITY), result);
+  result = vbslq_f32(vandq_u32(xZero, vcgtq_f32(y, vdupq_n_f32(0.0f))), vdupq_n_f32(0.0f), result);
+  return vbslq_f32(vorrq_u32(vmvnq_u32(vceqq_f32(x, x)), vmvnq_u32(vceqq_f32(y, y))), vdupq_n_f32(0.0f / 0.0f), result);
+}
 #endif // NSIMD_NEON && __aarch64__
 
 // ===== Fastest (~3.5 ULP) =====
