@@ -92,5 +92,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
       - name: Build
         run: cmake --build build-neon -j
-      - name: ULP gate (emulated aarch64)
+      - name: ULP gate (Fastest, emulated aarch64)
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheck
+      - name: ULP gate (High, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheckHigh
