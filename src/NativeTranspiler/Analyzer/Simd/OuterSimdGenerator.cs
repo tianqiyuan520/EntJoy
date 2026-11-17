@@ -92,21 +92,24 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("    }");
                 bool covered = EmitOverlapTail(sb, simdBody);
             if (!string.IsNullOrEmpty(scalarBody))
-                sb.Append(RemainderLoop(scalarBody, narrowOnly: covered));
+                sb.Append(RemainderLoop(scalarBody, narrowOnly: covered, aliasFallback: _aliasGuard));
                 return sb.ToString();
         }
 
         /// <summary>尾部用一个与主循环重叠的完整向量迭代覆盖：偏移取总末端减宽度，
         /// 重叠部分重算出同样的值，因此不需要掩码访问。返回是否覆盖了尾部。</summary>
+        private string _aliasGuard = "";
+
         private bool EmitOverlapTail(StringBuilder sb, string simdBody)
         {
             if (!BodyIsIdempotent(out var written)) return false;
+            _aliasGuard = AliasGuard(written);
 
             // 尾部是同一段向量体的第二份拷贝：内部所有合成标签都要改名，避免重定义
             string tailBody = Regex.Replace(simdBody, @"\bgoto\s+(__[A-Za-z0-9_]+)", m => "goto " + m.Groups[1].Value + "_tail");
             tailBody = Regex.Replace(tailBody, @"(?m)^(\s*)(__[A-Za-z0-9_]+)\s*:", m => m.Groups[1].Value + m.Groups[2].Value + "_tail:");
             sb.AppendLine("    int total_end_ = __startIndex + __count;");
-            sb.AppendLine("    if (__count >= g_simdWidthInt && total_end_ > simd_end_" + AliasGuard(written) + ")");
+            sb.AppendLine("    if (__count >= g_simdWidthInt && total_end_ > simd_end_" + _aliasGuard + ")");
             sb.AppendLine("    {");
             sb.AppendLine("        int si = total_end_ - g_simdWidthInt;");
             sb.AppendLine("        simd_value<int> v_i = simd_value<int>::sequence(0, g_simdWidthInt) + si;");
@@ -139,7 +142,9 @@ namespace NativeTranspiler.Analyzer
             // 只有 job 字段的数组才能安全地做别名判定：指针局部/参数无法在运行时比较基址
             foreach (var access in _methodSyntax.Body.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
             {
-                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is not IFieldSymbol) return false;
+                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is not IFieldSymbol f
+                    || !SymbolEqualityComparer.Default.Equals(f.ContainingType, _jobStruct))
+                    return false;
             }
             foreach (var unary in _methodSyntax.Body.DescendantNodes().OfType<PrefixUnaryExpressionSyntax>()
                          .Concat<ExpressionSyntax>(_methodSyntax.Body.DescendantNodes().OfType<PostfixUnaryExpressionSyntax>()))
@@ -218,11 +223,15 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-        private string RemainderLoop(string scalarBody, bool narrowOnly = false)
+        private string RemainderLoop(string scalarBody, bool narrowOnly = false, string aliasFallback = "")
         {
             string substituted = scalarBody;
             var sb = new StringBuilder();
-            string narrowGuard = narrowOnly ? "__count < g_simdWidthInt && " : "";
+            // 重叠尾部未执行时（批量不足或基址别名）标量循环必须覆盖尾部
+            string narrowGuard = narrowOnly
+                ? (aliasFallback.Length == 0 ? "__count < g_simdWidthInt && "
+                                             : "(__count < g_simdWidthInt || !(" + aliasFallback.Substring(4) + ")) && ")
+                : "";
             sb.AppendLine($"    for (int {_idx} = simd_end_; {narrowGuard}{_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
             bool hr = substituted.Contains("return;");

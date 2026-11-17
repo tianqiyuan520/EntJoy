@@ -939,7 +939,10 @@ static N_FORCEINLINE n_float _n_cosh_neon(n_float a) {
 }
 
 static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
-  n_float t2 = vmaxq_f32(vminq_f32(vmulq_f32(vdupq_n_f32(2.0f), a), vdupq_n_f32(88.0f)), vdupq_n_f32(-88.0f));
+  n_float t2 = vmulq_f32(vdupq_n_f32(2.0f), a);
+  t2 = vbslq_f32(vcgtq_f32(vabsq_f32(a), vdupq_n_f32(44.0f)),
+                 vorrq_u32(vreinterpretq_u32_f32(vdupq_n_f32(88.0f)), vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(vdupq_n_f32(-0.0f)))),
+                 t2);
   n_float e2 = _n_exp_neon(t2);
   n_float wide = vdivq_f32(vsubq_f32(e2, vdupq_n_f32(1.0f)), vaddq_f32(e2, vdupq_n_f32(1.0f)));
   n_float z = vmulq_f32(a, a);
@@ -1522,7 +1525,9 @@ static N_FORCEINLINE __m128 _n_cosh_sse41(__m128 a) {
 }
 
 static N_FORCEINLINE __m128 _n_tanh_sse41(__m128 a) {
-  __m128 t2 = _mm_max_ps(_mm_min_ps(_mm_mul_ps(_mm_set1_ps(2.0f), a), _mm_set1_ps(88.0f)), _mm_set1_ps(-88.0f));
+  __m128 t2 = _mm_mul_ps(_mm_set1_ps(2.0f), a);
+  t2 = _n_blend_sse41(t2, _mm_or_ps(_mm_set1_ps(88.0f), _mm_and_ps(a, _mm_set1_ps(-0.0f))),
+                      _mm_cmpgt_ps(_mm_and_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff))), _mm_set1_ps(44.0f)));
   __m128 e2 = _n_exp_sse41(t2);
   __m128 wide = _mm_div_ps(_mm_sub_ps(e2, _mm_set1_ps(1.0f)), _mm_add_ps(e2, _mm_set1_ps(1.0f)));
   __m128 z = _mm_mul_ps(a, a);
@@ -1987,7 +1992,11 @@ static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
   return n_blendv_ps(wide, series, n_cmp_lt_ps(n_fabs_ps(a), n_set1_ps(0.25f)));
 }static N_FORCEINLINE n_float _n_tanh_ps(n_float a) {
   // 閻?|x| 濞?e^2x - 1 闁烩晛鎲＄粔鐑芥晬瀹€鈧弫?x - x^3/3 + 2x^5/15 - 17x^7/315 + 62x^9/2835
-  n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
+  // |x| <= 9 用 e^2x 变形；超出时按位夹到 ±88，避免 exp 溢出把结果变成 NaN（保留 NaN 与符号）
+  n_float t2 = n_mul_ps(n_set1_ps(2.0f), a);
+  t2 = n_blendv_ps(t2, _mm256_or_ps(n_set1_ps(88.0f), _mm256_and_ps(a, n_set1_ps(-0.0f))),
+                   n_cmp_gt_ps(_n256_abs(a), n_set1_ps(44.0f)));
+  n_float e2 = n_exp_ps(t2);
   n_float wide = n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
   n_float x2 = n_mul_ps(a, a);
   n_float s = n_set1_ps(62.0f / 2835.0f);

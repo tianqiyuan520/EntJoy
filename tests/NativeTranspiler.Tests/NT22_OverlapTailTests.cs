@@ -53,7 +53,8 @@ public struct OverlapClampJob : IJobParallelFor
             Assert.Contains("total_end_ - g_simdWidthInt", result.Cpp);
             // 读写两个数组同址时不能走重叠尾部，否则重叠 lane 会读到已写回的值
             Assert.Contains("(const void*)Dst_ptr != (const void*)Src_ptr", result.Cpp);
-            Assert.Contains("__count < g_simdWidthInt && ", result.Cpp);
+            // 别名守卫生效时标量循环必须兜住尾部，所以窄条件是析取式
+            Assert.Contains("(__count < g_simdWidthInt || !(", result.Cpp);
             Assert.Contains("__simd_exit_tail", result.Cpp);
         }
 
