@@ -14,3 +14,8 @@ add_executable(MathUlpCheck ulp.cpp)
 target_compile_definitions(MathUlpCheck PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8 SIMD_MATH_PRECISION=1 NDEBUG NOMINMAX)
 target_compile_options(MathUlpCheck PRIVATE /arch:AVX2 /O2 /fp:precise)
 target_include_directories(MathUlpCheck PRIVATE "${ENTJOY_NATIVE_DLL_DIR}")
+
+add_executable(MathExpBench bench.cpp)
+target_compile_definitions(MathExpBench PRIVATE NSIMD_AVX2 NSIMD_WIDTH=8 SIMD_MATH_PRECISION=1 NDEBUG NOMINMAX)
+target_compile_options(MathExpBench PRIVATE /arch:AVX2 /O2 /fp:precise)
+target_include_directories(MathExpBench PRIVATE "${ENTJOY_NATIVE_DLL_DIR}")
