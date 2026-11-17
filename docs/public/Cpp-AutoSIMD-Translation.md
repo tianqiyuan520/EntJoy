@@ -138,3 +138,18 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 | pow (x>0) | 底数 [0.01,10] | — | — | 26.4 |
 
 `absULP = |out - ref| / 2^-24`，`relULP = (|out - ref| / |ref|) / 2^-24`。sin/cos 的绝对误差随 `|x|` 线性增长：三次 π/2 归约在 float 下精度有限，`|x|` 越大残余误差越大。log 的相对误差在 75 个数量级上均值 0.55 ULP，接近 1 时由绝对误差主导。
+### High 档
+
+`SIMD_MATH_PRECISION == 2` 是 double 中间精度实现（AVX2）：8 个 float lane 拆成两组 4 lane double，算完折回 float。逐函数实测（同口径标准 ULP）：
+
+| 函数 | max ULP | 相对 libm |
+|---|---|---|
+| sin / cos | 1.00 | 1.6–3.4× |
+| tan | 1.00 | 1.61× |
+| log | 1.00 | 2.96× |
+| exp | 0.00 | 2.92× |
+| atan / asin / acos | 0.00 | 1.17–2.96× |
+| sinh / cosh / tanh | 0.00 | 2.40–3.36× |
+| pow | 1.00 | 2.71× |
+
+表中 0.00 表示该域内全部样本与正确舍入结果的位模式一致。非 AVX2 平台上 High 档回退到逐 lane libm（精确但无加速）。

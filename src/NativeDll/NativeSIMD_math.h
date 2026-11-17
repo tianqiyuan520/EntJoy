@@ -215,6 +215,10 @@ static N_FORCEINLINE __m256d _n_log2_mant_pd(__m256d m) {
   return _mm256_mul_pd(_mm256_mul_pd(t, s), _mm256_set1_pd(2.8853900817779268));  // 2/ln2
 }
 
+static N_FORCEINLINE __m256d _n_log_mant_pd(__m256d m) {
+  return _mm256_mul_pd(_n_log2_mant_pd(m), _mm256_set1_pd(0.69314718055994530942));
+}
+
 static N_FORCEINLINE __m256d _n_exp2_pd(__m256d v) {
   __m256d n = _mm256_round_pd(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
   __m256d f = _mm256_sub_pd(v, n);
@@ -281,6 +285,205 @@ static N_FORCEINLINE n_float _n_pow_avx2_ps(n_float x, n_float y) {
   return n_blendv_ps(result, n_set1_ps(NAN),
                      n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
 }
+// ================================================================
+// High 档：double 中间精度实现（AVX2，目标 <=1 ULP float）
+// 8 个 float lane 拆成两组 4 lane double，算完折回。
+// ================================================================
+static N_FORCEINLINE void _n_reduce4_pd(__m256d x, __m256d* rOut, __m128i* qOut) {
+  // 三段 π/2 归约：|r| <= π/4；q = round(x*2/π)
+  const __m256d two_over_pi = _mm256_set1_pd(0.63661977236758134307553505349006);
+  __m256d q = _mm256_round_pd(_mm256_mul_pd(x, two_over_pi), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  __m256d r = _mm256_fnmadd_pd(q, _mm256_set1_pd(1.57079632673412561417e+00), x);
+  r = _mm256_fnmadd_pd(q, _mm256_set1_pd(6.07710050650619224932e-11), r);
+  r = _mm256_fnmadd_pd(q, _mm256_set1_pd(2.02226624879595063154e-21), r);
+  *rOut = r;
+  *qOut = _mm256_cvtpd_epi32(q);
+}
+
+static N_FORCEINLINE __m256d _n_sin_poly4_pd(__m256d r) {
+  // sin(r) = r + r^3*(c1 + c2 z + ...)，z = r^2，|r| <= π/4
+  __m256d z = _mm256_mul_pd(r, r);
+  __m256d p = _mm256_set1_pd(-2.50521083854417187751e-8);            // c5 = -1/39916800
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(2.75573192239858925109e-6));   // c4 = 1/362880
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(-1.98412698412698412522e-4));  // c3 = -1/5040
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(8.33333333333333321769e-3));   // c2 = 1/120
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(-1.66666666666666657415e-1));  // c1 = -1/6
+  return _mm256_fmadd_pd(_mm256_mul_pd(z, r), p, r);
+}
+static N_FORCEINLINE __m256d _n_cos_poly4_pd(__m256d r) {
+  __m256d z = _mm256_mul_pd(r, r);
+  __m256d p = _mm256_set1_pd(2.4801587301587301587e-5);
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(-1.3888888888888888889e-3));
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(4.1666666666666666667e-2));
+  p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(-5.0e-1));
+  return _mm256_fmadd_pd(p, z, _mm256_set1_pd(1.0));
+}
+
+// q mod 4，用于选择函数与符号
+static N_FORCEINLINE __m256d _n_quad4_pd(__m128i q) {
+  // q mod 4，落在 [0,3]（负 q 用 floor 除法，保证结果非负）
+  __m256d qd = _mm256_cvtepi32_pd(q);
+  __m256d q4 = _mm256_floor_pd(_mm256_mul_pd(qd, _mm256_set1_pd(0.25)));
+  return _mm256_sub_pd(qd, _mm256_mul_pd(q4, _mm256_set1_pd(4.0)));
+}
+
+static N_FORCEINLINE __m256d _n_is_odd4_pd(__m256d m4) {
+  return _mm256_cmp_pd(m4, _mm256_mul_pd(_mm256_floor_pd(_mm256_mul_pd(m4, _mm256_set1_pd(0.5))),
+                                         _mm256_set1_pd(2.0)), _CMP_GT_OQ);
+}
+static N_FORCEINLINE __m256d _n_sin4_pd(__m256d x) {
+  __m256d r; __m128i q;
+  _n_reduce4_pd(x, &r, &q);
+  __m256d m4 = _n_quad4_pd(q);
+  __m256d odd = _n_is_odd4_pd(m4);
+  __m256d u = _mm256_blendv_pd(_n_sin_poly4_pd(r), _n_cos_poly4_pd(r), odd);
+  return _mm256_blendv_pd(u, _mm256_sub_pd(_mm256_set1_pd(0.0), u),
+                          _mm256_cmp_pd(m4, _mm256_set1_pd(2.0), _CMP_GE_OQ));
+}
+static N_FORCEINLINE __m256d _n_cos4_pd(__m256d x) {
+  __m256d r; __m128i q;
+  _n_reduce4_pd(x, &r, &q);
+  __m256d m4 = _n_quad4_pd(q);
+  __m256d odd = _n_is_odd4_pd(m4);
+  __m256d u = _mm256_blendv_pd(_n_cos_poly4_pd(r), _n_sin_poly4_pd(r), odd);
+  __m256d neg = _mm256_and_pd(_mm256_cmp_pd(m4, _mm256_set1_pd(1.0), _CMP_GE_OQ),
+                              _mm256_cmp_pd(m4, _mm256_set1_pd(3.0), _CMP_LT_OQ));
+  return _mm256_blendv_pd(u, _mm256_sub_pd(_mm256_set1_pd(0.0), u), neg);
+}static N_FORCEINLINE __m256d _n_atan4_pd(__m256d x) {
+  // |x| <= tan(pi/8) 用奇多项式；|x| > 1 先取倒数；中间区间用 (x-1)/(x+1) 折到 pi/4 邻域
+  __m256d absMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL));
+  __m256d ax = _mm256_and_pd(x, absMask);
+  const __m256d t8 = _mm256_set1_pd(0.41421356237309503);
+  const __m256d one = _mm256_set1_pd(1.0);
+  const __m256d pi_4 = _mm256_set1_pd(0.78539816339744830962);
+  const __m256d pi_2 = _mm256_set1_pd(1.5707963267948966192);
+
+  __m256d big = _mm256_cmp_pd(ax, one, _CMP_GT_OQ);
+  __m256d t = _mm256_blendv_pd(ax, _mm256_div_pd(one, ax), big);       // t <= 1
+  __m256d mid = _mm256_cmp_pd(t, t8, _CMP_GT_OQ);
+  __m256d u = _mm256_blendv_pd(t, _mm256_div_pd(_mm256_sub_pd(t, one), _mm256_add_pd(t, one)), mid);
+
+  __m256d z = _mm256_mul_pd(u, u);
+  __m256d q = _mm256_set1_pd(0.0050311800327567501);
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.012939895549208824));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.022542847412336964));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.0084661109042136508));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.051163910574811677));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.074302501400929838));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.090650342969366443));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.11109618177625467));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.14285666574105049));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.19999999262220255));
+  q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.33333333329431702));
+  __m256d r = _mm256_fmadd_pd(_mm256_mul_pd(u, z), q, u);
+  r = _mm256_add_pd(r, _mm256_and_pd(mid, pi_4));                       // 中间区间补 pi/4
+  r = _mm256_blendv_pd(r, _mm256_sub_pd(pi_2, r), big);                 // |x|>1: pi/2 - atan(1/x)
+  return _mm256_blendv_pd(_mm256_sub_pd(_mm256_set1_pd(0.0), r), r,
+                          _mm256_cmp_pd(x, _mm256_set1_pd(0.0), _CMP_GT_OQ));
+}
+
+static N_FORCEINLINE __m256d _n_atan2_4_pd(__m256d y, __m256d x) {
+  const __m256d zero = _mm256_set1_pd(0.0);
+  const __m256d pi = _mm256_set1_pd(3.14159265358979323846);
+  __m256d r = _n_atan4_pd(_mm256_div_pd(y, x));
+  __m256d adj = _mm256_blendv_pd(_mm256_sub_pd(zero, pi), pi, _mm256_cmp_pd(y, zero, _CMP_GE_OQ));
+  r = _mm256_blendv_pd(r, _mm256_add_pd(r, adj), _mm256_cmp_pd(x, zero, _CMP_LT_OQ));
+  return _mm256_blendv_pd(r, zero, _mm256_and_pd(_mm256_cmp_pd(x, zero, _CMP_EQ_OQ),
+                                                 _mm256_cmp_pd(y, zero, _CMP_EQ_OQ)));
+}
+
+static N_FORCEINLINE __m256d _n_exp4_pd(__m256d x) {
+  // 复用 pow 路径里的 exp2：exp(x) = 2^(x/ln2)
+  return _n_exp2_pd(_mm256_mul_pd(x, _mm256_set1_pd(1.4426950408889634)));
+}
+
+static N_FORCEINLINE __m256d _n_tan4_pd(__m256d x) {
+  return _mm256_div_pd(_n_sin4_pd(x), _n_cos4_pd(x));
+}
+
+static N_FORCEINLINE __m256d _n_asin4_pd(__m256d x) {
+  __m256d one = _mm256_set1_pd(1.0);
+  __m256d t = _mm256_sqrt_pd(_mm256_max_pd(_mm256_mul_pd(_mm256_sub_pd(one, x), _mm256_add_pd(one, x)),
+                                           _mm256_set1_pd(0.0)));
+  return _mm256_mul_pd(_mm256_set1_pd(2.0), _n_atan2_4_pd(x, _mm256_add_pd(one, t)));
+}
+
+static N_FORCEINLINE __m256d _n_acos4_pd(__m256d x) {
+  __m256d one = _mm256_set1_pd(1.0);
+  __m256d t = _mm256_sqrt_pd(_mm256_max_pd(_mm256_mul_pd(_mm256_sub_pd(one, x), _mm256_add_pd(one, x)),
+                                           _mm256_set1_pd(0.0)));
+  __m256d r = _mm256_mul_pd(_mm256_set1_pd(2.0), _n_atan2_4_pd(t, _mm256_add_pd(one, x)));
+  return _mm256_blendv_pd(r, _mm256_set1_pd(3.14159265358979323846),
+                          _mm256_cmp_pd(x, _mm256_set1_pd(-1.0), _CMP_LE_OQ));
+}
+
+static N_FORCEINLINE __m256d _n_sinh4_pd(__m256d x) {
+  __m256d e = _n_exp4_pd(x);
+  __m256d inv = _n_exp4_pd(_mm256_sub_pd(_mm256_set1_pd(0.0), x));
+  return _mm256_mul_pd(_mm256_set1_pd(0.5), _mm256_sub_pd(e, inv));
+}
+
+static N_FORCEINLINE __m256d _n_cosh4_pd(__m256d x) {
+  __m256d e = _n_exp4_pd(x);
+  __m256d inv = _n_exp4_pd(_mm256_sub_pd(_mm256_set1_pd(0.0), x));
+  return _mm256_mul_pd(_mm256_set1_pd(0.5), _mm256_add_pd(e, inv));
+}
+
+static N_FORCEINLINE __m256d _n_tanh4_pd(__m256d x) {
+  __m256d e2 = _n_exp4_pd(_mm256_mul_pd(_mm256_set1_pd(2.0), x));
+  return _mm256_div_pd(_mm256_sub_pd(e2, _mm256_set1_pd(1.0)), _mm256_add_pd(e2, _mm256_set1_pd(1.0)));
+}
+
+// ---- High 档对外入口：8 个 float lane 拆两组 double 计算后折回 ----
+static N_FORCEINLINE n_float _n_high_map(n_float x, __m256d (*f)(__m256d)) {
+  __m128 lo = _mm256_cvtpd_ps(f(_mm256_cvtps_pd(_mm256_castps256_ps128(x))));
+  __m128 hi = _mm256_cvtpd_ps(f(_mm256_cvtps_pd(_mm256_extractf128_ps(x, 1))));
+  return _mm256_insertf128_ps(_mm256_castps128_ps256(lo), hi, 1);
+}
+
+static N_FORCEINLINE n_float _n_high_sin(n_float x)  { return _n_high_map(x, _n_sin4_pd); }
+static N_FORCEINLINE n_float _n_high_cos(n_float x)  { return _n_high_map(x, _n_cos4_pd); }
+static N_FORCEINLINE n_float _n_high_tan(n_float x)  { return _n_high_map(x, _n_tan4_pd); }
+static N_FORCEINLINE n_float _n_high_atan(n_float x) { return _n_high_map(x, _n_atan4_pd); }
+static N_FORCEINLINE n_float _n_high_asin(n_float x) { return _n_high_map(x, _n_asin4_pd); }
+static N_FORCEINLINE n_float _n_high_acos(n_float x) { return _n_high_map(x, _n_acos4_pd); }
+static N_FORCEINLINE n_float _n_high_sinh(n_float x) { return _n_high_map(x, _n_sinh4_pd); }
+static N_FORCEINLINE n_float _n_high_cosh(n_float x) { return _n_high_map(x, _n_cosh4_pd); }
+static N_FORCEINLINE n_float _n_high_tanh(n_float x) { return _n_high_map(x, _n_tanh4_pd); }
+static N_FORCEINLINE n_float _n_high_exp(n_float x)  { return _n_high_map(x, _n_exp4_pd); }
+
+static N_FORCEINLINE n_float _n_high_log(n_float x) {
+  // 指数与尾数在 float 域取出（精确），log(m) 在 double 算
+  n_float ax = _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+  n_int ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
+  n_float mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
+                                                   _mm256_set1_epi32(0x3f800000)));
+  const __m256d ln2 = _mm256_set1_pd(0.69314718055994530942);
+  __m256d lo = _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_castsi256_si128(ei)), ln2),
+                             _n_log_mant_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(mf))));
+  __m256d hi = _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extracti128_si256(ei, 1)), ln2),
+                             _n_log_mant_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(mf, 1))));
+  __m128 rl = _mm256_cvtpd_ps(lo), rh = _mm256_cvtpd_ps(hi);
+  return _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
+}
+
+static N_FORCEINLINE n_float _n_high_log10(n_float x) {
+  return _mm256_mul_ps(_n_high_log(x), _mm256_set1_ps(0.4342944819032518f));
+}
+
+static N_FORCEINLINE n_float _n_high_atan2(n_float y, n_float x) {
+  __m128 lo = _mm256_cvtpd_ps(_n_atan2_4_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(y)),
+                                            _mm256_cvtps_pd(_mm256_castps256_ps128(x))));
+  __m128 hi = _mm256_cvtpd_ps(_n_atan2_4_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(y, 1)),
+                                            _mm256_cvtps_pd(_mm256_extractf128_ps(x, 1))));
+  return _mm256_insertf128_ps(_mm256_castps128_ps256(lo), hi, 1);
+}
+
+static N_FORCEINLINE void _n_high_sincos(n_float x, n_float* s, n_float* c) {
+  *s = _n_high_sin(x);
+  *c = _n_high_cos(x);
+}
+
 #endif // NSIMD_AVX2
 
 // ================================================================
@@ -414,7 +617,24 @@ static N_FORCEINLINE n_float _n_log_avx512(n_float d) {
 
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
-  // No SIMD path — #ifndef guards below provide per-lane scalar fallback
+  // double 中间精度实现（AVX2）；其它平台由 #ifndef 守卫回退到逐 lane libm
+  #if defined(NSIMD_AVX2)
+    #define N_SIN(a)       _n_high_sin(a)
+    #define N_COS(a)       _n_high_cos(a)
+    #define N_TAN(a)       _n_high_tan(a)
+    #define N_ASIN(a)      _n_high_asin(a)
+    #define N_ACOS(a)      _n_high_acos(a)
+    #define N_ATAN(a)      _n_high_atan(a)
+    #define N_ATAN2(a,b)   _n_high_atan2(a, b)
+    #define N_SINH(a)      _n_high_sinh(a)
+    #define N_COSH(a)      _n_high_cosh(a)
+    #define N_TANH(a)      _n_high_tanh(a)
+    #define N_EXP(a)       _n_high_exp(a)
+    #define N_LOG(a)       _n_high_log(a)
+    #define N_LOG10(a)     _n_high_log10(a)
+    #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
+    #define N_SINCOS(a,s,c) _n_high_sincos(a, s, c)
+  #endif
 
 // ===== IEEE (exact scalar) =====
 #else

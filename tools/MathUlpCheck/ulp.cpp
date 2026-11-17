@@ -115,8 +115,8 @@ namespace
                 in[k] = (float)(lo + (hi - lo) * t);
             }
             __m256 x = _mm256_loadu_ps(in);
-            _mm256_storeu_ps(so, _n_sin_avx2(x));
-            _mm256_storeu_ps(co, _n_cos_avx2(x));
+            _mm256_storeu_ps(so, N_SIN(x));
+            _mm256_storeu_ps(co, N_COS(x));
             for (int k = 0; k < 8; k++)
             {
                 sinStat.Add(in[k], so[k], std::sin((double)in[k]));
@@ -166,17 +166,17 @@ int main()
     Sincos("sin/cos: [-10000, 10000]", -10000.0, 10000.0, 200000);
     Sincos("sin/cos: [1e6, 1e7]", 1e6, 1e7, 200000);
 
-    Unary("log: [1e-37, 1e38]", "log", _n_log_avx2, std::log, 1e-37, 1e38, 400000);
-    Unary("exp: [-87, 88]", "exp", _n_exp_avx2, std::exp, -87.0, 88.0, 400000);
+    Unary("log: [1e-37, 1e38]", "log", [](n_float v) { return N_LOG(v); }, std::log, 1e-37, 1e38, 400000);
+    Unary("exp: [-87, 88]", "exp", [](n_float v) { return N_EXP(v); }, std::exp, -87.0, 88.0, 400000);
 
-    Unary("tan: [-1.5, 1.5]", "tan", _n_tan_ps, std::tan, -1.5, 1.5, 400000);
-    Unary("atan: [-20, 20]", "atan", _n_atan_ps, std::atan, -20.0, 20.0, 400000);
-    Unary("asin: [-1, 1]", "asin", _n_asin_ps, std::asin, -1.0, 1.0, 400000);
-    Unary("acos: [-1, 1]", "acos", _n_acos_ps, std::acos, -1.0, 1.0, 400000);
-    Unary("sinh: [-10, 10]", "sinh", _n_sinh_ps, std::sinh, -10.0, 10.0, 400000);
-    Unary("cosh: [-10, 10]", "cosh", _n_cosh_ps, std::cosh, -10.0, 10.0, 400000);
-    Unary("tanh: [-5, 5]", "tanh", _n_tanh_ps, std::tanh, -5.0, 5.0, 400000);
-    Binary("atan2: 全象限", "atan2", _n_atan2_ps, std::atan2, -10.0, 10.0, -10.0, 10.0, 400000);
+    Unary("tan: [-1.5, 1.5]", "tan", [](n_float v) { return N_TAN(v); }, std::tan, -1.5, 1.5, 400000);
+    Unary("atan: [-20, 20]", "atan", [](n_float v) { return N_ATAN(v); }, std::atan, -20.0, 20.0, 400000);
+    Unary("asin: [-1, 1]", "asin", [](n_float v) { return N_ASIN(v); }, std::asin, -1.0, 1.0, 400000);
+    Unary("acos: [-1, 1]", "acos", [](n_float v) { return N_ACOS(v); }, std::acos, -1.0, 1.0, 400000);
+    Unary("sinh: [-10, 10]", "sinh", [](n_float v) { return N_SINH(v); }, std::sinh, -10.0, 10.0, 400000);
+    Unary("cosh: [-10, 10]", "cosh", [](n_float v) { return N_COSH(v); }, std::cosh, -10.0, 10.0, 400000);
+    Unary("tanh: [-5, 5]", "tanh", [](n_float v) { return N_TANH(v); }, std::tanh, -5.0, 5.0, 400000);
+    Binary("atan2: 全象限", "atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, std::atan2, -10.0, 10.0, -10.0, 10.0, 400000);
     PowRange("pow (x>0): 底数[0.01,10] 指数[-3,3]", 400000);
     return 0;
 }

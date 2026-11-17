@@ -106,7 +106,7 @@
 | NT003 / NT006 | error | 局部数组/托管类型、引用类型静态字段等**语言能力边界**，消息里给出替代写法（NativeArray/UnsafeList 传入、if/else 或静态查表代替 `switch` 表达式） |
 | NT018 | error | `AutoSIMD = Vectorize` 但 job 不是 `IJobChunk`/`IJobEntity`（该路径未实现，会被静默丢弃） |
 | NT019 / NT020 / NT021 / NT022 | error | 属性与后端不匹配（ISPC 不读 AutoSIMD / MathPrecision / CppMathLib / UseISPC_MT） |
-| **NT023** | warning | `MathPrecision = High` 没有 SIMD 实现：`NativeSIMD_math.h` 的 `== 2` 分支为空 ⇒ 产物是逐 lane 精确标量，精度不低于 `IEEE`、只是没有加速。要 SIMD 用 `Fastest`，要明确表达"只要正确"用 `IEEE` |
+| **NT023** | warning | 非向量化的 job 上设了 `MathPrecision`（非 `Fastest`）：标量代码直接调 libm，档位不生效。要让精度档起作用需同时开 AutoSIMD |
 | **NT024** | **error**（2026-09-27 由 warning 升级） | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%** ⇒ 默认不许开。要开必须**显式声明已量过**：MSBuild 属性 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`（由 `EntJoy.Jobs.props` 的 `CompilerVisibleProperty` 传给分析器）。job 被排除后调用点会报 CS0103 —— 这是故意的"响亮失败" |
 | **NT031** | error | `AutoSIMD = Enabled/Vectorize`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素 / `for` 循环控制不符合下述契约）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。`IJobEntity + AutoSIMD.Enabled` 当前生成标量实体体，直接报 NT031；`Disabled` 和 `Vectorize` 保持各自现有路径 |
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |

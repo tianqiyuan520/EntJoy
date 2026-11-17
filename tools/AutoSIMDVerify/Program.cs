@@ -182,6 +182,7 @@ namespace AutoSIMDVerify
             RunPairCase(ref passed, ref failed);
             RunExpLogCase(ref passed, ref failed);
             RunTranscendCase(ref passed, ref failed);
+            RunHighPrecisionCase(ref passed, ref failed);
             RunStress(passed: ref passed, failed: ref failed);
 
             Console.WriteLine($"\n{'=',-1}{"",-1} PASS {passed} / {passed + failed}");
@@ -225,6 +226,45 @@ namespace AutoSIMDVerify
                     Console.WriteLine($"  ❌ P14 Pair uint2 (mode={mode}) mismatches={errs}/{N}");
                     failed++;
                 }
+            }
+        }
+
+        /// <summary>High 精度档：double 中间精度实现，与 C# 基线对照（应接近逐位一致）。</summary>
+        private static unsafe void RunHighPrecisionCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+            var rnd = new Random(20261118);
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = (float)(rnd.NextDouble() * 2.0 - 1.0);
+
+            var reference = new EntJoySample.AutoSIMDTest.HighPrecision_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.HighPrecision_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-6f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P17 High precision tier (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P17 High precision mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
             }
         }
 

@@ -318,9 +318,10 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(UseIspcMtRequiresIspcBackendError,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
-                // F-6：High 没有实现（NativeSIMD_math.h 的 == 2 分支为空）⇒ 产物与 IEEE 相同。
-                // 只警告不报错：行为不错，但名字会误导（有人以为它比 Fastest 更精确且仍向量化）。
-                if (AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) == NativeTranspiler.SimdMathPrecision.High
+                // 精度档只决定向量路径用哪套实现：未向量化的 job 直接调 libm，档位不生效。
+                // 只警告不报错：产物本身正确，只是设置没起作用。
+                if (autoSimd == NativeTranspiler.AutoSIMD.Disabled
+                    && AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) != NativeTranspiler.SimdMathPrecision.Fastest
                     && target == NativeTranspiler.BackendTarget.Cpp)
                 {
                     diagnostics.Add(Diagnostic.Create(SimdMathPrecisionHighUnimplementedWarning,

@@ -97,7 +97,7 @@ public struct MyJob : IJobParallelFor { … }
 | `AutoSIMD = Enabled`（`IJobParallelFor`/`IJobFor`/`IJob`） | 实测整步比标量基线**慢 ~10%** ⇒ 默认 **error**；要开必须在项目里显式声明 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>` | **NT024**（error） |
 | `AutoSIMD = Enabled/Vectorize` 但 body 命中"不可向量化"判据 | `Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针+varying 下标+宽元素 ⇒ 整段退回 **per-lane 标量循环**（产物正确但 0 个 `simd_mask`） | **NT031**（error，2026-09-27 新增） |
 
-**三个"能编但没用"的坑**：`MathPrecision = High` 没有 SIMD 实现，产物是逐 lane 的精确标量（精度不低于 `IEEE`，只是没有加速）⇒ **NT023**（warning，只提示）；`AutoSIMD = Enabled` 在 `IJobParallelFor`/`IJobFor`/`IJob` 上实测比标量基线慢 ~10% ⇒ **NT024**（error）；body 命中不可向量化判据时整段退回 per-lane 标量 ⇒ **NT031**（error）。样例项目 `samples/EntJoySample` 因它的 AutoSIMD job 就是被 `tools/AutoSIMDVerify`(26/26)+`tools/AutoSIMDEdgeCases`(143/143) 逐值对照过的被测对象，显式打开了 `EntJoyAutoSimdMeasured`。详见边界文档 §4。
+**三个"能编但没用"的坑**：未向量化的 job 上设 `MathPrecision` 不生效（标量代码直接调 libm）⇒ **NT023**（warning，只提示）；`AutoSIMD = Enabled` 在 `IJobParallelFor`/`IJobFor`/`IJob` 上实测比标量基线慢 ~10% ⇒ **NT024**（error）；body 命中不可向量化判据时整段退回 per-lane 标量 ⇒ **NT031**（error）。样例项目 `samples/EntJoySample` 因它的 AutoSIMD job 就是被 `tools/AutoSIMDVerify`(26/26)+`tools/AutoSIMDEdgeCases`(143/143) 逐值对照过的被测对象，显式打开了 `EntJoyAutoSimdMeasured`。详见边界文档 §4。
 
 ### 2.4 混合 ECS 与 native
 
@@ -136,7 +136,7 @@ CMake 编译目标、以及把 `NativeDll.dll`/`NativeTranspiled.dll` 复制到�
 | 选项 | 取值 | 默认 |
 |---|---|---|
 | `NATIVE_SIMD_LEVEL` | `AUTO` / `AVX2` / `AVX` / `SSE4` / `NEON` / `SCALAR` | `AUTO`（x86_64→AVX2，arm64→NEON） |
-| `NATIVE_SIMD_MATH_PRECISION` | `1` Fastest / `2` High（未实现）/ `3` IEEE | `1` |
+| `NATIVE_SIMD_MATH_PRECISION` | `1` Fastest / `2` High / `3` IEEE | `1` |
 | `ENTJOY_ENABLE_SENTINEL` | `ON`/`OFF`：对齐 C# Debug 容器布局增 8B 字段 | `OFF`（当前 C# 侧无内嵌 sentinel 字段，保持 OFF） |
 
 传参方式：`cmake -S NativeTranspiler_Generated -B build -DNATIVE_SIMD_LEVEL=AVX2`。正常构建走 MSBuild 任务，自动调用 CMake；
