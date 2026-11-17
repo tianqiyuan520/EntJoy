@@ -1,0 +1,70 @@
+name: native-math
+
+on:
+  push:
+    paths:
+      - 'src/NativeDll/**'
+      - 'tools/MathUlpCheck/**'
+      - '.github/workflows/native-math.yml'
+  pull_request:
+    paths:
+      - 'src/NativeDll/**'
+      - 'tools/MathUlpCheck/**'
+      - '.github/workflows/native-math.yml'
+  workflow_dispatch:
+
+jobs:
+  # 本机就能跑的分支：AVX2 内联数学的 ULP 门禁
+  avx2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-avx2 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=avx2
+      - name: Build
+        run: cmake --build build-avx2 -j
+      - name: ULP gate (Fastest)
+        run: ./build-avx2/MathUlpCheck
+      - name: ULP gate (High)
+        run: ./build-avx2/MathUlpCheckHigh
+
+  # AVX512 指令用 Intel SDE 模拟：托管 runner 的 CPU 不一定有 AVX512
+  avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-avx512 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=avx512
+      - name: Build
+        run: cmake --build build-avx512 -j
+      - name: Fetch Intel SDE
+        run: |
+          URL=https://downloadmirror.intel.com/813591/sde-external-9.33.0-2024-01-07-lin.tar.xz
+          curl -fsSL -o sde.tar.xz "$URL"
+          tar xf sde.tar.xz
+          echo "SDE_DIR=$(echo sde-external-*/)" >> $GITHUB_ENV
+      - name: ULP gate (Fastest, emulated)
+        run: ./${{ env.SDE_DIR }}sde64 -skx -- ./build-avx512/MathUlpCheck
+      - name: ULP gate (High, emulated)
+        run: ./${{ env.SDE_DIR }}sde64 -skx -- ./build-avx512/MathUlpCheckHigh
+
+  # NEON：交叉编译 ＋ qemu-user 运行。数学实现目前回退到 libm，因此这里验证的是
+  # 交叉编译链路与回退路径的精确性；NEON 内联实现落地后同一门禁即可覆盖。
+  neon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu qemu-user cmake
+      - name: Configure
+        run: |
+          cmake -S tools/MathUlpCheck -B build-neon -DCMAKE_BUILD_TYPE=Release \
+            -DENTJOY_MATH_ISA=neon \
+            -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+      - name: Build
+        run: cmake --build build-neon -j
+      - name: ULP gate (emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheck

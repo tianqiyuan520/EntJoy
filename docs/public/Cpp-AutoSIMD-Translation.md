@@ -184,3 +184,16 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | NEON / SSE4 | 逐 lane libm | 逐 lane libm |
 
 AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
+### 跨平台数值门禁
+
+`tools/MathUlpCheck` 带阈值断言：任一函数超出上限时进程退出码非零。`ENTJOY_MATH_ISA` 选择目标指令集。
+
+`.github/workflows/native-math.yml` 三个作业：
+
+| 作业 | 指令集 | 运行方式 |
+|---|---|---|
+| `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档都过门禁 |
+| `avx512` | AVX512 | Intel SDE 模拟执行（runner CPU 不保证支持 AVX512） |
+| `neon` | NEON | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行 |
+
+NEON 目前没有内联实现，数学走 libm 回退，该作业验证的是交叉编译链路与回退路径的精确性。

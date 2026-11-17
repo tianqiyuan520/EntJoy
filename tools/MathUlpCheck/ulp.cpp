@@ -15,6 +15,7 @@
 namespace
 {
     constexpr double DenormUlp = 1.401298464324817e-45; // 2^-149
+    bool g_failed = false;   // 任一函数超出上限 → 进程退出码非零
 
     int32_t OrderedBits(float v)
     {
@@ -52,14 +53,37 @@ namespace
             if (Samples.size() < 4000000) Samples.push_back(err);
         }
 
-        void Report() const
+        // 每个函数的上限，留约 1 ulp 余量；只抓数量级劣化，不锁死个案
+        static double LimitFor(const char* name)
+        {
+            if (!std::strcmp(name, "sin"))   return 2.0;
+            if (!std::strcmp(name, "cos"))   return 3.0;
+            if (!std::strcmp(name, "tan"))   return 4.0;
+            if (!std::strcmp(name, "log"))   return 2.0;
+            if (!std::strcmp(name, "exp"))   return 2.0;
+            if (!std::strcmp(name, "atan"))  return 3.0;
+            if (!std::strcmp(name, "asin"))  return 3.0;
+            if (!std::strcmp(name, "acos"))  return 4.0;
+            if (!std::strcmp(name, "sinh"))  return 3.0;
+            if (!std::strcmp(name, "cosh"))  return 2.0;
+            if (!std::strcmp(name, "tanh"))  return 3.0;
+            if (!std::strcmp(name, "atan2")) return 3.0;
+            if (!std::strcmp(name, "pow"))   return 2.0;
+            return 8.0;
+        }
+
+        bool Report() const
         {
             std::vector<double> s = Samples;
             std::sort(s.begin(), s.end());
             double p999 = s.empty() ? 0 : s[std::min(s.size() - 1, (size_t)(s.size() * 0.999))];
             double mean = Count ? Sum / (double)Count : 0;
-            std::printf("  %-6s n=%-7lld max=%7.2f  p99.9=%6.2f  mean=%6.3f  worst in=%.9g out=%.9g ref=%.9g\n",
-                Name, Count, Max, p999, mean, (double)WorstIn, (double)WorstOut, (double)WorstRef);
+            double limit = LimitFor(Name);
+            bool ok = Max <= limit;
+            std::printf("  %-6s n=%-7lld max=%7.2f  p99.9=%6.2f  mean=%6.3f  limit=%4.1f %s  worst in=%.9g out=%.9g ref=%.9g\n",
+                Name, Count, Max, p999, mean, limit, ok ? "ok" : "FAIL",
+                (double)WorstIn, (double)WorstOut, (double)WorstRef);
+            return ok;
         }
     };
 
@@ -67,84 +91,84 @@ namespace
                double lo, double hi, int samples)
     {
         Stat st{ name };
-        alignas(32) float in[8], out[8];
-        for (int i = 0; i < samples; i += 8)
+        alignas(64) float in[NSIMD_WIDTH], out[8];
+        for (int i = 0; i < samples; i += NSIMD_WIDTH)
         {
-            for (int k = 0; k < 8; k++)
+            for (int k = 0; k < NSIMD_WIDTH; k++)
             {
                 double t = (double)(i + k) / (double)samples;
                 in[k] = (float)(lo + (hi - lo) * t);
             }
-            _mm256_storeu_ps(out, fn(_mm256_loadu_ps(in)));
-            for (int k = 0; k < 8; k++) st.Add(in[k], out[k], ref((double)in[k]));
+            n_store_ps(out, fn(n_load_ps(in)));
+            for (int k = 0; k < NSIMD_WIDTH; k++) st.Add(in[k], out[k], ref((double)in[k]));
         }
         std::printf("%s\n", label);
-        st.Report();
+        if (!st.Report()) g_failed = true;
     }
 
     void Binary(const char* label, const char* name, n_float (*fn)(n_float, n_float), double (*ref)(double, double),
                 double loA, double hiA, double loB, double hiB, int samples)
     {
         Stat st{ name };
-        alignas(32) float a[8], b[8], out[8];
-        for (int i = 0; i < samples; i += 8)
+        alignas(64) float a[NSIMD_WIDTH], b[NSIMD_WIDTH], out[NSIMD_WIDTH];
+        for (int i = 0; i < samples; i += NSIMD_WIDTH)
         {
-            for (int k = 0; k < 8; k++)
+            for (int k = 0; k < NSIMD_WIDTH; k++)
             {
                 double t = (double)(i + k) / (double)samples;
                 a[k] = (float)(loA + (hiA - loA) * t);
                 double u = std::fmod(t * 3.7 + 0.31, 1.0);   // 与 a 解耦，避免 atan2(a,a) 这类退化输入
                 b[k] = (float)(loB + (hiB - loB) * u);
             }
-            _mm256_storeu_ps(out, fn(_mm256_loadu_ps(a), _mm256_loadu_ps(b)));
-            for (int k = 0; k < 8; k++) st.Add(a[k], out[k], ref((double)a[k], (double)b[k]));
+            n_store_ps(out, fn(n_load_ps(a), n_load_ps(b)));
+            for (int k = 0; k < NSIMD_WIDTH; k++) st.Add(a[k], out[k], ref((double)a[k], (double)b[k]));
         }
         std::printf("%s\n", label);
-        st.Report();
+        if (!st.Report()) g_failed = true;
     }
 
     void Sincos(const char* label, double lo, double hi, int samples)
     {
         Stat sinStat{ "sin" }, cosStat{ "cos" };
-        alignas(32) float in[8], so[8], co[8];
-        for (int i = 0; i < samples; i += 8)
+        alignas(64) float in[NSIMD_WIDTH], so[NSIMD_WIDTH], co[NSIMD_WIDTH];
+        for (int i = 0; i < samples; i += NSIMD_WIDTH)
         {
-            for (int k = 0; k < 8; k++)
+            for (int k = 0; k < NSIMD_WIDTH; k++)
             {
                 double t = (double)(i + k) / (double)samples;
                 in[k] = (float)(lo + (hi - lo) * t);
             }
-            __m256 x = _mm256_loadu_ps(in);
-            _mm256_storeu_ps(so, N_SIN(x));
-            _mm256_storeu_ps(co, N_COS(x));
-            for (int k = 0; k < 8; k++)
+            n_float x = n_load_ps(in);
+            n_store_ps(so, N_SIN(x));
+            n_store_ps(co, N_COS(x));
+            for (int k = 0; k < NSIMD_WIDTH; k++)
             {
                 sinStat.Add(in[k], so[k], std::sin((double)in[k]));
                 cosStat.Add(in[k], co[k], std::cos((double)in[k]));
             }
         }
         std::printf("%s\n", label);
-        sinStat.Report();
-        cosStat.Report();
+        if (!sinStat.Report()) g_failed = true;
+        if (!cosStat.Report()) g_failed = true;
     }
 
     void PowRange(const char* label, int samples)
     {
         Stat st{ "pow" };
-        alignas(32) float a[8], b[8], out[8];
-        for (int i = 0; i < samples; i += 8)
+        alignas(64) float a[NSIMD_WIDTH], b[NSIMD_WIDTH], out[NSIMD_WIDTH];
+        for (int i = 0; i < samples; i += NSIMD_WIDTH)
         {
-            for (int k = 0; k < 8; k++)
+            for (int k = 0; k < NSIMD_WIDTH; k++)
             {
                 double t = (double)(i + k) / (double)samples;
                 a[k] = (float)(0.01 + 9.99 * t);
                 b[k] = (float)(-3.0 + 6.0 * std::fmod(t * 3.7 + 0.31, 1.0));
             }
-            _mm256_storeu_ps(out, N_POW(_mm256_loadu_ps(a), _mm256_loadu_ps(b)));
-            for (int k = 0; k < 8; k++) st.Add(a[k], out[k], std::pow((double)a[k], (double)b[k]));
+            n_store_ps(out, N_POW(n_load_ps(a), n_load_ps(b)));
+            for (int k = 0; k < NSIMD_WIDTH; k++) st.Add(a[k], out[k], std::pow((double)a[k], (double)b[k]));
         }
         std::printf("%s\n", label);
-        st.Report();
+        if (!st.Report()) g_failed = true;
     }
 }
 
@@ -178,5 +202,6 @@ int main()
     Unary("tanh: [-5, 5]", "tanh", [](n_float v) { return N_TANH(v); }, std::tanh, -5.0, 5.0, 400000);
     Binary("atan2: 全象限", "atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, std::atan2, -10.0, 10.0, -10.0, 10.0, 400000);
     PowRange("pow (x>0): 底数[0.01,10] 指数[-3,3]", 400000);
-    return 0;
+    std::printf("\n%s\n", g_failed ? "FAIL: 有函数超出 ULP 上限" : "PASS: 全部函数在 ULP 上限内");
+    return g_failed ? 1 : 0;
 }
