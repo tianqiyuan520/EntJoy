@@ -141,17 +141,21 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   __m256 t = _mm256_sub_ps(d, _mm256_set1_ps(1.0f));
   __m256 at = _mm256_and_ps(t, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
 
-  // log(1+t) = t*(1 - t/2 + t^2/3 - ... + t^8/9)
-  __m256 s = _mm256_set1_ps(-1.0f / 9.0f);
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 8.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 7.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 6.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 5.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 4.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 3.0f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(0.5f));
-  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f));
-  __m256 near = _mm256_mul_ps(_mm256_sub_ps(_mm256_setzero_ps(), t), s);   // t*(1 - t/2 + ...)
+  // log(1+t) = t*(1 - t/2 + t^2/3 - ... + t^12/13)；到 t^13 项，|t| <= 0.25 时截断误差 < 3e-9
+  __m256 s = _mm256_set1_ps(1.0f / 13.0f);
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 12.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 11.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 10.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 9.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 8.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 7.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 6.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 5.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 4.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 3.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 2.0f));
+  s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f));
+  __m256 near = _mm256_mul_ps(t, s);
 
   // 其余范围：尾数归约到 [1,2) + 两段 ln2 拼接
   __m256 dpos = _mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
@@ -547,6 +551,220 @@ static N_FORCEINLINE n_float _n_pow_avx512(n_float x, n_float y) {
   #define SIMD_MATH_PRECISION 1   // default: Fastest
 #endif
 
+// ================================================================
+// NEON (aarch64) inline math -- Fastest tier.
+// Same algorithms as the AVX2 kernels: argument reduction in double
+// lanes (float64x2_t), polynomials in float lanes. Kept in one place so
+// the constants stay in sync with the AVX2 versions.
+// ================================================================
+#if defined(NSIMD_NEON) && defined(__aarch64__)
+
+static N_FORCEINLINE void _n_reduce_neon(n_float d, n_float* rOut, n_int* qOut) {
+  float64x2_t dlo = vcvt_f64_f32(vget_low_f32(d));
+  float64x2_t dhi = vcvt_f64_f32(vget_high_f32(d));
+  const float64x2_t twoOverPi = vdupq_n_f64(0.63661977236758134308);
+  float64x2_t qlo = vrndnq_f64(vmulq_f64(dlo, twoOverPi));
+  float64x2_t qhi = vrndnq_f64(vmulq_f64(dhi, twoOverPi));
+  const float64x2_t pio2a = vdupq_n_f64(1.57079632673412561417e+00);
+  const float64x2_t pio2b = vdupq_n_f64(6.07710050650619224932e-11);
+  const float64x2_t pio2c = vdupq_n_f64(2.02226624879595063154e-21);
+  float64x2_t rlo = vfmaq_f64(dlo, vnegq_f64(qlo), pio2a);
+  float64x2_t rhi = vfmaq_f64(dhi, vnegq_f64(qhi), pio2a);
+  rlo = vfmaq_f64(rlo, vnegq_f64(qlo), pio2b);
+  rhi = vfmaq_f64(rhi, vnegq_f64(qhi), pio2b);
+  rlo = vfmaq_f64(rlo, vnegq_f64(qlo), pio2c);
+  rhi = vfmaq_f64(rhi, vnegq_f64(qhi), pio2c);
+  *rOut = vcombine_f32(vcvt_f32_f64(rlo), vcvt_f32_f64(rhi));
+  int64x2_t qloi = vcvtq_s64_f64(qlo);
+  int64x2_t qhii = vcvtq_s64_f64(qhi);
+  *qOut = vcombine_s32(vmovn_s64(qloi), vmovn_s64(qhii));
+}
+
+static N_FORCEINLINE n_float _n_sin_poly_neon(n_float r) {
+  n_float z = vmulq_f32(r, r);
+  n_float p = vdupq_n_f32(-2.50521083854417187751e-8f);
+  p = vfmaq_f32(vdupq_n_f32(2.75573192239858925109e-6f), p, z);
+  p = vfmaq_f32(vdupq_n_f32(-1.98412698412698412522e-4f), p, z);
+  p = vfmaq_f32(vdupq_n_f32(8.33333333333333321769e-3f), p, z);
+  p = vfmaq_f32(vdupq_n_f32(-1.66666666666666657415e-1f), p, z);
+  return vfmaq_f32(r, vmulq_f32(z, r), p);
+}
+
+static N_FORCEINLINE n_float _n_cos_poly_neon(n_float r) {
+  n_float z = vmulq_f32(r, r);
+  n_float p = vdupq_n_f32(2.4801587301587301587e-5f);
+  p = vfmaq_f32(vdupq_n_f32(-1.3888888888888888889e-3f), p, z);
+  p = vfmaq_f32(vdupq_n_f32(4.1666666666666666667e-2f), p, z);
+  p = vfmaq_f32(vdupq_n_f32(-5.0e-1f), p, z);
+  return vfmaq_f32(vdupq_n_f32(1.0f), p, z);
+}
+
+static N_FORCEINLINE n_float _n_sin_neon(n_float d) {
+  n_float r; n_int q;
+  _n_reduce_neon(d, &r, &q);
+  n_int odd = vandq_s32(q, vdupq_n_s32(1));
+  n_float u = vbslq_f32(vceqq_s32(odd, vdupq_n_s32(1)), _n_cos_poly_neon(r), _n_sin_poly_neon(r));
+  n_int flip = vandq_s32(q, vdupq_n_s32(2));
+  n_float res = vbslq_f32(vceqq_s32(flip, vdupq_n_s32(2)), vnegq_f32(u), u);
+  if (vmaxvq_f32(vabsq_f32(d)) > 1.0e7f) {
+    float lane[NSIMD_WIDTH]; n_store_ps(lane, d);
+    for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinf(lane[i]);
+    res = n_load_ps(lane);
+  }
+  return res;
+}
+
+static N_FORCEINLINE n_float _n_cos_neon(n_float d) {
+  n_float r; n_int q;
+  _n_reduce_neon(d, &r, &q);
+  n_int odd = vandq_s32(q, vdupq_n_s32(1));
+  n_float u = vbslq_f32(vceqq_s32(odd, vdupq_n_s32(1)), _n_sin_poly_neon(r), _n_cos_poly_neon(r));
+  n_int flip = vandq_s32(vaddq_s32(q, vdupq_n_s32(1)), vdupq_n_s32(2));
+  n_float res = vbslq_f32(vceqq_s32(flip, vdupq_n_s32(2)), vnegq_f32(u), u);
+  if (vmaxvq_f32(vabsq_f32(d)) > 1.0e7f) {
+    float lane[NSIMD_WIDTH]; n_store_ps(lane, d);
+    for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::cosf(lane[i]);
+    res = n_load_ps(lane);
+  }
+  return res;
+}
+
+static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
+  n_float n = vrndnq_f32(vmulq_f32(d, vdupq_n_f32(1.4426950408889634f)));
+  n_int ni = vcvtq_s32_f32(n);
+  n_float r = vfmaq_f32(d, vnegq_f32(n), vdupq_n_f32(0.693145751953125f));
+  r = vfmaq_f32(r, vnegq_f32(n), vdupq_n_f32(1.428606765330187045e-6f));
+  n_float p = vdupq_n_f32(1.0f / 5040.0f);
+  p = vfmaq_f32(vdupq_n_f32(1.0f / 720.0f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(1.0f / 120.0f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(1.0f / 24.0f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(1.0f / 6.0f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(0.5f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
+  p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
+  n_int e = vshlq_n_s32(vaddq_s32(ni, vdupq_n_s32(127)), 23);
+  n_float result = vmulq_f32(p, vreinterpretq_f32_s32(e));
+  result = vbslq_f32(vcgtq_f32(d, vdupq_n_f32(88.722839f)), vdupq_n_f32(INFINITY), result);
+  return vbslq_f32(vcltq_f32(d, vdupq_n_f32(-103.972084f)), vdupq_n_f32(0.0f), result);
+}
+
+static N_FORCEINLINE n_float _n_log_neon(n_float d) {
+  n_float t = vsubq_f32(d, vdupq_n_f32(1.0f));
+  n_float at = vabsq_f32(t);
+
+  n_float s = vdupq_n_f32(1.0f / 13.0f);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 12.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f / 11.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 10.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f / 9.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 8.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f / 7.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 6.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f / 5.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 4.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f / 3.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(-1.0f / 2.0f), s, t);
+  s = vfmaq_f32(vdupq_n_f32(1.0f), s, t);
+  n_float near = vmulq_f32(t, s);
+
+  n_int k = vreinterpretq_s32_f32(d);
+  n_int e = vsubq_s32(vshrq_n_s32(k, 23), vdupq_n_s32(127));
+  n_float m = vreinterpretq_f32_s32(vorrq_s32(vandq_s32(k, vdupq_n_s32(0x807fffff)), vdupq_n_s32(0x3f800000)));
+  n_float x = vdivq_f32(vsubq_f32(m, vdupq_n_f32(1.0f)), vaddq_f32(m, vdupq_n_f32(1.0f)));
+  n_float x2 = vmulq_f32(x, x);
+  n_float p = vdupq_n_f32(0.15384615384615385f);
+  p = vfmaq_f32(vdupq_n_f32(0.18181818181818182f), p, x2);
+  p = vfmaq_f32(vdupq_n_f32(0.2222222222222222f), p, x2);
+  p = vfmaq_f32(vdupq_n_f32(0.2857142857142857f), p, x2);
+  p = vfmaq_f32(vdupq_n_f32(0.4f), p, x2);
+  p = vfmaq_f32(vdupq_n_f32(0.6666666666666666f), p, x2);
+  p = vfmaq_f32(vdupq_n_f32(2.0f), p, x2);
+  n_float ef = vcvtq_f32_s32(e);
+  n_float wide = vmulq_f32(ef, vdupq_n_f32(0.693145751953125f));
+  wide = vfmaq_f32(wide, ef, vdupq_n_f32(1.428606765330187045e-6f));
+  wide = vfmaq_f32(wide, x, p);
+  return vbslq_f32(vcleq_f32(at, vdupq_n_f32(0.25f)), near, wide);
+}
+
+static N_FORCEINLINE n_float _n_atan_neon(n_float a) {
+  n_float ax = vabsq_f32(a);
+  n_float one = vdupq_n_f32(1.0f);
+  n_float big = vcgtq_f32(ax, one);
+  n_float t = vbslq_f32(big, vdivq_f32(one, ax), ax);
+  n_float z = vmulq_f32(t, t);
+  n_float q = vdupq_n_f32(2.922975910e-03f);
+  q = vfmaq_f32(vdupq_n_f32(-1.637927326e-02f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(4.323442722e-02f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(-7.554515826e-02f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(1.066727714e-01f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(-1.421142270e-01f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(1.999382071e-01f), q, z);
+  q = vfmaq_f32(vdupq_n_f32(-3.333315467e-01f), q, z);
+  n_float r = vfmaq_f32(t, vmulq_f32(vmulq_f32(t, t), t), q);
+  r = vbslq_f32(big, vsubq_f32(vdupq_n_f32(1.5707963267948966f), r), r);
+  return vbslq_f32(vcltq_f32(a, vdupq_n_f32(0.0f)), vnegq_f32(r), r);
+}
+
+static N_FORCEINLINE n_float _n_atan2_neon(n_float y, n_float x) {
+  n_float zero = vdupq_n_f32(0.0f);
+  n_float pi = vdupq_n_f32(3.14159265358979323846f);
+  n_float r = _n_atan_neon(vdivq_f32(y, x));
+  n_float adj = vbslq_f32(vcgeq_f32(y, zero), pi, vnegq_f32(pi));
+  r = vbslq_f32(vcltq_f32(x, zero), vaddq_f32(r, adj), r);
+  return vbslq_f32(vandq_u32(vceqq_f32(x, zero), vceqq_f32(y, zero)), zero, r);
+}
+
+static N_FORCEINLINE n_float _n_asin_neon(n_float a) {
+  n_float one = vdupq_n_f32(1.0f);
+  n_float t = vsqrtq_f32(vmaxq_f32(vmulq_f32(vsubq_f32(one, a), vaddq_f32(one, a)), vdupq_n_f32(0.0f)));
+  return vmulq_f32(vdupq_n_f32(2.0f), _n_atan2_neon(a, vaddq_f32(one, t)));
+}
+
+static N_FORCEINLINE n_float _n_acos_neon(n_float a) {
+  n_float one = vdupq_n_f32(1.0f);
+  n_float t = vsqrtq_f32(vmaxq_f32(vmulq_f32(vsubq_f32(one, a), vaddq_f32(one, a)), vdupq_n_f32(0.0f)));
+  n_float r = vmulq_f32(vdupq_n_f32(2.0f), _n_atan2_neon(t, vaddq_f32(one, a)));
+  return vbslq_f32(vcleq_f32(a, vdupq_n_f32(-1.0f)), vdupq_n_f32(3.14159265358979323846f), r);
+}
+
+static N_FORCEINLINE n_float _n_sinh_neon(n_float a) {
+  n_float e = _n_exp_neon(a);
+  n_float inv = _n_exp_neon(vnegq_f32(a));
+  n_float wide = vmulq_f32(vdupq_n_f32(0.5f), vsubq_f32(e, inv));
+  n_float z = vmulq_f32(a, a);
+  n_float sp = vdupq_n_f32(1.0f / 5040.0f);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f / 120.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f / 6.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f), sp, z);
+  return vbslq_f32(vcltq_f32(vabsq_f32(a), vdupq_n_f32(0.25f)), vmulq_f32(a, sp), wide);
+}
+
+static N_FORCEINLINE n_float _n_cosh_neon(n_float a) {
+  n_float e = _n_exp_neon(a);
+  n_float inv = _n_exp_neon(vnegq_f32(a));
+  n_float wide = vmulq_f32(vdupq_n_f32(0.5f), vaddq_f32(e, inv));
+  n_float z = vmulq_f32(a, a);
+  n_float sp = vdupq_n_f32(1.0f / 720.0f);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f / 24.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(0.5f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f), sp, z);
+  return vbslq_f32(vcltq_f32(vabsq_f32(a), vdupq_n_f32(0.25f)), sp, wide);
+}
+
+static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
+  n_float e2 = _n_exp_neon(vmulq_f32(vdupq_n_f32(2.0f), a));
+  n_float wide = vdivq_f32(vsubq_f32(e2, vdupq_n_f32(1.0f)), vaddq_f32(e2, vdupq_n_f32(1.0f)));
+  n_float z = vmulq_f32(a, a);
+  n_float sp = vdupq_n_f32(62.0f / 2835.0f);
+  sp = vfmaq_f32(vdupq_n_f32(-17.0f / 315.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(2.0f / 15.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(-1.0f / 3.0f), sp, z);
+  sp = vfmaq_f32(vdupq_n_f32(1.0f), sp, z);
+  return vbslq_f32(vcltq_f32(vabsq_f32(a), vdupq_n_f32(0.25f)), vmulq_f32(a, sp), wide);
+}
+
+#endif // NSIMD_NEON && __aarch64__
+
 // ===== Fastest (~3.5 ULP) =====
 #if SIMD_MATH_PRECISION == 1
 
@@ -564,6 +782,12 @@ static N_FORCEINLINE n_float _n_pow_avx512(n_float x, n_float y) {
     #define N_LOG(a)     _n_log_avx2(a)
     #define N_EXP(a)     _n_exp_avx2(a)
     #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+#define N_SIN(a)     _n_sin_neon(a)
+#define N_COS(a)     _n_cos_neon(a)
+#define N_LOG(a)     _n_log_neon(a)
+#define N_EXP(a)     _n_exp_neon(a)
+#define N_LOG10(a)   vmulq_f32(N_LOG(a), vdupq_n_f32(0.4342944819032518f))
   #endif
   // 组合函数复用上面的基础实现（定义在下方，宏在使用处展开，顺序无影响）：
   // tan/asin/acos/atan/atan2/pow 建立在 sin/cos/exp/log 之上，精度随之继承。
@@ -578,6 +802,16 @@ static N_FORCEINLINE n_float _n_pow_avx512(n_float x, n_float y) {
     #define N_TANH(a)      _n_tanh_ps(a)
 #if !defined(NSIMD_AVX512)
 #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
+#elif defined(NSIMD_NEON) && defined(__aarch64__)
+#define N_TAN(a)       _n_tan_neon(a)
+#define N_ASIN(a)      _n_asin_neon(a)
+#define N_ACOS(a)      _n_acos_neon(a)
+#define N_ATAN(a)      _n_atan_neon(a)
+#define N_ATAN2(a,b)   _n_atan2_neon(a, b)
+#define N_SINH(a)      _n_sinh_neon(a)
+#define N_COSH(a)      _n_cosh_neon(a)
+#define N_TANH(a)      _n_tanh_neon(a)
+#define N_SINCOS(a,s,c) do { (s) = _n_sin_neon(a); (c) = _n_cos_neon(a); } while (0)
 #endif
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
   #endif

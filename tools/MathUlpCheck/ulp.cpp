@@ -191,6 +191,7 @@ int main()
     Sincos("sin/cos: [1e6, 1e7]", 1e6, 1e7, 200000);
 
     Unary("log: [1e-37, 1e38]", "log", [](n_float v) { return N_LOG(v); }, std::log, 1e-37, 1e38, 400000);
+    Unary("log: 近 1 段 [0.75, 1.25]", "log", [](n_float v) { return N_LOG(v); }, std::log, 0.75, 1.25, 400000);
     Unary("exp: [-87, 88]", "exp", [](n_float v) { return N_EXP(v); }, std::exp, -87.0, 88.0, 400000);
 
     Unary("tan: [-1.5, 1.5]", "tan", [](n_float v) { return N_TAN(v); }, std::tan, -1.5, 1.5, 400000);
