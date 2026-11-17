@@ -31,6 +31,10 @@ elseif(ENTJOY_MATH_ISA STREQUAL "sse41")
         # 禁用 AVX/FMA，确保编出来的是 SSE4.1 路径而不是被编译器提升
         set(ENTJOY_SIMD_FLAGS -msse4.1 -mno-avx -mno-avx2 -mno-fma)
     endif()
+elseif(ENTJOY_MATH_ISA STREQUAL "auto")
+    # 由头文件按编译器宏自行判定（交叉编译 AArch32 等场景）
+    set(ENTJOY_SIMD_DEFS "")
+    set(ENTJOY_SIMD_FLAGS "")
 elseif(ENTJOY_MATH_ISA STREQUAL "neon")
     set(ENTJOY_SIMD_DEFS NSIMD_NEON NSIMD_WIDTH=4)
     set(ENTJOY_SIMD_FLAGS "")
