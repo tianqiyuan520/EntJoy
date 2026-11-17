@@ -174,9 +174,10 @@ C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（31.12 对 111.46）；chu
 两边的"块"不在同一层，读表前先看这一节。
 
 - Flecs 4.2.0 没有块尺寸参数：table 的列是一整块连续分配（`src/storage/table.c` 的列初始化按 `ecs_column_t` 向量生长，无按字节切块），一次 `ecs_query_next` 交付整张表，`iter.count` 等于表的实体数（`src/iter.c`）；公开 API 只有 `ecs_page_iter`（一个窗口，不会续页）与 `ecs_worker_iter`（把单次结果切区间）。10 万实体落在同一张表就是 1 块。
-- EntJoy 的块容量由 `Archetype.CalculateOptimalChunkCapacity` 按字节预算算出，10 万实体在 2 组件下 105 块、3 组件下 131 块（每块 952 / 763 实体）。`ChunkCapacityOverride` 可改，上限 `1<<16` 槽位。
+- EntJoy 的块容量由 `Archetype.CalculateOptimalChunkCapacity` 按 16 KiB 预算算出（`Archetype.cs` 第 132–137 行，注释为"Unity 风格的小物理 Chunk"），10 万实测 2 组件 105 块、3 组件 131 块（每块 960 / 768 实体）；Arch 同期实测 1000 / 800 实体一块（100k 时 100 / 125 块），与 EntJoy 同量级。Unity 的 `query.CalculateChunkCount()` 给 782 块（约 128 实体/块），与 16 KiB 预算对不上，成因未查。`ChunkCapacityOverride` 可改，上限 `1<<16` 槽位。
 - 每块成本的量级：Flecs 1 千档 1 块 0.112 µs、131 块 2.061 µs，相减得每次交付 ≈ 15 ns；10 万档从 1 块到 131 块是 ×2 +70…93%、×3 +88…89%（中位 / min），多出来的部分远超 131 × 15 ns ≈ 2 µs，其余是列不再连续后的缺失。EntJoy 从默认 131 块降到 13 / 4 / 2 块，10 万×2 是 7.40 / 6.90 / 5.90 / 6.20（min），3 组件档的差异落在轮次波动内。
-- 读法：**块数是这两个实现的容量选择，不是实现质量**。Flecs 用 1 块拿到 70–90% 的便宜，EntJoy 的默认容量则让它多付 15–25%（2 组件档）。
+- 读法：**块数是设计选择，不是实现质量**。EntJoy 的块按 16 KiB 目标对齐 Arch / Unity（`Archetype.cs` 第 132–137 行的 `targetChunkBytes`，注释写明"Unity 风格的小物理 Chunk"），10 万实测 960 / 768 实体一块，Arch 是 1000 / 800，同一量级；Flecs 4.2 不分块。所以 Flecs 用 1 块拿到 70–90% 的便宜，而 EntJoy 的 131 块是与 Arch / Unity 对齐的结果。把容量调到 65536 虽然让 10 万×2 从 7.40 降到 6.20，但会离开这条对齐线，只作为分离"块数"这一变量的实验臂。
+- C# 组 chunk 形式两家差 2%（30.15 对 30.74）、块数差 5%（100/125 对 105/131），是块规模对齐的直接结果。
 
 ## 1 千档不进对比
 
