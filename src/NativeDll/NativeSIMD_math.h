@@ -829,7 +829,7 @@ static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
 
 static N_FORCEINLINE n_float _n_log_neon(n_float d) {
   // 次正规输入先放大 2^24 再取对数，末尾补回 24*ln2
-  n_float sub = vcltq_f32(d, vdupq_n_f32(1.17549435e-38f));
+  n_mask sub = vcltq_f32(d, vdupq_n_f32(1.17549435e-38f));
   d = vbslq_f32(sub, vmulq_f32(d, vdupq_n_f32(16777216.0f)), d);
   n_float t = vsubq_f32(d, vdupq_n_f32(1.0f));
   n_float at = vabsq_f32(t);
