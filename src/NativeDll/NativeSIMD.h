@@ -1350,7 +1350,8 @@ static inline int n_all_zero(n_mask mask) {
 #elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_testz_ps(mask, mask);
 #elif defined(NSIMD_SSE4)
-    return _mm_testz_ps(mask, mask);
+    // 只用 SSE2 指令：_mm_testz_ps 需要 __SSE4_1__，-mno-avx 的构建里不一定可见
+  return _mm_movemask_ps(_mm_cmpeq_ps(mask, _mm_setzero_ps())) == 0xF;
 #elif defined(NSIMD_NEON)
     uint32x2_t lo = vget_low_u32(mask);
     uint32x2_t hi = vget_high_u32(mask);
