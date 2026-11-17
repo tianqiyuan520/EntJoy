@@ -193,7 +193,7 @@ AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 
 | 作业 | 指令集 | 运行方式 |
 |---|---|---|
 | `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档都过门禁 |
-| `avx512` | AVX512 | Intel SDE 模拟执行（runner CPU 不保证支持 AVX512） |
+| `avx512` | AVX512 | 编译门禁严格；数值执行经 Intel SDE，托管 runner 上 SDE 会 SIGSEGV，因此该步 best effort（同一产物在本地 Windows SDE 10.13.1 上跑通） |
 | `neon` | NEON | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行 |
 
 NEON 目前没有内联实现，数学走 libm 回退，该作业验证的是交叉编译链路与回退路径的精确性。
