@@ -182,7 +182,7 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | AVX2 | 内联多项式，全函数覆盖（1–3 ULP） | double 中间精度，全函数（0–1 ULP） |
 | AVX512 | 复用 AVX2 内核（16 lane 拆两组 8 lane），全函数；组合函数用 `__mmask16` + `mask_blend` | 复用 AVX2 的 `__m256` 实现，全函数 |
 | NEON (aarch64) | 双精度归约＋float 多项式，全函数（1–3 ULP） | double lane 实现，全函数（0–1 ULP） |
-| SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 逐 lane libm（见下方说明） |
+| SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 同一套 float 域实现（1–3 ULP，`pow` 走 libm） |
 | AArch32 / 其它 | 逐 lane libm | 逐 lane libm |
 
 NEON 路径要求 aarch64：实现用到 `vdivq_f32` 与 `vrnd*q_f32` 等 ARMv8 指令，
@@ -206,9 +206,9 @@ NEON 路径要求 aarch64：实现用到 `vdivq_f32` 与 `vrnd*q_f32` 等 ARMv8 
 SSE4.1 只有 4 lane 且没有 FMA，`tan`/`log`/`acos` 基本没有收益（≤1.2x）；
 AVX2 全函数都在 2x 以上。
 
-SSE4.1 的 High 档保留逐 lane libm：用 2 条 double lane 的实现在本机测得
-0.32–0.79x（exp 0.58x / log 0.55x / atan 0.52x / asin 0.39x / acos 0.32x / tanh 0.79x / pow 0.71x），
-即比 libm 更慢，因此不作为默认路径。
+SSE4.1 的 High 档用 float 域实现（精度 1–3 ULP，不追求 ~1 ULP）：同一套算法的
+2 条 double lane 版本在本机测得 0.32–0.79x（比 libm 慢），因此不采用。
+float 域版本实测 1.02–2.11x（exp 1.81x / atan 2.11x / tanh 2.03x / tan 1.02x）。
 
 AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
 ### 跨平台数值门禁
