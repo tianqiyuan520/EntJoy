@@ -837,7 +837,7 @@ static inline n_mask n_cmp_ult_epi32(n_int a, n_int b) {
     n_int sign = _mm_set1_epi32(0x80000000);
     return _mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(b, sign), _mm_xor_si128(a, sign)));
 #elif defined(NSIMD_NEON)
-    return vcltq_u32(a, b);
+    return vcltq_u32(vreinterpretq_u32_s32(a), vreinterpretq_u32_s32(b));
 #else
     return (unsigned int)a < (unsigned int)b;
 #endif
@@ -1376,7 +1376,7 @@ static inline int n_mask_to_bitmask(n_mask mask) {
     return _mm_movemask_ps(mask);
 #elif defined(NSIMD_NEON)
     // NEON: extract each lane's sign bit (MSB of float32)
-    uint32x4_t u = vreinterpretq_u32_f32(mask);
+    uint32x4_t u = mask;
     uint32_t tmp[4];
     vst1q_u32(tmp, u);
     return (int)((tmp[0] >> 31)) | ((int)(tmp[1] >> 31) << 1)
@@ -1679,7 +1679,7 @@ static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castpd_ps(_mm_cmplt_pd(a, b));
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    return vcltq_f64(a, b);  // NOLINT: returns uint32x4_t which IS n_mask on NEON
+        return vreinterpretq_u32_u64(vcltq_f64(a, b));
 #else
     return a < b;
 #endif
@@ -1693,7 +1693,7 @@ static inline n_mask n_cmp_eq_pd(n_double a, n_double b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castpd_ps(_mm_cmpeq_pd(a, b));
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    return vceqq_f64(a, b);
+        return vreinterpretq_u32_u64(vceqq_f64(a, b));
 #else
     return a == b;
 #endif
@@ -1708,7 +1708,7 @@ static inline n_double n_blend_pd(n_double f, n_double t, n_mask m) {
 #elif defined(NSIMD_SSE4)
     return _mm_blendv_pd(f, t, _mm_castps_pd(m));
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    return vbslq_f64(m, t, f);
+        return vbslq_f64(vreinterpretq_u64_u32(m), t, f);
 #else
     return (m != 0) ? t : f;
 #endif
