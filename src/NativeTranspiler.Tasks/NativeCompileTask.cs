@@ -268,6 +268,21 @@ namespace NativeTranspiler.Tasks
                 }
             }
 
+            // CMake 报成功不等于产物真的落地：目标名/输出目录变更、或并行 clean 删掉产物时，
+            // 这里不校验就会让构建变绿、运行时才抛 DllNotFoundException。
+            if (nativeDllExpected && !File.Exists(expectedNativeDll))
+            {
+                Log.LogError($"Native compilation reported success but '{expectedNativeDll}' is missing. " +
+                             $"Build directory: {buildDir}");
+                return false;
+            }
+            if (!File.Exists(expectedGeneratedDll))
+            {
+                Log.LogError($"Native compilation reported success but '{expectedGeneratedDll}' is missing. " +
+                             $"Build directory: {buildDir}");
+                return false;
+            }
+
             SaveHashManifest(dependencies, hashFile);
             Log.LogMessage(MessageImportance.High, "Native compilation succeeded.");
 
