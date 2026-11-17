@@ -42,7 +42,8 @@ jobs:
           URL=https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
           curl -fsSL -o sde.tar.xz "$URL"
           tar xf sde.tar.xz
-          echo "SDE_DIR=$(echo sde-external-*/)" >> $GITHUB_ENV
+          dir=$(echo sde-external-*/)
+          echo "SDE_DIR=${dir}" >> "$GITHUB_ENV"
       # 编译门禁严格；数值执行 best effort —— GitHub 托管 runner 上 SDE 会让被测进程
       # SIGSEGV（PIN 与内核交互），同一份产物在本地 Windows SDE 10.13.1 上跑通，
       # 数值与 AVX2 逐项一致。

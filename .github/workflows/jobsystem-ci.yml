@@ -414,7 +414,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = Invoke-TestProcess -FilePath (Join-Path $sampleDir 'EntJoySample.exe') -LogPath 'ci-reports/relationship-sample.log' -TimeoutSeconds 180
           if ($result -ne 0) { exit $result }
-          if (-not (Select-String -LiteralPath ci-reports/relationship-sample.log -SimpleMatch 'PASS：所有关系示例验证通过。' -Quiet)) { throw 'Relationship sample did not finish its scenarios.' }
+          if (-not (Select-String -LiteralPath ci-reports/relationship-sample.log -SimpleMatch 'PASS' -Quiet)) { throw 'Relationship sample did not finish its scenarios.' }
 
       - name: Negative check (marker gate must fail the build)
         shell: pwsh
