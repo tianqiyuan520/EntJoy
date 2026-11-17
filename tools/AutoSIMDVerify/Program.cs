@@ -181,6 +181,7 @@ namespace AutoSIMDVerify
             // ═══════════ pair 元素（uint2）═══════════
             RunPairCase(ref passed, ref failed);
             RunExpLogCase(ref passed, ref failed);
+            RunTranscendCase(ref passed, ref failed);
             RunStress(passed: ref passed, failed: ref failed);
 
             Console.WriteLine($"\n{'=',-1}{"",-1} PASS {passed} / {passed + failed}");
@@ -224,6 +225,46 @@ namespace AutoSIMDVerify
                     Console.WriteLine($"  ❌ P14 Pair uint2 (mode={mode}) mismatches={errs}/{N}");
                     failed++;
                 }
+            }
+        }
+
+        /// <summary>tan/atan/asin/acos/atan2/sinh/cosh/tanh/pow 九个函数的内联实现与 C# 基线对照。</summary>
+        private static unsafe void RunTranscendCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+            var rnd = new Random(20261117);
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = (float)(rnd.NextDouble() * 2.0 - 1.0);
+
+            var reference = new EntJoySample.AutoSIMDTest.Transcend_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.Transcend_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                // 9 个近似函数复合后按相对误差判定；单函数精度由 tools/MathUlpCheck 单独量。
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-4f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P16 tan/atan/asin/acos/atan2/sinh/cosh/tanh/pow (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P16 transcend mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
             }
         }
 

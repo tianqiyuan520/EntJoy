@@ -138,6 +138,43 @@ namespace
         std::printf("%s\n", label);
         log10Stat.Report();
     }
+    void RunUnary(const char* name, n_float (*fn)(n_float), double (*ref)(double), double lo, double hi, int samples)
+    {
+        Stat st{ name };
+        alignas(32) float in[8], out[8];
+        for (int i = 0; i < samples; i += 8)
+        {
+            for (int k = 0; k < 8; k++)
+            {
+                double t = (double)(i + k) / (double)samples;
+                in[k] = (float)(lo + (hi - lo) * t);
+            }
+            _mm256_storeu_ps(out, fn(_mm256_loadu_ps(in)));
+            for (int k = 0; k < 8; k++) st.Add(in[k], out[k], ref((double)in[k]));
+        }
+        st.Report();
+    }
+
+    void RunBinary(const char* name, n_float (*fn)(n_float, n_float), double (*ref)(double, double),
+                   double loA, double hiA, double loB, double hiB, int samples)
+    {
+        Stat st{ name };
+        alignas(32) float a[8], b[8], out[8];
+        for (int i = 0; i < samples; i += 8)
+        {
+            for (int k = 0; k < 8; k++)
+            {
+                double t = (double)(i + k) / (double)samples;
+                a[k] = (float)(loA + (hiA - loA) * t);
+                double u = std::fmod(t * 3.7 + 0.31, 1.0);   // 与 a 解耦，避免 atan2(a,a) 这类退化输入
+                b[k] = (float)(loB + (hiB - loB) * u);
+            }
+            _mm256_storeu_ps(out, fn(_mm256_loadu_ps(a), _mm256_loadu_ps(b)));
+            for (int k = 0; k < 8; k++) st.Add(a[k], out[k], ref((double)a[k], (double)b[k]));
+        }
+        st.Report();
+    }
+
     void RunLog(const char* label, double loExp, double hiExp, int samples, bool denseNearOne)
     {
         Stat logStat{ "log" };
@@ -180,5 +217,18 @@ int main()
     RunExp("exp: [-87, 88]", -87.0, 88.0, 400000);
     RunExp("exp: [-1, 1]", -1.0, 1.0, 200000);
     RunLog10("log10: [1e-37, 1e38]", -37.0, 38.0, 400000);
+
+    std::printf("\ntan / atan / asin / acos / sinh / cosh / tanh（AVX2 组合实现，无标量回退）：\n");
+    RunUnary("tan", _n_tan_ps, std::tan, -1.5, 1.5, 400000);
+    RunUnary("atan", _n_atan_ps, std::atan, -20.0, 20.0, 400000);
+    RunUnary("asin", _n_asin_ps, std::asin, -1.0, 1.0, 400000);
+    RunUnary("acos", _n_acos_ps, std::acos, -1.0, 1.0, 400000);
+    RunUnary("sinh", _n_sinh_ps, std::sinh, -10.0, 10.0, 400000);
+    RunUnary("cosh", _n_cosh_ps, std::cosh, -10.0, 10.0, 400000);
+    RunUnary("tanh", _n_tanh_ps, std::tanh, -5.0, 5.0, 400000);
+
+    std::printf("\natan2 / pow（双参数）：\n");
+    RunBinary("atan2", _n_atan2_ps, std::atan2, -10.0, 10.0, -10.0, 10.0, 400000);
+    RunBinary("pow(x>0)", _n_pow_ps, std::pow, 0.01, 10.0, -3.0, 3.0, 400000);
     return 0;
 }

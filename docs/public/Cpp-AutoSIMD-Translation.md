@@ -77,7 +77,7 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 
 ### Fastest 档的实测误差
 
-`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp`/`log10` 是内联多项式（AVX2；`log10` 由 `log` 乘常数得到），其余数学函数走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
 
 | 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
 |---|---|---|---|---|
@@ -93,5 +93,14 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 | exp | [-1, 1] | — | — | 1.99 |
 | exp | [-87, 88] | — | — | 2.00 |
 | log10 | [1e-37, 1e38] | 128.00 | 11.68 | — |
+| tan | [-1.5, 1.5] | 32.00 | 1.02 | 4.00 |
+| atan | [-20, 20] | 2.00 | 0.69 | 2.53 |
+| asin | [-1, 1] | 14.00 | 0.29 | 9.02 |
+| acos | [-1, 1] | 16.00 | 1.06 | — |
+| atan2 | 全象限 | 4.00 | 0.79 | 2.55 |
+| sinh | [-10, 10] | 16384 | 287 | 51.9 |
+| cosh | [-10, 10] | 16384 | 226 | 325 |
+| tanh | [-5, 5] | 1.00 | 0.26 | — |
+| pow (x>0) | 底数 [0.01,10] | — | — | 26.4 |
 
 `absULP = |out - ref| / 2^-24`，`relULP = (|out - ref| / |ref|) / 2^-24`。sin/cos 的绝对误差随 `|x|` 线性增长：三次 π/2 归约在 float 下精度有限，`|x|` 越大残余误差越大。log 的相对误差在 75 个数量级上均值 0.55 ULP，接近 1 时由绝对误差主导。

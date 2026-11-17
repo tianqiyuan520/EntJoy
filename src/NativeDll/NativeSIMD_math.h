@@ -275,6 +275,20 @@ static N_FORCEINLINE n_float _n_log_avx512(n_float d) {
     #define N_EXP(a)     _n_exp_avx2(a)
     #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
   #endif
+  // 组合函数复用上面的基础实现（定义在下方，宏在使用处展开，顺序无影响）：
+  // tan/asin/acos/atan/atan2/pow 建立在 sin/cos/exp/log 之上，精度随之继承。
+  #if defined(NSIMD_AVX512) || defined(NSIMD_AVX2)
+    #define N_TAN(a)       _n_tan_ps(a)
+    #define N_ASIN(a)      _n_asin_ps(a)
+    #define N_ACOS(a)      _n_acos_ps(a)
+    #define N_ATAN(a)      _n_atan_ps(a)
+    #define N_ATAN2(a,b)   _n_atan2_ps(a, b)
+    #define N_SINH(a)      _n_sinh_ps(a)
+    #define N_COSH(a)      _n_cosh_ps(a)
+    #define N_TANH(a)      _n_tanh_ps(a)
+    #define N_POW(a,b)     _n_pow_ps(a, b)
+    #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
+  #endif
   // 非 AVX2 平台：Sleef 已移除，由下方 #ifndef N_* 守卫的逐通道标量回退覆盖。
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
   // AVX512 暂缺 exp 内联实现，同样走标量回退。
@@ -471,58 +485,110 @@ static N_FORCEINLINE n_float _n_tan_ps(n_float a) {
   return n_div_ps(n_sin_ps(a), n_cos_ps(a));
 }
 
-static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
-  n_float zero = n_set1_ps(0.0f), pi = n_set1_ps(3.141592653589793f), pi_2 = n_set1_ps(1.5707963267948966f);
-  n_float r = n_atan_ps(n_div_ps(y, x));
-  // Quadrant adjustment: if x<0: r ± pi, if x=0: ±pi/2
-  n_float adj = n_blendv_ps(zero, n_mul_ps(n_blendv_ps(pi, n_sub_ps(zero, pi), n_cmp_lt_ps(y, zero)), n_set1_ps(-1.0f)), n_cmp_lt_ps(x, zero));
-  r = n_add_ps(r, adj);
-  // x=0 case: sign(y)*pi/2
-  n_mask xz = n_cmp_eq_ps(x, zero);
-  return n_blendv_ps(r, n_blendv_ps(n_mul_ps(pi_2, n_set1_ps(-1.0f)), pi_2, n_cmp_gt_ps(y, zero)), xz);
-}
+static N_FORCEINLINE n_float _n_atan_ps(n_float a);
 
+static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
+  // x = 0 由 y/x = ±inf 经 atan 的 |x|>1 分支自然得到 ±pi/2；只需补 atan2(0,0) = 0。
+  n_float zero = n_set1_ps(0.0f), pi = n_set1_ps(3.1415926535897932f);
+  n_float r = _n_atan_ps(n_div_ps(y, x));
+  n_float adj = n_blendv_ps(n_sub_ps(zero, pi), pi, n_cmp_ge_ps(y, zero));
+  r = n_blendv_ps(r, n_add_ps(r, adj), n_cmp_lt_ps(x, zero));
+  return n_blendv_ps(r, zero, n_and_mask(n_cmp_eq_ps(x, zero), n_cmp_eq_ps(y, zero)));
+}
 static N_FORCEINLINE n_float _n_asin_ps(n_float a) {
-  // asin(x) = atan2(x, sqrt(1 - x²)) using standard formula
-  n_float s = n_sqrt_ps(n_sub_ps(n_set1_ps(1.0f), n_mul_ps(a, a)));
-  return n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(a, n_add_ps(n_set1_ps(1.0f), s)));
+  // asin(x) = 2*atan2(x, 1 + sqrt(1 - x^2))：|x| -> 1 处仍良态
+  n_float t = n_sqrt_ps(n_max_ps(n_sub_ps(n_set1_ps(1.0f), n_mul_ps(a, a)), n_set1_ps(0.0f)));
+  return n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(a, n_add_ps(n_set1_ps(1.0f), t)));
 }
 
 static N_FORCEINLINE n_float _n_acos_ps(n_float a) {
-  return n_sub_ps(n_set1_ps(1.5707963267948966f), n_asin_ps(a));
+  // acos(x) = 2*atan2(sqrt(1 - x^2), 1 + x)；x = -1 时两项都为 0，单独补 pi
+  n_float t = n_sqrt_ps(n_max_ps(n_sub_ps(n_set1_ps(1.0f), n_mul_ps(a, a)), n_set1_ps(0.0f)));
+  n_float r = n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(t, n_add_ps(n_set1_ps(1.0f), a)));
+  return n_blendv_ps(r, n_set1_ps(3.1415926535897932f), n_cmp_le_ps(a, n_set1_ps(-1.0f)));
 }
-
 static N_FORCEINLINE n_float _n_atan_ps(n_float a) {
-  // atan polynomial on [-1,1], ~3.5 ULP; for |x|>1 use pi/2 - atan(1/x)
+  // atan(x) = x + x^3*q(x^2) 在 [0,1] 上的相对 minimax 拟合（max rel err 1.8e-8）；
+  // |x|>1 走 atan(x) = pi/2 - atan(1/x)。
   n_float one = n_set1_ps(1.0f), pi_2 = n_set1_ps(1.5707963267948966f);
-  // Reduce to [0,1]: x = min(|a|, 1/|a|)
   n_float ax = n_fabs_ps(a);
-  n_float rx = n_div_ps(one, ax);
-  n_float x = n_blendv_ps(ax, rx, n_cmp_gt_ps(ax, one));
-  n_float x2 = n_mul_ps(x, x);
-  n_float poly = n_set1_ps(0.00282363896258175373077393f);
-  poly = n_fmadd_ps(poly, x2, n_set1_ps(-0.015956902976496002127883f));
-  poly = n_fmadd_ps(poly, x2, n_set1_ps(0.0425049886108115014595081f));
-  poly = n_fmadd_ps(poly, x2, n_set1_ps(-0.074890092593843260168697f));
-  poly = n_fmadd_ps(poly, x2, n_set1_ps(0.166664004772415161132812f));
-  n_float r = n_fmadd_ps(n_mul_ps(x, x2), poly, x);
-  r = n_blendv_ps(r, n_sub_ps(pi_2, r), n_cmp_gt_ps(ax, one));
-  return n_blendv_ps(n_mul_ps(r, n_set1_ps(-1.0f)), r, n_cmp_gt_ps(a, n_set1_ps(0)));
+  n_float big = n_cmp_gt_ps(ax, one);
+  n_float t = n_blendv_ps(ax, n_div_ps(one, ax), big);
+  n_float z = n_mul_ps(t, t);
+  n_float q = n_set1_ps(2.922975910e-03f);
+  q = n_fmadd_ps(q, z, n_set1_ps(-1.637927326e-02f));
+  q = n_fmadd_ps(q, z, n_set1_ps(4.323442722e-02f));
+  q = n_fmadd_ps(q, z, n_set1_ps(-7.554515826e-02f));
+  q = n_fmadd_ps(q, z, n_set1_ps(1.066727714e-01f));
+  q = n_fmadd_ps(q, z, n_set1_ps(-1.421142270e-01f));
+  q = n_fmadd_ps(q, z, n_set1_ps(1.999382071e-01f));
+  q = n_fmadd_ps(q, z, n_set1_ps(-3.333315467e-01f));
+  n_float r = n_fmadd_ps(n_mul_ps(t, z), q, t);
+  r = n_blendv_ps(r, n_sub_ps(pi_2, r), big);
+  return n_blendv_ps(n_sub_ps(n_set1_ps(0.0f), r), r, n_cmp_gt_ps(a, n_set1_ps(0.0f)));
 }
-
 static N_FORCEINLINE n_float _n_sinh_ps(n_float a) {
+  // 小 |x| 下 e^x - e^-x 有相消误差，改用 Taylor；阈值 0.5 两侧误差同量级。
   n_float e = n_exp_ps(a);
-  return n_mul_ps(n_set1_ps(0.5f), n_sub_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+  n_float wide = n_mul_ps(n_set1_ps(0.5f), n_sub_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+  n_float x2 = n_mul_ps(a, a);
+  n_float s = n_fmadd_ps(x2, n_set1_ps(1.0f / 120.0f), n_set1_ps(1.0f / 6.0f));
+  n_float series = n_mul_ps(a, n_fmadd_ps(x2, s, n_set1_ps(1.0f)));
+  return n_blendv_ps(wide, series, n_cmp_lt_ps(n_fabs_ps(a), n_set1_ps(0.5f)));
 }
 
 static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
   n_float e = n_exp_ps(a);
-  return n_mul_ps(n_set1_ps(0.5f), n_add_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+  n_float wide = n_mul_ps(n_set1_ps(0.5f), n_add_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
+  n_float x2 = n_mul_ps(a, a);
+  n_float series = n_fmadd_ps(n_mul_ps(x2, x2), n_set1_ps(1.0f / 24.0f),
+                              n_fmadd_ps(x2, n_set1_ps(0.5f), n_set1_ps(1.0f)));
+  return n_blendv_ps(wide, series, n_cmp_lt_ps(n_fabs_ps(a), n_set1_ps(0.5f)));
 }
 
 static N_FORCEINLINE n_float _n_tanh_ps(n_float a) {
   n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
   return n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
+}
+
+static N_FORCEINLINE void _n_sincos_ps(n_float a, n_float* s, n_float* c) {
+  *s = n_sin_ps(a);
+  *c = n_cos_ps(a);
+}
+
+static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
+  // MathF.Pow 语义：正底数走 exp(y*log x)；负底数只在 y 为整数时成立，奇数指数取负；
+  // 底数为 0 由 log(0) = -inf 经 exp 自然落到 0 / +inf；非整数指数的负底数与 NaN 输入返回 NaN。
+  n_float ax = n_fabs_ps(x);
+  n_float mag = n_exp_ps(n_mul_ps(y, n_log_ps(ax)));
+
+  // y 是否为整数：y == trunc(y) 且 |y| < 2^23（float 在此范围内整数可精确表示）
+  n_float ay = n_fabs_ps(y);
+  n_mask yInt = n_and_mask(n_cmp_eq_ps(y, n_trunc_ps(y)), n_cmp_lt_ps(ay, n_set1_ps(8388608.0f)));
+  // 奇数判定：y/2 的截断乘 2 与 y 不等即为奇数
+  n_float half = n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f)));
+  n_mask yOdd = n_cmp_ne_ps(n_mul_ps(half, n_set1_ps(2.0f)), y);
+  n_mask negate = n_and_mask(yInt, yOdd);
+
+  n_float sign = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f),
+                             n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), negate));
+  n_float result = n_mul_ps(mag, sign);
+
+  // 负底数 + 非整数指数 ⇒ NaN
+  result = n_blendv_ps(result, n_set1_ps(NAN),
+                       n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), n_not_mask(yInt)));
+  // pow(x, 0) = 1（含 NaN 底数），与 MathF.Pow 一致
+  result = n_blendv_ps(result, n_set1_ps(1.0f), n_cmp_eq_ps(y, n_set1_ps(0.0f)));
+  // x = 0 且 y < 0 ⇒ +inf；x = 0 且 y > 0 ⇒ 0
+  n_mask xZero = n_cmp_eq_ps(x, n_set1_ps(0.0f));
+  result = n_blendv_ps(result, n_set1_ps(INFINITY),
+                       n_and_mask(xZero, n_cmp_lt_ps(y, n_set1_ps(0.0f))));
+  result = n_blendv_ps(result, n_set1_ps(0.0f),
+                       n_and_mask(xZero, n_cmp_gt_ps(y, n_set1_ps(0.0f))));
+  // NaN 传播（底数或指数任一为 NaN ⇒ NaN，但 pow(NaN, 0) = 1 已在上方处理）
+  result = n_blendv_ps(result, n_set1_ps(NAN),
+                       n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
+  return result;
 }
 
 // ================================================================
